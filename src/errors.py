@@ -1,0 +1,2 @@
+class IROpError(Exception):
+    pass

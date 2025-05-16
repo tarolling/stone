@@ -1,0 +1,9 @@
+def add(a, b):
+    return a + b
+
+
+def main():
+    x = 5
+    y = 7
+    result = add(x, y)
+    return result

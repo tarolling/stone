@@ -1,0 +1,3 @@
+# Newlang
+
+idk man

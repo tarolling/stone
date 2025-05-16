@@ -1,25 +1,26 @@
 from src.compiler import compile_code
+import argparse
 
 
 def main():
-    source_code = """
-def fibonacci(n):
-    if n <= 1:
-        return n
-    else:
-        return fibonacci(n - 1) + fibonacci(n - 2)
+    parser = argparse.ArgumentParser(prog="newlang")
+    parser.add_argument("--target", choices=["arm", "x86"], default="arm")
 
-def main():
-    result = fibonacci(10)
-    return result
-"""
+    args = vars(parser.parse_args())
 
-    with open("test/test.pi", "r") as fp:
+    source_code = ""
+
+    with open("test/simple.pi") as fp:
         source_code = "".join(fp.readlines())
 
     # Compile to ARM assembly
-    arm_code = compile_code(source_code, "arm")
+    arm_code = compile_code(source_code, args["target"])
     print(arm_code)
+
+    # write to file
+    with open("simple.s", "+w") as fp:
+        fp.write(arm_code)
+        fp.flush()
 
     # To compile to another architecture (when implemented)
     # x86_code = compile_code(source_code, "x86")

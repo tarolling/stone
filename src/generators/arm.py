@@ -23,7 +23,7 @@ class ARMGenerator:
 
     def generate(self, ir_instructions: List[IRInstruction]) -> str:
         """Generate ARM assembly from IR instructions"""
-        asm_lines = [".syntax unified", ".arch armv7-a", ".global main", ""]
+        asm_lines = [".global main", ""]
 
         # Process instructions
         for ir in ir_instructions:

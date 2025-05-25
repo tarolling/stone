@@ -3,7 +3,7 @@ def add(a, b):
 
 
 def main():
-    x = 5
-    y = 7
-    result = add(x, y)
-    return result
+    a = 10
+    b = 2
+    result = add(a, b)
+    return 0

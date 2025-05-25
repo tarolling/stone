@@ -46,6 +46,7 @@ class IRGenerator:
         self.current_function = None
         self.var_offsets = {}  # Maps variable names to stack offsets
         self.next_offset = 0
+        self.function_start_indices = {}
 
     def new_label(self) -> str:
         """Generate a new unique label"""
@@ -59,7 +60,7 @@ class IRGenerator:
             return self.var_offsets[name]
 
         offset = self.next_offset
-        self.next_offset += 4  # Assume 4 bytes per variable
+        self.next_offset += 8  # Use 8 bytes (64-bit) per variable for x86-64
         self.var_offsets[name] = offset
         return offset
 
@@ -80,43 +81,74 @@ class IRGenerator:
             self.var_offsets = {}
             self.next_offset = 0
 
+            function_start_idx = len(self.instructions)
+            self.function_start_indices[ast.name] = function_start_idx
+
             # Add function label
             self.instructions.append(IRInstruction(IROpType.LABEL, name=ast.name))
 
-            # Allocate space for parameters
+            param_offsets = {}
             for i, param in enumerate(ast.params):
+                # For x86-64, first 6 parameters are in registers
+                # Allocate stack space for them
                 offset = self.allocate_var(param)
-                # Parameters are passed in registers r0-r3 for ARM
-                if i < 4:
-                    self.instructions.append(
-                        IRInstruction(IROpType.STORE, dest=offset, src_reg=i)
-                    )
-                else:
-                    # Would need to load from stack for params > 4, simplifying for now
-                    pass
+                param_offsets[param] = offset
 
-            # Calculate stack space needed
-            stack_size = self.next_offset
-            if stack_size > 0:
-                self.instructions.append(
-                    IRInstruction(IROpType.ALLOCATE, size=stack_size)
-                )
-
-            # Generate code for function body
+            # Generate code for function body to discover all variables
+            # (This is the first pass to determine total stack space needed)
+            body_start_idx = len(self.instructions)
             self.generate(ast.body)
 
+            # Calculate final stack size needed (next_offset contains it)
+            stack_size = self.next_offset
+
+            # Ensure stack is 16-byte aligned for x86-64 ABI
+            if stack_size % 16 != 0:
+                stack_size += 16 - (stack_size % 16)
+
+            # Now insert function prologue at the beginning
+            self.instructions.insert(
+                function_start_idx + 1,  # Insert after the function label
+                IRInstruction(IROpType.ALLOCATE, size=stack_size),
+            )
+
+            body_start_idx += 1
+
+            # Store parameters in their allocated stack positions
+            for i, param in enumerate(ast.params):
+                offset = param_offsets[param]
+                if i < 6:  # x86-64 passes first 6 args in registers
+                    reg_mapping = {
+                        0: 0,
+                        1: 1,
+                        2: 2,
+                        3: 3,
+                        4: 5,
+                        5: 6,
+                    }  # Map to rdi, rsi, rdx, rcx, r8, r9
+                    self.instructions.insert(
+                        body_start_idx,  # Insert after ALLOCATE
+                        IRInstruction(
+                            IROpType.STORE, dest=offset, src_reg=reg_mapping[i]
+                        ),
+                    )
+                    body_start_idx += 1
+
             # Add implicit return if not present
-            if (
-                not self.instructions
-                or self.instructions[-1].op_type != IROpType.RETURN
+            if len(self.instructions) == 0 or (
+                self.instructions[-1].op_type != IROpType.RETURN
+                and getattr(self.instructions[-1], "name", None)
+                != self.current_function
             ):
                 self.instructions.append(IRInstruction(IROpType.RETURN))
 
-            # Deallocate stack space
+            # Add deallocate before return
             if stack_size > 0:
-                self.instructions[-1:-1] = [
-                    IRInstruction(IROpType.DEALLOCATE, size=stack_size)
-                ]
+                return_index = len(self.instructions) - 1
+                self.instructions.insert(
+                    return_index,  # Insert before RETURN
+                    IRInstruction(IROpType.DEALLOCATE, size=stack_size),
+                )
 
             # Restore previous context
             self.current_function = prev_function

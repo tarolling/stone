@@ -2,6 +2,7 @@ from enum import Enum, auto
 from typing import List, Dict, Union, Optional, Tuple
 from src.ir import IRInstruction
 from src.generators.arm import ARMGenerator
+from src.generators.x86_64 import X86_64Generator
 
 ###############################################################################
 # PART 5: ABSTRACT MACHINE CODE GENERATOR - Architecture-neutral interface
@@ -17,8 +18,8 @@ class MachineCodeGenerator:
         if self.architecture == "arm":
             gen = ARMGenerator()
             return gen.generate(ir_instructions)
-        elif self.architecture == "x86":
-            # Placeholder for x86 code generator
-            return "// x86 code generation not implemented yet"
+        elif self.architecture == "x86_64":
+            gen = X86_64Generator()
+            return gen.generate(ir_instructions)
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")

@@ -22,7 +22,7 @@ run_test() {
     as -o "${basename}.o" "$file"
     
     # Link the object file
-    gcc -o "${basename}" "${basename}.o"
+    gcc -g3 -o"${basename}" "${basename}.o"
     
     # Run the executable
     echo "Running ${basename}..."

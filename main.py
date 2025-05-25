@@ -4,7 +4,7 @@ import argparse
 
 def main():
     parser = argparse.ArgumentParser(prog="newlang")
-    parser.add_argument("--target", choices=["arm", "x86"], default="arm")
+    parser.add_argument("--target", choices=["arm", "x86_64"], default="arm")
 
     args = vars(parser.parse_args())
 
@@ -20,11 +20,6 @@ def main():
     # write to file
     with open("simple.s", "+w") as fp:
         fp.write(arm_code)
-        fp.flush()
-
-    # To compile to another architecture (when implemented)
-    # x86_code = compile_code(source_code, "x86")
-    # print(x86_code)
 
 
 if __name__ == "__main__":

@@ -6,4 +6,5 @@ def main():
     a = 10
     b = 2
     result = add(a, b)
+    print("hey")
     return 0

@@ -30,11 +30,14 @@ run_test() {
     
     # Check exit status
     if [ $? -eq 0 ]; then
-        echo "✅ Test passed!"
+        echo "✅ PASS ✅"
     else
-        echo "❌ Test failed!"
+        echo "❌ FAIL ❌"
         exit 1
     fi
+
+    # cleanup
+    rm *.o
 }
 
 # Run tests for each assembly file

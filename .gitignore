@@ -11,3 +11,4 @@ wheels/
 
 # Generated assembly test files
 *.s
+reference*

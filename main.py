@@ -786,296 +786,308 @@ class IRInstruction:
         return f"{self.op_type}({attrs})"
 
 
-class IRGenerator:
-    def __init__(self):
-        self.instructions = []
-        self.label_counter = 0
-        self.current_function = None
-        self.var_offsets = {}  # Maps variable names to stack offsets
-        self.next_offset = 0
-        self.function_start_indices = {}
-        self.string_literals = {}  # Maps string values to their labels
-        self.string_counter = 0
+IRGenerator_instructions = []
+IRGenerator_label_counter = 0
+IRGenerator_current_function = None
+IRGenerator_var_offsets = {}  # Maps variable names to stack offsets
+IRGenerator_next_offset = 0
+IRGenerator_function_start_indices = {}
+IRGenerator_string_literals = {}  # Maps string values to their labels
+IRGenerator_string_counter = 0
 
-    def add_string_literal(self, value: str) -> str:
-        """Add a string literal and return its label"""
-        if value in self.string_literals:
-            return self.string_literals[value]
 
-        label = f"str{self.string_counter}"
-        self.string_counter += 1
-        self.string_literals[value] = label
-        return label
+def IRGenerator__init__():
+    IRGenerator_instructions = []
+    IRGenerator_label_counter = 0
+    IRGenerator_current_function = None
+    IRGenerator_var_offsets = {}  # Maps variable names to stack offsets
+    IRGenerator_next_offset = 0
+    IRGenerator_function_start_indices = {}
+    IRGenerator_string_literals = {}  # Maps string values to their labels
+    IRGenerator_string_counter = 0
 
-    def new_label(self) -> str:
-        """Generate a new unique label"""
-        label = f"L{self.label_counter}"
-        self.label_counter += 1
-        return label
 
-    def allocate_var(self, name: str) -> int:
-        """Allocate space for a variable and return its offset"""
-        if name in self.var_offsets:
-            return self.var_offsets[name]
+def IRGenerator_add_string_literal(value):
+    """Add a string literal and return its label"""
+    if value in IRGenerator_string_literals:
+        return IRGenerator_string_literals[value]
 
-        offset = self.next_offset
-        self.next_offset += 8  # Use 8 bytes (64-bit) per variable for x86-64
-        self.var_offsets[name] = offset
-        return offset
+    label = f"str{IRGenerator_string_counter}"
+    IRGenerator_string_counter += 1
+    IRGenerator_string_literals[value] = label
+    return label
 
-    def generate(self, ast: ASTNode):
-        """Generate IR from AST"""
-        if ast.node_type == ASTNodeType["PROGRAM"]:
-            for stmt in ast.statements:
-                self.generate(stmt)
 
-        elif ast.node_type == ASTNodeType["FUNCTION_DEF"]:
-            # Save previous context
-            prev_function = self.current_function
-            prev_offsets = self.var_offsets
-            prev_next_offset = self.next_offset
+def IRGenerator_new_label():
+    """Generate a new unique label"""
+    label = f"L{IRGenerator_label_counter}"
+    IRGenerator_label_counter += 1
+    return label
 
-            # Set up new function context
-            self.current_function = ast.name
-            self.var_offsets = {}
-            self.next_offset = 0
 
-            function_start_idx = len(self.instructions)
-            self.function_start_indices[ast.name] = function_start_idx
+def IRGenerator_allocate_var(name):
+    """Allocate space for a variable and return its offset"""
+    if name in IRGenerator_var_offsets:
+        return IRGenerator_var_offsets[name]
 
-            # Add function label
-            self.instructions.append(IRInstruction(IROpType["LABEL"], name=ast.name))
+    offset = IRGenerator_next_offset
+    IRGenerator_next_offset += 8  # Use 8 bytes (64-bit) per variable for x86-64
+    IRGenerator_var_offsets[name] = offset
+    return offset
 
-            param_offsets = {}
-            for i, param in enumerate(ast.params):
-                # For x86-64, first 6 parameters are in registers
-                # Allocate stack space for them
-                offset = self.allocate_var(param)
-                param_offsets[param] = offset
 
-            # Generate code for function body to discover all variables
-            # (This is the first pass to determine total stack space needed)
-            body_start_idx = len(self.instructions)
-            self.generate(ast.body)
+def IRGenerator_generate(ast: ASTNode):
+    """Generate IR from AST"""
+    if ast.node_type == ASTNodeType["PROGRAM"]:
+        for stmt in ast.statements:
+            IRGenerator_generate(stmt)
 
-            # Calculate final stack size needed (next_offset contains it)
-            stack_size = self.next_offset
+    elif ast.node_type == ASTNodeType["FUNCTION_DEF"]:
+        # Save previous context
+        prev_function = IRGenerator_current_function
+        prev_offsets = IRGenerator_var_offsets
+        prev_next_offset = IRGenerator_next_offset
 
-            # Ensure stack is 16-byte aligned for x86-64 ABI
-            if stack_size % 16 != 0:
-                stack_size += 16 - (stack_size % 16)
+        # Set up new function context
+        IRGenerator_current_function = ast.name
+        IRGenerator_var_offsets = {}
+        IRGenerator_next_offset = 0
 
-            # Now insert function prologue at the beginning
-            self.instructions.insert(
-                function_start_idx + 1,  # Insert after the function label
-                IRInstruction(IROpType["ALLOCATE"], size=stack_size),
-            )
+        function_start_idx = len(IRGenerator_instructions)
+        IRGenerator_function_start_indices[ast.name] = function_start_idx
 
-            body_start_idx += 1
+        # Add function label
+        IRGenerator_instructions.append(IRInstruction(IROpType["LABEL"], name=ast.name))
 
-            # Store parameters in their allocated stack positions
-            for i, param in enumerate(ast.params):
-                offset = param_offsets[param]
-                if i < 6:  # x86-64 passes first 6 args in registers
-                    reg_mapping = {
-                        0: 0,
-                        1: 1,
-                        2: 2,
-                        3: 3,
-                        4: 5,
-                        5: 6,
-                    }  # Map to rdi, rsi, rdx, rcx, r8, r9
-                    self.instructions.insert(
-                        body_start_idx,  # Insert after ALLOCATE
-                        IRInstruction(
-                            IROpType["STORE"], dest=offset, src_reg=reg_mapping[i]
-                        ),
-                    )
-                    body_start_idx += 1
+        param_offsets = {}
+        for i, param in enumerate(ast.params):
+            # For x86-64, first 6 parameters are in registers
+            # Allocate stack space for them
+            offset = IRGenerator_allocate_var(param)
+            param_offsets[param] = offset
 
-            # Add implicit return if not present
-            if len(self.instructions) == 0 or (
-                self.instructions[-1].op_type != IROpType["RETURN"]
-                and getattr(self.instructions[-1], "name", None)
-                != self.current_function
-            ):
-                self.instructions.append(IRInstruction(IROpType["RETURN"]))
+        # Generate code for function body to discover all variables
+        # (This is the first pass to determine total stack space needed)
+        body_start_idx = len(IRGenerator_instructions)
+        IRGenerator_generate(ast.body)
 
-            # Add deallocate before return
-            if stack_size > 0:
-                return_index = len(self.instructions) - 1
-                self.instructions.insert(
-                    return_index,  # Insert before RETURN
-                    IRInstruction(IROpType["DEALLOCATE"], size=stack_size),
+        # Calculate final stack size needed (next_offset contains it)
+        stack_size = IRGenerator_next_offset
+
+        # Ensure stack is 16-byte aligned for x86-64 ABI
+        if stack_size % 16 != 0:
+            stack_size += 16 - (stack_size % 16)
+
+        # Now insert function prologue at the beginning
+        IRGenerator_instructions.insert(
+            function_start_idx + 1,  # Insert after the function label
+            IRInstruction(IROpType["ALLOCATE"], size=stack_size),
+        )
+
+        body_start_idx += 1
+
+        # Store parameters in their allocated stack positions
+        for i, param in enumerate(ast.params):
+            offset = param_offsets[param]
+            if i < 6:  # x86-64 passes first 6 args in registers
+                reg_mapping = {
+                    0: 0,
+                    1: 1,
+                    2: 2,
+                    3: 3,
+                    4: 5,
+                    5: 6,
+                }  # Map to rdi, rsi, rdx, rcx, r8, r9
+                IRGenerator_instructions.insert(
+                    body_start_idx,  # Insert after ALLOCATE
+                    IRInstruction(
+                        IROpType["STORE"], dest=offset, src_reg=reg_mapping[i]
+                    ),
                 )
+                body_start_idx += 1
 
-            # Restore previous context
-            self.current_function = prev_function
-            self.var_offsets = prev_offsets
-            self.next_offset = prev_next_offset
-
-        elif ast.node_type == ASTNodeType["BLOCK"]:
-            for stmt in ast.statements:
-                self.generate(stmt)
-
-        elif ast.node_type == ASTNodeType["RETURN_STMT"]:
-            if ast.expression:
-                # Evaluate the return expression and leave result in r0
-                self.generate_expr(ast.expression, 0)
-            self.instructions.append(IRInstruction(IROpType["RETURN"]))
-
-        elif ast.node_type == ASTNodeType["IF_STMT"]:
-            else_label = self.new_label()
-            end_label = self.new_label()
-
-            # Generate condition code, result in r0
-            self.generate_expr(ast.condition, 0)
-
-            # Jump to else block if condition is false (0)
-            self.instructions.append(
-                IRInstruction(IROpType["JUMP_IF_ZERO"], dest=else_label, src_reg=0)
-            )
-
-            # Generate then block
-            self.generate(ast.then_block)
-            self.instructions.append(IRInstruction(IROpType["JUMP"], dest=end_label))
-
-            # Generate else block if present
-            self.instructions.append(IRInstruction(IROpType["LABEL"], name=else_label))
-            if ast.else_block:
-                self.generate(ast.else_block)
-
-            self.instructions.append(IRInstruction(IROpType["LABEL"], name=end_label))
-
-        elif ast.node_type == ASTNodeType["WHILE_STMT"]:
-            start_label = self.new_label()
-            end_label = self.new_label()
-
-            # Generate loop start label
-            self.instructions.append(IRInstruction(IROpType["LABEL"], name=start_label))
-
-            # Generate condition code, result in r0
-            self.generate_expr(ast.condition, 0)
-
-            # Jump to end if condition is false (0)
-            self.instructions.append(
-                IRInstruction(IROpType["JUMP_IF_ZERO"], dest=end_label, src_reg=0)
-            )
-
-            # Generate loop body
-            self.generate(ast.body)
-
-            # Jump back to start
-            self.instructions.append(IRInstruction(IROpType["JUMP"], dest=start_label))
-
-            # End label
-            self.instructions.append(IRInstruction(IROpType["LABEL"], name=end_label))
-
-        elif ast.node_type == ASTNodeType["ASSIGNMENT"]:
-            # Evaluate the expression and store result in the variable
-            offset = self.allocate_var(ast.name)
-            self.generate_expr(ast.value, 0)
-            self.instructions.append(
-                IRInstruction(IROpType["STORE"], dest=offset, src_reg=0)
-            )
-
-        elif ast.node_type in (
-            ASTNodeType["BINARY_EXPR"],
-            ASTNodeType["CALL_EXPR"],
-            ASTNodeType["IDENTIFIER"],
-            ASTNodeType["NUMBER"],
-            ASTNodeType["STRING"],
+        # Add implicit return if not present
+        if len(IRGenerator_instructions) == 0 or (
+            IRGenerator_instructions[-1].op_type != IROpType["RETURN"]
+            and getattr(IRGenerator_instructions[-1], "name", None)
+            != IRGenerator_current_function
         ):
-            # For standalone expressions, evaluate and discard the result
-            self.generate_expr(ast, 0)
+            IRGenerator_instructions.append(IRInstruction(IROpType["RETURN"]))
 
-        return self.instructions
-
-    def generate_expr(self, expr: ASTNode, target_reg: int):
-        """Generate code for an expression, leaving result in the target register"""
-        if expr.node_type == ASTNodeType["NUMBER"]:
-            self.instructions.append(
-                IRInstruction(
-                    IROpType["LOAD_IMM"], dest_reg=target_reg, value=expr.value
-                )
+        # Add deallocate before return
+        if stack_size > 0:
+            return_index = len(IRGenerator_instructions) - 1
+            IRGenerator_instructions.insert(
+                return_index,  # Insert before RETURN
+                IRInstruction(IROpType["DEALLOCATE"], size=stack_size),
             )
 
-        elif expr.node_type == ASTNodeType["STRING"]:
-            label = self.add_string_literal(expr.value)
-            # For strings, we might want to load the address into a register
-            # This would be handled differently in the code generator
-            self.instructions.append(
-                IRInstruction(
-                    IROpType["LOAD_VAR"],
-                    dest_reg=target_reg,
-                    value=label,
-                    string_literal=True,
-                    string_value=expr.value,
-                    string_label=label,
-                )
+        # Restore previous context
+        IRGenerator_current_function = prev_function
+        IRGenerator_var_offsets = prev_offsets
+        IRGenerator_next_offset = prev_next_offset
+
+    elif ast.node_type == ASTNodeType["BLOCK"]:
+        for stmt in ast.statements:
+            IRGenerator_generate(stmt)
+
+    elif ast.node_type == ASTNodeType["RETURN_STMT"]:
+        if ast.expression:
+            # Evaluate the return expression and leave result in r0
+            IRGenerator_generate_expr(ast.expression, 0)
+        IRGenerator_instructions.append(IRInstruction(IROpType["RETURN"]))
+
+    elif ast.node_type == ASTNodeType["IF_STMT"]:
+        else_label = IRGenerator_new_label()
+        end_label = IRGenerator_new_label()
+
+        # Generate condition code, result in r0
+        IRGenerator_generate_expr(ast.condition, 0)
+
+        # Jump to else block if condition is false (0)
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["JUMP_IF_ZERO"], dest=else_label, src_reg=0)
+        )
+
+        # Generate then block
+        IRGenerator_generate(ast.then_block)
+        IRGenerator_instructions.append(IRInstruction(IROpType["JUMP"], dest=end_label))
+
+        # Generate else block if present
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["LABEL"], name=else_label)
+        )
+        if ast.else_block:
+            IRGenerator_generate(ast.else_block)
+
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["LABEL"], name=end_label)
+        )
+
+    elif ast.node_type == ASTNodeType["WHILE_STMT"]:
+        start_label = IRGenerator_new_label()
+        end_label = IRGenerator_new_label()
+
+        # Generate loop start label
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["LABEL"], name=start_label)
+        )
+
+        # Generate condition code, result in r0
+        IRGenerator_generate_expr(ast.condition, 0)
+
+        # Jump to end if condition is false (0)
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["JUMP_IF_ZERO"], dest=end_label, src_reg=0)
+        )
+
+        # Generate loop body
+        IRGenerator_generate(ast.body)
+
+        # Jump back to start
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["JUMP"], dest=start_label)
+        )
+
+        # End label
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["LABEL"], name=end_label)
+        )
+
+    elif ast.node_type == ASTNodeType["ASSIGNMENT"]:
+        # Evaluate the expression and store result in the variable
+        offset = IRGenerator_allocate_var(ast.name)
+        IRGenerator_generate_expr(ast.value, 0)
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["STORE"], dest=offset, src_reg=0)
+        )
+
+    elif ast.node_type in (
+        ASTNodeType["BINARY_EXPR"],
+        ASTNodeType["CALL_EXPR"],
+        ASTNodeType["IDENTIFIER"],
+        ASTNodeType["NUMBER"],
+        ASTNodeType["STRING"],
+    ):
+        # For standalone expressions, evaluate and discard the result
+        IRGenerator_generate_expr(ast, 0)
+
+    return IRGenerator_instructions
+
+
+def IRGenerator_generate_expr(expr: ASTNode, target_reg: int):
+    """Generate code for an expression, leaving result in the target register"""
+    if expr.node_type == ASTNodeType["NUMBER"]:
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["LOAD_IMM"], dest_reg=target_reg, value=expr.value)
+        )
+
+    elif expr.node_type == ASTNodeType["STRING"]:
+        label = IRGenerator_add_string_literal(expr.value)
+        # For strings, we might want to load the address into a register
+        # This would be handled differently in the code generator
+        IRGenerator_instructions.append(
+            IRInstruction(
+                IROpType["LOAD_VAR"],
+                dest_reg=target_reg,
+                value=label,
+                string_literal=True,
+                string_value=expr.value,
+                string_label=label,
+            )
+        )
+
+    elif expr.node_type == ASTNodeType["IDENTIFIER"]:
+        offset = IRGenerator_var_offsets.get(expr.name)
+        if offset is None:
+            raise ValueError(f"Undefined variable: {expr.name}")
+        IRGenerator_instructions.append(
+            IRInstruction(IROpType["LOAD_VAR"], dest_reg=target_reg, src_offset=offset)
+        )
+
+    elif expr.node_type == ASTNodeType["BINARY_EXPR"]:
+        # Generate code for left and right operands
+        IRGenerator_generate_expr(expr.left, target_reg)
+        temp_reg = (target_reg + 1) % 4  # Use next register for right operand
+        IRGenerator_generate_expr(expr.right, temp_reg)
+
+        # Generate operation
+        if expr.operator == "+":
+            IRGenerator_instructions.append(
+                IRInstruction(IROpType["ADD"], dest_reg=target_reg, src_reg=temp_reg)
+            )
+        elif expr.operator == "-":
+            IRGenerator_instructions.append(
+                IRInstruction(IROpType["SUB"], dest_reg=target_reg, src_reg=temp_reg)
+            )
+        elif expr.operator == "*":
+            IRGenerator_instructions.append(
+                IRInstruction(IROpType["MUL"], dest_reg=target_reg, src_reg=temp_reg)
+            )
+        elif expr.operator == "/":
+            IRGenerator_instructions.append(
+                IRInstruction(IROpType["DIV"], dest_reg=target_reg, src_reg=temp_reg)
             )
 
-        elif expr.node_type == ASTNodeType["IDENTIFIER"]:
-            offset = self.var_offsets.get(expr.name)
-            if offset is None:
-                raise ValueError(f"Undefined variable: {expr.name}")
-            self.instructions.append(
-                IRInstruction(
-                    IROpType["LOAD_VAR"], dest_reg=target_reg, src_offset=offset
-                )
+    elif expr.node_type == ASTNodeType["CALL_EXPR"]:
+        # Evaluate arguments and put in argument registers
+        for i, arg in enumerate(expr.args):
+            if i < 4:  # ARM uses r0-r3 for first 4 args
+                IRGenerator_generate_expr(arg, i)
+            else:
+                # Would need to push to stack for args > 4, simplifying for now
+                pass
+
+        # Generate call instruction
+        IRGenerator_instructions.append(IRInstruction(IROpType["CALL"], name=expr.name))
+
+        # Result is in r0, move to target register if needed
+        if target_reg != 0:
+            # This would be a MOV instruction in ARM
+            # For simplicity, we'll use ADD with 0
+            IRGenerator_instructions.append(
+                IRInstruction(IROpType["ADD"], dest_reg=target_reg, src_reg=0)
             )
-
-        elif expr.node_type == ASTNodeType["BINARY_EXPR"]:
-            # Generate code for left and right operands
-            self.generate_expr(expr.left, target_reg)
-            temp_reg = (target_reg + 1) % 4  # Use next register for right operand
-            self.generate_expr(expr.right, temp_reg)
-
-            # Generate operation
-            if expr.operator == "+":
-                self.instructions.append(
-                    IRInstruction(
-                        IROpType["ADD"], dest_reg=target_reg, src_reg=temp_reg
-                    )
-                )
-            elif expr.operator == "-":
-                self.instructions.append(
-                    IRInstruction(
-                        IROpType["SUB"], dest_reg=target_reg, src_reg=temp_reg
-                    )
-                )
-            elif expr.operator == "*":
-                self.instructions.append(
-                    IRInstruction(
-                        IROpType["MUL"], dest_reg=target_reg, src_reg=temp_reg
-                    )
-                )
-            elif expr.operator == "/":
-                self.instructions.append(
-                    IRInstruction(
-                        IROpType["DIV"], dest_reg=target_reg, src_reg=temp_reg
-                    )
-                )
-
-        elif expr.node_type == ASTNodeType["CALL_EXPR"]:
-            # Evaluate arguments and put in argument registers
-            for i, arg in enumerate(expr.args):
-                if i < 4:  # ARM uses r0-r3 for first 4 args
-                    self.generate_expr(arg, i)
-                else:
-                    # Would need to push to stack for args > 4, simplifying for now
-                    pass
-
-            # Generate call instruction
-            self.instructions.append(IRInstruction(IROpType["CALL"], name=expr.name))
-
-            # Result is in r0, move to target register if needed
-            if target_reg != 0:
-                # This would be a MOV instruction in ARM
-                # For simplicity, we'll use ADD with 0
-                self.instructions.append(
-                    IRInstruction(IROpType["ADD"], dest_reg=target_reg, src_reg=0)
-                )
 
 
 ###############################################################################
@@ -1404,7 +1416,7 @@ class X86_64Generator:
         asm_lines.extend(self.generate_int_to_string_function())
 
         for string_literal in string_literals:
-            self.add_string_literal(string_literal)
+            IRGenerator_add_string_literal(string_literal)
 
         if self.data_section:
             asm_lines.extend(["", ".section .data"])
@@ -1417,7 +1429,7 @@ class X86_64Generator:
 class MachineCodeGenerator:
     def __init__(self, architecture: str = "arm"):
         self.architecture = architecture.lower()
-        self.string_literals = {}
+        IRGenerator_string_literals = {}
 
     def generate(self, ir_instructions) -> str:
         """Generate machine code for the target architecture"""
@@ -1426,7 +1438,7 @@ class MachineCodeGenerator:
             return gen.generate(ir_instructions)
         elif self.architecture == "x86_64":
             gen = X86_64Generator()
-            return gen.generate(ir_instructions, self.string_literals)
+            return gen.generate(ir_instructions, IRGenerator_string_literals)
         else:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 
@@ -1450,8 +1462,7 @@ def compile_code(source_code, architecture: str = "arm"):
         print(ast)
 
     # Stage 3: IR Generation
-    ir_gen = IRGenerator()
-    ir = ir_gen.generate(ast)
+    ir = IRGenerator_generate(ast)
 
     if VERBOSE:
         print("----------IR----------")
@@ -1459,7 +1470,7 @@ def compile_code(source_code, architecture: str = "arm"):
 
     # Stage 4: Target Code Generation
     code_gen = MachineCodeGenerator(architecture)
-    code_gen.string_literals = ir_gen.string_literals
+    code_gen.string_literals = IRGenerator_string_literals
     target_code = code_gen.generate(ir)
 
     if VERBOSE:

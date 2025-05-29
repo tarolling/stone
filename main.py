@@ -1,254 +1,409 @@
 import argparse
 
+VERBOSE = False
+
 
 TokenType = {
-    "IDENTIFIER": 0,  # Variable/function names
-    "NUMBER": 1,  # Integer literals
-    "STRING": 2,  # String literals
-    "NEWLINE": 3,  # Line breaks
-    "INDENT": 4,  # Indentation level increase
-    "DEDENT": 5,  # Indentation level decrease
-    # Keywords
-    "DEF": 6,
-    "RETURN": 7,
-    "IF": 8,
-    "ELSE": 9,
-    "WHILE": 10,
-    "FOR": 22,
+    "IDENTIFIER": "IDENTIFIER",  # Variable/function names
+    "NUMBER": "NUMBER",  # Integer literals
+    "STRING": "STRING",  # String literals
+    "NEWLINE": "NEWLINE",  # Line breaks
+    "INDENT": "INDENT",  # Indentation level increase
+    "DEDENT": "DEDENT",  # Indentation level decrease
     # Operators and symbols
-    "PLUS": 11,
-    "MINUS": 12,
-    "MULTIPLY": 13,
-    "DIVIDE": 14,
-    "ASSIGN": 15,
-    "EQUALS": 16,
-    "LPAREN": 17,
-    "RPAREN": 18,
-    "COLON": 19,
-    "COMMA": 20,
+    "LPAR": "(",
+    "RPAR": ")",
+    "LSQB": "[",
+    "RSQB": "]",
+    "COLON": ":",
+    "COMMA": ",",
+    "SEMI": ";",
+    "PLUS": "+",
+    "MINUS": "-",
+    "STAR": "*",
+    "SLASH": "/",
+    "VBAR": "|",
+    "AMPER": "&",
+    "LESS": "<",
+    "GREATER": ">",
+    "EQUAL": "=",
+    "DOT": ".",
+    "PERCENT": "%",
+    "LBRACE": "{",
+    "RBRACE": "}",
+    "EQEQUAL": "==",
+    "NOTEQUAL": "!=",
+    "LESSEQUAL": "<=",
+    "GREATEREQUAL": ">=",
+    "TILDE": "~",
+    "CIRCUMFLEX": "^",
+    "LEFTSHIFT": "<<",
+    "RIGHTSHIFT": ">>",
+    "EXCLAMATION": "!",
     "EOF": 21,  # End of file
+    # Keywords
+    "DEF": "def",
+    "RETURN": "return",
+    "IF": "if",
+    "ELSE": "else",
+    "WHILE": "while",
+    "FOR": "for",
+    "BREAK": "break",
+    "CONTINUE": "continue",
+    "PASS": "pass",
+    "CLASS": "class",
 }
 
+KEYWORDS = {
+    "def": "DEF",
+    "return": "RETURN",
+    "if": "IF",
+    "else": "ELSE",
+    "while": "WHILE",
+    "for": "FOR",
+    "break": "BREAK",
+    "continue": "CONTINUE",
+    "pass": "PASS",
+    "class": "CLASS",
+}
 
-class Token:
-    def __init__(self, token_type, value: str = "", line: int = 0, column: int = 0):
-        self.type = token_type
-        self.value = value
-        self.line = line
-        self.column = column
-
-    def __repr__(self):
-        return (
-            f"Token({self.type}, '{self.value}', line={self.line}, col={self.column})"
-        )
+###############################################################################
+#                                  LEXER                                      #
+###############################################################################
 
 
-class Lexer:
-    def __init__(self, source_code: str):
-        self.source = source_code
-        self.position = 0
-        self.line = 1
-        self.column = 1
-        self.indent_stack = [0]  # Stack to track indentation levels
+def Token(token_type, value, line, column):
+    return {"type": token_type, "value": value, "line": line, "column": column}
 
-        # Define keywords
-        self.keywords = {
-            "def": TokenType["DEF"],
-            "return": TokenType["RETURN"],
-            "if": TokenType["IF"],
-            "else": TokenType["ELSE"],
-            "while": TokenType["WHILE"],
-            "for": TokenType["FOR"],
-        }
 
-    def peek(self):
-        """Look at the current character without advancing position"""
-        if self.position >= len(self.source):
-            return ""
-        return self.source[self.position]
+def Token__repr__(token):
+    return f"Token({token['type']}, '{token['value']}', line={token['line']}, col={token['column']})"
 
-    def advance(self):
-        """Get the current character and advance position"""
-        if self.position >= len(self.source):
-            return ""
 
-        char = self.source[self.position]
-        self.position += 1
-        self.column += 1
+Lexer_source = ""
+Lexer_position = 0
+Lexer_line = 1
+Lexer_column = 1
+Lexer_indent_stack = [0]
 
-        if char == "\n":
-            self.line += 1
-            self.column = 1
 
-        return char
+def Lexer(source_code):
+    global Lexer_source, Lexer_position, Lexer_line, Lexer_column, Lexer_indent_stack
+    Lexer_source = source_code
+    Lexer_position = 0
+    Lexer_line = 1
+    Lexer_column = 1
+    Lexer_indent_stack = [0]
 
-    def skip_whitespace(self):
-        """Skip whitespace except for newlines and indentation"""
-        while self.peek() in " \t\r" and self.peek() != "\n":
-            self.advance()
 
-    def handle_indentation(self):
-        """Process indentation at the beginning of a line"""
-        # Skip the newline character
-        self.advance()
+def Lexer_peek():
+    """Look at the current character without advancing position"""
+    global Lexer_source, Lexer_position
+    if Lexer_position >= len(Lexer_source):
+        return ""
+    return Lexer_source[Lexer_position]
 
-        # Count spaces at the beginning of the new line
-        indent_level = 0
-        while self.peek() == " ":
-            self.advance()
-            indent_level += 1
 
-        tokens = []
+def Lexer_advance():
+    """Get the current character and advance position"""
+    global Lexer_source, Lexer_position, Lexer_line, Lexer_column
+    if Lexer_position >= len(Lexer_source):
+        return ""
 
-        tokens.append(Token(TokenType["NEWLINE"], "\n", self.line - 1, self.column))
+    char = Lexer_source[Lexer_position]
+    Lexer_position += 1
+    Lexer_column += 1
 
-        current_indent = self.indent_stack[-1]
+    if char == "\n":
+        Lexer_line += 1
+        Lexer_column = 1
 
-        if indent_level > current_indent:
-            self.indent_stack.append(indent_level)
-            tokens.append(Token(TokenType["INDENT"], "", self.line, self.column))
-        elif indent_level < current_indent:
-            while indent_level < self.indent_stack[-1]:
-                self.indent_stack.pop()
-                tokens.append(Token(TokenType["DEDENT"], "", self.line, self.column))
+    return char
 
-            if indent_level != self.indent_stack[-1]:
-                raise SyntaxError(f"Invalid indentation at line {self.line}")
 
-        return tokens
+def Lexer_skip_whitespace():
+    """Skip whitespace except for newlines and indentation"""
+    while Lexer_peek() in " \t\r" and Lexer_peek() != "\n":
+        Lexer_advance()
 
-    def tokenize_number(self):
-        """Tokenize a numeric literal"""
-        start_col = self.column
-        number = ""
 
-        # Collect digits
-        while self.peek().isdigit():
-            number += self.advance()
+def Lexer_skip_to_eol():
+    while Lexer_peek() not in ("\n", ""):
+        Lexer_advance()
 
-        return Token(TokenType["NUMBER"], number, self.line, start_col)
 
-    def tokenize_identifier(self):
-        """Tokenize an identifier or keyword"""
-        start_col = self.column
-        identifier = ""
+def Lexer_handle_indentation():
+    """Process indentation at the beginning of a line"""
+    global Lexer_line, Lexer_column, Lexer_indent_stack
 
-        # Collect identifier characters (letters, digits, underscore)
-        while self.peek().isalnum() or self.peek() == "_":
-            identifier += self.advance()
+    # Skip the newline character
+    Lexer_advance()
 
-        # Check if this is a keyword
-        token_type = self.keywords.get(identifier, TokenType["IDENTIFIER"])
+    # Count spaces at the beginning of the new line
+    indent_level = 0
+    while Lexer_peek() == " ":
+        Lexer_advance()
+        indent_level += 1
 
-        return Token(token_type, identifier, self.line, start_col)
+    tokens = []
 
-    def tokenize_string(self):
-        """Tokenize a string literal"""
-        start_col = self.column
-        self.advance()  # Skip the opening quote
-        string = ""
+    tokens.append(Token("NEWLINE", TokenType["NEWLINE"], Lexer_line - 1, Lexer_column))
 
-        while self.peek() and self.peek() != '"':
-            string += self.advance()
+    current_indent = Lexer_indent_stack[-1]
 
-        if self.peek() != '"':
-            raise SyntaxError(f"Unterminated string at line {self.line}")
+    if indent_level > current_indent:
+        Lexer_indent_stack.append(indent_level)
+        tokens.append(Token("INDENT", TokenType["INDENT"], Lexer_line, Lexer_column))
+    elif indent_level < current_indent:
+        while indent_level < Lexer_indent_stack[-1]:
+            Lexer_indent_stack.pop()
+            tokens.append(
+                Token("DEDENT", TokenType["DEDENT"], Lexer_line, Lexer_column)
+            )
 
-        self.advance()  # Skip the closing quote
-        return Token(TokenType["STRING"], string, self.line, start_col)
+        if indent_level != Lexer_indent_stack[-1]:
+            raise SyntaxError(f"Invalid indentation at line {Lexer_line}")
 
-    def tokenize(self):
-        """Convert source code to a list of tokens"""
-        tokens = []
+    return tokens
 
-        while self.position < len(self.source):
-            char = self.peek()
 
-            # Handle whitespace
-            if char in " \t\r":
-                self.skip_whitespace()
+def Lexer_tokenize_number():
+    """Tokenize a numeric literal"""
+    global Lexer_line, Lexer_column
 
-            # Handle newlines and indentation
-            elif char == "\n":
-                tokens.extend(self.handle_indentation())
+    start_col = Lexer_column
+    number = ""
 
-            # Handle numbers
-            elif char.isdigit():
-                tokens.append(self.tokenize_number())
+    # Collect digits
+    while Lexer_peek().isdigit():
+        number += Lexer_advance()
 
-            # Handle identifiers and keywords
-            elif char.isalpha() or char == "_":
-                tokens.append(self.tokenize_identifier())
+    return Token(TokenType["NUMBER"], number, Lexer_line, start_col)
 
-            # Handle string literals
-            elif char == '"':
-                tokens.append(self.tokenize_string())
 
-            # Handle operators and symbols
-            elif char == "+":
-                tokens.append(Token(TokenType["PLUS"], "+", self.line, self.column))
-                self.advance()
-            elif char == "-":
-                tokens.append(Token(TokenType["MINUS"], "-", self.line, self.column))
-                self.advance()
-            elif char == "*":
-                tokens.append(Token(TokenType["MULTIPLY"], "*", self.line, self.column))
-                self.advance()
-            elif char == "/":
-                tokens.append(Token(TokenType["DIVIDE"], "/", self.line, self.column))
-                self.advance()
-            elif char == "=":
-                start_col = self.column
-                self.advance()
-                if self.peek() == "=":
-                    self.advance()
-                    tokens.append(
-                        Token(TokenType["EQUALS"], "==", self.line, start_col)
-                    )
-                else:
-                    tokens.append(Token(TokenType["ASSIGN"], "=", self.line, start_col))
-            elif char == "(":
-                tokens.append(Token(TokenType["LPAREN"], "(", self.line, self.column))
-                self.advance()
-            elif char == ")":
-                tokens.append(Token(TokenType["RPAREN"], ")", self.line, self.column))
-                self.advance()
-            elif char == ":":
-                tokens.append(Token(TokenType["COLON"], ":", self.line, self.column))
-                self.advance()
-            elif char == ",":
-                tokens.append(Token(TokenType["COMMA"], ",", self.line, self.column))
-                self.advance()
+def Lexer_tokenize_identifier():
+    """Tokenize an identifier or keyword"""
+    global Lexer_line, Lexer_column
+
+    start_col = Lexer_column
+    identifier = ""
+
+    # Collect identifier characters (letters, digits, underscore)
+    while Lexer_peek().isalnum() or Lexer_peek() == "_":
+        identifier += Lexer_advance()
+
+    # Check if this is a keyword
+    if identifier in KEYWORDS:
+        token_type = KEYWORDS[identifier]
+    else:
+        token_type = TokenType["IDENTIFIER"]
+
+    return Token(token_type, identifier, Lexer_line, start_col)
+
+
+def Lexer_tokenize_string():
+    """Tokenize a string literal"""
+    global Lexer_line, Lexer_column
+
+    start_col = Lexer_column
+    quote_char = Lexer_advance()  # Skip the opening quote
+    string_value = ""
+
+    while Lexer_peek() and Lexer_peek() != quote_char:
+        char = Lexer_peek()
+        if char == "\\":
+            Lexer_advance()
+            next_char = Lexer_peek()
+
+            if not next_char:
+                raise SyntaxError(f"Unterminated string at line {Lexer_line}")
+
+            if next_char == "n":
+                string_value += "\n"
+            elif next_char == "t":
+                string_value += "\t"
+            elif next_char == "r":
+                string_value += "\r"
+            elif next_char == "\\":
+                string_value += "\\"
             else:
-                raise SyntaxError(
-                    f"Unexpected character '{char}' at line {self.line}, column {self.column}"
+                string_value += "\\" + next_char
+            Lexer_advance()
+        else:
+            string_value += Lexer_advance()
+
+    if not Lexer_peek() or Lexer_peek() != quote_char:
+        raise SyntaxError(f"Unterminated string at line {Lexer_line}")
+
+    Lexer_advance()  # Skip the closing quote
+    return Token(TokenType["STRING"], string_value, Lexer_line, start_col)
+
+
+def Lexer_tokenize():
+    """Convert source code to a list of tokens"""
+    global Lexer_source, Lexer_position, Lexer_line, Lexer_column, Lexer_indent_stack
+
+    tokens = []
+
+    while Lexer_position < len(Lexer_source):
+        char = Lexer_peek()
+
+        # Handle whitespace
+        if char in " \t\r":
+            Lexer_skip_whitespace()
+
+        elif char == "#":
+            Lexer_skip_to_eol()
+
+        # Handle newlines and indentation
+        elif char == "\n":
+            tokens.extend(Lexer_handle_indentation())
+
+        # Handle numbers
+        elif char.isdigit():
+            tokens.append(Lexer_tokenize_number())
+
+        # Handle identifiers and keywords
+        elif char.isalpha() or char == "_":
+            tokens.append(Lexer_tokenize_identifier())
+
+        # Handle string literals
+        elif char == '"' or char == "'":
+            tokens.append(Lexer_tokenize_string())
+
+        # Handle operators and symbols
+        elif char == "+":
+            tokens.append(Token("PLUS", TokenType["PLUS"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == "-":
+            tokens.append(Token("MINUS", TokenType["MINUS"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == "*":
+            tokens.append(Token("STAR", TokenType["STAR"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == "/":
+            tokens.append(Token("SLASH", TokenType["SLASH"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == "=":
+            start_col = Lexer_column
+            Lexer_advance()
+            if Lexer_peek() == "=":
+                tokens.append(
+                    Token("EQEQUAL", TokenType["EQEQUAL"], Lexer_line, start_col)
                 )
+                Lexer_advance()
+            else:
+                tokens.append(Token("EQUAL", TokenType["EQUAL"], Lexer_line, start_col))
+        elif char == ".":
+            tokens.append(Token("DOT", TokenType["DOT"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == ">":
+            start_col = Lexer_column
+            Lexer_advance()
+            if Lexer_peek() == "=":
+                tokens.append(
+                    Token(
+                        "GREATEREQUAL", TokenType["GREATEREQUAL"], Lexer_line, start_col
+                    )
+                )
+                Lexer_advance()
+            elif Lexer_peek() == ">":
+                tokens.append(
+                    Token("RIGHTSHIFT", TokenType["RIGHTSHIFT"], Lexer_line, start_col)
+                )
+                Lexer_advance()
+            else:
+                tokens.append(
+                    Token("GREATER", TokenType["GREATER"], Lexer_line, start_col)
+                )
+        elif char == "<":
+            start_col = Lexer_column
+            Lexer_advance()
+            if Lexer_peek() == "=":
+                tokens.append(
+                    Token(TokenType["LESSEQUAL"], "<=", Lexer_line, start_col)
+                )
+                Lexer_advance()
+            elif Lexer_peek() == "<":
+                tokens.append(
+                    Token(TokenType["LEFTSHIFT"], "<<", Lexer_line, start_col)
+                )
+                Lexer_advance()
+            else:
+                tokens.append(Token(TokenType["LESS"], "<", Lexer_line, start_col))
+        elif char == "(":
+            tokens.append(Token("LPAR", TokenType["LPAR"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == ")":
+            tokens.append(Token("RPAR", TokenType["RPAR"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == "[":
+            tokens.append(Token(TokenType["LSQB"], "[", Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == "]":
+            tokens.append(Token(TokenType["RSQB"], "]", Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == "{":
+            tokens.append(
+                Token("LBRACE", TokenType["LBRACE"], Lexer_line, Lexer_column)
+            )
+            Lexer_advance()
+        elif char == "}":
+            tokens.append(
+                Token("RBRACE", TokenType["RBRACE"], Lexer_line, Lexer_column)
+            )
+            Lexer_advance()
+        elif char == ":":
+            tokens.append(Token("COLON", TokenType["COLON"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == ",":
+            tokens.append(Token("COMMA", TokenType["COMMA"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == "!":
+            start_col = Lexer_column
+            Lexer_advance()
+            if Lexer_peek() == "=":
+                tokens.append(Token(TokenType["NOTEQUAL"], "!=", Lexer_line, start_col))
+                Lexer_advance()
+            else:
+                tokens.append(
+                    Token(TokenType["EXCLAMATION"], "!", Lexer_line, start_col)
+                )
+        else:
+            if VERBOSE:
+                print(
+                    f"Unexpected character '{char}' at line {Lexer_line}, column {Lexer_column}"
+                )
+            raise SyntaxError(
+                f"Unexpected character '{char}' at line {Lexer_line}, column {Lexer_column}"
+            )
 
-        # Add DEDENT tokens for any remaining indentation levels
-        while len(self.indent_stack) > 1:
-            self.indent_stack.pop()
-            tokens.append(Token(TokenType["DEDENT"], "", self.line, self.column))
+    # Add DEDENT tokens for any remaining indentation levels
+    while len(Lexer_indent_stack) > 1:
+        Lexer_indent_stack.pop()
+        tokens.append(Token("DEDENT", TokenType["DEDENT"], Lexer_line, Lexer_column))
 
-        # Add EOF token
-        tokens.append(Token(TokenType["EOF"], "", self.line, self.column))
+    tokens.append(Token("EOF", TokenType["EOF"], Lexer_line, Lexer_column))
 
-        return tokens
+    return tokens
 
 
-##### PARSER #####
+###############################################################################
+#                                 PARSER                                      #
+###############################################################################
 ASTNodeType = {
-    "PROGRAM": 0,
-    "FUNCTION_DEF": 1,
-    "BLOCK": 2,
-    "RETURN_STMT": 3,
-    "IF_STMT": 4,
-    "WHILE_STMT": 5,
-    "ASSIGNMENT": 6,
-    "BINARY_EXPR": 7,
-    "CALL_EXPR": 8,
-    "IDENTIFIER": 9,
-    "NUMBER": 10,
-    "STRING": 11,
+    "PROGRAM": "Program",
+    "FUNCTION_DEF": "Function_Def",
+    "BLOCK": "Block",
+    "RETURN_STMT": "Return_Stmt",
+    "IF_STMT": "If_Stmt",
+    "WHILE_STMT": "While_Stmt",
+    "ASSIGNMENT": "Assignment",
+    "BINARY_EXPR": "Binary_Expr",
+    "CALL_EXPR": "Call_Expr",
+    "IDENTIFIER": "Identifier",
+    "NUMBER": "Number",
+    "STRING": "String",
 }
 
 
@@ -265,236 +420,333 @@ class ASTNode:
         return f"{self.node_type}({attrs})"
 
 
-class Parser:
-    def __init__(self, tokens):
-        self.tokens = tokens
-        self.position = 0
+Parser_tokens = []
+Parser_position = 0
 
-    def peek(self):
-        """Look at the current token without advancing position"""
-        if self.position >= len(self.tokens):
-            return Token(TokenType.EOF, "")
-        return self.tokens[self.position]
 
-    def advance(self):
-        """Get the current token and advance position"""
-        token = self.peek()
-        self.position += 1
-        return token
+def Parser(tokens):
+    global Parser_tokens, Parser_position
+    Parser_tokens = tokens
+    Parser_position = 0
 
-    def expect(self, token_type):
-        """Expect a specific token type, advance and return it"""
-        token = self.peek()
-        if token.type != token_type:
-            raise SyntaxError(
-                f"Expected {token_type}, got {token.type} at line {token.line}"
-            )
-        return self.advance()
 
-    def parse(self):
-        """Parse the entire program"""
-        statements = []
+def Parser_peek():
+    """Look at the current token without advancing position"""
+    global Parser_tokens, Parser_position
+    if Parser_position >= len(Parser_tokens):
+        return Token(TokenType["EOF"], "")
+    return Parser_tokens[Parser_position]
 
-        while self.peek().type != TokenType["EOF"]:
-            # Skip any standalone newlines at the top level
-            if self.peek().type == TokenType["NEWLINE"]:
-                self.advance()
-                continue
 
-            statements.append(self.parse_statement())
+def Parser_advance():
+    """Get the current token and advance position"""
+    global Parser_position
+    token = Parser_peek()
+    Parser_position += 1
+    return token
 
-        return ASTNode(ASTNodeType["PROGRAM"], statements=statements)
 
-    def parse_statement(self):
-        """Parse a statement"""
-        token = self.peek()
+def Parser_expect(token_type):
+    """Expect a specific token type, advance and return it"""
+    token = Parser_peek()
+    if token["type"] != token_type:
+        raise SyntaxError(
+            f"Expected {token_type}, got {token['type']} at line {token['line']}"
+        )
+    return Parser_advance()
 
-        if token.type == TokenType["DEF"]:
-            return self.parse_function_def()
-        elif token.type == TokenType["RETURN"]:
-            return self.parse_return_statement()
-        elif token.type == TokenType["IF"]:
-            return self.parse_if_statement()
-        elif token.type == TokenType["WHILE"]:
-            return self.parse_while_statement()
-        elif token.type == TokenType["IDENTIFIER"]:
-            # This could be an assignment or a function call
-            identifier = self.advance().value
 
-            if self.peek().type == TokenType["ASSIGN"]:
-                self.advance()  # Consume the '='
-                value = self.parse_expression()
-                self.expect(TokenType["NEWLINE"])  # Expect newline after assignment
-                return ASTNode(ASTNodeType["ASSIGNMENT"], name=identifier, value=value)
-            else:
-                # Put the identifier back and parse as expression
-                self.position -= 1
-                expr = self.parse_expression()
-                self.expect(
-                    TokenType["NEWLINE"]
-                )  # Expect newline after expression statement
-                return expr
+def Parser_parse():
+    """Parse the entire program"""
+    statements = []
+
+    while Parser_peek()["type"] != TokenType["EOF"]:
+        # Skip any standalone newlines at the top level
+        if Parser_peek()["type"] == TokenType["NEWLINE"]:
+            Parser_advance()
+            continue
+
+        statements.append(Parser_parse_statement())
+
+    return ASTNode(ASTNodeType["PROGRAM"], statements=statements)
+
+
+def Parser_parse_statement():
+    """Parse a statement"""
+    global Parser_position
+
+    token = Parser_peek()
+
+    if token["type"] == "DEF":
+        return Parser_parse_function_def()
+    elif token["type"] == "RETURN":
+        return Parser_parse_return_statement()
+    elif token["type"] == "IF":
+        return Parser_parse_if_statement()
+    elif token["type"] == "WHILE":
+        return Parser_parse_while_statement()
+    elif token["type"] == "PASS":
+        Parser_advance()
+        return ASTNode(ASTNodeType["BLOCK"], name="pass")
+    elif token["type"] == "IDENTIFIER":
+        # This could be an assignment or a function call
+        identifier = Parser_advance()["value"]
+
+        if Parser_peek()["type"] == TokenType["EQUAL"]:
+            Parser_advance()  # Consume the '='
+            value = Parser_parse_expression()
+            Parser_expect(TokenType["NEWLINE"])  # Expect newline after assignment
+            return ASTNode(ASTNodeType["ASSIGNMENT"], name=identifier, value=value)
         else:
-            raise SyntaxError(f"Unexpected token {token.type} at line {token.line}")
+            # Put the identifier back and parse as expression
+            Parser_position -= 1
+            expr = Parser_parse_expression()
+            Parser_expect(
+                TokenType["NEWLINE"]
+            )  # Expect newline after expression statement
+            return expr
+    else:
+        raise SyntaxError(f"Unexpected token {token['type']} at line {token['line']}")
 
-    def parse_function_def(self):
-        """Parse a function definition"""
-        self.expect(TokenType["DEF"])
-        name = self.expect(TokenType["IDENTIFIER"]).value
 
-        self.expect(TokenType["LPAREN"])
-        params = []
+def Parser_parse_function_def():
+    """Parse a function definition"""
+    Parser_expect("DEF")
+    name = Parser_expect(TokenType["IDENTIFIER"])["value"]
 
-        if self.peek().type != TokenType["RPAREN"]:
-            # Parse parameters
-            params.append(self.expect(TokenType["IDENTIFIER"]).value)
+    Parser_expect(TokenType["LPAR"])
+    params = []
 
-            while self.peek().type == TokenType["COMMA"]:
-                self.advance()  # Consume the comma
-                params.append(self.expect(TokenType["IDENTIFIER"]).value)
+    if Parser_peek()["type"] != TokenType["RPAR"]:
+        # Parse parameters
+        params.append(Parser_expect(TokenType["IDENTIFIER"])["value"])
 
-        self.expect(TokenType["RPAREN"])
-        self.expect(TokenType["COLON"])
-        self.expect(TokenType["NEWLINE"])
+        while Parser_peek()["type"] == TokenType["COMMA"]:
+            Parser_advance()  # Consume the comma
+            params.append(Parser_expect(TokenType["IDENTIFIER"])["value"])
 
-        # Parse function body
-        body = self.parse_block()
+    Parser_expect(TokenType["RPAR"])
+    Parser_expect(TokenType["COLON"])
+    Parser_expect(TokenType["NEWLINE"])
 
-        return ASTNode(ASTNodeType["FUNCTION_DEF"], name=name, params=params, body=body)
+    # Parse function body
+    body = Parser_parse_block()
 
-    def parse_block(self):
-        """Parse an indented block of statements"""
-        self.expect(TokenType["INDENT"])
-        statements = []
+    return ASTNode(ASTNodeType["FUNCTION_DEF"], name=name, params=params, body=body)
 
-        while (
-            self.peek().type != TokenType["DEDENT"]
-            and self.peek().type != TokenType["EOF"]
-        ):
-            statements.append(self.parse_statement())
 
-        self.expect(TokenType["DEDENT"])
+def Parser_parse_block():
+    """Parse an indented block of statements"""
+    Parser_expect(TokenType["INDENT"])
+    statements = []
 
-        return ASTNode(ASTNodeType["BLOCK"], statements=statements)
+    while (
+        Parser_peek()["type"] != TokenType["DEDENT"]
+        and Parser_peek()["type"] != TokenType["EOF"]
+    ):
+        statements.append(Parser_parse_statement())
 
-    def parse_return_statement(self):
-        """Parse a return statement"""
-        self.expect(TokenType["RETURN"])
+    Parser_expect(TokenType["DEDENT"])
 
-        # Check if there's an expression or just a newline
-        if self.peek().type == TokenType["NEWLINE"]:
-            expr = None
-        else:
-            expr = self.parse_expression()
+    return ASTNode(ASTNodeType["BLOCK"], statements=statements)
 
-        self.expect(TokenType["NEWLINE"])
-        return ASTNode(ASTNodeType["RETURN_STMT"], expression=expr)
 
-    def parse_if_statement(self):
-        """Parse an if statement"""
-        self.expect(TokenType["IF"])
-        condition = self.parse_expression()
-        self.expect(TokenType["COLON"])
-        self.expect(TokenType["NEWLINE"])
+def Parser_parse_return_statement():
+    """Parse a return statement"""
+    Parser_expect("RETURN")
 
-        then_block = self.parse_block()
+    # Check if there's an expression or just a newline
+    if Parser_peek()["type"] == TokenType["NEWLINE"]:
+        expr = None
+    else:
+        expr = Parser_parse_expression()
 
-        # Check for else clause
-        else_block = None
-        if self.peek().type == TokenType["ELSE"]:
-            self.advance()  # Consume 'else'
-            self.expect(TokenType["COLON"])
-            self.expect(TokenType["NEWLINE"])
-            else_block = self.parse_block()
+    Parser_expect(TokenType["NEWLINE"])
+    return ASTNode(ASTNodeType["RETURN_STMT"], expression=expr)
 
-        return ASTNode(
-            ASTNodeType.IF_STMT,
-            condition=condition,
-            then_block=then_block,
-            else_block=else_block,
+
+def Parser_parse_if_statement():
+    """Parse an if statement"""
+    Parser_expect("IF")
+    condition = Parser_parse_expression()
+    Parser_expect(TokenType["COLON"])
+    Parser_expect(TokenType["NEWLINE"])
+
+    then_block = Parser_parse_block()
+
+    # Check for else clause
+    else_block = None
+    if Parser_peek()["type"] == TokenType["ELSE"]:
+        Parser_advance()  # Consume 'else'
+        Parser_expect(TokenType["COLON"])
+        Parser_expect(TokenType["NEWLINE"])
+        else_block = Parser_parse_block()
+
+    return ASTNode(
+        ASTNodeType["IF_STMT"],
+        condition=condition,
+        then_block=then_block,
+        else_block=else_block,
+    )
+
+
+def Parser_parse_while_statement():
+    """Parse a while statement"""
+    Parser_expect("WHILE")
+    condition = Parser_parse_expression()
+    Parser_expect(TokenType["COLON"])
+    Parser_expect(TokenType["NEWLINE"])
+
+    body = Parser_parse_block()
+
+    return ASTNode(ASTNodeType["WHILE_STMT"], condition=condition, body=body)
+
+
+def Parser_parse_expression():
+    """Parse an expression with proper precedence"""
+    return Parser_parse_or_expression()
+
+
+def Parser_parse_or_expression():
+    """Parse logical OR expressions (lowest precedence)"""
+    left = Parser_parse_and_expression()
+
+    # Note: OR operator not in current token set, but keeping for completeness
+    while Parser_peek()["type"] in ("OR",):  # Empty for now
+        operator = Parser_advance()["value"]
+        right = Parser_parse_and_expression()
+        left = ASTNode(
+            ASTNodeType["BINARY_EXPR"], left=left, operator=operator, right=right
         )
 
-    def parse_while_statement(self):
-        """Parse a while statement"""
-        self.expect(TokenType["WHILE"])
-        condition = self.parse_expression()
-        self.expect(TokenType["COLON"])
-        self.expect(TokenType["NEWLINE"])
+    return left
 
-        body = self.parse_block()
 
-        return ASTNode(ASTNodeType.WHILE_STMT, condition=condition, body=body)
+def Parser_parse_and_expression():
+    """Parse logical AND expressions"""
+    left = Parser_parse_not_expression()
 
-    def parse_expression(self):
-        """Parse an expression (currently only simple expressions)"""
-        return self.parse_term()
+    # Note: AND operator not in current token set, but keeping for completeness
+    while Parser_peek()["type"] in ("AND",):  # Empty for now
+        operator = Parser_advance()["value"]
+        right = Parser_parse_not_expression()
+        left = ASTNode(
+            ASTNodeType["BINARY_EXPR"], left=left, operator=operator, right=right
+        )
 
-    def parse_term(self):
-        """Parse a term (addition/subtraction)"""
-        left = self.parse_factor()
+    return left
 
-        while self.peek().type in (TokenType["PLUS"], TokenType["MINUS"]):
-            operator = self.advance().value
-            right = self.parse_factor()
-            left = ASTNode(
-                ASTNodeType["BINARY_EXPR"], left=left, operator=operator, right=right
-            )
 
-        return left
+def Parser_parse_not_expression():
+    """Parse logical NOT expressions"""
+    # Note: NOT operator not in current token set, but keeping for completeness
+    if Parser_peek()["type"] == "NOT":
+        operator = Parser_advance()["value"]
+        expr = Parser_parse_not_expression()
+        return ASTNode(ASTNodeType["UNARY_EXPR"], operator=operator, operand=expr)
 
-    def parse_factor(self):
-        """Parse a factor (multiplication/division)"""
-        left = self.parse_primary()
+    return Parser_parse_comparison()
 
-        while self.peek().type in (TokenType["MULTIPLY"], TokenType["DIVIDE"]):
-            operator = self.advance().value
-            right = self.parse_primary()
-            left = ASTNode(
-                ASTNodeType["BINARY_EXPR"], left=left, operator=operator, right=right
-            )
 
-        return left
+def Parser_parse_comparison():
+    """Parse comparison expressions (==, !=, <, >, <=, >=)"""
+    left = Parser_parse_arithmetic_expression()
 
-    def parse_primary(self):
-        """Parse a primary expression (literal, identifier, call, parenthesized)"""
-        token = self.peek()
+    while Parser_peek()["type"] in (
+        TokenType["EQEQUAL"],
+        TokenType["NOTEQUAL"],
+        TokenType["LESS"],
+        TokenType["GREATER"],
+        TokenType["LESSEQUAL"],
+        TokenType["GREATEREQUAL"],
+    ):
+        operator = Parser_advance()["value"]
+        right = Parser_parse_arithmetic_expression()
+        left = ASTNode(
+            ASTNodeType["BINARY_EXPR"], left=left, operator=operator, right=right
+        )
 
-        if token.type == TokenType["NUMBER"]:
-            self.advance()
-            return ASTNode(ASTNodeType["NUMBER"], value=int(token.value))
+    return left
 
-        elif token.type == TokenType["STRING"]:
-            self.advance()
-            return ASTNode(ASTNodeType["STRING"], value=token.value)
 
-        elif token.type == TokenType["IDENTIFIER"]:
-            identifier = self.advance().value
+def Parser_parse_arithmetic_expression():
+    """Parse arithmetic expressions (+ and -)"""
+    left = Parser_parse_term()
 
-            # Check if this is a function call
-            if self.peek().type == TokenType["LPAREN"]:
-                self.advance()  # Consume '('
-                args = []
+    while Parser_peek()["type"] in (TokenType["PLUS"], TokenType["MINUS"]):
+        operator = Parser_advance()["value"]
+        right = Parser_parse_term()
+        left = ASTNode(
+            ASTNodeType["BINARY_EXPR"], left=left, operator=operator, right=right
+        )
 
-                if self.peek().type != TokenType["RPAREN"]:
-                    args.append(self.parse_expression())
+    return left
 
-                    while self.peek().type == TokenType["COMMA"]:
-                        self.advance()  # Consume ','
-                        args.append(self.parse_expression())
 
-                self.expect(TokenType["RPAREN"])
-                return ASTNode(ASTNodeType["CALL_EXPR"], name=identifier, args=args)
-            else:
-                return ASTNode(ASTNodeType["IDENTIFIER"], name=identifier)
+def Parser_parse_term():
+    """Parse a term (multiplication/division)"""
+    left = Parser_parse_factor()
 
-        elif token.type == TokenType["LPAREN"]:
-            self.advance()  # Consume '('
-            expr = self.parse_expression()
-            self.expect(TokenType["RPAREN"])
-            return expr
+    while Parser_peek()["type"] in (TokenType["STAR"], TokenType["SLASH"]):
+        operator = Parser_advance()["value"]
+        right = Parser_parse_factor()
+        left = ASTNode(
+            ASTNodeType["BINARY_EXPR"], left=left, operator=operator, right=right
+        )
 
+    return left
+
+
+def Parser_parse_factor():
+    """Parse a factor (unary expressions)"""
+    if Parser_peek()["type"] in (TokenType["PLUS"], TokenType["MINUS"]):
+        operator = Parser_advance()["value"]
+        operand = Parser_parse_factor()
+        return ASTNode(ASTNodeType["UNARY_EXPR"], operator=operator, operand=operand)
+
+    return Parser_parse_primary()
+
+
+def Parser_parse_primary():
+    """Parse a primary expression (literal, identifier, call, parenthesized)"""
+    token = Parser_peek()
+
+    if token["type"] == TokenType["NUMBER"]:
+        Parser_advance()
+        return ASTNode(ASTNodeType["NUMBER"], value=int(token["value"]))
+
+    elif token["type"] == TokenType["STRING"]:
+        Parser_advance()
+        return ASTNode(ASTNodeType["STRING"], value=token["value"])
+
+    elif token["type"] == TokenType["IDENTIFIER"]:
+        identifier = Parser_advance()["value"]
+
+        # Check if this is a function call
+        if Parser_peek()["type"] == TokenType["LPAR"]:
+            Parser_advance()  # Consume '('
+            args = []
+
+            if Parser_peek()["type"] != TokenType["RPAR"]:
+                args.append(Parser_parse_expression())
+
+                while Parser_peek()["type"] == TokenType["COMMA"]:
+                    Parser_advance()  # Consume ','
+                    args.append(Parser_parse_expression())
+
+            Parser_expect(TokenType["RPAR"])
+            return ASTNode(ASTNodeType["CALL_EXPR"], name=identifier, args=args)
         else:
-            raise SyntaxError(f"Unexpected token {token.type} at line {token.line}")
+            return ASTNode(ASTNodeType["IDENTIFIER"], name=identifier)
+
+    elif token["type"] == TokenType["LPAR"]:
+        Parser_advance()  # Consume '('
+        expr = Parser_parse_expression()
+        Parser_expect(TokenType["RPAR"])
+        return expr
+
+    else:
+        raise SyntaxError(f"Unexpected token {token['type']} at line {token['line']}")
 
 
 ###############################################################################
@@ -502,22 +754,22 @@ class Parser:
 ###############################################################################
 
 IROpType = {
-    "LOAD_IMM": 0,
-    "LOAD_VAR": 1,
-    "STORE": 2,
-    "ADD": 3,
-    "SUB": 4,
-    "MUL": 5,
-    "DIV": 6,
-    "JUMP": 7,
-    "JUMP_IF_ZERO": 8,
-    "JUMP_IF_NEG": 9,
-    "LABEL": 10,
-    "CALL": 11,
-    "RETURN": 12,
-    "ALLOCATE": 13,
-    "DEALLOCATE": 14,
-    "PRINT": 15,
+    "LOAD_IMM": "LOAD_IMM",
+    "LOAD_VAR": "LOAD_VAR",
+    "STORE": "STORE",
+    "ADD": "ADD",
+    "SUB": "SUB",
+    "MUL": "MUL",
+    "DIV": "DIV",
+    "JUMP": "JUMP",
+    "JUMP_IF_ZERO": "JUMP_IF_ZERO",
+    "JUMP_IF_NEG": "JUMP_IF_NEG",
+    "LABEL": "LABEL",
+    "CALL": "CALL",
+    "RETURN": "RETURN",
+    "ALLOCATE": "ALLOCATE",
+    "DEALLOCATE": "DEALLOCATE",
+    "PRINT": "PRINT",
 }
 
 
@@ -826,7 +1078,10 @@ class IRGenerator:
                 )
 
 
-##### MACHINE CODE GENERATION #####
+###############################################################################
+#                         MACHINE CODE GENERATION                             #
+###############################################################################
+#####  #####
 # thanks to https://github.com/ImanHosseini/AtX for the translation
 register_map = {
     "arm": [
@@ -1176,43 +1431,52 @@ class MachineCodeGenerator:
             raise ValueError(f"Unsupported architecture: {self.architecture}")
 
 
-def compile_code(source_code: str, architecture: str = "arm"):
+def compile_code(source_code, architecture: str = "arm"):
     """Compile source code to target machine code"""
     # Stage 1: Lexing
-    lexer = Lexer(source_code)
-    tokens = lexer.tokenize()
+    Lexer(source_code)
+    tokens = Lexer_tokenize()
 
-    print("-----TOKENS-----")
-    print(tokens)
+    if VERBOSE:
+        print("----------TOKENS----------")
+        print(tokens)
 
     # Stage 2: Parsing
-    parser = Parser(tokens)
-    ast = parser.parse()
+    Parser(tokens)
+    ast = Parser_parse()
 
-    print("-----AST-----")
-    print(ast)
+    if VERBOSE:
+        print("----------AST----------")
+        print(ast)
 
     # Stage 3: IR Generation
     ir_gen = IRGenerator()
     ir = ir_gen.generate(ast)
 
-    print("-----IR-----")
-    print(ir)
+    if VERBOSE:
+        print("----------IR----------")
+        print(ir)
 
     # Stage 4: Target Code Generation
     code_gen = MachineCodeGenerator(architecture)
     code_gen.string_literals = ir_gen.string_literals
     target_code = code_gen.generate(ir)
 
+    if VERBOSE:
+        print("----------ASSEMBLY----------")
+        print(target_code)
+
     return target_code
 
 
 def main():
+    global VERBOSE
     parser = argparse.ArgumentParser(prog="newlang")
     parser.add_argument("-t", "--target", choices=["arm", "x86_64"], default="arm")
     parser.add_argument("--debug", action="store_true", default=False)
 
     args = vars(parser.parse_args())
+    VERBOSE = args["debug"]
 
     source_code = ""
 
@@ -1221,7 +1485,6 @@ def main():
 
     # Compile to ARM assembly
     arm_code = compile_code(source_code, args["target"])
-    print(arm_code)
 
     # write to file
     with open("simple.s", "+w") as fp:

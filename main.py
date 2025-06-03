@@ -460,9 +460,9 @@ def Parser_parse():
     """Parse the entire program"""
     statements = []
 
-    while Parser_peek()["type"] != TokenType["EOF"]:
+    while Parser_peek()["type"] != "EOF":
         # Skip any standalone newlines at the top level
-        if Parser_peek()["type"] == TokenType["NEWLINE"]:
+        if Parser_peek()["type"] == "NEWLINE":
             Parser_advance()
             continue
 
@@ -492,18 +492,16 @@ def Parser_parse_statement():
         # This could be an assignment or a function call
         identifier = Parser_advance()["value"]
 
-        if Parser_peek()["type"] == TokenType["EQUAL"]:
+        if Parser_peek()["type"] == "EQUAL":
             Parser_advance()  # Consume the '='
             value = Parser_parse_expression()
-            Parser_expect(TokenType["NEWLINE"])  # Expect newline after assignment
+            Parser_expect("NEWLINE")  # Expect newline after assignment
             return ASTNode(ASTNodeType["ASSIGNMENT"], name=identifier, value=value)
         else:
             # Put the identifier back and parse as expression
             Parser_position -= 1
             expr = Parser_parse_expression()
-            Parser_expect(
-                TokenType["NEWLINE"]
-            )  # Expect newline after expression statement
+            Parser_expect("NEWLINE")  # Expect newline after expression statement
             return expr
     else:
         raise SyntaxError(f"Unexpected token {token['type']} at line {token['line']}")
@@ -514,20 +512,20 @@ def Parser_parse_function_def():
     Parser_expect("DEF")
     name = Parser_expect(TokenType["IDENTIFIER"])["value"]
 
-    Parser_expect(TokenType["LPAR"])
+    Parser_expect("LPAR")
     params = []
 
-    if Parser_peek()["type"] != TokenType["RPAR"]:
+    if Parser_peek()["type"] != "RPAR":
         # Parse parameters
         params.append(Parser_expect(TokenType["IDENTIFIER"])["value"])
 
-        while Parser_peek()["type"] == TokenType["COMMA"]:
+        while Parser_peek()["type"] == "COMMA":
             Parser_advance()  # Consume the comma
             params.append(Parser_expect(TokenType["IDENTIFIER"])["value"])
 
-    Parser_expect(TokenType["RPAR"])
-    Parser_expect(TokenType["COLON"])
-    Parser_expect(TokenType["NEWLINE"])
+    Parser_expect("RPAR")
+    Parser_expect("COLON")
+    Parser_expect("NEWLINE")
 
     # Parse function body
     body = Parser_parse_block()
@@ -556,12 +554,12 @@ def Parser_parse_return_statement():
     Parser_expect("RETURN")
 
     # Check if there's an expression or just a newline
-    if Parser_peek()["type"] == TokenType["NEWLINE"]:
+    if Parser_peek()["type"] == "NEWLINE":
         expr = None
     else:
         expr = Parser_parse_expression()
 
-    Parser_expect(TokenType["NEWLINE"])
+    Parser_expect("NEWLINE")
     return ASTNode(ASTNodeType["RETURN_STMT"], expression=expr)
 
 
@@ -569,17 +567,17 @@ def Parser_parse_if_statement():
     """Parse an if statement"""
     Parser_expect("IF")
     condition = Parser_parse_expression()
-    Parser_expect(TokenType["COLON"])
-    Parser_expect(TokenType["NEWLINE"])
+    Parser_expect("COLON")
+    Parser_expect("NEWLINE")
 
     then_block = Parser_parse_block()
 
     # Check for else clause
     else_block = None
-    if Parser_peek()["type"] == TokenType["ELSE"]:
+    if Parser_peek()["type"] == "ELSE":
         Parser_advance()  # Consume 'else'
-        Parser_expect(TokenType["COLON"])
-        Parser_expect(TokenType["NEWLINE"])
+        Parser_expect("COLON")
+        Parser_expect("NEWLINE")
         else_block = Parser_parse_block()
 
     return ASTNode(
@@ -653,12 +651,12 @@ def Parser_parse_comparison():
     left = Parser_parse_arithmetic_expression()
 
     while Parser_peek()["type"] in (
-        TokenType["EQEQUAL"],
-        TokenType["NOTEQUAL"],
-        TokenType["LESS"],
-        TokenType["GREATER"],
-        TokenType["LESSEQUAL"],
-        TokenType["GREATEREQUAL"],
+        "EQEQUAL",
+        "NOTEQUAL",
+        "LESS",
+        "GREATER",
+        "LESSEQUAL",
+        "GREATEREQUAL",
     ):
         operator = Parser_advance()["value"]
         right = Parser_parse_arithmetic_expression()
@@ -673,7 +671,7 @@ def Parser_parse_arithmetic_expression():
     """Parse arithmetic expressions (+ and -)"""
     left = Parser_parse_term()
 
-    while Parser_peek()["type"] in (TokenType["PLUS"], TokenType["MINUS"]):
+    while Parser_peek()["type"] in ("PLUS", "MINUS"):
         operator = Parser_advance()["value"]
         right = Parser_parse_term()
         left = ASTNode(
@@ -687,7 +685,7 @@ def Parser_parse_term():
     """Parse a term (multiplication/division)"""
     left = Parser_parse_factor()
 
-    while Parser_peek()["type"] in (TokenType["STAR"], TokenType["SLASH"]):
+    while Parser_peek()["type"] in ("STAR", "SLASH"):
         operator = Parser_advance()["value"]
         right = Parser_parse_factor()
         left = ASTNode(
@@ -699,7 +697,7 @@ def Parser_parse_term():
 
 def Parser_parse_factor():
     """Parse a factor (unary expressions)"""
-    if Parser_peek()["type"] in (TokenType["PLUS"], TokenType["MINUS"]):
+    if Parser_peek()["type"] in ("PLUS", "MINUS"):
         operator = Parser_advance()["value"]
         operand = Parser_parse_factor()
         return ASTNode(ASTNodeType["UNARY_EXPR"], operator=operator, operand=operand)
@@ -723,26 +721,26 @@ def Parser_parse_primary():
         identifier = Parser_advance()["value"]
 
         # Check if this is a function call
-        if Parser_peek()["type"] == TokenType["LPAR"]:
+        if Parser_peek()["type"] == "LPAR":
             Parser_advance()  # Consume '('
             args = []
 
-            if Parser_peek()["type"] != TokenType["RPAR"]:
+            if Parser_peek()["type"] != "RPAR":
                 args.append(Parser_parse_expression())
 
-                while Parser_peek()["type"] == TokenType["COMMA"]:
+                while Parser_peek()["type"] == "COMMA":
                     Parser_advance()  # Consume ','
                     args.append(Parser_parse_expression())
 
-            Parser_expect(TokenType["RPAR"])
+            Parser_expect("RPAR")
             return ASTNode(ASTNodeType["CALL_EXPR"], name=identifier, args=args)
         else:
             return ASTNode(ASTNodeType["IDENTIFIER"], name=identifier)
 
-    elif token["type"] == TokenType["LPAR"]:
+    elif token["type"] == "LPAR":
         Parser_advance()  # Consume '('
         expr = Parser_parse_expression()
-        Parser_expect(TokenType["RPAR"])
+        Parser_expect("RPAR")
         return expr
 
     else:
@@ -796,19 +794,10 @@ IRGenerator_string_literals = {}  # Maps string values to their labels
 IRGenerator_string_counter = 0
 
 
-def IRGenerator__init__():
-    IRGenerator_instructions = []
-    IRGenerator_label_counter = 0
-    IRGenerator_current_function = None
-    IRGenerator_var_offsets = {}  # Maps variable names to stack offsets
-    IRGenerator_next_offset = 0
-    IRGenerator_function_start_indices = {}
-    IRGenerator_string_literals = {}  # Maps string values to their labels
-    IRGenerator_string_counter = 0
-
-
 def IRGenerator_add_string_literal(value):
     """Add a string literal and return its label"""
+    global IRGenerator_instructions, IRGenerator_label_counter, IRGenerator_current_function, IRGenerator_var_offsets, IRGenerator_next_offset, IRGenerator_function_start_indices, IRGenerator_string_literals, IRGenerator_string_counter
+
     if value in IRGenerator_string_literals:
         return IRGenerator_string_literals[value]
 
@@ -820,6 +809,7 @@ def IRGenerator_add_string_literal(value):
 
 def IRGenerator_new_label():
     """Generate a new unique label"""
+    global IRGenerator_instructions, IRGenerator_label_counter, IRGenerator_current_function, IRGenerator_var_offsets, IRGenerator_next_offset, IRGenerator_function_start_indices, IRGenerator_string_literals, IRGenerator_string_counter
     label = f"L{IRGenerator_label_counter}"
     IRGenerator_label_counter += 1
     return label
@@ -827,6 +817,7 @@ def IRGenerator_new_label():
 
 def IRGenerator_allocate_var(name):
     """Allocate space for a variable and return its offset"""
+    global IRGenerator_instructions, IRGenerator_label_counter, IRGenerator_current_function, IRGenerator_var_offsets, IRGenerator_next_offset, IRGenerator_function_start_indices, IRGenerator_string_literals, IRGenerator_string_counter
     if name in IRGenerator_var_offsets:
         return IRGenerator_var_offsets[name]
 
@@ -838,6 +829,7 @@ def IRGenerator_allocate_var(name):
 
 def IRGenerator_generate(ast: ASTNode):
     """Generate IR from AST"""
+    global IRGenerator_instructions, IRGenerator_label_counter, IRGenerator_current_function, IRGenerator_var_offsets, IRGenerator_next_offset, IRGenerator_function_start_indices, IRGenerator_string_literals, IRGenerator_string_counter
     if ast.node_type == ASTNodeType["PROGRAM"]:
         for stmt in ast.statements:
             IRGenerator_generate(stmt)
@@ -1017,6 +1009,7 @@ def IRGenerator_generate(ast: ASTNode):
 
 def IRGenerator_generate_expr(expr: ASTNode, target_reg: int):
     """Generate code for an expression, leaving result in the target register"""
+    global IRGenerator_instructions, IRGenerator_label_counter, IRGenerator_current_function, IRGenerator_var_offsets, IRGenerator_next_offset, IRGenerator_function_start_indices, IRGenerator_string_literals, IRGenerator_string_counter
     if expr.node_type == ASTNodeType["NUMBER"]:
         IRGenerator_instructions.append(
             IRInstruction(IROpType["LOAD_IMM"], dest_reg=target_reg, value=expr.value)
@@ -1079,7 +1072,20 @@ def IRGenerator_generate_expr(expr: ASTNode, target_reg: int):
                 pass
 
         # Generate call instruction
-        IRGenerator_instructions.append(IRInstruction(IROpType["CALL"], name=expr.name))
+        if expr.name == "print":
+            IRGenerator_instructions.append(
+                IRInstruction(
+                    IROpType["CALL"],
+                    name=expr.name,
+                    print_type="string",
+                    string_label=IRGenerator_add_string_literal(expr.args[0].value),
+                    string_length=len(expr.args[0].value),
+                )
+            )
+        else:
+            IRGenerator_instructions.append(
+                IRInstruction(IROpType["CALL"], name=expr.name)
+            )
 
         # Result is in r0, move to target register if needed
         if target_reg != 0:
@@ -1133,99 +1139,99 @@ register_map = {
 }
 
 
-class ARMGenerator:
-    def __init__(self):
-        self.data_counter = 0
-        self.data_section = []
+# class ARMGenerator:
+#     def __init__(self):
+#         self.data_counter = 0
+#         self.data_section = []
 
-    def add_string_literal(self, value: str) -> str:
-        """Add a string literal to the data section and return its label"""
-        label = f"str{self.data_counter}"
-        self.data_counter += 1
-        escaped_value = value.replace('"', '\\"')
-        self.data_section.append(f'{label}: .asciz "{escaped_value}"')
-        return label
+#     def add_string_literal(self, value: str) -> str:
+#         """Add a string literal to the data section and return its label"""
+#         label = f"str{self.data_counter}"
+#         self.data_counter += 1
+#         escaped_value = value.replace('"', '\\"')
+#         self.data_section.append(f'{label}: .asciz "{escaped_value}"')
+#         return label
 
-    def generate(self, ir_instructions):
-        """Generate ARM assembly from IR instructions"""
-        asm_lines = [".global main", ""]
+#     def generate(self, ir_instructions):
+#         """Generate ARM assembly from IR instructions"""
+#         asm_lines = [".global main", ""]
 
-        # Process instructions
-        for ir in ir_instructions:
-            match ir.op_type:
-                case IROpType.LABEL:
-                    asm_lines.append(f"{ir.name}:")
-                case IROpType.LOAD_IMM:
-                    asm_lines.append(f"    mov r{ir.dest_reg}, #{ir.value}")
-                case IROpType.LOAD_VAR:
-                    asm_lines.append(
-                        f"    ldr r{ir.dest_reg}, [fp, #-{ir.src_offset+4}]"
-                    )
-                case IROpType.STORE:
-                    if hasattr(ir, "src_reg"):
-                        asm_lines.append(f"    str r{ir.src_reg}, [fp, #-{ir.dest+4}]")
-                    else:
-                        # This would be a store immediate, which ARM doesn't support directly
-                        asm_lines.append(f"    mov r4, #{ir.value}")
-                        asm_lines.append(f"    str r4, [fp, #-{ir.dest+4}]")
-                case IROpType.ADD:
-                    asm_lines.append(
-                        f"    add r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
-                    )
-                case IROpType.SUB:
-                    asm_lines.append(
-                        f"    sub r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
-                    )
-                case IROpType.MUL:
-                    asm_lines.append(
-                        f"    mul r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
-                    )
-                case IROpType.DIV:
-                    # ARM doesn't have a DIV instruction in base instruction set
-                    # In a real compiler, you'd call a division routine or use SDIV on newer ARM processors
-                    asm_lines.append(
-                        f"    ; Division would be implemented with SDIV or a library call"
-                    )
-                    asm_lines.append(
-                        f"    ; For ARMv7 with Thumb-2, you could use: sdiv r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
-                    )
-                case IROpType.JUMP:
-                    asm_lines.append(f"    b {ir.dest}")
-                case IROpType.JUMP_IF_ZERO:
-                    asm_lines.append(f"    cmp r{ir.src_reg}, #0")
-                    asm_lines.append(f"    beq {ir.dest}")
-                case IROpType.JUMP_IF_NEG:
-                    asm_lines.append(f"    cmp r{ir.src_reg}, #0")
-                    asm_lines.append(f"    blt {ir.dest}")
-                case IROpType.CALL:
-                    asm_lines.append(f"    bl {ir.name}")
-                case IROpType.RETURN:
-                    asm_lines.append(f"    mov pc, lr")
-                case IROpType.ALLOCATE:
-                    # ARM function prologue
-                    asm_lines.append(
-                        f"    push {{fp, lr}}"
-                    )  # Save frame pointer and return address
-                    asm_lines.append(f"    mov fp, sp")  # Set new frame pointer
-                    asm_lines.append(
-                        f"    sub sp, sp, #{ir.size}"
-                    )  # Allocate stack space
-                case IROpType.DEALLOCATE:
-                    # ARM function epilogue
-                    asm_lines.append(f"    mov sp, fp")  # Restore stack pointer
-                    asm_lines.append(
-                        f"    pop {{fp, pc}}"
-                    )  # Restore frame pointer and return
-                case _:
-                    raise Exception("This don't exist twin")
+#         # Process instructions
+#         for ir in ir_instructions:
+#             match ir.op_type:
+#                 case IROpType.LABEL:
+#                     asm_lines.append(f"{ir.name}:")
+#                 case IROpType.LOAD_IMM:
+#                     asm_lines.append(f"    mov r{ir.dest_reg}, #{ir.value}")
+#                 case IROpType.LOAD_VAR:
+#                     asm_lines.append(
+#                         f"    ldr r{ir.dest_reg}, [fp, #-{ir.src_offset+4}]"
+#                     )
+#                 case IROpType.STORE:
+#                     if hasattr(ir, "src_reg"):
+#                         asm_lines.append(f"    str r{ir.src_reg}, [fp, #-{ir.dest+4}]")
+#                     else:
+#                         # This would be a store immediate, which ARM doesn't support directly
+#                         asm_lines.append(f"    mov r4, #{ir.value}")
+#                         asm_lines.append(f"    str r4, [fp, #-{ir.dest+4}]")
+#                 case IROpType.ADD:
+#                     asm_lines.append(
+#                         f"    add r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
+#                     )
+#                 case IROpType.SUB:
+#                     asm_lines.append(
+#                         f"    sub r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
+#                     )
+#                 case IROpType.MUL:
+#                     asm_lines.append(
+#                         f"    mul r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
+#                     )
+#                 case IROpType.DIV:
+#                     # ARM doesn't have a DIV instruction in base instruction set
+#                     # In a real compiler, you'd call a division routine or use SDIV on newer ARM processors
+#                     asm_lines.append(
+#                         f"    ; Division would be implemented with SDIV or a library call"
+#                     )
+#                     asm_lines.append(
+#                         f"    ; For ARMv7 with Thumb-2, you could use: sdiv r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
+#                     )
+#                 case IROpType.JUMP:
+#                     asm_lines.append(f"    b {ir.dest}")
+#                 case IROpType.JUMP_IF_ZERO:
+#                     asm_lines.append(f"    cmp r{ir.src_reg}, #0")
+#                     asm_lines.append(f"    beq {ir.dest}")
+#                 case IROpType.JUMP_IF_NEG:
+#                     asm_lines.append(f"    cmp r{ir.src_reg}, #0")
+#                     asm_lines.append(f"    blt {ir.dest}")
+#                 case IROpType.CALL:
+#                     asm_lines.append(f"    bl {ir.name}")
+#                 case IROpType.RETURN:
+#                     asm_lines.append(f"    mov pc, lr")
+#                 case IROpType.ALLOCATE:
+#                     # ARM function prologue
+#                     asm_lines.append(
+#                         f"    push {{fp, lr}}"
+#                     )  # Save frame pointer and return address
+#                     asm_lines.append(f"    mov fp, sp")  # Set new frame pointer
+#                     asm_lines.append(
+#                         f"    sub sp, sp, #{ir.size}"
+#                     )  # Allocate stack space
+#                 case IROpType.DEALLOCATE:
+#                     # ARM function epilogue
+#                     asm_lines.append(f"    mov sp, fp")  # Restore stack pointer
+#                     asm_lines.append(
+#                         f"    pop {{fp, pc}}"
+#                     )  # Restore frame pointer and return
+#                 case _:
+#                     raise Exception("This don't exist twin")
 
-        # Add data section if needed
-        if self.data_section:
-            asm_lines.append("")
-            asm_lines.append(".data")
-            asm_lines.extend(self.data_section)
+#         # Add data section if needed
+#         if self.data_section:
+#             asm_lines.append("")
+#             asm_lines.append(".data")
+#             asm_lines.extend(self.data_section)
 
-        return "\n".join(asm_lines)
+#         return "\n".join(asm_lines)
 
 
 class X86_64Generator:
@@ -1313,6 +1319,9 @@ class X86_64Generator:
         """Generate x84-64 assembly from IR instructions"""
         asm_lines = [f'\t.file\t"example.py"', "\t.text", "\t.globl\tmain"]
 
+        for string_literal in string_literals:
+            self.add_string_literal(string_literal)
+
         # Process instructions
         for ir in ir_instructions:
             if ir.op_type == IROpType["LABEL"]:
@@ -1363,17 +1372,16 @@ class X86_64Generator:
                 asm_lines.append(f"\tjmp\t{ir.dest}")
             elif ir.op_type == IROpType["JUMP_IF_ZERO"]:
                 asm_lines.append(
-                    f"\ttestl\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.src_reg]}"
+                    f"\ttest\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.src_reg]}"
                 )
                 asm_lines.append(f"\tje\t{ir.dest}")
             elif ir.op_type == IROpType["JUMP_IF_NEG"]:
                 asm_lines.append(
-                    f"\ttestl\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.src_reg]}"
+                    f"\ttest\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.src_reg]}"
                 )
                 asm_lines.append(f"\tjl\t{ir.dest}")
             elif ir.op_type == IROpType["CALL"]:
                 if ir.name == "print":
-                    print(repr(ir))
                     if hasattr(ir, "print_type") and ir.print_type == "string":
                         # Use the string_label and string_length from IR
                         asm_lines.extend(
@@ -1415,9 +1423,6 @@ class X86_64Generator:
 
         asm_lines.extend(self.generate_int_to_string_function())
 
-        for string_literal in string_literals:
-            IRGenerator_add_string_literal(string_literal)
-
         if self.data_section:
             asm_lines.extend(["", ".section .data"])
             asm_lines.extend(self.data_section)
@@ -1426,21 +1431,23 @@ class X86_64Generator:
         return "\n".join(asm_lines)
 
 
-class MachineCodeGenerator:
-    def __init__(self, architecture: str = "arm"):
-        self.architecture = architecture.lower()
-        IRGenerator_string_literals = {}
+MachineCodeGenerator_architecture = ""
+IRGenerator_string_literals = {}
 
-    def generate(self, ir_instructions) -> str:
-        """Generate machine code for the target architecture"""
-        if self.architecture == "arm":
-            gen = ARMGenerator()
-            return gen.generate(ir_instructions)
-        elif self.architecture == "x86_64":
-            gen = X86_64Generator()
-            return gen.generate(ir_instructions, IRGenerator_string_literals)
-        else:
-            raise ValueError(f"Unsupported architecture: {self.architecture}")
+
+def MachineCodeGenerator(architecture):
+    global MachineCodeGenerator_architecture
+    MachineCodeGenerator_architecture = architecture.lower()
+
+
+def MachineCodeGenerator_generate(ir_instructions):
+    """Generate machine code for the target architecture"""
+    # if MachineCodeGenerator_architecture == "arm":
+    #     gen = ARMGenerator()
+    #     return gen.generate(ir_instructions)
+    # elif MachineCodeGenerator_architecture == "x86_64":
+    gen = X86_64Generator()
+    return gen.generate(ir_instructions, IRGenerator_string_literals)
 
 
 def compile_code(source_code, architecture: str = "arm"):
@@ -1469,9 +1476,8 @@ def compile_code(source_code, architecture: str = "arm"):
         print(ir)
 
     # Stage 4: Target Code Generation
-    code_gen = MachineCodeGenerator(architecture)
-    code_gen.string_literals = IRGenerator_string_literals
-    target_code = code_gen.generate(ir)
+    MachineCodeGenerator(architecture)
+    target_code = MachineCodeGenerator_generate(ir)
 
     if VERBOSE:
         print("----------ASSEMBLY----------")

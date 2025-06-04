@@ -137,6 +137,8 @@ def Lexer_handle_indentation():
     global Lexer_line, Lexer_column, Lexer_indent_stack
 
     # Skip the newline character
+    newline_line = Lexer_line
+    newline_column = Lexer_column
     Lexer_advance()
 
     # Count spaces at the beginning of the new line
@@ -145,9 +147,15 @@ def Lexer_handle_indentation():
         Lexer_advance()
         indent_level += 1
 
+    if Lexer_peek() == "\n" or not Lexer_peek():
+        return [Token("NEWLINE", TokenType["NEWLINE"], newline_line, newline_column)]
+
+    if Lexer_peek() == "#":
+        return [Token("NEWLINE", TokenType["NEWLINE"], newline_line, newline_column)]
+
     tokens = []
 
-    tokens.append(Token("NEWLINE", TokenType["NEWLINE"], Lexer_line - 1, Lexer_column))
+    tokens.append(Token("NEWLINE", TokenType["NEWLINE"], newline_line, Lexer_column))
 
     current_indent = Lexer_indent_stack[-1]
 
@@ -162,6 +170,8 @@ def Lexer_handle_indentation():
             )
 
         if indent_level != Lexer_indent_stack[-1]:
+            print("indent level:", indent_level)
+            print("indent stack:", Lexer_indent_stack[-1])
             raise SyntaxError(f"Invalid indentation at line {Lexer_line}")
 
     return tokens
@@ -338,10 +348,15 @@ def Lexer_tokenize():
             tokens.append(Token("RPAR", TokenType["RPAR"], Lexer_line, Lexer_column))
             Lexer_advance()
         elif char == "[":
-            tokens.append(Token(TokenType["LSQB"], "[", Lexer_line, Lexer_column))
+            tokens.append(Token("LSQB", TokenType["LSQB"], Lexer_line, Lexer_column))
             Lexer_advance()
         elif char == "]":
-            tokens.append(Token(TokenType["RSQB"], "]", Lexer_line, Lexer_column))
+            tokens.append(Token("RSQB", TokenType["RSQB"], Lexer_line, Lexer_column))
+            Lexer_advance()
+        elif char == "%":
+            tokens.append(
+                Token("PERCENT", TokenType["PERCENT"], Lexer_line, Lexer_column)
+            )
             Lexer_advance()
         elif char == "{":
             tokens.append(
@@ -1233,202 +1248,203 @@ register_map = {
 
 #         return "\n".join(asm_lines)
 
+X86_64Generator_data_counter = 0
+X86_64Generator_data_section = []
 
-class X86_64Generator:
-    def __init__(self):
-        self.data_counter = 0
-        self.data_section = []
 
-    def add_string_literal(self, value: str):
-        """Add a string literal to the data section and return its label"""
-        label = f"str{self.data_counter}"
-        self.data_counter += 1
-        escaped_value = (
-            value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
-        )
-        self.data_section.append(f'{label}: .string "{escaped_value}"')
-        return label
+def X86_64Generator_add_string_literal(value):
+    """Add a string literal to the data section and return its label"""
+    global X86_64Generator_data_counter, X86_64Generator_data_section
+    label = f"str{X86_64Generator_data_counter}"
+    X86_64Generator_data_counter += 1
+    escaped_value = value.replace("\\", "\\\\").replace('"', '\\"').replace("\n", "\\n")
+    X86_64Generator_data_section.append(f'{label}: .string "{escaped_value}"')
+    return label
 
-    def generate_print_syscall(self, data_label: str, length: int):
-        """Generate syscall instructions to print a string"""
-        return [
-            f"\tmovq\t$1, %rax",  # sys_write syscall number
-            f"\tmovq\t$1, %rdi",  # file descriptor (stdout)
-            f"\tleaq\t{data_label}(%rip), %rsi",  # RIP-relative address loading
-            f"\tmovq\t${length}, %rdx",  # number of bytes to write
-            f"\tsyscall",  # invoke system call
-        ]
 
-    def generate_print_int_immediate(self, value: int):
-        """Generate code to print an immediate integer value"""
-        return [
-            f"\tmovq\t${value}, %rdi",  # Move immediate value to first argument register
-            f"\tcall\tint_to_string",  # Call int conversion function
-            f"\tmovq\t%rax, %rsi",  # String address returned in %rax
-            f"\tmovq\t%rdx, %rdx",  # Length returned in %rdx
-            f"\tmovq\t$1, %rax",  # sys_write
-            f"\tmovq\t$1, %rdi",  # stdout
-            f"\tsyscall",
-        ]
+def X86_64Generator_generate_print_syscall(data_label, length):
+    """Generate syscall instructions to print a string"""
+    return [
+        f"\tmovq\t$1, %rax",  # sys_write syscall number
+        f"\tmovq\t$1, %rdi",  # file descriptor (stdout)
+        f"\tleaq\t{data_label}(%rip), %rsi",  # RIP-relative address loading
+        f"\tmovq\t${length}, %rdx",  # number of bytes to write
+        f"\tsyscall",  # invoke system call
+    ]
 
-    def generate_print_int_register(self, src_reg: int):
-        """Generate code to print an integer from a register"""
-        reg = register_map["x86_64"][src_reg]
-        return [
-            f"\tmovq\t{reg}, %rdi",  # Move register value to first argument register
-            f"\tcall\tint_to_string",  # Call int conversion function
-            f"\tmovq\t%rax, %rsi",  # String address returned in %rax
-            f"\tmovq\t%rdx, %rdx",  # Length returned in %rdx
-            f"\tmovq\t$1, %rax",  # sys_write
-            f"\tmovq\t$1, %rdi",  # stdout
-            f"\tsyscall",
-        ]
 
-    def generate_int_to_string_function(self):
-        """Generate a helper function to convert integer to string"""
-        return [
-            "",
-            "int_to_string:",
-            "\tpushq\t%rbp",
-            "\tmovq\t%rsp, %rbp",
-            "\tsubq\t$32, %rsp",  # Allocate space for string buffer
-            "\tmovq\t%rdi, %rax",  # Move input integer to %rax
-            "\tmovq\t$0, %rcx",  # Counter for digits
-            "\tmovq\t$10, %rbx",  # Divisor
-            "\tcmpq\t$0, %rax",  # Check if negative
-            "\tjge\tconvert_loop",
-            "\tnegq\t%rax",  # Make positive
-            "\tmovb\t$45, -32(%rbp)",  # Store '-' character
-            "\tincq\t%rcx",
-            "convert_loop:",
-            "\txorq\t%rdx, %rdx",  # Clear remainder
-            "\tdivq\t%rbx",  # Divide by 10
-            "\taddq\t$48, %rdx",  # Convert remainder to ASCII
-            "\tmovb\t%dl, -32(%rbp,%rcx,1)",  # Store digit
-            "\tincq\t%rcx",
-            "\tcmpq\t$0, %rax",
-            "\tjne\tconvert_loop",
-            "\tleaq\t-32(%rbp), %rax",  # Return string address
-            "\tmovq\t%rcx, %rdx",  # Return string length
-            "\taddq\t$32, %rsp",
-            "\tpopq\t%rbp",
-            "\tret",
-        ]
+def X86_64Generator_generate_print_int_immediate(value):
+    """Generate code to print an immediate integer value"""
+    return [
+        f"\tmovq\t${value}, %rdi",  # Move immediate value to first argument register
+        f"\tcall\tint_to_string",  # Call int conversion function
+        f"\tmovq\t%rax, %rsi",  # String address returned in %rax
+        f"\tmovq\t%rdx, %rdx",  # Length returned in %rdx
+        f"\tmovq\t$1, %rax",  # sys_write
+        f"\tmovq\t$1, %rdi",  # stdout
+        f"\tsyscall",
+    ]
 
-    def generate(self, ir_instructions, string_literals) -> str:
-        """Generate x84-64 assembly from IR instructions"""
-        asm_lines = [f'\t.file\t"example.py"', "\t.text", "\t.globl\tmain"]
 
-        for string_literal in string_literals:
-            self.add_string_literal(string_literal)
+def X86_64Generator_generate_print_int_register(src_reg):
+    """Generate code to print an integer from a register"""
+    reg = register_map["x86_64"][src_reg]
+    return [
+        f"\tmovq\t{reg}, %rdi",  # Move register value to first argument register
+        f"\tcall\tint_to_string",  # Call int conversion function
+        f"\tmovq\t%rax, %rsi",  # String address returned in %rax
+        f"\tmovq\t%rdx, %rdx",  # Length returned in %rdx
+        f"\tmovq\t$1, %rax",  # sys_write
+        f"\tmovq\t$1, %rdi",  # stdout
+        f"\tsyscall",
+    ]
 
-        # Process instructions
-        for ir in ir_instructions:
-            if ir.op_type == IROpType["LABEL"]:
-                asm_lines.append(f"{ir.name}:")
-            elif ir.op_type == IROpType["LOAD_IMM"]:
+
+def X86_64Generator_generate_int_to_string_function():
+    """Generate a helper function to convert integer to string"""
+    return [
+        "",
+        "int_to_string:",
+        "\tpushq\t%rbp",
+        "\tmovq\t%rsp, %rbp",
+        "\tsubq\t$32, %rsp",  # Allocate space for string buffer
+        "\tmovq\t%rdi, %rax",  # Move input integer to %rax
+        "\tmovq\t$0, %rcx",  # Counter for digits
+        "\tmovq\t$10, %rbx",  # Divisor
+        "\tcmpq\t$0, %rax",  # Check if negative
+        "\tjge\tconvert_loop",
+        "\tnegq\t%rax",  # Make positive
+        "\tmovb\t$45, -32(%rbp)",  # Store '-' character
+        "\tincq\t%rcx",
+        "convert_loop:",
+        "\txorq\t%rdx, %rdx",  # Clear remainder
+        "\tdivq\t%rbx",  # Divide by 10
+        "\taddq\t$48, %rdx",  # Convert remainder to ASCII
+        "\tmovb\t%dl, -32(%rbp,%rcx,1)",  # Store digit
+        "\tincq\t%rcx",
+        "\tcmpq\t$0, %rax",
+        "\tjne\tconvert_loop",
+        "\tleaq\t-32(%rbp), %rax",  # Return string address
+        "\tmovq\t%rcx, %rdx",  # Return string length
+        "\taddq\t$32, %rsp",
+        "\tpopq\t%rbp",
+        "\tret",
+    ]
+
+
+def X86_64Generator_generate(ir_instructions, string_literals) -> str:
+    """Generate x84-64 assembly from IR instructions"""
+    global X86_64Generator_data_counter, X86_64Generator_data_section
+    asm_lines = [f'\t.file\t"example.py"', "\t.text", "\t.globl\tmain"]
+
+    for string_literal in string_literals:
+        X86_64Generator_add_string_literal(string_literal)
+
+    # Process instructions
+    for ir in ir_instructions:
+        if ir.op_type == IROpType["LABEL"]:
+            asm_lines.append(f"{ir.name}:")
+        elif ir.op_type == IROpType["LOAD_IMM"]:
+            asm_lines.append(
+                f"\tmovq\t${ir.value}, {register_map['x86_64'][ir.dest_reg]}"
+            )
+        elif ir.op_type == IROpType["LOAD_VAR"]:
+            if hasattr(ir, "string_literal") and ir.string_literal:
                 asm_lines.append(
-                    f"\tmovq\t${ir.value}, {register_map['x86_64'][ir.dest_reg]}"
+                    f"\tleaq\t{ir.value}(%rip), {register_map['x86_64'][ir.dest_reg]}"
                 )
-            elif ir.op_type == IROpType["LOAD_VAR"]:
-                if hasattr(ir, "string_literal") and ir.string_literal:
-                    asm_lines.append(
-                        f"\tleaq\t{ir.value}(%rip), {register_map['x86_64'][ir.dest_reg]}"
-                    )
-                else:
-                    asm_lines.append(
-                        f"\tmovq\t-{ir.src_offset+4}(%rbp), {register_map['x86_64'][ir.dest_reg]}"
-                    )
+            else:
+                asm_lines.append(
+                    f"\tmovq\t-{ir.src_offset+4}(%rbp), {register_map['x86_64'][ir.dest_reg]}"
+                )
 
-            elif ir.op_type == IROpType["STORE"]:
-                if hasattr(ir, "src_reg"):
-                    asm_lines.append(
-                        f"\tmovq\t{register_map['x86_64'][ir.src_reg]}, -{ir.dest+8}(%rbp)"
-                    )
-                else:
-                    asm_lines.append(f"\tmovq\t%r4, ${ir.value}")
-                    asm_lines.append(f"\tstr\t%r4, -{ir.dest+8}(%rbp)")
-            elif ir.op_type == IROpType["ADD"]:
+        elif ir.op_type == IROpType["STORE"]:
+            if hasattr(ir, "src_reg"):
                 asm_lines.append(
-                    f"\taddq\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.dest_reg]}"
+                    f"\tmovq\t{register_map['x86_64'][ir.src_reg]}, -{ir.dest+8}(%rbp)"
                 )
-            elif ir.op_type == IROpType["SUB"]:
-                asm_lines.append(
-                    f"\tsubq\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.dest_reg]}"
-                )
-            elif ir.op_type == IROpType["MUL"]:
-                asm_lines.append(
-                    f"\timul\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.dest_reg]}"
-                )
-            elif ir.op_type == IROpType["DIV"]:
-                asm_lines.append(f"\tmovq\t{register_map['x86_64'][ir.dest_reg]}, %eax")
-                asm_lines.append("\tcdq")  # Sign-extend EAX into EDX:EAX
-                asm_lines.append(f"\tidivq\t{register_map['x86_64'][ir.src_reg]}")
-                if ir.dest_reg != 0:  # If result doesn't belong in EAX
-                    asm_lines.append(
-                        f"\tmovq\t%eax, {register_map['x86_64'][ir.dest_reg]}"
-                    )
-            elif ir.op_type == IROpType["JUMP"]:
-                asm_lines.append(f"\tjmp\t{ir.dest}")
-            elif ir.op_type == IROpType["JUMP_IF_ZERO"]:
-                asm_lines.append(
-                    f"\ttest\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.src_reg]}"
-                )
-                asm_lines.append(f"\tje\t{ir.dest}")
-            elif ir.op_type == IROpType["JUMP_IF_NEG"]:
-                asm_lines.append(
-                    f"\ttest\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.src_reg]}"
-                )
-                asm_lines.append(f"\tjl\t{ir.dest}")
-            elif ir.op_type == IROpType["CALL"]:
-                if ir.name == "print":
-                    if hasattr(ir, "print_type") and ir.print_type == "string":
-                        # Use the string_label and string_length from IR
-                        asm_lines.extend(
-                            self.generate_print_syscall(
-                                ir.string_label, ir.string_length
-                            )
+            else:
+                asm_lines.append(f"\tmovq\t%r4, ${ir.value}")
+                asm_lines.append(f"\tstr\t%r4, -{ir.dest+8}(%rbp)")
+        elif ir.op_type == IROpType["ADD"]:
+            asm_lines.append(
+                f"\taddq\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.dest_reg]}"
+            )
+        elif ir.op_type == IROpType["SUB"]:
+            asm_lines.append(
+                f"\tsubq\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.dest_reg]}"
+            )
+        elif ir.op_type == IROpType["MUL"]:
+            asm_lines.append(
+                f"\timul\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.dest_reg]}"
+            )
+        elif ir.op_type == IROpType["DIV"]:
+            asm_lines.append(f"\tmovq\t{register_map['x86_64'][ir.dest_reg]}, %eax")
+            asm_lines.append("\tcdq")  # Sign-extend EAX into EDX:EAX
+            asm_lines.append(f"\tidivq\t{register_map['x86_64'][ir.src_reg]}")
+            if ir.dest_reg != 0:  # If result doesn't belong in EAX
+                asm_lines.append(f"\tmovq\t%eax, {register_map['x86_64'][ir.dest_reg]}")
+        elif ir.op_type == IROpType["JUMP"]:
+            asm_lines.append(f"\tjmp\t{ir.dest}")
+        elif ir.op_type == IROpType["JUMP_IF_ZERO"]:
+            asm_lines.append(
+                f"\ttest\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.src_reg]}"
+            )
+            asm_lines.append(f"\tje\t{ir.dest}")
+        elif ir.op_type == IROpType["JUMP_IF_NEG"]:
+            asm_lines.append(
+                f"\ttest\t{register_map['x86_64'][ir.src_reg]}, {register_map['x86_64'][ir.src_reg]}"
+            )
+            asm_lines.append(f"\tjl\t{ir.dest}")
+        elif ir.op_type == IROpType["CALL"]:
+            if ir.name == "print":
+                if hasattr(ir, "print_type") and ir.print_type == "string":
+                    # Use the string_label and string_length from IR
+                    asm_lines.extend(
+                        X86_64Generator_generate_print_syscall(
+                            ir.string_label, ir.string_length
                         )
-                    elif hasattr(ir, "print_type") and ir.print_type == "int":
-                        # Handle integer printing
-                        if hasattr(ir, "value"):
-                            # Direct value
-                            asm_lines.extend(
-                                self.generate_print_int_immediate(ir.value)
-                            )
-                        else:
-                            # From register
-                            asm_lines.extend(
-                                self.generate_print_int_register(ir.src_reg)
-                            )
-                else:
-                    asm_lines.append(f"\tcall\t{ir.name}")
-            elif ir.op_type == IROpType["RETURN"]:
-                asm_lines.append(f"\tret")
-            elif ir.op_type == IROpType["ALLOCATE"]:
-                # x86-64 function prologue
-                asm_lines.append(
-                    f"\tenter\t${ir.size}, $0"
-                )  # TODO: change 2nd arg to lexical nesting level of func
-                # Optional: add stack canary for security
-                # asm_lines.append("\tmovq\t%fs:40, %rax")
-                # asm_lines.append("\tmovq\t%rax, -8(%rbp)")
-                # asm_lines.append("\txorl\t%eax, %eax")
-            elif ir.op_type == IROpType["DEALLOCATE"]:
-                # x86 function epilogue: restore stack pointer and restore frame pointer
-                asm_lines.append(f"\tleave")
-                # leave just an alias for following lines
-                # asm_lines.append("\tmovq\t%rbp, %rsp")  # Restore stack pointer
-                # asm_lines.append("\tpopq\t%rbp")        # Restore old base pointer
+                    )
+                elif hasattr(ir, "print_type") and ir.print_type == "int":
+                    # Handle integer printing
+                    if hasattr(ir, "value"):
+                        # Direct value
+                        asm_lines.extend(
+                            X86_64Generator_generate_print_int_immediate(ir.value)
+                        )
+                    else:
+                        # From register
+                        asm_lines.extend(
+                            X86_64Generator_generate_print_int_register(ir.src_reg)
+                        )
+            else:
+                asm_lines.append(f"\tcall\t{ir.name}")
+        elif ir.op_type == IROpType["RETURN"]:
+            asm_lines.append(f"\tret")
+        elif ir.op_type == IROpType["ALLOCATE"]:
+            # x86-64 function prologue
+            asm_lines.append(
+                f"\tenter\t${ir.size}, $0"
+            )  # TODO: change 2nd arg to lexical nesting level of func
+            # Optional: add stack canary for security
+            # asm_lines.append("\tmovq\t%fs:40, %rax")
+            # asm_lines.append("\tmovq\t%rax, -8(%rbp)")
+            # asm_lines.append("\txorl\t%eax, %eax")
+        elif ir.op_type == IROpType["DEALLOCATE"]:
+            # x86 function epilogue: restore stack pointer and restore frame pointer
+            asm_lines.append(f"\tleave")
+            # leave just an alias for following lines
+            # asm_lines.append("\tmovq\t%rbp, %rsp")  # Restore stack pointer
+            # asm_lines.append("\tpopq\t%rbp")        # Restore old base pointer
 
-        asm_lines.extend(self.generate_int_to_string_function())
+    asm_lines.extend(X86_64Generator_generate_int_to_string_function())
 
-        if self.data_section:
-            asm_lines.extend(["", ".section .data"])
-            asm_lines.extend(self.data_section)
+    if X86_64Generator_data_section:
+        asm_lines.extend(["", ".section .data"])
+        asm_lines.extend(X86_64Generator_data_section)
 
-        asm_lines.append("")
-        return "\n".join(asm_lines)
+    asm_lines.append("")
+    return "\n".join(asm_lines)
 
 
 MachineCodeGenerator_architecture = ""
@@ -1446,8 +1462,7 @@ def MachineCodeGenerator_generate(ir_instructions):
     #     gen = ARMGenerator()
     #     return gen.generate(ir_instructions)
     # elif MachineCodeGenerator_architecture == "x86_64":
-    gen = X86_64Generator()
-    return gen.generate(ir_instructions, IRGenerator_string_literals)
+    return X86_64Generator_generate(ir_instructions, IRGenerator_string_literals)
 
 
 def compile_code(source_code, architecture: str = "arm"):
@@ -1497,7 +1512,7 @@ def main():
 
     source_code = ""
 
-    with open("test/simple.pi") as fp:
+    with open("main.py") as fp:
         source_code = "".join(fp.readlines())
 
     # Compile to ARM assembly

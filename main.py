@@ -1,221 +1,292 @@
-import argparse
-
 VERBOSE = False
+MAX_INDENT = 100
+MAX_LEVEL = 200
+TABSIZE = 8
+
+tokens = [
+    "ENDMARKER",
+    "NAME",
+    "NUMBER",
+    "STRING",
+    "NEWLINE",
+    "INDENT",
+    "DEDENT",
+    "LPAR",
+    "RPAR",
+    "LSQB",
+    "RSQB",
+    "COLON",
+    "COMMA",
+    "SEMI",
+    "PLUS",
+    "MINUS",
+]
 
 
-TokenType = {
-    "IDENTIFIER": "IDENTIFIER",  # Variable/function names
-    "NUMBER": "NUMBER",  # Integer literals
-    "STRING": "STRING",  # String literals
-    "NEWLINE": "NEWLINE",  # Line breaks
-    "INDENT": "INDENT",  # Indentation level increase
-    "DEDENT": "DEDENT",  # Indentation level decrease
-    # Operators and symbols
-    "LPAR": "(",
-    "RPAR": ")",
-    "LSQB": "[",
-    "RSQB": "]",
-    "COLON": ":",
-    "COMMA": ",",
-    "SEMI": ";",
-    "PLUS": "+",
-    "MINUS": "-",
-    "STAR": "*",
-    "SLASH": "/",
-    "VBAR": "|",
-    "AMPER": "&",
-    "LESS": "<",
-    "GREATER": ">",
-    "EQUAL": "=",
-    "DOT": ".",
-    "PERCENT": "%",
-    "LBRACE": "{",
-    "RBRACE": "}",
-    "EQEQUAL": "==",
-    "NOTEQUAL": "!=",
-    "LESSEQUAL": "<=",
-    "GREATEREQUAL": ">=",
-    "TILDE": "~",
-    "CIRCUMFLEX": "^",
-    "LEFTSHIFT": "<<",
-    "RIGHTSHIFT": ">>",
-    "EXCLAMATION": "!",
-    "EOF": 21,  # End of file
-    # Keywords
-    "DEF": "def",
-    "RETURN": "return",
-    "IF": "if",
-    "ELSE": "else",
-    "WHILE": "while",
-    "FOR": "for",
-    "BREAK": "break",
-    "CONTINUE": "continue",
-    "PASS": "pass",
-    "CLASS": "class",
+# Operators and symbols
+token_STAR = "*"
+token_SLASH = "/"
+token_VBAR = "|"
+token_AMPER = "&"
+token_LESS = "<"
+token_GREATER = ">"
+token_EQUAL = "="
+token_DOT = "."
+token_PERCENT = "%"
+token_LBRACE = "{"
+token_RBRACE = "}"
+token_EQEQUAL = "=="
+token_NOTEQUAL = "!="
+token_LESSEQUAL = "<="
+token_GREATEREQUAL = ">="
+token_TILDE = "~"
+token_CIRCUMFLEX = "^"
+token_LEFTSHIFT = "<<"
+token_RIGHTSHIFT = ">>"
+token_EXCLAMATION = "!"
+
+# Keywords
+token_DEF = "def"
+token_RETURN = "return"
+token_IF = "if"
+token_ELIF = "elif"
+token_ELSE = "else"
+token_WHILE = "while"
+token_FOR = "for"
+token_BREAK = "break"
+token_CONTINUE = "continue"
+token_PASS = "pass"
+token_CLASS = "class"
+
+# More keywords
+keyword_def = "DEF"
+keyword_return = "RETURN"
+keyword_if = "IF"
+keyword_elif = "ELIF"
+keyword_else = "ELSE"
+keyword_while = "WHILE"
+keyword_for = "FOR"
+keyword_break = "BREAK"
+keyword_continue = "CONTINUE"
+keyword_pass = "PASS"
+keyword_class = "CLASS"
+
+# lookup for one-char tokens
+one_char_tokens = {
+    "!": "EXCLAMATION",
+    "%": "PERCENT",
+    "&": "AMPER",
+    "(": "LPAR",
+    ")": "RPAR",
+    "*": "STAR",
+    "+": "PLUS",
+    ",": "COMMA",
+    "-": "MINUS",
+    ".": "DOT",
+    "/": "SLASH",
+    ":": "COLON",
+    ";": "SEMI",
+    "<": "LESS",
+    "=": "EQUAL",
+    ">": "GREATER",
+    "@": "AT",
+    "[": "LSQB",
+    "]": "RSQB",
+    "^": "CIRCUMFLEX",
+    "{": "LBRACE",
+    "|": "VBAR",
+    "}": "RBRACE",
+    "~": "TILDE",
 }
 
-KEYWORDS = {
-    "def": "DEF",
-    "return": "RETURN",
-    "if": "IF",
-    "else": "ELSE",
-    "while": "WHILE",
-    "for": "FOR",
-    "break": "BREAK",
-    "continue": "CONTINUE",
-    "pass": "PASS",
-    "class": "CLASS",
+two_char_tokens = {
+    "!=": "NOTEQUAL",
+    "%=": "PERCENTEQUAL",
+    "&=": "AMPEREQUAL",
+    "**": "DOUBLESTAR",
+    "*=": "STAREQUAL",
+    "+=": "PLUSEQUAL",
+    "-=": "MINEQUAL",
+    "->": "RARROW",
+    "//": "DOUBLESLASH",
+    "/=": "SLASHEQUAL",
+    ":=": "COLONEQUAL",
+    "<<": "LEFTSHIFT",
+    "<=": "LESSEQUAL",
+    "==": "EQEQUAL",
+    ">=": "GREATEREQUAL",
+    ">>": "RIGHTSHIFT",
+    "@=": "ATEQUAL",
+    "^=": "CIRCUMFLEXEQUAL",
+    "|=": "VBAREQUAL",
 }
 
 ###############################################################################
-#                                  LEXER                                      #
+#                                   HELPERS                                   #
 ###############################################################################
+
+
+def is_potential_identifier_start(c):
+    return (c >= "a" and c <= "z") or (c >= "A" and c <= "Z") or (c == "_")
+
+
+def is_potential_identifier_char(c):
+    return (
+        (c >= "a" and c <= "z")
+        or (c >= "A" and c <= "Z")
+        or (c >= "0" and c <= "9")
+        or (c == "_")
+    )
+
+
+###############################################################################
+#                                SYSTEM FUNCS                                 #
+###############################################################################
+
+
+def isdigit(c):
+    return c >= "0" and c <= "9"
+
+
+###############################################################################
+#                                PREPROCESSOR                                 #
+###############################################################################
+
+
+# def preprocess(source_code):
+#     """
+#     Remove empty lines and whitespace-only lines without using string methods.
+#     Preserves indentation and line endings.
+#     """
+#     result = []
+#     line_start = 0
+#     length = len(source_code)
+#     i = 0
+
+#     while i < length:
+#         # Find the next newline or end of string
+#         while i < length and source_code[i] != "\n":
+#             i += 1
+
+#         # Extract the current line (including newline if present)
+#         line = (
+#             source_code[line_start:i]
+#             if i >= length
+#             else source_code[line_start : i + 1]
+#         )
+
+#         # Check if line is non-empty
+#         is_empty = True
+#         for char in line:
+#             if char not in (" ", "\t", "\r", "\n"):
+#                 is_empty = False
+#                 break
+
+#         if not is_empty:
+#             # Remove trailing whitespace (but preserve newline if present)
+#             end = len(line)
+#             has_newline = end > 0 and line[end - 1] == "\n"
+
+#             # Find last non-whitespace character
+#             last_char = end - (2 if has_newline else 1)
+#             while last_char >= 0 and line[last_char] in (" ", "\t", "\r"):
+#                 last_char -= 1
+
+#             # Rebuild the line
+#             if has_newline:
+#                 cleaned = line[: last_char + 1] + "\n"
+#             else:
+#                 cleaned = line[: last_char + 1]
+
+#             result.append(cleaned)
+
+#         # Move to next line
+#         i += 1
+#         line_start = i
+
+#     return "".join(result)
+
+
+###############################################################################
+#                                    LEXER                                    #
+###############################################################################
+
+EOF = -2
 
 
 def Token(token_type, value, line, column):
-    return {"type": token_type, "value": value, "line": line, "column": column}
+    return {
+        "type": token_type,
+        "value": value,
+        "line": line,
+        "column": column,
+    }
 
 
 def Token__repr__(token):
-    return f"Token({token['type']}, '{token['value']}', line={token['line']}, col={token['column']})"
+    return (
+        "Token("
+        + token["type"]
+        + ", "
+        + token["value"]
+        + "line="
+        + token["line"]
+        + ", col="
+        + token["column"]
+        + ")"
+    )
 
 
 Lexer_source = ""
 Lexer_position = 0
-Lexer_line = 1
-Lexer_column = 1
+Lexer_line_num = 1
+Lexer_col_offset = -1
+Lexer_cur_indent_idx = 0
 Lexer_indent_stack = [0]
+Lexer_cur_paren_lvl = 0
+Lexer_paren_stack = [0]
+Lexer_at_bol = True
+Lexer_tabsize = TABSIZE
+Lexer_pendin = 0
+Lexer_tok_start = 0
+Lexer_tok_cur = 0
+Lexer_comment_newline = False
 
 
 def Lexer(source_code):
-    global Lexer_source, Lexer_position, Lexer_line, Lexer_column, Lexer_indent_stack
+    global Lexer_source
     Lexer_source = source_code
-    Lexer_position = 0
-    Lexer_line = 1
-    Lexer_column = 1
-    Lexer_indent_stack = [0]
 
 
 def Lexer_peek():
     """Look at the current character without advancing position"""
     global Lexer_source, Lexer_position
     if Lexer_position >= len(Lexer_source):
-        return ""
+        return EOF
     return Lexer_source[Lexer_position]
 
 
 def Lexer_advance():
     """Get the current character and advance position"""
-    global Lexer_source, Lexer_position, Lexer_line, Lexer_column
+    global Lexer_source, Lexer_position, Lexer_line_num, Lexer_col_offset
     if Lexer_position >= len(Lexer_source):
-        return ""
-
+        return EOF
+    Lexer_col_offset += 1
     char = Lexer_source[Lexer_position]
     Lexer_position += 1
-    Lexer_column += 1
-
-    if char == "\n":
-        Lexer_line += 1
-        Lexer_column = 1
-
     return char
 
 
-def Lexer_skip_whitespace():
-    """Skip whitespace except for newlines and indentation"""
-    while Lexer_peek() in " \t\r" and Lexer_peek() != "\n":
-        Lexer_advance()
-
-
 def Lexer_skip_to_eol():
-    while Lexer_peek() not in ("\n", ""):
+    while Lexer_peek() != "\n" and Lexer_peek() != "":
         Lexer_advance()
-
-
-def Lexer_handle_indentation():
-    """Process indentation at the beginning of a line"""
-    global Lexer_line, Lexer_column, Lexer_indent_stack
-
-    # Skip the newline character
-    newline_line = Lexer_line
-    newline_column = Lexer_column
-    Lexer_advance()
-
-    # Count spaces at the beginning of the new line
-    indent_level = 0
-    while Lexer_peek() == " ":
-        Lexer_advance()
-        indent_level += 1
-
-    if Lexer_peek() == "\n" or not Lexer_peek():
-        return [Token("NEWLINE", TokenType["NEWLINE"], newline_line, newline_column)]
-
-    if Lexer_peek() == "#":
-        return [Token("NEWLINE", TokenType["NEWLINE"], newline_line, newline_column)]
-
-    tokens = []
-
-    tokens.append(Token("NEWLINE", TokenType["NEWLINE"], newline_line, Lexer_column))
-
-    current_indent = Lexer_indent_stack[-1]
-
-    if indent_level > current_indent:
-        Lexer_indent_stack.append(indent_level)
-        tokens.append(Token("INDENT", TokenType["INDENT"], Lexer_line, Lexer_column))
-    elif indent_level < current_indent:
-        while indent_level < Lexer_indent_stack[-1]:
-            Lexer_indent_stack.pop()
-            tokens.append(
-                Token("DEDENT", TokenType["DEDENT"], Lexer_line, Lexer_column)
-            )
-
-        if indent_level != Lexer_indent_stack[-1]:
-            print("indent level:", indent_level)
-            print("indent stack:", Lexer_indent_stack[-1])
-            raise SyntaxError(f"Invalid indentation at line {Lexer_line}")
-
-    return tokens
-
-
-def Lexer_tokenize_number():
-    """Tokenize a numeric literal"""
-    global Lexer_line, Lexer_column
-
-    start_col = Lexer_column
-    number = ""
-
-    # Collect digits
-    while Lexer_peek().isdigit():
-        number += Lexer_advance()
-
-    return Token(TokenType["NUMBER"], number, Lexer_line, start_col)
-
-
-def Lexer_tokenize_identifier():
-    """Tokenize an identifier or keyword"""
-    global Lexer_line, Lexer_column
-
-    start_col = Lexer_column
-    identifier = ""
-
-    # Collect identifier characters (letters, digits, underscore)
-    while Lexer_peek().isalnum() or Lexer_peek() == "_":
-        identifier += Lexer_advance()
-
-    # Check if this is a keyword
-    if identifier in KEYWORDS:
-        token_type = KEYWORDS[identifier]
-    else:
-        token_type = TokenType["IDENTIFIER"]
-
-    return Token(token_type, identifier, Lexer_line, start_col)
 
 
 def Lexer_tokenize_string():
     """Tokenize a string literal"""
-    global Lexer_line, Lexer_column
+    global Lexer_line_num, Lexer_col_offset
 
-    start_col = Lexer_column
+    start_col = Lexer_col_offset
     quote_char = Lexer_advance()  # Skip the opening quote
     string_value = ""
 
@@ -226,7 +297,7 @@ def Lexer_tokenize_string():
             next_char = Lexer_peek()
 
             if not next_char:
-                raise SyntaxError(f"Unterminated string at line {Lexer_line}")
+                raise SyntaxError(f"Unterminated string at line {Lexer_line_num}")
 
             if next_char == "n":
                 string_value += "\n"
@@ -243,162 +314,222 @@ def Lexer_tokenize_string():
             string_value += Lexer_advance()
 
     if not Lexer_peek() or Lexer_peek() != quote_char:
-        raise SyntaxError(f"Unterminated string at line {Lexer_line}")
+        print(f"Unterminated string at line {Lexer_line_num}")
+        return
 
     Lexer_advance()  # Skip the closing quote
-    return Token(TokenType["STRING"], string_value, Lexer_line, start_col)
+    return Token("STRING", string_value, Lexer_line_num, start_col)
+
+
+def tok_get_normal_mode():
+    """Get the next token in normal parsing mode"""
+    global Lexer_source, Lexer_position, Lexer_line_num, Lexer_col_offset
+    global Lexer_cur_indent_idx, Lexer_indent_stack, Lexer_cur_paren_lvl
+    global Lexer_paren_stack, Lexer_at_bol, Lexer_tabsize, Lexer_pendin
+    global Lexer_tok_start, Lexer_tok_cur, Lexer_comment_newline
+
+    blankline = False
+
+    # get indentation level
+    if Lexer_at_bol:
+        Lexer_at_bol = False
+        col = 0
+        cont_line_col = 0
+
+        while True:
+            c = Lexer_peek()
+            if c == " ":
+                col += 1
+            elif c == "\t":
+                col = (col / Lexer_tabsize + 1) * Lexer_tabsize
+            else:
+                break
+            Lexer_advance()
+
+        # check for blank lines
+        c = Lexer_peek()
+        blankline = False
+        if c == "#" or c == "\n" or c == "\r":
+            if col == 0 and c == "\n":
+                blankline = False
+            else:
+                blankline = True
+
+        # handle indentation changes
+        if not blankline and Lexer_cur_paren_lvl == 0:
+            if cont_line_col != 0:
+                col = cont_line_col
+            if col == Lexer_indent_stack[Lexer_cur_indent_idx]:
+                pass  # no change
+            elif col > Lexer_indent_stack[Lexer_cur_indent_idx]:
+                if Lexer_cur_indent_idx + 1 >= MAX_INDENT:
+                    return -1  # too deep
+                Lexer_pendin += 1
+                Lexer_cur_indent_idx += 1
+                Lexer_indent_stack.append(col)
+            else:  # col < tok->indstack[tok->indent]
+                while (
+                    Lexer_cur_indent_idx > 0
+                    and col < Lexer_indent_stack[Lexer_cur_indent_idx]
+                ):
+                    Lexer_pendin -= 1
+                    Lexer_cur_indent_idx -= 1
+                if col != Lexer_indent_stack[Lexer_cur_indent_idx]:
+                    return -1
+
+    # handle pending indents/dedents
+    if Lexer_pendin != 0:
+        if Lexer_pendin < 0:
+            Lexer_pendin += 1
+            return Token("DEDENT", "", Lexer_line_num, Lexer_col_offset)
+        else:
+            Lexer_pendin -= 1
+            return Token("INDENT", "", Lexer_line_num, Lexer_col_offset)
+
+    # skip whitespace
+    while Lexer_peek() == " " or Lexer_peek() == "\t" or Lexer_peek() == "\r":
+        Lexer_advance()
+
+    # get current char
+    c = Lexer_peek()
+    # EOF
+    if c == EOF:
+        return Token("ENDMARKER", "", Lexer_line_num, Lexer_col_offset)
+
+    # Comments
+    if c == "#":
+        Lexer_skip_to_eol()
+        return tok_get_normal_mode()  # potential issue if tens of thousands of comments
+
+    # Identifiers
+    if is_potential_identifier_start(c):
+        start_pos = Lexer_position
+        start_col = Lexer_col_offset
+        while is_potential_identifier_char(c):
+            Lexer_advance()
+            c = Lexer_peek()
+
+        identifier = Lexer_source[start_pos:Lexer_position]
+
+        if identifier == "def":
+            token_type = keyword_def
+        elif identifier == "return":
+            token_type = keyword_return
+        elif identifier == "if":
+            token_type = keyword_if
+        elif identifier == "elif":
+            token_type = keyword_elif
+        elif identifier == "else":
+            token_type = keyword_else
+        elif identifier == "while":
+            token_type = keyword_while
+        elif identifier == "for":
+            token_type = keyword_for
+        elif identifier == "break":
+            token_type = keyword_break
+        elif identifier == "continue":
+            token_type = keyword_continue
+        elif identifier == "pass":
+            token_type = keyword_pass
+        elif identifier == "class":
+            token_type = keyword_class
+        else:
+            token_type = "NAME"
+
+        return Token(token_type, identifier, Lexer_line_num, start_col)
+
+    # Newlines
+    if c == "\n":
+        Lexer_advance()
+        Lexer_at_bol = True
+        Lexer_line_num += 1
+        return Token("NEWLINE", "", Lexer_line_num, Lexer_col_offset)
+
+    # number
+    if isdigit(c) or (
+        c == "."
+        and Lexer_position + 1 < len(Lexer_source)
+        and isdigit(Lexer_source[Lexer_position + 1])
+    ):
+        start_col = Lexer_col_offset
+        number = ""
+
+        if c == ".":
+            number += Lexer_advance()
+            c = Lexer_peek()
+
+        while isdigit(c):
+            number += Lexer_advance()
+            c = Lexer_peek()
+
+        # Handle decimal point
+        if c == ".":
+            number += Lexer_advance()
+            c = Lexer_peek()
+            while isdigit(c):
+                number += Lexer_advance()
+                c = Lexer_peek()
+
+        return Token("NUMBER", number, Lexer_line_num, start_col)
+
+    # string literals (simple quotes, ignoring f-strings for now)
+    if c == '"' or c == "'":
+        return Lexer_tokenize_string()
+
+    # punctuation character
+    if c in one_char_tokens or c in two_char_tokens:
+        start_col = Lexer_col_offset
+        first_char = c
+
+        # Check for two-character tokens
+        if Lexer_position < len(Lexer_source):
+            second_char = Lexer_advance()
+            two_char = first_char + second_char
+            if two_char in two_char_tokens:
+                return Token(
+                    two_char_tokens[two_char], two_char, Lexer_line_num, start_col
+                )
+
+        # Single character token
+        if first_char in one_char_tokens:
+            return Token(
+                one_char_tokens[first_char], first_char, Lexer_line_num, start_col
+            )
+
+    # if we get here, it's an unrecognized character
+    return Token(
+        "ERROR", f"Unexpected character '{c}'", Lexer_line_num, Lexer_col_offset
+    )
 
 
 def Lexer_tokenize():
     """Convert source code to a list of tokens"""
-    global Lexer_source, Lexer_position, Lexer_line, Lexer_column, Lexer_indent_stack
+    global Lexer_source, Lexer_position, Lexer_line_num, Lexer_col_offset, Lexer_indent_stack
+
+    global Lexer_position, Lexer_line_num, Lexer_col_offset
+    global Lexer_indent_stack, Lexer_cur_indent_idx
 
     tokens = []
+    # Lexer_position = 0
+    # Lexer_line_num = 1
+    # Lexer_col_offset = 0
+    # Lexer_indent_stack = [0]
+    # Lexer_cur_indent_idx = 0
 
-    while Lexer_position < len(Lexer_source):
-        char = Lexer_peek()
-
-        # Handle whitespace
-        if char in " \t\r":
-            Lexer_skip_whitespace()
-
-        elif char == "#":
-            Lexer_skip_to_eol()
-
-        # Handle newlines and indentation
-        elif char == "\n":
-            tokens.extend(Lexer_handle_indentation())
-
-        # Handle numbers
-        elif char.isdigit():
-            tokens.append(Lexer_tokenize_number())
-
-        # Handle identifiers and keywords
-        elif char.isalpha() or char == "_":
-            tokens.append(Lexer_tokenize_identifier())
-
-        # Handle string literals
-        elif char == '"' or char == "'":
-            tokens.append(Lexer_tokenize_string())
-
-        # Handle operators and symbols
-        elif char == "+":
-            tokens.append(Token("PLUS", TokenType["PLUS"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == "-":
-            tokens.append(Token("MINUS", TokenType["MINUS"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == "*":
-            tokens.append(Token("STAR", TokenType["STAR"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == "/":
-            tokens.append(Token("SLASH", TokenType["SLASH"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == "=":
-            start_col = Lexer_column
-            Lexer_advance()
-            if Lexer_peek() == "=":
-                tokens.append(
-                    Token("EQEQUAL", TokenType["EQEQUAL"], Lexer_line, start_col)
-                )
-                Lexer_advance()
-            else:
-                tokens.append(Token("EQUAL", TokenType["EQUAL"], Lexer_line, start_col))
-        elif char == ".":
-            tokens.append(Token("DOT", TokenType["DOT"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == ">":
-            start_col = Lexer_column
-            Lexer_advance()
-            if Lexer_peek() == "=":
-                tokens.append(
-                    Token(
-                        "GREATEREQUAL", TokenType["GREATEREQUAL"], Lexer_line, start_col
-                    )
-                )
-                Lexer_advance()
-            elif Lexer_peek() == ">":
-                tokens.append(
-                    Token("RIGHTSHIFT", TokenType["RIGHTSHIFT"], Lexer_line, start_col)
-                )
-                Lexer_advance()
-            else:
-                tokens.append(
-                    Token("GREATER", TokenType["GREATER"], Lexer_line, start_col)
-                )
-        elif char == "<":
-            start_col = Lexer_column
-            Lexer_advance()
-            if Lexer_peek() == "=":
-                tokens.append(
-                    Token(TokenType["LESSEQUAL"], "<=", Lexer_line, start_col)
-                )
-                Lexer_advance()
-            elif Lexer_peek() == "<":
-                tokens.append(
-                    Token(TokenType["LEFTSHIFT"], "<<", Lexer_line, start_col)
-                )
-                Lexer_advance()
-            else:
-                tokens.append(Token(TokenType["LESS"], "<", Lexer_line, start_col))
-        elif char == "(":
-            tokens.append(Token("LPAR", TokenType["LPAR"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == ")":
-            tokens.append(Token("RPAR", TokenType["RPAR"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == "[":
-            tokens.append(Token("LSQB", TokenType["LSQB"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == "]":
-            tokens.append(Token("RSQB", TokenType["RSQB"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == "%":
-            tokens.append(
-                Token("PERCENT", TokenType["PERCENT"], Lexer_line, Lexer_column)
-            )
-            Lexer_advance()
-        elif char == "{":
-            tokens.append(
-                Token("LBRACE", TokenType["LBRACE"], Lexer_line, Lexer_column)
-            )
-            Lexer_advance()
-        elif char == "}":
-            tokens.append(
-                Token("RBRACE", TokenType["RBRACE"], Lexer_line, Lexer_column)
-            )
-            Lexer_advance()
-        elif char == ":":
-            tokens.append(Token("COLON", TokenType["COLON"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == ",":
-            tokens.append(Token("COMMA", TokenType["COMMA"], Lexer_line, Lexer_column))
-            Lexer_advance()
-        elif char == "!":
-            start_col = Lexer_column
-            Lexer_advance()
-            if Lexer_peek() == "=":
-                tokens.append(Token(TokenType["NOTEQUAL"], "!=", Lexer_line, start_col))
-                Lexer_advance()
-            else:
-                tokens.append(
-                    Token(TokenType["EXCLAMATION"], "!", Lexer_line, start_col)
-                )
+    while True:
+        token = tok_get_normal_mode()
+        if token["type"] == "ENDMARKER":
+            # add any pending DEDENTs
+            while len(Lexer_indent_stack) > 1:
+                Lexer_indent_stack.pop()
+                tokens.append(Token("DEDENT", "", Lexer_line_num, Lexer_col_offset))
+            tokens.append(token)
+            break
+        elif token["type"] == "ERROR":
+            print(f"Lexer error: {token['value']}")
+            return -1
         else:
-            if VERBOSE:
-                print(
-                    f"Unexpected character '{char}' at line {Lexer_line}, column {Lexer_column}"
-                )
-            raise SyntaxError(
-                f"Unexpected character '{char}' at line {Lexer_line}, column {Lexer_column}"
-            )
-
-    # Add DEDENT tokens for any remaining indentation levels
-    while len(Lexer_indent_stack) > 1:
-        Lexer_indent_stack.pop()
-        tokens.append(Token("DEDENT", TokenType["DEDENT"], Lexer_line, Lexer_column))
-
-    tokens.append(Token("EOF", TokenType["EOF"], Lexer_line, Lexer_column))
+            tokens.append(token)
 
     return tokens
 
@@ -408,17 +539,18 @@ def Lexer_tokenize():
 ###############################################################################
 ASTNodeType = {
     "PROGRAM": "Program",
-    "FUNCTION_DEF": "Function_Def",
+    "FUNCTION_DEF": "FunctionDef",
     "BLOCK": "Block",
     "RETURN_STMT": "Return_Stmt",
-    "IF_STMT": "If_Stmt",
-    "WHILE_STMT": "While_Stmt",
+    "IF_STMT": "If",
+    "WHILE_STMT": "While",
     "ASSIGNMENT": "Assignment",
     "BINARY_EXPR": "Binary_Expr",
     "CALL_EXPR": "Call_Expr",
     "IDENTIFIER": "Identifier",
     "NUMBER": "Number",
     "STRING": "String",
+    "DICT": "Dict",
 }
 
 
@@ -449,7 +581,7 @@ def Parser_peek():
     """Look at the current token without advancing position"""
     global Parser_tokens, Parser_position
     if Parser_position >= len(Parser_tokens):
-        return Token(TokenType["EOF"], "")
+        return Token(EOF, "")
     return Parser_tokens[Parser_position]
 
 
@@ -471,19 +603,30 @@ def Parser_expect(token_type):
     return Parser_advance()
 
 
-def Parser_parse():
-    """Parse the entire program"""
+def Parser_parse_file():
+    """Parse the entire file"""
     statements = []
 
-    while Parser_peek()["type"] != "EOF":
-        # Skip any standalone newlines at the top level
-        if Parser_peek()["type"] == "NEWLINE":
-            Parser_advance()
-            continue
+    if Parser_parse_statements(statements) != -1 and Parser_expect("EOF") != -1:
+        return ASTNode(ASTNodeType["FILE"], statements=statements)
+    return -1
 
-        statements.append(Parser_parse_statement())
 
-    return ASTNode(ASTNodeType["PROGRAM"], statements=statements)
+def Parser_parse_statements(statements):
+    pass
+
+
+def parse_expressions():
+    pass
+
+
+def parse_expression():
+    pass
+
+
+def parse_atom():
+    # if Parser_peek()["type"] == "IDENTIFIER":
+    pass
 
 
 def Parser_parse_statement():
@@ -500,7 +643,7 @@ def Parser_parse_statement():
         return Parser_parse_if_statement()
     elif token["type"] == "WHILE":
         return Parser_parse_while_statement()
-    elif token["type"] == "PASS":
+    elif token["type"] == "PASS" or token["type"] == "NEWLINE":
         Parser_advance()
         return ASTNode(ASTNodeType["BLOCK"], name="pass")
     elif token["type"] == "IDENTIFIER":
@@ -510,33 +653,32 @@ def Parser_parse_statement():
         if Parser_peek()["type"] == "EQUAL":
             Parser_advance()  # Consume the '='
             value = Parser_parse_expression()
-            Parser_expect("NEWLINE")  # Expect newline after assignment
             return ASTNode(ASTNodeType["ASSIGNMENT"], name=identifier, value=value)
         else:
             # Put the identifier back and parse as expression
             Parser_position -= 1
             expr = Parser_parse_expression()
-            Parser_expect("NEWLINE")  # Expect newline after expression statement
             return expr
     else:
-        raise SyntaxError(f"Unexpected token {token['type']} at line {token['line']}")
+        print(f"Unexpected token {token['type']} at line {token['line']}")
+        return -1
 
 
 def Parser_parse_function_def():
     """Parse a function definition"""
     Parser_expect("DEF")
-    name = Parser_expect(TokenType["IDENTIFIER"])["value"]
+    name = Parser_expect("NAME")["value"]
 
     Parser_expect("LPAR")
     params = []
 
     if Parser_peek()["type"] != "RPAR":
         # Parse parameters
-        params.append(Parser_expect(TokenType["IDENTIFIER"])["value"])
+        params.append(Parser_expect("NAME")["value"])
 
         while Parser_peek()["type"] == "COMMA":
             Parser_advance()  # Consume the comma
-            params.append(Parser_expect(TokenType["IDENTIFIER"])["value"])
+            params.append(Parser_expect("NAME")["value"])
 
     Parser_expect("RPAR")
     Parser_expect("COLON")
@@ -544,23 +686,25 @@ def Parser_parse_function_def():
 
     # Parse function body
     body = Parser_parse_block()
+    if body == -1:
+        return -1
 
     return ASTNode(ASTNodeType["FUNCTION_DEF"], name=name, params=params, body=body)
 
 
 def Parser_parse_block():
     """Parse an indented block of statements"""
-    Parser_expect(TokenType["INDENT"])
+    Parser_expect("NEWLINE")
+    Parser_expect("INDENT")
     statements = []
 
-    while (
-        Parser_peek()["type"] != TokenType["DEDENT"]
-        and Parser_peek()["type"] != TokenType["EOF"]
-    ):
-        statements.append(Parser_parse_statement())
+    while Parser_peek()["type"] != "DEDENT":
+        parsed_statement = Parser_parse_statement()
+        if parsed_statement == -1:
+            return -1
+        statements.append(parsed_statement)
 
-    Parser_expect(TokenType["DEDENT"])
-
+    Parser_expect("DEDENT")
     return ASTNode(ASTNodeType["BLOCK"], statements=statements)
 
 
@@ -575,6 +719,8 @@ def Parser_parse_return_statement():
         expr = Parser_parse_expression()
 
     Parser_expect("NEWLINE")
+    # while Parser_peek()["type"] == token_NEWLINE:
+    #     Parser_advance()
     return ASTNode(ASTNodeType["RETURN_STMT"], expression=expr)
 
 
@@ -607,8 +753,8 @@ def Parser_parse_while_statement():
     """Parse a while statement"""
     Parser_expect("WHILE")
     condition = Parser_parse_expression()
-    Parser_expect(TokenType["COLON"])
-    Parser_expect(TokenType["NEWLINE"])
+    Parser_expect("COLON")
+    Parser_expect("NEWLINE")
 
     body = Parser_parse_block()
 
@@ -720,19 +866,41 @@ def Parser_parse_factor():
     return Parser_parse_primary()
 
 
+def Parser_parse_dict():
+    """Parse a dictionary definition/literal"""
+    Parser_expect("LBRACE")
+    items = []
+
+    if Parser_peek()["type"] != "RBRACE":
+        key = Parser_parse_expression()
+        Parser_expect("COLON")
+        value = Parser_parse_expression()
+        items.append((key, value))
+
+        while Parser_peek()["type"] == "COMMA":
+            Parser_advance()
+            key = Parser_parse_expression()
+            Parser_expect("COLON")
+            value = Parser_parse_expression()
+            items.append((key, value))
+
+    Parser_expect("RBRACE")
+    return ASTNode(ASTNodeType["DICT"], items=items)
+
+
 def Parser_parse_primary():
     """Parse a primary expression (literal, identifier, call, parenthesized)"""
     token = Parser_peek()
 
-    if token["type"] == TokenType["NUMBER"]:
+    if token["type"] == "NUMBER":
         Parser_advance()
         return ASTNode(ASTNodeType["NUMBER"], value=int(token["value"]))
 
-    elif token["type"] == TokenType["STRING"]:
+    elif token["type"] == "STRING":
         Parser_advance()
         return ASTNode(ASTNodeType["STRING"], value=token["value"])
 
-    elif token["type"] == TokenType["IDENTIFIER"]:
+    elif token["type"] == "NAME":
         identifier = Parser_advance()["value"]
 
         # Check if this is a function call
@@ -757,7 +925,8 @@ def Parser_parse_primary():
         expr = Parser_parse_expression()
         Parser_expect("RPAR")
         return expr
-
+    elif token["type"] == "LBRACE":
+        return Parser_parse_dict()
     else:
         raise SyntaxError(f"Unexpected token {token['type']} at line {token['line']}")
 
@@ -1110,6 +1279,28 @@ def IRGenerator_generate_expr(expr: ASTNode, target_reg: int):
                 IRInstruction(IROpType["ADD"], dest_reg=target_reg, src_reg=0)
             )
 
+    elif expr.node_type == ASTNodeType["DICT"]:
+        IRGenerator_instructions.append(
+            IRInstruction(
+                IROpType["ALLOCATE"], size=len(expr.items) * 16 + 8  # simplified
+            )
+        )
+        IRGenerator_instructions.append(
+            IRInstruction(
+                IROpType["STORE"], dest=0, src_reg=target_reg, value=len(expr.items)
+            )
+        )
+
+        for i, (key, value) in enumerate(expr.items):
+            IRGenerator_generate_expr(key, target_reg)
+            IRGenerator_instructions.append(
+                IRInstruction(IROpType["STORE"], dest=i * 16 + 8, src_reg=target_reg)
+            )
+            IRGenerator_generate_expr(value, target_reg)
+            IRGenerator_instructions.append(
+                IRInstruction(IROpType["STORE"], dest=i * 16 + 16, src_reg=target_reg)
+            )
+
 
 ###############################################################################
 #                         MACHINE CODE GENERATION                             #
@@ -1117,23 +1308,6 @@ def IRGenerator_generate_expr(expr: ASTNode, target_reg: int):
 #####  #####
 # thanks to https://github.com/ImanHosseini/AtX for the translation
 register_map = {
-    "arm": [
-        "R0",
-        "R1",
-        "R2",
-        "R3",
-        "R4",
-        "R5",
-        "R6",
-        "R7",
-        "R8",
-        "R9",
-        "R10",
-        "R11",
-        "R12",
-        "LR",
-        "SP",
-    ],
     "x86_64": [
         "%rax",
         "%rsi",
@@ -1153,100 +1327,6 @@ register_map = {
     ],
 }
 
-
-# class ARMGenerator:
-#     def __init__(self):
-#         self.data_counter = 0
-#         self.data_section = []
-
-#     def add_string_literal(self, value: str) -> str:
-#         """Add a string literal to the data section and return its label"""
-#         label = f"str{self.data_counter}"
-#         self.data_counter += 1
-#         escaped_value = value.replace('"', '\\"')
-#         self.data_section.append(f'{label}: .asciz "{escaped_value}"')
-#         return label
-
-#     def generate(self, ir_instructions):
-#         """Generate ARM assembly from IR instructions"""
-#         asm_lines = [".global main", ""]
-
-#         # Process instructions
-#         for ir in ir_instructions:
-#             match ir.op_type:
-#                 case IROpType.LABEL:
-#                     asm_lines.append(f"{ir.name}:")
-#                 case IROpType.LOAD_IMM:
-#                     asm_lines.append(f"    mov r{ir.dest_reg}, #{ir.value}")
-#                 case IROpType.LOAD_VAR:
-#                     asm_lines.append(
-#                         f"    ldr r{ir.dest_reg}, [fp, #-{ir.src_offset+4}]"
-#                     )
-#                 case IROpType.STORE:
-#                     if hasattr(ir, "src_reg"):
-#                         asm_lines.append(f"    str r{ir.src_reg}, [fp, #-{ir.dest+4}]")
-#                     else:
-#                         # This would be a store immediate, which ARM doesn't support directly
-#                         asm_lines.append(f"    mov r4, #{ir.value}")
-#                         asm_lines.append(f"    str r4, [fp, #-{ir.dest+4}]")
-#                 case IROpType.ADD:
-#                     asm_lines.append(
-#                         f"    add r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
-#                     )
-#                 case IROpType.SUB:
-#                     asm_lines.append(
-#                         f"    sub r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
-#                     )
-#                 case IROpType.MUL:
-#                     asm_lines.append(
-#                         f"    mul r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
-#                     )
-#                 case IROpType.DIV:
-#                     # ARM doesn't have a DIV instruction in base instruction set
-#                     # In a real compiler, you'd call a division routine or use SDIV on newer ARM processors
-#                     asm_lines.append(
-#                         f"    ; Division would be implemented with SDIV or a library call"
-#                     )
-#                     asm_lines.append(
-#                         f"    ; For ARMv7 with Thumb-2, you could use: sdiv r{ir.dest_reg}, r{ir.dest_reg}, r{ir.src_reg}"
-#                     )
-#                 case IROpType.JUMP:
-#                     asm_lines.append(f"    b {ir.dest}")
-#                 case IROpType.JUMP_IF_ZERO:
-#                     asm_lines.append(f"    cmp r{ir.src_reg}, #0")
-#                     asm_lines.append(f"    beq {ir.dest}")
-#                 case IROpType.JUMP_IF_NEG:
-#                     asm_lines.append(f"    cmp r{ir.src_reg}, #0")
-#                     asm_lines.append(f"    blt {ir.dest}")
-#                 case IROpType.CALL:
-#                     asm_lines.append(f"    bl {ir.name}")
-#                 case IROpType.RETURN:
-#                     asm_lines.append(f"    mov pc, lr")
-#                 case IROpType.ALLOCATE:
-#                     # ARM function prologue
-#                     asm_lines.append(
-#                         f"    push {{fp, lr}}"
-#                     )  # Save frame pointer and return address
-#                     asm_lines.append(f"    mov fp, sp")  # Set new frame pointer
-#                     asm_lines.append(
-#                         f"    sub sp, sp, #{ir.size}"
-#                     )  # Allocate stack space
-#                 case IROpType.DEALLOCATE:
-#                     # ARM function epilogue
-#                     asm_lines.append(f"    mov sp, fp")  # Restore stack pointer
-#                     asm_lines.append(
-#                         f"    pop {{fp, pc}}"
-#                     )  # Restore frame pointer and return
-#                 case _:
-#                     raise Exception("This don't exist twin")
-
-#         # Add data section if needed
-#         if self.data_section:
-#             asm_lines.append("")
-#             asm_lines.append(".data")
-#             asm_lines.extend(self.data_section)
-
-#         return "\n".join(asm_lines)
 
 X86_64Generator_data_counter = 0
 X86_64Generator_data_section = []
@@ -1458,26 +1538,28 @@ def MachineCodeGenerator(architecture):
 
 def MachineCodeGenerator_generate(ir_instructions):
     """Generate machine code for the target architecture"""
-    # if MachineCodeGenerator_architecture == "arm":
-    #     gen = ARMGenerator()
-    #     return gen.generate(ir_instructions)
-    # elif MachineCodeGenerator_architecture == "x86_64":
     return X86_64Generator_generate(ir_instructions, IRGenerator_string_literals)
 
 
-def compile_code(source_code, architecture: str = "arm"):
+def compile_code(source_code, architecture):
     """Compile source code to target machine code"""
+    # preprocessed_code = preprocess(source_code)
+
     # Stage 1: Lexing
+    # Lexer(preprocessed_code)
     Lexer(source_code)
     tokens = Lexer_tokenize()
 
     if VERBOSE:
         print("----------TOKENS----------")
-        print(tokens)
+        print(tokens[:1000])
 
     # Stage 2: Parsing
     Parser(tokens)
-    ast = Parser_parse()
+    ast = Parser_parse_file()
+
+    if ast == -1:
+        return -1
 
     if VERBOSE:
         print("----------AST----------")
@@ -1503,23 +1585,25 @@ def compile_code(source_code, architecture: str = "arm"):
 
 def main():
     global VERBOSE
-    parser = argparse.ArgumentParser(prog="newlang")
-    parser.add_argument("-t", "--target", choices=["arm", "x86_64"], default="arm")
-    parser.add_argument("--debug", action="store_true", default=False)
+    # input_file = "main.py"
+    input_file = "test/simple.pi"
+    output_file = "newlang.s"
+    target_architecture = "x86_64"
 
-    args = vars(parser.parse_args())
-    VERBOSE = args["debug"]
+    VERBOSE = True
 
     source_code = ""
 
-    with open("main.py") as fp:
+    with open(input_file) as fp:
         source_code = "".join(fp.readlines())
 
-    # Compile to ARM assembly
-    arm_code = compile_code(source_code, args["target"])
+    arm_code = compile_code(source_code, target_architecture)
+
+    if arm_code == -1:
+        return -1
 
     # write to file
-    with open("simple.s", "+w") as fp:
+    with open(output_file, "+w") as fp:
         fp.write(arm_code)
 
 

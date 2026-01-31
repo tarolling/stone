@@ -28,7 +28,7 @@ macro_rules! debug {
 // Argument Parsing
 ////////////////////////////////////////////////////////////////
 
-/// The roll programming language executor
+/// The stone programming language executor
 #[derive(ClapParser, Debug)]
 #[command(author, version, about = "The stone programming language executor")]
 struct Args {
@@ -58,7 +58,7 @@ enum Command {
     },
 }
 
-/// Defines what mode to roll with (haha get it)
+/// Defines what mode to run with
 enum ExecutionMode {
     Build(String),
     Check(String),

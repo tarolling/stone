@@ -1,0 +1,41 @@
+EOF
+NAME
+NUMBER
+STRING
+NEWLINE
+INDENT
+DEDENT
+
+SPACE ' '   # 0x20
+LPAR '('    # 0x28
+RPAR ')'    # 0x29
+LSQB '['    # 0x5B
+RSQB ']'    # 0x5D
+COLON ':'   # 0x3A
+COMMA ','   # 0x2C
+SEMI ';'    # 0x3B
+PLUS '+'    # 0x2B
+MINUS '-'   # 0x2D
+STAR '*'    # 0x2A
+SLASH '/'   # 0x2F
+VBAR '|'    # 0x7C
+AMPER '&'   # 0x26
+LESS '<'    # 0x3C
+GREATER '>' # 0x3E
+EQUAL '='   # 0x3D
+DOT '.'     # 0x2E
+PERCENT '%' # 0x25
+LBRACE '{'  # 0x7B
+RBRACE '}'  # 0x7D
+EQEQUAL '=='
+NOTEQUAL '!='
+LESSEQUAL '<='
+GREATEREQUAL '>='
+
+OP
+TYPE_IGNORE
+TYPE_COMMENT
+SOFT_KEYWORD
+COMMENT
+NL
+ERRORTOKEN

@@ -1,0 +1,47 @@
+-- ASDL's 4 builtin types are:
+-- identifier, int, string, constant
+
+module stone
+{
+    mod = Module(stmt* body)
+
+    stmt = FunctionDef(identifier name, arguments args,
+                       stmt* body, expr? returns)
+
+          | Return(expr? value)
+
+          | Delete(expr* targets)
+          | Assign(expr* targets, expr value)
+
+          -- use 'orelse' because else is a keyword in target languages
+          | For(expr target, expr iter, stmt* body, stmt* orelse)
+          | While(expr test, stmt* body, stmt* orelse)
+          | If(expr test, stmt* body, stmt* orelse)
+
+          | Expr(expr value)
+          | Break | Continue
+
+    expr = BoolOp(boolop op, expr* values)
+         | BinOp(expr left, operator op, expr right)
+         | UnaryOp(unaryop op, expr operand)
+         | Compare(expr left, cmpop* ops, expr* comparators)
+         | Call(expr func, expr* args)
+         | Constant(constant value, string? kind)
+
+         | Name(identifier id, expr_context ctx)
+         | List(expr* elts, expr_context ctx)
+
+    expr_context = Load | Store | Delete
+
+    boolop = And | Or
+
+    operator = Add | Subtract | Multiply | Divide
+
+    unaryop = Invert | Not | UAdd | USub
+
+    cmpop = Eq | NotEq | Lt | LtE | Gt | GtE
+
+    arguments = (arg* args)
+
+    arg = (identifier arg)
+}

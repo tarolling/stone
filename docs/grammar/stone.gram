@@ -1,0 +1,270 @@
+# PEG grammar for stone
+
+
+
+# ========================= START OF THE GRAMMAR =========================
+
+# General grammatical elements and rules:
+#
+# * Strings with double quotes (") denote SOFT KEYWORDS
+# * Strings with single quotes (') denote KEYWORDS
+# * Upper case names (NAME) denote tokens in the Grammar/Tokens file
+#
+# Grammar Syntax:
+#
+# rule_name: expression
+#   Optionally, a type can be included right after the rule name, which
+#   specifies the return type of the C or Python function corresponding to the
+#   rule:
+# rule_name[return_type]: expression
+#   If the return type is omitted, then a std::any::Any is returned in Rust.
+# e1 e2
+#   Match e1, then match e2.
+# e1 | e2
+#   Match e1 or e2.
+#   The first alternative can also appear on the line after the rule name for
+#   formatting purposes. In that case, a | must be used before the first
+#   alternative, like so:
+#       rule_name[return_type]:
+#            | first_alt
+#            | second_alt
+# ( e )
+#   Match e (allows also to use other operators in the group like '(e)*')
+# [ e ] or e?
+#   Optionally match e.
+# e*
+#   Match zero or more occurrences of e.
+# e+
+#   Match one or more occurrences of e.
+# s.e+
+#   Match one or more occurrences of e, separated by s. The generated parse tree
+#   does not include the separator. This is otherwise identical to (e (s e)*).
+# &e
+#   Succeed if e can be parsed, without consuming any input.
+# !e
+#   Fail if e can be parsed, without consuming any input.
+# ~
+#   Commit to the current alternative, even if it fails to parse.
+# &&e
+#   Eager parse e. The parser will not backtrack and will immediately
+#   fail with SyntaxError if e cannot be parsed.
+#
+
+# STARTING RULES
+# ==============
+
+program[mod]:
+    | [statements] EOF 
+
+# GENERAL STATEMENTS
+# ==================
+
+statements[vec_stmt]:
+    | statement+ 
+
+statement[stmt]:
+    | compound_stmt
+    | simple_stmts 
+
+simple_stmts[vec_stmt]:
+    | simple_stmt NEWLINE
+
+# NOTE: assignment MUST precede expression, else parsing a simple assignment
+# will throw a SyntaxError.
+simple_stmt:
+    | assignment
+    | expressions 
+    | return_stmt
+    | 'break'
+    | 'cont' 
+
+compound_stmt:
+    | function_def
+    | if_stmt
+    | for_stmt
+    | while_stmt
+
+# SIMPLE STATEMENTS
+# =================
+
+assignment:
+    | (star_targets '=' )+ expressions !'=' 
+
+return_stmt:
+    | 'ret' [expressions] 
+
+# COMPOUND STATEMENTS
+# ===================
+
+# Common elements
+# ---------------
+
+block:
+    | NEWLINE INDENT statements DEDENT 
+    | simple_stmts
+
+# Function definitions
+# --------------------
+
+function_def:
+    | 'def' NAME '(' [parameters] ')' ';' block 
+
+# Function parameters
+# -------------------
+
+parameters:
+    | ','.param+
+
+param:
+    | NAME 
+
+# If statement
+# ------------
+
+if_stmt:
+    | 'if' expression ';' block elif_stmt 
+    | 'if' expression ';' block [else_block] 
+elif_stmt:
+    | 'elif' expression ';' block elif_stmt 
+    | 'elif' expression ';' block [else_block] 
+else_block:
+    | 'else' ';' block 
+
+# While statement
+# ---------------
+
+while_stmt:
+    | 'while' expression ';' block
+
+# For statement
+# -------------
+
+for_stmt:
+    | 'for' star_targets 'in' ~ expressions ';' block
+
+# EXPRESSIONS
+# -----------
+
+expressions:
+    | expression (',' expression )+ [','] 
+    | expression ',' 
+    | expression
+
+expression:
+    | disjunction
+
+named_expressions:
+    | ','.expression+ [','] 
+
+disjunction:
+    | conjunction ('or' conjunction )+ 
+    | conjunction
+
+conjunction:
+    | inversion ('and' inversion )+ 
+    | inversion
+
+inversion:
+    | 'not' inversion 
+    | comparison
+
+# Comparison operators
+# --------------------
+
+comparison:
+    | sum
+
+# Arithmetic operators
+# --------------------
+
+sum:
+    | term ('+'|'-' term)* 
+
+term:
+    | factor ('*'|'/' factor)* 
+
+factor:
+    | '+' factor 
+    | '-' factor 
+    | primary
+
+# Primary elements
+# ----------------
+
+# Primary elements are things like "obj.something.something", "obj[something]", "obj(something)", "obj" ...
+
+primary:
+    | atom ( '(' [arguments] ')' | '[' slices ']' )* 
+
+slices:
+    | slice !',' 
+
+slice:
+    | expression 
+
+atom:
+    | NAME
+    | 'true' 
+    | 'false' 
+    | 'none' 
+    | strings
+    | NUMBER
+    | list
+
+group:
+    | '(' expression ')' 
+
+# LITERALS
+# ========
+
+strings:
+    | (string)+ 
+
+string[expr]:
+    | STRING 
+
+list:
+    | '[' [named_expressions] ']' 
+
+# FUNCTION CALL ARGUMENTS
+# =======================
+
+arguments:
+    | args [','] &')' 
+
+args:
+    | ','.expression+
+
+
+# ASSIGNMENT TARGETS
+# ==================
+
+# Generic targets
+# ---------------
+
+star_targets:
+    | star_target !',' 
+
+star_target:
+    | target_with_star_atom
+
+target_with_star_atom:
+    | t_primary '[' slices ']' !t_lookahead 
+    | star_atom
+
+star_atom:
+    | NAME 
+
+single_subscript_attribute_target:
+    | t_primary '.' NAME !t_lookahead 
+    | t_primary '[' slices ']' !t_lookahead 
+
+t_primary:
+    | atom ( '[' slices ']' | '(' [arguments] ')' )* &t_lookahead 
+
+t_lookahead:
+    | '('
+    | '['
+    | '.'
+
+# ========================= END OF THE GRAMMAR ===========================

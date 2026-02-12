@@ -306,7 +306,7 @@ ret y
         let tokens = lexer.lex();
         assert_eq!(tokens.len(), 14);
         assert_eq!(
-            *tokens.get(0).unwrap(),
+            *tokens.first().unwrap(),
             Token {
                 r#type: TokenType::Name("x".to_string()),
                 line: 1,
@@ -410,7 +410,7 @@ ret y
             }
         );
         assert_eq!(
-            *tokens.get(13).unwrap(),
+            *tokens.last().unwrap(),
             Token {
                 r#type: TokenType::EOF,
                 line: 4,
@@ -430,7 +430,7 @@ ret y
         let tokens = lexer.lex();
         assert_eq!(tokens.len(), 14);
         assert_eq!(
-            *tokens.get(0).unwrap(),
+            *tokens.first().unwrap(),
             Token {
                 r#type: TokenType::Name("x".to_string()),
                 line: 2,
@@ -534,7 +534,7 @@ ret y
             }
         );
         assert_eq!(
-            *tokens.get(13).unwrap(),
+            *tokens.last().unwrap(),
             Token {
                 r#type: TokenType::EOF,
                 line: 6,
@@ -554,7 +554,7 @@ testing()
         let tokens = lexer.lex();
         assert_eq!(tokens.len(), 16);
         assert_eq!(
-            *tokens.get(0).unwrap(),
+            *tokens.first().unwrap(),
             Token {
                 r#type: TokenType::Keyword("def".to_string()),
                 line: 1,
@@ -674,7 +674,7 @@ testing()
             }
         );
         assert_eq!(
-            *tokens.get(15).unwrap(),
+            *tokens.last().unwrap(),
             Token {
                 r#type: TokenType::EOF,
                 line: 4,

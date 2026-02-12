@@ -2,7 +2,7 @@
 
 pub mod common;
 
-use crate::generators::common::{Architecture, AssemblyGenerator, find_assembler, find_linker};
+use crate::generators::common::{Architecture, AssemblyGenerator};
 use crate::stdlib::BUILTINS;
 use crate::stdlib::x64::builtins::{len, print};
 use crate::types::{BoolOp, Constant, Expr, ExprContext, Mod, Operator, Stmt, UnaryOp};
@@ -284,18 +284,18 @@ impl X64Generator {
                 for target in targets {
                     match target {
                         Expr::Name { id, .. } => {
-                            let offset = self.allocate_var(&id);
+                            let offset = self.allocate_var(id);
                             self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], rax", offset));
                         }
                         Expr::Subscript { value, slice, .. } => {
                             // Store to array element
                             self.emit("\tpush\trax"); // Save value
 
-                            self.gen_expr(&slice);
+                            self.gen_expr(slice);
                             self.emit("\timul\trax, 8");
                             self.emit("\tpush\trax");
 
-                            self.gen_expr(&value);
+                            self.gen_expr(value);
                             self.emit("\tpop\trbx");
                             self.emit("\tadd\trax, rbx");
 
@@ -305,9 +305,6 @@ impl X64Generator {
                         _ => {}
                     }
                 }
-                self.stack_offset += 8;
-                self.vars.insert("temp".to_string(), self.stack_offset);
-                self.emit(&format!("\tmov\t-{}[rbp], rax", self.stack_offset));
             }
             Stmt::Return { value } => {
                 if let Some(val) = value {
@@ -349,15 +346,20 @@ impl X64Generator {
                     }
                 }
 
-                // Allocate stack space for locals
+                // generate body first
+                let original_output = self.output.clone();
+                for stmt in body {
+                    self.gen_stmt(stmt);
+                }
+                let body_output = self.output[original_output.len()..].to_string();
+                self.output = original_output;
+
+                // NOW allocate stack space for locals
                 if self.stack_offset > 0 {
                     self.emit(&format!("\tsub\trsp, {}", self.stack_offset));
                 }
 
-                // Generate function body
-                for stmt in body {
-                    self.gen_stmt(stmt);
-                }
+                self.output.push_str(&body_output);
 
                 // Default return if no explicit return
                 self.emit("\tmov\trsp, rbp");
@@ -491,10 +493,10 @@ impl X64Generator {
 
             Stmt::Delete { targets } => {
                 for target in targets {
-                    if let Expr::Name { id, .. } = target {
-                        if let Some(&offset) = self.vars.get(id) {
-                            self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], 0", offset));
-                        }
+                    if let Expr::Name { id, .. } = target
+                        && let Some(&offset) = self.vars.get(id)
+                    {
+                        self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], 0", offset));
                     }
                 }
             }
@@ -570,10 +572,10 @@ impl X64Generator {
         match expr {
             Expr::Call { func, args } => {
                 // Check if it's a stdlib function
-                if let Expr::Name { id, .. } = &**func {
-                    if self.is_stdlib_function(id) {
-                        calls.insert(id.clone());
-                    }
+                if let Expr::Name { id, .. } = &**func
+                    && self.is_stdlib_function(id)
+                {
+                    calls.insert(id.clone());
                 }
 
                 // Check arguments too
@@ -681,7 +683,7 @@ impl X64Generator {
                             if name == "main" {
                                 has_main = true;
                             }
-                            self.gen_stmt(&stmt);
+                            self.gen_stmt(stmt);
                         }
                         _ => {
                             top_level_stmts.push(stmt);
@@ -712,8 +714,13 @@ impl X64Generator {
         // supress executable stack warning from linker
         self.emit("\t.section\t.note.GNU-stack,\"\",@progbits");
 
-        let mut file = File::create("out.s").unwrap();
-        let _ = file.write_all(self.output.clone().as_bytes());
+        match std::fs::create_dir_all("build") {
+            Ok(_) => {
+                let mut file = File::create("build/out.s").unwrap();
+                let _ = file.write_all(self.output.clone().as_bytes());
+            }
+            Err(_) => panic!("Unable to write to build file"),
+        }
 
         self.output.clone()
     }
@@ -728,9 +735,10 @@ impl X64Generator {
 
         // assemble and link here for now
         let output = std::process::Command::new("gcc")
+            .arg("-g")
             .arg("-o")
-            .arg("out")
-            .arg("out.s")
+            .arg("build/out")
+            .arg("build/out.s")
             .arg("-no-pie")
             .status()
             .expect("gcc should succeed");

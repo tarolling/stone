@@ -96,6 +96,7 @@ impl Parser {
                 && self.expect(TokenType::RBracket).is_some()
             {
                 results.push(PrimaryOp::Subscript(slices));
+                continue;
             }
             self.pos = mark;
 
@@ -105,6 +106,7 @@ impl Parser {
                 && self.expect(TokenType::RParen).is_some()
             {
                 results.push(PrimaryOp::Call(arguments));
+                continue;
             }
 
             self.pos = mark;
@@ -306,13 +308,10 @@ impl Parser {
         // Concatenate all strings
         let mut concatenated = String::new();
         for expr in results {
-            if let Expr::Constant { value, .. } = *expr {
-                match *value {
-                    Constant::Str(s) => {
-                        concatenated.push_str(&s);
-                    }
-                    _ => {}
-                }
+            if let Expr::Constant { value, .. } = *expr
+                && let Constant::Str(s) = *value
+            {
+                concatenated.push_str(&s);
             }
         }
 
@@ -383,7 +382,6 @@ impl Parser {
         self.pos = mark;
 
         // strings
-        let mark = self.pos;
         if let Ok(expr) = self.parse_strings() {
             return Ok(expr);
         }
@@ -434,10 +432,7 @@ impl Parser {
 
     /// [arguments]
     fn parse_arguments_optional(&mut self) -> Vec<Expr> {
-        match self.parse_arguments() {
-            Ok(args) => args,
-            Err(_) => vec![],
-        }
+        self.parse_arguments().unwrap_or_default()
     }
 
     /// ( '(' [arguments] ')' | '[' slices ']' )*
@@ -817,7 +812,7 @@ impl Parser {
     }
 
     ////////////////////////////////////////////////////////////////
-    /// WHILE STATEMENT
+    // WHILE STATEMENT
     ////////////////////////////////////////////////////////////////
 
     /// while_stmt:
@@ -842,7 +837,7 @@ impl Parser {
     }
 
     ////////////////////////////////////////////////////////////////
-    /// IF STATEMENT
+    // IF STATEMENT
     ////////////////////////////////////////////////////////////////
 
     /// else_block:
@@ -1301,10 +1296,7 @@ impl Parser {
     }
 
     fn parse_statements_optional(&mut self) -> Vec<Stmt> {
-        match self.parse_statements() {
-            Ok(res) => res,
-            Err(_) => vec![],
-        }
+        self.parse_statements().unwrap_or_default()
     }
 
     /// program[mod]:

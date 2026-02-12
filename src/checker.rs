@@ -1,7 +1,7 @@
 //! Type Checker
 //!
 
-use crate::types::{Mod, Stmt};
+use crate::types::Mod;
 
 pub struct TypeChecker;
 

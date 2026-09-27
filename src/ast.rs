@@ -1,53 +1,58 @@
+//! Abstract syntax tree node definitions, modeled on `docs/grammar/stone.asdl`.
+//!
+//! For example, `x = 42` parses into a [`Stmt::Assign`] whose value is an [`Expr::Constant`].
+
 ////////////////////////////////////////////////////////////////
-// AST Node Definitions
+// syntax tree node definitions
 ////////////////////////////////////////////////////////////////
 
 ////////////////////////////////////////////////////////////////
-// ASDL Built-in Types
+// built-in types from the asdl
 ////////////////////////////////////////////////////////////////
 
 use std::{error::Error, fmt::Display};
 
-use crate::types::TokenType;
+use crate::token::TokenType;
 
 type Identifier = String;
+#[allow(dead_code)] // mirrors the asdl, unused until int annotations land
 type Int = i64;
-// String already exists
+// `String` is built in
 
 ////////////////////////////////////////////////////////////////
-// Constant Type Definitions
+// constant type definitions
 ////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
-    /// Arbitrary precision integer; auto-promotes, never overflows
+    /// An arbitrary-precision integer that auto-promotes and never overflows, such as `42`.
     Int(i64),
-    // Signed integers
+    // signed integers
     I8(i8),
     I16(i16),
     I32(i32),
     I64(i64),
     I128(i128),
-    // Unsigned integers
+    // unsigned integers
     U8(u8),
     U16(u16),
     U32(u32),
     U64(u64),
     U128(u128),
-    // Pointer-sized integers
+    // pointer-sized integers
     ISize(isize),
     USize(usize),
-    // Floating point numbers
+    // floating point numbers
     Float(f64),
     F32(f32),
     F64(f64),
     Decimal(f64),
-    // Boolean
+    // boolean
     Bool(bool),
-    // Strings and characters
+    // strings and characters
     Char(char),
     Str(String),
-    // None
+    // none
     None,
 }
 
@@ -80,7 +85,7 @@ impl Constant {
 }
 
 ////////////////////////////////////////////////////////////////
-// ASDL Custom Types
+// custom types from the asdl
 ////////////////////////////////////////////////////////////////
 
 #[derive(Debug, Clone, PartialEq)]
@@ -93,9 +98,11 @@ pub struct Arguments {
     pub args: Vec<Arg>,
 }
 
-/// AST Node - CompOp
+/// A comparison operator, such as `<` in `a < b`.
 ///
-/// cmpop = [`Eq`] | [`NotEq`] | [`Lt`] | [`LtE`] | [`Gt`] | [`GtE`]
+/// ```text
+/// cmpop = Equal | NotEqual | LessThan | LessThanEqual | GreaterThan | GreaterThanEqual
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompOp {
     Equal,
@@ -106,9 +113,11 @@ pub enum CompOp {
     GreaterThanEqual,
 }
 
-/// AST Node - UnaryOp
+/// A unary operator, such as `-` in `-x`.
 ///
-/// unaryop = [`Invert`] | [`Not`] | [`UnaryAdd`] | [`UnarySub`]
+/// ```text
+/// unaryop = Not | UnaryAdd | UnarySub
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum UnaryOp {
     Not,
@@ -116,9 +125,11 @@ pub enum UnaryOp {
     UnarySub,
 }
 
-/// AST Node - Operator
+/// A binary arithmetic operator, such as `+` in `a + b`.
 ///
-/// operator = [`Add`] | [`Subtract`] | [`Multiply`] | [`Divide`]
+/// ```text
+/// operator = Add | Subtract | Multiply | Divide
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
     Add,
@@ -127,18 +138,22 @@ pub enum Operator {
     Divide,
 }
 
-/// AST Node - BoolOp
+/// A boolean operator, such as `and` in `a and b`.
 ///
-/// boolop = [`And`] | [`Or`]
+/// ```text
+/// boolop = And | Or
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum BoolOp {
     And,
     Or,
 }
 
-/// AST Node - ExprContext
+/// How a name or subscript is used: `x` in `print(x)` is loaded, and `x` in `x = 1` is stored.
 ///
-/// expr_context = [`Load`] | [`Store`] | [`Delete`]
+/// ```text
+/// expr_context = Load | Store | Delete
+/// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprContext {
     Load,
@@ -148,77 +163,77 @@ pub enum ExprContext {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
-    /// Boolean operation
+    /// A boolean operation, such as `a and b`.
     BoolOp { op: BoolOp, values: Vec<Expr> },
-    /// Binary operation
+    /// A binary operation, such as `a + b`.
     BinOp {
         op: Operator,
         left: Box<Expr>,
         right: Box<Expr>,
     },
-    /// Unary operation
+    /// A unary operation, such as `-x`.
     UnaryOp { op: UnaryOp, operand: Box<Expr> },
     Compare {
         left: Box<Expr>,
         ops: Vec<CompOp>,
         comparators: Vec<Expr>,
     },
-    /// Call
+    /// A function call, such as `f(1, 2)`.
     Call { func: Box<Expr>, args: Vec<Expr> },
-    /// Constant
+    /// A literal value, such as `42`, `"hi"`, or `true`.
     Constant {
         value: Box<Constant>,
         kind: Option<String>,
     },
-    /// Subscript
+    /// An index into a value, such as `a[0]`.
     Subscript {
         value: Box<Expr>,
         slice: Box<Expr>,
         ctx: ExprContext,
     },
-    /// Name
+    /// A variable reference, such as `x`.
     Name { id: Identifier, ctx: ExprContext },
-    /// List
+    /// A list literal, such as `[1, 2, 3]`.
     List { elts: Vec<Expr>, ctx: ExprContext },
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Stmt {
-    /// Function definition
+    /// A function definition, such as `def add(a, b); ret a + b`.
     FunctionDef {
         name: Identifier,
         args: Arguments,
         body: Vec<Stmt>,
     },
 
-    /// Return statement
+    /// A return statement, such as `ret x`.
     Return { value: Option<Box<Expr>> },
-    /// Delete statement
+    /// A delete statement that removes variables from scope.
     Delete { targets: Vec<Expr> },
-    /// Assignment
+    /// An assignment, such as `x = 1` or `a = b = 1`.
     Assign {
         targets: Vec<Expr>,
         value: Box<Expr>,
     },
-    /// For loop
+    /// A `for` loop, such as `for i in 10; print(i)`.
     For {
         target: Box<Expr>,
         iter: Box<Expr>,
         body: Vec<Stmt>,
     },
-    /// While statement
+    /// A `while` loop, such as `while x; x = x - 1`.
     While { test: Box<Expr>, body: Vec<Stmt> },
-    /// If statement
+    /// An `if` statement, where `elif` and `else` branches are nested in `orelse`.
     If {
         test: Box<Expr>,
         body: Vec<Stmt>,
         orelse: Vec<Stmt>,
     },
-    /// Expression statement
+    /// An expression used as a statement, such as `print(x)`.
     Expr { value: Box<Expr> },
-    /// Break
+    /// A `break` statement.
     Break,
-    /// Continue
+    /// A `cont` statement, which continues to the next loop iteration.
     Continue,
 }
 
@@ -252,3 +267,67 @@ impl Display for ParserError {
 }
 
 impl Error for ParserError {}
+
+////////////////////////////////////////////////////////////////
+// type annotations
+////////////////////////////////////////////////////////////////
+
+pub enum Type {
+    /// An arbitrary-precision integer that auto-promotes and never overflows, such as `42`.
+    Int,
+    // signed integers
+    I8,
+    I16,
+    I32,
+    I64,
+    I128,
+    // unsigned integers
+    U8,
+    U16,
+    U32,
+    U64,
+    U128,
+    // pointer-sized integers
+    ISize,
+    USize,
+    // floating point numbers
+    Float,
+    F32,
+    F64,
+    Decimal,
+    // boolean
+    Bool,
+    // strings and characters
+    Char,
+    String,
+    // none
+    None,
+}
+
+impl Type {
+    pub fn as_str(&self) -> &str {
+        match self {
+            Type::Int => "int",
+            Type::I8 => "i8",
+            Type::I16 => "i16",
+            Type::I32 => "i32",
+            Type::I64 => "i64",
+            Type::I128 => "i128",
+            Type::U8 => "u8",
+            Type::U16 => "u16",
+            Type::U32 => "u32",
+            Type::U64 => "u64",
+            Type::U128 => "u128",
+            Type::ISize => "isize",
+            Type::USize => "usize",
+            Type::Float => "float",
+            Type::F32 => "f32",
+            Type::F64 => "f64",
+            Type::Decimal => "decimal",
+            Type::Bool => "bool",
+            Type::Char => "char",
+            Type::String => "str",
+            Type::None => "none",
+        }
+    }
+}

@@ -1,19 +1,20 @@
-use crate::generators::common::AssemblyGenerator;
+use crate::codegen::AssemblyGenerator;
 
 pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("print:");
+    // prelude
     r#gen.emit("\tpush\trbp");
     r#gen.emit("\tmov\trbp, rsp");
     r#gen.emit("\tpush\trbx");
     r#gen.emit("\tpush\tr12");
     r#gen.emit("\tsub\trsp, 1024");
 
-    // Check if rdi points to a string
+    // check if rdi points to a string
     r#gen.emit("\tmov\trax, rdi");
     r#gen.emit("\tcmp\trax, 0x1000");
     r#gen.emit("\tjae\t.Lprint_string");
 
-    // === PRINT INTEGER ===
+    // === print integer ===
     r#gen.emit(".Lprint_int:");
     r#gen.emit("\tmov\trax, rdi");
     r#gen.emit("\tmov\trcx, 10");
@@ -52,7 +53,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tdec\trsi");
     r#gen.emit("\tmov\tbyte ptr [rsi], 45"); // '-'
 
-    // Write integer to stdout
+    // write integer to stdout
     r#gen.emit(".Lprint_write_int:");
     r#gen.emit("\tmov\trax, 1"); // sys_write
     r#gen.emit("\tmov\trdi, 1"); // stdout
@@ -62,11 +63,11 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tsyscall");
     r#gen.emit("\tjmp\t.Lprint_done");
 
-    // === PRINT STRING ===
+    // === print string ===
     r#gen.emit(".Lprint_string:");
     r#gen.emit("\tmov\trsi, rdi");
 
-    // Calculate string length
+    // calculate string length
     r#gen.emit("\txor\trdx, rdx");
     r#gen.emit(".Lstrlen_loop:");
     r#gen.emit("\tcmp\tbyte ptr [rsi + rdx], 0");
@@ -76,23 +77,23 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
 
     r#gen.emit(".Lstrlen_done:");
     r#gen.emit("\ttest\trdx, rdx");
-    r#gen.emit("\tjz\t.Lprint_done"); // Empty string
+    r#gen.emit("\tjz\t.Lprint_done"); // empty string
 
-    // Save length in r12
+    // length in r12
     r#gen.emit("\tmov\tr12, rdx");
 
-    // Copy string to stack buffer
+    // copy string to stack buffer
     r#gen.emit("\tlea\trdi, [rbp - 1024]");
     r#gen.emit("\tmov\trcx, r12");
     r#gen.emit("\trep\tmovsb"); // rdi now points past last copied byte
 
-    // Add newline
+    // add newline
     r#gen.emit("\tmov\tbyte ptr [rdi], 10");
 
-    // Write string to stdout
+    // write string to stdout
     r#gen.emit("\tmov\trax, 1"); // sys_write
-    r#gen.emit("\tlea\trsi, [rbp - 1024]"); // Start of buffer
-    r#gen.emit("\tmov\trdx, r12"); // Original length
+    r#gen.emit("\tlea\trsi, [rbp - 1024]"); // start of buffer
+    r#gen.emit("\tmov\trdx, r12"); // original length
     r#gen.emit("\tinc\trdx"); // +1 for newline
     r#gen.emit("\tmov\trdi, 1"); // stdout
     r#gen.emit("\tsyscall");
@@ -111,7 +112,7 @@ pub fn len(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trbp, rsp");
 
     // rdi points to null-terminated string
-    // Calculate length by finding null terminator
+    // calculate length by finding null terminator
     r#gen.emit("\txor\trax, rax");
     r#gen.emit(".Llen_loop:");
     r#gen.emit("\tcmp\tbyte ptr [rdi + rax], 0");

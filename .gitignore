@@ -21,4 +21,4 @@ target
 #.idea/
 
 # Added by stone
-build
+/build/

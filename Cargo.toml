@@ -2,6 +2,10 @@
 name = "stone"
 version = "0.1.0"
 edition = "2024"
+description = "A Python-like language with a tree-walking interpreter and an x86-64 compiler"
+license = "Apache-2.0"
+repository = "https://github.com/tarolling/newlang"
+readme = "README.md"
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }

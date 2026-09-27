@@ -1,6 +1,8 @@
-//! Stone Interpreter
+//! Tree-walking interpreter that evaluates a stone AST directly.
+//!
+//! For example, running `x = 42` followed by `print(x)` prints `42`.
 
-use crate::types::{BoolOp, CompOp, Constant, Expr, Mod, Operator, Stmt, UnaryOp};
+use crate::ast::{BoolOp, CompOp, Constant, Expr, Mod, Operator, Stmt, UnaryOp};
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -12,12 +14,20 @@ pub enum ControlFlow {
 }
 
 pub struct Interpreter {
-    // Global variables
+    // global variables
     globals: HashMap<String, Constant>,
-    /// Stack of current scopes
+    /// Stack of local scopes, with the innermost scope last.
     scopes: Vec<HashMap<String, Constant>>,
-    /// list of functions (name -> (params, body))
+    /// User-defined functions, mapping each name to its parameters and body.
+    ///
+    /// For example, `def add(a, b); ret a + b` is stored as `"add" -> (["a", "b"], body)`.
     functions: HashMap<String, (Vec<String>, Rc<Vec<Stmt>>)>,
+}
+
+impl Default for Interpreter {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Interpreter {
@@ -43,17 +53,19 @@ impl Interpreter {
         Ok(())
     }
 
-    ///     stmt =
+    /// Executes one statement and reports whether it breaks, continues, or returns.
     ///
-    ///           | FunctionDef(identifier name, arguments args, stmt* body, expr? returns)
-    ///           | Return(expr? value)
-    ///           | Delete(expr* targets)
-    ///           | Assign(expr* targets, expr value)
-    ///           | For(expr target, expr iter, stmt* body, stmt* orelse)
-    ///           | While(expr test, stmt* body, stmt* orelse)
-    ///           | If(expr test, stmt* body, stmt* orelse)
-    ///           | Expr(expr value)
-    ///           | Break | Continue
+    /// ```text
+    /// stmt = FunctionDef(identifier name, arguments args, stmt* body, expr? returns)
+    ///      | Return(expr? value)
+    ///      | Delete(expr* targets)
+    ///      | Assign(expr* targets, expr value)
+    ///      | For(expr target, expr iter, stmt* body, stmt* orelse)
+    ///      | While(expr test, stmt* body, stmt* orelse)
+    ///      | If(expr test, stmt* body, stmt* orelse)
+    ///      | Expr(expr value)
+    ///      | Break | Continue
+    /// ```
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<ControlFlow, Box<dyn std::error::Error>> {
         match stmt {
             Stmt::FunctionDef { name, args, body } => {
@@ -128,14 +140,18 @@ impl Interpreter {
         }
     }
 
+    /// Evaluates one expression to a constant, so `1 + 2` evaluates to `Int(3)`.
+    ///
+    /// ```text
     /// expr = BoolOp(boolop op, expr* values)
-    ///  | BinOp(expr left, operator op, expr right)
-    ///  | UnaryOp(unaryop op, expr operand)
-    ///  | Compare(expr left, cmpop* ops, expr* comparators)
-    ///  | Call(expr func, expr* args)
-    ///  | Constant(constant value, string? kind)
-    ///  | Name(identifier id, expr_context ctx)
-    ///  | List(expr* elts, expr_context ctx)
+    ///      | BinOp(expr left, operator op, expr right)
+    ///      | UnaryOp(unaryop op, expr operand)
+    ///      | Compare(expr left, cmpop* ops, expr* comparators)
+    ///      | Call(expr func, expr* args)
+    ///      | Constant(constant value, string? kind)
+    ///      | Name(identifier id, expr_context ctx)
+    ///      | List(expr* elts, expr_context ctx)
+    /// ```
     fn eval_expr(&mut self, expr: &Expr) -> Result<Constant, Box<dyn std::error::Error>> {
         match expr {
             // short-circuiting
@@ -224,14 +240,15 @@ impl Interpreter {
             }
             Expr::Call { func, args } => {
                 if let Expr::Name { id, .. } = &**func {
-                    // Built-in functions
+                    // built-in functions
                     match id.as_str() {
                         "print" => {
+                            let mut parts = Vec::with_capacity(args.len());
                             for arg in args {
                                 let val = self.eval_expr(arg)?;
-                                print!("{} ", self.to_string(&val));
+                                parts.push(self.to_string(&val));
                             }
-                            println!();
+                            println!("{}", parts.join(" "));
                             return Ok(Constant::None);
                         }
                         "len" => {
@@ -247,7 +264,7 @@ impl Interpreter {
                         _ => {}
                     }
 
-                    // User-defined functions
+                    // user-defined functions
                     if let Some((params, body_rc)) = self.functions.get(id) {
                         let params = params.clone();
                         let body = body_rc.clone();
@@ -303,7 +320,7 @@ impl Interpreter {
         name: &str,
         value: &Constant,
     ) -> Result<Constant, Box<dyn std::error::Error>> {
-        // Search existing scopes
+        // search existing scopes
         for scope in self.scopes.iter_mut().rev() {
             if scope.contains_key(name) {
                 scope.insert(name.to_string(), value.clone());
@@ -311,13 +328,13 @@ impl Interpreter {
             }
         }
 
-        // Check globals
+        // check globals
         if self.globals.contains_key(name) {
             self.globals.insert(name.to_string(), value.clone());
             return Ok(value.clone());
         }
 
-        // Create in current scope or globals
+        // create in current scope or globals
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), value.clone());
         } else {
@@ -328,14 +345,14 @@ impl Interpreter {
     }
 
     fn get_var(&self, name: &str) -> Result<Constant, Box<dyn std::error::Error>> {
-        // Search scopes
+        // search scopes
         for scope in self.scopes.iter().rev() {
             if let Some(var) = scope.get(name) {
                 return Ok(var.clone());
             }
         }
 
-        // Search globals
+        // search globals
         if let Some(var) = self.globals.get(name) {
             return Ok(var.clone());
         }
@@ -368,7 +385,7 @@ impl Interpreter {
         }
     }
 
-    // COMPARISON METHODS
+    // comparison methods
 
     fn compare_lt(&self, a: &Constant, b: &Constant) -> Result<bool, Box<dyn std::error::Error>> {
         match (a, b) {

@@ -1,145 +1,47 @@
-use crate::checker::TypeChecker;
-use crate::generators::X64Generator;
-use crate::interpreter::Interpreter;
-use crate::lexer::Lexer;
-use crate::parser::Parser;
-use crate::types::Stmt;
 use clap::{Parser as ClapParser, Subcommand};
 use std::io::Read;
+use std::path::PathBuf;
+use stone::driver;
 
-mod checker;
-mod generators;
-mod interpreter;
-mod lexer;
-mod parser;
-mod stdlib;
-mod types;
-
-#[macro_export]
-macro_rules! debug {
-    ($($arg:tt)*) => {
-        if cfg!(debug_assertions) {
-            println!($($arg)*);
-        }
-    };
-}
-
-////////////////////////////////////////////////////////////////
-// Argument Parsing
-////////////////////////////////////////////////////////////////
-
-/// The stone programming language executor
+/// The stone programming language executor.
 #[derive(ClapParser, Debug)]
 #[command(author, version, about = "The stone programming language executor")]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
-    /// File to process (used with run mode if no subcommand specified)
+    /// The file to run when no subcommand is given.
     file: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Run mode - execute a file
+    /// Runs a file with the interpreter.
     Run {
-        /// File to run
+        /// The file to run.
         file: String,
     },
-    /// Build mode - compile a file
+    /// Compiles a file to a native executable.
     Build {
-        /// File to build
+        /// The file to build.
         file: String,
+        /// Where to write the executable. The assembly goes next to it with a `.s` extension.
+        #[arg(short, long, default_value = "build/out")]
+        output: PathBuf,
     },
-    /// Check mode - check for errors
+    /// Checks a file for errors without running it.
     Check {
-        /// File to check
+        /// The file to check.
         file: String,
     },
 }
 
-/// Defines what mode to run with
+/// The mode stone runs in, chosen from the command-line arguments.
 enum ExecutionMode {
-    Build(String),
+    Build { file: String, output: PathBuf },
     Check(String),
     Repl,
     Run(String),
-}
-
-////////////////////////////////////////////////////////////////
-// Name Resolver
-////////////////////////////////////////////////////////////////
-
-struct Resolver;
-
-impl Resolver {
-    fn new() -> Self {
-        Self
-    }
-
-    pub fn resolve(&self, _ast: &[Stmt]) {
-        todo!()
-    }
-}
-
-////////////////////////////////////////////////////////////////
-// Execution Pipelines
-////////////////////////////////////////////////////////////////
-
-fn execute_compiler_pipeline(source: &str) {
-    // Lex
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.lex();
-
-    // Parse
-    let mut parser = Parser::new(&tokens);
-    let ast = parser.parse();
-
-    match ast {
-        Ok(ast) => {
-            // Generate x64
-            let mut r#gen = X64Generator::new();
-            let _asm = r#gen.compile(&ast);
-        }
-        Err(e) => panic!("{}", e),
-    }
-}
-
-fn execute_check_pipeline(_source: &str) {
-    todo!()
-}
-
-fn execute_repl_pipeline(_source: &str) {
-    todo!()
-}
-
-fn execute_interpreter_pipeline(source: &str) {
-    // Lex
-    let mut lexer = Lexer::new(source);
-    let tokens = lexer.lex();
-
-    debug!("{:?}", tokens);
-
-    // Parse
-    let mut parser = Parser::new(&tokens);
-    let ast = parser.parse();
-
-    match ast {
-        Ok(ast) => {
-            // Resolve names
-            // let resolver = Resolver::new();
-            // resolver.resolve(&ast);
-
-            // Type Check
-            let mut checker = TypeChecker::new();
-            let _ = checker.check(&ast);
-
-            // Interpret
-            let mut interpreter = Interpreter::new();
-            let _ = interpreter.evaluate(&ast);
-        }
-        Err(e) => panic!("{}", e),
-    }
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -147,7 +49,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let mode = match args.command {
         Some(Command::Run { file }) => ExecutionMode::Run(file),
-        Some(Command::Build { file }) => ExecutionMode::Build(file),
+        Some(Command::Build { file, output }) => ExecutionMode::Build { file, output },
         Some(Command::Check { file }) => ExecutionMode::Check(file),
         None => {
             if let Some(file) = args.file {
@@ -159,47 +61,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match mode {
-        ExecutionMode::Build(file) => {
-            let mut source = String::new();
-            let mut file = std::fs::File::open(&file)?;
-            file.read_to_string(&mut source)?;
-            execute_compiler_pipeline(&source);
+        ExecutionMode::Build { file, output } => {
+            driver::compile(&std::fs::read_to_string(file)?, &output)?;
+            println!("Compiled {}", output.display());
+            Ok(())
         }
-        ExecutionMode::Check(file) => {
-            let mut source = String::new();
-            let mut file = std::fs::File::open(&file)?;
-            file.read_to_string(&mut source)?;
-            execute_check_pipeline(&source)
-        }
+        ExecutionMode::Check(file) => driver::check(&std::fs::read_to_string(file)?),
         ExecutionMode::Repl => {
             println!("REPL mode - type your code (press Ctrl+D to exit)");
             let mut source = String::new();
             std::io::stdin().read_to_string(&mut source)?;
-            execute_repl_pipeline(&source);
+            driver::repl(&source)
         }
-        ExecutionMode::Run(file) => {
-            let mut source = String::new();
-            let mut file = std::fs::File::open(&file)?;
-            file.read_to_string(&mut source)?;
-            execute_interpreter_pipeline(&source);
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(test)]
-mod test {
-    use super::*;
-
-    #[test]
-    fn test_simple_program() {
-        let source = r#"
-x = 42
-y = x + 8
-ret y
-"#;
-
-        execute_interpreter_pipeline(source);
+        ExecutionMode::Run(file) => driver::interpret(&std::fs::read_to_string(file)?),
     }
 }

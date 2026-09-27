@@ -1,10 +1,13 @@
-//! Stone Lexer
+//! Lexer that turns stone source code into tokens.
+//!
+//! Indentation is tracked Python-style, so `def f();` followed by an indented line produces
+//! `Newline`, `Indent`, and later `Dedent` tokens around the function body.
 
-use crate::types::{RESERVED_KEYWORDS, Token, TokenType};
+use crate::token::{RESERVED_KEYWORDS, Token, TokenType};
 
 const TAB_SIZE: usize = 4;
 
-/// Lexer - source code -> tokens
+/// Lexer that converts source code into a list of [`Token`]s.
 pub struct Lexer {
     input: Vec<char>,
     pos: usize,
@@ -28,13 +31,15 @@ impl Lexer {
         }
     }
 
-    /// Top-level lexing function
+    /// Lexes the entire input and returns its tokens, ending with `Eof`.
+    ///
+    /// For example, `x = 1` produces `Name("x")`, `Operator("=")`, `Number(1)`, `Newline`, and `Eof`.
     pub fn lex(&mut self) -> Vec<Token> {
         let mut tokens: Vec<Token> = vec![];
         loop {
             let tok = self.next_token();
-            if matches!(tok.r#type, TokenType::EOF) {
-                // if the last token wasn't a newline, add one before EOF
+            if matches!(tok.r#type, TokenType::Eof) {
+                // newline before EOF if missing
                 if !tokens.is_empty()
                     && !matches!(tokens.last().unwrap().r#type, TokenType::Newline)
                 {
@@ -44,7 +49,7 @@ impl Lexer {
                         col: self.col,
                     });
                 }
-                // Emit remaining dedents at end of file
+                // emit remaining dedents at end of file
                 while self.indent_stack.len() > 1 {
                     self.indent_stack.pop();
                     tokens.push(Token {
@@ -87,7 +92,9 @@ impl Lexer {
         }
     }
 
-    /// Calculate indentation at start of line
+    /// Returns the indentation width at the start of the current line, skipping blank lines.
+    ///
+    /// Tabs count as `TAB_SIZE` columns, so a line starting with one tab has a width of 4.
     fn calculate_indent(&mut self) -> usize {
         let mut indent = 0;
         while let Some(ch) = self.peek() {
@@ -101,7 +108,7 @@ impl Lexer {
                     self.advance();
                 }
                 '\n' => {
-                    // Skip empty lines
+                    // skip empty lines
                     self.advance();
                     indent = 0;
                 }
@@ -111,13 +118,15 @@ impl Lexer {
         indent
     }
 
-    /// Handle indent/dedent tokens at start of line
+    /// Emits an `Indent` or `Dedent` token when the indentation of a new line changes.
+    ///
+    /// For example, dropping back two indentation levels at once produces two `Dedent` tokens.
     fn handle_indentation(&mut self) -> Option<Token> {
         if !self.at_line_start {
             return None;
         }
 
-        // Return pending dedents first
+        // return pending dedents first
         if !self.pending_dedents.is_empty() {
             return Some(self.pending_dedents.remove(0));
         }
@@ -134,7 +143,7 @@ impl Lexer {
                 col: 1,
             })
         } else if indent < current_indent {
-            // Generate dedents for each level we decreased
+            // one dedent per level dropped
             while let Some(&stack_indent) = self.indent_stack.last() {
                 if stack_indent <= indent {
                     break;
@@ -185,7 +194,7 @@ impl Lexer {
     }
 
     fn next_token(&mut self) -> Token {
-        // Handle indentation at line start
+        // handle indentation at line start
         if let Some(tok) = self.handle_indentation() {
             return tok;
         }
@@ -196,7 +205,7 @@ impl Lexer {
 
         match self.peek() {
             None => Token {
-                r#type: TokenType::EOF,
+                r#type: TokenType::Eof,
                 line,
                 col,
             },
@@ -412,7 +421,7 @@ ret y
         assert_eq!(
             *tokens.last().unwrap(),
             Token {
-                r#type: TokenType::EOF,
+                r#type: TokenType::Eof,
                 line: 4,
                 col: 1
             }
@@ -536,7 +545,7 @@ ret y
         assert_eq!(
             *tokens.last().unwrap(),
             Token {
-                r#type: TokenType::EOF,
+                r#type: TokenType::Eof,
                 line: 6,
                 col: 1
             }
@@ -676,16 +685,20 @@ testing()
         assert_eq!(
             *tokens.last().unwrap(),
             Token {
-                r#type: TokenType::EOF,
+                r#type: TokenType::Eof,
                 line: 4,
                 col: 1
             }
         );
     }
 
-    /// def testing(a, b, c):
+    /// Checks the tokens produced for a function with several parameters:
+    ///
+    /// ```text
+    /// def testing(a, b, c);
     ///     ret b
     /// testing(1, 2, 3)
+    /// ```
     #[test]
     fn simple_function_multiple_args() {
         let source = r#"def testing(a, b, c);
@@ -823,7 +836,7 @@ testing(1, 2, 3)"#;
                     col: 17,
                 },
                 Token {
-                    r#type: TokenType::EOF,
+                    r#type: TokenType::Eof,
                     line: 3,
                     col: 17,
                 },

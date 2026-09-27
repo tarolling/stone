@@ -1,9 +1,9 @@
-//! PEG grammar for stone
+//! Token definitions and reserved keywords for the stone grammar.
 
-/// Token types
+/// The kind of a token, such as `Name("x")` or `Number(42)`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum TokenType {
-    EOF,
+    Eof,
     Name(String),
     Keyword(String),
     Number(i64),
@@ -21,7 +21,7 @@ pub enum TokenType {
     Dot,
 }
 
-/// Token
+/// A token with the line and column where it starts, both counted from 1.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Token {
     pub r#type: TokenType,
@@ -29,7 +29,7 @@ pub struct Token {
     pub col: usize,
 }
 
-/// Keywords
-pub static RESERVED_KEYWORDS: [&'static str; 12] = [
+/// Words that are lexed as keywords instead of names, such as `def` and `ret`.
+pub static RESERVED_KEYWORDS: [&str; 12] = [
     "and", "break", "cont", "def", "elif", "else", "false", "if", "none", "or", "ret", "true",
 ];

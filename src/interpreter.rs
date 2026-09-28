@@ -2,14 +2,120 @@
 //!
 //! For example, running `x = 42` followed by `print(x)` prints `42`.
 
-use crate::ast::{BoolOp, CompOp, Constant, Expr, Mod, Operator, Stmt, UnaryOp};
+use crate::ast::{
+    BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp,
+};
+use crate::checker::range_args;
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::io::Write;
 use std::rc::Rc;
 
+type EvalResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// A value a running program works with.
+///
+/// Lists are shared rather than copied, like in Python, so after `b = a`, appending to `b` also
+/// changes `a`.
+#[derive(Debug, Clone)]
+pub enum Value {
+    Int(i64),
+    Bool(bool),
+    Str(Rc<str>),
+    None,
+    List(Rc<RefCell<Vec<Value>>>),
+}
+
+impl Value {
+    fn list(items: Vec<Value>) -> Value {
+        Value::List(Rc::new(RefCell::new(items)))
+    }
+
+    /// Formats the value the way `print` shows it, with strings inside lists quoted.
+    ///
+    /// For example, `[1, 2]` prints as `[1, 2]` and `["a"]` as `['a']`.
+    fn display(&self, nested: bool) -> String {
+        match self {
+            Value::Int(i) => i.to_string(),
+            Value::Bool(b) => b.to_string(),
+            Value::Str(s) if nested => format!("'{s}'"),
+            Value::Str(s) => s.to_string(),
+            Value::None => "none".to_string(),
+            Value::List(items) => {
+                let items: Vec<String> = items.borrow().iter().map(|v| v.display(true)).collect();
+                format!("[{}]", items.join(", "))
+            }
+        }
+    }
+
+    fn is_truthy(&self) -> bool {
+        match self {
+            Value::Int(i) => *i != 0,
+            Value::Bool(b) => *b,
+            Value::Str(s) => !s.is_empty(),
+            Value::None => false,
+            Value::List(items) => !items.borrow().is_empty(),
+        }
+    }
+
+    /// Returns whether two values are equal, comparing lists by identity as compiled code does.
+    fn equals(&self, other: &Value) -> bool {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Bool(a), Value::Bool(b)) => a == b,
+            (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::None, Value::None) => true,
+            (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
+            _ => false,
+        }
+    }
+
+    fn as_int(&self) -> EvalResult<i64> {
+        match self {
+            Value::Int(i) => Ok(*i),
+            other => Err(format!("expected an int, found {}", other.display(true)).into()),
+        }
+    }
+
+    fn as_list(&self) -> EvalResult<&Rc<RefCell<Vec<Value>>>> {
+        match self {
+            Value::List(items) => Ok(items),
+            other => Err(format!("expected a list, found {}", other.display(true)).into()),
+        }
+    }
+}
+
+impl From<&Constant> for Value {
+    fn from(constant: &Constant) -> Self {
+        match constant {
+            Constant::Bool(b) => Value::Bool(*b),
+            Constant::Str(s) => Value::Str(s.as_str().into()),
+            Constant::Char(c) => Value::Str(c.to_string().into()),
+            Constant::None => Value::None,
+            Constant::Int(i) | Constant::I64(i) => Value::Int(*i),
+            // other literal kinds are not lexed yet
+            _ => Value::None,
+        }
+    }
+}
+
+/// Converts `index` into a position in a list of length `len`, counting negative indexes from the
+/// end like Python.
+///
+/// For example, index `-1` of a 3-element list is position 2, and index 3 is an error.
+fn list_position(index: i64, len: usize) -> EvalResult<usize> {
+    let len = len as i64;
+    let position = if index < 0 { index + len } else { index };
+    if (0..len).contains(&position) {
+        Ok(position as usize)
+    } else {
+        Err(format!("list index out of range (index {index}, length {len})").into())
+    }
+}
+
 pub enum ControlFlow {
     None,
-    Return(Constant),
+    Return(Value),
     Break,
     Continue,
 }
@@ -42,9 +148,9 @@ impl Limits {
 
 pub struct Interpreter<'out> {
     // global variables
-    globals: HashMap<String, Constant>,
+    globals: HashMap<String, Value>,
     /// Stack of local scopes, with the innermost scope last.
-    scopes: Vec<HashMap<String, Constant>>,
+    scopes: Vec<HashMap<String, Value>>,
     /// User-defined functions, mapping each name to its parameters and body.
     ///
     /// For example, `def add(a, b); ret a + b` is stored as `"add" -> (["a", "b"], body)`.
@@ -131,6 +237,12 @@ impl<'out> Interpreter<'out> {
     pub fn evaluate(&mut self, module: &Mod) -> Result<(), Box<dyn std::error::Error>> {
         match module {
             Mod::Module { body } => {
+                // functions can be called before their definition
+                for stmt in body {
+                    if let StmtKind::FunctionDef { .. } = stmt.kind {
+                        self.eval_stmt(stmt)?;
+                    }
+                }
                 for stmt in body {
                     if let ControlFlow::Return(_) = self.eval_stmt(stmt)? {
                         break; // top-level return
@@ -163,77 +275,116 @@ impl<'out> Interpreter<'out> {
         &mut self,
         stmt: &Stmt,
     ) -> Result<ControlFlow, Box<dyn std::error::Error>> {
-        match stmt {
-            Stmt::FunctionDef { name, args, body } => {
+        match &stmt.kind {
+            StmtKind::FunctionDef {
+                name, args, body, ..
+            } => {
                 let param_names: Vec<String> =
                     args.args.iter().map(|arg| arg.arg.clone()).collect();
                 self.functions
                     .insert(name.clone(), (param_names, Rc::new(body.clone())));
                 Ok(ControlFlow::None)
             }
-            Stmt::Return { value } => {
+            StmtKind::Return { value } => {
                 let val = if let Some(expr) = value {
                     self.eval_expr(expr)?
                 } else {
-                    Constant::None
+                    Value::None
                 };
                 Ok(ControlFlow::Return(val))
             }
-            Stmt::Delete { targets } => {
+            StmtKind::Delete { targets } => {
                 for target in targets {
-                    if let Expr::Name { id, .. } = target {
+                    if let ExprKind::Name { id, .. } = &target.kind {
                         self.delete_var(id)?;
                     }
                 }
                 Ok(ControlFlow::None)
             }
-            Stmt::Assign { targets, value } => {
+            StmtKind::Assign { targets, value } => {
                 let rhs = self.eval_expr(value)?;
 
                 for target in targets {
-                    match target {
-                        Expr::Name { id, .. } => {
+                    match &target.kind {
+                        ExprKind::Name { id, .. } => {
                             self.set_var(id, &rhs)?;
+                        }
+                        ExprKind::Subscript { value, slice, .. } => {
+                            let list = self.eval_expr(value)?;
+                            let index = self.eval_expr(slice)?.as_int()?;
+                            let mut items = list.as_list()?.borrow_mut();
+                            let position = list_position(index, items.len())?;
+                            items[position] = rhs.clone();
                         }
                         _ => return Err("Invalid assignment target".into()),
                     }
                 }
                 Ok(ControlFlow::None)
             }
-            Stmt::For {
-                target: _,
-                iter: _,
-                body: _,
-            } => Ok(ControlFlow::None),
-            Stmt::While { test, body } => {
-                loop {
-                    let value = self.eval_expr(test)?;
-                    if !self.is_truthy(&value) {
-                        break;
+            StmtKind::For { target, iter, body } => {
+                let ExprKind::Name { id, .. } = &target.kind else {
+                    return Err("a 'for' loop's variable must be a name".into());
+                };
+                if let Some(args) = range_args(iter) {
+                    // the bounds are evaluated once, left to right
+                    let mut bounds = Vec::with_capacity(args.len());
+                    for arg in args {
+                        bounds.push(self.eval_expr(arg)?.as_int()?);
                     }
-                    self.burn_fuel()?;
-                    match self.eval_block(body)? {
-                        ControlFlow::Break => break,
-                        ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
-                        ControlFlow::Continue | ControlFlow::None => {}
+                    let (start, end) = match bounds[..] {
+                        [end] => (0, end),
+                        [start, end] => (start, end),
+                        _ => return Err("range() takes 1 or 2 arguments".into()),
+                    };
+                    for i in start..end {
+                        self.set_var(id, &Value::Int(i))?;
+                        if let Some(flow) = self.run_iteration(body)? {
+                            return Ok(flow);
+                        }
+                    }
+                    return Ok(ControlFlow::None);
+                }
+
+                // like Python, a list that grows while it is iterated keeps going
+                let list = self.eval_expr(iter)?;
+                let items = list.as_list()?.clone();
+                let mut position = 0;
+                loop {
+                    let Some(item) = items.borrow().get(position).cloned() else {
+                        break;
+                    };
+                    position += 1;
+                    self.set_var(id, &item)?;
+                    if let Some(flow) = self.run_iteration(body)? {
+                        return Ok(flow);
                     }
                 }
                 Ok(ControlFlow::None)
             }
-            Stmt::If { test, body, orelse } => {
-                let test = self.eval_expr(test)?;
-                if self.is_truthy(&test) {
+            StmtKind::While { test, body } => {
+                loop {
+                    if !self.eval_expr(test)?.is_truthy() {
+                        break;
+                    }
+                    if let Some(flow) = self.run_iteration(body)? {
+                        return Ok(flow);
+                    }
+                }
+                Ok(ControlFlow::None)
+            }
+            StmtKind::If { test, body, orelse } => {
+                if self.eval_expr(test)?.is_truthy() {
                     self.eval_block(body)
                 } else {
                     self.eval_block(orelse)
                 }
             }
-            Stmt::Expr { value } => {
+            StmtKind::Expr { value } => {
                 self.eval_expr(value)?;
                 Ok(ControlFlow::None)
             }
-            Stmt::Break => Ok(ControlFlow::Break),
-            Stmt::Continue => Ok(ControlFlow::Continue),
+            StmtKind::Break => Ok(ControlFlow::Break),
+            StmtKind::Continue => Ok(ControlFlow::Continue),
         }
     }
 
@@ -249,173 +400,167 @@ impl<'out> Interpreter<'out> {
     ///      | Name(identifier id, expr_context ctx)
     ///      | List(expr* elts, expr_context ctx)
     /// ```
-    fn eval_expr(&mut self, expr: &Expr) -> Result<Constant, Box<dyn std::error::Error>> {
+    /// Runs one iteration of a loop body, spending fuel, and returns how the loop should end, or
+    /// `None` to keep looping.
+    ///
+    /// For example, a `break` ends the loop normally with `ControlFlow::None`, while a `ret`
+    /// passes its `ControlFlow::Return` on to the enclosing function.
+    fn run_iteration(&mut self, body: &[Stmt]) -> EvalResult<Option<ControlFlow>> {
+        self.burn_fuel()?;
+        Ok(match self.eval_block(body)? {
+            ControlFlow::Break => Some(ControlFlow::None),
+            ControlFlow::Return(value) => Some(ControlFlow::Return(value)),
+            ControlFlow::Continue | ControlFlow::None => None,
+        })
+    }
+
+    fn eval_expr(&mut self, expr: &Expr) -> EvalResult<Value> {
         self.nested(|this| this.eval_expr_unguarded(expr))
     }
 
-    fn eval_expr_unguarded(&mut self, expr: &Expr) -> Result<Constant, Box<dyn std::error::Error>> {
-        match expr {
+    fn eval_expr_unguarded(&mut self, expr: &Expr) -> EvalResult<Value> {
+        match &expr.kind {
             // short-circuiting
-            Expr::BoolOp { op, values } => {
+            ExprKind::BoolOp { op, values } => {
                 let mut result = self.eval_expr(&values[0])?;
-
                 for value in &values[1..] {
-                    match op {
-                        BoolOp::And => {
-                            if !self.is_truthy(&result) {
-                                return Ok(result);
-                            }
-                            result = self.eval_expr(value)?;
-                        }
-                        BoolOp::Or => {
-                            if self.is_truthy(&result) {
-                                return Ok(result);
-                            }
-                            result = self.eval_expr(value)?;
-                        }
+                    let done = match op {
+                        BoolOp::And => !result.is_truthy(),
+                        BoolOp::Or => result.is_truthy(),
+                    };
+                    if done {
+                        return Ok(result);
                     }
+                    result = self.eval_expr(value)?;
                 }
                 Ok(result)
             }
-            Expr::BinOp { op, left, right } => {
+            ExprKind::BinOp { op, left, right } => {
                 let lhs = self.eval_expr(left)?;
                 let rhs = self.eval_expr(right)?;
 
                 match (lhs, rhs) {
-                    (Constant::Int(l), Constant::Int(r)) => match op {
+                    (Value::Int(l), Value::Int(r)) => match op {
                         // wrap like the compiled add, sub, and imul do
-                        Operator::Add => Ok(Constant::Int(l.wrapping_add(r))),
-                        Operator::Subtract => Ok(Constant::Int(l.wrapping_sub(r))),
-                        Operator::Multiply => Ok(Constant::Int(l.wrapping_mul(r))),
+                        Operator::Add => Ok(Value::Int(l.wrapping_add(r))),
+                        Operator::Subtract => Ok(Value::Int(l.wrapping_sub(r))),
+                        Operator::Multiply => Ok(Value::Int(l.wrapping_mul(r))),
                         // idiv traps on both of these, so report them instead
                         Operator::Divide => l
                             .checked_div(r)
-                            .map(Constant::Int)
+                            .map(Value::Int)
                             .ok_or_else(|| "division by zero or overflow".into()),
                     },
-                    (Constant::Float(l), Constant::Float(r)) => match op {
-                        Operator::Add => Ok(Constant::Float(l + r)),
-                        Operator::Subtract => Ok(Constant::Float(l - r)),
-                        Operator::Multiply => Ok(Constant::Float(l * r)),
-                        Operator::Divide => Ok(Constant::Float(l / r)),
-                    },
-                    (Constant::Str(l), Constant::Str(r)) if matches!(op, Operator::Add) => {
-                        Ok(Constant::Str(format!("{}{}", l, r)))
+                    (Value::Str(l), Value::Str(r)) if matches!(op, Operator::Add) => {
+                        Ok(Value::Str(format!("{l}{r}").into()))
                     }
                     _ => Err("Type mismatch in binary operation".into()),
                 }
             }
-            Expr::UnaryOp { op, operand } => {
+            ExprKind::UnaryOp { op, operand } => {
                 let val = self.eval_expr(operand)?;
-
                 match op {
-                    UnaryOp::Not => Ok(Constant::Bool(!self.is_truthy(&val))),
+                    UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
                     UnaryOp::UnaryAdd => Ok(val),
-                    UnaryOp::UnarySub => match val {
-                        Constant::Int(i) => Ok(Constant::Int(i.wrapping_neg())),
-                        Constant::Float(f) => Ok(Constant::Float(-f)),
-                        _ => Err("Cannot negate non-numeric value".into()),
-                    },
+                    UnaryOp::UnarySub => Ok(Value::Int(val.as_int()?.wrapping_neg())),
                 }
             }
-            Expr::Compare {
+            ExprKind::Compare {
                 left,
                 ops,
                 comparators,
             } => {
                 let mut current = self.eval_expr(left)?;
-
-                for (op, comparator) in ops.iter().zip(comparators.iter()) {
+                for (op, comparator) in ops.iter().zip(comparators) {
                     let next = self.eval_expr(comparator)?;
-
-                    let result = match op {
-                        CompOp::Equal => current == next,
-                        CompOp::NotEqual => current != next,
-                        CompOp::LessThan => self.compare_lt(&current, &next)?,
-                        CompOp::LessThanEqual => self.compare_lte(&current, &next)?,
-                        CompOp::GreaterThan => self.compare_gt(&current, &next)?,
-                        CompOp::GreaterThanEqual => self.compare_gte(&current, &next)?,
+                    let holds = match op {
+                        CompOp::Equal => current.equals(&next),
+                        CompOp::NotEqual => !current.equals(&next),
+                        CompOp::LessThan => current.as_int()? < next.as_int()?,
+                        CompOp::LessThanEqual => current.as_int()? <= next.as_int()?,
+                        CompOp::GreaterThan => current.as_int()? > next.as_int()?,
+                        CompOp::GreaterThanEqual => current.as_int()? >= next.as_int()?,
                     };
-
-                    if !result {
-                        return Ok(Constant::Bool(false));
+                    if !holds {
+                        return Ok(Value::Bool(false));
                     }
                     current = next;
                 }
-                Ok(Constant::Bool(true))
+                Ok(Value::Bool(true))
             }
-            Expr::Call { func, args } => {
-                if let Expr::Name { id, .. } = &**func {
-                    // built-in functions
-                    match id.as_str() {
-                        "print" => {
-                            let mut parts = Vec::with_capacity(args.len());
-                            for arg in args {
-                                let val = self.eval_expr(arg)?;
-                                parts.push(self.to_string(&val));
-                            }
-                            writeln!(self.out, "{}", parts.join(" "))?;
-                            return Ok(Constant::None);
-                        }
-                        "len" => {
-                            if args.len() != 1 {
-                                return Err("len() takes exactly 1 argument".into());
-                            }
-                            let val = self.eval_expr(&args[0])?;
-                            match val {
-                                Constant::Str(ref s) => return Ok(Constant::Int(s.len() as i64)),
-                                _ => return Err("len() requires list or string".into()),
-                            }
-                        }
-                        _ => {}
-                    }
-
-                    // user-defined functions
-                    if let Some((params, body_rc)) = self.functions.get(id) {
-                        let params = params.clone();
-                        let body = body_rc.clone();
-
-                        if params.len() != args.len() {
-                            return Err(
-                                format!("Function {} expects {} args", id, params.len()).into()
-                            );
-                        }
-
-                        // evaluate arguments in the caller's scope
-                        let mut values = Vec::with_capacity(args.len());
-                        for arg in args {
-                            values.push(self.eval_expr(arg)?);
-                        }
-
-                        self.burn_fuel()?;
-
-                        // bind parameters directly so they shadow globals of the same name
-                        self.enter_scope();
-                        let scope = self.scopes.last_mut().expect("scope was just entered");
-                        for (param, value) in params.into_iter().zip(values) {
-                            scope.insert(param, value);
-                        }
-
-                        let flow = self.eval_block(&body);
-                        self.exit_scope();
-
-                        return Ok(match flow? {
-                            ControlFlow::Return(value) => value,
-                            _ => Constant::None,
-                        });
-                    }
+            ExprKind::Call { func, args } => {
+                let ExprKind::Name { id, .. } = &func.kind else {
+                    return Err("only functions can be called, by name".into());
+                };
+                // arguments are evaluated left to right in the caller's scope
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.eval_expr(arg)?);
                 }
-                Err("Function not found".into())
+                self.call(id, values)
             }
-            Expr::Constant { value, kind: _ } => Ok(*value.clone()),
-            Expr::Subscript {
-                value: _,
-                slice: _,
-                ctx: _,
-            } => Err("subscript not supported yet".into()),
-            Expr::Name { id, ctx: _ } => self.get_var(id),
-            Expr::List { elts: _, ctx: _ } => Err("list not supported yet".into()),
+            ExprKind::Constant { value, kind: _ } => Ok(Value::from(&**value)),
+            ExprKind::Subscript { value, slice, .. } => {
+                let list = self.eval_expr(value)?;
+                let index = self.eval_expr(slice)?.as_int()?;
+                let items = list.as_list()?.borrow();
+                let position = list_position(index, items.len())?;
+                Ok(items[position].clone())
+            }
+            ExprKind::Name { id, ctx: _ } => self.get_var(id),
+            ExprKind::List { elts, ctx: _ } => {
+                let mut items = Vec::with_capacity(elts.len());
+                for elt in elts {
+                    items.push(self.eval_expr(elt)?);
+                }
+                Ok(Value::list(items))
+            }
         }
+    }
+
+    /// Calls the builtin or user-defined function named `name` with already evaluated arguments.
+    fn call(&mut self, name: &str, args: Vec<Value>) -> EvalResult<Value> {
+        match (name, &args[..]) {
+            ("print", _) => {
+                let parts: Vec<String> = args.iter().map(|v| v.display(false)).collect();
+                writeln!(self.out, "{}", parts.join(" "))?;
+                return Ok(Value::None);
+            }
+            // len counts bytes, like the compiled strlen
+            ("len", [Value::Str(s)]) => return Ok(Value::Int(s.len() as i64)),
+            ("len", [Value::List(items)]) => return Ok(Value::Int(items.borrow().len() as i64)),
+            ("len", _) => return Err("len() takes one str or list".into()),
+            ("append", [Value::List(items), item]) => {
+                items.borrow_mut().push(item.clone());
+                return Ok(Value::None);
+            }
+            ("append", _) => return Err("append() takes a list and a value".into()),
+            _ => {}
+        }
+
+        let Some((params, body)) = self.functions.get(name) else {
+            return Err(format!("Function '{name}' not found").into());
+        };
+        let (params, body) = (params.clone(), body.clone());
+        if params.len() != args.len() {
+            return Err(format!("Function {} expects {} args", name, params.len()).into());
+        }
+
+        self.burn_fuel()?;
+
+        // bind parameters directly so they shadow globals of the same name
+        self.enter_scope();
+        let scope = self.scopes.last_mut().expect("scope was just entered");
+        for (param, value) in params.into_iter().zip(args) {
+            scope.insert(param, value);
+        }
+        let flow = self.eval_block(&body);
+        self.exit_scope();
+
+        Ok(match flow? {
+            ControlFlow::Return(value) => value,
+            _ => Value::None,
+        })
     }
 
     fn enter_scope(&mut self) {
@@ -426,119 +571,32 @@ impl<'out> Interpreter<'out> {
         self.scopes.pop();
     }
 
-    fn set_var(
-        &mut self,
-        name: &str,
-        value: &Constant,
-    ) -> Result<Constant, Box<dyn std::error::Error>> {
-        // search existing scopes
-        for scope in self.scopes.iter_mut().rev() {
-            if scope.contains_key(name) {
-                scope.insert(name.to_string(), value.clone());
-                return Ok(value.clone());
-            }
-        }
-
-        // check globals
-        if self.globals.contains_key(name) {
-            self.globals.insert(name.to_string(), value.clone());
-            return Ok(value.clone());
-        }
-
-        // create in current scope or globals
-        if let Some(scope) = self.scopes.last_mut() {
-            scope.insert(name.to_string(), value.clone());
-        } else {
-            self.globals.insert(name.to_string(), value.clone());
-        }
-
+    /// Assigns a variable, which is local inside a function and global otherwise, like Python.
+    ///
+    /// For example, `x = 2` inside a function leaves a global `x` unchanged.
+    fn set_var(&mut self, name: &str, value: &Value) -> EvalResult<Value> {
+        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
+        scope.insert(name.to_string(), value.clone());
         Ok(value.clone())
     }
 
-    fn get_var(&self, name: &str) -> Result<Constant, Box<dyn std::error::Error>> {
-        // search scopes
-        for scope in self.scopes.iter().rev() {
-            if let Some(var) = scope.get(name) {
-                return Ok(var.clone());
-            }
-        }
-
-        // search globals
-        if let Some(var) = self.globals.get(name) {
-            return Ok(var.clone());
-        }
-
-        Err(format!("Variable '{}' not found", name).into())
+    /// Reads a variable from the current function's scope, then from the globals.
+    ///
+    /// A function never sees its caller's locals, so scoping is lexical.
+    fn get_var(&self, name: &str) -> EvalResult<Value> {
+        self.scopes
+            .last()
+            .and_then(|scope| scope.get(name))
+            .or_else(|| self.globals.get(name))
+            .cloned()
+            .ok_or_else(|| format!("Variable '{}' not found", name).into())
     }
 
-    fn delete_var(&mut self, name: &str) -> Result<(), Box<dyn std::error::Error>> {
-        for scope in self.scopes.iter_mut().rev() {
-            if scope.remove(name).is_some() {
-                return Ok(());
-            }
-        }
-
-        if self.globals.remove(name).is_some() {
+    fn delete_var(&mut self, name: &str) -> EvalResult<()> {
+        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
+        if scope.remove(name).is_some() {
             return Ok(());
         }
-
         Err(format!("Variable '{}' not found", name).into())
-    }
-
-    fn is_truthy(&self, val: &Constant) -> bool {
-        match val {
-            Constant::Bool(b) => *b,
-            Constant::None => false,
-            Constant::Int(i) => *i != 0,
-            Constant::Float(f) => *f != 0.0,
-            Constant::Str(s) => !s.is_empty(),
-            _ => false,
-        }
-    }
-
-    // comparison methods
-
-    fn compare_lt(&self, a: &Constant, b: &Constant) -> Result<bool, Box<dyn std::error::Error>> {
-        match (a, b) {
-            (Constant::Int(x), Constant::Int(y)) => Ok(x < y),
-            (Constant::Float(x), Constant::Float(y)) => Ok(x < y),
-            _ => Err("Cannot compare these types".into()),
-        }
-    }
-
-    fn compare_lte(&self, a: &Constant, b: &Constant) -> Result<bool, Box<dyn std::error::Error>> {
-        match (a, b) {
-            (Constant::Int(x), Constant::Int(y)) => Ok(x <= y),
-            (Constant::Float(x), Constant::Float(y)) => Ok(x <= y),
-            _ => Err("Cannot compare these types".into()),
-        }
-    }
-
-    fn compare_gt(&self, a: &Constant, b: &Constant) -> Result<bool, Box<dyn std::error::Error>> {
-        match (a, b) {
-            (Constant::Int(x), Constant::Int(y)) => Ok(x > y),
-            (Constant::Float(x), Constant::Float(y)) => Ok(x > y),
-            _ => Err("Cannot compare these types".into()),
-        }
-    }
-
-    fn compare_gte(&self, a: &Constant, b: &Constant) -> Result<bool, Box<dyn std::error::Error>> {
-        match (a, b) {
-            (Constant::Int(x), Constant::Int(y)) => Ok(x >= y),
-            (Constant::Float(x), Constant::Float(y)) => Ok(x >= y),
-            _ => Err("Cannot compare these types".into()),
-        }
-    }
-
-    fn to_string(&self, value: &Constant) -> String {
-        match value {
-            Constant::None => "none".to_string(),
-            Constant::Bool(b) => if *b { "true" } else { "false" }.to_string(),
-            Constant::Char(c) => c.to_string(),
-            Constant::Int(i) => i.to_string(),
-            Constant::Float(f) => f.to_string(),
-            Constant::Str(s) => s.clone(),
-            _ => "UNIMPLEMENTED".to_string(),
-        }
     }
 }

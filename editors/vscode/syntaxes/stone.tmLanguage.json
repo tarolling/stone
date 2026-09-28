@@ -1,0 +1,95 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "stone",
+  "scopeName": "source.stone",
+  "patterns": [
+    { "include": "#comment" },
+    { "include": "#string" },
+    { "include": "#function-definition" },
+    { "include": "#keyword" },
+    { "include": "#constant" },
+    { "include": "#number" },
+    { "include": "#builtin" },
+    { "include": "#function-call" },
+    { "include": "#operator" },
+    { "include": "#punctuation" }
+  ],
+  "repository": {
+    "comment": {
+      "name": "comment.line.number-sign.stone",
+      "match": "#.*$"
+    },
+    "string": {
+      "name": "string.quoted.double.stone",
+      "begin": "\"",
+      "end": "\"|$",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.stone" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.stone" } }
+    },
+    "function-definition": {
+      "match": "\\b(def)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.function.stone" },
+        "2": { "name": "entity.name.function.stone" }
+      }
+    },
+    "keyword": {
+      "patterns": [
+        {
+          "name": "keyword.control.stone",
+          "match": "\\b(if|elif|else|while|for|in|break|cont|ret)\\b"
+        },
+        {
+          "name": "keyword.operator.logical.stone",
+          "match": "\\b(and|or|not)\\b"
+        }
+      ]
+    },
+    "constant": {
+      "name": "constant.language.stone",
+      "match": "\\b(true|false|none)\\b"
+    },
+    "number": {
+      "name": "constant.numeric.integer.stone",
+      "match": "\\b[0-9]+\\b"
+    },
+    "builtin": {
+      "name": "support.function.builtin.stone",
+      "match": "\\b(print|len|range|append)\\b(?=\\s*\\()"
+    },
+    "function-call": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
+      "captures": {
+        "1": { "name": "entity.name.function.call.stone" }
+      }
+    },
+    "operator": {
+      "patterns": [
+        {
+          "name": "keyword.operator.comparison.stone",
+          "match": "==|!=|<=|>=|<|>"
+        },
+        {
+          "name": "keyword.operator.assignment.stone",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.stone",
+          "match": "\\+|-|\\*|/"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        {
+          "name": "punctuation.section.block.begin.stone",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.comma.stone",
+          "match": ","
+        }
+      ]
+    }
+  }
+}

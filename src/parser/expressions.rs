@@ -1,7 +1,10 @@
 //! Expression and assignment-target rules, such as `sum`, `primary`, and `star_targets`.
 
 use super::{ParseExprResult, Parser};
-use crate::ast::{BoolOp, Constant, Expr, ExprContext, Operator, ParserError, PrimaryOp, UnaryOp};
+use crate::ast::{
+    BoolOp, CompOp, Constant, Expr, ExprContext, ExprKind, Operator, ParserError, PrimaryOp,
+    UnaryOp,
+};
 use crate::debug;
 use crate::token::TokenType;
 
@@ -38,7 +41,12 @@ impl Parser {
         false
     }
 
-    /// Parses the trailing subscripts and calls of a `t_primary`, such as `[0](1)` in `a[0](1)`.
+    /// Parses the trailing subscripts and calls of a `t_primary`, such as `[0](1)` in `a[0](1)[2]`,
+    /// stopping before the last one so that the assignment target can claim it.
+    ///
+    /// The grammar's `t_primary` is left-recursive, so it naturally ends right before a final
+    /// subscript. Here each subscript or call is only taken if another one follows it, which gives
+    /// the same result: in `a[0][1] = 2`, this takes `[0]` and leaves `[1]` for the target.
     ///
     /// ```text
     /// ( '[' slices ']' | '(' [arguments] ')' )*
@@ -53,8 +61,9 @@ impl Parser {
             if self.expect(TokenType::LBracket).is_some()
                 && let Ok(slices) = self.parse_slices()
                 && self.expect(TokenType::RBracket).is_some()
+                && self.parse_t_lookahead()
             {
-                results.push(PrimaryOp::Subscript(slices));
+                results.push(PrimaryOp::Subscript(slices, self.last_span()));
                 continue;
             }
             self.pos = mark;
@@ -63,8 +72,9 @@ impl Parser {
             if self.expect(TokenType::LParen).is_some()
                 && let arguments = self.parse_arguments_optional()
                 && self.expect(TokenType::RParen).is_some()
+                && self.parse_t_lookahead()
             {
-                results.push(PrimaryOp::Call(arguments));
+                results.push(PrimaryOp::Call(arguments, self.last_span()));
                 continue;
             }
 
@@ -92,14 +102,21 @@ impl Parser {
                 return Ok(result);
             }
 
+            let start = result.span;
             for op in ops {
                 result = match op {
-                    PrimaryOp::Subscript(slice) => Box::new(Expr::Subscript {
-                        value: result,
-                        slice,
-                        ctx: ExprContext::Load,
-                    }),
-                    PrimaryOp::Call(args) => Box::new(Expr::Call { func: result, args }),
+                    PrimaryOp::Subscript(slice, end) => Box::new(Expr::new(
+                        ExprKind::Subscript {
+                            value: result,
+                            slice,
+                            ctx: ExprContext::Load,
+                        },
+                        start.to(end),
+                    )),
+                    PrimaryOp::Call(args, end) => Box::new(Expr::new(
+                        ExprKind::Call { func: result, args },
+                        start.to(end),
+                    )),
                 };
             }
 
@@ -111,8 +128,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_t_primary".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -125,21 +141,23 @@ impl Parser {
     pub(super) fn parse_star_atom(&mut self) -> ParseExprResult {
         let mark = self.pos;
 
-        // NAME
-        if let TokenType::Name(name) = &self.advance().r#type {
+        // NAME, quiet because the expression alternatives at the same token already cover names
+        if let Some((id, span)) = self.expect_name("a name", true) {
             debug!("parse_star_atom: successfully parsed rule: NAME");
-            return Ok(Box::new(Expr::Name {
-                id: name.to_string(),
-                ctx: ExprContext::Store,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::Name {
+                    id,
+                    ctx: ExprContext::Store,
+                },
+                span,
+            )));
         }
         self.pos = mark;
 
         Err(ParserError {
             method: "parse_star_atom".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -161,11 +179,14 @@ impl Parser {
             && self.expect(TokenType::RBracket).is_some()
             && !self.parse_t_lookahead()
         {
-            let res = Box::new(Expr::Subscript {
-                value,
-                slice,
-                ctx: ExprContext::Store,
-            });
+            let res = Box::new(Expr::new(
+                ExprKind::Subscript {
+                    value,
+                    slice,
+                    ctx: ExprContext::Store,
+                },
+                self.span_from(mark),
+            ));
             debug!(
                 "parse_target_with_star_atom: successfully parsed: {:?}",
                 res
@@ -203,8 +224,7 @@ impl Parser {
                 return Err(ParserError {
                     method: "parse_star_targets".to_string(),
                     token: self.peek().r#type.clone(),
-                    line: self.peek().line,
-                    col: self.peek().col,
+                    span: self.peek().span,
                 });
             }
 
@@ -215,8 +235,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_star_targets".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -231,9 +250,17 @@ impl Parser {
 
         let expr = self.parse_expression()?;
         args.push(*expr);
-        while self.expect(TokenType::Comma).is_some() {
-            let expr = self.parse_expression()?;
-            args.push(*expr);
+        loop {
+            let mark = self.pos;
+            // a comma with no expression after it belongs to `arguments` as a trailing comma
+            if self.expect(TokenType::Comma).is_some()
+                && let Ok(expr) = self.parse_expression()
+            {
+                args.push(*expr);
+                continue;
+            }
+            self.pos = mark;
+            break;
         }
 
         Ok(args)
@@ -248,35 +275,40 @@ impl Parser {
         let args = self.parse_args()?;
         self.expect(TokenType::Comma);
 
+        // &')'
         if self.peek().r#type == TokenType::RParen {
             return Ok(args);
         }
+        self.record_expected("')'".to_string(), false);
 
         Err(ParserError {
             method: "parse_arguments".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
     pub(super) fn parse_string(&mut self) -> ParseExprResult {
+        let mark = self.pos;
         if let TokenType::String(value) = self.advance().r#type {
-            return Ok(Box::new(Expr::Constant {
-                value: Box::new(Constant::Str(value.to_string())),
-                kind: None,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::Constant {
+                    value: Box::new(Constant::Str(value.to_string())),
+                    kind: None,
+                },
+                self.span_from(mark),
+            )));
         }
 
         Err(ParserError {
             method: "parse_string".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
     pub(super) fn parse_strings_loop(&mut self) -> ParseExprResult {
+        let start = self.pos;
         let mut results = vec![];
 
         let expr = self.parse_string()?;
@@ -295,17 +327,20 @@ impl Parser {
         // concatenate all strings
         let mut concatenated = String::new();
         for expr in results {
-            if let Expr::Constant { value, .. } = *expr
+            if let ExprKind::Constant { value, .. } = expr.kind
                 && let Constant::Str(s) = *value
             {
                 concatenated.push_str(&s);
             }
         }
 
-        Ok(Box::new(Expr::Constant {
-            value: Box::new(Constant::Str(concatenated)),
-            kind: None,
-        }))
+        Ok(Box::new(Expr::new(
+            ExprKind::Constant {
+                value: Box::new(Constant::Str(concatenated)),
+                kind: None,
+            },
+            self.span_from(start),
+        )))
     }
 
     pub(super) fn parse_strings(&mut self) -> ParseExprResult {
@@ -323,16 +358,32 @@ impl Parser {
     ///     | strings
     ///     | NUMBER
     ///     | list
+    ///     | group
     /// ```
     pub(super) fn parse_atom(&mut self) -> ParseExprResult {
         let mark = self.pos;
 
+        // group
+        if let Ok(expr) = self.parse_group() {
+            return Ok(expr);
+        }
+        self.pos = mark;
+
+        // list
+        if let Ok(expr) = self.parse_list() {
+            return Ok(expr);
+        }
+        self.pos = mark;
+
         // NAME
         if let TokenType::Name(name) = self.advance().r#type {
-            return Ok(Box::new(Expr::Name {
-                id: name.clone(),
-                ctx: ExprContext::Load,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::Name {
+                    id: name.clone(),
+                    ctx: ExprContext::Load,
+                },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
@@ -341,10 +392,13 @@ impl Parser {
             .expect(TokenType::Keyword("true".to_string()))
             .is_some()
         {
-            return Ok(Box::new(Expr::Constant {
-                value: Box::new(Constant::Bool(true)),
-                kind: None,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::Constant {
+                    value: Box::new(Constant::Bool(true)),
+                    kind: None,
+                },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
@@ -353,10 +407,13 @@ impl Parser {
             .expect(TokenType::Keyword("false".to_string()))
             .is_some()
         {
-            return Ok(Box::new(Expr::Constant {
-                value: Box::new(Constant::Bool(false)),
-                kind: None,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::Constant {
+                    value: Box::new(Constant::Bool(false)),
+                    kind: None,
+                },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
@@ -365,10 +422,13 @@ impl Parser {
             .expect(TokenType::Keyword("none".to_string()))
             .is_some()
         {
-            return Ok(Box::new(Expr::Constant {
-                value: Box::new(Constant::None),
-                kind: None,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::Constant {
+                    value: Box::new(Constant::None),
+                    kind: None,
+                },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
@@ -380,20 +440,98 @@ impl Parser {
 
         // NUMBER
         if let TokenType::Number(num) = self.advance().r#type {
-            let res = Box::new(Expr::Constant {
-                value: Box::new(Constant::Int(num)),
-                kind: None,
-            });
+            let res = Box::new(Expr::new(
+                ExprKind::Constant {
+                    value: Box::new(Constant::Int(num)),
+                    kind: None,
+                },
+                self.span_from(mark),
+            ));
             debug!("parse_atom: successfully parsed: {:?}", res);
             return Ok(res);
         }
         self.pos = mark;
+        self.record_expected("an expression".to_string(), false);
 
         Err(ParserError {
             method: "parse_atom".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses a parenthesized expression, such as `(1 + 2)` in `(1 + 2) * 3`. The expression's span
+    /// grows to cover the parentheses.
+    ///
+    /// ```text
+    /// group:
+    ///     | '(' expression ')'
+    /// ```
+    pub(super) fn parse_group(&mut self) -> ParseExprResult {
+        let mark = self.pos;
+
+        // '(' expression ')'
+        if self.expect(TokenType::LParen).is_some()
+            && let Ok(mut expr) = self.parse_expression()
+            && self.expect(TokenType::RParen).is_some()
+        {
+            expr.span = self.span_from(mark);
+            return Ok(expr);
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_group".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses a list literal, such as `[1, 2]` or `[]`.
+    ///
+    /// ```text
+    /// list:
+    ///     | '[' [named_expressions] ']'
+    /// named_expressions:
+    ///     | ','.expression+ [',']
+    /// ```
+    pub(super) fn parse_list(&mut self) -> ParseExprResult {
+        let mark = self.pos;
+
+        if self.expect(TokenType::LBracket).is_some() {
+            let mut elts = vec![];
+            if let Ok(first) = self.parse_expression() {
+                elts.push(*first);
+                loop {
+                    let before_comma = self.pos;
+                    if self.expect(TokenType::Comma).is_some()
+                        && let Ok(elt) = self.parse_expression()
+                    {
+                        elts.push(*elt);
+                        continue;
+                    }
+                    // a trailing comma is allowed
+                    self.pos = before_comma;
+                    self.expect(TokenType::Comma);
+                    break;
+                }
+            }
+            if self.expect(TokenType::RBracket).is_some() {
+                return Ok(Box::new(Expr::new(
+                    ExprKind::List {
+                        elts,
+                        ctx: ExprContext::Load,
+                    },
+                    self.span_from(mark),
+                )));
+            }
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_list".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
         })
     }
 
@@ -407,8 +545,7 @@ impl Parser {
                 return Err(ParserError {
                     method: "parse_slices".to_string(),
                     token: self.peek().r#type.clone(),
-                    line: self.peek().line,
-                    col: self.peek().col,
+                    span: self.peek().span,
                 });
             }
             return Ok(expr);
@@ -416,8 +553,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_slices".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -427,7 +563,11 @@ impl Parser {
     /// [arguments]
     /// ```
     pub(super) fn parse_arguments_optional(&mut self) -> Vec<Expr> {
-        self.parse_arguments().unwrap_or_default()
+        let mark = self.pos;
+        self.parse_arguments().unwrap_or_else(|_| {
+            self.pos = mark;
+            vec![]
+        })
     }
 
     /// Parses the calls and subscripts that follow an atom, such as `(1)[0]` in `f(1)[0]`.
@@ -445,7 +585,7 @@ impl Parser {
                 && let arguments = self.parse_arguments_optional()
                 && self.expect(TokenType::RParen).is_some()
             {
-                results.push(PrimaryOp::Call(arguments));
+                results.push(PrimaryOp::Call(arguments, self.last_span()));
                 continue;
             }
             self.pos = mark;
@@ -455,7 +595,7 @@ impl Parser {
                 && let Ok(slices) = self.parse_slices()
                 && self.expect(TokenType::RBracket).is_some()
             {
-                results.push(PrimaryOp::Subscript(slices));
+                results.push(PrimaryOp::Subscript(slices, self.last_span()));
                 continue;
             }
             self.pos = mark;
@@ -481,14 +621,21 @@ impl Parser {
                 return Ok(result);
             }
 
+            let start = result.span;
             for op in ops {
                 result = match op {
-                    PrimaryOp::Subscript(slice) => Box::new(Expr::Subscript {
-                        value: result,
-                        slice,
-                        ctx: ExprContext::Load,
-                    }),
-                    PrimaryOp::Call(args) => Box::new(Expr::Call { func: result, args }),
+                    PrimaryOp::Subscript(slice, end) => Box::new(Expr::new(
+                        ExprKind::Subscript {
+                            value: result,
+                            slice,
+                            ctx: ExprContext::Load,
+                        },
+                        start.to(end),
+                    )),
+                    PrimaryOp::Call(args, end) => Box::new(Expr::new(
+                        ExprKind::Call { func: result, args },
+                        start.to(end),
+                    )),
                 };
             }
 
@@ -500,8 +647,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_primary".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -520,10 +666,13 @@ impl Parser {
         if self.expect(TokenType::Operator("+".to_string())).is_some()
             && let Ok(factor) = self.nested(Self::parse_factor)
         {
-            return Ok(Box::new(Expr::UnaryOp {
-                op: UnaryOp::UnaryAdd,
-                operand: factor,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::UnaryOp {
+                    op: UnaryOp::UnaryAdd,
+                    operand: factor,
+                },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
@@ -531,10 +680,13 @@ impl Parser {
         if self.expect(TokenType::Operator("-".to_string())).is_some()
             && let Ok(factor) = self.nested(Self::parse_factor)
         {
-            return Ok(Box::new(Expr::UnaryOp {
-                op: UnaryOp::UnarySub,
-                operand: factor,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::UnaryOp {
+                    op: UnaryOp::UnarySub,
+                    operand: factor,
+                },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
@@ -592,11 +744,15 @@ impl Parser {
 
             // left-associative, e.g. ((a + b) - c)
             for (op, expr) in facts {
-                result = Box::new(Expr::BinOp {
-                    op,
-                    left: result,
-                    right: Box::new(expr),
-                });
+                let span = result.span.to(expr.span);
+                result = Box::new(Expr::new(
+                    ExprKind::BinOp {
+                        op,
+                        left: result,
+                        right: Box::new(expr),
+                    },
+                    span,
+                ));
             }
 
             debug!("parse_term: successfully parsed: {:?}", result);
@@ -607,8 +763,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_term".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -662,11 +817,15 @@ impl Parser {
 
             // left-associative, e.g. ((a + b) - c)
             for (op, expr) in sums {
-                result = Box::new(Expr::BinOp {
-                    op,
-                    left: result,
-                    right: Box::new(expr),
-                });
+                let span = result.span.to(expr.span);
+                result = Box::new(Expr::new(
+                    ExprKind::BinOp {
+                        op,
+                        left: result,
+                        right: Box::new(expr),
+                    },
+                    span,
+                ));
             }
 
             debug!("parse_sum: successfully parsed: {:?}", result);
@@ -677,13 +836,67 @@ impl Parser {
         Err(ParserError {
             method: "parse_sum".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
+    /// Parses one comparison operator, such as `<=`.
+    ///
+    /// ```text
+    /// compare_op:
+    ///     | '==' | '!=' | '<' | '<=' | '>' | '>='
+    /// ```
+    pub(super) fn parse_compare_op(&mut self) -> Option<CompOp> {
+        let ops = [
+            ("==", CompOp::Equal),
+            ("!=", CompOp::NotEqual),
+            ("<", CompOp::LessThan),
+            ("<=", CompOp::LessThanEqual),
+            (">", CompOp::GreaterThan),
+            (">=", CompOp::GreaterThanEqual),
+        ];
+        ops.into_iter()
+            .find(|(text, _)| self.expect(TokenType::Operator(text.to_string())).is_some())
+            .map(|(_, op)| op)
+    }
+
+    /// Parses a sum or a chain of comparisons between sums, such as `a < b <= c`, which means
+    /// `a < b and b <= c`.
+    ///
+    /// ```text
+    /// comparison:
+    ///     | sum (compare_op sum)*
+    /// ```
     pub(super) fn parse_comparison(&mut self) -> ParseExprResult {
-        self.parse_sum()
+        let left = self.parse_sum()?;
+
+        let mut ops = vec![];
+        let mut comparators: Vec<Expr> = vec![];
+        loop {
+            let mark = self.pos;
+            if let Some(op) = self.parse_compare_op()
+                && let Ok(right) = self.parse_sum()
+            {
+                ops.push(op);
+                comparators.push(*right);
+                continue;
+            }
+            self.pos = mark;
+            break;
+        }
+
+        let Some(last) = comparators.last() else {
+            return Ok(left);
+        };
+        let span = left.span.to(last.span);
+        Ok(Box::new(Expr::new(
+            ExprKind::Compare {
+                left,
+                ops,
+                comparators,
+            },
+            span,
+        )))
     }
 
     /// Parses an optional logical `not`, such as `not x`.
@@ -700,10 +913,13 @@ impl Parser {
         if self.expect(TokenType::Keyword("not".to_string())).is_some()
             && let Ok(res) = self.nested(Self::parse_inversion)
         {
-            return Ok(Box::new(Expr::UnaryOp {
-                op: UnaryOp::Not,
-                operand: res,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::UnaryOp {
+                    op: UnaryOp::Not,
+                    operand: res,
+                },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
@@ -735,8 +951,7 @@ impl Parser {
             Err(ParserError {
                 method: "parse_conjunction_loop".to_string(),
                 token: self.peek().r#type.clone(),
-                line: self.peek().line,
-                col: self.peek().col,
+                span: self.peek().span,
             })
         } else {
             Ok(results)
@@ -756,13 +971,17 @@ impl Parser {
 
         // inversion ('and' inversion )+
         if let Ok(exprs) = self.parse_conjunction_loop() {
+            let span = conj.span.to(exprs.last().map_or(conj.span, |e| e.span));
             let mut values = vec![*conj];
             values.extend(exprs);
 
-            return Ok(Box::new(Expr::BoolOp {
-                op: BoolOp::And,
-                values,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::BoolOp {
+                    op: BoolOp::And,
+                    values,
+                },
+                span,
+            )));
         }
 
         // inversion
@@ -792,8 +1011,7 @@ impl Parser {
             Err(ParserError {
                 method: "parse_disjunction_loop".to_string(),
                 token: self.peek().r#type.clone(),
-                line: self.peek().line,
-                col: self.peek().col,
+                span: self.peek().span,
             })
         } else {
             Ok(results)
@@ -813,13 +1031,17 @@ impl Parser {
 
         // conjunction ('or' conjunction )+
         if let Ok(exprs) = self.parse_disjunction_loop() {
+            let span = conj.span.to(exprs.last().map_or(conj.span, |e| e.span));
             let mut values = vec![*conj];
             values.extend(exprs);
 
-            return Ok(Box::new(Expr::BoolOp {
-                op: BoolOp::Or,
-                values,
-            }));
+            return Ok(Box::new(Expr::new(
+                ExprKind::BoolOp {
+                    op: BoolOp::Or,
+                    values,
+                },
+                span,
+            )));
         }
 
         // conjunction

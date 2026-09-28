@@ -12,6 +12,7 @@
 
 use std::{error::Error, fmt::Display};
 
+use crate::span::Span;
 use crate::token::TokenType;
 
 type Identifier = String;
@@ -88,9 +89,11 @@ impl Constant {
 // custom types from the asdl
 ////////////////////////////////////////////////////////////////
 
+/// A function parameter and the span of its name, such as `a` in `def f(a);`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arg {
     pub arg: Identifier,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -161,8 +164,24 @@ pub enum ExprContext {
     Delete,
 }
 
+/// An expression and the span of source text it was parsed from.
+///
+/// For example, `a + 12` in `x = a + 12` is a [`ExprKind::BinOp`] spanning cols 5 to 11.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Expr {
+pub struct Expr {
+    pub kind: ExprKind,
+    pub span: Span,
+}
+
+impl Expr {
+    pub fn new(kind: ExprKind, span: Span) -> Self {
+        Expr { kind, span }
+    }
+}
+
+/// The kind of an [`Expr`], such as a call or a binary operation.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ExprKind {
     /// A boolean operation, such as `a and b`.
     BoolOp { op: BoolOp, values: Vec<Expr> },
     /// A binary operation, such as `a + b`.
@@ -197,11 +216,30 @@ pub enum Expr {
     List { elts: Vec<Expr>, ctx: ExprContext },
 }
 
+/// A statement and the span of source text it was parsed from.
+///
+/// For example, `x = 1` spans cols 1 to 6, and a compound statement ends at the last token of its
+/// block.
 #[derive(Debug, Clone, PartialEq)]
-pub enum Stmt {
+pub struct Stmt {
+    pub kind: StmtKind,
+    pub span: Span,
+}
+
+impl Stmt {
+    pub fn new(kind: StmtKind, span: Span) -> Self {
+        Stmt { kind, span }
+    }
+}
+
+/// The kind of a [`Stmt`], such as an assignment or a loop.
+#[derive(Debug, Clone, PartialEq)]
+pub enum StmtKind {
     /// A function definition, such as `def add(a, b); ret a + b`.
     FunctionDef {
         name: Identifier,
+        /// The span of the function's name, which editor features point at.
+        name_span: Span,
         args: Arguments,
         body: Vec<Stmt>,
     },
@@ -242,18 +280,19 @@ pub enum Mod {
     Module { body: Vec<Stmt> },
 }
 
-// additional helper for parser
+/// A call or subscript that follows an atom, along with the span of its closing bracket.
+///
+/// For example, `(1)` in `f(1)` is a `Call` whose span covers the `)`.
 pub enum PrimaryOp {
-    Subscript(Box<Expr>),
-    Call(Vec<Expr>),
+    Subscript(Box<Expr>, Span),
+    Call(Vec<Expr>, Span),
 }
 
 #[derive(Debug, PartialEq)]
 pub struct ParserError {
     pub method: String,
     pub token: TokenType,
-    pub line: usize,
-    pub col: usize,
+    pub span: Span,
 }
 
 impl Display for ParserError {
@@ -261,7 +300,7 @@ impl Display for ParserError {
         write!(
             f,
             "{}: {:?} on line {}, col {}",
-            self.method, self.token, self.line, self.col
+            self.method, self.token, self.span.start.line, self.span.start.col
         )
     }
 }

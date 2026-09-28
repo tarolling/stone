@@ -1,0 +1,53 @@
+{
+  "name": "stone",
+  "displayName": "stone",
+  "description": "Language support for stone: highlighting, diagnostics, hover, go to definition, references, rename, outline, and completion",
+  "version": "0.1.0",
+  "publisher": "tarolling",
+  "license": "Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tarolling/newlang"
+  },
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "languages": [
+      {
+        "id": "stone",
+        "aliases": [
+          "stone"
+        ],
+        "extensions": [
+          ".st"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "stone",
+        "scopeName": "source.stone",
+        "path": "./syntaxes/stone.tmLanguage.json"
+      }
+    ],
+    "configuration": {
+      "title": "stone",
+      "properties": {
+        "stone.server.path": {
+          "type": "string",
+          "default": "stone-lsp",
+          "description": "The stone-lsp executable to run, either a name on PATH or an absolute path, such as the target/debug/stone-lsp of a local build."
+        }
+      }
+    }
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  }
+}

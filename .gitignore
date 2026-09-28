@@ -28,3 +28,7 @@ target
 /fuzz/coverage/
 /fuzz/corpus/*/*
 !/fuzz/corpus/*/*.st
+
+# VS Code extension dependencies and packages
+/editors/vscode/node_modules/
+*.vsix

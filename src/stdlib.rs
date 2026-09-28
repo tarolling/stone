@@ -1,3 +1,5 @@
 //! Names of the builtin functions shared by the interpreter and the compiler.
 
-pub static BUILTINS: [&str; 2] = ["print", "len"];
+///
+/// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3);`.
+pub static BUILTINS: [&str; 4] = ["print", "len", "range", "append"];

@@ -4,6 +4,9 @@
 
 # ========================= START OF THE GRAMMAR =========================
 
+# Comments run from '#' to the end of the line and are dropped by the lexer, along with blank
+# lines, so neither ever produces NEWLINE, INDENT, or DEDENT.
+
 # General grammatical elements and rules:
 #
 # * Strings with double quotes (") denote SOFT KEYWORDS
@@ -139,6 +142,7 @@ while_stmt:
 # For statement
 # -------------
 
+# the iterable is a list, or range(n) or range(a, b), which counts without building one
 for_stmt:
     | 'for' star_targets 'in' ~ expressions ';' block
 
@@ -171,8 +175,17 @@ inversion:
 # Comparison operators
 # --------------------
 
+# chains such as a < b <= c mean a < b and b <= c, evaluating b once
 comparison:
-    | sum
+    | sum (compare_op sum)*
+
+compare_op:
+    | '=='
+    | '!='
+    | '<'
+    | '<='
+    | '>'
+    | '>='
 
 # Arithmetic operators
 # --------------------
@@ -210,6 +223,7 @@ atom:
     | strings
     | NUMBER
     | list
+    | group
 
 group:
     | '(' expression ')' 

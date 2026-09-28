@@ -3,3 +3,16 @@ hi 1 2
 -7
 true
 false
+none
+0
+9223372036854775807
+-9223372036854775808
+true false
+with spaces  and after an empty string
+
+none
+loud 1
+loud 2
+line 1 2
+loud 3
+43

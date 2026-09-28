@@ -3,6 +3,8 @@
 //! Indentation is tracked Python-style, so `def f();` followed by an indented line produces
 //! `Newline`, `Indent`, and later `Dedent` tokens around the function body.
 
+use crate::diagnostic::Diagnostic;
+use crate::span::{Pos, Span};
 use crate::token::{RESERVED_KEYWORDS, Token, TokenType};
 use std::error::Error;
 use std::fmt::Display;
@@ -15,8 +17,7 @@ const TAB_SIZE: usize = 4;
 #[derive(Debug, PartialEq)]
 pub struct LexError {
     pub message: String,
-    pub line: usize,
-    pub col: usize,
+    pub span: Span,
 }
 
 impl Display for LexError {
@@ -24,12 +25,18 @@ impl Display for LexError {
         write!(
             f,
             "{} on line {}, col {}",
-            self.message, self.line, self.col
+            self.message, self.span.start.line, self.span.start.col
         )
     }
 }
 
 impl Error for LexError {}
+
+impl From<LexError> for Diagnostic {
+    fn from(err: LexError) -> Self {
+        Diagnostic::error(err.span, err.message)
+    }
+}
 
 /// Lexer that converts source code into a list of [`Token`]s.
 pub struct Lexer {
@@ -68,20 +75,12 @@ impl Lexer {
                 if let Some(last) = tokens.last()
                     && !matches!(last.r#type, TokenType::Newline | TokenType::Dedent)
                 {
-                    tokens.push(Token {
-                        r#type: TokenType::Newline,
-                        line: self.line,
-                        col: self.col,
-                    });
+                    tokens.push(Token::new(TokenType::Newline, Span::empty(self.pos())));
                 }
                 // emit remaining dedents at end of file
                 while self.indent_stack.len() > 1 {
                     self.indent_stack.pop();
-                    tokens.push(Token {
-                        r#type: TokenType::Dedent,
-                        line: self.line,
-                        col: self.col,
-                    });
+                    tokens.push(Token::new(TokenType::Dedent, Span::empty(self.pos())));
                 }
                 tokens.push(tok);
                 break;
@@ -89,6 +88,11 @@ impl Lexer {
             tokens.push(tok);
         }
         Ok(tokens)
+    }
+
+    /// Returns the position of the next character to be lexed.
+    fn pos(&self) -> Pos {
+        Pos::new(self.line, self.col)
     }
 
     fn peek(&self) -> Option<char> {
@@ -107,17 +111,32 @@ impl Lexer {
         Some(ch)
     }
 
+    /// Skips spaces, tabs, carriage returns (so `\r\n` acts like `\n`), and a trailing `#` comment,
+    /// stopping before the newline.
     fn skip_whitespace(&mut self) {
         while let Some(ch) = self.peek() {
-            if ch == ' ' || ch == '\t' {
-                self.advance();
-            } else {
-                break;
+            match ch {
+                ' ' | '\t' | '\r' => {
+                    self.advance();
+                }
+                '#' => self.skip_comment(),
+                _ => break,
             }
         }
     }
 
-    /// Returns the indentation width at the start of the current line, skipping blank lines.
+    /// Skips a `#` comment up to but not including the newline that ends it.
+    fn skip_comment(&mut self) {
+        while let Some(ch) = self.peek() {
+            if ch == '\n' {
+                break;
+            }
+            self.advance();
+        }
+    }
+
+    /// Returns the indentation width at the start of the current line, skipping blank and
+    /// comment-only lines, which never change indentation.
     ///
     /// Tabs count as `TAB_SIZE` columns, so a line starting with one tab has a width of 4.
     fn calculate_indent(&mut self) -> usize {
@@ -132,6 +151,10 @@ impl Lexer {
                     indent += TAB_SIZE;
                     self.advance();
                 }
+                '\r' => {
+                    self.advance();
+                }
+                '#' => self.skip_comment(),
                 '\n' => {
                     // skip empty lines
                     self.advance();
@@ -159,14 +182,19 @@ impl Lexer {
         let indent = self.calculate_indent();
         let current_indent = *self.indent_stack.last().unwrap();
 
+        // trailing blank or comment lines leave indentation alone, and `lex` closes open blocks
+        if self.peek().is_none() {
+            self.at_line_start = false;
+            return None;
+        }
+
         if indent > current_indent {
             self.indent_stack.push(indent);
             self.at_line_start = false;
-            Some(Token {
-                r#type: TokenType::Indent,
-                line: self.line,
-                col: 1,
-            })
+            Some(Token::new(
+                TokenType::Indent,
+                Span::empty(Pos::new(self.line, 1)),
+            ))
         } else if indent < current_indent {
             // one dedent per level dropped
             while let Some(&stack_indent) = self.indent_stack.last() {
@@ -174,11 +202,10 @@ impl Lexer {
                     break;
                 }
                 self.indent_stack.pop();
-                self.pending_dedents.push(Token {
-                    r#type: TokenType::Dedent,
-                    line: self.line,
-                    col: 1,
-                });
+                self.pending_dedents.push(Token::new(
+                    TokenType::Dedent,
+                    Span::empty(Pos::new(self.line, 1)),
+                ));
             }
             self.at_line_start = false;
             if !self.pending_dedents.is_empty() {
@@ -194,7 +221,7 @@ impl Lexer {
     }
 
     fn lex_number(&mut self) -> Result<i64, LexError> {
-        let (line, col) = (self.line, self.col);
+        let start = self.pos();
         let mut num = String::new();
         while let Some(ch) = self.peek() {
             if ch.is_ascii_digit() {
@@ -206,8 +233,34 @@ impl Lexer {
         }
         num.parse().map_err(|_| LexError {
             message: format!("integer literal {} is too large", num),
-            line,
-            col,
+            span: Span::new(start, self.pos()),
+        })
+    }
+
+    /// Lexes a string literal starting at its opening quote and returns its contents.
+    ///
+    /// For example, `"hi"` returns `hi`. A string must close on the line it opens on, so `"abc`
+    /// followed by a newline is an error spanning `"abc`.
+    fn lex_string(&mut self) -> Result<String, LexError> {
+        let start = self.pos();
+        self.advance();
+        let mut s = String::new();
+        while let Some(ch) = self.peek() {
+            match ch {
+                '"' => {
+                    self.advance();
+                    return Ok(s);
+                }
+                '\n' => break,
+                _ => {
+                    s.push(ch);
+                    self.advance();
+                }
+            }
+        }
+        Err(LexError {
+            message: "unterminated string".to_string(),
+            span: Span::new(start, self.pos()),
         })
     }
 
@@ -225,120 +278,108 @@ impl Lexer {
     }
 
     fn next_token(&mut self) -> Result<Token, LexError> {
-        // loop rather than recurse past unknown characters, so long runs cannot overflow the stack
-        loop {
-            // handle indentation at line start
-            if let Some(tok) = self.handle_indentation() {
-                return Ok(tok);
-            }
-
-            self.skip_whitespace();
-            let line = self.line;
-            let col = self.col;
-
-            let tok = match self.peek() {
-                None => Token {
-                    r#type: TokenType::Eof,
-                    line,
-                    col,
-                },
-                Some('\n') => {
-                    self.advance();
-                    self.at_line_start = true;
-                    Token {
-                        r#type: TokenType::Newline,
-                        line,
-                        col,
-                    }
-                }
-                Some(';') => {
-                    self.advance();
-                    Token {
-                        r#type: TokenType::Semi,
-                        line,
-                        col,
-                    }
-                }
-                Some(',') => {
-                    self.advance();
-                    Token {
-                        r#type: TokenType::Comma,
-                        line,
-                        col,
-                    }
-                }
-                Some('(') => {
-                    self.advance();
-                    Token {
-                        r#type: TokenType::LParen,
-                        line,
-                        col,
-                    }
-                }
-                Some(')') => {
-                    self.advance();
-                    Token {
-                        r#type: TokenType::RParen,
-                        line,
-                        col,
-                    }
-                }
-                Some('+') | Some('-') | Some('*') | Some('/') | Some('=') => {
-                    let op = self.advance().unwrap().to_string();
-                    Token {
-                        r#type: TokenType::Operator(op),
-                        line,
-                        col,
-                    }
-                }
-                Some('"') => {
-                    self.advance();
-                    let mut s = String::new();
-                    while let Some(ch) = self.peek() {
-                        if ch == '"' {
-                            self.advance();
-                            break;
-                        }
-                        s.push(ch);
-                        self.advance();
-                    }
-                    Token {
-                        r#type: TokenType::String(s),
-                        line,
-                        col,
-                    }
-                }
-                Some(ch) if ch.is_ascii_digit() => {
-                    let num = self.lex_number()?;
-                    Token {
-                        r#type: TokenType::Number(num),
-                        line,
-                        col,
-                    }
-                }
-                Some(ch) if ch.is_alphabetic() => {
-                    let ident = self.lex_name();
-                    let r#type = if RESERVED_KEYWORDS.contains(&ident.as_str()) {
-                        TokenType::Keyword(ident)
-                    } else {
-                        TokenType::Name(ident)
-                    };
-                    Token { r#type, line, col }
-                }
-                Some(_) => {
-                    // skip characters that cannot start a token
-                    self.advance();
-                    continue;
-                }
-            };
+        // handle indentation at line start
+        if let Some(tok) = self.handle_indentation() {
             return Ok(tok);
         }
+
+        self.skip_whitespace();
+        let start = self.pos();
+
+        let r#type = match self.peek() {
+            None => TokenType::Eof,
+            Some('\n') => {
+                self.advance();
+                self.at_line_start = true;
+                // the newline covers its own character, not the whole next line
+                let end = Pos::new(start.line, start.col + 1);
+                return Ok(Token::new(TokenType::Newline, Span::new(start, end)));
+            }
+            Some(';') => {
+                self.advance();
+                TokenType::Semi
+            }
+            Some(',') => {
+                self.advance();
+                TokenType::Comma
+            }
+            Some('(') => {
+                self.advance();
+                TokenType::LParen
+            }
+            Some(')') => {
+                self.advance();
+                TokenType::RParen
+            }
+            Some('[') => {
+                self.advance();
+                TokenType::LBracket
+            }
+            Some(']') => {
+                self.advance();
+                TokenType::RBracket
+            }
+            Some('.') => {
+                self.advance();
+                TokenType::Dot
+            }
+            Some('+') | Some('-') | Some('*') | Some('/') => {
+                let op = self.advance().unwrap().to_string();
+                TokenType::Operator(op)
+            }
+            Some(first @ ('=' | '<' | '>' | '!')) => {
+                self.advance();
+                if self.peek() == Some('=') {
+                    self.advance();
+                    TokenType::Operator(format!("{first}="))
+                } else if first == '!' {
+                    return Err(LexError {
+                        message: "unexpected character '!'".to_string(),
+                        span: Span::new(start, self.pos()),
+                    });
+                } else {
+                    TokenType::Operator(first.to_string())
+                }
+            }
+            Some('"') => TokenType::String(self.lex_string()?),
+            Some(ch) if ch.is_ascii_digit() => TokenType::Number(self.lex_number()?),
+            Some(ch) if ch.is_alphabetic() => {
+                let ident = self.lex_name();
+                if RESERVED_KEYWORDS.contains(&ident.as_str()) {
+                    TokenType::Keyword(ident)
+                } else {
+                    TokenType::Name(ident)
+                }
+            }
+            Some(ch) => {
+                self.advance();
+                return Err(LexError {
+                    message: format!("unexpected character '{ch}'"),
+                    span: Span::new(start, self.pos()),
+                });
+            }
+        };
+        Ok(Token::new(r#type, Span::new(start, self.pos())))
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Returns a token's type and start position, which is what most tests check.
+    fn start_of(token: &Token) -> (TokenType, usize, usize) {
+        (
+            token.r#type.clone(),
+            token.span.start.line,
+            token.span.start.col,
+        )
+    }
+
+    /// Builds the expected [`start_of`] result for a token of type `r#type` at `line` and `col`.
+    fn tok(r#type: TokenType, line: usize, col: usize) -> (TokenType, usize, usize) {
+        (r#type, line, col)
+    }
 
     #[test]
     fn simple_program() {
@@ -351,117 +392,43 @@ ret y
         let tokens = lexer.lex().unwrap();
         assert_eq!(tokens.len(), 14);
         assert_eq!(
-            *tokens.first().unwrap(),
-            Token {
-                r#type: TokenType::Name("x".to_string()),
-                line: 1,
-                col: 1
-            }
+            start_of(&tokens[0]),
+            tok(TokenType::Name("x".to_string()), 1, 1)
         );
         assert_eq!(
-            *tokens.get(1).unwrap(),
-            Token {
-                r#type: TokenType::Operator("=".to_string()),
-                line: 1,
-                col: 3
-            }
+            start_of(&tokens[1]),
+            tok(TokenType::Operator("=".to_string()), 1, 3)
+        );
+        assert_eq!(start_of(&tokens[2]), tok(TokenType::Number(42), 1, 5));
+        assert_eq!(start_of(&tokens[3]), tok(TokenType::Newline, 1, 7));
+        assert_eq!(
+            start_of(&tokens[4]),
+            tok(TokenType::Name("y".to_string()), 2, 1)
         );
         assert_eq!(
-            *tokens.get(2).unwrap(),
-            Token {
-                r#type: TokenType::Number(42),
-                line: 1,
-                col: 5
-            }
+            start_of(&tokens[5]),
+            tok(TokenType::Operator("=".to_string()), 2, 3)
         );
         assert_eq!(
-            *tokens.get(3).unwrap(),
-            Token {
-                r#type: TokenType::Newline,
-                line: 1,
-                col: 7
-            }
+            start_of(&tokens[6]),
+            tok(TokenType::Name("x".to_string()), 2, 5)
         );
         assert_eq!(
-            *tokens.get(4).unwrap(),
-            Token {
-                r#type: TokenType::Name("y".to_string()),
-                line: 2,
-                col: 1
-            }
+            start_of(&tokens[7]),
+            tok(TokenType::Operator("+".to_string()), 2, 7)
+        );
+        assert_eq!(start_of(&tokens[8]), tok(TokenType::Number(8), 2, 9));
+        assert_eq!(start_of(&tokens[9]), tok(TokenType::Newline, 2, 10));
+        assert_eq!(
+            start_of(&tokens[10]),
+            tok(TokenType::Keyword("ret".to_string()), 3, 1)
         );
         assert_eq!(
-            *tokens.get(5).unwrap(),
-            Token {
-                r#type: TokenType::Operator("=".to_string()),
-                line: 2,
-                col: 3
-            }
+            start_of(&tokens[11]),
+            tok(TokenType::Name("y".to_string()), 3, 5)
         );
-        assert_eq!(
-            *tokens.get(6).unwrap(),
-            Token {
-                r#type: TokenType::Name("x".to_string()),
-                line: 2,
-                col: 5
-            }
-        );
-        assert_eq!(
-            *tokens.get(7).unwrap(),
-            Token {
-                r#type: TokenType::Operator("+".to_string()),
-                line: 2,
-                col: 7
-            }
-        );
-        assert_eq!(
-            *tokens.get(8).unwrap(),
-            Token {
-                r#type: TokenType::Number(8),
-                line: 2,
-                col: 9
-            }
-        );
-        assert_eq!(
-            *tokens.get(9).unwrap(),
-            Token {
-                r#type: TokenType::Newline,
-                line: 2,
-                col: 10
-            }
-        );
-        assert_eq!(
-            *tokens.get(10).unwrap(),
-            Token {
-                r#type: TokenType::Keyword("ret".to_string()),
-                line: 3,
-                col: 1
-            }
-        );
-        assert_eq!(
-            *tokens.get(11).unwrap(),
-            Token {
-                r#type: TokenType::Name("y".to_string()),
-                line: 3,
-                col: 5
-            }
-        );
-        assert_eq!(
-            *tokens.get(12).unwrap(),
-            Token {
-                r#type: TokenType::Newline,
-                line: 3,
-                col: 6
-            }
-        );
-        assert_eq!(
-            *tokens.last().unwrap(),
-            Token {
-                r#type: TokenType::Eof,
-                line: 4,
-                col: 1
-            }
-        );
+        assert_eq!(start_of(&tokens[12]), tok(TokenType::Newline, 3, 6));
+        assert_eq!(start_of(tokens.last().unwrap()), tok(TokenType::Eof, 4, 1));
 
         // test with newlines, should skip over them
         let source = r#"
@@ -475,117 +442,43 @@ ret y
         let tokens = lexer.lex().unwrap();
         assert_eq!(tokens.len(), 14);
         assert_eq!(
-            *tokens.first().unwrap(),
-            Token {
-                r#type: TokenType::Name("x".to_string()),
-                line: 2,
-                col: 1
-            }
+            start_of(&tokens[0]),
+            tok(TokenType::Name("x".to_string()), 2, 1)
         );
         assert_eq!(
-            *tokens.get(1).unwrap(),
-            Token {
-                r#type: TokenType::Operator("=".to_string()),
-                line: 2,
-                col: 3
-            }
+            start_of(&tokens[1]),
+            tok(TokenType::Operator("=".to_string()), 2, 3)
+        );
+        assert_eq!(start_of(&tokens[2]), tok(TokenType::Number(42), 2, 5));
+        assert_eq!(start_of(&tokens[3]), tok(TokenType::Newline, 2, 7));
+        assert_eq!(
+            start_of(&tokens[4]),
+            tok(TokenType::Name("y".to_string()), 3, 1)
         );
         assert_eq!(
-            *tokens.get(2).unwrap(),
-            Token {
-                r#type: TokenType::Number(42),
-                line: 2,
-                col: 5
-            }
+            start_of(&tokens[5]),
+            tok(TokenType::Operator("=".to_string()), 3, 3)
         );
         assert_eq!(
-            *tokens.get(3).unwrap(),
-            Token {
-                r#type: TokenType::Newline,
-                line: 2,
-                col: 7
-            }
+            start_of(&tokens[6]),
+            tok(TokenType::Name("x".to_string()), 3, 5)
         );
         assert_eq!(
-            *tokens.get(4).unwrap(),
-            Token {
-                r#type: TokenType::Name("y".to_string()),
-                line: 3,
-                col: 1
-            }
+            start_of(&tokens[7]),
+            tok(TokenType::Operator("+".to_string()), 3, 7)
+        );
+        assert_eq!(start_of(&tokens[8]), tok(TokenType::Number(8), 3, 9));
+        assert_eq!(start_of(&tokens[9]), tok(TokenType::Newline, 3, 10));
+        assert_eq!(
+            start_of(&tokens[10]),
+            tok(TokenType::Keyword("ret".to_string()), 4, 1)
         );
         assert_eq!(
-            *tokens.get(5).unwrap(),
-            Token {
-                r#type: TokenType::Operator("=".to_string()),
-                line: 3,
-                col: 3
-            }
+            start_of(&tokens[11]),
+            tok(TokenType::Name("y".to_string()), 4, 5)
         );
-        assert_eq!(
-            *tokens.get(6).unwrap(),
-            Token {
-                r#type: TokenType::Name("x".to_string()),
-                line: 3,
-                col: 5
-            }
-        );
-        assert_eq!(
-            *tokens.get(7).unwrap(),
-            Token {
-                r#type: TokenType::Operator("+".to_string()),
-                line: 3,
-                col: 7
-            }
-        );
-        assert_eq!(
-            *tokens.get(8).unwrap(),
-            Token {
-                r#type: TokenType::Number(8),
-                line: 3,
-                col: 9
-            }
-        );
-        assert_eq!(
-            *tokens.get(9).unwrap(),
-            Token {
-                r#type: TokenType::Newline,
-                line: 3,
-                col: 10
-            }
-        );
-        assert_eq!(
-            *tokens.get(10).unwrap(),
-            Token {
-                r#type: TokenType::Keyword("ret".to_string()),
-                line: 4,
-                col: 1
-            }
-        );
-        assert_eq!(
-            *tokens.get(11).unwrap(),
-            Token {
-                r#type: TokenType::Name("y".to_string()),
-                line: 4,
-                col: 5
-            }
-        );
-        assert_eq!(
-            *tokens.get(12).unwrap(),
-            Token {
-                r#type: TokenType::Newline,
-                line: 4,
-                col: 6
-            }
-        );
-        assert_eq!(
-            *tokens.last().unwrap(),
-            Token {
-                r#type: TokenType::Eof,
-                line: 6,
-                col: 1
-            }
-        );
+        assert_eq!(start_of(&tokens[12]), tok(TokenType::Newline, 4, 6));
+        assert_eq!(start_of(tokens.last().unwrap()), tok(TokenType::Eof, 6, 1));
     }
 
     #[test]
@@ -599,133 +492,33 @@ testing()
         let tokens = lexer.lex().unwrap();
         assert_eq!(tokens.len(), 16);
         assert_eq!(
-            *tokens.first().unwrap(),
-            Token {
-                r#type: TokenType::Keyword("def".to_string()),
-                line: 1,
-                col: 1
-            }
+            start_of(&tokens[0]),
+            tok(TokenType::Keyword("def".to_string()), 1, 1)
         );
         assert_eq!(
-            *tokens.get(1).unwrap(),
-            Token {
-                r#type: TokenType::Name("testing".to_string()),
-                line: 1,
-                col: 5
-            }
+            start_of(&tokens[1]),
+            tok(TokenType::Name("testing".to_string()), 1, 5)
         );
+        assert_eq!(start_of(&tokens[2]), tok(TokenType::LParen, 1, 12));
+        assert_eq!(start_of(&tokens[3]), tok(TokenType::RParen, 1, 13));
+        assert_eq!(start_of(&tokens[4]), tok(TokenType::Semi, 1, 14));
+        assert_eq!(start_of(&tokens[5]), tok(TokenType::Newline, 1, 15));
+        assert_eq!(start_of(&tokens[6]), tok(TokenType::Indent, 2, 1));
         assert_eq!(
-            *tokens.get(2).unwrap(),
-            Token {
-                r#type: TokenType::LParen,
-                line: 1,
-                col: 12
-            }
+            start_of(&tokens[7]),
+            tok(TokenType::Keyword("ret".to_string()), 2, 5)
         );
+        assert_eq!(start_of(&tokens[8]), tok(TokenType::Number(52), 2, 9));
+        assert_eq!(start_of(&tokens[9]), tok(TokenType::Newline, 2, 11));
+        assert_eq!(start_of(&tokens[10]), tok(TokenType::Dedent, 3, 1));
         assert_eq!(
-            *tokens.get(3).unwrap(),
-            Token {
-                r#type: TokenType::RParen,
-                line: 1,
-                col: 13
-            }
+            start_of(&tokens[11]),
+            tok(TokenType::Name("testing".to_string()), 3, 1)
         );
-        assert_eq!(
-            *tokens.get(4).unwrap(),
-            Token {
-                r#type: TokenType::Semi,
-                line: 1,
-                col: 14
-            }
-        );
-        assert_eq!(
-            *tokens.get(5).unwrap(),
-            Token {
-                r#type: TokenType::Newline,
-                line: 1,
-                col: 15
-            }
-        );
-        assert_eq!(
-            *tokens.get(6).unwrap(),
-            Token {
-                r#type: TokenType::Indent,
-                line: 2,
-                col: 1
-            }
-        );
-        assert_eq!(
-            *tokens.get(7).unwrap(),
-            Token {
-                r#type: TokenType::Keyword("ret".to_string()),
-                line: 2,
-                col: 5
-            }
-        );
-        assert_eq!(
-            *tokens.get(8).unwrap(),
-            Token {
-                r#type: TokenType::Number(52),
-                line: 2,
-                col: 9
-            }
-        );
-        assert_eq!(
-            *tokens.get(9).unwrap(),
-            Token {
-                r#type: TokenType::Newline,
-                line: 2,
-                col: 11
-            }
-        );
-        assert_eq!(
-            *tokens.get(10).unwrap(),
-            Token {
-                r#type: TokenType::Dedent,
-                line: 3,
-                col: 1
-            }
-        );
-        assert_eq!(
-            *tokens.get(11).unwrap(),
-            Token {
-                r#type: TokenType::Name("testing".to_string()),
-                line: 3,
-                col: 1
-            }
-        );
-        assert_eq!(
-            *tokens.get(12).unwrap(),
-            Token {
-                r#type: TokenType::LParen,
-                line: 3,
-                col: 8
-            }
-        );
-        assert_eq!(
-            *tokens.get(13).unwrap(),
-            Token {
-                r#type: TokenType::RParen,
-                line: 3,
-                col: 9
-            }
-        );
-        assert_eq!(
-            *tokens.get(14).unwrap(),
-            Token {
-                r#type: TokenType::Newline,
-                line: 3,
-                col: 10
-            }
-        );
-        assert_eq!(
-            *tokens.last().unwrap(),
-            Token {
-                r#type: TokenType::Eof,
-                line: 4,
-                col: 1
-            }
-        );
+        assert_eq!(start_of(&tokens[12]), tok(TokenType::LParen, 3, 8));
+        assert_eq!(start_of(&tokens[13]), tok(TokenType::RParen, 3, 9));
+        assert_eq!(start_of(&tokens[14]), tok(TokenType::Newline, 3, 10));
+        assert_eq!(start_of(tokens.last().unwrap()), tok(TokenType::Eof, 4, 1));
     }
 
     /// Checks the tokens produced for a function with several parameters:
@@ -744,138 +537,34 @@ testing(1, 2, 3)"#;
         let mut lexer = Lexer::new(source);
         let tokens = lexer.lex().unwrap();
         assert_eq!(
-            tokens,
+            tokens.iter().map(start_of).collect::<Vec<_>>(),
             vec![
-                Token {
-                    r#type: TokenType::Keyword("def".to_string()),
-                    line: 1,
-                    col: 1,
-                },
-                Token {
-                    r#type: TokenType::Name("testing".to_string()),
-                    line: 1,
-                    col: 5,
-                },
-                Token {
-                    r#type: TokenType::LParen,
-                    line: 1,
-                    col: 12,
-                },
-                Token {
-                    r#type: TokenType::Name("a".to_string()),
-                    line: 1,
-                    col: 13,
-                },
-                Token {
-                    r#type: TokenType::Comma,
-                    line: 1,
-                    col: 14,
-                },
-                Token {
-                    r#type: TokenType::Name("b".to_string()),
-                    line: 1,
-                    col: 16,
-                },
-                Token {
-                    r#type: TokenType::Comma,
-                    line: 1,
-                    col: 17,
-                },
-                Token {
-                    r#type: TokenType::Name("c".to_string()),
-                    line: 1,
-                    col: 19,
-                },
-                Token {
-                    r#type: TokenType::RParen,
-                    line: 1,
-                    col: 20,
-                },
-                Token {
-                    r#type: TokenType::Semi,
-                    line: 1,
-                    col: 21,
-                },
-                Token {
-                    r#type: TokenType::Newline,
-                    line: 1,
-                    col: 22,
-                },
-                Token {
-                    r#type: TokenType::Indent,
-                    line: 2,
-                    col: 1,
-                },
-                Token {
-                    r#type: TokenType::Keyword("ret".to_string()),
-                    line: 2,
-                    col: 5,
-                },
-                Token {
-                    r#type: TokenType::Name("b".to_string()),
-                    line: 2,
-                    col: 9,
-                },
-                Token {
-                    r#type: TokenType::Newline,
-                    line: 2,
-                    col: 10,
-                },
-                Token {
-                    r#type: TokenType::Dedent,
-                    line: 3,
-                    col: 1,
-                },
-                Token {
-                    r#type: TokenType::Name("testing".to_string()),
-                    line: 3,
-                    col: 1,
-                },
-                Token {
-                    r#type: TokenType::LParen,
-                    line: 3,
-                    col: 8,
-                },
-                Token {
-                    r#type: TokenType::Number(1),
-                    line: 3,
-                    col: 9,
-                },
-                Token {
-                    r#type: TokenType::Comma,
-                    line: 3,
-                    col: 10,
-                },
-                Token {
-                    r#type: TokenType::Number(2),
-                    line: 3,
-                    col: 12,
-                },
-                Token {
-                    r#type: TokenType::Comma,
-                    line: 3,
-                    col: 13,
-                },
-                Token {
-                    r#type: TokenType::Number(3),
-                    line: 3,
-                    col: 15,
-                },
-                Token {
-                    r#type: TokenType::RParen,
-                    line: 3,
-                    col: 16,
-                },
-                Token {
-                    r#type: TokenType::Newline,
-                    line: 3,
-                    col: 17,
-                },
-                Token {
-                    r#type: TokenType::Eof,
-                    line: 3,
-                    col: 17,
-                },
+                tok(TokenType::Keyword("def".to_string()), 1, 1),
+                tok(TokenType::Name("testing".to_string()), 1, 5),
+                tok(TokenType::LParen, 1, 12),
+                tok(TokenType::Name("a".to_string()), 1, 13),
+                tok(TokenType::Comma, 1, 14),
+                tok(TokenType::Name("b".to_string()), 1, 16),
+                tok(TokenType::Comma, 1, 17),
+                tok(TokenType::Name("c".to_string()), 1, 19),
+                tok(TokenType::RParen, 1, 20),
+                tok(TokenType::Semi, 1, 21),
+                tok(TokenType::Newline, 1, 22),
+                tok(TokenType::Indent, 2, 1),
+                tok(TokenType::Keyword("ret".to_string()), 2, 5),
+                tok(TokenType::Name("b".to_string()), 2, 9),
+                tok(TokenType::Newline, 2, 10),
+                tok(TokenType::Dedent, 3, 1),
+                tok(TokenType::Name("testing".to_string()), 3, 1),
+                tok(TokenType::LParen, 3, 8),
+                tok(TokenType::Number(1), 3, 9),
+                tok(TokenType::Comma, 3, 10),
+                tok(TokenType::Number(2), 3, 12),
+                tok(TokenType::Comma, 3, 13),
+                tok(TokenType::Number(3), 3, 15),
+                tok(TokenType::RParen, 3, 16),
+                tok(TokenType::Newline, 3, 17),
+                tok(TokenType::Eof, 3, 17),
             ],
         );
     }
@@ -883,22 +572,149 @@ testing(1, 2, 3)"#;
     #[test]
     fn integer_literal_overflow_is_an_error() {
         let err = Lexer::new("x = 99999999999999999999\n").lex().unwrap_err();
-        assert_eq!(err.line, 1);
-        assert_eq!(err.col, 5);
+        assert_eq!(err.span.start, Pos::new(1, 5));
     }
 
     #[test]
-    fn non_ascii_digits_are_skipped() {
+    fn non_ascii_digits_are_an_error() {
         // '\u{0663}' is ARABIC-INDIC DIGIT THREE, which is numeric but not an ASCII digit
-        let tokens = Lexer::new("\u{0663}\n").lex().unwrap();
-        assert_eq!(tokens.last().unwrap().r#type, TokenType::Eof);
+        let err = Lexer::new("\u{0663}\n").lex().unwrap_err();
+        assert_eq!(err.message, "unexpected character '\u{0663}'");
     }
 
     #[test]
-    fn long_run_of_unknown_characters() {
+    fn long_run_of_unknown_characters_is_an_error() {
         let source = "@".repeat(1_000_000);
-        let tokens = Lexer::new(&source).lex().unwrap();
-        assert_eq!(tokens.last().unwrap().r#type, TokenType::Eof);
+        let err = Lexer::new(&source).lex().unwrap_err();
+        assert_eq!(err.span, Span::new(Pos::new(1, 1), Pos::new(1, 2)));
+    }
+
+    /// Returns just the token types of `source`, for tests that do not care about positions.
+    fn types_of(source: &str) -> Vec<TokenType> {
+        Lexer::new(source)
+            .lex()
+            .unwrap()
+            .into_iter()
+            .map(|t| t.r#type)
+            .collect()
+    }
+
+    fn name(id: &str) -> TokenType {
+        TokenType::Name(id.to_string())
+    }
+
+    fn op(op: &str) -> TokenType {
+        TokenType::Operator(op.to_string())
+    }
+
+    #[test]
+    fn comments_run_to_the_end_of_the_line() {
+        assert_eq!(
+            types_of("x = 1 # the answer, (sort of)\n"),
+            [
+                name("x"),
+                op("="),
+                TokenType::Number(1),
+                TokenType::Newline,
+                TokenType::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn comment_only_lines_do_not_change_indentation() {
+        let source = "if 1;\n    x = 1\n# at column one\n        # deeper\n    y = 2\n";
+        assert_eq!(
+            types_of(source),
+            [
+                TokenType::Keyword("if".to_string()),
+                TokenType::Number(1),
+                TokenType::Semi,
+                TokenType::Newline,
+                TokenType::Indent,
+                name("x"),
+                op("="),
+                TokenType::Number(1),
+                TokenType::Newline,
+                name("y"),
+                op("="),
+                TokenType::Number(2),
+                TokenType::Newline,
+                TokenType::Dedent,
+                TokenType::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn a_file_of_only_comments_is_empty() {
+        assert_eq!(types_of("# just\n    # comments"), [TokenType::Eof]);
+    }
+
+    #[test]
+    fn brackets_and_dots_are_tokens() {
+        assert_eq!(
+            types_of("a[0].b\n"),
+            [
+                name("a"),
+                TokenType::LBracket,
+                TokenType::Number(0),
+                TokenType::RBracket,
+                TokenType::Dot,
+                name("b"),
+                TokenType::Newline,
+                TokenType::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn windows_line_endings_are_newlines() {
+        assert_eq!(types_of("x = 1\r\ny = 2\r\n"), types_of("x = 1\ny = 2\n"));
+    }
+
+    #[test]
+    fn comparison_operators_are_one_token() {
+        assert_eq!(
+            types_of("a == b != c < d <= e > f >= g = h\n")
+                .into_iter()
+                .filter(|t| matches!(t, TokenType::Operator(_)))
+                .collect::<Vec<_>>(),
+            ["==", "!=", "<", "<=", ">", ">=", "="].map(op)
+        );
+    }
+
+    #[test]
+    fn for_and_in_are_keywords() {
+        assert_eq!(
+            types_of("for i in x;\n")[..4],
+            [
+                TokenType::Keyword("for".to_string()),
+                name("i"),
+                TokenType::Keyword("in".to_string()),
+                name("x"),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_lone_bang_is_an_error() {
+        let err = Lexer::new("x = !y\n").lex().unwrap_err();
+        assert_eq!(err.message, "unexpected character '!'");
+    }
+
+    #[test]
+    fn unknown_characters_are_an_error() {
+        let err = Lexer::new("x = 1 @ 2\n").lex().unwrap_err();
+        assert_eq!(err.message, "unexpected character '@'");
+        assert_eq!(err.span, Span::new(Pos::new(1, 7), Pos::new(1, 8)));
+    }
+
+    #[test]
+    fn unterminated_strings_are_an_error() {
+        let err = Lexer::new("x = \"abc\ny = 1\n").lex().unwrap_err();
+        assert_eq!(err.message, "unterminated string");
+        assert_eq!(err.span, Span::new(Pos::new(1, 5), Pos::new(1, 9)));
     }
 
     #[test]
@@ -922,6 +738,22 @@ testing(1, 2, 3)"#;
             .position(|t| *t == TokenType::Name("y".to_string()))
             .unwrap();
         assert_eq!(types[y - 2..y], [TokenType::Dedent, TokenType::Dedent]);
+    }
+
+    #[test]
+    fn tokens_span_their_source_text() {
+        let tokens = Lexer::new("total = 42\n").lex().unwrap();
+        let spans: Vec<Span> = tokens.iter().map(|t| t.span).collect();
+        assert_eq!(
+            spans,
+            [
+                Span::new(Pos::new(1, 1), Pos::new(1, 6)),
+                Span::new(Pos::new(1, 7), Pos::new(1, 8)),
+                Span::new(Pos::new(1, 9), Pos::new(1, 11)),
+                Span::new(Pos::new(1, 11), Pos::new(1, 12)),
+                Span::new(Pos::new(2, 1), Pos::new(2, 1)),
+            ]
+        );
     }
 
     #[test]

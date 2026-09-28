@@ -1,6 +1,9 @@
 use clap::{Parser as ClapParser, Subcommand};
+use std::error::Error;
 use std::io::Read;
 use std::path::PathBuf;
+use std::process::ExitCode;
+use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver;
 
 /// The stone programming language executor.
@@ -44,7 +47,7 @@ enum ExecutionMode {
     Run(String),
 }
 
-fn main() -> Result<(), Box<dyn std::error::Error>> {
+fn main() -> ExitCode {
     let args = Args::parse();
 
     let mode = match args.command {
@@ -61,18 +64,60 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     };
 
     match mode {
-        ExecutionMode::Build { file, output } => {
-            driver::compile(&std::fs::read_to_string(file)?, &output)?;
+        ExecutionMode::Build { file, output } => with_source(&file, |source| {
+            driver::compile(source, &output)?;
             println!("Compiled {}", output.display());
             Ok(())
-        }
-        ExecutionMode::Check(file) => driver::check(&std::fs::read_to_string(file)?),
+        }),
+        ExecutionMode::Check(file) => with_source(&file, |source| {
+            let diagnostics = driver::check(source);
+            if diagnostics.iter().any(|d| d.severity == Severity::Error) {
+                return Err(Box::new(Diagnostics(diagnostics)));
+            }
+            // warnings alone still pass
+            eprint!("{}", render_all(&file, source, &diagnostics));
+            Ok(())
+        }),
         ExecutionMode::Repl => {
             println!("REPL mode - type your code (press Ctrl+D to exit)");
             let mut source = String::new();
-            std::io::stdin().read_to_string(&mut source)?;
-            driver::repl(&source)
+            if let Err(e) = std::io::stdin().read_to_string(&mut source) {
+                eprintln!("error: {e}");
+                return ExitCode::FAILURE;
+            }
+            with_source("<stdin>", |_| driver::repl(&source))
         }
-        ExecutionMode::Run(file) => driver::interpret(&std::fs::read_to_string(file)?),
+        ExecutionMode::Run(file) => with_source(&file, driver::interpret),
     }
+}
+
+/// Reads `file` and runs `action` on its contents, printing any error to stderr and returning
+/// the exit code.
+///
+/// Diagnostics are rendered with the file name, line, and a caret under the problem, while other
+/// errors, such as runtime errors, are printed as `file: error: message`.
+fn with_source(file: &str, action: impl FnOnce(&str) -> Result<(), Box<dyn Error>>) -> ExitCode {
+    let source = match std::fs::read_to_string(file) {
+        Ok(source) => source,
+        Err(e) => {
+            eprintln!("{file}: error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    let Err(err) = action(&source) else {
+        return ExitCode::SUCCESS;
+    };
+    if let Some(Diagnostics(diagnostics)) = err.downcast_ref::<Diagnostics>() {
+        eprint!("{}", render_all(file, &source, diagnostics));
+    } else if let Some(diagnostic) = err.downcast_ref::<Diagnostic>() {
+        eprint!("{}", diagnostic.render(file, &source));
+    } else {
+        eprintln!("{file}: error: {err}");
+    }
+    ExitCode::FAILURE
+}
+
+/// Renders each diagnostic for a terminal, one after another.
+fn render_all(file: &str, source: &str, diagnostics: &[Diagnostic]) -> String {
+    diagnostics.iter().map(|d| d.render(file, source)).collect()
 }

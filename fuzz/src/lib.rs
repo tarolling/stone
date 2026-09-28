@@ -20,13 +20,6 @@ pub const LIMITS: Limits = Limits {
     max_depth: 200,
 };
 
-/// Largest integer the compiled `print` can show, since it treats larger values as string
-/// pointers.
-///
-/// For example, `print(4095)` works in both backends, while `print(4096)` crashes a compiled
-/// binary.
-const MAX_PRINTABLE: i64 = 4095;
-
 /// How long a compiled program may run before the differential check reports a hang.
 const RUN_TIMEOUT: Duration = Duration::from_secs(5);
 
@@ -36,15 +29,17 @@ const MAX_BLOCK_LEN: usize = 4;
 /// Deepest nesting of blocks and expressions the generator produces.
 const MAX_NESTING: usize = 4;
 
-/// Most parameters a generated function takes, matching the compiler's register arguments.
-const MAX_PARAMS: usize = 6;
+/// Most parameters a generated function takes, past the six the compiler passes in registers.
+const MAX_PARAMS: usize = 8;
 
 /// Generates a stone program from fuzzer bytes, staying inside the subset that both backends
 /// implement the same way.
 ///
-/// The subset avoids constructs where the backends are known to differ: no strings, booleans, or
-/// `none` values, no nested functions, no globals read from functions, `print` with exactly one
-/// argument, and `break`/`cont` only inside loops. Every `while` loop is bounded by a counter.
+/// Every program passes the checker. Variables hold ints, except top-level lists of ints that
+/// always have at least two elements, so indexes from -2 to 1 are always in range. Strings and
+/// booleans appear in `print` and in conditions. Functions never read globals, which may not be
+/// assigned yet when they run, and every loop is bounded: `while` loops by a counter, `for` loops
+/// by a small `range` or by a list that nothing appends to while it is iterated.
 ///
 /// For example, some input bytes produce:
 ///
@@ -78,6 +73,8 @@ pub fn generate(u: &mut Unstructured) -> Result<String> {
 struct Scope {
     /// Variables that can be read and assigned.
     variables: Vec<String>,
+    /// Lists of ints with at least two elements, which only top-level code uses.
+    lists: Vec<String>,
     /// Loop counters, which can be read but never assigned so every loop terminates.
     counters: Vec<String>,
     /// Whether this scope is a function body, so names are local and `ret` is allowed.
@@ -153,7 +150,7 @@ impl Generator {
         nesting: usize,
     ) -> Result<()> {
         let nested = nesting < MAX_NESTING;
-        match u.int_in_range(0..=9)? {
+        match u.int_in_range(0..=11)? {
             0..=2 => {
                 let value = self.expression(u, scope, 0)?;
                 let target = if !scope.variables.is_empty() && u.arbitrary()? {
@@ -168,10 +165,22 @@ impl Generator {
             }
             3 | 4 => {
                 let value = self.expression(u, scope, 0)?;
-                self.line(indent, &format!("print({value})"));
+                if u.arbitrary()? {
+                    let test = self.comparison(u, scope)?;
+                    let label = self.fresh("s");
+                    self.line(indent, &format!("print(\"{label}\", {value}, {test})"));
+                } else {
+                    self.line(indent, &format!("print({value})"));
+                }
             }
             5 if nested => self.if_statement(u, scope, indent, nesting)?,
-            6 if nested => self.while_statement(u, scope, indent, nesting)?,
+            6 if nested => {
+                if u.arbitrary()? {
+                    self.while_statement(u, scope, indent, nesting)?
+                } else {
+                    self.for_statement(u, scope, indent, nesting)?
+                }
+            }
             7 if scope.in_loop => {
                 let keyword = if u.arbitrary()? { "break" } else { "cont" };
                 self.line(indent, keyword);
@@ -184,9 +193,52 @@ impl Generator {
                 let call = self.call(u, scope, 0)?;
                 self.line(indent, &call);
             }
+            10 | 11 if !scope.in_function => self.list_statement(u, scope, indent)?,
             _ => {
                 let value = self.expression(u, scope, 0)?;
                 self.line(indent, &format!("print({value})"));
+            }
+        }
+        Ok(())
+    }
+
+    /// Emits a statement that makes, changes, or prints a list, or a `print` of several values.
+    fn list_statement(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &mut Scope,
+        indent: usize,
+    ) -> Result<()> {
+        if scope.lists.is_empty() || u.int_in_range(0..=4)? == 0 {
+            let name = self.fresh("list");
+            let mut items = vec![];
+            for _ in 0..u.int_in_range(2..=4)? {
+                items.push(self.expression(u, scope, 0)?);
+            }
+            self.line(indent, &format!("{name} = [{}]", items.join(", ")));
+            if u.arbitrary()? {
+                let value = self.expression(u, scope, 0)?;
+                self.line(indent, &format!("append({name}, {value})"));
+            }
+            scope.lists.push(name);
+            return Ok(());
+        }
+        let list = u.choose(&scope.lists)?.clone();
+        match u.int_in_range(0..=4)? {
+            0 | 4 => {
+                let value = self.expression(u, scope, 0)?;
+                self.line(indent, &format!("append({list}, {value})"));
+            }
+            1 => {
+                let index = u.int_in_range(-2..=1)?;
+                let value = self.expression(u, scope, 0)?;
+                self.line(indent, &format!("{list}[{index}] = {value}"));
+            }
+            2 => self.line(indent, &format!("print({list}, len({list}))")),
+            _ => {
+                let value = self.expression(u, scope, 0)?;
+                let test = self.comparison(u, scope)?;
+                self.line(indent, &format!("print(\"{list}\", {value}, {test})"));
             }
         }
         Ok(())
@@ -233,7 +285,7 @@ impl Generator {
     }
 
     /// Emits a loop that runs a fixed number of times, such as
-    /// `c0 = 0` then `while c0 - 3;` with `c0 = c0 + 1` as the first statement of its body.
+    /// `c0 = 0` then `while c0 < 3;` with `c0 = c0 + 1` as the first statement of its body.
     fn while_statement(
         &mut self,
         u: &mut Unstructured,
@@ -244,7 +296,7 @@ impl Generator {
         let counter = self.fresh("c");
         let bound = u.int_in_range(0..=5)?;
         self.line(indent, &format!("{counter} = 0"));
-        self.line(indent, &format!("while {counter} - {bound};"));
+        self.line(indent, &format!("while {counter} < {bound};"));
         // incrementing first means `cont` cannot skip it
         self.line(indent + 1, &format!("{counter} = {counter} + 1"));
 
@@ -254,18 +306,59 @@ impl Generator {
         self.block(u, &inner, indent + 1, nesting + 1)
     }
 
-    /// Generates an `if` or `elif` test, which unlike other expressions may use `not`.
-    fn condition(&mut self, u: &mut Unstructured, scope: &Scope) -> Result<String> {
-        let value = self.expression(u, scope, 0)?;
-        Ok(if u.arbitrary()? {
-            format!("not {value}")
+    /// Emits a `for` loop over a small range, or at the top level, over a list whose body never
+    /// appends to it.
+    fn for_statement(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &Scope,
+        indent: usize,
+        nesting: usize,
+    ) -> Result<()> {
+        let variable = self.fresh("c");
+        let mut inner = scope.clone();
+        if !scope.lists.is_empty() && u.arbitrary()? {
+            let list = u.choose(&scope.lists)?.clone();
+            self.line(indent, &format!("for {variable} in {list};"));
+            inner.lists.retain(|l| *l != list);
         } else {
-            value
+            let start = u.int_in_range(-2..=2)?;
+            let end = u.int_in_range(0..=5)?;
+            self.line(indent, &format!("for {variable} in range({start}, {end});"));
+        }
+        // the variable is read-only in the body, like a `while` counter
+        inner.counters.push(variable);
+        inner.in_loop = true;
+        self.block(u, &inner, indent + 1, nesting + 1)
+    }
+
+    /// Generates an `if` or `elif` test: an int, a comparison, or a negation of either.
+    fn condition(&mut self, u: &mut Unstructured, scope: &Scope) -> Result<String> {
+        let test = if u.arbitrary()? {
+            self.comparison(u, scope)?
+        } else {
+            self.expression(u, scope, 0)?
+        };
+        // parenthesized, since `not a and b` would mix a bool with an int
+        Ok(if u.arbitrary()? {
+            format!("not ({test})")
+        } else {
+            test
         })
     }
 
-    /// Generates an integer-valued expression following the grammar's precedence levels, since
-    /// stone has no parentheses for grouping.
+    /// Generates a comparison, possibly chained, such as `a < b <= c`.
+    fn comparison(&mut self, u: &mut Unstructured, scope: &Scope) -> Result<String> {
+        let mut text = self.sum(u, scope, 0)?;
+        for _ in 0..u.int_in_range(1..=2)? {
+            let op = *u.choose(&["==", "!=", "<", "<=", ">", ">="])?;
+            let operand = self.sum(u, scope, 0)?;
+            text = format!("{text} {op} {operand}");
+        }
+        Ok(text)
+    }
+
+    /// Generates an integer-valued expression following the grammar's precedence levels.
     ///
     /// ```text
     /// expression: sum ('or' sum)* | sum ('and' sum)*
@@ -320,7 +413,16 @@ impl Generator {
 
     fn primary(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
         let readable = scope.readable();
-        match u.int_in_range(0..=5)? {
+        match u.int_in_range(0..=7)? {
+            6 if !scope.lists.is_empty() => {
+                let list = u.choose(&scope.lists)?;
+                Ok(format!("{list}[{}]", u.int_in_range(-2..=1)?))
+            }
+            7 if !scope.lists.is_empty() => Ok(format!("len({})", u.choose(&scope.lists)?)),
+            4 if nesting < MAX_NESTING => {
+                let inner = self.expression(u, scope, nesting + 1)?;
+                Ok(format!("({inner})"))
+            }
             0 | 1 if !readable.is_empty() => Ok(u.choose(&readable)?.to_string()),
             2 if nesting < MAX_NESTING && !self.functions.is_empty() => {
                 self.call(u, scope, nesting + 1)
@@ -349,16 +451,6 @@ pub fn interpret(source: &str) -> Option<String> {
     let mut out = Vec::new();
     stone::driver::interpret_with(source, &mut out, LIMITS).ok()?;
     String::from_utf8(out).ok()
-}
-
-/// Reports whether every printed line is an integer the compiled `print` can show.
-///
-/// For example, `"1\n2\n"` qualifies, while `"-1\n"`, `"5000\n"`, and `"true\n"` do not.
-fn printable_by_compiled_code(output: &str) -> bool {
-    output.lines().all(|line| {
-        line.parse::<i64>()
-            .is_ok_and(|n| (0..=MAX_PRINTABLE).contains(&n))
-    })
 }
 
 /// Compiles `source` with `stone build`, runs the binary, and returns its stdout.
@@ -416,14 +508,11 @@ pub fn run_compiled(source: &str) -> std::result::Result<String, String> {
 /// the interpreter's.
 ///
 /// Programs the interpreter rejects, such as ones that run out of fuel or divide by zero, are
-/// skipped, as are programs whose output the compiled `print` cannot show.
+/// skipped.
 pub fn differential(source: &str) {
     let Some(expected) = interpret(source) else {
         return;
     };
-    if !printable_by_compiled_code(&expected) {
-        return;
-    }
 
     match run_compiled(source) {
         Ok(actual) => assert_eq!(
@@ -466,12 +555,45 @@ mod tests {
     }
 
     #[test]
+    fn generated_programs_type_check() {
+        for seed in 0..2_000 {
+            let data = bytes(seed, 512);
+            let source = generate(&mut Unstructured::new(&data)).unwrap();
+            let diagnostics = stone::driver::check(&source);
+            if let Some(first) = diagnostics.first() {
+                panic!("generated program failed to check ({first}):\n{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn generated_programs_agree_across_backends() {
+        // compiles each program with gcc, so keep the count small enough for every test run
+        for seed in 0..150 {
+            let data = bytes(seed, 512);
+            let source = generate(&mut Unstructured::new(&data)).unwrap();
+            differential(&source);
+        }
+    }
+
+    #[test]
+    fn generated_programs_cover_the_language() {
+        let sources: Vec<String> = (0..500)
+            .map(|seed| generate(&mut Unstructured::new(&bytes(seed, 512))).unwrap())
+            .collect();
+        for feature in ["for ", " in range(", "append(", "[", " < ", "not (", "print(\"", "def "] {
+            let count = sources.iter().filter(|s| s.contains(feature)).count();
+            assert!(count >= 25, "only {count} of 500 programs use {feature:?}");
+        }
+    }
+
+    #[test]
     fn generated_programs_are_mostly_comparable() {
         let comparable = (0..500)
             .filter(|&seed| {
                 let data = bytes(seed, 512);
                 let source = generate(&mut Unstructured::new(&data)).unwrap();
-                interpret(&source).is_some_and(|out| printable_by_compiled_code(&out))
+                interpret(&source).is_some()
             })
             .count();
         // the differential target skips the rest, so a low count means wasted fuzzing time
@@ -479,13 +601,5 @@ mod tests {
             comparable > 250,
             "only {comparable} of 500 generated programs can be compared"
         );
-    }
-
-    #[test]
-    fn printable_output() {
-        assert!(printable_by_compiled_code("0\n4095\n"));
-        assert!(!printable_by_compiled_code("-1\n"));
-        assert!(!printable_by_compiled_code("4096\n"));
-        assert!(!printable_by_compiled_code("true\n"));
     }
 }

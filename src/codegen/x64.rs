@@ -4,18 +4,25 @@
 
 pub mod builtins;
 
-use crate::ast::{Arg, BoolOp, Constant, Expr, ExprContext, Mod, Operator, Stmt, UnaryOp};
-use crate::codegen::x64::builtins::{len, print};
+use crate::ast::{
+    Arg, BoolOp, CompOp, Constant, Expr, ExprContext, ExprKind, Mod, Operator, Stmt, StmtKind,
+    UnaryOp,
+};
+use crate::checker::{Type, TypeChecker, range_args};
+use crate::codegen::x64::builtins::print;
 use crate::codegen::{Architecture, AssemblyGenerator};
+use crate::span::{Pos, Span};
 use crate::stdlib::BUILTINS;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-/// Arguments passed in registers under the System V ABI; stack-passed arguments are not
-/// supported yet, so calls and definitions with more than this many are rejected.
+/// Registers that carry arguments under the System V ABI, in order.
 ///
-/// For example, `f(1, 2, 3, 4, 5, 6)` compiles but `f(1, 2, 3, 4, 5, 6, 7)` does not.
-const MAX_REGISTER_ARGS: usize = 6;
+/// Calls between stone functions pass the first six arguments in these registers and also leave
+/// every argument on the stack, where the callee finds any past the sixth. The first argument is
+/// deepest, so with `n` arguments, argument `i` is at `[rbp + 16 + 8 * (n - 1 - i)]` in the
+/// callee.
+const ARG_REGS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
 /// Code generator for x86-64 that emits GNU assembler source in Intel syntax.
 ///
@@ -29,12 +36,16 @@ pub struct X64Generator {
     break_labels: Vec<String>,
     continue_labels: Vec<String>,
     string_literals: HashMap<String, String>,
+    /// The type of every expression, keyed by span, from the checker.
+    types: HashMap<Span, Type>,
+    /// List types that `print` needs a printer for, emitted after the code that uses them.
+    list_printers: Vec<Type>,
 }
 
 #[derive(Default)]
 struct CompilerEnv {
-    /// Stack offsets of global variables, which live in `main`'s frame.
-    globals: HashMap<String, i32>,
+    /// Names of global variables, each stored in `.bss` under [`global_label`].
+    globals: Vec<String>,
     /// Stack of local scopes, each mapping a variable name to its stack offset.
     scopes: Vec<HashMap<String, i32>>,
     functions: HashMap<String, FunctionInfo>,
@@ -106,48 +117,41 @@ impl AssemblyGenerator for X64Generator {
 
         match module {
             Mod::Module { body } => {
-                let mut has_main = false;
                 let mut top_level_stmts = Vec::new();
 
                 for stmt in body {
-                    match stmt {
-                        Stmt::FunctionDef { name, .. } => {
-                            if name == "main" {
-                                has_main = true;
-                            }
-                            self.gen_stmt(stmt)?;
-                        }
-                        _ => {
-                            top_level_stmts.push(stmt);
-                        }
+                    match &stmt.kind {
+                        StmtKind::FunctionDef { .. } => self.gen_stmt(stmt)?,
+                        _ => top_level_stmts.push(stmt),
                     }
                 }
 
-                if !has_main && !top_level_stmts.is_empty() {
-                    self.emit("\t.globl main");
-                    self.emit("main:");
-                    self.emit("\tpush\trbp");
-                    self.emit("\tmov\trbp, rsp");
+                // the entry point runs the top-level statements, even if there are none
+                self.emit("\t.globl main");
+                self.emit("main:");
+                self.emit("\tpush\trbp");
+                self.emit("\tmov\trbp, rsp");
+                // keep rsp 16-byte aligned, as it is at every other call site
+                self.emit("\tsub\trsp, 16");
 
-                    // globals live in main's frame, sized by the scan pass
-                    let globals_size = align16(self.stack_offset);
-                    if globals_size > 0 {
-                        self.emit(&format!("\tsub\trsp, {}", globals_size));
-                    }
+                for stmt in top_level_stmts {
+                    self.gen_stmt(stmt)?;
+                }
 
-                    for stmt in top_level_stmts {
-                        self.gen_stmt(stmt)?;
-                    }
+                self.emit("\txor\trax, rax"); // return 0
+                self.emit("\tmov\trsp, rbp");
+                self.emit("\tpop\trbp");
+                self.emit("\tret");
 
-                    self.emit("\txor\trax, rax"); // return 0
-                    self.emit("\tmov\trsp, rbp");
-                    self.emit("\tpop\trbp");
-                    self.emit("\tret");
+                self.emit_list_runtime()?;
+                if self.types.values().any(|ty| *ty == Type::Str) {
+                    builtins::string_runtime(self);
                 }
             }
         }
 
         self.emit_rodata();
+        self.emit_globals();
 
         // suppress the linker's executable stack warning
         self.emit("\t.section\t.note.GNU-stack,\"\",@progbits");
@@ -177,6 +181,13 @@ impl X64Generator {
     /// For example, assembling the module for `print(1)` returns text containing `main:` and
     /// `call print`.
     pub fn assemble(&mut self, module: &Mod) -> Result<String, String> {
+        // code generation depends on the checker's types, so it only accepts valid programs
+        let analysis = TypeChecker::new().analyze(module);
+        if let Some(error) = analysis.diagnostics.first() {
+            return Err(error.to_string());
+        }
+        self.types = analysis.types;
+
         // first pass: stack allocations, string literals, etc.
         self.scan(module)?;
         self.generate(module)?;
@@ -193,6 +204,8 @@ impl X64Generator {
             break_labels: Vec::new(),
             continue_labels: Vec::new(),
             string_literals: HashMap::new(),
+            types: HashMap::new(),
+            list_printers: Vec::new(),
         }
     }
 
@@ -204,49 +217,40 @@ impl X64Generator {
         self.env.scopes.pop();
     }
 
-    fn define_var(&mut self, name: &str) -> i32 {
+    fn define_var(&mut self, name: &str) {
         if let Some(scope) = self.env.scopes.last_mut() {
             // local variable
             self.stack_offset += 8;
             scope.insert(name.to_string(), self.stack_offset);
-            self.stack_offset
         } else {
-            // global variable
-            self.stack_offset += 8;
-            self.env.globals.insert(name.to_string(), self.stack_offset);
-            self.stack_offset
+            self.env.globals.push(name.to_string());
         }
     }
 
-    /// Returns the existing stack slot for `name` in the current scope, or allocates a new one.
+    /// Allocates storage for `name` in the current scope unless it already has some.
     ///
     /// For example, scanning `x = 1` then `x = 2` gives `x` a single slot rather than two.
-    fn declare_var(&mut self, name: &str) -> i32 {
-        let existing = match self.env.scopes.last() {
-            Some(scope) => scope.get(name),
-            None => self.env.globals.get(name),
+    fn declare_var(&mut self, name: &str) {
+        let exists = match self.env.scopes.last() {
+            Some(scope) => scope.contains_key(name),
+            None => self.env.globals.iter().any(|g| g == name),
         };
-
-        match existing {
-            Some(&offset) => offset,
-            None => self.define_var(name),
+        if !exists {
+            self.define_var(name);
         }
     }
 
-    fn lookup_var(&self, name: &str) -> Option<i32> {
-        // innermost to outermost, like the interpreter
-        for scope in self.env.scopes.iter().rev() {
-            if let Some(&offset) = scope.get(name) {
-                return Some(offset);
-            }
+    /// Finds where `name` is stored: the current function's stack frame, then the globals, the
+    /// same lexical scoping the checker and interpreter use.
+    fn lookup_var(&self, name: &str) -> Option<Slot> {
+        if let Some(&offset) = self.env.scopes.last().and_then(|scope| scope.get(name)) {
+            return Some(Slot::Stack(offset));
         }
-
-        // globals are rbp-relative to main's frame, unreachable from functions for now
-        if !self.env.scopes.is_empty() {
-            return None;
-        }
-
-        self.env.globals.get(name).copied()
+        self.env
+            .globals
+            .iter()
+            .any(|g| g == name)
+            .then(|| Slot::Global(global_label(name)))
     }
 
     fn scan_function(&mut self, name: &str, args: &[Arg], body: &[Stmt]) {
@@ -282,7 +286,7 @@ impl X64Generator {
     /// Returns the stack slot of a variable that the scan pass has already allocated.
     ///
     /// Fails if the variable was never allocated, which means `scan` missed it.
-    fn slot_of(&self, name: &str) -> Result<i32, String> {
+    fn slot_of(&self, name: &str) -> Result<Slot, String> {
         self.lookup_var(name)
             .ok_or_else(|| format!("variable '{}' was not allocated during scan", name))
     }
@@ -307,89 +311,94 @@ impl X64Generator {
     }
 
     fn scan_stmt(&mut self, stmt: &Stmt) {
-        match stmt {
-            Stmt::FunctionDef { name, args, body } => {
+        match &stmt.kind {
+            StmtKind::FunctionDef {
+                name, args, body, ..
+            } => {
                 self.scan_function(name, &args.args, body);
             }
 
-            Stmt::Assign { targets, value } => {
+            StmtKind::Assign { targets, value } => {
                 self.scan_expr(value);
                 for target in targets {
-                    if let Expr::Name { id, .. } = target {
+                    if let ExprKind::Name { id, .. } = &target.kind {
                         self.declare_var(id);
                     }
                     self.scan_expr(target);
                 }
             }
 
-            Stmt::While { test, body } => {
+            StmtKind::While { test, body } => {
                 self.scan_expr(test);
                 for s in body {
                     self.scan_stmt(s);
                 }
             }
 
-            Stmt::If { test, body, orelse } => {
+            StmtKind::If { test, body, orelse } => {
                 self.scan_expr(test);
                 for s in body.iter().chain(orelse) {
                     self.scan_stmt(s);
                 }
             }
 
-            Stmt::For { target, iter, body } => {
-                if let Expr::Name { id, .. } = &**target {
+            StmtKind::For { target, iter, body } => {
+                if let ExprKind::Name { id, .. } = &target.kind {
                     self.declare_var(id);
                 }
+                let (next, end) = for_slots(stmt);
+                self.declare_var(&next);
+                self.declare_var(&end);
                 self.scan_expr(iter);
                 for s in body {
                     self.scan_stmt(s);
                 }
             }
 
-            Stmt::Return { value } => {
+            StmtKind::Return { value } => {
                 if let Some(v) = value {
                     self.scan_expr(v);
                 }
             }
 
-            Stmt::Expr { value } => {
+            StmtKind::Expr { value } => {
                 self.scan_expr(value);
             }
 
-            Stmt::Delete { targets } => {
+            StmtKind::Delete { targets } => {
                 for t in targets {
                     self.scan_expr(t);
                 }
             }
 
-            Stmt::Break | Stmt::Continue => {}
+            StmtKind::Break | StmtKind::Continue => {}
         }
     }
 
     fn scan_expr(&mut self, expr: &Expr) {
-        match expr {
-            Expr::Constant { value, .. } => {
+        match &expr.kind {
+            ExprKind::Constant { value, .. } => {
                 if let Constant::Str(s) = &**value {
                     self.intern_string(s);
                 }
             }
 
-            Expr::BinOp { left, right, .. } => {
+            ExprKind::BinOp { left, right, .. } => {
                 self.scan_expr(left);
                 self.scan_expr(right);
             }
 
-            Expr::UnaryOp { operand, .. } => {
+            ExprKind::UnaryOp { operand, .. } => {
                 self.scan_expr(operand);
             }
 
-            Expr::BoolOp { values, .. } => {
+            ExprKind::BoolOp { values, .. } => {
                 for v in values {
                     self.scan_expr(v);
                 }
             }
 
-            Expr::Compare {
+            ExprKind::Compare {
                 left, comparators, ..
             } => {
                 self.scan_expr(left);
@@ -398,25 +407,25 @@ impl X64Generator {
                 }
             }
 
-            Expr::Call { func, args } => {
+            ExprKind::Call { func, args } => {
                 self.scan_expr(func);
                 for arg in args {
                     self.scan_expr(arg);
                 }
             }
 
-            Expr::Subscript { value, slice, .. } => {
+            ExprKind::Subscript { value, slice, .. } => {
                 self.scan_expr(value);
                 self.scan_expr(slice);
             }
 
-            Expr::List { elts, .. } => {
+            ExprKind::List { elts, .. } => {
                 for e in elts {
                     self.scan_expr(e);
                 }
             }
 
-            Expr::Name { .. } => {}
+            ExprKind::Name { .. } => {}
         }
     }
 
@@ -441,23 +450,23 @@ impl X64Generator {
     }
 
     fn gen_expr(&mut self, expr: &Expr) -> Result<(), String> {
-        match expr {
-            Expr::Constant { value, .. } => {
+        match &expr.kind {
+            ExprKind::Constant { value, .. } => {
                 self.gen_constant(value)?;
             }
 
-            Expr::Name { id, ctx } => {
-                if let Some(offset) = self.lookup_var(id) {
+            ExprKind::Name { id, ctx } => {
+                if let Some(slot) = self.lookup_var(id) {
                     match ctx {
                         ExprContext::Load => {
-                            self.emit(&format!("\tmov\trax, QWORD PTR [rbp - {}]", offset));
+                            self.emit(&format!("\tmov\trax, {}", slot));
                         }
                         ExprContext::Store => {
-                            self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], rax", offset));
+                            self.emit(&format!("\tmov\t{}, rax", slot));
                         }
                         ExprContext::Delete => {
                             // zero the slot
-                            self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], 0", offset));
+                            self.emit(&format!("\tmov\t{}, 0", slot));
                         }
                     }
                 } else {
@@ -467,16 +476,23 @@ impl X64Generator {
                 }
             }
 
-            Expr::BinOp { op, left, right } => {
-                // evaluate right, push it
-                self.gen_expr(right)?;
-                self.emit("\tpush\trax");
+            ExprKind::BinOp { op, left, right } => {
+                if self.type_of(expr)? == Type::Str {
+                    // only `+` applies to strings
+                    self.gen_expr(left)?;
+                    self.emit("\tpush\trax");
+                    self.gen_expr(right)?;
+                    self.emit("\tpush\trax");
+                    self.runtime_call("stone.str_concat", 2);
+                    return Ok(());
+                }
 
-                // evaluate left
+                // left to right, like the interpreter
                 self.gen_expr(left)?;
-
-                // pop right into rbx
-                self.emit("\tpop\trbx");
+                self.emit("\tpush\trax");
+                self.gen_expr(right)?;
+                self.emit("\tmov\trbx, rax");
+                self.emit("\tpop\trax");
 
                 match op {
                     Operator::Add => self.emit("\tadd\trax, rbx"),
@@ -490,7 +506,7 @@ impl X64Generator {
                 }
             }
 
-            Expr::BoolOp { op, values } => {
+            ExprKind::BoolOp { op, values } => {
                 if values.is_empty() {
                     return Ok(());
                 }
@@ -523,7 +539,7 @@ impl X64Generator {
                 }
             }
 
-            Expr::UnaryOp { op, operand } => {
+            ExprKind::UnaryOp { op, operand } => {
                 self.gen_expr(operand)?;
                 match op {
                     UnaryOp::Not => {
@@ -540,124 +556,280 @@ impl X64Generator {
                 }
             }
 
-            Expr::Compare {
+            ExprKind::Compare {
                 left,
-                ops: _,
+                ops,
                 comparators,
             } => {
-                // simplified: single comparison only
-                if !comparators.is_empty() {
-                    self.gen_expr(left)?;
+                // a < b < c means a < b and b < c, with b evaluated once and c skipped once false
+                let end_label = self.new_label("cmp_end");
+                self.gen_expr(left)?;
+                for (i, (op, comparator)) in ops.iter().zip(comparators).enumerate() {
                     self.emit("\tpush\trax");
-                    self.gen_expr(&comparators[0])?;
+                    self.gen_expr(comparator)?;
                     self.emit("\tmov\trbx, rax");
                     self.emit("\tpop\trax");
-                    self.emit("\tcmp\trax, rbx");
-
-                    // equality only for now
-                    self.emit("\tsete\tal");
-                    self.emit("\tmovzx\trax, al");
-                }
-            }
-
-            Expr::Call { func, args } => {
-                if args.len() > MAX_REGISTER_ARGS {
-                    return Err(format!(
-                        "calls with more than {} arguments are not supported",
-                        MAX_REGISTER_ARGS
-                    ));
-                }
-
-                // save caller-saved registers
-                self.emit("\tpush\trdi");
-                self.emit("\tpush\trsi");
-                self.emit("\tpush\trdx");
-                self.emit("\tpush\trcx");
-                self.emit("\tpush\tr8");
-                self.emit("\tpush\tr9");
-
-                // pass arguments (System V AMD64 ABI: rdi, rsi, rdx, rcx, r8, r9)
-                let arg_regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
-
-                for (i, arg) in args.iter().enumerate() {
-                    self.gen_expr(arg)?;
-                    if i < arg_regs.len() {
-                        self.emit(&format!("\tmov\t{}, rax", arg_regs[i]));
-                    } else {
-                        // push to stack for additional args
+                    if self.type_of(comparator)? == Type::Str {
+                        // strings compare by contents, and only with == and !=
+                        self.emit("\tpush\trbx"); // the next link's left side
                         self.emit("\tpush\trax");
+                        self.emit("\tpush\trbx");
+                        self.runtime_call("stone.str_eq", 2);
+                        self.emit("\tpop\trbx");
+                        if matches!(op, CompOp::NotEqual) {
+                            self.emit("\txor\trax, 1");
+                        }
+                    } else {
+                        self.emit("\tcmp\trax, rbx");
+                        self.emit(&format!("\t{}\tal", set_instruction(op)));
+                        self.emit("\tmovzx\trax, al");
+                    }
+                    if i + 1 < ops.len() {
+                        self.emit("\ttest\trax, rax");
+                        self.emit(&format!("\tjz\t{}", end_label));
+                        // the right side becomes the next link's left side
+                        self.emit("\tmov\trax, rbx");
                     }
                 }
-
-                // call the function
-                if let Expr::Name { id, .. } = &**func {
-                    self.emit(&format!("\tcall\t{}", id));
-                }
-
-                // restore caller-saved registers
-                self.emit("\tpop\tr9");
-                self.emit("\tpop\tr8");
-                self.emit("\tpop\trcx");
-                self.emit("\tpop\trdx");
-                self.emit("\tpop\trsi");
-                self.emit("\tpop\trdi");
+                self.emit(&format!("{}:", end_label));
             }
 
-            Expr::Subscript { value, slice, .. } => {
-                // simplified array access, value is the base address
-                self.gen_expr(slice)?;
-                self.emit("\timul\trax, 8"); // scale by 8 bytes
-                self.emit("\tpush\trax");
+            ExprKind::Call { func, args } => {
+                if let ExprKind::Name { id, .. } = &func.kind {
+                    match id.as_str() {
+                        "print" => return self.gen_print(args),
+                        "len" if matches!(self.type_of(&args[0])?, Type::List(_)) => {
+                            self.gen_expr(&args[0])?;
+                            self.emit("\tmov\trax, QWORD PTR [rax]");
+                            return Ok(());
+                        }
+                        "len" => {
+                            self.gen_expr(&args[0])?;
+                            self.emit("\tpush\trax");
+                            self.runtime_call("stone.str_len", 1);
+                            return Ok(());
+                        }
+                        "append" => {
+                            for arg in args {
+                                self.gen_expr(arg)?;
+                                self.emit("\tpush\trax");
+                            }
+                            self.runtime_call("stone.list_append", args.len());
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+                // evaluate every argument first, so nothing can clobber a loaded register, such
+                // as the rdx that division overwrites
+                for arg in args {
+                    self.gen_expr(arg)?;
+                    self.emit("\tpush\trax");
+                }
+                for (i, reg) in ARG_REGS.iter().take(args.len()).enumerate() {
+                    let depth = 8 * (args.len() - 1 - i);
+                    self.emit(&format!("\tmov\t{reg}, QWORD PTR [rsp + {depth}]"));
+                }
 
-                self.gen_expr(value)?;
-                self.emit("\tpop\trbx");
-                self.emit("\tadd\trax, rbx");
+                if let ExprKind::Name { id, .. } = &func.kind {
+                    self.emit(&format!("\tcall\t{}", function_label(id)));
+                }
+                if !args.is_empty() {
+                    self.emit(&format!("\tadd\trsp, {}", 8 * args.len()));
+                }
+            }
+
+            ExprKind::Subscript { value, slice, .. } => {
+                self.gen_list_slot(value, slice)?;
                 self.emit("\tmov\trax, QWORD PTR [rax]");
             }
 
-            Expr::List { elts, .. } => {
-                // simplified: evaluate elements only, real lists need heap allocation
-                if !elts.is_empty() {
-                    for elt in elts {
-                        self.gen_expr(elt)?;
-                    }
+            ExprKind::List { elts, .. } => {
+                for elt in elts {
+                    self.gen_expr(elt)?;
+                    self.emit("\tpush\trax");
+                }
+                self.emit(&format!("\tpush\t{}", elts.len()));
+                self.runtime_call("stone.list_new", 1);
+                // r10 and r11 carry no arguments, so filling the list leaves those intact
+                self.emit("\tmov\tr10, QWORD PTR [rax + 16]");
+                for i in (0..elts.len()).rev() {
+                    self.emit("\tpop\tr11");
+                    self.emit(&format!("\tmov\tQWORD PTR [r10 + {}], r11", 8 * i));
                 }
             }
         }
         Ok(())
     }
 
+    /// Generates `print(a, b, ...)`: evaluates every argument first, like the interpreter, then
+    /// writes each with the routine for its type, separated by spaces and ending with a newline.
+    fn gen_print(&mut self, args: &[Expr]) -> Result<(), String> {
+        for arg in args {
+            self.gen_expr(arg)?;
+            self.emit("\tpush\trax");
+        }
+        for (i, arg) in args.iter().enumerate() {
+            let ty = self.type_of(arg)?;
+            let routine = self.print_routine(&ty, false)?;
+            // the first argument was pushed first, so it is deepest
+            let depth = 8 * (args.len() - 1 - i);
+            self.emit(&format!("\tmov\trdi, QWORD PTR [rsp + {depth}]"));
+            self.emit(&format!("\tcall\t{routine}"));
+            if i + 1 < args.len() {
+                self.emit("\tmov\trdi, 32"); // ' '
+                self.emit("\tcall\tstone.print_char");
+            }
+        }
+        self.emit("\tmov\trdi, 10"); // newline
+        self.emit("\tcall\tstone.print_char");
+        if !args.is_empty() {
+            self.emit(&format!("\tadd\trsp, {}", 8 * args.len()));
+        }
+        self.emit("\txor\trax, rax"); // print returns none
+        Ok(())
+    }
+
+    /// Generates `for x in items;`, walking the list by index and rereading its length every
+    /// iteration, so a list that grows while it is iterated keeps going, like in the interpreter.
+    ///
+    /// `index` holds the next position and `list` holds the list, both hidden variables.
+    fn gen_for_list(
+        &mut self,
+        iter: &Expr,
+        body: &[Stmt],
+        target: &Slot,
+        index: &Slot,
+        list: &Slot,
+    ) -> Result<(), String> {
+        self.gen_expr(iter)?;
+        self.emit(&format!("\tmov\t{list}, rax"));
+        self.emit(&format!("\tmov\t{index}, 0"));
+
+        let start_label = self.new_label("for_start");
+        let end_label = self.new_label("for_end");
+        self.break_labels.push(end_label.clone());
+        self.continue_labels.push(start_label.clone());
+
+        self.emit(&format!("{start_label}:"));
+        self.emit(&format!("\tmov\trax, {index}"));
+        self.emit(&format!("\tmov\trbx, {list}"));
+        self.emit("\tcmp\trax, QWORD PTR [rbx]");
+        self.emit(&format!("\tjge\t{end_label}"));
+        self.emit("\tmov\trbx, QWORD PTR [rbx + 16]");
+        self.emit("\tmov\trax, QWORD PTR [rbx + rax * 8]");
+        self.emit(&format!("\tmov\t{target}, rax"));
+        self.emit(&format!("\tinc\t{index}"));
+
+        for stmt in body {
+            self.gen_stmt(stmt)?;
+        }
+
+        self.emit(&format!("\tjmp\t{start_label}"));
+        self.emit(&format!("{end_label}:"));
+        self.break_labels.pop();
+        self.continue_labels.pop();
+        Ok(())
+    }
+
+    /// Returns the type the checker inferred for `expr`.
+    fn type_of(&self, expr: &Expr) -> Result<Type, String> {
+        self.types
+            .get(&expr.span)
+            .cloned()
+            .ok_or_else(|| format!("expression at {:?} has no type", expr.span.start))
+    }
+
+    /// Returns the routine that prints a value of type `ty`, quoting strings inside lists.
+    ///
+    /// For example, `list[int]` is printed by `stone.print_list_int`, which is emitted later.
+    fn print_routine(&mut self, ty: &Type, nested: bool) -> Result<String, String> {
+        Ok(match ty {
+            Type::Int => "stone.print_int".to_string(),
+            Type::Bool => "stone.print_bool".to_string(),
+            Type::Str if nested => "stone.print_str_quoted".to_string(),
+            Type::Str => "stone.print_str".to_string(),
+            Type::None => "stone.print_none".to_string(),
+            Type::List(_) => {
+                if !self.list_printers.contains(ty) {
+                    self.list_printers.push(ty.clone());
+                }
+                format!("stone.print_{}", mangle(ty))
+            }
+            Type::Function { .. } => return Err("functions cannot be printed".to_string()),
+        })
+    }
+
+    /// Calls a runtime routine with `count` arguments, which the caller pushed left to right.
+    ///
+    /// Arguments only go into registers right before a call, so no register holds a value that
+    /// the routine could clobber. For example, after pushing a list and an index,
+    /// `self.runtime_call("stone.list_slot", 2)` pops both and leaves the element's address in
+    /// `rax`.
+    fn runtime_call(&mut self, label: &str, count: usize) {
+        for reg in ARG_REGS.iter().take(count).rev() {
+            self.emit(&format!("\tpop\t{reg}"));
+        }
+        self.emit(&format!("\tcall\t{label}"));
+    }
+
+    /// Leaves the address of `value[slice]` in `rax`, exiting with an error if the index is out
+    /// of range.
+    fn gen_list_slot(&mut self, value: &Expr, slice: &Expr) -> Result<(), String> {
+        self.gen_expr(value)?;
+        self.emit("\tpush\trax");
+        self.gen_expr(slice)?;
+        self.emit("\tpush\trax");
+        self.runtime_call("stone.list_slot", 2);
+        Ok(())
+    }
+
+    /// Emits the list runtime and every list printer `print` asked for, if the program uses lists.
+    fn emit_list_runtime(&mut self) -> Result<(), String> {
+        if !self.types.values().any(contains_list) {
+            return Ok(());
+        }
+        builtins::list_runtime(self);
+
+        // printing a nested list registers the printer for its elements, so work until none are new
+        let mut emitted = 0;
+        while emitted < self.list_printers.len() {
+            let ty = self.list_printers[emitted].clone();
+            emitted += 1;
+            let Type::List(elem) = &ty else {
+                continue;
+            };
+            let element = self.print_routine(elem, true)?;
+            builtins::print_list(self, &format!("stone.print_{}", mangle(&ty)), &element);
+        }
+        Ok(())
+    }
+
     fn gen_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
-        match stmt {
-            Stmt::Assign { targets, value } => {
+        match &stmt.kind {
+            StmtKind::Assign { targets, value } => {
                 self.gen_expr(value)?;
 
                 for target in targets {
-                    match target {
-                        Expr::Name { id, .. } => {
-                            let offset = self.slot_of(id)?;
-                            self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], rax", offset));
+                    match &target.kind {
+                        ExprKind::Name { id, .. } => {
+                            let slot = self.slot_of(id)?;
+                            self.emit(&format!("\tmov\t{}, rax", slot));
                         }
-                        Expr::Subscript { value, slice, .. } => {
-                            // store to array element
-                            self.emit("\tpush\trax"); // save value
-
-                            self.gen_expr(slice)?;
-                            self.emit("\timul\trax, 8");
+                        ExprKind::Subscript { value, slice, .. } => {
+                            // the value is evaluated first, like the interpreter
                             self.emit("\tpush\trax");
-
-                            self.gen_expr(value)?;
+                            self.gen_list_slot(value, slice)?;
                             self.emit("\tpop\trbx");
-                            self.emit("\tadd\trax, rbx");
-
-                            self.emit("\tpop\trbx"); // restore value
                             self.emit("\tmov\tQWORD PTR [rax], rbx");
+                            // later targets of `a = b[0] = 1` store the same value
+                            self.emit("\tmov\trax, rbx");
                         }
                         _ => {}
                     }
                 }
             }
-            Stmt::Return { value } => {
+            StmtKind::Return { value } => {
                 if let Some(val) = value {
                     self.gen_expr(val)?;
                 }
@@ -668,14 +840,9 @@ impl X64Generator {
                 self.emit("\tret");
             }
 
-            Stmt::FunctionDef { name, args, body } => {
-                if args.args.len() > MAX_REGISTER_ARGS {
-                    return Err(format!(
-                        "function '{}' has more than {} parameters, which is not supported",
-                        name, MAX_REGISTER_ARGS
-                    ));
-                }
-
+            StmtKind::FunctionDef {
+                name, args, body, ..
+            } => {
                 let func_info = self
                     .env
                     .functions
@@ -688,11 +855,7 @@ impl X64Generator {
                 // locals and their offsets were already laid out by the scan pass
                 self.env.scopes.push(locals);
 
-                // function label
-                if name == "main" {
-                    self.emit("\t.globl main");
-                }
-                self.emit(&format!("{}:", name));
+                self.emit(&format!("{}:", function_label(name)));
 
                 // function prologue
                 self.emit("\tpush\trbp");
@@ -702,15 +865,16 @@ impl X64Generator {
                     self.emit(&format!("\tsub\trsp, {}", stack_size));
                 }
 
-                // save arguments to local variables
-                let arg_regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+                // copy the arguments into the parameters' slots, from the caller's stack past six
+                let count = args.args.len();
                 for (i, arg) in args.args.iter().enumerate() {
-                    let offset = self.slot_of(&arg.arg)?;
-                    if i < arg_regs.len() {
-                        self.emit(&format!(
-                            "\tmov\tQWORD PTR [rbp - {}], {}",
-                            offset, arg_regs[i]
-                        ));
+                    let slot = self.slot_of(&arg.arg)?;
+                    if let Some(reg) = ARG_REGS.get(i) {
+                        self.emit(&format!("\tmov\t{slot}, {reg}"));
+                    } else {
+                        let offset = 16 + 8 * (count - 1 - i);
+                        self.emit(&format!("\tmov\trax, QWORD PTR [rbp + {offset}]"));
+                        self.emit(&format!("\tmov\t{slot}, rax"));
                     }
                 }
 
@@ -718,7 +882,8 @@ impl X64Generator {
                     self.gen_stmt(stmt)?;
                 }
 
-                // default return if no explicit return
+                // falling off the end returns none
+                self.emit("\txor\trax, rax");
                 self.emit("\tmov\trsp, rbp");
                 self.emit("\tpop\trbp");
                 self.emit("\tret");
@@ -728,7 +893,7 @@ impl X64Generator {
                 self.current_function = None;
             }
 
-            Stmt::While { test, body } => {
+            StmtKind::While { test, body } => {
                 let start_label = self.new_label("while_start");
                 let end_label = self.new_label("while_end");
 
@@ -754,7 +919,7 @@ impl X64Generator {
                 self.continue_labels.pop();
             }
 
-            Stmt::If { test, body, orelse } => {
+            StmtKind::If { test, body, orelse } => {
                 let else_label = self.new_label("if_else");
                 let end_label = self.new_label("if_end");
 
@@ -788,71 +953,79 @@ impl X64Generator {
                 }
             }
 
-            Stmt::For { target, iter, body } => {
-                // simplified: iter evaluates to a count
+            StmtKind::For { target, iter, body } => {
+                let ExprKind::Name { id, .. } = &target.kind else {
+                    return Err("a 'for' loop's variable must be a name".to_string());
+                };
+                let target = self.slot_of(id)?;
+                let (next, end) = for_slots(stmt);
+                let (next, end) = (self.slot_of(&next)?, self.slot_of(&end)?);
+                let Some(args) = range_args(iter) else {
+                    return self.gen_for_list(iter, body, &target, &next, &end);
+                };
+
+                // the bounds are evaluated once, left to right
+                match args {
+                    [limit] => {
+                        self.emit(&format!("\tmov\t{}, 0", next));
+                        self.gen_expr(limit)?;
+                        self.emit(&format!("\tmov\t{}, rax", end));
+                    }
+                    [start, limit] => {
+                        self.gen_expr(start)?;
+                        self.emit(&format!("\tmov\t{}, rax", next));
+                        self.gen_expr(limit)?;
+                        self.emit(&format!("\tmov\t{}, rax", end));
+                    }
+                    _ => return Err("range() takes 1 or 2 arguments".to_string()),
+                }
+
                 let start_label = self.new_label("for_start");
                 let end_label = self.new_label("for_end");
-
                 self.break_labels.push(end_label.clone());
                 self.continue_labels.push(start_label.clone());
 
-                // initialize counter
-                if let Expr::Name { id, .. } = &**target {
-                    let offset = self.slot_of(id)?;
-                    self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], 0", offset));
+                // a separate counter, so assigning the variable cannot change the iteration
+                self.emit(&format!("{}:", start_label));
+                self.emit(&format!("\tmov\trax, {}", next));
+                self.emit(&format!("\tcmp\trax, {}", end));
+                self.emit(&format!("\tjge\t{}", end_label));
+                self.emit(&format!("\tmov\t{}, rax", target));
+                self.emit(&format!("\tinc\t{}", next));
 
-                    // get limit
-                    self.gen_expr(iter)?;
-                    self.emit("\tpush\trax");
-
-                    self.emit(&format!("{}:", start_label));
-
-                    // check condition
-                    self.emit(&format!("\tmov\trax, QWORD PTR [rbp - {}]", offset));
-                    self.emit("\tpop\trbx");
-                    self.emit("\tpush\trbx");
-                    self.emit("\tcmp\trax, rbx");
-                    self.emit(&format!("\tjge\t{}", end_label));
-
-                    // body
-                    for stmt in body {
-                        self.gen_stmt(stmt)?;
-                    }
-
-                    // increment
-                    self.emit(&format!("\tinc\tQWORD PTR [rbp - {}]", offset));
-                    self.emit(&format!("\tjmp\t{}", start_label));
-
-                    self.emit(&format!("{}:", end_label));
-                    self.emit("\tpop\trbx"); // clean up limit
+                for stmt in body {
+                    self.gen_stmt(stmt)?;
                 }
+
+                self.emit(&format!("\tjmp\t{}", start_label));
+                self.emit(&format!("{}:", end_label));
 
                 self.break_labels.pop();
                 self.continue_labels.pop();
             }
 
-            Stmt::Expr { value } => {
+            StmtKind::Expr { value } => {
                 self.gen_expr(value)?;
             }
 
-            Stmt::Break => {
+            StmtKind::Break => {
                 if let Some(label) = self.break_labels.last() {
                     self.emit(&format!("\tjmp\t{}", label));
                 }
             }
 
-            Stmt::Continue => {
+            StmtKind::Continue => {
                 if let Some(label) = self.continue_labels.last() {
                     self.emit(&format!("\tjmp\t{}", label));
                 }
             }
 
-            Stmt::Delete { targets } => {
+            StmtKind::Delete { targets } => {
                 for target in targets {
-                    if let Expr::Name { id, .. } = target
-                        && let Some(offset) = self.lookup_var(id)
+                    if let ExprKind::Name { id, .. } = &target.kind
+                        && let Some(slot) = self.lookup_var(id)
                     {
-                        self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], 0", offset));
+                        self.emit(&format!("\tmov\t{}, 0", slot));
                     }
                 }
             }
@@ -878,20 +1051,20 @@ impl X64Generator {
     }
 
     fn collect_calls_from_stmt(&self, stmt: &Stmt, calls: &mut HashSet<String>) {
-        match stmt {
-            Stmt::Expr { value } => self.collect_calls_from_expr(value, calls),
-            Stmt::Assign { targets, value } => {
+        match &stmt.kind {
+            StmtKind::Expr { value } => self.collect_calls_from_expr(value, calls),
+            StmtKind::Assign { targets, value } => {
                 for target in targets {
                     self.collect_calls_from_expr(target, calls);
                 }
                 self.collect_calls_from_expr(value, calls);
             }
-            Stmt::Return { value } => {
+            StmtKind::Return { value } => {
                 if let Some(v) = value {
                     self.collect_calls_from_expr(v, calls);
                 }
             }
-            Stmt::If { test, body, orelse } => {
+            StmtKind::If { test, body, orelse } => {
                 self.collect_calls_from_expr(test, calls);
                 for s in body {
                     self.collect_calls_from_stmt(s, calls);
@@ -900,38 +1073,38 @@ impl X64Generator {
                     self.collect_calls_from_stmt(s, calls);
                 }
             }
-            Stmt::While { test, body } => {
+            StmtKind::While { test, body } => {
                 self.collect_calls_from_expr(test, calls);
                 for s in body {
                     self.collect_calls_from_stmt(s, calls);
                 }
             }
-            Stmt::For { target, iter, body } => {
+            StmtKind::For { target, iter, body } => {
                 self.collect_calls_from_expr(target, calls);
                 self.collect_calls_from_expr(iter, calls);
                 for s in body {
                     self.collect_calls_from_stmt(s, calls);
                 }
             }
-            Stmt::FunctionDef { body, .. } => {
+            StmtKind::FunctionDef { body, .. } => {
                 for s in body {
                     self.collect_calls_from_stmt(s, calls);
                 }
             }
-            Stmt::Delete { targets } => {
+            StmtKind::Delete { targets } => {
                 for target in targets {
                     self.collect_calls_from_expr(target, calls);
                 }
             }
-            Stmt::Break | Stmt::Continue => {}
+            StmtKind::Break | StmtKind::Continue => {}
         }
     }
 
     fn collect_calls_from_expr(&self, expr: &Expr, calls: &mut HashSet<String>) {
-        match expr {
-            Expr::Call { func, args } => {
+        match &expr.kind {
+            ExprKind::Call { func, args } => {
                 // stdlib call
-                if let Expr::Name { id, .. } = &**func
+                if let ExprKind::Name { id, .. } = &func.kind
                     && self.is_stdlib_function(id)
                 {
                     calls.insert(id.clone());
@@ -943,19 +1116,19 @@ impl X64Generator {
                     self.collect_calls_from_expr(arg, calls);
                 }
             }
-            Expr::BinOp { left, right, .. } => {
+            ExprKind::BinOp { left, right, .. } => {
                 self.collect_calls_from_expr(left, calls);
                 self.collect_calls_from_expr(right, calls);
             }
-            Expr::UnaryOp { operand, .. } => {
+            ExprKind::UnaryOp { operand, .. } => {
                 self.collect_calls_from_expr(operand, calls);
             }
-            Expr::BoolOp { values, .. } => {
+            ExprKind::BoolOp { values, .. } => {
                 for val in values {
                     self.collect_calls_from_expr(val, calls);
                 }
             }
-            Expr::Compare {
+            ExprKind::Compare {
                 left, comparators, ..
             } => {
                 self.collect_calls_from_expr(left, calls);
@@ -963,16 +1136,16 @@ impl X64Generator {
                     self.collect_calls_from_expr(comp, calls);
                 }
             }
-            Expr::Subscript { value, slice, .. } => {
+            ExprKind::Subscript { value, slice, .. } => {
                 self.collect_calls_from_expr(value, calls);
                 self.collect_calls_from_expr(slice, calls);
             }
-            Expr::List { elts, .. } => {
+            ExprKind::List { elts, .. } => {
                 for elt in elts {
                     self.collect_calls_from_expr(elt, calls);
                 }
             }
-            Expr::Constant { .. } | Expr::Name { .. } => {}
+            ExprKind::Constant { .. } | ExprKind::Name { .. } => {}
         }
     }
 
@@ -981,19 +1154,12 @@ impl X64Generator {
         BUILTINS.contains(&name)
     }
 
+    /// Emits the `print` routines if the program prints. The list and string runtimes are emitted
+    /// separately, based on the types the program uses.
     fn emit_stdlib(&mut self, calls: Vec<String>) {
-        if calls.is_empty() {
-            return;
-        }
-
-        self.emit("\t# Standard Library Functions");
-
-        for func in calls {
-            match func.as_str() {
-                "print" => print(self),
-                "len" => len(self),
-                _ => {}
-            }
+        if calls.iter().any(|call| call == "print") {
+            self.emit("\t# Standard Library Functions");
+            print(self);
         }
     }
 
@@ -1021,6 +1187,103 @@ impl X64Generator {
 
         self.emit("");
     }
+
+    /// Emits a zeroed 8-byte `.bss` slot for each global variable, so functions can reach them.
+    ///
+    /// For example, `total = 1` at the top level produces `g.total: .zero 8`.
+    fn emit_globals(&mut self) {
+        if self.env.globals.is_empty() {
+            return;
+        }
+
+        self.emit("\t.bss");
+        self.emit("\t.p2align\t3");
+        for name in self.env.globals.clone() {
+            self.emit(&format!("{}:", global_label(&name)));
+            self.emit("\t.zero\t8");
+        }
+        self.emit("\t.text");
+    }
+}
+
+/// Where a variable lives: a slot in the current stack frame, or a global in `.bss`.
+///
+/// Its `Display` is the memory operand, such as `QWORD PTR [rbp - 8]` or
+/// `QWORD PTR [rip + g.total]`.
+enum Slot {
+    Stack(i32),
+    Global(String),
+}
+
+impl std::fmt::Display for Slot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Slot::Stack(offset) => write!(f, "QWORD PTR [rbp - {offset}]"),
+            Slot::Global(label) => write!(f, "QWORD PTR [rip + {label}]"),
+        }
+    }
+}
+
+/// Returns the assembly symbol for a global variable.
+///
+/// The prefix keeps variables from colliding with functions or registers, so `global_label("rax")`
+/// is `g.rax`.
+fn global_label(name: &str) -> String {
+    format!("g.{name}")
+}
+
+/// Returns the assembly symbol for a user-defined function.
+///
+/// The prefix keeps stone functions from colliding with `main` or with C library functions, so
+/// `function_label("exit")` is `fn.exit`.
+fn function_label(name: &str) -> String {
+    format!("fn.{name}")
+}
+
+/// Returns whether a value of type `ty` involves a list, which means the list runtime is needed.
+fn contains_list(ty: &Type) -> bool {
+    match ty {
+        Type::List(_) => true,
+        Type::Function { params, ret } => params.iter().any(contains_list) || contains_list(ret),
+        _ => false,
+    }
+}
+
+/// Spells a type as part of an assembly symbol.
+///
+/// For example, `list[list[str]]` becomes `list_list_str`.
+fn mangle(ty: &Type) -> String {
+    match ty {
+        Type::List(elem) => format!("list_{}", mangle(elem)),
+        other => other.to_string(),
+    }
+}
+
+/// Returns the names of the hidden variables a `for` loop counts with: the next value, and the
+/// end of the range.
+///
+/// They are named after the loop's position, and the dots keep them from colliding with any
+/// stone name. For example, a loop on line 3, col 1 counts with `for.next.3.1` and `for.end.3.1`.
+fn for_slots(stmt: &Stmt) -> (String, String) {
+    let Pos { line, col } = stmt.span.start;
+    (
+        format!("for.next.{line}.{col}"),
+        format!("for.end.{line}.{col}"),
+    )
+}
+
+/// Returns the `setcc` instruction that sets `al` when a signed `cmp` satisfies `op`.
+///
+/// For example, `set_instruction(&CompOp::LessThanEqual)` returns `"setle"`.
+fn set_instruction(op: &CompOp) -> &'static str {
+    match op {
+        CompOp::Equal => "sete",
+        CompOp::NotEqual => "setne",
+        CompOp::LessThan => "setl",
+        CompOp::LessThanEqual => "setle",
+        CompOp::GreaterThan => "setg",
+        CompOp::GreaterThanEqual => "setge",
+    }
 }
 
 /// Rounds a frame size up to the 16-byte stack alignment required by the System V ABI.
@@ -1045,16 +1308,27 @@ mod tests {
     fn assemble_returns_assembly_text() {
         let assembly = assemble("print(1)\n").unwrap();
         assert!(assembly.contains("main:"));
-        assert!(assembly.contains("\tcall\tprint"));
+        assert!(assembly.contains("\tcall\tstone.print_int"));
     }
 
     #[test]
-    fn more_than_six_parameters_is_an_error() {
-        assert!(assemble("def f(a, b, c, d, e, g, h);\n    ret a\n").is_err());
+    fn invalid_programs_are_rejected_before_code_generation() {
+        assert_eq!(
+            assemble("x = 1 + \"a\"\n"),
+            Err("1:9: error: expected int, found str".to_string())
+        );
     }
 
     #[test]
-    fn more_than_six_arguments_is_an_error() {
-        assert!(assemble("print(1, 2, 3, 4, 5, 6, 7)\n").is_err());
+    fn more_than_six_parameters_assemble() {
+        assert!(
+            assemble("def f(a, b, c, d, e, g, h);\n    ret h\nprint(f(1, 2, 3, 4, 5, 6, 7))\n")
+                .is_ok()
+        );
+    }
+
+    #[test]
+    fn print_takes_any_number_of_arguments() {
+        assert!(assemble("print(1, 2, 3, 4, 5, 6, 7)\n").is_ok());
     }
 }

@@ -4,6 +4,10 @@
 //! For example, `examples/basics.st` must print exactly the contents of `examples/basics.out`
 //! under both `stone run` and a binary produced by `stone build`.
 //!
+//! A program that should fail at runtime, such as one indexing past the end of a list, has a
+//! sibling `.err` file too. It must then exit with an error under both backends, print the `.out`
+//! text first, and print the `.err` text somewhere in its stderr.
+//!
 //! A program can opt out of a backend by being listed in [`SKIPS`] along with the reason.
 
 use std::fmt::Write as _;
@@ -15,11 +19,7 @@ const PROGRAM_DIRS: [&str; 2] = ["examples", "tests/programs"];
 /// Programs a backend can't handle yet, as `(file stem, backend name, reason)`.
 ///
 /// For example, `("printing", "build", "...")` skips `printing.st` under `stone build` only.
-const SKIPS: &[(&str, &str, &str)] = &[(
-    "printing",
-    "build",
-    "compiled print shows only its first argument, nothing for negatives, and 1/0 for booleans",
-)];
+const SKIPS: &[(&str, &str, &str)] = &[];
 
 /// A way of executing a stone program.
 #[derive(Clone, Copy)]
@@ -63,37 +63,44 @@ fn skip_reason(program: &Path, backend: Backend) -> Option<&'static str> {
         .map(|(_, _, reason)| *reason)
 }
 
-/// Runs a command and returns its stdout, or a description of how it failed.
-fn stdout_of(command: &mut Command) -> Result<String, String> {
+/// How a run of a program ended.
+struct Outcome {
+    stdout: String,
+    /// The stderr of a run that exited with an error, or `None` if it succeeded.
+    error: Option<String>,
+}
+
+/// Runs a command to completion, failing only if it cannot be started.
+fn outcome_of(command: &mut Command) -> Result<Outcome, String> {
     let output = command
         .output()
         .map_err(|e| format!("failed to spawn {command:?}: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{command:?} exited with {}\nstderr:\n{}",
-            output.status,
-            String::from_utf8_lossy(&output.stderr)
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout).into_owned())
+    Ok(Outcome {
+        stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
+        error: (!output.status.success())
+            .then(|| String::from_utf8_lossy(&output.stderr).into_owned()),
+    })
 }
 
-/// Executes the program with the given backend and returns what it printed.
-fn execute(program: &Path, backend: Backend) -> Result<String, String> {
+/// Executes the program with the given backend and returns how it ended.
+fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
     let stone = env!("CARGO_BIN_EXE_stone");
     match backend {
-        Backend::Run => stdout_of(Command::new(stone).arg("run").arg(program)),
+        Backend::Run => outcome_of(Command::new(stone).arg("run").arg(program)),
         Backend::Build => {
             let name = program.file_stem().unwrap();
             let exe = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
-            stdout_of(
+            let build = outcome_of(
                 Command::new(stone)
                     .arg("build")
                     .arg(program)
                     .arg("-o")
                     .arg(&exe),
             )?;
-            stdout_of(&mut Command::new(&exe))
+            if let Some(stderr) = build.error {
+                return Err(format!("build failed:\n{stderr}"));
+            }
+            outcome_of(&mut Command::new(&exe))
         }
     }
 }
@@ -115,22 +122,34 @@ fn check_all(backend: Backend) {
         let expected = std::fs::read_to_string(&expected_path)
             .unwrap_or_else(|_| panic!("missing expected output {}", expected_path.display()));
 
-        match execute(&program, backend) {
-            Ok(actual) if actual == expected => {}
-            Ok(actual) => writeln!(
+        let expected_error = std::fs::read_to_string(program.with_extension("err"))
+            .ok()
+            .map(|e| e.trim().to_string());
+
+        let problem = match execute(&program, backend) {
+            Err(e) => Some(e),
+            Ok(outcome) if outcome.stdout != expected => Some(format!(
+                "expected:\n{expected:?}\nactual:\n{:?}",
+                outcome.stdout
+            )),
+            Ok(outcome) => match (outcome.error, &expected_error) {
+                (None, None) => None,
+                (Some(stderr), Some(want)) if stderr.contains(want.as_str()) => None,
+                (Some(stderr), Some(want)) => Some(format!(
+                    "expected stderr to contain {want:?}, got:\n{stderr}"
+                )),
+                (Some(stderr), None) => Some(format!("exited with an error:\n{stderr}")),
+                (None, Some(want)) => Some(format!("expected an error containing {want:?}")),
+            },
+        };
+        if let Some(problem) = problem {
+            writeln!(
                 failures,
-                "--- {} ({})\nexpected:\n{expected:?}\nactual:\n{actual:?}\n",
+                "--- {} ({})\n{problem}\n",
                 program.display(),
                 backend.name()
             )
-            .unwrap(),
-            Err(e) => writeln!(
-                failures,
-                "--- {} ({})\n{e}\n",
-                program.display(),
-                backend.name()
-            )
-            .unwrap(),
+            .unwrap();
         }
     }
     assert!(

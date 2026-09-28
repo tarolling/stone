@@ -14,23 +14,40 @@ stone is a language that is both compiled and interpreted, depending on the deve
 
 `src/driver.rs` wires the stages together, and `src/main.rs` picks a pipeline from the command line.
 
-- `stone run`: `lexer` -> `parser` -> `checker` (a no-op for now) -> `interpreter`
-- `stone build`: `lexer` -> `parser` -> `codegen::x64` (scan, generate, then gcc)
+- `stone run`: `lexer` -> `parser` -> `checker` -> `interpreter`
+- `stone build`: `lexer` -> `parser` -> `checker` -> `codegen::x64` (scan, generate, then gcc)
+- `stone check`: `lexer` -> `parser` -> `checker`, printing every diagnostic without running
 
 ## Source map
 
 | module | role |
 | --- | --- |
+| `span` | source positions (`Pos`) and ranges (`Span`) carried by tokens and AST nodes |
+| `diagnostic` | errors and warnings with a span, and their terminal rendering |
 | `token` | `Token`, `TokenType`, and reserved keywords |
 | `lexer` | source text to tokens, including Python-style `Indent`/`Dedent` |
 | `ast` | syntax tree nodes, modeled on `docs/grammar/stone.asdl` |
 | `parser` | recursive-descent PEG parser; `parser/expressions.rs` and `parser/statements.rs` mirror the rules in `docs/grammar/stone.gram` |
-| `checker` | type checker (accepts everything for now) |
+| `checker` | type inference and name resolution, producing diagnostics, expression types, and symbols with their references |
 | `interpreter` | tree-walking evaluator |
 | `codegen` | the `AssemblyGenerator` trait and toolchain discovery |
 | `codegen/x64` | the x86-64 backend and its hand-written builtins (`codegen/x64/builtins.rs`) |
-| `stdlib` | names of the builtins shared by both backends |
-| `driver` | the run/build pipelines |
+| `stdlib` | names of the builtins shared by both backends: `print`, `len`, `range`, and `append` |
+| `driver` | the run/build/check pipelines, and `analyze` for editor tooling |
+
+## Language server
+
+`lsp/` is the `stone-lsp` crate, a language server built on `lsp-server` and `lsp-types`, kept out of the main crate so stone itself still depends only on `clap`. It reanalyzes a document on every change with `driver::analyze` and answers requests from the resulting `checker::Analysis`: its diagnostics, the type of every expression, and every symbol with all of its references.
+
+| request | answered from |
+| --- | --- |
+| diagnostics | `Analysis::diagnostics`, with syntax errors from every top-level statement |
+| hover | the symbol's signature, a builtin's documentation, or the innermost expression's type |
+| definition, references, rename | `Analysis::reference_at` and `Analysis::references_to` |
+| document symbols | globals and functions, with each function's parameters and locals |
+| completion | `Analysis::visible_at`, builtins, and keywords |
+
+`editors/vscode/` is a VS Code extension that provides highlighting and indentation rules and starts `stone-lsp` for `.st` files.
 
 ## Fuzzing
 
@@ -44,6 +61,6 @@ The `fuzz/` crate uses cargo-fuzz (libFuzzer, nightly Rust). It is a separate cr
 | `structured` | programs from `stone_fuzz::generate` | the same stages on deep, valid programs |
 | `differential` | programs from `stone_fuzz::generate` | `stone run` and `stone build` print the same output |
 
-`stone_fuzz::generate` writes source text rule by rule from the grammar, tracking scope so every name and call is defined. It stays inside the subset where both backends agree. That means no strings, booleans, or nested functions, one argument per `print`, no globals read from functions, and every `while` bounded by a counter. `differential` skips a program if the interpreter rejects it (out of fuel, division by zero) or if it prints anything outside `0..=4095`, because compiled `print` treats larger or negative values as string pointers.
+`stone_fuzz::generate` writes source text rule by rule from the grammar, tracking scope so every name and call is defined and every program passes the checker. It covers int arithmetic, comparisons, functions with up to eight parameters, `if`/`while`/`for` with `break` and `cont`, multi-argument `print` with strings and booleans, and top-level lists. Every loop is bounded, and functions never read globals, which may not be assigned yet when they run. `differential` skips a program if the interpreter rejects it (out of fuel, division by zero, an unassigned variable).
 
 Seeds for the text targets are the `.st` programs in `fuzz/corpus/<target>/`. `fuzz/stone.dict` lists stone's tokens.

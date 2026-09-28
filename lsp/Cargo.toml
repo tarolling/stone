@@ -1,0 +1,13 @@
+[package]
+name = "stone-lsp"
+version = "0.1.0"
+edition = "2024"
+description = "A language server for stone, providing diagnostics, hover, navigation, rename, and completion"
+license = "Apache-2.0"
+publish = false
+
+[dependencies]
+lsp-server = "0.10"
+lsp-types = "0.97"
+serde_json = "1"
+stone = { path = ".." }

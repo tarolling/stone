@@ -1,25 +1,39 @@
 //! Statement rules, such as `if_stmt`, `function_def`, and `program`.
 
 use super::Parser;
-use crate::ast::{Arg, Arguments, Expr, Mod, ParserError, Stmt};
+use crate::ast::{Arg, Arguments, Expr, ParserError, Stmt, StmtKind};
 use crate::debug;
 use crate::token::TokenType;
 
 impl Parser {
-    /// Parses a `for` loop, such as `for i in 10; print(i)`.
-    ///
-    /// This is not implemented yet, so it always returns an error.
+    /// Parses a `for` loop, such as `for i in range(3); print(i)`.
     ///
     /// ```text
     /// for_stmt:
     ///     | 'for' star_targets 'in' ~ expressions ';' block
     /// ```
     pub(super) fn parse_for_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
+        // 'for' star_targets 'in' ~ expressions ';' block
+        if self.expect(TokenType::Keyword("for".to_string())).is_some()
+            && let Ok(target) = self.parse_star_targets()
+            && self.expect(TokenType::Keyword("in".to_string())).is_some()
+            && let Ok(iter) = self.parse_expressions()
+            && self.expect(TokenType::Semi).is_some()
+            && let Ok(body) = self.nested(Self::parse_block)
+        {
+            return Ok(Box::new(Stmt::new(
+                StmtKind::For { target, iter, body },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+
         Err(ParserError {
             method: "parse_for_stmt".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -34,6 +48,8 @@ impl Parser {
     ///     | 'while' expression ';' block
     /// ```
     pub(super) fn parse_while_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
         // 'while' expression ';' block
         if self
             .expect(TokenType::Keyword("while".to_string()))
@@ -42,13 +58,15 @@ impl Parser {
             && self.expect(TokenType::Semi).is_some()
             && let Ok(body) = self.parse_block()
         {
-            return Ok(Box::new(Stmt::While { test, body }));
+            return Ok(Box::new(Stmt::new(
+                StmtKind::While { test, body },
+                self.span_from(mark),
+            )));
         }
         Err(ParserError {
             method: "parse_while_stmt".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -79,8 +97,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_else_block".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -102,32 +119,37 @@ impl Parser {
             && self.expect(TokenType::Semi).is_some()
             && let Ok(body) = self.parse_block()
         {
-            let mark = self.pos;
+            let after_body = self.pos;
 
             // ... elif_stmt
             if let Ok(orelse) = self.parse_elif_stmt() {
-                return Ok(Box::new(Stmt::If {
-                    test,
-                    body,
-                    orelse: vec![*orelse],
-                }));
+                return Ok(Box::new(Stmt::new(
+                    StmtKind::If {
+                        test,
+                        body,
+                        orelse: vec![*orelse],
+                    },
+                    self.span_from(mark),
+                )));
             }
-            self.pos = mark;
+            self.pos = after_body;
 
             // ... [else_block]
             let orelse = self.parse_else_block().unwrap_or_else(|_| {
-                self.pos = mark;
+                self.pos = after_body;
                 vec![]
             });
-            return Ok(Box::new(Stmt::If { test, body, orelse }));
+            return Ok(Box::new(Stmt::new(
+                StmtKind::If { test, body, orelse },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
         Err(ParserError {
             method: "parse_elif_stmt".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -147,32 +169,37 @@ impl Parser {
             && self.expect(TokenType::Semi).is_some()
             && let Ok(body) = self.parse_block()
         {
-            let mark = self.pos;
+            let after_body = self.pos;
 
             // ... elif_stmt
             if let Ok(orelse) = self.parse_elif_stmt() {
-                return Ok(Box::new(Stmt::If {
-                    test,
-                    body,
-                    orelse: vec![*orelse],
-                }));
+                return Ok(Box::new(Stmt::new(
+                    StmtKind::If {
+                        test,
+                        body,
+                        orelse: vec![*orelse],
+                    },
+                    self.span_from(mark),
+                )));
             }
-            self.pos = mark;
+            self.pos = after_body;
 
             // ... [else_block]
             let orelse = self.parse_else_block().unwrap_or_else(|_| {
-                self.pos = mark;
+                self.pos = after_body;
                 vec![]
             });
-            return Ok(Box::new(Stmt::If { test, body, orelse }));
+            return Ok(Box::new(Stmt::new(
+                StmtKind::If { test, body, orelse },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
         Err(ParserError {
             method: "parse_if_stmt".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -186,16 +213,15 @@ impl Parser {
         let mark = self.pos;
 
         // NAME
-        if let TokenType::Name(arg) = self.advance().r#type {
-            return Ok(Arg { arg });
+        if let Some((arg, span)) = self.expect_name("a parameter name", false) {
+            return Ok(Arg { arg, span });
         }
         self.pos = mark;
 
         Err(ParserError {
             method: "parse_param".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -210,9 +236,16 @@ impl Parser {
 
         let expr = self.parse_param()?;
         args.push(expr);
-        while self.expect(TokenType::Comma).is_some() {
-            let expr = self.parse_param()?;
-            args.push(expr);
+        loop {
+            let mark = self.pos;
+            if self.expect(TokenType::Comma).is_some()
+                && let Ok(expr) = self.parse_param()
+            {
+                args.push(expr);
+                continue;
+            }
+            self.pos = mark;
+            break;
         }
 
         Ok(Arguments { args })
@@ -224,10 +257,11 @@ impl Parser {
     /// [parameters]
     /// ```
     pub(super) fn parse_function_def_optional(&mut self) -> Arguments {
-        match self.parse_parameters() {
-            Ok(args) => args,
-            Err(_) => Arguments { args: vec![] },
-        }
+        let mark = self.pos;
+        self.parse_parameters().unwrap_or_else(|_| {
+            self.pos = mark;
+            Arguments { args: vec![] }
+        })
     }
 
     /// Parses a function definition, such as `def add(a, b); ret a + b`.
@@ -241,22 +275,29 @@ impl Parser {
 
         // 'def' NAME '(' [params] ')' ';' block
         if self.expect(TokenType::Keyword("def".to_string())).is_some()
-            && let TokenType::Name(name) = self.advance().r#type
+            && let Some((name, name_span)) = self.expect_name("a function name", false)
             && self.expect(TokenType::LParen).is_some()
             && let args = self.parse_function_def_optional()
             && self.expect(TokenType::RParen).is_some()
             && self.expect(TokenType::Semi).is_some()
             && let Ok(body) = self.parse_block()
         {
-            return Ok(Box::new(Stmt::FunctionDef { name, args, body }));
+            return Ok(Box::new(Stmt::new(
+                StmtKind::FunctionDef {
+                    name,
+                    name_span,
+                    args,
+                    body,
+                },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
         Err(ParserError {
             method: "parse_function_def".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -294,18 +335,22 @@ impl Parser {
     /// return_stmt: 'ret' [expressions]
     /// ```
     pub(super) fn parse_return_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
         // 'ret' [expressions]
         if self.expect(TokenType::Keyword("ret".to_string())).is_some()
             && let value = self.parse_return_stmt_optional()
         {
-            return Ok(Box::new(Stmt::Return { value }));
+            return Ok(Box::new(Stmt::new(
+                StmtKind::Return { value },
+                self.span_from(mark),
+            )));
         }
 
         Err(ParserError {
             method: "parse_return_stmt".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -332,8 +377,7 @@ impl Parser {
             Err(ParserError {
                 method: "parse_assignment_loop".to_string(),
                 token: self.peek().r#type.clone(),
-                line: self.peek().line,
-                col: self.peek().col,
+                span: self.peek().span,
             })
         } else {
             Ok(results)
@@ -354,7 +398,10 @@ impl Parser {
             && let Ok(value) = self.parse_expressions()
             && self.expect(TokenType::Operator("=".to_string())).is_none()
         {
-            let res = Box::new(Stmt::Assign { targets, value });
+            let res = Box::new(Stmt::new(
+                StmtKind::Assign { targets, value },
+                self.span_from(mark),
+            ));
             debug!("parse_assignment: successfully parsed: {:?}", res);
             return Ok(res);
         }
@@ -363,8 +410,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_assignment".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -407,8 +453,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_compound_stmt".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -437,7 +482,10 @@ impl Parser {
         debug!("parse_simple_stmt: trying to parse expressions");
         if let Ok(expr) = self.parse_expressions() {
             debug!("parse_simple_stmt: successfully parsed expressions");
-            return Ok(Box::new(Stmt::Expr { value: expr }));
+            return Ok(Box::new(Stmt::new(
+                StmtKind::Expr { value: expr },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
@@ -455,7 +503,7 @@ impl Parser {
             .is_some()
         {
             debug!("parse_simple_stmt: successfully parsed 'break'");
-            return Ok(Box::new(Stmt::Break));
+            return Ok(Box::new(Stmt::new(StmtKind::Break, self.span_from(mark))));
         }
         self.pos = mark;
 
@@ -465,15 +513,17 @@ impl Parser {
             .is_some()
         {
             debug!("parse_simple_stmt: successfully parsed 'cont'");
-            return Ok(Box::new(Stmt::Continue));
+            return Ok(Box::new(Stmt::new(
+                StmtKind::Continue,
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
 
         Err(ParserError {
             method: "parse_simple_stmt".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -498,8 +548,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_simple_stmts".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -530,8 +579,7 @@ impl Parser {
         Err(ParserError {
             method: "parse_statement".to_string(),
             token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
+            span: self.peek().span,
         })
     }
 
@@ -559,34 +607,5 @@ impl Parser {
 
         debug!("parse_statements: successfully parsed statement+");
         Ok(results)
-    }
-
-    pub(super) fn parse_statements_optional(&mut self) -> Vec<Stmt> {
-        self.parse_statements().unwrap_or_default()
-    }
-
-    /// Parses a whole program up to the end of the file.
-    ///
-    /// ```text
-    /// program[mod]:
-    ///     | [statements] EOF
-    /// ```
-    pub(super) fn parse_program(&mut self) -> Result<Mod, ParserError> {
-        let mark = self.pos;
-
-        // [statements] EOF
-        if let res = self.parse_statements_optional()
-            && self.expect(TokenType::Eof).is_some()
-        {
-            return Ok(Mod::Module { body: res });
-        }
-        self.pos = mark;
-
-        Err(ParserError {
-            method: "parse_program".to_string(),
-            token: self.peek().r#type.clone(),
-            line: self.peek().line,
-            col: self.peek().col,
-        })
     }
 }

@@ -1,0 +1,5 @@
+print("hi", 1, 2)
+print(3 - 5)
+print(-7)
+print(true)
+print(false)

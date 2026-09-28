@@ -22,3 +22,9 @@ target
 
 # Added by stone
 /build/
+
+# fuzzing output; only the hand-written .st seeds in fuzz/corpus are tracked
+/fuzz/artifacts/
+/fuzz/coverage/
+/fuzz/corpus/*/*
+!/fuzz/corpus/*/*.st

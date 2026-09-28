@@ -30,6 +30,7 @@ pub struct Token {
 }
 
 /// Words that are lexed as keywords instead of names, such as `def` and `ret`.
-pub static RESERVED_KEYWORDS: [&str; 12] = [
-    "and", "break", "cont", "def", "elif", "else", "false", "if", "none", "or", "ret", "true",
+pub static RESERVED_KEYWORDS: [&str; 14] = [
+    "and", "break", "cont", "def", "elif", "else", "false", "if", "none", "not", "or", "ret",
+    "true", "while",
 ];

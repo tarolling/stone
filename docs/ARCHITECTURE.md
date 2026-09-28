@@ -32,3 +32,18 @@ stone is a language that is both compiled and interpreted, depending on the deve
 | `stdlib` | names of the builtins shared by both backends |
 | `driver` | the run/build pipelines |
 
+## Fuzzing
+
+The `fuzz/` crate uses cargo-fuzz (libFuzzer, nightly Rust). It is a separate crate, so the main crate still depends only on `clap`.
+
+| target | input | checks |
+| --- | --- | --- |
+| `lex`, `parse` | arbitrary text | the front end returns tokens, a module, or an error, and never panics, overflows the stack, or takes exponential time |
+| `interpret` | arbitrary text | the interpreter finishes under `fuzz::LIMITS` without panicking |
+| `codegen` | arbitrary text that parses | `X64Generator::assemble` succeeds or returns an error, without gcc |
+| `structured` | programs from `stone_fuzz::generate` | the same stages on deep, valid programs |
+| `differential` | programs from `stone_fuzz::generate` | `stone run` and `stone build` print the same output |
+
+`stone_fuzz::generate` writes source text rule by rule from the grammar, tracking scope so every name and call is defined. It stays inside the subset where both backends agree. That means no strings, booleans, or nested functions, one argument per `print`, no globals read from functions, and every `while` bounded by a counter. `differential` skips a program if the interpreter rejects it (out of fuel, division by zero) or if it prints anything outside `0..=4095`, because compiled `print` treats larger or negative values as string pointers.
+
+Seeds for the text targets are the `.st` programs in `fuzz/corpus/<target>/`. `fuzz/stone.dict` lists stone's tokens.

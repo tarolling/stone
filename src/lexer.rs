@@ -4,8 +4,32 @@
 //! `Newline`, `Indent`, and later `Dedent` tokens around the function body.
 
 use crate::token::{RESERVED_KEYWORDS, Token, TokenType};
+use std::error::Error;
+use std::fmt::Display;
 
 const TAB_SIZE: usize = 4;
+
+/// Error for source text that cannot be turned into tokens.
+///
+/// For example, lexing `99999999999999999999` fails because the literal does not fit in an `i64`.
+#[derive(Debug, PartialEq)]
+pub struct LexError {
+    pub message: String,
+    pub line: usize,
+    pub col: usize,
+}
+
+impl Display for LexError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "{} on line {}, col {}",
+            self.message, self.line, self.col
+        )
+    }
+}
+
+impl Error for LexError {}
 
 /// Lexer that converts source code into a list of [`Token`]s.
 pub struct Lexer {
@@ -34,14 +58,15 @@ impl Lexer {
     /// Lexes the entire input and returns its tokens, ending with `Eof`.
     ///
     /// For example, `x = 1` produces `Name("x")`, `Operator("=")`, `Number(1)`, `Newline`, and `Eof`.
-    pub fn lex(&mut self) -> Vec<Token> {
+    /// Integer literals that do not fit in an `i64` produce a [`LexError`].
+    pub fn lex(&mut self) -> Result<Vec<Token>, LexError> {
         let mut tokens: Vec<Token> = vec![];
         loop {
-            let tok = self.next_token();
+            let tok = self.next_token()?;
             if matches!(tok.r#type, TokenType::Eof) {
-                // newline before EOF if missing
-                if !tokens.is_empty()
-                    && !matches!(tokens.last().unwrap().r#type, TokenType::Newline)
+                // newline before EOF if missing; a trailing dedent already follows one
+                if let Some(last) = tokens.last()
+                    && !matches!(last.r#type, TokenType::Newline | TokenType::Dedent)
                 {
                     tokens.push(Token {
                         r#type: TokenType::Newline,
@@ -63,7 +88,7 @@ impl Lexer {
             }
             tokens.push(tok);
         }
-        tokens
+        Ok(tokens)
     }
 
     fn peek(&self) -> Option<char> {
@@ -122,13 +147,13 @@ impl Lexer {
     ///
     /// For example, dropping back two indentation levels at once produces two `Dedent` tokens.
     fn handle_indentation(&mut self) -> Option<Token> {
-        if !self.at_line_start {
-            return None;
-        }
-
-        // return pending dedents first
+        // return pending dedents first, even though the line start has already been consumed
         if !self.pending_dedents.is_empty() {
             return Some(self.pending_dedents.remove(0));
+        }
+
+        if !self.at_line_start {
+            return None;
         }
 
         let indent = self.calculate_indent();
@@ -159,7 +184,8 @@ impl Lexer {
             if !self.pending_dedents.is_empty() {
                 Some(self.pending_dedents.remove(0))
             } else {
-                Some(self.next_token())
+                // next_token keeps lexing the line
+                None
             }
         } else {
             self.at_line_start = false;
@@ -167,17 +193,22 @@ impl Lexer {
         }
     }
 
-    fn lex_number(&mut self) -> i64 {
+    fn lex_number(&mut self) -> Result<i64, LexError> {
+        let (line, col) = (self.line, self.col);
         let mut num = String::new();
         while let Some(ch) = self.peek() {
-            if ch.is_numeric() {
+            if ch.is_ascii_digit() {
                 num.push(ch);
                 self.advance();
             } else {
                 break;
             }
         }
-        num.parse().unwrap()
+        num.parse().map_err(|_| LexError {
+            message: format!("integer literal {} is too large", num),
+            line,
+            col,
+        })
     }
 
     fn lex_name(&mut self) -> String {
@@ -193,109 +224,114 @@ impl Lexer {
         ident
     }
 
-    fn next_token(&mut self) -> Token {
-        // handle indentation at line start
-        if let Some(tok) = self.handle_indentation() {
-            return tok;
-        }
+    fn next_token(&mut self) -> Result<Token, LexError> {
+        // loop rather than recurse past unknown characters, so long runs cannot overflow the stack
+        loop {
+            // handle indentation at line start
+            if let Some(tok) = self.handle_indentation() {
+                return Ok(tok);
+            }
 
-        self.skip_whitespace();
-        let line = self.line;
-        let col = self.col;
+            self.skip_whitespace();
+            let line = self.line;
+            let col = self.col;
 
-        match self.peek() {
-            None => Token {
-                r#type: TokenType::Eof,
-                line,
-                col,
-            },
-            Some('\n') => {
-                self.advance();
-                self.at_line_start = true;
-                Token {
-                    r#type: TokenType::Newline,
+            let tok = match self.peek() {
+                None => Token {
+                    r#type: TokenType::Eof,
                     line,
                     col,
-                }
-            }
-            Some(';') => {
-                self.advance();
-                Token {
-                    r#type: TokenType::Semi,
-                    line,
-                    col,
-                }
-            }
-            Some(',') => {
-                self.advance();
-                Token {
-                    r#type: TokenType::Comma,
-                    line,
-                    col,
-                }
-            }
-            Some('(') => {
-                self.advance();
-                Token {
-                    r#type: TokenType::LParen,
-                    line,
-                    col,
-                }
-            }
-            Some(')') => {
-                self.advance();
-                Token {
-                    r#type: TokenType::RParen,
-                    line,
-                    col,
-                }
-            }
-            Some('+') | Some('-') | Some('*') | Some('/') | Some('=') => {
-                let op = self.advance().unwrap().to_string();
-                Token {
-                    r#type: TokenType::Operator(op),
-                    line,
-                    col,
-                }
-            }
-            Some('"') => {
-                self.advance();
-                let mut s = String::new();
-                while let Some(ch) = self.peek() {
-                    if ch == '"' {
-                        self.advance();
-                        break;
-                    }
-                    s.push(ch);
+                },
+                Some('\n') => {
                     self.advance();
+                    self.at_line_start = true;
+                    Token {
+                        r#type: TokenType::Newline,
+                        line,
+                        col,
+                    }
                 }
-                Token {
-                    r#type: TokenType::String(s),
-                    line,
-                    col,
+                Some(';') => {
+                    self.advance();
+                    Token {
+                        r#type: TokenType::Semi,
+                        line,
+                        col,
+                    }
                 }
-            }
-            Some(ch) if ch.is_numeric() => {
-                let num = self.lex_number();
-                Token {
-                    r#type: TokenType::Number(num),
-                    line,
-                    col,
+                Some(',') => {
+                    self.advance();
+                    Token {
+                        r#type: TokenType::Comma,
+                        line,
+                        col,
+                    }
                 }
-            }
-            Some(ch) if ch.is_alphabetic() => {
-                let ident = self.lex_name();
-                let r#type = if RESERVED_KEYWORDS.contains(&ident.as_str()) {
-                    TokenType::Keyword(ident)
-                } else {
-                    TokenType::Name(ident)
-                };
-                Token { r#type, line, col }
-            }
-            _ => {
-                self.advance();
-                self.next_token()
-            }
+                Some('(') => {
+                    self.advance();
+                    Token {
+                        r#type: TokenType::LParen,
+                        line,
+                        col,
+                    }
+                }
+                Some(')') => {
+                    self.advance();
+                    Token {
+                        r#type: TokenType::RParen,
+                        line,
+                        col,
+                    }
+                }
+                Some('+') | Some('-') | Some('*') | Some('/') | Some('=') => {
+                    let op = self.advance().unwrap().to_string();
+                    Token {
+                        r#type: TokenType::Operator(op),
+                        line,
+                        col,
+                    }
+                }
+                Some('"') => {
+                    self.advance();
+                    let mut s = String::new();
+                    while let Some(ch) = self.peek() {
+                        if ch == '"' {
+                            self.advance();
+                            break;
+                        }
+                        s.push(ch);
+                        self.advance();
+                    }
+                    Token {
+                        r#type: TokenType::String(s),
+                        line,
+                        col,
+                    }
+                }
+                Some(ch) if ch.is_ascii_digit() => {
+                    let num = self.lex_number()?;
+                    Token {
+                        r#type: TokenType::Number(num),
+                        line,
+                        col,
+                    }
+                }
+                Some(ch) if ch.is_alphabetic() => {
+                    let ident = self.lex_name();
+                    let r#type = if RESERVED_KEYWORDS.contains(&ident.as_str()) {
+                        TokenType::Keyword(ident)
+                    } else {
+                        TokenType::Name(ident)
+                    };
+                    Token { r#type, line, col }
+                }
+                Some(_) => {
+                    // skip characters that cannot start a token
+                    self.advance();
+                    continue;
+                }
+            };
+            return Ok(tok);
         }
     }
 }
@@ -312,7 +348,7 @@ ret y
 "#;
 
         let mut lexer = Lexer::new(source);
-        let tokens = lexer.lex();
+        let tokens = lexer.lex().unwrap();
         assert_eq!(tokens.len(), 14);
         assert_eq!(
             *tokens.first().unwrap(),
@@ -436,7 +472,7 @@ ret y
 "#;
 
         let mut lexer = Lexer::new(source);
-        let tokens = lexer.lex();
+        let tokens = lexer.lex().unwrap();
         assert_eq!(tokens.len(), 14);
         assert_eq!(
             *tokens.first().unwrap(),
@@ -560,7 +596,7 @@ testing()
 "#;
 
         let mut lexer = Lexer::new(source);
-        let tokens = lexer.lex();
+        let tokens = lexer.lex().unwrap();
         assert_eq!(tokens.len(), 16);
         assert_eq!(
             *tokens.first().unwrap(),
@@ -706,7 +742,7 @@ testing()
 testing(1, 2, 3)"#;
 
         let mut lexer = Lexer::new(source);
-        let tokens = lexer.lex();
+        let tokens = lexer.lex().unwrap();
         assert_eq!(
             tokens,
             vec![
@@ -842,5 +878,56 @@ testing(1, 2, 3)"#;
                 },
             ],
         );
+    }
+
+    #[test]
+    fn integer_literal_overflow_is_an_error() {
+        let err = Lexer::new("x = 99999999999999999999\n").lex().unwrap_err();
+        assert_eq!(err.line, 1);
+        assert_eq!(err.col, 5);
+    }
+
+    #[test]
+    fn non_ascii_digits_are_skipped() {
+        // '\u{0663}' is ARABIC-INDIC DIGIT THREE, which is numeric but not an ASCII digit
+        let tokens = Lexer::new("\u{0663}\n").lex().unwrap();
+        assert_eq!(tokens.last().unwrap().r#type, TokenType::Eof);
+    }
+
+    #[test]
+    fn long_run_of_unknown_characters() {
+        let source = "@".repeat(1_000_000);
+        let tokens = Lexer::new(&source).lex().unwrap();
+        assert_eq!(tokens.last().unwrap().r#type, TokenType::Eof);
+    }
+
+    #[test]
+    fn indented_block_at_end_of_file() {
+        let tokens = Lexer::new("if 1;\n    x = 1\n").lex().unwrap();
+        let types: Vec<TokenType> = tokens.into_iter().map(|t| t.r#type).collect();
+        assert_eq!(
+            types[types.len() - 3..],
+            [TokenType::Newline, TokenType::Dedent, TokenType::Eof]
+        );
+    }
+
+    #[test]
+    fn dropping_two_levels_emits_two_dedents() {
+        let tokens = Lexer::new("if 1;\n    if 1;\n        x = 1\ny = 2\n")
+            .lex()
+            .unwrap();
+        let types: Vec<TokenType> = tokens.into_iter().map(|t| t.r#type).collect();
+        let y = types
+            .iter()
+            .position(|t| *t == TokenType::Name("y".to_string()))
+            .unwrap();
+        assert_eq!(types[y - 2..y], [TokenType::Dedent, TokenType::Dedent]);
+    }
+
+    #[test]
+    fn while_and_not_are_keywords() {
+        let tokens = Lexer::new("while not x;\n").lex().unwrap();
+        assert_eq!(tokens[0].r#type, TokenType::Keyword("while".to_string()));
+        assert_eq!(tokens[1].r#type, TokenType::Keyword("not".to_string()));
     }
 }

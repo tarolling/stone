@@ -1,6 +1,10 @@
-use super::Parser;
+use super::{MAX_DEPTH, Parser};
 use crate::ast::*;
+use crate::lexer::Lexer;
 use crate::token::{Token, TokenType};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 /// Checks that this program parses into assignments and a return:
 ///
@@ -607,4 +611,93 @@ fn simple_function_multiple_args() {
             ]
         })
     );
+}
+
+/// Lexes and parses `source` on a separate thread, failing the test if parsing takes longer than
+/// `limit`.
+///
+/// For example, `parse_within("x = 1\n".to_string(), Duration::from_secs(5))` returns the parsed
+/// module.
+fn parse_within(source: String, limit: Duration) -> Result<Mod, ParserError> {
+    let (tx, rx) = mpsc::channel();
+    thread::spawn(move || {
+        let tokens = Lexer::new(&source).lex().unwrap();
+        let _ = tx.send(Parser::new(&tokens).parse());
+    });
+    rx.recv_timeout(limit)
+        .expect("parser did not finish in time")
+}
+
+#[test]
+fn nested_calls_parse_in_linear_time() {
+    let depth = 40;
+    let source = format!("{}x{}\n", "f(".repeat(depth), ")".repeat(depth));
+    assert!(parse_within(source, Duration::from_secs(5)).is_ok());
+}
+
+/// Builds `depth` nested `if 1;` statements around a single assignment.
+///
+/// For example, `nested_ifs(2)` returns `"if 1;\n    if 1;\n        x = 1\n"`.
+fn nested_ifs(depth: usize) -> String {
+    let mut source = String::new();
+    for level in 0..depth {
+        source += &format!("{}if 1;\n", "    ".repeat(level));
+    }
+    source + &format!("{}x = 1\n", "    ".repeat(depth))
+}
+
+#[test]
+fn nested_ifs_parse_in_linear_time() {
+    assert!(parse_within(nested_ifs(40), Duration::from_secs(5)).is_ok());
+}
+
+#[test]
+fn if_elif_else_chain() {
+    let source = "if 1;\n    x = 1\nelif 2;\n    x = 2\nelif 3;\n    x = 3\nelse;\n    x = 4\n";
+    let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
+    let Stmt::If { orelse, .. } = &body[0] else {
+        panic!("expected if statement");
+    };
+    let Stmt::If { orelse, .. } = &orelse[0] else {
+        panic!("expected first elif");
+    };
+    let Stmt::If { orelse, .. } = &orelse[0] else {
+        panic!("expected second elif");
+    };
+    assert!(matches!(orelse[..], [Stmt::Assign { .. }]));
+}
+
+#[test]
+fn deeply_nested_input_is_an_error() {
+    let depth = 100_000;
+    let sources = [
+        format!("{}x{}\n", "f(".repeat(depth), ")".repeat(depth)),
+        format!("x = {}1\n", "-".repeat(depth)),
+        // indentation grows quadratically, so only go just past the limit
+        nested_ifs(MAX_DEPTH + 1),
+    ];
+    for source in sources {
+        assert!(parse_within(source, Duration::from_secs(5)).is_err());
+    }
+}
+
+#[test]
+fn nesting_just_under_the_limit_still_parses() {
+    // the statement's own expression takes one level, so leave room for it
+    let depth = MAX_DEPTH - 1;
+    let sources = [
+        format!("{}x{}\n", "f(".repeat(depth), ")".repeat(depth)),
+        format!("x = {}1\n", "-".repeat(depth)),
+        nested_ifs(depth),
+    ];
+    for source in sources {
+        assert!(parse_within(source, Duration::from_secs(5)).is_ok());
+    }
+}
+
+#[test]
+fn nesting_just_over_the_limit_is_an_error() {
+    let depth = MAX_DEPTH;
+    let source = format!("{}x{}\n", "f(".repeat(depth), ")".repeat(depth));
+    assert!(parse_within(source, Duration::from_secs(5)).is_err());
 }

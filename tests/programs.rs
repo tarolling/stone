@@ -15,18 +15,11 @@ const PROGRAM_DIRS: [&str; 2] = ["examples", "tests/programs"];
 /// Programs a backend can't handle yet, as `(file stem, backend name, reason)`.
 ///
 /// For example, `("printing", "build", "...")` skips `printing.st` under `stone build` only.
-const SKIPS: &[(&str, &str, &str)] = &[
-    (
-        "printing",
-        "build",
-        "compiled print shows only its first argument, nothing for negatives, and 1/0 for booleans",
-    ),
-    (
-        "recursion",
-        "run",
-        "interpreted `ret` inside `if` is dropped, and parameters overwrite the caller's variables",
-    ),
-];
+const SKIPS: &[(&str, &str, &str)] = &[(
+    "printing",
+    "build",
+    "compiled print shows only its first argument, nothing for negatives, and 1/0 for booleans",
+)];
 
 /// A way of executing a stone program.
 #[derive(Clone, Copy)]

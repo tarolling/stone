@@ -94,40 +94,32 @@ impl Parser {
     pub(super) fn parse_elif_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // 'elif' expression ';' block elif_stmt
+        // both alternatives share this prefix, so parse it once instead of backtracking
         if self
             .expect(TokenType::Keyword("elif".to_string()))
             .is_some()
             && let Ok(test) = self.parse_expression()
             && self.expect(TokenType::Semi).is_some()
             && let Ok(body) = self.parse_block()
-            && let Ok(orelse) = self.parse_elif_stmt()
         {
-            return Ok(Box::new(Stmt::If {
-                test,
-                body,
-                orelse: vec![*orelse],
-            }));
-        }
-        self.pos = mark;
+            let mark = self.pos;
 
-        // 'elif' expression ';' block [else_block]
-        if self
-            .expect(TokenType::Keyword("elif".to_string()))
-            .is_some()
-            && let Ok(test) = self.parse_expression()
-            && self.expect(TokenType::Semi).is_some()
-            && let Ok(body) = self.parse_block()
-        {
-            if let Ok(orelse) = self.parse_else_block() {
-                return Ok(Box::new(Stmt::If { test, body, orelse }));
+            // ... elif_stmt
+            if let Ok(orelse) = self.parse_elif_stmt() {
+                return Ok(Box::new(Stmt::If {
+                    test,
+                    body,
+                    orelse: vec![*orelse],
+                }));
             }
+            self.pos = mark;
 
-            return Ok(Box::new(Stmt::If {
-                test,
-                body,
-                orelse: vec![],
-            }));
+            // ... [else_block]
+            let orelse = self.parse_else_block().unwrap_or_else(|_| {
+                self.pos = mark;
+                vec![]
+            });
+            return Ok(Box::new(Stmt::If { test, body, orelse }));
         }
         self.pos = mark;
 
@@ -149,36 +141,30 @@ impl Parser {
     pub(super) fn parse_if_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // 'if' expression ';' block elif_stmt
+        // both alternatives share this prefix, so parse it once instead of backtracking
         if self.expect(TokenType::Keyword("if".to_string())).is_some()
             && let Ok(test) = self.parse_expression()
             && self.expect(TokenType::Semi).is_some()
             && let Ok(body) = self.parse_block()
-            && let Ok(orelse) = self.parse_elif_stmt()
         {
-            return Ok(Box::new(Stmt::If {
-                test,
-                body,
-                orelse: vec![*orelse],
-            }));
-        }
-        self.pos = mark;
+            let mark = self.pos;
 
-        // 'if' expression ';' block [else_block]
-        if self.expect(TokenType::Keyword("if".to_string())).is_some()
-            && let Ok(test) = self.parse_expression()
-            && self.expect(TokenType::Semi).is_some()
-            && let Ok(body) = self.parse_block()
-        {
-            if let Ok(orelse) = self.parse_else_block() {
-                return Ok(Box::new(Stmt::If { test, body, orelse }));
-            } else {
+            // ... elif_stmt
+            if let Ok(orelse) = self.parse_elif_stmt() {
                 return Ok(Box::new(Stmt::If {
                     test,
                     body,
-                    orelse: vec![],
+                    orelse: vec![*orelse],
                 }));
             }
+            self.pos = mark;
+
+            // ... [else_block]
+            let orelse = self.parse_else_block().unwrap_or_else(|_| {
+                self.pos = mark;
+                vec![]
+            });
+            return Ok(Box::new(Stmt::If { test, body, orelse }));
         }
         self.pos = mark;
 
@@ -287,7 +273,7 @@ impl Parser {
         // NEWLINE INDENT statements DEDENT
         if self.expect(TokenType::Newline).is_some()
             && self.expect(TokenType::Indent).is_some()
-            && let Ok(stmts) = self.parse_statements()
+            && let Ok(stmts) = self.nested(Self::parse_statements)
             && self.expect(TokenType::Dedent).is_some()
         {
             return Ok(stmts);

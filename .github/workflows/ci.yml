@@ -22,3 +22,30 @@ jobs:
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose
+
+  fuzz:
+
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Install nightly and cargo-fuzz
+      run: |
+        rustup toolchain install nightly --profile minimal
+        cargo install cargo-fuzz --locked
+    - name: Test the program generator
+      run: cargo test --manifest-path fuzz/Cargo.toml
+    - name: Build fuzz targets
+      run: cargo +nightly fuzz build
+    # the differential target invokes gcc per input, so it is too slow for every push
+    - name: Fuzz each crash target briefly
+      run: |
+        for target in lex parse interpret codegen structured; do
+          cargo +nightly fuzz run "$target" -- -dict=fuzz/stone.dict -max_total_time=60 -timeout=10
+        done
+    - name: Upload crashing inputs
+      if: failure()
+      uses: actions/upload-artifact@v4
+      with:
+        name: fuzz-artifacts
+        path: fuzz/artifacts

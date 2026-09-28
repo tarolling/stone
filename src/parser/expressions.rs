@@ -518,7 +518,7 @@ impl Parser {
 
         // '+' factor
         if self.expect(TokenType::Operator("+".to_string())).is_some()
-            && let Ok(factor) = self.parse_factor()
+            && let Ok(factor) = self.nested(Self::parse_factor)
         {
             return Ok(Box::new(Expr::UnaryOp {
                 op: UnaryOp::UnaryAdd,
@@ -529,7 +529,7 @@ impl Parser {
 
         // '-' factor
         if self.expect(TokenType::Operator("-".to_string())).is_some()
-            && let Ok(factor) = self.parse_factor()
+            && let Ok(factor) = self.nested(Self::parse_factor)
         {
             return Ok(Box::new(Expr::UnaryOp {
                 op: UnaryOp::UnarySub,
@@ -698,7 +698,7 @@ impl Parser {
 
         // 'not' inversion
         if self.expect(TokenType::Keyword("not".to_string())).is_some()
-            && let Ok(res) = self.parse_inversion()
+            && let Ok(res) = self.nested(Self::parse_inversion)
         {
             return Ok(Box::new(Expr::UnaryOp {
                 op: UnaryOp::Not,
@@ -751,12 +751,11 @@ impl Parser {
     ///     | inversion
     /// ```
     pub(super) fn parse_conjunction(&mut self) -> ParseExprResult {
-        let mark = self.pos;
+        // both alternatives start with inversion, so parse it once instead of backtracking
+        let conj = self.parse_inversion()?;
 
         // inversion ('and' inversion )+
-        if let Ok(conj) = self.parse_inversion()
-            && let Ok(exprs) = self.parse_conjunction_loop()
-        {
+        if let Ok(exprs) = self.parse_conjunction_loop() {
             let mut values = vec![*conj];
             values.extend(exprs);
 
@@ -765,10 +764,9 @@ impl Parser {
                 values,
             }));
         }
-        self.pos = mark;
 
         // inversion
-        self.parse_inversion()
+        Ok(conj)
     }
 
     /// Parses the repeated `or` operands of a disjunction, such as `or b or c` in `a or b or c`.
@@ -810,11 +808,11 @@ impl Parser {
     ///     | conjunction
     /// ```
     pub(super) fn parse_disjunction(&mut self) -> ParseExprResult {
+        // both alternatives start with conjunction, so parse it once instead of backtracking
+        let conj = self.parse_conjunction()?;
+
         // conjunction ('or' conjunction )+
-        let mark = self.pos;
-        if let Ok(conj) = self.parse_conjunction()
-            && let Ok(exprs) = self.parse_disjunction_loop()
-        {
+        if let Ok(exprs) = self.parse_disjunction_loop() {
             let mut values = vec![*conj];
             values.extend(exprs);
 
@@ -823,10 +821,9 @@ impl Parser {
                 values,
             }));
         }
-        self.pos = mark;
 
         // conjunction
-        self.parse_conjunction()
+        Ok(conj)
     }
 
     /// Parses a single expression, such as `x + 1 or y`.
@@ -836,7 +833,7 @@ impl Parser {
     ///     | disjunction
     /// ```
     pub(super) fn parse_expression(&mut self) -> ParseExprResult {
-        self.parse_disjunction()
+        self.nested(Self::parse_disjunction)
     }
 
     /// Parses one or more comma-separated expressions, such as `1, 2`.

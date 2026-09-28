@@ -16,11 +16,12 @@ pub mod token;
 /// Prints to stderr in debug builds only, so that program output on stdout stays clean.
 ///
 /// For example, `debug!("{:?}", tokens)` dumps the token stream under `cargo run` but not under
-/// `cargo run --release`.
+/// `cargo run --release`. It is also silent under `cargo fuzz`, which builds with debug assertions
+/// but would slow to a crawl printing traces for every input.
 #[macro_export]
 macro_rules! debug {
     ($($arg:tt)*) => {
-        if cfg!(debug_assertions) {
+        if cfg!(debug_assertions) && !cfg!(fuzzing) {
             eprintln!($($arg)*);
         }
     };

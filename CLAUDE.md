@@ -12,13 +12,14 @@ stone is a small Python-like language implemented in Rust (edition 2024, only de
 - Test: `cargo test`. CI also runs `cargo fmt --check` and `cargo clippy --all-targets -- -D warnings`
 - Single test: `cargo test <name>` (e.g. `cargo test simple_functions`). Unit tests live in `#[cfg(test)]` modules in `src/lexer.rs`, `src/parser/tests.rs`, and `src/driver.rs`
 - Golden-output tests: `tests/programs.rs` runs every `.st` in `examples/` and `tests/programs/` through both `stone run` and `stone build`, comparing stdout with the sibling `.out` file. Programs a backend can't handle yet are listed in `SKIPS` with a reason. Add a program plus its `.out` to cover new behavior
+- Fuzzing: the `fuzz/` crate (cargo-fuzz, nightly) has crash targets `lex`, `parse`, `interpret`, `codegen`, and `structured`, plus `differential`, which compares `stone run` with `stone build` on generated programs. Run one with `cargo +nightly fuzz run parse -- -dict=fuzz/stone.dict`. `cargo test --manifest-path fuzz/Cargo.toml` checks the program generator on stable. Turn each crash into a regression test, as a unit test or a `tests/programs/` program
 - Interpret a file: `cargo run -- run examples/basics.st` (or `cargo run -- examples/basics.st`)
 - Compile a file: `cargo run -- build examples/basics.st [-o build/out]` writes `<output>.s`, then invokes `gcc -g -no-pie` to produce `<output>` (requires gcc on PATH; the default `build/out` is relative to the working directory)
 - Format: `cargo fmt`
 - Lint: `cargo clippy --all-targets`
 - `check` subcommand and REPL mode (no args) are `todo!()` stubs.
 
-The `debug!` macro (defined in `src/lib.rs`) prints to stderr only in debug builds, so `cargo run` shows token dumps; use `--release` or redirect stderr for clean output.
+The `debug!` macro (defined in `src/lib.rs`) prints to stderr only in debug builds (and never under `cargo fuzz`), so `cargo run` shows token dumps; use `--release` or redirect stderr for clean output.
 
 ## Workflow
 
@@ -37,7 +38,8 @@ Key pieces:
 - `src/token.rs`: `Token`/`TokenType` and `RESERVED_KEYWORDS`. The lexer (`src/lexer.rs`) emits Python-style `Indent`/`Dedent`/`Newline` tokens.
 - `src/ast.rs`: AST (`Mod`, `Stmt`, `Expr`, `Constant`, `ParserError`, the `Type` annotation enum, …), modeled on the ASDL in `docs/grammar/stone.asdl`.
 - `src/parser.rs`: hand-written recursive-descent PEG parser. The struct, token helpers, and `parse()` entry are here; rules live in `src/parser/expressions.rs` and `src/parser/statements.rs` as `pub(super)` methods so siblings can call each other. Functions mirror rule names in `docs/grammar/stone.gram` (derived from CPython's grammar, kept as `python_grammar.gram` for reference), e.g. `parse_t_primary`, `parse_star_targets`, `*_loop0` for repetition. Keep the `.gram`/`.asdl` docs in sync when changing syntax.
-- `src/interpreter.rs`: evaluates the AST directly using a scope stack; `ControlFlow` carries break/continue/return.
+- `src/interpreter.rs`: evaluates the AST directly using a scope stack; `ControlFlow` carries break/continue/return. `Limits` bounds fuel (loop iterations plus calls) and total evaluation depth, and `print` writes to an injectable writer (`driver::interpret_with`).
+- Every stage must return an error, never panic, on bad input: `LexError` for bad literals, `parser::MAX_DEPTH` for nesting, `Limits` in the interpreter, and `Err(String)` from codegen (`X64Generator::assemble` generates assembly without gcc).
 - `src/codegen.rs`: `AssemblyGenerator` trait (`compile`/`scan`/`generate`/`emit`/`architecture`) plus assembler/linker discovery helpers.
 - `src/codegen/x64.rs`: `X64Generator`, emitting GNU-as Intel syntax (`.intel_syntax noprefix`). Pass 1 scans the AST for stack sizes per function/closure and string literals; pass 2 generates code into a buffer, which `compile` writes out. Top-level statements are wrapped in a synthesized `main` unless the program defines `main`. String literals are interned and emitted in `.rodata`.
 - Builtins: `BUILTINS` in `src/stdlib.rs` lists names shared by both backends; `src/codegen/x64/builtins.rs` emits hand-written assembly for each via `&mut dyn AssemblyGenerator`. Only builtins actually called are emitted (`collect_stdlib_calls`). Adding a builtin means updating `BUILTINS`, the x64 emitter, the dispatch in `X64Generator::emit_stdlib`, and the interpreter, plus a program in `tests/programs/`.

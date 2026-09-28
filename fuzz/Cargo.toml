@@ -1,0 +1,59 @@
+[package]
+name = "stone-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+arbitrary = "1"
+libfuzzer-sys = "0.4"
+stone = { path = ".." }
+
+# keep the fuzz crate out of any parent workspace
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "lex"
+path = "fuzz_targets/lex.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parse"
+path = "fuzz_targets/parse.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "interpret"
+path = "fuzz_targets/interpret.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "codegen"
+path = "fuzz_targets/codegen.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "structured"
+path = "fuzz_targets/structured.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential"
+path = "fuzz_targets/differential.rs"
+test = false
+doc = false
+bench = false

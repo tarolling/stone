@@ -11,6 +11,12 @@ use crate::stdlib::BUILTINS;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
+/// Arguments passed in registers under the System V ABI; stack-passed arguments are not
+/// supported yet, so calls and definitions with more than this many are rejected.
+///
+/// For example, `f(1, 2, 3, 4, 5, 6)` compiles but `f(1, 2, 3, 4, 5, 6, 7)` does not.
+const MAX_REGISTER_ARGS: usize = 6;
+
 /// Code generator for x86-64 that emits GNU assembler source in Intel syntax.
 ///
 /// For example, `1 + 2` becomes a `mov`, `push`, `mov`, `pop`, and `add rax, rbx` sequence.
@@ -53,15 +59,13 @@ struct ScanResult {
 
 impl AssemblyGenerator for X64Generator {
     fn compile(&mut self, module: &Mod, output: &Path) -> std::io::Result<()> {
-        // first pass: stack allocations, string literals, etc.
-        self.scan(module).map_err(std::io::Error::other)?;
-        self.generate(module).map_err(std::io::Error::other)?;
+        let text = self.assemble(module).map_err(std::io::Error::other)?;
 
         let assembly = output.with_extension("s");
         if let Some(dir) = output.parent() {
             std::fs::create_dir_all(dir)?;
         }
-        std::fs::write(&assembly, &self.output)?;
+        std::fs::write(&assembly, text)?;
 
         // assemble and link here for now
         let status = std::process::Command::new("gcc")
@@ -111,7 +115,7 @@ impl AssemblyGenerator for X64Generator {
                             if name == "main" {
                                 has_main = true;
                             }
-                            self.gen_stmt(stmt);
+                            self.gen_stmt(stmt)?;
                         }
                         _ => {
                             top_level_stmts.push(stmt);
@@ -132,7 +136,7 @@ impl AssemblyGenerator for X64Generator {
                     }
 
                     for stmt in top_level_stmts {
-                        self.gen_stmt(stmt);
+                        self.gen_stmt(stmt)?;
                     }
 
                     self.emit("\txor\trax, rax"); // return 0
@@ -168,6 +172,17 @@ impl Default for X64Generator {
 }
 
 impl X64Generator {
+    /// Runs both compilation passes and returns the assembly text, without assembling or linking.
+    ///
+    /// For example, assembling the module for `print(1)` returns text containing `main:` and
+    /// `call print`.
+    pub fn assemble(&mut self, module: &Mod) -> Result<String, String> {
+        // first pass: stack allocations, string literals, etc.
+        self.scan(module)?;
+        self.generate(module)?;
+        Ok(self.output.clone())
+    }
+
     pub fn new() -> Self {
         X64Generator {
             output: String::new(),
@@ -266,10 +281,10 @@ impl X64Generator {
 
     /// Returns the stack slot of a variable that the scan pass has already allocated.
     ///
-    /// Panics if the variable was never allocated, which means `scan` missed it.
-    fn slot_of(&self, name: &str) -> i32 {
+    /// Fails if the variable was never allocated, which means `scan` missed it.
+    fn slot_of(&self, name: &str) -> Result<i32, String> {
         self.lookup_var(name)
-            .unwrap_or_else(|| panic!("variable '{}' was not allocated during scan", name))
+            .ok_or_else(|| format!("variable '{}' was not allocated during scan", name))
     }
 
     fn new_label(&mut self, prefix: &str) -> String {
@@ -405,7 +420,7 @@ impl X64Generator {
         }
     }
 
-    fn gen_constant(&mut self, value: &Constant) {
+    fn gen_constant(&mut self, value: &Constant) -> Result<(), String> {
         match value {
             Constant::Int(n) => {
                 self.emit(&format!("\tmov\trax, {}", n));
@@ -420,14 +435,15 @@ impl X64Generator {
             Constant::None => {
                 self.emit("\txor\trax, rax"); // 0
             }
-            _ => panic!("unsupported constant value"),
+            other => return Err(format!("unsupported constant value {:?}", other)),
         }
+        Ok(())
     }
 
-    fn gen_expr(&mut self, expr: &Expr) {
+    fn gen_expr(&mut self, expr: &Expr) -> Result<(), String> {
         match expr {
             Expr::Constant { value, .. } => {
-                self.gen_constant(value);
+                self.gen_constant(value)?;
             }
 
             Expr::Name { id, ctx } => {
@@ -453,11 +469,11 @@ impl X64Generator {
 
             Expr::BinOp { op, left, right } => {
                 // evaluate right, push it
-                self.gen_expr(right);
+                self.gen_expr(right)?;
                 self.emit("\tpush\trax");
 
                 // evaluate left
-                self.gen_expr(left);
+                self.gen_expr(left)?;
 
                 // pop right into rbx
                 self.emit("\tpop\trbx");
@@ -468,7 +484,7 @@ impl X64Generator {
                     Operator::Multiply => self.emit("\timul\trax, rbx"),
                     Operator::Divide => {
                         // x64 division: rax = rdx:rax / rbx
-                        self.emit("\txor\trdx, rdx"); // clear rdx
+                        self.emit("\tcqo"); // sign-extend rax into rdx
                         self.emit("\tidiv\trbx");
                     }
                 }
@@ -476,7 +492,7 @@ impl X64Generator {
 
             Expr::BoolOp { op, values } => {
                 if values.is_empty() {
-                    return;
+                    return Ok(());
                 }
 
                 match op {
@@ -484,7 +500,7 @@ impl X64Generator {
                         let end_label = self.new_label("and_end");
 
                         for (i, val) in values.iter().enumerate() {
-                            self.gen_expr(val);
+                            self.gen_expr(val)?;
                             if i < values.len() - 1 {
                                 self.emit("\ttest\trax, rax");
                                 self.emit(&format!("\tjz\t{}", end_label));
@@ -496,7 +512,7 @@ impl X64Generator {
                         let end_label = self.new_label("or_end");
 
                         for (i, val) in values.iter().enumerate() {
-                            self.gen_expr(val);
+                            self.gen_expr(val)?;
                             if i < values.len() - 1 {
                                 self.emit("\ttest\trax, rax");
                                 self.emit(&format!("\tjnz\t{}", end_label));
@@ -508,7 +524,7 @@ impl X64Generator {
             }
 
             Expr::UnaryOp { op, operand } => {
-                self.gen_expr(operand);
+                self.gen_expr(operand)?;
                 match op {
                     UnaryOp::Not => {
                         self.emit("\ttest\trax, rax");
@@ -531,9 +547,9 @@ impl X64Generator {
             } => {
                 // simplified: single comparison only
                 if !comparators.is_empty() {
-                    self.gen_expr(left);
+                    self.gen_expr(left)?;
                     self.emit("\tpush\trax");
-                    self.gen_expr(&comparators[0]);
+                    self.gen_expr(&comparators[0])?;
                     self.emit("\tmov\trbx, rax");
                     self.emit("\tpop\trax");
                     self.emit("\tcmp\trax, rbx");
@@ -545,6 +561,13 @@ impl X64Generator {
             }
 
             Expr::Call { func, args } => {
+                if args.len() > MAX_REGISTER_ARGS {
+                    return Err(format!(
+                        "calls with more than {} arguments are not supported",
+                        MAX_REGISTER_ARGS
+                    ));
+                }
+
                 // save caller-saved registers
                 self.emit("\tpush\trdi");
                 self.emit("\tpush\trsi");
@@ -557,7 +580,7 @@ impl X64Generator {
                 let arg_regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 
                 for (i, arg) in args.iter().enumerate() {
-                    self.gen_expr(arg);
+                    self.gen_expr(arg)?;
                     if i < arg_regs.len() {
                         self.emit(&format!("\tmov\t{}, rax", arg_regs[i]));
                     } else {
@@ -582,11 +605,11 @@ impl X64Generator {
 
             Expr::Subscript { value, slice, .. } => {
                 // simplified array access, value is the base address
-                self.gen_expr(slice);
+                self.gen_expr(slice)?;
                 self.emit("\timul\trax, 8"); // scale by 8 bytes
                 self.emit("\tpush\trax");
 
-                self.gen_expr(value);
+                self.gen_expr(value)?;
                 self.emit("\tpop\trbx");
                 self.emit("\tadd\trax, rbx");
                 self.emit("\tmov\trax, QWORD PTR [rax]");
@@ -596,33 +619,34 @@ impl X64Generator {
                 // simplified: evaluate elements only, real lists need heap allocation
                 if !elts.is_empty() {
                     for elt in elts {
-                        self.gen_expr(elt);
+                        self.gen_expr(elt)?;
                     }
                 }
             }
         }
+        Ok(())
     }
 
-    fn gen_stmt(&mut self, stmt: &Stmt) {
+    fn gen_stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match stmt {
             Stmt::Assign { targets, value } => {
-                self.gen_expr(value);
+                self.gen_expr(value)?;
 
                 for target in targets {
                     match target {
                         Expr::Name { id, .. } => {
-                            let offset = self.slot_of(id);
+                            let offset = self.slot_of(id)?;
                             self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], rax", offset));
                         }
                         Expr::Subscript { value, slice, .. } => {
                             // store to array element
                             self.emit("\tpush\trax"); // save value
 
-                            self.gen_expr(slice);
+                            self.gen_expr(slice)?;
                             self.emit("\timul\trax, 8");
                             self.emit("\tpush\trax");
 
-                            self.gen_expr(value);
+                            self.gen_expr(value)?;
                             self.emit("\tpop\trbx");
                             self.emit("\tadd\trax, rbx");
 
@@ -635,7 +659,7 @@ impl X64Generator {
             }
             Stmt::Return { value } => {
                 if let Some(val) = value {
-                    self.gen_expr(val);
+                    self.gen_expr(val)?;
                 }
 
                 // function epilogue
@@ -645,7 +669,18 @@ impl X64Generator {
             }
 
             Stmt::FunctionDef { name, args, body } => {
-                let func_info = &self.env.functions[name];
+                if args.args.len() > MAX_REGISTER_ARGS {
+                    return Err(format!(
+                        "function '{}' has more than {} parameters, which is not supported",
+                        name, MAX_REGISTER_ARGS
+                    ));
+                }
+
+                let func_info = self
+                    .env
+                    .functions
+                    .get(name)
+                    .ok_or_else(|| format!("function '{}' was not scanned", name))?;
                 let locals = func_info.locals.clone();
                 let stack_size = align16(func_info.stack_size);
                 self.current_function = Some(name.clone());
@@ -670,7 +705,7 @@ impl X64Generator {
                 // save arguments to local variables
                 let arg_regs = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
                 for (i, arg) in args.args.iter().enumerate() {
-                    let offset = self.slot_of(&arg.arg);
+                    let offset = self.slot_of(&arg.arg)?;
                     if i < arg_regs.len() {
                         self.emit(&format!(
                             "\tmov\tQWORD PTR [rbp - {}], {}",
@@ -680,7 +715,7 @@ impl X64Generator {
                 }
 
                 for stmt in body {
-                    self.gen_stmt(stmt);
+                    self.gen_stmt(stmt)?;
                 }
 
                 // default return if no explicit return
@@ -703,13 +738,13 @@ impl X64Generator {
                 self.emit(&format!("{}:", start_label));
 
                 // test condition
-                self.gen_expr(test);
+                self.gen_expr(test)?;
                 self.emit("\ttest\trax, rax");
                 self.emit(&format!("\tjz\t{}", end_label));
 
                 // loop body
                 for stmt in body {
-                    self.gen_stmt(stmt);
+                    self.gen_stmt(stmt)?;
                 }
 
                 self.emit(&format!("\tjmp\t{}", start_label));
@@ -724,14 +759,14 @@ impl X64Generator {
                 let end_label = self.new_label("if_end");
 
                 // test condition
-                self.gen_expr(test);
+                self.gen_expr(test)?;
                 self.emit("\ttest\trax, rax");
 
                 if orelse.is_empty() {
                     self.emit(&format!("\tjz\t{}", end_label));
 
                     for stmt in body {
-                        self.gen_stmt(stmt);
+                        self.gen_stmt(stmt)?;
                     }
 
                     self.emit(&format!("{}:", end_label));
@@ -739,14 +774,14 @@ impl X64Generator {
                     self.emit(&format!("\tjz\t{}", else_label));
 
                     for stmt in body {
-                        self.gen_stmt(stmt);
+                        self.gen_stmt(stmt)?;
                     }
 
                     self.emit(&format!("\tjmp\t{}", end_label));
                     self.emit(&format!("{}:", else_label));
 
                     for stmt in orelse {
-                        self.gen_stmt(stmt);
+                        self.gen_stmt(stmt)?;
                     }
 
                     self.emit(&format!("{}:", end_label));
@@ -763,11 +798,11 @@ impl X64Generator {
 
                 // initialize counter
                 if let Expr::Name { id, .. } = &**target {
-                    let offset = self.slot_of(id);
+                    let offset = self.slot_of(id)?;
                     self.emit(&format!("\tmov\tQWORD PTR [rbp - {}], 0", offset));
 
                     // get limit
-                    self.gen_expr(iter);
+                    self.gen_expr(iter)?;
                     self.emit("\tpush\trax");
 
                     self.emit(&format!("{}:", start_label));
@@ -781,7 +816,7 @@ impl X64Generator {
 
                     // body
                     for stmt in body {
-                        self.gen_stmt(stmt);
+                        self.gen_stmt(stmt)?;
                     }
 
                     // increment
@@ -797,7 +832,7 @@ impl X64Generator {
             }
 
             Stmt::Expr { value } => {
-                self.gen_expr(value);
+                self.gen_expr(value)?;
             }
 
             Stmt::Break => {
@@ -822,6 +857,7 @@ impl X64Generator {
                 }
             }
         }
+        Ok(())
     }
 
     /// Returns the standard library functions that the module calls.
@@ -992,4 +1028,33 @@ impl X64Generator {
 /// For example, `align16(20)` returns `32` and `align16(32)` returns `32`.
 fn align16(size: i32) -> i32 {
     (size + 15) & !15
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::parse;
+
+    /// Parses and assembles `source` without invoking gcc.
+    fn assemble(source: &str) -> Result<String, String> {
+        let module = parse(source).map_err(|e| e.to_string())?;
+        X64Generator::new().assemble(&module)
+    }
+
+    #[test]
+    fn assemble_returns_assembly_text() {
+        let assembly = assemble("print(1)\n").unwrap();
+        assert!(assembly.contains("main:"));
+        assert!(assembly.contains("\tcall\tprint"));
+    }
+
+    #[test]
+    fn more_than_six_parameters_is_an_error() {
+        assert!(assemble("def f(a, b, c, d, e, g, h);\n    ret a\n").is_err());
+    }
+
+    #[test]
+    fn more_than_six_arguments_is_an_error() {
+        assert!(assemble("print(1, 2, 3, 4, 5, 6, 7)\n").is_err());
+    }
 }

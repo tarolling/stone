@@ -4,6 +4,7 @@
 
 use crate::ast::{BoolOp, CompOp, Constant, Expr, Mod, Operator, Stmt, UnaryOp};
 use std::collections::HashMap;
+use std::io::Write;
 use std::rc::Rc;
 
 pub enum ControlFlow {
@@ -13,7 +14,33 @@ pub enum ControlFlow {
     Continue,
 }
 
-pub struct Interpreter {
+/// Bounds on how much work a program may do before the interpreter stops it with an error.
+///
+/// For example, `Limits { fuel: 1_000, max_depth: 200 }` allows at most 1,000 loop iterations
+/// and calls combined, with statements, expressions, and calls nested at most 200 deep in total.
+#[derive(Clone, Copy, Debug)]
+pub struct Limits {
+    /// Loop iterations and function calls allowed in total.
+    pub fuel: u64,
+    /// Deepest nesting of statement and expression evaluation allowed, counting across calls.
+    ///
+    /// This bounds the interpreter's own recursion, and so its stack use. A recursive stone
+    /// function uses several levels per call, so `def f(n); ret f(n - 1)` uses about three.
+    pub max_depth: usize,
+}
+
+impl Limits {
+    /// No practical limit on fuel, and a depth that keeps evaluation on the main thread's stack.
+    ///
+    /// Each level takes up to about 5 KiB of stack in debug builds, so 1,000 levels stays inside
+    /// the main thread's 8 MiB.
+    pub const DEFAULT: Limits = Limits {
+        fuel: u64::MAX,
+        max_depth: 1_000,
+    };
+}
+
+pub struct Interpreter<'out> {
     // global variables
     globals: HashMap<String, Constant>,
     /// Stack of local scopes, with the innermost scope last.
@@ -22,21 +49,83 @@ pub struct Interpreter {
     ///
     /// For example, `def add(a, b); ret a + b` is stored as `"add" -> (["a", "b"], body)`.
     functions: HashMap<String, (Vec<String>, Rc<Vec<Stmt>>)>,
+    /// Where `print` writes, which is stdout unless a caller captures it.
+    out: Box<dyn Write + 'out>,
+    limits: Limits,
+    /// Fuel spent so far, compared against [`Limits::fuel`].
+    fuel_used: u64,
+    /// Current nesting of `eval_stmt` and `eval_expr`, compared against [`Limits::max_depth`].
+    depth: usize,
 }
 
-impl Default for Interpreter {
+impl Default for Interpreter<'static> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Interpreter {
+impl Interpreter<'static> {
+    /// Creates an interpreter that prints to stdout with [`Limits::DEFAULT`].
     pub fn new() -> Self {
+        Interpreter::with_output(std::io::stdout(), Limits::DEFAULT)
+    }
+}
+
+impl<'out> Interpreter<'out> {
+    /// Creates an interpreter that prints to `out` and stops programs that exceed `limits`.
+    ///
+    /// For example, `Interpreter::with_output(&mut buffer, limits)` collects printed lines in a
+    /// `Vec<u8>` named `buffer`.
+    pub fn with_output(out: impl Write + 'out, limits: Limits) -> Self {
         Self {
             globals: HashMap::new(),
             scopes: vec![],
             functions: HashMap::new(),
+            out: Box::new(out),
+            limits,
+            fuel_used: 0,
+            depth: 0,
         }
+    }
+
+    /// Spends one unit of fuel, failing once the budget in [`Limits::fuel`] is used up.
+    fn burn_fuel(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        self.fuel_used += 1;
+        if self.fuel_used > self.limits.fuel {
+            return Err("program ran out of fuel".into());
+        }
+        Ok(())
+    }
+
+    /// Runs `eval` one level deeper, failing once nesting exceeds [`Limits::max_depth`].
+    ///
+    /// For example, `self.nested(|this| this.eval_expr_unguarded(expr))` evaluates `expr` one
+    /// level deeper.
+    fn nested<T>(
+        &mut self,
+        eval: impl FnOnce(&mut Self) -> Result<T, Box<dyn std::error::Error>>,
+    ) -> Result<T, Box<dyn std::error::Error>> {
+        if self.depth >= self.limits.max_depth {
+            return Err(format!("nesting exceeded {} levels", self.limits.max_depth).into());
+        }
+        self.depth += 1;
+        let result = eval(self);
+        self.depth -= 1;
+        result
+    }
+
+    /// Runs statements in order until one of them breaks, continues, or returns.
+    ///
+    /// For example, the body of `if x; ret 1` yields `ControlFlow::Return(Int(1))` when `x` is
+    /// truthy, which the enclosing function then returns.
+    fn eval_block(&mut self, body: &[Stmt]) -> Result<ControlFlow, Box<dyn std::error::Error>> {
+        for stmt in body {
+            let flow = self.eval_stmt(stmt)?;
+            if !matches!(flow, ControlFlow::None) {
+                return Ok(flow);
+            }
+        }
+        Ok(ControlFlow::None)
     }
 
     pub fn evaluate(&mut self, module: &Mod) -> Result<(), Box<dyn std::error::Error>> {
@@ -67,6 +156,13 @@ impl Interpreter {
     ///      | Break | Continue
     /// ```
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<ControlFlow, Box<dyn std::error::Error>> {
+        self.nested(|this| this.eval_stmt_unguarded(stmt))
+    }
+
+    fn eval_stmt_unguarded(
+        &mut self,
+        stmt: &Stmt,
+    ) -> Result<ControlFlow, Box<dyn std::error::Error>> {
         match stmt {
             Stmt::FunctionDef { name, args, body } => {
                 let param_names: Vec<String> =
@@ -110,10 +206,16 @@ impl Interpreter {
                 body: _,
             } => Ok(ControlFlow::None),
             Stmt::While { test, body } => {
-                let test = self.eval_expr(test)?;
-                while self.is_truthy(&test) {
-                    for stmt in body {
-                        self.eval_stmt(stmt)?;
+                loop {
+                    let value = self.eval_expr(test)?;
+                    if !self.is_truthy(&value) {
+                        break;
+                    }
+                    self.burn_fuel()?;
+                    match self.eval_block(body)? {
+                        ControlFlow::Break => break,
+                        ControlFlow::Return(value) => return Ok(ControlFlow::Return(value)),
+                        ControlFlow::Continue | ControlFlow::None => {}
                     }
                 }
                 Ok(ControlFlow::None)
@@ -121,15 +223,10 @@ impl Interpreter {
             Stmt::If { test, body, orelse } => {
                 let test = self.eval_expr(test)?;
                 if self.is_truthy(&test) {
-                    for stmt in body {
-                        self.eval_stmt(stmt)?;
-                    }
+                    self.eval_block(body)
                 } else {
-                    for stmt in orelse {
-                        self.eval_stmt(stmt)?;
-                    }
+                    self.eval_block(orelse)
                 }
-                Ok(ControlFlow::None)
             }
             Stmt::Expr { value } => {
                 self.eval_expr(value)?;
@@ -153,6 +250,10 @@ impl Interpreter {
     ///      | List(expr* elts, expr_context ctx)
     /// ```
     fn eval_expr(&mut self, expr: &Expr) -> Result<Constant, Box<dyn std::error::Error>> {
+        self.nested(|this| this.eval_expr_unguarded(expr))
+    }
+
+    fn eval_expr_unguarded(&mut self, expr: &Expr) -> Result<Constant, Box<dyn std::error::Error>> {
         match expr {
             // short-circuiting
             Expr::BoolOp { op, values } => {
@@ -182,10 +283,15 @@ impl Interpreter {
 
                 match (lhs, rhs) {
                     (Constant::Int(l), Constant::Int(r)) => match op {
-                        Operator::Add => Ok(Constant::Int(l + r)),
-                        Operator::Subtract => Ok(Constant::Int(l - r)),
-                        Operator::Multiply => Ok(Constant::Int(l * r)),
-                        Operator::Divide => Ok(Constant::Int(l / r)),
+                        // wrap like the compiled add, sub, and imul do
+                        Operator::Add => Ok(Constant::Int(l.wrapping_add(r))),
+                        Operator::Subtract => Ok(Constant::Int(l.wrapping_sub(r))),
+                        Operator::Multiply => Ok(Constant::Int(l.wrapping_mul(r))),
+                        // idiv traps on both of these, so report them instead
+                        Operator::Divide => l
+                            .checked_div(r)
+                            .map(Constant::Int)
+                            .ok_or_else(|| "division by zero or overflow".into()),
                     },
                     (Constant::Float(l), Constant::Float(r)) => match op {
                         Operator::Add => Ok(Constant::Float(l + r)),
@@ -206,7 +312,7 @@ impl Interpreter {
                     UnaryOp::Not => Ok(Constant::Bool(!self.is_truthy(&val))),
                     UnaryOp::UnaryAdd => Ok(val),
                     UnaryOp::UnarySub => match val {
-                        Constant::Int(i) => Ok(Constant::Int(-i)),
+                        Constant::Int(i) => Ok(Constant::Int(i.wrapping_neg())),
                         Constant::Float(f) => Ok(Constant::Float(-f)),
                         _ => Err("Cannot negate non-numeric value".into()),
                     },
@@ -248,7 +354,7 @@ impl Interpreter {
                                 let val = self.eval_expr(arg)?;
                                 parts.push(self.to_string(&val));
                             }
-                            println!("{}", parts.join(" "));
+                            writeln!(self.out, "{}", parts.join(" "))?;
                             return Ok(Constant::None);
                         }
                         "len" => {
@@ -275,23 +381,28 @@ impl Interpreter {
                             );
                         }
 
+                        // evaluate arguments in the caller's scope
+                        let mut values = Vec::with_capacity(args.len());
+                        for arg in args {
+                            values.push(self.eval_expr(arg)?);
+                        }
+
+                        self.burn_fuel()?;
+
+                        // bind parameters directly so they shadow globals of the same name
                         self.enter_scope();
-
-                        for (param, arg) in params.iter().zip(args.iter()) {
-                            let val = self.eval_expr(arg)?;
-                            self.set_var(param, &val)?;
+                        let scope = self.scopes.last_mut().expect("scope was just entered");
+                        for (param, value) in params.into_iter().zip(values) {
+                            scope.insert(param, value);
                         }
 
-                        let mut result = Constant::None;
-                        for stmt in body.iter() {
-                            if let ControlFlow::Return(val) = self.eval_stmt(stmt)? {
-                                result = val;
-                                break;
-                            }
-                        }
-
+                        let flow = self.eval_block(&body);
                         self.exit_scope();
-                        return Ok(result);
+
+                        return Ok(match flow? {
+                            ControlFlow::Return(value) => value,
+                            _ => Constant::None,
+                        });
                     }
                 }
                 Err("Function not found".into())

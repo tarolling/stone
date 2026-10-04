@@ -294,7 +294,7 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.list_new` returns a list of length `rdi` whose elements the caller fills in
 /// - `stone.list_append` appends `rsi` to list `rdi`, doubling its capacity when full
 ///
-/// Indexing is generated inline by `X64Generator::gen_list_slot` rather than called here.
+/// Indexing is generated inline by `X64Generator::list_slot` (in `emit.rs`) rather than called here.
 pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("stone.list_new:");
     r#gen.emit("\tpush\trbp");

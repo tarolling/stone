@@ -1,5 +1,7 @@
 //! Backend-independent pieces of code generation, plus the per-architecture backends.
 
+pub mod ir;
+pub mod regalloc;
 pub mod x64;
 
 use std::path::Path;
@@ -39,11 +41,12 @@ pub trait AssemblyGenerator {
     ///
     /// For example, compiling to `build/out` writes the assembly to `build/out.s` and links `build/out`.
     fn compile(&mut self, module: &Mod, output: &Path) -> std::io::Result<()>;
-    /// Runs the first compilation pass, which gathers stack offsets, scopes, functions, and string literals.
+    /// Runs the first compilation pass, which lowers the module to [`ir`] functions.
     ///
-    /// For example, scanning `def f(a); b = a` records that `f` needs two stack slots.
+    /// For example, scanning `def f(a); b = a + 1` lowers `f` to `v1 = add v0, 1`.
     fn scan(&mut self, module: &Mod) -> Result<(), String>;
-    /// Runs the second compilation pass, which emits assembly using the layout found by [`Self::scan`].
+    /// Runs the second compilation pass, which allocates registers for the functions lowered by
+    /// [`Self::scan`] and emits their assembly.
     fn generate(&mut self, module: &Mod) -> Result<(), String>;
     fn emit(&mut self, code: &str);
     fn architecture(&self) -> Architecture;

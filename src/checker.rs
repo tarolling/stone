@@ -1198,7 +1198,7 @@ pub fn range_args(iter: &Expr) -> Option<&[Expr]> {
 /// looking inside function definitions.
 ///
 /// For example, for `x = 1` followed by `if x; y = x`, this collects `x` and then `y`.
-fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
+pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
     let add = |target: &Expr, out: &mut Vec<(String, Span)>| {
         if let ExprKind::Name { id, .. } = &target.kind
             && !out.iter().any(|(name, _)| name == id)

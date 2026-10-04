@@ -7,15 +7,16 @@ stone is a language that is both compiled and interpreted, depending on the deve
 
 ## Compiler passes
 
-1. Run through AST and collect all stack sizes per closure.
-2. Generate source code.
+1. Lower the checked AST to IR: blocks of instructions over virtual registers, one per local.
+2. For each function, compute live intervals and assign registers by linear scan, spilling the least-used values to the stack.
+3. Emit x86-64 assembly from the allocated IR, then assemble and link it with gcc.
 
 ## Pipelines
 
 `src/driver.rs` wires the stages together, and `src/main.rs` picks a pipeline from the command line.
 
 - `stone run`: `lexer` -> `parser` -> `checker` -> `interpreter`
-- `stone build`: `lexer` -> `parser` -> `checker` -> `codegen::x64` (scan, generate, then gcc)
+- `stone build`: `lexer` -> `parser` -> `checker` -> `codegen::ir` (lower to IR) -> `codegen::regalloc` (linear scan) -> `codegen::x64` (emit, then gcc)
 - `stone check`: `lexer` -> `parser` -> `checker`, printing every diagnostic without running
 
 ## Source map
@@ -31,7 +32,9 @@ stone is a language that is both compiled and interpreted, depending on the deve
 | `checker` | type inference and name resolution, producing diagnostics, expression types, and symbols with their references |
 | `interpreter` | tree-walking evaluator |
 | `codegen` | the `AssemblyGenerator` trait and toolchain discovery |
-| `codegen/x64` | the x86-64 backend and its hand-written builtins (`codegen/x64/builtins.rs`) |
+| `codegen/ir` | the IR the backend compiles through: lowering from the AST (`codegen/ir/lower.rs`) and liveness intervals (`codegen/ir/liveness.rs`) |
+| `codegen/regalloc` | target-independent linear-scan register allocation and parallel-move ordering |
+| `codegen/x64` | the x86-64 backend: instruction selection from allocated IR (`codegen/x64/emit.rs`) and its hand-written builtins (`codegen/x64/builtins.rs`) |
 | `stdlib` | names of the builtins shared by both backends (`print`, `len`, `range`, `append`, `int`, and `float`), and `format_float`, which defines how both print floats |
 | `driver` | the run/build/check pipelines, and `analyze` for editor tooling |
 

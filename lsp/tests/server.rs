@@ -211,6 +211,24 @@ fn answers_requests_about_an_open_document() {
 }
 
 #[test]
+fn definition_of_a_builtin_opens_its_documentation() {
+    let (mut session, _) = Session::start(None);
+    session.open("print(1)\n");
+    session.diagnostics();
+
+    let location = session.request("textDocument/definition", position(0, 2));
+    let uri = location["uri"].as_str().unwrap();
+    assert!(
+        uri.starts_with("file:///") && uri.ends_with("/builtins.st"),
+        "{uri}"
+    );
+    let text = std::fs::read_to_string(uri.trim_start_matches("file://")).unwrap();
+    let line = location["range"]["start"]["line"].as_u64().unwrap() as usize;
+    assert!(text.lines().nth(line).unwrap().starts_with("# print("));
+    session.shut_down();
+}
+
+#[test]
 fn rename_errors_are_reported_to_the_client() {
     let (mut session, _) = Session::start(None);
     session.open("x = 1\n");

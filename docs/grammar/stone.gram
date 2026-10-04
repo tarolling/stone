@@ -7,6 +7,9 @@
 # Comments run from '#' to the end of the line and are dropped by the lexer, along with blank
 # lines, so neither ever produces NEWLINE, INDENT, or DEDENT.
 
+# NUMBER is an int literal such as 42, or a float literal such as 1.5, 1e3, or 2.5e-3. A float
+# needs a digit after its '.' and after its 'e' and optional sign, so 1. lexes as NUMBER '.'.
+
 # General grammatical elements and rules:
 #
 # * Strings with double quotes (") denote SOFT KEYWORDS

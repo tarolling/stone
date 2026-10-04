@@ -27,6 +27,7 @@ mod tests;
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Int,
+    Float,
     Bool,
     Str,
     None,
@@ -38,6 +39,7 @@ impl Display for Type {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Type::Int => write!(f, "int"),
+            Type::Float => write!(f, "float"),
             Type::Bool => write!(f, "bool"),
             Type::Str => write!(f, "str"),
             Type::None => write!(f, "none"),
@@ -160,6 +162,7 @@ impl TypeChecker {
 #[derive(Debug, Clone, PartialEq)]
 enum Ty {
     Int,
+    Float,
     Bool,
     Str,
     None,
@@ -185,6 +188,7 @@ struct Constraint {
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Int,
+    Float,
     Bool,
     Str,
     None,
@@ -195,6 +199,7 @@ impl Kind {
     fn of(ty: &Ty) -> Option<Kind> {
         match ty {
             Ty::Int => Some(Kind::Int),
+            Ty::Float => Some(Kind::Float),
             Ty::Bool => Some(Kind::Bool),
             Ty::Str => Some(Kind::Str),
             Ty::None => Some(Kind::None),
@@ -203,6 +208,9 @@ impl Kind {
         }
     }
 }
+
+/// The kinds arithmetic and ordering comparisons accept, with `int` the default.
+const NUMBERS: &[Kind] = &[Kind::Int, Kind::Float];
 
 /// A function's inferred signature.
 struct FunctionInfo {
@@ -351,6 +359,7 @@ impl Inference {
     fn show(&self, ty: &Ty) -> String {
         match self.resolve(ty) {
             Ty::Int => "int".to_string(),
+            Ty::Float => "float".to_string(),
             Ty::Bool => "bool".to_string(),
             Ty::Str => "str".to_string(),
             Ty::None => "none".to_string(),
@@ -714,6 +723,9 @@ impl Inference {
                 Constant::Bool(_) => Ty::Bool,
                 Constant::Str(_) | Constant::Char(_) => Ty::Str,
                 Constant::None => Ty::None,
+                Constant::Float(_) | Constant::F32(_) | Constant::F64(_) | Constant::Decimal(_) => {
+                    Ty::Float
+                }
                 _ => Ty::Int,
             },
             ExprKind::Name { id, .. } => match self.resolve_name(id) {
@@ -745,20 +757,18 @@ impl Inference {
             ExprKind::BinOp { op, left, right } => {
                 let l = self.infer(left);
                 let r = self.infer(right);
-                if matches!(op, Operator::Add) {
-                    self.expect(&l, &r, right.span);
-                    self.require(
-                        l.clone(),
-                        &[Kind::Int, Kind::Str],
-                        expr.span,
-                        "'+' needs int or str operands, found {}",
-                    );
-                    l
-                } else {
-                    self.expect(&Ty::Int, &l, left.span);
-                    self.expect(&Ty::Int, &r, right.span);
-                    Ty::Int
-                }
+                self.expect(&l, &r, right.span);
+                let (allowed, message): (&'static [Kind], _) = match op {
+                    Operator::Add => (
+                        &[Kind::Int, Kind::Float, Kind::Str],
+                        "'+' needs int, float, or str operands, found {}",
+                    ),
+                    Operator::Subtract => (NUMBERS, "'-' needs int or float operands, found {}"),
+                    Operator::Multiply => (NUMBERS, "'*' needs int or float operands, found {}"),
+                    Operator::Divide => (NUMBERS, "'/' needs int or float operands, found {}"),
+                };
+                self.require(l.clone(), allowed, expr.span, message);
+                l
             }
             ExprKind::UnaryOp { op, operand } => {
                 let ty = self.infer(operand);
@@ -768,8 +778,12 @@ impl Inference {
                         Ty::Bool
                     }
                     UnaryOp::UnaryAdd | UnaryOp::UnarySub => {
-                        self.expect(&Ty::Int, &ty, operand.span);
-                        Ty::Int
+                        let message = match op {
+                            UnaryOp::UnaryAdd => "'+' needs an int or float operand, found {}",
+                            _ => "'-' needs an int or float operand, found {}",
+                        };
+                        self.require(ty.clone(), NUMBERS, operand.span, message);
+                        ty
                     }
                 }
             }
@@ -788,23 +802,29 @@ impl Inference {
                 ops,
                 comparators,
             } => {
-                let mut prev = (self.infer(left), left.span);
+                let mut prev = self.infer(left);
                 for (op, comparator) in ops.iter().zip(comparators) {
                     let ty = self.infer(comparator);
-                    if matches!(op, CompOp::Equal | CompOp::NotEqual) {
-                        self.expect(&prev.0, &ty, comparator.span);
+                    self.expect(&prev, &ty, comparator.span);
+                    let (allowed, message): (&'static [Kind], _) = match op {
                         // compiled code compares lists by address, so only compare values
-                        self.require(
-                            ty.clone(),
-                            &[Kind::Int, Kind::Bool, Kind::Str, Kind::None],
-                            expr.span,
+                        CompOp::Equal | CompOp::NotEqual => (
+                            &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str, Kind::None],
                             "'==' and '!=' cannot compare {}",
-                        );
-                    } else {
-                        self.expect(&Ty::Int, &prev.0, prev.1);
-                        self.expect(&Ty::Int, &ty, comparator.span);
-                    }
-                    prev = (ty, comparator.span);
+                        ),
+                        CompOp::LessThan => (NUMBERS, "'<' needs int or float operands, found {}"),
+                        CompOp::LessThanEqual => {
+                            (NUMBERS, "'<=' needs int or float operands, found {}")
+                        }
+                        CompOp::GreaterThan => {
+                            (NUMBERS, "'>' needs int or float operands, found {}")
+                        }
+                        CompOp::GreaterThanEqual => {
+                            (NUMBERS, "'>=' needs int or float operands, found {}")
+                        }
+                    };
+                    self.require(ty.clone(), allowed, expr.span, message);
+                    prev = ty;
                 }
                 Ty::Bool
             }
@@ -901,6 +921,18 @@ impl Inference {
                 }
                 Ty::None
             }
+            "int" | "float" => {
+                if args.len() != 1 {
+                    self.arity_error(call.span, name, 1, args.len());
+                } else {
+                    let message = match name {
+                        "int" => "'int' needs an int or float, found {}",
+                        _ => "'float' needs an int or float, found {}",
+                    };
+                    self.require(arg_types[0].clone(), NUMBERS, args[0].span, message);
+                }
+                if name == "int" { Ty::Int } else { Ty::Float }
+            }
             "range" => {
                 self.error(
                     call.span,
@@ -937,6 +969,7 @@ impl Inference {
                 // never pinned down, so take the default
                 let default = match constraint.allowed[0] {
                     Kind::Int => Ty::Int,
+                    Kind::Float => Ty::Float,
                     Kind::Bool => Ty::Bool,
                     Kind::Str => Ty::Str,
                     Kind::None => Ty::None,
@@ -988,6 +1021,7 @@ impl Inference {
     fn finalize(&self, ty: &Ty) -> Type {
         match self.resolve(ty) {
             Ty::Int | Ty::Var(_) => Type::Int,
+            Ty::Float => Type::Float,
             Ty::Bool => Type::Bool,
             Ty::Str => Type::Str,
             Ty::None => Type::None,

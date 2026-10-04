@@ -105,14 +105,37 @@ fn hover_on_nothing_is_empty() {
 #[test]
 fn definition_jumps_to_the_name() {
     let doc = doc(SOURCE);
-    let location = definition(&doc, &uri(), at(6, 14)).unwrap();
+    let location = definition(&doc, &uri(), at(6, 14), None).unwrap();
     assert_eq!(
         location.range,
         Range::new(Position::new(1, 4), Position::new(1, 7))
     );
     assert_eq!(location.uri, uri());
-    // builtins have no definition
-    assert_eq!(definition(&doc, &uri(), at(7, 2)), None);
+    // without the reference file, builtins have nowhere to go
+    assert_eq!(definition(&doc, &uri(), at(7, 2), None), None);
+}
+
+#[test]
+fn definition_of_a_builtin_opens_the_reference_file() {
+    let reference: Uri = "file:///cache/builtins.st".parse().unwrap();
+    let builtins = Builtins::new(reference.clone());
+    let doc = doc(SOURCE);
+
+    let location = definition(&doc, &uri(), at(7, 2), Some(&builtins)).unwrap();
+    assert_eq!(location.uri, reference);
+    // the `print` in the reference's `# print(values...) -> none` line
+    let text = stone::stdlib::builtins_reference();
+    let line = text
+        .lines()
+        .position(|l| l.starts_with("# print("))
+        .unwrap() as u32;
+    assert_eq!(
+        location.range,
+        Range::new(Position::new(line, 2), Position::new(line, 7))
+    );
+
+    let len = definition(&doc, &uri(), at(7, 15), Some(&builtins)).unwrap();
+    assert!(len.range.start.line > line);
 }
 
 #[test]
@@ -255,5 +278,15 @@ fn features_still_work_around_a_syntax_error() {
     assert_eq!(
         hover_text(&doc, at(4, 7)).unwrap(),
         "```stone\ndef f(a: int) -> int\n```"
+    );
+}
+
+#[test]
+fn features_work_inside_a_function_with_a_syntax_error() {
+    let doc = doc("def f(a);\n    x = \n    ret a\nprint(f(1))\n");
+    assert_eq!(diagnostics(&doc).len(), 1);
+    assert_eq!(
+        hover_text(&doc, at(3, 9)).unwrap(),
+        "```stone\n(parameter) a: int\n```"
     );
 }

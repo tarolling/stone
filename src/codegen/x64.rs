@@ -13,6 +13,7 @@ use crate::codegen::x64::builtins::print;
 use crate::codegen::{Architecture, AssemblyGenerator};
 use crate::span::{Pos, Span};
 use crate::stdlib::BUILTINS;
+use crate::stdlib::MAX_CALL_DEPTH;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
@@ -40,6 +41,10 @@ pub struct X64Generator {
     types: HashMap<Span, Type>,
     /// List types that `print` needs a printer for, emitted after the code that uses them.
     list_printers: Vec<Type>,
+    /// Whether `print` needs `stone.print_float`, emitted after the code that uses it.
+    prints_floats: bool,
+    /// Runtime errors the code can jump to, as `(label, message)`, emitted after `main`.
+    failures: Vec<(String, String)>,
 }
 
 #[derive(Default)]
@@ -143,7 +148,11 @@ impl AssemblyGenerator for X64Generator {
                 self.emit("\tpop\trbp");
                 self.emit("\tret");
 
+                self.emit_failures();
                 self.emit_list_runtime()?;
+                if self.prints_floats {
+                    builtins::print_float(self);
+                }
                 if self.types.values().any(|ty| *ty == Type::Str) {
                     builtins::string_runtime(self);
                 }
@@ -206,6 +215,8 @@ impl X64Generator {
             string_literals: HashMap::new(),
             types: HashMap::new(),
             list_printers: Vec::new(),
+            prints_floats: false,
+            failures: Vec::new(),
         }
     }
 
@@ -434,6 +445,10 @@ impl X64Generator {
             Constant::Int(n) => {
                 self.emit(&format!("\tmov\trax, {}", n));
             }
+            Constant::Float(x) => {
+                // floats live in general registers as their bits until an instruction needs them
+                self.emit(&format!("\tmov\trax, {}", x.to_bits() as i64));
+            }
             Constant::Bool(b) => {
                 self.emit(&format!("\tmov\trax, {}", if *b { 1 } else { 0 }));
             }
@@ -459,11 +474,19 @@ impl X64Generator {
                 if let Some(slot) = self.lookup_var(id) {
                     match ctx {
                         ExprContext::Load => {
+                            // top-level code is checked to assign before reading, but a
+                            // function can run before a global it reads is assigned
+                            if let Slot::Global(label) = &slot
+                                && self.current_function.is_some()
+                            {
+                                let fail = self
+                                    .fail_label(&format!("'{id}' is used before it is assigned"));
+                                self.emit(&format!("\tcmp\tQWORD PTR [rip + {label}.set], 0"));
+                                self.emit(&format!("\tje\t{fail}"));
+                            }
                             self.emit(&format!("\tmov\trax, {}", slot));
                         }
-                        ExprContext::Store => {
-                            self.emit(&format!("\tmov\t{}, rax", slot));
-                        }
+                        ExprContext::Store => self.store_rax(&slot),
                         ExprContext::Delete => {
                             // zero the slot
                             self.emit(&format!("\tmov\t{}, 0", slot));
@@ -487,6 +510,27 @@ impl X64Generator {
                     return Ok(());
                 }
 
+                if self.type_of(expr)? == Type::Float {
+                    self.gen_expr(left)?;
+                    self.emit("\tpush\trax");
+                    self.gen_expr(right)?;
+                    self.emit("\tmov\trbx, rax");
+                    self.emit("\tpop\trax");
+                    self.gen_float_binop(op);
+                    return Ok(());
+                }
+
+                if *op == Operator::Divide
+                    && let Some(divisor) = constant_int(right)
+                    && divisor != 0
+                    && divisor != -1
+                {
+                    // a literal has no side effects, so evaluating it last changes nothing
+                    self.gen_expr(left)?;
+                    self.gen_divide_by_constant(divisor);
+                    return Ok(());
+                }
+
                 // left to right, like the interpreter
                 self.gen_expr(left)?;
                 self.emit("\tpush\trax");
@@ -499,6 +543,19 @@ impl X64Generator {
                     Operator::Subtract => self.emit("\tsub\trax, rbx"),
                     Operator::Multiply => self.emit("\timul\trax, rbx"),
                     Operator::Divide => {
+                        // idiv traps on both of these, so report them like the interpreter
+                        let by_zero = self.fail_label("division by zero");
+                        let overflow = self.fail_label("integer overflow in division");
+                        let divide = self.new_label("divide");
+                        self.emit("\ttest\trbx, rbx");
+                        self.emit(&format!("\tjz\t{by_zero}"));
+                        self.emit("\tcmp\trbx, -1");
+                        self.emit(&format!("\tjne\t{divide}"));
+                        // only the minimum overflows when negated
+                        self.emit("\tmov\trcx, rax");
+                        self.emit("\tneg\trcx");
+                        self.emit(&format!("\tjo\t{overflow}"));
+                        self.emit(&format!("{divide}:"));
                         // x64 division: rax = rdx:rax / rbx
                         self.emit("\tcqo"); // sign-extend rax into rdx
                         self.emit("\tidiv\trbx");
@@ -550,6 +607,10 @@ impl X64Generator {
                     UnaryOp::UnaryAdd => {
                         // no-op
                     }
+                    UnaryOp::UnarySub if self.type_of(operand)? == Type::Float => {
+                        // flip the sign bit, which also negates 0.0 and nan like the interpreter
+                        self.emit("\tbtc\trax, 63");
+                    }
                     UnaryOp::UnarySub => {
                         self.emit("\tneg\trax");
                     }
@@ -579,6 +640,8 @@ impl X64Generator {
                         if matches!(op, CompOp::NotEqual) {
                             self.emit("\txor\trax, 1");
                         }
+                    } else if self.type_of(comparator)? == Type::Float {
+                        self.gen_float_compare(op);
                     } else {
                         self.emit("\tcmp\trax, rbx");
                         self.emit(&format!("\t{}\tal", set_instruction(op)));
@@ -607,6 +670,21 @@ impl X64Generator {
                             self.gen_expr(&args[0])?;
                             self.emit("\tpush\trax");
                             self.runtime_call("stone.str_len", 1);
+                            return Ok(());
+                        }
+                        "float" => {
+                            self.gen_expr(&args[0])?;
+                            if self.type_of(&args[0])? == Type::Int {
+                                self.emit("\tcvtsi2sd\txmm0, rax");
+                                self.emit("\tmovq\trax, xmm0");
+                            }
+                            return Ok(());
+                        }
+                        "int" => {
+                            self.gen_expr(&args[0])?;
+                            if self.type_of(&args[0])? == Type::Float {
+                                self.gen_float_to_int();
+                            }
                             return Ok(());
                         }
                         "append" => {
@@ -664,6 +742,115 @@ impl X64Generator {
 
     /// Generates `print(a, b, ...)`: evaluates every argument first, like the interpreter, then
     /// writes each with the routine for its type, separated by spaces and ending with a newline.
+    /// Divides `rax` by a constant that is neither 0 nor -1, rounding toward zero like `idiv`.
+    ///
+    /// Neither `idiv` trap can happen for such a divisor, so no checks are emitted, and a power
+    /// of two becomes shifts. For example, dividing by `8` emits a bias for negative dividends
+    /// and then `sar rax, 3`, and dividing by `10` emits a plain `idiv`.
+    fn gen_divide_by_constant(&mut self, divisor: i64) {
+        let magnitude = divisor.unsigned_abs();
+        if !magnitude.is_power_of_two() {
+            self.emit(&format!("\tmov\trbx, {divisor}"));
+            self.emit("\tcqo"); // sign-extend rax into rdx
+            self.emit("\tidiv\trbx");
+            return;
+        }
+
+        let shift = magnitude.trailing_zeros();
+        if shift > 0 {
+            // an arithmetic shift rounds down, so first add 2^shift - 1 to a negative dividend
+            self.emit("\tmov\trcx, rax");
+            self.emit("\tsar\trcx, 63"); // all ones if negative
+            self.emit(&format!("\tshr\trcx, {}", 64 - shift));
+            self.emit("\tadd\trax, rcx");
+            self.emit(&format!("\tsar\trax, {shift}"));
+        }
+        if divisor < 0 {
+            // the quotient is never the minimum here, so negating it cannot overflow
+            self.emit("\tneg\trax");
+        }
+    }
+
+    /// Applies `op` to the floats whose bits are in `rax` and `rbx`, leaving the result's bits in
+    /// `rax`.
+    ///
+    /// Dividing by 0.0 or -0.0 exits with `division by zero`, as in the interpreter, rather than
+    /// giving inf or nan.
+    fn gen_float_binop(&mut self, op: &Operator) {
+        self.emit("\tmovq\txmm0, rax");
+        self.emit("\tmovq\txmm1, rbx");
+        let instruction = match op {
+            Operator::Add => "addsd",
+            Operator::Subtract => "subsd",
+            Operator::Multiply => "mulsd",
+            Operator::Divide => {
+                let by_zero = self.fail_label("division by zero");
+                let divide = self.new_label("divide");
+                self.emit("\txorpd\txmm2, xmm2");
+                self.emit("\tucomisd\txmm1, xmm2");
+                // a nan divisor also sets ZF, but PF tells it apart
+                self.emit(&format!("\tjp\t{divide}"));
+                self.emit(&format!("\tje\t{by_zero}"));
+                self.emit(&format!("{divide}:"));
+                "divsd"
+            }
+        };
+        self.emit(&format!("\t{instruction}\txmm0, xmm1"));
+        self.emit("\tmovq\trax, xmm0");
+    }
+
+    /// Compares the floats whose bits are in `rax` and `rbx` with `op`, leaving 1 or 0 in `rax`.
+    ///
+    /// `ucomisd` sets ZF, PF, and CF when either side is nan, so `a < b` is computed as `b > a`
+    /// with `seta`, which is false for nan, and `==` also checks that PF is clear.
+    fn gen_float_compare(&mut self, op: &CompOp) {
+        self.emit("\tmovq\txmm0, rax");
+        self.emit("\tmovq\txmm1, rbx");
+        match op {
+            CompOp::LessThan | CompOp::LessThanEqual => {
+                self.emit("\tucomisd\txmm1, xmm0");
+            }
+            _ => self.emit("\tucomisd\txmm0, xmm1"),
+        }
+        match op {
+            CompOp::LessThan | CompOp::GreaterThan => self.emit("\tseta\tal"),
+            CompOp::LessThanEqual | CompOp::GreaterThanEqual => self.emit("\tsetae\tal"),
+            CompOp::Equal => {
+                self.emit("\tsete\tal");
+                self.emit("\tsetnp\tcl");
+                self.emit("\tand\tal, cl");
+            }
+            CompOp::NotEqual => {
+                self.emit("\tsetne\tal");
+                self.emit("\tsetp\tcl");
+                self.emit("\tor\tal, cl");
+            }
+        }
+        self.emit("\tmovzx\trax, al");
+    }
+
+    /// Converts the float whose bits are in `rax` to an int, dropping any fraction.
+    ///
+    /// `cvttsd2si` gives the minimum int for nan and for anything out of range, so that result
+    /// exits with an error unless the float really was -2^63.
+    fn gen_float_to_int(&mut self) {
+        let fail = self.fail_label("cannot convert float to int (nan or out of range)");
+        let done = self.new_label("to_int");
+        self.emit("\tmovq\txmm0, rax");
+        self.emit("\tmov\trcx, rax");
+        self.emit("\tcvttsd2si\trax, xmm0");
+        self.emit(&format!("\tmov\trdx, {}", i64::MIN));
+        self.emit("\tcmp\trax, rdx");
+        self.emit(&format!("\tjne\t{done}"));
+        self.emit(&format!(
+            "\tmov\trdx, {}",
+            (i64::MIN as f64).to_bits() as i64
+        ));
+        self.emit("\tcmp\trcx, rdx");
+        self.emit(&format!("\tjne\t{fail}"));
+        self.emit(&format!("{done}:"));
+    }
+
     fn gen_print(&mut self, args: &[Expr]) -> Result<(), String> {
         for arg in args {
             self.gen_expr(arg)?;
@@ -718,7 +905,7 @@ impl X64Generator {
         self.emit(&format!("\tjge\t{end_label}"));
         self.emit("\tmov\trbx, QWORD PTR [rbx + 16]");
         self.emit("\tmov\trax, QWORD PTR [rbx + rax * 8]");
-        self.emit(&format!("\tmov\t{target}, rax"));
+        self.store_rax(target);
         self.emit(&format!("\tinc\t{index}"));
 
         for stmt in body {
@@ -730,6 +917,69 @@ impl X64Generator {
         self.break_labels.pop();
         self.continue_labels.pop();
         Ok(())
+    }
+
+    /// Returns a label that stops the program with `message`, the way the interpreter reports the
+    /// same runtime error.
+    ///
+    /// For example, jumping to `self.fail_label("division by zero")` prints
+    /// `error: division by zero` to stderr and exits with status 1.
+    fn fail_label(&mut self, message: &str) -> String {
+        if let Some((label, _)) = self.failures.iter().find(|(_, m)| m == message) {
+            return label.clone();
+        }
+        let label = self.new_label("fail");
+        self.failures.push((label.clone(), message.to_string()));
+        label
+    }
+
+    /// Emits the code behind every [`X64Generator::fail_label`], plus `stone.fail`, which writes
+    /// `error: `, the string in `rdi`, and a newline to stderr, then exits with status 1.
+    fn emit_failures(&mut self) {
+        if self.failures.is_empty() {
+            return;
+        }
+        for (label, message) in self.failures.clone() {
+            let text = self.intern_string(&message);
+            self.emit(&format!("{label}:"));
+            self.emit(&format!("\tlea\trdi, [rip + {text}]"));
+            self.emit("\tjmp\tstone.fail");
+        }
+        let prefix = self.intern_string("error: ");
+        let newline = self.intern_string("\n");
+        self.emit("stone.fail:");
+        self.emit("\tmov\tr12, rdi");
+        for text in [prefix, "r12".to_string(), newline] {
+            if text == "r12" {
+                self.emit("\tmov\trsi, r12");
+            } else {
+                self.emit(&format!("\tlea\trsi, [rip + {text}]"));
+            }
+            // strlen, then write to stderr
+            self.emit("\txor\trdx, rdx");
+            let length = self.new_label("fail_length");
+            let write = self.new_label("fail_write");
+            self.emit(&format!("{length}:"));
+            self.emit("\tcmp\tbyte ptr [rsi + rdx], 0");
+            self.emit(&format!("\tje\t{write}"));
+            self.emit("\tinc\trdx");
+            self.emit(&format!("\tjmp\t{length}"));
+            self.emit(&format!("{write}:"));
+            self.emit("\tmov\trax, 1"); // sys_write
+            self.emit("\tmov\trdi, 2"); // stderr
+            self.emit("\tsyscall");
+        }
+        self.emit("\tmov\trax, 231"); // sys_exit_group
+        self.emit("\tmov\trdi, 1");
+        self.emit("\tsyscall");
+    }
+
+    /// Stores `rax` in `slot`, marking a global as assigned so functions can read it.
+    fn store_rax(&mut self, slot: &Slot) {
+        self.emit(&format!("\tmov\t{slot}, rax"));
+        if let Slot::Global(label) = slot {
+            self.emit(&format!("\tmov\tQWORD PTR [rip + {label}.set], 1"));
+        }
     }
 
     /// Returns the type the checker inferred for `expr`.
@@ -746,6 +996,10 @@ impl X64Generator {
     fn print_routine(&mut self, ty: &Type, nested: bool) -> Result<String, String> {
         Ok(match ty {
             Type::Int => "stone.print_int".to_string(),
+            Type::Float => {
+                self.prints_floats = true;
+                "stone.print_float".to_string()
+            }
             Type::Bool => "stone.print_bool".to_string(),
             Type::Str if nested => "stone.print_str_quoted".to_string(),
             Type::Str => "stone.print_str".to_string(),
@@ -763,9 +1017,9 @@ impl X64Generator {
     /// Calls a runtime routine with `count` arguments, which the caller pushed left to right.
     ///
     /// Arguments only go into registers right before a call, so no register holds a value that
-    /// the routine could clobber. For example, after pushing a list and an index,
-    /// `self.runtime_call("stone.list_slot", 2)` pops both and leaves the element's address in
-    /// `rax`.
+    /// the routine could clobber. For example, after pushing a list and a value,
+    /// `self.runtime_call("stone.list_append", 2)` pops the value into `rsi` and the list into
+    /// `rdi`, then calls the routine.
     fn runtime_call(&mut self, label: &str, count: usize) {
         for reg in ARG_REGS.iter().take(count).rev() {
             self.emit(&format!("\tpop\t{reg}"));
@@ -773,14 +1027,28 @@ impl X64Generator {
         self.emit(&format!("\tcall\t{label}"));
     }
 
-    /// Leaves the address of `value[slice]` in `rax`, exiting with an error if the index is out
-    /// of range.
+    /// Leaves the address of `value[slice]` in `rax`, counting negative indexes from the end, and
+    /// exits with an error if the index is out of range.
+    ///
+    /// A list is a pointer to a `{len, cap, data}` header (see [`builtins::list_runtime`]), so for
+    /// example `xs[-1]` with `xs` of length 3 checks that `-1 + 3` is below 3 and leaves the
+    /// address `data + 2 * 8`.
     fn gen_list_slot(&mut self, value: &Expr, slice: &Expr) -> Result<(), String> {
         self.gen_expr(value)?;
         self.emit("\tpush\trax");
         self.gen_expr(slice)?;
-        self.emit("\tpush\trax");
-        self.runtime_call("stone.list_slot", 2);
+        self.emit("\tpop\trdi");
+        let out_of_range = self.fail_label("list index out of range");
+        let check = self.new_label("index_check");
+        self.emit("\ttest\trax, rax");
+        self.emit(&format!("\tjns\t{check}"));
+        self.emit("\tadd\trax, QWORD PTR [rdi]"); // negative indexes count from the end
+        self.emit(&format!("{check}:"));
+        // unsigned, so an index still negative after adjusting is out of range too
+        self.emit("\tcmp\trax, QWORD PTR [rdi]");
+        self.emit(&format!("\tjae\t{out_of_range}"));
+        self.emit("\tmov\trdi, QWORD PTR [rdi + 16]");
+        self.emit("\tlea\trax, [rdi + rax * 8]");
         Ok(())
     }
 
@@ -814,7 +1082,7 @@ impl X64Generator {
                     match &target.kind {
                         ExprKind::Name { id, .. } => {
                             let slot = self.slot_of(id)?;
-                            self.emit(&format!("\tmov\t{}, rax", slot));
+                            self.store_rax(&slot);
                         }
                         ExprKind::Subscript { value, slice, .. } => {
                             // the value is evaluated first, like the interpreter
@@ -834,7 +1102,12 @@ impl X64Generator {
                     self.gen_expr(val)?;
                 }
 
-                // function epilogue
+                if self.current_function.is_some() {
+                    self.emit("\tdec\tQWORD PTR [rip + stone.call_depth]");
+                } else {
+                    // `ret` at the top level ends the program normally
+                    self.emit("\txor\trax, rax");
+                }
                 self.emit("\tmov\trsp, rbp");
                 self.emit("\tpop\trbp");
                 self.emit("\tret");
@@ -865,6 +1138,16 @@ impl X64Generator {
                     self.emit(&format!("\tsub\trsp, {}", stack_size));
                 }
 
+                // the same limit as the interpreter, rather than overflowing the stack
+                let too_deep = self.fail_label(&format!(
+                    "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
+                ));
+                self.emit("\tinc\tQWORD PTR [rip + stone.call_depth]");
+                self.emit(&format!(
+                    "\tcmp\tQWORD PTR [rip + stone.call_depth], {MAX_CALL_DEPTH}"
+                ));
+                self.emit(&format!("\tjg\t{too_deep}"));
+
                 // copy the arguments into the parameters' slots, from the caller's stack past six
                 let count = args.args.len();
                 for (i, arg) in args.args.iter().enumerate() {
@@ -883,6 +1166,7 @@ impl X64Generator {
                 }
 
                 // falling off the end returns none
+                self.emit("\tdec\tQWORD PTR [rip + stone.call_depth]");
                 self.emit("\txor\trax, rax");
                 self.emit("\tmov\trsp, rbp");
                 self.emit("\tpop\trbp");
@@ -990,7 +1274,7 @@ impl X64Generator {
                 self.emit(&format!("\tmov\trax, {}", next));
                 self.emit(&format!("\tcmp\trax, {}", end));
                 self.emit(&format!("\tjge\t{}", end_label));
-                self.emit(&format!("\tmov\t{}, rax", target));
+                self.store_rax(&target);
                 self.emit(&format!("\tinc\t{}", next));
 
                 for stmt in body {
@@ -1188,18 +1472,20 @@ impl X64Generator {
         self.emit("");
     }
 
-    /// Emits a zeroed 8-byte `.bss` slot for each global variable, so functions can reach them.
+    /// Emits the `.bss` data: the count of active calls, and a zeroed 8-byte slot for each global
+    /// variable, plus a flag that is set once the global is assigned.
     ///
-    /// For example, `total = 1` at the top level produces `g.total: .zero 8`.
+    /// For example, `total = 1` at the top level produces `g.total` and `g.total.set`.
     fn emit_globals(&mut self) {
-        if self.env.globals.is_empty() {
-            return;
-        }
-
         self.emit("\t.bss");
         self.emit("\t.p2align\t3");
+        self.emit("stone.call_depth:");
+        self.emit("\t.zero\t8");
         for name in self.env.globals.clone() {
-            self.emit(&format!("{}:", global_label(&name)));
+            let label = global_label(&name);
+            self.emit(&format!("{label}:"));
+            self.emit("\t.zero\t8");
+            self.emit(&format!("{label}.set:"));
             self.emit("\t.zero\t8");
         }
         self.emit("\t.text");
@@ -1272,6 +1558,23 @@ fn for_slots(stmt: &Stmt) -> (String, String) {
     )
 }
 
+/// Returns the value of `expr` if it is an int literal, possibly negated.
+///
+/// For example, `8` gives `Some(8)`, `-4` gives `Some(-4)`, and `x` or `2 + 2` gives `None`.
+fn constant_int(expr: &Expr) -> Option<i64> {
+    match &expr.kind {
+        ExprKind::Constant { value, .. } => match **value {
+            Constant::Int(n) => Some(n),
+            _ => None,
+        },
+        ExprKind::UnaryOp {
+            op: UnaryOp::UnarySub,
+            operand,
+        } => constant_int(operand).map(i64::wrapping_neg),
+        _ => None,
+    }
+}
+
 /// Returns the `setcc` instruction that sets `al` when a signed `cmp` satisfies `op`.
 ///
 /// For example, `set_instruction(&CompOp::LessThanEqual)` returns `"setle"`.
@@ -1330,5 +1633,76 @@ mod tests {
     #[test]
     fn print_takes_any_number_of_arguments() {
         assert!(assemble("print(1, 2, 3, 4, 5, 6, 7)\n").is_ok());
+    }
+
+    #[test]
+    fn division_by_a_power_of_two_shifts_instead_of_dividing() {
+        let assembly = assemble("x = 7\nprint(x / 8, x / -2)\n").unwrap();
+        assert!(!assembly.contains("idiv"), "{assembly}");
+        assert!(assembly.contains("\tsar\trax, 3"), "{assembly}");
+        assert!(!assembly.contains("division by zero"), "{assembly}");
+    }
+
+    #[test]
+    fn division_by_another_nonzero_constant_skips_the_checks() {
+        let assembly = assemble("x = 7\nprint(x / 10, x / -3)\n").unwrap();
+        assert!(assembly.contains("\tidiv\trbx"), "{assembly}");
+        assert!(!assembly.contains("division by zero"), "{assembly}");
+        assert!(!assembly.contains("integer overflow"), "{assembly}");
+    }
+
+    #[test]
+    fn list_indexing_checks_bounds_inline() {
+        let assembly = assemble("xs = [1, 2]\nxs[0] = xs[-1]\nprint(xs[1])\n").unwrap();
+        assert!(!assembly.contains("stone.list_slot"), "{assembly}");
+        assert!(assembly.contains("list index out of range"), "{assembly}");
+    }
+
+    #[test]
+    fn float_arithmetic_uses_sse() {
+        let assembly = assemble("a = 1.5\nb = -a * 2.0 + a / 0.5\nprint(a < b)\n").unwrap();
+        for instruction in [
+            "\tmulsd\t",
+            "\taddsd\t",
+            "\tdivsd\t",
+            "\tucomisd\t",
+            "\tbtc\t",
+        ] {
+            assert!(assembly.contains(instruction), "{instruction}");
+        }
+        // 1.5 is loaded by its bits
+        assert!(assembly.contains("\tmov\trax, 4609434218613702656"));
+        // even a literal float divisor is checked, unlike an int one
+        assert!(assembly.contains("division by zero"));
+    }
+
+    #[test]
+    fn float_printing_is_only_emitted_when_needed() {
+        let assembly = assemble("print([1.5])\n").unwrap();
+        assert!(assembly.contains("stone.print_float:"));
+        assert!(assembly.contains("\tcall\tsnprintf"));
+        let assembly = assemble("x = 1.5\nprint(1)\n").unwrap();
+        assert!(!assembly.contains("stone.print_float:"));
+    }
+
+    #[test]
+    fn converting_a_float_to_an_int_is_checked() {
+        let assembly = assemble("print(int(2.5), float(2))\n").unwrap();
+        assert!(assembly.contains("\tcvttsd2si\trax, xmm0"));
+        assert!(assembly.contains("\tcvtsi2sd\txmm0, rax"));
+        assert!(assembly.contains("cannot convert float to int"));
+    }
+
+    #[test]
+    fn division_by_a_variable_zero_or_minus_one_keeps_the_checks() {
+        for divisor in ["y", "0", "-1"] {
+            let source = format!("x = 7\ny = 2\nprint(x / {divisor})\n");
+            let assembly = assemble(&source).unwrap();
+            assert!(assembly.contains("division by zero"), "{divisor}");
+            assert!(
+                assembly.contains("integer overflow in division"),
+                "{divisor}"
+            );
+        }
     }
 }

@@ -5,7 +5,8 @@ Language support for stone `.st` files, backed by the `stone-lsp` language serve
 - syntax highlighting, comment toggling, bracket matching, and indentation after a line ending in `;`
 - errors as you type, from the same checker `stone check` uses
 - hover to see inferred types, such as `def add(a: int, b: int) -> int`
-- go to definition, find references, and rename
+- go to definition, find references, and rename. Going to the definition of a builtin like `print`
+  opens a generated `builtins.st` that documents the builtins
 - an outline of functions and variables, and completion of names, builtins, and keywords
 
 ## Setup

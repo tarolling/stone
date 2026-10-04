@@ -439,10 +439,15 @@ impl Parser {
         self.pos = mark;
 
         // NUMBER
-        if let TokenType::Number(num) = self.advance().r#type {
+        let value = match self.advance().r#type {
+            TokenType::Number(num) => Some(Constant::Int(num)),
+            TokenType::Float(x) => Some(Constant::Float(x)),
+            _ => None,
+        };
+        if let Some(value) = value {
             let res = Box::new(Expr::new(
                 ExprKind::Constant {
-                    value: Box::new(Constant::Int(num)),
+                    value: Box::new(value),
                     kind: None,
                 },
                 self.span_from(mark),

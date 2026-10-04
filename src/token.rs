@@ -9,6 +9,7 @@ pub enum TokenType {
     Name(String),
     Keyword(String),
     Number(i64),
+    Float(f64),
     String(String),
     Operator(String),
     Newline,

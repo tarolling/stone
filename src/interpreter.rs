@@ -6,7 +6,9 @@ use crate::ast::{
     BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp,
 };
 use crate::checker::range_args;
+use crate::stdlib::{self, MAX_CALL_DEPTH};
 use std::cell::RefCell;
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io::Write;
 use std::rc::Rc;
@@ -20,6 +22,7 @@ type EvalResult<T> = Result<T, Box<dyn std::error::Error>>;
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
+    Float(f64),
     Bool(bool),
     Str(Rc<str>),
     None,
@@ -37,6 +40,7 @@ impl Value {
     fn display(&self, nested: bool) -> String {
         match self {
             Value::Int(i) => i.to_string(),
+            Value::Float(x) => stdlib::format_float(*x),
             Value::Bool(b) => b.to_string(),
             Value::Str(s) if nested => format!("'{s}'"),
             Value::Str(s) => s.to_string(),
@@ -51,6 +55,7 @@ impl Value {
     fn is_truthy(&self) -> bool {
         match self {
             Value::Int(i) => *i != 0,
+            Value::Float(x) => *x != 0.0,
             Value::Bool(b) => *b,
             Value::Str(s) => !s.is_empty(),
             Value::None => false,
@@ -62,6 +67,7 @@ impl Value {
     fn equals(&self, other: &Value) -> bool {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
+            (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::None, Value::None) => true,
@@ -74,6 +80,17 @@ impl Value {
         match self {
             Value::Int(i) => Ok(*i),
             other => Err(format!("expected an int, found {}", other.display(true)).into()),
+        }
+    }
+
+    /// Orders two numbers, or returns `None` if either is nan.
+    fn compare(&self, other: &Value) -> EvalResult<Option<Ordering>> {
+        match (self, other) {
+            (Value::Int(a), Value::Int(b)) => Ok(Some(a.cmp(b))),
+            (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b)),
+            (a, b) => {
+                Err(format!("cannot order {} and {}", a.display(true), b.display(true)).into())
+            }
         }
     }
 
@@ -93,6 +110,7 @@ impl From<&Constant> for Value {
             Constant::Char(c) => Value::Str(c.to_string().into()),
             Constant::None => Value::None,
             Constant::Int(i) | Constant::I64(i) => Value::Int(*i),
+            Constant::Float(x) | Constant::F64(x) => Value::Float(*x),
             // other literal kinds are not lexed yet
             _ => Value::None,
         }
@@ -122,8 +140,9 @@ pub enum ControlFlow {
 
 /// Bounds on how much work a program may do before the interpreter stops it with an error.
 ///
-/// For example, `Limits { fuel: 1_000, max_depth: 200 }` allows at most 1,000 loop iterations
-/// and calls combined, with statements, expressions, and calls nested at most 200 deep in total.
+/// For example, `Limits { fuel: 1_000, max_depth: 200, max_calls: 50 }` allows at most 1,000 loop
+/// iterations and calls combined, with statements, expressions, and calls nested at most 200 deep
+/// in total, and at most 50 calls active at once.
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     /// Loop iterations and function calls allowed in total.
@@ -133,17 +152,25 @@ pub struct Limits {
     /// This bounds the interpreter's own recursion, and so its stack use. A recursive stone
     /// function uses several levels per call, so `def f(n); ret f(n - 1)` uses about three.
     pub max_depth: usize,
+    /// Most function calls active at once, which is part of the language, so compiled code
+    /// enforces the same limit.
+    pub max_calls: usize,
 }
 
 impl Limits {
-    /// No practical limit on fuel, and a depth that keeps evaluation on the main thread's stack.
-    ///
-    /// Each level takes up to about 5 KiB of stack in debug builds, so 1,000 levels stays inside
-    /// the main thread's 8 MiB.
+    /// No practical limit on fuel, the language's [`MAX_CALL_DEPTH`], and a nesting limit with
+    /// room for that many calls, which needs [`Limits::STACK_SIZE`] of stack.
     pub const DEFAULT: Limits = Limits {
         fuel: u64::MAX,
-        max_depth: 1_000,
+        max_depth: 50_000,
+        max_calls: MAX_CALL_DEPTH,
     };
+
+    /// Stack to run the interpreter on under [`Limits::DEFAULT`].
+    ///
+    /// Each level of nesting takes up to about 5 KiB in debug builds, so 50,000 levels needs about
+    /// 250 MiB. Only the pages actually used are ever allocated.
+    pub const STACK_SIZE: usize = 256 * 1024 * 1024;
 }
 
 pub struct Interpreter<'out> {
@@ -162,6 +189,8 @@ pub struct Interpreter<'out> {
     fuel_used: u64,
     /// Current nesting of `eval_stmt` and `eval_expr`, compared against [`Limits::max_depth`].
     depth: usize,
+    /// Function calls currently active, compared against [`Limits::max_calls`].
+    calls: usize,
 }
 
 impl Default for Interpreter<'static> {
@@ -191,6 +220,7 @@ impl<'out> Interpreter<'out> {
             limits,
             fuel_used: 0,
             depth: 0,
+            calls: 0,
         }
     }
 
@@ -445,11 +475,20 @@ impl<'out> Interpreter<'out> {
                         Operator::Add => Ok(Value::Int(l.wrapping_add(r))),
                         Operator::Subtract => Ok(Value::Int(l.wrapping_sub(r))),
                         Operator::Multiply => Ok(Value::Int(l.wrapping_mul(r))),
-                        // idiv traps on both of these, so report them instead
+                        // the same errors compiled code checks for before idiv
+                        Operator::Divide if r == 0 => Err("division by zero".into()),
                         Operator::Divide => l
                             .checked_div(r)
                             .map(Value::Int)
-                            .ok_or_else(|| "division by zero or overflow".into()),
+                            .ok_or_else(|| "integer overflow in division".into()),
+                    },
+                    (Value::Float(l), Value::Float(r)) => match op {
+                        Operator::Add => Ok(Value::Float(l + r)),
+                        Operator::Subtract => Ok(Value::Float(l - r)),
+                        Operator::Multiply => Ok(Value::Float(l * r)),
+                        // like Python, rather than giving inf or nan
+                        Operator::Divide if r == 0.0 => Err("division by zero".into()),
+                        Operator::Divide => Ok(Value::Float(l / r)),
                     },
                     (Value::Str(l), Value::Str(r)) if matches!(op, Operator::Add) => {
                         Ok(Value::Str(format!("{l}{r}").into()))
@@ -462,7 +501,10 @@ impl<'out> Interpreter<'out> {
                 match op {
                     UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
                     UnaryOp::UnaryAdd => Ok(val),
-                    UnaryOp::UnarySub => Ok(Value::Int(val.as_int()?.wrapping_neg())),
+                    UnaryOp::UnarySub => match val {
+                        Value::Float(x) => Ok(Value::Float(-x)),
+                        other => Ok(Value::Int(other.as_int()?.wrapping_neg())),
+                    },
                 }
             }
             ExprKind::Compare {
@@ -476,10 +518,14 @@ impl<'out> Interpreter<'out> {
                     let holds = match op {
                         CompOp::Equal => current.equals(&next),
                         CompOp::NotEqual => !current.equals(&next),
-                        CompOp::LessThan => current.as_int()? < next.as_int()?,
-                        CompOp::LessThanEqual => current.as_int()? <= next.as_int()?,
-                        CompOp::GreaterThan => current.as_int()? > next.as_int()?,
-                        CompOp::GreaterThanEqual => current.as_int()? >= next.as_int()?,
+                        CompOp::LessThan => current.compare(&next)?.is_some_and(Ordering::is_lt),
+                        CompOp::LessThanEqual => {
+                            current.compare(&next)?.is_some_and(Ordering::is_le)
+                        }
+                        CompOp::GreaterThan => current.compare(&next)?.is_some_and(Ordering::is_gt),
+                        CompOp::GreaterThanEqual => {
+                            current.compare(&next)?.is_some_and(Ordering::is_ge)
+                        }
                     };
                     if !holds {
                         return Ok(Value::Bool(false));
@@ -535,6 +581,18 @@ impl<'out> Interpreter<'out> {
                 return Ok(Value::None);
             }
             ("append", _) => return Err("append() takes a list and a value".into()),
+            ("float", [Value::Int(i)]) => return Ok(Value::Float(*i as f64)),
+            ("float", [Value::Float(x)]) => return Ok(Value::Float(*x)),
+            ("float", _) => return Err("float() takes one int or float".into()),
+            ("int", [Value::Int(i)]) => return Ok(Value::Int(*i)),
+            // -2^63 fits in an int but 2^63 does not, and nan fails both checks
+            ("int", [Value::Float(x)]) if (i64::MIN as f64..-(i64::MIN as f64)).contains(x) => {
+                return Ok(Value::Int(*x as i64));
+            }
+            ("int", [Value::Float(_)]) => {
+                return Err("cannot convert float to int (nan or out of range)".into());
+            }
+            ("int", _) => return Err("int() takes one int or float".into()),
             _ => {}
         }
 
@@ -547,8 +605,16 @@ impl<'out> Interpreter<'out> {
         }
 
         self.burn_fuel()?;
+        if self.calls >= self.limits.max_calls {
+            return Err(format!(
+                "recursion is too deep (more than {} nested calls)",
+                self.limits.max_calls
+            )
+            .into());
+        }
 
         // bind parameters directly so they shadow globals of the same name
+        self.calls += 1;
         self.enter_scope();
         let scope = self.scopes.last_mut().expect("scope was just entered");
         for (param, value) in params.into_iter().zip(args) {
@@ -556,6 +622,7 @@ impl<'out> Interpreter<'out> {
         }
         let flow = self.eval_block(&body);
         self.exit_scope();
+        self.calls -= 1;
 
         Ok(match flow? {
             ControlFlow::Return(value) => value,
@@ -589,7 +656,7 @@ impl<'out> Interpreter<'out> {
             .and_then(|scope| scope.get(name))
             .or_else(|| self.globals.get(name))
             .cloned()
-            .ok_or_else(|| format!("Variable '{}' not found", name).into())
+            .ok_or_else(|| format!("'{name}' is used before it is assigned").into())
     }
 
     fn delete_var(&mut self, name: &str) -> EvalResult<()> {

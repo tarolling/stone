@@ -18,6 +18,7 @@ use stone::interpreter::Limits;
 pub const LIMITS: Limits = Limits {
     fuel: 10_000,
     max_depth: 200,
+    max_calls: stone::stdlib::MAX_CALL_DEPTH,
 };
 
 /// How long a compiled program may run before the differential check reports a hang.
@@ -35,9 +36,9 @@ const MAX_PARAMS: usize = 8;
 /// Generates a stone program from fuzzer bytes, staying inside the subset that both backends
 /// implement the same way.
 ///
-/// Every program passes the checker. Variables hold ints, except top-level lists of ints that
-/// always have at least two elements, so indexes from -2 to 1 are always in range. Strings and
-/// booleans appear in `print` and in conditions. Functions never read globals, which may not be
+/// Every program passes the checker. Variables hold ints or floats, except top-level lists of
+/// ints that always have at least two elements, so indexes from -2 to 1 are always in range.
+/// Strings and booleans appear in `print` and in conditions. Functions never read globals, which may not be
 /// assigned yet when they run, and every loop is bounded: `while` loops by a counter, `for` loops
 /// by a small `range` or by a list that nothing appends to while it is iterated.
 ///
@@ -71,8 +72,10 @@ pub fn generate(u: &mut Unstructured) -> Result<String> {
 /// Names visible at one point in a generated program.
 #[derive(Clone, Default)]
 struct Scope {
-    /// Variables that can be read and assigned.
+    /// Int variables that can be read and assigned.
     variables: Vec<String>,
+    /// Float variables that can be read and assigned.
+    floats: Vec<String>,
     /// Lists of ints with at least two elements, which only top-level code uses.
     lists: Vec<String>,
     /// Loop counters, which can be read but never assigned so every loop terminates.
@@ -151,7 +154,7 @@ impl Generator {
     ) -> Result<()> {
         let nested = nesting < MAX_NESTING;
         match u.int_in_range(0..=11)? {
-            0..=2 => {
+            0 | 1 => {
                 let value = self.expression(u, scope, 0)?;
                 let target = if !scope.variables.is_empty() && u.arbitrary()? {
                     u.choose(&scope.variables)?.clone()
@@ -163,6 +166,7 @@ impl Generator {
                 };
                 self.line(indent, &format!("{target} = {value}"));
             }
+            2 => self.float_statement(u, scope, indent)?,
             3 | 4 => {
                 let value = self.expression(u, scope, 0)?;
                 if u.arbitrary()? {
@@ -240,6 +244,37 @@ impl Generator {
                 let test = self.comparison(u, scope)?;
                 self.line(indent, &format!("print(\"{list}\", {value}, {test})"));
             }
+        }
+        Ok(())
+    }
+
+    /// Emits a statement that assigns a float variable or prints floats, such as `g0 = 2.5 * g1`
+    /// or `print("s1", g0, g0 < 1e300)`.
+    fn float_statement(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &mut Scope,
+        indent: usize,
+    ) -> Result<()> {
+        let value = self.float_expression(u, scope, 0)?;
+        if u.arbitrary()? {
+            let target = if !scope.floats.is_empty() && u.arbitrary()? {
+                u.choose(&scope.floats)?.clone()
+            } else {
+                let prefix = if scope.in_function { "l" } else { "g" };
+                let name = self.fresh(prefix);
+                scope.floats.push(name.clone());
+                name
+            };
+            self.line(indent, &format!("{target} = {value}"));
+        } else {
+            let op = *u.choose(&["==", "!=", "<", "<=", ">", ">="])?;
+            let operand = self.float_expression(u, scope, 0)?;
+            let label = self.fresh("s");
+            self.line(
+                indent,
+                &format!("print(\"{label}\", {value}, {value} {op} {operand})"),
+            );
         }
         Ok(())
     }
@@ -428,7 +463,80 @@ impl Generator {
                 self.call(u, scope, nesting + 1)
             }
             3 => Ok(u.int_in_range(0..=i64::MAX)?.to_string()),
+            5 if nesting < MAX_NESTING && !scope.floats.is_empty() && u.arbitrary()? => {
+                // fails for nan and huge floats, which the differential check skips
+                let inner = self.float_expression(u, scope, nesting + 1)?;
+                Ok(format!("int({inner})"))
+            }
             _ => Ok(u.int_in_range(0..=12)?.to_string()),
+        }
+    }
+
+    /// Generates a float-valued expression, with the same precedence levels as [`expression`]
+    /// but no `and` or `or`, since floats are not conditions.
+    ///
+    /// [`expression`]: Generator::expression
+    fn float_expression(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &Scope,
+        nesting: usize,
+    ) -> Result<String> {
+        let mut text = self.float_term(u, scope, nesting)?;
+        for _ in 0..u.int_in_range(0..=2)? {
+            let op = if u.arbitrary()? { "+" } else { "-" };
+            let operand = self.float_term(u, scope, nesting)?;
+            text = format!("{text} {op} {operand}");
+        }
+        Ok(text)
+    }
+
+    fn float_term(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &Scope,
+        nesting: usize,
+    ) -> Result<String> {
+        let mut text = self.float_factor(u, scope, nesting)?;
+        for _ in 0..u.int_in_range(0..=1)? {
+            let op = if u.arbitrary()? { "*" } else { "/" };
+            let operand = self.float_factor(u, scope, nesting)?;
+            text = format!("{text} {op} {operand}");
+        }
+        Ok(text)
+    }
+
+    fn float_factor(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &Scope,
+        nesting: usize,
+    ) -> Result<String> {
+        if nesting < MAX_NESTING && u.int_in_range(0..=7)? == 7 {
+            let operand = self.float_factor(u, scope, nesting + 1)?;
+            return Ok(format!("-{operand}"));
+        }
+        match u.int_in_range(0..=5)? {
+            0 | 1 if !scope.floats.is_empty() => Ok(u.choose(&scope.floats)?.clone()),
+            2 if nesting < MAX_NESTING => {
+                let inner = self.float_expression(u, scope, nesting + 1)?;
+                Ok(format!("({inner})"))
+            }
+            3 if nesting < MAX_NESTING => {
+                let inner = self.sum(u, scope, nesting + 1)?;
+                Ok(format!("float({inner})"))
+            }
+            // values that print in e notation, round awkwardly, or overflow to inf when combined
+            4 => Ok(u
+                .choose(&[
+                    "0.1", "1e16", "1e300", "1e-300", "5e-324", "1e-05", "0.3", "2.5e-7",
+                ])?
+                .to_string()),
+            _ => Ok(format!(
+                "{}.{}",
+                u.int_in_range(0..=99)?,
+                u.int_in_range(0..=99)?
+            )),
         }
     }
 
@@ -581,7 +689,19 @@ mod tests {
         let sources: Vec<String> = (0..500)
             .map(|seed| generate(&mut Unstructured::new(&bytes(seed, 512))).unwrap())
             .collect();
-        for feature in ["for ", " in range(", "append(", "[", " < ", "not (", "print(\"", "def "] {
+        for feature in [
+            "for ",
+            " in range(",
+            "append(",
+            "[",
+            " < ",
+            "not (",
+            "print(\"",
+            "def ",
+            ".",
+            "float(",
+            "int(",
+        ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 25, "only {count} of 500 programs use {feature:?}");
         }

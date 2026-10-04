@@ -815,6 +815,39 @@ fn int(n: i64) -> Box<Expr> {
 }
 
 #[test]
+fn float_literals_parse() {
+    assert_eq!(
+        expr_of("1.5 * 2e3\n"),
+        ExprKind::BinOp {
+            left: Box::new(
+                ExprKind::Constant {
+                    value: Box::new(Constant::Float(1.5)),
+                    kind: None,
+                }
+                .into()
+            ),
+            op: Operator::Multiply,
+            right: Box::new(
+                ExprKind::Constant {
+                    value: Box::new(Constant::Float(2000.0)),
+                    kind: None,
+                }
+                .into()
+            ),
+        }
+        .into()
+    );
+}
+
+#[test]
+fn a_float_without_digits_after_the_point_is_an_error() {
+    assert_eq!(
+        error_of("x = 1.\n"),
+        ("expected end of line, found '.'".to_string(), 1, 6)
+    );
+}
+
+#[test]
 fn comparisons_chain() {
     assert_eq!(
         expr_of("a < b <= c\n"),
@@ -1052,8 +1085,24 @@ fn recovery_reports_every_bad_statement() {
     assert_eq!(body.len(), 2);
 }
 
+/// Returns the kinds of the statements in a function body, such as `["Assign", "Return"]`.
+fn body_kinds(stmt: &Stmt) -> Vec<&'static str> {
+    let StmtKind::FunctionDef { body, .. } = &stmt.kind else {
+        panic!("expected function definition");
+    };
+    body.iter()
+        .map(|s| match s.kind {
+            StmtKind::Assign { .. } => "Assign",
+            StmtKind::Return { .. } => "Return",
+            StmtKind::If { .. } => "If",
+            StmtKind::Expr { .. } => "Expr",
+            _ => "other",
+        })
+        .collect()
+}
+
 #[test]
-fn recovery_skips_a_whole_bad_block() {
+fn recovery_keeps_a_block_with_a_bad_statement() {
     let (body, errors) = recover("def f();\n    x = \n    ret 1\ng = 2\n");
     assert_eq!(
         errors,
@@ -1063,13 +1112,43 @@ fn recovery_skips_a_whole_bad_block() {
             9
         )]
     );
-    assert!(matches!(
-        &body[..],
-        [Stmt {
-            kind: StmtKind::Assign { .. },
-            ..
-        }]
-    ));
+    assert_eq!(body.len(), 2);
+    assert_eq!(body_kinds(&body[0]), ["Return"]);
+}
+
+#[test]
+fn recovery_reports_every_bad_statement_in_a_block() {
+    let (body, errors) = recover("def f();\n    x = \n    y = 1\n    z = (\n    ret y\n");
+    let lines: Vec<usize> = errors.iter().map(|(_, line, _)| *line).collect();
+    assert_eq!(lines, [2, 4]);
+    assert_eq!(body_kinds(&body[0]), ["Assign", "Return"]);
+}
+
+#[test]
+fn recovery_skips_a_bad_header_with_its_block() {
+    let source = "def f(c);\n    if c\n        print(1)\n        print(2)\n    ret 2\n";
+    let (body, errors) = recover(source);
+    assert_eq!(
+        errors,
+        [("expected ';', found end of line".to_string(), 2, 9)]
+    );
+    assert_eq!(body_kinds(&body[0]), ["Return"]);
+}
+
+#[test]
+fn recovery_works_in_nested_blocks() {
+    let source = "def f(c);\n    if c;\n        x = \n        ret 1\n    ret 2\n";
+    let (body, errors) = recover(source);
+    assert_eq!(errors.len(), 1);
+    assert_eq!(body_kinds(&body[0]), ["If", "Return"]);
+}
+
+#[test]
+fn a_block_of_only_bad_statements_is_empty() {
+    let (body, errors) = recover("def f();\n    x = \ny = 1\n");
+    assert_eq!(errors.len(), 1);
+    assert_eq!(body.len(), 2);
+    assert_eq!(body_kinds(&body[0]), Vec::<&str>::new());
 }
 
 #[test]

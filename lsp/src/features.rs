@@ -7,13 +7,13 @@ use std::collections::HashMap;
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover,
-    HoverContents, Location, MarkupContent, MarkupKind, Position, PrepareRenameResponse,
+    HoverContents, Location, MarkupContent, MarkupKind, Position, PrepareRenameResponse, Range,
     SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
 use stone::checker::{Analysis, Symbol, SymbolKind as StoneSymbolKind, Type};
 use stone::diagnostic::Severity;
 use stone::span::{Pos, Span};
-use stone::stdlib::BUILTINS;
+use stone::stdlib::{BUILTINS, builtin_doc, builtins_reference};
 use stone::token::RESERVED_KEYWORDS;
 
 use crate::line_index::{Encoding, LineIndex};
@@ -90,30 +90,6 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
     }
 }
 
-/// Returns the signature and description of a builtin, such as `len`.
-fn builtin_doc(name: &str) -> Option<(&'static str, &'static str)> {
-    Some(match name {
-        "print" => (
-            "print(values...) -> none",
-            "Prints the values separated by spaces, followed by a newline.",
-        ),
-        "len" => (
-            "len(value: str | list[T]) -> int",
-            "Returns the number of bytes in a string or elements in a list.",
-        ),
-        "range" => (
-            "range(end) | range(start, end)",
-            "Counts from `start`, or 0, up to but not including `end`. \
-             It can only be the iterable of a `for` loop.",
-        ),
-        "append" => (
-            "append(items: list[T], item: T) -> none",
-            "Adds `item` to the end of `items`.",
-        ),
-        _ => return None,
-    })
-}
-
 /// Returns the identifier the position is on or just after, and its span.
 fn word_at(doc: &Document, pos: Pos) -> Option<(String, Span)> {
     let line: Vec<char> = doc.text.lines().nth(pos.line - 1)?.chars().collect();
@@ -165,10 +141,10 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
         });
     }
     if let Some((word, span)) = word_at(doc, pos)
-        && let Some((code, text)) = builtin_doc(&word)
+        && let Some(builtin) = builtin_doc(&word)
     {
         return Some(Hover {
-            contents: markdown(code, Some(text)),
+            contents: markdown(builtin.signature, Some(builtin.description)),
             range: Some(doc.index.range(span)),
         });
     }
@@ -195,11 +171,51 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
     })
 }
 
-/// Returns where the symbol at `position` is defined.
-pub fn definition(doc: &Document, uri: &Uri, position: Position) -> Option<Location> {
-    let (symbol, _) = doc.symbol_at(position)?;
-    let span = doc.analysis.symbols[symbol].span;
-    Some(Location::new(uri.clone(), doc.index.range(span)))
+/// Where builtins are documented: the file [`builtins_reference`] generates, written out by the
+/// server so editors can open it.
+pub struct Builtins {
+    uri: Uri,
+    /// The line of each builtin's signature in the file, counted from 0.
+    lines: HashMap<&'static str, u32>,
+}
+
+impl Builtins {
+    pub fn new(uri: Uri) -> Self {
+        let text = builtins_reference();
+        let lines = BUILTINS
+            .iter()
+            .filter_map(|&name| {
+                let prefix = format!("# {name}(");
+                let line = text.lines().position(|line| line.starts_with(&prefix))?;
+                Some((name, line as u32))
+            })
+            .collect();
+        Builtins { uri, lines }
+    }
+
+    /// Returns the location of `name` in its signature line, just past the `# `.
+    fn location(&self, name: &str) -> Option<Location> {
+        let line = *self.lines.get(name)?;
+        let end = 2 + name.chars().count() as u32;
+        let range = Range::new(Position::new(line, 2), Position::new(line, end));
+        Some(Location::new(self.uri.clone(), range))
+    }
+}
+
+/// Returns where the symbol at `position` is defined, or for a builtin, where `builtins`
+/// documents it.
+pub fn definition(
+    doc: &Document,
+    uri: &Uri,
+    position: Position,
+    builtins: Option<&Builtins>,
+) -> Option<Location> {
+    if let Some((symbol, _)) = doc.symbol_at(position) {
+        let span = doc.analysis.symbols[symbol].span;
+        return Some(Location::new(uri.clone(), doc.index.range(span)));
+    }
+    let (word, _) = word_at(doc, doc.index.pos(position))?;
+    builtins?.location(&word)
 }
 
 /// Returns every appearance of the symbol at `position`, with or without its definition.
@@ -344,7 +360,7 @@ pub fn completion(doc: &Document, position: Position) -> Vec<CompletionItem> {
         items.push(CompletionItem {
             label: builtin.to_string(),
             kind: Some(CompletionItemKind::FUNCTION),
-            detail: builtin_doc(builtin).map(|(code, _)| code.to_string()),
+            detail: builtin_doc(builtin).map(|doc| doc.signature.to_string()),
             ..CompletionItem::default()
         });
     }

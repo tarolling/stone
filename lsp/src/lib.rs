@@ -6,6 +6,8 @@
 
 use std::collections::HashMap;
 use std::error::Error;
+use std::path::Path;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lsp_server::{Connection, ErrorCode, ExtractError, Message, Notification, Request, Response};
 use lsp_types::notification::{
@@ -23,7 +25,7 @@ use lsp_types::{
     TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkDoneProgressOptions,
 };
 
-use crate::features::Document;
+use crate::features::{Builtins, Document};
 use crate::line_index::Encoding;
 
 pub mod features;
@@ -49,6 +51,7 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     let mut server = Server {
         encoding,
         documents: HashMap::new(),
+        builtins: write_builtins_reference().map(Builtins::new),
     };
     for message in &connection.receiver {
         match message {
@@ -69,6 +72,48 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         }
     }
     Ok(())
+}
+
+/// Writes the builtins reference to a directory for this version of the server, returning its
+/// URI, so that going to the definition of a builtin like `print` has a file to open.
+///
+/// For example, on Linux this writes `/tmp/stone-lsp-0.1.0/builtins.st`.
+fn write_builtins_reference() -> Option<Uri> {
+    let dir = std::env::temp_dir().join(format!("stone-lsp-{}", env!("CARGO_PKG_VERSION")));
+    std::fs::create_dir_all(&dir).ok()?;
+    let path = dir.join("builtins.st");
+    // several servers can start at once, so replace the file whole rather than rewriting it
+    static NEXT: AtomicUsize = AtomicUsize::new(0);
+    let unique = NEXT.fetch_add(1, Ordering::Relaxed);
+    let temporary = dir.join(format!("builtins.st.{}.{unique}.tmp", std::process::id()));
+    std::fs::write(&temporary, stone::stdlib::builtins_reference()).ok()?;
+    std::fs::rename(&temporary, &path).ok()?;
+    file_uri(&path)
+}
+
+/// Returns the `file://` URI of an absolute path, percent-encoding anything but unreserved
+/// characters and separators.
+///
+/// For example, `/tmp/my dir/builtins.st` becomes `file:///tmp/my%20dir/builtins.st`, and
+/// `C:\Temp\builtins.st` becomes `file:///C:/Temp/builtins.st`.
+fn file_uri(path: &Path) -> Option<Uri> {
+    let path = path.to_str()?.replace('\\', "/");
+    let path = if path.starts_with('/') {
+        path
+    } else {
+        format!("/{path}")
+    };
+    let encoded: String = path
+        .bytes()
+        .map(|byte| {
+            if byte.is_ascii_alphanumeric() || b"/-._~:".contains(&byte) {
+                (byte as char).to_string()
+            } else {
+                format!("%{byte:02X}")
+            }
+        })
+        .collect();
+    format!("file://{encoded}").parse().ok()
 }
 
 /// Picks UTF-8 positions if the client supports them, and UTF-16 otherwise.
@@ -109,6 +154,8 @@ fn capabilities(encoding: Encoding) -> ServerCapabilities {
 struct Server {
     encoding: Encoding,
     documents: HashMap<Uri, Document>,
+    /// Where definitions of builtins go, or `None` if the reference file could not be written.
+    builtins: Option<Builtins>,
 }
 
 impl Server {
@@ -121,7 +168,12 @@ impl Server {
             }),
             GotoDefinition::METHOD => self.answer::<GotoDefinition>(request, |doc, params| {
                 let at = params.text_document_position_params;
-                let location = features::definition(doc, &at.text_document.uri, at.position);
+                let location = features::definition(
+                    doc,
+                    &at.text_document.uri,
+                    at.position,
+                    self.builtins.as_ref(),
+                );
                 Ok(location.map(GotoDefinitionResponse::Scalar))
             }),
             References::METHOD => self.answer::<References>(request, |doc, params| {
@@ -300,5 +352,16 @@ impl DocumentParams for lsp_types::DocumentSymbolParams {
 impl DocumentParams for lsp_types::CompletionParams {
     fn uri(&self) -> &Uri {
         &self.text_document_position.text_document.uri
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn file_uris_encode_their_paths() {
+        let uri = file_uri(Path::new("/tmp/my dir/builtins.st")).unwrap();
+        assert_eq!(uri.as_str(), "file:///tmp/my%20dir/builtins.st");
     }
 }

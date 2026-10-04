@@ -10,7 +10,7 @@ mod statements;
 #[cfg(test)]
 mod tests;
 
-use crate::ast::{Expr, Mod, ParserError};
+use crate::ast::{Expr, Mod, ParserError, Stmt};
 use crate::debug;
 use crate::diagnostic::Diagnostic;
 use crate::span::{Pos, Span};
@@ -47,6 +47,8 @@ pub struct Parser {
     expected: Vec<Expected>,
     /// Where nesting first went past [`MAX_DEPTH`], which takes priority over other errors.
     too_deep: Option<Span>,
+    /// Syntax errors of statements that were skipped so parsing could continue.
+    recovered: Vec<Diagnostic>,
 }
 
 /// Something a rule expected to find, such as `';'` or `an expression`.
@@ -69,6 +71,7 @@ impl Parser {
             furthest: 0,
             expected: vec![],
             too_deep: None,
+            recovered: vec![],
         }
     }
 
@@ -243,36 +246,60 @@ impl Parser {
     /// ```
     pub fn parse_recovering(&mut self) -> (Mod, Vec<Diagnostic>) {
         let mut body = vec![];
-        let mut diagnostics = vec![];
         while self.peek().r#type != TokenType::Eof {
             let start = self.pos;
-            // report each statement's own furthest failure
-            self.furthest = start;
-            self.expected.clear();
-            self.too_deep = None;
-
-            match self.parse_statement() {
-                Ok(stmts) => body.extend(stmts),
-                Err(_) => {
-                    diagnostics.push(self.syntax_error());
-                    self.pos = start;
-                    self.skip_statement();
-                }
+            if let Some(stmts) = self.parse_recoverable_statement() {
+                body.extend(stmts);
+            }
+            if self.pos == start {
+                // a stray token no statement can start with, such as a lone dedent
+                self.pos += 1;
             }
         }
+
+        // a block can be parsed more than once while backtracking, so drop repeated errors
+        let mut diagnostics: Vec<Diagnostic> = vec![];
+        for diagnostic in std::mem::take(&mut self.recovered) {
+            if !diagnostics.contains(&diagnostic) {
+                diagnostics.push(diagnostic);
+            }
+        }
+        diagnostics.sort_by_key(|d| (d.span.start.line, d.span.start.col));
         (Mod::Module { body }, diagnostics)
     }
 
-    /// Skips the top-level statement starting at the current token, including any indented block
-    /// after it, so parsing can resume at the next top-level statement.
+    /// Parses one statement, or if it fails, records its syntax error and skips past it.
+    fn parse_recoverable_statement(&mut self) -> Option<Vec<Stmt>> {
+        let start = self.pos;
+        // report each statement's own furthest failure
+        self.furthest = start;
+        self.expected.clear();
+        self.too_deep = None;
+
+        match self.parse_statement() {
+            Ok(stmts) => Some(stmts),
+            Err(_) => {
+                let error = self.syntax_error();
+                self.recovered.push(error);
+                self.pos = start;
+                self.skip_statement();
+                None
+            }
+        }
+    }
+
+    /// Skips the statement starting at the current token, including any indented block after it,
+    /// so parsing can resume at the next statement of the same block. It stops before a `Dedent`
+    /// that ends the enclosing block.
     fn skip_statement(&mut self) {
         let mut depth = 0usize;
         loop {
             match self.peek().r#type {
                 TokenType::Eof => return,
                 TokenType::Indent => depth += 1,
+                TokenType::Dedent if depth == 0 => return,
                 TokenType::Dedent => {
-                    depth = depth.saturating_sub(1);
+                    depth -= 1;
                     if depth == 0 {
                         self.pos += 1;
                         return;
@@ -310,6 +337,7 @@ fn describe_found(r#type: &TokenType) -> String {
         TokenType::Name(name) => format!("'{name}'"),
         TokenType::Keyword(word) => format!("'{word}'"),
         TokenType::Number(n) => format!("'{n}'"),
+        TokenType::Float(x) => format!("'{}'", crate::stdlib::format_float(*x)),
         TokenType::String(s) => format!("string \"{s}\""),
         TokenType::Operator(op) => format!("'{op}'"),
         TokenType::Newline => "end of line".to_string(),

@@ -99,6 +99,11 @@ impl Lexer {
         self.input.get(self.pos).copied()
     }
 
+    /// Returns the character `offset` places after the next one, so `peek_at(0)` is `peek()`.
+    fn peek_at(&self, offset: usize) -> Option<char> {
+        self.input.get(self.pos + offset).copied()
+    }
+
     fn advance(&mut self) -> Option<char> {
         let ch = self.peek()?;
         self.pos += 1;
@@ -220,21 +225,56 @@ impl Lexer {
         }
     }
 
-    fn lex_number(&mut self) -> Result<i64, LexError> {
+    /// Lexes an integer literal such as `42`, or a float literal such as `1.5`, `1e3`, or `2.5e-3`.
+    ///
+    /// A float needs a digit after its `.` and after its `e` and optional sign, so `1.` lexes as
+    /// `1` then `.`, and `1e` as `1` then the name `e`.
+    fn lex_number(&mut self) -> Result<TokenType, LexError> {
         let start = self.pos();
-        let mut num = String::new();
-        while let Some(ch) = self.peek() {
-            if ch.is_ascii_digit() {
-                num.push(ch);
-                self.advance();
-            } else {
-                break;
+        let mut num = self.lex_digits();
+        let mut is_float = false;
+        if self.peek() == Some('.') && self.peek_at(1).is_some_and(|ch| ch.is_ascii_digit()) {
+            self.advance();
+            num.push('.');
+            num += &self.lex_digits();
+            is_float = true;
+        }
+        if matches!(self.peek(), Some('e' | 'E')) {
+            let sign = matches!(self.peek_at(1), Some('+' | '-'));
+            let digit = self.peek_at(1 + sign as usize);
+            if digit.is_some_and(|ch| ch.is_ascii_digit()) {
+                for _ in 0..1 + sign as usize {
+                    num.push(self.advance().unwrap());
+                }
+                num += &self.lex_digits();
+                is_float = true;
             }
         }
-        num.parse().map_err(|_| LexError {
-            message: format!("integer literal {} is too large", num),
-            span: Span::new(start, self.pos()),
-        })
+        let span = Span::new(start, self.pos());
+        if is_float {
+            match num.parse::<f64>() {
+                Ok(value) if value.is_finite() => Ok(TokenType::Float(value)),
+                _ => Err(LexError {
+                    message: format!("float literal {num} is too large"),
+                    span,
+                }),
+            }
+        } else {
+            num.parse().map(TokenType::Number).map_err(|_| LexError {
+                message: format!("integer literal {num} is too large"),
+                span,
+            })
+        }
+    }
+
+    /// Lexes a run of ASCII digits, which may be empty.
+    fn lex_digits(&mut self) -> String {
+        let mut digits = String::new();
+        while let Some(ch) = self.peek().filter(char::is_ascii_digit) {
+            digits.push(ch);
+            self.advance();
+        }
+        digits
     }
 
     /// Lexes a string literal starting at its opening quote and returns its contents.
@@ -342,7 +382,7 @@ impl Lexer {
                 }
             }
             Some('"') => TokenType::String(self.lex_string()?),
-            Some(ch) if ch.is_ascii_digit() => TokenType::Number(self.lex_number()?),
+            Some(ch) if ch.is_ascii_digit() => self.lex_number()?,
             Some(ch) if ch.is_alphabetic() => {
                 let ident = self.lex_name();
                 if RESERVED_KEYWORDS.contains(&ident.as_str()) {
@@ -573,6 +613,52 @@ testing(1, 2, 3)"#;
     fn integer_literal_overflow_is_an_error() {
         let err = Lexer::new("x = 99999999999999999999\n").lex().unwrap_err();
         assert_eq!(err.span.start, Pos::new(1, 5));
+    }
+
+    #[test]
+    fn float_literals() {
+        assert_eq!(
+            types_of("1.5 0.25 1e3 2.5e-3 1E+9 007.5\n"),
+            [
+                TokenType::Float(1.5),
+                TokenType::Float(0.25),
+                TokenType::Float(1e3),
+                TokenType::Float(2.5e-3),
+                TokenType::Float(1e9),
+                TokenType::Float(7.5),
+                TokenType::Newline,
+                TokenType::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn a_float_needs_digits_after_the_point_or_exponent() {
+        assert_eq!(
+            types_of("1. 2e x\n"),
+            [
+                TokenType::Number(1),
+                TokenType::Dot,
+                TokenType::Number(2),
+                TokenType::Name("e".to_string()),
+                TokenType::Name("x".to_string()),
+                TokenType::Newline,
+                TokenType::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn float_literals_span_their_source_text() {
+        let tokens = Lexer::new("x = 2.5e-3\n").lex().unwrap();
+        assert_eq!(tokens[2].span, Span::new(Pos::new(1, 5), Pos::new(1, 11)));
+    }
+
+    #[test]
+    fn float_literal_overflow_is_an_error() {
+        let err = Lexer::new("x = 1e999\n").lex().unwrap_err();
+        assert_eq!(err.message, "float literal 1e999 is too large");
+        assert_eq!(err.span, Span::new(Pos::new(1, 5), Pos::new(1, 10)));
     }
 
     #[test]

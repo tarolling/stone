@@ -23,6 +23,7 @@ cargo run --release -- build examples/basics.st -o build/basics # compile (needs
 | `tests/programs/` | small programs that each cover one feature, also with `.out` files |
 | `tests/programs.rs` | runs every program above through both backends and compares output |
 | `docs/` | architecture notes and the grammar (`stone.gram`, `stone.asdl`) |
+| `bench/` | benchmarks comparing `stone build` with C and Python (see `bench/README.md`) |
 
 ## testing
 

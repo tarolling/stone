@@ -1,0 +1,13 @@
+[package]
+name = "stone-bench"
+version = "0.0.0"
+publish = false
+edition = "2024"
+description = "Benchmarks comparing stone's compiled output with C and Python"
+
+[dev-dependencies]
+stone = { path = ".." }
+
+# keep the bench crate out of any parent workspace
+[workspace]
+members = ["."]

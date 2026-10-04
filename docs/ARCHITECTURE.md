@@ -32,7 +32,7 @@ stone is a language that is both compiled and interpreted, depending on the deve
 | `interpreter` | tree-walking evaluator |
 | `codegen` | the `AssemblyGenerator` trait and toolchain discovery |
 | `codegen/x64` | the x86-64 backend and its hand-written builtins (`codegen/x64/builtins.rs`) |
-| `stdlib` | names of the builtins shared by both backends: `print`, `len`, `range`, and `append` |
+| `stdlib` | names of the builtins shared by both backends (`print`, `len`, `range`, `append`, `int`, and `float`), and `format_float`, which defines how both print floats |
 | `driver` | the run/build/check pipelines, and `analyze` for editor tooling |
 
 ## Language server
@@ -41,9 +41,9 @@ stone is a language that is both compiled and interpreted, depending on the deve
 
 | request | answered from |
 | --- | --- |
-| diagnostics | `Analysis::diagnostics`, with syntax errors from every top-level statement |
+| diagnostics | `Analysis::diagnostics`, with a syntax error for every statement that fails to parse, in blocks too |
 | hover | the symbol's signature, a builtin's documentation, or the innermost expression's type |
-| definition, references, rename | `Analysis::reference_at` and `Analysis::references_to` |
+| definition, references, rename | `Analysis::reference_at` and `Analysis::references_to`; a builtin's definition is its line in a generated `builtins.st` reference |
 | document symbols | globals and functions, with each function's parameters and locals |
 | completion | `Analysis::visible_at`, builtins, and keywords |
 
@@ -64,3 +64,7 @@ The `fuzz/` crate uses cargo-fuzz (libFuzzer, nightly Rust). It is a separate cr
 `stone_fuzz::generate` writes source text rule by rule from the grammar, tracking scope so every name and call is defined and every program passes the checker. It covers int arithmetic, comparisons, functions with up to eight parameters, `if`/`while`/`for` with `break` and `cont`, multi-argument `print` with strings and booleans, and top-level lists. Every loop is bounded, and functions never read globals, which may not be assigned yet when they run. `differential` skips a program if the interpreter rejects it (out of fuel, division by zero, an unassigned variable).
 
 Seeds for the text targets are the `.st` programs in `fuzz/corpus/<target>/`. `fuzz/stone.dict` lists stone's tokens.
+
+## Benchmarks
+
+The `bench/` crate compares compiled stone with C (`gcc -O2` and `gcc -O0`) and Python. It is a separate crate, like `fuzz/`, and depends on `stone` only for its tests. Each benchmark in `bench/programs/` is written three times, as `.st`, `.c`, and `.py`, and the runner refuses to time a program unless all four builds print the same `.out` file. See `bench/README.md` for the programs and a baseline.

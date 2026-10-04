@@ -583,29 +583,27 @@ impl Parser {
         })
     }
 
-    /// Parses one or more statements in sequence.
+    /// Parses the statements of an indented block, up to the `Dedent` that ends it.
+    ///
+    /// A statement that fails to parse is reported and skipped, along with any block under it, so
+    /// one mistake in a function body keeps the rest of the function. The block may end up empty.
     ///
     /// ```text
     /// statements: statement+
     /// ```
     pub(super) fn parse_statements(&mut self) -> Result<Vec<Stmt>, ParserError> {
-        // statement+
         let mut results: Vec<Stmt> = vec![];
-        let statement = self.parse_statement()?;
-        results.extend(statement);
-
-        loop {
-            let mark = self.pos;
-            if let Ok(stmts) = self.parse_statement() {
-                results.extend(stmts);
-            } else {
-                self.pos = mark;
-
-                break;
+        while !matches!(self.peek().r#type, TokenType::Dedent | TokenType::Eof) {
+            let start = self.pos;
+            match self.parse_recoverable_statement() {
+                Some(stmts) => results.extend(stmts),
+                // no progress is possible, so leave the error to the enclosing rule
+                None if self.pos == start => break,
+                None => {}
             }
         }
 
-        debug!("parse_statements: successfully parsed statement+");
+        debug!("parse_statements: successfully parsed statement*");
         Ok(results)
     }
 }

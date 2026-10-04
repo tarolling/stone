@@ -82,10 +82,7 @@ pub fn check(source: &str) -> Vec<Diagnostic> {
 ///
 /// For example, `interpret("print(1 + 2)\n")` prints `3`.
 pub fn interpret(source: &str) -> Result<(), Box<dyn Error>> {
-    let ast = checked(source)?;
-
-    let mut interpreter = Interpreter::new();
-    interpreter.evaluate(&ast)
+    interpret_with(source, &mut std::io::stdout(), Limits::DEFAULT)
 }
 
 /// Runs source code with the tree-walking interpreter, printing to `out` and stopping the program
@@ -95,13 +92,26 @@ pub fn interpret(source: &str) -> Result<(), Box<dyn Error>> {
 /// while `interpret_with("while 1;\n    x = 1\n", ...)` returns an error once fuel runs out.
 pub fn interpret_with(
     source: &str,
-    out: &mut impl Write,
+    out: &mut (impl Write + Send),
     limits: Limits,
 ) -> Result<(), Box<dyn Error>> {
     let ast = checked(source)?;
 
-    let mut interpreter = Interpreter::with_output(out, limits);
-    interpreter.evaluate(&ast)
+    // a thread of its own, since deep recursion needs more stack than the main thread has
+    let result = std::thread::scope(|scope| {
+        let thread = std::thread::Builder::new()
+            .stack_size(Limits::STACK_SIZE)
+            .spawn_scoped(scope, || {
+                Interpreter::with_output(out, limits)
+                    .evaluate(&ast)
+                    .map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("could not start the interpreter: {e}"))?;
+        thread
+            .join()
+            .unwrap_or_else(|_| Err("the interpreter panicked".to_string()))
+    });
+    Ok(result?)
 }
 
 /// Compiles source code to a native x86-64 executable at `output`.
@@ -144,6 +154,7 @@ ret y
         let limits = Limits {
             fuel: 10_000,
             max_depth: 50,
+            max_calls: 20,
         };
         interpret_with(source, &mut out, limits).map_err(|e| e.to_string())?;
         Ok(String::from_utf8(out).unwrap())

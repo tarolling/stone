@@ -100,6 +100,125 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tret");
 }
 
+/// Emits `stone.print_float`, which writes the float whose bits are in `rdi` the way
+/// `stdlib::format_float` formats it, such as `1.0`, `0.1`, `1e+16`, or `nan`.
+///
+/// It asks libc's `snprintf` for `%.*e` with 1, then 2, up to 17 significant digits, stopping at
+/// the first text `strtod` reads back as the same float, which is the shortest that round-trips.
+/// Exponents from -4 through 15 are then rewritten with `%.*f` to keep those digits, adding `.0`
+/// when nothing follows the point. It needs `print`'s routines, calls libc, so it clobbers every
+/// caller-saved register, and realigns the stack first, since generated code does not keep it
+/// aligned.
+pub fn print_float(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\t.section\t.rodata");
+    r#gen.emit(".Lstone_float_e:");
+    r#gen.emit("\t.string \"%.*e\"");
+    r#gen.emit(".Lstone_float_f:");
+    r#gen.emit("\t.string \"%.*f\"");
+    r#gen.emit(".Lstone_inf:");
+    r#gen.emit("\t.string \"inf\"");
+    r#gen.emit(".Lstone_nan:");
+    r#gen.emit("\t.string \"nan\"");
+    r#gen.emit(".Lstone_point_zero:");
+    r#gen.emit("\t.string \".0\"");
+    r#gen.emit("\t.text");
+
+    // rbx holds the bits, r12 the digits after the first, r13 the text, and r14 the exponent
+    r#gen.emit("stone.print_float:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
+    r#gen.emit("\tpush\tr14");
+    // 64 bytes below the saved registers hold the text, which is at most about 40 bytes
+    r#gen.emit("\tsub\trsp, 64");
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tlea\tr13, [rbp - 96]");
+    r#gen.emit("\tmov\trbx, rdi");
+    // an exponent of all ones means inf or nan
+    r#gen.emit("\tmov\trax, rdi");
+    r#gen.emit("\tshl\trax, 1"); // drop the sign
+    r#gen.emit("\tshr\trax, 53");
+    r#gen.emit("\tcmp\trax, 2047");
+    r#gen.emit("\tjne\t.Lprint_float_finite");
+    r#gen.emit("\tmov\trax, rdi");
+    r#gen.emit("\tshl\trax, 12"); // nan has fraction bits, inf does not
+    r#gen.emit("\tlea\trdi, [rip + .Lstone_nan]");
+    r#gen.emit("\tjnz\t.Lprint_float_text");
+    r#gen.emit("\ttest\trbx, rbx");
+    r#gen.emit("\tjns\t.Lprint_float_inf");
+    r#gen.emit("\tmov\trdi, 45"); // '-'
+    r#gen.emit("\tcall\tstone.print_char");
+    r#gen.emit(".Lprint_float_inf:");
+    r#gen.emit("\tlea\trdi, [rip + .Lstone_inf]");
+    r#gen.emit("\tjmp\t.Lprint_float_text");
+
+    r#gen.emit(".Lprint_float_finite:");
+    r#gen.emit("\txor\tr12, r12");
+    r#gen.emit(".Lprint_float_digits:");
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tmov\trsi, 64");
+    r#gen.emit("\tlea\trdx, [rip + .Lstone_float_e]");
+    r#gen.emit("\tmov\trcx, r12");
+    r#gen.emit("\tmovq\txmm0, rbx");
+    r#gen.emit("\tmov\teax, 1"); // one vector register argument
+    r#gen.emit("\tcall\tsnprintf");
+    // 17 significant digits always round-trip
+    r#gen.emit("\tcmp\tr12, 16");
+    r#gen.emit("\tje\t.Lprint_float_layout");
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\txor\tesi, esi");
+    r#gen.emit("\tcall\tstrtod");
+    r#gen.emit("\tmovq\trax, xmm0");
+    r#gen.emit("\tcmp\trax, rbx"); // the same bits, which tells -0.0 from 0.0
+    r#gen.emit("\tje\t.Lprint_float_layout");
+    r#gen.emit("\tinc\tr12");
+    r#gen.emit("\tjmp\t.Lprint_float_digits");
+
+    r#gen.emit(".Lprint_float_layout:");
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tmov\tesi, 101"); // 'e'
+    r#gen.emit("\tcall\tstrchr");
+    r#gen.emit("\tlea\trdi, [rax + 1]");
+    r#gen.emit("\tcall\tatoi");
+    r#gen.emit("\tmovsxd\tr14, eax");
+    // outside -4 through 15, the e notation is already right, like 1e+16 or 1.5e-07
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tcmp\tr14, -4");
+    r#gen.emit("\tjl\t.Lprint_float_text");
+    r#gen.emit("\tcmp\tr14, 16");
+    r#gen.emit("\tjge\t.Lprint_float_text");
+    // the same digits written out need max(digits after the first - exponent, 0) decimals
+    r#gen.emit("\tsub\tr12, r14");
+    r#gen.emit("\txor\teax, eax");
+    r#gen.emit("\ttest\tr12, r12");
+    r#gen.emit("\tcmovs\tr12, rax");
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tmov\trsi, 64");
+    r#gen.emit("\tlea\trdx, [rip + .Lstone_float_f]");
+    r#gen.emit("\tmov\trcx, r12");
+    r#gen.emit("\tmovq\txmm0, rbx");
+    r#gen.emit("\tmov\teax, 1");
+    r#gen.emit("\tcall\tsnprintf");
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tcall\tstone.print_str");
+    r#gen.emit("\ttest\tr12, r12");
+    r#gen.emit("\tjnz\t.Lprint_float_done");
+    r#gen.emit("\tlea\trdi, [rip + .Lstone_point_zero]"); // 100 prints as 100.0
+
+    r#gen.emit(".Lprint_float_text:");
+    r#gen.emit("\tcall\tstone.print_str");
+    r#gen.emit(".Lprint_float_done:");
+    r#gen.emit("\tlea\trsp, [rbp - 32]");
+    r#gen.emit("\tpop\tr14");
+    r#gen.emit("\tpop\tr13");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
 /// Emits the string runtime. Strings are null-terminated, and `+` makes a new one with `malloc`.
 ///
 /// - `stone.str_len` returns the length in bytes of the string in `rdi`
@@ -173,16 +292,10 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// it aligned.
 ///
 /// - `stone.list_new` returns a list of length `rdi` whose elements the caller fills in
-/// - `stone.list_slot` returns the address of element `rsi` of list `rdi`, counting negative
-///   indexes from the end, or exits with an error if the index is out of range
 /// - `stone.list_append` appends `rsi` to list `rdi`, doubling its capacity when full
+///
+/// Indexing is generated inline by `X64Generator::gen_list_slot` rather than called here.
 pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
-    r#gen.emit("\t.section\t.rodata");
-    r#gen.emit(".Lstone_index_error:");
-    r#gen.emit("\t.ascii \"error: list index out of range\\n\"");
-    r#gen.emit("\t.set\t.Lstone_index_error_len, . - .Lstone_index_error");
-    r#gen.emit("\t.text");
-
     r#gen.emit("stone.list_new:");
     r#gen.emit("\tpush\trbp");
     r#gen.emit("\tmov\trbp, rsp");
@@ -209,28 +322,6 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tpop\trbx");
     r#gen.emit("\tpop\trbp");
     r#gen.emit("\tret");
-
-    r#gen.emit("stone.list_slot:");
-    r#gen.emit("\tmov\trax, rsi");
-    r#gen.emit("\ttest\trax, rax");
-    r#gen.emit("\tjns\t.Llist_slot_check");
-    r#gen.emit("\tadd\trax, QWORD PTR [rdi]"); // negative indexes count from the end
-    r#gen.emit(".Llist_slot_check:");
-    // unsigned, so an index still negative after adjusting is out of range too
-    r#gen.emit("\tcmp\trax, QWORD PTR [rdi]");
-    r#gen.emit("\tjae\t.Llist_slot_error");
-    r#gen.emit("\tmov\trdx, QWORD PTR [rdi + 16]");
-    r#gen.emit("\tlea\trax, [rdx + rax * 8]");
-    r#gen.emit("\tret");
-    r#gen.emit(".Llist_slot_error:");
-    r#gen.emit("\tmov\trax, 1"); // sys_write
-    r#gen.emit("\tmov\trdi, 2"); // stderr
-    r#gen.emit("\tlea\trsi, [rip + .Lstone_index_error]");
-    r#gen.emit("\tmov\trdx, .Lstone_index_error_len");
-    r#gen.emit("\tsyscall");
-    r#gen.emit("\tmov\trax, 231"); // sys_exit_group
-    r#gen.emit("\tmov\trdi, 1");
-    r#gen.emit("\tsyscall");
 
     r#gen.emit("stone.list_append:");
     r#gen.emit("\tpush\trbp");

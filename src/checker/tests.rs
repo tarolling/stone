@@ -111,35 +111,117 @@ fn assigning_a_different_type_is_an_error() {
 }
 
 #[test]
-fn arithmetic_needs_ints() {
-    assert_error("x = \"a\" - 1\n", "expected int, found str", 1, 5);
+fn arithmetic_needs_numbers() {
+    assert_error(
+        "x = \"a\" - \"b\"\n",
+        "'-' needs int or float operands, found str",
+        1,
+        5,
+    );
+    assert_error(
+        "x = [1] * [2]\n",
+        "'*' needs int or float operands, found list[int]",
+        1,
+        5,
+    );
+    assert_error(
+        "x = -\"a\"\n",
+        "'-' needs an int or float operand, found str",
+        1,
+        6,
+    );
+}
+
+#[test]
+fn arithmetic_needs_matching_operands() {
+    assert_error("x = 1 - 2.5\n", "expected int, found float", 1, 9);
+    assert_error("x = 2.5 / 2\n", "expected float, found int", 1, 11);
 }
 
 #[test]
 fn adding_needs_matching_operands() {
     assert_error("x = \"a\" + 1\n", "expected str, found int", 1, 11);
+    assert_error("x = 1 + 1.5\n", "expected int, found float", 1, 9);
 }
 
 #[test]
-fn adding_needs_ints_or_strs() {
+fn adding_needs_ints_floats_or_strs() {
     assert_error(
         "x = true + false\n",
-        "'+' needs int or str operands, found bool",
+        "'+' needs int, float, or str operands, found bool",
         1,
         5,
     );
 }
 
 #[test]
+fn float_arithmetic_gives_floats() {
+    let source = "a = 1.5\nb = a + 2.0\nc = -a * b / 0.5 - 1e3\nd = a < b\ne = a == b\n";
+    assert_eq!(type_of_symbol(source, "a"), "float");
+    assert_eq!(type_of_symbol(source, "b"), "float");
+    assert_eq!(type_of_symbol(source, "c"), "float");
+    assert_eq!(type_of_symbol(source, "d"), "bool");
+    assert_eq!(type_of_symbol(source, "e"), "bool");
+}
+
+#[test]
+fn functions_take_their_operand_types_from_calls() {
+    let source = "def scale(a, b);\n    ret -a * b\nx = scale(1.5, 2.0)\n";
+    assert_eq!(
+        type_of_symbol(source, "scale"),
+        "def(float, float) -> float"
+    );
+    let source = "def less(a, b);\n    ret a < b\nx = less(1.5, 2.0)\n";
+    assert_eq!(type_of_symbol(source, "less"), "def(float, float) -> bool");
+}
+
+#[test]
+fn lists_can_hold_floats() {
+    let source = "xs = []\nappend(xs, 0.5)\ny = xs[0] * 2.0\n";
+    assert_eq!(type_of_symbol(source, "xs"), "list[float]");
+    assert_eq!(type_of_symbol(source, "y"), "float");
+}
+
+#[test]
+fn int_and_float_convert_numbers() {
+    let source = "a = float(3)\nb = int(2.5)\nc = float(a)\nd = int(b)\n";
+    assert_eq!(type_of_symbol(source, "a"), "float");
+    assert_eq!(type_of_symbol(source, "b"), "int");
+    assert_eq!(type_of_symbol(source, "c"), "float");
+    assert_eq!(type_of_symbol(source, "d"), "int");
+    assert_error(
+        "x = int(\"3\")\n",
+        "'int' needs an int or float, found str",
+        1,
+        9,
+    );
+    assert_error(
+        "x = float(1, 2)\n",
+        "'float' takes 1 argument, but 2 were given",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn floats_are_not_conditions() {
+    assert_error(
+        "if 1.5;\n    print(1)\n",
+        "a condition must be int or bool, found float",
+        1,
+        4,
+    );
+}
+
+#[test]
 fn comparisons_need_matching_operands() {
     assert_error("x = 1 == \"a\"\n", "expected int, found str", 1, 10);
-    // each operand of an ordering comparison is reported
-    assert_eq!(
-        errors("x = \"a\" < \"b\"\n"),
-        [
-            ("expected int, found str".to_string(), 1, 5),
-            ("expected int, found str".to_string(), 1, 11)
-        ]
+    assert_error("x = 1 < 2.5\n", "expected int, found float", 1, 9);
+    assert_error(
+        "x = \"a\" < \"b\"\n",
+        "'<' needs int or float operands, found str",
+        1,
+        5,
     );
 }
 

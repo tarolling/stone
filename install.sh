@@ -1,14 +1,14 @@
 #!/bin/sh
 # Installs a prebuilt stone binary from the GitHub releases.
 #
-#   curl -fsSL https://raw.githubusercontent.com/tarolling/newlang/main/install.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | sh
 #
 # Pass options after `sh -s --`, e.g. `... | sh -s -- --version v0.1.0`.
 # Everything runs inside main, called on the last line, so a partial download
 # never runs half a script.
 set -eu
 
-repo="tarolling/newlang"
+repo="tarolling/stone"
 
 usage() {
     cat <<EOF

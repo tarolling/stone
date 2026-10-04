@@ -26,6 +26,9 @@ jobs:
       run: shellcheck install.sh scripts/test-install.sh
     - name: Test the install script
       run: sh scripts/test-install.sh
+    - name: Test the VS Code extension
+      working-directory: editors/vscode
+      run: npm test
 
   fuzz:
 

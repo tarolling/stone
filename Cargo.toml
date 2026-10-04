@@ -5,7 +5,7 @@ version = "0.1.0"
 edition = "2024"
 description = "A Python-like language with a tree-walking interpreter and an x86-64 compiler"
 license = "Apache-2.0"
-repository = "https://github.com/tarolling/newlang"
+repository = "https://github.com/tarolling/stone"
 readme = "README.md"
 
 # the language server is a separate crate, so stone itself still depends only on clap

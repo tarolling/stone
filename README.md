@@ -7,7 +7,7 @@ it is also optimized for developers to press the shift key as little as possible
 ## install
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tarolling/newlang/main/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | sh
 ```
 
 this downloads a prebuilt `stone` for linux or macos (x86-64 or arm64) into `~/.local/bin`. pick another directory or release with `sh -s -- --dir /usr/local/bin --version v0.1.0`, or set `STONE_INSTALL_DIR` and `STONE_VERSION`.
@@ -17,7 +17,7 @@ this downloads a prebuilt `stone` for linux or macos (x86-64 or arm64) into `~/.
 to build from source instead, with rust installed:
 
 ```sh
-cargo install --git https://github.com/tarolling/newlang stone
+cargo install --git https://github.com/tarolling/stone stone
 ```
 
 ## usage

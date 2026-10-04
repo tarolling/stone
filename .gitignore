@@ -32,3 +32,6 @@ target
 # VS Code extension dependencies and packages
 /editors/vscode/node_modules/
 *.vsix
+
+# stone-lsp copied in to package a platform-specific extension
+/editors/vscode/server/

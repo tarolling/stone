@@ -1,0 +1,176 @@
+name: VS Code extension
+
+# pushing a tag like vscode-v0.1.0 builds stone-lsp for each target, packages a
+# platform-specific .vsix that bundles it plus a universal one that uses
+# stone-lsp on PATH, and publishes them to the VS Code Marketplace and Open VSX.
+# Running it by hand packages the extensions without publishing them, or, with
+# marketplace-identity checked, only prints the ID to add to the Marketplace
+# publisher.
+#
+# The Marketplace accepts no global Azure DevOps PATs after December 1, 2026,
+# so publishing there signs in to Microsoft Entra ID with GitHub's OIDC token
+# as an app registration, through a federated credential for the marketplace
+# environment, and the app is a member of the tarolling publisher. Needs the
+# secrets AZURE_CLIENT_ID and AZURE_TENANT_ID for that app, and OVSX_PAT (an
+# open-vsx.org token).
+on:
+  push:
+    tags: [ "vscode-v*" ]
+  workflow_dispatch:
+    inputs:
+      marketplace-identity:
+        description: Only print the Entra ID app's Marketplace ID
+        type: boolean
+        default: false
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    if: ${{ !inputs.marketplace-identity }}
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Check the tag matches package.json
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        version=$(node -p "require('./editors/vscode/package.json').version")
+        if [ "$GITHUB_REF_NAME" != "vscode-v$version" ]; then
+          echo "tag $GITHUB_REF_NAME does not match editors/vscode/package.json version $version" >&2
+          exit 1
+        fi
+
+  server:
+    needs: check-version
+    strategy:
+      matrix:
+        include:
+        - target: x86_64-unknown-linux-musl
+          vscode: linux-x64
+          runner: ubuntu-latest
+        - target: aarch64-unknown-linux-musl
+          vscode: linux-arm64
+          runner: ubuntu-24.04-arm
+        - target: aarch64-apple-darwin
+          vscode: darwin-arm64
+          runner: macos-latest
+        - target: x86_64-apple-darwin
+          vscode: darwin-x64
+          runner: macos-latest
+    runs-on: ${{ matrix.runner }}
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Install Rust if the runner lacks it
+      run: command -v rustup || curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+    - name: Install musl tools
+      if: contains(matrix.target, 'musl')
+      run: sudo apt-get update && sudo apt-get install -y musl-tools
+    - name: Add the target
+      run: |
+        export PATH="$HOME/.cargo/bin:$PATH"
+        rustup target add ${{ matrix.target }}
+    - name: Build
+      run: |
+        export PATH="$HOME/.cargo/bin:$PATH"
+        cargo build --release --locked -p stone-lsp --target ${{ matrix.target }}
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: stone-lsp-${{ matrix.vscode }}
+        path: target/${{ matrix.target }}/release/stone-lsp
+
+  package:
+    needs: server
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: editors/vscode
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        pattern: stone-lsp-*
+        path: servers
+    - name: Install dependencies
+      run: npm ci
+    - name: Test
+      run: npm test
+    - name: Package
+      run: |
+        mkdir -p dist
+        for target in linux-x64 linux-arm64 darwin-arm64 darwin-x64; do
+          mkdir -p server
+          cp "$GITHUB_WORKSPACE/servers/stone-lsp-$target/stone-lsp" server/
+          chmod 755 server/stone-lsp
+          npx --yes @vscode/vsce@3 package --target "$target" -o "dist/stone-$target.vsix"
+          rm -rf server
+        done
+        # for every other platform, falling back to stone-lsp on PATH
+        npx --yes @vscode/vsce@3 package -o dist/stone-universal.vsix
+    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      with:
+        name: vsix
+        path: editors/vscode/dist/*.vsix
+
+  marketplace:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    # the Entra ID app's federated credential trusts this environment
+    environment: marketplace
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+    - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        name: vsix
+        path: dist
+    - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        # the app has no Azure subscription, only a token for Azure DevOps
+        allow-no-subscriptions: true
+    - name: Publish to the VS Code Marketplace
+      run: |
+        for vsix in dist/*.vsix; do
+          npx --yes @vscode/vsce@3 publish --azure-credential --packagePath "$vsix"
+        done
+
+  marketplace-identity:
+    if: ${{ inputs.marketplace-identity }}
+    runs-on: ubuntu-latest
+    environment: marketplace
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+    - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+      with:
+        client-id: ${{ secrets.AZURE_CLIENT_ID }}
+        tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+        # the app has no Azure subscription, only a token for Azure DevOps
+        allow-no-subscriptions: true
+    # 499b84ac-... is the Azure DevOps resource the Marketplace signs in through
+    - name: Print the Marketplace ID to add as a publisher member
+      run: >
+        az rest -u https://app.vssps.visualstudio.com/_apis/profile/profiles/me
+        --resource 499b84ac-1321-427f-aa17-267ca6975798 --query id -o tsv
+
+  open-vsx:
+    needs: package
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7.0.0
+      with:
+        name: vsix
+        path: dist
+    - name: Publish to Open VSX
+      env:
+        OVSX_PAT: ${{ secrets.OVSX_PAT }}
+      run: |
+        for vsix in dist/*.vsix; do
+          npx --yes ovsx@1 publish --packagePath "$vsix" -p "$OVSX_PAT"
+        done

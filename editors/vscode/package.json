@@ -7,7 +7,7 @@
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
-    "url": "https://github.com/tarolling/newlang"
+    "url": "https://github.com/tarolling/stone"
   },
   "engines": {
     "vscode": "^1.82.0"
@@ -16,6 +16,9 @@
     "Programming Languages"
   ],
   "main": "./extension.js",
+  "scripts": {
+    "test": "node --test"
+  },
   "contributes": {
     "languages": [
       {
@@ -41,8 +44,8 @@
       "properties": {
         "stone.server.path": {
           "type": "string",
-          "default": "stone-lsp",
-          "description": "The stone-lsp executable to run, either a name on PATH or an absolute path, such as the target/debug/stone-lsp of a local build."
+          "default": "",
+          "description": "The stone-lsp executable to run, either a name on PATH or an absolute path, such as the target/debug/stone-lsp of a local build. When empty, the extension runs the server bundled with it, or stone-lsp on PATH if it has none."
         }
       }
     }

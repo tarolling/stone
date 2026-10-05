@@ -1,8 +1,8 @@
 {
   "name": "stone-lang",
-  "displayName": "stone",
+  "displayName": "stone language",
   "description": "Language support for stone: highlighting, diagnostics, hover, go to definition, references, rename, outline, and completion",
-  "version": "0.1.2",
+  "version": "0.1.3",
   "publisher": "tarolling",
   "license": "Apache-2.0",
   "repository": {

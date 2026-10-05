@@ -25,7 +25,7 @@ This file is left out of the packaged extension, so it does not show on the Mark
 
    ```sh
    npx @vscode/vsce package
-   code --install-extension stone-lang-0.1.2.vsix
+   code --install-extension stone-lang-0.1.3.vsix
    ```
 
 ## Tests

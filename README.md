@@ -4,6 +4,8 @@ stone is a language. it has a built-in interpreter and compiler so you can choos
 
 it is also optimized for developers to press the shift key as little as possible.
 
+the [documentation](https://tarolling.github.io/stone/) has a tutorial, a language reference, and development guides.
+
 ## install
 
 ```sh

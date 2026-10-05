@@ -26,6 +26,20 @@ Make sure the directory is on your `PATH`, then check the install:
 stone --version
 ```
 
+## Upgrading
+
+A release binary can replace itself with the newest release:
+
+```sh
+stone self-update            # install the newest release
+stone self-update --check    # only report whether there is one
+stone self-update --version v0.1.0
+```
+
+It checks the download against the release's SHA-256 checksum and makes sure the new binary
+runs before swapping it in. A `stone` built with `cargo install` does not include
+`self-update`; rerun `cargo install` to upgrade it instead.
+
 ## From source
 
 With [Rust](https://rustup.rs) installed:

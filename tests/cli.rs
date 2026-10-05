@@ -64,3 +64,16 @@ fn run_reports_a_runtime_error_and_fails() {
         "{stderr}"
     );
 }
+
+#[cfg(not(feature = "self-update"))]
+#[test]
+fn self_update_without_feature_explains_how_to_upgrade() {
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("self-update")
+        .output()
+        .expect("stone should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("built without self-update"), "{stderr}");
+    assert!(stderr.contains("install.sh"), "{stderr}");
+}

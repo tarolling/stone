@@ -1,5 +1,5 @@
-//! Golden-output tests that run every `.st` program in `examples/` and `tests/programs/`
-//! through both backends and compare stdout against the sibling `.out` file.
+//! Golden-output tests that run every `.st` program in `examples/`, `tests/programs/`, and
+//! `docs/examples/` (the programs the documentation shows) through both backends and compare stdout against the sibling `.out` file.
 //!
 //! For example, `examples/basics.st` must print exactly the contents of `examples/basics.out`
 //! under both `stone run` and a binary produced by `stone build`.
@@ -14,7 +14,7 @@ use std::fmt::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-const PROGRAM_DIRS: [&str; 2] = ["examples", "tests/programs"];
+const PROGRAM_DIRS: [&str; 3] = ["examples", "tests/programs", "docs/examples"];
 
 /// Programs a backend can't handle yet, as `(file stem, backend name, reason)`.
 ///

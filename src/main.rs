@@ -6,6 +6,9 @@ use std::process::ExitCode;
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver;
 
+#[cfg(feature = "self-update")]
+mod update;
+
 /// The stone programming language executor.
 #[derive(ClapParser, Debug)]
 #[command(author, version, about = "The stone programming language executor")]
@@ -37,6 +40,15 @@ enum Command {
         /// The file to check.
         file: String,
     },
+    /// Updates stone to the newest release.
+    SelfUpdate {
+        /// Only report whether a newer release exists.
+        #[arg(long, conflicts_with = "version")]
+        check: bool,
+        /// The release to install instead of the newest, such as v0.1.0.
+        #[arg(long, value_name = "TAG")]
+        version: Option<String>,
+    },
 }
 
 /// The mode stone runs in, chosen from the command-line arguments.
@@ -45,6 +57,7 @@ enum ExecutionMode {
     Check(String),
     Repl,
     Run(String),
+    SelfUpdate { check: bool, tag: Option<String> },
 }
 
 fn main() -> ExitCode {
@@ -54,6 +67,10 @@ fn main() -> ExitCode {
         Some(Command::Run { file }) => ExecutionMode::Run(file),
         Some(Command::Build { file, output }) => ExecutionMode::Build { file, output },
         Some(Command::Check { file }) => ExecutionMode::Check(file),
+        Some(Command::SelfUpdate { check, version }) => ExecutionMode::SelfUpdate {
+            check,
+            tag: version,
+        },
         None => {
             if let Some(file) = args.file {
                 ExecutionMode::Run(file)
@@ -88,7 +105,31 @@ fn main() -> ExitCode {
             with_source("<stdin>", |_| driver::repl(&source))
         }
         ExecutionMode::Run(file) => with_source(&file, driver::interpret),
+        ExecutionMode::SelfUpdate { check, tag } => self_update(check, tag.as_deref()),
     }
+}
+
+/// Runs `stone self-update`, printing any error to stderr and returning the exit code.
+#[cfg(feature = "self-update")]
+fn self_update(check: bool, tag: Option<&str>) -> ExitCode {
+    match update::run(check, tag) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
+}
+
+/// Explains how to upgrade a stone built without the `self-update` feature, such as one from
+/// `cargo install`.
+#[cfg(not(feature = "self-update"))]
+fn self_update(_check: bool, _tag: Option<&str>) -> ExitCode {
+    eprintln!(
+        "error: this stone was built without self-update; upgrade it by rerunning install.sh \
+         or `cargo install`, or build with `--features self-update`"
+    );
+    ExitCode::FAILURE
 }
 
 /// Reads `file` and runs `action` on its contents, printing any error to stderr and returning

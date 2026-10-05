@@ -12,6 +12,8 @@ curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | s
 
 this downloads a prebuilt `stone` for linux or macos (x86-64 or arm64) into `~/.local/bin`. pick another directory or release with `sh -s -- --dir /usr/local/bin --version v0.1.0`, or set `STONE_INSTALL_DIR` and `STONE_VERSION`.
 
+to upgrade later, run `stone self-update` (or `stone self-update --check` to see if there is a new release).
+
 `stone run` and `stone check` work everywhere, but `stone build` emits x86-64 assembly, so it needs x86-64 linux with gcc.
 
 to build from source instead, with rust installed:

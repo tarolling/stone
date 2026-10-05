@@ -58,12 +58,13 @@ jobs:
     - name: Build
       run: |
         export PATH="$HOME/.cargo/bin:$PATH"
-        cargo build --release --locked -p stone --target ${{ matrix.target }}
+        cargo build --release --locked -p stone --features self-update --target ${{ matrix.target }}
     - name: Smoke test
       if: matrix.smoke
       run: |
         stone=target/${{ matrix.target }}/release/stone
         $stone --version
+        $stone self-update --help
         $stone run examples/basics.st | diff - examples/basics.out
     - name: Package
       run: |

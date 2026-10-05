@@ -1,0 +1,5 @@
+# the documentation site; build it with `sphinx-build -W -b html docs docs/_build/html`
+sphinx==9.1.0
+furo==2025.12.19
+myst-parser==5.1.0
+sphinx-copybutton==0.5.2

@@ -23,6 +23,9 @@ target
 # Added by stone
 /build/
 
+# the documentation site built by sphinx-build
+/docs/_build/
+
 # fuzzing output; only the hand-written .st seeds in fuzz/corpus are tracked
 /fuzz/artifacts/
 /fuzz/coverage/

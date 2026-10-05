@@ -2,11 +2,11 @@
 def primes_below(limit);
     is_prime = []
     for i in range(limit);
-        append(is_prime, i >= 2)
+        is_prime.append(i >= 2)
     found = []
     for n in range(2, limit);
         if is_prime[n];
-            append(found, n)
+            found.append(n)
             multiple = n * n
             while multiple < limit;
                 is_prime[multiple] = false
@@ -15,4 +15,4 @@ def primes_below(limit);
 
 primes = primes_below(50)
 print(primes)
-print(len(primes), "primes below 50")
+print(primes.len(), "primes below 50")

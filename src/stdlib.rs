@@ -9,37 +9,30 @@ pub const MAX_CALL_DEPTH: usize = 1_000;
 /// Names of the builtin functions.
 ///
 /// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3);`.
-pub static BUILTINS: [&str; 6] = ["print", "len", "range", "append", "int", "float"];
+pub static BUILTINS: [&str; 4] = ["print", "range", "int", "float"];
 
-/// Documentation for a builtin function, for editor tooling.
+/// Names of the builtin methods, which are called on a value, such as `xs.len()`.
+pub static METHODS: [&str; 2] = ["len", "append"];
+
+/// Documentation for a builtin function or method, for editor tooling.
 pub struct BuiltinDoc {
     pub name: &'static str,
-    /// How the builtin is called, such as `len(value: str | list[T]) -> int`.
+    /// How the builtin is called, such as `int(value: int | float) -> int`.
     pub signature: &'static str,
     pub description: &'static str,
 }
 
-pub static BUILTIN_DOCS: [BuiltinDoc; 6] = [
+pub static BUILTIN_DOCS: [BuiltinDoc; 4] = [
     BuiltinDoc {
         name: "print",
         signature: "print(values...) -> none",
         description: "Prints the values separated by spaces, followed by a newline.",
     },
     BuiltinDoc {
-        name: "len",
-        signature: "len(value: str | list[T]) -> int",
-        description: "Returns the number of bytes in a string or elements in a list.",
-    },
-    BuiltinDoc {
         name: "range",
         signature: "range(end) | range(start, end)",
         description: "Counts from `start`, or 0, up to but not including `end`. \
                       It can only be the iterable of a `for` loop.",
-    },
-    BuiltinDoc {
-        name: "append",
-        signature: "append(items: list[T], item: T) -> none",
-        description: "Adds `item` to the end of `items`.",
     },
     BuiltinDoc {
         name: "int",
@@ -54,27 +47,51 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 6] = [
     },
 ];
 
-/// Returns the documentation for the builtin named `name`.
+pub static METHOD_DOCS: [BuiltinDoc; 2] = [
+    BuiltinDoc {
+        name: "len",
+        signature: "(str | list[T]).len() -> int",
+        description: "Returns the number of bytes in a string or elements in a list.",
+    },
+    BuiltinDoc {
+        name: "append",
+        signature: "list[T].append(item: T) -> none",
+        description: "Adds `item` to the end of the list.",
+    },
+];
+
+/// Returns the documentation for the builtin function named `name`.
 ///
-/// For example, `builtin_doc("len")` has the signature `len(value: str | list[T]) -> int`.
+/// For example, `builtin_doc("int")` has the signature `int(value: int | float) -> int`.
 pub fn builtin_doc(name: &str) -> Option<&'static BuiltinDoc> {
     BUILTIN_DOCS.iter().find(|doc| doc.name == name)
+}
+
+/// Returns the documentation for the builtin method named `name`.
+///
+/// For example, `method_doc("len")` has the signature `(str | list[T]).len() -> int`.
+pub fn method_doc(name: &str) -> Option<&'static BuiltinDoc> {
+    METHOD_DOCS.iter().find(|doc| doc.name == name)
 }
 
 /// Returns a stone file that documents every builtin, for editors to open when asked where a
 /// builtin is defined.
 ///
 /// Builtins are part of the interpreter and the compiler rather than written in stone, so the
-/// file is only comments, which keeps it valid stone. Each builtin gets a line holding `# ` and its
-/// signature, followed by its description.
+/// file is only comments, which keeps it valid stone. Each builtin function, then each builtin
+/// method, gets a line holding `# ` and its signature, followed by its description.
 pub fn builtins_reference() -> String {
     let mut text = String::from(
-        "# stone's builtin functions\n\
+        "# stone's builtin functions and methods\n\
          #\n\
          # These are part of the interpreter and the compiler rather than written in stone, so this\n\
          # file only documents them. stone-lsp generates it, and editing it changes nothing.\n",
     );
     for doc in &BUILTIN_DOCS {
+        text += &format!("\n# {}\n#     {}\n", doc.signature, doc.description);
+    }
+    text += "\n# Methods, called on a value as in `xs.len()`\n";
+    for doc in &METHOD_DOCS {
         text += &format!("\n# {}\n#     {}\n", doc.signature, doc.description);
     }
     text
@@ -140,6 +157,18 @@ mod tests {
     }
 
     #[test]
+    fn every_method_is_documented() {
+        let documented: Vec<&str> = METHOD_DOCS.iter().map(|doc| doc.name).collect();
+        assert_eq!(documented, METHODS);
+        for name in METHODS {
+            let doc = method_doc(name).unwrap();
+            assert!(doc.signature.contains(&format!(".{name}(")), "{name}");
+            assert!(!BUILTINS.contains(&name), "{name}");
+        }
+        assert!(method_doc("print").is_none());
+    }
+
+    #[test]
     fn floats_format_like_python_repr() {
         let cases = [
             (1.0, "1.0"),
@@ -180,7 +209,7 @@ mod tests {
     #[test]
     fn the_reference_has_a_line_for_each_builtin() {
         let reference = builtins_reference();
-        for doc in &BUILTIN_DOCS {
+        for doc in BUILTIN_DOCS.iter().chain(&METHOD_DOCS) {
             let line = format!("# {}", doc.signature);
             assert_eq!(
                 reference.lines().filter(|l| *l == line).count(),

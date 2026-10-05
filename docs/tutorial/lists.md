@@ -19,7 +19,7 @@ from it.
 - `items[i]` reads an element, counting from `0`. A negative index counts from the end, so
   `items[-1]` is the last element.
 - `items[i] = value` replaces an element.
-- `append(items, value)` adds to the end, and `len(items)` counts the elements.
+- `items.append(value)` adds to the end, and `items.len()` counts the elements.
 - `for item in items;` walks the list in order. If the body appends to the list, the loop also
   visits the new elements.
 

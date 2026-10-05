@@ -13,7 +13,7 @@ print(total, int(total))
 # bools, strings, and none
 ready = count > 2
 name = "stone"
-print(ready, not ready, name + "!", len(name))
+print(ready, not ready, name + "!", name.len())
 print(none)
 
 # floats print the way Python shows them

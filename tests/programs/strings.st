@@ -1,13 +1,13 @@
 # concatenation
 greeting = "hello" + ", " + "world"
-print(greeting, len(greeting))
-print("" + "", len(""), "a" + "")
+print(greeting, greeting.len())
+print("" + "", "".len(), "a" + "")
 
 # building a string in a loop
 stars = ""
 for i in range(5);
     stars = stars + "*"
-print(stars, len(stars))
+print(stars, stars.len())
 
 # equality compares contents, not where the string is stored
 joined = "ab" + "c"

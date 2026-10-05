@@ -385,6 +385,7 @@ impl X64Generator {
                     self.collect_calls_from_expr(elt, calls);
                 }
             }
+            ExprKind::Attribute { value, .. } => self.collect_calls_from_expr(value, calls),
             ExprKind::Constant { .. } | ExprKind::Name { .. } => {}
         }
     }

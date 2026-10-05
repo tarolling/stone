@@ -10,8 +10,8 @@ big = 1e308
 print(big * 10.0, -big * 10.0, big * 10.0 - big * 10.0)
 print(1.0 / 3.0, 2.0 / 3.0, 10.0 / 4.0, 7.0 / 2.0)
 xs = [0.5, 1.0, 2.5e-10]
-append(xs, 3.0)
-print(xs, len(xs), xs[-1])
+xs.append(3.0)
+print(xs, xs.len(), xs[-1])
 xs[0] = xs[0] * 4.0
 print(xs[0])
 total = 0.0
@@ -23,7 +23,7 @@ def mean(values);
     sum = 0.0
     for v in values;
         sum = sum + v
-    ret sum / float(len(values))
+    ret sum / float(values.len())
 
 print(mean(xs))
 grid = [[1.0, 2.0], [0.5, -0.5]]

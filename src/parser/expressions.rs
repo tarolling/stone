@@ -41,15 +41,15 @@ impl Parser {
         false
     }
 
-    /// Parses the trailing subscripts and calls of a `t_primary`, such as `[0](1)` in `a[0](1)[2]`,
-    /// stopping before the last one so that the assignment target can claim it.
+    /// Parses the trailing subscripts, calls, and attributes of a `t_primary`, such as `[0](1)` in
+    /// `a[0](1)[2]`, stopping before the last one so that the assignment target can claim it.
     ///
     /// The grammar's `t_primary` is left-recursive, so it naturally ends right before a final
     /// subscript. Here each subscript or call is only taken if another one follows it, which gives
     /// the same result: in `a[0][1] = 2`, this takes `[0]` and leaves `[1]` for the target.
     ///
     /// ```text
-    /// ( '[' slices ']' | '(' [arguments] ')' )*
+    /// ( '[' slices ']' | '(' [arguments] ')' | '.' NAME )*
     /// ```
     pub(super) fn parse_t_primary_loop0(&mut self) -> Vec<PrimaryOp> {
         let mut results = vec![];
@@ -77,6 +77,16 @@ impl Parser {
                 results.push(PrimaryOp::Call(arguments, self.last_span()));
                 continue;
             }
+            self.pos = mark;
+
+            // '.' NAME
+            if self.expect(TokenType::Dot).is_some()
+                && let Some((attr, span)) = self.expect_name("a method name", false)
+                && self.parse_t_lookahead()
+            {
+                results.push(PrimaryOp::Attribute(attr, span));
+                continue;
+            }
 
             self.pos = mark;
             break;
@@ -88,12 +98,12 @@ impl Parser {
     ///
     /// ```text
     /// t_primary:
-    ///     | atom ( '[' slices ']' | '(' [arguments] ')' )* &t_lookahead
+    ///     | atom ( '[' slices ']' | '(' [arguments] ')' | '.' NAME )* &t_lookahead
     /// ```
     pub(super) fn parse_t_primary(&mut self) -> ParseExprResult {
         let mark = self.pos;
 
-        // atom ( '[' slices ']' | '(' [arguments] ')' )* &t_lookahead
+        // atom ( '[' slices ']' | '(' [arguments] ')' | '.' NAME )* &t_lookahead
         if let Ok(mut result) = self.parse_atom()
             && let ops = self.parse_t_primary_loop0()
             && self.parse_t_lookahead()
@@ -115,6 +125,14 @@ impl Parser {
                     )),
                     PrimaryOp::Call(args, end) => Box::new(Expr::new(
                         ExprKind::Call { func: result, args },
+                        start.to(end),
+                    )),
+                    PrimaryOp::Attribute(attr, end) => Box::new(Expr::new(
+                        ExprKind::Attribute {
+                            value: result,
+                            attr,
+                            ctx: ExprContext::Load,
+                        },
                         start.to(end),
                     )),
                 };
@@ -575,10 +593,11 @@ impl Parser {
         })
     }
 
-    /// Parses the calls and subscripts that follow an atom, such as `(1)[0]` in `f(1)[0]`.
+    /// Parses the calls, subscripts, and attributes that follow an atom, such as `(1)[0]` in
+    /// `f(1)[0]` or `.len()` in `xs.len()`.
     ///
     /// ```text
-    /// ( '(' [arguments] ')' | '[' slices ']' )*
+    /// ( '(' [arguments] ')' | '[' slices ']' | '.' NAME )*
     /// ```
     pub(super) fn parse_primary_loop0(&mut self) -> Vec<PrimaryOp> {
         let mut results: Vec<PrimaryOp> = vec![];
@@ -604,21 +623,31 @@ impl Parser {
                 continue;
             }
             self.pos = mark;
+
+            // '.' NAME
+            if self.expect(TokenType::Dot).is_some()
+                && let Some((attr, span)) = self.expect_name("a method name", false)
+            {
+                results.push(PrimaryOp::Attribute(attr, span));
+                continue;
+            }
+            self.pos = mark;
             break;
         }
         results
     }
 
-    /// Parses an atom followed by any calls or subscripts, such as `f(1)` or `a[0]`.
+    /// Parses an atom followed by any calls, subscripts, or attributes, such as `f(1)`, `a[0]`, or
+    /// `xs.len()`.
     ///
     /// ```text
     /// primary:
-    ///     | atom ( '(' [arguments] ')' | '[' slices ']' )*
+    ///     | atom ( '(' [arguments] ')' | '[' slices ']' | '.' NAME )*
     /// ```
     pub(super) fn parse_primary(&mut self) -> ParseExprResult {
         let mark = self.pos;
 
-        // atom ( '(' [arguments] ')' | '[' slices ']' )*
+        // atom ( '(' [arguments] ')' | '[' slices ']' | '.' NAME )*
         if let Ok(mut result) = self.parse_atom()
             && let ops = self.parse_primary_loop0()
         {
@@ -639,6 +668,14 @@ impl Parser {
                     )),
                     PrimaryOp::Call(args, end) => Box::new(Expr::new(
                         ExprKind::Call { func: result, args },
+                        start.to(end),
+                    )),
+                    PrimaryOp::Attribute(attr, end) => Box::new(Expr::new(
+                        ExprKind::Attribute {
+                            value: result,
+                            attr,
+                            ctx: ExprContext::Load,
+                        },
                         start.to(end),
                     )),
                 };

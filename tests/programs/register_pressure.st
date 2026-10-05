@@ -42,9 +42,9 @@ def mixed(n);
     t = 0
     u = 1.5
     for i in range(n);
-        append(xs, i * i)
+        xs.append(i * i)
         s = s + "b"
-        t = t + len(xs) + len(s)
+        t = t + xs.len() + s.len()
         u = u * 2.0
     print(xs, s, t, u)
     ret t

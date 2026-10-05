@@ -7,8 +7,8 @@ def matrix(n, seed);
         for j in range(n);
             x = x * 1103515245 + 12345
             x = x - (x / 2147483648) * 2147483648
-            append(row, float(x) / 2147483648.0)
-        append(rows, row)
+            row.append(float(x) / 2147483648.0)
+        rows.append(row)
     ret rows
 
 def multiply(a, b, n);
@@ -19,8 +19,8 @@ def multiply(a, b, n);
             total = 0.0
             for k in range(n);
                 total = total + a[i][k] * b[k][j]
-            append(row, total)
-        append(c, row)
+            row.append(total)
+        c.append(row)
     ret c
 
 def checksum(c, n);

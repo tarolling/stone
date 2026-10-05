@@ -131,6 +131,11 @@ fn strip_expr(expr: Expr) -> Expr {
             slice: strip_box(slice),
             ctx,
         },
+        ExprKind::Attribute { value, attr, ctx } => ExprKind::Attribute {
+            value: strip_box(value),
+            attr,
+            ctx,
+        },
         ExprKind::List { elts, ctx } => ExprKind::List {
             elts: strip_all(elts),
             ctx,
@@ -842,8 +847,13 @@ fn float_literals_parse() {
 #[test]
 fn a_float_without_digits_after_the_point_is_an_error() {
     assert_eq!(
+        // the '.' starts a method call on 1
         error_of("x = 1.\n"),
-        ("expected end of line, found '.'".to_string(), 1, 6)
+        (
+            "expected a method name, found end of line".to_string(),
+            1,
+            7
+        )
     );
 }
 
@@ -1163,4 +1173,91 @@ fn recovery_of_a_valid_program_has_no_errors() {
     let (body, errors) = recover("def f();\n    ret 1\nprint(f())\n");
     assert_eq!(errors, []);
     assert_eq!(body.len(), 2);
+}
+
+/// Builds the call `value.attr(args)`.
+fn method_call(value: Box<Expr>, attr: &str, args: Vec<Expr>) -> Expr {
+    ExprKind::Call {
+        func: Box::new(
+            ExprKind::Attribute {
+                value,
+                attr: attr.to_string(),
+                ctx: ExprContext::Load,
+            }
+            .into(),
+        ),
+        args,
+    }
+    .into()
+}
+
+#[test]
+fn method_calls_parse_as_calls_of_attributes() {
+    assert_eq!(
+        expr_of("xs.append(1)\n"),
+        method_call(name("xs"), "append", vec![*int(1)])
+    );
+    assert_eq!(
+        expr_of("xs.len()\n"),
+        method_call(name("xs"), "len", vec![])
+    );
+}
+
+#[test]
+fn method_calls_chain_after_subscripts_and_calls() {
+    assert_eq!(
+        expr_of("grid[0].len()\n"),
+        method_call(
+            subscript(name("grid"), int(0), ExprContext::Load),
+            "len",
+            vec![]
+        )
+    );
+    let f_call = ExprKind::Call {
+        func: name("f"),
+        args: vec![],
+    };
+    assert_eq!(
+        expr_of("f().len()\n"),
+        method_call(Box::new(f_call.into()), "len", vec![])
+    );
+}
+
+#[test]
+fn method_calls_span_their_source_text() {
+    let Mod::Module { body } =
+        parse_within("xs.append(1)\n".to_string(), Duration::from_secs(5)).unwrap();
+    let StmtKind::Expr { value } = &body[0].kind else {
+        panic!("expected expression statement");
+    };
+    assert_eq!(value.span, span(1, 1, 1, 13));
+    let ExprKind::Call { func, .. } = &value.kind else {
+        panic!("expected call");
+    };
+    assert_eq!(func.span, span(1, 1, 1, 10));
+}
+
+#[test]
+fn method_calls_work_as_subscript_targets() {
+    let Mod::Module { body } =
+        parse_within("f().x[0] = 1\n".to_string(), Duration::from_secs(5)).unwrap();
+    assert!(matches!(body[0].kind, StmtKind::Assign { .. }));
+}
+
+#[test]
+fn attribute_needs_a_name() {
+    assert_eq!(
+        error_of("xs.\n"),
+        (
+            "expected a method name, found end of line".to_string(),
+            1,
+            4
+        )
+    );
+}
+
+#[test]
+fn attribute_is_not_an_assignment_target() {
+    let (message, line, col) = error_of("xs.len = 1\n");
+    assert_eq!((line, col), (1, 8), "{message}");
 }

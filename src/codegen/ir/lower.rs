@@ -759,10 +759,17 @@ impl<'a> Lowerer<'a> {
             } => self.compare(left, ops, comparators, into),
 
             ExprKind::Call { func, args } => {
+                if let ExprKind::Attribute { value, attr, .. } = &func.kind {
+                    return self.method(value, attr, args, into);
+                }
                 let ExprKind::Name { id, .. } = &func.kind else {
                     return Err("only functions can be called, by name".to_string());
                 };
                 self.call(id, args, into)
+            }
+
+            ExprKind::Attribute { attr, .. } => {
+                Err(format!("'{attr}' is a method, so it can only be called"))
             }
 
             ExprKind::Subscript { value, slice, .. } => {
@@ -866,6 +873,52 @@ impl<'a> Lowerer<'a> {
         Ok(self.finish(Operand::Reg(result), into))
     }
 
+    /// Lowers the method call `receiver.name(args)`, evaluating the receiver before the arguments
+    /// like the interpreter.
+    ///
+    /// For example, `xs.len()` on a list becomes `v1 = len v0`, and on a string it calls
+    /// `stone.str_len`.
+    fn method(
+        &mut self,
+        receiver: &Expr,
+        name: &str,
+        args: &[Expr],
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        match name {
+            "len" if matches!(self.type_of(receiver)?, Type::List(_)) => {
+                let list = self.expr(receiver)?;
+                let dst = self.dst(into);
+                self.push(Inst::ListLen { dst, list });
+                Ok(Operand::Reg(dst))
+            }
+            "len" => {
+                let text = self.expr(receiver)?;
+                let dst = self.dst(into);
+                self.push(Inst::Call {
+                    dst: Some(dst),
+                    callee: Callee::Runtime("stone.str_len"),
+                    args: vec![text],
+                });
+                Ok(Operand::Reg(dst))
+            }
+            "append" => {
+                let mut values = vec![self.expr(receiver)?];
+                for arg in args {
+                    values.push(self.expr(arg)?);
+                }
+                self.push(Inst::Call {
+                    dst: None,
+                    callee: Callee::Runtime("stone.list_append"),
+                    args: values,
+                });
+                // append returns none
+                Ok(self.finish(Operand::Imm(0), into))
+            }
+            _ => Err(format!("there is no method '{name}'")),
+        }
+    }
+
     /// Lowers a call to a builtin or a stone function.
     fn call(&mut self, name: &str, args: &[Expr], into: Option<VReg>) -> Result<Operand, String> {
         match name {
@@ -890,22 +943,6 @@ impl<'a> Lowerer<'a> {
                 // print returns none
                 Ok(self.finish(Operand::Imm(0), into))
             }
-            "len" if matches!(self.type_of(&args[0])?, Type::List(_)) => {
-                let list = self.expr(&args[0])?;
-                let dst = self.dst(into);
-                self.push(Inst::ListLen { dst, list });
-                Ok(Operand::Reg(dst))
-            }
-            "len" => {
-                let text = self.expr(&args[0])?;
-                let dst = self.dst(into);
-                self.push(Inst::Call {
-                    dst: Some(dst),
-                    callee: Callee::Runtime("stone.str_len"),
-                    args: vec![text],
-                });
-                Ok(Operand::Reg(dst))
-            }
             "float" | "int" => {
                 let from = self.type_of(&args[0])?;
                 let src = self.expr(&args[0])?;
@@ -922,19 +959,6 @@ impl<'a> Lowerer<'a> {
                     _ => Inst::FloatToInt { dst, src },
                 });
                 Ok(Operand::Reg(dst))
-            }
-            "append" => {
-                let mut values = Vec::new();
-                for arg in args {
-                    values.push(self.expr(arg)?);
-                }
-                self.push(Inst::Call {
-                    dst: None,
-                    callee: Callee::Runtime("stone.list_append"),
-                    args: values,
-                });
-                // append returns none
-                Ok(self.finish(Operand::Imm(0), into))
             }
             _ => {
                 let mut values = Vec::new();

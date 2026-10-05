@@ -535,6 +535,15 @@ impl<'out> Interpreter<'out> {
                 Ok(Value::Bool(true))
             }
             ExprKind::Call { func, args } => {
+                if let ExprKind::Attribute { value, attr, .. } = &func.kind {
+                    // the receiver is evaluated before the arguments
+                    let receiver = self.eval_expr(value)?;
+                    let mut values = Vec::with_capacity(args.len());
+                    for arg in args {
+                        values.push(self.eval_expr(arg)?);
+                    }
+                    return self.call_method(attr, receiver, values);
+                }
                 let ExprKind::Name { id, .. } = &func.kind else {
                     return Err("only functions can be called, by name".into());
                 };
@@ -544,6 +553,9 @@ impl<'out> Interpreter<'out> {
                     values.push(self.eval_expr(arg)?);
                 }
                 self.call(id, values)
+            }
+            ExprKind::Attribute { attr, .. } => {
+                Err(format!("'{attr}' is a method, so it can only be called").into())
             }
             ExprKind::Constant { value, kind: _ } => Ok(Value::from(&**value)),
             ExprKind::Subscript { value, slice, .. } => {
@@ -564,6 +576,24 @@ impl<'out> Interpreter<'out> {
         }
     }
 
+    /// Calls the builtin method `name` on an already evaluated receiver and arguments.
+    ///
+    /// For example, `call_method("len", Value::Str("abc".into()), vec![])` returns `Value::Int(3)`.
+    fn call_method(&mut self, name: &str, receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
+        match (name, &receiver, &args[..]) {
+            // len counts bytes, like the compiled strlen
+            ("len", Value::Str(s), []) => Ok(Value::Int(s.len() as i64)),
+            ("len", Value::List(items), []) => Ok(Value::Int(items.borrow().len() as i64)),
+            ("len", _, _) => Err("len() is called on a str or list, with no arguments".into()),
+            ("append", Value::List(items), [item]) => {
+                items.borrow_mut().push(item.clone());
+                Ok(Value::None)
+            }
+            ("append", _, _) => Err("append() is called on a list, with one value".into()),
+            _ => Err(format!("there is no method '{name}'").into()),
+        }
+    }
+
     /// Calls the builtin or user-defined function named `name` with already evaluated arguments.
     fn call(&mut self, name: &str, args: Vec<Value>) -> EvalResult<Value> {
         match (name, &args[..]) {
@@ -572,15 +602,6 @@ impl<'out> Interpreter<'out> {
                 writeln!(self.out, "{}", parts.join(" "))?;
                 return Ok(Value::None);
             }
-            // len counts bytes, like the compiled strlen
-            ("len", [Value::Str(s)]) => return Ok(Value::Int(s.len() as i64)),
-            ("len", [Value::List(items)]) => return Ok(Value::Int(items.borrow().len() as i64)),
-            ("len", _) => return Err("len() takes one str or list".into()),
-            ("append", [Value::List(items), item]) => {
-                items.borrow_mut().push(item.clone());
-                return Ok(Value::None);
-            }
-            ("append", _) => return Err("append() takes a list and a value".into()),
             ("float", [Value::Int(i)]) => return Ok(Value::Float(*i as f64)),
             ("float", [Value::Float(x)]) => return Ok(Value::Float(*x)),
             ("float", _) => return Err("float() takes one int or float".into()),

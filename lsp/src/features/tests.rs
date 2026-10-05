@@ -8,7 +8,7 @@ def add(a, b);
     ret sum
 for i in range(3);
     total = add(total, i)
-print(total, len(\"é\"))
+print(total, \"é\".len())
 ";
 
 fn doc(text: &str) -> Document {
@@ -89,6 +89,19 @@ fn hover_documents_builtins() {
 }
 
 #[test]
+fn hover_documents_methods() {
+    // the `len` in `"é".len()`
+    let text = hover_text(&doc(SOURCE), at(7, 18)).unwrap();
+    assert!(
+        text.starts_with("```stone\n(str | list[T]).len() -> int\n```\n"),
+        "{text}"
+    );
+    // a variable named like a method is still a variable
+    let text = hover_text(&doc("len = 1\nx = len\n"), at(2, 5)).unwrap();
+    assert_eq!(text, "```stone\n(global) len: int\n```");
+}
+
+#[test]
 fn hover_shows_the_type_of_other_expressions() {
     // the `+` in `a + b`
     assert_eq!(
@@ -134,8 +147,16 @@ fn definition_of_a_builtin_opens_the_reference_file() {
         Range::new(Position::new(line, 2), Position::new(line, 7))
     );
 
-    let len = definition(&doc, &uri(), at(7, 15), Some(&builtins)).unwrap();
-    assert!(len.range.start.line > line);
+    // the `len` in the reference's `# (str | list[T]).len() -> int` line
+    let len = definition(&doc, &uri(), at(7, 18), Some(&builtins)).unwrap();
+    let line = text
+        .lines()
+        .position(|l| l.starts_with("# (str | list[T]).len("))
+        .unwrap() as u32;
+    assert_eq!(
+        len.range,
+        Range::new(Position::new(line, 18), Position::new(line, 21))
+    );
 }
 
 #[test]
@@ -181,8 +202,8 @@ fn rename_rejects_bad_names() {
         "'2x' is not a valid name"
     );
     assert_eq!(
-        rename(&doc, &uri(), at(3, 5), "len").unwrap_err(),
-        "'len' is a builtin"
+        rename(&doc, &uri(), at(3, 5), "print").unwrap_err(),
+        "'print' is a builtin"
     );
     // `a` is already a parameter where `sum` is used
     assert_eq!(
@@ -256,6 +277,26 @@ fn completion_offers_what_is_in_scope() {
     let outside = labels(at(7, 1));
     assert!(!outside.iter().any(|(label, _)| label == "sum"));
     assert!(outside.iter().any(|(label, _)| label == "total"));
+}
+
+#[test]
+fn completion_after_a_dot_offers_methods() {
+    let doc = doc("xs = []\nxs.\nxs.le\n");
+    let labels = |pos: Position| -> Vec<(String, Option<CompletionItemKind>)> {
+        completion(&doc, pos)
+            .into_iter()
+            .map(|item| (item.label, item.kind))
+            .collect()
+    };
+    let methods = [
+        ("len".to_string(), Some(CompletionItemKind::METHOD)),
+        ("append".to_string(), Some(CompletionItemKind::METHOD)),
+    ];
+    assert_eq!(labels(at(2, 4)), methods);
+    assert_eq!(labels(at(3, 6)), methods);
+    // and methods are not offered as functions
+    let outside = labels(at(1, 1));
+    assert!(!outside.iter().any(|(label, _)| label == "len"));
 }
 
 #[test]

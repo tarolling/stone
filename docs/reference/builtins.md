@@ -1,7 +1,8 @@
 # Builtins
 
 These functions are part of the language and available everywhere. Their names cannot be
-assigned to. The same descriptions appear on hover in the editor.
+assigned to. The builtin [methods](#methods) are called on a value instead, as in `xs.len()`.
+The same descriptions appear on hover in the editor.
 
 ## `print`
 
@@ -17,18 +18,6 @@ in brackets, with strings inside a list in single quotes:
 print("total", 3, 0.5, true, none, [1, 2], ["a"])   # total 3 0.5 true none [1, 2] ['a']
 ```
 
-## `len`
-
-```text
-len(value: str | list[T]) -> int
-```
-
-Returns the number of bytes in a string or elements in a list.
-
-```stone
-print(len("stone"), len([1, 2, 3]), len([]))   # 5 3 0
-```
-
 ## `range`
 
 ```text
@@ -41,20 +30,6 @@ Counts from `start`, or 0, up to but not including `end`. It can only be the ite
 ```stone
 for i in range(2, 5);
     print(i)   # 2, then 3, then 4
-```
-
-## `append`
-
-```text
-append(items: list[T], item: T) -> none
-```
-
-Adds `item` to the end of `items`.
-
-```stone
-names = []
-append(names, "ada")
-print(names)   # ['ada']
 ```
 
 ## `int`
@@ -81,4 +56,36 @@ Converts a number to a float, rounding to the nearest float if needed.
 
 ```stone
 print(float(3), float(9007199254740993))   # 3.0 9007199254740992.0
+```
+
+## Methods
+
+A method is called on a value with a `.`, as in `items.append(4)`. The value before the `.` is
+evaluated first, then the arguments, left to right. A method must be called: `items.len` on its
+own is an error. `len` and `append` are not reserved, so they also work as ordinary names.
+
+### `len`
+
+```text
+(str | list[T]).len() -> int
+```
+
+Returns the number of bytes in a string or elements in a list.
+
+```stone
+print("stone".len(), [1, 2, 3].len(), [].len())   # 5 3 0
+```
+
+### `append`
+
+```text
+list[T].append(item: T) -> none
+```
+
+Adds `item` to the end of the list.
+
+```stone
+names = []
+names.append("ada")
+print(names)   # ['ada']
 ```

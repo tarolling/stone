@@ -13,7 +13,7 @@ else;
 
 def test(y, z, a);
     print("testing")
-    print(len("testing"))
+    print("testing".len())
     ret a
 
 print(test(1, 2, 3))

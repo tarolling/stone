@@ -13,7 +13,10 @@ use lsp_types::{
 use stone::checker::{Analysis, Symbol, SymbolKind as StoneSymbolKind, Type};
 use stone::diagnostic::Severity;
 use stone::span::{Pos, Span};
-use stone::stdlib::{BUILTINS, builtin_doc, builtins_reference};
+use stone::stdlib::{
+    BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, builtin_doc, builtins_reference,
+    method_doc,
+};
 use stone::token::RESERVED_KEYWORDS;
 
 use crate::line_index::{Encoding, LineIndex};
@@ -117,6 +120,18 @@ fn word_at(doc: &Document, pos: Pos) -> Option<(String, Span)> {
     Some((word, span))
 }
 
+/// Returns whether the text right before `pos` is a `.`, so a name there is a method, as `len` is
+/// in `xs.len()`.
+fn follows_dot(doc: &Document, pos: Pos) -> bool {
+    pos.col > 1
+        && doc
+            .text
+            .lines()
+            .nth(pos.line - 1)
+            .and_then(|line| line.chars().nth(pos.col - 2))
+            == Some('.')
+}
+
 fn markdown(code: &str, text: Option<&str>) -> HoverContents {
     let mut value = format!("```stone\n{code}\n```");
     if let Some(text) = text {
@@ -141,7 +156,11 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
         });
     }
     if let Some((word, span)) = word_at(doc, pos)
-        && let Some(builtin) = builtin_doc(&word)
+        && let Some(builtin) = if follows_dot(doc, span.start) {
+            method_doc(&word)
+        } else {
+            builtin_doc(&word)
+        }
     {
         return Some(Hover {
             contents: markdown(builtin.signature, Some(builtin.description)),
@@ -175,29 +194,45 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
 /// server so editors can open it.
 pub struct Builtins {
     uri: Uri,
-    /// The line of each builtin's signature in the file, counted from 0.
-    lines: HashMap<&'static str, u32>,
+    /// The line and column of each builtin function's name in its signature, counted from 0.
+    functions: HashMap<&'static str, (u32, u32)>,
+    /// The same for each builtin method, such as `len` in `# (str | list[T]).len() -> int`.
+    methods: HashMap<&'static str, (u32, u32)>,
 }
 
 impl Builtins {
     pub fn new(uri: Uri) -> Self {
         let text = builtins_reference();
-        let lines = BUILTINS
-            .iter()
-            .filter_map(|&name| {
-                let prefix = format!("# {name}(");
-                let line = text.lines().position(|line| line.starts_with(&prefix))?;
-                Some((name, line as u32))
-            })
-            .collect();
-        Builtins { uri, lines }
+        // the signature's line, and the column of `name` where it is followed by a `(`
+        let find = |doc: &BuiltinDoc| {
+            let signature = format!("# {}", doc.signature);
+            let line = text.lines().position(|line| line == signature)?;
+            let col = signature.find(&format!("{}(", doc.name))?;
+            Some((
+                doc.name,
+                (line as u32, signature[..col].chars().count() as u32),
+            ))
+        };
+        let functions = BUILTIN_DOCS.iter().filter_map(find).collect();
+        let methods = METHOD_DOCS.iter().filter_map(find).collect();
+        Builtins {
+            uri,
+            functions,
+            methods,
+        }
     }
 
-    /// Returns the location of `name` in its signature line, just past the `# `.
-    fn location(&self, name: &str) -> Option<Location> {
-        let line = *self.lines.get(name)?;
-        let end = 2 + name.chars().count() as u32;
-        let range = Range::new(Position::new(line, 2), Position::new(line, end));
+    /// Returns the location of the builtin function, or with `method` the builtin method, named
+    /// `name` in its signature line.
+    fn location(&self, name: &str, method: bool) -> Option<Location> {
+        let names = if method {
+            &self.methods
+        } else {
+            &self.functions
+        };
+        let &(line, start) = names.get(name)?;
+        let end = start + name.chars().count() as u32;
+        let range = Range::new(Position::new(line, start), Position::new(line, end));
         Some(Location::new(self.uri.clone(), range))
     }
 }
@@ -214,8 +249,8 @@ pub fn definition(
         let span = doc.analysis.symbols[symbol].span;
         return Some(Location::new(uri.clone(), doc.index.range(span)));
     }
-    let (word, _) = word_at(doc, doc.index.pos(position))?;
-    builtins?.location(&word)
+    let (word, span) = word_at(doc, doc.index.pos(position))?;
+    builtins?.location(&word, follows_dot(doc, span.start))
 }
 
 /// Returns every appearance of the symbol at `position`, with or without its definition.
@@ -333,11 +368,25 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
     outline
 }
 
-/// Returns the names that can be written at `position`: symbols in scope, builtins, and keywords.
+/// Returns the names that can be written at `position`: symbols in scope, builtins, and keywords,
+/// or right after a `.`, the builtin methods.
 ///
 /// The client filters them by what has been typed so far.
 pub fn completion(doc: &Document, position: Position) -> Vec<CompletionItem> {
     let pos = doc.index.pos(position);
+    // after a `.`, only a method can come next, as in `xs.le`
+    let start = word_at(doc, pos).map_or(pos, |(_, span)| span.start);
+    if follows_dot(doc, start) {
+        return METHODS
+            .iter()
+            .map(|method| CompletionItem {
+                label: method.to_string(),
+                kind: Some(CompletionItemKind::METHOD),
+                detail: method_doc(method).map(|doc| doc.signature.to_string()),
+                ..CompletionItem::default()
+            })
+            .collect();
+    }
     let mut items: Vec<CompletionItem> = vec![];
     // locals come first, so they win over a global with the same name
     let mut visible: Vec<&Symbol> = doc.analysis.visible_at(pos).collect();

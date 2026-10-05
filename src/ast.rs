@@ -210,6 +210,14 @@ pub enum ExprKind {
         slice: Box<Expr>,
         ctx: ExprContext,
     },
+    /// An attribute of a value, such as `xs.len` in `xs.len()`.
+    ///
+    /// Attributes are only meaningful as the function of a call, which calls a method.
+    Attribute {
+        value: Box<Expr>,
+        attr: Identifier,
+        ctx: ExprContext,
+    },
     /// A variable reference, such as `x`.
     Name { id: Identifier, ctx: ExprContext },
     /// A list literal, such as `[1, 2, 3]`.
@@ -280,12 +288,14 @@ pub enum Mod {
     Module { body: Vec<Stmt> },
 }
 
-/// A call or subscript that follows an atom, along with the span of its closing bracket.
+/// A call, subscript, or attribute that follows an atom, along with the span of its last token.
 ///
-/// For example, `(1)` in `f(1)` is a `Call` whose span covers the `)`.
+/// For example, `(1)` in `f(1)` is a `Call` whose span covers the `)`, and `.len` in `xs.len()` is
+/// an `Attribute` whose span covers `len`.
 pub enum PrimaryOp {
     Subscript(Box<Expr>, Span),
     Call(Vec<Expr>, Span),
+    Attribute(Identifier, Span),
 }
 
 #[derive(Debug, PartialEq)]

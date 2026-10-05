@@ -143,3 +143,14 @@ fn negative_literals_fold_to_immediates() {
     let bits = (-1.5f64).to_bits() as i64;
     assert!(floats.contains(&format!("fmul v0, {bits}")), "{floats}");
 }
+
+#[test]
+fn methods_lower_to_list_and_string_operations() {
+    let source = "def f(xs, s);\n    xs.append(s.len())\n    ret xs.len()\nf([], \"a\")\n";
+    assert_eq!(
+        dump(source).split("fn main").next().unwrap(),
+        "fn f(v0, v1):\n\
+         b0:\n  v2 = call stone.str_len(v1)\n  call stone.list_append(v0, v2)\n  \
+         v3 = len v0\n  ret v3\n"
+    );
+}

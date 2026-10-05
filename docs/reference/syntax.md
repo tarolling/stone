@@ -14,7 +14,6 @@ fewer Shift presses. The full grammar is
 | `return x` | `ret x` |
 | `continue` | `cont` |
 | `True`, `False`, `None` | `true`, `false`, `none` |
-| `xs.append(x)` | `append(xs, x)` |
 | `'single'` or `"double"` quotes | `"double"` quotes only |
 | `-7 // 2 == -4` | `-7 / 2 == -3` (truncates) |
 
@@ -93,7 +92,12 @@ From lowest to highest precedence:
 | `+` `-` | two ints or two floats; `+` also joins two strings |
 | `*` `/` | two ints or two floats |
 | unary `+` `-` | an int or a float |
-| calls `f(x)`, indexing `xs[i]` | |
+| calls `f(x)`, method calls `xs.len()`, indexing `xs[i]` | |
 
 Comparisons chain, so `a < b <= c` means `a < b and b <= c` with `b` evaluated once.
 Parentheses group as usual. Operands are evaluated left to right.
+
+A method call such as `xs.append(1)` evaluates the value before the `.` first, then the
+arguments. The builtin methods are `len` and `append`, documented in
+[Builtins](builtins.md#methods). A `.` right after an int starts a method call, so `1.` is not a
+float; write `1.0`.

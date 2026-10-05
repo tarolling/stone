@@ -13,7 +13,7 @@ prints
 ## Conditions
 
 `if`, `elif`, and `while` take a condition that is a `bool` or an `int`, where `0` is false and
-every other int is true. Strings, floats, and lists are not conditions, so write `len(s) > 0` or
+every other int is true. Strings, floats, and lists are not conditions, so write `s.len() > 0` or
 `x != 0.0` instead.
 
 Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`. They chain the way they do in Python:

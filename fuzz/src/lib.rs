@@ -222,7 +222,7 @@ impl Generator {
             self.line(indent, &format!("{name} = [{}]", items.join(", ")));
             if u.arbitrary()? {
                 let value = self.expression(u, scope, 0)?;
-                self.line(indent, &format!("append({name}, {value})"));
+                self.line(indent, &format!("{name}.append({value})"));
             }
             scope.lists.push(name);
             return Ok(());
@@ -231,14 +231,14 @@ impl Generator {
         match u.int_in_range(0..=4)? {
             0 | 4 => {
                 let value = self.expression(u, scope, 0)?;
-                self.line(indent, &format!("append({list}, {value})"));
+                self.line(indent, &format!("{list}.append({value})"));
             }
             1 => {
                 let index = u.int_in_range(-2..=1)?;
                 let value = self.expression(u, scope, 0)?;
                 self.line(indent, &format!("{list}[{index}] = {value}"));
             }
-            2 => self.line(indent, &format!("print({list}, len({list}))")),
+            2 => self.line(indent, &format!("print({list}, {list}.len())")),
             _ => {
                 let value = self.expression(u, scope, 0)?;
                 let test = self.comparison(u, scope)?;
@@ -453,7 +453,7 @@ impl Generator {
                 let list = u.choose(&scope.lists)?;
                 Ok(format!("{list}[{}]", u.int_in_range(-2..=1)?))
             }
-            7 if !scope.lists.is_empty() => Ok(format!("len({})", u.choose(&scope.lists)?)),
+            7 if !scope.lists.is_empty() => Ok(format!("{}.len()", u.choose(&scope.lists)?)),
             4 if nesting < MAX_NESTING => {
                 let inner = self.expression(u, scope, nesting + 1)?;
                 Ok(format!("({inner})"))
@@ -692,7 +692,8 @@ mod tests {
         for feature in [
             "for ",
             " in range(",
-            "append(",
+            ".append(",
+            ".len()",
             "[",
             " < ",
             "not (",

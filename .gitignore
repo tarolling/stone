@@ -38,3 +38,9 @@ target
 
 # stone-lsp copied in to package a platform-specific extension
 /editors/vscode/server/
+
+# python virtual environments and bytecode, e.g. from building the docs
+.venv/
+venv/
+__pycache__/
+*.py[cod]

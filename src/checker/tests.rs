@@ -177,7 +177,7 @@ fn functions_take_their_operand_types_from_calls() {
 
 #[test]
 fn lists_can_hold_floats() {
-    let source = "xs = []\nappend(xs, 0.5)\ny = xs[0] * 2.0\n";
+    let source = "xs = []\nxs.append(0.5)\ny = xs[0] * 2.0\n";
     assert_eq!(type_of_symbol(source, "xs"), "list[float]");
     assert_eq!(type_of_symbol(source, "y"), "float");
 }
@@ -256,8 +256,8 @@ fn calls_need_the_right_number_of_arguments() {
         1,
     );
     assert_error(
-        "x = len(\"a\", \"b\")\n",
-        "'len' takes 1 argument, but 2 were given",
+        "x = \"a\".len(\"b\")\n",
+        "'len' takes 0 arguments, but 1 was given",
         1,
         5,
     );
@@ -379,7 +379,12 @@ fn parameters_must_be_unique() {
 
 #[test]
 fn len_needs_a_str() {
-    assert_error("x = len(5)\n", "'len' needs a str or list, found int", 1, 9);
+    assert_error(
+        "x = 5.len()\n",
+        "'len' needs a str or list, found int",
+        1,
+        5,
+    );
 }
 
 #[test]
@@ -494,7 +499,7 @@ fn a_for_loop_does_not_count_as_returning() {
 
 #[test]
 fn lists_have_element_types() {
-    let source = "a = [1, 2]\nb = [[\"x\"], []]\nc = a[0]\nd = []\nappend(d, true)\n";
+    let source = "a = [1, 2]\nb = [[\"x\"], []]\nc = a[0]\nd = []\nd.append(true)\n";
     assert_eq!(type_of_symbol(source, "a"), "list[int]");
     assert_eq!(type_of_symbol(source, "b"), "list[list[str]]");
     assert_eq!(type_of_symbol(source, "c"), "int");
@@ -510,10 +515,10 @@ fn an_empty_list_that_is_never_filled_holds_ints() {
 fn list_elements_must_agree() {
     assert_error("a = [1, \"b\"]\n", "expected int, found str", 1, 9);
     assert_error(
-        "a = [1]\nappend(a, \"b\")\n",
+        "a = [1]\na.append(\"b\")\n",
         "expected int, found str",
         2,
-        11,
+        10,
     );
     assert_error("a = [1]\na[0] = true\n", "expected int, found bool", 2, 8);
 }
@@ -531,7 +536,7 @@ fn indexes_must_be_ints_and_values_lists() {
 
 #[test]
 fn len_takes_lists() {
-    assert_eq!(type_of_symbol("n = len([1, 2])\n", "n"), "int");
+    assert_eq!(type_of_symbol("n = [1, 2].len()\n", "n"), "int");
 }
 
 #[test]
@@ -558,10 +563,15 @@ fn lists_cannot_be_compared() {
 
 #[test]
 fn append_needs_a_list() {
-    assert_error("append(1, 2)\n", "expected list[int], found int", 1, 8);
     assert_error(
-        "a = []\nappend(a)\n",
-        "'append' takes 2 arguments, but 1 was given",
+        "x = 1\nx.append(2)\n",
+        "expected list[int], found int",
+        2,
+        1,
+    );
+    assert_error(
+        "a = []\na.append()\n",
+        "'append' takes 1 argument, but 0 were given",
         2,
         1,
     );
@@ -684,4 +694,74 @@ fn visible_symbols_depend_on_position() {
     assert_eq!(names_at(Pos::new(3, 5)), ["a", "b", "f", "g", "h"]);
     assert_eq!(names_at(Pos::new(6, 5)), ["f", "g", "h"]);
     assert_eq!(names_at(Pos::new(1, 1)), ["f", "g", "h"]);
+}
+
+#[test]
+fn len_takes_strings() {
+    assert_eq!(type_of_symbol("s = \"abc\"\nn = s.len()\n", "n"), "int");
+}
+
+#[test]
+fn methods_chain_after_subscripts_and_calls() {
+    let source = "def f();\n    ret [\"a\"]\ngrid = [[1]]\ngrid[0].append(2)\nn = f().len()\n";
+    assert_eq!(type_of_symbol(source, "n"), "int");
+}
+
+#[test]
+fn append_infers_a_parameter_is_a_list() {
+    let source = "def push(xs, x);\n    xs.append(x + 1)\npush([], 2)\n";
+    assert_eq!(
+        type_of_symbol(source, "push"),
+        "def(list[int], int) -> none"
+    );
+}
+
+#[test]
+fn unknown_methods_are_errors() {
+    assert_error("xs = []\nxs.push(1)\n", "there is no method 'push'", 2, 4);
+}
+
+#[test]
+fn methods_must_be_called() {
+    assert_error(
+        "xs = []\nn = xs.len\n",
+        "'len' is a method, so it can only be called",
+        2,
+        5,
+    );
+}
+
+#[test]
+fn len_and_append_are_no_longer_functions() {
+    assert_error(
+        "x = len(\"a\")\n",
+        "'len' is a method, so call it as value.len()",
+        1,
+        5,
+    );
+    assert_error(
+        "xs = []\nappend(xs, 1)\n",
+        "'append' is a method, so call it as value.append(...)",
+        2,
+        1,
+    );
+}
+
+#[test]
+fn len_and_append_are_ordinary_names() {
+    assert_eq!(type_of_symbol("len = 3\n", "len"), "int");
+    assert_eq!(
+        type_of_symbol("def append(a);\n    ret a\n", "append"),
+        "def(int) -> int"
+    );
+}
+
+#[test]
+fn method_receivers_must_be_assigned_first() {
+    assert_error(
+        "xs.append(1)\nxs = []\n",
+        "'xs' might be used before it is assigned",
+        1,
+        1,
+    );
 }

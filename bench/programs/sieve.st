@@ -2,7 +2,7 @@
 def count_primes(limit);
     is_prime = []
     for i in range(limit + 1);
-        append(is_prime, 1)
+        is_prime.append(1)
     is_prime[0] = 0
     is_prime[1] = 0
     p = 2

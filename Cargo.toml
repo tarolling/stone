@@ -1,7 +1,7 @@
 [package]
 name = "stone"
 default-run = "stone"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "A Python-like language with a tree-walking interpreter and an x86-64 compiler"
 license = "Apache-2.0"
@@ -16,7 +16,15 @@ default-members = [".", "lsp"]
 
 [dependencies]
 clap = { version = "4.5.54", features = ["derive"] }
-self_update = { version = "1.3", default-features = false, features = ["ureq", "rustls", "github", "archive-tar", "compression-tar-gz", "checksums", "progress-bar"], optional = true }
+self_update = { version = "1.3", default-features = false, features = [
+    "ureq",
+    "rustls",
+    "github",
+    "archive-tar",
+    "compression-tar-gz",
+    "checksums",
+    "progress-bar",
+], optional = true }
 
 [lints.rust]
 # cargo fuzz sets --cfg fuzzing, which `debug!` checks

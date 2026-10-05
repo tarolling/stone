@@ -28,6 +28,8 @@ module stone
          | Call(expr func, expr* args)
          | Constant(constant value, string? kind)
 
+         | Attribute(expr value, identifier attr, expr_context ctx)
+         | Subscript(expr value, expr slice, expr_context ctx)
          | Name(identifier id, expr_context ctx)
          | List(expr* elts, expr_context ctx)
 

@@ -18,7 +18,7 @@ use std::fmt::Display;
 use crate::ast::{CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::diagnostic::Diagnostic;
 use crate::span::{Pos, Span};
-use crate::stdlib::BUILTINS;
+use crate::stdlib::{BUILTINS, METHODS};
 
 #[cfg(test)]
 mod tests;
@@ -829,6 +829,14 @@ impl Inference {
                 Ty::Bool
             }
             ExprKind::Call { func, args } => self.infer_call(expr, func, args),
+            ExprKind::Attribute { value, attr, .. } => {
+                self.infer(value);
+                self.error(
+                    expr.span,
+                    format!("'{attr}' is a method, so it can only be called"),
+                );
+                self.fresh()
+            }
             ExprKind::Subscript { value, slice, .. } => self.subscript(value, slice),
             ExprKind::List { elts, .. } => {
                 let elem = self.fresh();
@@ -852,6 +860,9 @@ impl Inference {
     }
 
     fn infer_call(&mut self, call: &Expr, func: &Expr, args: &[Expr]) -> Ty {
+        if let ExprKind::Attribute { value, attr, .. } = &func.kind {
+            return self.infer_method(call, func, value, attr, args);
+        }
         let ExprKind::Name { id, .. } = &func.kind else {
             self.error(func.span, "only functions can be called, by name");
             for arg in args {
@@ -882,8 +893,71 @@ impl Inference {
                 self.error(func.span, format!("'{id}' is not a function"));
                 self.fresh()
             }
+            Resolved::Undefined if METHODS.contains(&id.as_str()) => {
+                let args = if id == "len" { "" } else { "..." };
+                self.error(
+                    func.span,
+                    format!("'{id}' is a method, so call it as value.{id}({args})"),
+                );
+                self.fresh()
+            }
             Resolved::Undefined => {
                 self.error(func.span, format!("undefined function '{id}'"));
+                self.fresh()
+            }
+        }
+    }
+
+    /// Infers the method call `receiver.name(args)`, evaluating the receiver before the arguments.
+    ///
+    /// For example, `xs.append(1)` requires `xs` to be a `list[int]` and has type `none`.
+    fn infer_method(
+        &mut self,
+        call: &Expr,
+        func: &Expr,
+        receiver: &Expr,
+        name: &str,
+        args: &[Expr],
+    ) -> Ty {
+        let receiver_ty = self.infer(receiver);
+        let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+        match name {
+            "len" => {
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, 0, args.len());
+                }
+                self.require(
+                    receiver_ty,
+                    &[Kind::Str, Kind::List],
+                    receiver.span,
+                    "'len' needs a str or list, found {}",
+                );
+                Ty::Int
+            }
+            "append" => {
+                if args.len() != 1 {
+                    self.arity_error(call.span, name, 1, args.len());
+                    return Ty::None;
+                }
+                let elem = self.fresh();
+                let list = Ty::List(Box::new(elem.clone()));
+                if self.unify(&list, &receiver_ty) {
+                    self.expect(&elem, &arg_types[0], args[0].span);
+                } else {
+                    // the element pins down the message, as in `expected list[int]`
+                    self.unify(&elem, &arg_types[0]);
+                    self.expect(&list, &receiver_ty, receiver.span);
+                }
+                Ty::None
+            }
+            _ => {
+                // the name is the last token of `func`
+                let end = func.span.end;
+                let start = Pos::new(end.line, end.col - name.chars().count());
+                self.error(
+                    Span::new(start, end),
+                    format!("there is no method '{name}'"),
+                );
                 self.fresh()
             }
         }
@@ -892,35 +966,6 @@ impl Inference {
     fn infer_builtin(&mut self, call: &Expr, name: &str, args: &[Expr], arg_types: &[Ty]) -> Ty {
         match name {
             "print" => Ty::None,
-            "len" => {
-                if args.len() != 1 {
-                    self.arity_error(call.span, name, 1, args.len());
-                } else {
-                    self.require(
-                        arg_types[0].clone(),
-                        &[Kind::Str, Kind::List],
-                        args[0].span,
-                        "'len' needs a str or list, found {}",
-                    );
-                }
-                Ty::Int
-            }
-            "append" => {
-                if args.len() != 2 {
-                    self.arity_error(call.span, name, 2, args.len());
-                } else {
-                    let elem = self.fresh();
-                    let list = Ty::List(Box::new(elem.clone()));
-                    if self.unify(&list, &arg_types[0]) {
-                        self.expect(&elem, &arg_types[1], args[1].span);
-                    } else {
-                        // the element pins down the message, as in `expected list[int]`
-                        self.unify(&elem, &arg_types[1]);
-                        self.expect(&list, &arg_types[0], args[0].span);
-                    }
-                }
-                Ty::None
-            }
             "int" | "float" => {
                 if args.len() != 1 {
                     self.arity_error(call.span, name, 1, args.len());
@@ -1161,11 +1206,16 @@ impl<'a> AssignmentCheck<'a> {
                     self.reads(comparator, assigned);
                 }
             }
-            ExprKind::Call { args, .. } => {
+            ExprKind::Call { func, args } => {
+                // a called name is a function, but a method's receiver is read
+                if let ExprKind::Attribute { .. } = &func.kind {
+                    self.reads(func, assigned);
+                }
                 for arg in args {
                     self.reads(arg, assigned);
                 }
             }
+            ExprKind::Attribute { value, .. } => self.reads(value, assigned),
             ExprKind::Subscript { value, slice, .. } => {
                 self.reads(value, assigned);
                 self.reads(slice, assigned);

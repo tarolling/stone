@@ -7,4 +7,4 @@ def greet();
 greet()
 print(add(2, 3))
 print(add(add(1, 2), 4))
-print(len("hello"))
+print("hello".len())

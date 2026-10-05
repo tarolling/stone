@@ -33,6 +33,8 @@ highlight_language = "stone"
 
 html_theme = "furo"
 html_title = f"stone {release}"
+html_logo = "_static/logo.svg"
+html_favicon = "_static/logo.svg"
 html_theme_options = {
     "source_repository": "https://github.com/tarolling/stone/",
     "source_branch": "main",

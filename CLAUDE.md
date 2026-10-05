@@ -68,6 +68,8 @@ Language server (`lsp/`, crate `stone-lsp`, depends on `lsp-server`, `lsp-types`
 - Tests: unit tests for features and positions, `tests/server.rs` over an in-memory connection, and `tests/stdio.rs` against the real binary.
 - `driver::analyze` recovers from syntax errors statement by statement, in blocks too (`Parser::parse_recovering`, `parse_statements`), so features keep working around a typo, and it hides type errors until the syntax errors are fixed.
 
+The logo is `docs/_static/logo.svg` (the S in Black Ops One, `#f1c232`), used by the docs and README. The VS Code extension can only package its own directory, so it keeps a copy as `editors/vscode/images/stone.svg` (the `.st` file icon) and a 256x256 render as `editors/vscode/icon.png` (the Marketplace icon, which must be a PNG).
+
 `build/` is gitignored scratch output.
 
 ## Style

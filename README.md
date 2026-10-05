@@ -1,3 +1,5 @@
+<p align="center"><img src="docs/_static/logo.svg" alt="stone logo" width="128"></p>
+
 # stone
 
 stone is a language. it has a built-in interpreter and compiler so you can choose to wait for the program to run or to build.

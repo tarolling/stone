@@ -917,8 +917,36 @@ impl<'a> Lowerer<'a> {
                 // append returns none
                 Ok(self.finish(Operand::Imm(0), into))
             }
+            "strip" | "split" => {
+                let mut values = vec![self.expr(receiver)?];
+                for arg in args {
+                    values.push(self.expr(arg)?);
+                }
+                let label = match (name, values.len()) {
+                    ("strip", _) => "stone.str_strip",
+                    (_, 1) => "stone.str_split_ws",
+                    _ => "stone.str_split",
+                };
+                Ok(self.runtime_call(label, values, into))
+            }
             _ => Err(format!("there is no method '{name}'")),
         }
+    }
+
+    /// Calls the runtime routine `label` with `args`, returning its result.
+    fn runtime_call(
+        &mut self,
+        label: &'static str,
+        args: Vec<Operand>,
+        into: Option<VReg>,
+    ) -> Operand {
+        let dst = self.dst(into);
+        self.push(Inst::Call {
+            dst: Some(dst),
+            callee: Callee::Runtime(label),
+            args,
+        });
+        Operand::Reg(dst)
     }
 
     /// Lowers a call to a builtin or a stone function.
@@ -945,9 +973,22 @@ impl<'a> Lowerer<'a> {
                 // print returns none
                 Ok(self.finish(Operand::Imm(0), into))
             }
-            "float" | "int" => {
+            "float" | "int" | "str" => {
                 let from = self.type_of(&args[0])?;
                 let src = self.expr(&args[0])?;
+                let runtime = match (name, &from) {
+                    ("int", Type::Str) => Some("stone.parse_int"),
+                    ("float", Type::Str) => Some("stone.parse_float"),
+                    ("str", Type::Int) => Some("stone.str_int"),
+                    ("str", Type::Float) => Some("stone.str_float"),
+                    ("str", Type::Bool) => Some("stone.str_bool"),
+                    // strings never change, so str of a str can share it
+                    ("str", _) => return Ok(self.finish(src, into)),
+                    _ => None,
+                };
+                if let Some(label) = runtime {
+                    return Ok(self.runtime_call(label, vec![src], into));
+                }
                 let converts = match name {
                     "float" => from == Type::Int,
                     _ => from == Type::Float,
@@ -962,6 +1003,16 @@ impl<'a> Lowerer<'a> {
                 });
                 Ok(Operand::Reg(dst))
             }
+            "input" => {
+                // no prompt is a null pointer
+                let prompt = match args {
+                    [prompt] => self.expr(prompt)?,
+                    _ => Operand::Imm(0),
+                };
+                Ok(self.runtime_call("stone.input", vec![prompt], into))
+            }
+            "eof" => Ok(self.runtime_call("stone.eof", vec![], into)),
+            "args" => Ok(self.runtime_call("stone.args", vec![], into)),
             _ => {
                 let mut values = Vec::new();
                 for arg in args {

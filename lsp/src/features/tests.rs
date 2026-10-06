@@ -379,10 +379,10 @@ fn completion_after_a_dot_offers_methods() {
             .map(|item| (item.label, item.kind))
             .collect()
     };
-    let methods = [
-        ("len".to_string(), Some(CompletionItemKind::METHOD)),
-        ("append".to_string(), Some(CompletionItemKind::METHOD)),
-    ];
+    let methods: Vec<_> = ["len", "append", "strip", "split"]
+        .iter()
+        .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
+        .collect();
     assert_eq!(labels(at(2, 4)), methods);
     assert_eq!(labels(at(3, 6)), methods);
     // and methods are not offered as functions

@@ -19,8 +19,8 @@ from pygments.token import (
 
 KEYWORDS = ("and", "break", "cont", "def", "elif", "else", "for", "if", "in", "not", "or", "ret", "while")
 CONSTANTS = ("true", "false", "none")
-BUILTINS = ("print", "range", "int", "float")
-METHODS = ("len", "append")
+BUILTINS = ("print", "range", "int", "float", "str", "input", "eof", "args")
+METHODS = ("len", "append", "strip", "split")
 
 
 class StoneLexer(RegexLexer):

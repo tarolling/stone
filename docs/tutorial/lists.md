@@ -43,4 +43,4 @@ prints
 :language: text
 ```
 
-Next, {doc}`errors`.
+Next, {doc}`input`.

@@ -1,7 +1,7 @@
 # Command line
 
 ```text
-stone [FILE] [COMMAND]
+stone [FILE [ARGS...]] [COMMAND]
 ```
 
 Every command reads one `.st` file, then checks it before doing anything else. If the checker
@@ -9,12 +9,15 @@ finds errors, the command prints all of them and exits with status 1 without run
 Errors print as `file:line:col: error: message`, followed by the source line and a caret under
 the problem.
 
-## `stone run FILE`
+## `stone run FILE [ARGS...]`
 
-Interprets the program. `stone FILE` is shorthand for `stone run FILE`.
+Interprets the program. `stone FILE` is shorthand for `stone run FILE`. Everything after the
+file is passed to the program, which reads it with `args()`, even arguments that start with `-`.
+The program's standard input is stone's own, for `input()` and `eof()`.
 
 ```sh
 stone run examples/basics.st
+stone run sum.st 1 2 3 < numbers.txt
 ```
 
 ## `stone build FILE [-o OUTPUT]`
@@ -27,6 +30,9 @@ current directory), writing the assembly next to it as `OUTPUT.s`. This needs x8
 stone build examples/basics.st -o build/basics
 ./build/basics
 ```
+
+The executable reads its own arguments and standard input the same way, so `./build/sum 1 2 3`
+behaves like `stone run sum.st 1 2 3`.
 
 ## `stone check FILE`
 

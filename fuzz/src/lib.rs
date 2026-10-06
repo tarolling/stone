@@ -610,7 +610,9 @@ pub fn run_compiled(source: &str) -> std::result::Result<String, String> {
 
         // stdout goes to a file, so a chatty program cannot block on a full pipe
         let stdout = File::create(&stdout_path).map_err(|e| e.to_string())?;
+        // empty stdin, like the input `interpret` gives the interpreter
         let mut child = Command::new(&exe)
+            .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::null())
             .spawn()

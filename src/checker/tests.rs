@@ -240,8 +240,8 @@ fn int_and_float_convert_numbers() {
     assert_eq!(type_of_symbol(source, "c"), "float");
     assert_eq!(type_of_symbol(source, "d"), "int");
     assert_error(
-        "x = int(\"3\")\n",
-        "'int' needs an int or float, found str",
+        "x = int([3])\n",
+        "'int' needs an int, float, or str, found list[int]",
         1,
         9,
     );
@@ -814,4 +814,106 @@ fn method_receivers_must_be_assigned_first() {
         1,
         1,
     );
+}
+
+#[test]
+fn int_and_float_parse_strs() {
+    let source = "a = int(\"3\")\nb = float(\"2.5\")\n";
+    assert_eq!(type_of_symbol(source, "a"), "int");
+    assert_eq!(type_of_symbol(source, "b"), "float");
+    assert_error(
+        "x = float(true)\n",
+        "'float' needs an int, float, or str, found bool",
+        1,
+        11,
+    );
+}
+
+#[test]
+fn str_converts_scalars() {
+    let source = "a = str(1)\nb = str(1.5)\nc = str(true)\nd = str(\"x\")\n";
+    for name in ["a", "b", "c", "d"] {
+        assert_eq!(type_of_symbol(source, name), "str");
+    }
+    assert_error(
+        "x = str([1])\n",
+        "'str' needs an int, float, bool, or str, found list[int]",
+        1,
+        9,
+    );
+    assert_error(
+        "x = str()\n",
+        "'str' takes 1 argument, but 0 were given",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn input_reads_strs() {
+    assert_eq!(type_of_symbol("a = input()\n", "a"), "str");
+    assert_eq!(type_of_symbol("a = input(\"? \")\n", "a"), "str");
+    assert_error("x = input(1)\n", "expected str, found int", 1, 11);
+    assert_error(
+        "x = input(\"a\", \"b\")\n",
+        "'input' takes 0 or 1 arguments, but 2 were given",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn eof_and_args_take_nothing() {
+    assert_eq!(type_of_symbol("a = eof()\n", "a"), "bool");
+    assert_eq!(type_of_symbol("a = args()\n", "a"), "list[str]");
+    assert_error(
+        "x = eof(1)\n",
+        "'eof' takes 0 arguments, but 1 was given",
+        1,
+        5,
+    );
+    assert_error(
+        "x = args(1)\n",
+        "'args' takes 0 arguments, but 1 was given",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn eof_is_a_condition() {
+    assert_eq!(errors("while not eof();\n    print(input())\n"), []);
+}
+
+#[test]
+fn strip_and_split_take_strs() {
+    let source = "s = \" a b \"\na = s.strip()\nb = s.split()\nc = s.split(\",\")\n";
+    assert_eq!(type_of_symbol(source, "a"), "str");
+    assert_eq!(type_of_symbol(source, "b"), "list[str]");
+    assert_eq!(type_of_symbol(source, "c"), "list[str]");
+    assert_error(
+        "x = [1].strip()\n",
+        "'strip' needs a str, found list[int]",
+        1,
+        5,
+    );
+    assert_error(
+        "x = \"a\".strip(1)\n",
+        "'strip' takes 0 arguments, but 1 was given",
+        1,
+        5,
+    );
+    assert_error("x = \"a\".split(1)\n", "expected str, found int", 1, 15);
+    assert_error("x = 5.split()\n", "'split' needs a str, found int", 1, 5);
+    assert_error(
+        "x = \"a\".split(\"b\", \"c\")\n",
+        "'split' takes 0 or 1 arguments, but 2 were given",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn new_builtins_cannot_be_assigned() {
+    assert_error("args = 2\n", "cannot assign to builtin 'args'", 1, 1);
 }

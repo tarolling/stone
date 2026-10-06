@@ -171,3 +171,29 @@ fn modulo_and_power_lower_to_arithmetic() {
     assert!(floats.contains("frem v0, "), "{floats}");
     assert!(floats.contains("fpow v0, -2"), "{floats}");
 }
+
+#[test]
+fn io_and_string_builtins_call_the_runtime() {
+    let source = "def f(s, n, x, b);\n    \
+                  ret [input(), input(s), str(n), str(x), str(b), str(s), s.strip()]\n\
+                  def g(s);\n    \
+                  ret int(s) + int(float(s)) + args().len() + s.split().len() + s.split(s).len()\n\
+                  f(\"a\", 1, 1.5, true)\ng(\"1\")\nprint(eof())\n";
+    let text = dump(source);
+    for call in [
+        "call stone.input(0)",
+        "call stone.input(v0)",
+        "call stone.str_int(v1)",
+        "call stone.str_float(v2)",
+        "call stone.str_bool(v3)",
+        "call stone.str_strip(v0)",
+        "call stone.parse_int(v0)",
+        "call stone.parse_float(v0)",
+        "call stone.args()",
+        "call stone.str_split_ws(v0)",
+        "call stone.str_split(v0, v0)",
+        "call stone.eof()",
+    ] {
+        assert!(text.contains(call), "{call} in\n{text}");
+    }
+}

@@ -12,7 +12,7 @@ use crate::interpreter::{Interpreter, Limits};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use std::error::Error;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::path::Path;
 
 /// Lexes and parses source code into a module.
@@ -80,9 +80,16 @@ pub fn check(source: &str) -> Vec<Diagnostic> {
 
 /// Runs source code with the tree-walking interpreter.
 ///
-/// For example, `interpret("print(1 + 2)\n")` prints `3`.
-pub fn interpret(source: &str) -> Result<(), Box<dyn Error>> {
-    interpret_with(source, &mut std::io::stdout(), Limits::DEFAULT)
+/// For example, `interpret("print(1 + 2)\n", &[])` prints `3`. `input` reads stdin, and `args`
+/// returns `args`.
+pub fn interpret(source: &str, args: &[String]) -> Result<(), Box<dyn Error>> {
+    interpret_with_io(
+        source,
+        &mut std::io::BufReader::new(std::io::stdin()),
+        &mut std::io::stdout(),
+        args,
+        Limits::DEFAULT,
+    )
 }
 
 /// Runs source code with the tree-walking interpreter, printing to `out` and stopping the program
@@ -95,6 +102,21 @@ pub fn interpret_with(
     out: &mut (impl Write + Send),
     limits: Limits,
 ) -> Result<(), Box<dyn Error>> {
+    interpret_with_io(source, &mut std::io::empty(), out, &[], limits)
+}
+
+/// Runs source code with the tree-walking interpreter, reading `input` for `input` and `eof`,
+/// printing to `out`, giving `args` to `args`, and stopping the program once it exceeds `limits`.
+///
+/// For example, `interpret_with_io("print(input())\n", &mut "hi\n".as_bytes(), &mut buffer, &[],
+/// limits)` appends `hi\n` to `buffer`.
+pub fn interpret_with_io(
+    source: &str,
+    input: &mut (impl BufRead + Send),
+    out: &mut (impl Write + Send),
+    args: &[String],
+    limits: Limits,
+) -> Result<(), Box<dyn Error>> {
     let ast = checked(source)?;
 
     // a thread of its own, since deep recursion needs more stack than the main thread has
@@ -103,6 +125,8 @@ pub fn interpret_with(
             .stack_size(Limits::STACK_SIZE)
             .spawn_scoped(scope, || {
                 Interpreter::with_output(out, limits)
+                    .with_input(input)
+                    .with_args(args.to_vec())
                     .evaluate(&ast)
                     .map_err(|e| e.to_string())
             })
@@ -143,7 +167,7 @@ y = x + 8
 ret y
 "#;
 
-        let _ = interpret(source);
+        let _ = interpret(source, &[]);
     }
 
     /// Interprets `source` with small limits and returns what it printed, or the error message.
@@ -294,5 +318,86 @@ ret y
     fn parameters_do_not_overwrite_caller_variables() {
         let source = "def f(a);\n    ret a\na = 7\nprint(f(1))\nprint(a)\n";
         assert_eq!(run_limited(source), Ok("1\n7\n".to_string()));
+    }
+
+    /// Interprets `source` reading `input` as stdin with `args`, returning what it printed or the
+    /// error message.
+    ///
+    /// For example, `run_io("print(input())\n", "a\n", &[])` returns `Ok("a\n")`.
+    fn run_io(source: &str, input: &str, args: &[&str]) -> Result<String, String> {
+        let mut out = Vec::new();
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        interpret_with_io(
+            source,
+            &mut input.as_bytes(),
+            &mut out,
+            &args,
+            Limits::DEFAULT,
+        )
+        .map_err(|e| e.to_string())?;
+        Ok(String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn input_reads_lines_until_eof() {
+        let source =
+            "while not eof();\n    print(\"[\" + input() + \"]\")\nprint(input() == \"\")\n";
+        assert_eq!(
+            run_io(source, "a\n\nb c\r\nlast", &[]),
+            Ok("[a]\n[]\n[b c\r]\n[last]\ntrue\n".to_string())
+        );
+    }
+
+    #[test]
+    fn input_writes_its_prompt_first() {
+        assert_eq!(
+            run_io("x = input(\"name? \")\nprint(x)\n", "Ada\n", &[]),
+            Ok("name? Ada\n".to_string())
+        );
+    }
+
+    #[test]
+    fn interpret_with_has_no_input() {
+        assert_eq!(
+            run_limited("print(eof(), input() == \"\")\n"),
+            Ok("true true\n".to_string())
+        );
+    }
+
+    #[test]
+    fn args_are_the_given_arguments() {
+        assert_eq!(
+            run_io("print(args())\n", "", &["a", "-b", "c d"]),
+            Ok("['a', '-b', 'c d']\n".to_string())
+        );
+        assert_eq!(run_io("print(args())\n", "", &[]), Ok("[]\n".to_string()));
+    }
+
+    #[test]
+    fn strs_parse_and_convert() {
+        let source =
+            "print(int(\" 42 \") + 1, float(\"2.5\") * 2.0, str(1.0) + str(true) + str(-3))\n";
+        assert_eq!(run_limited(source), Ok("43 5.0 1.0true-3\n".to_string()));
+        assert_eq!(
+            run_limited("print(int(\"x\"))\n"),
+            Err("invalid literal for int() with base 10: 'x'".to_string())
+        );
+        assert_eq!(
+            run_limited("print(float(\"\"))\n"),
+            Err("could not convert string to float: ''".to_string())
+        );
+    }
+
+    #[test]
+    fn strip_and_split_work_on_strs() {
+        let source = "s = \" a,b  c \"\nprint(s.strip(), s.split(), s.split(\",\"))\n";
+        assert_eq!(
+            run_limited(source),
+            Ok("a,b  c ['a,b', 'c'] [' a', 'b  c ']\n".to_string())
+        );
+        assert_eq!(
+            run_limited("print(\"a\".split(\"\"))\n"),
+            Err("empty separator".to_string())
+        );
     }
 }

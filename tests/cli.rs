@@ -77,3 +77,28 @@ fn self_update_without_feature_explains_how_to_upgrade() {
     assert!(stderr.contains("built without self-update"), "{stderr}");
     assert!(stderr.contains("install.sh"), "{stderr}");
 }
+
+/// Writes `source` to a temporary `.st` file named after `name` and runs `stone <before> <file>
+/// <after>`, returning its stdout.
+fn stone_stdout(before: &[&str], name: &str, source: &str, after: &[&str]) -> String {
+    let file = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.st"));
+    std::fs::write(&file, source).unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(before)
+        .arg(&file)
+        .args(after)
+        .output()
+        .expect("stone should run");
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn run_passes_the_arguments_after_the_file_to_the_program() {
+    let source = "print(args())\n";
+    let expected = "['a', '-b', '--c', 'd e']\n";
+    let after = ["a", "-b", "--c", "d e"];
+    assert_eq!(stone_stdout(&["run"], "args_run", source, &after), expected);
+    assert_eq!(stone_stdout(&[], "args_bare", source, &after), expected);
+    assert_eq!(stone_stdout(&["run"], "args_none", source, &[]), "[]\n");
+}

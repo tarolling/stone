@@ -9,14 +9,24 @@ mod emit;
 
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
 use crate::checker::{Type, TypeChecker};
-use crate::codegen::ir::Program;
 use crate::codegen::ir::lower::lower;
+use crate::codegen::ir::{Callee, Inst, Program};
 use crate::codegen::x64::builtins::print;
 use crate::codegen::{Architecture, AssemblyGenerator};
 use crate::span::Span;
 use crate::stdlib::BUILTINS;
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
+
+/// Runtime routines that need the string runtime, even in a program where no expression is a
+/// `str`, such as one that only prints `args()`.
+const STRING_ROUTINES: &[&str] = &[
+    "stone.parse_int",
+    "stone.parse_float",
+    "stone.str_strip",
+    "stone.str_split_ws",
+    "stone.str_split",
+];
 
 /// Registers that carry arguments under the System V ABI, in order.
 ///
@@ -42,6 +52,11 @@ pub struct X64Generator {
     prints_floats: bool,
     /// Runtime errors the code can jump to, as `(label, message)`, emitted after `main`.
     failures: Vec<(String, String)>,
+    /// Whether runtime routines build messages for `stone.fail` themselves, so it is needed even
+    /// without a [`X64Generator::fail_label`].
+    needs_fail: bool,
+    /// Every runtime routine the lowered program calls, such as `stone.input`.
+    runtime: HashSet<&'static str>,
 }
 
 impl AssemblyGenerator for X64Generator {
@@ -79,6 +94,21 @@ impl AssemblyGenerator for X64Generator {
         self.emit("\t.intel_syntax noprefix");
         self.emit("\t.text");
 
+        self.runtime = self
+            .program
+            .functions
+            .iter()
+            .flat_map(|function| &function.blocks)
+            .flat_map(|block| &block.insts)
+            .filter_map(|inst| match inst {
+                Inst::Call {
+                    callee: Callee::Runtime(label),
+                    ..
+                } => Some(*label),
+                _ => None,
+            })
+            .collect();
+
         // only emit the stdlib functions that are actually called
         let stdlib_calls = self.collect_stdlib_calls(module);
         self.emit_stdlib(stdlib_calls);
@@ -88,12 +118,13 @@ impl AssemblyGenerator for X64Generator {
             self.emit_function(&function)?;
         }
 
+        self.emit_io_runtime();
         self.emit_failures();
         self.emit_list_runtime()?;
-        if self.prints_floats {
-            builtins::print_float(self);
+        if self.prints_floats || self.uses(&["stone.str_float"]) {
+            builtins::float_runtime(self);
         }
-        if self.types.values().any(|ty| *ty == Type::Str) {
+        if self.types.values().any(|ty| *ty == Type::Str) || self.uses(STRING_ROUTINES) {
             builtins::string_runtime(self);
         }
 
@@ -151,6 +182,8 @@ impl X64Generator {
             list_printers: Vec::new(),
             prints_floats: false,
             failures: Vec::new(),
+            needs_fail: false,
+            runtime: HashSet::new(),
         }
     }
 
@@ -190,7 +223,7 @@ impl X64Generator {
     /// Emits the code behind every [`X64Generator::fail_label`], plus `stone.fail`, which writes
     /// `error: `, the string in `rdi`, and a newline to stderr, then exits with status 1.
     fn emit_failures(&mut self) {
-        if self.failures.is_empty() {
+        if self.failures.is_empty() && !self.needs_fail {
             return;
         }
         for (label, message) in self.failures.clone() {
@@ -252,9 +285,37 @@ impl X64Generator {
         })
     }
 
+    /// Returns whether the program calls any of the runtime routines in `labels`.
+    fn uses(&self, labels: &[&str]) -> bool {
+        labels.iter().any(|label| self.runtime.contains(label))
+    }
+
+    /// Emits the routines behind input, `args`, parsing, `str`, and the string methods that the
+    /// program calls, before the failures, since some of them fail through `stone.fail`.
+    fn emit_io_runtime(&mut self) {
+        if self.uses(&["stone.input", "stone.eof"]) {
+            builtins::io_runtime(self);
+        }
+        if self.uses(&["stone.args"]) {
+            builtins::args_runtime(self);
+        }
+        if self.uses(&["stone.parse_int", "stone.parse_float"]) {
+            builtins::parse_runtime(self);
+            self.needs_fail = true;
+        }
+        if self.uses(&["stone.str_int", "stone.str_bool"]) {
+            builtins::conversion_runtime(self);
+        }
+        if self.uses(&["stone.str_strip", "stone.str_split_ws", "stone.str_split"]) {
+            let empty_separator = self.fail_label("empty separator");
+            builtins::string_methods(self, &empty_separator);
+        }
+    }
+
     /// Emits the list runtime and every list printer `print` asked for, if the program uses lists.
     fn emit_list_runtime(&mut self) -> Result<(), String> {
-        if !self.types.values().any(contains_list) {
+        let needed = self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"]);
+        if !needed && !self.types.values().any(contains_list) {
             return Ok(());
         }
         builtins::list_runtime(self);
@@ -398,7 +459,10 @@ impl X64Generator {
     /// Emits the `print` routines if the program prints. The list and string runtimes are emitted
     /// separately, based on the types the program uses.
     fn emit_stdlib(&mut self, calls: Vec<String>) {
-        if calls.iter().any(|call| call == "print") {
+        // input prints its prompt, and str of a float shares print_float's code
+        if calls.iter().any(|call| call == "print")
+            || self.uses(&["stone.input", "stone.str_float"])
+        {
             self.emit("\t# Standard Library Functions");
             print(self);
         }
@@ -438,6 +502,13 @@ impl X64Generator {
         self.emit("\t.p2align\t3");
         self.emit("stone.call_depth:");
         self.emit("\t.zero\t8");
+        if self.uses(&["stone.args"]) {
+            // main saves its argc and argv here for args()
+            self.emit("stone.argc:");
+            self.emit("\t.zero\t8");
+            self.emit("stone.argv:");
+            self.emit("\t.zero\t8");
+        }
         for name in self.program.globals.clone() {
             let label = global_label(&name);
             self.emit(&format!("{label}:"));
@@ -707,5 +778,43 @@ mod tests {
                 "{divisor}"
             );
         }
+    }
+
+    #[test]
+    fn io_and_string_routines_are_only_emitted_when_used() {
+        let plain = assemble("print(1)\n").unwrap();
+        for label in [
+            "stone.input:",
+            "stone.eof:",
+            "stone.args:",
+            "stone.argc",
+            "stone.parse_int:",
+            "stone.str_int:",
+            "stone.str_split:",
+            "stone.format_float:",
+        ] {
+            assert!(!plain.contains(label), "{label} in {plain}");
+        }
+
+        let reading = assemble("while not eof();\n    x = input(\"> \")\n").unwrap();
+        assert!(reading.contains("stone.input:"), "{reading}");
+        assert!(reading.contains("stone.print_str:"), "{reading}");
+        assert!(!reading.contains("stone.args:"), "{reading}");
+
+        let arguments = assemble("x = args()\n").unwrap();
+        assert!(arguments.contains("stone.args:"), "{arguments}");
+        assert!(arguments.contains("[rip + stone.argc], edi"), "{arguments}");
+
+        let parsing = assemble("x = int(\"1\")\n").unwrap();
+        assert!(parsing.contains("stone.parse_int:"), "{parsing}");
+        assert!(parsing.contains("stone.fail:"), "{parsing}");
+
+        let converting = assemble("x = str(1.5)\n").unwrap();
+        assert!(converting.contains("stone.str_float:"), "{converting}");
+        assert!(converting.contains("stone.format_float:"), "{converting}");
+
+        let splitting = assemble("x = \"a b\".split(\" \")\n").unwrap();
+        assert!(splitting.contains("stone.str_split:"), "{splitting}");
+        assert!(splitting.contains("empty separator"), "{splitting}");
     }
 }

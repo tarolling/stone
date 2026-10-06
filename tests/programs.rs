@@ -8,11 +8,16 @@
 //! sibling `.err` file too. It must then exit with an error under both backends, print the `.out`
 //! text first, and print the `.err` text somewhere in its stderr.
 //!
+//! A program that reads input has a sibling `.in` file, which becomes its stdin (otherwise stdin
+//! is empty), and one that reads `args()` has a sibling `.args` file holding one argument per
+//! line, passed after the program under `stone run` and to the built binary.
+//!
 //! A program can opt out of a backend by being listed in [`SKIPS`] along with the reason.
 
 use std::fmt::Write as _;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Stdio};
 
 const PROGRAM_DIRS: [&str; 3] = ["examples", "tests/programs", "docs/examples"];
 
@@ -70,11 +75,21 @@ struct Outcome {
     error: Option<String>,
 }
 
-/// Runs a command to completion, failing only if it cannot be started.
-fn outcome_of(command: &mut Command) -> Result<Outcome, String> {
-    let output = command
-        .output()
+/// Runs a command to completion with `input` as its stdin, failing only if it cannot be started.
+fn outcome_of(command: &mut Command, input: &[u8]) -> Result<Outcome, String> {
+    let mut child = command
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .map_err(|e| format!("failed to spawn {command:?}: {e}"))?;
+    let mut stdin = child.stdin.take().expect("stdin is piped");
+    // a program may exit without reading everything, which closes the pipe early
+    let _ = stdin.write_all(input);
+    drop(stdin);
+    let output = child
+        .wait_with_output()
+        .map_err(|e| format!("failed to wait for {command:?}: {e}"))?;
     Ok(Outcome {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         error: (!output.status.success())
@@ -85,8 +100,15 @@ fn outcome_of(command: &mut Command) -> Result<Outcome, String> {
 /// Executes the program with the given backend and returns how it ended.
 fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
     let stone = env!("CARGO_BIN_EXE_stone");
+    let input = std::fs::read(program.with_extension("in")).unwrap_or_default();
+    let args: Vec<String> = std::fs::read_to_string(program.with_extension("args"))
+        .map(|text| text.lines().map(str::to_string).collect())
+        .unwrap_or_default();
     match backend {
-        Backend::Run => outcome_of(Command::new(stone).arg("run").arg(program)),
+        Backend::Run => outcome_of(
+            Command::new(stone).arg("run").arg(program).args(&args),
+            &input,
+        ),
         Backend::Build => {
             let name = program.file_stem().unwrap();
             let exe = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
@@ -96,11 +118,12 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                     .arg(program)
                     .arg("-o")
                     .arg(&exe),
+                &[],
             )?;
             if let Some(stderr) = build.error {
                 return Err(format!("build failed:\n{stderr}"));
             }
-            outcome_of(&mut Command::new(&exe))
+            outcome_of(Command::new(&exe).args(&args), &input)
         }
     }
 }

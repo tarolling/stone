@@ -182,6 +182,11 @@ impl X64Generator {
         }
         self.emit("\tpush\trbp");
         self.emit("\tmov\trbp, rsp");
+        if frame.is_main && self.uses(&["stone.args"]) {
+            // argc is a C int, so only its low half is set
+            self.emit("\tmov\tDWORD PTR [rip + stone.argc], edi");
+            self.emit("\tmov\tQWORD PTR [rip + stone.argv], rsi");
+        }
         for reg in &allocation.used_callee_saved {
             self.emit(&format!("\tpush\t{reg}"));
         }

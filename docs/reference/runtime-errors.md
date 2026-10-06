@@ -23,6 +23,10 @@ to right in both.
 | `negative exponent` | `**` with an int base and a negative exponent, which has no int result |
 | `list index out of range` | an index at or past the length, or a negative index before the start. The interpreter adds the index and length |
 | `cannot convert float to int (nan or out of range)` | `int()` of nan, an infinity, or a float outside the int range |
+| `invalid literal for int() with base 10: '...'` | `int()` of a string that is not a decimal int, quoted as given |
+| `int() argument out of range: '...'` | `int()` of a string holding an int too large or small to fit |
+| `could not convert string to float: '...'` | `float()` of a string that is not a float, quoted as given |
+| `empty separator` | `split("")` |
 | `recursion is too deep (more than 1000 nested calls)` | more than 1,000 calls active at once |
 | `'name' is used before it is assigned` | a function read a global that had not been assigned yet when it ran |
 

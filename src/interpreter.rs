@@ -10,7 +10,7 @@ use crate::stdlib::{self, MAX_CALL_DEPTH};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
-use std::io::Write;
+use std::io::{BufRead, Write};
 use std::rc::Rc;
 
 type EvalResult<T> = Result<T, Box<dyn std::error::Error>>;
@@ -27,6 +27,11 @@ pub enum Value {
     Str(Rc<str>),
     None,
     List(Rc<RefCell<Vec<Value>>>),
+}
+
+/// Makes a new list of strings, such as the pieces `split` returns.
+fn str_list(items: Vec<&str>) -> Value {
+    Value::list(items.into_iter().map(|s| Value::Str(s.into())).collect())
 }
 
 impl Value {
@@ -184,6 +189,10 @@ pub struct Interpreter<'out> {
     functions: HashMap<String, (Vec<String>, Rc<Vec<Stmt>>)>,
     /// Where `print` writes, which is stdout unless a caller captures it.
     out: Box<dyn Write + 'out>,
+    /// Where `input` and `eof` read, which is empty unless a caller gives one.
+    input: Box<dyn BufRead + 'out>,
+    /// What `args` returns.
+    args: Vec<String>,
     limits: Limits,
     /// Fuel spent so far, compared against [`Limits::fuel`].
     fuel_used: u64,
@@ -217,11 +226,47 @@ impl<'out> Interpreter<'out> {
             scopes: vec![],
             functions: HashMap::new(),
             out: Box::new(out),
+            input: Box::new(std::io::empty()),
+            args: vec![],
             limits,
             fuel_used: 0,
             depth: 0,
             calls: 0,
         }
+    }
+
+    /// Makes `input` and `eof` read from `input` instead of an empty stream.
+    ///
+    /// For example, `Interpreter::with_output(out, limits).with_input(std::io::stdin().lock())`
+    /// reads the program's stdin.
+    pub fn with_input(mut self, input: impl BufRead + 'out) -> Self {
+        self.input = Box::new(input);
+        self
+    }
+
+    /// Makes `args` return `args` instead of an empty list.
+    pub fn with_args(mut self, args: Vec<String>) -> Self {
+        self.args = args;
+        self
+    }
+
+    /// Reads one line for `input`, without its newline, or `""` at the end of the input.
+    ///
+    /// A read error counts as the end of the input, and bytes that are not UTF-8 become U+FFFD.
+    fn read_line(&mut self) -> String {
+        let mut line = Vec::new();
+        if self.input.read_until(b'\n', &mut line).is_err() {
+            return String::new();
+        }
+        if line.last() == Some(&b'\n') {
+            line.pop();
+        }
+        String::from_utf8_lossy(&line).into_owned()
+    }
+
+    /// Returns whether `input` has nothing left, which is what `eof` returns.
+    fn at_eof(&mut self) -> bool {
+        self.input.fill_buf().map_or(true, |buf| buf.is_empty())
     }
 
     /// Spends one unit of fuel, failing once the budget in [`Limits::fuel`] is used up.
@@ -607,6 +652,13 @@ impl<'out> Interpreter<'out> {
                 Ok(Value::None)
             }
             ("append", _, _) => Err("append() is called on a list, with one value".into()),
+            ("strip", Value::Str(s), []) => Ok(Value::Str(stdlib::strip(s).into())),
+            ("strip", _, _) => Err("strip() is called on a str, with no arguments".into()),
+            ("split", Value::Str(s), []) => Ok(str_list(stdlib::split_whitespace(s))),
+            ("split", Value::Str(s), [Value::Str(separator)]) => {
+                Ok(str_list(stdlib::split(s, separator)?))
+            }
+            ("split", _, _) => Err("split() is called on a str, with at most one str".into()),
             _ => Err(format!("there is no method '{name}'").into()),
         }
     }
@@ -621,7 +673,8 @@ impl<'out> Interpreter<'out> {
             }
             ("float", [Value::Int(i)]) => return Ok(Value::Float(*i as f64)),
             ("float", [Value::Float(x)]) => return Ok(Value::Float(*x)),
-            ("float", _) => return Err("float() takes one int or float".into()),
+            ("float", [Value::Str(s)]) => return Ok(Value::Float(stdlib::parse_float(s)?)),
+            ("float", _) => return Err("float() takes one int, float, or str".into()),
             ("int", [Value::Int(i)]) => return Ok(Value::Int(*i)),
             // -2^63 fits in an int but 2^63 does not, and nan fails both checks
             ("int", [Value::Float(x)]) if (i64::MIN as f64..-(i64::MIN as f64)).contains(x) => {
@@ -630,7 +683,25 @@ impl<'out> Interpreter<'out> {
             ("int", [Value::Float(_)]) => {
                 return Err("cannot convert float to int (nan or out of range)".into());
             }
-            ("int", _) => return Err("int() takes one int or float".into()),
+            ("int", [Value::Str(s)]) => return Ok(Value::Int(stdlib::parse_int(s)?)),
+            ("int", _) => return Err("int() takes one int, float, or str".into()),
+            ("str", [value]) => return Ok(Value::Str(value.display(false).into())),
+            ("input", [] | [Value::Str(_)]) => {
+                if let [prompt] = &args[..] {
+                    write!(self.out, "{}", prompt.display(false))?;
+                }
+                // a prompt, or earlier output a pipe buffered, shows before waiting for input
+                self.out.flush()?;
+                return Ok(Value::Str(self.read_line().into()));
+            }
+            ("eof", []) => {
+                self.out.flush()?;
+                return Ok(Value::Bool(self.at_eof()));
+            }
+            ("args", []) => {
+                let args = self.args.iter().map(|a| a.as_str()).collect();
+                return Ok(str_list(args));
+            }
             _ => {}
         }
 

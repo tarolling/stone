@@ -12,12 +12,17 @@ mod update;
 /// The stone programming language executor.
 #[derive(ClapParser, Debug)]
 #[command(author, version, about = "The stone programming language executor")]
+#[command(args_conflicts_with_subcommands = true)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
 
     /// The file to run when no subcommand is given.
     file: Option<String>,
+
+    /// Arguments for the program, which it reads with `args()`.
+    #[arg(trailing_var_arg = true, allow_hyphen_values = true, requires = "file")]
+    args: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -26,6 +31,9 @@ enum Command {
     Run {
         /// The file to run.
         file: String,
+        /// Arguments for the program, which it reads with `args()`.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
     },
     /// Compiles a file to a native executable.
     Build {
@@ -56,7 +64,7 @@ enum ExecutionMode {
     Build { file: String, output: PathBuf },
     Check(String),
     Repl,
-    Run(String),
+    Run { file: String, args: Vec<String> },
     SelfUpdate { check: bool, tag: Option<String> },
 }
 
@@ -64,7 +72,7 @@ fn main() -> ExitCode {
     let args = Args::parse();
 
     let mode = match args.command {
-        Some(Command::Run { file }) => ExecutionMode::Run(file),
+        Some(Command::Run { file, args }) => ExecutionMode::Run { file, args },
         Some(Command::Build { file, output }) => ExecutionMode::Build { file, output },
         Some(Command::Check { file }) => ExecutionMode::Check(file),
         Some(Command::SelfUpdate { check, version }) => ExecutionMode::SelfUpdate {
@@ -73,7 +81,10 @@ fn main() -> ExitCode {
         },
         None => {
             if let Some(file) = args.file {
-                ExecutionMode::Run(file)
+                ExecutionMode::Run {
+                    file,
+                    args: args.args,
+                }
             } else {
                 ExecutionMode::Repl
             }
@@ -104,7 +115,9 @@ fn main() -> ExitCode {
             }
             with_source("<stdin>", |_| driver::repl(&source))
         }
-        ExecutionMode::Run(file) => with_source(&file, driver::interpret),
+        ExecutionMode::Run { file, args } => {
+            with_source(&file, |source| driver::interpret(source, &args))
+        }
         ExecutionMode::SelfUpdate { check, tag } => self_update(check, tag.as_deref()),
     }
 }

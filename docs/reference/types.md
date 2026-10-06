@@ -37,7 +37,9 @@ and its calls. A function called as `f(1)` cannot also be called as `f("a")`.
 These keep the two backends identical and catch common mistakes:
 
 - **No implicit conversion.** Arithmetic and comparisons never mix `int` and `float`; use
-  `int()` or `float()`. The one exception is `**`, whose exponent is always an `int`.
+  `int()` or `float()`. The one exception is `**`, whose exponent is always an `int`. Strings
+  never mix with numbers either: `int("3")` and `float("2.5")` read numbers from strings, and
+  `str(3)` writes them.
 - **Conditions are `int` or `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject
   floats, strings, lists, and `none`.
 - **Lists are not comparable.** `==` and `!=` cannot compare lists.

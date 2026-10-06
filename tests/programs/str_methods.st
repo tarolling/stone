@@ -1,0 +1,12 @@
+// strip and split, with tabs and other whitespace read from stdin
+s = input()
+print("[" + s.strip() + "]", s.len(), s.strip().len())
+print(s.split(), s.split().len())
+print("[" + "".strip() + "]", "[" + "   ".strip() + "]", "[" + "x".strip() + "]")
+print("[" + " x".strip() + "]", "[" + "x ".strip() + "]")
+print("".split(), "   ".split(), "one".split(), " a  b ".split())
+print("a,,b,".split(","), "".split(","), "a::b::".split("::"), "aaa".split("aa"))
+print("abc".split("abc"), "abc".split("x"), "a b".split(" "))
+words = "the quick  brown fox".split()
+words.append("!")
+print(words, words.len(), words[1].len())

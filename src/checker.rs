@@ -211,6 +211,10 @@ impl Kind {
 
 /// The kinds arithmetic and ordering comparisons accept, with `int` the default.
 const NUMBERS: &[Kind] = &[Kind::Int, Kind::Float];
+/// What `int` and `float` convert from.
+const CONVERTIBLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
+/// What `str` converts from.
+const PRINTABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
 
 /// A function's inferred signature.
 struct FunctionInfo {
@@ -906,7 +910,7 @@ impl Inference {
                 self.add_reference(func.span, symbol);
                 self.expr_types.push((func.span, Ty::None));
                 if params.len() != args.len() {
-                    self.arity_error(call.span, id, params.len(), args.len());
+                    self.arity_error(call.span, id, &params.len().to_string(), args.len());
                     return ret;
                 }
                 for ((param, arg_ty), arg) in params.iter().zip(&arg_types).zip(args) {
@@ -951,7 +955,7 @@ impl Inference {
         match name {
             "len" => {
                 if !args.is_empty() {
-                    self.arity_error(call.span, name, 0, args.len());
+                    self.arity_error(call.span, name, "0", args.len());
                 }
                 self.require(
                     receiver_ty,
@@ -963,7 +967,7 @@ impl Inference {
             }
             "append" => {
                 if args.len() != 1 {
-                    self.arity_error(call.span, name, 1, args.len());
+                    self.arity_error(call.span, name, "1", args.len());
                     return Ty::None;
                 }
                 let elem = self.fresh();
@@ -976,6 +980,24 @@ impl Inference {
                     self.expect(&list, &receiver_ty, receiver.span);
                 }
                 Ty::None
+            }
+            "strip" | "split" => {
+                let message = match name {
+                    "strip" => "'strip' needs a str, found {}",
+                    _ => "'split' needs a str, found {}",
+                };
+                self.require(receiver_ty, &[Kind::Str], receiver.span, message);
+                match (name, args) {
+                    ("strip", []) | ("split", []) => {}
+                    ("split", [separator]) => self.expect(&Ty::Str, &arg_types[0], separator.span),
+                    ("strip", _) => self.arity_error(call.span, name, "0", args.len()),
+                    _ => self.arity_error(call.span, name, "0 or 1", args.len()),
+                }
+                if name == "strip" {
+                    Ty::Str
+                } else {
+                    Ty::List(Box::new(Ty::Str))
+                }
             }
             _ => {
                 // the name is the last token of `func`
@@ -993,17 +1015,43 @@ impl Inference {
     fn infer_builtin(&mut self, call: &Expr, name: &str, args: &[Expr], arg_types: &[Ty]) -> Ty {
         match name {
             "print" => Ty::None,
-            "int" | "float" => {
+            "int" | "float" | "str" => {
                 if args.len() != 1 {
-                    self.arity_error(call.span, name, 1, args.len());
+                    self.arity_error(call.span, name, "1", args.len());
                 } else {
-                    let message = match name {
-                        "int" => "'int' needs an int or float, found {}",
-                        _ => "'float' needs an int or float, found {}",
+                    let (allowed, message) = match name {
+                        "int" => (CONVERTIBLE, "'int' needs an int, float, or str, found {}"),
+                        "float" => (CONVERTIBLE, "'float' needs an int, float, or str, found {}"),
+                        _ => (
+                            PRINTABLE,
+                            "'str' needs an int, float, bool, or str, found {}",
+                        ),
                     };
-                    self.require(arg_types[0].clone(), NUMBERS, args[0].span, message);
+                    self.require(arg_types[0].clone(), allowed, args[0].span, message);
                 }
-                if name == "int" { Ty::Int } else { Ty::Float }
+                match name {
+                    "int" => Ty::Int,
+                    "float" => Ty::Float,
+                    _ => Ty::Str,
+                }
+            }
+            "input" => {
+                match args {
+                    [] => {}
+                    [prompt] => self.expect(&Ty::Str, &arg_types[0], prompt.span),
+                    _ => self.arity_error(call.span, name, "0 or 1", args.len()),
+                }
+                Ty::Str
+            }
+            "eof" | "args" => {
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                if name == "eof" {
+                    Ty::Bool
+                } else {
+                    Ty::List(Box::new(Ty::Str))
+                }
             }
             "range" => {
                 self.error(
@@ -1016,15 +1064,14 @@ impl Inference {
         }
     }
 
-    fn arity_error(&mut self, span: Span, name: &str, expected: usize, given: usize) {
-        let plural = |n: usize| if n == 1 { "" } else { "s" };
+    /// Reports a call to `name` with `given` arguments when it takes `expected`, such as `1` or
+    /// `0 or 1`.
+    fn arity_error(&mut self, span: Span, name: &str, expected: &str, given: usize) {
+        let plural = if expected == "1" { "" } else { "s" };
         let verb = if given == 1 { "was" } else { "were" };
         self.error(
             span,
-            format!(
-                "'{name}' takes {expected} argument{}, but {given} {verb} given",
-                plural(expected)
-            ),
+            format!("'{name}' takes {expected} argument{plural}, but {given} {verb} given"),
         );
     }
 

@@ -1,0 +1,6 @@
+['one', '-two', '--three=3', 'four five'] 4
+[one]
+[-two]
+[--three=3]
+[four five]
+4

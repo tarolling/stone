@@ -48,9 +48,10 @@ for i in range(3);
 while true; break
 ```
 
-Indent with spaces or tabs, as long as each block is consistent. Comments start with `#` outside
+Indent with spaces or tabs, as long as each block is consistent. Comments start with `//` outside
 a string and run to the end of the line, and blank and comment-only lines may sit at any
-indentation.
+indentation. Comment lines directly above a function or variable definition document it, and
+editors show them when you hover over its name.
 
 ## Literals
 

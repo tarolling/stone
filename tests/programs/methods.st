@@ -1,4 +1,4 @@
-# len and append are methods, called on a value
+// len and append are methods, called on a value
 def push(xs, x);
     xs.append(x)
 
@@ -15,7 +15,7 @@ def words();
 
 xs = []
 push(xs, 1)
-# the receiver is evaluated before the argument
+// the receiver is evaluated before the argument
 tag(xs, "receiver").append(value(2))
 print(xs, xs.len(), (xs).len())
 
@@ -30,7 +30,7 @@ floats = []
 floats.append(0.5)
 print(floats, floats.len())
 
-# len and append are ordinary names now
+// len and append are ordinary names now
 len = 3
 def append(a, b);
     ret a + b

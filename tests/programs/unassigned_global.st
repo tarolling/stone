@@ -1,4 +1,4 @@
-# a function can read a global that is assigned later, but not before it is assigned
+// a function can read a global that is assigned later, but not before it is assigned
 def read_total();
     ret total
 print("start")

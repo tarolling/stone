@@ -1,4 +1,4 @@
-# nested list indexing: multiplying two matrices filled from a generator
+// nested list indexing: multiplying two matrices filled from a generator
 def matrix(n, seed);
     rows = []
     x = seed

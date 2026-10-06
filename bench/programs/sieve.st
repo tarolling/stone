@@ -1,4 +1,4 @@
-# list appends and indexed loads and stores: counting primes with a sieve
+// list appends and indexed loads and stores: counting primes with a sieve
 def count_primes(limit);
     is_prime = []
     for i in range(limit + 1);

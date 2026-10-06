@@ -1,4 +1,4 @@
-# the 1001st active call is an error rather than a crash
+// the 1001st active call is an error rather than a crash
 def depth(n);
     if n == 0;
         ret 0

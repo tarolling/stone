@@ -1,18 +1,18 @@
-# range(n) counts from 0 up to but not including n
+// range(n) counts from 0 up to but not including n
 for i in range(3);
     print(i)
 
-# range(a, b) counts from a up to but not including b
+// range(a, b) counts from a up to but not including b
 for i in range(-2, 2);
     print("from -2:", i)
 
-# an empty range runs no iterations
+// an empty range runs no iterations
 for i in range(5, 5);
     print("never")
 for i in range(0);
     print("never")
 
-# break and cont
+// break and cont
 for i in range(10);
     if i == 1;
         cont
@@ -20,22 +20,22 @@ for i in range(10);
         break
     print("kept", i)
 
-# the bounds are evaluated once, before the first iteration
+// the bounds are evaluated once, before the first iteration
 n = 3
 for i in range(n);
     n = n + 1
     print("n is", n)
 
-# reassigning the variable does not change the next iteration
+// reassigning the variable does not change the next iteration
 i = 0
 for i in range(3);
     print("got", i)
     i = 100
 
-# the variable keeps its last value after the loop
+// the variable keeps its last value after the loop
 print("after", i)
 
-# nested loops, including inside a function
+// nested loops, including inside a function
 def table(size);
     total = 0
     for row in range(1, size + 1);

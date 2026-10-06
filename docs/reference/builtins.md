@@ -15,7 +15,7 @@ Floats print like Python's `repr`, bools as `true` and `false`, and lists with t
 in brackets, with strings inside a list in single quotes:
 
 ```stone
-print("total", 3, 0.5, true, none, [1, 2], ["a"])   # total 3 0.5 true none [1, 2] ['a']
+print("total", 3, 0.5, true, none, [1, 2], ["a"])   // total 3 0.5 true none [1, 2] ['a']
 ```
 
 ## `range`
@@ -29,7 +29,7 @@ Counts from `start`, or 0, up to but not including `end`. It can only be the ite
 
 ```stone
 for i in range(2, 5);
-    print(i)   # 2, then 3, then 4
+    print(i)   // 2, then 3, then 4
 ```
 
 ## `int`
@@ -43,7 +43,7 @@ with `cannot convert float to int (nan or out of range)` if `value` is nan or do
 int.
 
 ```stone
-print(int(2.9), int(-2.9), int(7))   # 2 -2 7
+print(int(2.9), int(-2.9), int(7))   // 2 -2 7
 ```
 
 ## `float`
@@ -55,7 +55,7 @@ float(value: int | float) -> float
 Converts a number to a float, rounding to the nearest float if needed.
 
 ```stone
-print(float(3), float(9007199254740993))   # 3.0 9007199254740992.0
+print(float(3), float(9007199254740993))   // 3.0 9007199254740992.0
 ```
 
 ## Methods
@@ -73,7 +73,7 @@ own is an error. `len` and `append` are not reserved, so they also work as ordin
 Returns the number of bytes in a string or elements in a list.
 
 ```stone
-print("stone".len(), [1, 2, 3].len(), [].len())   # 5 3 0
+print("stone".len(), [1, 2, 3].len(), [].len())   // 5 3 0
 ```
 
 ### `append`
@@ -87,5 +87,5 @@ Adds `item` to the end of the list.
 ```stone
 names = []
 names.append("ada")
-print(names)   # ['ada']
+print(names)   // ['ada']
 ```

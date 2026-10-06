@@ -33,7 +33,7 @@ class StoneLexer(RegexLexer):
     tokens = {
         "root": [
             (r"\s+", Whitespace),
-            (r"#.*$", Comment.Single),
+            (r"//.*$", Comment.Single),
             (r'"[^"\n]*"', String.Double),
             (r"(def)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
             (words(KEYWORDS, suffix=r"\b"), Keyword),

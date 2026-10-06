@@ -1,5 +1,5 @@
-# the lcg benchmark, but reading its constants from globals inside the loop,
-# which compiled stone checks are assigned on every read
+// the lcg benchmark, but reading its constants from globals inside the loop,
+// which compiled stone checks are assigned on every read
 multiplier = 1103515245
 increment = 12345
 modulus = 2147483648

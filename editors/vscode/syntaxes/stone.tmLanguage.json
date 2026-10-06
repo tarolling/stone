@@ -16,8 +16,8 @@
   ],
   "repository": {
     "comment": {
-      "name": "comment.line.number-sign.stone",
-      "match": "#.*$"
+      "name": "comment.line.double-slash.stone",
+      "match": "//.*$"
     },
     "string": {
       "name": "string.quoted.double.stone",

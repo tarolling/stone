@@ -116,21 +116,21 @@ impl Lexer {
         Some(ch)
     }
 
-    /// Skips spaces, tabs, carriage returns (so `\r\n` acts like `\n`), and a trailing `#` comment,
-    /// stopping before the newline.
+    /// Skips spaces, tabs, carriage returns (so `\r\n` acts like `\n`), and a trailing `//`
+    /// comment, stopping before the newline.
     fn skip_whitespace(&mut self) {
         while let Some(ch) = self.peek() {
             match ch {
                 ' ' | '\t' | '\r' => {
                     self.advance();
                 }
-                '#' => self.skip_comment(),
+                '/' if self.peek_at(1) == Some('/') => self.skip_comment(),
                 _ => break,
             }
         }
     }
 
-    /// Skips a `#` comment up to but not including the newline that ends it.
+    /// Skips a `//` comment up to but not including the newline that ends it.
     fn skip_comment(&mut self) {
         while let Some(ch) = self.peek() {
             if ch == '\n' {
@@ -159,7 +159,7 @@ impl Lexer {
                 '\r' => {
                     self.advance();
                 }
-                '#' => self.skip_comment(),
+                '/' if self.peek_at(1) == Some('/') => self.skip_comment(),
                 '\n' => {
                     // skip empty lines
                     self.advance();
@@ -705,7 +705,7 @@ testing(1, 2, 3)"#;
     #[test]
     fn comments_run_to_the_end_of_the_line() {
         assert_eq!(
-            types_of("x = 1 # the answer, (sort of)\n"),
+            types_of("x = 1 // the answer, (sort of)\n"),
             [
                 name("x"),
                 op("="),
@@ -718,7 +718,7 @@ testing(1, 2, 3)"#;
 
     #[test]
     fn comment_only_lines_do_not_change_indentation() {
-        let source = "if 1;\n    x = 1\n# at column one\n        # deeper\n    y = 2\n";
+        let source = "if 1;\n    x = 1\n// at column one\n        // deeper\n    y = 2\n";
         assert_eq!(
             types_of(source),
             [
@@ -743,7 +743,27 @@ testing(1, 2, 3)"#;
 
     #[test]
     fn a_file_of_only_comments_is_empty() {
-        assert_eq!(types_of("# just\n    # comments"), [TokenType::Eof]);
+        assert_eq!(types_of("// just\n    // comments"), [TokenType::Eof]);
+    }
+
+    #[test]
+    fn a_single_slash_is_still_division() {
+        assert_eq!(
+            types_of("a / b // c / d\n"),
+            [
+                name("a"),
+                op("/"),
+                name("b"),
+                TokenType::Newline,
+                TokenType::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn hash_is_not_a_comment() {
+        let err = Lexer::new("x = 1 # not a comment\n").lex().unwrap_err();
+        assert_eq!(err.message, "unexpected character '#'");
     }
 
     #[test]

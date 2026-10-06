@@ -1,4 +1,4 @@
-# branches and division: the start below a limit with the longest Collatz chain
+// branches and division: the start below a limit with the longest Collatz chain
 def chain(n);
     steps = 0
     while n != 1;

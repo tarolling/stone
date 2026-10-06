@@ -18,6 +18,29 @@ These rules apply to code, comments, documentation, and commit messages.
   `// globals live in main's frame`.
 - Format with `cargo fmt`, and keep `cargo clippy --all-targets -- -D warnings` clean.
 
+## Writing stone
+
+These apply to stone programs, such as the examples, tests, and benchmarks.
+
+- Document a function or variable with `//` comments on the lines directly above its definition,
+  with no blank line between. Editors show them when hovering over the name, under its
+  signature, as Markdown. Use a line holding only `//` to start a new paragraph:
+
+  ```stone
+  // how many times `n` can be halved before it reaches 1
+  //
+  // `n` must be positive.
+  def halvings(n);
+      count = 0
+      while n > 1;
+          n = n / 2
+          count = count + 1
+      ret count
+  ```
+
+- A comment at the end of a line, or one separated from the next line by a blank line, is an
+  ordinary comment and documents nothing.
+
 ## Changing the language
 
 - Keep `docs/grammar/stone.gram` and `docs/grammar/stone.asdl` in sync with the parser and AST.

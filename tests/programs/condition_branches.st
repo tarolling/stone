@@ -1,4 +1,4 @@
-# conditions branch on comparisons directly, left to right, stopping as soon as the result is known
+// conditions branch on comparisons directly, left to right, stopping as soon as the result is known
 def note(label, v);
     print(label)
     ret v
@@ -36,7 +36,7 @@ def count_down(n);
 
 print(count_down(10), count_down(2))
 
-# comparisons with nan are false, except !=
+// comparisons with nan are false, except !=
 inf = 1e308 * 10.0
 nan = inf - inf
 
@@ -58,7 +58,7 @@ while nan < 1.0;
     n = n + 1
 print(n)
 
-# a string comparison in a condition
+// a string comparison in a condition
 def greet(name);
     if name == "stone" and name != "rock";
         ret "hi " + name

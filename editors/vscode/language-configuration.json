@@ -1,6 +1,6 @@
 {
   "comments": {
-    "lineComment": "#"
+    "lineComment": "//"
   },
   "brackets": [
     ["[", "]"],
@@ -20,12 +20,12 @@
     "offSide": true
   },
   "indentationRules": {
-    "increaseIndentPattern": ";\\s*(#.*)?$",
+    "increaseIndentPattern": ";\\s*(//.*)?$",
     "decreaseIndentPattern": "^\\s*(elif|else)\\b"
   },
   "onEnterRules": [
     {
-      "beforeText": ";\\s*(#.*)?$",
+      "beforeText": ";\\s*(//.*)?$",
       "action": { "indent": "indent" }
     },
     {

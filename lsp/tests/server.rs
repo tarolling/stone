@@ -224,7 +224,7 @@ fn definition_of_a_builtin_opens_its_documentation() {
     );
     let text = std::fs::read_to_string(uri.trim_start_matches("file://")).unwrap();
     let line = location["range"]["start"]["line"].as_u64().unwrap() as usize;
-    assert!(text.lines().nth(line).unwrap().starts_with("# print("));
+    assert!(text.lines().nth(line).unwrap().starts_with("// print("));
     session.shut_down();
 }
 

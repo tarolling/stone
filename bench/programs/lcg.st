@@ -1,5 +1,5 @@
-# integer arithmetic in a tight loop: a linear congruential generator
-# stone has no %, so the modulo is written with / instead
+// integer arithmetic in a tight loop: a linear congruential generator
+// stone has no %, so the modulo is written with / instead
 def lcg(rounds);
     x = 1
     total = 0

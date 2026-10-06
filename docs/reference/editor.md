@@ -9,7 +9,8 @@ arguments, speaking LSP over stdin and stdout, for files ending in `.st`.
 - **Diagnostics as you type**, from the same checker `stone check` uses. A syntax error only
   affects the statement it is in, so the rest of the file keeps working while you type.
 - **Hover** shows a variable's or expression's inferred type, a function's signature such as
-  `def add(a: int, b: int) -> int`, or a builtin's documentation.
+  `def add(a: int, b: int) -> int`, or a builtin's documentation. A function or variable also
+  shows the `//` comment lines directly above its definition.
 - **Go to definition**, **find references**, and **rename** for variables, parameters, and
   functions. Going to the definition of a builtin like `print` opens a generated `builtins.st`
   that documents every builtin.

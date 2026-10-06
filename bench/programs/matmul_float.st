@@ -1,4 +1,4 @@
-# float arithmetic in nested lists: multiplying two matrices of floats from a generator
+// float arithmetic in nested lists: multiplying two matrices of floats from a generator
 def matrix(n, seed);
     rows = []
     x = seed
@@ -31,5 +31,5 @@ def checksum(c, n);
     ret total
 
 n = 300
-# scaled to an int, so C need not print floats the way stone does
+// scaled to an int, so C need not print floats the way stone does
 print(int(checksum(multiply(matrix(n, 1), matrix(n, 2), n), n) * 1000000.0))

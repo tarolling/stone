@@ -79,6 +79,97 @@ fn hover_shows_variables_with_their_kind() {
     );
 }
 
+const DOCUMENTED: &str = "\
+// the largest value tried
+limit = 3
+
+// how many times `n` halves
+// before it reaches 1
+//
+// `n` must be positive.
+def halvings(n);
+    // the count so far
+    count = 0
+    while n > 1;
+        n = n / 2
+        count = count + 1
+    ret count
+print(halvings(limit))
+";
+
+#[test]
+fn hover_shows_the_comment_above_a_function() {
+    let doc = doc(DOCUMENTED);
+    assert_eq!(
+        hover_text(&doc, at(8, 5)).unwrap(),
+        "```stone\ndef halvings(n: int) -> int\n```\n\
+         how many times `n` halves\nbefore it reaches 1\n\n`n` must be positive."
+    );
+}
+
+#[test]
+fn hover_shows_the_comment_above_a_variable() {
+    let doc = doc(DOCUMENTED);
+    assert_eq!(
+        hover_text(&doc, at(2, 1)).unwrap(),
+        "```stone\n(global) limit: int\n```\nthe largest value tried"
+    );
+    assert_eq!(
+        hover_text(&doc, at(10, 5)).unwrap(),
+        "```stone\n(local) count: int\n```\nthe count so far"
+    );
+}
+
+#[test]
+fn hover_on_a_use_shows_the_definitions_comment() {
+    let doc = doc(DOCUMENTED);
+    assert_eq!(
+        hover_text(&doc, at(15, 16)).unwrap(),
+        "```stone\n(global) limit: int\n```\nthe largest value tried"
+    );
+    assert!(
+        hover_text(&doc, at(15, 7))
+            .unwrap()
+            .ends_with("`n` must be positive."),
+    );
+}
+
+#[test]
+fn a_blank_line_detaches_a_comment() {
+    let doc = doc("// about nothing\n\nx = 1\n");
+    assert_eq!(
+        hover_text(&doc, at(3, 1)).unwrap(),
+        "```stone\n(global) x: int\n```"
+    );
+}
+
+#[test]
+fn a_trailing_comment_is_not_documentation() {
+    let doc = doc("y = 1 // about y\nx = 1\n");
+    assert_eq!(
+        hover_text(&doc, at(2, 1)).unwrap(),
+        "```stone\n(global) x: int\n```"
+    );
+}
+
+#[test]
+fn only_a_definition_that_starts_its_line_is_documented() {
+    let doc = doc("// about the loop\nfor i in range(3);\n    print(i)\n");
+    assert_eq!(
+        hover_text(&doc, at(2, 5)).unwrap(),
+        "```stone\n(global) i: int\n```"
+    );
+}
+
+#[test]
+fn parameters_have_no_documentation() {
+    let doc = doc("// about f\ndef f(n);\n    ret n\nprint(f(1))\n");
+    assert_eq!(
+        hover_text(&doc, at(2, 7)).unwrap(),
+        "```stone\n(parameter) n: int\n```"
+    );
+}
+
 #[test]
 fn hover_documents_builtins() {
     let text = hover_text(&doc(SOURCE), at(7, 2)).unwrap();
@@ -136,26 +227,26 @@ fn definition_of_a_builtin_opens_the_reference_file() {
 
     let location = definition(&doc, &uri(), at(7, 2), Some(&builtins)).unwrap();
     assert_eq!(location.uri, reference);
-    // the `print` in the reference's `# print(values...) -> none` line
+    // the `print` in the reference's `// print(values...) -> none` line
     let text = stone::stdlib::builtins_reference();
     let line = text
         .lines()
-        .position(|l| l.starts_with("# print("))
+        .position(|l| l.starts_with("// print("))
         .unwrap() as u32;
     assert_eq!(
         location.range,
-        Range::new(Position::new(line, 2), Position::new(line, 7))
+        Range::new(Position::new(line, 3), Position::new(line, 8))
     );
 
-    // the `len` in the reference's `# (str | list[T]).len() -> int` line
+    // the `len` in the reference's `// (str | list[T]).len() -> int` line
     let len = definition(&doc, &uri(), at(7, 18), Some(&builtins)).unwrap();
     let line = text
         .lines()
-        .position(|l| l.starts_with("# (str | list[T]).len("))
+        .position(|l| l.starts_with("// (str | list[T]).len("))
         .unwrap() as u32;
     assert_eq!(
         len.range,
-        Range::new(Position::new(line, 18), Position::new(line, 21))
+        Range::new(Position::new(line, 19), Position::new(line, 22))
     );
 }
 

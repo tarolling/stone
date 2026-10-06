@@ -1,4 +1,4 @@
-# every argument keeps its value while later arguments are evaluated, even ones that divide
+// every argument keeps its value while later arguments are evaluated, even ones that divide
 def digits(a, b, c, d);
     ret a * 1000 + b * 100 + c * 10 + d
 print(digits(1, 2, 3, 8 / 2))

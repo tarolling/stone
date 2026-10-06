@@ -1,4 +1,4 @@
-# prints floats of many sizes, so both backends must agree on every digit
+// prints floats of many sizes, so both backends must agree on every digit
 x = 12345
 scale = 1e-30
 for i in range(400);

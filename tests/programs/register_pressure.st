@@ -1,4 +1,4 @@
-# more values live at once than there are registers, across calls of every kind
+// more values live at once than there are registers, across calls of every kind
 def id(x);
     ret x
 
@@ -24,7 +24,7 @@ def many(n);
 
 print(many(5))
 
-# each frame keeps values in registers across the recursive call
+// each frame keeps values in registers across the recursive call
 def depth(n, acc);
     if n == 0;
         ret acc
@@ -35,7 +35,7 @@ def depth(n, acc);
 
 print(depth(50, 1))
 
-# values live across append, string concatenation, len, and print
+// values live across append, string concatenation, len, and print
 def mixed(n);
     xs = []
     s = "a"
@@ -51,7 +51,7 @@ def mixed(n);
 
 print(mixed(4))
 
-# an assignment whose right side reads the variable being assigned
+// an assignment whose right side reads the variable being assigned
 def reads_target(x, y);
     x = y - x
     y = x * y + x

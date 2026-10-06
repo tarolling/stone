@@ -1,4 +1,4 @@
-# recursive calls and returns
+// recursive calls and returns
 def fib(n);
     if n < 2;
         ret n

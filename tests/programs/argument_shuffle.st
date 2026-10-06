@@ -1,5 +1,5 @@
-# arguments passed in a different order than the caller received them, which needs the
-# register moves at each call ordered so none overwrites a value another still needs
+// arguments passed in a different order than the caller received them, which needs the
+// register moves at each call ordered so none overwrites a value another still needs
 def pair(a, b);
     ret a * 10 + b
 

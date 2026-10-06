@@ -1,4 +1,4 @@
-# operands and arguments are evaluated left to right, which shows when they print
+// operands and arguments are evaluated left to right, which shows when they print
 def say(n);
     print(n)
     ret n

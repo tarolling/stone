@@ -1,4 +1,4 @@
-# float literals, arithmetic, and how print shows them
+// float literals, arithmetic, and how print shows them
 a = 1.5
 b = 0.25
 print(a + b, a - b, a * b, a / b)

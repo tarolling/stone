@@ -1,4 +1,4 @@
-# prints the primes below a limit with the sieve of Eratosthenes
+// prints the primes below a limit with the sieve of Eratosthenes
 def primes_below(limit);
     is_prime = []
     for i in range(limit);

@@ -93,6 +93,40 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
     }
 }
 
+/// Returns the `//` comment lines directly above a function's or variable's definition, without
+/// their `//` and the space after it, as Markdown for hover.
+///
+/// For example, for `f` in `"// adds one\n// to n\ndef f(n);\n    ret n + 1\n"` this returns
+/// `"adds one\nto n"`. A line that is only `//` becomes a paragraph break. A blank line between
+/// the comment and the definition detaches it, parameters are never documented, and neither is a
+/// definition that does not start its line, such as `i` in `for i in range(3);`.
+fn doc_comment(text: &str, symbol: &Symbol) -> Option<String> {
+    if symbol.kind == StoneSymbolKind::Parameter {
+        return None;
+    }
+    let lines: Vec<&str> = text.lines().collect();
+    let line = symbol.span.start.line - 1;
+    let before: String = lines
+        .get(line)?
+        .chars()
+        .take(symbol.span.start.col - 1)
+        .collect();
+    if !matches!(before.trim(), "" | "def") {
+        return None;
+    }
+    let comment: Vec<&str> = lines[..line]
+        .iter()
+        .rev()
+        .map_while(|line| line.trim_start().strip_prefix("//"))
+        .map(|line| line.strip_prefix(' ').unwrap_or(line).trim_end())
+        .collect();
+    if comment.is_empty() {
+        return None;
+    }
+    let lines: Vec<&str> = comment.into_iter().rev().collect();
+    Some(lines.join("\n"))
+}
+
 /// Returns the identifier the position is on or just after, and its span.
 fn word_at(doc: &Document, pos: Pos) -> Option<(String, Span)> {
     let line: Vec<char> = doc.text.lines().nth(pos.line - 1)?.chars().collect();
@@ -144,14 +178,15 @@ fn markdown(code: &str, text: Option<&str>) -> HoverContents {
     })
 }
 
-/// Describes what is at `position`: a symbol's declaration, a builtin's documentation, or the
-/// type of the innermost expression there.
+/// Describes what is at `position`: a symbol's declaration with the comment above its definition
+/// (see [`doc_comment`]), a builtin's documentation, or the type of the innermost expression there.
 pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
     let pos = doc.index.pos(position);
     if let Some((symbol, span)) = doc.symbol_at(position) {
         let symbol = &doc.analysis.symbols[symbol];
+        let comment = doc_comment(&doc.text, symbol);
         return Some(Hover {
-            contents: markdown(&signature(&doc.analysis, symbol), None),
+            contents: markdown(&signature(&doc.analysis, symbol), comment.as_deref()),
             range: Some(doc.index.range(span)),
         });
     }
@@ -196,7 +231,7 @@ pub struct Builtins {
     uri: Uri,
     /// The line and column of each builtin function's name in its signature, counted from 0.
     functions: HashMap<&'static str, (u32, u32)>,
-    /// The same for each builtin method, such as `len` in `# (str | list[T]).len() -> int`.
+    /// The same for each builtin method, such as `len` in `// (str | list[T]).len() -> int`.
     methods: HashMap<&'static str, (u32, u32)>,
 }
 
@@ -205,7 +240,7 @@ impl Builtins {
         let text = builtins_reference();
         // the signature's line, and the column of `name` where it is followed by a `(`
         let find = |doc: &BuiltinDoc| {
-            let signature = format!("# {}", doc.signature);
+            let signature = format!("// {}", doc.signature);
             let line = text.lines().position(|line| line == signature)?;
             let col = signature.find(&format!("{}(", doc.name))?;
             Some((

@@ -50,6 +50,6 @@ if 2 > 1;
 ```
 
 A block with a single statement can also follow the `;` on the same line, as in
-`if done; break`. Comments start with `#` and run to the end of the line.
+`if done; break`. Comments start with `//` and run to the end of the line.
 
 Next, {doc}`values`.

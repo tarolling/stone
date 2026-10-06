@@ -1,4 +1,4 @@
-# float comparisons follow IEEE 754, so nan is unequal to everything
+// float comparisons follow IEEE 754, so nan is unequal to everything
 a = 1.5
 b = 2.5
 print(a < b, a <= b, a > b, a >= b, a == b, a != b)

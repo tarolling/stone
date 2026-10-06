@@ -79,20 +79,21 @@ pub fn method_doc(name: &str) -> Option<&'static BuiltinDoc> {
 ///
 /// Builtins are part of the interpreter and the compiler rather than written in stone, so the
 /// file is only comments, which keeps it valid stone. Each builtin function, then each builtin
-/// method, gets a line holding `# ` and its signature, followed by its description.
+/// method, gets a line holding `// ` and its signature, followed by its description.
 pub fn builtins_reference() -> String {
     let mut text = String::from(
-        "# stone's builtin functions and methods\n\
-         #\n\
-         # These are part of the interpreter and the compiler rather than written in stone, so this\n\
-         # file only documents them. stone-lsp generates it, and editing it changes nothing.\n",
+        "// stone's builtin functions and methods\n\
+         //\n\
+         // These are part of the interpreter and the compiler rather than written in stone, so\n\
+         // this file only documents them. stone-lsp generates it, and editing it changes\n\
+         // nothing.\n",
     );
     for doc in &BUILTIN_DOCS {
-        text += &format!("\n# {}\n#     {}\n", doc.signature, doc.description);
+        text += &format!("\n// {}\n//     {}\n", doc.signature, doc.description);
     }
-    text += "\n# Methods, called on a value as in `xs.len()`\n";
+    text += "\n// Methods, called on a value as in `xs.len()`\n";
     for doc in &METHOD_DOCS {
-        text += &format!("\n# {}\n#     {}\n", doc.signature, doc.description);
+        text += &format!("\n// {}\n//     {}\n", doc.signature, doc.description);
     }
     text
 }
@@ -272,7 +273,7 @@ mod tests {
     fn the_reference_has_a_line_for_each_builtin() {
         let reference = builtins_reference();
         for doc in BUILTIN_DOCS.iter().chain(&METHOD_DOCS) {
-            let line = format!("# {}", doc.signature);
+            let line = format!("// {}", doc.signature);
             assert_eq!(
                 reference.lines().filter(|l| *l == line).count(),
                 1,

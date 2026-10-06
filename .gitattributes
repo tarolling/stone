@@ -1,1 +1,7 @@
 * text=auto
+
+# golden test data is compared byte for byte, so keep line endings such as \r\n as written
+*.in -text
+*.out -text
+*.err -text
+*.args -text

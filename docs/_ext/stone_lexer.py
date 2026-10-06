@@ -42,7 +42,7 @@ class StoneLexer(RegexLexer):
             (words(METHODS, prefix=r"(?<=\.)", suffix=r"\b"), Name.Builtin),
             (r"\d+\.\d*([eE][+-]?\d+)?|\d+[eE][+-]?\d+", Number.Float),
             (r"\d+", Number.Integer),
-            (r"==|!=|<=|>=|[-+*/<>=]", Operator),
+            (r"==|!=|<=|>=|\*\*|[-+*/%<>=]", Operator),
             (r"[()\[\],;.]", Punctuation),
             (r"[A-Za-z_]\w*", Name),
             (r".", Text),

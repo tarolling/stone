@@ -540,6 +540,27 @@ mod tests {
     }
 
     #[test]
+    fn modulo_by_a_safe_constant_skips_the_checks() {
+        let assembly = assemble("x = 7\nprint(x % 10, x % -8)\n").unwrap();
+        assert!(assembly.contains("\tidiv\trcx"), "{assembly}");
+        assert!(!assembly.contains("division by zero"), "{assembly}");
+        let checked = assemble("x = 7\ny = 3\nprint(x % y)\n").unwrap();
+        assert!(checked.contains("division by zero"), "{checked}");
+        assert!(!checked.contains("integer overflow"), "{checked}");
+    }
+
+    #[test]
+    fn powers_and_float_remainders_do_not_call_libc() {
+        let assembly =
+            assemble("x = 2.5\nn = 3\nprint(x ** n, x ** -2, x % 0.75, n ** n, n ** 2)\n").unwrap();
+        assert!(!assembly.contains("\tcall\tpow"), "{assembly}");
+        assert!(!assembly.contains("\tcall\tfmod"), "{assembly}");
+        assert!(assembly.contains("\tfprem"), "{assembly}");
+        // only the exponent that is not a literal is checked
+        assert_eq!(assembly.matches("\tjs\t").count(), 1, "{assembly}");
+    }
+
+    #[test]
     fn list_indexing_checks_bounds_inline() {
         let assembly = assemble("xs = [1, 2]\nxs[0] = xs[-1]\nprint(xs[1])\n").unwrap();
         assert!(!assembly.contains("stone.list_slot"), "{assembly}");

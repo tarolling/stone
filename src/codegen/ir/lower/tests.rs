@@ -154,3 +154,20 @@ fn methods_lower_to_list_and_string_operations() {
          v3 = len v0\n  ret v3\n"
     );
 }
+
+#[test]
+fn modulo_and_power_lower_to_arithmetic() {
+    assert_eq!(
+        dump("def f(x, n);\n    ret x % n ** 2\nprint(f(7, 2))\n")
+            .split("fn main")
+            .next()
+            .unwrap(),
+        "fn f(v0, v1):\nb0:\n  v2 = pow v1, 2\n  v3 = rem v0, v2\n  ret v3\n"
+    );
+    // a float power's exponent stays an int, not float bits
+    let floats = dump("def f(x, n);\n    ret x % 1.5 ** n + x ** -2\nprint(f(2.0, 3))\n");
+    let bits = 1.5f64.to_bits() as i64;
+    assert!(floats.contains(&format!("fpow {bits}, v1")), "{floats}");
+    assert!(floats.contains("frem v0, "), "{floats}");
+    assert!(floats.contains("fpow v0, -2"), "{floats}");
+}

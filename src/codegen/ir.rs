@@ -51,6 +51,10 @@ pub enum BinOp {
     Sub,
     Mul,
     Div,
+    /// The remainder of `Div`, which takes the dividend's sign.
+    Rem,
+    /// `lhs` raised to the int `rhs`, by squaring and multiplying.
+    Pow,
 }
 
 /// A comparison, as in [`Inst::Compare`] and [`Terminator::CmpBranch`].
@@ -139,14 +143,17 @@ pub enum Inst {
     /// `dst = src`.
     Copy { dst: VReg, src: Operand },
     /// Wrapping int arithmetic. `Div` rounds toward zero and fails on a zero divisor and on
-    /// `MIN / -1`, unless `rhs` is an immediate other than 0 and -1, which needs no checks.
+    /// `MIN / -1`, unless `rhs` is an immediate other than 0 and -1, which needs no checks. `Rem`
+    /// fails on a zero divisor too, but `x % -1` is 0. `Pow` fails on a negative exponent and
+    /// wraps like `stdlib::int_pow`.
     Binary {
         op: BinOp,
         dst: VReg,
         lhs: Operand,
         rhs: Operand,
     },
-    /// Float arithmetic on bits. `Div` fails on a zero divisor.
+    /// Float arithmetic on bits. `Div` and `Rem` fail on a zero divisor. For `Pow`, `rhs` is an
+    /// int exponent rather than float bits, and the result matches `stdlib::float_pow`.
     FloatBinary {
         op: BinOp,
         dst: VReg,
@@ -415,6 +422,8 @@ fn bin_name(op: BinOp) -> &'static str {
         BinOp::Sub => "sub",
         BinOp::Mul => "mul",
         BinOp::Div => "div",
+        BinOp::Rem => "rem",
+        BinOp::Pow => "pow",
     }
 }
 

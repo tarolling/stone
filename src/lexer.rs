@@ -363,7 +363,16 @@ impl Lexer {
                 self.advance();
                 TokenType::Dot
             }
-            Some('+') | Some('-') | Some('*') | Some('/') => {
+            Some('*') => {
+                self.advance();
+                if self.peek() == Some('*') {
+                    self.advance();
+                    TokenType::Operator("**".to_string())
+                } else {
+                    TokenType::Operator("*".to_string())
+                }
+            }
+            Some('+') | Some('-') | Some('/') | Some('%') => {
                 let op = self.advance().unwrap().to_string();
                 TokenType::Operator(op)
             }
@@ -767,6 +776,17 @@ testing(1, 2, 3)"#;
                 .filter(|t| matches!(t, TokenType::Operator(_)))
                 .collect::<Vec<_>>(),
             ["==", "!=", "<", "<=", ">", ">=", "="].map(op)
+        );
+    }
+
+    #[test]
+    fn modulo_and_power_are_operators() {
+        assert_eq!(
+            types_of("a % b ** c * * d\n")
+                .into_iter()
+                .filter(|t| matches!(t, TokenType::Operator(_)))
+                .collect::<Vec<_>>(),
+            ["%", "**", "*", "*"].map(op)
         );
     }
 

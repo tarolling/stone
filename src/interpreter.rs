@@ -470,6 +470,16 @@ impl<'out> Interpreter<'out> {
                 let rhs = self.eval_expr(right)?;
 
                 match (lhs, rhs) {
+                    // the exponent is always an int, even for a float base
+                    (Value::Int(_), Value::Int(r)) if *op == Operator::Power && r < 0 => {
+                        Err("negative exponent".into())
+                    }
+                    (Value::Int(l), Value::Int(r)) if *op == Operator::Power => {
+                        Ok(Value::Int(stdlib::int_pow(l, r)))
+                    }
+                    (Value::Float(l), Value::Int(r)) if *op == Operator::Power => {
+                        Ok(Value::Float(stdlib::float_pow(l, r)))
+                    }
                     (Value::Int(l), Value::Int(r)) => match op {
                         // wrap like the compiled add, sub, and imul do
                         Operator::Add => Ok(Value::Int(l.wrapping_add(r))),
@@ -481,6 +491,10 @@ impl<'out> Interpreter<'out> {
                             .checked_div(r)
                             .map(Value::Int)
                             .ok_or_else(|| "integer overflow in division".into()),
+                        Operator::Modulo if r == 0 => Err("division by zero".into()),
+                        // `MIN % -1` is 0, which compiled code also gives
+                        Operator::Modulo => Ok(Value::Int(l.wrapping_rem(r))),
+                        Operator::Power => Err("Type mismatch in binary operation".into()),
                     },
                     (Value::Float(l), Value::Float(r)) => match op {
                         Operator::Add => Ok(Value::Float(l + r)),
@@ -489,6 +503,9 @@ impl<'out> Interpreter<'out> {
                         // like Python, rather than giving inf or nan
                         Operator::Divide if r == 0.0 => Err("division by zero".into()),
                         Operator::Divide => Ok(Value::Float(l / r)),
+                        Operator::Modulo if r == 0.0 => Err("division by zero".into()),
+                        Operator::Modulo => Ok(Value::Float(l % r)),
+                        Operator::Power => Err("Type mismatch in binary operation".into()),
                     },
                     (Value::Str(l), Value::Str(r)) if matches!(op, Operator::Add) => {
                         Ok(Value::Str(format!("{l}{r}").into()))

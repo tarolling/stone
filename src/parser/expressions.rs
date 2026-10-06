@@ -693,13 +693,47 @@ impl Parser {
         })
     }
 
-    /// Parses a primary with optional unary signs, such as `-x` or `+5`.
+    /// Parses a primary raised to a power, such as `2 ** n`, or just a primary.
+    ///
+    /// The exponent is a factor, so `2 ** 3 ** 2` groups as `2 ** (3 ** 2)` and `2 ** -1` parses,
+    /// while `-2 ** 2` is `-(2 ** 2)`, since the sign belongs to the enclosing factor.
+    ///
+    /// ```text
+    /// power:
+    ///     | primary '**' factor
+    ///     | primary
+    /// ```
+    pub(super) fn parse_power(&mut self) -> ParseExprResult {
+        let base = self.parse_primary()?;
+        let mark = self.pos;
+
+        // primary '**' factor
+        if self.expect(TokenType::Operator("**".to_string())).is_some()
+            && let Ok(exponent) = self.nested(Self::parse_factor)
+        {
+            let span = base.span.to(exponent.span);
+            return Ok(Box::new(Expr::new(
+                ExprKind::BinOp {
+                    op: Operator::Power,
+                    left: base,
+                    right: exponent,
+                },
+                span,
+            )));
+        }
+        self.pos = mark;
+
+        // primary
+        Ok(base)
+    }
+
+    /// Parses a power with optional unary signs, such as `-x` or `+5`.
     ///
     /// ```text
     /// factor:
     ///     | '+' factor
     ///     | '-' factor
-    ///     | primary
+    ///     | power
     /// ```
     pub(super) fn parse_factor(&mut self) -> ParseExprResult {
         let mark = self.pos;
@@ -732,14 +766,15 @@ impl Parser {
         }
         self.pos = mark;
 
-        // factor
-        self.parse_primary()
+        // power
+        self.parse_power()
     }
 
-    /// Parses the repeated `*` and `/` operations of a term, such as `* b / c` in `a * b / c`.
+    /// Parses the repeated `*`, `/`, and `%` operations of a term, such as `* b % c` in
+    /// `a * b % c`.
     ///
     /// ```text
-    /// ('*'|'/' factor)*
+    /// ('*'|'/'|'%' factor)*
     /// ```
     pub(super) fn parse_term_loop0(&mut self) -> Vec<(Operator, Expr)> {
         let mut results: Vec<(Operator, Expr)> = vec![];
@@ -760,6 +795,14 @@ impl Parser {
                 results.push((Operator::Divide, *term));
                 continue;
             }
+            self.pos = mark;
+
+            if self.expect(TokenType::Operator("%".to_string())).is_some()
+                && let Ok(term) = self.parse_factor()
+            {
+                results.push((Operator::Modulo, *term));
+                continue;
+            }
 
             self.pos = mark;
             break;
@@ -767,16 +810,16 @@ impl Parser {
         results
     }
 
-    /// Parses multiplication and division, such as `a * b / c`.
+    /// Parses multiplication, division, and remainders, such as `a * b / c % d`.
     ///
     /// ```text
     /// term:
-    ///     | factor ('*'|'/' factor)*
+    ///     | factor ('*'|'/'|'%' factor)*
     /// ```
     pub(super) fn parse_term(&mut self) -> ParseExprResult {
         let mark = self.pos;
 
-        // factor ('*'|'/' factor)*
+        // factor ('*'|'/'|'%' factor)*
         if let Ok(mut result) = self.parse_factor()
             && let facts = self.parse_term_loop0()
         {

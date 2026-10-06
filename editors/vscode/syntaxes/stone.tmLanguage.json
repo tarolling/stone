@@ -75,7 +75,7 @@
         },
         {
           "name": "keyword.operator.arithmetic.stone",
-          "match": "\\+|-|\\*|/"
+          "match": "\\*\\*|\\+|-|\\*|/|%"
         }
       ]
     },

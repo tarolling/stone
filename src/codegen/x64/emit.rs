@@ -458,36 +458,71 @@ impl X64Generator {
             }
 
             Inst::Binary {
-                op: BinOp::Div,
+                op: op @ (BinOp::Div | BinOp::Rem),
                 dst,
                 lhs,
                 rhs,
             } => {
                 let (dst, lhs, rhs) = (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
+                // idiv leaves the quotient in rax and the remainder in rdx
+                let result = if *op == BinOp::Div { "rax" } else { "rdx" };
                 self.load("rax", lhs);
                 match rhs {
                     Value::Imm(divisor) if divisor != 0 && divisor != -1 => {
-                        self.divide_by_constant(divisor)
+                        if *op == BinOp::Div {
+                            self.divide_by_constant(divisor);
+                        } else {
+                            self.emit(&format!("\tmov\trcx, {divisor}"));
+                            self.emit("\tcqo"); // sign-extend rax into rdx
+                            self.emit("\tidiv\trcx");
+                        }
                     }
                     _ => {
                         self.load("rcx", rhs);
                         // idiv traps on both of these, so report them like the interpreter
                         let by_zero = self.fail_label("division by zero");
-                        let overflow = self.fail_label("integer overflow in division");
                         let divide = self.new_label("divide");
+                        let done = self.new_label("divided");
                         self.emit("\ttest\trcx, rcx");
                         self.emit(&format!("\tjz\t{by_zero}"));
                         self.emit("\tcmp\trcx, -1");
                         self.emit(&format!("\tjne\t{divide}"));
-                        // only the minimum overflows when negated
-                        self.emit("\tmov\trdx, rax");
-                        self.emit("\tneg\trdx");
-                        self.emit(&format!("\tjo\t{overflow}"));
+                        if *op == BinOp::Div {
+                            let overflow = self.fail_label("integer overflow in division");
+                            // only the minimum overflows when negated
+                            self.emit("\tmov\trdx, rax");
+                            self.emit("\tneg\trdx");
+                            self.emit(&format!("\tjo\t{overflow}"));
+                        } else {
+                            // anything % -1 is 0, including the minimum, where idiv would trap
+                            self.emit("\txor\tedx, edx");
+                            self.emit(&format!("\tjmp\t{done}"));
+                        }
                         self.emit(&format!("{divide}:"));
                         self.emit("\tcqo"); // sign-extend rax into rdx
                         self.emit("\tidiv\trcx");
+                        self.emit(&format!("{done}:"));
                     }
                 }
+                self.store(dst, result);
+            }
+
+            Inst::Binary {
+                op: BinOp::Pow,
+                dst,
+                lhs,
+                rhs,
+            } => {
+                let (dst, lhs, rhs) = (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
+                self.load("rcx", lhs);
+                self.load("rdx", rhs);
+                if !matches!(rhs, Value::Imm(n) if n >= 0) {
+                    let negative = self.fail_label("negative exponent");
+                    self.emit("\ttest\trdx, rdx");
+                    self.emit(&format!("\tjs\t{negative}"));
+                }
+                self.emit("\tmov\teax, 1");
+                self.power_loop("imul\trax, rcx", "imul\trcx, rcx");
                 self.store(dst, "rax");
             }
 
@@ -510,13 +545,98 @@ impl X64Generator {
                         let name = match op {
                             BinOp::Add => "add",
                             BinOp::Sub => "sub",
-                            _ => "imul",
+                            BinOp::Mul => "imul",
+                            BinOp::Div | BinOp::Rem | BinOp::Pow => {
+                                return Err(format!("{op:?} is emitted separately"));
+                            }
                         };
                         let rhs = self.source(rhs, "rcx");
                         self.emit(&format!("\t{name}\t{target}, {rhs}"));
                     }
                 }
                 self.store(dst, target);
+            }
+
+            Inst::FloatBinary {
+                op: BinOp::Rem,
+                dst,
+                lhs,
+                rhs,
+            } => {
+                let (dst, lhs, rhs) = (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
+                self.load_xmm("xmm1", rhs);
+                self.fail_on_float_zero("xmm1");
+                // x87's fprem gives the exact remainder with the dividend's sign, as Rust's `%`
+                // does, but only reduces the exponent by up to 63 per step, so repeat it until
+                // C2 (bit 2 of ah) says the remainder is complete
+                self.load("rcx", rhs);
+                self.load("rdx", lhs);
+                self.emit("\tpush\trcx");
+                self.emit("\tpush\trdx");
+                self.emit("\tfld\tQWORD PTR [rsp + 8]");
+                self.emit("\tfld\tQWORD PTR [rsp]");
+                let reduce = self.new_label("fprem");
+                self.emit(&format!("{reduce}:"));
+                self.emit("\tfprem");
+                self.emit("\tfnstsw\tax");
+                self.emit("\ttest\tah, 4");
+                self.emit(&format!("\tjnz\t{reduce}"));
+                // pop both x87 registers, leaving its stack empty
+                self.emit("\tfstp\tQWORD PTR [rsp]");
+                self.emit("\tfstp\tst(0)");
+                self.emit("\tpop\trax");
+                self.emit("\tadd\trsp, 8");
+                self.store(dst, "rax");
+            }
+
+            Inst::FloatBinary {
+                op: BinOp::Pow,
+                dst,
+                lhs,
+                rhs,
+            } => {
+                let (dst, lhs, rhs) = (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
+                // the same operations as `stdlib::float_pow`: square and multiply by the
+                // exponent's magnitude, then take the reciprocal if it was negative
+                self.load_xmm("xmm1", lhs);
+                self.emit(&format!("\tmov\trax, {}", 1.0f64.to_bits() as i64));
+                self.emit("\tmovq\txmm0, rax");
+                let negative = match rhs {
+                    Value::Imm(n) => {
+                        // the magnitude of the minimum is 2^63, which shr reads correctly
+                        self.load("rdx", Value::Imm(n.unsigned_abs() as i64));
+                        Some(n < 0)
+                    }
+                    _ => {
+                        self.load("rdx", rhs);
+                        self.emit("\tmov\trcx, rdx");
+                        let positive = self.new_label("positive");
+                        self.emit("\ttest\trdx, rdx");
+                        self.emit(&format!("\tjns\t{positive}"));
+                        self.emit("\tneg\trdx");
+                        self.emit(&format!("{positive}:"));
+                        None
+                    }
+                };
+                self.power_loop("mulsd\txmm0, xmm1", "mulsd\txmm1, xmm1");
+                let reciprocal = |r#gen: &mut Self| {
+                    // rax still holds 1.0
+                    r#gen.emit("\tmovq\txmm1, rax");
+                    r#gen.emit("\tdivsd\txmm1, xmm0");
+                    r#gen.emit("\tmovapd\txmm0, xmm1");
+                };
+                match negative {
+                    Some(true) => reciprocal(self),
+                    Some(false) => {}
+                    None => {
+                        let done = self.new_label("powered");
+                        self.emit("\ttest\trcx, rcx");
+                        self.emit(&format!("\tjns\t{done}"));
+                        reciprocal(self);
+                        self.emit(&format!("{done}:"));
+                    }
+                }
+                self.emit(&format!("\tmovq\t{dst}, xmm0"));
             }
 
             Inst::FloatBinary { op, dst, lhs, rhs } => {
@@ -528,17 +648,11 @@ impl X64Generator {
                     BinOp::Sub => "subsd",
                     BinOp::Mul => "mulsd",
                     BinOp::Div => {
-                        // dividing by 0.0 or -0.0 fails, as in the interpreter, rather than
-                        // giving inf or nan
-                        let by_zero = self.fail_label("division by zero");
-                        let divide = self.new_label("divide");
-                        self.emit("\txorpd\txmm2, xmm2");
-                        self.emit("\tucomisd\txmm1, xmm2");
-                        // a nan divisor also sets ZF, but PF tells it apart
-                        self.emit(&format!("\tjp\t{divide}"));
-                        self.emit(&format!("\tje\t{by_zero}"));
-                        self.emit(&format!("{divide}:"));
+                        self.fail_on_float_zero("xmm1");
                         "divsd"
+                    }
+                    BinOp::Rem | BinOp::Pow => {
+                        return Err(format!("float {op:?} is emitted separately"));
                     }
                 };
                 self.emit(&format!("\t{instruction}\txmm0, xmm1"));
@@ -794,6 +908,42 @@ impl X64Generator {
             Some(n) => format!("[rax + {}]", 8 * n),
             None => "[rax + rcx * 8]".to_string(),
         }
+    }
+
+    /// Jumps to the `division by zero` failure if the float divisor in `xmm` is 0.0 or -0.0, as
+    /// in the interpreter, rather than letting `/` or `%` give inf or nan. Clobbers `xmm2`.
+    fn fail_on_float_zero(&mut self, xmm: &str) {
+        let by_zero = self.fail_label("division by zero");
+        let nonzero = self.new_label("nonzero");
+        self.emit("\txorpd\txmm2, xmm2");
+        self.emit(&format!("\tucomisd\t{xmm}, xmm2"));
+        // a nan divisor also sets ZF, but PF tells it apart
+        self.emit(&format!("\tjp\t{nonzero}"));
+        self.emit(&format!("\tje\t{by_zero}"));
+        self.emit(&format!("{nonzero}:"));
+    }
+
+    /// Emits the loop that raises a base to the exponent in `rdx` by squaring and multiplying,
+    /// as `stdlib::int_pow` and `stdlib::float_pow` do. `multiply` folds the base into the
+    /// result and `square` squares the base, and `rdx` ends at 0.
+    ///
+    /// For example, `power_loop("imul\trax, rcx", "imul\trcx, rcx")` leaves `rcx` to the power
+    /// `rdx` in `rax`, if `rax` started at 1.
+    fn power_loop(&mut self, multiply: &str, square: &str) {
+        let top = self.new_label("pow");
+        let skip = self.new_label("pow_skip");
+        let done = self.new_label("pow_done");
+        self.emit(&format!("{top}:"));
+        self.emit("\ttest\trdx, rdx");
+        self.emit(&format!("\tjz\t{done}"));
+        self.emit("\ttest\tdl, 1");
+        self.emit(&format!("\tjz\t{skip}"));
+        self.emit(&format!("\t{multiply}"));
+        self.emit(&format!("{skip}:"));
+        self.emit(&format!("\t{square}"));
+        self.emit("\tshr\trdx, 1");
+        self.emit(&format!("\tjmp\t{top}"));
+        self.emit(&format!("{done}:"));
     }
 
     /// Divides `rax` by a constant that is neither 0 nor -1, rounding toward zero like `idiv`.

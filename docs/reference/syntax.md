@@ -16,6 +16,8 @@ fewer Shift presses. The full grammar is
 | `True`, `False`, `None` | `true`, `false`, `none` |
 | `'single'` or `"double"` quotes | `"double"` quotes only |
 | `-7 // 2 == -4` | `-7 / 2 == -3` (truncates) |
+| `-7 % 2 == 1` | `-7 % 2 == -1` (takes the dividend's sign, like `/`) |
+| `2 ** -1 == 0.5`, `2 ** 0.5` | `2.0 ** -1 == 0.5`; the exponent is always an `int` |
 
 ## Keywords
 
@@ -90,11 +92,14 @@ From lowest to highest precedence:
 | `not` | an `int` or `bool` condition |
 | `==` `!=` `<` `<=` `>` `>=` | numbers; `==` and `!=` also strings, bools, and `none` |
 | `+` `-` | two ints or two floats; `+` also joins two strings |
-| `*` `/` | two ints or two floats |
+| `*` `/` `%` | two ints or two floats |
 | unary `+` `-` | an int or a float |
+| `**` | an int or float base and an `int` exponent |
 | calls `f(x)`, method calls `xs.len()`, indexing `xs[i]` | |
 
 Comparisons chain, so `a < b <= c` means `a < b and b <= c` with `b` evaluated once.
+`**` groups right to left and binds tighter than a unary sign on its left, as in Python, so
+`2 ** 3 ** 2 == 512` and `-2 ** 2 == -4`, while `2 ** -1` raises to `-1`.
 Parentheses group as usual. Operands are evaluated left to right.
 
 A method call such as `xs.append(1)` evaluates the value before the `.` first, then the

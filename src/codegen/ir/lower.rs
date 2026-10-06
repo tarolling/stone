@@ -683,6 +683,8 @@ impl<'a> Lowerer<'a> {
                     Operator::Subtract => BinOp::Sub,
                     Operator::Multiply => BinOp::Mul,
                     Operator::Divide => BinOp::Div,
+                    Operator::Modulo => BinOp::Rem,
+                    Operator::Power => BinOp::Pow,
                 };
                 self.push(match ty {
                     // only `+` applies to strings

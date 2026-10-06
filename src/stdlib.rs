@@ -141,6 +141,44 @@ pub fn format_float(value: f64) -> String {
     }
 }
 
+/// Raises `base` to a non-negative `exp` by squaring and multiplying, wrapping on overflow like
+/// `*` does.
+///
+/// For example, `int_pow(2, 10)` returns `1024` and `int_pow(2, 64)` wraps around to `0`. Unlike
+/// `i64::wrapping_pow`, the exponent can be any `i64`, so `int_pow(1, i64::MAX)` is `1`. Compiled
+/// code runs the same loop, and since wrapping multiplication is exact modulo 2^64, it gets the
+/// same result.
+pub fn int_pow(base: i64, exp: i64) -> i64 {
+    let (mut result, mut base, mut exp) = (1i64, base, exp as u64);
+    while exp != 0 {
+        if exp & 1 == 1 {
+            result = result.wrapping_mul(base);
+        }
+        base = base.wrapping_mul(base);
+        exp >>= 1;
+    }
+    result
+}
+
+/// Raises `base` to an int `exp` by squaring and multiplying, then takes the reciprocal for a
+/// negative `exp`.
+///
+/// For example, `float_pow(2.5, 3)` returns `15.625` and `float_pow(2.0, -2)` returns `0.25`.
+/// Compiled code does the same float operations in the same order, so the two backends round
+/// identically, though the result can differ from a correctly rounded power in the last bits.
+/// The reciprocal is IEEE division, so `float_pow(0.0, -1)` is infinity rather than an error.
+pub fn float_pow(base: f64, exp: i64) -> f64 {
+    let (mut result, mut base, mut magnitude) = (1.0, base, exp.unsigned_abs());
+    while magnitude != 0 {
+        if magnitude & 1 == 1 {
+            result *= base;
+        }
+        base *= base;
+        magnitude >>= 1;
+    }
+    if exp < 0 { 1.0 / result } else { result }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -166,6 +204,30 @@ mod tests {
             assert!(!BUILTINS.contains(&name), "{name}");
         }
         assert!(method_doc("print").is_none());
+    }
+
+    #[test]
+    fn int_powers_wrap_like_multiplication() {
+        assert_eq!(int_pow(2, 10), 1024);
+        assert_eq!(int_pow(0, 0), 1);
+        assert_eq!(int_pow(-3, 3), -27);
+        assert_eq!(int_pow(3, 50), 3i64.wrapping_pow(50));
+        assert_eq!(int_pow(2, 64), 0);
+        assert_eq!(int_pow(1, i64::MAX), 1);
+        assert_eq!(int_pow(-1, i64::MAX), -1);
+    }
+
+    #[test]
+    fn float_powers_multiply_in_a_fixed_order() {
+        assert_eq!(float_pow(2.5, 3), 15.625);
+        assert_eq!(float_pow(2.0, -2), 0.25);
+        assert_eq!(float_pow(0.0, -1), f64::INFINITY);
+        assert_eq!(float_pow(-0.0, -1), f64::NEG_INFINITY);
+        assert_eq!(float_pow(1.0, i64::MIN), 1.0);
+        assert_eq!(float_pow(f64::NAN, 0), 1.0);
+        assert!(float_pow(f64::NAN, 1).is_nan());
+        assert_eq!(float_pow(1.5, 4), 5.0625);
+        assert_eq!(float_pow(10.0, 400), f64::INFINITY);
     }
 
     #[test]

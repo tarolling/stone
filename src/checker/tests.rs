@@ -155,6 +155,56 @@ fn adding_needs_ints_floats_or_strs() {
 }
 
 #[test]
+fn modulo_needs_matching_numbers() {
+    assert_error(
+        "x = \"a\" % \"b\"\n",
+        "'%' needs int or float operands, found str",
+        1,
+        5,
+    );
+    assert_error("x = 1 % 1.5\n", "expected int, found float", 1, 9);
+    assert_eq!(type_of_symbol("x = 7 % 2\n", "x"), "int");
+    assert_eq!(type_of_symbol("x = 7.5 % 2.0\n", "x"), "float");
+}
+
+#[test]
+fn power_takes_a_number_base_and_an_int_exponent() {
+    assert_eq!(type_of_symbol("x = 2 ** 10\n", "x"), "int");
+    assert_eq!(type_of_symbol("x = 2.5 ** 3\n", "x"), "float");
+    assert_eq!(type_of_symbol("x = 2.5 ** -3\n", "x"), "float");
+    assert_error(
+        "x = 2.0 ** 0.5\n",
+        "'**' needs an int exponent, found float",
+        1,
+        12,
+    );
+    assert_error(
+        "x = 2 ** 0.5\n",
+        "'**' needs an int exponent, found float",
+        1,
+        10,
+    );
+    assert_error(
+        "x = \"a\" ** 2\n",
+        "'**' needs an int or float base, found str",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn a_power_exponent_is_inferred_as_int() {
+    let source = "def f(n);\n    ret 1.5 ** n\nx = f(2)\n";
+    assert_eq!(type_of_symbol(source, "x"), "float");
+    assert_error(
+        "def f(n);\n    ret 1.5 ** n\nx = f(2.0)\n",
+        "expected int, found float",
+        3,
+        7,
+    );
+}
+
+#[test]
 fn float_arithmetic_gives_floats() {
     let source = "a = 1.5\nb = a + 2.0\nc = -a * b / 0.5 - 1e3\nd = a < b\ne = a == b\n";
     assert_eq!(type_of_symbol(source, "a"), "float");

@@ -8,7 +8,7 @@ conflict.
 
 | type | values |
 | --- | --- |
-| `int` | 64-bit signed integers. `+`, `-`, and `*` wrap around on overflow |
+| `int` | 64-bit signed integers. `+`, `-`, `*`, and `**` wrap around on overflow |
 | `float` | IEEE 754 doubles, including `inf`, `-inf`, and `nan` |
 | `bool` | `true` and `false` |
 | `str` | immutable byte strings |
@@ -37,7 +37,7 @@ and its calls. A function called as `f(1)` cannot also be called as `f("a")`.
 These keep the two backends identical and catch common mistakes:
 
 - **No implicit conversion.** Arithmetic and comparisons never mix `int` and `float`; use
-  `int()` or `float()`.
+  `int()` or `float()`. The one exception is `**`, whose exponent is always an `int`.
 - **Conditions are `int` or `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject
   floats, strings, lists, and `none`.
 - **Lists are not comparable.** `==` and `!=` cannot compare lists.

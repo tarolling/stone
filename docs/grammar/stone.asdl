@@ -37,7 +37,7 @@ module stone
 
     boolop = And | Or
 
-    operator = Add | Subtract | Multiply | Divide
+    operator = Add | Subtract | Multiply | Divide | Modulo | Power
 
     unaryop = Invert | Not | UAdd | USub
 

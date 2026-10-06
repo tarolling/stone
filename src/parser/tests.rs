@@ -1261,3 +1261,84 @@ fn attribute_is_not_an_assignment_target() {
     let (message, line, col) = error_of("xs.len = 1\n");
     assert_eq!((line, col), (1, 8), "{message}");
 }
+
+/// Builds the boxed expression `left op right`, for expected trees.
+fn binop(left: Box<Expr>, op: Operator, right: Box<Expr>) -> Box<Expr> {
+    Box::new(ExprKind::BinOp { op, left, right }.into())
+}
+
+/// Builds the boxed expression `-operand`, for expected trees.
+fn negate(operand: Box<Expr>) -> Box<Expr> {
+    Box::new(
+        ExprKind::UnaryOp {
+            op: UnaryOp::UnarySub,
+            operand,
+        }
+        .into(),
+    )
+}
+
+#[test]
+fn modulo_binds_like_multiplication() {
+    assert_eq!(
+        expr_of("a % b * c + d\n"),
+        *binop(
+            binop(
+                binop(name("a"), Operator::Modulo, name("b")),
+                Operator::Multiply,
+                name("c")
+            ),
+            Operator::Add,
+            name("d")
+        )
+    );
+}
+
+#[test]
+fn power_is_right_associative() {
+    assert_eq!(
+        expr_of("2 ** 3 ** 2\n"),
+        *binop(
+            int(2),
+            Operator::Power,
+            binop(int(3), Operator::Power, int(2))
+        )
+    );
+}
+
+#[test]
+fn power_binds_tighter_than_unary_minus_on_its_left() {
+    assert_eq!(
+        expr_of("-2 ** 2\n"),
+        *negate(binop(int(2), Operator::Power, int(2)))
+    );
+}
+
+#[test]
+fn a_power_exponent_can_be_negated() {
+    assert_eq!(
+        expr_of("2 ** -1\n"),
+        *binop(int(2), Operator::Power, negate(int(1)))
+    );
+}
+
+#[test]
+fn power_binds_tighter_than_multiplication() {
+    assert_eq!(
+        expr_of("a * b ** c\n"),
+        *binop(
+            name("a"),
+            Operator::Multiply,
+            binop(name("b"), Operator::Power, name("c"))
+        )
+    );
+}
+
+#[test]
+fn a_power_applies_to_a_whole_primary() {
+    let ExprKind::BinOp { op, left, .. } = expr_of("xs[0] ** 2\n").kind else {
+        panic!("expected a power");
+    };
+    assert_eq!(op, Operator::Power);
+    assert!(matches!(left.kind, ExprKind::Subscript { .. }));
+}

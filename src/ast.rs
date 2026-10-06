@@ -131,7 +131,7 @@ pub enum UnaryOp {
 /// A binary arithmetic operator, such as `+` in `a + b`.
 ///
 /// ```text
-/// operator = Add | Subtract | Multiply | Divide
+/// operator = Add | Subtract | Multiply | Divide | Modulo | Power
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum Operator {
@@ -139,6 +139,10 @@ pub enum Operator {
     Subtract,
     Multiply,
     Divide,
+    /// `%`, the remainder of `/`, which takes the dividend's sign: `-7 % 2` is `-1`.
+    Modulo,
+    /// `**`, which raises an int or float base to an int exponent: `2 ** 10` is `1024`.
+    Power,
 }
 
 /// A boolean operator, such as `and` in `a and b`.

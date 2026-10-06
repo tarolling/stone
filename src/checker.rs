@@ -754,6 +754,31 @@ impl Inference {
                     self.fresh()
                 }
             },
+            ExprKind::BinOp {
+                op: Operator::Power,
+                left,
+                right,
+            } => {
+                let l = self.infer(left);
+                let r = self.infer(right);
+                // an unknown exponent, such as a parameter, becomes an int
+                if matches!(self.resolve(&r), Ty::Var(_)) {
+                    self.expect(&Ty::Int, &r, right.span);
+                }
+                self.require(
+                    l.clone(),
+                    NUMBERS,
+                    expr.span,
+                    "'**' needs an int or float base, found {}",
+                );
+                self.require(
+                    r,
+                    &[Kind::Int],
+                    right.span,
+                    "'**' needs an int exponent, found {}",
+                );
+                l
+            }
             ExprKind::BinOp { op, left, right } => {
                 let l = self.infer(left);
                 let r = self.infer(right);
@@ -766,6 +791,8 @@ impl Inference {
                     Operator::Subtract => (NUMBERS, "'-' needs int or float operands, found {}"),
                     Operator::Multiply => (NUMBERS, "'*' needs int or float operands, found {}"),
                     Operator::Divide => (NUMBERS, "'/' needs int or float operands, found {}"),
+                    Operator::Modulo => (NUMBERS, "'%' needs int or float operands, found {}"),
+                    Operator::Power => unreachable!("matched above"),
                 };
                 self.require(l.clone(), allowed, expr.span, message);
                 l

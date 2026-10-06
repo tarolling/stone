@@ -398,8 +398,8 @@ impl Generator {
     /// ```text
     /// expression: sum ('or' sum)* | sum ('and' sum)*
     /// sum:        term (('+' | '-') term)*
-    /// term:       factor (('*' | '/') factor)*
-    /// factor:     '-' factor | primary
+    /// term:       factor (('*' | '/' | '%') factor)*
+    /// factor:     '-' factor | primary ['**' exponent]
     /// ```
     fn expression(
         &mut self,
@@ -431,7 +431,7 @@ impl Generator {
     fn term(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
         let mut text = self.factor(u, scope, nesting)?;
         for _ in 0..u.int_in_range(0..=1)? {
-            let op = if u.arbitrary()? { "*" } else { "/" };
+            let op = u.choose(&["*", "/", "%"])?;
             let operand = self.factor(u, scope, nesting)?;
             text = format!("{text} {op} {operand}");
         }
@@ -443,7 +443,21 @@ impl Generator {
             let operand = self.factor(u, scope, nesting + 1)?;
             return Ok(format!("-{operand}"));
         }
-        self.primary(u, scope, nesting)
+        let base = self.primary(u, scope, nesting)?;
+        if nesting < MAX_NESTING && u.int_in_range(0..=7)? == 7 {
+            let exponent = self.exponent(u, scope, nesting + 1)?;
+            return Ok(format!("{base} ** {exponent}"));
+        }
+        Ok(base)
+    }
+
+    /// Generates the int exponent of a `**`, usually a small literal, but sometimes an
+    /// expression, which can be huge or negative.
+    fn exponent(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
+        if u.int_in_range(0..=3)? == 3 {
+            return self.factor(u, scope, nesting);
+        }
+        Ok(u.int_in_range(0..=4)?.to_string())
     }
 
     fn primary(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
@@ -499,7 +513,7 @@ impl Generator {
     ) -> Result<String> {
         let mut text = self.float_factor(u, scope, nesting)?;
         for _ in 0..u.int_in_range(0..=1)? {
-            let op = if u.arbitrary()? { "*" } else { "/" };
+            let op = u.choose(&["*", "/", "%"])?;
             let operand = self.float_factor(u, scope, nesting)?;
             text = format!("{text} {op} {operand}");
         }
@@ -516,6 +530,20 @@ impl Generator {
             let operand = self.float_factor(u, scope, nesting + 1)?;
             return Ok(format!("-{operand}"));
         }
+        let base = self.float_primary(u, scope, nesting)?;
+        if nesting < MAX_NESTING && u.int_in_range(0..=7)? == 7 {
+            let exponent = self.exponent(u, scope, nesting + 1)?;
+            return Ok(format!("{base} ** {exponent}"));
+        }
+        Ok(base)
+    }
+
+    fn float_primary(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &Scope,
+        nesting: usize,
+    ) -> Result<String> {
         match u.int_in_range(0..=5)? {
             0 | 1 if !scope.floats.is_empty() => Ok(u.choose(&scope.floats)?.clone()),
             2 if nesting < MAX_NESTING => {
@@ -702,6 +730,8 @@ mod tests {
             ".",
             "float(",
             "int(",
+            " % ",
+            " ** ",
         ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 25, "only {count} of 500 programs use {feature:?}");

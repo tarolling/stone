@@ -2,11 +2,18 @@
 
 ## stone
 
-1. Bump `version` in `Cargo.toml` and commit.
-2. Push a matching tag:
+1. Bump the version, which edits `Cargo.toml` and stone's entry in each `Cargo.lock`:
 
    ```sh
-   git tag v0.1.1 && git push origin v0.1.1
+   sh scripts/bump-version.sh stone patch   # or minor, major, or a version such as 1.0.0
+   ```
+
+2. Commit, and push a matching tag. The script prints the commands, such as
+
+   ```sh
+   git add Cargo.toml Cargo.lock fuzz/Cargo.lock bench/Cargo.lock
+   git commit -m "bump stone to 0.1.2"
+   git tag v0.1.2 && git push origin HEAD v0.1.2
    ```
 
 `.github/workflows/release.yml` checks that the tag matches `Cargo.toml`, builds `stone` with the
@@ -27,11 +34,18 @@ which serves a fake release from a `file://` URL through `STONE_DOWNLOAD_URL`.
 
 ## The VS Code extension
 
-1. Bump `version` in `editors/vscode/package.json` and commit.
-2. Push a matching tag:
+1. Bump the version, which edits `editors/vscode/package.json` and `package-lock.json`. The
+   extension ships `stone-lsp`, so this also sets `lsp/Cargo.toml` and its `Cargo.lock` entry
+   to the same version:
 
    ```sh
-   git tag vscode-v0.1.1 && git push origin vscode-v0.1.1
+   sh scripts/bump-version.sh vscode patch   # or minor, major, or a version such as 1.0.0
+   ```
+
+2. Commit, and push a matching tag. The script prints the commands, such as
+
+   ```sh
+   git tag vscode-v0.1.5 && git push origin HEAD vscode-v0.1.5
    ```
 
 `.github/workflows/vscode.yml` builds `stone-lsp` for each platform, packages a `.vsix` per

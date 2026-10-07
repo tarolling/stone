@@ -34,10 +34,13 @@ This file is left out of the packaged extension, so it does not show on the Mark
 
 ## Releasing
 
-Bump `version` in `package.json`, then push a matching tag:
+Bump the version from the repository root, which sets `package.json`, `package-lock.json`, and
+`stone-lsp`'s version in `lsp/Cargo.toml` and `Cargo.lock` together, then commit and push the
+matching tag it prints:
 
 ```sh
-git tag vscode-v0.1.1 && git push origin vscode-v0.1.1
+sh scripts/bump-version.sh vscode patch   # or minor, major, or a version such as 1.0.0
+git tag vscode-v0.1.5 && git push origin HEAD vscode-v0.1.5
 ```
 
 `.github/workflows/vscode.yml` builds `stone-lsp` for each platform, packages a `.vsix` per

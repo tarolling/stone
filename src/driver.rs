@@ -12,6 +12,7 @@ use crate::interpreter::{Interpreter, Limits};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::project::{self, DEFAULT_ENTRY, Linked, MapSources, SourceMap, Sources};
+use crate::repl;
 use std::error::Error;
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -211,9 +212,33 @@ pub fn compile_module(ast: &Mod, output: &Path) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-/// Runs an interactive session over the given input. Not implemented yet.
-pub fn repl(_source: &str) -> Result<(), Box<dyn Error>> {
-    todo!()
+/// Runs an interactive session that reads entries from `input`, prints program output and
+/// expression values to `out`, and prints errors, plus prompts if `prompts` is set, to `err`.
+/// Modules named by `use` are read from `sources`. See [`crate::repl`].
+///
+/// For example, a session over the input `x = 1\nx + 1\n` prints `2` to `out`.
+pub fn repl(
+    input: &mut (impl BufRead + Send),
+    out: &mut (impl Write + Send),
+    err: &mut (impl Write + Send),
+    prompts: bool,
+    sources: &(dyn Sources + Sync),
+) -> Result<(), Box<dyn Error>> {
+    // a thread of its own, since deep recursion needs more stack than the main thread has
+    let result = std::thread::scope(|scope| {
+        let thread = std::thread::Builder::new()
+            .stack_size(Limits::STACK_SIZE)
+            .spawn_scoped(scope, || {
+                let mut interpreter =
+                    Interpreter::with_output(out, Limits::DEFAULT).with_input(input);
+                repl::run(&mut interpreter, err, prompts, sources).map_err(|e| e.to_string())
+            })
+            .map_err(|e| format!("could not start the interpreter: {e}"))?;
+        thread
+            .join()
+            .unwrap_or_else(|_| Err("the interpreter panicked".to_string()))
+    });
+    Ok(result?)
 }
 
 #[cfg(test)]

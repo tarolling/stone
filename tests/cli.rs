@@ -173,3 +173,30 @@ fn run_and_build_load_imported_files() {
     let built = Command::new(&exe).output().expect("program should run");
     assert_eq!(String::from_utf8_lossy(&built.stdout), "42\n");
 }
+
+#[test]
+fn no_arguments_runs_a_quiet_session_over_piped_input() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("stone should run");
+    let entries = "x = 2\nx * 3\n1 / 0\ndef f(n);\n    ret n + x\n\nf(1)\n";
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(entries.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "6\n3\n");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: division by zero\n"
+    );
+}

@@ -329,6 +329,48 @@ impl<'out> Interpreter<'out> {
         Ok(())
     }
 
+    /// Runs one entry of an interactive session, keeping the globals and functions of earlier
+    /// entries, and prints the value of each top-level expression statement unless it is `none`.
+    ///
+    /// For example, after an entry `x = 1`, running the entry `x + 1` prints `2`, and running
+    /// `"hi"` prints `'hi'`, quoted as it would be inside a list.
+    pub fn run_entry(&mut self, body: &[Stmt]) -> EvalResult<()> {
+        // functions can be called before their definition
+        for stmt in body {
+            if let StmtKind::FunctionDef { .. } = stmt.kind {
+                self.eval_stmt(stmt)?;
+            }
+        }
+        for stmt in body {
+            match &stmt.kind {
+                StmtKind::FunctionDef { .. } => {}
+                StmtKind::Expr { value } => {
+                    let value = self.eval_expr(value)?;
+                    if !matches!(value, Value::None) {
+                        writeln!(self.out, "{}", value.display(true))?;
+                    }
+                }
+                _ => {
+                    if let ControlFlow::Return(_) = self.eval_stmt(stmt)? {
+                        break; // top-level return
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns the reader `input` and `eof` read from, so an interactive session can read its
+    /// entries from the same place.
+    pub fn input(&mut self) -> &mut (dyn BufRead + 'out) {
+        &mut *self.input
+    }
+
+    /// Returns the writer `print` writes to.
+    pub fn output(&mut self) -> &mut (dyn Write + 'out) {
+        &mut *self.out
+    }
+
     /// Executes one statement and reports whether it breaks, continues, or returns.
     ///
     /// ```text

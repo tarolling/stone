@@ -1,6 +1,6 @@
 [package]
 name = "stone-lsp"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2024"
 description = "A language server for stone, providing diagnostics, hover, navigation, rename, and completion"
 license = "Apache-2.0"

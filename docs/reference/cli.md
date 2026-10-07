@@ -44,6 +44,37 @@ there are any. Warnings alone print but leave the status at 0.
 stone check examples/basics.st
 ```
 
+## `stone`
+
+With no file, stone starts an interactive session. Each entry runs as soon as it is complete,
+and variables, functions, and modules from earlier entries stay available. An expression on its
+own prints its value unless the value is `none`, with strings quoted as they are inside a list.
+
+```text
+$ stone
+stone 0.1.3. Press Ctrl+D to exit.
+>>> x = 6
+>>> x * 7
+42
+>>> def greet(name);
+...     ret "hi " + name
+...
+>>> greet("Ada")
+'hi Ada'
+```
+
+A line that opens a block, such as `def f(n);` or `if x;`, continues the entry with a `...`
+prompt, and a blank line ends it. Every entry is checked together with the earlier ones as if
+they were one file, so `x = "a"` after `x = 6` is an error. An entry with an error is reported as
+`<stdin>:line:col` and discarded, and one that fails at runtime prints `error: message`; the
+session continues either way. Defining a function again replaces the earlier definition.
+`use` reads modules relative to the current directory, and `input()` reads the line after the
+entry.
+
+Ctrl+D ends the session. stone does no line editing of its own, so run `rlwrap stone` for
+arrow keys and history. When standard input is not a terminal, stone prints no banner or
+prompts, so `printf 'x = 6\nx * 7\n' | stone` prints just `42`.
+
 ## `stone self-update [--check] [--version TAG]`
 
 Replaces the installed binary with a newer GitHub release, after verifying its checksum. With

@@ -1,6 +1,6 @@
 use clap::{Parser as ClapParser, Subcommand};
 use std::error::Error;
-use std::io::Read;
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use stone::ast::Mod;
@@ -116,16 +116,21 @@ fn main() -> ExitCode {
             }
         }
         ExecutionMode::Repl => {
-            println!("REPL mode - type your code (press Ctrl+D to exit)");
-            let mut source = String::new();
-            if let Err(e) = std::io::stdin().read_to_string(&mut source) {
-                eprintln!("error: {e}");
-                return ExitCode::FAILURE;
+            // prompts only make sense for a person typing, so piped input runs quietly
+            let prompts = std::io::stdin().is_terminal();
+            if prompts {
+                eprintln!("stone {}. Press Ctrl+D to exit.", env!("CARGO_PKG_VERSION"));
             }
-            match driver::repl(&source) {
+            match driver::repl(
+                &mut std::io::BufReader::new(std::io::stdin()),
+                &mut std::io::stdout(),
+                &mut std::io::stderr(),
+                prompts,
+                &FsSources,
+            ) {
                 Ok(()) => ExitCode::SUCCESS,
                 Err(e) => {
-                    eprintln!("<stdin>: error: {e}");
+                    eprintln!("error: {e}");
                     ExitCode::FAILURE
                 }
             }

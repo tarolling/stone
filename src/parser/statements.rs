@@ -3,6 +3,7 @@
 use super::Parser;
 use crate::ast::{Arg, Arguments, Expr, ParserError, Stmt, StmtKind};
 use crate::debug;
+use crate::span::Span;
 use crate::token::TokenType;
 
 impl Parser {
@@ -264,16 +265,17 @@ impl Parser {
         })
     }
 
-    /// Parses a function definition, such as `def add(a, b); ret a + b`.
+    /// Parses a function definition, such as `def add(a, b); ret a + b` or `pub def f(); ret 1`.
     ///
     /// ```text
     /// function_def:
-    ///     | 'def' NAME '(' [params] ')' ';' block
+    ///     | ['pub'] 'def' NAME '(' [params] ')' ';' block
     /// ```
     pub(super) fn parse_function_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // 'def' NAME '(' [params] ')' ';' block
+        // ['pub'] 'def' NAME '(' [params] ')' ';' block
+        let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
         if self.expect(TokenType::Keyword("def".to_string())).is_some()
             && let Some((name, name_span)) = self.expect_name("a function name", false)
             && self.expect(TokenType::LParen).is_some()
@@ -286,6 +288,7 @@ impl Parser {
                 StmtKind::FunctionDef {
                     name,
                     name_span,
+                    public,
                     args,
                     body,
                 },
@@ -414,6 +417,59 @@ impl Parser {
         })
     }
 
+    /// Parses an import, such as `use geometry.shapes` or `use util.pad as lpad`.
+    ///
+    /// ```text
+    /// use_stmt: 'use' NAME ('.' NAME)* ['as' NAME]
+    /// ```
+    pub(super) fn parse_use_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
+        // 'use' NAME ('.' NAME)* ['as' NAME]
+        if self.expect(TokenType::Keyword("use".to_string())).is_some()
+            && let Some(first) = self.expect_name("a module name", false)
+            && let Some(path) = self.parse_use_stmt_loop(first)
+            && let Some(alias) = self.parse_use_stmt_alias()
+        {
+            return Ok(Box::new(Stmt::new(
+                StmtKind::Use { path, alias },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_use_stmt".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses the rest of a `use` path after its first name, failing on a dot with no name after.
+    ///
+    /// ```text
+    /// ('.' NAME)*
+    /// ```
+    fn parse_use_stmt_loop(&mut self, first: (String, Span)) -> Option<Vec<(String, Span)>> {
+        let mut path = vec![first];
+        while self.expect(TokenType::Dot).is_some() {
+            path.push(self.expect_name("a module name", false)?);
+        }
+        Some(path)
+    }
+
+    /// Parses the optional `as` and name that rename an import, failing on `as` with no name.
+    ///
+    /// ```text
+    /// ['as' NAME]
+    /// ```
+    fn parse_use_stmt_alias(&mut self) -> Option<Option<(String, Span)>> {
+        if self.expect(TokenType::Keyword("as".to_string())).is_none() {
+            return Some(None);
+        }
+        self.expect_name("a name", false).map(Some)
+    }
+
     /// Parses a statement that contains a block, such as a function definition or an `if` statement.
     ///
     /// ```text
@@ -464,6 +520,7 @@ impl Parser {
     ///     | assignment
     ///     | expressions
     ///     | return_stmt
+    ///     | use_stmt
     ///     | 'break'
     ///     | 'cont'
     /// ```
@@ -493,6 +550,12 @@ impl Parser {
         debug!("parse_simple_stmt: trying to parse return_stmt");
         if let Ok(stmt) = self.parse_return_stmt() {
             debug!("parse_simple_stmt: successfully parsed return_stmt");
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
+        // use_stmt
+        if let Ok(stmt) = self.parse_use_stmt() {
             return Ok(stmt);
         }
         self.pos = mark;

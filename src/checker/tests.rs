@@ -1,6 +1,6 @@
 use super::*;
 use crate::driver::parse;
-use crate::span::{Pos, Span};
+use crate::span::{FileId, Pos, Span};
 
 /// Parses and checks `source`, returning its analysis.
 fn analyze_source(source: &str) -> Analysis {
@@ -703,7 +703,7 @@ fn each_unassigned_variable_is_reported_once() {
 fn references_are_found_by_position() {
     let analysis = analyze_source("def add(a, b);\n    ret a + b\nx = add(1, 2)\n");
     // inside the `add` of the call
-    let reference = analysis.reference_at(Pos::new(3, 6)).unwrap();
+    let reference = analysis.reference_at(FileId(0), Pos::new(3, 6)).unwrap();
     let symbol = &analysis.symbols[reference.symbol];
     assert_eq!(
         (symbol.name.as_str(), symbol.kind),
@@ -711,10 +711,12 @@ fn references_are_found_by_position() {
     );
     // the end of a name still counts, since editors put the cursor after the last character
     assert_eq!(
-        analysis.reference_at(Pos::new(3, 8)).map(|r| r.symbol),
+        analysis
+            .reference_at(FileId(0), Pos::new(3, 8))
+            .map(|r| r.symbol),
         Some(reference.symbol)
     );
-    assert_eq!(analysis.reference_at(Pos::new(3, 10)), None);
+    assert_eq!(analysis.reference_at(FileId(0), Pos::new(3, 10)), None);
 
     let uses: Vec<Pos> = analysis
         .references_to(reference.symbol)
@@ -737,7 +739,10 @@ fn visible_symbols_depend_on_position() {
     let source = "g = 1\ndef f(a);\n    b = a\n    ret b\ndef h();\n    ret 2\n";
     let analysis = analyze_source(source);
     let names_at = |pos: Pos| -> Vec<String> {
-        let mut names: Vec<String> = analysis.visible_at(pos).map(|s| s.name.clone()).collect();
+        let mut names: Vec<String> = analysis
+            .visible_at(FileId(0), pos)
+            .map(|s| s.name.clone())
+            .collect();
         names.sort();
         names
     };
@@ -916,4 +921,14 @@ fn strip_and_split_take_strs() {
 #[test]
 fn new_builtins_cannot_be_assigned() {
     assert_error("args = 2\n", "cannot assign to builtin 'args'", 1, 1);
+}
+
+#[test]
+fn use_inside_a_block_is_an_error() {
+    assert_error(
+        "def f();\n    use util\n    ret 1\n",
+        "use is only allowed at the top level of a file",
+        2,
+        5,
+    );
 }

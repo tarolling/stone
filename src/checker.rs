@@ -17,7 +17,7 @@ use std::fmt::Display;
 
 use crate::ast::{CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::diagnostic::Diagnostic;
-use crate::span::{Pos, Span};
+use crate::span::{FileId, Pos, Span};
 use crate::stdlib::{BUILTINS, METHODS};
 
 #[cfg(test)]
@@ -89,24 +89,26 @@ pub struct Reference {
 /// Everything the checker learned about a module.
 #[derive(Debug, Default)]
 pub struct Analysis {
-    /// Problems found, sorted by position.
+    /// Problems found, sorted by file and position.
     pub diagnostics: Vec<Diagnostic>,
     /// The type of every expression, keyed by the expression's span.
     pub types: HashMap<Span, Type>,
     pub symbols: Vec<Symbol>,
-    /// Every appearance of every symbol, sorted by position.
+    /// Every appearance of every symbol, sorted by file and position.
     pub references: Vec<Reference>,
     /// The span of each function's whole definition, from `def` to the end of its body.
     pub functions: HashMap<String, Span>,
 }
 
 impl Analysis {
-    /// Returns the reference at `pos`, if the position is on a symbol's name.
+    /// Returns the reference at `pos` in `file`, if the position is on a symbol's name.
     ///
     /// For example, in `x = add(1, 2)`, any position from the `a` of `add` to just past its `d`
     /// finds the reference to `add`.
-    pub fn reference_at(&self, pos: Pos) -> Option<&Reference> {
-        self.references.iter().find(|r| r.span.contains(pos))
+    pub fn reference_at(&self, file: FileId, pos: Pos) -> Option<&Reference> {
+        self.references
+            .iter()
+            .find(|r| r.span.file == file && r.span.contains(pos))
     }
 
     /// Returns every reference to the symbol at index `symbol`, including its definition, in
@@ -115,17 +117,19 @@ impl Analysis {
         self.references.iter().filter(move |r| r.symbol == symbol)
     }
 
-    /// Returns the symbols that code at `pos` can refer to: top-level functions and globals, plus
-    /// the parameters and locals of the function `pos` is inside.
-    pub fn visible_at(&self, pos: Pos) -> impl Iterator<Item = &Symbol> {
+    /// Returns the symbols that code at `pos` in `file` can refer to by their own names: the
+    /// file's top-level functions and globals, plus the parameters and locals of the function `pos`
+    /// is inside.
+    pub fn visible_at(&self, file: FileId, pos: Pos) -> impl Iterator<Item = &Symbol> {
         let function = self
             .functions
             .iter()
-            .find(|(_, span)| span.contains(pos))
+            .find(|(_, span)| span.file == file && span.contains(pos))
             .map(|(name, _)| name.as_str());
-        self.symbols
-            .iter()
-            .filter(move |s| s.scope.is_none() || s.scope.as_deref() == function)
+        self.symbols.iter().filter(move |s| match &s.scope {
+            None => s.span.file == file,
+            Some(scope) => Some(scope.as_str()) == function,
+        })
     }
 }
 
@@ -482,6 +486,7 @@ impl Inference {
                 name_span,
                 args,
                 body,
+                ..
             } => {
                 if self.function.is_some() || self.loop_depth > 0 {
                     self.error(*name_span, "functions can only be defined at the top level");
@@ -558,6 +563,10 @@ impl Inference {
                 if self.loop_depth == 0 {
                     self.error(stmt.span, "'cont' outside a loop");
                 }
+            }
+            // the linker removes every top-level `use`, so any left over is nested
+            StmtKind::Use { .. } => {
+                self.error(stmt.span, "use is only allowed at the top level of a file");
             }
         }
     }
@@ -1004,7 +1013,7 @@ impl Inference {
                 let end = func.span.end;
                 let start = Pos::new(end.line, end.col - name.chars().count());
                 self.error(
-                    Span::new(start, end),
+                    Span::new(start, end).in_file(func.span.file),
                     format!("there is no method '{name}'"),
                 );
                 self.fresh()
@@ -1126,10 +1135,10 @@ impl Inference {
         analysis.references = self.references;
         analysis
             .references
-            .sort_by_key(|r| (r.span.start.line, r.span.start.col));
+            .sort_by_key(|r| (r.span.file, r.span.start));
         analysis.functions = self.function_spans;
         self.diagnostics
-            .sort_by_key(|d| (d.span.start.line, d.span.start.col));
+            .sort_by_key(|d| (d.span.file, d.span.start));
         analysis.diagnostics = self.diagnostics;
         analysis
     }
@@ -1244,7 +1253,7 @@ impl<'a> AssignmentCheck<'a> {
                 Some(assigned)
             }
             StmtKind::Break | StmtKind::Continue => None,
-            StmtKind::FunctionDef { .. } => Some(assigned),
+            StmtKind::FunctionDef { .. } | StmtKind::Use { .. } => Some(assigned),
         }
     }
 
@@ -1347,6 +1356,7 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
                 collect_assigned(orelse, out);
             }
             StmtKind::FunctionDef { .. }
+            | StmtKind::Use { .. }
             | StmtKind::Return { .. }
             | StmtKind::Delete { .. }
             | StmtKind::Expr { .. }

@@ -5,7 +5,7 @@ module stone
 {
     mod = Module(stmt* body)
 
-    stmt = FunctionDef(identifier name, arguments args,
+    stmt = FunctionDef(identifier name, bool public, arguments args,
                        stmt* body, expr? returns)
 
           | Return(expr? value)
@@ -19,6 +19,7 @@ module stone
           | If(expr test, stmt* body, stmt* orelse)
 
           | Expr(expr value)
+          | Use(identifier* path, identifier? alias)
           | Break | Continue
 
     expr = BoolOp(boolop op, expr* values)

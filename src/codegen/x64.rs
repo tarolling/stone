@@ -397,7 +397,7 @@ impl X64Generator {
                     self.collect_calls_from_expr(target, calls);
                 }
             }
-            StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::Break | StmtKind::Continue | StmtKind::Use { .. } => {}
         }
     }
 

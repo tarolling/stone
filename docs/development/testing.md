@@ -23,6 +23,19 @@ A program that should fail at runtime also gets a `name.err` file holding text i
 contain, such as `division by zero`. It must then exit with an error under both backends, after
 printing its `.out`.
 
+A program of several files is a directory instead, run from its `main.st`, with the `.out` (and
+any `.err`, `.in`, or `.args`) next to `main.st`:
+
+```text
+tests/programs/
+  module_cycle/
+    main.st
+    main.out
+    parity/
+      even.st
+      odd.st
+```
+
 Both backends must agree on everything the checker accepts, so `SKIPS` in `tests/programs.rs`
 should stay empty. If they disagree, either fix the backend or make the checker reject the
 program.

@@ -1,5 +1,7 @@
 use super::*;
 use lsp_types::{CompletionItemKind, DiagnosticSeverity, HoverContents, Range, SymbolKind};
+use std::path::Path;
+use stone::project::MapSources;
 
 const SOURCE: &str = "\
 total = 0
@@ -353,7 +355,7 @@ fn document_symbols_nest_locals_in_functions() {
 fn completion_offers_what_is_in_scope() {
     let doc = doc(SOURCE);
     let labels = |pos: Position| -> Vec<(String, Option<CompletionItemKind>)> {
-        completion(&doc, pos)
+        completion(&doc, pos, &MapSources::default())
             .into_iter()
             .map(|item| (item.label, item.kind))
             .collect()
@@ -374,7 +376,7 @@ fn completion_offers_what_is_in_scope() {
 fn completion_after_a_dot_offers_methods() {
     let doc = doc("xs = []\nxs.\nxs.le\n");
     let labels = |pos: Position| -> Vec<(String, Option<CompletionItemKind>)> {
-        completion(&doc, pos)
+        completion(&doc, pos, &MapSources::default())
             .into_iter()
             .map(|item| (item.label, item.kind))
             .collect()
@@ -393,7 +395,7 @@ fn completion_after_a_dot_offers_methods() {
 #[test]
 fn completion_details_show_types() {
     let doc = doc(SOURCE);
-    let add = completion(&doc, at(7, 1))
+    let add = completion(&doc, at(7, 1), &MapSources::default())
         .into_iter()
         .find(|item| item.label == "add")
         .unwrap();
@@ -420,5 +422,250 @@ fn features_work_inside_a_function_with_a_syntax_error() {
     assert_eq!(
         hover_text(&doc, at(3, 9)).unwrap(),
         "```stone\n(parameter) a: int\n```"
+    );
+}
+
+// programs of several files
+
+const MAIN: &str = "\
+use util
+use util.twice as double
+
+print(util.twice(1), double(2))
+";
+
+const UTIL: &str = "\
+// doubles x
+pub def twice(x);
+    ret helper(x) * 2
+
+def helper(x);
+    ret x
+";
+
+/// Builds in-memory sources for a project under `/p`.
+fn project(files: &[(&str, &str)]) -> MapSources {
+    let mut sources = MapSources::default();
+    for (path, text) in files {
+        sources.insert(format!("/p/{path}"), *text);
+    }
+    sources
+}
+
+/// Opens the file at `/p/<path>` of a project, as part of the program it belongs to.
+fn project_doc(path: &str, files: &[(&str, &str)]) -> Document {
+    let path = format!("/p/{path}");
+    Document::in_program(Path::new(&path), &project(files), Encoding::Utf16)
+        .expect("the file should exist")
+}
+
+fn uri_of(path: &str) -> Uri {
+    format!("file:///p/{path}").parse().unwrap()
+}
+
+#[test]
+fn diagnostics_only_cover_their_own_file() {
+    let files = [
+        ("main.st", MAIN),
+        ("util.st", "pub def twice(x);\n    ret x +\n"),
+    ];
+    assert_eq!(diagnostics(&project_doc("main.st", &files)), []);
+    let in_util = diagnostics(&project_doc("util.st", &files));
+    assert_eq!(in_util.len(), 1);
+    assert_eq!(in_util[0].range.start, Position::new(1, 11));
+}
+
+#[test]
+fn a_module_is_checked_as_part_of_the_program_that_uses_it() {
+    // `twice` is only called with an int from main.st, so `x` is an int in util.st
+    let doc = project_doc("util.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    assert_eq!(diagnostics(&doc), []);
+    assert_eq!(
+        hover_text(&doc, at(3, 16)).unwrap(),
+        "```stone\n(parameter) x: int\n```"
+    );
+}
+
+#[test]
+fn a_module_the_program_does_not_use_yet_is_checked_from_the_root() {
+    let files = [
+        ("main.st", "print(1)\n"),
+        ("geometry/vec.st", "pub def zero();\n    ret 0\n"),
+        (
+            "geometry/shapes.st",
+            "use geometry.vec\n\npub def area();\n    ret vec.zero()\n",
+        ),
+    ];
+    assert_eq!(diagnostics(&project_doc("geometry/shapes.st", &files)), []);
+}
+
+#[test]
+fn definition_jumps_into_another_file() {
+    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let location = definition(&doc, &uri_of("main.st"), at(4, 13), None).unwrap();
+    assert_eq!(location.uri, uri_of("util.st"));
+    assert_eq!(
+        location.range,
+        Range::new(Position::new(1, 8), Position::new(1, 13))
+    );
+}
+
+#[test]
+fn definition_of_a_use_path_opens_what_it_names() {
+    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let module = definition(&doc, &uri_of("main.st"), at(1, 6), None).unwrap();
+    assert_eq!(module.uri, uri_of("util.st"));
+    assert_eq!(module.range.start, Position::new(0, 0));
+
+    let function = definition(&doc, &uri_of("main.st"), at(2, 11), None).unwrap();
+    assert_eq!(function.uri, uri_of("util.st"));
+    assert_eq!(function.range.start, Position::new(1, 8));
+}
+
+#[test]
+fn hover_on_an_imported_function_shows_its_comment() {
+    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    assert_eq!(
+        hover_text(&doc, at(4, 13)).unwrap(),
+        "```stone\ndef util.twice(x: int) -> int\n```\ndoubles x"
+    );
+}
+
+#[test]
+fn references_span_every_file() {
+    let doc = project_doc("util.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let locations: Vec<(Uri, Position)> = references(&doc, &uri_of("util.st"), at(2, 10), true)
+        .into_iter()
+        .map(|l| (l.uri, l.range.start))
+        .collect();
+    assert_eq!(
+        locations,
+        [
+            (uri_of("main.st"), Position::new(3, 11)),
+            (uri_of("main.st"), Position::new(3, 21)),
+            (uri_of("util.st"), Position::new(1, 8)),
+        ]
+    );
+}
+
+#[test]
+fn rename_edits_every_file_but_leaves_aliases() {
+    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let edit = rename(&doc, &uri_of("main.st"), at(4, 13), "triple").unwrap();
+    let starts = |path: &str| -> Vec<Position> {
+        let mut starts: Vec<Position> = edit.changes.as_ref().unwrap()[&uri_of(path)]
+            .iter()
+            .map(|e| e.range.start)
+            .collect();
+        starts.sort_by_key(|p| (p.line, p.character));
+        starts
+    };
+    assert_eq!(starts("util.st"), [Position::new(1, 8)]);
+    // the `twice` of `use util.twice as double` and of `util.twice(1)`, but not `double(2)`
+    assert_eq!(
+        starts("main.st"),
+        [Position::new(1, 9), Position::new(3, 11)]
+    );
+}
+
+#[test]
+fn rename_checks_names_in_the_definitions_file() {
+    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    assert_eq!(
+        rename(&doc, &uri_of("main.st"), at(4, 13), "helper").unwrap_err(),
+        "'helper' is already defined here"
+    );
+}
+
+#[test]
+fn document_symbols_of_a_module_use_its_own_names() {
+    let doc = project_doc("util.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let names: Vec<String> = document_symbols(&doc).into_iter().map(|s| s.name).collect();
+    assert_eq!(names, ["twice", "helper"]);
+    let names: Vec<String> = document_symbols(&project_doc(
+        "main.st",
+        &[("main.st", MAIN), ("util.st", UTIL)],
+    ))
+    .into_iter()
+    .map(|s| s.name)
+    .collect();
+    assert_eq!(names, Vec::<String>::new());
+}
+
+#[test]
+fn completion_offers_imported_names() {
+    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let items = completion(&doc, at(4, 1), &MapSources::default());
+    let kind_of = |label: &str| items.iter().find(|i| i.label == label).and_then(|i| i.kind);
+    assert_eq!(kind_of("util"), Some(CompletionItemKind::MODULE));
+    assert_eq!(kind_of("double"), Some(CompletionItemKind::FUNCTION));
+    assert_eq!(kind_of("helper"), None);
+}
+
+#[test]
+fn completion_after_a_module_offers_its_public_functions() {
+    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let labels: Vec<String> = completion(&doc, at(4, 12), &MapSources::default())
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+    assert_eq!(labels, ["twice"]);
+}
+
+#[test]
+fn completion_in_a_use_offers_modules_and_directories() {
+    let files = [
+        ("main.st", "use \nuse geometry.\n"),
+        ("util.st", UTIL),
+        ("geometry/vec.st", "pub def zero();\n    ret 0\n"),
+    ];
+    let doc = project_doc("main.st", &files);
+    let sources = project(&files);
+    let labels = |pos: Position| -> Vec<(String, Option<CompletionItemKind>)> {
+        let mut items: Vec<(String, Option<CompletionItemKind>)> = completion(&doc, pos, &sources)
+            .into_iter()
+            .map(|i| (i.label, i.kind))
+            .collect();
+        items.sort_by(|a, b| a.0.cmp(&b.0));
+        items
+    };
+    assert_eq!(
+        labels(at(1, 5)),
+        [
+            ("geometry".to_string(), Some(CompletionItemKind::FOLDER)),
+            ("util".to_string(), Some(CompletionItemKind::MODULE)),
+        ]
+    );
+    assert_eq!(
+        labels(at(2, 14)),
+        [("vec".to_string(), Some(CompletionItemKind::MODULE))]
+    );
+}
+
+const STATS: &str = "\
+// summary statistics
+// for lists of ints
+
+pub def mean(xs);
+    ret xs[0]
+";
+
+#[test]
+fn hover_on_a_module_shows_the_comment_at_the_top_of_its_file() {
+    let main = "use stats\nuse stats as s\nprint(stats.mean([1]), s.mean([2]))\n";
+    let doc = project_doc("main.st", &[("main.st", main), ("stats.st", STATS)]);
+    let expected = "```stone\nmodule stats\n```\nsummary statistics\nfor lists of ints";
+    // the `use` path, the module before a `.`, and an alias for it
+    assert_eq!(hover_text(&doc, at(1, 6)).unwrap(), expected);
+    assert_eq!(hover_text(&doc, at(3, 8)).unwrap(), expected);
+    assert_eq!(hover_text(&doc, at(3, 24)).unwrap(), expected);
+}
+
+#[test]
+fn a_comment_right_above_a_definition_is_not_the_modules() {
+    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    assert_eq!(
+        hover_text(&doc, at(4, 8)).unwrap(),
+        "```stone\nmodule util\n```"
     );
 }

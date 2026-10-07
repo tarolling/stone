@@ -2,6 +2,7 @@
 # pass with: cargo +nightly fuzz run <target> -- -dict=stone.dict
 
 "and"
+"as"
 "break"
 "cont"
 "def"
@@ -14,8 +15,10 @@
 "none"
 "not"
 "or"
+"pub"
 "ret"
 "true"
+"use"
 "while"
 "print"
 ".len()"

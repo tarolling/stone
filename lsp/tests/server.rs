@@ -258,3 +258,47 @@ fn unknown_requests_are_errors_and_the_server_keeps_going() {
     );
     session.shut_down();
 }
+
+#[test]
+fn a_change_to_one_file_republishes_the_others_in_its_program() {
+    // the files only exist in the editor, so the server must read them from the open documents
+    let main = "file:///stone-lsp-test-project/main.st";
+    let util = "file:///stone-lsp-test-project/util.st";
+    let (session, _) = Session::start(None);
+    let open = |uri: &str, text: &str| {
+        session.notify(
+            "textDocument/didOpen",
+            json!({
+                "textDocument": { "uri": uri, "languageId": "stone", "version": 1, "text": text }
+            }),
+        );
+    };
+    // the next diagnostics published for each uri, in the order they arrive
+    let published = |count: usize| -> Vec<(String, usize)> {
+        (0..count)
+            .map(|_| match session.receive() {
+                Message::Notification(n) if n.method == "textDocument/publishDiagnostics" => (
+                    n.params["uri"].as_str().unwrap().to_string(),
+                    n.params["diagnostics"].as_array().unwrap().len(),
+                ),
+                other => panic!("expected diagnostics, got {other:?}"),
+            })
+            .collect()
+    };
+
+    open(util, "pub def twice(x);\n    ret x * 2\n");
+    assert_eq!(published(1), [(util.to_string(), 0)]);
+    open(main, "use util\nprint(util.twice(1))\n");
+    assert_eq!(published(2), [(main.to_string(), 0), (util.to_string(), 0)]);
+
+    // making `twice` private breaks main.st
+    session.notify(
+        "textDocument/didChange",
+        json!({
+            "textDocument": { "uri": util, "version": 2 },
+            "contentChanges": [{ "text": "def twice(x);\n    ret x * 2\n" }]
+        }),
+    );
+    assert_eq!(published(2), [(util.to_string(), 0), (main.to_string(), 1)]);
+    session.shut_down();
+}

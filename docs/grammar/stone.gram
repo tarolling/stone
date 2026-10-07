@@ -81,6 +81,7 @@ simple_stmt:
     | assignment
     | expressions 
     | return_stmt
+    | use_stmt
     | 'break'
     | 'cont' 
 
@@ -99,6 +100,10 @@ assignment:
 return_stmt:
     | 'ret' [expressions] 
 
+# only valid at the top level of a file, which the checker enforces
+use_stmt:
+    | 'use' NAME ('.' NAME)* ['as' NAME]
+
 # COMPOUND STATEMENTS
 # ===================
 
@@ -113,7 +118,7 @@ block:
 # --------------------
 
 function_def:
-    | 'def' NAME '(' [parameters] ')' ';' block 
+    | ['pub'] 'def' NAME '(' [parameters] ')' ';' block 
 
 # Function parameters
 # -------------------

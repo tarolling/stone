@@ -102,3 +102,74 @@ fn run_passes_the_arguments_after_the_file_to_the_program() {
     assert_eq!(stone_stdout(&[], "args_bare", source, &after), expected);
     assert_eq!(stone_stdout(&["run"], "args_none", source, &[]), "[]\n");
 }
+
+/// Writes each `(path, source)` file under a fresh temporary directory named after `name` and
+/// returns the directory.
+fn project(name: &str, files: &[(&str, &str)]) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    let _ = std::fs::remove_dir_all(&dir);
+    for (path, source) in files {
+        let file = dir.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(file, source).unwrap();
+    }
+    dir
+}
+
+#[test]
+fn errors_in_an_imported_file_name_that_file() {
+    let dir = project(
+        "project_errors",
+        &[
+            ("main.st", "use geometry.vec\nprint(vec.zero())\n"),
+            ("geometry/vec.st", "pub def zero();\n    ret 0 +\n"),
+        ],
+    );
+    let expected = format!(
+        "{}:2:12: error: expected an expression, found end of line\n  |\n2 |     ret 0 +\n  |            ^\n",
+        dir.join("geometry/vec.st").display()
+    );
+    for command in ["check", "run", "build"] {
+        let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+            .arg(command)
+            .arg(dir.join("main.st"))
+            .output()
+            .expect("stone should run");
+        assert!(!output.status.success(), "{command}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            expected,
+            "{command}"
+        );
+    }
+}
+
+#[test]
+fn run_and_build_load_imported_files() {
+    let dir = project(
+        "project_runs",
+        &[
+            ("main.st", "use util.twice\nprint(twice(21))\n"),
+            ("util.st", "pub def twice(x);\n    ret x * 2\n"),
+        ],
+    );
+    let main = dir.join("main.st");
+    let run = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("run")
+        .arg(&main)
+        .output()
+        .expect("stone should run");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "{run:?}");
+
+    let exe = dir.join("out");
+    let build = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("build")
+        .arg(&main)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("stone should run");
+    assert!(build.status.success(), "{build:?}");
+    let built = Command::new(&exe).output().expect("program should run");
+    assert_eq!(String::from_utf8_lossy(&built.stdout), "42\n");
+}

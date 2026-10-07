@@ -15,6 +15,7 @@ control-flow
 functions
 lists
 input
+modules
 errors
 ```
 

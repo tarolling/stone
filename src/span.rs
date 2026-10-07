@@ -17,29 +17,47 @@ impl Pos {
     }
 }
 
-/// A half-open range of source text from `start` up to but not including `end`.
+/// Identifies one source file of a program, as an index into its list of files.
+///
+/// The entry file is always `FileId(0)`, so a program read from a single string never needs
+/// another. For example, in a program whose `main.st` imports `util.st`, `util.st` is `FileId(1)`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
+pub struct FileId(pub u32);
+
+/// A half-open range of source text from `start` up to but not including `end`, in `file`.
 ///
 /// For example, `Span::new(Pos::new(1, 5), Pos::new(1, 7))` covers the two characters of `42` in
-/// `x = 42`.
+/// `x = 42` in the entry file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct Span {
+    pub file: FileId,
     pub start: Pos,
     pub end: Pos,
 }
 
 impl Span {
+    /// Returns the span from `start` to `end` in the entry file.
     pub fn new(start: Pos, end: Pos) -> Self {
-        Span { start, end }
+        Span {
+            file: FileId::default(),
+            start,
+            end,
+        }
+    }
+
+    /// Returns the same range in `file`.
+    ///
+    /// For example, `Span::new(start, end).in_file(FileId(2))` covers `start` to `end` of the
+    /// program's third file.
+    pub fn in_file(self, file: FileId) -> Span {
+        Span { file, ..self }
     }
 
     /// Returns an empty span at `pos`, for tokens like `Indent` that cover no text.
     ///
     /// For example, `Span::empty(Pos::new(2, 1))` starts and ends at line 2, col 1.
     pub fn empty(pos: Pos) -> Self {
-        Span {
-            start: pos,
-            end: pos,
-        }
+        Span::new(pos, pos)
     }
 
     /// Returns whether `pos` is inside the span, counting the position just past its end, which is
@@ -55,8 +73,8 @@ impl Span {
     /// For example, joining the spans of `a` and `b` in `a + b` gives the span of the whole sum.
     pub fn to(self, other: Span) -> Span {
         Span {
-            start: self.start,
             end: other.end,
+            ..self
         }
     }
 }

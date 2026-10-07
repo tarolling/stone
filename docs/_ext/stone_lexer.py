@@ -17,7 +17,10 @@ from pygments.token import (
     Whitespace,
 )
 
-KEYWORDS = ("and", "break", "cont", "def", "elif", "else", "for", "if", "in", "not", "or", "ret", "while")
+KEYWORDS = (
+    "and", "as", "break", "cont", "def", "elif", "else", "for", "if", "in", "not", "or", "pub", "ret",
+    "use", "while",
+)
 CONSTANTS = ("true", "false", "none")
 BUILTINS = ("print", "range", "int", "float", "str", "input", "eof", "args")
 METHODS = ("len", "append", "strip", "split")
@@ -36,6 +39,7 @@ class StoneLexer(RegexLexer):
             (r"//.*$", Comment.Single),
             (r'"[^"\n]*"', String.Double),
             (r"(def)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
+            (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
             (words(KEYWORDS, suffix=r"\b"), Keyword),
             (words(CONSTANTS, suffix=r"\b"), Keyword.Constant),
             (words(BUILTINS, suffix=r"\b"), Name.Builtin),

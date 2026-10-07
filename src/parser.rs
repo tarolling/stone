@@ -13,7 +13,7 @@ mod tests;
 use crate::ast::{Expr, Mod, ParserError, Stmt};
 use crate::debug;
 use crate::diagnostic::Diagnostic;
-use crate::span::{Pos, Span};
+use crate::span::{FileId, Pos, Span};
 use crate::token::{Token, TokenType};
 
 type ParseExprResult = Result<Box<Expr>, ParserError>;
@@ -29,6 +29,7 @@ pub(crate) const MAX_DEPTH: usize = 200;
 const EOF: Token = Token {
     r#type: TokenType::Eof,
     span: Span {
+        file: FileId(0),
         start: Pos { line: 1, col: 1 },
         end: Pos { line: 1, col: 1 },
     },

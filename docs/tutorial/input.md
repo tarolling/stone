@@ -73,4 +73,4 @@ stone build sum.st -o sum && ./sum 1 2 3     # prints 6 too
 Everything after the file belongs to the program, even arguments starting with `-`, so
 `stone run sum.st -5 --x` gives it `["-5", "--x"]`.
 
-Next, {doc}`errors`.
+Next, {doc}`modules`.

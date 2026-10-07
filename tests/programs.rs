@@ -12,6 +12,10 @@
 //! is empty), and one that reads `args()` has a sibling `.args` file holding one argument per
 //! line, passed after the program under `stone run` and to the built binary.
 //!
+//! A subdirectory of one of those directories is a program of several files, run from its
+//! `main.st`, whose `.out`, `.err`, `.in`, and `.args` files sit next to `main.st`. For example,
+//! `tests/programs/modules/main.st` uses modules such as `tests/programs/modules/text.st`.
+//!
 //! A program can opt out of a backend by being listed in [`SKIPS`] along with the reason.
 
 use std::fmt::Write as _;
@@ -42,14 +46,19 @@ impl Backend {
     }
 }
 
-/// Returns every `.st` file under [`PROGRAM_DIRS`], sorted so failures are reported in a stable order.
+/// Returns every `.st` file directly in [`PROGRAM_DIRS`] and the `main.st` of each of their
+/// subdirectories, sorted so failures are reported in a stable order.
 fn programs() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut programs = Vec::new();
     for dir in PROGRAM_DIRS {
         for entry in std::fs::read_dir(root.join(dir)).expect("program directory should exist") {
             let path = entry.unwrap().path();
-            if path.extension().is_some_and(|ext| ext == "st") {
+            if path.is_dir() {
+                let main = path.join("main.st");
+                assert!(main.is_file(), "{} has no main.st", path.display());
+                programs.push(main);
+            } else if path.extension().is_some_and(|ext| ext == "st") {
                 programs.push(path);
             }
         }
@@ -59,9 +68,26 @@ fn programs() -> Vec<PathBuf> {
     programs
 }
 
+/// Returns a program's name: its file stem, or for a program of several files, its directory's
+/// name.
+///
+/// For example, `tests/programs/lists.st` is `lists` and `tests/programs/modules/main.st` is
+/// `modules`.
+fn name_of(program: &Path) -> &str {
+    let path = if program
+        .parent()
+        .is_some_and(|dir| PROGRAM_DIRS.iter().all(|d| !dir.ends_with(d)))
+    {
+        program.parent().unwrap()
+    } else {
+        program
+    };
+    path.file_stem().and_then(|s| s.to_str()).unwrap_or("")
+}
+
 /// Returns the reason the program is skipped under the backend, if it is listed in [`SKIPS`].
 fn skip_reason(program: &Path, backend: Backend) -> Option<&'static str> {
-    let stem = program.file_stem()?.to_str()?;
+    let stem = name_of(program);
     SKIPS
         .iter()
         .find(|(name, skipped, _)| *name == stem && *skipped == backend.name())
@@ -110,8 +136,7 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
             &input,
         ),
         Backend::Build => {
-            let name = program.file_stem().unwrap();
-            let exe = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name);
+            let exe = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name_of(program));
             let build = outcome_of(
                 Command::new(stone)
                     .arg("build")

@@ -48,10 +48,15 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
     let strip_all = |stmts: Vec<Stmt>| stmts.into_iter().map(strip_stmt).collect();
     let kind = match stmt.kind {
         StmtKind::FunctionDef {
-            name, args, body, ..
+            name,
+            public,
+            args,
+            body,
+            ..
         } => StmtKind::FunctionDef {
             name,
             name_span: Span::default(),
+            public,
             args: Arguments {
                 args: args
                     .args
@@ -90,6 +95,13 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
         },
         StmtKind::Expr { value } => StmtKind::Expr {
             value: Box::new(strip_expr(*value)),
+        },
+        StmtKind::Use { path, alias } => StmtKind::Use {
+            path: path
+                .into_iter()
+                .map(|(name, _)| (name, Span::default()))
+                .collect(),
+            alias: alias.map(|(name, _)| (name, Span::default())),
         },
         kind @ (StmtKind::Break | StmtKind::Continue) => kind,
     };
@@ -282,6 +294,7 @@ fn simple_function_no_args() {
                 StmtKind::FunctionDef {
                     name: "testing".to_string(),
                     name_span: Span::default(),
+                    public: false,
                     args: Arguments { args: vec![] },
                     body: vec![
                         StmtKind::Return {
@@ -359,6 +372,7 @@ fn simple_function_one_arg() {
                 StmtKind::FunctionDef {
                     name: "testing".to_string(),
                     name_span: Span::default(),
+                    public: false,
                     args: Arguments {
                         args: vec![Arg {
                             arg: "a".to_string(),
@@ -466,6 +480,7 @@ fn simple_function_multiple_args() {
                 StmtKind::FunctionDef {
                     name: "testing".to_string(),
                     name_span: Span::default(),
+                    public: false,
                     args: Arguments {
                         args: vec![
                             Arg {
@@ -1341,4 +1356,116 @@ fn a_power_applies_to_a_whole_primary() {
     };
     assert_eq!(op, Operator::Power);
     assert!(matches!(left.kind, ExprKind::Subscript { .. }));
+}
+
+/// Parses `source` and returns its statements with spans stripped.
+fn stmts_of(source: &str) -> Vec<Stmt> {
+    let Mod::Module { body } =
+        without_spans(parse_within(source.to_string(), Duration::from_secs(5)).unwrap());
+    body
+}
+
+/// Builds a `use` path from its dotted names, with empty spans.
+fn use_path(names: &[&str]) -> Vec<(String, Span)> {
+    names
+        .iter()
+        .map(|n| (n.to_string(), Span::default()))
+        .collect()
+}
+
+#[test]
+fn use_of_a_module() {
+    assert_eq!(
+        stmts_of("use geometry.shapes\n"),
+        [StmtKind::Use {
+            path: use_path(&["geometry", "shapes"]),
+            alias: None,
+        }
+        .into()]
+    );
+}
+
+#[test]
+fn use_of_a_single_name() {
+    assert_eq!(
+        stmts_of("use util\n"),
+        [StmtKind::Use {
+            path: use_path(&["util"]),
+            alias: None,
+        }
+        .into()]
+    );
+}
+
+#[test]
+fn use_with_an_alias() {
+    assert_eq!(
+        stmts_of("use util.pad as lpad\n"),
+        [StmtKind::Use {
+            path: use_path(&["util", "pad"]),
+            alias: Some(("lpad".to_string(), Span::default())),
+        }
+        .into()]
+    );
+}
+
+#[test]
+fn use_spans_each_name() {
+    let Mod::Module { body } =
+        parse_within("use a.bc as d\n".to_string(), Duration::from_secs(5)).unwrap();
+    assert_eq!(body[0].span, span(1, 1, 1, 14));
+    let StmtKind::Use { path, alias } = &body[0].kind else {
+        panic!("expected use");
+    };
+    assert_eq!(path[0].1, span(1, 5, 1, 6));
+    assert_eq!(path[1].1, span(1, 7, 1, 9));
+    assert_eq!(alias.as_ref().unwrap().1, span(1, 13, 1, 14));
+}
+
+#[test]
+fn use_needs_a_name_after_each_dot() {
+    assert_eq!(
+        error_of("use a.\n"),
+        (
+            "expected a module name, found end of line".to_string(),
+            1,
+            7
+        )
+    );
+}
+
+#[test]
+fn use_needs_a_name_after_as() {
+    assert_eq!(
+        error_of("use a as\n"),
+        ("expected a name, found end of line".to_string(), 1, 9)
+    );
+}
+
+#[test]
+fn pub_marks_a_function_public() {
+    let body = stmts_of("pub def f(); ret 1\ndef g(); ret 2\n");
+    let StmtKind::FunctionDef { public, .. } = &body[0].kind else {
+        panic!("expected function definition");
+    };
+    assert!(public);
+    let StmtKind::FunctionDef { public, .. } = &body[1].kind else {
+        panic!("expected function definition");
+    };
+    assert!(!public);
+}
+
+#[test]
+fn pub_spans_from_the_keyword() {
+    let Mod::Module { body } =
+        parse_within("pub def f(); ret 1\n".to_string(), Duration::from_secs(5)).unwrap();
+    assert_eq!(body[0].span, span(1, 1, 1, 19));
+}
+
+#[test]
+fn pub_must_come_before_def() {
+    assert_eq!(
+        error_of("pub x = 1\n"),
+        ("expected 'def', found 'x'".to_string(), 1, 5)
+    );
 }

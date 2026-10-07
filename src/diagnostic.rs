@@ -56,7 +56,7 @@ impl Diagnostic {
     ///   |     ^
     /// ```
     pub fn render(&self, file: &str, source: &str) -> String {
-        let Span { start, end } = self.span;
+        let Span { start, end, .. } = self.span;
         let mut out = format!(
             "{file}:{}:{}: {}: {}\n",
             start.line,

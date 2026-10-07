@@ -460,6 +460,7 @@ impl<'out> Interpreter<'out> {
             }
             StmtKind::Break => Ok(ControlFlow::Break),
             StmtKind::Continue => Ok(ControlFlow::Continue),
+            StmtKind::Use { .. } => Err("use is only allowed at the top level of a file".into()),
         }
     }
 

@@ -252,6 +252,8 @@ pub enum StmtKind {
         name: Identifier,
         /// The span of the function's name, which editor features point at.
         name_span: Span,
+        /// Whether the definition starts with `pub`, so other modules may use it.
+        public: bool,
         args: Arguments,
         body: Vec<Stmt>,
     },
@@ -281,6 +283,12 @@ pub enum StmtKind {
     },
     /// An expression used as a statement, such as `print(x)`.
     Expr { value: Box<Expr> },
+    /// An import, such as `use geometry.shapes` or `use util.pad as lpad`, holding each dotted
+    /// name and the optional name after `as`, each with its span.
+    Use {
+        path: Vec<(Identifier, Span)>,
+        alias: Option<(Identifier, Span)>,
+    },
     /// A `break` statement.
     Break,
     /// A `cont` statement, which continues to the next loop iteration.

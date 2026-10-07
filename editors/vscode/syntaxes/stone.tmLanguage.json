@@ -36,6 +36,21 @@
     "keyword": {
       "patterns": [
         {
+          "match": "\\b(use)\\s+([A-Za-z_][A-Za-z0-9_.]*)",
+          "captures": {
+            "1": { "name": "keyword.control.import.stone" },
+            "2": { "name": "entity.name.namespace.stone" }
+          }
+        },
+        {
+          "name": "keyword.control.import.stone",
+          "match": "\\b(as)\\b"
+        },
+        {
+          "name": "storage.modifier.stone",
+          "match": "\\b(pub)\\b"
+        },
+        {
           "name": "keyword.control.stone",
           "match": "\\b(if|elif|else|while|for|in|break|cont|ret)\\b"
         },

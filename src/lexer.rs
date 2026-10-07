@@ -4,7 +4,7 @@
 //! `Newline`, `Indent`, and later `Dedent` tokens around the function body.
 
 use crate::diagnostic::Diagnostic;
-use crate::span::{Pos, Span};
+use crate::span::{FileId, Pos, Span};
 use crate::token::{RESERVED_KEYWORDS, Token, TokenType};
 use std::error::Error;
 use std::fmt::Display;
@@ -47,11 +47,23 @@ pub struct Lexer {
     indent_stack: Vec<usize>,
     at_line_start: bool,
     pending_dedents: Vec<Token>,
+    /// The file every span is in.
+    file: FileId,
 }
 
 impl Lexer {
+    /// Returns a lexer for the entry file's source.
     pub fn new(source: &str) -> Self {
+        Self::with_file(source, FileId::default())
+    }
+
+    /// Returns a lexer whose tokens and errors point into `file`.
+    ///
+    /// For example, `Lexer::with_file("x\n", FileId(1)).lex()` gives a `Name("x")` whose span is in
+    /// `FileId(1)`.
+    pub fn with_file(source: &str, file: FileId) -> Self {
         Lexer {
+            file,
             input: source.chars().collect(),
             pos: 0,
             line: 1,
@@ -67,6 +79,24 @@ impl Lexer {
     /// For example, `x = 1` produces `Name("x")`, `Operator("=")`, `Number(1)`, `Newline`, and `Eof`.
     /// Integer literals that do not fit in an `i64` produce a [`LexError`].
     pub fn lex(&mut self) -> Result<Vec<Token>, LexError> {
+        let file = self.file;
+        match self.lex_tokens() {
+            Ok(mut tokens) => {
+                for token in &mut tokens {
+                    token.span.file = file;
+                }
+                Ok(tokens)
+            }
+            Err(e) => Err(LexError {
+                span: e.span.in_file(file),
+                ..e
+            }),
+        }
+    }
+
+    /// Lexes the entire input with every span in the entry file, which `lex` then moves into
+    /// `self.file`.
+    fn lex_tokens(&mut self) -> Result<Vec<Token>, LexError> {
         let mut tokens: Vec<Token> = vec![];
         loop {
             let tok = self.next_token()?;
@@ -682,6 +712,18 @@ testing(1, 2, 3)"#;
         let source = "@".repeat(1_000_000);
         let err = Lexer::new(&source).lex().unwrap_err();
         assert_eq!(err.span, Span::new(Pos::new(1, 1), Pos::new(1, 2)));
+    }
+
+    #[test]
+    fn spans_carry_the_file_they_were_lexed_from() {
+        let tokens = Lexer::with_file("x = 1\n", FileId(3)).lex().unwrap();
+        assert!(tokens.iter().all(|t| t.span.file == FileId(3)));
+
+        let err = Lexer::with_file("x = @\n", FileId(3)).lex().unwrap_err();
+        assert_eq!(err.span.file, FileId(3));
+
+        let tokens = Lexer::new("x\n").lex().unwrap();
+        assert_eq!(tokens[0].span.file, FileId(0));
     }
 
     /// Returns just the token types of `source`, for tests that do not care about positions.

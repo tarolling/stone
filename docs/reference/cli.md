@@ -4,7 +4,8 @@
 stone [FILE [ARGS...]] [COMMAND]
 ```
 
-Every command reads one `.st` file, then checks it before doing anything else. If the checker
+Every command reads one `.st` file, the entry file, along with every module it uses (see
+[Modules](modules.md)), then checks them before doing anything else. If the checker
 finds errors, the command prints all of them and exits with status 1 without running anything.
 Errors print as `file:line:col: error: message`, followed by the source line and a caret under
 the problem.

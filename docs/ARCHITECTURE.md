@@ -15,15 +15,20 @@ stone is a language that is both compiled and interpreted, depending on the deve
 
 `src/driver.rs` wires the stages together, and `src/main.rs` picks a pipeline from the command line.
 
-- `stone run`: `lexer` -> `parser` -> `checker` -> `interpreter`
-- `stone build`: `lexer` -> `parser` -> `checker` -> `codegen::ir` (lower to IR) -> `codegen::regalloc` (linear scan) -> `codegen::x64` (emit, then gcc)
-- `stone check`: `lexer` -> `parser` -> `checker`, printing every diagnostic without running
+- `stone run`: `project` (`lexer` -> `parser` for each file, then link) -> `checker` -> `interpreter`
+- `stone build`: `project` -> `checker` -> `codegen::ir` (lower to IR) -> `codegen::regalloc` (linear scan) -> `codegen::x64` (emit, then gcc)
+- `stone check`: `project` -> `checker`, printing every diagnostic without running
+
+`project::link` lexes and parses the entry file, loads every module its `use` statements name, and
+merges them into one module in which each library function is renamed to its module path, such
+as `geometry.shapes.area`, and every use of it points there. Everything after it sees a program
+of one file, except that each `Span` carries the `FileId` of the file it is in.
 
 ## Source map
 
 | module | role |
 | --- | --- |
-| `span` | source positions (`Pos`) and ranges (`Span`) carried by tokens and AST nodes |
+| `span` | source positions (`Pos`), file ids (`FileId`), and ranges (`Span`) carried by tokens and AST nodes |
 | `diagnostic` | errors and warnings with a span, and their terminal rendering |
 | `token` | `Token`, `TokenType`, and reserved keywords |
 | `lexer` | source text to tokens, including Python-style `Indent`/`Dedent` |
@@ -36,19 +41,20 @@ stone is a language that is both compiled and interpreted, depending on the deve
 | `codegen/regalloc` | target-independent linear-scan register allocation and parallel-move ordering |
 | `codegen/x64` | the x86-64 backend: instruction selection from allocated IR (`codegen/x64/emit.rs`) and its hand-written builtins (`codegen/x64/builtins.rs`) |
 | `stdlib` | names of the builtins shared by both backends (`print`, `len`, `range`, `append`, `int`, and `float`), and `format_float`, which defines how both print floats |
-| `driver` | the run/build/check pipelines, and `analyze` for editor tooling |
+| `project` | loading the modules a program uses (`Sources`), checking `use` and `pub`, linking them into one module, and `SourceMap` for rendering diagnostics from any file |
+| `driver` | the run/build/check pipelines, and `analyze_linked` for editor tooling |
 
 ## Language server
 
-`lsp/` is the `stone-lsp` crate, a language server built on `lsp-server` and `lsp-types`, kept out of the main crate so stone itself still depends only on `clap`. It reanalyzes a document on every change with `driver::analyze` and answers requests from the resulting `checker::Analysis`: its diagnostics, the type of every expression, and every symbol with all of its references.
+`lsp/` is the `stone-lsp` crate, a language server built on `lsp-server` and `lsp-types`, kept out of the main crate so stone itself still depends only on `clap`. On every change it reanalyzes each open document as part of its program (the one whose entry file is the nearest `main.st` above it) with `project::link` and `driver::analyze_linked`, reading open documents' text over what is on disk, and answers requests from the resulting `checker::Analysis`: its diagnostics, the type of every expression, and every symbol with all of its references, in every file.
 
 | request | answered from |
 | --- | --- |
 | diagnostics | `Analysis::diagnostics`, with a syntax error for every statement that fails to parse, in blocks too |
 | hover | the symbol's signature, a builtin's documentation, or the innermost expression's type |
-| definition, references, rename | `Analysis::reference_at` and `Analysis::references_to`; a builtin's definition is its line in a generated `builtins.st` reference |
+| definition, references, rename | `Analysis::reference_at` and `Analysis::references_to`, across files; a `use` path's definition is the module or function it names, and a builtin's is its line in a generated `builtins.st` reference |
 | document symbols | globals and functions, with each function's parameters and locals |
-| completion | `Analysis::visible_at`, builtins, and keywords |
+| completion | `Analysis::visible_at`, names bound by `use`, builtins, and keywords; a module's `pub` functions after its name and a `.`; modules and directories in a `use` |
 
 `editors/vscode/` is a VS Code extension that provides highlighting and indentation rules and starts `stone-lsp` for `.st` files.
 

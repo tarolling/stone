@@ -26,6 +26,8 @@ These names are reserved and cannot be used for variables or functions:
 | keyword | meaning |
 | --- | --- |
 | `def` | defines a function |
+| `pub` | lets other files use the function after it, as in `pub def f();` |
+| `use`, `as` | uses a module or one of its functions, optionally under another name |
 | `ret` | returns from a function, or ends the program at the top level |
 | `if`, `elif`, `else` | conditional blocks |
 | `while` | loops while a condition holds |
@@ -51,7 +53,9 @@ while true; break
 Indent with spaces or tabs, as long as each block is consistent. Comments start with `//` outside
 a string and run to the end of the line, and blank and comment-only lines may sit at any
 indentation. Comment lines directly above a function or variable definition document it, and
-editors show them when you hover over its name.
+editors show them when you hover over its name. Comment lines at the very top of a module's file,
+followed by a blank line, document the module, and editors show them when you hover over the
+module's name in a `use` or before a `.`.
 
 ## Literals
 
@@ -79,8 +83,10 @@ and a `t`.
 | `while` | `while i < 10;` plus a block |
 | `for` | `for x in items;`, `for i in range(n);`, `for i in range(a, b);` |
 | `break`, `cont` | inside a loop only |
+| `use` | `use util`, `use geometry.shapes.area as area` |
 
 A `for` loop's variable must be a plain name. Functions can only be defined at the top level.
+`use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
 
 ## Operators
 

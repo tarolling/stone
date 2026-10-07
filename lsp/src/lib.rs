@@ -1,12 +1,13 @@
 //! A language server for stone.
 //!
 //! [`run`] speaks the Language Server Protocol over a [`Connection`]. Each open document is
-//! analyzed with [`stone::driver::analyze`] whenever it changes, which publishes its diagnostics,
-//! and requests like hover and rename are answered from that analysis by [`features`].
+//! analyzed as part of the program it belongs to (see [`Document::in_program`]) whenever any open
+//! document changes, which publishes its diagnostics, and requests like hover and rename are
+//! answered from that analysis by [`features`].
 
 use std::collections::HashMap;
 use std::error::Error;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lsp_server::{Connection, ErrorCode, ExtractError, Message, Notification, Request, Response};
@@ -25,11 +26,15 @@ use lsp_types::{
     TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkDoneProgressOptions,
 };
 
+use stone::project::{FsSources, Sources};
+
 use crate::features::{Builtins, Document};
 use crate::line_index::Encoding;
+use crate::uri::{file_path, file_uri};
 
 pub mod features;
 pub mod line_index;
+pub mod uri;
 
 /// Runs the server until the client shuts it down.
 ///
@@ -50,6 +55,7 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
 
     let mut server = Server {
         encoding,
+        texts: HashMap::new(),
         documents: HashMap::new(),
         builtins: write_builtins_reference().map(Builtins::new),
     };
@@ -91,31 +97,6 @@ fn write_builtins_reference() -> Option<Uri> {
     file_uri(&path)
 }
 
-/// Returns the `file://` URI of an absolute path, percent-encoding anything but unreserved
-/// characters and separators.
-///
-/// For example, `/tmp/my dir/builtins.st` becomes `file:///tmp/my%20dir/builtins.st`, and
-/// `C:\Temp\builtins.st` becomes `file:///C:/Temp/builtins.st`.
-fn file_uri(path: &Path) -> Option<Uri> {
-    let path = path.to_str()?.replace('\\', "/");
-    let path = if path.starts_with('/') {
-        path
-    } else {
-        format!("/{path}")
-    };
-    let encoded: String = path
-        .bytes()
-        .map(|byte| {
-            if byte.is_ascii_alphanumeric() || b"/-._~:".contains(&byte) {
-                (byte as char).to_string()
-            } else {
-                format!("%{byte:02X}")
-            }
-        })
-        .collect();
-    format!("file://{encoded}").parse().ok()
-}
-
 /// Picks UTF-8 positions if the client supports them, and UTF-16 otherwise.
 fn negotiate_encoding(params: &InitializeParams) -> Encoding {
     let offered = params
@@ -153,6 +134,9 @@ fn capabilities(encoding: Encoding) -> ServerCapabilities {
 /// The server's state: the documents the client has open.
 struct Server {
     encoding: Encoding,
+    /// The text of each open document, which wins over what is on disk.
+    texts: HashMap<Uri, String>,
+    /// The analysis of each open document.
     documents: HashMap<Uri, Document>,
     /// Where definitions of builtins go, or `None` if the reference file could not be written.
     builtins: Option<Builtins>,
@@ -205,7 +189,9 @@ impl Server {
             Completion::METHOD => self.answer::<Completion>(request, |doc, params| {
                 let position = params.text_document_position.position;
                 Ok(Some(CompletionResponse::Array(features::completion(
-                    doc, position,
+                    doc,
+                    position,
+                    &self.workspace(),
                 ))))
             }),
             method => Response::new_err(
@@ -287,24 +273,85 @@ impl Server {
             _ => return vec![],
         };
 
-        // a closed document's diagnostics are cleared
-        let diagnostics = match text {
+        match text {
             Some(text) => {
-                let doc = Document::new(text, self.encoding);
-                let diagnostics = features::diagnostics(&doc);
-                self.documents.insert(uri.clone(), doc);
-                diagnostics
+                self.texts.insert(uri.clone(), text);
             }
             None => {
+                self.texts.remove(&uri);
                 self.documents.remove(&uri);
-                vec![]
             }
-        };
-        let params = PublishDiagnosticsParams::new(uri, diagnostics, None);
-        vec![Notification::new(
-            PublishDiagnostics::METHOD.to_string(),
-            params,
-        )]
+        }
+
+        // a change to one file can change what is wrong in any other file of its program
+        let workspace = self.workspace();
+        self.documents = self
+            .texts
+            .iter()
+            .map(|(uri, text)| {
+                let doc = file_path(uri)
+                    .and_then(|path| Document::in_program(&path, &workspace, self.encoding))
+                    .unwrap_or_else(|| Document::new(text.clone(), self.encoding));
+                (uri.clone(), doc)
+            })
+            .collect();
+
+        // the changed document first, and a closed one's diagnostics are cleared
+        let mut uris: Vec<&Uri> = self.documents.keys().filter(|u| **u != uri).collect();
+        uris.sort_by_key(|u| u.as_str());
+        let mut replies = vec![publish(&uri, self.documents.get(&uri))];
+        replies.extend(uris.into_iter().map(|u| publish(u, self.documents.get(u))));
+        replies
+    }
+
+    /// Returns the files of the workspace, with the open documents' text over what is on disk.
+    fn workspace(&self) -> Workspace {
+        Workspace {
+            open: self
+                .texts
+                .iter()
+                .filter_map(|(uri, text)| Some((file_path(uri)?, text.clone())))
+                .collect(),
+        }
+    }
+}
+
+/// Returns the notification that publishes a document's diagnostics, or clears them if it is
+/// closed.
+fn publish(uri: &Uri, doc: Option<&Document>) -> Notification {
+    let diagnostics = doc.map(features::diagnostics).unwrap_or_default();
+    let params = PublishDiagnosticsParams::new(uri.clone(), diagnostics, None);
+    Notification::new(PublishDiagnostics::METHOD.to_string(), params)
+}
+
+/// The files programs are read from: the open documents, then the filesystem.
+struct Workspace {
+    open: HashMap<PathBuf, String>,
+}
+
+impl Sources for Workspace {
+    fn read(&self, path: &Path) -> Option<String> {
+        self.open
+            .get(path)
+            .cloned()
+            .or_else(|| FsSources.read(path))
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        FsSources.is_dir(path) || self.open.keys().any(|p| p != path && p.starts_with(path))
+    }
+
+    fn entries(&self, dir: &Path) -> Vec<PathBuf> {
+        let mut entries = FsSources.entries(dir);
+        entries.extend(
+            self.open
+                .keys()
+                .filter_map(|p| p.strip_prefix(dir).ok()?.components().next())
+                .map(|first| dir.join(first)),
+        );
+        entries.sort();
+        entries.dedup();
+        entries
     }
 }
 
@@ -352,16 +399,5 @@ impl DocumentParams for lsp_types::DocumentSymbolParams {
 impl DocumentParams for lsp_types::CompletionParams {
     fn uri(&self) -> &Uri {
         &self.text_document_position.text_document.uri
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn file_uris_encode_their_paths() {
-        let uri = file_uri(Path::new("/tmp/my dir/builtins.st")).unwrap();
-        assert_eq!(uri.as_str(), "file:///tmp/my%20dir/builtins.st");
     }
 }

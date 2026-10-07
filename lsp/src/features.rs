@@ -1,9 +1,11 @@
 //! The language features, each a function from a [`Document`] and a position to an LSP result.
 //!
-//! The work is done by [`stone::driver::analyze`]. These functions only find what is at a
-//! position and convert it to LSP types, so they are tested without running a server.
+//! The work is done by [`stone::driver::analyze_linked`] over the whole program a document
+//! belongs to. These functions only find what is at a position and convert it to LSP types, so
+//! they are tested without running a server.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use lsp_types::{
     CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover,
@@ -12,7 +14,10 @@ use lsp_types::{
 };
 use stone::checker::{Analysis, Symbol, SymbolKind as StoneSymbolKind, Type};
 use stone::diagnostic::Severity;
-use stone::span::{Pos, Span};
+use stone::project::{
+    DEFAULT_ENTRY, Import, Linked, MapSources, SourceMap, Sources, Target, link, link_in,
+};
+use stone::span::{FileId, Pos, Span};
 use stone::stdlib::{
     BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, builtin_doc, builtins_reference,
     method_doc,
@@ -20,33 +25,154 @@ use stone::stdlib::{
 use stone::token::RESERVED_KEYWORDS;
 
 use crate::line_index::{Encoding, LineIndex};
+use crate::uri::file_uri;
 
 #[cfg(test)]
 mod tests;
 
-/// An open document and everything the checker learned about it.
+/// An open document and everything the checker learned about the program it belongs to.
 pub struct Document {
     pub text: String,
     pub analysis: Analysis,
     pub index: LineIndex,
+    /// The document's file in its program.
+    pub file: FileId,
+    /// Every file of the program.
+    pub sources: SourceMap,
+    /// Every name the program's files bind with `use`.
+    pub imports: Vec<Import>,
+    /// The linked names of the program's `pub` functions, such as `util.twice`.
+    pub public: HashSet<String>,
+    /// The directory module paths start from.
+    pub root: PathBuf,
+    encoding: Encoding,
 }
 
 impl Document {
-    /// Analyzes `text`, keeping the result for answering requests until the text changes.
+    /// Analyzes `text` on its own, as a program of one file, keeping the result for answering
+    /// requests until the text changes.
     pub fn new(text: String, encoding: Encoding) -> Self {
-        let analysis = stone::driver::analyze(&text);
+        let linked = link(Path::new(DEFAULT_ENTRY), &text, &MapSources::default());
+        Self::from_linked(linked, FileId(0), encoding)
+    }
+
+    /// Analyzes the file at `path` as part of its program, reading every file from `sources`, or
+    /// returns `None` if there is no file at `path`.
+    ///
+    /// The program is the one whose entry file is the nearest `main.st` in the file's directory or
+    /// one above it. If that program does not use the file yet, the file is checked as an entry
+    /// file of its own, from the program's root if it is in a directory under it.
+    pub fn in_program(path: &Path, sources: &dyn Sources, encoding: Encoding) -> Option<Self> {
+        let text = sources.read(path)?;
+        let linked = program_of(path, &text, sources);
+        let file = linked.sources.find(path).unwrap_or(FileId(0));
+        Some(Self::from_linked(linked, file, encoding))
+    }
+
+    fn from_linked(linked: Linked, file: FileId, encoding: Encoding) -> Self {
+        let analysis = stone::driver::analyze_linked(&linked);
+        let text = linked.sources.file(file).source.clone();
         let index = LineIndex::new(&text, encoding);
         Document {
             text,
             analysis,
             index,
+            file,
+            sources: linked.sources,
+            imports: linked.imports,
+            public: linked.public,
+            root: linked.root,
+            encoding,
         }
     }
 
     /// Returns the symbol whose name is at `position`, with the span of that appearance.
     fn symbol_at(&self, position: Position) -> Option<(usize, Span)> {
-        let reference = self.analysis.reference_at(self.index.pos(position))?;
+        let reference = self
+            .analysis
+            .reference_at(self.file, self.index.pos(position))?;
         Some((reference.symbol, reference.span))
+    }
+
+    /// Returns the `use` of this document whose last name is at `position`.
+    fn import_at(&self, position: Position) -> Option<&Import> {
+        let pos = self.index.pos(position);
+        self.imports
+            .iter()
+            .find(|i| i.span.file == self.file && i.span.contains(pos))
+    }
+
+    /// Returns where `span` is, given that this document is at `uri`.
+    fn location(&self, span: Span, uri: &Uri) -> Option<Location> {
+        if span.file == self.file {
+            return Some(Location::new(uri.clone(), self.index.range(span)));
+        }
+        let file = self.sources.file(span.file);
+        let index = LineIndex::new(&file.source, self.encoding);
+        Some(Location::new(file_uri(&file.path)?, index.range(span)))
+    }
+
+    /// Returns the name a symbol has in its own file, which for a module's function leaves out
+    /// the module, such as `twice` for `util.twice`.
+    fn local_name<'a>(&self, symbol: &'a Symbol) -> &'a str {
+        let module = &self.sources.file(symbol.span.file).module;
+        if module.is_empty() || symbol.scope.is_some() {
+            return &symbol.name;
+        }
+        symbol
+            .name
+            .strip_prefix(module.as_str())
+            .and_then(|rest| rest.strip_prefix('.'))
+            .unwrap_or(&symbol.name)
+    }
+
+    /// Returns the text `span` covers, if it is on one line.
+    fn text_at(&self, span: Span) -> Option<String> {
+        let line = self
+            .sources
+            .file(span.file)
+            .source
+            .lines()
+            .nth(span.start.line.checked_sub(1)?)?;
+        (span.start.line == span.end.line).then(|| {
+            line.chars()
+                .skip(span.start.col - 1)
+                .take(span.end.col - span.start.col)
+                .collect()
+        })
+    }
+
+    /// Returns the symbol of the function with this linked name, such as `util.twice`.
+    fn function(&self, name: &str) -> Option<&Symbol> {
+        self.analysis
+            .symbols
+            .iter()
+            .find(|s| s.kind == StoneSymbolKind::Function && s.name == name)
+    }
+}
+
+/// Links the program the file at `path` belongs to. See [`Document::in_program`].
+fn program_of(path: &Path, text: &str, sources: &dyn Sources) -> Linked {
+    let dir = path.parent().unwrap_or(Path::new(""));
+    let root = dir
+        .ancestors()
+        .find(|d| sources.read(&d.join(DEFAULT_ENTRY)).is_some());
+    let Some(root) = root else {
+        return link(path, text, sources);
+    };
+    let main = root.join(DEFAULT_ENTRY);
+    if main == path {
+        return link(path, text, sources);
+    }
+    let linked = link(&main, &sources.read(&main).unwrap_or_default(), sources);
+    if linked.sources.find(path).is_some() {
+        return linked;
+    }
+    // not used by the program yet
+    if dir == root {
+        link(path, text, sources)
+    } else {
+        link_in(root, path, text, sources)
     }
 }
 
@@ -55,6 +181,7 @@ pub fn diagnostics(doc: &Document) -> Vec<Diagnostic> {
     doc.analysis
         .diagnostics
         .iter()
+        .filter(|d| d.span.file == doc.file)
         .map(|d| Diagnostic {
             range: doc.index.range(d.span),
             severity: Some(match d.severity {
@@ -111,7 +238,7 @@ fn doc_comment(text: &str, symbol: &Symbol) -> Option<String> {
         .chars()
         .take(symbol.span.start.col - 1)
         .collect();
-    if !matches!(before.trim(), "" | "def") {
+    if !matches!(before.trim(), "" | "def" | "pub def") {
         return None;
     }
     let comment: Vec<&str> = lines[..line]
@@ -125,6 +252,53 @@ fn doc_comment(text: &str, symbol: &Symbol) -> Option<String> {
     }
     let lines: Vec<&str> = comment.into_iter().rev().collect();
     Some(lines.join("\n"))
+}
+
+/// Returns the `//` comment lines at the very top of a module's file, without their `//` and the
+/// space after it, as Markdown for hover.
+///
+/// For example, for `"// summary statistics\n\npub def mean(xs);\n..."` this returns
+/// `"summary statistics"`. A comment directly above a definition documents that definition
+/// instead (see [`doc_comment`]), so only one followed by a blank line or the end of the file
+/// counts.
+fn module_comment(text: &str) -> Option<String> {
+    let lines: Vec<&str> = text.lines().collect();
+    let comment: Vec<&str> = lines
+        .iter()
+        .map_while(|line| line.trim_start().strip_prefix("//"))
+        .map(|line| line.strip_prefix(' ').unwrap_or(line).trim_end())
+        .collect();
+    let after = lines.get(comment.len());
+    if comment.is_empty() || after.is_some_and(|line| !line.trim().is_empty()) {
+        return None;
+    }
+    Some(comment.join("\n"))
+}
+
+/// Returns the module named at `position` and the span of its name: the last name of a
+/// `use` path that binds a module, or a name bound to a module right before a `.`, as `stats`
+/// is in `stats.mean(xs)`.
+fn module_at(doc: &Document, position: Position) -> Option<(FileId, Span)> {
+    if let Some(import) = doc.import_at(position) {
+        return match import.target {
+            Target::Module(file) => Some((file, import.span)),
+            Target::Function(_) => None,
+        };
+    }
+    let (word, span) = word_at(doc, doc.index.pos(position))?;
+    let next = doc
+        .text
+        .lines()
+        .nth(span.end.line - 1)?
+        .chars()
+        .nth(span.end.col - 1);
+    if next != Some('.') {
+        return None;
+    }
+    doc.imports.iter().find_map(|i| match i.target {
+        Target::Module(file) if i.span.file == doc.file && i.name == word => Some((file, span)),
+        _ => None,
+    })
 }
 
 /// Returns the identifier the position is on or just after, and its span.
@@ -184,9 +358,21 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
     let pos = doc.index.pos(position);
     if let Some((symbol, span)) = doc.symbol_at(position) {
         let symbol = &doc.analysis.symbols[symbol];
-        let comment = doc_comment(&doc.text, symbol);
+        let text = &doc.sources.file(symbol.span.file).source;
+        let comment = doc_comment(text, symbol);
         return Some(Hover {
             contents: markdown(&signature(&doc.analysis, symbol), comment.as_deref()),
+            range: Some(doc.index.range(span)),
+        });
+    }
+    // a local that shadows a module is a symbol, so this only finds real modules
+    if let Some((file, span)) = module_at(doc, position) {
+        let module = doc.sources.file(file);
+        return Some(Hover {
+            contents: markdown(
+                &format!("module {}", module.module),
+                module_comment(&module.source).as_deref(),
+            ),
             range: Some(doc.index.range(span)),
         });
     }
@@ -217,7 +403,7 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
         .analysis
         .types
         .iter()
-        .filter(|(span, _)| span.contains(pos))
+        .filter(|(span, _)| span.file == doc.file && span.contains(pos))
         .max_by_key(|(span, _)| (span.start, std::cmp::Reverse(span.end)))?;
     Some(Hover {
         contents: markdown(&ty.to_string(), None),
@@ -281,8 +467,19 @@ pub fn definition(
     builtins: Option<&Builtins>,
 ) -> Option<Location> {
     if let Some((symbol, _)) = doc.symbol_at(position) {
-        let span = doc.analysis.symbols[symbol].span;
-        return Some(Location::new(uri.clone(), doc.index.range(span)));
+        return doc.location(doc.analysis.symbols[symbol].span, uri);
+    }
+    if let Some(import) = doc.import_at(position) {
+        return match &import.target {
+            Target::Module(file) => {
+                let start = Range::new(Position::new(0, 0), Position::new(0, 0));
+                Some(Location::new(
+                    file_uri(&doc.sources.file(*file).path)?,
+                    start,
+                ))
+            }
+            Target::Function(name) => doc.location(doc.function(name)?.span, uri),
+        };
     }
     let (word, span) = word_at(doc, doc.index.pos(position))?;
     builtins?.location(&word, follows_dot(doc, span.start))
@@ -302,7 +499,7 @@ pub fn references(
     doc.analysis
         .references_to(symbol)
         .filter(|r| include_declaration || r.span != definition)
-        .map(|r| Location::new(uri.clone(), doc.index.range(r.span)))
+        .filter_map(|r| doc.location(r.span, uri))
         .collect()
 }
 
@@ -328,7 +525,7 @@ pub fn rename(
     position: Position,
     new_name: &str,
 ) -> Result<WorkspaceEdit, String> {
-    let Some((symbol, _)) = doc.symbol_at(position) else {
+    let Some((index, _)) = doc.symbol_at(position) else {
         return Err("nothing to rename here".to_string());
     };
     if RESERVED_KEYWORDS.contains(&new_name) {
@@ -340,21 +537,43 @@ pub fn rename(
     if !is_name(new_name) {
         return Err(format!("'{new_name}' is not a valid name"));
     }
-    let uses: Vec<Span> = doc.analysis.references_to(symbol).map(|r| r.span).collect();
+    let symbol = &doc.analysis.symbols[index];
+    let name = doc.local_name(symbol);
+    // an alias from `use ... as` keeps its own name
+    let mut uses: Vec<Span> = doc
+        .analysis
+        .references_to(index)
+        .map(|r| r.span)
+        .filter(|span| doc.text_at(*span).as_deref() == Some(name))
+        .collect();
+    let target = Target::Function(symbol.name.clone());
+    uses.extend(
+        doc.imports
+            .iter()
+            .filter(|i| i.target == target)
+            .map(|i| i.span),
+    );
     let taken = uses.iter().any(|span| {
         doc.analysis
-            .visible_at(span.start)
-            .any(|s| s.name == new_name)
+            .visible_at(span.file, span.start)
+            .any(|s| doc.local_name(s) == new_name)
     });
     if taken {
         return Err(format!("'{new_name}' is already defined here"));
     }
-    let edits = uses
-        .into_iter()
-        .map(|span| TextEdit::new(doc.index.range(span), new_name.to_string()))
-        .collect();
+    let mut changes: Vec<(Uri, Vec<TextEdit>)> = vec![];
+    for span in uses {
+        let Some(location) = doc.location(span, uri) else {
+            return Err("cannot find a file to rename in".to_string());
+        };
+        let edit = TextEdit::new(location.range, new_name.to_string());
+        match changes.iter_mut().find(|(uri, _)| *uri == location.uri) {
+            Some((_, edits)) => edits.push(edit),
+            None => changes.push((location.uri, vec![edit])),
+        }
+    }
     Ok(WorkspaceEdit {
-        changes: Some(HashMap::from([(uri.clone(), edits)])),
+        changes: Some(changes.into_iter().collect()),
         ..WorkspaceEdit::default()
     })
 }
@@ -362,7 +581,7 @@ pub fn rename(
 #[allow(deprecated)] // `DocumentSymbol::deprecated` must still be set
 fn document_symbol(doc: &Document, symbol: &Symbol, range: Span) -> DocumentSymbol {
     DocumentSymbol {
-        name: symbol.name.clone(),
+        name: doc.local_name(symbol).to_string(),
         detail: Some(signature(&doc.analysis, symbol)),
         kind: match symbol.kind {
             StoneSymbolKind::Function => SymbolKind::FUNCTION,
@@ -383,7 +602,7 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
     let mut outline: Vec<DocumentSymbol> = analysis
         .symbols
         .iter()
-        .filter(|s| s.scope.is_none())
+        .filter(|s| s.scope.is_none() && s.span.file == doc.file)
         .map(|symbol| {
             let Some(&extent) = analysis.functions.get(&symbol.name) else {
                 return document_symbol(doc, symbol, symbol.span);
@@ -403,15 +622,46 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
     outline
 }
 
-/// Returns the names that can be written at `position`: symbols in scope, builtins, and keywords,
-/// or right after a `.`, the builtin methods.
+/// Returns the names that can be written at `position`: symbols in scope, imported names,
+/// builtins, and keywords. Right after a `.`, it is the public functions of an imported module, or
+/// otherwise the builtin methods, and in a `use`, the modules and directories there are.
 ///
 /// The client filters them by what has been typed so far.
-pub fn completion(doc: &Document, position: Position) -> Vec<CompletionItem> {
+pub fn completion(
+    doc: &Document,
+    position: Position,
+    sources: &dyn Sources,
+) -> Vec<CompletionItem> {
     let pos = doc.index.pos(position);
-    // after a `.`, only a method can come next, as in `xs.le`
     let start = word_at(doc, pos).map_or(pos, |(_, span)| span.start);
-    if follows_dot(doc, start) {
+    let before: String = doc
+        .text
+        .lines()
+        .nth(pos.line - 1)
+        .unwrap_or("")
+        .chars()
+        .take(start.col - 1)
+        .collect();
+    if let Some(path) = before.trim_start().strip_prefix("use ") {
+        return use_completion(doc, path.trim_start(), sources);
+    }
+    // after a `.`, only a module's function or a method can come next, as in `xs.le`
+    if let Some(receiver) = before.strip_suffix('.') {
+        let receiver: String = receiver
+            .chars()
+            .rev()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect::<Vec<char>>()
+            .into_iter()
+            .rev()
+            .collect();
+        let module = doc.imports.iter().find_map(|i| match i.target {
+            Target::Module(file) if i.span.file == doc.file && i.name == receiver => Some(file),
+            _ => None,
+        });
+        if let Some(file) = module {
+            return module_functions(doc, file);
+        }
         return METHODS
             .iter()
             .map(|method| CompletionItem {
@@ -424,19 +674,38 @@ pub fn completion(doc: &Document, position: Position) -> Vec<CompletionItem> {
     }
     let mut items: Vec<CompletionItem> = vec![];
     // locals come first, so they win over a global with the same name
-    let mut visible: Vec<&Symbol> = doc.analysis.visible_at(pos).collect();
+    let mut visible: Vec<&Symbol> = doc.analysis.visible_at(doc.file, pos).collect();
     visible.sort_by_key(|s| s.scope.is_none());
     for symbol in visible {
-        if items.iter().any(|item| item.label == symbol.name) {
+        let label = doc.local_name(symbol);
+        if items.iter().any(|item| item.label == label) {
             continue;
         }
         items.push(CompletionItem {
-            label: symbol.name.clone(),
+            label: label.to_string(),
             kind: Some(match symbol.kind {
                 StoneSymbolKind::Function => CompletionItemKind::FUNCTION,
                 _ => CompletionItemKind::VARIABLE,
             }),
             detail: Some(signature(&doc.analysis, symbol)),
+            ..CompletionItem::default()
+        });
+    }
+    for import in doc.imports.iter().filter(|i| i.span.file == doc.file) {
+        let (kind, detail) = match &import.target {
+            Target::Module(file) => (
+                CompletionItemKind::MODULE,
+                Some(format!("module {}", doc.sources.file(*file).module)),
+            ),
+            Target::Function(name) => (
+                CompletionItemKind::FUNCTION,
+                doc.function(name).map(|s| signature(&doc.analysis, s)),
+            ),
+        };
+        items.push(CompletionItem {
+            label: import.name.clone(),
+            kind: Some(kind),
+            detail,
             ..CompletionItem::default()
         });
     }
@@ -454,6 +723,63 @@ pub fn completion(doc: &Document, position: Position) -> Vec<CompletionItem> {
             kind: Some(CompletionItemKind::KEYWORD),
             ..CompletionItem::default()
         });
+    }
+    items
+}
+
+/// Returns the public functions of the module in `file`, by their own names.
+fn module_functions(doc: &Document, file: FileId) -> Vec<CompletionItem> {
+    doc.analysis
+        .symbols
+        .iter()
+        .filter(|s| s.kind == StoneSymbolKind::Function && s.span.file == file)
+        .filter(|s| doc.public.contains(&s.name))
+        .map(|symbol| CompletionItem {
+            label: doc.local_name(symbol).to_string(),
+            kind: Some(CompletionItemKind::FUNCTION),
+            detail: Some(signature(&doc.analysis, symbol)),
+            ..CompletionItem::default()
+        })
+        .collect()
+}
+
+/// Returns what can come next in a `use` whose path so far is `path`, such as `geometry.`: the
+/// modules and directories in the directory it names, and the public functions of the module it
+/// names, if the program has loaded it.
+fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<CompletionItem> {
+    let parent = path.rsplit_once('.').map_or("", |(parent, _)| parent);
+    let names: Vec<&str> = parent.split('.').filter(|n| !n.is_empty()).collect();
+    let dir = names.iter().fold(doc.root.clone(), |dir, n| dir.join(n));
+    let mut items: Vec<CompletionItem> = vec![];
+    for entry in sources.entries(&dir) {
+        let Some(name) = entry.file_stem().and_then(|s| s.to_str()) else {
+            continue;
+        };
+        let kind = if entry.extension().is_some_and(|ext| ext == "st") {
+            // the entry file cannot be imported
+            if doc.sources.find(&entry) == Some(FileId(0)) {
+                continue;
+            }
+            CompletionItemKind::MODULE
+        } else if sources.is_dir(&entry) {
+            CompletionItemKind::FOLDER
+        } else {
+            continue;
+        };
+        if items.iter().any(|i| i.label == name) {
+            continue;
+        }
+        items.push(CompletionItem {
+            label: name.to_string(),
+            kind: Some(kind),
+            ..CompletionItem::default()
+        });
+    }
+    if !names.is_empty() {
+        let module = names.join(".");
+        if let Some((file, _)) = doc.sources.files().find(|(_, f)| f.module == module) {
+            items.extend(module_functions(doc, file));
+        }
     }
     items
 }

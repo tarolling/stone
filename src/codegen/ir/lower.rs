@@ -420,6 +420,9 @@ impl<'a> Lowerer<'a> {
             StmtKind::FunctionDef { .. } => {
                 return Err("functions must be defined at the top level".to_string());
             }
+            StmtKind::Use { .. } => {
+                return Err("use is only allowed at the top level of a file".to_string());
+            }
         }
         Ok(())
     }

@@ -10,17 +10,22 @@ cargo install --path lsp      # install stone-lsp into ~/.cargo/bin
 
 ## How it works
 
-On every change to an open document, the server reruns `stone::driver::analyze` and answers
-requests from the resulting `checker::Analysis`: its diagnostics, the type of every expression,
-and every symbol with all its references. `analyze` recovers from syntax errors statement by
-statement, so features keep working around a typo, and it hides type errors until the syntax
-errors are fixed.
+On every change to an open document, the server reanalyzes every open document as part of the
+program it belongs to: the one whose entry file is the nearest `main.st` in its directory or
+above. `Document::in_program` links that program with `stone::project::link`, reading open
+documents' text over what is on disk, and runs `stone::driver::analyze_linked`. A file the
+program does not use yet is checked on its own, from the program's root. Requests are answered
+from the resulting `checker::Analysis`: its diagnostics, the type of every expression, and every
+symbol with all its references in every file. The analysis recovers from syntax errors statement
+by statement, so features keep working around a typo, and it hides type errors until the syntax
+and `use` errors are fixed.
 
 | file | role |
 | --- | --- |
 | `lsp/src/lib.rs` | the initialize handshake, open documents, diagnostics, and request dispatch |
 | `lsp/src/features.rs` | one pure function per request over a `Document` |
 | `lsp/src/line_index.rs` | converts stone's 1-based char positions to LSP's UTF-16 or UTF-8 positions |
+| `lsp/src/uri.rs` | converts between `file://` URIs and paths |
 
 To add a feature, write it in `features.rs` with unit tests in `lsp/src/features/tests.rs`, then
 wire it into `Server::handle_request` and `capabilities`.

@@ -11,6 +11,7 @@ use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
 use crate::interpreter::{Interpreter, Limits};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
+use crate::project::{self, DEFAULT_ENTRY, Linked, MapSources, SourceMap, Sources};
 use std::error::Error;
 use std::io::{BufRead, Write};
 use std::path::Path;
@@ -29,45 +30,72 @@ pub fn parse(source: &str) -> Result<Mod, Diagnostic> {
     parser.parse()
 }
 
-/// Parses and checks source code, returning the module only if no errors were found.
+/// Parses, links, and checks the program with this entry source, given as a single string with
+/// no other files, returning the module only if no errors were found.
 ///
 /// For example, `checked("x = \n")` fails with the syntax error, while a program that parses
 /// returns its module.
 fn checked(source: &str) -> Result<Mod, Diagnostics> {
-    let ast = parse(source)?;
-    let diagnostics = TypeChecker::new().check(&ast);
-    if diagnostics.iter().any(|d| d.severity == Severity::Error) {
-        return Err(Diagnostics(diagnostics));
+    load(Path::new(DEFAULT_ENTRY), source, &MapSources::default()).1
+}
+
+/// Loads, links, and checks the program whose entry file is at `entry` and holds `source`,
+/// reading the modules it uses from `sources`. Returns the program's files, for rendering
+/// diagnostics, and its linked module if no errors were found.
+///
+/// For example, loading `main.st` holding `use util` without a `util.st` fails with
+/// `no module named 'util'`.
+pub fn load(
+    entry: &Path,
+    source: &str,
+    sources: &dyn Sources,
+) -> (SourceMap, Result<Mod, Diagnostics>) {
+    let Linked {
+        module,
+        sources,
+        diagnostics,
+        ..
+    } = project::link(entry, source, sources);
+    if has_errors(&diagnostics) {
+        return (sources, Err(Diagnostics(diagnostics)));
     }
-    Ok(ast)
+    let diagnostics = TypeChecker::new().check(&module);
+    if has_errors(&diagnostics) {
+        return (sources, Err(Diagnostics(diagnostics)));
+    }
+    (sources, Ok(module))
+}
+
+fn has_errors(diagnostics: &[Diagnostic]) -> bool {
+    diagnostics.iter().any(|d| d.severity == Severity::Error)
+}
+
+/// Checks a linked program, returning everything learned about it for editor tooling, with any
+/// syntax or import error as one of its diagnostics.
+///
+/// Syntax and import errors do not stop the analysis: the statements around them are still
+/// checked, so an editor can hover and jump to definitions in the rest of the program. Type
+/// errors are left out until the others are fixed, since a statement that failed to parse or an
+/// import that failed to resolve makes names look undefined.
+pub fn analyze_linked(linked: &Linked) -> Analysis {
+    let mut analysis = TypeChecker::new().analyze(&linked.module);
+    if !linked.diagnostics.is_empty() {
+        analysis.diagnostics = linked.diagnostics.clone();
+    }
+    analysis
 }
 
 /// Parses and checks source code, returning everything learned about it for editor tooling,
-/// with any syntax error as one of its diagnostics.
+/// with any syntax error as one of its diagnostics. See [`analyze_linked`].
 ///
 /// For example, `analyze("x = 1\n")` has a symbol for `x` of type `int`, and `analyze("x = \n")`
 /// has only the syntax error.
-///
-/// Syntax errors do not stop the analysis: the statements around them are still checked, so an
-/// editor can hover and jump to definitions in the rest of the file. Type errors are left out
-/// until the syntax errors are fixed, since a statement that failed to parse makes its names look
-/// undefined.
 pub fn analyze(source: &str) -> Analysis {
-    let tokens = match Lexer::new(source).lex() {
-        Ok(tokens) => tokens,
-        Err(e) => {
-            return Analysis {
-                diagnostics: vec![e.into()],
-                ..Analysis::default()
-            };
-        }
-    };
-    let (module, syntax_errors) = Parser::new(&tokens).parse_recovering();
-    let mut analysis = TypeChecker::new().analyze(&module);
-    if !syntax_errors.is_empty() {
-        analysis.diagnostics = syntax_errors;
-    }
-    analysis
+    analyze_linked(&project::link(
+        Path::new(DEFAULT_ENTRY),
+        source,
+        &MapSources::default(),
+    ))
 }
 
 /// Checks source code for errors without running it, returning every problem found.
@@ -76,6 +104,21 @@ pub fn analyze(source: &str) -> Analysis {
 /// pointing at the end of the first line.
 pub fn check(source: &str) -> Vec<Diagnostic> {
     analyze(source).diagnostics
+}
+
+/// Checks the program whose entry file is at `entry` and holds `source` without running it,
+/// returning its files and every problem found in any of them.
+///
+/// For example, checking a `main.st` that uses a `util.st` with a syntax error returns that error,
+/// whose span is in `util.st`.
+pub fn check_program(
+    entry: &Path,
+    source: &str,
+    sources: &dyn Sources,
+) -> (SourceMap, Vec<Diagnostic>) {
+    let linked = project::link(entry, source, sources);
+    let diagnostics = analyze_linked(&linked).diagnostics;
+    (linked.sources, diagnostics)
 }
 
 /// Runs source code with the tree-walking interpreter.
@@ -118,7 +161,21 @@ pub fn interpret_with_io(
     limits: Limits,
 ) -> Result<(), Box<dyn Error>> {
     let ast = checked(source)?;
+    run_module(&ast, input, out, args, limits)
+}
 
+/// Runs a checked module, such as one from [`load`], with the tree-walking interpreter. It reads
+/// `input` for `input` and `eof`, prints to `out`, gives `args` to `args`, and stops the program
+/// once it exceeds `limits`.
+///
+/// For example, running the module of `print(1)` appends `1\n` to `out`.
+pub fn run_module(
+    ast: &Mod,
+    input: &mut (impl BufRead + Send),
+    out: &mut (impl Write + Send),
+    args: &[String],
+    limits: Limits,
+) -> Result<(), Box<dyn Error>> {
     // a thread of its own, since deep recursion needs more stack than the main thread has
     let result = std::thread::scope(|scope| {
         let thread = std::thread::Builder::new()
@@ -127,7 +184,7 @@ pub fn interpret_with_io(
                 Interpreter::with_output(out, limits)
                     .with_input(input)
                     .with_args(args.to_vec())
-                    .evaluate(&ast)
+                    .evaluate(ast)
                     .map_err(|e| e.to_string())
             })
             .map_err(|e| format!("could not start the interpreter: {e}"))?;
@@ -143,10 +200,14 @@ pub fn interpret_with_io(
 /// For example, `compile("print(1)\n", Path::new("build/out"))` writes `build/out.s` and links
 /// `build/out`.
 pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
-    let ast = checked(source)?;
+    compile_module(&checked(source)?, output)
+}
 
+/// Compiles a checked module, such as one from [`load`], to a native x86-64 executable at
+/// `output`.
+pub fn compile_module(ast: &Mod, output: &Path) -> Result<(), Box<dyn Error>> {
     let mut r#gen = X64Generator::new();
-    r#gen.compile(&ast, output)?;
+    r#gen.compile(ast, output)?;
     Ok(())
 }
 

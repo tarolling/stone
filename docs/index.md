@@ -50,6 +50,7 @@ tutorial/index
 :caption: Reference
 
 reference/syntax
+reference/modules
 reference/types
 reference/builtins
 reference/runtime-errors

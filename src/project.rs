@@ -594,7 +594,6 @@ impl Rewriter<'_> {
                     self.expr(value);
                 }
             }
-            StmtKind::Delete { targets } => targets.iter_mut().for_each(|t| self.expr(t)),
             StmtKind::Assign { targets, value } => {
                 targets.iter_mut().for_each(|t| self.expr(t));
                 self.expr(value);

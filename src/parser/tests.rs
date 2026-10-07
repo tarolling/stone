@@ -72,9 +72,6 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
         StmtKind::Return { value } => StmtKind::Return {
             value: value.map(|v| Box::new(strip_expr(*v))),
         },
-        StmtKind::Delete { targets } => StmtKind::Delete {
-            targets: targets.into_iter().map(strip_expr).collect(),
-        },
         StmtKind::Assign { targets, value } => StmtKind::Assign {
             targets: targets.into_iter().map(strip_expr).collect(),
             value: Box::new(strip_expr(*value)),

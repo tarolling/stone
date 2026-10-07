@@ -334,7 +334,6 @@ impl<'out> Interpreter<'out> {
     /// ```text
     /// stmt = FunctionDef(identifier name, arguments args, stmt* body, expr? returns)
     ///      | Return(expr? value)
-    ///      | Delete(expr* targets)
     ///      | Assign(expr* targets, expr value)
     ///      | For(expr target, expr iter, stmt* body, stmt* orelse)
     ///      | While(expr test, stmt* body, stmt* orelse)
@@ -367,14 +366,6 @@ impl<'out> Interpreter<'out> {
                     Value::None
                 };
                 Ok(ControlFlow::Return(val))
-            }
-            StmtKind::Delete { targets } => {
-                for target in targets {
-                    if let ExprKind::Name { id, .. } = &target.kind {
-                        self.delete_var(id)?;
-                    }
-                }
-                Ok(ControlFlow::None)
             }
             StmtKind::Assign { targets, value } => {
                 let rhs = self.eval_expr(value)?;
@@ -767,13 +758,5 @@ impl<'out> Interpreter<'out> {
             .or_else(|| self.globals.get(name))
             .cloned()
             .ok_or_else(|| format!("'{name}' is used before it is assigned").into())
-    }
-
-    fn delete_var(&mut self, name: &str) -> EvalResult<()> {
-        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
-        if scope.remove(name).is_some() {
-            return Ok(());
-        }
-        Err(format!("Variable '{}' not found", name).into())
     }
 }

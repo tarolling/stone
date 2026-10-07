@@ -1,5 +1,139 @@
 use crate::codegen::AssemblyGenerator;
 
+/// The reference count of a string literal or other static object, which is never freed: no
+/// program can release it `1 << 62` times.
+pub const IMMORTAL: i64 = 1 << 62;
+
+/// Emits a string that lives as long as the program, preceded by the reference count every
+/// string has at `[label - 8]`, so retaining and releasing it works like any other string's.
+///
+/// For example, `immortal_string(gen, ".Lstone_empty", "")` emits the empty string `stone.input`
+/// returns at the end of the input. The caller picks the section, which must be writable.
+pub fn immortal_string(r#gen: &mut dyn AssemblyGenerator, label: &str, escaped: &str) {
+    r#gen.emit("\t.balign\t8");
+    r#gen.emit(&format!("\t.quad\t{IMMORTAL}"));
+    r#gen.emit(&format!("{label}:"));
+    r#gen.emit(&format!("\t.string \"{escaped}\""));
+}
+
+/// Emits the memory runtime. Every string and list `p` is counted: `[p - 8]` holds how many
+/// variables, list slots, and temporaries refer to it, and it is freed when that reaches 0.
+/// `stone.live` counts the objects allocated and not yet freed.
+///
+/// - `stone.alloc` returns a new object with room for `rdi` bytes and a count of 1
+/// - `stone.free_str` frees the string in `rax`, whose count just reached 0
+/// - `stone.free_list` frees the list in `rax`, whose count just reached 0, along with its
+///   elements' storage, first releasing each element if its `elem` field says they are counted
+/// - `stone.leak_check` exits with an error if the `STONE_LEAK_CHECK` environment variable is set
+///   and any object is still allocated, which tests use to find leaks
+///
+/// The free routines are reached from inline releases that do not count as calls, so they
+/// preserve every register except `rax`, `rcx`, `rdx`, and the `xmm` registers. `stone.leak_check`
+/// also preserves `rax`, which holds `main`'s exit status.
+pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\t.section\t.rodata");
+    r#gen.emit(".Lstone_leak_env:");
+    r#gen.emit("\t.string \"STONE_LEAK_CHECK\"");
+    r#gen.emit(".Lstone_leak_message:");
+    r#gen.emit("\t.string \"error: %ld objects were never freed\\n\"");
+    r#gen.emit("\t.text");
+
+    r#gen.emit("stone.alloc:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tadd\trdi, 8"); // room for the count
+    r#gen.emit("\tcall\tmalloc");
+    r#gen.emit("\tmov\tQWORD PTR [rax], 1");
+    r#gen.emit("\tinc\tQWORD PTR [rip + stone.live]");
+    r#gen.emit("\tadd\trax, 8");
+    r#gen.emit("\tleave");
+    r#gen.emit("\tret");
+
+    let saved = ["rdi", "rsi", "r8", "r9", "r10", "r11"];
+    r#gen.emit("stone.free_str:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    for reg in saved {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tlea\trdi, [rax - 8]");
+    r#gen.emit("\tcall\tfree");
+    r#gen.emit("\tdec\tQWORD PTR [rip + stone.live]");
+    r#gen.emit(&format!("\tlea\trsp, [rbp - {}]", 8 * saved.len()));
+    for reg in saved.iter().rev() {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+
+    // rbx holds the list and r12 the index of the element being released
+    let saved = ["rdi", "rsi", "r8", "r9", "r10", "r11", "rbx", "r12"];
+    r#gen.emit("stone.free_list:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    for reg in saved {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rax");
+    r#gen.emit("\tcmp\tQWORD PTR [rbx + 24], 0");
+    r#gen.emit("\tje\t.Lfree_list_storage"); // the elements are not counted
+    r#gen.emit("\txor\tr12, r12");
+    r#gen.emit(".Lfree_list_loop:");
+    r#gen.emit("\tcmp\tr12, QWORD PTR [rbx]");
+    r#gen.emit("\tjge\t.Lfree_list_storage");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tmov\trax, QWORD PTR [rax + r12 * 8]");
+    r#gen.emit("\tinc\tr12");
+    r#gen.emit("\tdec\tQWORD PTR [rax - 8]");
+    r#gen.emit("\tjnz\t.Lfree_list_loop");
+    r#gen.emit("\tcmp\tQWORD PTR [rbx + 24], 1");
+    r#gen.emit("\tje\t.Lfree_list_str");
+    // nesting is bounded by the element type, so this recursion is shallow
+    r#gen.emit("\tcall\tstone.free_list");
+    r#gen.emit("\tjmp\t.Lfree_list_loop");
+    r#gen.emit(".Lfree_list_str:");
+    r#gen.emit("\tcall\tstone.free_str");
+    r#gen.emit("\tjmp\t.Lfree_list_loop");
+    r#gen.emit(".Lfree_list_storage:");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tcall\tfree");
+    r#gen.emit("\tlea\trdi, [rbx - 8]");
+    r#gen.emit("\tcall\tfree");
+    r#gen.emit("\tdec\tQWORD PTR [rip + stone.live]");
+    r#gen.emit(&format!("\tlea\trsp, [rbp - {}]", 8 * saved.len()));
+    for reg in saved.iter().rev() {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+
+    r#gen.emit("stone.leak_check:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    r#gen.emit("\tpush\trax");
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tcmp\tQWORD PTR [rip + stone.live], 0");
+    r#gen.emit("\tje\t.Lleak_check_done");
+    r#gen.emit("\tlea\trdi, [rip + .Lstone_leak_env]");
+    r#gen.emit("\tcall\tgetenv");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lleak_check_done");
+    r#gen.emit("\tmov\tedi, 2"); // stderr
+    r#gen.emit("\tlea\trsi, [rip + .Lstone_leak_message]");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rip + stone.live]");
+    r#gen.emit("\txor\teax, eax"); // no vector register arguments
+    r#gen.emit("\tcall\tdprintf");
+    r#gen.emit("\tmov\tedi, 1");
+    r#gen.emit("\tcall\texit");
+    r#gen.emit(".Lleak_check_done:");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbp - 8]");
+    r#gen.emit("\tleave");
+    r#gen.emit("\tret");
+}
+
 /// Emits the routines behind `print`, each writing one value to stdout with no newline, so a call
 /// like `print("n", 1)` writes `n`, a space, `1`, and a newline with four calls.
 ///
@@ -102,13 +236,12 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
 
 /// Emits the float routines: `stone.format_float`, which writes the float whose bits are in `rdi`
 /// into the 64-byte buffer at `rsi` the way `stdlib::format_float` formats it, such as `1.0`,
-/// `0.1`, `1e+16`, or `nan`, plus `stone.print_float`, which prints it, and `stone.str_float`,
-/// which returns it as a new string for `str`.
+/// `0.1`, `1e+16`, or `nan`, plus `stone.print_float`, which prints it.
 ///
 /// It asks libc's `snprintf` for `%.*e` with 1, then 2, up to 17 significant digits, stopping at
 /// the first text `strtod` reads back as the same float, which is the shortest that round-trips.
 /// Exponents from -4 through 15 are then rewritten with `%.*f` to keep those digits, adding `.0`
-/// when nothing follows the point. `stone.print_float` needs `print`'s routines. They call libc,
+/// when nothing follows the point. `stone.print_float` needs `print`'s routines. Both call libc,
 /// so they clobber every caller-saved register, and realign the stack first, since generated code
 /// does not keep it aligned.
 pub fn float_runtime(r#gen: &mut dyn AssemblyGenerator) {
@@ -229,7 +362,11 @@ pub fn float_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcall\tstone.print_str");
     r#gen.emit("\tleave");
     r#gen.emit("\tret");
+}
 
+/// Emits `stone.str_float`, which returns the float whose bits are in `rdi` as a new string, the
+/// way `stone.print_float` prints it. It needs [`float_runtime`] and the memory runtime.
+pub fn str_float_runtime(r#gen: &mut dyn AssemblyGenerator) {
     // rbx holds the bits, then the new string
     r#gen.emit("stone.str_float:");
     r#gen.emit("\tpush\trbp");
@@ -238,7 +375,7 @@ pub fn float_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tand\trsp, -16");
     r#gen.emit("\tmov\trbx, rdi");
     r#gen.emit("\tmov\tedi, 64");
-    r#gen.emit("\tcall\tmalloc");
+    r#gen.emit("\tcall\tstone.alloc");
     r#gen.emit("\tmov\trdi, rbx");
     r#gen.emit("\tmov\trsi, rax");
     r#gen.emit("\tmov\trbx, rax");
@@ -249,7 +386,8 @@ pub fn float_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tret");
 }
 
-/// Emits the string runtime. Strings are null-terminated, and `+` makes a new one with `malloc`.
+/// Emits the string runtime. Strings are null-terminated and counted (see [`memory_runtime`]), and
+/// `+` makes a new one with `stone.alloc`.
 ///
 /// - `stone.str_len` returns the length in bytes of the string in `rdi`
 /// - `stone.str_eq` returns 1 if the strings in `rdi` and `rsi` hold the same bytes, else 0
@@ -300,7 +438,7 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcall\tstone.str_len");
     r#gen.emit("\tmov\tr15, rax");
     r#gen.emit("\tlea\trdi, [r14 + r15 + 1]"); // room for the terminator
-    r#gen.emit("\tcall\tmalloc");
+    r#gen.emit("\tcall\tstone.alloc");
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, r12");
     r#gen.emit("\tmov\trcx, r14");
@@ -325,7 +463,7 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trbx, rdi");
     r#gen.emit("\tmov\tr12, rsi");
     r#gen.emit("\tlea\trdi, [rsi + 1]"); // room for the terminator
-    r#gen.emit("\tcall\tmalloc");
+    r#gen.emit("\tcall\tstone.alloc");
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit("\tmov\trcx, r12");
@@ -338,27 +476,33 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tret");
 }
 
-/// Emits the list runtime. A list is a pointer to a 24-byte header `{len, cap, data}`, where
-/// `data` points to `cap` 8-byte elements. The routines follow the System V calling convention,
-/// and realign the stack before calling `malloc` or `realloc`, since generated code does not keep
-/// it aligned.
+/// Emits the list runtime. A list is a pointer to a counted 32-byte header `{len, cap, data,
+/// elem}` (see [`memory_runtime`]), where `data` points to `cap` 8-byte elements and `elem` says
+/// what they are: 0 for values that are not counted, 1 for strings, and 2 for lists. The routines
+/// follow the System V calling convention, and realign the stack before calling `malloc` or
+/// `realloc`, since generated code does not keep it aligned.
 ///
-/// - `stone.list_new` returns a list of length `rdi` whose elements the caller fills in
+/// - `stone.list_new` returns a list of length `rdi` whose elements the caller fills in, with
+///   `elem` set to `rsi`
 /// - `stone.list_append` appends `rsi` to list `rdi`, doubling its capacity when full
 ///
 /// Indexing is generated inline by `X64Generator::list_slot` (in `emit.rs`) rather than called here.
 pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the list, r12 its length, and r13 what its elements are
     r#gen.emit("stone.list_new:");
     r#gen.emit("\tpush\trbp");
     r#gen.emit("\tmov\trbp, rsp");
     r#gen.emit("\tpush\trbx");
     r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
     r#gen.emit("\tand\trsp, -16");
-    r#gen.emit("\tmov\tr12, rdi"); // length
-    r#gen.emit("\tmov\trdi, 24");
-    r#gen.emit("\tcall\tmalloc");
+    r#gen.emit("\tmov\tr12, rdi");
+    r#gen.emit("\tmov\tr13, rsi");
+    r#gen.emit("\tmov\trdi, 32");
+    r#gen.emit("\tcall\tstone.alloc");
     r#gen.emit("\tmov\trbx, rax");
     r#gen.emit("\tmov\tQWORD PTR [rbx], r12");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 24], r13");
     // room for at least 4 elements, so the first appends do not reallocate
     r#gen.emit("\tmov\trax, r12");
     r#gen.emit("\tmov\trcx, 4");
@@ -369,7 +513,8 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcall\tmalloc");
     r#gen.emit("\tmov\tQWORD PTR [rbx + 16], rax");
     r#gen.emit("\tmov\trax, rbx");
-    r#gen.emit("\tlea\trsp, [rbp - 16]");
+    r#gen.emit("\tlea\trsp, [rbp - 24]");
+    r#gen.emit("\tpop\tr13");
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbx");
     r#gen.emit("\tpop\trbp");
@@ -475,15 +620,15 @@ fn jump_if_space(r#gen: &mut dyn AssemblyGenerator, reg: &str, label: &str) {
 /// with syscalls, so a prompt shows before the program waits.
 ///
 /// - `stone.input` prints the string in `rdi` unless it is null, then returns the next line of
-///   stdin as a new string without its newline, or an empty string at the end of the input
+///   stdin as a new string without its newline, or an empty string at the end of the input. The
+///   line is copied out of `getline`'s buffer, which is then freed
 /// - `stone.eof` returns 1 if stdin has nothing left and 0 otherwise, peeking one byte with
 ///   `getc` and putting it back with `ungetc`
 ///
-/// `stone.input` needs `print`'s routines.
+/// `stone.input` needs `print`'s routines and the string runtime.
 pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator) {
-    r#gen.emit("\t.section\t.rodata");
-    r#gen.emit(".Lstone_empty:");
-    r#gen.emit("\t.string \"\"");
+    r#gen.emit("\t.data");
+    immortal_string(r#gen, ".Lstone_empty", "");
     r#gen.emit("\t.text");
 
     // getline fills the line pointer at [rbp - 16] and its capacity at [rbp - 24]
@@ -507,10 +652,16 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tjle\t.Linput_end");
     r#gen.emit("\tmov\trdi, QWORD PTR [rbp - 16]");
     r#gen.emit("\tcmp\tbyte ptr [rdi + rax - 1], 10"); // newline
-    r#gen.emit("\tjne\t.Linput_done");
-    r#gen.emit("\tmov\tbyte ptr [rdi + rax - 1], 0");
-    r#gen.emit(".Linput_done:");
-    r#gen.emit("\tmov\trax, rdi");
+    r#gen.emit("\tjne\t.Linput_copy");
+    r#gen.emit("\tdec\trax");
+    // the line becomes a counted string, and getline's buffer is freed
+    r#gen.emit(".Linput_copy:");
+    r#gen.emit("\tmov\trsi, rax");
+    r#gen.emit("\tcall\tstone.str_slice");
+    r#gen.emit("\tmov\tQWORD PTR [rbp - 8], rax");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbp - 16]");
+    r#gen.emit("\tcall\tfree");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbp - 8]");
     r#gen.emit("\tleave");
     r#gen.emit("\tret");
     // getline can allocate even when nothing is left to read
@@ -541,8 +692,9 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tret");
 }
 
-/// Emits `stone.args`, which returns a new list of the program's arguments without its name, from
-/// `stone.argc` and `stone.argv`, which `main` saves on entry. It needs the list runtime.
+/// Emits `stone.args`, which returns a new list of copies of the program's arguments without its
+/// name, from `stone.argc` and `stone.argv`, which `main` saves on entry. It needs the list and
+/// string runtimes.
 pub fn args_runtime(r#gen: &mut dyn AssemblyGenerator) {
     // rbx holds the list and r12 its length
     r#gen.emit("stone.args:");
@@ -558,14 +710,27 @@ pub fn args_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\ttest\trdi, rdi");
     r#gen.emit("\tcmovs\trdi, rax");
     r#gen.emit("\tmov\tr12, rdi");
+    r#gen.emit("\tmov\tesi, 1"); // a list of strings
     r#gen.emit("\tcall\tstone.list_new");
     r#gen.emit("\tmov\trbx, rax");
-    // the arguments' own strings become the elements
-    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 16]");
-    r#gen.emit("\tmov\trsi, QWORD PTR [rip + stone.argv]");
-    r#gen.emit("\tadd\trsi, 8");
-    r#gen.emit("\tmov\trcx, r12");
-    r#gen.emit("\trep\tmovsq");
+    // each argument is copied into a counted string, filling the list from the end
+    r#gen.emit(".Largs_loop:");
+    r#gen.emit("\ttest\tr12, r12");
+    r#gen.emit("\tjz\t.Largs_done");
+    r#gen.emit("\tmov\trax, QWORD PTR [rip + stone.argv]");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rax + r12 * 8]");
+    r#gen.emit("\tdec\tr12");
+    r#gen.emit("\tpush\trdi");
+    r#gen.emit("\tsub\trsp, 8");
+    r#gen.emit("\tcall\tstone.str_len");
+    r#gen.emit("\tmov\trsi, rax");
+    r#gen.emit("\tadd\trsp, 8");
+    r#gen.emit("\tpop\trdi");
+    r#gen.emit("\tcall\tstone.str_slice");
+    r#gen.emit("\tmov\trcx, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tmov\tQWORD PTR [rcx + r12 * 8], rax");
+    r#gen.emit("\tjmp\t.Largs_loop");
+    r#gen.emit(".Largs_done:");
     r#gen.emit("\tmov\trax, rbx");
     r#gen.emit("\tlea\trsp, [rbp - 16]");
     r#gen.emit("\tpop\tr12");
@@ -765,11 +930,9 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.str_int` returns the int in `rdi` as a new string, written like `stone.print_int`
 /// - `stone.str_bool` returns a constant `true` if `rdi` is nonzero and `false` otherwise
 pub fn conversion_runtime(r#gen: &mut dyn AssemblyGenerator) {
-    r#gen.emit("\t.section\t.rodata");
-    r#gen.emit(".Lstone_str_true:");
-    r#gen.emit("\t.string \"true\"");
-    r#gen.emit(".Lstone_str_false:");
-    r#gen.emit("\t.string \"false\"");
+    r#gen.emit("\t.data");
+    immortal_string(r#gen, ".Lstone_str_true", "true");
+    immortal_string(r#gen, ".Lstone_str_false", "false");
     r#gen.emit("\t.text");
 
     // digits are written backwards from the terminator at [rbp - 17], and rbx and r12 hold the
@@ -809,7 +972,7 @@ pub fn conversion_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tlea\tr12, [rbp - 16]");
     r#gen.emit("\tsub\tr12, rbx"); // the size, counting the terminator
     r#gen.emit("\tmov\trdi, r12");
-    r#gen.emit("\tcall\tmalloc");
+    r#gen.emit("\tcall\tstone.alloc");
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit("\tmov\trcx, r12");
@@ -880,6 +1043,7 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, empty_separator: &str) 
     r#gen.emit("\tand\trsp, -16");
     r#gen.emit("\tmov\trbx, rdi");
     r#gen.emit("\txor\tedi, edi");
+    r#gen.emit("\tmov\tesi, 1"); // a list of strings
     r#gen.emit("\tcall\tstone.list_new");
     r#gen.emit("\tmov\tr12, rax");
     r#gen.emit(".Lstr_split_ws_skip:");
@@ -934,6 +1098,7 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, empty_separator: &str) 
     r#gen.emit("\tcall\tstone.str_len");
     r#gen.emit("\tmov\tr14, rax");
     r#gen.emit("\txor\tedi, edi");
+    r#gen.emit("\tmov\tesi, 1"); // a list of strings
     r#gen.emit("\tcall\tstone.list_new");
     r#gen.emit("\tmov\tr12, rax");
     r#gen.emit(".Lstr_split_find:");

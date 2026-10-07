@@ -159,13 +159,12 @@ pub enum BoolOp {
 /// How a name or subscript is used: `x` in `print(x)` is loaded, and `x` in `x = 1` is stored.
 ///
 /// ```text
-/// expr_context = Load | Store | Delete
+/// expr_context = Load | Store
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprContext {
     Load,
     Store,
-    Delete,
 }
 
 /// An expression and the span of source text it was parsed from.
@@ -260,8 +259,6 @@ pub enum StmtKind {
 
     /// A return statement, such as `ret x`.
     Return { value: Option<Box<Expr>> },
-    /// A delete statement that removes variables from scope.
-    Delete { targets: Vec<Expr> },
     /// An assignment, such as `x = 1` or `a = b = 1`.
     Assign {
         targets: Vec<Expr>,

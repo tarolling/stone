@@ -148,7 +148,11 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
             if let Some(stderr) = build.error {
                 return Err(format!("build failed:\n{stderr}"));
             }
-            outcome_of(Command::new(&exe).args(&args), &input)
+            // the binary reports any string or list still allocated when it ends
+            outcome_of(
+                Command::new(&exe).args(&args).env("STONE_LEAK_CHECK", "1"),
+                &input,
+            )
         }
     }
 }

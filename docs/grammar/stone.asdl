@@ -10,7 +10,6 @@ module stone
 
           | Return(expr? value)
 
-          | Delete(expr* targets)
           | Assign(expr* targets, expr value)
 
           -- use 'orelse' because else is a keyword in target languages
@@ -34,7 +33,7 @@ module stone
          | Name(identifier id, expr_context ctx)
          | List(expr* elts, expr_context ctx)
 
-    expr_context = Load | Store | Delete
+    expr_context = Load | Store
 
     boolop = And | Or
 

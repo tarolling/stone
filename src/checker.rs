@@ -512,11 +512,6 @@ impl Inference {
                     }
                 }
             }
-            StmtKind::Delete { targets } => {
-                for target in targets {
-                    self.infer(target);
-                }
-            }
             StmtKind::Assign { targets, value } => {
                 let found = self.infer(value);
                 for target in targets {
@@ -1218,12 +1213,6 @@ impl<'a> AssignmentCheck<'a> {
                 }
                 None
             }
-            StmtKind::Delete { targets } => {
-                for target in targets {
-                    self.reads(target, &assigned);
-                }
-                Some(assigned)
-            }
             StmtKind::If { test, body, orelse } => {
                 self.reads(test, &assigned);
                 let then = self.block(body, Some(assigned.clone()));
@@ -1358,7 +1347,6 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
             StmtKind::FunctionDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Return { .. }
-            | StmtKind::Delete { .. }
             | StmtKind::Expr { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}

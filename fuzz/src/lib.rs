@@ -591,8 +591,8 @@ pub fn interpret(source: &str) -> Option<String> {
 
 /// Compiles `source` with `stone build`, runs the binary, and returns its stdout.
 ///
-/// For example, `run_compiled("print(1)\n")` returns `Ok("1\n")`. A compile error, crash, or hang
-/// is returned as `Err` with a description.
+/// For example, `run_compiled("print(1)\n")` returns `Ok("1\n")`. A compile error, crash, hang,
+/// or string or list the program never freed is returned as `Err` with a description.
 pub fn run_compiled(source: &str) -> std::result::Result<String, String> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let dir = std::env::temp_dir().join("stone-fuzz");
@@ -612,6 +612,7 @@ pub fn run_compiled(source: &str) -> std::result::Result<String, String> {
         let stdout = File::create(&stdout_path).map_err(|e| e.to_string())?;
         // empty stdin, like the input `interpret` gives the interpreter
         let mut child = Command::new(&exe)
+            .env("STONE_LEAK_CHECK", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
             .stderr(Stdio::null())

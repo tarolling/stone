@@ -8,7 +8,7 @@ pub mod builtins;
 mod emit;
 
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
-use crate::checker::{Type, TypeChecker};
+use crate::checker::{Symbol, Type, TypeChecker};
 use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::{Callee, Inst, Program};
 use crate::codegen::x64::builtins::print;
@@ -26,6 +26,8 @@ const STRING_ROUTINES: &[&str] = &[
     "stone.str_strip",
     "stone.str_split_ws",
     "stone.str_split",
+    "stone.input",
+    "stone.args",
 ];
 
 /// Registers that carry arguments under the System V ABI, in order.
@@ -46,6 +48,8 @@ pub struct X64Generator {
     string_literals: HashMap<String, String>,
     /// The type of every expression, keyed by span, from the checker.
     types: HashMap<Span, Type>,
+    /// Every function and variable, with its type, from the checker.
+    symbols: Vec<Symbol>,
     /// List types that `print` needs a printer for, emitted after the code that uses them.
     list_printers: Vec<Type>,
     /// Whether `print` needs `stone.print_float`, emitted after the code that uses it.
@@ -57,6 +61,9 @@ pub struct X64Generator {
     needs_fail: bool,
     /// Every runtime routine the lowered program calls, such as `stone.input`.
     runtime: HashSet<&'static str>,
+    /// Whether the program has strings or lists, which need the memory runtime, and `main` checks
+    /// for leaks before it returns.
+    counts_references: bool,
 }
 
 impl AssemblyGenerator for X64Generator {
@@ -86,7 +93,7 @@ impl AssemblyGenerator for X64Generator {
     }
 
     fn scan(&mut self, module: &Mod) -> Result<(), String> {
-        self.program = lower(module, &self.types)?;
+        self.program = lower(module, &self.types, &self.symbols)?;
         Ok(())
     }
 
@@ -109,6 +116,8 @@ impl AssemblyGenerator for X64Generator {
             })
             .collect();
 
+        self.counts_references = self.needs_strings() || self.needs_lists();
+
         // only emit the stdlib functions that are actually called
         let stdlib_calls = self.collect_stdlib_calls(module);
         self.emit_stdlib(stdlib_calls);
@@ -124,11 +133,17 @@ impl AssemblyGenerator for X64Generator {
         if self.prints_floats || self.uses(&["stone.str_float"]) {
             builtins::float_runtime(self);
         }
-        if self.types.values().any(|ty| *ty == Type::Str) || self.uses(STRING_ROUTINES) {
+        if self.uses(&["stone.str_float"]) {
+            builtins::str_float_runtime(self);
+        }
+        if self.needs_strings() {
             builtins::string_runtime(self);
         }
+        if self.counts_references {
+            builtins::memory_runtime(self);
+        }
 
-        self.emit_rodata();
+        self.emit_string_literals();
         self.emit_globals();
 
         // suppress the linker's executable stack warning
@@ -165,6 +180,7 @@ impl X64Generator {
             return Err(error.to_string());
         }
         self.types = analysis.types;
+        self.symbols = analysis.symbols;
 
         // first pass lowers to IR, and the second allocates registers and emits
         self.scan(module)?;
@@ -179,11 +195,13 @@ impl X64Generator {
             program: Program::default(),
             string_literals: HashMap::new(),
             types: HashMap::new(),
+            symbols: Vec::new(),
             list_printers: Vec::new(),
             prints_floats: false,
             failures: Vec::new(),
             needs_fail: false,
             runtime: HashSet::new(),
+            counts_references: false,
         }
     }
 
@@ -285,6 +303,17 @@ impl X64Generator {
         })
     }
 
+    /// Returns whether the program needs the string runtime.
+    fn needs_strings(&self) -> bool {
+        self.types.values().any(|ty| *ty == Type::Str) || self.uses(STRING_ROUTINES)
+    }
+
+    /// Returns whether the program needs the list runtime.
+    fn needs_lists(&self) -> bool {
+        self.types.values().any(contains_list)
+            || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
+    }
+
     /// Returns whether the program calls any of the runtime routines in `labels`.
     fn uses(&self, labels: &[&str]) -> bool {
         labels.iter().any(|label| self.runtime.contains(label))
@@ -314,8 +343,7 @@ impl X64Generator {
 
     /// Emits the list runtime and every list printer `print` asked for, if the program uses lists.
     fn emit_list_runtime(&mut self) -> Result<(), String> {
-        let needed = self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"]);
-        if !needed && !self.types.values().any(contains_list) {
+        if !self.needs_lists() {
             return Ok(());
         }
         builtins::list_runtime(self);
@@ -392,11 +420,6 @@ impl X64Generator {
                     self.collect_calls_from_stmt(s, calls);
                 }
             }
-            StmtKind::Delete { targets } => {
-                for target in targets {
-                    self.collect_calls_from_expr(target, calls);
-                }
-            }
             StmtKind::Break | StmtKind::Continue | StmtKind::Use { .. } => {}
         }
     }
@@ -468,17 +491,18 @@ impl X64Generator {
         }
     }
 
-    fn emit_rodata(&mut self) {
+    /// Emits every interned string literal as an immortal string (see
+    /// [`builtins::immortal_string`]). They go in `.data` rather than `.rodata`, since retaining
+    /// and releasing a string writes its count.
+    fn emit_string_literals(&mut self) {
         if self.string_literals.is_empty() {
             return;
         }
 
         self.emit("");
-        self.emit("\t.section\t.rodata");
+        self.emit("\t.data");
 
         for (content, label) in &self.string_literals.clone() {
-            self.emit(&format!("{}:", label));
-
             // escape special characters for assembly
             let escaped = content
                 .replace("\\", "\\\\")
@@ -487,14 +511,15 @@ impl X64Generator {
                 .replace("\t", "\\t")
                 .replace("\r", "\\r");
 
-            self.emit(&format!("\t.string \"{}\"", escaped));
+            builtins::immortal_string(self, label, &escaped);
         }
 
         self.emit("");
     }
 
-    /// Emits the `.bss` data: the count of active calls, and a zeroed 8-byte slot for each global
-    /// variable, plus a flag that is set once the global is assigned.
+    /// Emits the `.bss` data: the count of active calls, the count of live objects if the program
+    /// has strings or lists, and a zeroed 8-byte slot for each global variable, plus a flag that
+    /// is set once the global is assigned.
     ///
     /// For example, `total = 1` at the top level produces `g.total` and `g.total.set`.
     fn emit_globals(&mut self) {
@@ -502,6 +527,10 @@ impl X64Generator {
         self.emit("\t.p2align\t3");
         self.emit("stone.call_depth:");
         self.emit("\t.zero\t8");
+        if self.counts_references {
+            self.emit("stone.live:");
+            self.emit("\t.zero\t8");
+        }
         if self.uses(&["stone.args"]) {
             // main saves its argc and argv here for args()
             self.emit("stone.argc:");
@@ -702,6 +731,42 @@ mod tests {
         assert!(!lcg.contains("[rbp -"), "{lcg}");
         assert!(!lcg.contains("\tpush\trax"), "{lcg}");
         assert!(!lcg.contains("idiv"), "{lcg}");
+    }
+
+    #[test]
+    fn releasing_is_not_a_call_so_a_loop_keeps_caller_saved_registers() {
+        let source = "def count(xs);\n    n = 0\n    for x in xs;\n        n = n + 1\n    ret n\n\
+                      print(count([\"a\", \"b\"]))\n";
+        let count = function_text(&assemble(source).unwrap(), "count");
+        // each element is retained for x, and x's old value released, freeing it if it was last
+        assert!(count.contains("\tinc\tQWORD PTR ["), "{count}");
+        assert!(count.contains("\tdec\tQWORD PTR ["), "{count}");
+        assert!(count.contains("\tcall\tstone.free_str"), "{count}");
+        assert!(count.contains("\tcall\tstone.free_list"), "{count}");
+        // so nothing needs a callee-saved register or a spill slot
+        for reg in ["rbx", "r12", "r13", "r14", "r15"] {
+            assert!(!count.contains(&format!("\tpush\t{reg}")), "{count}");
+        }
+        assert!(!count.contains("[rbp -"), "{count}");
+    }
+
+    #[test]
+    fn string_literals_are_writable_and_never_freed() {
+        let text = assemble("print(\"hi\" + \"!\")\n").unwrap();
+        let data = text.split("\t.data").nth(1).expect("a data section");
+        assert!(
+            data.contains(&format!("\t.quad\t{}\n", builtins::IMMORTAL)),
+            "{data}"
+        );
+        assert!(data.contains("\t.string \"hi\""), "{data}");
+        assert!(text.contains("\tcall\tstone.leak_check"), "{text}");
+    }
+
+    #[test]
+    fn programs_without_strings_or_lists_have_no_memory_runtime() {
+        let text = assemble("print(1 + 2)\n").unwrap();
+        assert!(!text.contains("stone.alloc"), "{text}");
+        assert!(!text.contains("stone.leak_check"), "{text}");
     }
 
     #[test]

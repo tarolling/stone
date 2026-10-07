@@ -125,6 +125,30 @@ impl From<&CompOp> for Cond {
     }
 }
 
+/// What a counted value is, which tells [`Inst::Release`] how to free it.
+///
+/// Strings and lists are counted: each holds how many variables, list slots, and temporaries
+/// refer to it, and is freed when the last one lets go. Other values are not counted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RcKind {
+    Str,
+    List,
+}
+
+impl RcKind {
+    /// Returns the kind of a value of type `ty`, or `None` if it is not counted.
+    ///
+    /// For example, `RcKind::of(&Type::Str)` is `Some(RcKind::Str)` and `RcKind::of(&Type::Int)`
+    /// is `None`.
+    pub fn of(ty: &Type) -> Option<RcKind> {
+        match ty {
+            Type::Str => Some(RcKind::Str),
+            Type::List(_) => Some(RcKind::List),
+            _ => None,
+        }
+    }
+}
+
 /// What a [`Inst::Call`] calls.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Callee {
@@ -181,12 +205,8 @@ pub enum Inst {
         name: String,
         checked: bool,
     },
-    /// Writes a global, also marking it assigned when `mark_set` is true.
-    StoreGlobal {
-        name: String,
-        src: Operand,
-        mark_set: bool,
-    },
+    /// Writes a global, also marking it assigned.
+    StoreGlobal { name: String, src: Operand },
     /// The address of a string literal.
     StrAddr { dst: VReg, text: String },
     /// The length of a list.
@@ -197,8 +217,10 @@ pub enum Inst {
         list: Operand,
         index: Operand,
     },
-    /// `list[index] = value`, with the same index rules as [`Inst::ListLoad`].
+    /// `list[index] = value`, with the same index rules as [`Inst::ListLoad`], also writing the
+    /// element it replaces to `old` if there is one.
     ListStore {
+        old: Option<VReg>,
         list: Operand,
         index: Operand,
         value: Operand,
@@ -219,6 +241,11 @@ pub enum Inst {
     IntToFloat { dst: VReg, src: Operand },
     /// Converts a float's bits to an int, dropping the fraction and failing on nan or overflow.
     FloatToInt { dst: VReg, src: Operand },
+    /// Adds a reference to the counted value `src`, unless it is null.
+    Retain { src: Operand },
+    /// Drops a reference to the counted value `src`, unless it is null, freeing it when no
+    /// references are left. It is not a call: freeing preserves every register a vreg can be in.
+    Release { src: Operand, kind: RcKind },
     /// Calls a function with `args` and stores its result in `dst`, if any. A call may change
     /// globals and lists, but never a caller's vregs.
     Call {
@@ -248,8 +275,11 @@ impl Inst {
             | Inst::ListGet { dst, .. }
             | Inst::IntToFloat { dst, .. }
             | Inst::FloatToInt { dst, .. } => Some(*dst),
-            Inst::Call { dst, .. } => *dst,
-            Inst::StoreGlobal { .. } | Inst::ListStore { .. } | Inst::ListInit { .. } => None,
+            Inst::Call { dst, .. } | Inst::ListStore { old: dst, .. } => *dst,
+            Inst::StoreGlobal { .. }
+            | Inst::ListInit { .. }
+            | Inst::Retain { .. }
+            | Inst::Release { .. } => None,
         }
     }
 
@@ -264,7 +294,9 @@ impl Inst {
             | Inst::Not { src, .. }
             | Inst::IntToFloat { src, .. }
             | Inst::FloatToInt { src, .. }
-            | Inst::StoreGlobal { src, .. } => vec![*src],
+            | Inst::StoreGlobal { src, .. }
+            | Inst::Retain { src }
+            | Inst::Release { src, .. } => vec![*src],
             Inst::Binary { lhs, rhs, .. }
             | Inst::FloatBinary { lhs, rhs, .. }
             | Inst::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
@@ -273,7 +305,9 @@ impl Inst {
             Inst::ListLoad { list, index, .. } | Inst::ListGet { list, index, .. } => {
                 vec![*list, *index]
             }
-            Inst::ListStore { list, index, value } => vec![*list, *index, *value],
+            Inst::ListStore {
+                list, index, value, ..
+            } => vec![*list, *index, *value],
             Inst::ListInit { list, value, .. } => vec![*list, *value],
             Inst::Call { args, .. } => args.clone(),
         }
@@ -462,20 +496,21 @@ impl fmt::Display for Inst {
                 let suffix = if *checked { "_checked" } else { "" };
                 write!(f, "{dst} = load_global{suffix} {name}")
             }
-            Inst::StoreGlobal {
-                name,
-                src,
-                mark_set,
-            } => {
-                let suffix = if *mark_set { "" } else { "_unmarked" };
-                write!(f, "store_global{suffix} {name}, {src}")
-            }
+            Inst::StoreGlobal { name, src } => write!(f, "store_global {name}, {src}"),
             Inst::StrAddr { dst, text } => write!(f, "{dst} = str {text:?}"),
             Inst::ListLen { dst, list } => write!(f, "{dst} = len {list}"),
             Inst::ListLoad { dst, list, index } => {
                 write!(f, "{dst} = list_load {list}, {index}")
             }
-            Inst::ListStore { list, index, value } => {
+            Inst::ListStore {
+                old,
+                list,
+                index,
+                value,
+            } => {
+                if let Some(old) = old {
+                    write!(f, "{old} = ")?;
+                }
                 write!(f, "list_store {list}, {index}, {value}")
             }
             Inst::ListGet { dst, list, index } => write!(f, "{dst} = list_get {list}, {index}"),
@@ -484,6 +519,11 @@ impl fmt::Display for Inst {
             }
             Inst::IntToFloat { dst, src } => write!(f, "{dst} = int_to_float {src}"),
             Inst::FloatToInt { dst, src } => write!(f, "{dst} = float_to_int {src}"),
+            Inst::Retain { src } => write!(f, "retain {src}"),
+            Inst::Release { src, kind } => match kind {
+                RcKind::Str => write!(f, "release_str {src}"),
+                RcKind::List => write!(f, "release_list {src}"),
+            },
             Inst::Call { dst, callee, args } => {
                 if let Some(dst) = dst {
                     write!(f, "{dst} = ")?;

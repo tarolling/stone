@@ -10,7 +10,9 @@
 use super::{ARG_REGS, X64Generator, function_label};
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::ir::liveness::analyze;
-use crate::codegen::ir::{BinOp, BlockId, Callee, Cond, Function, Inst, Operand, Terminator, VReg};
+use crate::codegen::ir::{
+    BinOp, BlockId, Callee, Cond, Function, Inst, Operand, RcKind, Terminator, VReg,
+};
 use crate::codegen::regalloc::{Hint, Location, linear_scan, parallel_moves};
 use crate::stdlib::MAX_CALL_DEPTH;
 use std::collections::HashMap;
@@ -236,6 +238,9 @@ impl X64Generator {
         }
 
         self.emit(&format!("{}:", frame.epilogue));
+        if frame.is_main && self.counts_references {
+            self.emit("\tcall\tstone.leak_check");
+        }
         if !frame.is_main {
             self.emit("\tdec\tQWORD PTR [rip + stone.call_depth]");
         }
@@ -731,11 +736,7 @@ impl X64Generator {
                 self.store(dst, target);
             }
 
-            Inst::StoreGlobal {
-                name,
-                src,
-                mark_set,
-            } => {
+            Inst::StoreGlobal { name, src } => {
                 let label = super::global_label(name);
                 match frame.value(*src)? {
                     Value::Reg(reg) => {
@@ -749,9 +750,7 @@ impl X64Generator {
                         self.emit(&format!("\tmov\tQWORD PTR [rip + {label}], rax"));
                     }
                 }
-                if *mark_set {
-                    self.emit(&format!("\tmov\tQWORD PTR [rip + {label}.set], 1"));
-                }
+                self.emit(&format!("\tmov\tQWORD PTR [rip + {label}.set], 1"));
             }
 
             Inst::StrAddr { dst, text } => {
@@ -780,15 +779,64 @@ impl X64Generator {
                 self.store(dst, target);
             }
 
-            Inst::ListStore { list, index, value } => {
+            Inst::ListStore {
+                old,
+                list,
+                index,
+                value,
+            } => {
                 let (list, index, value) = (
                     frame.value(*list)?,
                     frame.value(*index)?,
                     frame.value(*value)?,
                 );
                 let slot = self.list_slot(list, index, true);
+                // the slot needs rax and rcx and the value may need rdx, so the old element waits
+                // in xmm0, since `old` may share a register with `value`
+                if old.is_some() {
+                    self.emit(&format!("\tmovq\txmm0, QWORD PTR {slot}"));
+                }
                 self.store_qword(&slot, value);
+                if let Some(old) = old {
+                    let old = frame.reg(*old)?;
+                    self.emit(&format!("\tmovq\t{old}, xmm0"));
+                }
             }
+
+            Inst::Retain { src } => match frame.value(*src)? {
+                // none, or a variable never assigned
+                Value::Imm(0) => {}
+                Value::Imm(_) => return Err("only a pointer can be retained".to_string()),
+                value => {
+                    let base = self.base(value, "rax");
+                    let skip = self.new_label("retained");
+                    self.emit(&format!("\ttest\t{base}, {base}"));
+                    self.emit(&format!("\tjz\t{skip}"));
+                    self.emit(&format!("\tinc\tQWORD PTR [{base} - 8]"));
+                    self.emit(&format!("{skip}:"));
+                }
+            },
+
+            Inst::Release { src, kind } => match frame.value(*src)? {
+                Value::Imm(0) => {}
+                Value::Imm(_) => return Err("only a pointer can be released".to_string()),
+                value => {
+                    let base = self.base(value, "rax");
+                    let skip = self.new_label("released");
+                    self.emit(&format!("\ttest\t{base}, {base}"));
+                    self.emit(&format!("\tjz\t{skip}"));
+                    self.emit(&format!("\tdec\tQWORD PTR [{base} - 8]"));
+                    self.emit(&format!("\tjnz\t{skip}"));
+                    // the last reference is gone, and the free routines take it in rax
+                    self.load("rax", Value::Reg(base));
+                    let routine = match kind {
+                        RcKind::Str => "stone.free_str",
+                        RcKind::List => "stone.free_list",
+                    };
+                    self.emit(&format!("\tcall\t{routine}"));
+                    self.emit(&format!("{skip}:"));
+                }
+            },
 
             Inst::ListInit { list, index, value } => {
                 let (list, value) = (frame.value(*list)?, frame.value(*value)?);

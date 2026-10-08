@@ -22,6 +22,9 @@ jobs:
       run: cargo clippy --all-targets --features self-update -- -D warnings
     - name: Build
       run: cargo build --verbose
+    # the golden programs are also built for aarch64 and run under qemu-user
+    - name: Install the aarch64 cross compiler and qemu
+      run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
     - name: Run tests
       run: cargo test --verbose
     - name: Run self-update tests
@@ -35,6 +38,22 @@ jobs:
     - name: Test the VS Code extension
       working-directory: editors/vscode
       run: npm test
+
+  # stone build targets the host, so this runs the arm64 backend natively
+  build-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Install Rust if the runner lacks it
+      run: command -v rustup || curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
+    - name: Build
+      run: |
+        export PATH="$HOME/.cargo/bin:$PATH"
+        cargo build --verbose
+    - name: Run tests
+      run: |
+        export PATH="$HOME/.cargo/bin:$PATH"
+        cargo test --verbose
 
   fuzz:
 

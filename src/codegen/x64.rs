@@ -7,28 +7,11 @@
 pub mod builtins;
 mod emit;
 
-use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
-use crate::checker::{Symbol, Type, TypeChecker};
-use crate::codegen::ir::lower::lower;
-use crate::codegen::ir::{Callee, Inst, Program};
+use crate::ast::Mod;
+use crate::codegen::context::{Context, global_label, immortal_string};
 use crate::codegen::x64::builtins::print;
 use crate::codegen::{Architecture, AssemblyGenerator};
-use crate::span::Span;
-use crate::stdlib::BUILTINS;
-use std::collections::{HashMap, HashSet};
 use std::path::Path;
-
-/// Runtime routines that need the string runtime, even in a program where no expression is a
-/// `str`, such as one that only prints `args()`.
-const STRING_ROUTINES: &[&str] = &[
-    "stone.parse_int",
-    "stone.parse_float",
-    "stone.str_strip",
-    "stone.str_split_ws",
-    "stone.str_split",
-    "stone.input",
-    "stone.args",
-];
 
 /// Registers that carry arguments under the System V ABI, in order.
 ///
@@ -40,106 +23,59 @@ const ARG_REGS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 /// Code generator for x86-64 that emits GNU assembler source in Intel syntax.
 ///
 /// For example, `a + b` with `a` and `b` in registers becomes a `mov` and an `add`.
+#[derive(Default)]
 pub struct X64Generator {
     output: String,
-    label_count: usize,
-    /// The lowered module, produced by [`AssemblyGenerator::scan`].
-    program: Program,
-    string_literals: HashMap<String, String>,
-    /// The type of every expression, keyed by span, from the checker.
-    types: HashMap<Span, Type>,
-    /// Every function and variable, with its type, from the checker.
-    symbols: Vec<Symbol>,
-    /// List types that `print` needs a printer for, emitted after the code that uses them.
-    list_printers: Vec<Type>,
-    /// Whether `print` needs `stone.print_float`, emitted after the code that uses it.
-    prints_floats: bool,
-    /// Runtime errors the code can jump to, as `(label, message)`, emitted after `main`.
-    failures: Vec<(String, String)>,
-    /// Whether runtime routines build messages for `stone.fail` themselves, so it is needed even
-    /// without a [`X64Generator::fail_label`].
-    needs_fail: bool,
-    /// Every runtime routine the lowered program calls, such as `stone.input`.
-    runtime: HashSet<&'static str>,
-    /// Whether the program has strings or lists, which need the memory runtime, and `main` checks
-    /// for leaks before it returns.
-    counts_references: bool,
+    /// What the backends share about the program being compiled.
+    ctx: Context,
 }
 
 impl AssemblyGenerator for X64Generator {
     fn compile(&mut self, module: &Mod, output: &Path) -> std::io::Result<()> {
         let text = self.assemble(module).map_err(std::io::Error::other)?;
+        crate::codegen::link(&text, output, self.architecture())
+    }
 
-        let assembly = output.with_extension("s");
-        if let Some(dir) = output.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        std::fs::write(&assembly, text)?;
-
-        // assemble and link here for now
-        let status = std::process::Command::new("gcc")
-            .arg("-g")
-            .arg("-no-pie")
-            .arg("-o")
-            .arg(output)
-            .arg(&assembly)
-            .status()?;
-
-        if !status.success() {
-            return Err(std::io::Error::other(format!("gcc failed with {status}")));
-        }
-
-        Ok(())
+    fn assemble(&mut self, module: &Mod) -> Result<String, String> {
+        self.ctx.check(module)?;
+        // first pass lowers to IR, and the second allocates registers and emits
+        self.scan(module)?;
+        self.generate(module)?;
+        Ok(self.output.clone())
     }
 
     fn scan(&mut self, module: &Mod) -> Result<(), String> {
-        self.program = lower(module, &self.types, &self.symbols)?;
-        Ok(())
+        self.ctx.lower(module)
     }
 
     fn generate(&mut self, module: &Mod) -> Result<(), String> {
         self.emit("\t.intel_syntax noprefix");
         self.emit("\t.text");
 
-        self.runtime = self
-            .program
-            .functions
-            .iter()
-            .flat_map(|function| &function.blocks)
-            .flat_map(|block| &block.insts)
-            .filter_map(|inst| match inst {
-                Inst::Call {
-                    callee: Callee::Runtime(label),
-                    ..
-                } => Some(*label),
-                _ => None,
-            })
-            .collect();
-
-        self.counts_references = self.needs_strings() || self.needs_lists();
-
-        // only emit the stdlib functions that are actually called
-        let stdlib_calls = self.collect_stdlib_calls(module);
-        self.emit_stdlib(stdlib_calls);
+        // only emit the print routines if the program prints
+        if self.ctx.needs_print(module) {
+            self.emit("\t# Standard Library Functions");
+            print(self);
+        }
 
         // stone functions first, then main, which the lowering puts last
-        for function in std::mem::take(&mut self.program.functions) {
+        for function in std::mem::take(&mut self.ctx.program.functions) {
             self.emit_function(&function)?;
         }
 
         self.emit_io_runtime();
         self.emit_failures();
         self.emit_list_runtime()?;
-        if self.prints_floats || self.uses(&["stone.str_float"]) {
+        if self.ctx.prints_floats || self.ctx.uses(&["stone.str_float"]) {
             builtins::float_runtime(self);
         }
-        if self.uses(&["stone.str_float"]) {
+        if self.ctx.uses(&["stone.str_float"]) {
             builtins::str_float_runtime(self);
         }
-        if self.needs_strings() {
+        if self.ctx.needs_strings() {
             builtins::string_runtime(self);
         }
-        if self.counts_references {
+        if self.ctx.counts_references {
             builtins::memory_runtime(self);
         }
 
@@ -162,96 +98,25 @@ impl AssemblyGenerator for X64Generator {
     }
 }
 
-impl Default for X64Generator {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl X64Generator {
-    /// Runs both compilation passes and returns the assembly text, without assembling or linking.
-    ///
-    /// For example, assembling the module for `print(1)` returns text containing `main:` and
-    /// `call stone.print_int`.
-    pub fn assemble(&mut self, module: &Mod) -> Result<String, String> {
-        // code generation depends on the checker's types, so it only accepts valid programs
-        let analysis = TypeChecker::new().analyze(module);
-        if let Some(error) = analysis.diagnostics.first() {
-            return Err(error.to_string());
-        }
-        self.types = analysis.types;
-        self.symbols = analysis.symbols;
-
-        // first pass lowers to IR, and the second allocates registers and emits
-        self.scan(module)?;
-        self.generate(module)?;
-        Ok(self.output.clone())
-    }
-
     pub fn new() -> Self {
-        X64Generator {
-            output: String::new(),
-            label_count: 0,
-            program: Program::default(),
-            string_literals: HashMap::new(),
-            types: HashMap::new(),
-            symbols: Vec::new(),
-            list_printers: Vec::new(),
-            prints_floats: false,
-            failures: Vec::new(),
-            needs_fail: false,
-            runtime: HashSet::new(),
-            counts_references: false,
-        }
+        Self::default()
     }
 
-    fn new_label(&mut self, prefix: &str) -> String {
-        let label = format!(".L{}_{}", prefix, self.label_count);
-        self.label_count += 1;
-        label
-    }
-
-    fn intern_string(&mut self, content: &str) -> String {
-        // reuse an existing label
-        if let Some(label) = self.string_literals.get(content) {
-            return label.clone();
-        }
-
-        // new label for this string
-        let label = self.new_label("str");
-        self.string_literals
-            .insert(content.to_string(), label.clone());
-        label
-    }
-
-    /// Returns a label that stops the program with `message`, the way the interpreter reports the
-    /// same runtime error.
-    ///
-    /// For example, jumping to `self.fail_label("division by zero")` prints
-    /// `error: division by zero` to stderr and exits with status 1.
-    fn fail_label(&mut self, message: &str) -> String {
-        if let Some((label, _)) = self.failures.iter().find(|(_, m)| m == message) {
-            return label.clone();
-        }
-        let label = self.new_label("fail");
-        self.failures.push((label.clone(), message.to_string()));
-        label
-    }
-
-    /// Emits the code behind every [`X64Generator::fail_label`], plus `stone.fail`, which writes
+    /// Emits the code behind every [`Context::fail_label`], plus `stone.fail`, which writes
     /// `error: `, the string in `rdi`, and a newline to stderr, then exits with status 1.
     fn emit_failures(&mut self) {
-        if self.failures.is_empty() && !self.needs_fail {
+        let Some(failures) = self.ctx.failures() else {
             return;
-        }
-        for (label, message) in self.failures.clone() {
-            let text = self.intern_string(&message);
+        };
+        for (label, message) in failures {
+            let text = self.ctx.intern_string(&message);
             self.emit(&format!("{label}:"));
             self.emit(&format!("\tlea\trdi, [rip + {text}]"));
             self.emit("\tjmp\tstone.fail");
         }
-        let prefix = self.intern_string("error: ");
-        let newline = self.intern_string("\n");
+        let prefix = self.ctx.intern_string("error: ");
+        let newline = self.ctx.intern_string("\n");
         self.emit("stone.fail:");
         self.emit("\tmov\tr12, rdi");
         for text in [prefix, "r12".to_string(), newline] {
@@ -262,8 +127,8 @@ impl X64Generator {
             }
             // strlen, then write to stderr
             self.emit("\txor\trdx, rdx");
-            let length = self.new_label("fail_length");
-            let write = self.new_label("fail_write");
+            let length = self.ctx.new_label("fail_length");
+            let write = self.ctx.new_label("fail_write");
             self.emit(&format!("{length}:"));
             self.emit("\tcmp\tbyte ptr [rsi + rdx], 0");
             self.emit(&format!("\tje\t{write}"));
@@ -279,241 +144,57 @@ impl X64Generator {
         self.emit("\tsyscall");
     }
 
-    /// Returns the routine that prints a value of type `ty`, quoting strings inside lists.
-    ///
-    /// For example, `list[int]` is printed by `stone.print_list_int`, which is emitted later.
-    fn print_routine(&mut self, ty: &Type, nested: bool) -> Result<String, String> {
-        Ok(match ty {
-            Type::Int => "stone.print_int".to_string(),
-            Type::Float => {
-                self.prints_floats = true;
-                "stone.print_float".to_string()
-            }
-            Type::Bool => "stone.print_bool".to_string(),
-            Type::Str if nested => "stone.print_str_quoted".to_string(),
-            Type::Str => "stone.print_str".to_string(),
-            Type::None => "stone.print_none".to_string(),
-            Type::List(_) => {
-                if !self.list_printers.contains(ty) {
-                    self.list_printers.push(ty.clone());
-                }
-                format!("stone.print_{}", mangle(ty))
-            }
-            Type::Function { .. } => return Err("functions cannot be printed".to_string()),
-        })
-    }
-
-    /// Returns whether the program needs the string runtime.
-    fn needs_strings(&self) -> bool {
-        self.types.values().any(|ty| *ty == Type::Str) || self.uses(STRING_ROUTINES)
-    }
-
-    /// Returns whether the program needs the list runtime.
-    fn needs_lists(&self) -> bool {
-        self.types.values().any(contains_list)
-            || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
-    }
-
-    /// Returns whether the program calls any of the runtime routines in `labels`.
-    fn uses(&self, labels: &[&str]) -> bool {
-        labels.iter().any(|label| self.runtime.contains(label))
-    }
-
     /// Emits the routines behind input, `args`, parsing, `str`, and the string methods that the
     /// program calls, before the failures, since some of them fail through `stone.fail`.
     fn emit_io_runtime(&mut self) {
-        if self.uses(&["stone.input", "stone.eof"]) {
+        if self.ctx.uses(&["stone.input", "stone.eof"]) {
             builtins::io_runtime(self);
         }
-        if self.uses(&["stone.args"]) {
+        if self.ctx.uses(&["stone.args"]) {
             builtins::args_runtime(self);
         }
-        if self.uses(&["stone.parse_int", "stone.parse_float"]) {
+        if self.ctx.uses(&["stone.parse_int", "stone.parse_float"]) {
             builtins::parse_runtime(self);
-            self.needs_fail = true;
+            self.ctx.needs_fail = true;
         }
-        if self.uses(&["stone.str_int", "stone.str_bool"]) {
+        if self.ctx.uses(&["stone.str_int", "stone.str_bool"]) {
             builtins::conversion_runtime(self);
         }
-        if self.uses(&["stone.str_strip", "stone.str_split_ws", "stone.str_split"]) {
-            let empty_separator = self.fail_label("empty separator");
+        if self
+            .ctx
+            .uses(&["stone.str_strip", "stone.str_split_ws", "stone.str_split"])
+        {
+            let empty_separator = self.ctx.fail_label("empty separator");
             builtins::string_methods(self, &empty_separator);
         }
     }
 
     /// Emits the list runtime and every list printer `print` asked for, if the program uses lists.
     fn emit_list_runtime(&mut self) -> Result<(), String> {
-        if !self.needs_lists() {
+        if !self.ctx.needs_lists() {
             return Ok(());
         }
         builtins::list_runtime(self);
-
-        // printing a nested list registers the printer for its elements, so work until none are new
-        let mut emitted = 0;
-        while emitted < self.list_printers.len() {
-            let ty = self.list_printers[emitted].clone();
-            emitted += 1;
-            let Type::List(elem) = &ty else {
-                continue;
-            };
-            let element = self.print_routine(elem, true)?;
-            builtins::print_list(self, &format!("stone.print_{}", mangle(&ty)), &element);
+        for (label, element) in self.ctx.list_printers()? {
+            builtins::print_list(self, &label, &element);
         }
         Ok(())
     }
 
-    /// Returns the standard library functions that the module calls.
-    ///
-    /// For example, a program that only calls `print` returns `["print"]`, so `len` is never emitted.
-    fn collect_stdlib_calls(&self, module: &Mod) -> Vec<String> {
-        let mut calls = HashSet::new();
-
-        match module {
-            Mod::Module { body } => {
-                for stmt in body {
-                    self.collect_calls_from_stmt(stmt, &mut calls);
-                }
-            }
-        }
-
-        calls.into_iter().collect()
-    }
-
-    fn collect_calls_from_stmt(&self, stmt: &Stmt, calls: &mut HashSet<String>) {
-        match &stmt.kind {
-            StmtKind::Expr { value } => self.collect_calls_from_expr(value, calls),
-            StmtKind::Assign { targets, value } => {
-                for target in targets {
-                    self.collect_calls_from_expr(target, calls);
-                }
-                self.collect_calls_from_expr(value, calls);
-            }
-            StmtKind::Return { value } => {
-                if let Some(v) = value {
-                    self.collect_calls_from_expr(v, calls);
-                }
-            }
-            StmtKind::If { test, body, orelse } => {
-                self.collect_calls_from_expr(test, calls);
-                for s in body {
-                    self.collect_calls_from_stmt(s, calls);
-                }
-                for s in orelse {
-                    self.collect_calls_from_stmt(s, calls);
-                }
-            }
-            StmtKind::While { test, body } => {
-                self.collect_calls_from_expr(test, calls);
-                for s in body {
-                    self.collect_calls_from_stmt(s, calls);
-                }
-            }
-            StmtKind::For { target, iter, body } => {
-                self.collect_calls_from_expr(target, calls);
-                self.collect_calls_from_expr(iter, calls);
-                for s in body {
-                    self.collect_calls_from_stmt(s, calls);
-                }
-            }
-            StmtKind::FunctionDef { body, .. } => {
-                for s in body {
-                    self.collect_calls_from_stmt(s, calls);
-                }
-            }
-            StmtKind::Break | StmtKind::Continue | StmtKind::Use { .. } => {}
-        }
-    }
-
-    fn collect_calls_from_expr(&self, expr: &Expr, calls: &mut HashSet<String>) {
-        match &expr.kind {
-            ExprKind::Call { func, args } => {
-                // stdlib call
-                if let ExprKind::Name { id, .. } = &func.kind
-                    && self.is_stdlib_function(id)
-                {
-                    calls.insert(id.clone());
-                }
-
-                // arguments too
-                self.collect_calls_from_expr(func, calls);
-                for arg in args {
-                    self.collect_calls_from_expr(arg, calls);
-                }
-            }
-            ExprKind::BinOp { left, right, .. } => {
-                self.collect_calls_from_expr(left, calls);
-                self.collect_calls_from_expr(right, calls);
-            }
-            ExprKind::UnaryOp { operand, .. } => {
-                self.collect_calls_from_expr(operand, calls);
-            }
-            ExprKind::BoolOp { values, .. } => {
-                for val in values {
-                    self.collect_calls_from_expr(val, calls);
-                }
-            }
-            ExprKind::Compare {
-                left, comparators, ..
-            } => {
-                self.collect_calls_from_expr(left, calls);
-                for comp in comparators {
-                    self.collect_calls_from_expr(comp, calls);
-                }
-            }
-            ExprKind::Subscript { value, slice, .. } => {
-                self.collect_calls_from_expr(value, calls);
-                self.collect_calls_from_expr(slice, calls);
-            }
-            ExprKind::List { elts, .. } => {
-                for elt in elts {
-                    self.collect_calls_from_expr(elt, calls);
-                }
-            }
-            ExprKind::Attribute { value, .. } => self.collect_calls_from_expr(value, calls),
-            ExprKind::Constant { .. } | ExprKind::Name { .. } => {}
-        }
-    }
-
-    #[inline(always)]
-    fn is_stdlib_function(&self, name: &str) -> bool {
-        BUILTINS.contains(&name)
-    }
-
-    /// Emits the `print` routines if the program prints. The list and string runtimes are emitted
-    /// separately, based on the types the program uses.
-    fn emit_stdlib(&mut self, calls: Vec<String>) {
-        // input prints its prompt, and str of a float shares print_float's code
-        if calls.iter().any(|call| call == "print")
-            || self.uses(&["stone.input", "stone.str_float"])
-        {
-            self.emit("\t# Standard Library Functions");
-            print(self);
-        }
-    }
-
-    /// Emits every interned string literal as an immortal string (see
-    /// [`builtins::immortal_string`]). They go in `.data` rather than `.rodata`, since retaining
-    /// and releasing a string writes its count.
+    /// Emits every interned string literal as an immortal string (see [`immortal_string`]). They
+    /// go in `.data` rather than `.rodata`, since retaining and releasing a string writes its
+    /// count.
     fn emit_string_literals(&mut self) {
-        if self.string_literals.is_empty() {
+        let literals = self.ctx.string_literals();
+        if literals.is_empty() {
             return;
         }
 
         self.emit("");
         self.emit("\t.data");
-
-        for (content, label) in &self.string_literals.clone() {
-            // escape special characters for assembly
-            let escaped = content
-                .replace("\\", "\\\\")
-                .replace("\"", "\\\"")
-                .replace("\n", "\\n")
-                .replace("\t", "\\t")
-                .replace("\r", "\\r");
-
-            builtins::immortal_string(self, label, &escaped);
+        for (label, escaped) in literals {
+            immortal_string(self, &label, &escaped);
         }
-
         self.emit("");
     }
 
@@ -527,18 +208,18 @@ impl X64Generator {
         self.emit("\t.p2align\t3");
         self.emit("stone.call_depth:");
         self.emit("\t.zero\t8");
-        if self.counts_references {
+        if self.ctx.counts_references {
             self.emit("stone.live:");
             self.emit("\t.zero\t8");
         }
-        if self.uses(&["stone.args"]) {
+        if self.ctx.uses(&["stone.args"]) {
             // main saves its argc and argv here for args()
             self.emit("stone.argc:");
             self.emit("\t.zero\t8");
             self.emit("stone.argv:");
             self.emit("\t.zero\t8");
         }
-        for name in self.program.globals.clone() {
+        for name in self.ctx.program.globals.clone() {
             let label = global_label(&name);
             self.emit(&format!("{label}:"));
             self.emit("\t.zero\t8");
@@ -549,44 +230,10 @@ impl X64Generator {
     }
 }
 
-/// Returns the assembly symbol for a global variable.
-///
-/// The prefix keeps variables from colliding with functions or registers, so `global_label("rax")`
-/// is `g.rax`.
-fn global_label(name: &str) -> String {
-    format!("g.{name}")
-}
-
-/// Returns the assembly symbol for a user-defined function.
-///
-/// The prefix keeps stone functions from colliding with `main` or with C library functions, so
-/// `function_label("exit")` is `fn.exit`.
-fn function_label(name: &str) -> String {
-    format!("fn.{name}")
-}
-
-/// Returns whether a value of type `ty` involves a list, which means the list runtime is needed.
-fn contains_list(ty: &Type) -> bool {
-    match ty {
-        Type::List(_) => true,
-        Type::Function { params, ret } => params.iter().any(contains_list) || contains_list(ret),
-        _ => false,
-    }
-}
-
-/// Spells a type as part of an assembly symbol.
-///
-/// For example, `list[list[str]]` becomes `list_list_str`.
-fn mangle(ty: &Type) -> String {
-    match ty {
-        Type::List(elem) => format!("list_{}", mangle(elem)),
-        other => other.to_string(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::context::function_label;
     use crate::driver::parse;
 
     /// Parses and assembles `source` without invoking gcc.

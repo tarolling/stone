@@ -11,6 +11,15 @@ cargo test simple_functions # tests whose name contains the filter
 `docs/examples/` through both `stone run` and `stone build`, and compares stdout with the
 sibling `.out` file. This is the main guarantee that the interpreter and the compiler agree.
 
+`stone build` compiles for the processor the tests run on. The compiler for the other one is
+tested too, by building each program with `--target` and running it under qemu-user, when its
+cross compiler and emulator are on `PATH`: `aarch64-linux-gnu-gcc` and `qemu-aarch64` on an
+x86-64 machine, or `x86_64-linux-gnu-gcc` and `qemu-x86_64` on an arm64 one. Otherwise that pass
+is skipped with a note. qemu finds the target's libc through `QEMU_LD_PREFIX`, which defaults to
+`/usr/aarch64-linux-gnu` (or `/usr/x86_64-linux-gnu`), where the cross compiler's packages put
+it. CI runs both backends: the x86-64 job installs the aarch64 cross tools, and an arm64 job
+runs the suite natively.
+
 To cover new behavior, add `name.st` and the exact output it should print as `name.out`:
 
 ```text
@@ -52,7 +61,9 @@ Unit tests live in `#[cfg(test)]` modules next to the code:
 | `src/codegen/ir/lower/tests.rs` | IR produced from the AST |
 | `src/codegen/ir/liveness.rs` | live intervals |
 | `src/codegen/regalloc.rs` | linear scan and parallel moves |
-| `src/codegen/x64.rs` | generated assembly |
+| `src/codegen.rs` | target names and linker selection |
+| `src/codegen/x64.rs` | generated x86-64 assembly |
+| `src/codegen/arm64.rs` | generated arm64 assembly |
 | `src/driver.rs` | the run, build, and check pipelines |
 | `src/update.rs` | self-update (run with `--features self-update`) |
 

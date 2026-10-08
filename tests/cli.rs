@@ -200,3 +200,33 @@ fn no_arguments_runs_a_quiet_session_over_piped_input() {
         "error: division by zero\n"
     );
 }
+
+#[test]
+fn build_rejects_an_unknown_target() {
+    let (output, _) = stone(&["build", "--target", "sparc"], "sparc", "print(1)\n");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("unknown target 'sparc' (expected x86_64 or aarch64)"),
+        "{stderr}"
+    );
+}
+
+#[test]
+fn build_for_the_host_target_by_name_runs() {
+    let host = if cfg!(target_arch = "aarch64") {
+        "aarch64"
+    } else {
+        "x86_64"
+    };
+    let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("host_target");
+    let exe_arg = exe.to_str().unwrap();
+    let (output, _) = stone(
+        &["build", "--target", host, "-o", exe_arg],
+        "host_target",
+        "print(6 * 7)\n",
+    );
+    assert!(output.status.success(), "{output:?}");
+    let run = Command::new(&exe).output().expect("the binary should run");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n");
+}

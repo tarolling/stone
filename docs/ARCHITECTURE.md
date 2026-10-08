@@ -9,14 +9,14 @@ stone is a language that is both compiled and interpreted, depending on the deve
 
 1. Lower the checked AST to IR: blocks of instructions over virtual registers, one per local.
 2. For each function, compute live intervals and assign registers by linear scan, spilling the least-used values to the stack.
-3. Emit x86-64 assembly from the allocated IR, then assemble and link it with gcc.
+3. Emit x86-64 or arm64 assembly from the allocated IR, then assemble and link it with gcc (or the target's cross gcc).
 
 ## Pipelines
 
 `src/driver.rs` wires the stages together, and `src/main.rs` picks a pipeline from the command line.
 
 - `stone run`: `project` (`lexer` -> `parser` for each file, then link) -> `checker` -> `interpreter`
-- `stone build`: `project` -> `checker` -> `codegen::ir` (lower to IR) -> `codegen::regalloc` (linear scan) -> `codegen::x64` (emit, then gcc)
+- `stone build`: `project` -> `checker` -> `codegen::ir` (lower to IR) -> `codegen::regalloc` (linear scan) -> `codegen::x64` or `codegen::arm64` (emit, then gcc), picked by `--target`, which defaults to the host's `codegen::Architecture`
 - `stone check`: `project` -> `checker`, printing every diagnostic without running
 
 `project::link` lexes and parses the entry file, loads every module its `use` statements name, and
@@ -36,10 +36,12 @@ of one file, except that each `Span` carries the `FileId` of the file it is in.
 | `parser` | recursive-descent PEG parser; `parser/expressions.rs` and `parser/statements.rs` mirror the rules in `docs/grammar/stone.gram` |
 | `checker` | type inference and name resolution, producing diagnostics, expression types, and symbols with their references |
 | `interpreter` | tree-walking evaluator |
-| `codegen` | the `AssemblyGenerator` trait and toolchain discovery |
+| `codegen` | the `AssemblyGenerator` trait, `Architecture` (the `--target` names and each one's linker), and `link`, which runs gcc |
+| `codegen/context` | what both backends share about the program being compiled: the checked and lowered program, labels, interned strings, runtime failures, and which runtime routines it needs |
 | `codegen/ir` | the IR the backend compiles through: lowering from the AST (`codegen/ir/lower.rs`) and liveness intervals (`codegen/ir/liveness.rs`) |
 | `codegen/regalloc` | target-independent linear-scan register allocation and parallel-move ordering |
 | `codegen/x64` | the x86-64 backend: instruction selection from allocated IR (`codegen/x64/emit.rs`) and its hand-written builtins (`codegen/x64/builtins.rs`) |
+| `codegen/arm64` | the arm64 backend, with the same split (`codegen/arm64/emit.rs` and `codegen/arm64/builtins.rs`) and the same runtime routines under the same labels |
 | `stdlib` | names of the builtins shared by both backends (`print`, `len`, `range`, `append`, `int`, and `float`), and `format_float`, which defines how both print floats |
 | `project` | loading the modules a program uses (`Sources`), checking `use` and `pub`, linking them into one module, and `SourceMap` for rendering diagnostics from any file |
 | `driver` | the run/build/check pipelines, and `analyze_linked` for editor tooling |
@@ -66,8 +68,8 @@ The `fuzz/` crate uses cargo-fuzz (libFuzzer, nightly Rust). It is a separate cr
 | --- | --- | --- |
 | `lex`, `parse` | arbitrary text | the front end returns tokens, a module, or an error, and never panics, overflows the stack, or takes exponential time |
 | `interpret` | arbitrary text | the interpreter finishes under `fuzz::LIMITS` without panicking |
-| `codegen` | arbitrary text that parses | `X64Generator::assemble` succeeds or returns an error, without gcc |
-| `structured` | programs from `stone_fuzz::generate` | the same stages on deep, valid programs |
+| `codegen` | arbitrary text that parses | both backends' `assemble` succeeds or returns an error, without gcc |
+| `structured` | programs from `stone_fuzz::generate` | the same stages on deep, valid programs, for both backends |
 | `differential` | programs from `stone_fuzz::generate` | `stone run` and `stone build` print the same output |
 
 `stone_fuzz::generate` writes source text rule by rule from the grammar, tracking scope so every name and call is defined and every program passes the checker. It covers int arithmetic, comparisons, functions with up to eight parameters, `if`/`while`/`for` with `break` and `cont`, multi-argument `print` with strings and booleans, and top-level lists. Every loop is bounded, and functions never read globals, which may not be assigned yet when they run. `differential` skips a program if the interpreter rejects it (out of fuel, division by zero, an unassigned variable).

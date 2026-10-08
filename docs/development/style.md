@@ -49,7 +49,7 @@ These apply to stone programs, such as the examples, tests, and benchmarks.
 - Runtime error messages must match between backends.
 - Adding a builtin touches `BUILTINS` and `BUILTIN_DOCS` in `src/stdlib.rs`, its type rule in
   `Inference::infer_builtin`, `Interpreter::call`, its lowering in `Lowerer::call` (plus an IR
-  instruction and its x86-64 emission if it is not a runtime call), a program in
+  instruction and its emission in both backends if it is not a runtime call), a program in
   `tests/programs/`, and `docs/reference/builtins.md`.
 - New keywords go in `docs/reference/syntax.md`. `tests/docs.rs` fails until both pages are
   updated.

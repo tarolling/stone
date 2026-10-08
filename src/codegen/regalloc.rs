@@ -1,11 +1,11 @@
 //! Linear-scan register allocation over [`liveness`](crate::codegen::ir::liveness) intervals, and
 //! ordering of parallel moves.
 //!
-//! Both are independent of the target: registers are any `Copy + Eq` type, such as the x64
-//! backend's register names.
+//! Both are independent of the target: registers are any `Copy + Eq` type, such as the x64 or
+//! arm64 backend's register names.
 
-use crate::codegen::ir::VReg;
 use crate::codegen::ir::liveness::Interval;
+use crate::codegen::ir::{BinOp, Function, Inst, Operand, VReg};
 use std::collections::HashMap;
 
 /// Where a vreg lives for its whole interval: a register, or a numbered spill slot in memory.
@@ -33,6 +33,68 @@ pub struct Allocation<R> {
     /// The callee-saved registers the allocation uses, which the function must save and restore,
     /// in the order they were given.
     pub used_callee_saved: Vec<R>,
+}
+
+/// Returns the registers each vreg would like, so that values are computed where they are needed.
+///
+/// A parameter would like the register its argument arrives in, and a call argument the register
+/// it is passed in. A copy and its source, and the result of a two-address instruction and its
+/// first input, would like to share a register, so the move between them disappears. For example,
+/// in `v1 = sub v0, 1; call f(v1)`, `v1` would like the first of `arg_regs`, such as `rdi` on
+/// x86-64.
+pub fn hints<R: Copy>(function: &Function, arg_regs: &[R]) -> HashMap<VReg, Vec<Hint<R>>> {
+    let mut hints: HashMap<VReg, Vec<Hint<R>>> = HashMap::new();
+    let mut add = |reg: VReg, hint| hints.entry(reg).or_default().push(hint);
+    for (param, reg) in function.params.iter().zip(arg_regs) {
+        add(*param, Hint::Reg(*reg));
+    }
+    for inst in function.blocks.iter().flat_map(|block| &block.insts) {
+        match inst {
+            Inst::Call { args, .. } => {
+                for (arg, reg) in args.iter().zip(arg_regs) {
+                    if let Operand::Reg(arg) = arg {
+                        add(*arg, Hint::Reg(*reg));
+                    }
+                }
+            }
+            Inst::Copy {
+                dst,
+                src: Operand::Reg(src),
+            } => {
+                add(*dst, Hint::Like(*src));
+                add(*src, Hint::Like(*dst));
+            }
+            Inst::Binary {
+                op: BinOp::Add | BinOp::Sub | BinOp::Mul,
+                dst,
+                lhs,
+                rhs,
+            } => {
+                if let Operand::Reg(lhs) = lhs {
+                    add(*dst, Hint::Like(*lhs));
+                }
+                if let Operand::Reg(rhs) = rhs {
+                    add(*dst, Hint::Like(*rhs));
+                }
+            }
+            Inst::Neg {
+                dst,
+                src: Operand::Reg(src),
+            }
+            | Inst::FloatNeg {
+                dst,
+                src: Operand::Reg(src),
+            } => {
+                add(*dst, Hint::Like(*src));
+            }
+            _ => {}
+        }
+    }
+    // a fixed register saves a move at the call or entry, so it comes before a shared one
+    for list in hints.values_mut() {
+        list.sort_by_key(|hint| matches!(hint, Hint::Like(_)));
+    }
+    hints
 }
 
 /// Assigns each interval a register or a spill slot, in the style of Poletto and Sarkar.

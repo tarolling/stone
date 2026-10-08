@@ -1,8 +1,8 @@
 # stone
 
 stone is a small, statically checked language with Python-like syntax. One binary both interprets
-a program and compiles it to a native x86-64 executable, and the two always agree on what a
-program prints.
+a program and compiles it to a native x86-64 or arm64 executable, and the two always agree on
+what a program prints.
 
 ```stone
 def fib(n);

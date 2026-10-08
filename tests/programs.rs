@@ -16,18 +16,26 @@
 //! `main.st`, whose `.out`, `.err`, `.in`, and `.args` files sit next to `main.st`. For example,
 //! `tests/programs/modules/main.st` uses modules such as `tests/programs/modules/text.st`.
 //!
+//! The compiler is also tested for the other architecture, such as aarch64 on an x86-64 machine,
+//! by cross-compiling each program with `stone build --target` and running it under qemu-user.
+//! That needs the cross compiler (such as `aarch64-linux-gnu-gcc`) and qemu (such as
+//! `qemu-aarch64`) on `PATH`, and is skipped with a note when either is missing. qemu finds the
+//! target's libc through `QEMU_LD_PREFIX`, which defaults to `/usr/aarch64-linux-gnu`.
+//!
 //! A program can opt out of a backend by being listed in [`SKIPS`] along with the reason.
 
 use std::fmt::Write as _;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use stone::codegen::Architecture;
 
 const PROGRAM_DIRS: [&str; 3] = ["examples", "tests/programs", "docs/examples"];
 
 /// Programs a backend can't handle yet, as `(file stem, backend name, reason)`.
 ///
-/// For example, `("printing", "build", "...")` skips `printing.st` under `stone build` only.
+/// For example, `("printing", "build", "...")` skips `printing.st` under `stone build` only, and
+/// `("printing", "build-aarch64", "...")` only when cross-compiling it for aarch64.
 const SKIPS: &[(&str, &str, &str)] = &[];
 
 /// A way of executing a stone program.
@@ -35,6 +43,8 @@ const SKIPS: &[(&str, &str, &str)] = &[];
 enum Backend {
     Run,
     Build,
+    /// `stone build --target` for an architecture other than the host's, run under qemu-user.
+    Cross(Architecture),
 }
 
 impl Backend {
@@ -42,8 +52,34 @@ impl Backend {
         match self {
             Backend::Run => "run",
             Backend::Build => "build",
+            Backend::Cross(Architecture::X64) => "build-x86_64",
+            Backend::Cross(Architecture::Arm64) => "build-aarch64",
         }
     }
+}
+
+/// Returns the qemu-user emulator for `arch` and the directory it should find that
+/// architecture's libc in.
+///
+/// For example, aarch64 is run by `qemu-aarch64` with libc from `/usr/aarch64-linux-gnu`, unless
+/// `QEMU_LD_PREFIX` says otherwise.
+fn emulator(arch: Architecture) -> (&'static str, String) {
+    let (qemu, prefix) = match arch {
+        Architecture::X64 => ("qemu-x86_64", "/usr/x86_64-linux-gnu"),
+        Architecture::Arm64 => ("qemu-aarch64", "/usr/aarch64-linux-gnu"),
+    };
+    let prefix = std::env::var("QEMU_LD_PREFIX").unwrap_or_else(|_| prefix.to_string());
+    (qemu, prefix)
+}
+
+/// Returns whether `tool` can be run, checking with `--version`.
+fn runs(tool: &str) -> bool {
+    Command::new(tool)
+        .arg("--version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok()
 }
 
 /// Returns every `.st` file directly in [`PROGRAM_DIRS`] and the `main.st` of each of their
@@ -135,24 +171,30 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
             Command::new(stone).arg("run").arg(program).args(&args),
             &input,
         ),
-        Backend::Build => {
-            let exe = Path::new(env!("CARGO_TARGET_TMPDIR")).join(name_of(program));
-            let build = outcome_of(
-                Command::new(stone)
-                    .arg("build")
-                    .arg(program)
-                    .arg("-o")
-                    .arg(&exe),
-                &[],
-            )?;
+        Backend::Build | Backend::Cross(_) => {
+            let exe = Path::new(env!("CARGO_TARGET_TMPDIR"))
+                .join(backend.name())
+                .join(name_of(program));
+            let mut build = Command::new(stone);
+            build.arg("build").arg(program).arg("-o").arg(&exe);
+            if let Backend::Cross(arch) = backend {
+                build.arg("--target").arg(arch.to_string());
+            }
+            let build = outcome_of(&mut build, &[])?;
             if let Some(stderr) = build.error {
                 return Err(format!("build failed:\n{stderr}"));
             }
+            let mut command = match backend {
+                Backend::Cross(arch) => {
+                    let (qemu, prefix) = emulator(arch);
+                    let mut command = Command::new(qemu);
+                    command.arg(&exe).env("QEMU_LD_PREFIX", prefix);
+                    command
+                }
+                _ => Command::new(&exe),
+            };
             // the binary reports any string or list still allocated when it ends
-            outcome_of(
-                Command::new(&exe).args(&args).env("STONE_LEAK_CHECK", "1"),
-                &input,
-            )
+            outcome_of(command.args(&args).env("STONE_LEAK_CHECK", "1"), &input)
         }
     }
 }
@@ -218,4 +260,22 @@ fn interpreter_matches_expected() {
 #[test]
 fn compiler_matches_expected() {
     check_all(Backend::Build);
+}
+
+#[test]
+fn cross_compiler_matches_expected() {
+    let Some(arch) = Architecture::ALL
+        .into_iter()
+        .find(|arch| *arch != Architecture::host())
+    else {
+        return;
+    };
+    let (qemu, _) = emulator(arch);
+    for tool in [arch.linker(), qemu] {
+        if !runs(tool) {
+            eprintln!("skipped building for {arch}: {tool} was not found");
+            return;
+        }
+    }
+    check_all(Backend::Cross(arch));
 }

@@ -18,7 +18,7 @@ this downloads a prebuilt `stone` for linux or macos (x86-64 or arm64) into `~/.
 
 to upgrade later, run `stone self-update` (or `stone self-update --check` to see if there is a new release).
 
-`stone run` and `stone check` work everywhere, but `stone build` emits x86-64 assembly, so it needs x86-64 linux with gcc.
+`stone run` and `stone check` work everywhere, but `stone build` emits x86-64 or arm64 assembly for linux, so it needs linux with gcc. `--target aarch64` (or `x86_64`) cross-compiles with that processor's cross gcc.
 
 to build from source instead, with rust installed:
 

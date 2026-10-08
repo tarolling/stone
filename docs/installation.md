@@ -53,10 +53,12 @@ cargo install --git https://github.com/tarolling/stone stone
 | command | needs |
 | --- | --- |
 | `stone run`, `stone check` | any platform stone builds on |
-| `stone build` | x86-64 Linux with `gcc` on `PATH` |
+| `stone build` | x86-64 or arm64 Linux with `gcc` on `PATH` |
 
-`stone build` writes x86-64 assembly and runs `gcc` to assemble and link it, so it does not work
-on arm64 or macOS yet. The interpreter runs the same programs everywhere.
+`stone build` writes assembly for the processor it runs on and runs `gcc` to assemble and link
+it, so it does not work on macOS yet. `--target` builds for the other Linux processor with a
+cross compiler (see [the CLI reference](reference/cli.md)). The interpreter runs the same
+programs everywhere.
 
 ## Editor support
 

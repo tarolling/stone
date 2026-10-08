@@ -4,6 +4,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use stone::ast::Mod;
+use stone::codegen::Architecture;
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver;
 use stone::interpreter::Limits;
@@ -45,6 +46,10 @@ enum Command {
         /// Where to write the executable. The assembly goes next to it with a `.s` extension.
         #[arg(short, long, default_value = "build/out")]
         output: PathBuf,
+        /// The processor to build for, `x86_64` or `aarch64`. Defaults to this machine's, and
+        /// another needs that processor's cross compiler, such as `aarch64-linux-gnu-gcc`.
+        #[arg(long, value_name = "ARCH", value_parser = str::parse::<Architecture>)]
+        target: Option<Architecture>,
     },
     /// Checks a file for errors without running it.
     Check {
@@ -64,11 +69,21 @@ enum Command {
 
 /// The mode stone runs in, chosen from the command-line arguments.
 enum ExecutionMode {
-    Build { file: String, output: PathBuf },
+    Build {
+        file: String,
+        output: PathBuf,
+        target: Architecture,
+    },
     Check(String),
     Repl,
-    Run { file: String, args: Vec<String> },
-    SelfUpdate { check: bool, tag: Option<String> },
+    Run {
+        file: String,
+        args: Vec<String>,
+    },
+    SelfUpdate {
+        check: bool,
+        tag: Option<String>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -76,7 +91,15 @@ fn main() -> ExitCode {
 
     let mode = match args.command {
         Some(Command::Run { file, args }) => ExecutionMode::Run { file, args },
-        Some(Command::Build { file, output }) => ExecutionMode::Build { file, output },
+        Some(Command::Build {
+            file,
+            output,
+            target,
+        }) => ExecutionMode::Build {
+            file,
+            output,
+            target: target.unwrap_or_else(Architecture::host),
+        },
         Some(Command::Check { file }) => ExecutionMode::Check(file),
         Some(Command::SelfUpdate { check, version }) => ExecutionMode::SelfUpdate {
             check,
@@ -95,8 +118,12 @@ fn main() -> ExitCode {
     };
 
     match mode {
-        ExecutionMode::Build { file, output } => with_program(&file, |module| {
-            driver::compile_module(module, &output)?;
+        ExecutionMode::Build {
+            file,
+            output,
+            target,
+        } => with_program(&file, |module| {
+            driver::compile_module(module, &output, target)?;
             println!("Compiled {}", output.display());
             Ok(())
         }),

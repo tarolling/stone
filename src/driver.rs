@@ -4,8 +4,7 @@
 
 use crate::ast::Mod;
 use crate::checker::{Analysis, TypeChecker};
-use crate::codegen::AssemblyGenerator;
-use crate::codegen::x64::X64Generator;
+use crate::codegen::Architecture;
 use crate::debug;
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
 use crate::interpreter::{Interpreter, Limits};
@@ -196,19 +195,30 @@ pub fn run_module(
     Ok(result?)
 }
 
-/// Compiles source code to a native x86-64 executable at `output`.
+/// Compiles source code to a native executable for the machine stone runs on, at `output`.
 ///
 /// For example, `compile("print(1)\n", Path::new("build/out"))` writes `build/out.s` and links
 /// `build/out`.
 pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
-    compile_module(&checked(source)?, output)
+    compile_for(source, output, Architecture::host())
 }
 
-/// Compiles a checked module, such as one from [`load`], to a native x86-64 executable at
+/// Compiles source code to a native executable for `arch` at `output`, which needs that
+/// architecture's [`Architecture::linker`].
+///
+/// For example, `compile_for("print(1)\n", Path::new("build/out"), Architecture::Arm64)` writes
+/// arm64 assembly to `build/out.s` and links it into an arm64 `build/out`.
+pub fn compile_for(source: &str, output: &Path, arch: Architecture) -> Result<(), Box<dyn Error>> {
+    compile_module(&checked(source)?, output, arch)
+}
+
+/// Compiles a checked module, such as one from [`load`], to a native executable for `arch` at
 /// `output`.
-pub fn compile_module(ast: &Mod, output: &Path) -> Result<(), Box<dyn Error>> {
-    let mut r#gen = X64Generator::new();
-    r#gen.compile(ast, output)?;
+///
+/// For example, compiling for [`Architecture::Arm64`] on an x86-64 machine links with
+/// `aarch64-linux-gnu-gcc`.
+pub fn compile_module(ast: &Mod, output: &Path, arch: Architecture) -> Result<(), Box<dyn Error>> {
+    arch.generator().compile(ast, output)?;
     Ok(())
 }
 

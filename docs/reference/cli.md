@@ -21,15 +21,22 @@ stone run examples/basics.st
 stone run sum.st 1 2 3 < numbers.txt
 ```
 
-## `stone build FILE [-o OUTPUT]`
+## `stone build FILE [-o OUTPUT] [--target ARCH]`
 
 Compiles the program to a native executable at `OUTPUT` (default `build/out`, relative to the
-current directory), writing the assembly next to it as `OUTPUT.s`. This needs x86-64 Linux with
-`gcc` on `PATH`, which assembles and links the output.
+current directory), writing the assembly next to it as `OUTPUT.s`. This needs Linux with `gcc` on
+`PATH`, which assembles and links the output.
+
+The executable is for the processor stone runs on, x86-64 or arm64. `--target` picks one
+explicitly, as `x86_64` (or `x64`) or `aarch64` (or `arm64`). Building for the other processor
+needs its cross compiler instead of `gcc`: `aarch64-linux-gnu-gcc` for arm64 or
+`x86_64-linux-gnu-gcc` for x86-64, as Debian and Ubuntu's `gcc-aarch64-linux-gnu` and
+`gcc-x86-64-linux-gnu` packages install them.
 
 ```sh
 stone build examples/basics.st -o build/basics
 ./build/basics
+stone build examples/basics.st -o build/basics-arm64 --target aarch64
 ```
 
 The executable reads its own arguments and standard input the same way, so `./build/sum 1 2 3`

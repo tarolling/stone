@@ -7,13 +7,14 @@
 //! `v2 = add v0, v1` with `v0` in `rbx`, `v1` in `r12`, and `v2` in `r13` becomes
 //! `mov r13, rbx` then `add r13, r12`.
 
-use super::{ARG_REGS, X64Generator, function_label};
+use super::{ARG_REGS, X64Generator};
 use crate::codegen::AssemblyGenerator;
+use crate::codegen::context::{function_label, global_label};
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::{
     BinOp, BlockId, Callee, Cond, Function, Inst, Operand, RcKind, Terminator, VReg,
 };
-use crate::codegen::regalloc::{Hint, Location, linear_scan, parallel_moves};
+use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
 use crate::stdlib::MAX_CALL_DEPTH;
 use std::collections::HashMap;
 use std::fmt;
@@ -43,67 +44,6 @@ impl fmt::Display for Value {
             Value::Imm(n) => write!(f, "{n}"),
         }
     }
-}
-
-/// Returns the registers each vreg would like, so that values are computed where they are needed.
-///
-/// A parameter would like the register its argument arrives in, and a call argument the register
-/// it is passed in. A copy and its source, and the result of a two-address instruction and its
-/// first input, would like to share a register, so the move between them disappears. For example,
-/// in `v1 = sub v0, 1; call f(v1)`, `v1` would like `rdi`.
-fn hints(function: &Function) -> HashMap<VReg, Vec<Hint<&'static str>>> {
-    let mut hints: HashMap<VReg, Vec<Hint<&'static str>>> = HashMap::new();
-    let mut add = |reg: VReg, hint| hints.entry(reg).or_default().push(hint);
-    for (param, reg) in function.params.iter().zip(ARG_REGS) {
-        add(*param, Hint::Reg(reg));
-    }
-    for inst in function.blocks.iter().flat_map(|block| &block.insts) {
-        match inst {
-            Inst::Call { args, .. } => {
-                for (arg, reg) in args.iter().zip(ARG_REGS) {
-                    if let Operand::Reg(arg) = arg {
-                        add(*arg, Hint::Reg(reg));
-                    }
-                }
-            }
-            Inst::Copy {
-                dst,
-                src: Operand::Reg(src),
-            } => {
-                add(*dst, Hint::Like(*src));
-                add(*src, Hint::Like(*dst));
-            }
-            Inst::Binary {
-                op: BinOp::Add | BinOp::Sub | BinOp::Mul,
-                dst,
-                lhs,
-                rhs,
-            } => {
-                if let Operand::Reg(lhs) = lhs {
-                    add(*dst, Hint::Like(*lhs));
-                }
-                if let Operand::Reg(rhs) = rhs {
-                    add(*dst, Hint::Like(*rhs));
-                }
-            }
-            Inst::Neg {
-                dst,
-                src: Operand::Reg(src),
-            }
-            | Inst::FloatNeg {
-                dst,
-                src: Operand::Reg(src),
-            } => {
-                add(*dst, Hint::Like(*src));
-            }
-            _ => {}
-        }
-    }
-    // a fixed register saves a move at the call or entry, so it comes before a shared one
-    for list in hints.values_mut() {
-        list.sort_by_key(|hint| matches!(hint, Hint::Like(_)));
-    }
-    hints
 }
 
 /// Returns whether `n` fits the sign-extended 32-bit immediate most instructions take.
@@ -159,19 +99,19 @@ impl X64Generator {
             &liveness.intervals,
             &CALLEE_SAVED,
             &CALLER_SAVED,
-            &hints(function),
+            &hints(function, &ARG_REGS),
         );
         crate::debug!("{function}");
         crate::debug!("allocation: {:?}", allocation.locations);
 
         let blocks = (0..function.blocks.len())
-            .map(|_| self.new_label("block"))
+            .map(|_| self.ctx.new_label("block"))
             .collect();
         let frame = Frame {
             locations: allocation.locations,
             saved: allocation.used_callee_saved.len(),
             blocks,
-            epilogue: self.new_label("return"),
+            epilogue: self.ctx.new_label("return"),
             is_main: function.name.is_none(),
         };
 
@@ -184,7 +124,7 @@ impl X64Generator {
         }
         self.emit("\tpush\trbp");
         self.emit("\tmov\trbp, rsp");
-        if frame.is_main && self.uses(&["stone.args"]) {
+        if frame.is_main && self.ctx.uses(&["stone.args"]) {
             // argc is a C int, so only its low half is set
             self.emit("\tmov\tDWORD PTR [rip + stone.argc], edi");
             self.emit("\tmov\tQWORD PTR [rip + stone.argv], rsi");
@@ -198,7 +138,7 @@ impl X64Generator {
 
         if !frame.is_main {
             // the same limit as the interpreter, rather than overflowing the stack
-            let too_deep = self.fail_label(&format!(
+            let too_deep = self.ctx.fail_label(&format!(
                 "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
             ));
             self.emit("\tinc\tQWORD PTR [rip + stone.call_depth]");
@@ -238,7 +178,7 @@ impl X64Generator {
         }
 
         self.emit(&format!("{}:", frame.epilogue));
-        if frame.is_main && self.counts_references {
+        if frame.is_main && self.ctx.counts_references {
             self.emit("\tcall\tstone.leak_check");
         }
         if !frame.is_main {
@@ -490,15 +430,15 @@ impl X64Generator {
                     _ => {
                         self.load("rcx", rhs);
                         // idiv traps on both of these, so report them like the interpreter
-                        let by_zero = self.fail_label("division by zero");
-                        let divide = self.new_label("divide");
-                        let done = self.new_label("divided");
+                        let by_zero = self.ctx.fail_label("division by zero");
+                        let divide = self.ctx.new_label("divide");
+                        let done = self.ctx.new_label("divided");
                         self.emit("\ttest\trcx, rcx");
                         self.emit(&format!("\tjz\t{by_zero}"));
                         self.emit("\tcmp\trcx, -1");
                         self.emit(&format!("\tjne\t{divide}"));
                         if *op == BinOp::Div {
-                            let overflow = self.fail_label("integer overflow in division");
+                            let overflow = self.ctx.fail_label("integer overflow in division");
                             // only the minimum overflows when negated
                             self.emit("\tmov\trdx, rax");
                             self.emit("\tneg\trdx");
@@ -527,7 +467,7 @@ impl X64Generator {
                 self.load("rcx", lhs);
                 self.load("rdx", rhs);
                 if !matches!(rhs, Value::Imm(n) if n >= 0) {
-                    let negative = self.fail_label("negative exponent");
+                    let negative = self.ctx.fail_label("negative exponent");
                     self.emit("\ttest\trdx, rdx");
                     self.emit(&format!("\tjs\t{negative}"));
                 }
@@ -585,7 +525,7 @@ impl X64Generator {
                 self.emit("\tpush\trdx");
                 self.emit("\tfld\tQWORD PTR [rsp + 8]");
                 self.emit("\tfld\tQWORD PTR [rsp]");
-                let reduce = self.new_label("fprem");
+                let reduce = self.ctx.new_label("fprem");
                 self.emit(&format!("{reduce}:"));
                 self.emit("\tfprem");
                 self.emit("\tfnstsw\tax");
@@ -620,7 +560,7 @@ impl X64Generator {
                     _ => {
                         self.load("rdx", rhs);
                         self.emit("\tmov\trcx, rdx");
-                        let positive = self.new_label("positive");
+                        let positive = self.ctx.new_label("positive");
                         self.emit("\ttest\trdx, rdx");
                         self.emit(&format!("\tjns\t{positive}"));
                         self.emit("\tneg\trdx");
@@ -639,7 +579,7 @@ impl X64Generator {
                     Some(true) => reciprocal(self),
                     Some(false) => {}
                     None => {
-                        let done = self.new_label("powered");
+                        let done = self.ctx.new_label("powered");
                         self.emit("\ttest\trcx, rcx");
                         self.emit(&format!("\tjns\t{done}"));
                         reciprocal(self);
@@ -725,9 +665,11 @@ impl X64Generator {
 
             Inst::LoadGlobal { dst, name, checked } => {
                 let dst = frame.reg(*dst)?;
-                let label = super::global_label(name);
+                let label = global_label(name);
                 if *checked {
-                    let fail = self.fail_label(&format!("'{name}' is used before it is assigned"));
+                    let fail = self
+                        .ctx
+                        .fail_label(&format!("'{name}' is used before it is assigned"));
                     self.emit(&format!("\tcmp\tQWORD PTR [rip + {label}.set], 0"));
                     self.emit(&format!("\tje\t{fail}"));
                 }
@@ -737,7 +679,7 @@ impl X64Generator {
             }
 
             Inst::StoreGlobal { name, src } => {
-                let label = super::global_label(name);
+                let label = global_label(name);
                 match frame.value(*src)? {
                     Value::Reg(reg) => {
                         self.emit(&format!("\tmov\tQWORD PTR [rip + {label}], {reg}"))
@@ -755,7 +697,7 @@ impl X64Generator {
 
             Inst::StrAddr { dst, text } => {
                 let dst = frame.reg(*dst)?;
-                let label = self.intern_string(text);
+                let label = self.ctx.intern_string(text);
                 let target = self.target(dst, None);
                 self.emit(&format!("\tlea\t{target}, [rip + {label}]"));
                 self.store(dst, target);
@@ -809,7 +751,7 @@ impl X64Generator {
                 Value::Imm(_) => return Err("only a pointer can be retained".to_string()),
                 value => {
                     let base = self.base(value, "rax");
-                    let skip = self.new_label("retained");
+                    let skip = self.ctx.new_label("retained");
                     self.emit(&format!("\ttest\t{base}, {base}"));
                     self.emit(&format!("\tjz\t{skip}"));
                     self.emit(&format!("\tinc\tQWORD PTR [{base} - 8]"));
@@ -822,7 +764,7 @@ impl X64Generator {
                 Value::Imm(_) => return Err("only a pointer can be released".to_string()),
                 value => {
                     let base = self.base(value, "rax");
-                    let skip = self.new_label("released");
+                    let skip = self.ctx.new_label("released");
                     self.emit(&format!("\ttest\t{base}, {base}"));
                     self.emit(&format!("\tjz\t{skip}"));
                     self.emit(&format!("\tdec\tQWORD PTR [{base} - 8]"));
@@ -892,7 +834,7 @@ impl X64Generator {
                 let label = match callee {
                     Callee::User(name) => function_label(name),
                     Callee::Runtime(label) => label.to_string(),
-                    Callee::Print(ty) => self.print_routine(ty, false)?,
+                    Callee::Print(ty) => self.ctx.print_routine(ty, false)?,
                 };
                 self.emit(&format!("\tcall\t{label}"));
                 if extra > 0 {
@@ -933,7 +875,7 @@ impl X64Generator {
             _ => None,
         };
         if checked {
-            let out_of_range = self.fail_label("list index out of range");
+            let out_of_range = self.ctx.fail_label("list index out of range");
             match constant {
                 Some(n) => {
                     // the length is never negative, so a constant index is in range below it
@@ -941,7 +883,7 @@ impl X64Generator {
                     self.emit(&format!("\tjle\t{out_of_range}"));
                 }
                 None => {
-                    let check = self.new_label("index_check");
+                    let check = self.ctx.new_label("index_check");
                     self.load("rcx", index);
                     self.emit("\ttest\trcx, rcx");
                     self.emit(&format!("\tjns\t{check}"));
@@ -966,8 +908,8 @@ impl X64Generator {
     /// Jumps to the `division by zero` failure if the float divisor in `xmm` is 0.0 or -0.0, as
     /// in the interpreter, rather than letting `/` or `%` give inf or nan. Clobbers `xmm2`.
     fn fail_on_float_zero(&mut self, xmm: &str) {
-        let by_zero = self.fail_label("division by zero");
-        let nonzero = self.new_label("nonzero");
+        let by_zero = self.ctx.fail_label("division by zero");
+        let nonzero = self.ctx.new_label("nonzero");
         self.emit("\txorpd\txmm2, xmm2");
         self.emit(&format!("\tucomisd\t{xmm}, xmm2"));
         // a nan divisor also sets ZF, but PF tells it apart
@@ -983,9 +925,9 @@ impl X64Generator {
     /// For example, `power_loop("imul\trax, rcx", "imul\trcx, rcx")` leaves `rcx` to the power
     /// `rdx` in `rax`, if `rax` started at 1.
     fn power_loop(&mut self, multiply: &str, square: &str) {
-        let top = self.new_label("pow");
-        let skip = self.new_label("pow_skip");
-        let done = self.new_label("pow_done");
+        let top = self.ctx.new_label("pow");
+        let skip = self.ctx.new_label("pow_skip");
+        let done = self.ctx.new_label("pow_done");
         self.emit(&format!("{top}:"));
         self.emit("\ttest\trdx, rdx");
         self.emit(&format!("\tjz\t{done}"));
@@ -1033,8 +975,10 @@ impl X64Generator {
     /// `cvttsd2si` gives the minimum int for nan and for anything out of range, so that result
     /// exits with an error unless the float really was -2^63.
     fn gen_float_to_int(&mut self) {
-        let fail = self.fail_label("cannot convert float to int (nan or out of range)");
-        let done = self.new_label("to_int");
+        let fail = self
+            .ctx
+            .fail_label("cannot convert float to int (nan or out of range)");
+        let done = self.ctx.new_label("to_int");
         self.emit("\tmovq\txmm0, rax");
         self.emit("\tmov\trcx, rax");
         self.emit("\tcvttsd2si\trax, xmm0");

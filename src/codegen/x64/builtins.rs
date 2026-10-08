@@ -1,20 +1,5 @@
 use crate::codegen::AssemblyGenerator;
-
-/// The reference count of a string literal or other static object, which is never freed: no
-/// program can release it `1 << 62` times.
-pub const IMMORTAL: i64 = 1 << 62;
-
-/// Emits a string that lives as long as the program, preceded by the reference count every
-/// string has at `[label - 8]`, so retaining and releasing it works like any other string's.
-///
-/// For example, `immortal_string(gen, ".Lstone_empty", "")` emits the empty string `stone.input`
-/// returns at the end of the input. The caller picks the section, which must be writable.
-pub fn immortal_string(r#gen: &mut dyn AssemblyGenerator, label: &str, escaped: &str) {
-    r#gen.emit("\t.balign\t8");
-    r#gen.emit(&format!("\t.quad\t{IMMORTAL}"));
-    r#gen.emit(&format!("{label}:"));
-    r#gen.emit(&format!("\t.string \"{escaped}\""));
-}
+pub use crate::codegen::context::{IMMORTAL, immortal_string};
 
 /// Emits the memory runtime. Every string and list `p` is counted: `[p - 8]` holds how many
 /// variables, list slots, and temporaries refer to it, and it is freed when that reaches 0.

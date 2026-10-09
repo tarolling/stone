@@ -10,6 +10,7 @@ use stone::driver;
 use stone::interpreter::{Exit, Limits};
 use stone::project::FsSources;
 
+mod uninstall;
 #[cfg(feature = "self-update")]
 mod update;
 
@@ -57,13 +58,19 @@ enum Command {
         file: String,
     },
     /// Updates stone to the newest release.
-    SelfUpdate {
+    Update {
         /// Only report whether a newer release exists.
         #[arg(long, conflicts_with = "version")]
         check: bool,
         /// The release to install instead of the newest, such as v0.1.0.
         #[arg(long, value_name = "TAG")]
         version: Option<String>,
+    },
+    /// Removes the stone binary.
+    Uninstall {
+        /// Remove it without asking first.
+        #[arg(short, long)]
+        yes: bool,
     },
 }
 
@@ -80,7 +87,10 @@ enum ExecutionMode {
         file: String,
         args: Vec<String>,
     },
-    SelfUpdate {
+    Uninstall {
+        yes: bool,
+    },
+    Update {
         check: bool,
         tag: Option<String>,
     },
@@ -101,10 +111,11 @@ fn main() -> ExitCode {
             target: target.unwrap_or_else(Architecture::host),
         },
         Some(Command::Check { file }) => ExecutionMode::Check(file),
-        Some(Command::SelfUpdate { check, version }) => ExecutionMode::SelfUpdate {
+        Some(Command::Update { check, version }) => ExecutionMode::Update {
             check,
             tag: version,
         },
+        Some(Command::Uninstall { yes }) => ExecutionMode::Uninstall { yes },
         None => {
             if let Some(file) = args.file {
                 ExecutionMode::Run {
@@ -174,13 +185,20 @@ fn main() -> ExitCode {
                 Limits::DEFAULT,
             )
         }),
-        ExecutionMode::SelfUpdate { check, tag } => self_update(check, tag.as_deref()),
+        ExecutionMode::Uninstall { yes } => match uninstall::run(yes) {
+            Ok(()) => ExitCode::SUCCESS,
+            Err(e) => {
+                eprintln!("error: {e}");
+                ExitCode::FAILURE
+            }
+        },
+        ExecutionMode::Update { check, tag } => update(check, tag.as_deref()),
     }
 }
 
-/// Runs `stone self-update`, printing any error to stderr and returning the exit code.
+/// Runs `stone update`, printing any error to stderr and returning the exit code.
 #[cfg(feature = "self-update")]
-fn self_update(check: bool, tag: Option<&str>) -> ExitCode {
+fn update(check: bool, tag: Option<&str>) -> ExitCode {
     match update::run(check, tag) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
@@ -193,10 +211,10 @@ fn self_update(check: bool, tag: Option<&str>) -> ExitCode {
 /// Explains how to upgrade a stone built without the `self-update` feature, such as one from
 /// `cargo install`.
 #[cfg(not(feature = "self-update"))]
-fn self_update(_check: bool, _tag: Option<&str>) -> ExitCode {
+fn update(_check: bool, _tag: Option<&str>) -> ExitCode {
     eprintln!(
-        "error: this stone was built without self-update; upgrade it by rerunning install.sh \
-         or `cargo install`, or build with `--features self-update`"
+        "error: this stone was built without `stone update`; upgrade it by rerunning \
+         install.sh or `cargo install`, or build with `--features self-update`"
     );
     ExitCode::FAILURE
 }

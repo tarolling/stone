@@ -1,4 +1,4 @@
-//! `stone self-update`: replaces the running binary with a release from GitHub.
+//! `stone update`: replaces the running binary with a release from GitHub.
 //!
 //! It downloads the same `stone-<target>.tar.gz` that `install.sh` does, and checks it against
 //! the release's `stone-<target>.tar.gz.sha256` (plus the digest GitHub publishes for each asset)
@@ -55,7 +55,7 @@ pub fn run(check: bool, tag: Option<&str>) -> Result<(), Box<dyn Error>> {
     if check {
         match updater.is_update_available()? {
             Some(release) => println!(
-                "stone {} is available (you have {current}); run `stone self-update`",
+                "stone {} is available (you have {current}); run `stone update`",
                 release.version()
             ),
             None => println!("stone {current} is up to date"),

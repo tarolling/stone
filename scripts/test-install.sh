@@ -7,7 +7,8 @@
 #
 # It packages the binary the way release.yml does, installs it through
 # install.sh with STONE_DOWNLOAD_URL pointing at a file:// directory, runs an
-# example with the installed binary, and checks that a bad checksum is rejected.
+# example with the installed binary, uninstalls one, and checks that a bad
+# checksum is rejected.
 set -eu
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -35,6 +36,10 @@ STONE_DOWNLOAD_URL="file://$work/release" STONE_INSTALL_DIR="$work/bin" \
 echo "test: --dir overrides the install directory"
 STONE_DOWNLOAD_URL="file://$work/release" sh "$root/install.sh" --dir "$work/other"
 "$work/other/stone" --version
+
+echo "test: stone uninstall removes the installed binary"
+"$work/other/stone" uninstall --yes
+[ ! -e "$work/other/stone" ]
 
 echo "test: rejects a checksum mismatch"
 for checksum in "$work"/release/*.sha256; do

@@ -64,7 +64,8 @@ jobs:
       run: |
         stone=target/${{ matrix.target }}/release/stone
         $stone --version
-        $stone self-update --help
+        $stone update --help
+        $stone uninstall --help
         $stone run examples/basics.st | diff - examples/basics.out
     # stone build targets Linux, where the runner's gcc assembles and links for its own processor
     - name: Smoke test the compiler

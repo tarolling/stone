@@ -22,7 +22,7 @@ run, and publishes `stone-<target>.tar.gz` plus a `.sha256` for each as a GitHub
 Running the workflow by hand from the Actions tab builds and tests the archives without
 publishing.
 
-`install.sh` and `stone self-update` both download from these releases. To test the install
+`install.sh` and `stone update` both download from these releases. To test the install
 script against a local release, build first and run
 
 ```sh

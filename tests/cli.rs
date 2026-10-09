@@ -67,15 +67,81 @@ fn run_reports_a_runtime_error_and_fails() {
 
 #[cfg(not(feature = "self-update"))]
 #[test]
-fn self_update_without_feature_explains_how_to_upgrade() {
+fn update_without_feature_explains_how_to_upgrade() {
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("update")
+        .output()
+        .expect("stone should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("built without"), "{stderr}");
+    assert!(stderr.contains("install.sh"), "{stderr}");
+}
+
+#[test]
+fn self_update_is_not_a_command() {
     let output = Command::new(env!("CARGO_BIN_EXE_stone"))
         .arg("self-update")
         .output()
         .expect("stone should run");
     assert!(!output.status.success());
+    // with no such subcommand, `self-update` is read as a file to run
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("built without self-update"), "{stderr}");
-    assert!(stderr.contains("install.sh"), "{stderr}");
+    assert!(stderr.starts_with("self-update: error: "), "{stderr}");
+}
+
+/// Copies the stone binary to `<target tmp>/<dir>/stone` so a test can uninstall it, returning
+/// the copy's path.
+///
+/// For example, `installed_copy("uninstall_yes/bin")` returns `.../uninstall_yes/bin/stone`.
+fn installed_copy(dir: &str) -> PathBuf {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let copy = dir.join("stone");
+    std::fs::copy(env!("CARGO_BIN_EXE_stone"), &copy).unwrap();
+    copy
+}
+
+/// Runs `<exe> uninstall <args>` with no stdin and `CARGO_HOME` set to `cargo_home`.
+fn uninstall(exe: &PathBuf, args: &[&str], cargo_home: &PathBuf) -> Output {
+    Command::new(exe)
+        .arg("uninstall")
+        .args(args)
+        .env("CARGO_HOME", cargo_home)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("stone should run")
+}
+
+#[test]
+fn uninstall_without_a_terminal_needs_yes() {
+    let copy = installed_copy("uninstall_no_terminal/bin");
+    let output = uninstall(&copy, &[], &copy.with_file_name("no-cargo"));
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("--yes"), "{stderr}");
+    assert!(copy.exists());
+}
+
+#[test]
+fn uninstall_yes_removes_the_binary() {
+    let copy = installed_copy("uninstall_yes/bin");
+    let output = uninstall(&copy, &["--yes"], &copy.with_file_name("no-cargo"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stderr}");
+    assert!(String::from_utf8_lossy(&output.stdout).contains("removed"));
+    assert!(!copy.exists());
+}
+
+#[test]
+fn uninstall_refuses_a_cargo_install() {
+    let copy = installed_copy("uninstall_cargo/cargo/bin");
+    let cargo_home = copy.parent().unwrap().parent().unwrap().to_path_buf();
+    let output = uninstall(&copy, &["--yes"], &cargo_home);
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cargo uninstall stone"), "{stderr}");
+    assert!(copy.exists());
 }
 
 /// Writes `source` to a temporary `.st` file named after `name` and runs `stone <before> <file>

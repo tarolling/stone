@@ -82,12 +82,19 @@ Ctrl+D ends the session. stone does no line editing of its own, so run `rlwrap s
 arrow keys and history. When standard input is not a terminal, stone prints no banner or
 prompts, so `printf 'x = 6\nx * 7\n' | stone` prints just `42`.
 
-## `stone self-update [--check] [--version TAG]`
+## `stone update [--check] [--version TAG]`
 
 Replaces the installed binary with a newer GitHub release, after verifying its checksum. With
 `--check`, it only reports whether a newer release exists, and `--version` installs a specific
 release, such as `v0.1.0`. Release binaries include this command. A `stone` built with `cargo`
 explains how to upgrade instead, unless it was built with `--features self-update`.
+
+## `stone uninstall [--yes]`
+
+Deletes the running `stone` binary. It asks `remove PATH? [y/N]` first, and `--yes` (or `-y`)
+skips the question. Without a terminal on standard input it needs `--yes`. A binary in
+`$CARGO_HOME/bin` (by default `~/.cargo/bin`) was put there by `cargo install`, so stone leaves
+it and tells you to run `cargo uninstall stone`.
 
 ## Other options
 

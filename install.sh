@@ -137,7 +137,7 @@ main() {
     # rename into place so a running stone is never overwritten mid-write
     mv -f "$dir/stone.tmp" "$dir/stone"
     say "installed $("$dir/stone" --version) to $dir/stone"
-    say "upgrade it later with 'stone self-update'"
+    say "upgrade it later with 'stone update', or remove it with 'stone uninstall'"
 
     case ":$PATH:" in
         *":$dir:"*) ;;

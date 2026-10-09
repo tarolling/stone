@@ -6,7 +6,7 @@ use crate::ast::{
     BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp,
 };
 use crate::checker::range_args;
-use crate::stdlib::{self, MAX_CALL_DEPTH};
+use crate::stdlib::{self, MAX_CALL_DEPTH, os};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -135,6 +135,22 @@ fn list_position(index: i64, len: usize) -> EvalResult<usize> {
         Err(format!("list index out of range (index {index}, length {len})").into())
     }
 }
+
+/// The error `os.exit` stops a program with, holding the exit status, which is the low 8 bits of
+/// the code it was given, as the system keeps them.
+///
+/// For example, `os.exit(3)` stops with `Exit(3)` and `os.exit(-1)` with `Exit(255)`. It is not
+/// a failure: callers print nothing for it and exit with its status, which may be 0.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Exit(pub u8);
+
+impl std::fmt::Display for Exit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "the program exited with status {}", self.0)
+    }
+}
+
+impl std::error::Error for Exit {}
 
 pub enum ControlFlow {
     None,
@@ -736,6 +752,20 @@ impl<'out> Interpreter<'out> {
                 let args = self.args.iter().map(|a| a.as_str()).collect();
                 return Ok(str_list(args));
             }
+            ("os.env", [Value::Str(name)]) => return Ok(Value::Str(os::env(name).into())),
+            ("os.has_env", [Value::Str(name)]) => return Ok(Value::Bool(os::has_env(name))),
+            ("os.platform", []) => return Ok(Value::Str(os::platform().into())),
+            ("os.arch", []) => return Ok(Value::Str(os::arch().into())),
+            ("os.hostname", []) => return Ok(Value::Str(os::hostname().into())),
+            ("os.cpu_count", []) => return Ok(Value::Int(os::cpu_count())),
+            ("os.pid", []) => return Ok(Value::Int(os::pid())),
+            ("os.cwd", []) => return Ok(Value::Str(os::cwd()?.into())),
+            ("os.exit", [Value::Int(code)]) => {
+                self.out.flush()?;
+                return Err(Box::new(Exit(*code as u8)));
+            }
+            ("os.time", []) => return Ok(Value::Float(os::time())),
+            ("os.clock", []) => return Ok(Value::Float(os::clock())),
             _ => {}
         }
 

@@ -8,6 +8,10 @@
 //! [`link`] merges every module into a single [`Mod`] in which each library function is named by
 //! its module, such as `geometry.shapes.area`, and every use of it is rewritten to that name. The
 //! checker and both backends then run on it as they would on one file.
+//!
+//! `os` is a builtin module with no file (see [`crate::stdlib::os`]). Calls to its functions are
+//! rewritten to their linked names too, such as `os.env`, which the checker and both backends
+//! treat as builtins.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -18,7 +22,7 @@ use crate::diagnostic::Diagnostic;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::span::{FileId, Pos, Span};
-use crate::stdlib::BUILTINS;
+use crate::stdlib::{BUILTINS, is_builtin, os};
 
 #[cfg(test)]
 mod tests;
@@ -150,8 +154,11 @@ impl SourceMap {
 pub enum Target {
     /// A module, whose functions are called as `name.f()`.
     Module(FileId),
-    /// A library function, by its linked name, such as `geometry.vec.dot`.
+    /// A library function, by its linked name, such as `geometry.vec.dot`, or a function of a
+    /// builtin module, such as `os.env`.
     Function(String),
+    /// A builtin module, which has no file, by its name, such as `os`.
+    BuiltinModule(String),
 }
 
 /// A name a `use` binds, for editor tooling.
@@ -229,6 +236,8 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
 /// What a name a file binds with `use` refers to while linking.
 enum Binding {
     Module(FileId),
+    /// The builtin `os` module.
+    BuiltinModule,
     Function(String),
     /// A `use` that failed to resolve, which was already reported, so its uses are left alone.
     Unresolved,
@@ -341,6 +350,9 @@ impl Loader<'_> {
     fn resolve(&mut self, file: FileId, path: &[(String, Span)]) -> Result<Target, Diagnostic> {
         let names: Vec<String> = path.iter().map(|(name, _)| name.clone()).collect();
         let span = path[0].1.to(path[path.len() - 1].1);
+        if names[0] == os::MODULE {
+            return self.resolve_os(path, span);
+        }
         let entry = self.entry_names.join(".");
         let entry_error = || {
             Diagnostic::error(
@@ -394,6 +406,47 @@ impl Loader<'_> {
         ))
     }
 
+    /// Finds what a `use` path starting with `os` names: the builtin module, or one of its
+    /// functions, by its linked name.
+    ///
+    /// For example, `use os` is the module and `use os.env` is the function `os.env`. A file
+    /// `os.st` next to the entry file would be ambiguous, so it is an error to import it.
+    fn resolve_os(&self, path: &[(String, Span)], span: Span) -> Result<Target, Diagnostic> {
+        let module = [os::MODULE.to_string()];
+        if !self.is_entry(&module)
+            && self
+                .sources
+                .read(&self.root.join(module_path(&module)))
+                .is_some()
+        {
+            return Err(Diagnostic::error(
+                span,
+                format!("'{}' is a builtin module, so rename os.st", os::MODULE),
+            ));
+        }
+        match path {
+            [_] => Ok(Target::BuiltinModule(os::MODULE.to_string())),
+            [_, (function, function_span)] => {
+                let linked = format!("{}.{function}", os::MODULE);
+                if os::is_function(&linked) {
+                    Ok(Target::Function(linked))
+                } else {
+                    Err(Diagnostic::error(
+                        *function_span,
+                        format!("module '{}' has no function '{function}'", os::MODULE),
+                    ))
+                }
+            }
+            _ => {
+                let dotted: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
+                Err(Diagnostic::error(
+                    span,
+                    format!("no module named '{}'", dotted.join(".")),
+                ))
+            }
+        }
+    }
+
     /// Checks every file's top-level rules and names, then merges the files into one module.
     fn link(mut self) -> Linked {
         let functions: Vec<HashMap<String, bool>> =
@@ -442,6 +495,7 @@ impl Loader<'_> {
                         match target {
                             Target::Module(id) => Binding::Module(*id),
                             Target::Function(name) => Binding::Function(name.clone()),
+                            Target::BuiltinModule(_) => Binding::BuiltinModule,
                         }
                     }
                     None => Binding::Unresolved,
@@ -663,14 +717,31 @@ impl Rewriter<'_> {
         if self.locals.contains(id) {
             return false;
         }
-        let Some(Binding::Module(target)) = self.bindings.get(id) else {
-            return false;
+        let target = match self.bindings.get(id) {
+            Some(Binding::Module(target)) => target,
+            Some(Binding::BuiltinModule) => {
+                let attr_span = self.attr_span(func.span, attr);
+                let linked = format!("{}.{attr}", os::MODULE);
+                if os::is_function(&linked) {
+                    *func = Expr::new(
+                        ExprKind::Name {
+                            id: linked,
+                            ctx: ExprContext::Load,
+                        },
+                        attr_span,
+                    );
+                } else {
+                    self.diagnostics.push(Diagnostic::error(
+                        attr_span,
+                        format!("module '{}' has no function '{attr}'", os::MODULE),
+                    ));
+                }
+                return true;
+            }
+            _ => return false,
         };
 
-        // the function's name is the last token of `func`
-        let end = func.span.end;
-        let start = Pos::new(end.line, end.col.saturating_sub(attr.chars().count()));
-        let attr_span = Span::new(start, end).in_file(self.file);
+        let attr_span = self.attr_span(func.span, attr);
         let module = &self.module_names[target.0 as usize];
         match self.functions[target.0 as usize].get(attr) {
             Some(&public) if public || *target == self.file => {
@@ -694,6 +765,14 @@ impl Rewriter<'_> {
         true
     }
 
+    /// Returns the span of `attr`, the function's name, which is the last token of a call's
+    /// `func` spanning `span`.
+    fn attr_span(&self, span: Span, attr: &str) -> Span {
+        let end = span.end;
+        let start = Pos::new(end.line, end.col.saturating_sub(attr.chars().count()));
+        Span::new(start, end).in_file(self.file)
+    }
+
     /// Rewrites a name to what it refers to: an imported function's linked name, or in a library,
     /// one of the module's own functions. In a library, a name that is none of those, nor a local
     /// or builtin, is undefined, since a module cannot see the entry file's names.
@@ -703,14 +782,13 @@ impl Rewriter<'_> {
         }
         match self.bindings.get(id) {
             Some(Binding::Function(name)) => *id = name.clone(),
-            Some(Binding::Module(_)) => self.diagnostics.push(Diagnostic::error(
-                span,
-                format!("'{id}' is a module, not a value"),
-            )),
+            Some(Binding::Module(_) | Binding::BuiltinModule) => self.diagnostics.push(
+                Diagnostic::error(span, format!("'{id}' is a module, not a value")),
+            ),
             Some(Binding::Unresolved) => {}
             None if !self.library => {}
             None if self.own.contains_key(id) => *id = format!("{}.{id}", self.module),
-            None if BUILTINS.contains(&id.as_str()) => {}
+            None if is_builtin(id) => {}
             None => {
                 let what = if called { "function" } else { "name" };
                 self.diagnostics

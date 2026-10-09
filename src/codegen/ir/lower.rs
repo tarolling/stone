@@ -29,6 +29,7 @@ use super::{
 };
 use crate::ast::{Arg, BoolOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::checker::{Symbol, SymbolKind, Type, collect_assigned, range_args};
+use crate::codegen::context::os_routine;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
@@ -1388,6 +1389,28 @@ impl<'a> Lowerer<'a> {
             "eof" => Ok(self.runtime_call("stone.eof", vec![], into)),
             "args" => {
                 let result = self.runtime_call("stone.args", vec![], into);
+                self.own(result, kind);
+                Ok(result)
+            }
+            "os.exit" => {
+                let code = self.expr(&args[0])?;
+                // it never returns, but the call is a statement like any other
+                self.push(Inst::Call {
+                    dst: None,
+                    callee: Callee::Runtime("stone.os_exit"),
+                    args: vec![code],
+                });
+                Ok(self.finish(Operand::Imm(0), into))
+            }
+            _ if let Some(label) = os_routine(name) => {
+                let mut values = Vec::new();
+                for arg in args {
+                    values.push(self.expr(arg)?);
+                }
+                let result = self.runtime_call(label, values.clone(), into);
+                for value in values {
+                    self.release_temp(value);
+                }
                 self.own(result, kind);
                 Ok(result)
             }

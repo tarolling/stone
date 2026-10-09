@@ -22,7 +22,38 @@ const STRING_ROUTINES: &[&str] = &[
     "stone.str_split",
     "stone.input",
     "stone.args",
+    "stone.os_env",
+    "stone.os_platform",
+    "stone.os_arch",
+    "stone.os_hostname",
+    "stone.os_cwd",
 ];
+
+/// The runtime routine behind each function of the `os` module, by its linked name.
+///
+/// For example, `os.env("HOME")` lowers to a call of `stone.os_env`.
+pub const OS_ROUTINES: [(&str, &str); 11] = [
+    ("os.env", "stone.os_env"),
+    ("os.has_env", "stone.os_has_env"),
+    ("os.platform", "stone.os_platform"),
+    ("os.arch", "stone.os_arch"),
+    ("os.hostname", "stone.os_hostname"),
+    ("os.cpu_count", "stone.os_cpu_count"),
+    ("os.pid", "stone.os_pid"),
+    ("os.cwd", "stone.os_cwd"),
+    ("os.exit", "stone.os_exit"),
+    ("os.time", "stone.os_time"),
+    ("os.clock", "stone.os_clock"),
+];
+
+/// Returns the runtime routine behind the `os` function with the linked name `name`, such as
+/// `stone.os_pid` for `os.pid`.
+pub fn os_routine(name: &str) -> Option<&'static str> {
+    OS_ROUTINES
+        .iter()
+        .find(|(function, _)| *function == name)
+        .map(|(_, label)| *label)
+}
 
 /// The reference count of a string literal or other static object, which is never freed: no
 /// program can release it `1 << 62` times.
@@ -204,6 +235,26 @@ impl Context {
             || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
     }
 
+    /// Returns the runtime routines of the `os` module that the program calls, such as
+    /// `stone.os_pid`.
+    pub fn os_routines(&self) -> Vec<&'static str> {
+        OS_ROUTINES
+            .iter()
+            .map(|(_, label)| *label)
+            .filter(|label| self.uses(&[label]))
+            .collect()
+    }
+
+    /// Returns the failure label `stone.os_cwd` jumps to, if the program calls it, or an empty
+    /// string, so programs that cannot fail need no `stone.fail`.
+    pub fn os_cwd_failure(&mut self) -> String {
+        if self.uses(&["stone.os_cwd"]) {
+            self.fail_label(crate::stdlib::os::CWD_FAILURE)
+        } else {
+            String::new()
+        }
+    }
+
     /// Returns whether the program calls any of the runtime routines in `labels`.
     pub fn uses(&self, labels: &[&str]) -> bool {
         labels.iter().any(|label| self.runtime.contains(label))
@@ -330,7 +381,7 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
     match &expr.kind {
         ExprKind::Call { func, args } => {
             if let ExprKind::Name { id, .. } = &func.kind
-                && crate::stdlib::BUILTINS.contains(&id.as_str())
+                && crate::stdlib::is_builtin(id)
             {
                 calls.insert(id.clone());
             }

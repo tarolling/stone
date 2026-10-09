@@ -20,7 +20,7 @@ use stone::project::{
 use stone::span::{FileId, Pos, Span};
 use stone::stdlib::{
     BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, builtin_doc, builtins_reference,
-    method_doc,
+    method_doc, os,
 };
 use stone::token::RESERVED_KEYWORDS;
 
@@ -148,6 +148,17 @@ impl Document {
             .symbols
             .iter()
             .find(|s| s.kind == StoneSymbolKind::Function && s.name == name)
+    }
+
+    /// Returns the builtin module this document binds to `name`, such as `os` for `system` after
+    /// `use os as system`.
+    fn builtin_module(&self, name: &str) -> Option<&str> {
+        self.imports.iter().find_map(|i| match &i.target {
+            Target::BuiltinModule(module) if i.span.file == self.file && i.name == name => {
+                Some(module.as_str())
+            }
+            _ => None,
+        })
     }
 }
 
@@ -282,23 +293,61 @@ fn module_at(doc: &Document, position: Position) -> Option<(FileId, Span)> {
     if let Some(import) = doc.import_at(position) {
         return match import.target {
             Target::Module(file) => Some((file, import.span)),
-            Target::Function(_) => None,
+            Target::Function(_) | Target::BuiltinModule(_) => None,
         };
     }
     let (word, span) = word_at(doc, doc.index.pos(position))?;
-    let next = doc
-        .text
-        .lines()
-        .nth(span.end.line - 1)?
-        .chars()
-        .nth(span.end.col - 1);
-    if next != Some('.') {
+    if !precedes_dot(doc, span.end) {
         return None;
     }
     doc.imports.iter().find_map(|i| match i.target {
         Target::Module(file) if i.span.file == doc.file && i.name == word => Some((file, span)),
         _ => None,
     })
+}
+
+/// Returns the builtin module named at `position` and the span of its name, like [`module_at`]
+/// does for module files, as `os` is in `use os` and in `os.pid()`.
+fn builtin_module_at(doc: &Document, position: Position) -> Option<(String, Span)> {
+    if let Some(import) = doc.import_at(position) {
+        return match &import.target {
+            Target::BuiltinModule(module) => Some((module.clone(), import.span)),
+            _ => None,
+        };
+    }
+    let (word, span) = word_at(doc, doc.index.pos(position))?;
+    if !precedes_dot(doc, span.end) {
+        return None;
+    }
+    Some((doc.builtin_module(&word)?.to_string(), span))
+}
+
+/// Returns the documentation of the builtin named at `position`, whether it is a method, and the
+/// span of its name.
+///
+/// A name right after a `.` is a method, as `len` is in `xs.len()`, unless the `.` follows a
+/// builtin module, as in `os.pid()`. Other names are builtin functions, either by their own name,
+/// such as `print`, or through a `use` that binds one, such as `getenv` after
+/// `use os.env as getenv`.
+fn builtin_at(doc: &Document, position: Position) -> Option<(&'static BuiltinDoc, bool, Span)> {
+    if let Some(import) = doc.import_at(position) {
+        return match &import.target {
+            Target::Function(name) => builtin_doc(name).map(|d| (d, false, import.span)),
+            _ => None,
+        };
+    }
+    let (word, span) = word_at(doc, doc.index.pos(position))?;
+    if follows_dot(doc, span.start) {
+        if let Some(module) = receiver(doc, span.start).and_then(|r| doc.builtin_module(&r)) {
+            return builtin_doc(&format!("{module}.{word}")).map(|d| (d, false, span));
+        }
+        return method_doc(&word).map(|d| (d, true, span));
+    }
+    let imported = doc.imports.iter().find_map(|i| match &i.target {
+        Target::Function(name) if i.span.file == doc.file && i.name == word => Some(name.as_str()),
+        _ => None,
+    });
+    builtin_doc(imported.unwrap_or(&word)).map(|d| (d, false, span))
 }
 
 /// Returns the identifier the position is on or just after, and its span.
@@ -326,6 +375,31 @@ fn word_at(doc: &Document, pos: Pos) -> Option<(String, Span)> {
     let word = line[start..end].iter().collect();
     let span = Span::new(Pos::new(pos.line, start + 1), Pos::new(pos.line, end + 1));
     Some((word, span))
+}
+
+/// Returns whether the text right at `pos` is a `.`, so a name ending there is a module or a
+/// receiver, as `xs` is in `xs.len()`.
+fn precedes_dot(doc: &Document, pos: Pos) -> bool {
+    doc.text
+        .lines()
+        .nth(pos.line - 1)
+        .and_then(|line| line.chars().nth(pos.col - 1))
+        == Some('.')
+}
+
+/// Returns the name right before the `.` that comes right before `pos`, such as `os` when `pos`
+/// is the start of `pid` in `os.pid()`.
+fn receiver(doc: &Document, pos: Pos) -> Option<String> {
+    if !follows_dot(doc, pos) {
+        return None;
+    }
+    let line: Vec<char> = doc.text.lines().nth(pos.line - 1)?.chars().collect();
+    let dot = pos.col - 2;
+    let start = (0..dot)
+        .rev()
+        .take_while(|&i| line[i].is_alphanumeric() || line[i] == '_')
+        .last()?;
+    Some(line[start..dot].iter().collect())
 }
 
 /// Returns whether the text right before `pos` is a `.`, so a name there is a method, as `len` is
@@ -376,13 +450,13 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
             range: Some(doc.index.range(span)),
         });
     }
-    if let Some((word, span)) = word_at(doc, pos)
-        && let Some(builtin) = if follows_dot(doc, span.start) {
-            method_doc(&word)
-        } else {
-            builtin_doc(&word)
-        }
-    {
+    if let Some((module, span)) = builtin_module_at(doc, position) {
+        return Some(Hover {
+            contents: markdown(&format!("module {module}"), Some(os::MODULE_DOC)),
+            range: Some(doc.index.range(span)),
+        });
+    }
+    if let Some((builtin, _, span)) = builtin_at(doc, position) {
         return Some(Hover {
             contents: markdown(builtin.signature, Some(builtin.description)),
             range: Some(doc.index.range(span)),
@@ -419,6 +493,8 @@ pub struct Builtins {
     functions: HashMap<&'static str, (u32, u32)>,
     /// The same for each builtin method, such as `len` in `// (str | list[T]).len() -> int`.
     methods: HashMap<&'static str, (u32, u32)>,
+    /// The line and column of the `os` in the heading of the `os` module's functions.
+    os_module: Option<(u32, u32)>,
 }
 
 impl Builtins {
@@ -434,13 +510,34 @@ impl Builtins {
                 (line as u32, signature[..col].chars().count() as u32),
             ))
         };
-        let functions = BUILTIN_DOCS.iter().filter_map(find).collect();
+        let functions = BUILTIN_DOCS
+            .iter()
+            .chain(&os::DOCS)
+            .filter_map(find)
+            .collect();
         let methods = METHOD_DOCS.iter().filter_map(find).collect();
+        let heading = format!("// The {} module", os::MODULE);
+        let os_module = text
+            .lines()
+            .position(|line| line.starts_with(&heading))
+            .map(|line| (line as u32, "// The ".len() as u32));
         Builtins {
             uri,
             functions,
             methods,
+            os_module,
         }
+    }
+
+    /// Returns the location of the builtin module `name` in the heading of its functions.
+    fn module_location(&self, name: &str) -> Option<Location> {
+        if name != os::MODULE {
+            return None;
+        }
+        let (line, start) = self.os_module?;
+        let end = start + name.chars().count() as u32;
+        let range = Range::new(Position::new(line, start), Position::new(line, end));
+        Some(Location::new(self.uri.clone(), range))
     }
 
     /// Returns the location of the builtin function, or with `method` the builtin method, named
@@ -470,19 +567,26 @@ pub fn definition(
         return doc.location(doc.analysis.symbols[symbol].span, uri);
     }
     if let Some(import) = doc.import_at(position) {
-        return match &import.target {
+        match &import.target {
             Target::Module(file) => {
                 let start = Range::new(Position::new(0, 0), Position::new(0, 0));
-                Some(Location::new(
+                return Some(Location::new(
                     file_uri(&doc.sources.file(*file).path)?,
                     start,
-                ))
+                ));
             }
-            Target::Function(name) => doc.location(doc.function(name)?.span, uri),
-        };
+            Target::Function(name) if !stone::stdlib::is_builtin(name) => {
+                return doc.location(doc.function(name)?.span, uri);
+            }
+            // a builtin module or function, documented in `builtins`
+            _ => {}
+        }
     }
-    let (word, span) = word_at(doc, doc.index.pos(position))?;
-    builtins?.location(&word, follows_dot(doc, span.start))
+    if let Some((module, _)) = builtin_module_at(doc, position) {
+        return builtins?.module_location(&module);
+    }
+    let (builtin, method, _) = builtin_at(doc, position)?;
+    builtins?.location(builtin.name, method)
 }
 
 /// Returns every appearance of the symbol at `position`, with or without its definition.
@@ -662,6 +766,9 @@ pub fn completion(
         if let Some(file) = module {
             return module_functions(doc, file);
         }
+        if let Some(module) = doc.builtin_module(&receiver) {
+            return builtin_module_functions(module);
+        }
         return METHODS
             .iter()
             .map(|method| CompletionItem {
@@ -699,8 +806,13 @@ pub fn completion(
             ),
             Target::Function(name) => (
                 CompletionItemKind::FUNCTION,
-                doc.function(name).map(|s| signature(&doc.analysis, s)),
+                doc.function(name)
+                    .map(|s| signature(&doc.analysis, s))
+                    .or_else(|| builtin_doc(name).map(|d| d.signature.to_string())),
             ),
+            Target::BuiltinModule(module) => {
+                (CompletionItemKind::MODULE, Some(format!("module {module}")))
+            }
         };
         items.push(CompletionItem {
             label: import.name.clone(),
@@ -743,9 +855,27 @@ fn module_functions(doc: &Document, file: FileId) -> Vec<CompletionItem> {
         .collect()
 }
 
+/// Returns the functions of the builtin module `module`, by their own names, such as `env` for
+/// `os.env`.
+fn builtin_module_functions(module: &str) -> Vec<CompletionItem> {
+    os::DOCS
+        .iter()
+        .filter_map(|doc| {
+            let name = doc.name.strip_prefix(module)?.strip_prefix('.')?;
+            Some(CompletionItem {
+                label: name.to_string(),
+                kind: Some(CompletionItemKind::FUNCTION),
+                detail: Some(doc.signature.to_string()),
+                ..CompletionItem::default()
+            })
+        })
+        .collect()
+}
+
 /// Returns what can come next in a `use` whose path so far is `path`, such as `geometry.`: the
 /// modules and directories in the directory it names, and the public functions of the module it
-/// names, if the program has loaded it.
+/// names, if the program has loaded it. At the start of the path, that includes the builtin
+/// `os` module, and after `os.`, its functions.
 fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<CompletionItem> {
     let parent = path.rsplit_once('.').map_or("", |(parent, _)| parent);
     let names: Vec<&str> = parent.split('.').filter(|n| !n.is_empty()).collect();
@@ -775,7 +905,17 @@ fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<Comp
             ..CompletionItem::default()
         });
     }
-    if !names.is_empty() {
+    if names.is_empty() && !items.iter().any(|i| i.label == os::MODULE) {
+        items.push(CompletionItem {
+            label: os::MODULE.to_string(),
+            kind: Some(CompletionItemKind::MODULE),
+            detail: Some(format!("module {}", os::MODULE)),
+            ..CompletionItem::default()
+        });
+    }
+    if names == [os::MODULE] {
+        items.extend(builtin_module_functions(os::MODULE));
+    } else if !names.is_empty() {
         let module = names.join(".");
         if let Some((file, _)) = doc.sources.files().find(|(_, f)| f.module == module) {
             items.extend(module_functions(doc, file));

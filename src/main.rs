@@ -7,7 +7,7 @@ use stone::ast::Mod;
 use stone::codegen::Architecture;
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver;
-use stone::interpreter::Limits;
+use stone::interpreter::{Exit, Limits};
 use stone::project::FsSources;
 
 #[cfg(feature = "self-update")]
@@ -156,10 +156,13 @@ fn main() -> ExitCode {
                 &FsSources,
             ) {
                 Ok(()) => ExitCode::SUCCESS,
-                Err(e) => {
-                    eprintln!("error: {e}");
-                    ExitCode::FAILURE
-                }
+                Err(e) => match e.downcast_ref::<Exit>() {
+                    Some(Exit(status)) => ExitCode::from(*status),
+                    None => {
+                        eprintln!("error: {e}");
+                        ExitCode::FAILURE
+                    }
+                },
             }
         }
         ExecutionMode::Run { file, args } => with_program(&file, |module| {
@@ -214,6 +217,7 @@ fn read(file: &str) -> Option<String> {
 ///
 /// Diagnostics are rendered with the path of the file they are in, the line, and a caret under
 /// the problem, while other errors, such as runtime errors, are printed as `file: error: message`.
+/// A program that ended with `os.exit` prints nothing more and exits with its status.
 fn with_program(file: &str, action: impl FnOnce(&Mod) -> Result<(), Box<dyn Error>>) -> ExitCode {
     let Some(source) = read(file) else {
         return ExitCode::FAILURE;
@@ -226,6 +230,9 @@ fn with_program(file: &str, action: impl FnOnce(&Mod) -> Result<(), Box<dyn Erro
         },
         Err(diagnostics) => Box::new(diagnostics),
     };
+    if let Some(Exit(status)) = err.downcast_ref::<Exit>() {
+        return ExitCode::from(*status);
+    }
     if let Some(Diagnostics(diagnostics)) = err.downcast_ref::<Diagnostics>() {
         let rendered: String = diagnostics.iter().map(|d| sources.render(d)).collect();
         eprint!("{rendered}");

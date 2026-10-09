@@ -1,5 +1,7 @@
 //! The builtin functions shared by the interpreter and the compiler, and the limits both enforce.
 
+pub mod os;
+
 /// The most function calls that can be active at once, in both backends.
 ///
 /// For example, a recursive function can call itself 999 times from a top-level call, but a
@@ -103,11 +105,25 @@ pub static METHOD_DOCS: [BuiltinDoc; 4] = [
     },
 ];
 
-/// Returns the documentation for the builtin function named `name`.
+/// Returns whether `name` is a builtin function: one of [`BUILTINS`] or the linked name of a
+/// function of the builtin `os` module.
 ///
-/// For example, `builtin_doc("int")` has the signature `int(value: int | float) -> int`.
+/// For example, `is_builtin("print")` and `is_builtin("os.env")` are true, but `is_builtin("env")`
+/// is false.
+pub fn is_builtin(name: &str) -> bool {
+    BUILTINS.contains(&name) || os::is_function(name)
+}
+
+/// Returns the documentation for the builtin function named `name`, which may be a function of
+/// the `os` module by its linked name.
+///
+/// For example, `builtin_doc("int")` has the signature `int(value: int | float) -> int`, and
+/// `builtin_doc("os.pid")` has `os.pid() -> int`.
 pub fn builtin_doc(name: &str) -> Option<&'static BuiltinDoc> {
-    BUILTIN_DOCS.iter().find(|doc| doc.name == name)
+    BUILTIN_DOCS
+        .iter()
+        .chain(&os::DOCS)
+        .find(|doc| doc.name == name)
 }
 
 /// Returns the documentation for the builtin method named `name`.
@@ -122,7 +138,8 @@ pub fn method_doc(name: &str) -> Option<&'static BuiltinDoc> {
 ///
 /// Builtins are part of the interpreter and the compiler rather than written in stone, so the
 /// file is only comments, which keeps it valid stone. Each builtin function, then each builtin
-/// method, gets a line holding `// ` and its signature, followed by its description.
+/// method, then each function of the `os` module, gets a line holding `// ` and its signature,
+/// followed by its description.
 pub fn builtins_reference() -> String {
     let mut text = String::from(
         "// stone's builtin functions and methods\n\
@@ -136,6 +153,10 @@ pub fn builtins_reference() -> String {
     }
     text += "\n// Methods, called on a value as in `xs.len()`\n";
     for doc in &METHOD_DOCS {
+        text += &format!("\n// {}\n//     {}\n", doc.signature, doc.description);
+    }
+    text += "\n// The os module, imported with `use os`\n";
+    for doc in &os::DOCS {
         text += &format!("\n// {}\n//     {}\n", doc.signature, doc.description);
     }
     text
@@ -499,7 +520,7 @@ mod tests {
     #[test]
     fn the_reference_has_a_line_for_each_builtin() {
         let reference = builtins_reference();
-        for doc in BUILTIN_DOCS.iter().chain(&METHOD_DOCS) {
+        for doc in BUILTIN_DOCS.iter().chain(&METHOD_DOCS).chain(&os::DOCS) {
             let line = format!("// {}", doc.signature);
             assert_eq!(
                 reference.lines().filter(|l| *l == line).count(),

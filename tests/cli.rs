@@ -230,3 +230,73 @@ fn build_for_the_host_target_by_name_runs() {
     let run = Command::new(&exe).output().expect("the binary should run");
     assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n");
 }
+
+/// Writes `source` as `main.st` in a fresh temporary directory named after `name`, then runs it
+/// from that directory both with `stone run` and as a binary from `stone build`, returning each
+/// run's output.
+fn run_and_build_in(name: &str, source: &str) -> (PathBuf, [Output; 2]) {
+    let dir = project(name, &[("main.st", source)]);
+    let run = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("run")
+        .arg("main.st")
+        .current_dir(&dir)
+        .output()
+        .expect("stone should run");
+    let build = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["build", "main.st", "-o", "out"])
+        .current_dir(&dir)
+        .output()
+        .expect("stone should run");
+    assert!(build.status.success(), "{build:?}");
+    let built = Command::new(dir.join("out"))
+        .current_dir(&dir)
+        .env("STONE_LEAK_CHECK", "1")
+        .output()
+        .expect("the binary should run");
+    (dir, [run, built])
+}
+
+#[test]
+fn exit_ends_the_program_with_its_status() {
+    let source = "use os\n\ndef stop(xs);\n    os.exit(3)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
+    let (_, outputs) = run_and_build_in("os_exit_status", source);
+    for output in outputs {
+        assert_eq!(output.status.code(), Some(3), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    }
+}
+
+#[test]
+fn exit_ends_a_session_with_its_status() {
+    use std::io::Write;
+    use std::process::Stdio;
+
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("stone should run");
+    let entries = "use os\nprint(1)\nos.exit(5)\nprint(2)\n";
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(entries.as_bytes())
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert_eq!(output.status.code(), Some(5), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+}
+
+#[test]
+fn cwd_is_the_directory_the_program_runs_in() {
+    let (dir, outputs) = run_and_build_in("os_cwd", "use os\nprint(os.cwd())\n");
+    let expected = format!("{}\n", dir.canonicalize().unwrap().display());
+    for output in outputs {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    }
+}

@@ -153,14 +153,19 @@ impl Arm64Generator {
         self.emit("\tsvc\t#0");
     }
 
-    /// Emits the routines behind input, `args`, parsing, `str`, and the string methods that the
-    /// program calls, before the failures, since some of them fail through `stone.fail`.
+    /// Emits the routines behind input, `args`, the `os` module, parsing, `str`, and the string
+    /// methods that the program calls, before the failures, since some of them fail through `stone.fail`.
     fn emit_io_runtime(&mut self) {
         if self.ctx.uses(&["stone.input", "stone.eof"]) {
             builtins::io_runtime(self);
         }
         if self.ctx.uses(&["stone.args"]) {
             builtins::args_runtime(self);
+        }
+        let os = self.ctx.os_routines();
+        if !os.is_empty() {
+            let cwd_failure = self.ctx.os_cwd_failure();
+            builtins::os_runtime(self, &os, &cwd_failure);
         }
         if self.ctx.uses(&["stone.parse_int", "stone.parse_float"]) {
             builtins::parse_runtime(self);
@@ -461,6 +466,56 @@ mod tests {
                 .and_then(|n| n.trim_end_matches('!').trim_end_matches(']').parse().ok())
                 .unwrap_or_else(|| panic!("no amount in {line}"));
             assert_eq!(amount % 16, 0, "{line}");
+        }
+    }
+
+    /// Links and assembles `source` without invoking gcc, so that it can `use os`.
+    fn assemble_linked(source: &str) -> String {
+        let (_, module) = crate::driver::load(
+            Path::new("main.st"),
+            source,
+            &crate::project::MapSources::default(),
+        );
+        Arm64Generator::new().assemble(&module.unwrap()).unwrap()
+    }
+
+    #[test]
+    fn os_routines_are_only_emitted_when_used() {
+        let plain = assemble_linked("use os\nprint(1)\n");
+        assert!(!plain.contains("stone.os_"), "{plain}");
+
+        let pid = assemble_linked("use os\nprint(os.pid())\n");
+        assert!(pid.contains("stone.os_pid:"), "{pid}");
+        assert!(!pid.contains("stone.os_cwd:"), "{pid}");
+        assert!(!pid.contains("stone.fail:"), "{pid}");
+
+        let env = assemble_linked("use os\nprint(os.env(\"A\"), os.has_env(\"B\"))\n");
+        for label in ["stone.os_env:", "stone.os_has_env:", "stone.os_getenv:"] {
+            assert!(env.contains(label), "{label} in {env}");
+        }
+
+        let cwd = assemble_linked("use os\nprint(os.cwd())\n");
+        assert!(cwd.contains("stone.os_cwd:"), "{cwd}");
+        assert!(
+            cwd.contains("could not read the current directory"),
+            "{cwd}"
+        );
+
+        let arch = assemble_linked("use os\nprint(os.arch(), os.platform())\n");
+        assert!(arch.contains("\t.string \"aarch64\""), "{arch}");
+        assert!(arch.contains("\t.string \"linux\""), "{arch}");
+
+        let rest =
+            "use os\nprint(os.hostname(), os.cpu_count(), os.time(), os.clock())\nos.exit(0)\n";
+        let rest = assemble_linked(rest);
+        for label in [
+            "stone.os_hostname:",
+            "stone.os_cpu_count:",
+            "stone.os_time:",
+            "stone.os_clock:",
+            "stone.os_exit:",
+        ] {
+            assert!(rest.contains(label), "{label} in {rest}");
         }
     }
 

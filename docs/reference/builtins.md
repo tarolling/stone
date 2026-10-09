@@ -1,8 +1,9 @@
 # Builtins
 
 These functions are part of the language and available everywhere. Their names cannot be
-assigned to. The builtin [methods](#methods) are called on a value instead, as in `xs.len()`.
-The same descriptions appear on hover in the editor.
+assigned to. The builtin [methods](#methods) are called on a value instead, as in `xs.len()`,
+and the functions of the [`os` module](#the-os-module) are imported with `use os`. The same
+descriptions appear on hover in the editor.
 
 ## `print`
 
@@ -189,4 +190,151 @@ leading and trailing whitespace make no difference.
 ```stone
 print("a,,b".split(","), "a::b".split("::"))   // ['a', '', 'b'] ['a', 'b']
 print("  3 4   5 ".split())                    // ['3', '4', '5']
+```
+
+## The `os` module
+
+`os` is a builtin module: it has no file, and a program imports it like any other module, with
+`use os` to call `os.env("HOME")`, `use os.env` to call `env("HOME")`, or `use os as system` to
+call `system.env("HOME")`. Its names are only reserved once imported, so a program can still
+have its own `env` or `time`. A file named `os.st` next to the entry file cannot be imported,
+since `use os` always means this module.
+
+Both `stone run` and a built program answer from the same C library calls, so they agree on
+every machine. The examples show values from one machine.
+
+### `os.env`
+
+```text
+os.env(name: str) -> str
+```
+
+Returns the value of the environment variable `name`, or `""` if it is not set. Use `os.has_env`
+to tell an empty value from a missing one. A name that is empty or holds `=` is never set.
+
+```stone
+use os
+
+print(os.env("HOME"))   // /home/ada
+```
+
+### `os.has_env`
+
+```text
+os.has_env(name: str) -> bool
+```
+
+Returns whether the environment variable `name` is set, even to `""`.
+
+```stone
+use os
+
+if os.has_env("DEBUG");
+    print("debugging")
+```
+
+### `os.platform`
+
+```text
+os.platform() -> str
+```
+
+Returns the operating system the program runs on, such as `"linux"`.
+
+### `os.arch`
+
+```text
+os.arch() -> str
+```
+
+Returns the processor architecture the program runs on, `"x86_64"` or `"aarch64"`. A program
+built with `--target aarch64` reports `"aarch64"` wherever it runs.
+
+### `os.hostname`
+
+```text
+os.hostname() -> str
+```
+
+Returns the name of the machine the program runs on.
+
+### `os.cpu_count`
+
+```text
+os.cpu_count() -> int
+```
+
+Returns the number of processors that are online, which is at least 1.
+
+### `os.pid`
+
+```text
+os.pid() -> int
+```
+
+Returns the process ID of the running program. Under `stone run`, that is the interpreter's
+process.
+
+### `os.cwd`
+
+```text
+os.cwd() -> str
+```
+
+Returns the absolute path of the current working directory, the one the program was started
+from unless something changed it. It stops the program with
+`could not read the current directory` if the directory cannot be read, such as after it was
+deleted.
+
+### `os.exit`
+
+```text
+os.exit(code: int) -> none
+```
+
+Stops the program at once with the exit status `code`. Nothing after it runs, and it prints
+nothing. The system keeps only the low 8 bits of the status, so `os.exit(256)` exits with 0 and
+`os.exit(-1)` with 255. In an interactive session, it ends the session.
+
+```stone
+use os
+
+if args().len() == 0;
+    print("usage: greet NAME")
+    os.exit(2)
+print("hello", args()[0])
+```
+
+### `os.time`
+
+```text
+os.time() -> float
+```
+
+Returns the seconds since 1970-01-01 00:00:00 UTC, with a fraction.
+
+```stone
+use os
+
+print(os.time())   // 1791512687.8459256
+```
+
+### `os.clock`
+
+```text
+os.clock() -> float
+```
+
+Returns seconds from a fixed but arbitrary point, which never go backward, even if the system's
+time changes. Only the difference between two calls means anything, which makes it the way to
+time code:
+
+```stone
+use os
+
+start = os.clock()
+total = 0
+for i in range(1000000);
+    total = total + i
+print("took", os.clock() - start, "seconds")
 ```

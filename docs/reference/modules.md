@@ -58,6 +58,11 @@ The rules for `use`:
 A function's parameters and locals may shadow a name bound by `use`, just as they shadow
 functions.
 
+`os` is a builtin module with no file, so `use os`, `use os.env`, and `use os as system` work in
+any file without an `os.st`. A program cannot have a module of its own named `os`: using it is
+the error `'os' is a builtin module, so rename os.st`. See
+[the `os` module](builtins.md#the-os-module) for its functions.
+
 ## pub
 
 `pub def` makes a function usable from other files. Every other function is private to the file

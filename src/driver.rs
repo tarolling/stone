@@ -7,7 +7,7 @@ use crate::checker::{Analysis, TypeChecker};
 use crate::codegen::Architecture;
 use crate::debug;
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
-use crate::interpreter::{Interpreter, Limits};
+use crate::interpreter::{Exit, Interpreter, Limits};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::project::{self, DEFAULT_ENTRY, Linked, MapSources, SourceMap, Sources};
@@ -169,6 +169,9 @@ pub fn interpret_with_io(
 /// once it exceeds `limits`.
 ///
 /// For example, running the module of `print(1)` appends `1\n` to `out`.
+///
+/// A program that calls `os.exit` with a status other than 0 ends with the error [`Exit`], which
+/// callers report by exiting with that status, while `os.exit(0)` ends it successfully.
 pub fn run_module(
     ast: &Mod,
     input: &mut (impl BufRead + Send),
@@ -181,18 +184,48 @@ pub fn run_module(
         let thread = std::thread::Builder::new()
             .stack_size(Limits::STACK_SIZE)
             .spawn_scoped(scope, || {
-                Interpreter::with_output(out, limits)
+                let result = Interpreter::with_output(out, limits)
                     .with_input(input)
                     .with_args(args.to_vec())
-                    .evaluate(ast)
-                    .map_err(|e| e.to_string())
+                    .evaluate(ast);
+                Ending::of(result)
             })
-            .map_err(|e| format!("could not start the interpreter: {e}"))?;
+            .map_err(|e| Ending::Error(format!("could not start the interpreter: {e}")))?;
         thread
             .join()
-            .unwrap_or_else(|_| Err("the interpreter panicked".to_string()))
+            .unwrap_or_else(|_| Err(Ending::Error("the interpreter panicked".to_string())))
     });
-    Ok(result?)
+    result.map_err(Ending::into_error)
+}
+
+/// How an interpreter thread stopped early, in a form that can leave the thread, since the
+/// interpreter's errors are not `Send`.
+enum Ending {
+    /// A runtime error, by its message.
+    Error(String),
+    /// `os.exit` with a status other than 0.
+    Exit(Exit),
+}
+
+impl Ending {
+    /// Turns what a program's run returned into how it ended, treating `os.exit(0)` as success.
+    fn of(result: Result<(), Box<dyn Error>>) -> Result<(), Ending> {
+        let Err(error) = result else {
+            return Ok(());
+        };
+        match error.downcast::<Exit>() {
+            Ok(exit) if exit.0 == 0 => Ok(()),
+            Ok(exit) => Err(Ending::Exit(*exit)),
+            Err(error) => Err(Ending::Error(error.to_string())),
+        }
+    }
+
+    fn into_error(self) -> Box<dyn Error> {
+        match self {
+            Ending::Error(message) => message.into(),
+            Ending::Exit(exit) => Box::new(exit),
+        }
+    }
 }
 
 /// Compiles source code to a native executable for the machine stone runs on, at `output`.
@@ -226,7 +259,8 @@ pub fn compile_module(ast: &Mod, output: &Path, arch: Architecture) -> Result<()
 /// expression values to `out`, and prints errors, plus prompts if `prompts` is set, to `err`.
 /// Modules named by `use` are read from `sources`. See [`crate::repl`].
 ///
-/// For example, a session over the input `x = 1\nx + 1\n` prints `2` to `out`.
+/// For example, a session over the input `x = 1\nx + 1\n` prints `2` to `out`. An entry that
+/// calls `os.exit` ends the session, with the error [`Exit`] unless its status is 0.
 pub fn repl(
     input: &mut (impl BufRead + Send),
     out: &mut (impl Write + Send),
@@ -241,14 +275,18 @@ pub fn repl(
             .spawn_scoped(scope, || {
                 let mut interpreter =
                     Interpreter::with_output(out, Limits::DEFAULT).with_input(input);
-                repl::run(&mut interpreter, err, prompts, sources).map_err(|e| e.to_string())
+                match repl::run(&mut interpreter, err, prompts, sources) {
+                    Ok(0) => Ok(()),
+                    Ok(status) => Err(Ending::Exit(Exit(status))),
+                    Err(e) => Err(Ending::Error(e.to_string())),
+                }
             })
-            .map_err(|e| format!("could not start the interpreter: {e}"))?;
+            .map_err(|e| Ending::Error(format!("could not start the interpreter: {e}")))?;
         thread
             .join()
-            .unwrap_or_else(|_| Err("the interpreter panicked".to_string()))
+            .unwrap_or_else(|_| Err(Ending::Error("the interpreter panicked".to_string())))
     });
-    Ok(result?)
+    result.map_err(Ending::into_error)
 }
 
 #[cfg(test)]
@@ -432,6 +470,50 @@ ret y
         )
         .map_err(|e| e.to_string())?;
         Ok(String::from_utf8(out).unwrap())
+    }
+
+    #[test]
+    fn os_functions_run_in_the_interpreter() {
+        let platform = crate::stdlib::os::platform();
+        assert_eq!(
+            run_io(
+                "use os\nprint(os.platform(), os.has_env(\"PATH\"), os.env(\"STONE_UNSET\") == \"\")\n",
+                "",
+                &[]
+            ),
+            Ok(format!("{platform} true true\n"))
+        );
+        let source = "use os\nprint(os.pid() > 0, os.cpu_count() > 0, os.time() > 0.0)\n\
+                      print(os.clock() >= 0.0, os.hostname() == os.hostname(), os.cwd() != \"\")\n";
+        assert_eq!(
+            run_io(source, "", &[]),
+            Ok("true true true\ntrue true true\n".to_string())
+        );
+    }
+
+    #[test]
+    fn exit_with_status_zero_ends_the_program_successfully() {
+        let source =
+            "use os\n\ndef stop(xs);\n    os.exit(0)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
+        assert_eq!(run_io(source, "", &[]), Ok("1\n".to_string()));
+        // only the low 8 bits are the status
+        let source = "use os\nprint(1)\nos.exit(256)\nprint(2)\n";
+        assert_eq!(run_io(source, "", &[]), Ok("1\n".to_string()));
+    }
+
+    #[test]
+    fn exit_with_another_status_is_an_exit_error() {
+        let mut out = Vec::new();
+        let error = interpret_with_io(
+            "use os\nprint(1)\nos.exit(-1)\nprint(2)\n",
+            &mut std::io::empty(),
+            &mut out,
+            &[],
+            Limits::DEFAULT,
+        )
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<Exit>(), Some(&Exit(255)));
+        assert_eq!(out, b"1\n");
     }
 
     #[test]

@@ -532,3 +532,139 @@ fn map_sources_list_directories() {
     assert!(sources.is_dir(Path::new("p/geometry")));
     assert!(!sources.is_dir(Path::new("p/main.st")));
 }
+
+#[test]
+fn the_os_module_is_builtin() {
+    let platform = crate::stdlib::os::platform();
+    assert_eq!(
+        output(&[("main.st", "use os\nprint(os.platform())\n")]),
+        format!("{platform}\n")
+    );
+    assert_eq!(
+        output(&[("main.st", "use os.platform\nprint(platform())\n")]),
+        format!("{platform}\n")
+    );
+    assert_eq!(
+        output(&[("main.st", "use os as system\nprint(system.platform())\n")]),
+        format!("{platform}\n")
+    );
+    assert_eq!(
+        output(&[("main.st", "use os.platform as p\nprint(p())\n")]),
+        format!("{platform}\n")
+    );
+}
+
+#[test]
+fn a_library_module_can_use_os() {
+    assert_eq!(
+        output(&[
+            ("main.st", "use util\nprint(util.ok())\n"),
+            ("util.st", "use os\n\npub def ok();\n    ret os.pid() > 0\n"),
+        ]),
+        "true\n"
+    );
+}
+
+#[test]
+fn os_links_to_builtin_names() {
+    let linked = link(
+        Path::new("main.st"),
+        "use os\nuse os.pid\nprint(os.cwd(), pid())\n",
+        &MapSources::default(),
+    );
+    assert_eq!(linked.diagnostics, []);
+    let Mod::Module { body } = &linked.module;
+    let StmtKind::Expr { value } = &body[0].kind else {
+        panic!("expected a call");
+    };
+    let ExprKind::Call { args, .. } = &value.kind else {
+        panic!("expected a call");
+    };
+    let names: Vec<&str> = args
+        .iter()
+        .map(|arg| match &arg.kind {
+            ExprKind::Call { func, .. } => match &func.kind {
+                ExprKind::Name { id, .. } => id.as_str(),
+                _ => "",
+            },
+            _ => "",
+        })
+        .collect();
+    assert_eq!(names, ["os.cwd", "os.pid"]);
+    let targets: Vec<(&str, &Target)> = linked
+        .imports
+        .iter()
+        .map(|i| (i.name.as_str(), &i.target))
+        .collect();
+    assert_eq!(
+        targets,
+        [
+            ("os", &Target::BuiltinModule("os".to_string())),
+            ("pid", &Target::Function("os.pid".to_string())),
+        ]
+    );
+}
+
+#[test]
+fn os_has_only_its_own_functions() {
+    assert_error(
+        &[("main.st", "use os.nope\n")],
+        "main.st",
+        "module 'os' has no function 'nope'",
+        1,
+        8,
+    );
+    assert_error(
+        &[("main.st", "use os\nos.nope()\n")],
+        "main.st",
+        "module 'os' has no function 'nope'",
+        2,
+        4,
+    );
+    assert_error(
+        &[("main.st", "use os.env.x\n")],
+        "main.st",
+        "no module named 'os.env.x'",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn os_is_not_a_value() {
+    assert_error(
+        &[("main.st", "use os\nx = os\n")],
+        "main.st",
+        "'os' is a module, not a value",
+        2,
+        5,
+    );
+}
+
+#[test]
+fn os_cannot_be_called_without_importing_it() {
+    let errors = errors(&[("main.st", "print(os.pid())\n")]);
+    assert_eq!(
+        errors[0],
+        (
+            "main.st".to_string(),
+            "undefined name 'os'".to_string(),
+            1,
+            7
+        )
+    );
+}
+
+#[test]
+fn a_file_cannot_take_the_builtin_os_modules_name() {
+    assert_error(
+        &[
+            ("main.st", "use os\nprint(os.pid() > 0)\n"),
+            ("os.st", "pub def pid();\n    ret 0\n"),
+        ],
+        "main.st",
+        "'os' is a builtin module, so rename os.st",
+        1,
+        5,
+    );
+}

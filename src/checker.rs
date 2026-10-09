@@ -18,7 +18,7 @@ use std::fmt::Display;
 use crate::ast::{CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
-use crate::stdlib::{BUILTINS, METHODS};
+use crate::stdlib::{BUILTINS, METHODS, is_builtin};
 
 #[cfg(test)]
 mod tests;
@@ -708,7 +708,7 @@ impl Inference {
         if self.functions.contains_key(name) {
             return Resolved::Function(name.to_string());
         }
-        if BUILTINS.contains(&name) {
+        if is_builtin(name) {
             return Resolved::Builtin;
         }
         Resolved::Undefined
@@ -1063,6 +1063,29 @@ impl Inference {
                     "'range' can only be used as the iterable of a 'for' loop",
                 );
                 Ty::List(Box::new(Ty::Int))
+            }
+            "os.env" | "os.has_env" | "os.exit" => {
+                let param = if name == "os.exit" { Ty::Int } else { Ty::Str };
+                match args {
+                    [arg] => self.expect(&param, &arg_types[0], arg.span),
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                match name {
+                    "os.env" => Ty::Str,
+                    "os.has_env" => Ty::Bool,
+                    _ => Ty::None,
+                }
+            }
+            "os.platform" | "os.arch" | "os.hostname" | "os.cpu_count" | "os.pid" | "os.cwd"
+            | "os.time" | "os.clock" => {
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                match name {
+                    "os.cpu_count" | "os.pid" => Ty::Int,
+                    "os.time" | "os.clock" => Ty::Float,
+                    _ => Ty::Str,
+                }
             }
             _ => unreachable!("builtin '{name}' has no type rule"),
         }

@@ -7,7 +7,7 @@
 use crate::ast::{Mod, Stmt, StmtKind};
 use crate::diagnostic::{Diagnostic, Diagnostics};
 use crate::driver;
-use crate::interpreter::Interpreter;
+use crate::interpreter::{Exit, Interpreter};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::project::{SourceMap, Sources};
@@ -194,7 +194,7 @@ pub fn run(
     err: &mut dyn Write,
     prompts: bool,
     sources: &dyn Sources,
-) -> std::io::Result<()> {
+) -> std::io::Result<u8> {
     let mut session = Session::default();
     let mut buffer = String::new();
     loop {
@@ -208,10 +208,13 @@ pub fn run(
             if prompts {
                 writeln!(err)?;
             }
-            if !buffer.is_empty() {
-                submit(&mut session, &buffer, interpreter, err, sources)?;
-            }
-            return interpreter.output().flush();
+            let status = if buffer.is_empty() {
+                None
+            } else {
+                submit(&mut session, &buffer, interpreter, err, sources)?
+            };
+            interpreter.output().flush()?;
+            return Ok(status.unwrap_or(0));
         }
         let line = String::from_utf8_lossy(&bytes);
         if buffer.is_empty() && line.trim().is_empty() {
@@ -220,23 +223,29 @@ pub fn run(
         buffer += line.trim_end_matches('\n');
         buffer.push('\n');
         if !needs_more(&buffer) {
-            submit(&mut session, &buffer, interpreter, err, sources)?;
+            if let Some(status) = submit(&mut session, &buffer, interpreter, err, sources)? {
+                return Ok(status);
+            }
             buffer.clear();
         }
     }
 }
 
-/// Checks and runs one entry, writing any error to `err`.
+/// Checks and runs one entry, writing any error to `err`, and returns the exit status if it
+/// called `os.exit`.
 fn submit(
     session: &mut Session,
     entry: &str,
     interpreter: &mut Interpreter,
     err: &mut dyn Write,
     sources: &dyn Sources,
-) -> std::io::Result<()> {
+) -> std::io::Result<Option<u8>> {
     let prepared = match session.prepare(entry, sources) {
         Ok(prepared) => prepared,
-        Err(rendered) => return err.write_all(rendered.as_bytes()),
+        Err(rendered) => {
+            err.write_all(rendered.as_bytes())?;
+            return Ok(None);
+        }
     };
     let statements = prepared.statements();
     // kept even if it fails, since the statements before the failure have already run
@@ -244,8 +253,14 @@ fn submit(
     let result = interpreter.run_entry(&statements);
     interpreter.output().flush()?;
     match result {
-        Ok(()) => Ok(()),
-        Err(e) => writeln!(err, "error: {e}"),
+        Ok(()) => Ok(None),
+        Err(e) => match e.downcast_ref::<Exit>() {
+            Some(Exit(status)) => Ok(Some(*status)),
+            None => {
+                writeln!(err, "error: {e}")?;
+                Ok(None)
+            }
+        },
     }
 }
 
@@ -431,6 +446,35 @@ mod tests {
     fn modules_can_be_used() {
         assert_eq!(session("use util\nutil.one() + 1\n").0, "2\n");
         assert_eq!(session("use util.one\none()\n").0, "1\n");
+    }
+
+    #[test]
+    fn the_os_module_can_be_used() {
+        let platform = crate::stdlib::os::platform();
+        assert_eq!(
+            session("use os\nos.platform()\n").0,
+            format!("'{platform}'\n")
+        );
+    }
+
+    #[test]
+    fn exit_ends_the_session() {
+        assert_eq!(
+            session("use os\nprint(1)\nos.exit(0)\nprint(2)\n"),
+            ("1\n".into(), "".into())
+        );
+        let (mut out, mut err) = (Vec::new(), Vec::new());
+        let input = "use os\nprint(1)\nif 1;\n    os.exit(4)\n\nprint(2)\n";
+        let error = driver::repl(
+            &mut input.as_bytes(),
+            &mut out,
+            &mut err,
+            false,
+            &MapSources::default(),
+        )
+        .unwrap_err();
+        assert_eq!(error.downcast_ref::<Exit>(), Some(&Exit(4)));
+        assert_eq!((out, err), (b"1\n".to_vec(), vec![]));
     }
 
     #[test]

@@ -1,10 +1,11 @@
 //! Tests that the documentation site in `docs/` keeps up with the language.
 //!
-//! For example, adding a builtin to `stdlib::BUILTIN_DOCS` or `stdlib::METHOD_DOCS` fails these
-//! tests until `docs/reference/builtins.md` documents its signature.
+//! For example, adding a builtin to `stdlib::BUILTIN_DOCS`, `stdlib::METHOD_DOCS`, or
+//! `stdlib::os::DOCS` fails these tests until `docs/reference/builtins.md` documents its
+//! signature.
 
 use std::path::Path;
-use stone::stdlib::{BUILTIN_DOCS, METHOD_DOCS};
+use stone::stdlib::{BUILTIN_DOCS, METHOD_DOCS, os};
 use stone::token::RESERVED_KEYWORDS;
 
 /// Returns the contents of a file under `docs/`.
@@ -18,7 +19,7 @@ fn read_doc(path: &str) -> String {
 #[test]
 fn builtins_reference_documents_every_builtin() {
     let page = read_doc("reference/builtins.md");
-    for doc in BUILTIN_DOCS.iter().chain(&METHOD_DOCS) {
+    for doc in BUILTIN_DOCS.iter().chain(&METHOD_DOCS).chain(&os::DOCS) {
         assert!(
             page.contains(doc.signature),
             "docs/reference/builtins.md does not mention `{}`",

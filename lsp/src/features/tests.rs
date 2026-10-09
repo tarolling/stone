@@ -633,6 +633,7 @@ fn completion_in_a_use_offers_modules_and_directories() {
         labels(at(1, 5)),
         [
             ("geometry".to_string(), Some(CompletionItemKind::FOLDER)),
+            ("os".to_string(), Some(CompletionItemKind::MODULE)),
             ("util".to_string(), Some(CompletionItemKind::MODULE)),
         ]
     );
@@ -668,4 +669,98 @@ fn a_comment_right_above_a_definition_is_not_the_modules() {
         hover_text(&doc, at(4, 8)).unwrap(),
         "```stone\nmodule util\n```"
     );
+}
+
+const OS: &str = "use os\nuse os.env as getenv\nprint(os.pid(), getenv(\"HOME\"))\n";
+
+#[test]
+fn hover_documents_the_os_module() {
+    let doc = doc(OS);
+    // the `pid` in `os.pid()`, and `getenv`, bound to `os.env`
+    let text = hover_text(&doc, at(3, 10)).unwrap();
+    assert!(
+        text.starts_with("```stone\nos.pid() -> int\n```\n"),
+        "{text}"
+    );
+    let text = hover_text(&doc, at(3, 18)).unwrap();
+    assert!(
+        text.starts_with("```stone\nos.env(name: str) -> str\n```\n"),
+        "{text}"
+    );
+    // the module, in its `use` and before a `.`
+    let expected = format!(
+        "```stone\nmodule os\n```\n{}",
+        stone::stdlib::os::MODULE_DOC
+    );
+    assert_eq!(hover_text(&doc, at(1, 5)).unwrap(), expected);
+    assert_eq!(hover_text(&doc, at(3, 7)).unwrap(), expected);
+}
+
+#[test]
+fn definition_of_the_os_module_opens_the_reference_file() {
+    let reference: Uri = "file:///cache/builtins.st".parse().unwrap();
+    let builtins = Builtins::new(reference.clone());
+    let doc = doc(OS);
+    let text = stone::stdlib::builtins_reference();
+    let line_of = |prefix: &str| text.lines().position(|l| l.starts_with(prefix)).unwrap() as u32;
+    let range = |position: Position| {
+        let location = definition(&doc, &uri(), position, Some(&builtins)).unwrap();
+        assert_eq!(location.uri, reference);
+        location.range
+    };
+
+    // `os.pid` in its signature line
+    let line = line_of("// os.pid(");
+    let pid = Range::new(Position::new(line, 3), Position::new(line, 9));
+    assert_eq!(range(at(3, 10)), pid);
+    // `os.env`, from the name it is bound to and from its `use`
+    let line = line_of("// os.env(");
+    let env = Range::new(Position::new(line, 3), Position::new(line, 9));
+    assert_eq!(range(at(3, 18)), env);
+    assert_eq!(range(at(2, 8)), env);
+    // the module, from its `use` and before a `.`, goes to its heading
+    let line = line_of("// The os module");
+    let module = Range::new(Position::new(line, 7), Position::new(line, 9));
+    assert_eq!(range(at(1, 5)), module);
+    assert_eq!(range(at(3, 7)), module);
+}
+
+#[test]
+fn completion_after_os_offers_its_functions() {
+    let doc = doc("use os as system\nsystem.\n");
+    let items = completion(&doc, at(2, 8), &MapSources::default());
+    let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
+    let expected: Vec<&str> = stone::stdlib::os::FUNCTIONS
+        .iter()
+        .map(|name| name.strip_prefix("os.").unwrap())
+        .collect();
+    assert_eq!(labels, expected);
+    assert_eq!(items[0].kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(items[0].detail.as_deref(), Some("os.env(name: str) -> str"));
+}
+
+#[test]
+fn completion_offers_os_imports() {
+    let doc = doc(OS);
+    let items = completion(&doc, at(4, 1), &MapSources::default());
+    let item = |label: &str| items.iter().find(|i| i.label == label).unwrap();
+    assert_eq!(item("os").kind, Some(CompletionItemKind::MODULE));
+    assert_eq!(item("os").detail.as_deref(), Some("module os"));
+    assert_eq!(item("getenv").kind, Some(CompletionItemKind::FUNCTION));
+    assert_eq!(
+        item("getenv").detail.as_deref(),
+        Some("os.env(name: str) -> str")
+    );
+}
+
+#[test]
+fn completion_in_a_use_of_os_offers_its_functions() {
+    let files = [("main.st", "use os.\n")];
+    let doc = project_doc("main.st", &files);
+    let labels: Vec<String> = completion(&doc, at(1, 8), &project(&files))
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+    assert_eq!(labels.len(), stone::stdlib::os::FUNCTIONS.len());
+    assert!(labels.contains(&"env".to_string()), "{labels:?}");
 }

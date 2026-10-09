@@ -44,8 +44,9 @@ fn every_example_and_test_program_checks_cleanly() {
         for entry in std::fs::read_dir(root.join(dir)).unwrap() {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|ext| ext == "st") {
+                // linked, so a program can use the builtin os module
                 let source = std::fs::read_to_string(&path).unwrap();
-                assert_eq!(errors(&source), [], "{}", path.display());
+                assert_eq!(linked_errors(&source), [], "{}", path.display());
             }
         }
     }
@@ -930,5 +931,87 @@ fn use_inside_a_block_is_an_error() {
         "use is only allowed at the top level of a file",
         2,
         5,
+    );
+}
+
+/// Returns each diagnostic of `source`, linked first so that `use os` resolves, as its message
+/// and start position.
+fn linked_errors(source: &str) -> Vec<(String, usize, usize)> {
+    crate::driver::analyze(source)
+        .diagnostics
+        .into_iter()
+        .map(|d| (d.message, d.span.start.line, d.span.start.col))
+        .collect()
+}
+
+/// Returns the type of the global `name` in `source`, linked first.
+fn linked_type(source: &str, name: &str) -> String {
+    let analysis = crate::driver::analyze(source);
+    assert_eq!(analysis.diagnostics, [], "{source}");
+    let symbol = analysis.symbols.iter().find(|s| s.name == name).unwrap();
+    symbol.ty.to_string()
+}
+
+#[test]
+fn os_functions_have_types() {
+    let cases = [
+        ("os.env(\"HOME\")", "str"),
+        ("os.has_env(\"HOME\")", "bool"),
+        ("os.platform()", "str"),
+        ("os.arch()", "str"),
+        ("os.hostname()", "str"),
+        ("os.cpu_count()", "int"),
+        ("os.pid()", "int"),
+        ("os.cwd()", "str"),
+        ("os.exit(0)", "none"),
+        ("os.time()", "float"),
+        ("os.clock()", "float"),
+    ];
+    for (call, ty) in cases {
+        assert_eq!(
+            linked_type(&format!("use os\nx = {call}\n"), "x"),
+            ty,
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn os_functions_check_their_arguments() {
+    assert_eq!(
+        linked_errors("use os\nos.env()\n"),
+        [(
+            "'os.env' takes 1 argument, but 0 were given".to_string(),
+            2,
+            1
+        )]
+    );
+    assert_eq!(
+        linked_errors("use os\nos.has_env(1)\n"),
+        [("expected str, found int".to_string(), 2, 12)]
+    );
+    assert_eq!(
+        linked_errors("use os\nos.exit(\"no\")\n"),
+        [("expected int, found str".to_string(), 2, 9)]
+    );
+    assert_eq!(
+        linked_errors("use os\nos.pid(1)\n"),
+        [(
+            "'os.pid' takes 0 arguments, but 1 was given".to_string(),
+            2,
+            1
+        )]
+    );
+}
+
+#[test]
+fn an_os_function_is_not_a_value() {
+    assert_eq!(
+        linked_errors("use os.pid\nx = pid\n"),
+        [(
+            "'os.pid' is a function, so it can only be called".to_string(),
+            2,
+            5
+        )]
     );
 }

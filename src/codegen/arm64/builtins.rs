@@ -988,3 +988,154 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, empty_separator: &str) 
     r#gen.emit("\tmov\tx0, x20");
     pop_frame(r#gen, &saved);
 }
+
+/// Emits the routines behind the `os` module that the program calls, each named in `used`, under
+/// the same labels and contracts as `x64::builtins::os_runtime`, with arguments in `x0` and
+/// results in `x0`. `cwd_failure` is the failure label for `stone.os_cwd`, needed only if it is
+/// used. The routines that return strings need the string runtime.
+pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure: &str) {
+    let uses = |label: &str| used.contains(&label);
+    r#gen.emit("\t.data");
+    immortal_string(r#gen, ".Lstone_os_empty", "");
+    immortal_string(r#gen, ".Lstone_os_platform", "linux");
+    immortal_string(r#gen, ".Lstone_os_arch", "aarch64");
+    r#gen.emit("\t.text");
+
+    if uses("stone.os_env") || uses("stone.os_has_env") {
+        // x19 holds the name across strchr
+        r#gen.emit("stone.os_getenv:");
+        push_frame(r#gen, &["x19"]);
+        r#gen.emit("\tmov\tx19, x0");
+        r#gen.emit("\tldrb\tw9, [x0]");
+        r#gen.emit("\tcbz\tw9, .Los_getenv_unset");
+        r#gen.emit("\tmov\tw1, #61"); // '='
+        r#gen.emit("\tbl\tstrchr");
+        r#gen.emit("\tcbnz\tx0, .Los_getenv_unset");
+        r#gen.emit("\tmov\tx0, x19");
+        r#gen.emit("\tbl\tgetenv");
+        pop_frame(r#gen, &["x19"]);
+        r#gen.emit(".Los_getenv_unset:");
+        r#gen.emit("\tmov\tx0, #0");
+        pop_frame(r#gen, &["x19"]);
+    }
+    if uses("stone.os_env") {
+        r#gen.emit("stone.os_env:");
+        push_frame(r#gen, &[]);
+        r#gen.emit("\tbl\tstone.os_getenv");
+        r#gen.emit("\tcbz\tx0, .Los_env_unset");
+        r#gen.emit("\tbl\tstone.os_copy");
+        pop_frame(r#gen, &[]);
+        r#gen.emit(".Los_env_unset:");
+        address(r#gen, "x0", ".Lstone_os_empty");
+        pop_frame(r#gen, &[]);
+    }
+    if uses("stone.os_has_env") {
+        r#gen.emit("stone.os_has_env:");
+        push_frame(r#gen, &[]);
+        r#gen.emit("\tbl\tstone.os_getenv");
+        r#gen.emit("\tcmp\tx0, #0");
+        r#gen.emit("\tcset\tx0, ne");
+        pop_frame(r#gen, &[]);
+    }
+    if uses("stone.os_env") || uses("stone.os_hostname") || uses("stone.os_cwd") {
+        // returns a counted copy of the C string in x0, which x19 holds across str_len
+        r#gen.emit("stone.os_copy:");
+        push_frame(r#gen, &["x19"]);
+        r#gen.emit("\tmov\tx19, x0");
+        r#gen.emit("\tbl\tstone.str_len");
+        r#gen.emit("\tmov\tx1, x0");
+        r#gen.emit("\tmov\tx0, x19");
+        r#gen.emit("\tbl\tstone.str_slice");
+        pop_frame(r#gen, &["x19"]);
+    }
+    if uses("stone.os_platform") {
+        r#gen.emit("stone.os_platform:");
+        address(r#gen, "x0", ".Lstone_os_platform");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_arch") {
+        r#gen.emit("stone.os_arch:");
+        address(r#gen, "x0", ".Lstone_os_arch");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_hostname") {
+        // the name is read into a buffer on the stack, whose last byte stays 0
+        let size = crate::stdlib::os::HOSTNAME_BUFFER;
+        r#gen.emit("stone.os_hostname:");
+        push_frame(r#gen, &[]);
+        r#gen.emit(&format!("\tsub\tsp, sp, #{size}"));
+        r#gen.emit(&format!("\tstrb\twzr, [sp, #{}]", size - 1));
+        r#gen.emit("\tmov\tx0, sp");
+        r#gen.emit(&format!("\tmov\tx1, #{}", size - 1));
+        r#gen.emit("\tbl\tgethostname");
+        r#gen.emit("\tcbnz\tw0, .Los_hostname_empty");
+        r#gen.emit("\tmov\tx0, sp");
+        r#gen.emit("\tbl\tstone.os_copy");
+        pop_frame(r#gen, &[]);
+        r#gen.emit(".Los_hostname_empty:");
+        address(r#gen, "x0", ".Lstone_os_empty");
+        pop_frame(r#gen, &[]);
+    }
+    if uses("stone.os_cpu_count") {
+        r#gen.emit("stone.os_cpu_count:");
+        push_frame(r#gen, &[]);
+        r#gen.emit("\tmov\tx0, #84"); // _SC_NPROCESSORS_ONLN
+        r#gen.emit("\tbl\tsysconf");
+        r#gen.emit("\tmov\tx9, #1");
+        r#gen.emit("\tcmp\tx0, #1");
+        r#gen.emit("\tcsel\tx0, x0, x9, ge");
+        pop_frame(r#gen, &[]);
+    }
+    if uses("stone.os_pid") {
+        r#gen.emit("stone.os_pid:");
+        push_frame(r#gen, &[]);
+        r#gen.emit("\tbl\tgetpid");
+        r#gen.emit("\tsxtw\tx0, w0");
+        pop_frame(r#gen, &[]);
+    }
+    if uses("stone.os_cwd") {
+        // a null buffer asks getcwd to allocate one, which x19 holds until it is freed, while
+        // x20 holds the copy
+        let saved = ["x19", "x20"];
+        r#gen.emit("stone.os_cwd:");
+        push_frame(r#gen, &saved);
+        r#gen.emit("\tmov\tx0, #0");
+        r#gen.emit("\tmov\tx1, #0");
+        r#gen.emit("\tbl\tgetcwd");
+        r#gen.emit(&format!("\tcbz\tx0, {cwd_failure}"));
+        r#gen.emit("\tmov\tx19, x0");
+        r#gen.emit("\tbl\tstone.os_copy");
+        r#gen.emit("\tmov\tx20, x0");
+        r#gen.emit("\tmov\tx0, x19");
+        r#gen.emit("\tbl\tfree");
+        r#gen.emit("\tmov\tx0, x20");
+        pop_frame(r#gen, &saved);
+    }
+    if uses("stone.os_exit") {
+        r#gen.emit("stone.os_exit:");
+        r#gen.emit("\tbl\texit");
+    }
+    for (label, clock) in [("stone.os_time", 0), ("stone.os_clock", 1)] {
+        if !uses(label) {
+            continue;
+        }
+        // clock_gettime fills the seconds at [sp] and the nanoseconds at [sp, #8]
+        r#gen.emit(&format!("{label}:"));
+        push_frame(r#gen, &[]);
+        r#gen.emit("\tsub\tsp, sp, #16");
+        r#gen.emit(&format!("\tmov\tx0, #{clock}"));
+        r#gen.emit("\tmov\tx1, sp");
+        r#gen.emit("\tbl\tclock_gettime");
+        r#gen.emit("\tldp\tx9, x10, [sp]");
+        r#gen.emit("\tscvtf\td0, x9");
+        r#gen.emit("\tscvtf\td1, x10");
+        // 1e9
+        r#gen.emit("\tmovz\tx11, #0x41cd, lsl #48");
+        r#gen.emit("\tmovk\tx11, #0xcd65, lsl #32");
+        r#gen.emit("\tfmov\td2, x11");
+        r#gen.emit("\tfdiv\td1, d1, d2");
+        r#gen.emit("\tfadd\td0, d0, d1");
+        r#gen.emit("\tfmov\tx0, d0");
+        pop_frame(r#gen, &[]);
+    }
+}

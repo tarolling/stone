@@ -273,3 +273,49 @@ fn a_row_read_for_indexing_is_borrowed_unless_a_call_could_replace_it() {
          release_list v5\n  v8 = add v4, v7\n  ret v8\n"
     );
 }
+
+/// Links, checks, and lowers `source` like [`dump`], so that it can `use os`.
+fn dump_linked(source: &str) -> String {
+    let (_, module) = crate::driver::load(
+        std::path::Path::new("main.st"),
+        source,
+        &crate::project::MapSources::default(),
+    );
+    let module = module.unwrap();
+    let analysis = TypeChecker::new().analyze(&module);
+    let program = lower(&module, &analysis.types, &analysis.symbols).unwrap();
+    program.functions.iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn os_functions_call_the_runtime() {
+    let source = "use os\nx = os.env(\"A\")\n\
+                  print(os.has_env(x), os.platform(), os.arch(), os.hostname(), os.cpu_count())\n\
+                  print(os.pid(), os.cwd(), os.time(), os.clock())\nos.exit(1)\n";
+    let text = dump_linked(source);
+    for call in [
+        "call stone.os_env(",
+        "call stone.os_has_env(",
+        "call stone.os_platform()",
+        "call stone.os_arch()",
+        "call stone.os_hostname()",
+        "call stone.os_cpu_count()",
+        "call stone.os_pid()",
+        "call stone.os_cwd()",
+        "call stone.os_time()",
+        "call stone.os_clock()",
+        "call stone.os_exit(1)",
+    ] {
+        assert!(text.contains(call), "{call} in\n{text}");
+    }
+}
+
+#[test]
+fn os_strings_are_owned_by_whoever_uses_them() {
+    // a printed result is a temporary, released after the print
+    let text = dump_linked("use os\nprint(os.cwd())\n");
+    assert!(
+        text.contains("v0 = call stone.os_cwd()") && text.contains("release_str v0"),
+        "{text}"
+    );
+}

@@ -10,10 +10,12 @@
 //!
 //! A program that reads input has a sibling `.in` file, which becomes its stdin (otherwise stdin
 //! is empty), and one that reads `args()` has a sibling `.args` file holding one argument per
-//! line, passed after the program under `stone run` and to the built binary.
+//! line, passed after the program under `stone run` and to the built binary. One that reads the
+//! environment through `os.env` can have a sibling `.env` file holding one `NAME=value` per line,
+//! which every backend sets on top of the environment the tests run in.
 //!
 //! A subdirectory of one of those directories is a program of several files, run from its
-//! `main.st`, whose `.out`, `.err`, `.in`, and `.args` files sit next to `main.st`. For example,
+//! `main.st`, whose `.out`, `.err`, `.in`, `.args`, and `.env` files sit next to `main.st`. For example,
 //! `tests/programs/modules/main.st` uses modules such as `tests/programs/modules/text.st`.
 //!
 //! The compiler is also tested for the other architecture, such as aarch64 on an x86-64 machine,
@@ -166,9 +168,21 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
     let args: Vec<String> = std::fs::read_to_string(program.with_extension("args"))
         .map(|text| text.lines().map(str::to_string).collect())
         .unwrap_or_default();
+    let env: Vec<(String, String)> = std::fs::read_to_string(program.with_extension("env"))
+        .map(|text| {
+            text.lines()
+                .filter_map(|line| line.split_once('='))
+                .map(|(name, value)| (name.to_string(), value.to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
     match backend {
         Backend::Run => outcome_of(
-            Command::new(stone).arg("run").arg(program).args(&args),
+            Command::new(stone)
+                .arg("run")
+                .arg(program)
+                .args(&args)
+                .envs(env),
             &input,
         ),
         Backend::Build | Backend::Cross(_) => {
@@ -194,7 +208,10 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 _ => Command::new(&exe),
             };
             // the binary reports any string or list still allocated when it ends
-            outcome_of(command.args(&args).env("STONE_LEAK_CHECK", "1"), &input)
+            outcome_of(
+                command.args(&args).envs(env).env("STONE_LEAK_CHECK", "1"),
+                &input,
+            )
         }
     }
 }

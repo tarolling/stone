@@ -1122,3 +1122,190 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, empty_separator: &str) 
     r#gen.emit("\tpop\trbp");
     r#gen.emit("\tret");
 }
+
+/// Emits the routines behind the `os` module that the program calls, each named in `used`, such
+/// as `stone.os_pid`. Each follows a function of `stdlib::os` and calls the same libc function.
+/// `cwd_failure` is the failure label for `stone.os_cwd`, needed only if it is used.
+///
+/// - `stone.os_getenv` returns libc's `getenv` of the string in `rdi`, or null if it is empty or
+///   holds `=`, which `getenv` could otherwise match. `stone.os_env` and `stone.os_has_env` use it
+/// - `stone.os_env` returns a copy of the variable named by `rdi`, or an empty string
+/// - `stone.os_has_env` returns 1 if the variable named by `rdi` is set, else 0
+/// - `stone.os_platform` and `stone.os_arch` return immortal strings
+/// - `stone.os_hostname` returns a copy of `gethostname`'s answer, or an empty string
+/// - `stone.os_cpu_count` returns `sysconf(_SC_NPROCESSORS_ONLN)`, at least 1
+/// - `stone.os_pid` returns `getpid()`
+/// - `stone.os_cwd` returns a copy of `getcwd`'s answer, failing if there is none
+/// - `stone.os_exit` calls libc's `exit` with `rdi`, so it never returns
+/// - `stone.os_time` and `stone.os_clock` return the bits of `clock_gettime`'s seconds plus its
+///   nanoseconds over 1e9, for `CLOCK_REALTIME` and `CLOCK_MONOTONIC`
+///
+/// The routines that return strings need the string runtime.
+pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure: &str) {
+    let uses = |label: &str| used.contains(&label);
+    r#gen.emit("\t.data");
+    immortal_string(r#gen, ".Lstone_os_empty", "");
+    immortal_string(r#gen, ".Lstone_os_platform", "linux");
+    immortal_string(r#gen, ".Lstone_os_arch", "x86_64");
+    r#gen.emit("\t.text");
+
+    if uses("stone.os_env") || uses("stone.os_has_env") {
+        // rbx holds the name across strchr
+        r#gen.emit("stone.os_getenv:");
+        r#gen.emit("\tpush\trbp");
+        r#gen.emit("\tmov\trbp, rsp");
+        r#gen.emit("\tpush\trbx");
+        r#gen.emit("\tand\trsp, -16");
+        r#gen.emit("\tmov\trbx, rdi");
+        r#gen.emit("\txor\teax, eax");
+        r#gen.emit("\tcmp\tbyte ptr [rdi], 0");
+        r#gen.emit("\tje\t.Los_getenv_done");
+        r#gen.emit("\tmov\tesi, 61"); // '='
+        r#gen.emit("\tcall\tstrchr");
+        r#gen.emit("\tmov\trcx, rax");
+        r#gen.emit("\txor\teax, eax");
+        r#gen.emit("\ttest\trcx, rcx");
+        r#gen.emit("\tjnz\t.Los_getenv_done");
+        r#gen.emit("\tmov\trdi, rbx");
+        r#gen.emit("\tcall\tgetenv");
+        r#gen.emit(".Los_getenv_done:");
+        r#gen.emit("\tmov\trbx, QWORD PTR [rbp - 8]");
+        r#gen.emit("\tleave");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_env") {
+        r#gen.emit("stone.os_env:");
+        r#gen.emit("\tcall\tstone.os_getenv");
+        r#gen.emit("\ttest\trax, rax");
+        r#gen.emit("\tjnz\tstone.os_copy");
+        r#gen.emit("\tlea\trax, [rip + .Lstone_os_empty]");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_has_env") {
+        r#gen.emit("stone.os_has_env:");
+        r#gen.emit("\tcall\tstone.os_getenv");
+        r#gen.emit("\ttest\trax, rax");
+        r#gen.emit("\tsetne\tal");
+        r#gen.emit("\tmovzx\teax, al");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_env") || uses("stone.os_hostname") || uses("stone.os_cwd") {
+        // returns a counted copy of the C string in rax, which rbx holds across str_len
+        r#gen.emit("stone.os_copy:");
+        r#gen.emit("\tpush\trbx");
+        r#gen.emit("\tmov\trbx, rax");
+        r#gen.emit("\tmov\trdi, rax");
+        r#gen.emit("\tcall\tstone.str_len");
+        r#gen.emit("\tmov\trsi, rax");
+        r#gen.emit("\tmov\trdi, rbx");
+        r#gen.emit("\tcall\tstone.str_slice");
+        r#gen.emit("\tpop\trbx");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_platform") {
+        r#gen.emit("stone.os_platform:");
+        r#gen.emit("\tlea\trax, [rip + .Lstone_os_platform]");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_arch") {
+        r#gen.emit("stone.os_arch:");
+        r#gen.emit("\tlea\trax, [rip + .Lstone_os_arch]");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_hostname") {
+        // the name is read into a buffer on the stack, whose last byte stays 0
+        let size = crate::stdlib::os::HOSTNAME_BUFFER;
+        r#gen.emit("stone.os_hostname:");
+        r#gen.emit("\tpush\trbp");
+        r#gen.emit("\tmov\trbp, rsp");
+        r#gen.emit(&format!("\tsub\trsp, {size}"));
+        r#gen.emit("\tand\trsp, -16");
+        r#gen.emit(&format!("\tmov\tbyte ptr [rsp + {}], 0", size - 1));
+        r#gen.emit("\tmov\trdi, rsp");
+        r#gen.emit(&format!("\tmov\tesi, {}", size - 1));
+        r#gen.emit("\tcall\tgethostname");
+        r#gen.emit("\tlea\trcx, [rip + .Lstone_os_empty]");
+        r#gen.emit("\ttest\teax, eax");
+        r#gen.emit("\tjnz\t.Los_hostname_done");
+        r#gen.emit("\tmov\trax, rsp");
+        r#gen.emit("\tcall\tstone.os_copy");
+        r#gen.emit("\tmov\trcx, rax");
+        r#gen.emit(".Los_hostname_done:");
+        r#gen.emit("\tmov\trax, rcx");
+        r#gen.emit("\tleave");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_cpu_count") {
+        r#gen.emit("stone.os_cpu_count:");
+        r#gen.emit("\tpush\trbp");
+        r#gen.emit("\tmov\trbp, rsp");
+        r#gen.emit("\tand\trsp, -16");
+        r#gen.emit("\tmov\tedi, 84"); // _SC_NPROCESSORS_ONLN
+        r#gen.emit("\tcall\tsysconf");
+        r#gen.emit("\tmov\tecx, 1");
+        r#gen.emit("\tcmp\trax, 1");
+        r#gen.emit("\tcmovl\trax, rcx");
+        r#gen.emit("\tleave");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_pid") {
+        r#gen.emit("stone.os_pid:");
+        r#gen.emit("\tpush\trbp");
+        r#gen.emit("\tmov\trbp, rsp");
+        r#gen.emit("\tand\trsp, -16");
+        r#gen.emit("\tcall\tgetpid");
+        r#gen.emit("\tmovsxd\trax, eax");
+        r#gen.emit("\tleave");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_cwd") {
+        // a null buffer asks getcwd to allocate one, which rbx holds until it is freed
+        r#gen.emit("stone.os_cwd:");
+        r#gen.emit("\tpush\trbp");
+        r#gen.emit("\tmov\trbp, rsp");
+        r#gen.emit("\tpush\trbx");
+        r#gen.emit("\tand\trsp, -16");
+        r#gen.emit("\txor\tedi, edi");
+        r#gen.emit("\txor\tesi, esi");
+        r#gen.emit("\tcall\tgetcwd");
+        r#gen.emit("\ttest\trax, rax");
+        r#gen.emit(&format!("\tjz\t{cwd_failure}"));
+        r#gen.emit("\tmov\trbx, rax");
+        r#gen.emit("\tcall\tstone.os_copy");
+        r#gen.emit("\tmov\trdi, rbx");
+        r#gen.emit("\tmov\trbx, rax");
+        r#gen.emit("\tcall\tfree");
+        r#gen.emit("\tmov\trax, rbx");
+        r#gen.emit("\tmov\trbx, QWORD PTR [rbp - 8]");
+        r#gen.emit("\tleave");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.os_exit") {
+        r#gen.emit("stone.os_exit:");
+        r#gen.emit("\tand\trsp, -16");
+        r#gen.emit("\tcall\texit");
+    }
+    for (label, clock) in [("stone.os_time", 0), ("stone.os_clock", 1)] {
+        if !uses(label) {
+            continue;
+        }
+        // clock_gettime fills the seconds at [rsp] and the nanoseconds at [rsp + 8]
+        r#gen.emit(&format!("{label}:"));
+        r#gen.emit("\tpush\trbp");
+        r#gen.emit("\tmov\trbp, rsp");
+        r#gen.emit("\tsub\trsp, 16");
+        r#gen.emit("\tand\trsp, -16");
+        r#gen.emit(&format!("\tmov\tedi, {clock}"));
+        r#gen.emit("\tmov\trsi, rsp");
+        r#gen.emit("\tcall\tclock_gettime");
+        r#gen.emit("\tcvtsi2sd\txmm0, QWORD PTR [rsp]");
+        r#gen.emit("\tcvtsi2sd\txmm1, QWORD PTR [rsp + 8]");
+        r#gen.emit("\tmovabs\trax, 0x41cdcd6500000000"); // 1e9
+        r#gen.emit("\tmovq\txmm2, rax");
+        r#gen.emit("\tdivsd\txmm1, xmm2");
+        r#gen.emit("\taddsd\txmm0, xmm1");
+        r#gen.emit("\tmovq\trax, xmm0");
+        r#gen.emit("\tleave");
+        r#gen.emit("\tret");
+    }
+}

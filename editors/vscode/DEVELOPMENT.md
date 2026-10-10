@@ -34,18 +34,23 @@ This file is left out of the packaged extension, so it does not show on the Mark
 
 ## Releasing
 
-Bump the version from the repository root, which sets `package.json`, `package-lock.json`, and
-`stone-lsp`'s version in `lsp/Cargo.toml` and `Cargo.lock` together, then commit and push the
-matching tag it prints:
+List each change under `## [Unreleased]` in `CHANGELOG.md` as it lands. The version in
+`package.json` is always the next one to release, since it is bumped right after each release.
+To release it, push its tag, then bump from the repository root, which dates the release's notes
+in `CHANGELOG.md` and sets `package.json`, `package-lock.json`, and `stone-lsp`'s version in
+`lsp/Cargo.toml` and `Cargo.lock` together, and commit what it prints:
 
 ```sh
+git tag vscode-v0.1.6 && git push origin vscode-v0.1.6
 sh scripts/bump-version.sh vscode patch   # or minor, major, or a version such as 1.0.0
-git tag vscode-v0.1.5 && git push origin HEAD vscode-v0.1.5
 ```
 
 `.github/workflows/vscode.yml` builds `stone-lsp` for each platform, packages a `.vsix` per
-platform plus a universal one, and publishes them to the VS Code Marketplace and Open VSX. Running
-the workflow by hand from the Actions tab packages the extensions without publishing them.
+platform plus a universal one, and publishes them to the VS Code Marketplace and Open VSX, which
+show `CHANGELOG.md`. It then creates a GitHub release with every `.vsix` attached and the
+version's changelog section (or `[Unreleased]`, if it has none yet) as its notes, never marked
+Latest so that `install.sh` keeps finding stone's releases. Running the workflow by hand from the
+Actions tab packages the extensions without publishing them.
 
 Publishing needs the repository secret `OVSX_PAT` for Open VSX, and `AZURE_CLIENT_ID` and
 `AZURE_TENANT_ID` for a Microsoft Entra ID app that is a member of the `tarolling` Marketplace

@@ -2,8 +2,11 @@ name: VS Code extension
 
 # pushing a tag like vscode-v0.1.0 builds stone-lsp for each target, packages a
 # platform-specific .vsix that bundles it plus a universal one that uses
-# stone-lsp on PATH, and publishes them to the VS Code Marketplace and Open VSX.
-# Running it by hand packages the extensions without publishing them, or, with
+# stone-lsp on PATH, and publishes them to the VS Code Marketplace and Open VSX,
+# which show editors/vscode/CHANGELOG.md (vsce packages it), then to a GitHub
+# release with the version's section of that changelog as its notes. That
+# release is never Latest, so install.sh and `stone update` keep finding stone's
+# releases. Running it by hand packages the extensions without publishing them, or, with
 # marketplace-identity checked, only prints the ID to add to the Marketplace
 # publisher.
 #
@@ -40,6 +43,9 @@ jobs:
           echo "tag $GITHUB_REF_NAME does not match editors/vscode/package.json version $version" >&2
           exit 1
         fi
+    - name: Check the changelog has notes for the version
+      if: startsWith(github.ref, 'refs/tags/')
+      run: sh scripts/changelog.sh release-notes editors/vscode/CHANGELOG.md "${GITHUB_REF_NAME#vscode-v}" > /dev/null
 
   server:
     needs: check-version
@@ -95,6 +101,14 @@ jobs:
       run: npm ci
     - name: Test
       run: npm test
+    # the tag's notes are usually still under Unreleased, so the packaged changelog, which the
+    # Marketplace and Open VSX show, gets them under the version's heading instead
+    - name: Date the changelog
+      if: startsWith(github.ref, 'refs/tags/')
+      run: |
+        version=${GITHUB_REF_NAME#vscode-v}
+        grep -qF "## [$version]" CHANGELOG.md ||
+          sh "$GITHUB_WORKSPACE/scripts/changelog.sh" release CHANGELOG.md "$version"
     - name: Package
       run: |
         mkdir -p dist
@@ -174,3 +188,24 @@ jobs:
         for vsix in dist/*.vsix; do
           npx --yes ovsx@1 publish --packagePath "$vsix" -p "$OVSX_PAT"
         done
+
+  github-release:
+    needs: [marketplace, open-vsx]
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+      with:
+        name: vsix
+        path: dist
+    - name: Create the release
+      env:
+        GH_TOKEN: ${{ github.token }}
+      run: |
+        version=${GITHUB_REF_NAME#vscode-v}
+        sh scripts/changelog.sh release-notes editors/vscode/CHANGELOG.md "$version" > "$RUNNER_TEMP/notes.md"
+        gh release create "$GITHUB_REF_NAME" dist/*.vsix --repo "$GITHUB_REPOSITORY" \
+          --title "VS Code extension $version" --notes-file "$RUNNER_TEMP/notes.md" --latest=false

@@ -35,6 +35,8 @@ jobs:
       run: sh scripts/test-install.sh
     - name: Test the version bump script
       run: sh scripts/test-bump-version.sh
+    - name: Test the changelog script
+      run: sh scripts/test-changelog.sh
     - name: Test the VS Code extension
       working-directory: editors/vscode
       run: npm test

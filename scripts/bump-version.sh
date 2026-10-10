@@ -1,6 +1,6 @@
 #!/bin/sh
 # Bumps the version of stone, or of the VS Code extension and stone-lsp, in every file that
-# records it, then prints the commands that commit and tag the release.
+# records it, then prints the commands that commit it and, later, tag it.
 #
 # Usage, from anywhere:
 #
@@ -12,7 +12,13 @@
 # bench/Cargo.lock. `vscode` edits editors/vscode/package.json and package-lock.json, plus
 # lsp/Cargo.toml and stone-lsp's entry in Cargo.lock, since the extension ships the server, so
 # both share one version taken from package.json. A new version must be greater than the
-# current one. STONE_ROOT overrides the repository root, for tests.
+# current one.
+#
+# Bump right after tagging a release. If the current version's tag exists (v1.2.3, or
+# vscode-v1.2.3), the changes under `## [Unreleased]` in that target's changelog (CHANGELOG.md, or
+# editors/vscode/CHANGELOG.md) were its release notes, so they are dated as that version, with the
+# tag's day, through changelog.sh, and a new empty Unreleased collects the next version's. Without
+# the tag, the changelog is left alone. STONE_ROOT overrides the repository root, for tests.
 set -eu
 
 usage() {
@@ -23,7 +29,8 @@ usage() {
 [ $# -eq 2 ] || usage
 target=$1
 bump=$2
-root=${STONE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}
+scripts=$(cd "$(dirname "$0")" && pwd)
+root=${STONE_ROOT:-$(cd "$scripts/.." && pwd)}
 
 # replaces the file with stdin once the command writing it has succeeded
 replace() {
@@ -92,6 +99,19 @@ if [ "$new" = "$current" ] || [ "$newer" != "$new" ]; then
     exit 1
 fi
 
+# first, so a release with no notes changes nothing
+case $target in
+    stone) changelog=CHANGELOG.md released="v$current" ;;
+    vscode) changelog=editors/vscode/CHANGELOG.md released="vscode-v$current" ;;
+esac
+if git -C "$root" rev-parse -q --verify "refs/tags/$released" > /dev/null 2>&1 &&
+    ! grep -qF "## [$current]" "$root/$changelog"; then
+    day=$(git -C "$root" log -1 --format=%cs "$released")
+    sh "$scripts/changelog.sh" release "$root/$changelog" "$current" "$day" ||
+        { echo "error: $released is tagged, but $changelog has no notes for it" >&2; exit 1; }
+    echo "dated the notes of $current in $changelog as $day"
+fi
+
 case $target in
     stone)
         set_cargo_version "$root/Cargo.toml" "$new"
@@ -99,7 +119,7 @@ case $target in
             set_locked_version "$root/$lock" stone "$new"
         done
         tag="v$new"
-        files="Cargo.toml Cargo.lock fuzz/Cargo.lock bench/Cargo.lock"
+        files="Cargo.toml Cargo.lock fuzz/Cargo.lock bench/Cargo.lock $changelog"
         ;;
     vscode)
         set_npm_version "$root/editors/vscode/package.json" "$new"
@@ -107,14 +127,18 @@ case $target in
         set_cargo_version "$root/lsp/Cargo.toml" "$new"
         set_locked_version "$root/Cargo.lock" stone-lsp "$new"
         tag="vscode-v$new"
-        files="editors/vscode/package.json editors/vscode/package-lock.json lsp/Cargo.toml Cargo.lock"
+        files="editors/vscode/package.json editors/vscode/package-lock.json lsp/Cargo.toml Cargo.lock $changelog"
         ;;
 esac
 
 echo "bumped $target from $current to $new"
 echo
-echo "to release it:"
+echo "commit it:"
 echo
 echo "  git add $files"
-echo "  git commit -m \"bump $target to $new\""
-echo "  git tag $tag && git push origin HEAD $tag"
+echo "  git commit -m \"bump $target to $new\" && git push origin HEAD"
+echo
+echo "then, once $new's changes are under [Unreleased] in $changelog, release it:"
+echo
+echo "  git tag $tag && git push origin $tag"
+echo "  sh scripts/bump-version.sh $target patch   # dates $new's notes and starts the next version"

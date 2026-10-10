@@ -1,5 +1,5 @@
 #!/bin/sh
-# Tests bump-version.sh on a copy of the files it edits.
+# Tests bump-version.sh on a copy of the files it edits, with fixture changelogs.
 #
 # Usage, from anywhere:
 #
@@ -10,7 +10,18 @@ root=$(cd "$(dirname "$0")/.." && pwd)
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
 
-# a fresh copy of every file the script touches, with known versions
+# a changelog with one release and nothing unreleased
+changelog() {
+    printf '# Changelog\n\n## [Unreleased]\n\n## [0.0.1] - 2026-01-01\n\n- first\n' > "$work/repo/$1"
+}
+
+# adds a change under Unreleased
+note() {
+    awk -v change="$2" '{ print } $0 == "## [Unreleased]" { print ""; print "- " change }' \
+        "$work/repo/$1" > "$work/note" && mv "$work/note" "$work/repo/$1"
+}
+
+# a fresh copy of every file the script touches, with known versions, and no tags
 reset() {
     rm -rf "$work/repo"
     mkdir -p "$work/repo/lsp" "$work/repo/fuzz" "$work/repo/bench" "$work/repo/editors/vscode"
@@ -18,8 +29,19 @@ reset() {
         editors/vscode/package.json editors/vscode/package-lock.json; do
         cp "$root/$file" "$work/repo/$file"
     done
-    STONE_ROOT="$work/repo" sh "$root/scripts/bump-version.sh" stone 1.2.3 > /dev/null
-    STONE_ROOT="$work/repo" sh "$root/scripts/bump-version.sh" vscode 0.4.5 > /dev/null
+    changelog CHANGELOG.md
+    changelog editors/vscode/CHANGELOG.md
+    bump stone 1.2.3 > /dev/null
+    bump vscode 0.4.5 > /dev/null
+    git -C "$work/repo" init -q
+}
+
+# commits everything and tags it on the given day, as releasing does
+tag() {
+    git -C "$work/repo" add -A
+    GIT_COMMITTER_DATE="$2T12:00:00" git -C "$work/repo" -c user.name=test -c user.email=test@example.com \
+        commit -q --allow-empty -m "release $1"
+    git -C "$work/repo" tag "$1"
 }
 
 bump() {
@@ -84,6 +106,63 @@ output=$(bump vscode patch)
 case $output in
     *"git tag vscode-v0.4.6"*) ;;
     *) echo "FAIL: no tag command in: $output" >&2; exit 1 ;;
+esac
+
+echo "test: a bump before a release leaves the changelog alone"
+reset
+note CHANGELOG.md "a change to stone"
+cp "$work/repo/CHANGELOG.md" "$work/before.md"
+bump stone patch > /dev/null
+expect "$(cat "$work/repo/CHANGELOG.md")" "$(cat "$work/before.md")"
+
+echo "test: a bump right after a release dates its notes with the tag's day"
+reset
+note CHANGELOG.md "a change to stone"
+note editors/vscode/CHANGELOG.md "a change to the extension"
+tag v1.2.3 2026-03-04
+bump stone patch > /dev/null
+expect "$(grep -m1 '^version' "$work/repo/Cargo.toml")" 'version = "1.2.4"'
+expect "$(grep -A 4 '^## \[Unreleased\]$' "$work/repo/CHANGELOG.md")" \
+    "$(printf '## [Unreleased]\n\n## [1.2.3] - 2026-03-04\n\n- a change to stone')"
+expect "$(grep -c '^## \[Unreleased\]$' "$work/repo/CHANGELOG.md")" 1
+expect "$(grep -c '^## \[1.2.3\]' "$work/repo/editors/vscode/CHANGELOG.md")" 0
+
+echo "test: vscode looks for its own tag"
+bump vscode patch > /dev/null
+expect "$(grep -c '^## \[0.4.5\]' "$work/repo/editors/vscode/CHANGELOG.md")" 0
+tag vscode-v0.4.6 2026-03-05
+bump vscode patch > /dev/null
+expect "$(grep -A 4 '^## \[Unreleased\]$' "$work/repo/editors/vscode/CHANGELOG.md")" \
+    "$(printf '## [Unreleased]\n\n## [0.4.6] - 2026-03-05\n\n- a change to the extension')"
+
+echo "test: a version that is already dated stays as it is"
+reset
+printf '# Changelog\n\n## [Unreleased]\n\n## [1.2.3] - 2026-03-01\n\n- done\n' > "$work/repo/CHANGELOG.md"
+cp "$work/repo/CHANGELOG.md" "$work/before.md"
+tag v1.2.3 2026-03-04
+bump stone patch > /dev/null
+expect "$(cat "$work/repo/CHANGELOG.md")" "$(cat "$work/before.md")"
+
+echo "test: a release with no notes stops the bump and changes nothing"
+reset
+tag v1.2.3 2026-03-04
+cp -R "$work/repo" "$work/before"
+if bump stone patch > /dev/null 2>&1; then
+    echo "FAIL: bumped past a release with no notes" >&2
+    exit 1
+fi
+diff -r -x .git "$work/before" "$work/repo"
+rm -rf "$work/before"
+
+echo "test: the printed commands add the changelog"
+reset
+case $(bump stone patch) in
+    *"git add Cargo.toml "*" CHANGELOG.md"*) ;;
+    *) echo "FAIL: stone's git add misses CHANGELOG.md" >&2; exit 1 ;;
+esac
+case $(bump vscode patch) in
+    *"git add editors/vscode/package.json "*" editors/vscode/CHANGELOG.md"*) ;;
+    *) echo "FAIL: vscode's git add misses editors/vscode/CHANGELOG.md" >&2; exit 1 ;;
 esac
 
 echo "test: rejects bad arguments"

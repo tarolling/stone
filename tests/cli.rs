@@ -3,7 +3,7 @@
 //! For example, `stone check` on a file with a syntax error must exit with a failure and print the
 //! error with its file, line, and column.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
 /// Writes `source` to a temporary `.st` file named after `name` and runs `stone <args> <file>`.
@@ -273,14 +273,16 @@ fn build_rejects_an_unknown_target() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unknown target 'sparc' (expected x86_64 or aarch64)"),
+        stderr.contains("unknown target 'sparc' (expected x86_64, aarch64, or aarch64-macos)"),
         "{stderr}"
     );
 }
 
 #[test]
 fn build_for_the_host_target_by_name_runs() {
-    let host = if cfg!(target_arch = "aarch64") {
+    let host = if cfg!(target_os = "macos") {
+        "aarch64-macos"
+    } else if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else {
         "x86_64"
@@ -382,6 +384,19 @@ fn cwd_is_the_directory_the_program_runs_in() {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
     }
+}
+
+#[test]
+fn machine_values_are_the_same_in_both_backends() {
+    // the golden programs cannot check these, since they differ from machine to machine
+    let source = "use os\nprint(os.hostname(), os.cpu_count(), os.platform(), os.arch())\n";
+    let (_, [run, built]) = run_and_build_in("os_machine", source);
+    assert!(run.status.success(), "{run:?}");
+    assert!(built.status.success(), "{built:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&built.stdout),
+        String::from_utf8_lossy(&run.stdout)
+    );
 }
 
 #[test]
@@ -508,8 +523,38 @@ fn program_header_types(bytes: &[u8]) -> Vec<u32> {
         .collect()
 }
 
+/// Checks that the executable `exe`, built for this machine, needs nothing but the system: on
+/// Linux it is static, and on macOS it is signed and loads only `libSystem`.
+fn assert_needs_only_the_system(exe: &Path) {
+    if cfg!(target_os = "macos") {
+        let verify = Command::new("codesign")
+            .args(["--verify", "--strict"])
+            .arg(exe)
+            .output()
+            .expect("codesign should run");
+        assert!(verify.status.success(), "{verify:?}");
+        let libraries = Command::new("otool")
+            .arg("-L")
+            .arg(exe)
+            .output()
+            .expect("otool should run");
+        let libraries = String::from_utf8_lossy(&libraries.stdout);
+        let listed: Vec<&str> = libraries.lines().skip(1).map(str::trim).collect();
+        assert_eq!(listed.len(), 1, "{libraries}");
+        assert!(
+            listed[0].starts_with("/usr/lib/libSystem.B.dylib "),
+            "{libraries}"
+        );
+    } else {
+        let types = program_header_types(&std::fs::read(exe).unwrap());
+        // no dynamic loader and no dynamic section, so nothing but the kernel runs before _start
+        assert!(!types.contains(&3), "{types:?}");
+        assert!(!types.contains(&2), "{types:?}");
+    }
+}
+
 #[test]
-fn built_programs_are_static_and_start_on_their_own() {
+fn built_programs_need_only_the_system_and_start_on_their_own() {
     let source = "use os\nprint(args(), os.env(\"STONE_TEST\"), os.has_env(\"HOME\"))\n";
     let dir = project("static_start", &[("main.st", source)]);
     let build = Command::new(env!("CARGO_BIN_EXE_stone"))
@@ -518,10 +563,7 @@ fn built_programs_are_static_and_start_on_their_own() {
         .output()
         .expect("stone should run");
     assert!(build.status.success(), "{build:?}");
-    let types = program_header_types(&std::fs::read(dir.join("out")).unwrap());
-    // no dynamic loader and no dynamic section, so nothing but the kernel runs before _start
-    assert!(!types.contains(&3), "{types:?}");
-    assert!(!types.contains(&2), "{types:?}");
+    assert_needs_only_the_system(&dir.join("out"));
 
     let empty = Command::new(dir.join("out"))
         .env_clear()

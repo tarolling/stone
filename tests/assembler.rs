@@ -44,9 +44,10 @@ fn programs() -> Vec<PathBuf> {
     programs
 }
 
-/// Returns GNU as and ld for `arch`, if both are on `PATH`.
+/// Returns GNU as and ld for `arch`, if both are on `PATH`. Only Linux's own `as` and `ld` are
+/// GNU's, so elsewhere both need the cross tools' prefix.
 fn gnu_tools(arch: Architecture) -> Option<(String, String)> {
-    let prefix = if arch == Architecture::host() {
+    let prefix = if arch == Architecture::host() && cfg!(target_os = "linux") {
         String::new()
     } else {
         format!("{arch}-linux-gnu-")

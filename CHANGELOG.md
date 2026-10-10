@@ -15,6 +15,10 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - Warnings. The first one points out a function that changes a parameter and never uses it
   afterward, since the caller cannot see the change. `stone run` and `stone build` print
   warnings and still run or build the program.
+- `stone build` writes executables for arm64 macOS, the default on an Apple silicon Mac, and
+  `--target aarch64-macos` builds one from any machine. stone writes and signs the Mach-O file
+  itself, and the program calls the system only through `libSystem`, so it needs nothing
+  installed to build or run.
 
 ### Changed
 

@@ -18,7 +18,7 @@ this downloads a prebuilt `stone` for linux or macos (x86-64 or arm64) into `~/.
 
 to upgrade later, run `stone update` (or `stone update --check` to see if there is a new release). to remove it, run `stone uninstall`.
 
-`stone run` and `stone check` work everywhere. `stone build` writes static x86-64 or arm64 linux executables itself, with no assembler, linker, or C compiler installed, and `--target aarch64` (or `x86_64`) builds for the other processor from any machine.
+`stone run` and `stone check` work everywhere. `stone build` writes executables itself, with no assembler, linker, or C compiler installed: static x86-64 or arm64 linux programs, or arm64 macos programs that need only the system's `libSystem`. it builds for the machine it runs on, and `--target` (`x86_64`, `aarch64`, or `aarch64-macos`) builds for any of them from any machine.
 
 to build from source instead, with rust installed:
 

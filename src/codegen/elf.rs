@@ -1,5 +1,5 @@
 //! The built-in linker, which places an assembled [`Object`] at its addresses, resolves every
-//! [`Fixup`], and writes a static ELF executable that needs no C library or dynamic linker.
+//! [`Fixup`](crate::codegen::asm::Fixup), and writes a static ELF executable that needs no C library or dynamic linker.
 //!
 //! The file starts with the ELF header and program headers, which the first segment maps along
 //! with `.text`, starting on the next cache line. `.rodata`, then `.data` and `.bss`, get segments of their own, each starting
@@ -10,7 +10,7 @@
 use std::collections::HashMap;
 
 use crate::codegen::Architecture;
-use crate::codegen::asm::{Fixup, FixupKind, Object, Section, Symbol};
+use crate::codegen::asm::{Object, Section, Symbol, apply_fixup};
 
 /// Where the first segment, which holds the headers, is mapped, as GNU ld places a static
 /// executable.
@@ -155,70 +155,12 @@ pub fn link(object: &Object, arch: Architecture) -> Result<Vec<u8>, String> {
             .ok_or_else(|| format!("undefined label '{}'", fixup.symbol))?;
         let place = layout.address(fixup.section) + fixup.offset;
         let at = (layout.offsets[fixup.section as usize] + fixup.offset) as usize;
-        apply(&mut file[at..], fixup, place, target)?;
+        apply_fixup(&mut file[at..], fixup, place, target)?;
     }
 
     write_headers(&mut file, object, arch, &layout, entry);
     write_sections(&mut file, object, &layout);
     Ok(file)
-}
-
-/// Patches the bytes at the start of `code` for `fixup`, which sits at address `place` and
-/// refers to a symbol at `target`.
-fn apply(code: &mut [u8], fixup: &Fixup, place: u64, target: u64) -> Result<(), String> {
-    let value = (target as i64).wrapping_add(fixup.addend);
-    let relative = value.wrapping_sub(place as i64);
-    let too_far = || format!("'{}' is too far away to reach", fixup.symbol);
-    let misaligned = || format!("'{}' is misaligned", fixup.symbol);
-    if fixup.kind == FixupKind::X64Rel32 {
-        let displacement = i32::try_from(relative).map_err(|_| too_far())?;
-        code[..4].copy_from_slice(&displacement.to_le_bytes());
-        return Ok(());
-    }
-
-    let mut word = u32::from_le_bytes(code[..4].try_into().unwrap());
-    // a field of `bits` bits at `shift`, holding a signed word offset
-    let branch = |word: &mut u32, bits: u32, shift: u32| -> Result<(), String> {
-        if relative % 4 != 0 {
-            return Err(misaligned());
-        }
-        let words = relative >> 2;
-        let limit = 1i64 << (bits - 1);
-        if !(-limit..limit).contains(&words) {
-            return Err(too_far());
-        }
-        let mask = (1u32 << bits) - 1;
-        *word = (*word & !(mask << shift)) | ((words as u32 & mask) << shift);
-        Ok(())
-    };
-    match fixup.kind {
-        FixupKind::X64Rel32 => unreachable!(),
-        FixupKind::Arm64Branch26 => branch(&mut word, 26, 0)?,
-        FixupKind::Arm64Branch19 => branch(&mut word, 19, 5)?,
-        FixupKind::Arm64Branch14 => branch(&mut word, 14, 5)?,
-        FixupKind::Arm64AdrpPage21 => {
-            let pages = (value >> 12) - (place as i64 >> 12);
-            if !(-(1 << 20)..1 << 20).contains(&pages) {
-                return Err(too_far());
-            }
-            let pages = pages as u32;
-            word = (word & !(0b11 << 29 | 0x7ffff << 5))
-                | (pages & 0b11) << 29
-                | (pages >> 2 & 0x7ffff) << 5;
-        }
-        FixupKind::Arm64AddLo12 => {
-            word = (word & !(0xfff << 10)) | ((value as u32 & 0xfff) << 10);
-        }
-        FixupKind::Arm64LdStLo12(shift) => {
-            let low = value as u32 & 0xfff;
-            if low & ((1 << shift) - 1) != 0 {
-                return Err(misaligned());
-            }
-            word = (word & !(0xfff << 10)) | ((low >> shift) << 10);
-        }
-    }
-    code[..4].copy_from_slice(&word.to_le_bytes());
-    Ok(())
 }
 
 fn put16(file: &mut Vec<u8>, value: u16) {
@@ -442,6 +384,7 @@ fn write_sections(file: &mut Vec<u8>, object: &Object, layout: &Layout) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::asm::{Fixup, FixupKind};
 
     /// Reads a little-endian integer of `N` bytes at `at`.
     fn read<const N: usize>(file: &[u8], at: usize) -> u64 {
@@ -523,6 +466,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(target_os = "linux")]
     fn a_linked_object_runs_on_its_own() {
         let file = link(&exit_seven(), Architecture::host()).unwrap();
         let dir = std::env::temp_dir().join(format!("stone-elf-{}", std::process::id()));
@@ -659,6 +603,16 @@ mod tests {
         assert_eq!(
             link(&object, Architecture::X64),
             Err("'_start' is never defined".to_string())
+        );
+
+        let object = crate::codegen::asm::assemble(
+            "\t.text\n\t.globl\t_start\n_start:\n\tcall\tnowhere\n",
+            Architecture::X64,
+        )
+        .unwrap();
+        assert_eq!(
+            link(&object, Architecture::X64),
+            Err("undefined label 'nowhere'".to_string())
         );
     }
 }

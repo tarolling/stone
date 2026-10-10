@@ -11,7 +11,7 @@ pub mod floats;
 use crate::ast::Mod;
 use crate::codegen::context::{Context, global_label, immortal_string};
 use crate::codegen::x64::builtins::print;
-use crate::codegen::{Architecture, AssemblyGenerator};
+use crate::codegen::{AssemblyGenerator, Target};
 use std::path::Path;
 
 /// Registers that carry arguments under the System V ABI, in order.
@@ -34,7 +34,7 @@ pub struct X64Generator {
 impl AssemblyGenerator for X64Generator {
     fn compile(&mut self, module: &Mod, output: &Path) -> std::io::Result<()> {
         let text = self.assemble(module).map_err(std::io::Error::other)?;
-        crate::codegen::link(&text, output, self.architecture())
+        crate::codegen::link(&text, output, self.target())
     }
 
     fn assemble(&mut self, module: &Mod) -> Result<String, String> {
@@ -106,8 +106,8 @@ impl AssemblyGenerator for X64Generator {
         self.output.push('\n');
     }
 
-    fn architecture(&self) -> Architecture {
-        Architecture::X64
+    fn target(&self) -> Target {
+        Target::X64_LINUX
     }
 }
 

@@ -276,6 +276,10 @@ fn compiler_matches_expected() {
 
 #[test]
 fn cross_compiler_matches_expected() {
+    // qemu-user runs Linux programs only on Linux
+    if !cfg!(target_os = "linux") {
+        return;
+    }
     let Some(arch) = Architecture::ALL
         .into_iter()
         .find(|arch| *arch != Architecture::host())
@@ -288,4 +292,34 @@ fn cross_compiler_matches_expected() {
         return;
     }
     check_all(Backend::Cross(arch));
+}
+
+/// Builds every program for arm64 macOS on a machine that cannot run the result, so a change
+/// that breaks the Mach-O linker or the macOS runtime fails everywhere, not only on a Mac. A Mac
+/// runs every program in [`compiler_matches_expected`] instead.
+#[test]
+fn every_program_links_for_macos() {
+    if cfg!(target_os = "macos") {
+        return;
+    }
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("link-aarch64-macos");
+    let mut failures = String::new();
+    for program in programs() {
+        let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+            .arg("build")
+            .arg(&program)
+            .arg("-o")
+            .arg(dir.join(name_of(&program)))
+            .args(["--target", "aarch64-macos"])
+            .output()
+            .expect("stone should run");
+        if !output.status.success() {
+            failures.push_str(&format!(
+                "--- {}\n{}\n",
+                program.display(),
+                String::from_utf8_lossy(&output.stderr)
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "macOS builds failed:\n{failures}");
 }

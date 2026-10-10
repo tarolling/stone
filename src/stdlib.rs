@@ -18,6 +18,16 @@ pub static BUILTINS: [&str; 8] = [
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
 pub static METHODS: [&str; 4] = ["len", "append", "strip", "split"];
 
+/// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
+/// rather than only reading it.
+///
+/// Such a call changes the variable that holds the value, like an assignment, so it must be a
+/// statement of its own whose receiver is a variable or an element of one, such as
+/// `grid[0].append(1)`.
+pub fn changes_receiver(name: &str) -> bool {
+    name == "append"
+}
+
 /// Documentation for a builtin function or method, for editor tooling.
 pub struct BuiltinDoc {
     pub name: &'static str,
@@ -88,7 +98,8 @@ pub static METHOD_DOCS: [BuiltinDoc; 4] = [
     BuiltinDoc {
         name: "append",
         signature: "list[T].append(item: T) -> none",
-        description: "Adds `item` to the end of the list.",
+        description: "Adds `item` to the end of the list, changing only the variable it is \
+                      called on, since lists are values. It is a statement of its own.",
     },
     BuiltinDoc {
         name: "strip",

@@ -13,7 +13,7 @@ conflict.
 | `bool` | `true` and `false` |
 | `str` | immutable byte strings |
 | `none` | `none`, also what a function without `ret value` returns |
-| `list[T]` | growable lists of `T`, shared by reference |
+| `list[T]` | growable lists of `T`, which are values: assigning or passing one copies it |
 | functions | each function has one signature, such as `(int, list[str]) -> bool` |
 
 ## Inference
@@ -43,6 +43,14 @@ These keep the two backends identical and catch common mistakes:
 - **Conditions are `int` or `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject
   floats, strings, lists, and `none`.
 - **Lists are not comparable.** `==` and `!=` cannot compare lists.
+- **Changes are statements, made to variables.** Since lists are values, `xs.append(v)` and
+  `xs[i] = v` change only the variable they start from. Each is a statement of its own, so
+  `ys = xs.append(1)` is an error, and the list must be in a variable or an element of one, so
+  `f().append(1)` is an error too, since the change would be lost.
+- **Functions change only their own variables.** A function can read a global but cannot
+  change it, with `append` or an index, just as it cannot assign it. It takes the list as an
+  argument and returns the changed one instead. A function that changes a parameter and then
+  never uses it gets a warning, since its caller cannot see the change.
 - **`range` is only a `for` iterable.** It cannot be stored or passed around.
 - **Functions are top level, and only called.** A function cannot be assigned, stored, or
   passed as a value, and a builtin's name cannot be assigned to.

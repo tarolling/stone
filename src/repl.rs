@@ -100,7 +100,8 @@ impl Session {
         let offset = history.lines().count();
         let program = format!("{history}{entry}");
         match driver::load(Path::new(ENTRY), &program, sources) {
-            (_, Ok(module)) => Ok(Prepared {
+            // a warning would repeat with every later entry, so the session leaves them out
+            (_, Ok((module, _))) => Ok(Prepared {
                 module,
                 offset,
                 chunks,

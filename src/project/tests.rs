@@ -20,7 +20,7 @@ fn sources_of(files: &[(&str, &str)]) -> MapSources {
 fn output(files: &[(&str, &str)]) -> String {
     let (entry, source) = files[0];
     let (map, result) = driver::load(Path::new(entry), source, &sources_of(&files[1..]));
-    let ast = result.unwrap_or_else(|errors| {
+    let (ast, _) = result.unwrap_or_else(|errors| {
         let rendered: String = errors.0.iter().map(|d| map.render(d)).collect();
         panic!("program should have no errors:\n{rendered}")
     });

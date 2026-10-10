@@ -44,6 +44,15 @@ impl Diagnostic {
         }
     }
 
+    /// Makes a warning, which points out a likely mistake but still lets the program run.
+    pub fn warning(span: Span, message: impl Into<String>) -> Self {
+        Diagnostic {
+            severity: Severity::Warning,
+            span,
+            message: message.into(),
+        }
+    }
+
     /// Formats the diagnostic for a terminal as `file:line:col: severity: message`, followed by the
     /// offending source line and a caret under the start of the span.
     ///

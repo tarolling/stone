@@ -504,7 +504,7 @@ mod tests {
             source,
             &crate::project::MapSources::default(),
         );
-        X64Generator::new().assemble(&module.unwrap()).unwrap()
+        X64Generator::new().assemble(&module.unwrap().0).unwrap()
     }
 
     #[test]

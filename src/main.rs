@@ -242,10 +242,14 @@ fn with_program(file: &str, action: impl FnOnce(&Mod) -> Result<(), Box<dyn Erro
     };
     let (sources, result) = driver::load(Path::new(file), &source, &FsSources);
     let err = match result {
-        Ok(module) => match action(&module) {
-            Ok(()) => return ExitCode::SUCCESS,
-            Err(err) => err,
-        },
+        Ok((module, warnings)) => {
+            let rendered: String = warnings.iter().map(|d| sources.render(d)).collect();
+            eprint!("{rendered}");
+            match action(&module) {
+                Ok(()) => return ExitCode::SUCCESS,
+                Err(err) => err,
+            }
+        }
         Err(diagnostics) => Box::new(diagnostics),
     };
     if let Some(Exit(status)) = err.downcast_ref::<Exit>() {

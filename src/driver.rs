@@ -36,12 +36,14 @@ pub fn parse(source: &str) -> Result<Mod, Diagnostic> {
 /// For example, `checked("x = \n")` fails with the syntax error, while a program that parses
 /// returns its module.
 fn checked(source: &str) -> Result<Mod, Diagnostics> {
-    load(Path::new(DEFAULT_ENTRY), source, &MapSources::default()).1
+    load(Path::new(DEFAULT_ENTRY), source, &MapSources::default())
+        .1
+        .map(|(module, _)| module)
 }
 
 /// Loads, links, and checks the program whose entry file is at `entry` and holds `source`,
 /// reading the modules it uses from `sources`. Returns the program's files, for rendering
-/// diagnostics, and its linked module if no errors were found.
+/// diagnostics, and its linked module with any warnings if no errors were found.
 ///
 /// For example, loading `main.st` holding `use util` without a `util.st` fails with
 /// `no module named 'util'`.
@@ -49,7 +51,7 @@ pub fn load(
     entry: &Path,
     source: &str,
     sources: &dyn Sources,
-) -> (SourceMap, Result<Mod, Diagnostics>) {
+) -> (SourceMap, Result<(Mod, Vec<Diagnostic>), Diagnostics>) {
     let Linked {
         module,
         sources,
@@ -63,7 +65,7 @@ pub fn load(
     if has_errors(&diagnostics) {
         return (sources, Err(Diagnostics(diagnostics)));
     }
-    (sources, Ok(module))
+    (sources, Ok((module, diagnostics)))
 }
 
 fn has_errors(diagnostics: &[Diagnostic]) -> bool {

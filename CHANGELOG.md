@@ -10,6 +10,30 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Warnings. The first one points out a function that changes a parameter and never uses it
+  afterward, since the caller cannot see the change. `stone run` and `stone build` print
+  warnings and still run or build the program.
+
+### Changed
+
+- stone has a new design philosophy, described in the documentation's Philosophy page: Python's
+  simplicity with Rust's memory safety, speed, and error reporting, with the complexity moved
+  into the compiler, and compiled programs that need no libc. The syntax is unchanged.
+- Lists are values. Assigning a list, passing it to a function, or putting it in another list
+  behaves as a copy, so after `b = a`, `b.append(3)` leaves `a` unchanged. Compiled code copies a
+  list only when it is about to change while something else still refers to it, so a list held
+  by one variable is still changed in place.
+- A function changes its caller's list by returning it, as in `xs = add(xs, 1)`, and can read
+  a global but no longer change it with `append` or an index.
+- `append` is a statement of its own (`ys = xs.append(1)` is an error), and it and `xs[i] = v`
+  must change a variable or an element of one (`f().append(1)` is an error).
+- A `for` loop walks its list as it was when the loop started, so appending to the list inside
+  the loop no longer makes the loop run longer.
+- A change such as `grid[i][j] = v` evaluates every index before checking any against the
+  lists, so an out-of-range `i` now stops the program after `j` is evaluated.
+
 ## [0.1.3] - 2026-10-09
 
 ### Added

@@ -780,6 +780,19 @@ impl X64Generator {
                 }
             },
 
+            Inst::ListUnique { dst, src } => {
+                let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
+                // a list nothing else refers to is changed in place, and any other is copied
+                // first by `stone.list_copy`, which takes and returns it in rax
+                self.load("rax", src);
+                let skip = self.ctx.new_label("unique");
+                self.emit("\tcmp\tQWORD PTR [rax - 8], 1");
+                self.emit(&format!("\tje\t{skip}"));
+                self.emit("\tcall\tstone.list_copy");
+                self.emit(&format!("{skip}:"));
+                self.store(dst, "rax");
+            }
+
             Inst::ListInit { list, index, value } => {
                 let (list, value) = (frame.value(*list)?, frame.value(*value)?);
                 let slot = self.list_slot(list, Value::Imm(*index as i64), false);

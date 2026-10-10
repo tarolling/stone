@@ -143,16 +143,16 @@ fn assigning_a_string_releases_the_old_value_after_computing_the_new_one() {
 }
 
 #[test]
-fn parameters_are_borrowed_and_temporaries_are_released_once_used() {
+fn parameters_are_borrowed_unless_changed_and_temporaries_are_released_once_used() {
     let source = "def f(xs, i);\n    xs[i] = xs[0]\n    g(xs[1] + \"!\")\n\
                   def g(s);\n    ret s\nf([\"a\"], 0)\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
-         b0:\n  v2 = list_load v0, 0\n  retain v2\n  v3 = list_store v0, v1, v2\n  \
-         release_str v3\n  v4 = list_load v0, 1\n  retain v4\n  v5 = str \"!\"\n  \
-         v6 = call stone.str_concat(v4, v5)\n  release_str v4\n  v7 = call g(v6)\n  \
-         release_str v6\n  release_str v7\n  ret 0\n\
+         b0:\n  retain v0\n  v2 = list_load v0, 0\n  retain v2\n  v0 = list_unique v0\n  \
+         v3 = list_store v0, v1, v2\n  release_str v3\n  v4 = list_load v0, 1\n  retain v4\n  \
+         v5 = str \"!\"\n  v6 = call stone.str_concat(v4, v5)\n  release_str v4\n  \
+         v7 = call g(v6)\n  release_str v6\n  release_str v7\n  release_list v0\n  ret 0\n\
          fn g(v0):\n\
          b0:\n  retain v0\n  ret v0\n"
     );
@@ -213,9 +213,29 @@ fn methods_lower_to_list_and_string_operations() {
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
-         b0:\n  v2 = call stone.str_len(v1)\n  call stone.list_append(v0, v2)\n  \
-         v3 = len v0\n  ret v3\n"
+         b0:\n  retain v0\n  v2 = call stone.str_len(v1)\n  v0 = list_unique v0\n  \
+         call stone.list_append(v0, v2)\n  v3 = len v0\n  release_list v0\n  ret v3\n"
     );
+}
+
+#[test]
+fn a_changed_parameter_is_owned_and_made_unique_before_each_change() {
+    let source = "def f(xs, i);\n    xs[i] = 0\n    xs.append(i)\n    ret xs\nprint(f([1], 0))\n";
+    assert_eq!(
+        dump(source).split("fn main").next().unwrap(),
+        "fn f(v0, v1):\n\
+         b0:\n  retain v0\n  v0 = list_unique v0\n  list_store v0, v1, 0\n  \
+         v0 = list_unique v0\n  call stone.list_append(v0, v1)\n  ret v0\n"
+    );
+}
+
+#[test]
+fn a_nested_change_makes_every_list_on_the_way_unique() {
+    let dump = dump("grid = [[1]]\ngrid[0][0] = 2\n");
+    let change = "v3 = load_global grid\n  v4 = list_unique v3\n  store_global grid, v4\n  \
+                  v5 = list_load v4, 0\n  v5 = list_unique v5\n  list_store v4, 0, v5\n  \
+                  list_store v5, 0, 2\n";
+    assert!(dump.contains(change), "{dump}");
 }
 
 #[test]
@@ -281,7 +301,7 @@ fn dump_linked(source: &str) -> String {
         source,
         &crate::project::MapSources::default(),
     );
-    let module = module.unwrap();
+    let (module, _) = module.unwrap();
     let analysis = TypeChecker::new().analyze(&module);
     let program = lower(&module, &analysis.types, &analysis.symbols).unwrap();
     program.functions.iter().map(ToString::to_string).collect()

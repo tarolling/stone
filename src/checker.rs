@@ -9,6 +9,10 @@
 //! local, and other names refer to top-level variables or functions. Functions can only be
 //! defined at the top level, and can be called before their definition.
 //!
+//! Lists are values: assigning one or passing it to a function behaves as a copy. So a change,
+//! `xs[i] = v` or `xs.append(v)`, is a statement of its own that changes a variable or an element
+//! of one, and a function changes only its own variables, never a global.
+//!
 //! The checker only accepts programs that the interpreter and the compiler run the same way. For
 //! example, conditions must be `int` or `bool`, because compiled code tests them for zero.
 
@@ -18,7 +22,7 @@ use std::fmt::Display;
 use crate::ast::{CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
-use crate::stdlib::{BUILTINS, METHODS, is_builtin};
+use crate::stdlib::{BUILTINS, METHODS, changes_receiver, is_builtin};
 
 #[cfg(test)]
 mod tests;
@@ -252,6 +256,9 @@ struct Inference {
     function: Option<FunctionScope>,
     loop_depth: usize,
     function_spans: HashMap<String, Span>,
+    /// The span of the call an expression statement makes, if it is one, which is the only place
+    /// a method that changes its receiver may be called.
+    statement_call: Option<Span>,
 }
 
 /// What a name refers to where it is used.
@@ -547,7 +554,9 @@ impl Inference {
                 self.check_block(orelse);
             }
             StmtKind::Expr { value } => {
+                self.statement_call = Some(value.span);
                 self.infer(value);
+                self.statement_call = None;
             }
             StmtKind::Break => {
                 if self.loop_depth == 0 {
@@ -638,6 +647,19 @@ impl Inference {
         self.check_block(body);
         self.loop_depth = saved_loops;
 
+        for arg in &args.args {
+            if let Some(span) = lost_change(body, &arg.arg) {
+                let param = &arg.arg;
+                self.diagnostics.push(Diagnostic::warning(
+                    span,
+                    format!(
+                        "changes to '{param}' are lost when '{name}' returns, since parameters \
+                         are copies; return it and assign the result where '{name}' is called"
+                    ),
+                ));
+            }
+        }
+
         // falling off the end returns none, which must agree with every `ret`
         if !always_exits(body) && !self.unify(&ret, &Ty::None) {
             self.error(
@@ -692,8 +714,34 @@ impl Inference {
             ExprKind::Subscript { value, slice, .. } => {
                 let elem = self.subscript(value, slice);
                 self.expect(&elem, found, value_span);
+                self.check_change(value);
             }
             _ => self.error(target.span, "cannot assign to this expression"),
+        }
+    }
+
+    /// Checks that `list`, which a statement changes, is a variable or an element of one, since a
+    /// change to any other list would be lost, and that a function changes only its own variables.
+    ///
+    /// For example, `f().append(1)` and a function's `names.append(x)` for a global `names` are
+    /// errors, while `grid[0].append(1)` is fine.
+    fn check_change(&mut self, list: &Expr) {
+        let root = place_root(list);
+        let ExprKind::Name { id, .. } = &root.kind else {
+            self.error(
+                root.span,
+                "this list is not stored in a variable, so changing it has no effect",
+            );
+            return;
+        };
+        if self.function.is_some() && self.local(id).is_none() && self.globals.contains_key(id) {
+            self.error(
+                root.span,
+                format!(
+                    "a function cannot change the global '{id}'; pass it as an argument and \
+                     return the changed value"
+                ),
+            );
         }
     }
 
@@ -956,6 +1004,19 @@ impl Inference {
     ) -> Ty {
         let receiver_ty = self.infer(receiver);
         let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+        if changes_receiver(name) {
+            // inside an expression, a borrowed copy of the receiver could see the change
+            if self.statement_call != Some(call.span) {
+                self.error(
+                    call.span,
+                    format!(
+                        "'{name}' changes a list and returns none, so it can only be a statement \
+                         of its own"
+                    ),
+                );
+            }
+            self.check_change(receiver);
+        }
         match name {
             "len" => {
                 if !args.is_empty() {
@@ -1373,6 +1434,213 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
             | StmtKind::Expr { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
+        }
+    }
+}
+
+/// Returns the expression the place `expr` starts from, following its subscripts.
+///
+/// For example, the root of `grid[i][j]` is `grid`, and the root of `f()[0]` is `f()`.
+pub(crate) fn place_root(expr: &Expr) -> &Expr {
+    match &expr.kind {
+        ExprKind::Subscript { value, .. } => place_root(value),
+        _ => expr,
+    }
+}
+
+/// Splits a list that a statement changes into the variable it starts from and the indexes that
+/// lead from that variable to it, outermost first, or returns `None` if it is not in a variable.
+///
+/// For example, `grid[i][j]` gives `grid` and `[i, j]`, `xs` gives `xs` and no indexes, and
+/// `f()[0]` gives `None`.
+pub(crate) fn place(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
+    match &expr.kind {
+        ExprKind::Name { id, .. } => Some((id, vec![])),
+        ExprKind::Subscript { value, slice, .. } => {
+            let (root, mut indexes) = place(value)?;
+            indexes.push(slice);
+            Some((root, indexes))
+        }
+        _ => None,
+    }
+}
+
+/// Returns the receiver of `expr` if it calls a method that changes its receiver.
+///
+/// For example, for `grid[0].append(1)` this returns `grid[0]`, and for `xs.len()` it returns
+/// `None`.
+pub(crate) fn changed_receiver(expr: &Expr) -> Option<&Expr> {
+    let ExprKind::Call { func, .. } = &expr.kind else {
+        return None;
+    };
+    match &func.kind {
+        ExprKind::Attribute { value, attr, .. } if changes_receiver(attr) => Some(value),
+        _ => None,
+    }
+}
+
+/// Collects the name of every variable that `body` changes in place, through `xs[i] = v` or
+/// `xs.append(v)`, without looking inside function definitions.
+///
+/// For example, for `grid[0][1] = 2` followed by `if x; ys.append(1)`, this collects `grid` and
+/// `ys`.
+pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
+    let add = |list: &Expr, out: &mut HashSet<String>| {
+        if let Some((root, _)) = place(list) {
+            out.insert(root.to_string());
+        }
+    };
+    for stmt in body {
+        match &stmt.kind {
+            StmtKind::Assign { targets, .. } => {
+                for target in targets {
+                    if let ExprKind::Subscript { value, .. } = &target.kind {
+                        add(value, out);
+                    }
+                }
+            }
+            StmtKind::Expr { value } => {
+                if let Some(receiver) = changed_receiver(value) {
+                    add(receiver, out);
+                }
+            }
+            StmtKind::For { body, .. } | StmtKind::While { body, .. } => collect_changed(body, out),
+            StmtKind::If { body, orelse, .. } => {
+                collect_changed(body, out);
+                collect_changed(orelse, out);
+            }
+            StmtKind::FunctionDef { .. }
+            | StmtKind::Use { .. }
+            | StmtKind::Return { .. }
+            | StmtKind::Break
+            | StmtKind::Continue => {}
+        }
+    }
+}
+
+/// Returns where `body` first changes the parameter `name` if it never reads it anywhere else,
+/// since the caller cannot see the change and nothing else uses it.
+///
+/// For example, the change in `def push(xs, x); xs.append(x)` is lost, but a later `ret xs` or
+/// `print(xs)` uses it.
+fn lost_change(body: &[Stmt], name: &str) -> Option<Span> {
+    let mut usage = ParameterUse {
+        name,
+        changed: None,
+        read: false,
+    };
+    usage.block(body);
+    if usage.read { None } else { usage.changed }
+}
+
+/// How a function body uses one of its parameters, for [`lost_change`].
+struct ParameterUse<'a> {
+    name: &'a str,
+    /// Where the body first changes the parameter in place.
+    changed: Option<Span>,
+    /// Whether the body reads the parameter anywhere other than to change it.
+    read: bool,
+}
+
+impl ParameterUse<'_> {
+    fn block(&mut self, body: &[Stmt]) {
+        for stmt in body {
+            self.stmt(stmt);
+        }
+    }
+
+    fn stmt(&mut self, stmt: &Stmt) {
+        match &stmt.kind {
+            StmtKind::Assign { targets, value } => {
+                self.expr(value);
+                for target in targets {
+                    match &target.kind {
+                        ExprKind::Name { .. } => {}
+                        ExprKind::Subscript { value, slice, .. } => {
+                            self.change(value);
+                            self.expr(slice);
+                        }
+                        _ => self.expr(target),
+                    }
+                }
+            }
+            StmtKind::Expr { value } => match (changed_receiver(value), &value.kind) {
+                (Some(receiver), ExprKind::Call { args, .. }) => {
+                    self.change(receiver);
+                    for arg in args {
+                        self.expr(arg);
+                    }
+                }
+                _ => self.expr(value),
+            },
+            StmtKind::Return { value } => {
+                if let Some(value) = value {
+                    self.expr(value);
+                }
+            }
+            StmtKind::If { test, body, orelse } => {
+                self.expr(test);
+                self.block(body);
+                self.block(orelse);
+            }
+            StmtKind::While { test, body } => {
+                self.expr(test);
+                self.block(body);
+            }
+            StmtKind::For { iter, body, .. } => {
+                self.expr(iter);
+                self.block(body);
+            }
+            StmtKind::FunctionDef { .. }
+            | StmtKind::Use { .. }
+            | StmtKind::Break
+            | StmtKind::Continue => {}
+        }
+    }
+
+    /// Notes a change to `list`, which changes the parameter if `list` starts from it.
+    fn change(&mut self, list: &Expr) {
+        match place(list) {
+            Some((root, indexes)) if root == self.name => {
+                self.changed.get_or_insert(place_root(list).span);
+                for index in indexes {
+                    self.expr(index);
+                }
+            }
+            _ => self.expr(list),
+        }
+    }
+
+    /// Notes whether `expr` reads the parameter.
+    fn expr(&mut self, expr: &Expr) {
+        match &expr.kind {
+            ExprKind::Name { id, .. } => self.read |= id == self.name,
+            ExprKind::BoolOp { values, .. } => values.iter().for_each(|value| self.expr(value)),
+            ExprKind::BinOp { left, right, .. } => {
+                self.expr(left);
+                self.expr(right);
+            }
+            ExprKind::UnaryOp { operand, .. } => self.expr(operand),
+            ExprKind::Compare {
+                left, comparators, ..
+            } => {
+                self.expr(left);
+                comparators.iter().for_each(|value| self.expr(value));
+            }
+            ExprKind::Call { func, args } => {
+                // a called name is a function, but a method's receiver is read
+                if let ExprKind::Attribute { .. } = &func.kind {
+                    self.expr(func);
+                }
+                args.iter().for_each(|arg| self.expr(arg));
+            }
+            ExprKind::Attribute { value, .. } => self.expr(value),
+            ExprKind::Subscript { value, slice, .. } => {
+                self.expr(value);
+                self.expr(slice);
+            }
+            ExprKind::List { elts, .. } => elts.iter().for_each(|elt| self.expr(elt)),
+            ExprKind::Constant { .. } => {}
         }
     }
 }

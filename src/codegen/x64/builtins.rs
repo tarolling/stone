@@ -470,6 +470,11 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.list_new` returns a list of length `rdi` whose elements the caller fills in, with
 ///   `elem` set to `rsi`
 /// - `stone.list_append` appends `rsi` to list `rdi`, doubling its capacity when full
+/// - `stone.list_copy` returns in `rax` a copy of the list in `rax`, retaining each element if
+///   they are counted, and drops one reference to the original, which something else still
+///   holds. Like the free routines, it is reached from an inline `list_unique` that does not
+///   count as a call, so it preserves every register except `rax`, `rcx`, `rdx`, and the `xmm`
+///   registers.
 ///
 /// Indexing is generated inline by `X64Generator::list_slot` (in `emit.rs`) rather than called here.
 pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
@@ -532,6 +537,45 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tlea\trsp, [rbp - 16]");
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+
+    // rbx holds the original, r12 the copy, rdi and rsi their elements, and r8 what they are
+    let saved = ["rdi", "rsi", "r8", "r9", "r10", "r11", "rbx", "r12"];
+    r#gen.emit("stone.list_copy:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    for reg in saved {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rax");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbx]");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rbx + 24]");
+    r#gen.emit("\tcall\tstone.list_new");
+    r#gen.emit("\tmov\tr12, rax");
+    r#gen.emit("\tmov\trdi, QWORD PTR [r12 + 16]");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tmov\tr8, QWORD PTR [rbx + 24]");
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit(".Llist_copy_loop:");
+    r#gen.emit("\tcmp\trcx, QWORD PTR [rbx]");
+    r#gen.emit("\tjge\t.Llist_copy_done");
+    r#gen.emit("\tmov\trax, QWORD PTR [rsi + rcx * 8]");
+    r#gen.emit("\tmov\tQWORD PTR [rdi + rcx * 8], rax");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit("\ttest\tr8, r8");
+    r#gen.emit("\tjz\t.Llist_copy_loop"); // the elements are not counted
+    r#gen.emit("\tinc\tQWORD PTR [rax - 8]");
+    r#gen.emit("\tjmp\t.Llist_copy_loop");
+    r#gen.emit(".Llist_copy_done:");
+    // the variable or slot that held the original now holds the copy instead
+    r#gen.emit("\tdec\tQWORD PTR [rbx - 8]");
+    r#gen.emit("\tmov\trax, r12");
+    r#gen.emit(&format!("\tlea\trsp, [rbp - {}]", 8 * saved.len()));
+    for reg in saved.iter().rev() {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
     r#gen.emit("\tpop\trbp");
     r#gen.emit("\tret");
 

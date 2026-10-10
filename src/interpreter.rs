@@ -5,9 +5,8 @@
 use crate::ast::{
     BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp,
 };
-use crate::checker::range_args;
+use crate::checker::{place, range_args};
 use crate::stdlib::{self, MAX_CALL_DEPTH, os};
-use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -17,8 +16,9 @@ type EvalResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// A value a running program works with.
 ///
-/// Lists are shared rather than copied, like in Python, so after `b = a`, appending to `b` also
-/// changes `a`.
+/// Lists are values: after `b = a`, appending to `b` leaves `a` unchanged. They share their
+/// elements through an `Rc` until one is changed, which copies it first if anything else still
+/// holds it ([`Rc::make_mut`]), the same copy on write compiled code does.
 #[derive(Debug, Clone)]
 pub enum Value {
     Int(i64),
@@ -26,7 +26,7 @@ pub enum Value {
     Bool(bool),
     Str(Rc<str>),
     None,
-    List(Rc<RefCell<Vec<Value>>>),
+    List(Rc<Vec<Value>>),
 }
 
 /// Makes a new list of strings, such as the pieces `split` returns.
@@ -36,7 +36,7 @@ fn str_list(items: Vec<&str>) -> Value {
 
 impl Value {
     fn list(items: Vec<Value>) -> Value {
-        Value::List(Rc::new(RefCell::new(items)))
+        Value::List(Rc::new(items))
     }
 
     /// Formats the value the way `print` shows it, with strings inside lists quoted.
@@ -51,7 +51,7 @@ impl Value {
             Value::Str(s) => s.to_string(),
             Value::None => "none".to_string(),
             Value::List(items) => {
-                let items: Vec<String> = items.borrow().iter().map(|v| v.display(true)).collect();
+                let items: Vec<String> = items.iter().map(|v| v.display(true)).collect();
                 format!("[{}]", items.join(", "))
             }
         }
@@ -64,7 +64,7 @@ impl Value {
             Value::Bool(b) => *b,
             Value::Str(s) => !s.is_empty(),
             Value::None => false,
-            Value::List(items) => !items.borrow().is_empty(),
+            Value::List(items) => !items.is_empty(),
         }
     }
 
@@ -99,9 +99,18 @@ impl Value {
         }
     }
 
-    fn as_list(&self) -> EvalResult<&Rc<RefCell<Vec<Value>>>> {
+    fn as_list(&self) -> EvalResult<&Rc<Vec<Value>>> {
         match self {
             Value::List(items) => Ok(items),
+            other => Err(format!("expected a list, found {}", other.display(true)).into()),
+        }
+    }
+
+    /// Returns the elements of a list for changing, copying them first if another value still
+    /// shares them, so the change shows through no other variable.
+    fn as_list_mut(&mut self) -> EvalResult<&mut Vec<Value>> {
+        match self {
+            Value::List(items) => Ok(Rc::make_mut(items)),
             other => Err(format!("expected a list, found {}", other.display(true)).into()),
         }
     }
@@ -434,9 +443,9 @@ impl<'out> Interpreter<'out> {
                             self.set_var(id, &rhs)?;
                         }
                         ExprKind::Subscript { value, slice, .. } => {
-                            let list = self.eval_expr(value)?;
+                            let (root, indexes) = self.eval_place(value)?;
                             let index = self.eval_expr(slice)?.as_int()?;
-                            let mut items = list.as_list()?.borrow_mut();
+                            let items = self.place_list(root, &indexes)?;
                             let position = list_position(index, items.len())?;
                             items[position] = rhs.clone();
                         }
@@ -469,16 +478,11 @@ impl<'out> Interpreter<'out> {
                     return Ok(ControlFlow::None);
                 }
 
-                // like Python, a list that grows while it is iterated keeps going
+                // the loop holds the list as it was, so changing the variable copies it first
                 let list = self.eval_expr(iter)?;
                 let items = list.as_list()?.clone();
-                let mut position = 0;
-                loop {
-                    let Some(item) = items.borrow().get(position).cloned() else {
-                        break;
-                    };
-                    position += 1;
-                    self.set_var(id, &item)?;
+                for item in items.iter() {
+                    self.set_var(id, item)?;
                     if let Some(flow) = self.run_iteration(body)? {
                         return Ok(flow);
                     }
@@ -647,6 +651,24 @@ impl<'out> Interpreter<'out> {
                 Ok(Value::Bool(true))
             }
             ExprKind::Call { func, args } => {
+                if let ExprKind::Attribute { value, attr, .. } = &func.kind
+                    && stdlib::changes_receiver(attr)
+                {
+                    // the receiver's indexes, then the arguments, then the change
+                    let (root, indexes) = self.eval_place(value)?;
+                    let mut values = Vec::with_capacity(args.len());
+                    for arg in args {
+                        values.push(self.eval_expr(arg)?);
+                    }
+                    let items = self.place_list(root, &indexes)?;
+                    return match (attr.as_str(), &values[..]) {
+                        ("append", [item]) => {
+                            items.push(item.clone());
+                            Ok(Value::None)
+                        }
+                        _ => Err("append() is called on a list, with one value".into()),
+                    };
+                }
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind {
                     // the receiver is evaluated before the arguments
                     let receiver = self.eval_expr(value)?;
@@ -673,7 +695,7 @@ impl<'out> Interpreter<'out> {
             ExprKind::Subscript { value, slice, .. } => {
                 let list = self.eval_expr(value)?;
                 let index = self.eval_expr(slice)?.as_int()?;
-                let items = list.as_list()?.borrow();
+                let items = list.as_list()?;
                 let position = list_position(index, items.len())?;
                 Ok(items[position].clone())
             }
@@ -695,13 +717,8 @@ impl<'out> Interpreter<'out> {
         match (name, &receiver, &args[..]) {
             // len counts bytes, like the compiled strlen
             ("len", Value::Str(s), []) => Ok(Value::Int(s.len() as i64)),
-            ("len", Value::List(items), []) => Ok(Value::Int(items.borrow().len() as i64)),
+            ("len", Value::List(items), []) => Ok(Value::Int(items.len() as i64)),
             ("len", _, _) => Err("len() is called on a str or list, with no arguments".into()),
-            ("append", Value::List(items), [item]) => {
-                items.borrow_mut().push(item.clone());
-                Ok(Value::None)
-            }
-            ("append", _, _) => Err("append() is called on a list, with one value".into()),
             ("strip", Value::Str(s), []) => Ok(Value::Str(stdlib::strip(s).into())),
             ("strip", _, _) => Err("strip() is called on a str, with no arguments".into()),
             ("split", Value::Str(s), []) => Ok(str_list(stdlib::split_whitespace(s))),
@@ -830,5 +847,40 @@ impl<'out> Interpreter<'out> {
             .or_else(|| self.globals.get(name))
             .cloned()
             .ok_or_else(|| format!("'{name}' is used before it is assigned").into())
+    }
+
+    /// Evaluates the indexes of `list`, a variable or an element of one that a statement is about
+    /// to change, and returns the variable's name with the indexes, outermost first.
+    ///
+    /// For example, `grid[i][j]` gives `"grid"` and the values of `i` and `j`. Nothing is checked
+    /// against the lists yet: [`Interpreter::place_list`] does that once the change is ready.
+    fn eval_place<'e>(&mut self, list: &'e Expr) -> EvalResult<(&'e str, Vec<i64>)> {
+        let Some((root, exprs)) = place(list) else {
+            return Err("only a list in a variable can be changed".into());
+        };
+        let mut indexes = Vec::with_capacity(exprs.len());
+        for index in exprs {
+            indexes.push(self.eval_expr(index)?.as_int()?);
+        }
+        Ok((root, indexes))
+    }
+
+    /// Walks from the variable `root` through `indexes` to the list a statement changes, and
+    /// returns its elements for changing.
+    ///
+    /// Every list on the way that another value still shares is copied first, so the change shows
+    /// through no other variable. The checker allows a function to change only its own variables,
+    /// so `root` is in the function's scope, or in the globals at the top level.
+    fn place_list(&mut self, root: &str, indexes: &[i64]) -> EvalResult<&mut Vec<Value>> {
+        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
+        let mut value = scope
+            .get_mut(root)
+            .ok_or_else(|| format!("'{root}' is used before it is assigned"))?;
+        for &index in indexes {
+            let items = value.as_list_mut()?;
+            let position = list_position(index, items.len())?;
+            value = &mut items[position];
+        }
+        value.as_list_mut()
     }
 }

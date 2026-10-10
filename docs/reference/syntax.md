@@ -1,7 +1,7 @@
 # Syntax
 
-stone's grammar is derived from Python's, trimmed down and changed so that common code needs
-fewer Shift presses. The full grammar is
+stone's grammar is derived from Python's, trimmed down and changed in a few places. The full
+grammar is
 [`docs/grammar/stone.gram`](https://github.com/tarolling/stone/blob/main/docs/grammar/stone.gram).
 
 ## Compared with Python
@@ -109,7 +109,9 @@ Comparisons chain, so `a < b <= c` means `a < b and b <= c` with `b` evaluated o
 `2 ** 3 ** 2 == 512` and `-2 ** 2 == -4`, while `2 ** -1` raises to `-1`.
 Parentheses group as usual. Operands are evaluated left to right.
 
-A method call such as `xs.append(1)` evaluates the value before the `.` first, then the
-arguments. The builtin methods are `len` and `append`, documented in
+A method call such as `xs.len()` evaluates the value before the `.` first, then the
+arguments. A change, `xs[i][j] = v` or `xs[i].append(v)`, evaluates the assigned value, then
+each index from the outermost, then the arguments, and only then checks the indexes against the
+lists and makes the change. The builtin methods are `len` and `append`, documented in
 [Builtins](builtins.md#methods). A `.` right after an int starts a method call, so `1.` is not a
 float; write `1.0`.

@@ -59,12 +59,14 @@ print(grow(kept, "m" + "n"), kept)
 line = "  a b  c "
 print(line.strip(), line.split(), line.split(" ").len(), line.strip().split("b"))
 
-// a row stays alive when the index calls a function that replaces it
+// a row stays alive while the index calls a function that replaces it in a copy
 table = [["r0" + "", "s0"], ["r1" + "", "s1"]]
-def replace_row(i);
-    table[i] = ["new" + ""]
-    ret 0
-print(table[0][replace_row(0)], table[0])
+def replace_row(rows, i);
+    rows[i] = ["new" + ""]
+    ret rows
+def first(rows);
+    ret rows[0].len() - 1
+print(table[0][first(replace_row(table, 0))], replace_row(table, 1), table[0])
 
 // a row of a temporary list stays alive while it is read
 def fresh_table();

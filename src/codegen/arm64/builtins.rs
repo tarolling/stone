@@ -445,6 +445,11 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.list_new` returns a list of length `x0` whose elements the caller fills in, with
 ///   `elem` set to `x1`
 /// - `stone.list_append` appends `x1` to list `x0`, doubling its capacity when full
+/// - `stone.list_copy` returns in `x9` a copy of the list in `x9`, retaining each element if
+///   they are counted, and drops one reference to the original, which something else still
+///   holds. Like the free routines, it is reached from an inline `list_unique` that does not
+///   count as a call, so it clobbers only `x8` to `x11`, `x16`, `x17`, `x30`, and the float
+///   registers.
 ///
 /// Indexing is generated inline by `Arm64Generator::list_slot` (in `emit.rs`) rather than called
 /// here.
@@ -493,6 +498,40 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tadd\tx9, x9, #1");
     r#gen.emit("\tstr\tx9, [x19]");
     r#gen.emit("\tmov\tx0, #0"); // append returns none
+    pop_frame(r#gen, &saved);
+
+    // x19 holds the original, x20 the copy, x10 and x11 their elements, and x17 what they are
+    let mut saved = CALLER_SAVED.to_vec();
+    saved.extend(["x19", "x20"]);
+    r#gen.emit("stone.list_copy:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x9");
+    r#gen.emit("\tldr\tx0, [x19]");
+    r#gen.emit("\tldr\tx1, [x19, #24]");
+    r#gen.emit("\tbl\tstone.list_new");
+    r#gen.emit("\tmov\tx20, x0");
+    r#gen.emit("\tldr\tx10, [x20, #16]");
+    r#gen.emit("\tldr\tx11, [x19, #16]");
+    r#gen.emit("\tldr\tx17, [x19, #24]");
+    r#gen.emit("\tmov\tx8, #0");
+    r#gen.emit(".Llist_copy_loop:");
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\tcmp\tx8, x9");
+    r#gen.emit("\tb.ge\t.Llist_copy_done");
+    r#gen.emit("\tldr\tx9, [x11, x8, lsl #3]");
+    r#gen.emit("\tstr\tx9, [x10, x8, lsl #3]");
+    r#gen.emit("\tadd\tx8, x8, #1");
+    r#gen.emit("\tcbz\tx17, .Llist_copy_loop"); // the elements are not counted
+    r#gen.emit("\tldur\tx16, [x9, #-8]");
+    r#gen.emit("\tadd\tx16, x16, #1");
+    r#gen.emit("\tstur\tx16, [x9, #-8]");
+    r#gen.emit("\tb\t.Llist_copy_loop");
+    r#gen.emit(".Llist_copy_done:");
+    // the variable or slot that held the original now holds the copy instead
+    r#gen.emit("\tldur\tx16, [x19, #-8]");
+    r#gen.emit("\tsub\tx16, x16, #1");
+    r#gen.emit("\tstur\tx16, [x19, #-8]");
+    r#gen.emit("\tmov\tx9, x20");
     pop_frame(r#gen, &saved);
 
     // strings inside a printed list are quoted, like ['a']

@@ -231,6 +231,12 @@ pub enum Inst {
         list: Operand,
         index: Operand,
     },
+    /// Makes the list `src`, which a variable or a list slot holds, the only reference to its
+    /// elements before they change: `dst` is `src` when nothing else refers to it, and otherwise a
+    /// copy, in which case the holder gives up its reference to `src`. Whatever held `src` must
+    /// then hold `dst`. Like [`Inst::Release`], it is not a call: copying preserves every register
+    /// a vreg can be in.
+    ListUnique { dst: VReg, src: Operand },
     /// Fills slot `index` of a list that was just created with room for it.
     ListInit {
         list: Operand,
@@ -273,6 +279,7 @@ impl Inst {
             | Inst::ListLen { dst, .. }
             | Inst::ListLoad { dst, .. }
             | Inst::ListGet { dst, .. }
+            | Inst::ListUnique { dst, .. }
             | Inst::IntToFloat { dst, .. }
             | Inst::FloatToInt { dst, .. } => Some(*dst),
             Inst::Call { dst, .. } | Inst::ListStore { old: dst, .. } => *dst,
@@ -296,7 +303,8 @@ impl Inst {
             | Inst::FloatToInt { src, .. }
             | Inst::StoreGlobal { src, .. }
             | Inst::Retain { src }
-            | Inst::Release { src, .. } => vec![*src],
+            | Inst::Release { src, .. }
+            | Inst::ListUnique { src, .. } => vec![*src],
             Inst::Binary { lhs, rhs, .. }
             | Inst::FloatBinary { lhs, rhs, .. }
             | Inst::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
@@ -514,6 +522,7 @@ impl fmt::Display for Inst {
                 write!(f, "list_store {list}, {index}, {value}")
             }
             Inst::ListGet { dst, list, index } => write!(f, "{dst} = list_get {list}, {index}"),
+            Inst::ListUnique { dst, src } => write!(f, "{dst} = list_unique {src}"),
             Inst::ListInit { list, index, value } => {
                 write!(f, "list_init {list}[{index}], {value}")
             }

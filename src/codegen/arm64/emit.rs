@@ -837,6 +837,20 @@ impl Arm64Generator {
                 }
             },
 
+            Inst::ListUnique { dst, src } => {
+                let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
+                // a list nothing else refers to is changed in place, and any other is copied
+                // first by `stone.list_copy`, which takes and returns it in x9
+                self.load("x9", src);
+                let skip = self.ctx.new_label("unique");
+                self.emit("\tldur\tx16, [x9, #-8]");
+                self.emit("\tcmp\tx16, #1");
+                self.emit(&format!("\tb.eq\t{skip}"));
+                self.emit("\tbl\tstone.list_copy");
+                self.emit(&format!("{skip}:"));
+                self.store(dst, "x9");
+            }
+
             Inst::IntToFloat { dst, src } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 let src = self.operand(src, "x10");

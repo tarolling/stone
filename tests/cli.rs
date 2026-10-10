@@ -323,6 +323,23 @@ fn run_and_build_in(name: &str, source: &str) -> (PathBuf, [Output; 2]) {
 }
 
 #[test]
+fn run_and_build_print_warnings_and_still_succeed() {
+    let source = "def push(xs, x);\n    xs.append(x)\n\nys = [1]\npush(ys, 2)\nprint(ys)\n";
+    let warning = "main.st:2:5: warning: changes to 'xs' are lost when 'push' returns";
+    for command in ["run", "build"] {
+        let dir = project(&format!("warns_{command}"), &[("main.st", source)]);
+        let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+            .args([command, "main.st"])
+            .current_dir(&dir)
+            .output()
+            .expect("stone should run");
+        assert!(output.status.success(), "{output:?}");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.starts_with(warning), "{command}: {stderr}");
+    }
+}
+
+#[test]
 fn exit_ends_the_program_with_its_status() {
     let source = "use os\n\ndef stop(xs);\n    os.exit(3)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
     let (_, outputs) = run_and_build_in("os_exit_status", source);

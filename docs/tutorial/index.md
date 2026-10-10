@@ -1,8 +1,8 @@
 # Tutorial
 
 This tutorial walks through stone from a first program to lists, functions, and input. If you
-know Python, most of it will look familiar: the differences are mostly fewer Shift presses and
-a type checker that runs before your program does.
+know Python, most of it will look familiar: the differences are mostly a few changes in syntax
+and a type checker that runs before your program does.
 
 Every program in this tutorial is part of stone's test suite, which runs it under both the
 interpreter and the compiler and checks that each prints exactly the output shown.

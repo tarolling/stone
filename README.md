@@ -4,7 +4,7 @@
 
 stone is a language. it has a built-in interpreter and compiler so you can choose to wait for the program to run or to build.
 
-it is also optimized for developers to press the shift key as little as possible.
+it aims to be as simple to write as python and as fast and memory-safe as rust, with error messages as clear as rust's, by moving the complexity into the compiler. compiled programs are meant to need nothing from the system, not even libc. see [philosophy](docs/philosophy.md).
 
 the [documentation](https://tarolling.github.io/stone/) has a tutorial, a language reference, and development guides.
 

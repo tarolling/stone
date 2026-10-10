@@ -9,6 +9,7 @@ use crate::checker::{Symbol, Type, TypeChecker};
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::{Callee, Inst, Program};
+use crate::diagnostic::Severity;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
@@ -106,7 +107,11 @@ impl Context {
     pub fn check(&mut self, module: &Mod) -> Result<(), String> {
         // code generation depends on the checker's types, so it only accepts valid programs
         let analysis = TypeChecker::new().analyze(module);
-        if let Some(error) = analysis.diagnostics.first() {
+        if let Some(error) = analysis
+            .diagnostics
+            .iter()
+            .find(|d| d.severity == Severity::Error)
+        {
             return Err(error.to_string());
         }
         self.types = analysis.types;

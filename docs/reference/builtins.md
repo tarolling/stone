@@ -134,7 +134,8 @@ print(total)
 ## Methods
 
 A method is called on a value with a `.`, as in `items.append(4)`. The value before the `.` is
-evaluated first, then the arguments, left to right. A method must be called: `items.len` on its
+evaluated first, then the arguments, left to right, except that a method that changes its value
+evaluates the indexes of its value, then the arguments, then makes the change. A method must be called: `items.len` on its
 own is an error. Method names are not reserved, so they also work as ordinary names.
 
 ### `len`
@@ -155,7 +156,9 @@ print("stone".len(), [1, 2, 3].len(), [].len())   // 5 3 0
 list[T].append(item: T) -> none
 ```
 
-Adds `item` to the end of the list.
+Adds `item` to the end of the list. Since lists are values, this changes only the variable
+`append` is called on, or the element of one, as in `grid[0].append(1)`, and never another
+variable that was assigned from it. It is always a statement of its own.
 
 ```stone
 names = []

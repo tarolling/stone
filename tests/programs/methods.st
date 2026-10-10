@@ -1,10 +1,11 @@
 // len and append are methods, called on a value
 def push(xs, x);
     xs.append(x)
-
-def tag(xs, label);
-    print(label)
     ret xs
+
+def index(n);
+    print("index")
+    ret n
 
 def value(n);
     print("argument")
@@ -14,10 +15,11 @@ def words();
     ret ["a", "bb"]
 
 xs = []
-push(xs, 1)
-// the receiver is evaluated before the argument
-tag(xs, "receiver").append(value(2))
-print(xs, xs.len(), (xs).len())
+xs = push(xs, 1)
+// the receiver's index is evaluated before the argument
+rows = [[0], []]
+rows[index(1)].append(value(2))
+print(xs, xs.len(), (xs).len(), rows)
 
 grid = [[1], []]
 grid[0].append(2)

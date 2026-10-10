@@ -765,10 +765,10 @@ fn methods_chain_after_subscripts_and_calls() {
 
 #[test]
 fn append_infers_a_parameter_is_a_list() {
-    let source = "def push(xs, x);\n    xs.append(x + 1)\npush([], 2)\n";
+    let source = "def push(xs, x);\n    xs.append(x + 1)\n    ret xs\npush([], 2)\n";
     assert_eq!(
         type_of_symbol(source, "push"),
-        "def(list[int], int) -> none"
+        "def(list[int], int) -> list[int]"
     );
 }
 
@@ -820,6 +820,89 @@ fn method_receivers_must_be_assigned_first() {
         1,
         1,
     );
+}
+
+#[test]
+fn append_can_only_be_a_statement() {
+    let message =
+        "'append' changes a list and returns none, so it can only be a statement of its own";
+    assert_error("xs = [1]\nys = xs.append(2)\n", message, 2, 6);
+    // a borrowed `xs` would otherwise see the change partway through the call
+    assert_error("xs = [none]\nprint(xs, xs.append(none))\n", message, 2, 11);
+    assert_eq!(errors("xs = [1]\nxs.append(2)\n"), []);
+}
+
+#[test]
+fn only_a_list_in_a_variable_can_be_changed() {
+    let message = "this list is not stored in a variable, so changing it has no effect";
+    assert_error("def f();\n    ret [1]\nf().append(2)\n", message, 3, 1);
+    assert_error("def f();\n    ret [[1]]\nf()[0][0] = 2\n", message, 3, 1);
+    assert_error("[1].append(2)\n", message, 1, 1);
+    assert_eq!(
+        errors("grid = [[1]]\ngrid[0][0] = 2\ngrid[0].append(3)\n"),
+        []
+    );
+}
+
+#[test]
+fn functions_cannot_change_globals() {
+    let source = "names = []\ndef add(name);\n    names.append(name)\nadd(\"a\")\n";
+    assert_error(
+        source,
+        "a function cannot change the global 'names'; pass it as an argument and return the \
+         changed value",
+        3,
+        5,
+    );
+    let source = "grid = [[0]]\ndef clear(i);\n    grid[i][0] = 0\nclear(0)\n";
+    assert_error(
+        source,
+        "a function cannot change the global 'grid'; pass it as an argument and return the \
+         changed value",
+        3,
+        5,
+    );
+    // reading a global is fine, and so is changing a local that shadows one
+    let source = "names = [1]\ndef f();\n    names = [2]\n    names.append(3)\n    ret names\n\
+                  def g();\n    ret names[0]\nprint(f(), g())\n";
+    assert_eq!(errors(source), []);
+}
+
+#[test]
+fn changing_a_parameter_that_is_never_used_again_is_a_warning() {
+    let source = "def push(xs, x);\n    xs.append(x)\nys = [1]\npush(ys, 2)\n";
+    let diagnostics = analyze_source(source).diagnostics;
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].severity,
+        crate::diagnostic::Severity::Warning
+    );
+    assert_eq!(
+        diagnostics[0].message,
+        "changes to 'xs' are lost when 'push' returns, since parameters are copies; return it \
+         and assign the result where 'push' is called"
+    );
+    assert_eq!(diagnostics[0].span.start, Pos::new(2, 5));
+    let source = "def clear(grid, i);\n    if i > 0;\n        grid[i][0] = 0\nclear([[1]], 0)\n";
+    assert_eq!(
+        errors(source),
+        [(
+            "changes to 'grid' are lost when 'clear' returns, since parameters are copies; \
+             return it and assign the result where 'clear' is called"
+                .into(),
+            3,
+            9
+        )]
+    );
+    // reading the parameter afterward, or returning it, uses the change
+    for body in [
+        "    xs.append(x)\n    ret xs\n",
+        "    xs[0] = x\n    print(xs)\n",
+        "    for i in range(3);\n        xs.append(x)\n    ret xs.len()\n",
+    ] {
+        let source = format!("def push(xs, x);\n{body}push([1], 2)\n");
+        assert_eq!(errors(&source), [], "{source}");
+    }
 }
 
 #[test]

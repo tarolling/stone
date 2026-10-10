@@ -18,12 +18,13 @@ for i in range(20);
 print(squares.len(), squares[19])
 print(squares)
 
-// lists are shared, not copied
+// assigning a list copies it
 alias = nums
 alias.append(99)
-print(nums)
+print(nums, alias)
 
-// iterating, including over a list that grows while it is being iterated
+// iterating, including over a list that grows while it is being iterated, which walks the
+// list as it was when the loop started
 total = 0
 for n in nums;
     total = total + n
@@ -39,7 +40,7 @@ grid = [[0, 0], [0, 0]]
 grid[1][0] = 5
 print(grid, grid[1])
 
-// lists pass through functions by reference
+// a function changes its own copy of a list, and gives it back
 def fill(items, n);
     for i in range(n);
         items.append(i)

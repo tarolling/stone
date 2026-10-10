@@ -21,8 +21,10 @@ stone build fib.st -o fib && ./fib   # or compile it to a native executable
 
 ## Why stone
 
-**Fewer Shift presses.** Blocks open with `;` instead of `:`, functions return with `ret`, and
-loops skip ahead with `cont`. The constants are `true`, `false`, and `none`, all lowercase.
+**Simple to write, fast and safe to run.** stone aims for Python's simplicity with Rust's
+speed, memory safety, and error messages, by moving the complexity into the compiler: you
+write no type annotations, lifetimes, or `lazy` keywords, because the compiler works them out.
+See [Philosophy](philosophy.md).
 
 **Two backends, one behavior.** `stone run` walks the syntax tree, and `stone build` lowers it
 to an IR, allocates registers, and emits assembly. Every program in the test suite, including
@@ -43,6 +45,7 @@ completion.
 
 installation
 tutorial/index
+philosophy
 ```
 
 ```{toctree}

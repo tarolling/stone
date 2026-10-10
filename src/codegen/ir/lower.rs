@@ -13,7 +13,11 @@
 //!   since a later call could replace it in the list)
 //! - whatever uses a temporary releases it right after, and storing a value moves a temporary's
 //!   reference or retains a borrowed value
-//! - a parameter is borrowed from the caller, unless the function assigns it, which retains it
+//! - a parameter is borrowed from the caller, unless the function assigns or changes it, which
+//!   retains it
+//! - lists are values, so before a statement changes one (`xs[i] = v` or `xs.append(v)`), each
+//!   list from the variable to it is made unique (`list_unique`): copied if anything else refers
+//!   to it, so the change shows through no other variable
 //! - returning releases every local, and every list a `for` loop is walking
 //! - the end of `main` releases every global, so nothing is left when the program ends
 //!
@@ -28,7 +32,9 @@ use super::{
     BinOp, Block, BlockId, Callee, Cond, Function, Inst, Operand, Program, RcKind, Terminator, VReg,
 };
 use crate::ast::{Arg, BoolOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
-use crate::checker::{Symbol, SymbolKind, Type, collect_assigned, range_args};
+use crate::checker::{
+    Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, range_args,
+};
 use crate::codegen::context::os_routine;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
@@ -158,12 +164,14 @@ impl<'a> Lowerer<'a> {
     fn function(mut self, args: &[Arg], body: &[Stmt]) -> Result<Function, String> {
         let mut params = Vec::new();
         let mut assigned = Vec::new();
+        let mut changed = HashSet::new();
         if self.name.is_some() {
             for arg in args {
                 let reg = self.local(&arg.arg);
                 params.push(reg);
             }
             collect_assigned(body, &mut assigned);
+            collect_changed(body, &mut changed);
             for (name, _) in &assigned {
                 self.local(name);
             }
@@ -171,8 +179,8 @@ impl<'a> Lowerer<'a> {
 
         let entry = self.new_block();
         self.start(entry);
-        // a parameter the function assigns needs a reference of its own to release, and other
-        // counted locals start null, since they may not be assigned on every path to a return
+        // a parameter the function assigns or changes needs a reference of its own to release,
+        // and other counted locals start null, since they may not be assigned on every path
         let names = args
             .iter()
             .map(|arg| &arg.arg)
@@ -191,7 +199,9 @@ impl<'a> Lowerer<'a> {
                     dst: reg,
                     src: Operand::Imm(0),
                 });
-            } else if assigned.iter().any(|(assigned, _)| assigned == name) {
+            } else if assigned.iter().any(|(assigned, _)| assigned == name)
+                || changed.contains(name)
+            {
                 self.push(Inst::Retain {
                     src: Operand::Reg(reg),
                 });
@@ -658,9 +668,10 @@ impl<'a> Lowerer<'a> {
             ExprKind::Subscript {
                 value: list, slice, ..
             } => {
-                // the value was evaluated first, like the interpreter
-                let list = self.list_operand(list, &[slice])?;
+                // the value was evaluated first, then the indexes, like the interpreter
+                let indexes = self.place_indexes(list)?;
                 let index = self.expr(slice)?;
+                let list = self.unique_place(list, &indexes)?;
                 let old = kind.map(|_| self.fresh());
                 self.push(Inst::ListStore {
                     old,
@@ -674,11 +685,80 @@ impl<'a> Lowerer<'a> {
                         kind,
                     });
                 }
-                self.release_temp(list);
             }
             _ => {}
         }
         Ok(())
+    }
+
+    /// Evaluates the indexes that lead from a variable to `list`, which a statement is about to
+    /// change, outermost first. For example, `grid[i][j]` evaluates `i` and `j`.
+    fn place_indexes(&mut self, list: &Expr) -> Result<Vec<Operand>, String> {
+        let Some((_, indexes)) = place(list) else {
+            return Err("only a list in a variable can be changed".to_string());
+        };
+        indexes.into_iter().map(|index| self.expr(index)).collect()
+    }
+
+    /// Walks from the variable `list` starts from through `indexes`, from
+    /// [`Lowerer::place_indexes`], and returns `list` once nothing else refers to it, borrowed
+    /// from whatever holds it.
+    ///
+    /// Each list on the way is made unique and written back where it came from, since making it
+    /// unique may copy it. For example, `grid[0].append(1)` in a function lowers to
+    /// `v0 = list_unique v0`, `v1 = list_load v0, 0`, `v1 = list_unique v1`, and
+    /// `list_store v0, 0, v1` before the append. Only `main` changes globals.
+    fn unique_place(&mut self, list: &Expr, indexes: &[Operand]) -> Result<Operand, String> {
+        let Some((root, _)) = place(list) else {
+            return Err("only a list in a variable can be changed".to_string());
+        };
+        let mut current = if let Some(&local) = self.locals.get(root) {
+            self.push(Inst::ListUnique {
+                dst: local,
+                src: Operand::Reg(local),
+            });
+            Operand::Reg(local)
+        } else if self.name.is_none() && self.context.global_set.contains(root) {
+            let loaded = self.fresh();
+            self.push(Inst::LoadGlobal {
+                dst: loaded,
+                name: root.to_string(),
+                checked: false,
+            });
+            let unique = self.fresh();
+            self.push(Inst::ListUnique {
+                dst: unique,
+                src: Operand::Reg(loaded),
+            });
+            self.push(Inst::StoreGlobal {
+                name: root.to_string(),
+                src: Operand::Reg(unique),
+            });
+            Operand::Reg(unique)
+        } else {
+            return Err(format!("a function cannot change the global '{root}'"));
+        };
+        for &index in indexes {
+            let row = self.fresh();
+            self.push(Inst::ListLoad {
+                dst: row,
+                list: current,
+                index,
+            });
+            self.push(Inst::ListUnique {
+                dst: row,
+                src: Operand::Reg(row),
+            });
+            // the slot's reference moves to the unique row, which may be a copy
+            self.push(Inst::ListStore {
+                old: None,
+                list: current,
+                index,
+                value: Operand::Reg(row),
+            });
+            current = Operand::Reg(row);
+        }
+        Ok(current)
     }
 
     /// Writes global `name`, releasing its old value if it is counted as `kind`.
@@ -1253,21 +1333,23 @@ impl<'a> Lowerer<'a> {
                 Ok(Operand::Reg(dst))
             }
             "append" => {
+                // the receiver's indexes, then the arguments, then the change
                 let elem = self.element_kind(receiver);
-                let list = self.list_operand(receiver, &args.iter().collect::<Vec<_>>())?;
-                let mut values = vec![list];
+                let indexes = self.place_indexes(receiver)?;
+                let mut values = Vec::new();
                 for arg in args {
                     let value = self.expr(arg)?;
                     // the list keeps a reference to what it holds
                     self.take(value, elem);
                     values.push(value);
                 }
+                let list = self.unique_place(receiver, &indexes)?;
+                values.insert(0, list);
                 self.push(Inst::Call {
                     dst: None,
                     callee: Callee::Runtime("stone.list_append"),
                     args: values,
                 });
-                self.release_temp(list);
                 // append returns none
                 Ok(self.finish(Operand::Imm(0), into))
             }

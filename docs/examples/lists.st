@@ -17,10 +17,10 @@ for p in primes;
     total = total + p
 print(total)
 
-// lists are shared, not copied
+// assigning a list copies it, so changing the copy leaves the original alone
 alias = primes
 alias.append(11)
-print(primes)
+print(primes, alias)
 
 // lists can nest
 grid = [[1, 2], [3, 4]]

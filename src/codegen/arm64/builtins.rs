@@ -8,12 +8,150 @@
 
 use super::emit::CALLER_SAVED;
 use super::{address, pop_frame, push_frame};
-use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{CPU_ONLINE, PATH_BUFFER, UTSNAME_FIELD, UTSNAME_SIZE};
 use crate::codegen::context::{
     HEAP_REGION, LARGEST_CLASS, LEAK_PREFIX, LEAK_SUFFIX, OUT_OF_MEMORY, OUT_OF_MEMORY_LENGTH,
     SMALLEST_CLASS, STDIN_BUFFER, immortal_string,
 };
+use crate::codegen::{AssemblyGenerator, Os};
+use crate::stdlib::os::HOSTNAME_BUFFER;
+
+/// A call into the operating system that the runtime makes.
+///
+/// On Linux each is a system call made directly with `svc`. macOS has no stable system call
+/// interface, so there each is a call to the `libSystem` function of the same name through a
+/// shim ([`system_shims`]).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sys {
+    Read,
+    Write,
+    Openat,
+    Close,
+    Mmap,
+    Munmap,
+    Mremap,
+    Exit,
+    Uname,
+    Getpid,
+    Getcwd,
+    ClockGettime,
+    Sysctl,
+}
+
+impl Sys {
+    /// Every call, in the order their shims are emitted.
+    pub const ALL: [Sys; 13] = [
+        Sys::Read,
+        Sys::Write,
+        Sys::Openat,
+        Sys::Close,
+        Sys::Mmap,
+        Sys::Munmap,
+        Sys::Mremap,
+        Sys::Exit,
+        Sys::Uname,
+        Sys::Getpid,
+        Sys::Getcwd,
+        Sys::ClockGettime,
+        Sys::Sysctl,
+    ];
+
+    /// Returns the call's Linux system call number, such as 64 for `write`, or `None` if the
+    /// runtime only makes it on macOS.
+    pub fn linux(self) -> Option<u32> {
+        Some(match self {
+            Sys::Read => 63,
+            Sys::Write => 64,
+            Sys::Openat => 56,
+            Sys::Close => 57,
+            Sys::Mmap => 222,
+            Sys::Munmap => 215,
+            Sys::Mremap => 216,
+            Sys::Exit => 94, // exit_group
+            Sys::Uname => 160,
+            Sys::Getpid => 172,
+            Sys::Getcwd => 17,
+            Sys::ClockGettime => 113,
+            Sys::Sysctl => return None,
+        })
+    }
+
+    /// Returns the `libSystem` function behind the call on macOS, such as `_exit` for
+    /// [`Sys::Exit`], or `None` if the runtime only makes it on Linux.
+    pub fn macos(self) -> Option<&'static str> {
+        Some(match self {
+            Sys::Read => "read",
+            Sys::Write => "write",
+            Sys::Mmap => "mmap",
+            Sys::Munmap => "munmap",
+            Sys::Exit => "_exit",
+            Sys::Getpid => "getpid",
+            Sys::Getcwd => "getcwd",
+            Sys::ClockGettime => "clock_gettime",
+            Sys::Sysctl => "sysctl",
+            Sys::Openat | Sys::Close | Sys::Mremap | Sys::Uname => return None,
+        })
+    }
+
+    /// Returns the label of the call's macOS shim, such as `stone.sys_write`.
+    fn shim(self) -> String {
+        format!(
+            "stone.sys_{}",
+            self.macos().unwrap().trim_start_matches('_')
+        )
+    }
+}
+
+/// Emits a call into the operating system with its arguments in `x0` and up, which returns its
+/// result in `x0` and changes no other general register, as a Linux system call does.
+///
+/// On Linux that is `mov x8, #n` and `svc #0`. On macOS it calls the call's shim, saving `x30`
+/// around it.
+pub fn system_call(r#gen: &mut dyn AssemblyGenerator, call: Sys) {
+    match r#gen.target().os {
+        Os::Linux => {
+            let number = call
+                .linux()
+                .expect("a system call the runtime makes on Linux");
+            r#gen.emit(&format!("\tmov\tx8, #{number}"));
+            r#gen.emit("\tsvc\t#0");
+        }
+        Os::MacOs => {
+            r#gen.emit("\tstr\tx30, [sp, #-16]!");
+            r#gen.emit(&format!("\tbl\t{}", call.shim()));
+            r#gen.emit("\tldr\tx30, [sp], #16");
+        }
+    }
+}
+
+/// The registers a macOS shim saves around a `libSystem` call: every general register the call
+/// may change except `x0`, which carries the result.
+const SHIM_SAVED: [&str; 17] = [
+    "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x8", "x9", "x10", "x11", "x12", "x13", "x14", "x15",
+    "x16", "x17",
+];
+
+/// Emits the macOS shim of every call that `assembly`, the program's text so far, makes through
+/// [`system_call`]. Each shim calls the `libSystem` function, which the linker binds, and keeps
+/// the contract of a Linux system call: only `x0` changes. `libSystem` reports a failure as -1,
+/// which the checks written for Linux's -4095 through -1 catch too, except that `getcwd` returns
+/// a pointer, so its shim turns a null into -1.
+pub fn system_shims(r#gen: &mut dyn AssemblyGenerator, assembly: &str) {
+    for call in Sys::ALL {
+        if call.macos().is_none() || !assembly.contains(&format!("\tbl\t{}\n", call.shim())) {
+            continue;
+        }
+        r#gen.emit(&format!("{}:", call.shim()));
+        push_frame(r#gen, &SHIM_SAVED);
+        r#gen.emit(&format!("\tbl\t{}", call.macos().unwrap()));
+        if call == Sys::Getcwd {
+            r#gen.emit("\tcbnz\tx0, .Lsys_getcwd_done");
+            r#gen.emit("\tmov\tx0, #-1");
+            r#gen.emit(".Lsys_getcwd_done:");
+        }
+        pop_frame(r#gen, &SHIM_SAVED);
+    }
+}
 
 /// Emits a loop that copies `count` bytes from `src` to `dst`, advancing both and counting
 /// `count` down to 0. It clobbers `w16`, and uses `label` and `label_done` as its labels.
@@ -56,6 +194,14 @@ fn count_live(r#gen: &mut dyn AssemblyGenerator, delta: i64) {
 pub fn start_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\t.globl\t_start");
     r#gen.emit("_start:");
+    if r#gen.target().os == Os::MacOs {
+        // dyld calls the entry point as C calls main, with the arguments and environment in place
+        r#gen.emit("\tstp\tx29, x30, [sp, #-16]!");
+        r#gen.emit("\tmov\tx29, sp");
+        r#gen.emit("\tbl\tmain");
+        system_call(r#gen, Sys::Exit);
+        return;
+    }
     r#gen.emit("\tmov\tx29, #0"); // the outermost frame
     r#gen.emit("\tmov\tx30, #0");
     r#gen.emit("\tldr\tx0, [sp]");
@@ -63,8 +209,7 @@ pub fn start_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tadd\tx2, x1, x0, lsl #3");
     r#gen.emit("\tadd\tx2, x2, #8");
     r#gen.emit("\tbl\tmain");
-    r#gen.emit("\tmov\tx8, #94"); // sys_exit_group
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Exit);
 }
 
 /// Emits the allocator, which takes memory from the system with the `mmap` syscall instead of
@@ -166,8 +311,7 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tstp\tx0, x1, [sp, #-16]!");
     r#gen.emit("\tmov\tx0, x9");
     r#gen.emit("\tmov\tx1, x10");
-    r#gen.emit("\tmov\tx8, #215"); // sys_munmap
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Munmap);
     r#gen.emit("\tldp\tx0, x1, [sp], #16");
     r#gen.emit("\tret");
 
@@ -205,8 +349,33 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcmp\tx10, x9");
     r#gen.emit("\tb.hi\t.Lmem_realloc_remap");
     r#gen.emit("\tret");
-    // the kernel moves the pages if it cannot grow the mapping where it is
     r#gen.emit(".Lmem_realloc_remap:");
+    if r#gen.target().os == Os::MacOs {
+        // macOS has no mremap, so the bytes move to a new mapping and the old one is unmapped
+        r#gen.emit("\tstp\tx29, x30, [sp, #-16]!");
+        r#gen.emit("\tstp\tx0, x9, [sp, #-16]!");
+        r#gen.emit("\tadd\tx0, x10, #4095");
+        r#gen.emit("\tand\tx0, x0, #-4096");
+        r#gen.emit("\tstr\tx0, [sp, #-16]!");
+        r#gen.emit("\tbl\tstone.mem_map");
+        r#gen.emit("\tldr\tx10, [sp], #16");
+        r#gen.emit("\tstr\tx10, [x0]");
+        r#gen.emit("\tldp\tx9, x11, [sp], #16");
+        r#gen.emit("\tsub\tx11, x11, #8");
+        r#gen.emit("\tadd\tx10, x0, #8");
+        r#gen.emit("\tmov\tx17, x9");
+        r#gen.emit(".Lmem_realloc_remap_copy:");
+        r#gen.emit("\tldr\tx16, [x17], #8");
+        r#gen.emit("\tstr\tx16, [x10], #8");
+        r#gen.emit("\tsubs\tx11, x11, #8");
+        r#gen.emit("\tb.ne\t.Lmem_realloc_remap_copy");
+        r#gen.emit("\tbl\tstone.mem_free");
+        r#gen.emit("\tadd\tx0, x0, #8");
+        r#gen.emit("\tldp\tx29, x30, [sp], #16");
+        r#gen.emit("\tret");
+        return emit_mem_map(r#gen);
+    }
+    // the kernel moves the pages if it cannot grow the mapping where it is
     r#gen.emit("\tstp\tx1, x2, [sp, #-16]!");
     r#gen.emit("\tstp\tx3, x4, [sp, #-16]!");
     r#gen.emit("\tadd\tx2, x10, #4095");
@@ -214,8 +383,7 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx1, x9");
     r#gen.emit("\tsub\tx0, x0, #8");
     r#gen.emit("\tmov\tx3, #1"); // MREMAP_MAYMOVE
-    r#gen.emit("\tmov\tx8, #216"); // sys_mremap
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Mremap);
     r#gen.emit("\tcmn\tx0, #4095");
     r#gen.emit("\tb.hs\tstone.out_of_memory");
     r#gen.emit("\tstr\tx2, [x0]");
@@ -223,8 +391,12 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tldp\tx3, x4, [sp], #16");
     r#gen.emit("\tldp\tx1, x2, [sp], #16");
     r#gen.emit("\tret");
+    emit_mem_map(r#gen);
+}
 
-    // returns x0 new bytes of zeros, a whole number of pages, clobbering only x8
+/// Emits `stone.mem_map`, which returns `x0` new bytes of zeros, a whole number of pages,
+/// clobbering only `x8`, and `stone.out_of_memory`, where it goes when the system has none.
+fn emit_mem_map(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("stone.mem_map:");
     r#gen.emit("\tstp\tx1, x2, [sp, #-16]!");
     r#gen.emit("\tstp\tx3, x4, [sp, #-16]!");
@@ -232,12 +404,15 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx1, x0");
     r#gen.emit("\tmov\tx0, #0"); // anywhere
     r#gen.emit("\tmov\tx2, #3"); // PROT_READ | PROT_WRITE
-    r#gen.emit("\tmov\tx3, #0x22"); // MAP_PRIVATE | MAP_ANONYMOUS
+    let flags = match r#gen.target().os {
+        Os::Linux => "0x22",
+        Os::MacOs => "0x1002",
+    };
+    r#gen.emit(&format!("\tmov\tx3, #{flags}")); // MAP_PRIVATE | MAP_ANONYMOUS
     r#gen.emit("\tmov\tx4, #-1"); // no file
     r#gen.emit("\tmov\tx5, #0");
-    r#gen.emit("\tmov\tx8, #222"); // sys_mmap
-    r#gen.emit("\tsvc\t#0");
-    // the kernel returns an error as -4095 through -1
+    system_call(r#gen, Sys::Mmap);
+    // the kernel returns an error as -4095 through -1, and libSystem as -1
     r#gen.emit("\tcmn\tx0, #4095");
     r#gen.emit("\tb.hs\tstone.out_of_memory");
     r#gen.emit("\tldr\tx5, [sp], #16");
@@ -249,11 +424,9 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx0, #2"); // stderr
     address(r#gen, "x1", ".Lstone_out_of_memory");
     r#gen.emit(&format!("\tmov\tx2, #{OUT_OF_MEMORY_LENGTH}"));
-    r#gen.emit("\tmov\tx8, #64"); // sys_write
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Write);
     r#gen.emit("\tmov\tx0, #1");
-    r#gen.emit("\tmov\tx8, #94"); // sys_exit_group
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Exit);
 }
 
 /// Emits the memory runtime. Every string and list `p` is counted: `[p - 8]` holds how many
@@ -364,12 +537,10 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tadd\tx2, sp, #32");
     r#gen.emit("\tsub\tx2, x2, x1");
     r#gen.emit("\tmov\tx0, #2"); // stderr
-    r#gen.emit("\tmov\tx8, #64"); // sys_write
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Write);
     write_stderr(r#gen, ".Lstone_leak_suffix", LEAK_SUFFIX.len() + 1);
     r#gen.emit("\tmov\tx0, #1");
-    r#gen.emit("\tmov\tx8, #94"); // sys_exit_group
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Exit);
     r#gen.emit(".Lleak_check_done:");
     pop_frame(r#gen, &["x0"]);
 }
@@ -380,8 +551,7 @@ fn write_stderr(r#gen: &mut dyn AssemblyGenerator, label: &str, length: usize) {
     r#gen.emit("\tmov\tx0, #2"); // stderr
     address(r#gen, "x1", label);
     r#gen.emit(&format!("\tmov\tx2, #{length}"));
-    r#gen.emit("\tmov\tx8, #64"); // sys_write
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Write);
 }
 
 /// Emits `stone.getenv`, which returns the value of the environment variable named by the
@@ -466,8 +636,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tadd\tx2, sp, #32");
     r#gen.emit("\tsub\tx2, x2, x1");
     r#gen.emit("\tmov\tx0, #1"); // stdout
-    r#gen.emit("\tmov\tx8, #64"); // write
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Write);
     r#gen.emit("\tadd\tsp, sp, #32");
     r#gen.emit("\tret");
 
@@ -482,8 +651,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lprint_str_write:");
     r#gen.emit("\tcbz\tx2, .Lprint_str_done"); // empty string
     r#gen.emit("\tmov\tx0, #1"); // stdout
-    r#gen.emit("\tmov\tx8, #64"); // write
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Write);
     r#gen.emit(".Lprint_str_done:");
     r#gen.emit("\tret");
 
@@ -504,8 +672,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx1, sp");
     r#gen.emit("\tmov\tx2, #1");
     r#gen.emit("\tmov\tx0, #1"); // stdout
-    r#gen.emit("\tmov\tx8, #64"); // write
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Write);
     r#gen.emit("\tadd\tsp, sp, #16");
     r#gen.emit("\tret");
 
@@ -778,8 +945,7 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     r#gen.emit("\tmov\tx0, #0"); // stdin
     address(r#gen, "x1", "stone.stdin_buffer");
     r#gen.emit(&format!("\tmov\tx2, #{STDIN_BUFFER}"));
-    r#gen.emit("\tmov\tx8, #63"); // sys_read
-    r#gen.emit("\tsvc\t#0");
+    system_call(r#gen, Sys::Read);
     r#gen.emit("\tcmp\tx0, #0");
     r#gen.emit("\tcsel\tx0, x0, xzr, gt");
     r#gen.emit("\tadrp\tx9, stone.stdin_len");
@@ -1334,15 +1500,51 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, used: &[&str], empty_se
     }
 }
 
+/// `sysctl`'s names for the kernel's and the hardware's values, `CTL_KERN` and `CTL_HW`, and for
+/// the host name and the number of processors that are online in them.
+const CTL_KERN: i64 = 1;
+const KERN_HOSTNAME: i64 = 10;
+const CTL_HW: i64 = 6;
+const HW_AVAILCPU: i64 = 25;
+
+/// Emits a macOS `sysctl` call that copies at most `size` bytes of the value named
+/// `{top, second}` to the bottom of a new stack area, after which `x0` is 0 if it succeeded. The
+/// area holds the value, then the two-int name and the value's length, which `sysctl` reads and
+/// updates, so `size` plus 16 bytes, rounded up to keep `sp` aligned.
+///
+/// For example, `sysctl(gen, CTL_HW, HW_AVAILCPU, 4)` leaves the number of processors as an int
+/// at `[sp]`.
+fn sysctl(r#gen: &mut dyn AssemblyGenerator, top: i64, second: i64, size: usize) {
+    let name = size.next_multiple_of(8);
+    r#gen.emit(&format!(
+        "\tsub\tsp, sp, #{}",
+        (name + 16).next_multiple_of(16)
+    ));
+    r#gen.emit(&format!("\tmov\tx9, #{top}"));
+    r#gen.emit(&format!("\tmovk\tx9, #{second}, lsl #32"));
+    r#gen.emit(&format!("\tstr\tx9, [sp, #{name}]"));
+    r#gen.emit(&format!("\tmov\tx9, #{size}"));
+    r#gen.emit(&format!("\tstr\tx9, [sp, #{}]", name + 8));
+    r#gen.emit(&format!("\tadd\tx0, sp, #{name}"));
+    r#gen.emit("\tmov\tx1, #2");
+    r#gen.emit("\tmov\tx2, sp");
+    r#gen.emit(&format!("\tadd\tx3, sp, #{}", name + 8));
+    r#gen.emit("\tmov\tx4, #0"); // nothing to set
+    r#gen.emit("\tmov\tx5, #0");
+    system_call(r#gen, Sys::Sysctl);
+}
+
 /// Emits the routines behind the `os` module that the program calls, each named in `used`, under
 /// the same labels and contracts as `x64::builtins::os_runtime`, with arguments in `x0` and
 /// results in `x0`. `cwd_failure` is the failure label for `stone.os_cwd`, needed only if it is
 /// used. The routines that return strings need the string runtime.
 pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure: &str) {
     let uses = |label: &str| used.contains(&label);
+    let macos = r#gen.target().os == Os::MacOs;
     r#gen.emit("\t.data");
     immortal_string(r#gen, ".Lstone_os_empty", "");
-    immortal_string(r#gen, ".Lstone_os_platform", "linux");
+    let platform = if macos { "macos" } else { "linux" };
+    immortal_string(r#gen, ".Lstone_os_platform", platform);
     immortal_string(r#gen, ".Lstone_os_arch", "aarch64");
     r#gen.emit("\t.text");
 
@@ -1402,14 +1604,26 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         address(r#gen, "x0", ".Lstone_os_arch");
         r#gen.emit("\tret");
     }
-    if uses("stone.os_hostname") {
+    if uses("stone.os_hostname") && macos {
+        // sysctl copies kern.hostname into 256 bytes of stack, as gethostname does on macOS
+        r#gen.emit("stone.os_hostname:");
+        push_frame(r#gen, &[]);
+        sysctl(r#gen, CTL_KERN, KERN_HOSTNAME, HOSTNAME_BUFFER);
+        r#gen.emit("\tcbnz\tx0, .Los_hostname_empty");
+        r#gen.emit(&format!("\tstrb\twzr, [sp, #{}]", HOSTNAME_BUFFER - 1));
+        r#gen.emit("\tmov\tx0, sp");
+        r#gen.emit("\tbl\tstone.os_copy");
+        pop_frame(r#gen, &[]);
+        r#gen.emit(".Los_hostname_empty:");
+        address(r#gen, "x0", ".Lstone_os_empty");
+        pop_frame(r#gen, &[]);
+    } else if uses("stone.os_hostname") {
         // uname fills six fields of 65 bytes, and the host name is the second
         r#gen.emit("stone.os_hostname:");
         push_frame(r#gen, &[]);
         r#gen.emit(&format!("\tsub\tsp, sp, #{UTSNAME_SIZE}"));
         r#gen.emit("\tmov\tx0, sp");
-        r#gen.emit("\tmov\tx8, #160"); // sys_uname
-        r#gen.emit("\tsvc\t#0");
+        system_call(r#gen, Sys::Uname);
         r#gen.emit("\tcbnz\tx0, .Los_hostname_empty");
         r#gen.emit(&format!("\tadd\tx0, sp, #{UTSNAME_FIELD}"));
         r#gen.emit("\tbl\tstone.os_copy");
@@ -1418,7 +1632,20 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         address(r#gen, "x0", ".Lstone_os_empty");
         pop_frame(r#gen, &[]);
     }
-    if uses("stone.os_cpu_count") {
+    if uses("stone.os_cpu_count") && macos {
+        // sysctl copies hw.activecpu, an int, as sysconf(_SC_NPROCESSORS_ONLN) reads it
+        r#gen.emit("stone.os_cpu_count:");
+        push_frame(r#gen, &[]);
+        sysctl(r#gen, CTL_HW, HW_AVAILCPU, 4);
+        r#gen.emit("\tcbnz\tx0, .Lcpu_count_one");
+        r#gen.emit("\tldrsw\tx0, [sp]");
+        r#gen.emit("\tcmp\tx0, #1");
+        r#gen.emit("\tb.ge\t.Lcpu_count_return");
+        r#gen.emit(".Lcpu_count_one:");
+        r#gen.emit("\tmov\tx0, #1");
+        r#gen.emit(".Lcpu_count_return:");
+        pop_frame(r#gen, &[]);
+    } else if uses("stone.os_cpu_count") {
         r#gen.emit("\t.section\t.rodata");
         r#gen.emit(".Lstone_cpu_online:");
         r#gen.emit(&format!("\t.string \"{CPU_ONLINE}\""));
@@ -1444,18 +1671,15 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         address(r#gen, "x1", ".Lstone_cpu_online");
         r#gen.emit("\tmov\tx2, #0"); // O_RDONLY
         r#gen.emit("\tmov\tx3, #0");
-        r#gen.emit("\tmov\tx8, #56"); // sys_openat
-        r#gen.emit("\tsvc\t#0");
+        system_call(r#gen, Sys::Openat);
         r#gen.emit("\ttbnz\tx0, #63, .Lcpu_count_one");
         r#gen.emit("\tmov\tx9, x0");
         r#gen.emit("\tmov\tx1, sp");
         r#gen.emit("\tmov\tx2, #255");
-        r#gen.emit("\tmov\tx8, #63"); // sys_read
-        r#gen.emit("\tsvc\t#0");
+        system_call(r#gen, Sys::Read);
         r#gen.emit("\tmov\tx10, x0");
         r#gen.emit("\tmov\tx0, x9");
-        r#gen.emit("\tmov\tx8, #57"); // sys_close
-        r#gen.emit("\tsvc\t#0");
+        system_call(r#gen, Sys::Close);
         r#gen.emit("\tcmp\tx10, #1");
         r#gen.emit("\tb.lt\t.Lcpu_count_one");
         r#gen.emit("\tstrb\twzr, [sp, x10]");
@@ -1488,8 +1712,7 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
     }
     if uses("stone.os_pid") {
         r#gen.emit("stone.os_pid:");
-        r#gen.emit("\tmov\tx8, #172"); // sys_getpid
-        r#gen.emit("\tsvc\t#0");
+        system_call(r#gen, Sys::Getpid);
         r#gen.emit("\tret");
     }
     if uses("stone.os_cwd") {
@@ -1501,8 +1724,7 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit(&format!("\tsub\tsp, sp, #{PATH_BUFFER}"));
         r#gen.emit("\tmov\tx0, sp");
         r#gen.emit(&format!("\tmov\tx1, #{PATH_BUFFER}"));
-        r#gen.emit("\tmov\tx8, #17"); // sys_getcwd
-        r#gen.emit("\tsvc\t#0");
+        system_call(r#gen, Sys::Getcwd);
         r#gen.emit(&format!("\ttbnz\tx0, #63, {cwd_failure}"));
         r#gen.emit("\tldrb\tw9, [sp]");
         r#gen.emit("\tcmp\tw9, #47"); // '/'
@@ -1513,10 +1735,11 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
     }
     if uses("stone.os_exit") {
         r#gen.emit("stone.os_exit:");
-        r#gen.emit("\tmov\tx8, #94"); // sys_exit_group
-        r#gen.emit("\tsvc\t#0");
+        system_call(r#gen, Sys::Exit);
     }
-    for (label, clock) in [("stone.os_time", 0), ("stone.os_clock", 1)] {
+    // CLOCK_REALTIME is 0 on both systems, and CLOCK_MONOTONIC is 1 on Linux but 6 on macOS
+    let monotonic = if macos { 6 } else { 1 };
+    for (label, clock) in [("stone.os_time", 0), ("stone.os_clock", monotonic)] {
         if !uses(label) {
             continue;
         }
@@ -1526,8 +1749,7 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("\tsub\tsp, sp, #16");
         r#gen.emit(&format!("\tmov\tx0, #{clock}"));
         r#gen.emit("\tmov\tx1, sp");
-        r#gen.emit("\tmov\tx8, #113"); // sys_clock_gettime
-        r#gen.emit("\tsvc\t#0");
+        system_call(r#gen, Sys::ClockGettime);
         r#gen.emit("\tldp\tx9, x10, [sp]");
         r#gen.emit("\tscvtf\td0, x9");
         r#gen.emit("\tscvtf\td1, x10");

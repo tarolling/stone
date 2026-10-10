@@ -4,7 +4,7 @@ use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use stone::ast::Mod;
-use stone::codegen::Architecture;
+use stone::codegen::Target;
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver;
 use stone::interpreter::{Exit, Limits};
@@ -47,10 +47,10 @@ enum Command {
         /// Where to write the executable. The assembly goes next to it with a `.s` extension.
         #[arg(short, long, default_value = "build/out")]
         output: PathBuf,
-        /// The processor to build for, `x86_64` or `aarch64`. Defaults to this machine's, and
-        /// any can be built for from any machine.
-        #[arg(long, value_name = "ARCH", value_parser = str::parse::<Architecture>)]
-        target: Option<Architecture>,
+        /// The system to build for: `x86_64` or `aarch64` for Linux, or `aarch64-macos`.
+        /// Defaults to this machine, and any can be built for from any machine.
+        #[arg(long, value_name = "TARGET", value_parser = str::parse::<Target>)]
+        target: Option<Target>,
     },
     /// Checks a file for errors without running it.
     Check {
@@ -79,7 +79,8 @@ enum ExecutionMode {
     Build {
         file: String,
         output: PathBuf,
-        target: Architecture,
+        /// What to build for, or the host if not given.
+        target: Option<Target>,
     },
     Check(String),
     Repl,
@@ -108,7 +109,7 @@ fn main() -> ExitCode {
         }) => ExecutionMode::Build {
             file,
             output,
-            target: target.unwrap_or_else(Architecture::host),
+            target,
         },
         Some(Command::Check { file }) => ExecutionMode::Check(file),
         Some(Command::Update { check, version }) => ExecutionMode::Update {
@@ -134,6 +135,7 @@ fn main() -> ExitCode {
             output,
             target,
         } => with_program(&file, |module| {
+            let target = target.map_or_else(Target::host, Ok)?;
             driver::compile_module(module, &output, target)?;
             println!("Compiled {}", output.display());
             Ok(())

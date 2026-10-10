@@ -1,4 +1,5 @@
-//! The arm64 backend, which compiles a stone AST to GNU assembler source for AArch64 Linux.
+//! The arm64 backend, which compiles a stone AST to GNU assembler source for AArch64 Linux or
+//! macOS.
 //!
 //! It shares everything up to register allocation with the x86-64 backend: the AST is lowered to
 //! [`ir`](crate::codegen::ir), each function's vregs are assigned registers by linear scan, and
@@ -17,7 +18,8 @@ pub mod floats;
 
 use crate::ast::Mod;
 use crate::codegen::context::{Context, global_label, immortal_string};
-use crate::codegen::{Architecture, AssemblyGenerator};
+use crate::codegen::{AssemblyGenerator, Os, Target};
+use builtins::{Sys, system_call};
 use std::path::Path;
 
 /// Registers that carry arguments under AAPCS64, in order.
@@ -27,7 +29,8 @@ use std::path::Path;
 /// `i >= 8` is at `[x29, #16 + 8 * (i - 8)]` in the callee.
 const ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
 
-/// Code generator for arm64 that emits GNU assembler source for AArch64 Linux.
+/// Code generator for arm64 that emits GNU assembler source for AArch64 Linux or macOS. Only the
+/// runtime's calls into the system differ between the two (see [`builtins::system_call`]).
 ///
 /// For example, `a + b` with `a` and `b` in registers becomes one `add`.
 #[derive(Default)]
@@ -37,12 +40,14 @@ pub struct Arm64Generator {
     ctx: Context,
     /// Whether some float `%` calls `stone.fmod`, emitted after the code that uses it.
     uses_fmod: bool,
+    /// The system the program runs on, which decides how the runtime calls it.
+    os: Os,
 }
 
 impl AssemblyGenerator for Arm64Generator {
     fn compile(&mut self, module: &Mod, output: &Path) -> std::io::Result<()> {
         let text = self.assemble(module).map_err(std::io::Error::other)?;
-        crate::codegen::link(&text, output, self.architecture())
+        crate::codegen::link(&text, output, self.target())
     }
 
     fn assemble(&mut self, module: &Mod) -> Result<String, String> {
@@ -101,12 +106,19 @@ impl AssemblyGenerator for Arm64Generator {
         if self.ctx.needs_env() {
             builtins::env_runtime(self);
         }
+        if self.os == Os::MacOs {
+            self.emit("\t.text");
+            let text = self.output.clone();
+            builtins::system_shims(self, &text);
+        }
 
         self.emit_string_literals();
         self.emit_globals();
 
-        // suppress the linker's executable stack warning
-        self.emit("\t.section\t.note.GNU-stack,\"\",@progbits");
+        if self.os == Os::Linux {
+            // suppress the linker's executable stack warning
+            self.emit("\t.section\t.note.GNU-stack,\"\",@progbits");
+        }
 
         Ok(())
     }
@@ -116,14 +128,26 @@ impl AssemblyGenerator for Arm64Generator {
         self.output.push('\n');
     }
 
-    fn architecture(&self) -> Architecture {
-        Architecture::Arm64
+    fn target(&self) -> Target {
+        Target {
+            arch: crate::codegen::Architecture::Arm64,
+            os: self.os,
+        }
     }
 }
 
 impl Arm64Generator {
+    /// Returns a generator for AArch64 Linux.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns a generator for AArch64 running `os`.
+    pub fn for_os(os: Os) -> Self {
+        Self {
+            os,
+            ..Self::default()
+        }
     }
 
     /// Emits the code behind every [`Context::fail_label`], plus `stone.fail`, which writes
@@ -158,12 +182,10 @@ impl Arm64Generator {
             self.emit(&format!("\tb\t{length}"));
             self.emit(&format!("{write}:"));
             self.emit("\tmov\tx0, #2"); // stderr
-            self.emit("\tmov\tx8, #64"); // write
-            self.emit("\tsvc\t#0");
+            system_call(self, Sys::Write);
         }
         self.emit("\tmov\tx0, #1");
-        self.emit("\tmov\tx8, #94"); // exit_group
-        self.emit("\tsvc\t#0");
+        system_call(self, Sys::Exit);
     }
 
     /// Emits the routines behind input, `args`, the `os` module, parsing, `str`, and the string

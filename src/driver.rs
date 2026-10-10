@@ -4,7 +4,7 @@
 
 use crate::ast::Mod;
 use crate::checker::{Analysis, TypeChecker};
-use crate::codegen::Architecture;
+use crate::codegen::Target;
 use crate::debug;
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
 use crate::interpreter::{Exit, Interpreter, Limits};
@@ -235,25 +235,25 @@ impl Ending {
 /// For example, `compile("print(1)\n", Path::new("build/out"))` writes `build/out.s` and links
 /// `build/out`.
 pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
-    compile_for(source, output, Architecture::host())
+    compile_for(source, output, Target::host()?)
 }
 
-/// Compiles source code to a native executable for `arch` at `output`. Any architecture can be
+/// Compiles source code to a native executable for `target` at `output`. Any target can be
 /// built for on any machine, since stone assembles and links the program itself.
 ///
-/// For example, `compile_for("print(1)\n", Path::new("build/out"), Architecture::Arm64)` writes
-/// arm64 assembly to `build/out.s` and links it into an arm64 `build/out`.
-pub fn compile_for(source: &str, output: &Path, arch: Architecture) -> Result<(), Box<dyn Error>> {
-    compile_module(&checked(source)?, output, arch)
+/// For example, `compile_for("print(1)\n", Path::new("build/out"), Target::ARM64_LINUX)` writes
+/// arm64 assembly to `build/out.s` and links it into an arm64 Linux `build/out`.
+pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
+    compile_module(&checked(source)?, output, target)
 }
 
-/// Compiles a checked module, such as one from [`load`], to a native executable for `arch` at
+/// Compiles a checked module, such as one from [`load`], to a native executable for `target` at
 /// `output`.
 ///
-/// For example, compiling for [`Architecture::Arm64`] on an x86-64 machine writes an arm64
-/// executable, with no cross toolchain installed.
-pub fn compile_module(ast: &Mod, output: &Path, arch: Architecture) -> Result<(), Box<dyn Error>> {
-    arch.generator().compile(ast, output)?;
+/// For example, compiling for [`Target::ARM64_MACOS`] on an x86-64 Linux machine writes an arm64
+/// macOS executable, with no cross toolchain installed.
+pub fn compile_module(ast: &Mod, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
+    target.generator().compile(ast, output)?;
     Ok(())
 }
 

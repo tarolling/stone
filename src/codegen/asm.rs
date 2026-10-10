@@ -449,13 +449,71 @@ impl Assembler {
                 return Err(format!(".globl names '{name}', which is never defined"));
             }
         }
-        for fixup in &object.fixups {
-            if !defined.contains(fixup.symbol.as_str()) {
-                return Err(format!("undefined label '{}'", fixup.symbol));
-            }
-        }
+        // a symbol defined nowhere may be one the linker provides, such as a system function
         Ok(object)
     }
+}
+
+/// Patches the bytes at the start of `code` for `fixup`, which sits at address `place` and
+/// refers to a symbol at `target`. Every linker resolves fixups this way, whatever file format
+/// it writes.
+///
+/// For example, a `bl` at `0x1000` whose target is at `0x1010` gets 4 words in its low 26 bits,
+/// and a target more than 128 MiB away is the error `'f' is too far away to reach`.
+pub fn apply_fixup(code: &mut [u8], fixup: &Fixup, place: u64, target: u64) -> Result<(), String> {
+    let value = (target as i64).wrapping_add(fixup.addend);
+    let relative = value.wrapping_sub(place as i64);
+    let too_far = || format!("'{}' is too far away to reach", fixup.symbol);
+    let misaligned = || format!("'{}' is misaligned", fixup.symbol);
+    if fixup.kind == FixupKind::X64Rel32 {
+        let displacement = i32::try_from(relative).map_err(|_| too_far())?;
+        code[..4].copy_from_slice(&displacement.to_le_bytes());
+        return Ok(());
+    }
+
+    let mut word = u32::from_le_bytes(code[..4].try_into().unwrap());
+    // a field of `bits` bits at `shift`, holding a signed word offset
+    let branch = |word: &mut u32, bits: u32, shift: u32| -> Result<(), String> {
+        if relative % 4 != 0 {
+            return Err(misaligned());
+        }
+        let words = relative >> 2;
+        let limit = 1i64 << (bits - 1);
+        if !(-limit..limit).contains(&words) {
+            return Err(too_far());
+        }
+        let mask = (1u32 << bits) - 1;
+        *word = (*word & !(mask << shift)) | ((words as u32 & mask) << shift);
+        Ok(())
+    };
+    match fixup.kind {
+        FixupKind::X64Rel32 => unreachable!(),
+        FixupKind::Arm64Branch26 => branch(&mut word, 26, 0)?,
+        FixupKind::Arm64Branch19 => branch(&mut word, 19, 5)?,
+        FixupKind::Arm64Branch14 => branch(&mut word, 14, 5)?,
+        FixupKind::Arm64AdrpPage21 => {
+            let pages = (value >> 12) - (place as i64 >> 12);
+            if !(-(1 << 20)..1 << 20).contains(&pages) {
+                return Err(too_far());
+            }
+            let pages = pages as u32;
+            word = (word & !(0b11 << 29 | 0x7ffff << 5))
+                | (pages & 0b11) << 29
+                | (pages >> 2 & 0x7ffff) << 5;
+        }
+        FixupKind::Arm64AddLo12 => {
+            word = (word & !(0xfff << 10)) | ((value as u32 & 0xfff) << 10);
+        }
+        FixupKind::Arm64LdStLo12(shift) => {
+            let low = value as u32 & 0xfff;
+            if low & ((1 << shift) - 1) != 0 {
+                return Err(misaligned());
+            }
+            word = (word & !(0xfff << 10)) | ((low >> shift) << 10);
+        }
+    }
+    code[..4].copy_from_slice(&word.to_le_bytes());
+    Ok(())
 }
 
 /// Returns the offset of every label among `items`, with every jump at its current size.
@@ -519,13 +577,15 @@ pub fn split_operands(text: &str) -> Vec<&str> {
     operands
 }
 
-/// Returns whether `name` can be a label, such as `fn.area`, `.Lstone_true`, or `_start`.
+/// Returns whether `name` can be a label, such as `fn.area`, `.Lstone_true`, or `_start`. Like
+/// GNU as, it takes letters and digits from any script, since a stone name such as `größe`
+/// becomes the label `fn.größe`.
 pub fn is_symbol(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '.')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '.')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.')
 }
 
 /// Parses an integer written in decimal or hex, with an optional `-`, the way GNU as reads
@@ -626,6 +686,21 @@ mod tests {
     }
 
     #[test]
+    fn labels_may_hold_letters_from_any_script() {
+        for arch in Architecture::ALL {
+            let reference = match arch {
+                Architecture::X64 => "\tmov\tQWORD PTR [rip + g.bׇ], 3\n\tcall\tfn.größe",
+                Architecture::Arm64 => "\tadrp\tx16, g.bׇ\n\tbl\tfn.größe",
+            };
+            let text = format!("\t.text\n{reference}\nfn.größe:\n\t.data\ng.bׇ:\n\t.quad\t0\n");
+            let object = assemble(&text, arch).unwrap();
+            let names: Vec<&str> = object.symbols.iter().map(|s| s.name.as_str()).collect();
+            assert_eq!(names, ["fn.größe", "g.bׇ"], "{arch}");
+        }
+        assert!(!is_symbol("fn.a b") && !is_symbol("fn.a,b") && !is_symbol("1a"));
+    }
+
+    #[test]
     fn labels_mark_offsets_in_their_sections() {
         let object = x64("\t.text\nmain:\n\tret\nnext:\n\t.bss\nx:\n\t.zero\t8\ny:\n").unwrap();
         assert_eq!(object.text, [0xc3]);
@@ -709,7 +784,6 @@ mod tests {
                 "\t.data\n\tret\n",
                 "line 2 (`ret`): instructions must be in .text",
             ),
-            ("\t.text\n\tcall\tnowhere\n", "undefined label 'nowhere'"),
             (
                 "\t.globl\tmain\n",
                 ".globl names 'main', which is never defined",

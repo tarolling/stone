@@ -66,14 +66,16 @@ cargo install --git https://github.com/tarolling/stone stone
 | command | needs |
 | --- | --- |
 | `stone run`, `stone check` | any platform stone builds on |
-| `stone build` | any platform stone builds on; the executables it writes run on x86-64 or arm64 Linux |
+| `stone build` | any platform stone builds on; the executables it writes run on x86-64 or arm64 Linux, or arm64 macOS |
 
 `stone build` assembles and links programs itself, so it needs no assembler, linker, or C
-compiler. The executables it makes are static Linux programs that need no C library, so they
-run on any Linux machine with the same processor. They are for the processor stone runs on
-unless `--target` picks the other one (see [the CLI reference](reference/cli.md)), and neither
-needs anything else installed. Executables for macOS are not supported yet. The interpreter
-runs the same programs everywhere.
+compiler. Its Linux executables are static programs that need no C library, so they run on any
+Linux machine with the same processor. Its macOS executables call the system only through
+`libSystem`, which every Mac has, and are signed, so they run on any Apple silicon Mac with
+macOS 12 or later. Executables are for the machine stone runs on unless `--target` picks
+another (see [the CLI reference](reference/cli.md)), and none needs anything else installed.
+Executables for Intel Macs are not supported. The interpreter runs the same programs
+everywhere.
 
 ## Editor support
 

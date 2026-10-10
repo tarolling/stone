@@ -21,24 +21,32 @@ stone run examples/basics.st
 stone run sum.st 1 2 3 < numbers.txt
 ```
 
-## `stone build FILE [-o OUTPUT] [--target ARCH]`
+## `stone build FILE [-o OUTPUT] [--target TARGET]`
 
 Compiles the program to a native executable at `OUTPUT` (default `build/out`, relative to the
 current directory), writing the assembly next to it as `OUTPUT.s`. stone assembles and links
-the program itself, so no assembler, linker, or C compiler needs to be installed. The executable
-is a static Linux program that needs no C library, so it runs on any Linux machine with the
-same processor. It has a symbol table, so tools such as `gdb`, `perf`, and `objdump` show its
-functions by name, such as `fn.area` for a stone function `area` and `main` for the top-level
-code.
+the program itself, so no assembler, linker, or C compiler needs to be installed. A Linux
+executable is a static program that needs no C library, so it runs on any Linux machine with
+the same processor. A macOS executable calls the system only through `libSystem`, which every
+Mac has, and is signed, as macOS requires, so it runs on any Apple silicon Mac with macOS 12 or
+later. Either has a symbol table, so tools such as `gdb`, `lldb`, `perf`, and `objdump` show
+its functions by name, such as `fn.area` for a stone function `area` and `main` for the
+top-level code.
 
-The executable is for the processor stone runs on, x86-64 or arm64. `--target` picks one
-explicitly, as `x86_64` (or `x64`) or `aarch64` (or `arm64`), and works the same from any
-machine.
+The executable is for the machine stone runs on: x86-64 or arm64 Linux, or arm64 macOS.
+`--target` picks one explicitly, and works the same from any machine:
+
+| target | runs on |
+| --- | --- |
+| `x86_64` (or `x64`, `x86_64-linux`) | x86-64 Linux |
+| `aarch64` (or `arm64`, `aarch64-linux`) | arm64 Linux |
+| `aarch64-macos` (or `arm64-macos`, `aarch64-apple-darwin`) | arm64 macOS |
 
 ```sh
 stone build examples/basics.st -o build/basics
 ./build/basics
 stone build examples/basics.st -o build/basics-arm64 --target aarch64
+stone build examples/basics.st -o build/basics-mac --target aarch64-macos
 ```
 
 The executable reads its own arguments and standard input the same way, so `./build/sum 1 2 3`

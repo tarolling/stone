@@ -10,7 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use stone::codegen::Architecture;
+use stone::codegen::{Architecture, Target};
 use stone::interpreter::Limits;
 
 /// Limits for fuzzing the interpreter, small enough that every input finishes quickly.
@@ -590,23 +590,23 @@ pub fn interpret(source: &str) -> Option<String> {
     String::from_utf8(out).ok()
 }
 
-/// Returns the architecture to compile for: the one `STONE_FUZZ_TARGET` names, such as
-/// `aarch64`, or the host's.
-fn target() -> Architecture {
+/// Returns the target to compile for: the one `STONE_FUZZ_TARGET` names, such as `aarch64`, or
+/// the host.
+fn target() -> Target {
     std::env::var("STONE_FUZZ_TARGET")
         .ok()
         .and_then(|name| name.parse().ok())
-        .unwrap_or_else(Architecture::host)
+        .unwrap_or_else(|| Target::host().unwrap())
 }
 
-/// Returns the command that runs the binary `exe` built for `arch`: the binary itself on its own
-/// architecture, and qemu-user otherwise, which needs nothing else, since compiled programs are
-/// static and use no libc.
-fn runner(exe: &Path, arch: Architecture) -> Command {
-    if arch == Architecture::host() {
+/// Returns the command that runs the binary `exe` built for `target`: the binary itself on the
+/// host, and qemu-user for another Linux processor, which needs nothing else, since Linux
+/// programs are static and use no libc.
+fn runner(exe: &Path, target: Target) -> Command {
+    if Target::host() == Ok(target) {
         return Command::new(exe);
     }
-    let qemu = match arch {
+    let qemu = match target.arch {
         Architecture::X64 => "qemu-x86_64",
         Architecture::Arm64 => "qemu-aarch64",
     };
@@ -634,14 +634,14 @@ pub fn run_compiled(source: &str) -> std::result::Result<String, String> {
     let stdout_path = dir.join(format!("{stem}.stdout"));
 
     let result = (|| {
-        let arch = target();
-        stone::driver::compile_for(source, &exe, arch)
+        let target = target();
+        stone::driver::compile_for(source, &exe, target)
             .map_err(|e| format!("compile failed: {e}"))?;
 
         // stdout goes to a file, so a chatty program cannot block on a full pipe
         let stdout = File::create(&stdout_path).map_err(|e| e.to_string())?;
         // empty stdin, like the input `interpret` gives the interpreter
-        let mut child = runner(&exe, arch)
+        let mut child = runner(&exe, target)
             .env("STONE_LEAK_CHECK", "1")
             .stdin(Stdio::null())
             .stdout(Stdio::from(stdout))
@@ -746,12 +746,10 @@ mod tests {
             let Ok((module, _)) = loaded else {
                 continue;
             };
-            for arch in Architecture::ALL {
-                let text = arch.generator().assemble(&module).unwrap();
-                let linked = stone::codegen::asm::assemble(&text, arch)
-                    .and_then(|object| stone::codegen::elf::link(&object, arch));
-                if let Err(e) = linked {
-                    panic!("{arch} assembly of a generated program failed ({e}):\n{source}");
+            for target in Target::ALL {
+                let text = target.generator().assemble(&module).unwrap();
+                if let Err(e) = stone::codegen::executable(&text, target, "out") {
+                    panic!("{target} assembly of a generated program failed ({e}):\n{source}");
                 }
             }
         }

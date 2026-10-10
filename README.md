@@ -14,7 +14,7 @@ the [documentation](https://tarolling.github.io/stone/) has a tutorial, a langua
 curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | sh
 ```
 
-this downloads a prebuilt `stone` for linux or macos (x86-64 or arm64) into `~/.local/bin`. pick another directory or release with `sh -s -- --dir /usr/local/bin --version v0.1.0`, or set `STONE_INSTALL_DIR` and `STONE_VERSION`.
+this downloads a prebuilt `stone` for linux or macos (x86-64 or arm64) into `~/.local/bin`. pick another directory or release with `sh -s -- --dir /usr/local/bin --version v0.2.0`, or set `STONE_INSTALL_DIR` and `STONE_VERSION`.
 
 to upgrade later, run `stone update` (or `stone update --check` to see if there is a new release). to remove it, run `stone uninstall`.
 
@@ -29,12 +29,12 @@ cargo install --git https://github.com/tarolling/stone stone
 ## usage
 
 ```sh
-cargo run --release -- run examples/basics.st                  # interpret
-cargo run --release -- build examples/basics.st -o build/basics # compile
-./build/basics
+cargo run --release -- run examples/basics.st    # interpret
+cargo run --release -- build examples/basics.st  # compile
+./examples/build/basics
 ```
 
-`stone <file>` is shorthand for `stone run <file>`. `build` writes the assembly next to the executable (`build/basics.s`) and defaults to `build/out`.
+`stone <file>` is shorthand for `stone run <file>`. `build` writes the executable to a `build` directory next to the file, named after it (a `main.st` is named after its directory), with the assembly beside it (`examples/build/basics.s`). other targets go in `build/<target>/`, `-o` picks a path instead, and `stone clean` removes the directory.
 
 ## layout
 

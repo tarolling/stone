@@ -12,7 +12,7 @@ curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | s
 Pass options after `sh -s --` to choose another directory or release:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | sh -s -- --dir /usr/local/bin --version v0.1.0
+curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | sh -s -- --dir /usr/local/bin --version v0.2.0
 ```
 
 | option | environment variable | default |
@@ -33,7 +33,7 @@ A release binary can replace itself with the newest release:
 ```sh
 stone update            # install the newest release
 stone update --check    # only report whether there is one
-stone update --version v0.1.0
+stone update --version v0.2.0
 ```
 
 It checks the download against the release's SHA-256 checksum and makes sure the new binary

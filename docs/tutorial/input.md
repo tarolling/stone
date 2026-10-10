@@ -66,8 +66,8 @@ print(total)
 ```
 
 ```sh
-stone run sum.st 1 2 3                       # prints 6
-stone build sum.st -o sum && ./sum 1 2 3     # prints 6 too
+stone run sum.st 1 2 3                        # prints 6
+stone build sum.st && ./build/sum 1 2 3       # prints 6 too
 ```
 
 Everything after the file belongs to the program, even arguments starting with `-`, so

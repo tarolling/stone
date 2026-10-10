@@ -20,8 +20,8 @@ target
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 
-# Added by stone
-/build/
+# stone build writes next to each program it compiles
+build/
 
 # the documentation site built by sphinx-build
 /docs/_build/

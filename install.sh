@@ -3,7 +3,7 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | sh
 #
-# Pass options after `sh -s --`, e.g. `... | sh -s -- --version v0.1.0`.
+# Pass options after `sh -s --`, e.g. `... | sh -s -- --version v0.2.0`.
 # Everything runs inside main, called on the last line, so a partial download
 # never runs half a script.
 set -eu
@@ -17,7 +17,7 @@ Installs the stone programming language.
 Usage: install.sh [--version <tag>] [--dir <path>]
 
 Options:
-  --version <tag>  release to install, such as v0.1.0 (default: latest)
+  --version <tag>  release to install, such as v0.2.0 (default: latest)
   --dir <path>     directory to put stone in (default: \$HOME/.local/bin)
   -h, --help       print this help
 

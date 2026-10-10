@@ -31,7 +31,7 @@ stone gives you three ways to handle it:
 
 ```sh
 stone run hello.st          # interpret it
-stone build hello.st -o hello && ./hello   # compile a native executable
+stone build hello.st && ./build/hello   # compile a native executable
 stone check hello.st        # only look for errors
 ```
 

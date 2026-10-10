@@ -14,7 +14,7 @@ use crate::project::{self, DEFAULT_ENTRY, Linked, MapSources, SourceMap, Sources
 use crate::repl;
 use std::error::Error;
 use std::io::{BufRead, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 /// Lexes and parses source code into a module.
 ///
@@ -255,6 +255,100 @@ pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Bo
 pub fn compile_module(ast: &Mod, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
     target.generator().compile(ast, output)?;
     Ok(())
+}
+
+/// The name of the directory, next to a program's entry file, that `stone build` writes to.
+pub const BUILD_DIR: &str = "build";
+
+/// The file that marks a build directory as stone's, so `stone clean` never deletes a `build`
+/// directory something else made.
+pub const MARKER: &str = ".stone";
+
+/// Returns the build directory of the program whose entry file is `entry`: `build` next to it,
+/// in the same directory that is the root of the program's modules.
+///
+/// For example, `build_dir(Path::new("examples/basics.st"))` is `examples/build`, and
+/// `build_dir(Path::new("main.st"))` is `build`.
+pub fn build_dir(entry: &Path) -> PathBuf {
+    entry.parent().unwrap_or(Path::new("")).join(BUILD_DIR)
+}
+
+/// Returns the name of the executable built from the entry file `entry`: the file's stem, or,
+/// for a `main.st`, the name of the directory it is in, as a Cargo package is named.
+///
+/// For example, `examples/basics.st` is named `basics`, `tests/programs/modules/main.st` is
+/// named `modules`, and `/main.st`, whose directory has no name, is named `main`.
+pub fn program_name(entry: &Path) -> String {
+    let stem = entry.file_stem().unwrap_or_default().to_string_lossy();
+    if entry.file_name().and_then(|name| name.to_str()) != Some(DEFAULT_ENTRY) {
+        return stem.into_owned();
+    }
+    // `main.st` alone, or `sub/../main.st`, names a directory only once resolved
+    let parent = match entry.parent() {
+        Some(parent) if !parent.as_os_str().is_empty() => parent,
+        _ => Path::new("."),
+    };
+    std::fs::canonicalize(parent)
+        .ok()
+        .and_then(|dir| {
+            dir.file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+        })
+        .unwrap_or_else(|| stem.into_owned())
+}
+
+/// Returns where `stone build` writes the executable for `target` built from the entry file
+/// `entry`: in the program's [`build_dir`] for the machine stone runs on, or in a directory
+/// named after the target inside it for any other target, so builds for different targets
+/// never overwrite each other.
+///
+/// For example, on an x86-64 Linux machine, `examples/basics.st` builds to
+/// `examples/build/basics`, and for [`Target::ARM64_MACOS`] to
+/// `examples/build/aarch64-macos/basics`.
+pub fn output_path(entry: &Path, target: Target) -> PathBuf {
+    let mut path = build_dir(entry);
+    // an Intel Mac has no host target, so everything it builds is for another machine
+    if Target::host().ok() != Some(target) {
+        path.push(target.to_string());
+    }
+    path.push(program_name(entry));
+    path
+}
+
+/// Creates the build directory `build`, if it does not exist yet, with the [`MARKER`] that lets
+/// [`clean`] delete it.
+///
+/// For example, `prepare_build_dir(Path::new("build"))` creates `build/.stone`.
+pub fn prepare_build_dir(build: &Path) -> std::io::Result<()> {
+    std::fs::create_dir_all(build)?;
+    let marker = build.join(MARKER);
+    if !marker.exists() {
+        std::fs::write(
+            marker,
+            "stone build made this directory, and stone clean deletes it.\n",
+        )?;
+    }
+    Ok(())
+}
+
+/// Deletes the build directory in `dir`, returning whether there was one. A `build` directory
+/// without the [`MARKER`] is an error and stays, since stone did not make it.
+///
+/// For example, after `stone build examples/basics.st`, `clean(Path::new("examples"))` deletes
+/// `examples/build` and returns `Ok(true)`, and a second call returns `Ok(false)`.
+pub fn clean(dir: &Path) -> std::io::Result<bool> {
+    let build = dir.join(BUILD_DIR);
+    if std::fs::symlink_metadata(&build).is_err() {
+        return Ok(false);
+    }
+    if !build.join(MARKER).is_file() {
+        return Err(std::io::Error::other(format!(
+            "{} was not made by stone, so it was left alone",
+            build.display()
+        )));
+    }
+    std::fs::remove_dir_all(&build)?;
+    Ok(true)
 }
 
 /// Runs an interactive session that reads entries from `input`, prints program output and
@@ -566,6 +660,87 @@ ret y
             run_limited("print(float(\"\"))\n"),
             Err("could not convert string to float: ''".to_string())
         );
+    }
+
+    /// Makes an empty directory named `name` under the system's temporary directory, unique to
+    /// this process.
+    ///
+    /// For example, `scratch("clean")` returns `/tmp/stone-driver-1234/clean`.
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir()
+            .join(format!("stone-driver-{}", std::process::id()))
+            .join(name);
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn the_build_directory_sits_next_to_the_entry_file() {
+        assert_eq!(
+            build_dir(Path::new("examples/basics.st")),
+            Path::new("examples/build")
+        );
+        assert_eq!(build_dir(Path::new("main.st")), Path::new("build"));
+        assert_eq!(build_dir(Path::new("/abs/p.st")), Path::new("/abs/build"));
+    }
+
+    #[test]
+    fn programs_are_named_after_their_entry_file() {
+        assert_eq!(program_name(Path::new("examples/basics.st")), "basics");
+        let dir = scratch("modules");
+        std::fs::write(dir.join("main.st"), "").unwrap();
+        assert_eq!(program_name(&dir.join("main.st")), "modules");
+        // a relative main.st takes the name of the directory it resolves to
+        let nested = dir.join("sub").join("main.st");
+        std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
+        std::fs::write(&nested, "").unwrap();
+        assert_eq!(program_name(&dir.join("sub/../main.st")), "modules");
+        assert_eq!(program_name(Path::new("/main.st")), "main");
+    }
+
+    #[test]
+    fn other_targets_build_into_directories_of_their_own() {
+        let host = Target::host().unwrap();
+        assert_eq!(
+            output_path(Path::new("examples/basics.st"), host),
+            Path::new("examples/build/basics")
+        );
+        let other = if host == Target::ARM64_MACOS {
+            Target::X64_LINUX
+        } else {
+            Target::ARM64_MACOS
+        };
+        assert_eq!(
+            output_path(Path::new("examples/basics.st"), other),
+            Path::new("examples/build")
+                .join(other.to_string())
+                .join("basics")
+        );
+        let leveled: Target = "x86_64v3-linux".parse().unwrap();
+        assert_eq!(
+            output_path(Path::new("p.st"), leveled),
+            Path::new("build/x86_64v3-linux/p")
+        );
+    }
+
+    #[test]
+    fn clean_removes_only_a_build_directory_stone_made() {
+        let dir = scratch("clean");
+        assert!(!clean(&dir).unwrap());
+
+        prepare_build_dir(&dir.join("build")).unwrap();
+        assert!(dir.join("build").join(MARKER).exists());
+        std::fs::create_dir_all(dir.join("build/aarch64-macos")).unwrap();
+        std::fs::write(dir.join("build/aarch64-macos/p"), "").unwrap();
+        assert!(clean(&dir).unwrap());
+        assert!(!dir.join("build").exists());
+
+        std::fs::create_dir_all(dir.join("build")).unwrap();
+        std::fs::write(dir.join("build/keep.txt"), "mine").unwrap();
+        let err = clean(&dir).unwrap_err();
+        assert!(err.to_string().contains("not made by stone"), "{err}");
+        assert!(dir.join("build/keep.txt").exists());
     }
 
     #[test]

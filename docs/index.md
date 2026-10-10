@@ -16,7 +16,7 @@ for i in range(10);
 
 ```sh
 stone run fib.st                # interpret it right away
-stone build fib.st -o fib && ./fib   # or compile it to a native executable
+stone build fib.st && ./build/fib   # or compile it to a native executable
 ```
 
 ## Why stone

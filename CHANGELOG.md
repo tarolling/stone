@@ -22,9 +22,19 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - `--target` takes a processor level, such as `x86_64v3-linux` or `aarch64v8.2-macos`, naming
   the features a program may assume (stone does not use them yet), and accepts Rust's names for
   the same machines, such as `x86_64-unknown-linux-musl`.
+- `stone build` takes several files, building each into its own executable, and `--target` can
+  be given more than once to build for several targets in one run.
+- `stone clean [PATH]` removes the build directory of the program in `PATH` (an entry file or a
+  directory, the current one by default). It only removes a `build` directory that
+  `stone build` made.
 
 ### Changed
 
+- `stone build` writes to a `build` directory next to the entry file instead of `build/out` in
+  the current directory, and names the executable after the file, so
+  `stone build examples/basics.st` writes `examples/build/basics`. A `main.st` is named after
+  its directory, and a target other than the machine stone runs on builds into
+  `build/<target>/`, such as `build/aarch64-macos/basics`. `-o` still picks a path.
 - Targets display by their full names, `x86_64-linux` and `aarch64-linux`, in messages and help.
   The short names `x86_64` and `aarch64` still work.
 - Release archives are named by stone's target names, such as `stone-x86_64-linux.tar.gz` and

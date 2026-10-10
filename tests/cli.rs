@@ -281,15 +281,22 @@ fn build_rejects_an_unknown_target() {
     );
 }
 
-#[test]
-fn build_for_the_host_target_by_name_runs() {
-    let host = if cfg!(target_os = "macos") {
+/// Returns the `--target` name of the machine the tests run on.
+///
+/// For example, it is `x86_64-linux` on an x86-64 Linux machine.
+fn host_target() -> &'static str {
+    if cfg!(target_os = "macos") {
         "aarch64-macos"
     } else if cfg!(target_arch = "aarch64") {
         "aarch64-linux"
     } else {
         "x86_64-linux"
-    };
+    }
+}
+
+#[test]
+fn build_for_the_host_target_by_name_runs() {
+    let host = host_target();
     let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("host_target");
     let exe_arg = exe.to_str().unwrap();
     let (output, _) = stone(
@@ -583,4 +590,151 @@ fn built_programs_need_only_the_system_and_start_on_their_own() {
         String::from_utf8_lossy(&full.stdout),
         format!("['a', 'b c'] x=y {has_home}\n")
     );
+}
+
+/// Runs `stone <args>` in `dir`.
+///
+/// For example, `stone_in(&dir, &["build", "main.st"])` builds `dir/main.st`.
+fn stone_in(dir: &Path, args: &[&str]) -> Output {
+    Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(args)
+        .current_dir(dir)
+        .output()
+        .expect("stone should run")
+}
+
+/// Runs the executable at `exe` and returns what it printed.
+///
+/// For example, running a build of `print(1)` returns `"1\n"`.
+fn stdout_of(exe: &Path) -> String {
+    let run = Command::new(exe).output().expect("the binary should run");
+    assert!(run.status.success(), "{run:?}");
+    String::from_utf8_lossy(&run.stdout).into_owned()
+}
+
+#[test]
+fn build_defaults_to_the_projects_build_directory() {
+    let dir = project("default_build", &[("app/prog.st", "print(6 * 7)\n")]);
+    // built from outside the project, it still lands next to the entry file
+    let output = stone_in(&dir, &["build", "app/prog.st"]);
+    assert!(output.status.success(), "{output:?}");
+    let build = dir.join("app/build");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Compiled {}\n", Path::new("app/build/prog").display())
+    );
+    assert_eq!(stdout_of(&build.join("prog")), "42\n");
+    assert!(build.join("prog.s").is_file());
+    assert!(build.join(".stone").is_file());
+}
+
+#[test]
+fn build_names_main_after_its_directory() {
+    let dir = project("named_proj", &[("main.st", "print(1)\n")]);
+    let output = stone_in(&dir, &["build", "main.st"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(stdout_of(&dir.join("build/named_proj")), "1\n");
+}
+
+#[test]
+fn build_puts_other_targets_in_their_own_directory() {
+    let dir = project("several_targets", &[("p.st", "print(2)\n")]);
+    let host = host_target();
+    let other = if host == "aarch64-macos" {
+        "x86_64-linux"
+    } else {
+        "aarch64-macos"
+    };
+    let output = stone_in(
+        &dir,
+        &["build", "p.st", "--target", host, "--target", other],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(stdout_of(&dir.join("build/p")), "2\n");
+    assert!(dir.join("build").join(other).join("p").is_file());
+    assert!(!dir.join("build").join(host).exists());
+}
+
+#[test]
+fn build_takes_several_files_and_reports_each_failure() {
+    let dir = project(
+        "several_files",
+        &[
+            ("a.st", "print(\"a\")\n"),
+            ("bad.st", "x = 1 + \"s\"\n"),
+            ("b.st", "print(\"b\")\n"),
+        ],
+    );
+    let output = stone_in(&dir, &["build", "a.st", "bad.st", "b.st"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("bad.st:1:"),
+        "{output:?}"
+    );
+    assert_eq!(stdout_of(&dir.join("build/a")), "a\n");
+    assert_eq!(stdout_of(&dir.join("build/b")), "b\n");
+    assert!(!dir.join("build/bad").exists());
+}
+
+#[test]
+fn build_rejects_output_with_several_files_or_targets() {
+    let dir = project(
+        "output_conflict",
+        &[("a.st", "print(1)\n"), ("b.st", "print(2)\n")],
+    );
+    let expected = "error: -o names one executable, so it needs exactly one file and one target\n";
+    for args in [
+        &["build", "a.st", "b.st", "-o", "out"][..],
+        &[
+            "build",
+            "a.st",
+            "--target",
+            "x86_64-linux",
+            "--target",
+            "aarch64-linux",
+            "-o",
+            "out",
+        ],
+    ] {
+        let output = stone_in(&dir, args);
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stderr), expected);
+        assert!(!dir.join("out").exists());
+    }
+}
+
+#[test]
+fn clean_removes_the_build_directory() {
+    let dir = project("clean_project", &[("app/main.st", "print(1)\n")]);
+    assert!(stone_in(&dir, &["build", "app/main.st"]).status.success());
+    assert!(dir.join("app/build/app").is_file());
+
+    // a file names its program's directory
+    let output = stone_in(&dir, &["clean", "app/main.st"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("Removed {}\n", Path::new("app/build").display())
+    );
+    assert!(!dir.join("app/build").exists());
+
+    // with no path, the current directory
+    let output = stone_in(&dir.join("app"), &["clean"]);
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        "nothing to clean in build\n"
+    );
+}
+
+#[test]
+fn clean_refuses_a_build_directory_stone_did_not_make() {
+    let dir = project("clean_foreign", &[("build/notes.txt", "mine\n")]);
+    let output = stone_in(&dir, &["clean"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: build was not made by stone, so it was left alone\n"
+    );
+    assert!(dir.join("build/notes.txt").is_file());
 }

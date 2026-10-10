@@ -10,6 +10,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Changed
+
+- `stone-lsp` is built on stone 0.2.0, whose lists are values, so the editor reports the
+  language's new rules: a warning when a function changes a list parameter it never reads
+  again, since the caller cannot see the change, and errors for `append` used as a value
+  (`ys = xs.append(1)`) and for a function that changes a global. Hover on `append` explains
+  that it changes only the variable it is called on.
+
 ## [0.1.6] - 2026-10-09
 
 ### Added

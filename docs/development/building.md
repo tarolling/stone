@@ -23,7 +23,7 @@ binutils for both processors, which on an x86-64 Debian or Ubuntu machine is
 | task | command |
 | --- | --- |
 | interpret a file | `cargo run -- run examples/basics.st` |
-| compile a file | `cargo run -- build examples/basics.st -o build/basics` |
+| compile a file | `cargo run -- build examples/basics.st` (writes `examples/build/basics`) |
 | check a file | `cargo run -- check examples/basics.st` |
 | run every test | `cargo test` |
 | run one test | `cargo test simple_functions` |
@@ -31,7 +31,8 @@ binutils for both processors, which on an x86-64 Debian or Ubuntu machine is
 | lint | `cargo clippy --all-targets` |
 | build the docs | see below |
 
-`build/` is gitignored scratch output. In a debug build, setting `STONE_DEBUG=1` prints token
+Every `build/` directory is gitignored scratch output, whether at the root or next to a program
+`stone build` compiled. In a debug build, setting `STONE_DEBUG=1` prints token
 dumps, parser traces, and each function's IR and register assignment to stderr:
 
 ```sh

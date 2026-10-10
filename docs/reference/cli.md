@@ -21,10 +21,11 @@ stone run examples/basics.st
 stone run sum.st 1 2 3 < numbers.txt
 ```
 
-## `stone build FILE [-o OUTPUT] [--target TARGET]`
+## `stone build FILE... [-o OUTPUT] [--target TARGET]...`
 
-Compiles the program to a native executable at `OUTPUT` (default `build/out`, relative to the
-current directory), writing the assembly next to it as `OUTPUT.s`. stone assembles and links
+Compiles each program to a native executable in its build directory (see
+[Where executables go](#where-executables-go)), writing the assembly next to it with a `.s`
+extension. stone assembles and links
 the program itself, so no assembler, linker, or C compiler needs to be installed. A Linux
 executable is a static program that needs no C library, so it runs on any Linux machine with
 the same processor. A macOS executable calls the system only through `libSystem`, which every
@@ -34,7 +35,8 @@ its functions by name, such as `fn.area` for a stone function `area` and `main` 
 top-level code.
 
 The executable is for the machine stone runs on: x86-64 or arm64 Linux, or arm64 macOS.
-`--target` picks one explicitly, and works the same from any machine:
+`--target` picks one explicitly, and works the same from any machine. Give it more than once to
+build for several targets in one run:
 
 | target | runs on |
 | --- | --- |
@@ -53,10 +55,9 @@ every processor of the architecture. stone does not use the extra features yet, 
 level builds the same program.
 
 ```sh
-stone build examples/basics.st -o build/basics
-./build/basics
-stone build examples/basics.st -o build/basics-arm64 --target aarch64-linux
-stone build examples/basics.st -o build/basics-mac --target aarch64-macos
+stone build examples/basics.st
+./examples/build/basics
+stone build examples/basics.st --target aarch64-linux --target aarch64-macos
 ```
 
 The release archives use the same names for the machines the `stone` binary itself runs on,
@@ -65,6 +66,47 @@ runs programs but cannot build them.
 
 The executable reads its own arguments and standard input the same way, so `./build/sum 1 2 3`
 behaves like `stone run sum.st 1 2 3`.
+
+### Where executables go
+
+Like Cargo's `target` directory, each program has a `build` directory next to its entry file,
+the same directory its modules are found from, so the result does not depend on where you run
+stone:
+
+```text
+examples/
+  basics.st
+  build/
+    basics              built for this machine
+    basics.s
+    aarch64-macos/
+      basics            built with --target aarch64-macos
+      basics.s
+```
+
+- An executable is named after its entry file, so `basics.st` becomes `basics`. A `main.st` is
+  named after its directory instead, as a program of several files usually is, so
+  `geometry/main.st` becomes `geometry/build/geometry`.
+- An executable for the machine stone runs on goes straight into `build/`, and one for any
+  other target into `build/TARGET/`, named as `--target` names it (`aarch64-macos`,
+  `x86_64v3-linux`). Builds for different targets never overwrite each other.
+- Several files, as in `stone build a.st b.st`, each build into their own executable. If one
+  has errors, stone prints them, still builds the rest, and exits with status 1.
+- `-o OUTPUT` writes the executable to exactly `OUTPUT` instead, with the assembly at
+  `OUTPUT.s`, so it needs exactly one file and one target.
+
+stone marks each build directory it makes with a `.stone` file, which `stone clean` looks for.
+
+## `stone clean [PATH]`
+
+Removes the build directory of the program in `PATH`, which is an entry file or a directory
+and defaults to the current directory. It only removes a `build` directory that `stone build`
+made; any other is an error and stays as it is.
+
+```sh
+stone clean examples/basics.st   # removes examples/build
+stone clean                      # removes ./build
+```
 
 ## `stone check FILE`
 
@@ -83,7 +125,7 @@ own prints its value unless the value is `none`, with strings quoted as they are
 
 ```text
 $ stone
-stone 0.1.3. Press Ctrl+D to exit.
+stone 0.2.0. Press Ctrl+D to exit.
 >>> x = 6
 >>> x * 7
 42
@@ -110,7 +152,7 @@ prompts, so `printf 'x = 6\nx * 7\n' | stone` prints just `42`.
 
 Replaces the installed binary with a newer GitHub release, after verifying its checksum. With
 `--check`, it only reports whether a newer release exists, and `--version` installs a specific
-release, such as `v0.1.0`. Release binaries include this command. A `stone` built with `cargo`
+release, such as `v0.2.0`. Release binaries include this command. A `stone` built with `cargo`
 explains how to upgrade instead, unless it was built with `--features self-update`.
 
 ## `stone uninstall [--yes]`

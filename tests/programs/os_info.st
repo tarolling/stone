@@ -1,7 +1,8 @@
 // prints only what is the same on every machine the tests run on
 use os
 
-print(os.platform())
+platform = os.platform()
+print(platform == "linux" or platform == "macos")
 arch = os.arch()
 print(arch == "x86_64" or arch == "aarch64")
 print(os.hostname().len() > 0, os.hostname() == os.hostname())

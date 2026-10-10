@@ -25,23 +25,22 @@ const INITIAL: [u32; 8] = [
 /// For example, `sha256(b"")` starts with `e3 b0 c4 42`.
 pub fn sha256(data: &[u8]) -> [u8; 32] {
     let mut state = INITIAL;
-    let mut blocks = data.chunks_exact(64);
-    for block in &mut blocks {
-        compress(&mut state, block.try_into().unwrap());
+    let (blocks, rest) = data.as_chunks::<64>();
+    for block in blocks {
+        compress(&mut state, block);
     }
     // the rest, a 1 bit, zeros, and the length in bits fill one or two final blocks
-    let rest = blocks.remainder();
     let mut tail = [0u8; 128];
     tail[..rest.len()].copy_from_slice(rest);
     tail[rest.len()] = 0x80;
     let len = if rest.len() < 56 { 64 } else { 128 };
     tail[len - 8..len].copy_from_slice(&(data.len() as u64 * 8).to_be_bytes());
-    for block in tail[..len].chunks_exact(64) {
-        compress(&mut state, block.try_into().unwrap());
+    for block in tail[..len].as_chunks::<64>().0 {
+        compress(&mut state, block);
     }
     let mut digest = [0u8; 32];
-    for (bytes, word) in digest.chunks_exact_mut(4).zip(state) {
-        bytes.copy_from_slice(&word.to_be_bytes());
+    for (bytes, word) in digest.as_chunks_mut::<4>().0.iter_mut().zip(state) {
+        *bytes = word.to_be_bytes();
     }
     digest
 }
@@ -49,8 +48,8 @@ pub fn sha256(data: &[u8]) -> [u8; 32] {
 /// Mixes one 64-byte block into `state`.
 fn compress(state: &mut [u32; 8], block: &[u8; 64]) {
     let mut w = [0u32; 64];
-    for (i, word) in block.chunks_exact(4).enumerate() {
-        w[i] = u32::from_be_bytes(word.try_into().unwrap());
+    for (i, word) in block.as_chunks::<4>().0.iter().enumerate() {
+        w[i] = u32::from_be_bytes(*word);
     }
     for i in 16..64 {
         let s0 = w[i - 15].rotate_right(7) ^ w[i - 15].rotate_right(18) ^ (w[i - 15] >> 3);

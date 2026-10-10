@@ -238,8 +238,8 @@ pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
     compile_for(source, output, Architecture::host())
 }
 
-/// Compiles source code to a native executable for `arch` at `output`, which needs that
-/// architecture's [`Architecture::linker`].
+/// Compiles source code to a native executable for `arch` at `output`. Any architecture can be
+/// built for on any machine, since stone assembles and links the program itself.
 ///
 /// For example, `compile_for("print(1)\n", Path::new("build/out"), Architecture::Arm64)` writes
 /// arm64 assembly to `build/out.s` and links it into an arm64 `build/out`.
@@ -250,8 +250,8 @@ pub fn compile_for(source: &str, output: &Path, arch: Architecture) -> Result<()
 /// Compiles a checked module, such as one from [`load`], to a native executable for `arch` at
 /// `output`.
 ///
-/// For example, compiling for [`Architecture::Arm64`] on an x86-64 machine links with
-/// `aarch64-linux-gnu-gcc`.
+/// For example, compiling for [`Architecture::Arm64`] on an x86-64 machine writes an arm64
+/// executable, with no cross toolchain installed.
 pub fn compile_module(ast: &Mod, output: &Path, arch: Architecture) -> Result<(), Box<dyn Error>> {
     arch.generator().compile(ast, output)?;
     Ok(())

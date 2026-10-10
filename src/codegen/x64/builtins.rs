@@ -386,6 +386,8 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.print_bool` writes `true` if `rdi` is nonzero and `false` otherwise
 /// - `stone.print_none` writes `none`
 /// - `stone.print_char` writes the byte in `dil`
+/// - `stone.print_str_quoted` writes the string `rdi` points to in single quotes, as a
+///   printed list shows its strings
 ///
 /// They write with the `write` syscall and clobber `rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8`, and
 /// `r11`.
@@ -476,6 +478,16 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tsyscall");
     r#gen.emit("\tleave");
     r#gen.emit("\tret");
+
+    // strings inside a printed list are quoted, like ['a']
+    r#gen.emit("stone.print_str_quoted:");
+    r#gen.emit("\tpush\trdi");
+    r#gen.emit("\tmov\trdi, 39"); // '\''
+    r#gen.emit("\tcall\tstone.print_char");
+    r#gen.emit("\tpop\trdi");
+    r#gen.emit("\tcall\tstone.print_str");
+    r#gen.emit("\tmov\trdi, 39");
+    r#gen.emit("\tjmp\tstone.print_char");
 }
 
 /// Emits `stone.str_float`, which returns the float whose bits are in `rdi` as a new string, the
@@ -706,16 +718,6 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     }
     r#gen.emit("\tpop\trbp");
     r#gen.emit("\tret");
-
-    // strings inside a printed list are quoted, like ['a']
-    r#gen.emit("stone.print_str_quoted:");
-    r#gen.emit("\tpush\trdi");
-    r#gen.emit("\tmov\trdi, 39"); // '\''
-    r#gen.emit("\tcall\tstone.print_char");
-    r#gen.emit("\tpop\trdi");
-    r#gen.emit("\tcall\tstone.print_str");
-    r#gen.emit("\tmov\trdi, 39");
-    r#gen.emit("\tjmp\tstone.print_char");
 }
 
 /// Emits `label`, a routine that prints the list in `rdi` as `[a, b]`, calling `element` for each

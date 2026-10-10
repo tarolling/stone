@@ -18,7 +18,7 @@ this downloads a prebuilt `stone` for linux or macos (x86-64 or arm64) into `~/.
 
 to upgrade later, run `stone update` (or `stone update --check` to see if there is a new release). to remove it, run `stone uninstall`.
 
-`stone run` and `stone check` work everywhere, but `stone build` emits x86-64 or arm64 assembly for linux, so it needs linux with gcc. `--target aarch64` (or `x86_64`) cross-compiles with that processor's cross gcc.
+`stone run` and `stone check` work everywhere. `stone build` writes static x86-64 or arm64 linux executables itself, with no assembler, linker, or C compiler installed, and `--target aarch64` (or `x86_64`) builds for the other processor from any machine.
 
 to build from source instead, with rust installed:
 
@@ -30,7 +30,7 @@ cargo install --git https://github.com/tarolling/stone stone
 
 ```sh
 cargo run --release -- run examples/basics.st                  # interpret
-cargo run --release -- build examples/basics.st -o build/basics # compile (needs gcc)
+cargo run --release -- build examples/basics.st -o build/basics # compile
 ./build/basics
 ```
 

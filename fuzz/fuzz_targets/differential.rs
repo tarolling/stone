@@ -1,5 +1,5 @@
 //! Runs grammar-generated programs through both `stone run` and `stone build` and checks that
-//! they print the same thing. Slow, since every input invokes gcc.
+//! they print the same thing. Slow, since every input builds and runs a binary.
 
 #![no_main]
 

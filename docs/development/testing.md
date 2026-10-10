@@ -12,12 +12,18 @@ cargo test simple_functions # tests whose name contains the filter
 sibling `.out` file. This is the main guarantee that the interpreter and the compiler agree.
 
 `stone build` compiles for the processor the tests run on. The compiler for the other one is
-tested too, by building each program with `--target` and running it under qemu-user, when its
-cross compiler and emulator are on `PATH`: `aarch64-linux-gnu-gcc` and `qemu-aarch64` on an
-x86-64 machine, or `x86_64-linux-gnu-gcc` and `qemu-x86_64` on an arm64 one. Otherwise that pass
-is skipped with a note. Compiled programs are static and need no libc, so qemu needs nothing
-else. CI runs both backends: the x86-64 job installs the aarch64 cross tools, and an arm64 job
-runs the suite natively.
+tested too, by building each program with `--target` and running it under qemu-user, when the
+emulator is on `PATH`: `qemu-aarch64` on an x86-64 machine, or `qemu-x86_64` on an arm64 one.
+Otherwise that pass is skipped with a note. Compiled programs are static and need no libc, so
+qemu needs nothing else. CI runs both backends: each job installs qemu-user for the other
+processor, and an arm64 job runs the suite natively.
+
+`tests/assembler.rs` checks the built-in assembler and linker against GNU's. For every golden
+program and both processors, it assembles the backend's output with GNU as, links it with GNU
+ld at the addresses the built-in linker chose, and requires every section to hold the same
+bytes. It needs `as` and `ld` for the host plus `aarch64-linux-gnu-as` and `-ld` (or the
+`x86_64-linux-gnu-` pair) for the other processor, and skips a processor whose tools are
+missing.
 
 To cover new behavior, add `name.st` and the exact output it should print as `name.out`:
 
@@ -60,7 +66,10 @@ Unit tests live in `#[cfg(test)]` modules next to the code:
 | `src/codegen/ir/lower/tests.rs` | IR produced from the AST |
 | `src/codegen/ir/liveness.rs` | live intervals |
 | `src/codegen/regalloc.rs` | linear scan and parallel moves |
-| `src/codegen.rs` | target names and linker selection |
+| `src/codegen.rs` | target names and the leak check of a linked program |
+| `src/codegen/asm.rs` | the assembler's parsing, directives, and jump relaxation |
+| `src/codegen/asm/x64.rs`, `src/codegen/asm/arm64.rs` | instruction encodings, against bytes from GNU as |
+| `src/codegen/elf.rs` | executable layout, fixups, and the symbol table |
 | `src/codegen/x64.rs` | generated x86-64 assembly |
 | `src/codegen/arm64.rs` | generated arm64 assembly |
 | `src/driver.rs` | the run, build, and check pipelines |

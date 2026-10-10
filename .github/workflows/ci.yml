@@ -22,9 +22,10 @@ jobs:
       run: cargo clippy --all-targets --features self-update -- -D warnings
     - name: Build
       run: cargo build --verbose
-    # the golden programs are also built for aarch64 and run under qemu-user
-    - name: Install the aarch64 cross compiler and qemu
-      run: sudo apt-get update && sudo apt-get install -y gcc-aarch64-linux-gnu qemu-user
+    # the golden programs are also built for aarch64 and run under qemu-user, and the built-in
+    # assembler is compared with GNU as for both processors
+    - name: Install qemu and the aarch64 binutils
+      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-aarch64-linux-gnu
     - name: Run tests
       run: cargo test --verbose
     - name: Run self-update tests
@@ -52,6 +53,9 @@ jobs:
       run: |
         export PATH="$HOME/.cargo/bin:$PATH"
         cargo build --verbose
+    # the golden programs are also built for x86-64 and run under qemu-user
+    - name: Install qemu and the x86-64 binutils
+      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-x86-64-linux-gnu
     - name: Run tests
       run: |
         export PATH="$HOME/.cargo/bin:$PATH"
@@ -71,7 +75,7 @@ jobs:
       run: cargo test --manifest-path fuzz/Cargo.toml
     - name: Build fuzz targets
       run: cargo +nightly fuzz build
-    # the differential target invokes gcc per input, so it is too slow for every push
+    # the differential target builds and runs a binary per input, so it is too slow for every push
     - name: Fuzz each crash target briefly
       run: |
         for target in lex parse interpret codegen structured; do

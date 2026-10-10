@@ -24,15 +24,16 @@ stone run sum.st 1 2 3 < numbers.txt
 ## `stone build FILE [-o OUTPUT] [--target ARCH]`
 
 Compiles the program to a native executable at `OUTPUT` (default `build/out`, relative to the
-current directory), writing the assembly next to it as `OUTPUT.s`. This needs Linux with `gcc` on
-`PATH`, which assembles and links the output. The executable is static and needs no C library,
-so it runs on any Linux machine with the same processor, whether or not gcc is installed there.
+current directory), writing the assembly next to it as `OUTPUT.s`. stone assembles and links
+the program itself, so no assembler, linker, or C compiler needs to be installed. The executable
+is a static Linux program that needs no C library, so it runs on any Linux machine with the
+same processor. It has a symbol table, so tools such as `gdb`, `perf`, and `objdump` show its
+functions by name, such as `fn.area` for a stone function `area` and `main` for the top-level
+code.
 
 The executable is for the processor stone runs on, x86-64 or arm64. `--target` picks one
-explicitly, as `x86_64` (or `x64`) or `aarch64` (or `arm64`). Building for the other processor
-needs its cross compiler instead of `gcc`: `aarch64-linux-gnu-gcc` for arm64 or
-`x86_64-linux-gnu-gcc` for x86-64, as Debian and Ubuntu's `gcc-aarch64-linux-gnu` and
-`gcc-x86-64-linux-gnu` packages install them.
+explicitly, as `x86_64` (or `x64`) or `aarch64` (or `arm64`), and works the same from any
+machine.
 
 ```sh
 stone build examples/basics.st -o build/basics

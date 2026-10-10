@@ -20,8 +20,8 @@
 //!
 //! The compiler is also tested for the other architecture, such as aarch64 on an x86-64 machine,
 //! by cross-compiling each program with `stone build --target` and running it under qemu-user.
-//! That needs the cross compiler (such as `aarch64-linux-gnu-gcc`) and qemu (such as
-//! `qemu-aarch64`) on `PATH`, and is skipped with a note when either is missing. Compiled
+//! `stone build` needs no other tools for any target, but running the program needs qemu (such
+//! as `qemu-aarch64`) on `PATH`, so the pass is skipped with a note when it is missing. Compiled
 //! programs are static and need no libc, so qemu needs nothing else.
 //!
 //! A program can opt out of a backend by being listed in [`SKIPS`] along with the reason.
@@ -282,11 +282,10 @@ fn cross_compiler_matches_expected() {
     else {
         return;
     };
-    for tool in [arch.linker(), emulator(arch)] {
-        if !runs(tool) {
-            eprintln!("skipped building for {arch}: {tool} was not found");
-            return;
-        }
+    let emulator = emulator(arch);
+    if !runs(emulator) {
+        eprintln!("skipped running programs built for {arch}: {emulator} was not found");
+        return;
     }
     check_all(Backend::Cross(arch));
 }

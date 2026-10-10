@@ -424,6 +424,8 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.print_bool` writes `true` if `x0` is nonzero and `false` otherwise
 /// - `stone.print_none` writes `none`
 /// - `stone.print_char` writes the byte in `w0`
+/// - `stone.print_str_quoted` writes the string `x0` points to in single quotes, as a
+///   printed list shows its strings
 ///
 /// They write with the `write` system call and clobber `x0` to `x2`, `x8` to `x13`, and `x16`.
 pub fn print(r#gen: &mut dyn AssemblyGenerator) {
@@ -506,6 +508,18 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tsvc\t#0");
     r#gen.emit("\tadd\tsp, sp, #16");
     r#gen.emit("\tret");
+
+    // strings inside a printed list are quoted, like ['a']
+    r#gen.emit("stone.print_str_quoted:");
+    push_frame(r#gen, &["x19"]);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx0, #39"); // '\''
+    r#gen.emit("\tbl\tstone.print_char");
+    r#gen.emit("\tmov\tx0, x19");
+    r#gen.emit("\tbl\tstone.print_str");
+    r#gen.emit("\tmov\tx0, #39");
+    r#gen.emit("\tbl\tstone.print_char");
+    pop_frame(r#gen, &["x19"]);
 }
 
 /// Emits `stone.str_float`, which returns the float whose bits are in `x0` as a new string, the
@@ -687,18 +701,6 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tstur\tx16, [x19, #-8]");
     r#gen.emit("\tmov\tx9, x20");
     pop_frame(r#gen, &saved);
-
-    // strings inside a printed list are quoted, like ['a']
-    r#gen.emit("stone.print_str_quoted:");
-    push_frame(r#gen, &["x19"]);
-    r#gen.emit("\tmov\tx19, x0");
-    r#gen.emit("\tmov\tx0, #39"); // '\''
-    r#gen.emit("\tbl\tstone.print_char");
-    r#gen.emit("\tmov\tx0, x19");
-    r#gen.emit("\tbl\tstone.print_str");
-    r#gen.emit("\tmov\tx0, #39");
-    r#gen.emit("\tbl\tstone.print_char");
-    pop_frame(r#gen, &["x19"]);
 }
 
 /// Emits `label`, a routine that prints the list in `x0` as `[a, b]`, calling `element` for each

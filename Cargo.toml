@@ -1,7 +1,7 @@
 [package]
 name = "stone"
 default-run = "stone"
-version = "0.1.4"
+version = "0.2.0"
 edition = "2024"
 description = "A Python-like language with a tree-walking interpreter and an x86-64 and arm64 compiler"
 license = "Apache-2.0"

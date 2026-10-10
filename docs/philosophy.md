@@ -179,15 +179,16 @@ that call the kernel through `libSystem`, and Windows only through `kernel32.dll
 systems the goal is the thinnest possible layer: call only the system's own interface, never a
 C library's higher-level functions.
 
-The same idea applies to the toolchain. Eventually `stone build` should write executables
-itself, with no assembler, linker, or C compiler installed, so that installing stone is all it
-takes to build stone programs.
+The same idea applies to the toolchain. `stone build` should write executables itself, with no
+assembler, linker, or C compiler installed, so that installing stone is all it takes to build
+stone programs.
 
 Status: on Linux, compiled programs need no C library. They start at their own `_start`, make
 system calls directly, allocate memory with their own allocator on top of `mmap`, read input
 through their own buffer, and format and parse floats themselves, digit for digit like the
-interpreter, so `stone build` links each one into a static executable. `stone build` still runs
-gcc to assemble and link, which is planned to go away.
+interpreter, so each one is a static executable. `stone build` writes that executable itself,
+with its own assembler and linker, so it needs no assembler, linker, or C compiler installed,
+and builds for either processor from any machine.
 
 ## Two backends, one behavior
 

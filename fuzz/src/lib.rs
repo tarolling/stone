@@ -736,8 +736,30 @@ mod tests {
     }
 
     #[test]
+    fn generated_programs_assemble_for_every_target() {
+        // only assembles and links in memory, so it can cover many more programs than run
+        for seed in 0..2_000 {
+            let data = bytes(seed, 512);
+            let source = generate(&mut Unstructured::new(&data)).unwrap();
+            let sources = stone::project::MapSources::default();
+            let (_, loaded) = stone::driver::load(Path::new("main.st"), &source, &sources);
+            let Ok((module, _)) = loaded else {
+                continue;
+            };
+            for arch in Architecture::ALL {
+                let text = arch.generator().assemble(&module).unwrap();
+                let linked = stone::codegen::asm::assemble(&text, arch)
+                    .and_then(|object| stone::codegen::elf::link(&object, arch));
+                if let Err(e) = linked {
+                    panic!("{arch} assembly of a generated program failed ({e}):\n{source}");
+                }
+            }
+        }
+    }
+
+    #[test]
     fn generated_programs_agree_across_backends() {
-        // compiles each program with gcc, so keep the count small enough for every test run
+        // builds and runs each program, so keep the count small enough for every test run
         for seed in 0..150 {
             let data = bytes(seed, 512);
             let source = generate(&mut Unstructured::new(&data)).unwrap();

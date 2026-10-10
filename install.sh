@@ -146,11 +146,10 @@ main() {
             echo "    export PATH=\"$dir:\$PATH\""
             ;;
     esac
-    if [ "$target" != x86_64-unknown-linux-musl ]; then
-        say "note: 'stone build' compiles to x86-64 Linux only, so use 'stone run' here"
-    elif ! command -v gcc > /dev/null 2>&1; then
-        say "note: 'stone build' needs gcc, which is not on your PATH"
-    fi
+    case "$target" in
+        *linux*) ;;
+        *) say "note: 'stone build' writes Linux executables, so use 'stone run' to run programs here" ;;
+    esac
 }
 
 main "$@"

@@ -12,10 +12,11 @@ cd stone
 cargo build
 ```
 
-`stone build` and the test suite also need `gcc` on x86-64 or arm64 Linux, since compiled
-programs are assembled and linked with it. To also test the other processor's backend, install
-its cross compiler and qemu-user, which on an x86-64 Debian or Ubuntu machine is
-`sudo apt-get install gcc-aarch64-linux-gnu qemu-user` (see [testing](testing.md)).
+`stone build` assembles and links programs itself, so it needs no other tools, but the test
+suite runs what it builds, so it needs x86-64 or arm64 Linux. To also run the other processor's
+programs, and to compare the built-in assembler with GNU's, install qemu-user and the GNU
+binutils for both processors, which on an x86-64 Debian or Ubuntu machine is
+`sudo apt-get install qemu-user binutils-aarch64-linux-gnu` (see [testing](testing.md)).
 
 ## Everyday commands
 

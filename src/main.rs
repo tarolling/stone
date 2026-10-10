@@ -48,7 +48,7 @@ enum Command {
         #[arg(short, long, default_value = "build/out")]
         output: PathBuf,
         /// The processor to build for, `x86_64` or `aarch64`. Defaults to this machine's, and
-        /// another needs that processor's cross compiler, such as `aarch64-linux-gnu-gcc`.
+        /// any can be built for from any machine.
         #[arg(long, value_name = "ARCH", value_parser = str::parse::<Architecture>)]
         target: Option<Architecture>,
     },

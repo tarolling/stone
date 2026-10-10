@@ -1,14 +1,16 @@
 //! Backend-independent pieces of code generation, plus the per-architecture backends.
 
 pub mod arm64;
+pub mod asm;
 pub mod context;
+pub mod elf;
 pub mod ir;
 pub mod regalloc;
 pub mod x64;
 
 use std::fmt;
+use std::io::Write;
 use std::path::Path;
-use std::process::Command;
 use std::str::FromStr;
 
 use crate::ast::Mod;
@@ -34,21 +36,6 @@ impl Architecture {
             Architecture::Arm64
         } else {
             Architecture::X64
-        }
-    }
-
-    /// Returns the compiler driver that assembles and links for this architecture: `gcc` for
-    /// the host, and the Debian name of a cross compiler otherwise.
-    ///
-    /// For example, on an x86-64 machine `Architecture::Arm64.linker()` is
-    /// `aarch64-linux-gnu-gcc`.
-    pub fn linker(self) -> &'static str {
-        if self == Architecture::host() {
-            return "gcc";
-        }
-        match self {
-            Architecture::X64 => "x86_64-linux-gnu-gcc",
-            Architecture::Arm64 => "aarch64-linux-gnu-gcc",
         }
     }
 
@@ -86,13 +73,14 @@ impl FromStr for Architecture {
     }
 }
 
-/// Writes `assembly` to `output` with a `.s` extension, then assembles and links it into the
-/// executable `output` with the architecture's [`Architecture::linker`]. The program needs no C
-/// library, since its runtime makes system calls itself and starts at its own `_start`, so it is
-/// linked alone into a static executable.
+/// Writes `assembly` to `output` with a `.s` extension, then assembles it with the built-in
+/// assembler ([`asm`]) and links it with the built-in linker ([`elf`]) into the executable
+/// `output`. The program needs no C library, since its runtime makes system calls itself and
+/// starts at its own `_start`, and building it needs no assembler, linker, or C compiler.
 ///
-/// For example, linking to `build/out` writes `build/out.s` and runs
-/// `gcc -g -nostdlib -static -no-pie -o build/out build/out.s`.
+/// For example, linking to `build/out` writes `build/out.s` and the static executable
+/// `build/out`. The executable is written beside `output` first and then renamed over it, so a
+/// copy of the old program that is still running keeps working.
 pub fn link(assembly: &str, output: &Path, arch: Architecture) -> std::io::Result<()> {
     let source = output.with_extension("s");
     if let Some(dir) = output.parent() {
@@ -100,54 +88,31 @@ pub fn link(assembly: &str, output: &Path, arch: Architecture) -> std::io::Resul
     }
     std::fs::write(&source, assembly)?;
 
-    let linker = arch.linker();
-    let status = Command::new(linker)
-        .arg("-g")
-        .arg("-nostdlib")
-        .arg("-static")
-        .arg("-no-pie")
-        .arg("-o")
-        .arg(output)
-        .arg(&source)
-        .status()
+    let executable = asm::assemble(assembly, arch)
+        .and_then(|object| elf::link(&object, arch))
         .map_err(|e| {
-            if e.kind() == std::io::ErrorKind::NotFound {
-                std::io::Error::other(format!(
-                    "{linker} was not found; install it to build for {arch}"
-                ))
-            } else {
-                std::io::Error::other(format!("could not run {linker}: {e}"))
-            }
+            std::io::Error::other(format!(
+                "internal error: cannot assemble {}: {e}",
+                source.display()
+            ))
         })?;
-    if !status.success() {
-        return Err(std::io::Error::other(format!(
-            "{linker} failed with {status}"
-        )));
-    }
-    Ok(())
-}
-
-/// Returns the first assembler found on the system, checking `as`, `nasm`, and `yasm` in order.
-pub fn find_assembler() -> Option<String> {
-    for tool in &["as", "nasm", "yasm"] {
-        if std::process::Command::new(tool)
-            .arg("--version")
-            .output()
-            .is_ok()
-        {
-            return Some(tool.to_string());
-        }
-    }
-    None
-}
-
-pub fn find_linker() -> Option<String> {
-    for tool in &["gcc", "clang", "ld", "ld.lld"] {
-        if Command::new(tool).arg("--version").output().is_ok() {
-            return Some(tool.to_string());
-        }
-    }
-    None
+    let name = output.file_name().ok_or_else(|| {
+        std::io::Error::other(format!("'{}' is not a file name", output.display()))
+    })?;
+    let mut temporary = std::ffi::OsString::from(".");
+    temporary.push(name);
+    temporary.push(".tmp");
+    let temporary = output.with_file_name(temporary);
+    let _ = std::fs::remove_file(&temporary);
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    // executable by everyone the umask allows, as a linker's output is
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o777);
+    let mut file = options.open(&temporary)?;
+    file.write_all(&executable)?;
+    drop(file);
+    std::fs::rename(&temporary, output)
 }
 
 pub trait AssemblyGenerator {
@@ -175,6 +140,7 @@ pub trait AssemblyGenerator {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::process::Command;
 
     #[test]
     fn targets_parse_by_either_name_and_display_their_first() {
@@ -191,14 +157,6 @@ mod tests {
             "sparc".parse::<Architecture>(),
             Err("unknown target 'sparc' (expected x86_64 or aarch64)".to_string())
         );
-    }
-
-    #[test]
-    fn only_the_host_links_with_plain_gcc() {
-        for arch in Architecture::ALL {
-            let linker = arch.linker();
-            assert_eq!(linker == "gcc", arch == Architecture::host(), "{arch}");
-        }
     }
 
     /// A program that calls every runtime routine: every builtin, method, and `os` function,

@@ -9,14 +9,14 @@ stone is a language that is both compiled and interpreted, depending on the deve
 
 1. Lower the checked AST to IR: blocks of instructions over virtual registers, one per local.
 2. For each function, compute live intervals and assign registers by linear scan, spilling the least-used values to the stack.
-3. Emit x86-64 or arm64 assembly from the allocated IR, then assemble and link it with gcc (or the target's cross gcc).
+3. Emit x86-64 or arm64 assembly from the allocated IR, then assemble and link it into a static ELF executable with the built-in assembler and linker.
 
 ## Pipelines
 
 `src/driver.rs` wires the stages together, and `src/main.rs` picks a pipeline from the command line.
 
 - `stone run`: `project` (`lexer` -> `parser` for each file, then link) -> `checker` -> `interpreter`
-- `stone build`: `project` -> `checker` -> `codegen::ir` (lower to IR) -> `codegen::regalloc` (linear scan) -> `codegen::x64` or `codegen::arm64` (emit, then gcc), picked by `--target`, which defaults to the host's `codegen::Architecture`
+- `stone build`: `project` -> `checker` -> `codegen::ir` (lower to IR) -> `codegen::regalloc` (linear scan) -> `codegen::x64` or `codegen::arm64` (emit), picked by `--target`, -> `codegen::asm` (assemble) -> `codegen::elf` (link), which defaults to the host's `codegen::Architecture`
 - `stone check`: `project` -> `checker`, printing every diagnostic without running
 
 `project::link` lexes and parses the entry file, loads every module its `use` statements name, and
@@ -36,7 +36,9 @@ of one file, except that each `Span` carries the `FileId` of the file it is in.
 | `parser` | recursive-descent PEG parser; `parser/expressions.rs` and `parser/statements.rs` mirror the rules in `docs/grammar/stone.gram` |
 | `checker` | type inference and name resolution, producing diagnostics, expression types, and symbols with their references |
 | `interpreter` | tree-walking evaluator |
-| `codegen` | the `AssemblyGenerator` trait, `Architecture` (the `--target` names and each one's linker), and `link`, which runs gcc |
+| `codegen` | the `AssemblyGenerator` trait, `Architecture` (the `--target` names), and `link`, which writes the `.s` file and the executable |
+| `codegen/asm` | the built-in assembler: parses the GNU as syntax both backends emit and encodes it (`codegen/asm/x64.rs`, `codegen/asm/arm64.rs`), picking the same encodings as GNU as, with jumps relaxed to their short form where they reach |
+| `codegen/elf` | the built-in linker: lays out sections, resolves fixups, and writes a static ELF executable with a symbol table |
 | `codegen/context` | what both backends share about the program being compiled: the checked and lowered program, labels, interned strings, runtime failures, and which runtime routines it needs |
 | `codegen/ir` | the IR the backend compiles through: lowering from the AST (`codegen/ir/lower.rs`) and liveness intervals (`codegen/ir/liveness.rs`) |
 | `codegen/regalloc` | target-independent linear-scan register allocation and parallel-move ordering |
@@ -68,7 +70,7 @@ The `fuzz/` crate uses cargo-fuzz (libFuzzer, nightly Rust). It is a separate cr
 | --- | --- | --- |
 | `lex`, `parse` | arbitrary text | the front end returns tokens, a module, or an error, and never panics, overflows the stack, or takes exponential time |
 | `interpret` | arbitrary text | the interpreter finishes under `fuzz::LIMITS` without panicking |
-| `codegen` | arbitrary text that parses | both backends' `assemble` succeeds or returns an error, without gcc |
+| `codegen` | arbitrary text that parses | both backends' `assemble` succeeds or returns an error, and the assembly it returns assembles and links |
 | `structured` | programs from `stone_fuzz::generate` | the same stages on deep, valid programs, for both backends |
 | `differential` | programs from `stone_fuzz::generate` | `stone run` and `stone build` print the same output |
 

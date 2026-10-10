@@ -42,13 +42,20 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - Compiled programs no longer need a C library. They start at their own entry point and call
   the Linux kernel directly, with their own memory allocator, input buffering, and float
   formatting and parsing, so `stone build` makes a static executable that runs on any Linux
-  machine with the same processor. gcc is still needed, but only to assemble and link.
+  machine with the same processor.
+- `stone build` no longer needs gcc. It assembles and links programs itself, so installing
+  stone is all it takes to build them, for either processor from any machine:
+  `--target aarch64` on x86-64 (or `x86_64` on arm64) needs no cross compiler. The machine
+  code is the same, byte for byte, as GNU's assembler makes, and the executable's symbol table
+  names each function, so tools such as `gdb`, `perf`, and `objdump` show `fn.area` and `main`,
+  though `gdb` can no longer step through the lines of the `.s` file.
 - Compiled programs print floats several times faster.
 
 ### Fixed
 
 - A compiled program that called `strip` but used no lists, or `eof` but never `input`, failed
   to link.
+- A compiled program that used lists but never printed anything failed to link.
 
 ## [0.1.3] - 2026-10-09
 

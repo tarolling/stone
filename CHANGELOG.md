@@ -25,6 +25,12 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   behaves as a copy, so after `b = a`, `b.append(3)` leaves `a` unchanged. Compiled code copies a
   list only when it is about to change while something else still refers to it, so a list held
   by one variable is still changed in place.
+- `xs = f(xs)` and `ret f(xs)` change the list in place: stone moves `xs` into the call instead
+  of copying it, unless `f` could read `xs` as a global, so building a list through a
+  function no longer copies it on every call.
+- More generally, a list moves at its last use instead of being copied, in both `stone run` and
+  `stone build`: `ys = add(xs, 1)`, `ys = xs`, and `rows.append(row)` hand over the list itself
+  when nothing reads `xs` or `row` afterward, so a later change to it happens in place.
 - A function changes its caller's list by returning it, as in `xs = add(xs, 1)`, and can read
   a global but no longer change it with `append` or an index.
 - `append` is a statement of its own (`ys = xs.append(1)` is an error), and it and `xs[i] = v`

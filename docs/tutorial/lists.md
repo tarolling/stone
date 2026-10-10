@@ -60,7 +60,10 @@ an argument and returns the new one instead. The checker points out each of thes
 
 The copies cost nothing until they are needed. Copies share their elements, and a list is only
 copied when it is about to change while another variable still holds it, so changing a list
-that only one variable holds happens in place. See
+that only one variable holds happens in place. That includes `scores = with_total(scores)`
+above: since `scores` is replaced by the result, stone hands the list itself to the function,
+which appends to it in place. The same goes for any list at its last use, such as `xs` in
+`ys = xs` when nothing reads `xs` afterward. See
 [value semantics](../philosophy.md#value-semantics) for why stone works this way.
 
 ## Putting it together

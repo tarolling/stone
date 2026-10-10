@@ -124,7 +124,7 @@ fn a_list_literal_is_built_before_its_variable_lets_go_of_the_old_list() {
             .next()
             .unwrap(),
         "fn f(v0):\n\
-         b0:\n  retain v0\n  v1 = list_load v0, 0\n  v2 = call stone.list_new(1, 0)\n  \
+         b0:\n  v1 = list_load v0, 0\n  v2 = call stone.list_new(1, 0)\n  \
          list_init v2[0], v1\n  release_list v0\n  v0 = copy v2\n  ret v0\n"
     );
 }
@@ -134,10 +134,10 @@ fn assigning_a_string_releases_the_old_value_after_computing_the_new_one() {
     assert_eq!(
         dump("def f(s);\n    s = s + \"x\"\n    ret s\nprint(f(\"a\"))\n"),
         "fn f(v0):\n\
-         b0:\n  retain v0\n  v1 = str \"x\"\n  v2 = call stone.str_concat(v0, v1)\n  \
+         b0:\n  v1 = str \"x\"\n  v2 = call stone.str_concat(v0, v1)\n  \
          release_str v0\n  v0 = copy v2\n  ret v0\n\
          fn main():\n\
-         b0:\n  v0 = str \"a\"\n  v1 = call f(v0)\n  call print[str](v1)\n  \
+         b0:\n  v0 = str \"a\"\n  retain v0\n  v1 = call f(v0)\n  call print[str](v1)\n  \
          call stone.print_char(10)\n  release_str v1\n  ret 0\n"
     );
 }
@@ -149,7 +149,7 @@ fn parameters_are_borrowed_unless_changed_and_temporaries_are_released_once_used
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
-         b0:\n  retain v0\n  v2 = list_load v0, 0\n  retain v2\n  v0 = list_unique v0\n  \
+         b0:\n  v2 = list_load v0, 0\n  retain v2\n  v0 = list_unique v0\n  \
          v3 = list_store v0, v1, v2\n  release_str v3\n  v4 = list_load v0, 1\n  retain v4\n  \
          v5 = str \"!\"\n  v6 = call stone.str_concat(v4, v5)\n  release_str v4\n  \
          v7 = call g(v6)\n  release_str v6\n  release_str v7\n  release_list v0\n  ret 0\n\
@@ -213,7 +213,7 @@ fn methods_lower_to_list_and_string_operations() {
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
-         b0:\n  retain v0\n  v2 = call stone.str_len(v1)\n  v0 = list_unique v0\n  \
+         b0:\n  v2 = call stone.str_len(v1)\n  v0 = list_unique v0\n  \
          call stone.list_append(v0, v2)\n  v3 = len v0\n  release_list v0\n  ret v3\n"
     );
 }
@@ -224,7 +224,7 @@ fn a_changed_parameter_is_owned_and_made_unique_before_each_change() {
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
-         b0:\n  retain v0\n  v0 = list_unique v0\n  list_store v0, v1, 0\n  \
+         b0:\n  v0 = list_unique v0\n  list_store v0, v1, 0\n  \
          v0 = list_unique v0\n  call stone.list_append(v0, v1)\n  ret v0\n"
     );
 }
@@ -236,6 +236,121 @@ fn a_nested_change_makes_every_list_on_the_way_unique() {
                   v5 = list_load v4, 0\n  v5 = list_unique v5\n  list_store v4, 0, v5\n  \
                   list_store v5, 0, 2\n";
     assert!(dump.contains(change), "{dump}");
+}
+
+/// A function that appends to its parameter and returns it, for the tests of moves below.
+const ADD: &str = "def add(xs, x);\n    xs.append(x)\n    ret xs\n";
+
+#[test]
+fn the_caller_gives_an_owned_parameter_its_reference() {
+    // a borrowed variable is retained for the call, and a temporary is given up
+    let source = format!("{ADD}def f(ys);\n    ret [add(ys, 1), add([2], 3)]\nprint(f([0]))\n");
+    let dump = dump(&source);
+    assert!(
+        dump.contains(
+            "retain v0\n  v1 = call add(v0, 1)\n  v2 = call stone.list_new(1, 0)\n  \
+             list_init v2[0], 2\n  v3 = call add(v2, 3)\n  v4 = call stone.list_new(2, 2)\n"
+        ),
+        "{dump}"
+    );
+}
+
+#[test]
+fn a_local_assigned_the_result_of_a_call_is_moved_into_it() {
+    let source = format!("{ADD}def f(xs);\n    xs = add(xs, 1)\n    ret xs\nprint(f([0]))\n");
+    let dump = dump(&source);
+    assert!(
+        dump.contains("fn f(v0):\nb0:\n  v1 = call add(v0, 1)\n  v0 = copy v1\n  ret v0\n"),
+        "{dump}"
+    );
+}
+
+#[test]
+fn only_one_of_two_copies_of_an_argument_moves() {
+    let source = "def two(xs, ys);\n    ys.append(2)\n    xs.append(ys.len())\n    ret xs\n\
+                  def f(xs);\n    xs = two(xs, xs)\n    ret xs\nprint(f([0]))\n";
+    let dump = dump(source);
+    assert!(
+        dump.contains("fn f(v0):\nb0:\n  retain v0\n  v1 = call two(v0, v0)\n  v0 = copy v1\n"),
+        "{dump}"
+    );
+}
+
+#[test]
+fn a_global_moves_only_into_a_function_that_never_reads_it() {
+    let moved = dump(&format!("{ADD}xs = [0]\nxs = add(xs, 1)\n"));
+    assert!(
+        moved.contains("v2 = load_global xs\n  v3 = call add(v2, 1)\n  store_global xs, v3\n"),
+        "{moved}"
+    );
+    // `peek` reads xs, so the call needs a copy
+    let source = "def peek(ys);\n    ys.append(xs[0])\n    ret ys\n\
+                  def add(ys);\n    ys.append(1)\n    ret peek(ys)\nxs = [0]\nxs = add(xs)\n";
+    let kept = dump(source);
+    assert!(
+        kept.contains("v2 = load_global xs\n  retain v2\n  v3 = call add(v2)\n"),
+        "{kept}"
+    );
+}
+
+#[test]
+fn a_variable_moves_into_a_call_at_its_last_use_and_is_left_null() {
+    let source =
+        format!("{ADD}def f(n);\n    xs = [n]\n    ys = add(xs, 1)\n    ret ys\nprint(f(0))\n");
+    let dump = dump(&source);
+    assert!(
+        dump.contains("v4 = call add(v1, 1)\n  release_list v2\n  v2 = copy v4\n  v1 = copy 0\n"),
+        "{dump}"
+    );
+    // a later read keeps the variable's own copy
+    let source = format!(
+        "{ADD}def f(n);\n    xs = [n]\n    ys = add(xs, 1)\n    print(xs)\n    ret ys\n\
+         print(f(0))\n"
+    );
+    let dump = super::tests::dump(&source);
+    assert!(
+        dump.contains("retain v1\n  v4 = call add(v1, 1)\n"),
+        "{dump}"
+    );
+}
+
+#[test]
+fn a_variable_moves_into_another_variable_or_a_list_at_its_last_use() {
+    let dump = dump("def f(n);\n    xs = [n]\n    ys = xs\n    ret ys\nprint(f(0))\n");
+    assert!(
+        dump.contains(
+            "release_list v2\n  v2 = copy v1\n  v1 = copy 0\n  release_list v1\n  ret v2\n"
+        ),
+        "{dump}"
+    );
+    let source = "def f(n);\n    rows = []\n    row = [n]\n    rows.append(row)\n    \
+                  ret rows\nprint(f(0))\n";
+    let dump = super::tests::dump(source);
+    assert!(
+        dump.contains("v1 = list_unique v1\n  call stone.list_append(v1, v2)\n  v2 = copy 0\n"),
+        "{dump}"
+    );
+}
+
+#[test]
+fn a_global_moves_at_its_last_use_in_main() {
+    let dump = dump(&format!("{ADD}xs = [1]\nys = add(xs, 2)\nprint(ys)\n"));
+    assert!(
+        dump.contains("v2 = load_global xs\n  v3 = call add(v2, 2)\n"),
+        "{dump}"
+    );
+    assert!(dump.contains("store_global xs, 0\n"), "{dump}");
+}
+
+#[test]
+fn returning_a_call_moves_the_locals_it_is_given() {
+    let source = "def fill(xs, n);\n    if n == 0;\n        ret xs\n    xs.append(n)\n    \
+                  ret fill(xs, n - 1)\nprint(fill([], 3))\n";
+    let dump = dump(source);
+    assert!(
+        dump.contains("v2 = sub v1, 1\n  v3 = call fill(v0, v2)\n  ret v3\n"),
+        "{dump}"
+    );
 }
 
 #[test]

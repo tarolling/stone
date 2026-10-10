@@ -119,9 +119,14 @@ do instead:
 Status: lists have value semantics in both backends. Compiled code checks a list's reference
 count before changing it and copies the list only when something else refers to it
 (`list_unique` in the IR), so changing a list that only one variable holds is still done in
-place. Next: when a call's argument is the variable its result is assigned to, as in
-`xs = f(xs)`, the compiler should move the value into the call instead of copying it, so the
-function changes it in place.
+place. A function owns each parameter it assigns or changes, and the caller hands it a reference
+for it. When nothing reads the argument after the call, as in `xs = f(xs)` or `ret f(xs)`, the
+caller moves its own reference in instead of keeping one, so the function changes the list in
+place. More generally, both backends find each variable's last use, and a value moves there
+instead of being copied: into a call (`ys = f(xs)`), another variable (`ys = xs`), or a list
+(`rows.append(row)`) when nothing reads it afterward. A global moves only into a function that
+never reads it, directly or through the functions it calls, and never in an interactive session,
+where a later entry may read it.
 
 ## Fast like Rust
 

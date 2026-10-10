@@ -5,7 +5,9 @@
 use crate::ast::{
     BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp,
 };
-use crate::checker::{place, range_args};
+use crate::checker::{collect_assigned, place, range_args};
+use crate::last_use::{GlobalReads, global_reads, last_uses};
+use crate::span::Span;
 use crate::stdlib::{self, MAX_CALL_DEPTH, os};
 use std::cmp::Ordering;
 use std::collections::HashMap;
@@ -13,6 +15,51 @@ use std::io::{BufRead, Write};
 use std::rc::Rc;
 
 type EvalResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// The variables each statement of a body uses for the last time, which the interpreter drops
+/// after the statement so that a list nothing else holds can change in place.
+#[derive(Default)]
+struct LastUses {
+    by_span: HashMap<Span, Vec<String>>,
+    /// Whether some statement starting on each line uses a variable for the last time, which
+    /// rules out most statements without hashing their span.
+    lines: Vec<bool>,
+}
+
+impl LastUses {
+    /// Finds the last uses in `body`, a function's or the program's, given what each function
+    /// reads.
+    fn new(body: &[Stmt], reads: &GlobalReads) -> Self {
+        let by_span = last_uses(body, reads);
+        let mut lines = Vec::new();
+        for span in by_span.keys() {
+            let line = span.start.line;
+            if lines.len() <= line {
+                lines.resize(line + 1, false);
+            }
+            lines[line] = true;
+        }
+        LastUses { by_span, lines }
+    }
+
+    /// Returns the variables the statement at `span` uses for the last time, if any.
+    fn get(&self, span: Span) -> Option<&Vec<String>> {
+        if !self.lines.get(span.start.line).copied().unwrap_or(false) {
+            return None;
+        }
+        self.by_span.get(&span)
+    }
+}
+
+/// A user-defined function.
+///
+/// For example, `def add(a, b); ret a + b` has the parameters `["a", "b"]`.
+struct Function {
+    params: Vec<String>,
+    body: Vec<Stmt>,
+    /// The variables each statement of the body uses for the last time.
+    last_uses: Rc<LastUses>,
+}
 
 /// A value a running program works with.
 ///
@@ -104,6 +151,11 @@ impl Value {
             Value::List(items) => Ok(items),
             other => Err(format!("expected a list, found {}", other.display(true)).into()),
         }
+    }
+
+    /// Returns whether this is a list that another value shares, so changing it copies it.
+    fn is_shared(&self) -> bool {
+        matches!(self, Value::List(items) if Rc::strong_count(items) > 1)
     }
 
     /// Returns the elements of a list for changing, copying them first if another value still
@@ -208,10 +260,20 @@ pub struct Interpreter<'out> {
     globals: HashMap<String, Value>,
     /// Stack of local scopes, with the innermost scope last.
     scopes: Vec<HashMap<String, Value>>,
-    /// User-defined functions, mapping each name to its parameters and body.
-    ///
-    /// For example, `def add(a, b); ret a + b` is stored as `"add" -> (["a", "b"], body)`.
-    functions: HashMap<String, (Vec<String>, Rc<Vec<Stmt>>)>,
+    /// User-defined functions by name.
+    functions: HashMap<String, Rc<Function>>,
+    /// The variables each statement of the running body uses for the last time, innermost call
+    /// last. A variable is dropped after its last use, so a list that nothing else holds can be
+    /// changed in place.
+    last_uses: Vec<Rc<LastUses>>,
+    /// For each function, the globals it may read, which must not move into a call to it.
+    global_reads: GlobalReads,
+    /// Whether globals can move at their last use, which is never in an interactive session,
+    /// since a later entry may read them.
+    moves_globals: bool,
+    /// The call a statement makes as its value, by span, and the variables it may take its
+    /// arguments from, since nothing reads them after it.
+    top_call: Option<(Span, Vec<String>)>,
     /// Where `print` writes, which is stdout unless a caller captures it.
     out: Box<dyn Write + 'out>,
     /// Where `input` and `eof` read, which is empty unless a caller gives one.
@@ -225,6 +287,9 @@ pub struct Interpreter<'out> {
     depth: usize,
     /// Function calls currently active, compared against [`Limits::max_calls`].
     calls: usize,
+    /// How many times a change copied a list that something else still shared, which tests use
+    /// to check that values move rather than being copied.
+    copies: u64,
 }
 
 impl Default for Interpreter<'static> {
@@ -250,6 +315,10 @@ impl<'out> Interpreter<'out> {
             globals: HashMap::new(),
             scopes: vec![],
             functions: HashMap::new(),
+            last_uses: vec![],
+            global_reads: GlobalReads::new(),
+            moves_globals: false,
+            top_call: None,
             out: Box::new(out),
             input: Box::new(std::io::empty()),
             args: vec![],
@@ -257,6 +326,7 @@ impl<'out> Interpreter<'out> {
             fuel_used: 0,
             depth: 0,
             calls: 0,
+            copies: 0,
         }
     }
 
@@ -337,6 +407,12 @@ impl<'out> Interpreter<'out> {
     pub fn evaluate(&mut self, module: &Mod) -> Result<(), Box<dyn std::error::Error>> {
         match module {
             Mod::Module { body } => {
+                let mut assigned = vec![];
+                collect_assigned(body, &mut assigned);
+                let globals = assigned.into_iter().map(|(name, _)| name).collect();
+                self.global_reads = global_reads(body, &globals);
+                self.moves_globals = true;
+                self.last_uses = vec![Rc::new(LastUses::new(body, &self.global_reads))];
                 // functions can be called before their definition
                 for stmt in body {
                     if let StmtKind::FunctionDef { .. } = stmt.kind {
@@ -360,6 +436,9 @@ impl<'out> Interpreter<'out> {
     /// For example, after an entry `x = 1`, running the entry `x + 1` prints `2`, and running
     /// `"hi"` prints `'hi'`, quoted as it would be inside a list.
     pub fn run_entry(&mut self, body: &[Stmt]) -> EvalResult<()> {
+        // a later entry may read any global, so none moves
+        self.moves_globals = false;
+        self.last_uses = vec![Rc::default()];
         // functions can be called before their definition
         for stmt in body {
             if let StmtKind::FunctionDef { .. } = stmt.kind {
@@ -409,7 +488,87 @@ impl<'out> Interpreter<'out> {
     ///      | Break | Continue
     /// ```
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<ControlFlow, Box<dyn std::error::Error>> {
-        self.nested(|this| this.eval_stmt_unguarded(stmt))
+        self.nested(|this| {
+            let flow = this.eval_stmt_unguarded(stmt)?;
+            // returning drops the whole scope anyway
+            if !matches!(stmt.kind, StmtKind::Return { .. }) {
+                this.drop_last_uses(stmt.span);
+            }
+            Ok(flow)
+        })
+    }
+
+    /// Notes `value`, the value of the statement at `span`, if it calls a stone function, with
+    /// the variables the call may take its arguments from: those the statement uses for the last
+    /// time, and `targets`, the names it assigns.
+    ///
+    /// For example, `xs = add(xs, 1)` may take `xs`, since the assignment replaces it.
+    fn note_top_call(&mut self, span: Span, value: &Expr, targets: &[Expr]) {
+        let ExprKind::Call { func, .. } = &value.kind else {
+            return;
+        };
+        let ExprKind::Name { id, .. } = &func.kind else {
+            return;
+        };
+        if !self.functions.contains_key(id) {
+            return;
+        }
+        let mut names = self
+            .last_uses
+            .last()
+            .and_then(|uses| uses.get(span))
+            .cloned()
+            .unwrap_or_default();
+        for target in targets {
+            if let ExprKind::Name { id, .. } = &target.kind {
+                names.push(id.clone());
+            }
+        }
+        // a call claims only its own entry, by span, so an unclaimed one can stay
+        self.top_call = Some((value.span, names));
+    }
+
+    /// Drops the variables the statement at `span` used for the last time, so the values they
+    /// held are no longer shared.
+    fn drop_last_uses(&mut self, span: Span) {
+        // most statements use nothing for the last time, so only a hit is cloned
+        let Some(names) = self
+            .last_uses
+            .last()
+            .and_then(|uses| uses.get(span))
+            .cloned()
+        else {
+            return;
+        };
+        for name in &names {
+            self.drop_variable(name, None);
+        }
+    }
+
+    /// Drops the variable `name` of the running body if it holds a list, the only value a
+    /// change can copy: a local of the running function, or a global at the top level, unless
+    /// globals cannot move or the function `callee` may read it.
+    fn drop_variable(&mut self, name: &str, callee: Option<&str>) {
+        let holds_list =
+            |scope: &HashMap<String, Value>| matches!(scope.get(name), Some(Value::List(_)));
+        match self.scopes.last_mut() {
+            Some(scope) => {
+                if holds_list(scope) {
+                    scope.remove(name);
+                }
+            }
+            None if self.moves_globals
+                && holds_list(&self.globals)
+                && callee.is_none_or(|callee| {
+                    self.global_reads
+                        .get(callee)
+                        .is_none_or(|reads| !reads.contains(name))
+                }) =>
+            {
+                self.globals.remove(name);
+            }
+            None => {}
+        }
     }
 
     fn eval_stmt_unguarded(
@@ -420,14 +579,17 @@ impl<'out> Interpreter<'out> {
             StmtKind::FunctionDef {
                 name, args, body, ..
             } => {
-                let param_names: Vec<String> =
-                    args.args.iter().map(|arg| arg.arg.clone()).collect();
-                self.functions
-                    .insert(name.clone(), (param_names, Rc::new(body.clone())));
+                let function = Function {
+                    params: args.args.iter().map(|arg| arg.arg.clone()).collect(),
+                    last_uses: Rc::new(LastUses::new(body, &self.global_reads)),
+                    body: body.clone(),
+                };
+                self.functions.insert(name.clone(), Rc::new(function));
                 Ok(ControlFlow::None)
             }
             StmtKind::Return { value } => {
                 let val = if let Some(expr) = value {
+                    self.note_top_call(stmt.span, expr, &[]);
                     self.eval_expr(expr)?
                 } else {
                     Value::None
@@ -435,6 +597,13 @@ impl<'out> Interpreter<'out> {
                 Ok(ControlFlow::Return(val))
             }
             StmtKind::Assign { targets, value } => {
+                // a target's indexes are read after the call
+                if targets
+                    .iter()
+                    .all(|target| matches!(target.kind, ExprKind::Name { .. }))
+                {
+                    self.note_top_call(stmt.span, value, targets);
+                }
                 let rhs = self.eval_expr(value)?;
 
                 for target in targets {
@@ -508,6 +677,7 @@ impl<'out> Interpreter<'out> {
                 }
             }
             StmtKind::Expr { value } => {
+                self.note_top_call(stmt.span, value, &[]);
                 self.eval_expr(value)?;
                 Ok(ControlFlow::None)
             }
@@ -681,10 +851,22 @@ impl<'out> Interpreter<'out> {
                 let ExprKind::Name { id, .. } = &func.kind else {
                     return Err("only functions can be called, by name".into());
                 };
+                // claimed first, since a call among the arguments runs statements of its own
+                let movable = self.top_call.take_if(|(span, _)| *span == expr.span);
                 // arguments are evaluated left to right in the caller's scope
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.eval_expr(arg)?);
+                }
+                // an argument nothing reads after its statement's call moves into it
+                if let Some((_, names)) = movable {
+                    for arg in args {
+                        if let ExprKind::Name { id: name, .. } = &arg.kind
+                            && names.contains(name)
+                        {
+                            self.drop_variable(name, Some(id));
+                        }
+                    }
                 }
                 self.call(id, values)
             }
@@ -786,12 +968,12 @@ impl<'out> Interpreter<'out> {
             _ => {}
         }
 
-        let Some((params, body)) = self.functions.get(name) else {
+        let Some(function) = self.functions.get(name).cloned() else {
             return Err(format!("Function '{name}' not found").into());
         };
-        let (params, body) = (params.clone(), body.clone());
-        if params.len() != args.len() {
-            return Err(format!("Function {} expects {} args", name, params.len()).into());
+        if function.params.len() != args.len() {
+            let expected = function.params.len();
+            return Err(format!("Function {name} expects {expected} args").into());
         }
 
         self.burn_fuel()?;
@@ -805,13 +987,15 @@ impl<'out> Interpreter<'out> {
 
         // bind parameters directly so they shadow globals of the same name
         self.calls += 1;
+        self.last_uses.push(function.last_uses.clone());
         self.enter_scope();
         let scope = self.scopes.last_mut().expect("scope was just entered");
-        for (param, value) in params.into_iter().zip(args) {
-            scope.insert(param, value);
+        for (param, value) in function.params.iter().zip(args) {
+            scope.insert(param.clone(), value);
         }
-        let flow = self.eval_block(&body);
+        let flow = self.eval_block(&function.body);
         self.exit_scope();
+        self.last_uses.pop();
         self.calls -= 1;
 
         Ok(match flow? {
@@ -877,10 +1061,81 @@ impl<'out> Interpreter<'out> {
             .get_mut(root)
             .ok_or_else(|| format!("'{root}' is used before it is assigned"))?;
         for &index in indexes {
+            self.copies += value.is_shared() as u64;
             let items = value.as_list_mut()?;
             let position = list_position(index, items.len())?;
             value = &mut items[position];
         }
+        self.copies += value.is_shared() as u64;
         value.as_list_mut()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::parse;
+
+    /// Runs `source` and returns how many times a change copied a list that something else
+    /// still shared.
+    fn copies(source: &str) -> u64 {
+        let module = parse(source).unwrap();
+        let mut out = Vec::new();
+        let mut interpreter = Interpreter::with_output(&mut out, Limits::DEFAULT);
+        interpreter.evaluate(&module).unwrap();
+        interpreter.copies
+    }
+
+    /// A function that appends to its parameter and returns it.
+    const ADD: &str = "def add(xs, x);\n    xs.append(x)\n    ret xs\n";
+
+    #[test]
+    fn a_list_assigned_the_result_of_a_call_is_changed_in_place() {
+        let source =
+            format!("{ADD}xs = []\nfor i in range(100);\n    xs = add(xs, i)\nprint(xs)\n");
+        assert_eq!(copies(&source), 0);
+        let source = format!(
+            "{ADD}def fill(xs, n);\n    if n == 0;\n        ret xs\n    xs.append(n)\n    \
+             ret fill(xs, n - 1)\nprint(fill([], 50))\n"
+        );
+        assert_eq!(copies(&source), 0);
+        // a call among the arguments runs statements of its own first
+        let source = format!(
+            "{ADD}def one();\n    n = 1\n    ret n\nxs = []\nfor i in range(10);\n    \
+             xs = add(xs, one())\nprint(xs)\n"
+        );
+        assert_eq!(copies(&source), 0);
+    }
+
+    #[test]
+    fn a_list_moves_at_its_last_use() {
+        assert_eq!(
+            copies(&format!("{ADD}xs = [1]\nys = add(xs, 2)\nprint(ys)\n")),
+            0
+        );
+        assert_eq!(copies("xs = [1]\nys = xs\nys.append(2)\nprint(ys)\n"), 0);
+        assert_eq!(
+            copies("rows = []\nrow = [1]\nrows.append(row)\nrows[0].append(2)\nprint(rows)\n"),
+            0
+        );
+        let source = "def f(n);\n    xs = [n]\n    ys = xs\n    ys.append(1)\n    ret ys\n\
+                      print(f(0))\n";
+        assert_eq!(copies(source), 0);
+    }
+
+    #[test]
+    fn a_list_read_later_is_copied() {
+        assert_eq!(
+            copies(&format!("{ADD}xs = [1]\nys = add(xs, 2)\nprint(xs, ys)\n")),
+            1
+        );
+        assert_eq!(
+            copies("xs = [1]\nys = xs\nys.append(2)\nprint(xs, ys)\n"),
+            1
+        );
+        // the function reads the global it is given, so it must not see the change
+        let source = "def peek(ys);\n    ys.append(xs[0])\n    ret ys\nxs = [1]\nxs = peek(xs)\n\
+                      print(xs)\n";
+        assert_eq!(copies(source), 1);
     }
 }

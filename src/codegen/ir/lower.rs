@@ -13,8 +13,10 @@
 //!   since a later call could replace it in the list)
 //! - whatever uses a temporary releases it right after, and storing a value moves a temporary's
 //!   reference or retains a borrowed value
-//! - a parameter is borrowed from the caller, unless the function assigns or changes it, which
-//!   retains it
+//! - a parameter is borrowed from the caller, unless the function assigns or changes it: then
+//!   the function owns it, and the caller gives it a reference, a temporary's own, a retained
+//!   one, or a variable's own when nothing reads the variable after the call (`xs = f(xs)` or
+//!   `ret f(xs)`), which moves the value in so the function can change it in place
 //! - lists are values, so before a statement changes one (`xs[i] = v` or `xs.append(v)`), each
 //!   list from the variable to it is made unique (`list_unique`): copied if anything else refers
 //!   to it, so the change shows through no other variable
@@ -36,6 +38,7 @@ use crate::checker::{
     Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, range_args,
 };
 use crate::codegen::context::os_routine;
+use crate::last_use::{LiveAfter, global_reads, live_after};
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
@@ -67,11 +70,14 @@ pub fn lower(
             )
         })
         .collect();
+    let global_set: HashSet<String> = globals.iter().cloned().collect();
     let context = Context {
         types,
         variables: &variables,
         globals: &globals,
-        global_set: globals.iter().cloned().collect(),
+        owned_params: owned_params(body),
+        global_reads: global_reads(body, &global_set),
+        global_set,
     };
 
     let mut functions = Vec::new();
@@ -99,6 +105,12 @@ struct Context<'a> {
     /// Every global, in the order they are first assigned.
     globals: &'a [String],
     global_set: HashSet<String>,
+    /// For each function, whether it owns each parameter, which it does if it assigns or changes
+    /// it. A caller gives an owned parameter a reference of its own.
+    owned_params: HashMap<String, Vec<bool>>,
+    /// For each function, the globals it or any function it calls may read, which a caller must
+    /// not move into it.
+    global_reads: HashMap<String, HashSet<String>>,
 }
 
 /// What a `for` loop walks: a range up to an end, or a list.
@@ -142,6 +154,19 @@ struct Lowerer<'a> {
     /// Each enclosing loop, innermost last.
     loops: Vec<Loop>,
     loop_depth: u32,
+    /// The variables whose value the next call to a stone function may move into it, since
+    /// nothing reads them after the call: the target of `x = f(...)`, or every counted local for
+    /// `ret f(...)`.
+    movable: Vec<String>,
+    /// The locals and globals a call moved, whose old value the assignment or return that follows
+    /// must not release.
+    moved_locals: HashSet<VReg>,
+    moved_globals: HashSet<String>,
+    /// The variables still read after each statement of the body being lowered.
+    live_after: LiveAfter,
+    /// The variables the expression statement being lowered uses for the last time, which an
+    /// `append` it makes may move into the list.
+    statement_last_uses: Vec<String>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -158,6 +183,11 @@ impl<'a> Lowerer<'a> {
             current: None,
             loops: Vec::new(),
             loop_depth: 0,
+            movable: Vec::new(),
+            moved_locals: HashSet::new(),
+            moved_globals: HashSet::new(),
+            live_after: LiveAfter::new(),
+            statement_last_uses: Vec::new(),
         }
     }
 
@@ -177,10 +207,12 @@ impl<'a> Lowerer<'a> {
             }
         }
 
+        self.live_after = live_after(body, &self.context.global_reads);
         let entry = self.new_block();
         self.start(entry);
-        // a parameter the function assigns or changes needs a reference of its own to release,
-        // and other counted locals start null, since they may not be assigned on every path
+        // the caller gives a parameter the function assigns or changes a reference of its own to
+        // release, and other counted locals start null, since they may not be assigned on every
+        // path
         let names = args
             .iter()
             .map(|arg| &arg.arg)
@@ -199,13 +231,9 @@ impl<'a> Lowerer<'a> {
                     dst: reg,
                     src: Operand::Imm(0),
                 });
-            } else if assigned.iter().any(|(assigned, _)| assigned == name)
-                || changed.contains(name)
+            } else if !assigned.iter().any(|(assigned, _)| assigned == name)
+                && !changed.contains(name)
             {
-                self.push(Inst::Retain {
-                    src: Operand::Reg(reg),
-                });
-            } else {
                 continue;
             }
             self.counted_locals.push((reg, kind));
@@ -416,8 +444,10 @@ impl<'a> Lowerer<'a> {
             });
         }
         if self.name.is_some() {
+            let moved = std::mem::take(&mut self.moved_locals);
             for (reg, kind) in self.counted_locals.clone() {
-                if value == Operand::Reg(reg) {
+                // a local moved into a call no longer holds a reference
+                if value == Operand::Reg(reg) || moved.contains(&reg) {
                     continue;
                 }
                 self.push(Inst::Release {
@@ -511,6 +541,23 @@ impl<'a> Lowerer<'a> {
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         match &stmt.kind {
             StmtKind::Assign { targets, value } => {
+                let last_uses = self.last_uses(stmt);
+                // a call can also take a target's old value, which the assignment replaces, but
+                // not what a target's indexes read after it
+                if self.is_stone_call(value)
+                    && targets
+                        .iter()
+                        .all(|target| matches!(target.kind, ExprKind::Name { .. }))
+                {
+                    self.movable = last_uses.clone();
+                    for target in targets {
+                        if let ExprKind::Name { id, .. } = &target.kind
+                            && self.is_counted_variable(id)
+                        {
+                            self.movable.push(id.clone());
+                        }
+                    }
+                }
                 let kind = self.counted(value);
                 if kind.is_none()
                     && let [target] = targets.as_slice()
@@ -518,25 +565,34 @@ impl<'a> Lowerer<'a> {
                     && let Some(&local) = self.locals.get(id)
                 {
                     self.expr_into(value, Some(local))?;
-                    return Ok(());
-                }
-                let value = self.expr(value)?;
-                // every target gets a reference of its own, the last one the temporary's
-                for (i, target) in targets.iter().enumerate() {
-                    if i + 1 < targets.len() {
-                        if kind.is_some() {
-                            self.push(Inst::Retain { src: value });
+                } else {
+                    let result = self.expr(value)?;
+                    // every target gets a reference of its own, the last one the temporary's
+                    for (i, target) in targets.iter().enumerate() {
+                        if i + 1 < targets.len() {
+                            if kind.is_some() {
+                                self.push(Inst::Retain { src: result });
+                            }
+                        } else {
+                            self.take_from(value, result, kind, &last_uses);
                         }
-                    } else {
-                        self.take(value, kind);
+                        self.assign(target, result, kind)?;
                     }
-                    self.assign(target, value, kind)?;
                 }
+                self.clear_moved();
             }
 
             StmtKind::Expr { value } => {
-                let value = self.expr(value)?;
-                self.release_temp(value);
+                let last_uses = self.last_uses(stmt);
+                if self.is_stone_call(value) {
+                    self.movable = last_uses.clone();
+                }
+                // `xs.append(row)` can take `row` at its last use
+                self.statement_last_uses = last_uses;
+                let result = self.expr(value)?;
+                self.statement_last_uses.clear();
+                self.release_temp(result);
+                self.clear_moved();
             }
 
             StmtKind::Return { value } => {
@@ -548,6 +604,10 @@ impl<'a> Lowerer<'a> {
                         Operand::Imm(0)
                     }
                     Some(value) => {
+                        // returning releases every local, so a call can take any of them
+                        if self.is_stone_call(value) {
+                            self.movable = self.last_uses(stmt);
+                        }
                         let result = self.expr(value)?;
                         // a counted local gives its own reference to the caller
                         if !self
@@ -649,7 +709,10 @@ impl<'a> Lowerer<'a> {
         match &target.kind {
             ExprKind::Name { id, .. } => {
                 if let Some(&local) = self.locals.get(id) {
-                    if let Some(kind) = kind {
+                    // a value moved into the call that computed the new one is not ours to release
+                    if let Some(kind) = kind
+                        && !self.moved_locals.remove(&local)
+                    {
                         self.push(Inst::Release {
                             src: Operand::Reg(local),
                             kind,
@@ -662,6 +725,7 @@ impl<'a> Lowerer<'a> {
                         });
                     }
                 } else if self.context.global_set.contains(id) {
+                    let kind = kind.filter(|_| !self.moved_globals.remove(id));
                     self.store_global(id, value, kind);
                 }
             }
@@ -1340,7 +1404,9 @@ impl<'a> Lowerer<'a> {
                 for arg in args {
                     let value = self.expr(arg)?;
                     // the list keeps a reference to what it holds
-                    self.take(value, elem);
+                    let last_uses = std::mem::take(&mut self.statement_last_uses);
+                    self.take_from(arg, value, elem, &last_uses);
+                    self.statement_last_uses = last_uses;
                     values.push(value);
                 }
                 let list = self.unique_place(receiver, &indexes)?;
@@ -1497,23 +1563,160 @@ impl<'a> Lowerer<'a> {
                 Ok(result)
             }
             _ => {
+                // taken first, so that no call among the arguments moves what a later one reads
+                let movable = std::mem::take(&mut self.movable);
                 let mut values = Vec::new();
                 for arg in args {
                     values.push(self.expr(arg)?);
                 }
+                let given = self.give_references(name, args, &values, &movable);
                 let dst = self.dst(into);
                 self.push(Inst::Call {
                     dst: Some(dst),
                     callee: Callee::User(name.to_string()),
                     args: values.clone(),
                 });
-                for value in values {
-                    self.release_temp(value);
+                for (value, given) in values.into_iter().zip(given) {
+                    if !given {
+                        self.release_temp(value);
+                    }
                 }
                 self.own(Operand::Reg(dst), kind);
                 Ok(Operand::Reg(dst))
             }
         }
+    }
+
+    /// Gives a reference to each argument of the stone function `name` that it owns, once every
+    /// argument is evaluated, and returns which arguments got one.
+    ///
+    /// A temporary gives its own. A variable in `movable` gives its own too, which moves its
+    /// value into the call, unless it is a global the function may read, or it was already given
+    /// to another parameter of the same call. Anything else is retained. For example, in
+    /// `xs = add(xs, 1)` the list moves into `add`, which can then append to it in place, while
+    /// `ys = add(xs, 1)` retains it, so `add` copies it before appending.
+    fn give_references(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        values: &[Operand],
+        movable: &[String],
+    ) -> Vec<bool> {
+        let owned = self.context.owned_params.get(name);
+        let mut given = vec![false; values.len()];
+        for (i, (arg, &value)) in args.iter().zip(values).enumerate() {
+            if owned.is_none_or(|owned| owned.get(i) != Some(&true)) || self.counted(arg).is_none()
+            {
+                continue;
+            }
+            given[i] = true;
+            if let Operand::Reg(reg) = value
+                && self.owned.remove(&reg).is_some()
+            {
+                continue;
+            }
+            // a global the function may read must keep its own copy while it runs
+            if let ExprKind::Name { id, .. } = &arg.kind
+                && movable.contains(id)
+                && (self.locals.contains_key(id) || !self.context.global_reads[name].contains(id))
+                && self.mark_moved(id)
+            {
+                continue;
+            }
+            self.push(Inst::Retain { src: value });
+        }
+        given
+    }
+
+    /// Returns the counted variables this function owns, or the counted globals in `main`, that
+    /// nothing reads after `stmt`, so that `stmt` may move them instead of copying them.
+    ///
+    /// For example, in `ys = add(xs, 1)` followed by `print(ys)`, this is `xs`.
+    fn last_uses(&self, stmt: &Stmt) -> Vec<String> {
+        let live = self.live_after.get(&stmt.span);
+        let mut names: Vec<String> = match &self.name {
+            Some(_) => self
+                .locals
+                .keys()
+                .filter(|name| self.is_counted_variable(name))
+                .cloned()
+                .collect(),
+            None => self
+                .context
+                .globals
+                .iter()
+                .filter(|name| self.global_kind(name).is_some())
+                .cloned()
+                .collect(),
+        };
+        names.retain(|name| live.is_none_or(|live| !live.contains(name)));
+        names.sort();
+        names
+    }
+
+    /// Returns whether `name` is a variable this code owns a counted reference in: a counted
+    /// local of this function, or a counted global in `main`.
+    fn is_counted_variable(&self, name: &str) -> bool {
+        match self.locals.get(name) {
+            Some(reg) => self.counted_locals.iter().any(|(local, _)| local == reg),
+            None => self.name.is_none() && self.global_kind(name).is_some(),
+        }
+    }
+
+    /// Notes that the variable `name` gave its reference away, returning false if it already
+    /// had.
+    fn mark_moved(&mut self, name: &str) -> bool {
+        match self.locals.get(name) {
+            Some(&local) => self.moved_locals.insert(local),
+            None => self.moved_globals.insert(name.to_string()),
+        }
+    }
+
+    /// Like [`Lowerer::take`], but a variable in `last_uses` gives its own reference instead of
+    /// being retained, so that `ys = xs` at the last use of `xs` leaves one reference, not two.
+    fn take_from(
+        &mut self,
+        expr: &Expr,
+        value: Operand,
+        kind: Option<RcKind>,
+        last_uses: &[String],
+    ) {
+        if kind.is_some()
+            && let ExprKind::Name { id, .. } = &expr.kind
+            && last_uses.contains(id)
+            && self.mark_moved(id)
+        {
+            return;
+        }
+        self.take(value, kind);
+    }
+
+    /// Leaves null in each variable that gave its reference away and that its statement did not
+    /// assign again, so releasing it later does nothing.
+    fn clear_moved(&mut self) {
+        let mut locals: Vec<VReg> = self.moved_locals.drain().collect();
+        locals.sort_by_key(|reg| reg.0);
+        for local in locals {
+            self.push(Inst::Copy {
+                dst: local,
+                src: Operand::Imm(0),
+            });
+        }
+        let mut globals: Vec<String> = self.moved_globals.drain().collect();
+        globals.sort();
+        for name in globals {
+            self.push(Inst::StoreGlobal {
+                name,
+                src: Operand::Imm(0),
+            });
+        }
+    }
+
+    /// Returns whether `expr` is a call to a stone function, rather than a builtin or a method.
+    fn is_stone_call(&self, expr: &Expr) -> bool {
+        matches!(&expr.kind, ExprKind::Call { func, .. }
+            if matches!(&func.kind, ExprKind::Name { id, .. }
+                if self.context.owned_params.contains_key(id)))
     }
 
     fn print_char(&mut self, c: char) {
@@ -1523,6 +1726,34 @@ impl<'a> Lowerer<'a> {
             args: vec![Operand::Imm(c as i64)],
         });
     }
+}
+
+/// Returns, for each function in `body`, whether it owns each of its parameters, which it does if
+/// it assigns or changes the parameter.
+///
+/// For example, `def add(xs, x); xs.append(x); ret xs` owns `xs` but not `x`.
+fn owned_params(body: &[Stmt]) -> HashMap<String, Vec<bool>> {
+    let mut owned = HashMap::new();
+    for stmt in body {
+        if let StmtKind::FunctionDef {
+            name, args, body, ..
+        } = &stmt.kind
+        {
+            let mut assigned = Vec::new();
+            collect_assigned(body, &mut assigned);
+            let mut changed = HashSet::new();
+            collect_changed(body, &mut changed);
+            let params = args
+                .args
+                .iter()
+                .map(|arg| {
+                    changed.contains(&arg.arg) || assigned.iter().any(|(name, _)| *name == arg.arg)
+                })
+                .collect();
+            owned.insert(name.clone(), params);
+        }
+    }
+    owned
 }
 
 /// Returns whether evaluating `expr` can call a function or method, which is the only way code

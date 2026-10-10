@@ -28,7 +28,15 @@ extensions = [
 myst_enable_extensions = ["colon_fence", "deflist"]
 myst_heading_anchors = 3
 source_suffix = {".md": "markdown"}
-exclude_patterns = ["_build", "grammar", "examples", "ARCHITECTURE.md", "requirements.txt"]
+# a virtualenv made in docs/ for building would otherwise be read as pages
+exclude_patterns = [
+    "_build",
+    "grammar",
+    "examples",
+    "ARCHITECTURE.md",
+    "requirements.txt",
+    ".venv",
+]
 highlight_language = "stone"
 
 html_theme = "furo"

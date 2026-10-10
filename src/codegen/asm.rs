@@ -577,13 +577,15 @@ pub fn split_operands(text: &str) -> Vec<&str> {
     operands
 }
 
-/// Returns whether `name` can be a label, such as `fn.area`, `.Lstone_true`, or `_start`.
+/// Returns whether `name` can be a label, such as `fn.area`, `.Lstone_true`, or `_start`. Like
+/// GNU as, it takes letters and digits from any script, since a stone name such as `größe`
+/// becomes the label `fn.größe`.
 pub fn is_symbol(name: &str) -> bool {
     let mut chars = name.chars();
     chars
         .next()
-        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_' || c == '.')
-        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '.')
+        .is_some_and(|c| c.is_alphabetic() || c == '_' || c == '.')
+        && chars.all(|c| c.is_alphanumeric() || c == '_' || c == '.')
 }
 
 /// Parses an integer written in decimal or hex, with an optional `-`, the way GNU as reads
@@ -681,6 +683,21 @@ mod tests {
 
     fn x64(text: &str) -> Result<Object, String> {
         assemble(text, Architecture::X64)
+    }
+
+    #[test]
+    fn labels_may_hold_letters_from_any_script() {
+        for arch in Architecture::ALL {
+            let reference = match arch {
+                Architecture::X64 => "\tmov\tQWORD PTR [rip + g.bׇ], 3\n\tcall\tfn.größe",
+                Architecture::Arm64 => "\tadrp\tx16, g.bׇ\n\tbl\tfn.größe",
+            };
+            let text = format!("\t.text\n{reference}\nfn.größe:\n\t.data\ng.bׇ:\n\t.quad\t0\n");
+            let object = assemble(&text, arch).unwrap();
+            let names: Vec<&str> = object.symbols.iter().map(|s| s.name.as_str()).collect();
+            assert_eq!(names, ["fn.größe", "g.bׇ"], "{arch}");
+        }
+        assert!(!is_symbol("fn.a b") && !is_symbol("fn.a,b") && !is_symbol("1a"));
     }
 
     #[test]

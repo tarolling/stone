@@ -21,8 +21,8 @@
 //! The compiler is also tested for the other architecture, such as aarch64 on an x86-64 machine,
 //! by cross-compiling each program with `stone build --target` and running it under qemu-user.
 //! That needs the cross compiler (such as `aarch64-linux-gnu-gcc`) and qemu (such as
-//! `qemu-aarch64`) on `PATH`, and is skipped with a note when either is missing. qemu finds the
-//! target's libc through `QEMU_LD_PREFIX`, which defaults to `/usr/aarch64-linux-gnu`.
+//! `qemu-aarch64`) on `PATH`, and is skipped with a note when either is missing. Compiled
+//! programs are static and need no libc, so qemu needs nothing else.
 //!
 //! A program can opt out of a backend by being listed in [`SKIPS`] along with the reason.
 
@@ -60,18 +60,14 @@ impl Backend {
     }
 }
 
-/// Returns the qemu-user emulator for `arch` and the directory it should find that
-/// architecture's libc in.
+/// Returns the qemu-user emulator for `arch`.
 ///
-/// For example, aarch64 is run by `qemu-aarch64` with libc from `/usr/aarch64-linux-gnu`, unless
-/// `QEMU_LD_PREFIX` says otherwise.
-fn emulator(arch: Architecture) -> (&'static str, String) {
-    let (qemu, prefix) = match arch {
-        Architecture::X64 => ("qemu-x86_64", "/usr/x86_64-linux-gnu"),
-        Architecture::Arm64 => ("qemu-aarch64", "/usr/aarch64-linux-gnu"),
-    };
-    let prefix = std::env::var("QEMU_LD_PREFIX").unwrap_or_else(|_| prefix.to_string());
-    (qemu, prefix)
+/// For example, aarch64 is run by `qemu-aarch64`.
+fn emulator(arch: Architecture) -> &'static str {
+    match arch {
+        Architecture::X64 => "qemu-x86_64",
+        Architecture::Arm64 => "qemu-aarch64",
+    }
 }
 
 /// Returns whether `tool` can be run, checking with `--version`.
@@ -200,9 +196,8 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
             }
             let mut command = match backend {
                 Backend::Cross(arch) => {
-                    let (qemu, prefix) = emulator(arch);
-                    let mut command = Command::new(qemu);
-                    command.arg(&exe).env("QEMU_LD_PREFIX", prefix);
+                    let mut command = Command::new(emulator(arch));
+                    command.arg(&exe);
                     command
                 }
                 _ => Command::new(&exe),
@@ -287,8 +282,7 @@ fn cross_compiler_matches_expected() {
     else {
         return;
     };
-    let (qemu, _) = emulator(arch);
-    for tool in [arch.linker(), qemu] {
+    for tool in [arch.linker(), emulator(arch)] {
         if !runs(tool) {
             eprintln!("skipped building for {arch}: {tool} was not found");
             return;

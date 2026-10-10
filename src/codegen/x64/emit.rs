@@ -129,6 +129,9 @@ impl X64Generator {
             self.emit("\tmov\tDWORD PTR [rip + stone.argc], edi");
             self.emit("\tmov\tQWORD PTR [rip + stone.argv], rsi");
         }
+        if frame.is_main && self.ctx.needs_env() {
+            self.emit("\tmov\tQWORD PTR [rip + stone.envp], rdx");
+        }
         for reg in &allocation.used_callee_saved {
             self.emit(&format!("\tpush\t{reg}"));
         }

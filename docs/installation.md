@@ -69,9 +69,10 @@ cargo install --git https://github.com/tarolling/stone stone
 | `stone build` | x86-64 or arm64 Linux with `gcc` on `PATH` |
 
 `stone build` writes assembly for the processor it runs on and runs `gcc` to assemble and link
-it, so it does not work on macOS yet. `--target` builds for the other Linux processor with a
-cross compiler (see [the CLI reference](reference/cli.md)). The interpreter runs the same
-programs everywhere.
+it, so it does not work on macOS yet. The executables it makes are static and need no C
+library, so they run on any Linux machine with the same processor. `--target` builds for the
+other Linux processor with a cross compiler (see [the CLI reference](reference/cli.md)). The
+interpreter runs the same programs everywhere.
 
 ## Editor support
 

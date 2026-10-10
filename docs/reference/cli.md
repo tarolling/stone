@@ -25,7 +25,8 @@ stone run sum.st 1 2 3 < numbers.txt
 
 Compiles the program to a native executable at `OUTPUT` (default `build/out`, relative to the
 current directory), writing the assembly next to it as `OUTPUT.s`. This needs Linux with `gcc` on
-`PATH`, which assembles and links the output.
+`PATH`, which assembles and links the output. The executable is static and needs no C library,
+so it runs on any Linux machine with the same processor, whether or not gcc is installed there.
 
 The executable is for the processor stone runs on, x86-64 or arm64. `--target` picks one
 explicitly, as `x86_64` (or `x64`) or `aarch64` (or `arm64`). Building for the other processor

@@ -15,9 +15,8 @@ sibling `.out` file. This is the main guarantee that the interpreter and the com
 tested too, by building each program with `--target` and running it under qemu-user, when its
 cross compiler and emulator are on `PATH`: `aarch64-linux-gnu-gcc` and `qemu-aarch64` on an
 x86-64 machine, or `x86_64-linux-gnu-gcc` and `qemu-x86_64` on an arm64 one. Otherwise that pass
-is skipped with a note. qemu finds the target's libc through `QEMU_LD_PREFIX`, which defaults to
-`/usr/aarch64-linux-gnu` (or `/usr/x86_64-linux-gnu`), where the cross compiler's packages put
-it. CI runs both backends: the x86-64 job installs the aarch64 cross tools, and an arm64 job
+is skipped with a note. Compiled programs are static and need no libc, so qemu needs nothing
+else. CI runs both backends: the x86-64 job installs the aarch64 cross tools, and an arm64 job
 runs the suite natively.
 
 To cover new behavior, add `name.st` and the exact output it should print as `name.out`:

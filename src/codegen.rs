@@ -87,11 +87,12 @@ impl FromStr for Architecture {
 }
 
 /// Writes `assembly` to `output` with a `.s` extension, then assembles and links it into the
-/// executable `output` with the architecture's [`Architecture::linker`], against libc and libm
-/// (the arm64 runtime's float `%` calls `fmod`).
+/// executable `output` with the architecture's [`Architecture::linker`]. The program needs no C
+/// library, since its runtime makes system calls itself and starts at its own `_start`, so it is
+/// linked alone into a static executable.
 ///
 /// For example, linking to `build/out` writes `build/out.s` and runs
-/// `gcc -g -no-pie -o build/out build/out.s -lm`.
+/// `gcc -g -nostdlib -static -no-pie -o build/out build/out.s`.
 pub fn link(assembly: &str, output: &Path, arch: Architecture) -> std::io::Result<()> {
     let source = output.with_extension("s");
     if let Some(dir) = output.parent() {
@@ -102,11 +103,12 @@ pub fn link(assembly: &str, output: &Path, arch: Architecture) -> std::io::Resul
     let linker = arch.linker();
     let status = Command::new(linker)
         .arg("-g")
+        .arg("-nostdlib")
+        .arg("-static")
         .arg("-no-pie")
         .arg("-o")
         .arg(output)
         .arg(&source)
-        .arg("-lm")
         .status()
         .map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -197,5 +199,119 @@ mod tests {
             let linker = arch.linker();
             assert_eq!(linker == "gcc", arch == Architecture::host(), "{arch}");
         }
+    }
+
+    /// A program that calls every runtime routine: every builtin, method, and `os` function,
+    /// plus float `%`, so its assembly holds the whole runtime.
+    const EVERY_ROUTINE: &str = "\
+use os
+xs = [1.5, float(\" 2.5 \")]
+xs.append(xs[0] % 0.5)
+words = input(\"> \").strip().split()
+words.append(str(xs[0]) + str(int(\"-7\")) + str(true))
+parts = \"a,b\".split(\",\")
+print(xs, words, parts, eof(), args(), words.len())
+print(os.env(\"HOME\"), os.has_env(\"HOME\"), os.platform(), os.arch(), os.hostname())
+print(os.cpu_count(), os.pid(), os.cwd(), os.time(), os.clock())
+os.exit(0)
+";
+
+    /// Returns every symbol `assembly` jumps to, calls, or takes the address of, such as
+    /// `stone.alloc` for `\tcall\tstone.alloc` or `stdin` for `[rip + stdin]`.
+    fn referenced_symbols(assembly: &str) -> Vec<String> {
+        let branches = [
+            "call", "jmp", "bl", "b", "cbz", "cbnz", "tbz", "tbnz", "adrp", "adr",
+        ];
+        let mut symbols = Vec::new();
+        for line in assembly.lines() {
+            let mut fields = line.trim().splitn(2, '\t');
+            let (Some(op), Some(operands)) = (fields.next(), fields.next()) else {
+                continue;
+            };
+            let operands = operands.split(" //").next().unwrap();
+            let jumps = op.starts_with('j') || op.starts_with("b.");
+            if branches.contains(&op) || jumps {
+                let target = operands.rsplit(", ").next().unwrap().trim();
+                symbols.push(target.trim_start_matches(":got:").to_string());
+            }
+            for prefix in ["rip + ", ":got:", ":got_lo12:", ":lo12:"] {
+                for piece in operands.split(prefix).skip(1) {
+                    let end = piece.find([']', ',', ' ']).unwrap_or(piece.len());
+                    symbols.push(piece[..end].to_string());
+                }
+            }
+        }
+        symbols
+    }
+
+    #[test]
+    fn the_leak_check_reports_how_many_objects_were_never_freed() {
+        let module = crate::driver::parse("xs = [\"a\"]\nprint(xs)\n").unwrap();
+        let arch = Architecture::host();
+        let assembly = arch.generator().assemble(&module).unwrap();
+        // pretends 12 objects were never freed
+        let (call, leak) = match arch {
+            Architecture::X64 => (
+                "\tcall\tstone.leak_check",
+                "\tadd\tQWORD PTR [rip + stone.live], 12\n",
+            ),
+            Architecture::Arm64 => (
+                "\tbl\tstone.leak_check",
+                "\tadrp\tx9, stone.live\n\tldr\tx10, [x9, :lo12:stone.live]\n\
+                 \tadd\tx10, x10, #12\n\tstr\tx10, [x9, :lo12:stone.live]\n",
+            ),
+        };
+        assert!(assembly.contains(call), "{assembly}");
+        let leaky = assembly.replace(call, &format!("{leak}{call}"));
+        let output = std::env::temp_dir().join(format!("stone-leak-{}", std::process::id()));
+        link(&leaky, &output, arch).unwrap();
+
+        let checked = Command::new(&output)
+            .env("STONE_LEAK_CHECK", "1")
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&checked.stdout), "['a']\n");
+        assert_eq!(
+            String::from_utf8_lossy(&checked.stderr),
+            "error: 12 objects were never freed\n"
+        );
+        assert_eq!(checked.status.code(), Some(1));
+
+        let unchecked = Command::new(&output)
+            .env_remove("STONE_LEAK_CHECK")
+            .output()
+            .unwrap();
+        assert_eq!(unchecked.stderr, b"");
+        assert_eq!(unchecked.status.code(), Some(0));
+        let _ = std::fs::remove_file(&output);
+        let _ = std::fs::remove_file(output.with_extension("s"));
+    }
+
+    #[test]
+    fn compiled_programs_need_nothing_but_their_own_routines() {
+        let (_, module) = crate::driver::load(
+            Path::new("main.st"),
+            EVERY_ROUTINE,
+            &crate::project::MapSources::default(),
+        );
+        let module = module.unwrap().0;
+        let mut needs = Vec::new();
+        for arch in Architecture::ALL {
+            let assembly = arch.generator().assemble(&module).unwrap();
+            let defined: std::collections::HashSet<&str> = assembly
+                .lines()
+                .filter_map(|line| line.strip_suffix(':'))
+                .collect();
+            let mut missing: Vec<String> = referenced_symbols(&assembly)
+                .into_iter()
+                .filter(|symbol| !defined.contains(symbol.as_str()))
+                .collect();
+            missing.sort();
+            missing.dedup();
+            if !missing.is_empty() {
+                needs.push(format!("{arch} needs {missing:?}"));
+            }
+        }
+        assert!(needs.is_empty(), "{}", needs.join("\n"));
     }
 }

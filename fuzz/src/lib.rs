@@ -600,21 +600,18 @@ fn target() -> Architecture {
 }
 
 /// Returns the command that runs the binary `exe` built for `arch`: the binary itself on its own
-/// architecture, and qemu-user otherwise, which finds that architecture's libc through
-/// `QEMU_LD_PREFIX` (by default `/usr/aarch64-linux-gnu` or `/usr/x86_64-linux-gnu`).
+/// architecture, and qemu-user otherwise, which needs nothing else, since compiled programs are
+/// static and use no libc.
 fn runner(exe: &Path, arch: Architecture) -> Command {
     if arch == Architecture::host() {
         return Command::new(exe);
     }
-    let (qemu, prefix) = match arch {
-        Architecture::X64 => ("qemu-x86_64", "/usr/x86_64-linux-gnu"),
-        Architecture::Arm64 => ("qemu-aarch64", "/usr/aarch64-linux-gnu"),
+    let qemu = match arch {
+        Architecture::X64 => "qemu-x86_64",
+        Architecture::Arm64 => "qemu-aarch64",
     };
     let mut command = Command::new(qemu);
     command.arg(exe);
-    if std::env::var_os("QEMU_LD_PREFIX").is_none() {
-        command.env("QEMU_LD_PREFIX", prefix);
-    }
     command
 }
 

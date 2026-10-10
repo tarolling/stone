@@ -6,6 +6,7 @@
 
 pub mod builtins;
 mod emit;
+pub mod floats;
 
 use crate::ast::Mod;
 use crate::codegen::context::{Context, global_label, immortal_string};
@@ -63,11 +64,20 @@ impl AssemblyGenerator for X64Generator {
             self.emit_function(&function)?;
         }
 
+        builtins::start_runtime(self);
         self.emit_io_runtime();
         self.emit_failures();
         self.emit_list_runtime()?;
-        if self.ctx.prints_floats || self.ctx.uses(&["stone.str_float"]) {
-            builtins::float_runtime(self);
+        let formats_floats = self.ctx.prints_floats || self.ctx.uses(&["stone.str_float"]);
+        let parses_floats = self.ctx.uses(&["stone.parse_float"]);
+        if formats_floats {
+            floats::float_runtime(self);
+        }
+        if parses_floats {
+            floats::decimal_runtime(self);
+        }
+        if formats_floats || parses_floats {
+            floats::bignum_runtime(self);
         }
         if self.ctx.uses(&["stone.str_float"]) {
             builtins::str_float_runtime(self);
@@ -77,6 +87,9 @@ impl AssemblyGenerator for X64Generator {
         }
         if self.ctx.counts_references {
             builtins::memory_runtime(self);
+        }
+        if self.ctx.needs_env() {
+            builtins::env_runtime(self);
         }
 
         self.emit_string_literals();
@@ -147,8 +160,12 @@ impl X64Generator {
     /// Emits the routines behind input, `args`, the `os` module, parsing, `str`, and the string
     /// methods that the program calls, before the failures, since some of them fail through `stone.fail`.
     fn emit_io_runtime(&mut self) {
-        if self.ctx.uses(&["stone.input", "stone.eof"]) {
-            builtins::io_runtime(self);
+        let input: Vec<&str> = ["stone.input", "stone.eof"]
+            .into_iter()
+            .filter(|label| self.ctx.uses(&[label]))
+            .collect();
+        if !input.is_empty() {
+            builtins::io_runtime(self, &input);
         }
         if self.ctx.uses(&["stone.args"]) {
             builtins::args_runtime(self);
@@ -158,19 +175,28 @@ impl X64Generator {
             let cwd_failure = self.ctx.os_cwd_failure();
             builtins::os_runtime(self, &os, &cwd_failure);
         }
-        if self.ctx.uses(&["stone.parse_int", "stone.parse_float"]) {
-            builtins::parse_runtime(self);
+        let parsing: Vec<&str> = ["stone.parse_int", "stone.parse_float"]
+            .into_iter()
+            .filter(|label| self.ctx.uses(&[label]))
+            .collect();
+        if !parsing.is_empty() {
+            builtins::parse_runtime(self, &parsing);
             self.ctx.needs_fail = true;
         }
         if self.ctx.uses(&["stone.str_int", "stone.str_bool"]) {
             builtins::conversion_runtime(self);
         }
-        if self
-            .ctx
-            .uses(&["stone.str_strip", "stone.str_split_ws", "stone.str_split"])
-        {
-            let empty_separator = self.ctx.fail_label("empty separator");
-            builtins::string_methods(self, &empty_separator);
+        let methods: Vec<&str> = ["stone.str_strip", "stone.str_split_ws", "stone.str_split"]
+            .into_iter()
+            .filter(|label| self.ctx.uses(&[label]))
+            .collect();
+        if !methods.is_empty() {
+            let empty_separator = if self.ctx.uses(&["stone.str_split"]) {
+                self.ctx.fail_label("empty separator")
+            } else {
+                String::new()
+            };
+            builtins::string_methods(self, &methods, &empty_separator);
         }
     }
 
@@ -222,6 +248,11 @@ impl X64Generator {
             self.emit("stone.argc:");
             self.emit("\t.zero\t8");
             self.emit("stone.argv:");
+            self.emit("\t.zero\t8");
+        }
+        if self.ctx.needs_env() {
+            // and its environment here for stone.getenv
+            self.emit("stone.envp:");
             self.emit("\t.zero\t8");
         }
         for name in self.ctx.program.globals.clone() {
@@ -309,7 +340,9 @@ mod tests {
         assert!(!assembly.contains("\tcall\tfmod"), "{assembly}");
         assert!(assembly.contains("\tfprem"), "{assembly}");
         // only the exponent that is not a literal is checked
-        assert_eq!(assembly.matches("\tjs\t").count(), 1, "{assembly}");
+        let main = assembly.split("\nmain:").nth(1).unwrap();
+        let main = main.split("\nstone.").next().unwrap();
+        assert_eq!(main.matches("\tjs\t").count(), 1, "{main}");
     }
 
     #[test]
@@ -341,9 +374,16 @@ mod tests {
     fn float_printing_is_only_emitted_when_needed() {
         let assembly = assemble("print([1.5])\n").unwrap();
         assert!(assembly.contains("stone.print_float:"));
-        assert!(assembly.contains("\tcall\tsnprintf"));
+        assert!(assembly.contains("\tcall\tstone.format_float"));
+        assert!(assembly.contains("stone.big_mul_add:"));
+        assert!(!assembly.contains("stone.decimal_to_float:"));
         let assembly = assemble("x = 1.5\nprint(1)\n").unwrap();
         assert!(!assembly.contains("stone.print_float:"));
+        assert!(!assembly.contains("stone.big_mul_add:"));
+        let assembly = assemble("x = float(\"1.5\")\n").unwrap();
+        assert!(assembly.contains("stone.decimal_to_float:"));
+        assert!(!assembly.contains("stone.format_float:"));
+        assert!(!assembly.contains("stone.parse_int:"));
     }
 
     #[test]
@@ -567,6 +607,9 @@ mod tests {
         assert!(reading.contains("stone.input:"), "{reading}");
         assert!(reading.contains("stone.print_str:"), "{reading}");
         assert!(!reading.contains("stone.args:"), "{reading}");
+        let peeking = assemble("print(eof())\n").unwrap();
+        assert!(peeking.contains("stone.eof:"), "{peeking}");
+        assert!(!peeking.contains("stone.input:"), "{peeking}");
 
         let arguments = assemble("x = args()\n").unwrap();
         assert!(arguments.contains("stone.args:"), "{arguments}");

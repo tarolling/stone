@@ -4,8 +4,9 @@
 //! `use os.env` then `env("HOME")`. Linking renames each call to the function's linked name, such
 //! as `os.env`, which no stone name can collide with since it holds a dot.
 //!
-//! The functions here are what the interpreter runs. Compiled code calls the same libc functions
-//! from `stone.os_*` routines, so both backends agree.
+//! The functions here are what the interpreter runs. Compiled code makes the system calls
+//! behind the same libc functions from `stone.os_*` routines, reading what they read, so both
+//! backends agree.
 
 use super::BuiltinDoc;
 use std::ffi::{c_char, c_int, c_long};

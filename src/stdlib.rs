@@ -181,8 +181,9 @@ pub fn builtins_reference() -> String {
 /// `format_float(0.1 + 0.2)` returns `"0.30000000000000004"`, `format_float(1e16)` returns
 /// `"1e+16"`, and `format_float(1e-5)` returns `"1e-05"`.
 ///
-/// Compiled code gets the same digits from libc by asking `snprintf` for 1, then 2, up to 17
-/// significant digits until `strtod` reads the text back as the same float.
+/// Compiled code follows the same steps with the bignums of its float runtime: it counts the
+/// shortest digits the way Rust's `{:e}` does, then rounds the exact value to that many digits,
+/// half to even.
 pub fn format_float(value: f64) -> String {
     if value.is_nan() {
         return "nan".into();
@@ -192,7 +193,7 @@ pub fn format_float(value: f64) -> String {
         return format!("{sign}inf");
     }
     // `{:e}` finds how many digits round-trip, and formatting again with that precision breaks
-    // ties to even the way libc does, so 1462468587316101.25 shows as ...101.2, not ...101.3
+    // ties to even, so 1462468587316101.25 shows as ...101.2, not ...101.3
     let shortest = format!("{:e}", value.abs());
     let count = shortest.split_once('e').unwrap().0.replace('.', "").len();
     let scientific = format!("{:.*e}", count - 1, value.abs());
@@ -293,8 +294,8 @@ pub fn split<'a>(text: &'a str, separator: &str) -> Result<Vec<&'a str>, String>
 ///
 /// For example, `parse_int(" -42\n")` returns `-42`, `parse_int("1.5")` fails with
 /// `invalid literal for int() with base 10: '1.5'`, and a number that does not fit in an int
-/// fails with `int() argument out of range: '...'`. Compiled code gets the same answers from
-/// libc's `strtoll`.
+/// fails with `int() argument out of range: '...'`. Compiled code reads the digits the same way,
+/// checking each step for overflow.
 pub fn parse_int(text: &str) -> Result<i64, String> {
     let trimmed = strip(text);
     let digits = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);
@@ -311,7 +312,8 @@ pub fn parse_int(text: &str) -> Result<i64, String> {
 ///
 /// For example, `parse_float(" 2.5\n")` returns `2.5`, `parse_float("1e999")` returns infinity,
 /// and `parse_float("0x1p3")` fails with `could not convert string to float: '0x1p3'`. Compiled
-/// code checks the same grammar, then calls libc's `strtod`, which like Rust rounds correctly.
+/// code checks the same grammar, then rounds the number to the nearest float exactly, as Rust
+/// does.
 pub fn parse_float(text: &str) -> Result<f64, String> {
     let trimmed = strip(text);
     let unsigned = trimmed.strip_prefix(['+', '-']).unwrap_or(trimmed);

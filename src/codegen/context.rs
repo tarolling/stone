@@ -60,6 +60,63 @@ pub fn os_routine(name: &str) -> Option<&'static str> {
 /// program can release it `1 << 62` times.
 pub const IMMORTAL: i64 = 1 << 62;
 
+/// The smallest block the allocator hands out is `1 << SMALLEST_CLASS` bytes, counting its
+/// 8-byte header, so a block on a free list has room for the link to the next one.
+pub const SMALLEST_CLASS: i64 = 5;
+
+/// Blocks of up to `1 << LARGEST_CLASS` bytes come from free lists, one per power of two, and
+/// larger ones get a mapping of their own, which is returned to the system when freed.
+///
+/// For example, a 100-byte string is a 128-byte block of class 7, while a list of 10,000
+/// elements stores them in a mapping of 80,008 bytes rounded up to whole pages.
+pub const LARGEST_CLASS: i64 = 16;
+
+/// The size of each region the allocator maps to cut small blocks from.
+pub const HEAP_REGION: i64 = 1 << 20;
+
+/// The size of the buffer compiled programs read stdin into, one `read` syscall at a time.
+pub const STDIN_BUFFER: i64 = 1 << 16;
+
+/// The file that lists the processors that are online, as ranges such as `0-3,6`, which
+/// `os.cpu_count` reads the way glibc's `sysconf(_SC_NPROCESSORS_ONLN)` does.
+pub const CPU_ONLINE: &str = "/sys/devices/system/cpu/online";
+
+/// The size of the buffer `os.cwd` asks the kernel to write the path into, which is the most
+/// the `getcwd` syscall can return.
+pub const PATH_BUFFER: i64 = 4096;
+
+/// The size of the `utsname` structure the `uname` syscall fills: six fields of 65 bytes, rounded
+/// up to keep the stack aligned.
+pub const UTSNAME_SIZE: i64 = 400;
+
+/// Where the host name starts in the `utsname` structure, after the system's name.
+pub const UTSNAME_FIELD: i64 = 65;
+
+/// How many 64-bit limbs each bignum of the float runtime has room for. The largest is a
+/// parsed number's divisor, at most `10^1125`, about 3,740 bits, lined up with its dividend.
+pub const BIG_LIMBS: i64 = 64;
+
+/// How many significant digits `float` keeps when it reads a number. A float halfway between
+/// two others never needs more than 767, so any digits past these only matter in whether
+/// they are all 0, which the runtime remembers as one more digit of 1.
+pub const MAX_DIGITS: i64 = 800;
+
+/// The largest exponent `float` reads, such as the `400` of `1e400`. Any larger one gives the
+/// same result, infinity or 0, and stopping there keeps the arithmetic from overflowing.
+pub const EXPONENT_LIMIT: i64 = 100_000;
+
+/// What the leak check writes before the number of objects never freed.
+pub const LEAK_PREFIX: &str = "error: ";
+
+/// What the leak check writes after the number of objects never freed, before a newline.
+pub const LEAK_SUFFIX: &str = " objects were never freed";
+
+/// The message the program stops with when the system has no memory left to map.
+pub const OUT_OF_MEMORY: &str = "error: out of memory\\n";
+
+/// The length in bytes of [`OUT_OF_MEMORY`] once assembled, where `\\n` is one newline.
+pub const OUT_OF_MEMORY_LENGTH: usize = OUT_OF_MEMORY.len() - 1;
+
 /// Emits a string that lives as long as the program, preceded by the reference count every
 /// string has at `[label - 8]`, so retaining and releasing it works like any other string's.
 ///
@@ -238,6 +295,13 @@ impl Context {
     pub fn needs_lists(&self) -> bool {
         self.types.values().any(contains_list)
             || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
+    }
+
+    /// Returns whether the program reads its environment: through `os.env` or `os.has_env`, or
+    /// through the leak check every program with strings or lists ends with, which looks for
+    /// `STONE_LEAK_CHECK`.
+    pub fn needs_env(&self) -> bool {
+        self.counts_references || self.uses(&["stone.os_env", "stone.os_has_env"])
     }
 
     /// Returns the runtime routines of the `os` module that the program calls, such as

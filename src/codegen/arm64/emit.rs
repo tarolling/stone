@@ -169,6 +169,10 @@ impl Arm64Generator {
             self.emit("\tadrp\tx16, stone.argv");
             self.emit("\tstr\tx1, [x16, :lo12:stone.argv]");
         }
+        if is_main && self.ctx.needs_env() {
+            self.emit("\tadrp\tx16, stone.envp");
+            self.emit("\tstr\tx2, [x16, :lo12:stone.envp]");
+        }
 
         if !is_main {
             // the same limit as the interpreter, rather than overflowing the stack

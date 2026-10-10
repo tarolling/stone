@@ -39,6 +39,16 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   the loop no longer makes the loop run longer.
 - A change such as `grid[i][j] = v` evaluates every index before checking any against the
   lists, so an out-of-range `i` now stops the program after `j` is evaluated.
+- Compiled programs no longer need a C library. They start at their own entry point and call
+  the Linux kernel directly, with their own memory allocator, input buffering, and float
+  formatting and parsing, so `stone build` makes a static executable that runs on any Linux
+  machine with the same processor. gcc is still needed, but only to assemble and link.
+- Compiled programs print floats several times faster.
+
+### Fixed
+
+- A compiled program that called `strip` but used no lists, or `eof` but never `input`, failed
+  to link.
 
 ## [0.1.3] - 2026-10-09
 

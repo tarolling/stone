@@ -183,16 +183,11 @@ The same idea applies to the toolchain. Eventually `stone build` should write ex
 itself, with no assembler, linker, or C compiler installed, so that installing stone is all it
 takes to build stone programs.
 
-Status: compiled programs currently link against glibc and call 26 of its functions, plus its
-`stdin`:
-
-- memory: `malloc`, `realloc`, `free`
-- output, input, and exiting: `dprintf`, `getline`, `getc`, `ungetc`, `exit`
-- numbers: `snprintf`, `strtod`, `strtoll`, `atoi`, `fmod`, `pow`, `__errno_location`
-- strings: `strcpy`, `strcat`, `strchr`, `strstr`, `strncasecmp`
-- the `os` module: `getenv`, `gethostname`, `getcwd`, `getpid`, `sysconf`, `clock_gettime`
-
-`stone build` also runs gcc to assemble and link. Both are planned to go away.
+Status: on Linux, compiled programs need no C library. They start at their own `_start`, make
+system calls directly, allocate memory with their own allocator on top of `mmap`, read input
+through their own buffer, and format and parse floats themselves, digit for digit like the
+interpreter, so `stone build` links each one into a static executable. `stone build` still runs
+gcc to assemble and link, which is planned to go away.
 
 ## Two backends, one behavior
 

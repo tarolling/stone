@@ -1,7 +1,7 @@
 //! `stone update`: replaces the running binary with a release from GitHub.
 //!
-//! It downloads the same `stone-<target>.tar.gz` that `install.sh` does, and checks it against
-//! the release's `stone-<target>.tar.gz.sha256` (plus the digest GitHub publishes for each asset)
+//! It downloads the same `stone-<machine>.tar.gz` that `install.sh` does, and checks it against
+//! the release's `stone-<machine>.tar.gz.sha256` (plus the digest GitHub publishes for each asset)
 //! before installing it.
 
 use self_update::ReleaseAsset;
@@ -9,11 +9,23 @@ use self_update::backends::github::Update;
 use std::error::Error;
 use std::path::Path;
 use std::process::Command;
+use stone::codegen::Architecture;
 
-/// Returns the release archive for `target`, as `release.yml` names it.
+/// Returns the name of the machine this binary runs on, as `release.yml` names its archives:
+/// stone's name for the target, such as `x86_64-linux` or `aarch64-macos`, or `x86_64-macos` on
+/// an Intel Mac, where stone runs but cannot build programs.
+fn machine() -> String {
+    let os = if cfg!(target_os = "macos") {
+        "macos"
+    } else {
+        "linux"
+    };
+    format!("{}-{os}", Architecture::host())
+}
+
+/// Returns the release archive for the machine `target`, as `release.yml` names it.
 ///
-/// For example, `asset_name("x86_64-unknown-linux-musl")` returns
-/// `"stone-x86_64-unknown-linux-musl.tar.gz"`.
+/// For example, `asset_name("x86_64-linux")` returns `"stone-x86_64-linux.tar.gz"`.
 fn asset_name(target: &str) -> String {
     format!("stone-{target}.tar.gz")
 }
@@ -31,18 +43,21 @@ fn pick_asset(assets: &[ReleaseAsset], target: &str) -> Option<ReleaseAsset> {
 /// is older. With `check`, it only reports whether a newer release exists.
 pub fn run(check: bool, tag: Option<&str>) -> Result<(), Box<dyn Error>> {
     let current = env!("CARGO_PKG_VERSION");
-    // the triple this binary was built for, which is the one to download
-    let target = self_update::get_target();
+    // the machine this binary was built for, which is the one to download
+    let target = machine();
     let mut builder = Update::configure();
     builder
         .repo_owner("tarolling")
         .repo_name("stone")
         .tag_prefix("v")
         .bin_name("stone")
-        .target(target)
+        .target(&target)
         .current_version(current)
-        .asset_matcher(move |assets| pick_asset(assets, target))
-        .checksum_from_asset(format!("{}.sha256", asset_name(target)))
+        .asset_matcher({
+            let target = target.clone();
+            move |assets| pick_asset(assets, &target)
+        })
+        .checksum_from_asset(format!("{}.sha256", asset_name(&target)))
         .verify_binary(check_binary)
         .show_download_progress(true)
         .show_output(false)
@@ -97,27 +112,35 @@ mod tests {
 
     #[test]
     fn asset_name_matches_the_release_archives() {
-        assert_eq!(
-            asset_name("aarch64-apple-darwin"),
-            "stone-aarch64-apple-darwin.tar.gz"
-        );
+        assert_eq!(asset_name("aarch64-macos"), "stone-aarch64-macos.tar.gz");
+    }
+
+    #[test]
+    fn this_machine_is_named_as_stone_names_targets() {
+        let name = machine();
+        if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+            assert_eq!(name, "x86_64-macos");
+        } else {
+            let host = stone::codegen::Target::host().unwrap();
+            assert_eq!(name, host.to_string());
+        }
     }
 
     #[test]
     fn pick_asset_skips_the_checksum_file() {
-        let target = "x86_64-unknown-linux-musl";
+        let target = "x86_64-linux";
         let assets = [
-            asset("stone-x86_64-unknown-linux-musl.tar.gz.sha256"),
-            asset("stone-aarch64-unknown-linux-musl.tar.gz"),
-            asset("stone-x86_64-unknown-linux-musl.tar.gz"),
+            asset("stone-x86_64-linux.tar.gz.sha256"),
+            asset("stone-aarch64-linux.tar.gz"),
+            asset("stone-x86_64-linux.tar.gz"),
         ];
         let picked = pick_asset(&assets, target).unwrap();
-        assert_eq!(picked.name(), "stone-x86_64-unknown-linux-musl.tar.gz");
+        assert_eq!(picked.name(), "stone-x86_64-linux.tar.gz");
     }
 
     #[test]
     fn pick_asset_finds_nothing_for_an_unreleased_target() {
-        let assets = [asset("stone-x86_64-unknown-linux-musl.tar.gz")];
-        assert!(pick_asset(&assets, "x86_64-unknown-linux-gnu").is_none());
+        let assets = [asset("stone-x86_64-linux.tar.gz")];
+        assert!(pick_asset(&assets, "x86_64-unknown-linux-musl").is_none());
     }
 }

@@ -21,8 +21,7 @@ trap 'rm -rf "$work"' EXIT
 # package the binary under every target name install.sh might pick
 mkdir -p "$work/package" "$work/release"
 cp "$binary" "$root/LICENSE" "$root/README.md" "$work/package/"
-for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
-    x86_64-apple-darwin aarch64-apple-darwin; do
+for target in x86_64-linux aarch64-linux x86_64-macos aarch64-macos; do
     archive="stone-$target.tar.gz"
     tar -czf "$work/release/$archive" -C "$work/package" stone LICENSE README.md
     (cd "$work/release" && sha256sum "$archive" > "$archive.sha256")

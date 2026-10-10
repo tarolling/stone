@@ -129,9 +129,11 @@ impl AssemblyGenerator for Arm64Generator {
     }
 
     fn target(&self) -> Target {
+        let arch = crate::codegen::Architecture::Arm64;
         Target {
-            arch: crate::codegen::Architecture::Arm64,
+            arch,
             os: self.os,
+            level: arch.baseline(),
         }
     }
 }

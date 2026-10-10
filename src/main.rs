@@ -47,8 +47,9 @@ enum Command {
         /// Where to write the executable. The assembly goes next to it with a `.s` extension.
         #[arg(short, long, default_value = "build/out")]
         output: PathBuf,
-        /// The system to build for: `x86_64` or `aarch64` for Linux, or `aarch64-macos`.
-        /// Defaults to this machine, and any can be built for from any machine.
+        /// The system to build for: `x86_64-linux`, `aarch64-linux`, or `aarch64-macos`,
+        /// optionally with a processor level such as `x86_64v3-linux`. Defaults to this machine,
+        /// and any can be built for from any machine.
         #[arg(long, value_name = "TARGET", value_parser = str::parse::<Target>)]
         target: Option<Target>,
     },

@@ -3,6 +3,7 @@
 pub mod arm64;
 pub mod asm;
 pub mod context;
+pub mod device;
 pub mod elf;
 pub mod ir;
 pub mod macho;
@@ -39,11 +40,39 @@ impl Architecture {
         }
     }
 
+    /// Returns the level every processor of this architecture reaches, which a target name
+    /// without a level means.
+    ///
+    /// For example, `Architecture::X64.baseline()` is x86-64 `v1` and
+    /// `Architecture::Arm64.baseline()` is Armv8.0 (`v8`).
+    pub const fn baseline(self) -> Level {
+        match self {
+            Architecture::X64 => Level { major: 1, minor: 0 },
+            Architecture::Arm64 => Level { major: 8, minor: 0 },
+        }
+    }
+
+    /// Returns whether `level` names a level of this architecture: x86-64 `v1` through `v4`
+    /// (the psABI microarchitecture levels), or Arm `v8` through `v8.9` and `v9` through `v9.5`.
+    ///
+    /// For example, x86-64 has `v3` but no `v3.1`, and Arm has `v8.2` but no `v7`.
+    fn has_level(self, level: Level) -> bool {
+        match self {
+            Architecture::X64 => (1..=4).contains(&level.major) && level.minor == 0,
+            Architecture::Arm64 => match level.major {
+                8 => level.minor <= 9,
+                9 => level.minor <= 5,
+                _ => false,
+            },
+        }
+    }
+
     /// Returns a new code generator for this architecture running Linux.
     pub fn generator(self) -> Box<dyn AssemblyGenerator> {
         Target {
             arch: self,
             os: Os::Linux,
+            level: self.baseline(),
         }
         .generator()
     }
@@ -55,6 +84,28 @@ impl fmt::Display for Architecture {
             Architecture::X64 => "x86_64",
             Architecture::Arm64 => "aarch64",
         })
+    }
+}
+
+/// A level of an architecture: the processor features a program may assume, beyond those of
+/// every processor of the architecture (its [baseline](Architecture::baseline)).
+///
+/// It is written after the architecture in a target name, such as `x86_64v3-linux` (x86-64 with
+/// AVX2, `major: 3, minor: 0`) or `aarch64v8.2-macos` (Armv8.2, `major: 8, minor: 2`). A level
+/// lets the compiler use those features, but never requires it: code generation emits baseline
+/// code for now, which runs on every processor of the architecture.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Level {
+    pub major: u8,
+    pub minor: u8,
+}
+
+impl fmt::Display for Level {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self.minor {
+            0 => write!(f, "v{}", self.major),
+            minor => write!(f, "v{}.{minor}", self.major),
+        }
     }
 }
 
@@ -72,30 +123,41 @@ pub enum Os {
 
 /// The error for a target stone cannot build for: macOS on an Intel processor.
 pub const INTEL_MACOS: &str =
-    "stone build writes macOS programs only for arm64; pass --target aarch64-macos or x86_64";
+    "stone build writes macOS programs only for arm64; pass --target aarch64-macos or x86_64-linux";
 
-/// What `stone build` compiles for: a processor and the operating system it runs.
+/// What `stone build` compiles for: a processor, its [`Level`], and the operating system it
+/// runs, named `<arch>[<level>]-<os>`.
 ///
-/// For example, `"aarch64-macos".parse::<Target>()` is `Ok(Target::ARM64_MACOS)`, and a bare
-/// processor name such as `aarch64` means Linux.
+/// Compiled programs use no C library, so a target names no vendor or C environment as LLVM's
+/// triples do, though Rust's names for the same machines parse too. A GPU is never part of a
+/// target: a program that runs code on GPUs will be built for one target plus a device target per
+/// GPU, since one program may carry code for several.
+///
+/// For example, `"aarch64-macos".parse::<Target>()` is `Ok(Target::ARM64_MACOS)`, which displays
+/// as `aarch64-macos`; `x86_64v3-linux` is x86-64 Linux at level `v3`; and a bare processor name
+/// such as `aarch64` means Linux at the baseline level.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Target {
     pub arch: Architecture,
     pub os: Os,
+    pub level: Level,
 }
 
 impl Target {
     pub const X64_LINUX: Target = Target {
         arch: Architecture::X64,
         os: Os::Linux,
+        level: Architecture::X64.baseline(),
     };
     pub const ARM64_LINUX: Target = Target {
         arch: Architecture::Arm64,
         os: Os::Linux,
+        level: Architecture::Arm64.baseline(),
     };
     pub const ARM64_MACOS: Target = Target {
         arch: Architecture::Arm64,
         os: Os::MacOs,
+        level: Architecture::Arm64.baseline(),
     };
 
     /// Every target, in the order `--target` lists them.
@@ -109,12 +171,23 @@ impl Target {
         } else {
             Os::Linux
         };
-        let target = Target {
-            arch: Architecture::host(),
+        let arch = Architecture::host();
+        Target {
+            arch,
             os,
-        };
-        if Target::ALL.contains(&target) {
-            Ok(target)
+            level: arch.baseline(),
+        }
+        .supported()
+    }
+
+    /// Returns this target if `stone build` can write programs for its processor and system,
+    /// at any level, or [`INTEL_MACOS`] otherwise.
+    fn supported(self) -> Result<Target, String> {
+        if Target::ALL
+            .iter()
+            .any(|target| (target.arch, target.os) == (self.arch, self.os))
+        {
+            Ok(self)
         } else {
             Err(INTEL_MACOS.to_string())
         }
@@ -131,9 +204,13 @@ impl Target {
 
 impl fmt::Display for Target {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.arch)?;
+        if self.level != self.arch.baseline() {
+            write!(f, "{}", self.level)?;
+        }
         match self.os {
-            Os::Linux => write!(f, "{}", self.arch),
-            Os::MacOs => write!(f, "{}-macos", self.arch),
+            Os::Linux => f.write_str("-linux"),
+            Os::MacOs => f.write_str("-macos"),
         }
     }
 }
@@ -141,35 +218,74 @@ impl fmt::Display for Target {
 impl FromStr for Target {
     type Err = String;
 
-    /// Parses a target name: a processor (`x86_64` or `x64`, `aarch64` or `arm64`), which means
-    /// Linux, optionally followed by `-linux` or `-macos`. `aarch64-apple-darwin`, the name Rust
-    /// uses, means arm64 macOS too.
+    /// Parses a target name: a processor (`x86_64` or `x64`, `aarch64` or `arm64`), optionally
+    /// followed by a [`Level`] such as `v3` or `v8.2`, then optionally by `-linux` or `-macos`
+    /// (without a system, the target is Linux). Rust's names for the same machines, such as
+    /// `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`, parse too.
     fn from_str(name: &str) -> Result<Self, Self::Err> {
-        let (arch, os) = match name.split_once('-') {
-            Some((arch, "linux")) => (arch, Os::Linux),
-            Some((arch, "macos" | "apple-darwin")) => (arch, Os::MacOs),
-            Some(_) => ("", Os::Linux),
-            None => (name, Os::Linux),
+        let unknown = || {
+            let names = Target::ALL.map(|target| target.to_string());
+            let (last, rest) = names.split_last().unwrap();
+            format!(
+                "unknown target '{name}' (expected {}, or {last}, with an optional level such \
+                 as x86_64v3-linux)",
+                rest.join(", ")
+            )
         };
+        let (processor, os) = match name.split_once('-') {
+            None => (name, Os::Linux),
+            Some((processor, system)) => match system {
+                "linux" | "linux-gnu" | "linux-musl" | "unknown-linux-gnu"
+                | "unknown-linux-musl" => (processor, Os::Linux),
+                "macos" | "apple-darwin" => (processor, Os::MacOs),
+                _ => return Err(unknown()),
+            },
+        };
+        let (arch, level) = ["x86_64", "x64", "aarch64", "arm64"]
+            .into_iter()
+            .find_map(|prefix| {
+                let level = processor.strip_prefix(prefix)?;
+                (level.is_empty() || level.starts_with('v')).then_some((prefix, level))
+            })
+            .ok_or_else(unknown)?;
         let arch = match arch {
             "x86_64" | "x64" => Architecture::X64,
-            "aarch64" | "arm64" => Architecture::Arm64,
-            _ => {
-                let names = Target::ALL.map(|target| target.to_string());
-                let (last, rest) = names.split_last().unwrap();
-                return Err(format!(
-                    "unknown target '{name}' (expected {}, or {last})",
-                    rest.join(", ")
-                ));
-            }
+            _ => Architecture::Arm64,
         };
-        let target = Target { arch, os };
-        if Target::ALL.contains(&target) {
-            Ok(target)
-        } else {
-            Err(INTEL_MACOS.to_string())
-        }
+        let level = match level {
+            "" => arch.baseline(),
+            level => parse_level(level)
+                .filter(|&parsed| arch.has_level(parsed))
+                .ok_or_else(|| {
+                    let expected = match arch {
+                        Architecture::X64 => "v1, v2, v3, or v4",
+                        Architecture::Arm64 => "v8, v8.1 to v8.9, v9, or v9.1 to v9.5",
+                    };
+                    format!("unknown level '{level}' for {arch} (expected {expected})")
+                })?,
+        };
+        Target { arch, os, level }.supported()
     }
+}
+
+/// Parses a level such as `v3` or `v8.2`, whose numbers have no leading zeros, or returns
+/// `None`.
+///
+/// For example, `parse_level("v8.2")` is `Some(Level { major: 8, minor: 2 })`, and `"v08"` and
+/// `"v8."` are `None`.
+fn parse_level(text: &str) -> Option<Level> {
+    let number = |digits: &str| {
+        let canonical = !digits.is_empty()
+            && digits.bytes().all(|b| b.is_ascii_digit())
+            && (digits == "0" || !digits.starts_with('0'));
+        canonical.then(|| digits.parse::<u8>().ok()).flatten()
+    };
+    let text = text.strip_prefix('v')?;
+    let (major, minor) = match text.split_once('.') {
+        Some((major, minor)) => (number(major)?, number(minor)?),
+        None => (number(text)?, 0),
+    };
+    Some(Level { major, minor })
 }
 
 /// Assembles `assembly` and links it into the bytes of an executable for `target`, named `name`
@@ -255,14 +371,17 @@ mod tests {
     use std::process::Command;
 
     #[test]
-    fn targets_parse_by_any_name_and_display_their_first() {
+    fn targets_parse_by_any_name_and_display_their_canonical_one() {
         for (name, target) in [
             ("x86_64", Target::X64_LINUX),
             ("x64", Target::X64_LINUX),
             ("x86_64-linux", Target::X64_LINUX),
+            ("x86_64-unknown-linux-gnu", Target::X64_LINUX),
+            ("x86_64-unknown-linux-musl", Target::X64_LINUX),
             ("aarch64", Target::ARM64_LINUX),
             ("arm64", Target::ARM64_LINUX),
             ("aarch64-linux", Target::ARM64_LINUX),
+            ("aarch64-linux-gnu", Target::ARM64_LINUX),
             ("aarch64-macos", Target::ARM64_MACOS),
             ("arm64-macos", Target::ARM64_MACOS),
             ("aarch64-apple-darwin", Target::ARM64_MACOS),
@@ -270,15 +389,117 @@ mod tests {
             assert_eq!(name.parse(), Ok(target), "{name}");
         }
         let names = Target::ALL.map(|target| target.to_string());
-        assert_eq!(names, ["x86_64", "aarch64", "aarch64-macos"]);
+        assert_eq!(names, ["x86_64-linux", "aarch64-linux", "aarch64-macos"]);
         assert_eq!(
             "sparc".parse::<Target>(),
-            Err("unknown target 'sparc' (expected x86_64, aarch64, or aarch64-macos)".to_string())
+            Err(
+                "unknown target 'sparc' (expected x86_64-linux, aarch64-linux, or \
+                 aarch64-macos, with an optional level such as x86_64v3-linux)"
+                    .to_string()
+            )
+        );
+        assert_eq!(
+            "x86_64-windows".parse::<Target>(),
+            "sparc"
+                .parse::<Target>()
+                .map_err(|e| e.replace("sparc", "x86_64-windows"))
+        );
+        assert_eq!(
+            "arm64x".parse::<Target>(),
+            "sparc"
+                .parse::<Target>()
+                .map_err(|e| e.replace("sparc", "arm64x"))
         );
         assert_eq!(
             "x86_64-macos".parse::<Target>(),
             Err(INTEL_MACOS.to_string())
         );
+    }
+
+    #[test]
+    fn targets_carry_a_level_that_displays_unless_it_is_the_baseline() {
+        for (name, arch, os, level, canonical) in [
+            (
+                "x86_64v3-linux",
+                Architecture::X64,
+                Os::Linux,
+                (3, 0),
+                "x86_64v3-linux",
+            ),
+            (
+                "x64v4",
+                Architecture::X64,
+                Os::Linux,
+                (4, 0),
+                "x86_64v4-linux",
+            ),
+            (
+                "x86_64v1",
+                Architecture::X64,
+                Os::Linux,
+                (1, 0),
+                "x86_64-linux",
+            ),
+            (
+                "aarch64v8.2-macos",
+                Architecture::Arm64,
+                Os::MacOs,
+                (8, 2),
+                "aarch64v8.2-macos",
+            ),
+            (
+                "arm64v9-linux",
+                Architecture::Arm64,
+                Os::Linux,
+                (9, 0),
+                "aarch64v9-linux",
+            ),
+            (
+                "aarch64v9.5",
+                Architecture::Arm64,
+                Os::Linux,
+                (9, 5),
+                "aarch64v9.5-linux",
+            ),
+            (
+                "aarch64v8.0",
+                Architecture::Arm64,
+                Os::Linux,
+                (8, 0),
+                "aarch64-linux",
+            ),
+        ] {
+            let target: Target = name.parse().unwrap();
+            let (major, minor) = level;
+            assert_eq!(
+                target,
+                Target {
+                    arch,
+                    os,
+                    level: Level { major, minor }
+                },
+                "{name}"
+            );
+            assert_eq!(target.to_string(), canonical, "{name}");
+        }
+        assert_eq!(Target::X64_LINUX.level, Architecture::X64.baseline());
+        assert_eq!(Target::ARM64_MACOS.level, Architecture::Arm64.baseline());
+        let x64 = "unknown level 'v5' for x86_64 (expected v1, v2, v3, or v4)";
+        let arm64 =
+            "unknown level 'v7' for aarch64 (expected v8, v8.1 to v8.9, v9, or v9.1 to v9.5)";
+        for (name, error) in [
+            ("x86_64v5-linux", x64.to_string()),
+            ("x86_64v0", x64.replace("v5", "v0")),
+            ("x86_64v3.1", x64.replace("v5", "v3.1")),
+            ("x86_64v", x64.replace("v5", "v")),
+            ("aarch64v7-macos", arm64.to_string()),
+            ("aarch64v8.10", arm64.replace("v7", "v8.10")),
+            ("aarch64v9.6", arm64.replace("v7", "v9.6")),
+            ("aarch64v8.", arm64.replace("v7", "v8.")),
+            ("aarch64v08", arm64.replace("v7", "v08")),
+        ] {
+            assert_eq!(name.parse::<Target>(), Err(error), "{name}");
+        }
     }
 
     #[test]

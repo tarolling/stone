@@ -38,16 +38,30 @@ The executable is for the machine stone runs on: x86-64 or arm64 Linux, or arm64
 
 | target | runs on |
 | --- | --- |
-| `x86_64` (or `x64`, `x86_64-linux`) | x86-64 Linux |
-| `aarch64` (or `arm64`, `aarch64-linux`) | arm64 Linux |
-| `aarch64-macos` (or `arm64-macos`, `aarch64-apple-darwin`) | arm64 macOS |
+| `x86_64-linux` (or `x86_64`, `x64`) | x86-64 Linux |
+| `aarch64-linux` (or `aarch64`, `arm64`) | arm64 Linux |
+| `aarch64-macos` (or `arm64-macos`) | arm64 macOS |
+
+A target is named `<arch>[<level>]-<system>`. There is no vendor or C library part, since
+compiled programs use no C library, but Rust's names for the same machines work too, such as
+`x86_64-unknown-linux-musl` and `aarch64-apple-darwin`. A system left out means Linux.
+
+The optional level names the processor features the program may assume: `v1` to `v4` for
+x86-64 (the x86-64 psABI levels, so `x86_64v3-linux` assumes AVX2), and `v8`, `v8.1` to `v8.9`,
+`v9`, or `v9.1` to `v9.5` for arm64 (as in `aarch64v8.2-macos`). Without one, the program runs on
+every processor of the architecture. stone does not use the extra features yet, so for now every
+level builds the same program.
 
 ```sh
 stone build examples/basics.st -o build/basics
 ./build/basics
-stone build examples/basics.st -o build/basics-arm64 --target aarch64
+stone build examples/basics.st -o build/basics-arm64 --target aarch64-linux
 stone build examples/basics.st -o build/basics-mac --target aarch64-macos
 ```
+
+The release archives use the same names for the machines the `stone` binary itself runs on,
+such as `stone-x86_64-linux.tar.gz`, plus `stone-x86_64-macos.tar.gz` for Intel Macs, where stone
+runs programs but cannot build them.
 
 The executable reads its own arguments and standard input the same way, so `./build/sum 1 2 3`
 behaves like `stone run sum.st 1 2 3`.

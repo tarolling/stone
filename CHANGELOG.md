@@ -19,9 +19,18 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `--target aarch64-macos` builds one from any machine. stone writes and signs the Mach-O file
   itself, and the program calls the system only through `libSystem`, so it needs nothing
   installed to build or run.
+- `--target` takes a processor level, such as `x86_64v3-linux` or `aarch64v8.2-macos`, naming
+  the features a program may assume (stone does not use them yet), and accepts Rust's names for
+  the same machines, such as `x86_64-unknown-linux-musl`.
 
 ### Changed
 
+- Targets display by their full names, `x86_64-linux` and `aarch64-linux`, in messages and help.
+  The short names `x86_64` and `aarch64` still work.
+- Release archives are named by stone's target names, such as `stone-x86_64-linux.tar.gz` and
+  `stone-aarch64-macos.tar.gz`, instead of Rust's. `install.sh` and `stone update` look for the
+  new names, so `stone update` from an earlier version cannot find this release; reinstall with
+  `install.sh` instead.
 - stone has a new design philosophy, described in the documentation's Philosophy page: Python's
   simplicity with Rust's memory safety, speed, and error reporting, with the complexity moved
   into the compiler, and compiled programs that need no libc. The syntax is unchanged.

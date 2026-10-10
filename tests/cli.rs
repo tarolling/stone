@@ -273,7 +273,10 @@ fn build_rejects_an_unknown_target() {
     assert!(!output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("unknown target 'sparc' (expected x86_64, aarch64, or aarch64-macos)"),
+        stderr.contains(
+            "unknown target 'sparc' (expected x86_64-linux, aarch64-linux, or aarch64-macos, \
+             with an optional level such as x86_64v3-linux)"
+        ),
         "{stderr}"
     );
 }
@@ -283,9 +286,9 @@ fn build_for_the_host_target_by_name_runs() {
     let host = if cfg!(target_os = "macos") {
         "aarch64-macos"
     } else if cfg!(target_arch = "aarch64") {
-        "aarch64"
+        "aarch64-linux"
     } else {
-        "x86_64"
+        "x86_64-linux"
     };
     let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("host_target");
     let exe_arg = exe.to_str().unwrap();

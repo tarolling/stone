@@ -603,7 +603,7 @@ fn target() -> Target {
 /// host, and qemu-user for another Linux processor, which needs nothing else, since Linux
 /// programs are static and use no libc.
 fn runner(exe: &Path, target: Target) -> Command {
-    if Target::host() == Ok(target) {
+    if Target::host().is_ok_and(|host| (host.arch, host.os) == (target.arch, target.os)) {
         return Command::new(exe);
     }
     let qemu = match target.arch {

@@ -37,7 +37,7 @@ err() {
     exit 1
 }
 
-# prints the release target for this machine, such as x86_64-unknown-linux-musl
+# prints the name of this machine that release archives use, such as x86_64-linux
 detect_target() {
     os=$(uname -s)
     arch=$(uname -m)
@@ -47,8 +47,8 @@ detect_target() {
         *) arch="" ;;
     esac
     case "$os" in
-        Linux) os=unknown-linux-musl ;;
-        Darwin) os=apple-darwin ;;
+        Linux) os=linux ;;
+        Darwin) os=macos ;;
         *) os="" ;;
     esac
     if [ -z "$arch" ] || [ -z "$os" ]; then
@@ -147,8 +147,8 @@ main() {
             ;;
     esac
     case "$target" in
-        *linux*) ;;
-        *) say "note: 'stone build' writes Linux executables, so use 'stone run' to run programs here" ;;
+        x86_64-macos) say "note: 'stone build' cannot write programs for Intel Macs, so use 'stone run' to run programs here" ;;
+        *) ;;
     esac
 }
 

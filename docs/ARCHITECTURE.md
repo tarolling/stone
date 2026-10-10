@@ -36,7 +36,8 @@ of one file, except that each `Span` carries the `FileId` of the file it is in.
 | `parser` | recursive-descent PEG parser; `parser/expressions.rs` and `parser/statements.rs` mirror the rules in `docs/grammar/stone.gram` |
 | `checker` | type inference and name resolution, producing diagnostics, expression types, and symbols with their references |
 | `interpreter` | tree-walking evaluator |
-| `codegen` | the `AssemblyGenerator` trait, `Architecture` (the `--target` names), and `link`, which writes the `.s` file and the executable |
+| `codegen` | the `AssemblyGenerator` trait, `Target` (the `--target` names: an `Architecture`, a `Level`, and an `Os`), and `link`, which writes the `.s` file and the executable |
+| `codegen/device` | `Device`, the GPUs (`gfx1100`, `sm_90`) that code will run on beside a target; no backend generates GPU code yet |
 | `codegen/asm` | the built-in assembler: parses the GNU as syntax both backends emit and encodes it (`codegen/asm/x64.rs`, `codegen/asm/arm64.rs`), picking the same encodings as GNU as, with jumps relaxed to their short form where they reach |
 | `codegen/elf` | the built-in linker: lays out sections, resolves fixups, and writes a static ELF executable with a symbol table |
 | `codegen/context` | what both backends share about the program being compiled: the checked and lowered program, labels, interned strings, runtime failures, and which runtime routines it needs |

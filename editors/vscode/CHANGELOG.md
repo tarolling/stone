@@ -15,6 +15,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Support for stone's new builtin `math`, `random`, and `time` modules, which works as it does
   for `os`: hover, completion after `use` and after the module's name, and go to definition in
   the builtins reference.
+- Support for stone's new list features: completion after `.` offers `pop`, `insert`, and
+  `extend`, hover and go to definition document them, and the editor understands slices such as
+  `xs[1:]` and arithmetic on lists such as `a * 2.0 + b`, reporting their errors and the warning
+  for `[0] * n`, which multiplies the element instead of repeating it.
 
 ## [0.2.0] - 2026-10-10
 

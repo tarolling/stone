@@ -234,6 +234,160 @@ fn list_position(index: i64, len: usize) -> EvalResult<usize> {
     }
 }
 
+/// An arithmetic expression partly evaluated by [`Interpreter::arithmetic`]: a value, or an
+/// operation that has a list among its operands and so works element by element.
+enum Lazy {
+    Value(Value),
+    Binary(Operator, Box<Lazy>, Box<Lazy>),
+    Unary(UnaryOp, Box<Lazy>),
+}
+
+impl Lazy {
+    /// Returns the element at `index` of what this computes, where every list it holds has more
+    /// than `index` elements.
+    fn at(&self, index: usize) -> EvalResult<Value> {
+        match self {
+            Lazy::Value(Value::List(items)) => Ok(items[index].clone()),
+            Lazy::Value(value) => Ok(value.clone()),
+            Lazy::Binary(op, left, right) => binary(*op, left.at(index)?, right.at(index)?),
+            Lazy::Unary(op, operand) => unary(*op, operand.at(index)?),
+        }
+    }
+
+    /// Adds every list this holds to `out`, left to right.
+    fn lists<'a>(&'a self, out: &mut Vec<&'a Rc<Vec<Value>>>) {
+        match self {
+            Lazy::Value(Value::List(items)) => out.push(items),
+            Lazy::Value(_) => {}
+            Lazy::Binary(_, left, right) => {
+                left.lists(out);
+                right.lists(out);
+            }
+            Lazy::Unary(_, operand) => operand.lists(out),
+        }
+    }
+}
+
+/// Computes `lazy`, which holds a list, element by element: once every list is known to have the
+/// same length, the whole expression is evaluated for the first element, then the second, and so
+/// on, so `a / b + c / d` reports the first element where either division fails.
+///
+/// For example, `[1, 2] * 2 + [10, 20]` gives `[12, 24]`.
+fn elementwise(lazy: &Lazy) -> EvalResult<Value> {
+    let mut lists = Vec::new();
+    lazy.lists(&mut lists);
+    let len = lists[0].len();
+    if let Some(other) = lists.iter().find(|list| list.len() != len) {
+        return Err(format!("{} ({len} and {})", stdlib::LENGTHS_DIFFER, other.len()).into());
+    }
+    let items = (0..len)
+        .map(|index| lazy.at(index))
+        .collect::<EvalResult<Vec<Value>>>()?;
+    Ok(Value::list(items))
+}
+
+/// Applies the binary operator `op` to two numbers, or `+` to two strings.
+fn binary(op: Operator, lhs: Value, rhs: Value) -> EvalResult<Value> {
+    match (lhs, rhs) {
+        // the exponent is always an int, even for a float base
+        (Value::Int(_), Value::Int(r)) if op == Operator::Power && r < 0 => {
+            Err("negative exponent".into())
+        }
+        (Value::Int(l), Value::Int(r)) if op == Operator::Power => {
+            Ok(Value::Int(stdlib::int_pow(l, r)))
+        }
+        (Value::Float(l), Value::Int(r)) if op == Operator::Power => {
+            Ok(Value::Float(stdlib::float_pow(l, r)))
+        }
+        (Value::Int(l), Value::Int(r)) => match op {
+            // wrap like the compiled add, sub, and imul do
+            Operator::Add => Ok(Value::Int(l.wrapping_add(r))),
+            Operator::Subtract => Ok(Value::Int(l.wrapping_sub(r))),
+            Operator::Multiply => Ok(Value::Int(l.wrapping_mul(r))),
+            // the same errors compiled code checks for before idiv
+            Operator::Divide if r == 0 => Err("division by zero".into()),
+            Operator::Divide => l
+                .checked_div(r)
+                .map(Value::Int)
+                .ok_or_else(|| "integer overflow in division".into()),
+            Operator::Modulo if r == 0 => Err("division by zero".into()),
+            // `MIN % -1` is 0, which compiled code also gives
+            Operator::Modulo => Ok(Value::Int(l.wrapping_rem(r))),
+            Operator::Power => Err("Type mismatch in binary operation".into()),
+        },
+        (Value::Float(l), Value::Float(r)) => match op {
+            Operator::Add => Ok(Value::Float(l + r)),
+            Operator::Subtract => Ok(Value::Float(l - r)),
+            Operator::Multiply => Ok(Value::Float(l * r)),
+            // like Python, rather than giving inf or nan
+            Operator::Divide if r == 0.0 => Err("division by zero".into()),
+            Operator::Divide => Ok(Value::Float(l / r)),
+            Operator::Modulo if r == 0.0 => Err("division by zero".into()),
+            Operator::Modulo => Ok(Value::Float(l % r)),
+            Operator::Power => Err("Type mismatch in binary operation".into()),
+        },
+        (Value::Str(l), Value::Str(r)) if matches!(op, Operator::Add) => {
+            Ok(Value::Str(format!("{l}{r}").into()))
+        }
+        _ => Err("Type mismatch in binary operation".into()),
+    }
+}
+
+/// Applies the unary operator `op` to a value.
+fn unary(op: UnaryOp, value: Value) -> EvalResult<Value> {
+    match op {
+        UnaryOp::Not => Ok(Value::Bool(!value.is_truthy())),
+        UnaryOp::UnaryAdd => Ok(value),
+        UnaryOp::UnarySub => match value {
+            Value::Float(x) => Ok(Value::Float(-x)),
+            other => Ok(Value::Int(other.as_int()?.wrapping_neg())),
+        },
+    }
+}
+
+/// Calls the method `name`, which changes its receiver, on `items` with `args`.
+///
+/// For example, `append` with `[Value::Int(1)]` pushes 1 and returns `Value::None`, and `pop`
+/// with no arguments removes and returns the last element.
+fn change_list(items: &mut Vec<Value>, name: &str, args: Vec<Value>) -> EvalResult<Value> {
+    match (name, &args[..]) {
+        ("append", [item]) => {
+            items.push(item.clone());
+            Ok(Value::None)
+        }
+        ("pop", []) => items.pop().ok_or_else(|| stdlib::POP_EMPTY.into()),
+        ("pop", [index]) => {
+            if items.is_empty() {
+                return Err(stdlib::POP_EMPTY.into());
+            }
+            let index = index.as_int()?;
+            let len = items.len() as i64;
+            let position = if index < 0 { index + len } else { index };
+            if !(0..len).contains(&position) {
+                return Err(stdlib::POP_RANGE.into());
+            }
+            Ok(items.remove(position as usize))
+        }
+        ("insert", [index, item]) => {
+            let index = index.as_int()?;
+            let len = items.len() as i64;
+            let position = if index < 0 { index + len } else { index };
+            if !(0..=len).contains(&position) {
+                return Err(
+                    format!("{} (index {index}, length {len})", stdlib::INDEX_RANGE).into(),
+                );
+            }
+            items.insert(position as usize, item.clone());
+            Ok(Value::None)
+        }
+        ("extend", [other]) => {
+            items.extend(other.as_list()?.iter().cloned());
+            Ok(Value::None)
+        }
+        _ => Err(format!("{name}() is called on a list with the wrong arguments").into()),
+    }
+}
+
 /// The error `os.exit` stops a program with, holding the exit status, which is the low 8 bits of
 /// the code it was given, as the system keeps them.
 ///
@@ -754,6 +908,39 @@ impl<'out> Interpreter<'out> {
         })
     }
 
+    /// Evaluates the arithmetic `expr`, computing each operation whose operands are both numbers
+    /// as soon as they are known, left to right, and leaving those with a list among their
+    /// operands for [`elementwise`].
+    ///
+    /// For example, `a * (2 + 3)` for a list `a` evaluates `a`, then `2 + 3`, and returns a
+    /// multiplication of `a` by 5 for each element.
+    fn arithmetic(&mut self, expr: &Expr) -> EvalResult<Lazy> {
+        self.nested(|this| match &expr.kind {
+            ExprKind::BinOp { op, left, right } => {
+                let left = this.arithmetic(left)?;
+                let right = this.arithmetic(right)?;
+                match (left, right) {
+                    (Lazy::Value(lhs), Lazy::Value(rhs))
+                        if !matches!(lhs, Value::List(_)) && !matches!(rhs, Value::List(_)) =>
+                    {
+                        Ok(Lazy::Value(binary(*op, lhs, rhs)?))
+                    }
+                    (left, right) => Ok(Lazy::Binary(*op, Box::new(left), Box::new(right))),
+                }
+            }
+            ExprKind::UnaryOp {
+                op: op @ (UnaryOp::UnaryAdd | UnaryOp::UnarySub),
+                operand,
+            } => match this.arithmetic(operand)? {
+                Lazy::Value(value) if !matches!(value, Value::List(_)) => {
+                    Ok(Lazy::Value(unary(*op, value)?))
+                }
+                operand => Ok(Lazy::Unary(*op, Box::new(operand))),
+            },
+            _ => Ok(Lazy::Value(this.eval_expr(expr)?)),
+        })
+    }
+
     fn eval_expr(&mut self, expr: &Expr) -> EvalResult<Value> {
         self.nested(|this| this.eval_expr_unguarded(expr))
     }
@@ -775,64 +962,17 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(result)
             }
-            ExprKind::BinOp { op, left, right } => {
-                let lhs = self.eval_expr(left)?;
-                let rhs = self.eval_expr(right)?;
-
-                match (lhs, rhs) {
-                    // the exponent is always an int, even for a float base
-                    (Value::Int(_), Value::Int(r)) if *op == Operator::Power && r < 0 => {
-                        Err("negative exponent".into())
-                    }
-                    (Value::Int(l), Value::Int(r)) if *op == Operator::Power => {
-                        Ok(Value::Int(stdlib::int_pow(l, r)))
-                    }
-                    (Value::Float(l), Value::Int(r)) if *op == Operator::Power => {
-                        Ok(Value::Float(stdlib::float_pow(l, r)))
-                    }
-                    (Value::Int(l), Value::Int(r)) => match op {
-                        // wrap like the compiled add, sub, and imul do
-                        Operator::Add => Ok(Value::Int(l.wrapping_add(r))),
-                        Operator::Subtract => Ok(Value::Int(l.wrapping_sub(r))),
-                        Operator::Multiply => Ok(Value::Int(l.wrapping_mul(r))),
-                        // the same errors compiled code checks for before idiv
-                        Operator::Divide if r == 0 => Err("division by zero".into()),
-                        Operator::Divide => l
-                            .checked_div(r)
-                            .map(Value::Int)
-                            .ok_or_else(|| "integer overflow in division".into()),
-                        Operator::Modulo if r == 0 => Err("division by zero".into()),
-                        // `MIN % -1` is 0, which compiled code also gives
-                        Operator::Modulo => Ok(Value::Int(l.wrapping_rem(r))),
-                        Operator::Power => Err("Type mismatch in binary operation".into()),
-                    },
-                    (Value::Float(l), Value::Float(r)) => match op {
-                        Operator::Add => Ok(Value::Float(l + r)),
-                        Operator::Subtract => Ok(Value::Float(l - r)),
-                        Operator::Multiply => Ok(Value::Float(l * r)),
-                        // like Python, rather than giving inf or nan
-                        Operator::Divide if r == 0.0 => Err("division by zero".into()),
-                        Operator::Divide => Ok(Value::Float(l / r)),
-                        Operator::Modulo if r == 0.0 => Err("division by zero".into()),
-                        Operator::Modulo => Ok(Value::Float(l % r)),
-                        Operator::Power => Err("Type mismatch in binary operation".into()),
-                    },
-                    (Value::Str(l), Value::Str(r)) if matches!(op, Operator::Add) => {
-                        Ok(Value::Str(format!("{l}{r}").into()))
-                    }
-                    _ => Err("Type mismatch in binary operation".into()),
-                }
-            }
+            ExprKind::BinOp { .. }
+            | ExprKind::UnaryOp {
+                op: UnaryOp::UnaryAdd | UnaryOp::UnarySub,
+                ..
+            } => match self.arithmetic(expr)? {
+                Lazy::Value(value) => Ok(value),
+                lazy => elementwise(&lazy),
+            },
             ExprKind::UnaryOp { op, operand } => {
                 let val = self.eval_expr(operand)?;
-                match op {
-                    UnaryOp::Not => Ok(Value::Bool(!val.is_truthy())),
-                    UnaryOp::UnaryAdd => Ok(val),
-                    UnaryOp::UnarySub => match val {
-                        Value::Float(x) => Ok(Value::Float(-x)),
-                        other => Ok(Value::Int(other.as_int()?.wrapping_neg())),
-                    },
-                }
+                unary(*op, val)
             }
             ExprKind::Compare {
                 left,
@@ -872,13 +1012,7 @@ impl<'out> Interpreter<'out> {
                         values.push(self.eval_expr(arg)?);
                     }
                     let items = self.place_list(root, &indexes)?;
-                    return match (attr.as_str(), &values[..]) {
-                        ("append", [item]) => {
-                            items.push(item.clone());
-                            Ok(Value::None)
-                        }
-                        _ => Err("append() is called on a list, with one value".into()),
-                    };
+                    return change_list(items, attr, values);
                 }
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind {
                     // the receiver is evaluated before the arguments
@@ -917,6 +1051,22 @@ impl<'out> Interpreter<'out> {
             ExprKind::Constant { value, kind: _ } => Ok(Value::from(&**value)),
             ExprKind::Subscript { value, slice, .. } => {
                 let list = self.eval_expr(value)?;
+                if let ExprKind::Slice { lower, upper, step } = &slice.kind {
+                    let mut bound = |bound: &Option<Box<Expr>>| -> EvalResult<Option<i64>> {
+                        bound
+                            .as_ref()
+                            .map(|bound| self.eval_expr(bound)?.as_int())
+                            .transpose()
+                    };
+                    let (lower, upper, step) = (bound(lower)?, bound(upper)?, bound(step)?);
+                    let items = list.as_list()?;
+                    let (start, step, count) =
+                        stdlib::slice_indices(items.len(), lower, upper, step)?;
+                    let picked = (0..count as i64)
+                        .map(|k| items[(start + k * step) as usize].clone())
+                        .collect();
+                    return Ok(Value::list(picked));
+                }
                 let index = self.eval_expr(slice)?.as_int()?;
                 let items = list.as_list()?;
                 let position = list_position(index, items.len())?;
@@ -930,6 +1080,7 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(Value::list(items))
             }
+            ExprKind::Slice { .. } => Err("a slice can only appear in brackets".into()),
         }
     }
 

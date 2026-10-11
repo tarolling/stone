@@ -149,6 +149,11 @@ fn strip_expr(expr: Expr) -> Expr {
             elts: strip_all(elts),
             ctx,
         },
+        ExprKind::Slice { lower, upper, step } => ExprKind::Slice {
+            lower: lower.map(strip_box),
+            upper: upper.map(strip_box),
+            step: step.map(strip_box),
+        },
         kind @ (ExprKind::Constant { .. } | ExprKind::Name { .. }) => kind,
     };
     kind.into()
@@ -1018,6 +1023,62 @@ fn assign_target_of(source: &str) -> Expr {
 
 fn subscript(value: Box<Expr>, slice: Box<Expr>, ctx: ExprContext) -> Box<Expr> {
     Box::new(ExprKind::Subscript { value, slice, ctx }.into())
+}
+
+fn slice(lower: Option<Box<Expr>>, upper: Option<Box<Expr>>, step: Option<Box<Expr>>) -> Box<Expr> {
+    Box::new(ExprKind::Slice { lower, upper, step }.into())
+}
+
+#[test]
+fn slices_parse() {
+    let sliced = |source: &str| {
+        let ExprKind::Subscript { value, slice, .. } = expr_of(source).kind else {
+            panic!("expected subscript");
+        };
+        assert_eq!(value, name("a"));
+        slice
+    };
+    assert_eq!(sliced("a[1:]\n"), slice(Some(int(1)), None, None));
+    assert_eq!(sliced("a[:2]\n"), slice(None, Some(int(2)), None));
+    assert_eq!(sliced("a[:]\n"), slice(None, None, None));
+    assert_eq!(sliced("a[::]\n"), slice(None, None, None));
+    let ExprKind::Slice {
+        lower: None,
+        upper: None,
+        step: Some(step),
+    } = sliced("a[::-1]\n").kind
+    else {
+        panic!("expected a slice with only a step");
+    };
+    assert!(matches!(step.kind, ExprKind::UnaryOp { .. }));
+    assert_eq!(
+        sliced("a[i:j:k]\n"),
+        slice(Some(name("i")), Some(name("j")), Some(name("k")))
+    );
+    assert_eq!(sliced("a[1:2:]\n"), slice(Some(int(1)), Some(int(2)), None));
+    assert_eq!(sliced("a[0]\n"), int(0));
+}
+
+#[test]
+fn slices_of_slices_parse() {
+    let ExprKind::Subscript {
+        value,
+        slice: outer,
+        ..
+    } = expr_of("a[1:][0]\n").kind
+    else {
+        panic!("expected subscript");
+    };
+    assert_eq!(outer, int(0));
+    assert!(matches!(value.kind, ExprKind::Subscript { .. }));
+}
+
+#[test]
+fn a_slice_needs_its_closing_bracket() {
+    assert_eq!(
+        error_of("a[1:2:3:4]\n"),
+        ("expected ']', found ':'".to_string(), 1, 8)
+    );
 }
 
 #[test]

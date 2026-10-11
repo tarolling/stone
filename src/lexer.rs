@@ -393,6 +393,10 @@ impl Lexer {
                 self.advance();
                 TokenType::Dot
             }
+            Some(':') => {
+                self.advance();
+                TokenType::Colon
+            }
             Some('*') => {
                 self.advance();
                 if self.peek() == Some('*') {
@@ -819,6 +823,24 @@ testing(1, 2, 3)"#;
                 TokenType::RBracket,
                 TokenType::Dot,
                 name("b"),
+                TokenType::Newline,
+                TokenType::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn colons_are_tokens() {
+        assert_eq!(
+            types_of("a[1::2]\n"),
+            [
+                name("a"),
+                TokenType::LBracket,
+                TokenType::Number(1),
+                TokenType::Colon,
+                TokenType::Colon,
+                TokenType::Number(2),
+                TokenType::RBracket,
                 TokenType::Newline,
                 TokenType::Eof
             ]

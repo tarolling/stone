@@ -17,7 +17,7 @@ mod emit;
 pub mod floats;
 
 use crate::ast::Mod;
-use crate::codegen::context::{Context, global_label, immortal_string};
+use crate::codegen::context::{Context, LIST_ROUTINES, global_label, immortal_string};
 use crate::codegen::{AssemblyGenerator, Os, Target};
 use builtins::{Sys, system_call};
 use std::path::Path;
@@ -262,6 +262,12 @@ impl Arm64Generator {
             return Ok(());
         }
         builtins::list_runtime(self);
+        let methods: Vec<&str> = LIST_ROUTINES
+            .iter()
+            .copied()
+            .filter(|label| self.ctx.uses(&[label]))
+            .collect();
+        builtins::list_methods(self, &methods);
         for (label, element) in self.ctx.list_printers()? {
             builtins::print_list(self, &label, &element);
         }

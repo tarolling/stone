@@ -121,7 +121,7 @@ pub enum CompOp {
 /// ```text
 /// unaryop = Not | UnaryAdd | UnarySub
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum UnaryOp {
     Not,
     UnaryAdd,
@@ -133,7 +133,7 @@ pub enum UnaryOp {
 /// ```text
 /// operator = Add | Subtract | Multiply | Divide | Modulo | Power
 /// ```
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub enum Operator {
     Add,
     Subtract,
@@ -225,6 +225,13 @@ pub enum ExprKind {
     Name { id: Identifier, ctx: ExprContext },
     /// A list literal, such as `[1, 2, 3]`.
     List { elts: Vec<Expr>, ctx: ExprContext },
+    /// The bounds of a slice, such as `1:` in `xs[1:]`, which can only be a
+    /// [`ExprKind::Subscript`]'s `slice`. A missing bound is `None`.
+    Slice {
+        lower: Option<Box<Expr>>,
+        upper: Option<Box<Expr>>,
+        step: Option<Box<Expr>>,
+    },
 }
 
 /// A statement and the span of source text it was parsed from.

@@ -38,7 +38,7 @@ pub struct BlockId(pub usize);
 ///
 /// Floats are immediates of their bits, bools are 0 or 1, and `none` is 0, so for example the
 /// literal `1.5` is `Imm(4609434218613702656)`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Operand {
     Reg(VReg),
     Imm(i64),
@@ -160,6 +160,56 @@ pub enum Callee {
     Print(Type),
 }
 
+/// What a [`Inst::Packed`] loop computes for each element, over list data pointers from
+/// [`Inst::ListData`] and numbers that are the same for every element.
+///
+/// For example, `a * 2.0 + b` is `fadd(fmul([v4], 4611686018427387904), [v5])`, where `[v4]` is
+/// the element of the list whose elements start at `v4`.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Kernel {
+    /// The element of the list whose elements start at this address.
+    Element(Operand),
+    /// A number, the same for every element.
+    Number(Operand),
+    /// `Add`, `Sub`, or `Mul` of ints or floats, or `Div` of floats.
+    Binary(BinOp, Box<Kernel>, Box<Kernel>),
+    Neg(Box<Kernel>),
+}
+
+impl Kernel {
+    /// Adds every operand of the kernel to `out`, left to right.
+    pub fn operands(&self, out: &mut Vec<Operand>) {
+        match self {
+            Kernel::Element(value) | Kernel::Number(value) => out.push(*value),
+            Kernel::Binary(_, lhs, rhs) => {
+                lhs.operands(out);
+                rhs.operands(out);
+            }
+            Kernel::Neg(operand) => operand.operands(out),
+        }
+    }
+
+    fn show(&self, float: bool, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let prefix = if float { "f" } else { "" };
+        match self {
+            Kernel::Element(value) => write!(f, "[{value}]"),
+            Kernel::Number(value) => write!(f, "{value}"),
+            Kernel::Binary(op, lhs, rhs) => {
+                write!(f, "{prefix}{}(", bin_name(*op))?;
+                lhs.show(float, f)?;
+                write!(f, ", ")?;
+                rhs.show(float, f)?;
+                write!(f, ")")
+            }
+            Kernel::Neg(operand) => {
+                write!(f, "{prefix}neg(")?;
+                operand.show(float, f)?;
+                write!(f, ")")
+            }
+        }
+    }
+}
+
 /// One instruction. Every instruction reads all of its inputs before writing `dst`, so `dst` may
 /// be the same vreg as an input.
 #[derive(Clone, Debug, PartialEq)]
@@ -233,6 +283,28 @@ pub enum Inst {
         list: Operand,
         index: Operand,
     },
+    /// `list[index] = value` for an index already known to be in range, in a list whose elements
+    /// are not counted, so nothing is released.
+    ListSet {
+        list: Operand,
+        index: Operand,
+        value: Operand,
+    },
+    /// The address of the first element of a list.
+    ListData { dst: VReg, list: Operand },
+    /// Computes `kernel` for the elements of lists two at a time, with packed (SIMD) instructions,
+    /// on floats if `float` and ints otherwise, writing each result to the same position of the
+    /// list whose elements start at `out`. It starts at position 0, does every whole pair below
+    /// `len` it can, and writes to `done` the position where it stopped, for a loop over single
+    /// elements to finish. A float division stops before a pair with a zero divisor, so that loop
+    /// fails at the same element. It is not a call: it uses only registers no vreg is in.
+    Packed {
+        done: VReg,
+        float: bool,
+        kernel: Kernel,
+        out: Operand,
+        len: Operand,
+    },
     /// Makes the list `src`, which a variable or a list slot holds, the only reference to its
     /// elements before they change: `dst` is `src` when nothing else refers to it, and otherwise a
     /// copy, in which case the holder gives up its reference to `src`. Whatever held `src` must
@@ -282,12 +354,15 @@ impl Inst {
             | Inst::ListLen { dst, .. }
             | Inst::ListLoad { dst, .. }
             | Inst::ListGet { dst, .. }
+            | Inst::ListData { dst, .. }
+            | Inst::Packed { done: dst, .. }
             | Inst::ListUnique { dst, .. }
             | Inst::IntToFloat { dst, .. }
             | Inst::FloatToInt { dst, .. } => Some(*dst),
             Inst::Call { dst, .. } | Inst::ListStore { old: dst, .. } => *dst,
             Inst::StoreGlobal { .. }
             | Inst::ListInit { .. }
+            | Inst::ListSet { .. }
             | Inst::Retain { .. }
             | Inst::Release { .. } => None,
         }
@@ -313,13 +388,22 @@ impl Inst {
             | Inst::FloatBinary { lhs, rhs, .. }
             | Inst::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
             Inst::LoadGlobal { .. } | Inst::StrAddr { .. } => vec![],
-            Inst::ListLen { list, .. } => vec![*list],
+            Inst::ListLen { list, .. } | Inst::ListData { list, .. } => vec![*list],
+            Inst::Packed {
+                kernel, out, len, ..
+            } => {
+                let mut operands = Vec::new();
+                kernel.operands(&mut operands);
+                operands.extend([*out, *len]);
+                operands
+            }
             Inst::ListLoad { list, index, .. } | Inst::ListGet { list, index, .. } => {
                 vec![*list, *index]
             }
             Inst::ListStore {
                 list, index, value, ..
-            } => vec![*list, *index, *value],
+            }
+            | Inst::ListSet { list, index, value } => vec![*list, *index, *value],
             Inst::ListInit { list, value, .. } => vec![*list, *value],
             Inst::Call { args, .. } => args.clone(),
         }
@@ -529,6 +613,20 @@ impl fmt::Display for Inst {
                 write!(f, "list_store {list}, {index}, {value}")
             }
             Inst::ListGet { dst, list, index } => write!(f, "{dst} = list_get {list}, {index}"),
+            Inst::ListSet { list, index, value } => {
+                write!(f, "list_set {list}, {index}, {value}")
+            }
+            Inst::ListData { dst, list } => write!(f, "{dst} = list_data {list}"),
+            Inst::Packed {
+                done,
+                float,
+                kernel,
+                out,
+                len,
+            } => {
+                write!(f, "{done} = packed {out}, {len}, ")?;
+                kernel.show(*float, f)
+            }
             Inst::ListUnique { dst, src } => write!(f, "{dst} = list_unique {src}"),
             Inst::ListInit { list, index, value } => {
                 write!(f, "list_init {list}[{index}], {value}")

@@ -16,7 +16,7 @@ use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{function_label, global_label};
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::{
-    BinOp, BlockId, Callee, Cond, Function, Inst, Operand, RcKind, Terminator, VReg,
+    BinOp, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, RcKind, Terminator, VReg,
 };
 use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
 use crate::stdlib::MAX_CALL_DEPTH;
@@ -43,6 +43,42 @@ enum Value {
     /// A spill slot at `[sp, #offset]`.
     Stack(i64),
     Imm(i64),
+}
+
+/// The registers of a packed loop while it is emitted, by the number of their `v` register.
+struct Packing {
+    /// The vector registers holding nothing, taken from the end.
+    free: Vec<u32>,
+    /// Each number in the kernel and the register holding it in both halves.
+    numbers: Vec<(Operand, u32)>,
+    float: bool,
+    /// The label after the loop.
+    stop: String,
+}
+
+impl Packing {
+    fn take(&mut self) -> Result<u32, String> {
+        self.free
+            .pop()
+            .ok_or_else(|| "packed arithmetic needs too many registers".to_string())
+    }
+
+    fn give(&mut self, reg: u32) {
+        self.free.push(reg);
+    }
+}
+
+/// Adds every number in `kernel` to `out`, left to right.
+fn number_operands(kernel: &Kernel, out: &mut Vec<Operand>) {
+    match kernel {
+        Kernel::Number(value) => out.push(*value),
+        Kernel::Element(_) => {}
+        Kernel::Binary(_, lhs, rhs) => {
+            number_operands(lhs, out);
+            number_operands(rhs, out);
+        }
+        Kernel::Neg(operand) => number_operands(operand, out),
+    }
 }
 
 /// Returns whether `n` is an immediate that `add`, `sub`, and `cmp` can take: 12 bits, optionally
@@ -281,6 +317,129 @@ impl Arm64Generator {
         }
     }
 
+    /// Emits a [`Inst::Packed`] loop with NEON, two elements at a time in `v16` to `v31`, which
+    /// hold no vregs and which callers need not save. `x10` counts the elements done, `x11` holds
+    /// the number of whole pairs' worth, `x16` an element's address, and `x9` and `x17` a pointer
+    /// or number that was not in a register. Each number is copied to both halves of a register
+    /// once, before the loop.
+    fn packed(
+        &mut self,
+        frame: &Frame,
+        done: VReg,
+        float: bool,
+        kernel: &Kernel,
+        out: Operand,
+        len: Operand,
+    ) -> Result<(), String> {
+        let mut packing = Packing {
+            free: (16..32).rev().collect(),
+            numbers: Vec::new(),
+            float,
+            stop: self.ctx.new_label("packed_done"),
+        };
+        let mut numbers = Vec::new();
+        number_operands(kernel, &mut numbers);
+        for number in numbers {
+            if packing.numbers.iter().any(|(n, _)| *n == number) {
+                continue;
+            }
+            let reg = packing.take()?;
+            let value = frame.value(number)?;
+            let gpr = match value {
+                Value::Reg(gpr) => gpr,
+                _ => {
+                    self.load("x17", value);
+                    "x17"
+                }
+            };
+            self.emit(&format!("\tdup\tv{reg}.2d, {gpr}"));
+            packing.numbers.push((number, reg));
+        }
+        let len = frame.value(len)?;
+        self.load("x11", len);
+        self.emit("\tlsr\tx11, x11, #1");
+        self.emit("\tlsl\tx11, x11, #1");
+        self.emit("\tmov\tx10, #0");
+        self.emit(&format!("\tcbz\tx11, {}", packing.stop));
+        let top = self.ctx.new_label("packed");
+        self.emit(&format!("{top}:"));
+        let (result, _) = self.packed_node(frame, &mut packing, kernel)?;
+        let base = self.base(frame.value(out)?, "x9");
+        self.emit(&format!("\tadd\tx16, {base}, x10, lsl #3"));
+        self.emit(&format!("\tstr\tq{result}, [x16]"));
+        self.emit("\tadd\tx10, x10, #2");
+        self.emit("\tcmp\tx10, x11");
+        self.emit(&format!("\tb.lt\t{top}"));
+        self.emit(&format!("{}:", packing.stop));
+        let done = frame.reg(done)?;
+        self.store(done, "x10");
+        Ok(())
+    }
+
+    /// Emits the instructions for one node of a packed kernel inside the loop, returning the
+    /// number of the `v` register holding its two results and whether the node owns that
+    /// register, which a broadcast number does not.
+    fn packed_node(
+        &mut self,
+        frame: &Frame,
+        packing: &mut Packing,
+        node: &Kernel,
+    ) -> Result<(u32, bool), String> {
+        match node {
+            Kernel::Number(value) => {
+                let reg = packing
+                    .numbers
+                    .iter()
+                    .find(|(n, _)| n == value)
+                    .map(|(_, reg)| *reg)
+                    .ok_or("a packed number was not broadcast")?;
+                Ok((reg, false))
+            }
+            Kernel::Element(data) => {
+                let reg = packing.take()?;
+                let base = self.base(frame.value(*data)?, "x9");
+                self.emit(&format!("\tadd\tx16, {base}, x10, lsl #3"));
+                self.emit(&format!("\tldr\tq{reg}, [x16]"));
+                Ok((reg, true))
+            }
+            Kernel::Binary(op, lhs, rhs) => {
+                let (lhs, lhs_owned) = self.packed_node(frame, packing, lhs)?;
+                let (rhs, rhs_owned) = self.packed_node(frame, packing, rhs)?;
+                let dst = if lhs_owned { lhs } else { packing.take()? };
+                let mnemonic = match (op, packing.float) {
+                    (BinOp::Add, true) => "fadd",
+                    (BinOp::Sub, true) => "fsub",
+                    (BinOp::Mul, true) => "fmul",
+                    (BinOp::Div, true) => {
+                        // stop before a pair with a zero divisor, for the single loop to report
+                        let zero = packing.take()?;
+                        self.emit(&format!("\tfcmeq\tv{zero}.2d, v{rhs}.2d, #0.0"));
+                        self.emit(&format!("\taddp\td{zero}, v{zero}.2d"));
+                        self.emit(&format!("\tfmov\tx17, d{zero}"));
+                        self.emit(&format!("\tcbnz\tx17, {}", packing.stop));
+                        packing.give(zero);
+                        "fdiv"
+                    }
+                    (BinOp::Add, false) => "add",
+                    (BinOp::Sub, false) => "sub",
+                    _ => return Err(format!("{op:?} cannot be packed")),
+                };
+                self.emit(&format!("\t{mnemonic}\tv{dst}.2d, v{lhs}.2d, v{rhs}.2d"));
+                if rhs_owned {
+                    packing.give(rhs);
+                }
+                Ok((dst, true))
+            }
+            Kernel::Neg(operand) => {
+                let (src, owned) = self.packed_node(frame, packing, operand)?;
+                let dst = if owned { src } else { packing.take()? };
+                let mnemonic = if packing.float { "fneg" } else { "neg" };
+                self.emit(&format!("\t{mnemonic}\tv{dst}.2d, v{src}.2d"));
+                Ok((dst, true))
+            }
+        }
+    }
+
     /// Loads `src` into register `reg`, unless it is already there.
     fn load(&mut self, reg: &'static str, src: Value) {
         match src {
@@ -511,6 +670,22 @@ impl Arm64Generator {
 
     fn emit_inst(&mut self, frame: &Frame, inst: &Inst) -> Result<(), String> {
         match inst {
+            Inst::ListData { dst, list } => {
+                let (dst, list) = (frame.reg(*dst)?, frame.value(*list)?);
+                let base = self.base(list, "x9");
+                let target = self.target(dst);
+                self.emit(&format!("\tldr\t{target}, [{base}, #16]"));
+                self.store(dst, target);
+            }
+
+            Inst::Packed {
+                done,
+                float,
+                kernel,
+                out,
+                len,
+            } => self.packed(frame, *done, *float, kernel, *out, *len)?,
+
             Inst::Copy { dst, src } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 self.mov(dst, src);
@@ -799,6 +974,17 @@ impl Arm64Generator {
                 if let Some(old) = old {
                     self.store(frame.reg(*old)?, "x9");
                 }
+            }
+
+            Inst::ListSet { list, index, value } => {
+                let (list, index, value) = (
+                    frame.value(*list)?,
+                    frame.value(*index)?,
+                    frame.value(*value)?,
+                );
+                let slot = self.list_slot(list, index, false);
+                let reg = self.operand(value, "x16");
+                self.emit(&format!("\tstr\t{reg}, {slot}"));
             }
 
             Inst::ListInit { list, index, value } => {

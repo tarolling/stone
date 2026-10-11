@@ -126,7 +126,9 @@ place. More generally, both backends find each variable's last use, and a value 
 instead of being copied: into a call (`ys = f(xs)`), another variable (`ys = xs`), or a list
 (`rows.append(row)`) when nothing reads it afterward. A global moves only into a function that
 never reads it, directly or through the functions it calls, and never in an interactive session,
-where a later entry may read it.
+where a later entry may read it. Arithmetic on lists, such as `xs = xs * 2.0 + ys`, writes its
+result over an operand's list when that operand is at its last use or is the variable being
+assigned and nothing else refers to its list, so it allocates nothing.
 
 ## Fast like Rust
 
@@ -141,7 +143,11 @@ stay in the language, and the compiler's job is to prove them unnecessary and re
 to let the programmer turn them off.
 
 Status: the compiler lowers to an IR, allocates registers with linear scan, and specializes a
-few cases such as division by a constant. Optimization passes (inlining, constant
+few cases such as division by a constant. Arithmetic on whole lists, such as `a * 2.0 + b`,
+compiles to one loop with no intermediate lists and no index checks, which handles two elements
+at a time with SSE2 or NEON where the operations allow, so on the `vector` benchmark it is
+about 3 times as fast as numpy, which builds a temporary array for each operator. Wider vectors
+such as AVX2 on targets that have them, and optimization passes (inlining, constant
 propagation, removing checks and reference counts it can prove redundant) are future work.
 
 ## Errors like Rust

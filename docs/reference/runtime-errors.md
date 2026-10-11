@@ -21,7 +21,11 @@ to right in both.
 | `division by zero` | `/` or `%` with a divisor of `0`, or `0.0` (as in Python, rather than IEEE 754's infinity or nan) |
 | `integer overflow in division` | the smallest int divided by `-1`, which has no int result. `%` by `-1` is always `0` |
 | `negative exponent` | `**` with an int base and a negative exponent, which has no int result |
-| `list index out of range` | an index at or past the length, or a negative index before the start. The interpreter adds the index and length |
+| `list index out of range` | an index at or past the length, or a negative index before the start, including `insert` at an index below `-len` or above `len`. The interpreter adds the index and length |
+| `pop from empty list` | `pop()` or `pop(i)` on an empty list |
+| `pop index out of range` | `pop(i)` with `i` at or past the length, or before the start |
+| `slice step cannot be zero` | a slice such as `xs[::0]` |
+| `lists have different lengths` | arithmetic on two lists, such as `a + b`, whose lengths differ. The interpreter adds both lengths |
 | `cannot convert float to int (nan or out of range)` | `int()` or `math.floor()` of nan, an infinity, or a float outside the int range |
 | `invalid literal for int() with base 10: '...'` | `int()` of a string that is not a decimal int, quoted as given |
 | `int() argument out of range: '...'` | `int()` of a string holding an int too large or small to fit |
@@ -37,6 +41,10 @@ to right in both.
 | `sleep length is too large` | `time.sleep()` of 2^63 seconds or more |
 | `recursion is too deep (more than 1000 nested calls)` | more than 1,000 calls active at once |
 | `'name' is used before it is assigned` | a function read a global that had not been assigned yet when it ran |
+
+Arithmetic on lists computes the whole expression for the first element, then the second, and
+so on, so an error comes from the first element where any of its operations fails. In
+`a / b + c / d`, a zero in `d` at index 1 stops the program before a zero in `b` at index 2.
 
 Integer `+`, `-`, `*`, and `**` wrap around on overflow instead of failing. Float arithmetic
 follows IEEE 754 apart from division by zero and `math.sqrt` of a negative number, so it produces `inf`, `-inf`, and `nan` instead of

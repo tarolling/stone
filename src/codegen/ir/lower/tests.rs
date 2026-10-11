@@ -577,3 +577,70 @@ fn choice_retains_a_counted_element() {
          ret v3\n"
     );
 }
+
+#[test]
+fn elementwise_arithmetic_is_one_loop_with_no_temporary_lists() {
+    let ir = first_function("def f(a, b);\n    ret a * 2 + b * b\nf([1], [2])\n");
+    // the lengths are checked once, then each element is read, computed, and stored
+    assert_eq!(ir.matches("= len ").count(), 2, "{ir}");
+    // `b` is read once for both of its uses
+    assert_eq!(ir.matches("list_get").count(), 2, "{ir}");
+    assert_eq!(ir.matches("list_set").count(), 1, "{ir}");
+    assert_eq!(ir.matches("call stone.list_new").count(), 1, "{ir}");
+    assert_eq!(ir.matches("call ").count(), 1, "{ir}");
+    assert!(ir.contains("fail \"lists have different lengths\""), "{ir}");
+    assert!(!ir.contains("list_load"), "{ir}");
+}
+
+#[test]
+fn elementwise_float_arithmetic_uses_float_instructions() {
+    let ir = first_function("def f(a, k);\n    ret -(a * k) + 1.5\nf([1.0], 2.0)\n");
+    assert!(ir.contains("fmul"), "{ir}");
+    assert!(ir.contains("fneg"), "{ir}");
+    assert!(ir.contains("fadd"), "{ir}");
+}
+
+#[test]
+fn elementwise_arithmetic_reuses_a_list_at_its_last_use() {
+    // `a` is assigned, so its old list can hold the result
+    let ir = first_function("def f(a, b);\n    a = a * 2 + b\n    ret a\nf([1], [2])\n");
+    assert!(ir.contains("call stone.list_reuse"), "{ir}");
+    assert!(!ir.contains("stone.list_new"), "{ir}");
+    // `b` is not read afterward, so it can too, though `a`, read afterward, cannot
+    let ir = first_function(
+        "def f(x);\n    a = x * 1\n    b = a * 2\n    c = b + a\n    ret [a, c]\nf([1])\n",
+    );
+    assert_eq!(ir.matches("call stone.list_reuse").count(), 1, "{ir}");
+    assert_eq!(ir.matches("call stone.list_new(v").count(), 2, "{ir}");
+    // and a borrowed parameter belongs to the caller
+    let ir = first_function("def f(a);\n    c = a + 1\n    ret c\nf([1])\n");
+    assert!(!ir.contains("stone.list_reuse"), "{ir}");
+    assert!(ir.contains("call stone.list_new"), "{ir}");
+}
+
+#[test]
+fn elementwise_arithmetic_packs_pairs_when_it_can() {
+    let ir = first_function("def f(a, b);\n    ret -(a * 2.5) / b\nf([1.0], [2.0])\n");
+    assert!(
+        ir.contains("= packed v") && ir.contains("fdiv(fneg(fmul([v"),
+        "{ir}"
+    );
+    assert_eq!(ir.matches("= list_data ").count(), 3, "{ir}");
+    // the loop over single elements starts where the packed one stopped
+    let done = ir
+        .split(" = packed")
+        .next()
+        .unwrap()
+        .rsplit('\n')
+        .next()
+        .unwrap();
+    assert!(ir.contains(&format!("= copy {}", done.trim())), "{ir}");
+    // ints add and subtract in pairs
+    let ir = first_function("def f(a);\n    ret a - 1 + a\nf([1])\n");
+    assert!(ir.contains("add(sub([v"), "{ir}");
+    // but nothing else on ints packs, so the single loop does all of it
+    let ir = first_function("def f(a);\n    ret a * 3\nf([1])\n");
+    assert!(!ir.contains("packed"), "{ir}");
+    let ir = first_function("def f(a);\n    ret a ** 2\nf([1.5])\n");
+    assert!(!ir.contains("packed"), "{ir}");
+}

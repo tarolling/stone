@@ -880,6 +880,264 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     pop_frame(r#gen, &saved);
 }
 
+/// Emits each list routine in `labels`, which are the [`LIST_ROUTINES`] a program calls, under
+/// the same labels and contracts as the x64 ones, with arguments in `x0` onward.
+///
+/// - `stone.list_slice` returns a new list of the elements of list `x0` that the slice from `x1`
+///   to `x2` by `x3` picks, as `stdlib::slice_indices` picks them, retaining them if they are
+///   counted. Bit 0 of `x4` says `x1` is missing, bit 1 `x2`, and bit 2 `x3`, and the step is
+///   never 0, which the caller checks.
+/// - `stone.list_pop` removes the element at position `x1` of list `x0`, moving the ones after it
+///   down, and returns it in `x0` with the list's reference to it. The caller checks that `x1` is
+///   in range.
+/// - `stone.list_insert` puts `x2` at position `x1` of list `x0`, moving the elements from there
+///   on up, and the list takes the caller's reference to it. The caller checks that `x1` is at
+///   most the length.
+/// - `stone.list_extend` appends every element of list `x1` to list `x0`, retaining them if they
+///   are counted. The two may be the same list.
+/// - `stone.list_reuse` takes a reference to list `x0`, whose elements are not counted, and
+///   returns it if nothing else refers to it, for arithmetic to write its result over. Otherwise
+///   it drops the reference and returns a new list of length `x1` from `stone.list_new`.
+///
+/// [`LIST_ROUTINES`]: crate::codegen::context::LIST_ROUTINES
+pub fn list_methods(r#gen: &mut dyn AssemblyGenerator, labels: &[&str]) {
+    if labels.contains(&"stone.list_slice") {
+        list_slice(r#gen);
+    }
+    if labels.contains(&"stone.list_pop") {
+        list_pop(r#gen);
+    }
+    if labels.contains(&"stone.list_insert") {
+        list_insert(r#gen);
+    }
+    if labels.contains(&"stone.list_extend") {
+        list_extend(r#gen);
+    }
+    if labels.contains(&"stone.list_reuse") {
+        r#gen.emit("stone.list_reuse:");
+        r#gen.emit("\tldur\tx9, [x0, #-8]");
+        r#gen.emit("\tcmp\tx9, #1");
+        r#gen.emit("\tb.ne\t.Llist_reuse_new");
+        r#gen.emit("\tret");
+        r#gen.emit(".Llist_reuse_new:");
+        // something else still holds it, so this only drops a reference
+        r#gen.emit("\tsub\tx9, x9, #1");
+        r#gen.emit("\tstur\tx9, [x0, #-8]");
+        r#gen.emit("\tmov\tx0, x1");
+        r#gen.emit("\tmov\tx1, #0");
+        r#gen.emit("\tb\tstone.list_new");
+    }
+}
+
+/// Emits `stone.list_pop` (see [`list_methods`]).
+fn list_pop(r#gen: &mut dyn AssemblyGenerator) {
+    // x9 holds the elements, x10 the new length, and x11 the element popped
+    r#gen.emit("stone.list_pop:");
+    r#gen.emit("\tldr\tx9, [x0, #16]");
+    r#gen.emit("\tldr\tx11, [x9, x1, lsl #3]");
+    r#gen.emit("\tldr\tx10, [x0]");
+    r#gen.emit("\tsub\tx10, x10, #1");
+    r#gen.emit("\tstr\tx10, [x0]");
+    r#gen.emit(".Llist_pop_loop:");
+    r#gen.emit("\tcmp\tx1, x10");
+    r#gen.emit("\tb.ge\t.Llist_pop_done");
+    r#gen.emit("\tadd\tx12, x1, #1");
+    r#gen.emit("\tldr\tx13, [x9, x12, lsl #3]");
+    r#gen.emit("\tstr\tx13, [x9, x1, lsl #3]");
+    r#gen.emit("\tmov\tx1, x12");
+    r#gen.emit("\tb\t.Llist_pop_loop");
+    r#gen.emit(".Llist_pop_done:");
+    r#gen.emit("\tmov\tx0, x11");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.list_insert` (see [`list_methods`]).
+fn list_insert(r#gen: &mut dyn AssemblyGenerator) {
+    // x19 holds the list, x20 the position, and x21 the element
+    let saved = ["x19", "x20", "x21"];
+    r#gen.emit("stone.list_insert:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    r#gen.emit("\tmov\tx21, x2");
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\tldr\tx10, [x19, #8]");
+    r#gen.emit("\tcmp\tx9, x10");
+    r#gen.emit("\tb.lt\t.Llist_insert_shift");
+    r#gen.emit("\tlsl\tx10, x10, #1");
+    r#gen.emit("\tstr\tx10, [x19, #8]");
+    r#gen.emit("\tldr\tx0, [x19, #16]");
+    r#gen.emit("\tlsl\tx1, x10, #3");
+    r#gen.emit("\tbl\tstone.mem_realloc");
+    r#gen.emit("\tstr\tx0, [x19, #16]");
+    r#gen.emit(".Llist_insert_shift:");
+    // move each element from the end down to the position up by one
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\tldr\tx10, [x19, #16]");
+    r#gen.emit(".Llist_insert_loop:");
+    r#gen.emit("\tcmp\tx9, x20");
+    r#gen.emit("\tb.le\t.Llist_insert_place");
+    r#gen.emit("\tsub\tx11, x9, #1");
+    r#gen.emit("\tldr\tx12, [x10, x11, lsl #3]");
+    r#gen.emit("\tstr\tx12, [x10, x9, lsl #3]");
+    r#gen.emit("\tmov\tx9, x11");
+    r#gen.emit("\tb\t.Llist_insert_loop");
+    r#gen.emit(".Llist_insert_place:");
+    r#gen.emit("\tstr\tx21, [x10, x20, lsl #3]");
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\tadd\tx9, x9, #1");
+    r#gen.emit("\tstr\tx9, [x19]");
+    r#gen.emit("\tmov\tx0, #0"); // insert returns none
+    pop_frame(r#gen, &saved);
+}
+
+/// Emits `stone.list_extend` (see [`list_methods`]).
+fn list_extend(r#gen: &mut dyn AssemblyGenerator) {
+    // x19 holds the list, x20 the other list, and x21 how many elements it adds, read before
+    // growing, since the other list may be this one
+    let saved = ["x19", "x20", "x21"];
+    r#gen.emit("stone.list_extend:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    r#gen.emit("\tldr\tx21, [x20]");
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\tadd\tx9, x9, x21");
+    r#gen.emit("\tldr\tx10, [x19, #8]");
+    r#gen.emit("\tcmp\tx9, x10");
+    r#gen.emit("\tb.le\t.Llist_extend_copy");
+    // double the capacity, or more if that is not enough
+    r#gen.emit("\tlsl\tx10, x10, #1");
+    r#gen.emit("\tcmp\tx10, x9");
+    r#gen.emit("\tcsel\tx10, x9, x10, lt");
+    r#gen.emit("\tstr\tx10, [x19, #8]");
+    r#gen.emit("\tldr\tx0, [x19, #16]");
+    r#gen.emit("\tlsl\tx1, x10, #3");
+    r#gen.emit("\tbl\tstone.mem_realloc");
+    r#gen.emit("\tstr\tx0, [x19, #16]");
+    r#gen.emit(".Llist_extend_copy:");
+    // the other list's elements are read after growing, which may have moved them
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\tldr\tx10, [x19, #16]");
+    r#gen.emit("\tlsl\tx9, x9, #3");
+    r#gen.emit("\tadd\tx10, x10, x9");
+    r#gen.emit("\tldr\tx11, [x20, #16]");
+    r#gen.emit("\tldr\tx17, [x19, #24]");
+    r#gen.emit("\tmov\tx8, #0");
+    r#gen.emit(".Llist_extend_loop:");
+    r#gen.emit("\tcmp\tx8, x21");
+    r#gen.emit("\tb.ge\t.Llist_extend_done");
+    r#gen.emit("\tldr\tx9, [x11, x8, lsl #3]");
+    r#gen.emit("\tstr\tx9, [x10, x8, lsl #3]");
+    r#gen.emit("\tadd\tx8, x8, #1");
+    r#gen.emit("\tcbz\tx17, .Llist_extend_loop"); // the elements are not counted
+    r#gen.emit("\tldur\tx16, [x9, #-8]");
+    r#gen.emit("\tadd\tx16, x16, #1");
+    r#gen.emit("\tstur\tx16, [x9, #-8]");
+    r#gen.emit("\tb\t.Llist_extend_loop");
+    r#gen.emit(".Llist_extend_done:");
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\tadd\tx9, x9, x21");
+    r#gen.emit("\tstr\tx9, [x19]");
+    r#gen.emit("\tmov\tx0, #0"); // extend returns none
+    pop_frame(r#gen, &saved);
+}
+
+/// Emits `stone.list_slice` (see [`list_methods`]).
+fn list_slice(r#gen: &mut dyn AssemblyGenerator) {
+    // x19 holds the list, x20 the first index, x21 the step, x22 the count, and x23 the new list;
+    // x9 holds the length while the bounds are clamped
+    let saved = ["x19", "x20", "x21", "x22", "x23"];
+    r#gen.emit("stone.list_slice:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\ttbz\tx4, #2, .Llist_slice_step");
+    r#gen.emit("\tmov\tx3, #1");
+    r#gen.emit(".Llist_slice_step:");
+    // a step of MIN, the only one that doubles to 0, acts like -MAX
+    r#gen.emit("\tadd\tx10, x3, x3");
+    r#gen.emit("\tcbnz\tx10, .Llist_slice_bounds");
+    r#gen.emit("\tadd\tx3, x3, #1");
+    r#gen.emit(".Llist_slice_bounds:");
+    r#gen.emit("\tmov\tx21, x3");
+    // x10 is -1 for a negative step and 0 otherwise
+    r#gen.emit("\tasr\tx10, x3, #63");
+    // a missing start is len - 1 going backward and 0 going forward
+    r#gen.emit("\tmov\tx11, x1");
+    r#gen.emit("\ttbz\tx4, #0, .Llist_slice_start");
+    r#gen.emit("\tsub\tx11, x9, #1");
+    r#gen.emit("\tand\tx11, x11, x10");
+    r#gen.emit("\tb\t.Llist_slice_start_done");
+    r#gen.emit(".Llist_slice_start:");
+    clamp_slice_bound(r#gen, "start");
+    r#gen.emit("\tmov\tx20, x11");
+    // a missing stop is -1 going backward and len going forward
+    r#gen.emit("\tmov\tx11, x2");
+    r#gen.emit("\ttbz\tx4, #1, .Llist_slice_stop");
+    r#gen.emit("\tbic\tx11, x9, x10");
+    r#gen.emit("\tadd\tx11, x11, x10");
+    r#gen.emit("\tb\t.Llist_slice_stop_done");
+    r#gen.emit(".Llist_slice_stop:");
+    clamp_slice_bound(r#gen, "stop");
+    // the distance to cover, start - stop going backward and stop - start going forward
+    r#gen.emit("\tsub\tx11, x11, x20");
+    r#gen.emit("\tmov\tx12, x21");
+    r#gen.emit("\tcbz\tx10, .Llist_slice_count");
+    r#gen.emit("\tneg\tx11, x11");
+    r#gen.emit("\tneg\tx12, x12");
+    r#gen.emit(".Llist_slice_count:");
+    // count = (distance - 1) / |step| + 1 for a positive distance, else 0
+    r#gen.emit("\tmov\tx22, #0");
+    r#gen.emit("\tcmp\tx11, #0");
+    r#gen.emit("\tb.le\t.Llist_slice_new");
+    r#gen.emit("\tsub\tx11, x11, #1");
+    r#gen.emit("\tudiv\tx11, x11, x12");
+    r#gen.emit("\tadd\tx22, x11, #1");
+    r#gen.emit(".Llist_slice_new:");
+    r#gen.emit("\tmov\tx0, x22");
+    r#gen.emit("\tldr\tx1, [x19, #24]");
+    r#gen.emit("\tbl\tstone.list_new");
+    r#gen.emit("\tmov\tx23, x0");
+    r#gen.emit("\tldr\tx10, [x23, #16]");
+    r#gen.emit("\tldr\tx11, [x19, #16]");
+    r#gen.emit("\tldr\tx17, [x19, #24]");
+    r#gen.emit("\tmov\tx12, x20");
+    r#gen.emit("\tmov\tx8, #0");
+    r#gen.emit(".Llist_slice_loop:");
+    r#gen.emit("\tcmp\tx8, x22");
+    r#gen.emit("\tb.ge\t.Llist_slice_done");
+    r#gen.emit("\tldr\tx9, [x11, x12, lsl #3]");
+    r#gen.emit("\tstr\tx9, [x10, x8, lsl #3]");
+    r#gen.emit("\tadd\tx12, x12, x21");
+    r#gen.emit("\tadd\tx8, x8, #1");
+    r#gen.emit("\tcbz\tx17, .Llist_slice_loop"); // the elements are not counted
+    r#gen.emit("\tldur\tx16, [x9, #-8]");
+    r#gen.emit("\tadd\tx16, x16, #1");
+    r#gen.emit("\tstur\tx16, [x9, #-8]");
+    r#gen.emit("\tb\t.Llist_slice_loop");
+    r#gen.emit(".Llist_slice_done:");
+    r#gen.emit("\tmov\tx0, x23");
+    pop_frame(r#gen, &saved);
+}
+
+/// Emits the steps of `stone.list_slice` that clamp the bound in `x11` to the list, given its
+/// length in `x9` and, in `x10`, -1 for a negative step or 0 otherwise, as the x64 routine does.
+/// `name` keeps the labels apart.
+fn clamp_slice_bound(r#gen: &mut dyn AssemblyGenerator, name: &str) {
+    r#gen.emit(&format!("\ttbz\tx11, #63, .Llist_slice_{name}_high"));
+    // len is at most 2^60, so adding it cannot overflow
+    r#gen.emit("\tadd\tx11, x11, x9");
+    r#gen.emit(&format!("\ttbz\tx11, #63, .Llist_slice_{name}_done"));
+    r#gen.emit("\tmov\tx11, x10");
+    r#gen.emit(&format!("\tb\t.Llist_slice_{name}_done"));
+    r#gen.emit(&format!(".Llist_slice_{name}_high:"));
+    r#gen.emit("\tcmp\tx11, x9");
+    r#gen.emit(&format!("\tb.lt\t.Llist_slice_{name}_done"));
+    r#gen.emit("\tadd\tx11, x9, x10");
+    r#gen.emit(&format!(".Llist_slice_{name}_done:"));
+}
+
 /// Emits `label`, a routine that prints the list in `x0` as `[a, b]`, calling `element` for each
 /// element.
 ///

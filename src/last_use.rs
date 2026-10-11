@@ -144,6 +144,10 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
             expr_names(slice, out);
         }
         ExprKind::Attribute { value, .. } => expr_names(value, out),
+        ExprKind::Slice { lower, upper, step } => [lower, upper, step]
+            .into_iter()
+            .flatten()
+            .for_each(|bound| expr_names(bound, out)),
     }
 }
 

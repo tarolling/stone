@@ -32,21 +32,33 @@ to it, assigned into it, or what it is passed to.
 Functions are monomorphic: each parameter has a single type inferred from the function's body
 and its calls. A function called as `f(1)` cannot also be called as `f("a")`.
 
+Arithmetic works on numbers and, element by element, on lists of them, so an operand whose type
+is not known yet can be either. In `def scale(xs, k); ret xs * k`, the call `scale([1.5], 2.0)`
+makes `xs` a `list[float]` and `k` a `float`, while `scale(3, 2)` would make both `int`. The
+operand still has to be a number or a list of numbers that fits the other operand, so in
+`def twice(n); ret n * 2`, the call `twice("a")` is an error at `"a"`. If nothing ever settles
+it, it is the same type as the other operand.
+
 ## Rules the checker enforces
 
 These keep the two backends identical and catch common mistakes:
 
 - **No implicit conversion.** Arithmetic and comparisons never mix `int` and `float`; use
-  `int()` or `float()`. The one exception is `**`, whose exponent is always an `int`. Strings
+  `int()` or `float()`. The one exception is `**`, whose exponent is always an `int`. The same
+  holds element by element, so `list[int] + list[float]` and `[1, 2] * 0.5` are errors. Strings
   never mix with numbers either: `int("3")` and `float("2.5")` read numbers from strings, and
   `str(3)` writes them.
 - **Conditions are `int` or `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject
   floats, strings, lists, and `none`.
 - **Lists are not comparable.** `==` and `!=` cannot compare lists.
+- **Arithmetic on lists needs numbers.** `+ - * / % **` apply to a list only if it holds ints
+  or floats, so `["a"] + ["b"]` and `[[1]] * [[2]]` are errors.
 - **Changes are statements, made to variables.** Since lists are values, `xs.append(v)` and
   `xs[i] = v` change only the variable they start from. Each is a statement of its own, so
   `ys = xs.append(1)` is an error, and the list must be in a variable or an element of one, so
-  `f().append(1)` is an error too, since the change would be lost.
+  `f().append(1)` and `xs[1:].append(1)` are errors too, since the change would be lost. `pop`,
+  which also returns what it removes, may instead be the whole value of an assignment, as in
+  `x = xs.pop()`.
 - **Functions change only their own variables.** A function can read a global but cannot
   change it, with `append` or an index, just as it cannot assign it. It takes the list as an
   argument and returns the changed one instead. A function that changes a parameter and then

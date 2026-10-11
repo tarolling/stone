@@ -18,6 +18,8 @@ grammar is
 | `-7 // 2 == -4` | `-7 / 2 == -3` (truncates) |
 | `-7 % 2 == 1` | `-7 % 2 == -1` (takes the dividend's sign, like `/`) |
 | `2 ** -1 == 0.5`, `2 ** 0.5` | `2.0 ** -1 == 0.5`; the exponent is always an `int` |
+| `[1, 2] + [3]` joins, `[0] * 3` repeats | `+ - * / % **` on lists work element by element, as in numpy; join with `xs.extend(ys)` |
+| `xs.insert(9, x)` clamps the index | an index past either end is an error |
 
 ## Keywords
 
@@ -98,11 +100,11 @@ From lowest to highest precedence:
 | `and` | `int` or `bool` conditions |
 | `not` | an `int` or `bool` condition |
 | `==` `!=` `<` `<=` `>` `>=` | numbers; `==` and `!=` also strings, bools, and `none` |
-| `+` `-` | two ints or two floats; `+` also joins two strings |
-| `*` `/` `%` | two ints or two floats |
-| unary `+` `-` | an int or a float |
-| `**` | an int or float base and an `int` exponent |
-| calls `f(x)`, method calls `xs.len()`, indexing `xs[i]` | |
+| `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings |
+| `*` `/` `%` | two ints or two floats, or lists of them |
+| unary `+` `-` | an int or a float, or a list of them |
+| `**` | an int or float base and an `int` exponent, or lists of them |
+| calls `f(x)`, method calls `xs.len()`, indexing `xs[i]`, slicing `xs[i:j:k]` | |
 
 Comparisons chain, so `a < b <= c` means `a < b and b <= c` with `b` evaluated once.
 `**` groups right to left and binds tighter than a unary sign on its left, as in Python, so
@@ -112,6 +114,46 @@ Parentheses group as usual. Operands are evaluated left to right.
 A method call such as `xs.len()` evaluates the value before the `.` first, then the
 arguments. A change, `xs[i][j] = v` or `xs[i].append(v)`, evaluates the assigned value, then
 each index from the outermost, then the arguments, and only then checks the indexes against the
-lists and makes the change. The builtin methods are `len` and `append`, documented in
-[Builtins](builtins.md#methods). A `.` right after an int starts a method call, so `1.` is not a
+lists and makes the change. The builtin methods are `len`, `append`, `pop`, `insert`, `extend`,
+`strip`, and `split`, documented in [Builtins](builtins.md#methods). A `.` right after an int starts a method call, so `1.` is not a
 float; write `1.0`.
+
+## Slices
+
+`xs[start:stop]` is a new list of the elements from `start` up to but not including `stop`, and
+`xs[start:stop:step]` takes every `step`th one, as in Python. Any of the three can be left out:
+`start` defaults to the beginning and `stop` to the end, or the other way around for a negative
+step, and `step` defaults to 1, so `xs[1:]` drops the first element and `xs[::-1]` is reversed.
+A negative `start` or `stop` counts from the end, and one past either end is clamped, so
+`xs[-2:]` is the last two elements and `xs[:100]` is all of a shorter list. A step of 0 stops
+the program with `slice step cannot be zero`. The list is evaluated first, then the bounds left
+to right.
+
+A slice is a new list, so it cannot be assigned to or changed: `xs[1:3] = ys` and
+`xs[1:].append(x)` are errors.
+
+## Arithmetic on lists
+
+The arithmetic operators work on lists of ints or floats element by element, as numpy's arrays
+do. Both lists must have the same length, and a number on either side applies to every element:
+
+```stone
+a = [1.0, 2.0, 3.0]
+b = [10.0, 20.0, 30.0]
+print(a * 2.0 + b)   // [12.0, 24.0, 36.0]
+print(-a, a ** 2)    // [-1.0, -2.0, -3.0] [1.0, 4.0, 9.0]
+```
+
+Each element follows the rules for single numbers: int arithmetic wraps, `/` on ints truncates,
+and dividing by zero stops the program. Lists of different lengths stop it with
+`lists have different lengths`. The operands that are not themselves arithmetic on lists are
+evaluated once, left to right, then the lengths are checked, then the whole expression is
+computed for the first element, then the second, and so on, so `a / b + c / d` reports the first
+element where either division fails.
+
+Because of this, `[0] * n` is a list of one element, `[0 * n]`, rather than `n` zeros as in
+Python, and the checker warns about it. Join two lists with `xs.extend(ys)`.
+
+Arithmetic on lists compiles to one loop over the elements, with no list for any intermediate
+result, two elements at a time where the processor allows. When the result replaces a list
+nothing else holds, as in `xs = xs * 2.0 + ys`, the loop writes over it in place.

@@ -381,7 +381,7 @@ fn completion_after_a_dot_offers_methods() {
             .map(|item| (item.label, item.kind))
             .collect()
     };
-    let methods: Vec<_> = ["len", "append", "strip", "split"]
+    let methods: Vec<_> = ["len", "append", "pop", "insert", "extend", "strip", "split"]
         .iter()
         .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
         .collect();

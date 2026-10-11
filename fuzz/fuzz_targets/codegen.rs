@@ -10,10 +10,10 @@ use stone::codegen::{Target, executable};
 fuzz_target!(|source: &str| {
     if let Ok(module) = stone::driver::parse(source) {
         for target in Target::ALL {
-            if let Ok(text) = target.generator().assemble(&module) {
-                if let Err(error) = executable(&text, target, "out") {
-                    panic!("{target} assembly failed to assemble: {error}\n{text}");
-                }
+            if let Ok(text) = target.generator().assemble(&module)
+                && let Err(error) = executable(&text, target, "out")
+            {
+                panic!("{target} assembly failed to assemble: {error}\n{text}");
             }
         }
     }

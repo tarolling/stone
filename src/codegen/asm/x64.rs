@@ -162,6 +162,7 @@ fn parse_memory(text: &str) -> Result<Mem, String> {
         "word ptr" => Some(2),
         "dword ptr" => Some(4),
         "qword ptr" => Some(8),
+        "xmmword ptr" => Some(16),
         _ => return Err(bad()),
     };
     let mut mem = Mem {
@@ -551,8 +552,9 @@ const UNARY: [(&str, u8, u8, u8); 8] = [
     ("idiv", 0xf6, 0xf7, 7),
 ];
 
-/// Scalar double instructions written `op xmm, xmm/m64`, with their prefix and opcode.
-const SSE: [(&str, u8, u8); 8] = [
+/// SSE instructions written `op xmm, xmm/mem`, with their prefix and opcode: scalar doubles, then
+/// packed doubles and quadwords.
+const SSE: [(&str, u8, u8); 16] = [
     ("addsd", 0xf2, 0x58),
     ("mulsd", 0xf2, 0x59),
     ("subsd", 0xf2, 0x5c),
@@ -561,6 +563,14 @@ const SSE: [(&str, u8, u8); 8] = [
     ("ucomisd", 0x66, 0x2e),
     ("xorpd", 0x66, 0x57),
     ("movapd", 0x66, 0x28),
+    ("addpd", 0x66, 0x58),
+    ("mulpd", 0x66, 0x59),
+    ("subpd", 0x66, 0x5c),
+    ("divpd", 0x66, 0x5e),
+    ("paddq", 0x66, 0xd4),
+    ("psubq", 0x66, 0xfb),
+    ("pxor", 0x66, 0xef),
+    ("punpcklqdq", 0x66, 0x6c),
 ];
 
 fn encode(mnemonic: &str, operands: &[Operand]) -> Result<Encoded, String> {
@@ -644,6 +654,37 @@ fn encode(mnemonic: &str, operands: &[Operand]) -> Result<Encoded, String> {
         };
         let opcode = if size == 1 { byte_op } else { op };
         return Inst::new(&[opcode]).size(size).ext(ext, target).finish();
+    }
+
+    match (mnemonic, operands) {
+        ("movupd", [Reg(dst), src]) if dst.kind == Kind::Xmm => {
+            let Some(src) = xmm_rm(src) else { return bad() };
+            return Inst::new(&[0x0f, 0x10])
+                .prefix(0x66)
+                .reg(*dst, src)
+                .finish();
+        }
+        ("movupd", [Mem(mem), Reg(src)]) if src.kind == Kind::Xmm => {
+            return Inst::new(&[0x0f, 0x11])
+                .prefix(0x66)
+                .reg(*src, Rm::Mem(mem))
+                .finish();
+        }
+        ("cmppd", [Reg(dst), src, Imm(predicate)]) if dst.kind == Kind::Xmm => {
+            let Some(src) = xmm_rm(src) else { return bad() };
+            return Inst::new(&[0x0f, 0xc2])
+                .prefix(0x66)
+                .reg(*dst, src)
+                .imm(*predicate, 1)
+                .finish();
+        }
+        ("movmskpd", [Reg(dst), Reg(src)]) if dst.size == 4 && src.kind == Kind::Xmm => {
+            return Inst::new(&[0x0f, 0x50])
+                .prefix(0x66)
+                .reg(*dst, Rm::Reg(*src))
+                .finish();
+        }
+        _ => {}
     }
 
     if let Some(&(_, prefix, opcode)) = SSE.iter().find(|(name, ..)| *name == mnemonic) {
@@ -952,6 +993,9 @@ fn fixed(bytes: &[u8]) -> Result<Encoded, String> {
 /// unknown one.
 fn is_known(mnemonic: &str) -> bool {
     [
+        "movupd",
+        "cmppd",
+        "movmskpd",
         "mov",
         "movabs",
         "lea",
@@ -1193,6 +1237,39 @@ mod tests {
             ("sete al", "0f 94 c0"),
             ("setnp dl", "0f 9b c2"),
             ("cqo", "48 99"),
+        ]);
+    }
+
+    #[test]
+    fn packed_doubles_and_quadwords_match_gnu_as() {
+        check(&[
+            ("movupd xmm3, XMMWORD PTR [rax + rcx * 8]", "66 0f 10 1c c8"),
+            (
+                "movupd xmm15, XMMWORD PTR [r9 + rcx * 8]",
+                "66 45 0f 10 3c c9",
+            ),
+            ("movupd XMMWORD PTR [rax + rcx * 8], xmm3", "66 0f 11 1c c8"),
+            (
+                "movupd XMMWORD PTR [r12 + r13 * 8], xmm12",
+                "66 47 0f 11 24 ec",
+            ),
+            ("addpd xmm3, xmm4", "66 0f 58 dc"),
+            ("subpd xmm10, xmm3", "66 44 0f 5c d3"),
+            ("mulpd xmm3, xmm15", "66 41 0f 59 df"),
+            ("divpd xmm8, xmm9", "66 45 0f 5e c1"),
+            ("paddq xmm3, xmm4", "66 0f d4 dc"),
+            ("psubq xmm11, xmm12", "66 45 0f fb dc"),
+            ("pxor xmm5, xmm5", "66 0f ef ed"),
+            ("punpcklqdq xmm3, xmm3", "66 0f 6c db"),
+            ("punpcklqdq xmm13, xmm13", "66 45 0f 6c ed"),
+            ("cmppd xmm5, xmm4, 0", "66 0f c2 ec 00"),
+            ("cmppd xmm14, xmm9, 0", "66 45 0f c2 f1 00"),
+            ("movmskpd eax, xmm5", "66 0f 50 c5"),
+            ("movmskpd eax, xmm14", "66 41 0f 50 c6"),
+            ("movq xmm13, rsi", "66 4c 0f 6e ee"),
+            ("movq xmm3, r10", "66 49 0f 6e da"),
+            ("movapd xmm4, xmm13", "66 41 0f 28 e5"),
+            ("xorpd xmm3, xmm14", "66 41 0f 57 de"),
         ]);
     }
 

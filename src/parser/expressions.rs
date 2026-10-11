@@ -558,8 +558,46 @@ impl Parser {
         })
     }
 
+    /// Parses what goes between a subscript's brackets: an index, such as `i` in `xs[i]`, or the
+    /// bounds of a slice, such as `1:` in `xs[1:]` or `::-1` in `xs[::-1]`.
+    ///
+    /// ```text
+    /// slice:
+    ///     | [expression] ':' [expression] [':' [expression]]
+    ///     | expression
+    /// ```
     pub(super) fn parse_slice(&mut self) -> ParseExprResult {
-        self.parse_expression()
+        let mark = self.pos;
+        let lower = self.parse_expression_optional();
+        if self.expect(TokenType::Colon).is_none() {
+            return match lower {
+                Some(index) => Ok(index),
+                None => Err(ParserError {
+                    method: "parse_slice".to_string(),
+                    token: self.peek().r#type.clone(),
+                    span: self.peek().span,
+                }),
+            };
+        }
+        let upper = self.parse_expression_optional();
+        let step = match self.expect(TokenType::Colon) {
+            Some(_) => self.parse_expression_optional(),
+            None => None,
+        };
+        Ok(Box::new(Expr::new(
+            ExprKind::Slice { lower, upper, step },
+            self.span_from(mark),
+        )))
+    }
+
+    /// Parses an expression if one comes next, leaving the position where it was otherwise.
+    fn parse_expression_optional(&mut self) -> Option<Box<Expr>> {
+        let mark = self.pos;
+        let expr = self.parse_expression().ok();
+        if expr.is_none() {
+            self.pos = mark;
+        }
+        expr
     }
 
     pub(super) fn parse_slices(&mut self) -> ParseExprResult {

@@ -31,7 +31,8 @@
 mod tests;
 
 use super::{
-    BinOp, Block, BlockId, Callee, Cond, Function, Inst, Operand, Program, RcKind, Terminator, VReg,
+    BinOp, Block, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, Program, RcKind,
+    Terminator, VReg,
 };
 use crate::ast::{Arg, BoolOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::checker::{
@@ -40,7 +41,9 @@ use crate::checker::{
 use crate::codegen::context::module_routine;
 use crate::last_use::{LiveAfter, global_reads, live_after};
 use crate::span::Span;
-use crate::stdlib::{math, random};
+use crate::stdlib::{
+    INDEX_RANGE, LENGTHS_DIFFER, POP_EMPTY, POP_RANGE, SLICE_STEP_ZERO, math, random,
+};
 use std::collections::{HashMap, HashSet};
 
 /// The type of each variable, keyed by the function it belongs to (`None` for globals) and name.
@@ -155,9 +158,9 @@ struct Lowerer<'a> {
     /// Each enclosing loop, innermost last.
     loops: Vec<Loop>,
     loop_depth: u32,
-    /// The variables whose value the next call to a stone function may move into it, since
-    /// nothing reads them after the call: the target of `x = f(...)`, or every counted local for
-    /// `ret f(...)`.
+    /// The variables whose value the next call to a stone function, or elementwise arithmetic,
+    /// may move into it, since nothing reads them after the call: the target of `x = f(...)`, or
+    /// every counted local for `ret f(...)`.
     movable: Vec<String>,
     /// The locals and globals a call moved, whose old value the assignment or return that follows
     /// must not release.
@@ -545,7 +548,7 @@ impl<'a> Lowerer<'a> {
                 let last_uses = self.last_uses(stmt);
                 // a call can also take a target's old value, which the assignment replaces, but
                 // not what a target's indexes read after it
-                if self.is_stone_call(value)
+                if (self.is_stone_call(value) || self.is_elementwise(value))
                     && targets
                         .iter()
                         .all(|target| matches!(target.kind, ExprKind::Name { .. }))
@@ -606,7 +609,7 @@ impl<'a> Lowerer<'a> {
                     }
                     Some(value) => {
                         // returning releases every local, so a call can take any of them
-                        if self.is_stone_call(value) {
+                        if self.is_stone_call(value) || self.is_elementwise(value) {
                             self.movable = self.last_uses(stmt);
                         }
                         let result = self.expr(value)?;
@@ -1098,19 +1101,16 @@ impl<'a> Lowerer<'a> {
                 Ok(self.finish(Operand::Imm(0), into))
             }
 
+            ExprKind::BinOp { .. } | ExprKind::UnaryOp { .. } if self.is_elementwise(expr) => {
+                self.elementwise(expr, kind)
+            }
+
             ExprKind::BinOp { op, left, right } => {
                 let ty = self.type_of(expr)?;
                 let lhs = self.expr(left)?;
                 let rhs = self.expr(right)?;
                 let dst = self.dst(into);
-                let op = match op {
-                    Operator::Add => BinOp::Add,
-                    Operator::Subtract => BinOp::Sub,
-                    Operator::Multiply => BinOp::Mul,
-                    Operator::Divide => BinOp::Div,
-                    Operator::Modulo => BinOp::Rem,
-                    Operator::Power => BinOp::Pow,
-                };
+                let op = bin_op(*op);
                 self.push(match ty {
                     // only `+` applies to strings
                     Type::Str => Inst::Call {
@@ -1203,6 +1203,9 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::Subscript { value, slice, .. } => {
+                if let ExprKind::Slice { lower, upper, step } = &slice.kind {
+                    return self.slice(value, [lower, upper, step], into, kind);
+                }
                 let list = self.list_operand(value, &[slice])?;
                 let index = self.expr(slice)?;
                 let dst = self.dst(into);
@@ -1249,7 +1252,349 @@ impl<'a> Lowerer<'a> {
                 self.own(Operand::Reg(list), kind);
                 Ok(Operand::Reg(list))
             }
+
+            ExprKind::Slice { .. } => Err("a slice can only appear in brackets".to_string()),
         }
+    }
+
+    /// Lowers arithmetic on lists to one loop over their elements, with no list for any
+    /// intermediate result and no index checks, as the interpreter's `elementwise` defines it:
+    /// every operand that is not itself arithmetic on lists is evaluated once, left to right, then
+    /// the lists' lengths are checked, then the whole expression is computed for each element in
+    /// turn.
+    ///
+    /// The result goes in a new list, unless an operand is a variable in [`Lowerer::movable`] with
+    /// the result's element type, which moves into `stone.list_reuse`: when nothing else refers
+    /// to its list, the loop writes the result over it, so `a = a * 2 + b` allocates nothing.
+    fn elementwise(&mut self, expr: &Expr, kind: Option<RcKind>) -> Result<Operand, String> {
+        // taken first, so that no call among the operands moves what the loop reads
+        let movable = std::mem::take(&mut self.movable);
+        let tree = self.fused(expr)?;
+        let float = matches!(self.type_of(expr)?, Type::List(elem) if *elem == Type::Float);
+        let mut lists = Vec::new();
+        tree.lists(&mut lists);
+        // a list used twice, as in `a * a`, is checked and read once
+        let mut seen = HashSet::new();
+        lists.retain(|leaf| seen.insert(leaf.value));
+        let first = lists
+            .first()
+            .ok_or("arithmetic on lists has no list")?
+            .value;
+        let len = self.fresh();
+        self.push(Inst::ListLen {
+            dst: len,
+            list: first,
+        });
+        for leaf in &lists[1..] {
+            let other = self.fresh();
+            self.push(Inst::ListLen {
+                dst: other,
+                list: leaf.value,
+            });
+            self.fail_unless(
+                Cond::Eq,
+                Operand::Reg(len),
+                Operand::Reg(other),
+                LENGTHS_DIFFER,
+            );
+        }
+        let reused = lists.iter().find(|leaf| {
+            leaf.float == float
+                && leaf
+                    .name
+                    .as_ref()
+                    .is_some_and(|name| movable.contains(name))
+        });
+        let result = self.fresh();
+        let call = match reused {
+            Some(leaf) if self.mark_moved(leaf.name.as_deref().unwrap_or_default()) => Inst::Call {
+                dst: Some(result),
+                callee: Callee::Runtime("stone.list_reuse"),
+                args: vec![leaf.value, Operand::Reg(len)],
+            },
+            _ => Inst::Call {
+                dst: Some(result),
+                callee: Callee::Runtime("stone.list_new"),
+                args: vec![Operand::Reg(len), Operand::Imm(0)],
+            },
+        };
+        self.push(call);
+        let temporaries: Vec<Operand> = lists.iter().map(|leaf| leaf.value).collect();
+
+        // pairs of elements first, when the operations allow, then one at a time from where that
+        // stopped
+        let mut start = Operand::Imm(0);
+        if tree.packable(float) && tree.size() <= MAX_PACKED_SIZE {
+            let mut data = HashMap::new();
+            for leaf in &lists {
+                let dst = self.fresh();
+                self.push(Inst::ListData {
+                    dst,
+                    list: leaf.value,
+                });
+                data.insert(leaf.value, Operand::Reg(dst));
+            }
+            let out = self.fresh();
+            self.push(Inst::ListData {
+                dst: out,
+                list: Operand::Reg(result),
+            });
+            let done = self.fresh();
+            self.push(Inst::Packed {
+                done,
+                float,
+                kernel: tree.kernel(&data),
+                out: Operand::Reg(out),
+                len: Operand::Reg(len),
+            });
+            start = Operand::Reg(done);
+        }
+        let index = self.fresh();
+        self.push(Inst::Copy {
+            dst: index,
+            src: start,
+        });
+        let (header, body, exit) = (self.new_block(), self.new_block(), self.new_block());
+        self.loop_depth += 1;
+        self.start(header);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(index),
+            rhs: Operand::Reg(len),
+            then: body,
+            otherwise: exit,
+        });
+        self.start(body);
+        let value = self.element(&tree, Operand::Reg(index), &mut HashMap::new());
+        self.push(Inst::ListSet {
+            list: Operand::Reg(result),
+            index: Operand::Reg(index),
+            value,
+        });
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: index,
+            lhs: Operand::Reg(index),
+            rhs: Operand::Imm(1),
+        });
+        self.jump(header);
+        self.loop_depth -= 1;
+        self.start(exit);
+        for value in temporaries {
+            self.release_temp(value);
+        }
+        self.own(Operand::Reg(result), kind);
+        Ok(Operand::Reg(result))
+    }
+
+    /// Evaluates the operands of the arithmetic on lists `expr`, left to right, into a tree that
+    /// [`Lowerer::element`] computes one element of. An operand that is a number, including
+    /// arithmetic on numbers such as `2 + 3` in `a * (2 + 3)`, is computed here, once.
+    fn fused(&mut self, expr: &Expr) -> Result<Fused, String> {
+        let ty = self.type_of(expr)?;
+        if let Type::List(elem) = &ty {
+            let float = **elem == Type::Float;
+            match &expr.kind {
+                ExprKind::BinOp { op, left, right } => {
+                    let lhs = self.fused(left)?;
+                    let rhs = self.fused(right)?;
+                    return Ok(Fused::Binary {
+                        op: bin_op(*op),
+                        float,
+                        lhs: Box::new(lhs),
+                        rhs: Box::new(rhs),
+                    });
+                }
+                ExprKind::UnaryOp {
+                    op: UnaryOp::UnaryAdd,
+                    operand,
+                } => return self.fused(operand),
+                ExprKind::UnaryOp {
+                    op: UnaryOp::UnarySub,
+                    operand,
+                } => {
+                    let operand = self.fused(operand)?;
+                    return Ok(Fused::Neg {
+                        float,
+                        operand: Box::new(operand),
+                    });
+                }
+                _ => {}
+            }
+        }
+        let value = self.expr(expr)?;
+        Ok(match ty {
+            Type::List(elem) => Fused::List(FusedList {
+                value,
+                float: *elem == Type::Float,
+                name: match &expr.kind {
+                    ExprKind::Name { id, .. } => Some(id.clone()),
+                    _ => None,
+                },
+            }),
+            _ => Fused::Number(value),
+        })
+    }
+
+    /// Computes the element at `index` of `tree`, from [`Lowerer::fused`], whose lists all have
+    /// more than `index` elements, with the same instructions as arithmetic on single numbers.
+    /// `loaded` holds the element already read from each list.
+    fn element(
+        &mut self,
+        tree: &Fused,
+        index: Operand,
+        loaded: &mut HashMap<Operand, Operand>,
+    ) -> Operand {
+        match tree {
+            Fused::Number(value) => *value,
+            Fused::List(leaf) => {
+                if let Some(&element) = loaded.get(&leaf.value) {
+                    return element;
+                }
+                let dst = self.fresh();
+                self.push(Inst::ListGet {
+                    dst,
+                    list: leaf.value,
+                    index,
+                });
+                loaded.insert(leaf.value, Operand::Reg(dst));
+                Operand::Reg(dst)
+            }
+            Fused::Binary {
+                op,
+                float,
+                lhs,
+                rhs,
+            } => {
+                let lhs = self.element(lhs, index, loaded);
+                let rhs = self.element(rhs, index, loaded);
+                let dst = self.fresh();
+                self.push(match float {
+                    true => Inst::FloatBinary {
+                        op: *op,
+                        dst,
+                        lhs,
+                        rhs,
+                    },
+                    false => Inst::Binary {
+                        op: *op,
+                        dst,
+                        lhs,
+                        rhs,
+                    },
+                });
+                Operand::Reg(dst)
+            }
+            Fused::Neg { float, operand } => {
+                let src = self.element(operand, index, loaded);
+                let dst = self.fresh();
+                self.push(match float {
+                    true => Inst::FloatNeg { dst, src },
+                    false => Inst::Neg { dst, src },
+                });
+                Operand::Reg(dst)
+            }
+        }
+    }
+
+    /// Stops the program with the runtime error `message` unless `lhs cond rhs` holds for ints.
+    fn fail_unless(&mut self, cond: Cond, lhs: Operand, rhs: Operand, message: &str) {
+        let (holds, fails) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond,
+            float: false,
+            lhs,
+            rhs,
+            then: holds,
+            otherwise: fails,
+        });
+        self.start(fails);
+        self.terminate(Terminator::Fail(message.to_string()));
+        self.start(holds);
+    }
+
+    /// Returns where `index` points in a list of `len` elements, counting a negative index from
+    /// the end, and stops the program with `message` unless that is an element, or with `end`,
+    /// an element or the end of the list.
+    ///
+    /// For example, `xs.insert(-1, x)` puts `x` at position `len - 1`, and `xs.insert(len, x)` at
+    /// the end, but `xs.pop(len)` fails.
+    fn list_position(&mut self, index: Operand, len: Operand, end: bool, message: &str) -> Operand {
+        let position = self.fresh();
+        self.push(Inst::Copy {
+            dst: position,
+            src: index,
+        });
+        let (negative, check) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(position),
+            rhs: Operand::Imm(0),
+            then: negative,
+            otherwise: check,
+        });
+        self.start(negative);
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: position,
+            lhs: Operand::Reg(position),
+            rhs: len,
+        });
+        self.start(check);
+        self.fail_unless(Cond::Ge, Operand::Reg(position), Operand::Imm(0), message);
+        let below = if end { Cond::Le } else { Cond::Lt };
+        self.fail_unless(below, Operand::Reg(position), len, message);
+        Operand::Reg(position)
+    }
+
+    /// Lowers the slice `list[lower:upper:step]`, evaluating the list and then each bound that is
+    /// there, then failing on a step of 0, into a call to `stone.list_slice`. A missing bound is passed as 0 with its bit set in
+    /// the last argument: 1 for `lower`, 2 for `upper`, and 4 for `step`.
+    ///
+    /// For example, `xs[1:]` becomes `v1 = call stone.list_slice(v0, 1, 0, 0, 6)`.
+    fn slice(
+        &mut self,
+        list: &Expr,
+        bounds: [&Option<Box<Expr>>; 3],
+        into: Option<VReg>,
+        kind: Option<RcKind>,
+    ) -> Result<Operand, String> {
+        let present: Vec<&Expr> = bounds.iter().filter_map(|b| b.as_deref()).collect();
+        let list = self.list_operand(list, &present)?;
+        let mut args = vec![list];
+        let mut omitted = 0;
+        for (bit, bound) in bounds.into_iter().enumerate() {
+            match bound {
+                Some(bound) => args.push(self.expr(bound)?),
+                None => {
+                    args.push(Operand::Imm(0));
+                    omitted |= 1 << bit;
+                }
+            }
+        }
+        if let Some(step) = bounds[2]
+            && constant_int(step).is_none_or(|n| n == 0)
+        {
+            let (zero, nonzero) = (self.new_block(), self.new_block());
+            self.terminate(Terminator::CmpBranch {
+                cond: Cond::Eq,
+                float: false,
+                lhs: args[3],
+                rhs: Operand::Imm(0),
+                then: zero,
+                otherwise: nonzero,
+            });
+            self.start(zero);
+            self.terminate(Terminator::Fail(SLICE_STEP_ZERO.to_string()));
+            self.start(nonzero);
+        }
+        args.push(Operand::Imm(omitted));
+        let result = self.runtime_call("stone.list_slice", args, into);
+        self.release_temp(list);
+        self.own(result, kind);
+        Ok(result)
     }
 
     /// Lowers `list`, the list an operation reads once `before` are evaluated.
@@ -1262,7 +1607,9 @@ impl<'a> Lowerer<'a> {
         let ExprKind::Subscript { value, slice, .. } = &list.kind else {
             return self.expr(list);
         };
-        if before.iter().any(|expr| has_call(expr)) {
+        // a slice is a new list, which the operation must release
+        if matches!(slice.kind, ExprKind::Slice { .. }) || before.iter().any(|expr| has_call(expr))
+        {
             return self.expr(list);
         }
         let outer = self.list_operand(value, &[slice])?;
@@ -1418,6 +1765,74 @@ impl<'a> Lowerer<'a> {
                     args: values,
                 });
                 // append returns none
+                Ok(self.finish(Operand::Imm(0), into))
+            }
+            "pop" => {
+                // the receiver's indexes, then the index, then the change
+                let indexes = self.place_indexes(receiver)?;
+                let index = match args.first() {
+                    Some(arg) => Some(self.expr(arg)?),
+                    None => None,
+                };
+                let list = self.unique_place(receiver, &indexes)?;
+                let len = self.fresh();
+                self.push(Inst::ListLen { dst: len, list });
+                self.fail_unless(Cond::Ne, Operand::Reg(len), Operand::Imm(0), POP_EMPTY);
+                let position = match index {
+                    Some(index) => self.list_position(index, Operand::Reg(len), false, POP_RANGE),
+                    None => {
+                        let last = self.fresh();
+                        self.push(Inst::Binary {
+                            op: BinOp::Sub,
+                            dst: last,
+                            lhs: Operand::Reg(len),
+                            rhs: Operand::Imm(1),
+                        });
+                        Operand::Reg(last)
+                    }
+                };
+                // the list's reference to the element moves to the result
+                let result = self.runtime_call("stone.list_pop", vec![list, position], into);
+                self.own(result, kind);
+                Ok(result)
+            }
+            "insert" => {
+                let elem = self.element_kind(receiver);
+                let indexes = self.place_indexes(receiver)?;
+                let [index, item] = args else {
+                    return Err("insert() takes an index and a value".to_string());
+                };
+                let index = self.expr(index)?;
+                let value = self.expr(item)?;
+                // the list keeps a reference to what it holds
+                let last_uses = std::mem::take(&mut self.statement_last_uses);
+                self.take_from(item, value, elem, &last_uses);
+                self.statement_last_uses = last_uses;
+                let list = self.unique_place(receiver, &indexes)?;
+                let len = self.fresh();
+                self.push(Inst::ListLen { dst: len, list });
+                let position = self.list_position(index, Operand::Reg(len), true, INDEX_RANGE);
+                self.push(Inst::Call {
+                    dst: None,
+                    callee: Callee::Runtime("stone.list_insert"),
+                    args: vec![list, position, value],
+                });
+                Ok(self.finish(Operand::Imm(0), into))
+            }
+            "extend" => {
+                let indexes = self.place_indexes(receiver)?;
+                let [other] = args else {
+                    return Err("extend() takes a list".to_string());
+                };
+                // the elements are retained, so the call only borrows the other list
+                let other = self.expr(other)?;
+                let list = self.unique_place(receiver, &indexes)?;
+                self.push(Inst::Call {
+                    dst: None,
+                    callee: Callee::Runtime("stone.list_extend"),
+                    args: vec![list, other],
+                });
+                self.release_temp(other);
                 Ok(self.finish(Operand::Imm(0), into))
             }
             "strip" | "split" => {
@@ -2071,6 +2486,18 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Returns whether `expr` is arithmetic on lists, which [`Lowerer::elementwise`] lowers.
+    fn is_elementwise(&self, expr: &Expr) -> bool {
+        matches!(
+            expr.kind,
+            ExprKind::BinOp { .. }
+                | ExprKind::UnaryOp {
+                    op: UnaryOp::UnaryAdd | UnaryOp::UnarySub,
+                    ..
+                }
+        ) && matches!(self.context.types.get(&expr.span), Some(Type::List(_)))
+    }
+
     /// Returns whether `expr` is a call to a stone function, rather than a builtin or a method.
     fn is_stone_call(&self, expr: &Expr) -> bool {
         matches!(&expr.kind, ExprKind::Call { func, .. }
@@ -2115,6 +2542,116 @@ fn owned_params(body: &[Stmt]) -> HashMap<String, Vec<bool>> {
     owned
 }
 
+/// Arithmetic on lists with its operands evaluated, from [`Lowerer::fused`].
+enum Fused {
+    /// A number, the same for every element.
+    Number(Operand),
+    List(FusedList),
+    /// An operation on ints, or on floats if `float`.
+    Binary {
+        op: BinOp,
+        float: bool,
+        lhs: Box<Fused>,
+        rhs: Box<Fused>,
+    },
+    Neg {
+        float: bool,
+        operand: Box<Fused>,
+    },
+}
+
+/// A list operand of arithmetic on lists, read one element at a time.
+struct FusedList {
+    value: Operand,
+    /// Whether its elements are floats.
+    float: bool,
+    /// The variable it is, if any, which can give its list to the result.
+    name: Option<String>,
+}
+
+/// The most nodes a [`Fused`] tree may have to be computed in pairs, so that its numbers, its
+/// intermediate results, and the few registers a packed loop needs besides fit the 13 vector
+/// registers x64 has free.
+const MAX_PACKED_SIZE: usize = 10;
+
+impl Fused {
+    /// Returns whether every operation in the tree can be computed two elements at a time with
+    /// packed instructions, on floats if `float` and ints otherwise: adding, subtracting, and
+    /// negating either, and multiplying and dividing floats.
+    fn packable(&self, float: bool) -> bool {
+        match self {
+            Fused::Number(_) => true,
+            Fused::List(leaf) => leaf.float == float,
+            Fused::Binary {
+                op,
+                float: node,
+                lhs,
+                rhs,
+            } => {
+                let packs = match op {
+                    BinOp::Add | BinOp::Sub => true,
+                    BinOp::Mul | BinOp::Div => float,
+                    BinOp::Rem | BinOp::Pow => false,
+                };
+                packs && *node == float && lhs.packable(float) && rhs.packable(float)
+            }
+            Fused::Neg {
+                float: node,
+                operand,
+            } => *node == float && operand.packable(float),
+        }
+    }
+
+    /// Returns how many nodes the tree has.
+    fn size(&self) -> usize {
+        match self {
+            Fused::Number(_) | Fused::List(_) => 1,
+            Fused::Binary { lhs, rhs, .. } => 1 + lhs.size() + rhs.size(),
+            Fused::Neg { operand, .. } => 1 + operand.size(),
+        }
+    }
+
+    /// Returns the tree as a kernel for [`Inst::Packed`], reading each list through its data
+    /// pointer in `data`.
+    fn kernel(&self, data: &HashMap<Operand, Operand>) -> Kernel {
+        match self {
+            Fused::Number(value) => Kernel::Number(*value),
+            Fused::List(leaf) => Kernel::Element(data[&leaf.value]),
+            Fused::Binary { op, lhs, rhs, .. } => {
+                Kernel::Binary(*op, Box::new(lhs.kernel(data)), Box::new(rhs.kernel(data)))
+            }
+            Fused::Neg { operand, .. } => Kernel::Neg(Box::new(operand.kernel(data))),
+        }
+    }
+
+    /// Adds every list in the tree to `out`, left to right.
+    fn lists<'a>(&'a self, out: &mut Vec<&'a FusedList>) {
+        match self {
+            Fused::Number(_) => {}
+            Fused::List(leaf) => out.push(leaf),
+            Fused::Binary { lhs, rhs, .. } => {
+                lhs.lists(out);
+                rhs.lists(out);
+            }
+            Fused::Neg { operand, .. } => operand.lists(out),
+        }
+    }
+}
+
+/// Returns the IR operation for an arithmetic operator.
+///
+/// For example, `bin_op(Operator::Modulo)` is `BinOp::Rem`.
+fn bin_op(op: Operator) -> BinOp {
+    match op {
+        Operator::Add => BinOp::Add,
+        Operator::Subtract => BinOp::Sub,
+        Operator::Multiply => BinOp::Mul,
+        Operator::Divide => BinOp::Div,
+        Operator::Modulo => BinOp::Rem,
+        Operator::Power => BinOp::Pow,
+    }
+}
+
 /// Returns whether evaluating `expr` can call a function or method, which is the only way code
 /// can change a list while an expression is being evaluated.
 ///
@@ -2133,6 +2670,10 @@ fn has_call(expr: &Expr) -> bool {
         } => has_call(left) || comparators.iter().any(has_call),
         ExprKind::Subscript { value, slice, .. } => has_call(value) || has_call(slice),
         ExprKind::Attribute { value, .. } => has_call(value),
+        ExprKind::Slice { lower, upper, step } => [lower, upper, step]
+            .into_iter()
+            .flatten()
+            .any(|b| has_call(b)),
     }
 }
 

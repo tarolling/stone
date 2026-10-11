@@ -225,6 +225,7 @@ slices:
     | slice !',' 
 
 slice:
+    | [expression] ':' [expression] [':' [expression]]
     | expression 
 
 atom:

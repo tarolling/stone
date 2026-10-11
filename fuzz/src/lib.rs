@@ -60,6 +60,10 @@ pub fn generate(u: &mut Unstructured) -> Result<String> {
     }
 
     let mut scope = Scope::default();
+    // a list from the start gives later statements one to change, slice, and compute with
+    if u.arbitrary()? {
+        generator.list_statement(u, &mut scope, 0)?;
+    }
     for _ in 0..u.int_in_range(0..=MAX_BLOCK_LEN)? {
         generator.statement(u, &mut scope, 0, 0)?;
     }
@@ -159,7 +163,7 @@ impl Generator {
         nesting: usize,
     ) -> Result<()> {
         let nested = nesting < MAX_NESTING;
-        match u.int_in_range(0..=11)? {
+        match u.int_in_range(0..=13)? {
             0 | 1 => {
                 let value = self.expression(u, scope, 0)?;
                 let target = if !scope.variables.is_empty() && u.arbitrary()? {
@@ -203,7 +207,7 @@ impl Generator {
                 let call = self.call(u, scope, 0)?;
                 self.line(indent, &call);
             }
-            10 | 11 if !scope.in_function => self.list_statement(u, scope, indent)?,
+            10..=13 if !scope.in_function => self.list_statement(u, scope, indent)?,
             _ => {
                 let value = self.expression(u, scope, 0)?;
                 self.line(indent, &format!("print({value})"));
@@ -234,7 +238,52 @@ impl Generator {
             return Ok(());
         }
         let list = u.choose(&scope.lists)?.clone();
-        match u.int_in_range(0..=4)? {
+        match u.int_in_range(0..=9)? {
+            5 => {
+                // a list has at least two elements, so any of these indexes is in range
+                let index = u.int_in_range(-2..=2)?;
+                let value = self.expression(u, scope, 0)?;
+                self.line(indent, &format!("{list}.insert({index}, {value})"));
+            }
+            6 => {
+                let other = u.choose(&scope.lists)?.clone();
+                self.line(indent, &format!("{list}.extend({other})"));
+            }
+            7 => {
+                // appending first keeps at least two elements after the pop
+                let value = self.expression(u, scope, 0)?;
+                self.line(indent, &format!("{list}.append({value})"));
+                let target = self.fresh("g");
+                let index = match u.arbitrary()? {
+                    true => u.int_in_range(-2..=1)?.to_string(),
+                    false => String::new(),
+                };
+                self.line(indent, &format!("{target} = {list}.pop({index})"));
+                scope.variables.push(target);
+            }
+            8 => {
+                let bound = |u: &mut Unstructured| -> Result<String> {
+                    Ok(match u.arbitrary()? {
+                        true => u.int_in_range(-3..=3)?.to_string(),
+                        false => String::new(),
+                    })
+                };
+                let (lower, upper) = (bound(u)?, bound(u)?);
+                let step = *u.choose(&["", "1", "2", "3", "-1", "-2"])?;
+                self.line(indent, &format!("print({list}[{lower}:{upper}:{step}])"));
+            }
+            9 => {
+                // arithmetic on a list and itself, so the lengths always match
+                let name = self.fresh("list");
+                let value = self.expression(u, scope, 0)?;
+                let op = *u.choose(&["+", "-", "*"])?;
+                let sign = *u.choose(&["", "-"])?;
+                self.line(
+                    indent,
+                    &format!("{name} = ({list}) {op} {sign}({value}) * {list}"),
+                );
+                scope.lists.push(name);
+            }
             0 | 4 => {
                 let value = self.expression(u, scope, 0)?;
                 self.line(indent, &format!("{list}.append({value})"));
@@ -641,6 +690,33 @@ impl Generator {
 ///
 /// For example, `interpret("print(1)\n")` returns `Some("1\n")`, and a program that divides by
 /// zero returns `None`.
+/// Loads `source` as a whole program, linking any modules it uses and checking it as `stone build`
+/// does, then generates, assembles, and links it in memory for every target, returning the first
+/// failure.
+///
+/// For example, `build_every_target("use math\nprint(math.abs(0))\n")` succeeds, while
+/// `build_every_target("print(\"a\" + 1)\n")` fails with the checker's error.
+pub fn build_every_target(source: &str) -> std::result::Result<(), String> {
+    let sources = stone::project::MapSources::default();
+    let (_, loaded) = stone::driver::load(Path::new("main.st"), source, &sources);
+    let (module, _) = loaded.map_err(|errors| {
+        errors
+            .0
+            .iter()
+            .map(|d| d.render("main.st", source))
+            .collect::<String>()
+    })?;
+    for target in Target::ALL {
+        let text = target
+            .generator()
+            .assemble(&module)
+            .map_err(|e| format!("failed to compile for {target} ({e})"))?;
+        stone::codegen::executable(&text, target, "out")
+            .map_err(|e| format!("failed to assemble for {target} ({e})"))?;
+    }
+    Ok(())
+}
+
 pub fn interpret(source: &str) -> Option<String> {
     let mut out = Vec::new();
     stone::driver::interpret_with(source, &mut out, LIMITS).ok()?;
@@ -798,18 +874,17 @@ mod tests {
         for seed in 0..2_000 {
             let data = bytes(seed, 512);
             let source = generate(&mut Unstructured::new(&data)).unwrap();
-            let sources = stone::project::MapSources::default();
-            let (_, loaded) = stone::driver::load(Path::new("main.st"), &source, &sources);
-            let Ok((module, _)) = loaded else {
-                continue;
-            };
-            for target in Target::ALL {
-                let text = target.generator().assemble(&module).unwrap();
-                if let Err(e) = stone::codegen::executable(&text, target, "out") {
-                    panic!("{target} assembly of a generated program failed ({e}):\n{source}");
-                }
+            if let Err(e) = build_every_target(&source) {
+                panic!("a generated program {e}:\n{source}");
             }
         }
+    }
+
+    /// The `structured` target once compiled a program without linking it, so `use math` reached
+    /// code generation and failed (fuzz/artifacts/structured/crash-0f28244165d2aa3c6817437698463464b8c41fcc).
+    #[test]
+    fn a_program_using_a_builtin_module_builds_for_every_target() {
+        build_every_target("use math\nprint(math.abs(0))\n").unwrap();
     }
 
     #[test]
@@ -846,6 +921,20 @@ mod tests {
         ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 25, "only {count} of 500 programs use {feature:?}");
+        }
+    }
+
+    /// Changing a list, slicing it, and arithmetic on it need a list to exist first, which short
+    /// inputs rarely get to, so this looks at longer ones.
+    #[test]
+    fn generated_programs_change_slice_and_compute_with_lists() {
+        let sources: Vec<String> = (0..500)
+            .map(|seed| generate(&mut Unstructured::new(&bytes(seed, 4096))).unwrap())
+            .collect();
+        // a colon only appears in a slice
+        for feature in [".pop(", ".insert(", ".extend(", ":", "= (list"] {
+            let count = sources.iter().filter(|s| s.contains(feature)).count();
+            assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
         }
     }
 

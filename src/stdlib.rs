@@ -77,16 +77,17 @@ pub static BUILTINS: [&str; 8] = [
 ];
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 4] = ["len", "append", "strip", "split"];
+pub static METHODS: [&str; 7] = ["len", "append", "pop", "insert", "extend", "strip", "split"];
 
 /// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
 /// rather than only reading it.
 ///
 /// Such a call changes the variable that holds the value, like an assignment, so it must be a
 /// statement of its own whose receiver is a variable or an element of one, such as
-/// `grid[0].append(1)`.
+/// `grid[0].append(1)`. `pop`, which also returns a value, may instead be the whole value of an
+/// assignment, as in `x = xs.pop()`.
 pub fn changes_receiver(name: &str) -> bool {
-    name == "append"
+    matches!(name, "append" | "pop" | "insert" | "extend")
 }
 
 /// Documentation for a builtin function or method, for editor tooling.
@@ -150,7 +151,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 4] = [
+pub static METHOD_DOCS: [BuiltinDoc; 7] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T]).len() -> int",
@@ -161,6 +162,29 @@ pub static METHOD_DOCS: [BuiltinDoc; 4] = [
         signature: "list[T].append(item: T) -> none",
         description: "Adds `item` to the end of the list, changing only the variable it is \
                       called on, since lists are values. It is a statement of its own.",
+    },
+    BuiltinDoc {
+        name: "pop",
+        signature: "list[T].pop() | list[T].pop(index: int) -> T",
+        description: "Removes the last element, or the one at `index`, and returns it, so \
+                      `x = xs.pop()` takes the last element off `xs`. A negative `index` counts \
+                      from the end. It stops the program if the list is empty or `index` is out \
+                      of range, and it is a statement of its own or the whole value of an \
+                      assignment.",
+    },
+    BuiltinDoc {
+        name: "insert",
+        signature: "list[T].insert(index: int, item: T) -> none",
+        description: "Puts `item` at `index`, moving the elements from there on up by one, so \
+                      `xs.insert(0, x)` adds `x` at the front and `xs.insert(xs.len(), x)` at the \
+                      end. A negative `index` counts from the end. Unlike Python, it stops the \
+                      program if `index` is out of range. It is a statement of its own.",
+    },
+    BuiltinDoc {
+        name: "extend",
+        signature: "list[T].extend(items: list[T]) -> none",
+        description: "Adds every element of `items` to the end of the list, in order. It is a \
+                      statement of its own.",
     },
     BuiltinDoc {
         name: "strip",
@@ -320,6 +344,75 @@ pub fn float_pow(base: f64, exp: i64) -> f64 {
     if exp < 0 { 1.0 / result } else { result }
 }
 
+/// The runtime error for a slice whose step is 0, such as `xs[::0]`.
+pub const SLICE_STEP_ZERO: &str = "slice step cannot be zero";
+
+/// The runtime error for an index past either end of a list, as in `[1][1]`. The interpreter adds
+/// the index and the length, as in `list index out of range (index 1, length 1)`.
+pub const INDEX_RANGE: &str = "list index out of range";
+
+/// The runtime error for arithmetic on lists of different lengths, as in `[1, 2] + [3]`. The
+/// interpreter adds the lengths, as in `lists have different lengths (2 and 1)`.
+pub const LENGTHS_DIFFER: &str = "lists have different lengths";
+
+/// The runtime error for `pop` on an empty list.
+pub const POP_EMPTY: &str = "pop from empty list";
+
+/// The runtime error for `pop` at an index past either end of a list, as in `[1].pop(1)`.
+pub const POP_RANGE: &str = "pop index out of range";
+
+/// Picks the elements a slice such as `xs[start:stop:step]` takes from a list of `len` elements,
+/// as Python's `slice.indices` does, returning the first index, the step, and how many elements
+/// there are. A missing bound is `None`.
+///
+/// Negative bounds count from the end, bounds past either end are clamped, and missing ones
+/// default by the sign of the step, which is 1 if missing. For example, `[1:4:2]` of 5 elements
+/// gives `(1, 2, 2)`, which picks indexes 1 and 3, and `[::-1]` gives `(4, -1, 5)`. Compiled code
+/// runs the same steps in `stone.list_slice`.
+pub fn slice_indices(
+    len: usize,
+    start: Option<i64>,
+    stop: Option<i64>,
+    step: Option<i64>,
+) -> Result<(i64, i64, usize), &'static str> {
+    // as in Python, a step of MIN acts like -MAX, which has a magnitude
+    let step = match step.unwrap_or(1) {
+        0 => return Err(SLICE_STEP_ZERO),
+        i64::MIN => -i64::MAX,
+        step => step,
+    };
+    let len = len as i64;
+    let clamp = |bound: i64| {
+        if bound < 0 {
+            let bound = bound + len;
+            if bound >= 0 {
+                bound
+            } else if step < 0 {
+                -1
+            } else {
+                0
+            }
+        } else if bound >= len {
+            if step < 0 { len - 1 } else { len }
+        } else {
+            bound
+        }
+    };
+    let (start, stop) = match step < 0 {
+        true => (
+            clamp(start.unwrap_or(i64::MAX)),
+            clamp(stop.unwrap_or(i64::MIN)),
+        ),
+        false => (clamp(start.unwrap_or(0)), clamp(stop.unwrap_or(i64::MAX))),
+    };
+    let count = match step < 0 {
+        true if stop < start => (start - stop - 1) / -step + 1,
+        false if start < stop => (stop - start - 1) / step + 1,
+        _ => 0,
+    };
+    Ok((start, step, count as usize))
+}
+
 /// The characters `strip`, `split()`, `int`, and `float` treat as whitespace, which are the ones
 /// C's `isspace` accepts: space, tab, newline, vertical tab, form feed, and carriage return.
 pub fn is_space(c: char) -> bool {
@@ -425,6 +518,55 @@ fn is_decimal(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Returns the indexes a slice of a list of `len` elements picks, in order.
+    fn sliced(len: usize, start: Option<i64>, stop: Option<i64>, step: Option<i64>) -> Vec<i64> {
+        let (first, step, count) = slice_indices(len, start, stop, step).unwrap();
+        (0..count as i64).map(|k| first + k * step).collect()
+    }
+
+    #[test]
+    fn slices_pick_what_python_picks() {
+        let (min, max) = (Some(i64::MIN), Some(i64::MAX));
+        // each expected list is `list(range(5))[start:stop:step]` in Python
+        type Case = (Option<i64>, Option<i64>, Option<i64>, &'static [i64]);
+        let cases: [Case; 17] = [
+            (None, None, None, &[0, 1, 2, 3, 4]),
+            (Some(1), None, None, &[1, 2, 3, 4]),
+            (None, Some(2), None, &[0, 1]),
+            (Some(-2), None, None, &[3, 4]),
+            (None, Some(-1), None, &[0, 1, 2, 3]),
+            (None, None, Some(-1), &[4, 3, 2, 1, 0]),
+            (Some(3), Some(0), Some(-1), &[3, 2, 1]),
+            (Some(1), Some(4), Some(2), &[1, 3]),
+            (Some(4), None, Some(-2), &[4, 2, 0]),
+            (Some(10), Some(20), None, &[]),
+            (Some(-10), Some(2), None, &[0, 1]),
+            (None, None, Some(3), &[0, 3]),
+            (min, max, None, &[0, 1, 2, 3, 4]),
+            (max, min, Some(-1), &[4, 3, 2, 1, 0]),
+            (None, None, min, &[4]),
+            (Some(2), Some(2), None, &[]),
+            (Some(3), Some(1), None, &[]),
+        ];
+        for (start, stop, step, expected) in cases {
+            assert_eq!(
+                sliced(5, start, stop, step),
+                expected,
+                "{start:?}:{stop:?}:{step:?}"
+            );
+        }
+        assert_eq!(sliced(0, None, None, Some(-1)), []);
+        assert_eq!(sliced(0, Some(3), Some(-3), None), []);
+    }
+
+    #[test]
+    fn a_slice_step_cannot_be_zero() {
+        assert_eq!(
+            slice_indices(3, None, None, Some(0)),
+            Err("slice step cannot be zero")
+        );
+    }
 
     #[test]
     fn every_builtin_is_documented() {

@@ -120,8 +120,8 @@ fn arithmetic_needs_numbers() {
         5,
     );
     assert_error(
-        "x = [1] * [2]\n",
-        "'*' needs int or float operands, found list[int]",
+        "x = none * none\n",
+        "'*' needs int or float operands, found none",
         1,
         5,
     );
@@ -131,6 +131,151 @@ fn arithmetic_needs_numbers() {
         1,
         6,
     );
+}
+
+#[test]
+fn arithmetic_on_lists_works_element_by_element() {
+    let source = "a = [1, 2]\nb = a * 2 + a\nc = 2.5 * [1.0]\nd = -a\ne = a ** 2\nf = 2 ** a\n\
+                  g = [1.5] ** [2]\nh = a % 3 - +a\n";
+    for (name, ty) in [
+        ("b", "list[int]"),
+        ("c", "list[float]"),
+        ("d", "list[int]"),
+        ("e", "list[int]"),
+        ("f", "list[int]"),
+        ("g", "list[float]"),
+        ("h", "list[int]"),
+    ] {
+        assert_eq!(type_of_symbol(source, name), ty, "{name}");
+    }
+}
+
+#[test]
+fn elementwise_operands_are_inferred_from_calls() {
+    let source = "def scale(xs, k);\n    ret xs * k\ny = scale([1.5], 2.0)\n";
+    assert_eq!(
+        type_of_symbol(source, "scale"),
+        "def(list[float], float) -> list[float]"
+    );
+    let source = "def scale(k, xs);\n    ret k * xs\ny = scale(2, [1])\n";
+    assert_eq!(type_of_symbol(source, "y"), "list[int]");
+    let source = "def double(x);\n    ret x * 2\na = double(3)\n";
+    assert_eq!(type_of_symbol(source, "double"), "def(int) -> int");
+    let source = "def shift(xs);\n    ret xs + 1.0\nb = shift([1.5])\n";
+    assert_eq!(type_of_symbol(source, "b"), "list[float]");
+    // a result used as a list makes its unknown operand a list
+    let source = "def twice(xs);\n    ys = xs * 2\n    ys.append(1)\n    ret ys\n";
+    assert_eq!(
+        type_of_symbol(source, "twice"),
+        "def(list[int]) -> list[int]"
+    );
+    // with nothing else to go on, both operands have the same type, as for numbers
+    let source = "def add(a, b);\n    ret a + b\n";
+    assert_eq!(type_of_symbol(source, "add"), "def(int, int) -> int");
+}
+
+#[test]
+fn a_wrong_argument_to_arithmetic_is_reported_where_it_is_passed() {
+    let twice = "def twice(n);\n    ret n * 2\n";
+    // either a number or a list, though not both, since functions are not generic yet
+    assert_eq!(errors(&format!("{twice}a = twice(3)\n")), []);
+    assert_eq!(errors(&format!("{twice}b = twice([1])\n")), []);
+    assert_error(
+        &format!("{twice}x = twice(\"a\")\n"),
+        "expected int, found str",
+        3,
+        11,
+    );
+    assert_error(
+        &format!("{twice}x = twice([1.5])\n"),
+        "expected int, found list[float]",
+        3,
+        11,
+    );
+}
+
+/// An unknown operand with a list of unknown elements once recursed forever when forced
+/// (fuzz/artifacts/codegen/crash-a68ccb90d3bb1a68416882987cd0fb824f07781e, `[]--d`).
+#[test]
+fn arithmetic_on_unknown_lists_and_operands_settles() {
+    assert_error("[]--d\n", "undefined name 'd'", 1, 5);
+    assert_eq!(
+        type_of_symbol("def f(a);\n    ret [] - a\n", "f"),
+        "def(int) -> list[int]"
+    );
+    assert_eq!(
+        type_of_symbol("def f(a);\n    ret -a * []\n", "f"),
+        "def(int) -> list[int]"
+    );
+    // a result used as a list of floats cannot come from an int list times 2
+    let source = "def f(n);\n    ys = n * 2\n    ys.append(1.5)\n    ret ys\n";
+    assert_eq!(
+        errors(source),
+        [("expected list[float], found int".to_string(), 2, 10)]
+    );
+}
+
+#[test]
+fn elementwise_operands_must_agree() {
+    assert_error(
+        "x = [1] + [1.5]\n",
+        "expected list[int], found list[float]",
+        1,
+        11,
+    );
+    assert_error("x = [1] * 2.5\n", "expected int, found float", 1, 11);
+    assert_error("x = 2.5 * [1]\n", "expected float, found int", 1, 11);
+    assert_error(
+        "x = [\"a\"] + [\"b\"]\n",
+        "'+' on lists needs int or float elements, found str",
+        1,
+        5,
+    );
+    assert_error(
+        "x = [[1]] * [[2]]\n",
+        "'*' on lists needs int or float elements, found list[int]",
+        1,
+        5,
+    );
+    assert_error(
+        "x = -[true]\n",
+        "'-' on lists needs int or float elements, found bool",
+        1,
+        6,
+    );
+    assert_error(
+        "x = [1.5] ** 0.5\n",
+        "'**' needs an int exponent, found float",
+        1,
+        14,
+    );
+    assert_error(
+        "x = [1.5] ** [0.5]\n",
+        "'**' needs an int exponent, found list[float]",
+        1,
+        14,
+    );
+    // lists still cannot be compared
+    assert_error(
+        "x = [1] < [2]\n",
+        "'<' needs int or float operands, found list[int]",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn repeating_a_one_element_list_is_a_warning() {
+    let source = "n = 3\nxs = [0] * n\nys = n * [0]\nzs = [1, 2] * n\nws = [0] * 2.5\n";
+    let diagnostics = analyze_source(source).diagnostics;
+    let warnings: Vec<_> = diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::diagnostic::Severity::Warning)
+        .map(|d| (d.message.as_str(), d.span.start.line))
+        .collect();
+    let message = "'*' multiplies each element of a list, so this is a list of one element, not \
+                   copies of it as in Python; build a longer list with 'append' in a loop";
+    assert_eq!(warnings, [(message, 2), (message, 3)]);
 }
 
 #[test]
@@ -586,6 +731,36 @@ fn indexes_must_be_ints_and_values_lists() {
 }
 
 #[test]
+fn slices_are_lists_of_the_same_type() {
+    let source = "a = [1.5, 2.5]\nb = a[1:]\nc = a[::-1][0]\ni = 1\nd = [[\"x\"]][i:i + 1:1]\n";
+    assert_eq!(type_of_symbol(source, "b"), "list[float]");
+    assert_eq!(type_of_symbol(source, "c"), "float");
+    assert_eq!(type_of_symbol(source, "d"), "list[list[str]]");
+}
+
+#[test]
+fn slice_bounds_must_be_ints() {
+    assert_error("a = [1]\nb = a[0.5:]\n", "expected int, found float", 2, 7);
+    assert_error("a = [1]\nb = a[:\"x\"]\n", "expected int, found str", 2, 8);
+    assert_error("a = [1]\nb = a[::true]\n", "expected int, found bool", 2, 9);
+    assert_error(
+        "x = 1\nb = x[1:]\n",
+        "expected list[unknown], found int",
+        2,
+        5,
+    );
+}
+
+#[test]
+fn slices_cannot_be_changed() {
+    let message = "a slice is a new list, so changing it has no effect";
+    assert_error("a = [1, 2]\na[1:] = [3]\n", message, 2, 1);
+    assert_error("a = [1, 2]\na[1:][0] = 3\n", message, 2, 1);
+    assert_error("a = [1, 2]\na[1:].append(3)\n", message, 2, 1);
+    assert_error("a = [[1], [2]]\na[:1][0].append(3)\n", message, 2, 1);
+}
+
+#[test]
 fn len_takes_lists() {
     assert_eq!(type_of_symbol("n = [1, 2].len()\n", "n"), "int");
 }
@@ -819,6 +994,108 @@ fn method_receivers_must_be_assigned_first() {
         "'xs' might be used before it is assigned",
         1,
         1,
+    );
+}
+
+#[test]
+fn pop_insert_and_extend_have_types() {
+    let source = "xs = [1.5]\nx = xs.pop()\ny = xs.pop(0)\nxs.insert(0, 2.5)\nxs.extend([x, y])\n\
+                  xs.pop()\n";
+    assert_eq!(type_of_symbol(source, "x"), "float");
+    assert_eq!(type_of_symbol(source, "y"), "float");
+    assert_eq!(type_of_symbol(source, "xs"), "list[float]");
+    // the list's type can come from what is put in it
+    let source = "xs = []\nxs.insert(0, \"a\")\nys = []\nys.extend(xs)\nz = ys.pop()\n";
+    assert_eq!(type_of_symbol(source, "z"), "str");
+}
+
+#[test]
+fn pop_insert_and_extend_check_their_arguments() {
+    assert_error(
+        "xs = [1]\nxs.pop(1, 2)\n",
+        "'pop' takes 0 or 1 arguments, but 2 were given",
+        2,
+        1,
+    );
+    assert_error("xs = [1]\nxs.pop(\"0\")\n", "expected int, found str", 2, 8);
+    assert_error(
+        "xs = [1]\nxs.insert(1)\n",
+        "'insert' takes 2 arguments, but 1 was given",
+        2,
+        1,
+    );
+    assert_error(
+        "xs = [1]\nxs.insert(0, \"a\")\n",
+        "expected int, found str",
+        2,
+        14,
+    );
+    assert_error(
+        "xs = [1]\nxs.insert(0.5, 1)\n",
+        "expected int, found float",
+        2,
+        11,
+    );
+    assert_error(
+        "xs = [1]\nxs.extend(2)\n",
+        "expected list[int], found int",
+        2,
+        11,
+    );
+    assert_error(
+        "xs = [1]\nxs.extend([\"a\"])\n",
+        "expected list[int], found list[str]",
+        2,
+        11,
+    );
+    assert_error(
+        "x = 1\nx.pop()\n",
+        "expected list[unknown], found int",
+        2,
+        1,
+    );
+}
+
+#[test]
+fn pop_is_a_statement_or_an_assigned_value() {
+    let message = "'pop' changes a list, so it can only be a statement of its own or the value of \
+                   an assignment, as in 'x = xs.pop()'";
+    assert_error("xs = [1]\nprint(xs.pop())\n", message, 2, 7);
+    assert_error("xs = [1]\ny = xs.pop() + 1\n", message, 2, 5);
+    assert_error("def f(xs);\n    ret xs.pop()\nf([1])\n", message, 2, 9);
+    assert_eq!(
+        errors("xs = [1, 2]\ny = xs.pop()\nxs.pop()\ngrid = [[1]]\nrow = grid.pop()\n"),
+        []
+    );
+    let message =
+        "'insert' changes a list and returns none, so it can only be a statement of its own";
+    assert_error("xs = [1]\ny = xs.insert(0, 1)\n", message, 2, 5);
+}
+
+#[test]
+fn popping_counts_as_a_change() {
+    // a function cannot pop from a global, and popping a parameter it never reads again is lost
+    assert_error(
+        "xs = [1]\ndef f();\n    x = xs.pop()\n    ret x\nf()\n",
+        "a function cannot change the global 'xs'; pass it as an argument and return the \
+         changed value",
+        3,
+        9,
+    );
+    let source = "def f(xs);\n    x = xs.pop()\n    ret x\nf([1])\n";
+    assert_eq!(
+        errors(source),
+        [(
+            "changes to 'xs' are lost when 'f' returns, since parameters are copies; return it \
+             and assign the result where 'f' is called"
+                .into(),
+            2,
+            9
+        )]
+    );
+    assert_eq!(
+        errors("def f(xs);\n    x = xs.pop()\n    ret xs\nf([1])\n"),
+        []
     );
 }
 

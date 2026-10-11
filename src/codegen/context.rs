@@ -13,6 +13,16 @@ use crate::diagnostic::Severity;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
+/// Runtime routines for list methods and slices, which `builtins::list_methods` emits in each
+/// backend for the ones a program calls.
+pub const LIST_ROUTINES: &[&str] = &[
+    "stone.list_slice",
+    "stone.list_pop",
+    "stone.list_insert",
+    "stone.list_extend",
+    "stone.list_reuse",
+];
+
 /// Runtime routines that need the string runtime, even in a program where no expression is a
 /// `str`, such as one that only prints `args()`.
 const STRING_ROUTINES: &[&str] = &[
@@ -498,6 +508,11 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
             }
         }
         ExprKind::Attribute { value, .. } => collect_calls_from_expr(value, calls),
+        ExprKind::Slice { lower, upper, step } => {
+            for bound in [lower, upper, step].into_iter().flatten() {
+                collect_calls_from_expr(bound, calls);
+            }
+        }
         ExprKind::Constant { .. } | ExprKind::Name { .. } => {}
     }
 }

@@ -167,6 +167,60 @@ names.append("ada")
 print(names)   // ['ada']
 ```
 
+### `pop`
+
+```text
+list[T].pop() | list[T].pop(index: int) -> T
+```
+
+Removes the last element, or the one at `index`, and returns it. A negative `index` counts from
+the end, as in indexing. Like `append`, it changes only the variable it is called on, so it is
+either a statement of its own or the whole value of an assignment, as in `x = xs.pop()`. It stops
+the program with `pop from empty list` if the list is empty, and with `pop index out of range` if
+`index` is past either end.
+
+```stone
+stack = [1, 2, 3]
+top = stack.pop()
+first = stack.pop(0)
+print(top, first, stack)   // 3 1 [2]
+```
+
+### `insert`
+
+```text
+list[T].insert(index: int, item: T) -> none
+```
+
+Puts `item` at `index`, moving the elements from there on up by one, so `xs.insert(0, x)` adds
+`x` at the front and `xs.insert(xs.len(), x)` at the end. A negative `index` counts from the end.
+Unlike Python, which quietly clamps the index, it stops the program with `list index out of range`
+if `index` is below `-len` or above `len`. It is a statement of its own.
+
+```stone
+xs = [1, 3]
+xs.insert(1, 2)
+xs.insert(-3, 0)
+print(xs)   // [0, 1, 2, 3]
+```
+
+### `extend`
+
+```text
+list[T].extend(items: list[T]) -> none
+```
+
+Adds every element of `items` to the end of the list, in order. A list can extend itself. It is
+a statement of its own. Since `+` on lists works element by element, `extend` is how to join two
+lists.
+
+```stone
+xs = [1, 2]
+xs.extend([3, 4])
+xs.extend(xs)
+print(xs)   // [1, 2, 3, 4, 1, 2, 3, 4]
+```
+
 ### `strip`
 
 ```text

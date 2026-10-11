@@ -1,0 +1,21 @@
+// slices copy part of a list
+xs = [10, 20, 30, 40, 50]
+print(xs[1:3], xs[:2], xs[-2:], xs[::-1], xs[::2])
+
+// pop removes and returns an element, insert adds one anywhere, extend adds a whole list
+last = xs.pop()
+first = xs.pop(0)
+xs.insert(1, 25)
+xs.extend([60, 70])
+print(last, first, xs)
+
+// arithmetic works element by element, and a number applies to every element
+prices = [2.5, 4.0, 10.0]
+counts = [4.0, 2.0, 1.0]
+totals = prices * counts
+print(totals, totals * 1.08, -counts)
+
+// and inside functions
+def scale(values, factor);
+    ret values * factor + 1.0
+print(scale(prices, 2.0))

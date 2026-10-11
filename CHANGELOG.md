@@ -21,6 +21,20 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   numbers on every machine. Without a seed, each run seeds itself from the system's entropy.
 - The builtin `time` module: `time.now`, `time.clock`, and `time.sleep`, which waits for a number
   of seconds that may have a fraction.
+- Slices, as in Python: `xs[1:3]`, `xs[:2]`, `xs[-2:]`, `xs[::-1]`, and `xs[a:b:step]` give a
+  new list. A step of 0 stops the program with `slice step cannot be zero`.
+- The list methods `pop`, `insert`, and `extend`. `x = xs.pop()` takes the last element off `xs`,
+  `xs.pop(i)` the one at `i`, `xs.insert(i, x)` puts `x` at `i`, and `xs.extend(ys)` adds every
+  element of `ys`. Unlike Python's, `insert` stops the program when the index is out of range.
+- Arithmetic on lists of ints or floats, element by element, as with numpy's arrays:
+  `a * 2.0 + b` multiplies each element of `a` by 2 and adds the matching element of `b`. Both
+  lists must have the same length, or the program stops with `lists have different lengths`.
+  Compiled programs compute each such expression in one loop with no intermediate lists, two
+  elements at a time with SSE2 or NEON where the operations allow, and in place when the result
+  replaces a list nothing else holds. The checker warns about `[0] * n`, which multiplies the
+  element rather than repeating it as Python does.
+- The benchmark runner takes `--numpy PYTHON` and times a benchmark's numpy version, such as the
+  new `vector` benchmark's `vector.np.py`, alongside the others.
 
 ### Changed
 

@@ -619,6 +619,112 @@ fn branch(word: u32, kind: FixupKind, target: &str) -> Result<Word> {
     Ok((word, Some((kind, label(target)?))))
 }
 
+/// Parses a vector register with the arrangement `arrangement`, such as `v16` from `v16.2d`.
+fn vreg(text: &str, arrangement: &str) -> Result<u32> {
+    text.strip_prefix('v')
+        .and_then(|rest| rest.strip_suffix(arrangement))
+        .and_then(|num| num.strip_suffix('.'))
+        .and_then(|num| num.parse::<u32>().ok())
+        .filter(|num| *num < 32)
+        .ok_or_else(|| format!("bad register '{text}', expected a v register with .{arrangement}"))
+}
+
+/// Encodes the vector instructions the backends emit for arithmetic on two doubles or two ints
+/// at once, returning `None` for anything else.
+///
+/// These are `ldr`/`str` of a `q` register at `[xN]`, the `.2d` forms of `fadd`, `fsub`,
+/// `fmul`, `fdiv`, `add`, `sub`, `fneg`, `neg`, `dup` from an x register, and `fcmeq` with
+/// `#0.0`, `addp` into a d register, and `mov` of a whole `.16b` register.
+fn vector(mnemonic: &str, operands: &[&str]) -> Option<Result<u32>> {
+    let first = operands.first()?;
+    let q = first
+        .strip_prefix('q')
+        .is_some_and(|num| num.parse::<u32>().is_ok());
+    let is_vector = q || (first.starts_with('v') && first.contains('.'));
+    let only_vector = matches!(mnemonic, "fneg" | "dup" | "fcmeq" | "addp");
+    if !is_vector && !only_vector {
+        return None;
+    }
+    let count = |n: usize| -> Result<()> {
+        match operands.len() == n {
+            true => Ok(()),
+            false => Err(format!(
+                "'{mnemonic}' takes {n} operands, but {} were given",
+                operands.len()
+            )),
+        }
+    };
+    let d2 = |text: &str| vreg(text, "2d");
+    let three = |base: u32| -> Result<u32> {
+        count(3)?;
+        let (rd, rn, rm) = (d2(operands[0])?, d2(operands[1])?, d2(operands[2])?);
+        Ok(base | rm << 16 | rn << 5 | rd)
+    };
+    let two = |base: u32| -> Result<u32> {
+        count(2)?;
+        let (rd, rn) = (d2(operands[0])?, d2(operands[1])?);
+        Ok(base | rn << 5 | rd)
+    };
+    Some(match mnemonic {
+        "ldr" | "str" => (|| {
+            count(2)?;
+            let rt = first
+                .strip_prefix('q')
+                .and_then(|num| num.parse::<u32>().ok())
+                .filter(|num| *num < 32)
+                .ok_or_else(|| format!("bad register '{first}'"))?;
+            let base = operands[1]
+                .strip_prefix('[')
+                .and_then(|rest| rest.strip_suffix(']'))
+                .ok_or_else(|| format!("bad address '{}'", operands[1]))?;
+            let rn = reg(base)?;
+            if rn.kind != Kind::X {
+                return Err(format!("bad address '{}'", operands[1]));
+            }
+            let opcode = if mnemonic == "ldr" {
+                0x3dc00000
+            } else {
+                0x3d800000
+            };
+            Ok(opcode | rn.num << 5 | rt)
+        })(),
+        "fadd" => three(0x4e60d400),
+        "fsub" => three(0x4ee0d400),
+        "fmul" => three(0x6e60dc00),
+        "fdiv" => three(0x6e60fc00),
+        "add" => three(0x4ee08400),
+        "sub" => three(0x6ee08400),
+        "fneg" => two(0x6ee0f800),
+        "neg" => two(0x6ee0b800),
+        "dup" => (|| {
+            count(2)?;
+            let rd = d2(operands[0])?;
+            let rn = gpr(operands[1])?;
+            if rn.kind != Kind::X {
+                return Err("dup takes an x register".to_string());
+            }
+            Ok(0x4e080c00 | rn.num << 5 | rd)
+        })(),
+        "fcmeq" => (|| {
+            count(3)?;
+            if operands[2] != "#0.0" {
+                return Err("fcmeq compares with #0.0".to_string());
+            }
+            Ok(0x4ee0d800 | d2(operands[1])? << 5 | d2(operands[0])?)
+        })(),
+        "addp" => (|| {
+            count(2)?;
+            Ok(0x5ef1b800 | d2(operands[1])? << 5 | dreg(operands[0])?.num)
+        })(),
+        "mov" => (|| {
+            count(2)?;
+            let (rd, rn) = (vreg(operands[0], "16b")?, vreg(operands[1], "16b")?);
+            Ok(0x4ea01c00 | rn << 16 | rn << 5 | rd)
+        })(),
+        _ => Err(format!("'{mnemonic}' does not take vector registers")),
+    })
+}
+
 fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
     let count = |n: usize| -> Result<()> {
         if operands.len() == n {
@@ -630,6 +736,9 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
             ))
         }
     };
+    if let Some(word) = vector(mnemonic, operands) {
+        return word.map(|word| (word, None));
+    }
     if let Some(cond) = mnemonic.strip_prefix("b.") {
         count(1)?;
         return branch(
@@ -1196,6 +1305,32 @@ mod tests {
             ("stp x29, x30, [sp, #-16]!", "a9bf7bfd"),
             ("stp x19, x20, [sp, #16]", "a90153f3"),
             ("stp x0, x1, [x2]", "a9000440"),
+        ]);
+    }
+
+    #[test]
+    fn vectors_of_two_doubles_match_gnu_as() {
+        check(&[
+            ("ldr q16, [x16]", "3dc00210"),
+            ("ldr q31, [x17]", "3dc0023f"),
+            ("str q16, [x16]", "3d800210"),
+            ("str q20, [x17]", "3d800234"),
+            ("add x16, x9, x8, lsl #3", "8b080d30"),
+            ("add x17, x21, x8, lsl #3", "8b080eb1"),
+            ("fadd v16.2d, v16.2d, v17.2d", "4e71d610"),
+            ("fsub v16.2d, v17.2d, v18.2d", "4ef2d630"),
+            ("fmul v20.2d, v21.2d, v31.2d", "6e7fdeb4"),
+            ("fdiv v16.2d, v16.2d, v17.2d", "6e71fe10"),
+            ("add v16.2d, v16.2d, v17.2d", "4ef18610"),
+            ("sub v30.2d, v16.2d, v17.2d", "6ef1861e"),
+            ("fneg v16.2d, v17.2d", "6ee0fa30"),
+            ("neg v16.2d, v17.2d", "6ee0ba30"),
+            ("dup v16.2d, x0", "4e080c10"),
+            ("dup v31.2d, x16", "4e080e1f"),
+            ("fcmeq v17.2d, v16.2d, #0.0", "4ee0da11"),
+            ("addp d17, v17.2d", "5ef1ba31"),
+            ("fmov x16, d17", "9e660230"),
+            ("mov v16.16b, v17.16b", "4eb11e30"),
         ]);
     }
 

@@ -3,7 +3,8 @@
 //! For example, `cargo run --release --manifest-path bench/Cargo.toml -- --runs 3 --filter fib`
 //! builds `bench/programs/fib.st` with `stone build`, `fib.c` with `gcc -O2` and `gcc -O0`, checks
 //! that all of them and `python3 fib.py` print `fib.out`, then prints a table of their median
-//! times over three runs.
+//! times over three runs. A benchmark with a numpy version, such as `vector.np.py`, also runs it
+//! with the `--numpy` interpreter when that can import numpy.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -13,12 +14,13 @@ use std::time::{Duration, Instant};
 use stone_bench::{Implementation, Program, Row, discover, format_table, median, min};
 
 const USAGE: &str = "\
-usage: stone-bench [--runs N] [--filter NAME] [--stone PATH] [--min]
+usage: stone-bench [--runs N] [--filter NAME] [--stone PATH] [--numpy PYTHON] [--min]
 
-  --runs N       timed runs of each implementation, after one untimed check (default 5)
-  --filter NAME  only run benchmarks whose name contains NAME
-  --stone PATH   use this stone binary instead of building target/release/stone
-  --min          report the fastest run instead of the median";
+  --runs N         timed runs of each implementation, after one untimed check (default 5)
+  --filter NAME    only run benchmarks whose name contains NAME
+  --stone PATH     use this stone binary instead of building target/release/stone
+  --numpy PYTHON   run numpy versions with this Python, such as a virtualenv's (default python3)
+  --min            report the fastest run instead of the median";
 
 /// A timing this short usually means gcc optimized the benchmark's work away.
 const SUSPICIOUSLY_FAST: Duration = Duration::from_millis(10);
@@ -28,6 +30,7 @@ struct Options {
     runs: usize,
     filter: Option<String>,
     stone: Option<PathBuf>,
+    numpy: OsString,
     use_min: bool,
 }
 
@@ -39,6 +42,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
         runs: 5,
         filter: None,
         stone: None,
+        numpy: "python3".into(),
         use_min: false,
     };
     while let Some(arg) = args.next() {
@@ -53,6 +57,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
             }
             "--filter" => options.filter = Some(value()?),
             "--stone" => options.stone = Some(PathBuf::from(value()?)),
+            "--numpy" => options.numpy = value()?.into(),
             "--min" => options.use_min = true,
             "-h" | "--help" => return Err(USAGE.into()),
             _ => return Err(format!("unknown argument {arg}\n{USAGE}")),
@@ -190,6 +195,17 @@ fn run() -> Result<(), String> {
         None => build_stone(root)?,
     };
 
+    let numpy = programs.iter().any(Program::has_numpy)
+        && run_command(&[options.numpy.clone(), "-c".into(), "import numpy".into()])
+            .inspect_err(|_| {
+                eprintln!(
+                    "warning: {} cannot import numpy, so numpy versions are skipped; pass \
+                     --numpy with a Python that can",
+                    options.numpy.to_string_lossy()
+                )
+            })
+            .is_ok();
+
     let mut rows = Vec::new();
     for program in &programs {
         let commands = prepare(program, &stone, &out_dir)?;
@@ -212,9 +228,24 @@ fn run() -> Result<(), String> {
                 );
             }
         }
+        let numpy = match numpy && program.has_numpy() {
+            true => {
+                let what = format!("{} under numpy", program.name);
+                eprintln!("running {what}");
+                let argv = [options.numpy.clone(), program.file("np.py").into()];
+                let samples = measure(&argv, options.runs, &expected, &what)?;
+                Some(if options.use_min {
+                    min(&samples)
+                } else {
+                    median(&samples)
+                })
+            }
+            false => None,
+        };
         rows.push(Row {
             name: program.name.clone(),
             times,
+            numpy,
         });
     }
 

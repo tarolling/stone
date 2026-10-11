@@ -350,6 +350,7 @@ fn describe_found(r#type: &TokenType) -> String {
         TokenType::RBracket => "']'".to_string(),
         TokenType::Semi => "';'".to_string(),
         TokenType::Comma => "','".to_string(),
+        TokenType::Colon => "':'".to_string(),
         TokenType::Dot => "'.'".to_string(),
     }
 }
@@ -370,5 +371,6 @@ fn is_quiet(r#type: &TokenType) -> bool {
             | TokenType::LBracket
             | TokenType::Dot
             | TokenType::Comma
+            | TokenType::Colon
     )
 }

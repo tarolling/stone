@@ -21,6 +21,7 @@ pub enum TokenType {
     RBracket,
     Semi,
     Comma,
+    Colon,
     Dot,
 }
 

@@ -3,10 +3,12 @@
 This crate times stone's compiled output (`stone build`) against the same programs written in C and Python. The interpreter is not benchmarked.
 
 ```sh
-cargo run --release --manifest-path bench/Cargo.toml -- [--runs 5] [--filter NAME] [--stone PATH] [--min]
+cargo run --release --manifest-path bench/Cargo.toml -- [--runs 5] [--filter NAME] [--stone PATH] [--numpy PYTHON] [--min]
 ```
 
 For each benchmark, the runner builds stone in release mode, compiles the `.st` with `stone build` and the `.c` with `gcc -O2 -fwrapv` and `gcc -O0 -fwrapv`, and runs the `.py` with `python3`. It runs each implementation once untimed and requires its stdout to match the `.out` file exactly. It then times `--runs` more runs, checking the output of each, and prints a Markdown table of the median wall times, or the fastest with `--min`. Progress and warnings go to stderr, so `> results.md` captures only the table. It needs `gcc` and `python3` on `PATH`.
+
+A benchmark of arithmetic on lists can also have a numpy version, `name.np.py`, which runs under the Python that `--numpy` names (`python3` by default), such as a virtualenv's `bin/python`, and adds `numpy (ms)` and `numpy / stone` columns. If that Python cannot import numpy, the runner warns and leaves numpy out.
 
 `cargo test --manifest-path bench/Cargo.toml` checks the statistics and table code, and that every benchmark still passes stone's checker, without running any workloads.
 
@@ -29,6 +31,7 @@ For each benchmark, the runner builds stone in release mode, compiles the `.st` 
 | `sieve` | list append, indexed load and store | counting primes up to 5,000,000 |
 | `matmul` | nested list indexing | multiplying two 300x300 `list[list[int]]` |
 | `matmul_float` | float arithmetic and nested list indexing | multiplying two 300x300 `list[list[float]]` |
+| `vector` | arithmetic on lists, element by element | `y = 0.5 * x + y` over a million floats, 50 times |
 
 Stone programs cannot read arguments or input, so each workload size is a constant written into all three versions. Sizes are chosen so `gcc -O2` takes at least about 40 ms and the whole suite finishes in a few minutes. The runner warns when any time is under 10 ms, which usually means gcc optimized the work away.
 
@@ -38,20 +41,21 @@ To add a benchmark, write `name.st`, `name.c`, and `name.py`, put the hot loop i
 
 ## Baseline
 
-Median of 5 runs on 2026-10-04, on an Intel Core i7-10750H under WSL2, with gcc and Python 3 from the distribution, after adding register allocation. Absolute times on a machine like this can differ by 2x between sessions, as CPU boost and background load change, so compare the ratio columns, which come from the same session, rather than times from different sessions. For steadier numbers, close other programs and pin the runner to one core with `taskset -c 2`.
+Median of 5 runs on 2026-10-10, on an Intel Core i7-10750H under WSL2, with gcc 13.3 and Python 3.12 from the distribution, and numpy 2.5.4 in a virtualenv for `vector`, after adding arithmetic on lists. Absolute times on a machine like this can differ by 2x between sessions, as CPU boost and background load change, so compare the ratio columns, which come from the same session, rather than times from different sessions. For steadier numbers, close other programs and pin the runner to one core with `taskset -c 2`.
 
-| program | C -O2 (ms) | C -O0 (ms) | stone (ms) | Python (ms) | stone / C -O2 | Python / stone |
-|---|---:|---:|---:|---:|---:|---:|
-| collatz | 62.7 | 132.5 | 113.5 | 2430.3 | 1.8x | 21.4x |
-| fib | 20.8 | 64.7 | 77.2 | 1256.5 | 3.7x | 16.3x |
-| globals | 231.1 | 258.0 | 259.7 | 5236.5 | 1.1x | 20.2x |
-| lcg | 50.5 | 66.3 | 70.3 | 5103.7 | 1.4x | 72.6x |
-| matmul | 19.1 | 77.4 | 84.4 | 2416.2 | 4.4x | 28.6x |
-| matmul_float | 28.0 | 75.9 | 93.9 | 1434.8 | 3.4x | 15.3x |
-| sieve | 112.9 | 128.8 | 109.2 | 1006.4 | 1.0x | 9.2x |
-| geometric mean | | | | | 2.0x | 21.4x |
+| program | C -O2 (ms) | C -O0 (ms) | stone (ms) | Python (ms) | numpy (ms) | stone / C -O2 | Python / stone | numpy / stone |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| collatz | 61.8 | 135.6 | 112.1 | 2490.2 | | 1.8x | 22.2x | |
+| fib | 19.4 | 63.8 | 83.0 | 1342.5 | | 4.3x | 16.2x | |
+| globals | 234.5 | 253.2 | 255.0 | 5334.6 | | 1.1x | 20.9x | |
+| lcg | 49.2 | 65.9 | 66.9 | 5152.3 | | 1.4x | 77.1x | |
+| matmul | 20.5 | 70.5 | 86.1 | 2147.0 | | 4.2x | 24.9x | |
+| matmul_float | 28.5 | 74.1 | 97.5 | 1405.3 | | 3.4x | 14.4x | |
+| sieve | 108.4 | 147.2 | 123.4 | 1007.9 | | 1.1x | 8.2x | |
+| vector | 57.1 | 127.0 | 84.2 | 2899.0 | 261.1 | 1.5x | 34.4x | 3.1x |
+| geometric mean | | | | | | 2.0x | 22.2x | 3.1x |
 
-Compiled stone is about 2.0x slower than `gcc -O2` and about 21x faster than CPython, as a geometric mean. It is faster than `gcc -O0` on `collatz` and `sieve`, and within about 25% of it on the rest.
+Compiled stone is about 2.0x slower than `gcc -O2` and about 22x faster than CPython, as a geometric mean. It is faster than `gcc -O0` on `collatz`, `sieve`, and `vector`, and within about a third of it on the rest. On `vector`, it is about 3x faster than numpy. The other benchmarks moved by no more than the noise between sessions since the previous baseline, as this change did not touch the code they generate.
 
 - `sieve` is close to C because allocating and touching 40 MB of memory dominates all three native versions.
 - `globals` looks close to C only because C's version is also slow: once the modulus is a variable instead of a constant, gcc has to use `idiv` too. Compare stone's `globals` with its own `lcg` to see what reading globals costs.
@@ -77,3 +81,9 @@ The generated assembly for each benchmark is left at `bench/target/programs/<nam
 - **List access chases two pointers and checks bounds.** An index loads the list's header, adjusts a negative index, compares it with the length, then loads the data pointer and the element. For `list[list[int]]` that happens twice per `a[i][k]`, where C's flat array needs one load.
 - **Globals are checked on every read in a function.** `globals` compared with `lcg` shows the cost of the `g.<name>.set` check, plus the load itself, since globals always live in memory.
 - **Loops test at the top.** Each iteration jumps back to the test, then branches into the body, where gcc puts the test at the bottom so an iteration takes one branch.
+
+### Arithmetic on lists
+
+`vector` measures arithmetic on whole lists, which numpy is built for. An expression such as `0.5 * x + y` compiles to one loop with no list for any intermediate result, where numpy makes a temporary array for each operator. The loop runs over pairs of floats with SSE2 (NEON on arm64), then finishes any odd element one at a time, and writes over `y` in place, since `y` is assigned and nothing else holds its list. The baseline above shows the result.
+
+The times include building the lists and summing them with ordinary loops, plus Python's startup and importing numpy, which is about 100 ms of numpy's time. Timing only the passes over the lists, stone took about 1.25x as long as `gcc -O2`, which also uses SSE2 here, and numpy about 2.5x as long as stone, or 1.9x with `out=` arguments that avoid its temporaries.

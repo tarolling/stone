@@ -709,6 +709,10 @@ impl Rewriter<'_> {
             }
             ExprKind::Attribute { value, .. } => self.expr(value),
             ExprKind::List { elts, .. } => elts.iter_mut().for_each(|e| self.expr(e)),
+            ExprKind::Slice { lower, upper, step } => [lower, upper, step]
+                .into_iter()
+                .flatten()
+                .for_each(|b| self.expr(b)),
             ExprKind::Constant { .. } => {}
         }
     }

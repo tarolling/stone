@@ -192,6 +192,110 @@ struct Constraint {
     message: &'static str,
 }
 
+/// An arithmetic operation whose operands may be lists, checked once its operands are known to be
+/// lists or not, since `xs * k` takes a list and a number while `a * b` takes two numbers.
+///
+/// For example, in `def scale(xs, k); ret xs * k`, nothing is known about `xs` or `k` until
+/// `scale([1.5], 2.0)` is checked, which makes the result `list[float]`.
+struct Arithmetic {
+    op: ArithmeticOp,
+    left: Ty,
+    /// The right operand, or `None` for a unary operation.
+    right: Option<Ty>,
+    result: Ty,
+    /// The whole expression.
+    span: Span,
+    /// The right operand, or the only one.
+    operand_span: Span,
+    /// Whether `left` or `right` is a list literal of one element multiplied, as in `[0] * n`,
+    /// which Python reads as repeating it.
+    literal_left: bool,
+    literal_right: bool,
+}
+
+/// What an unknown operand of arithmetic can still turn out to be, which unification enforces so
+/// that a wrong argument is reported where it is passed rather than inside the function.
+///
+/// For example, in `def twice(n); ret n * 2`, `n` is an int or a list of ints, so `twice("a")`
+/// is an error at `"a"`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Bound {
+    /// The number, or a list of it, as `n` is in `n * 2`, where the number is `int` or `float`.
+    NumberOrList(NumberTy),
+    /// Any number or list of numbers, as `a` is in `a * b`, or also a string for `+`.
+    Numeric { strings: bool },
+}
+
+/// A number type, for [`Bound::NumberOrList`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum NumberTy {
+    Int,
+    Float,
+}
+
+impl NumberTy {
+    fn of(ty: &Ty) -> Option<NumberTy> {
+        match ty {
+            Ty::Int => Some(NumberTy::Int),
+            Ty::Float => Some(NumberTy::Float),
+            _ => None,
+        }
+    }
+
+    fn ty(self) -> Ty {
+        match self {
+            NumberTy::Int => Ty::Int,
+            NumberTy::Float => Ty::Float,
+        }
+    }
+}
+
+impl Bound {
+    /// Returns what both bounds allow, if anything.
+    fn meet(self, other: Bound) -> Option<Bound> {
+        match (self, other) {
+            (Bound::NumberOrList(a), Bound::NumberOrList(b)) => (a == b).then_some(self),
+            (bound @ Bound::NumberOrList(_), Bound::Numeric { .. })
+            | (Bound::Numeric { .. }, bound @ Bound::NumberOrList(_)) => Some(bound),
+            (Bound::Numeric { strings: a }, Bound::Numeric { strings: b }) => {
+                Some(Bound::Numeric { strings: a && b })
+            }
+        }
+    }
+
+    /// The type an unknown with this bound is shown as and defaults to.
+    fn default(self) -> Ty {
+        match self {
+            Bound::NumberOrList(number) => number.ty(),
+            Bound::Numeric { .. } => Ty::Int,
+        }
+    }
+}
+
+/// The operator of an [`Arithmetic`] operation.
+#[derive(Clone, Copy, PartialEq)]
+enum ArithmeticOp {
+    Binary(Operator),
+    Unary(UnaryOp),
+}
+
+impl ArithmeticOp {
+    /// The operator as written, such as `"**"`.
+    fn symbol(self) -> &'static str {
+        match self {
+            ArithmeticOp::Binary(Operator::Add) | ArithmeticOp::Unary(UnaryOp::UnaryAdd) => "+",
+            ArithmeticOp::Binary(Operator::Subtract) | ArithmeticOp::Unary(UnaryOp::UnarySub) => {
+                "-"
+            }
+            ArithmeticOp::Binary(Operator::Multiply) => "*",
+            ArithmeticOp::Binary(Operator::Divide) => "/",
+            ArithmeticOp::Binary(Operator::Modulo) => "%",
+            ArithmeticOp::Binary(Operator::Power) => "**",
+            ArithmeticOp::Unary(UnaryOp::Not) => "not",
+        }
+    }
+}
+
 /// A kind of type, ignoring what a list holds, for [`Constraint`]s.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
@@ -248,6 +352,10 @@ struct Inference {
     vars: Vec<Option<Ty>>,
     diagnostics: Vec<Diagnostic>,
     constraints: Vec<Constraint>,
+    /// Arithmetic whose operands were not yet known to be lists or numbers when it was found.
+    arithmetic: Vec<Arithmetic>,
+    /// What each type variable that is an operand of such arithmetic can still be.
+    bounds: HashMap<usize, Bound>,
     expr_types: Vec<(Span, Ty)>,
     symbols: Vec<Symbol>,
     /// The type of each symbol in `symbols`, resolved into [`Symbol::ty`] at the end.
@@ -261,6 +369,9 @@ struct Inference {
     /// The span of the call an expression statement makes, if it is one, which is the only place
     /// a method that changes its receiver may be called.
     statement_call: Option<Span>,
+    /// The span of the call that is the whole value of an assignment, if it is one, where `pop`,
+    /// which changes its receiver and returns a value, may also be called.
+    assigned_call: Option<Span>,
 }
 
 /// What a name refers to where it is used.
@@ -351,12 +462,71 @@ impl Inference {
                 if self.occurs(x, &other) {
                     return false;
                 }
+                if let Some(bound) = self.bounds.get(&x).copied()
+                    && !self.admits(bound, &other)
+                {
+                    return false;
+                }
                 self.vars[x] = Some(other);
                 true
             }
             (Ty::List(x), Ty::List(y)) => self.unify(&x, &y),
             (x, y) => x == y,
         }
+    }
+
+    /// Returns whether a type variable with `bound` can become `ty`, passing the bound on if `ty`
+    /// is another variable.
+    fn admits(&mut self, bound: Bound, ty: &Ty) -> bool {
+        match ty {
+            Ty::Var(y) => match self.bounds.get(y) {
+                None => {
+                    self.bounds.insert(*y, bound);
+                    true
+                }
+                Some(other) => match bound.meet(*other) {
+                    Some(met) => {
+                        self.bounds.insert(*y, met);
+                        true
+                    }
+                    None => false,
+                },
+            },
+            Ty::List(elem) => match bound {
+                Bound::NumberOrList(number) => self.unify(elem, &number.ty()),
+                Bound::Numeric { .. } => {
+                    matches!(self.shallow(elem), Ty::Int | Ty::Float | Ty::Var(_))
+                }
+            },
+            Ty::Str => bound == Bound::Numeric { strings: true },
+            ty => match bound {
+                Bound::NumberOrList(number) => *ty == number.ty(),
+                Bound::Numeric { .. } => NumberTy::of(ty).is_some(),
+            },
+        }
+    }
+
+    /// Notes what the unknown `operand` of arithmetic can be, given the other operand, if any.
+    fn bound_operand(&mut self, operand: &Ty, other: Option<&Ty>, strings: bool) {
+        let Ty::Var(x) = self.shallow(operand) else {
+            return;
+        };
+        let bound = match other.map(|other| self.shallow(other)) {
+            Some(Ty::List(elem)) => match NumberTy::of(&self.shallow(&elem)) {
+                Some(number) => Bound::NumberOrList(number),
+                None => Bound::Numeric { strings: false },
+            },
+            Some(other) => match NumberTy::of(&other) {
+                Some(number) => Bound::NumberOrList(number),
+                None => Bound::Numeric { strings },
+            },
+            None => Bound::Numeric { strings },
+        };
+        let bound = match self.bounds.get(&x) {
+            Some(old) => old.meet(bound).unwrap_or(*old),
+            None => bound,
+        };
+        self.bounds.insert(x, bound);
     }
 
     /// Unifies the type that was found with the type that was expected, reporting
@@ -381,8 +551,243 @@ impl Inference {
             Ty::Str => "str".to_string(),
             Ty::None => "none".to_string(),
             Ty::List(elem) => format!("list[{}]", self.show(&elem)),
-            Ty::Var(_) => "unknown".to_string(),
+            Ty::Var(x) => match self.bounds.get(&x) {
+                Some(bound) => self.show(&bound.default()),
+                None => "unknown".to_string(),
+            },
         }
+    }
+
+    /// Checks `op` now if its operands are known to be lists or numbers, and otherwise once they
+    /// are, in [`Inference::finish`].
+    fn arithmetic(&mut self, op: Arithmetic) {
+        if self.solve_arithmetic(&op, false) {
+            return;
+        }
+        let strings = op.op == ArithmeticOp::Binary(Operator::Add);
+        match &op.right {
+            Some(_) if op.op == ArithmeticOp::Binary(Operator::Power) => {
+                self.bound_operand(&op.left, None, false);
+            }
+            Some(right) => {
+                self.bound_operand(&op.left, Some(right), strings);
+                self.bound_operand(right, Some(&op.left), strings);
+            }
+            None => self.bound_operand(&op.left, None, false),
+        }
+        self.arithmetic.push(op);
+    }
+
+    /// Checks the arithmetic `op` and gives its result a type, returning whether it could. Without
+    /// `force`, it waits while an operand is unknown, since it could still turn out to be a list
+    /// or a number. With `force`, an operand that is still unknown is a number: the other
+    /// operand's element if that is a list, or else the same type as the other operand, unless the
+    /// result is known to be a list.
+    ///
+    /// A list operand works element by element, so `[1, 2] * 2` is `list[int]` and `[1.5] + [2.5]`
+    /// is `list[float]`, and its elements must be int or float.
+    fn solve_arithmetic(&mut self, op: &Arithmetic, force: bool) -> bool {
+        let symbol = op.op.symbol();
+        let left = self.shallow(&op.left);
+        let Some(right) = &op.right else {
+            // `+x` or `-x`
+            match &left {
+                Ty::Var(_) if !force => return false,
+                Ty::List(elem) => self.require_elements((**elem).clone(), symbol, op.operand_span),
+                _ => {
+                    let message = match symbol {
+                        "+" => "'+' needs an int or float operand, found {}",
+                        _ => "'-' needs an int or float operand, found {}",
+                    };
+                    self.require(left.clone(), NUMBERS, op.operand_span, message);
+                }
+            }
+            self.unify(&op.result, &left);
+            return true;
+        };
+        let right = self.shallow(right);
+        if op.op == ArithmeticOp::Binary(Operator::Power) {
+            return self.solve_power(op, left, right, force);
+        }
+        // a string, bool, or none is never a list, so an unknown other operand has its type
+        let scalar = |ty: &Ty| matches!(ty, Ty::Str | Ty::Bool | Ty::None);
+        match (&left, &right) {
+            (Ty::Var(_), other) | (other, Ty::Var(_)) if !force && !scalar(other) => false,
+            (Ty::List(_), Ty::List(_)) => {
+                if self.unify(&left, &right) {
+                    let Ty::List(elem) = &left else {
+                        unreachable!()
+                    };
+                    self.require_elements((**elem).clone(), symbol, op.span);
+                } else {
+                    self.mismatch(&left, &right, op.operand_span);
+                }
+                self.unify(&op.result, &left);
+                true
+            }
+            (Ty::List(elem), Ty::Var(_)) | (Ty::Var(_), Ty::List(elem)) => {
+                // an unknown number for each element, whose type may still be unknown too, so
+                // this settles here rather than solving again
+                let (list, unknown) = match left {
+                    Ty::List(_) => (&left, &right),
+                    _ => (&right, &left),
+                };
+                self.unify(unknown, elem);
+                self.require_elements((**elem).clone(), symbol, op.span);
+                self.unify(&op.result, list);
+                true
+            }
+            (Ty::List(elem), number) | (number, Ty::List(elem)) => {
+                let list_on_left = matches!(left, Ty::List(_));
+                let (expected, found) = match list_on_left {
+                    true => ((**elem).clone(), number.clone()),
+                    false => (number.clone(), (**elem).clone()),
+                };
+                if self.unify(&expected, &found) {
+                    self.require_elements(expected, symbol, op.span);
+                    let literal = match list_on_left {
+                        true => op.literal_left,
+                        false => op.literal_right,
+                    };
+                    if literal && self.shallow(number) == Ty::Int {
+                        self.diagnostics.push(Diagnostic::warning(
+                            op.span,
+                            "'*' multiplies each element of a list, so this is a list of one \
+                             element, not copies of it as in Python; build a longer list with \
+                             'append' in a loop",
+                        ));
+                    }
+                } else {
+                    self.mismatch(&expected, &found, op.operand_span);
+                }
+                let list = if list_on_left { &left } else { &right };
+                self.unify(&op.result, list);
+                true
+            }
+            (Ty::Var(_), _) | (_, Ty::Var(_))
+                if matches!(self.shallow(&op.result), Ty::List(_)) =>
+            {
+                // used as a list, so an unknown operand is the list, after which this solves
+                // as arithmetic on a list
+                let result = op.result.clone();
+                for operand in [&left, &right] {
+                    if matches!(operand, Ty::Var(_)) && !self.unify(operand, &result) {
+                        self.mismatch(&result, operand, op.span);
+                        return true;
+                    }
+                }
+                self.solve_arithmetic(op, force)
+            }
+            _ => {
+                // two numbers, or strings for `+`
+                let ArithmeticOp::Binary(operator) = op.op else {
+                    unreachable!("unary operations are handled above")
+                };
+                self.expect(&left, &right, op.operand_span);
+                let (allowed, message): (&'static [Kind], _) = match operator {
+                    Operator::Add => (
+                        &[Kind::Int, Kind::Float, Kind::Str],
+                        "'+' needs int, float, or str operands, found {}",
+                    ),
+                    Operator::Subtract => (NUMBERS, "'-' needs int or float operands, found {}"),
+                    Operator::Multiply => (NUMBERS, "'*' needs int or float operands, found {}"),
+                    Operator::Divide => (NUMBERS, "'/' needs int or float operands, found {}"),
+                    Operator::Modulo => (NUMBERS, "'%' needs int or float operands, found {}"),
+                    Operator::Power => unreachable!("handled by solve_power"),
+                };
+                self.require(left.clone(), allowed, op.span, message);
+                self.unify(&op.result, &left);
+                true
+            }
+        }
+    }
+
+    /// Checks `base ** exponent` for [`Inference::solve_arithmetic`]. The exponent is an int, or
+    /// a list of ints, and the base an int or float, or a list of them, and the result is a list
+    /// if either is. An exponent that is unknown when the operation is found is an int.
+    fn solve_power(&mut self, op: &Arithmetic, base: Ty, exponent: Ty, force: bool) -> bool {
+        // an unknown exponent, such as a parameter, becomes an int right away, so a mistaken
+        // argument is reported where the function is called
+        if matches!(exponent, Ty::Var(_)) && !matches!(self.shallow(&op.result), Ty::List(_)) {
+            self.unify(&exponent, &Ty::Int);
+        }
+        let exponent = self.shallow(&exponent);
+        if !force && matches!(base, Ty::Var(_)) {
+            return false;
+        }
+        let exponent_list = match &exponent {
+            Ty::List(elem) => {
+                if !self.unify(elem, &Ty::Int) {
+                    let message =
+                        format!("'**' needs an int exponent, found {}", self.show(&exponent));
+                    self.error(op.operand_span, message);
+                }
+                true
+            }
+            Ty::Var(_) if matches!(self.shallow(&op.result), Ty::List(_)) && base == Ty::Int => {
+                self.unify(&exponent, &Ty::List(Box::new(Ty::Int)));
+                true
+            }
+            _ => {
+                self.require(
+                    exponent,
+                    &[Kind::Int],
+                    op.operand_span,
+                    "'**' needs an int exponent, found {}",
+                );
+                false
+            }
+        };
+        let base = match base {
+            Ty::Var(_) if matches!(self.shallow(&op.result), Ty::List(_)) && !exponent_list => {
+                self.unify(&base, &op.result);
+                self.shallow(&base)
+            }
+            base => base,
+        };
+        match &base {
+            Ty::List(elem) => {
+                self.require_elements((**elem).clone(), "**", op.span);
+                self.unify(&op.result, &base);
+            }
+            _ => {
+                self.require(
+                    base.clone(),
+                    NUMBERS,
+                    op.span,
+                    "'**' needs an int or float base, found {}",
+                );
+                let result = match exponent_list {
+                    true => Ty::List(Box::new(base)),
+                    false => base,
+                };
+                self.unify(&op.result, &result);
+            }
+        }
+        true
+    }
+
+    /// Requires the elements of a list that `symbol` works on element by element to be numbers.
+    fn require_elements(&mut self, elem: Ty, symbol: &str, span: Span) {
+        let message = match symbol {
+            "+" => "'+' on lists needs int or float elements, found {}",
+            "-" => "'-' on lists needs int or float elements, found {}",
+            "*" => "'*' on lists needs int or float elements, found {}",
+            "/" => "'/' on lists needs int or float elements, found {}",
+            "%" => "'%' on lists needs int or float elements, found {}",
+            _ => "'**' on lists needs int or float elements, found {}",
+        };
+        self.require(elem, NUMBERS, span, message);
+    }
+
+    /// Reports that `found` should have been `expected`, as [`Inference::expect`] does.
+    fn mismatch(&mut self, expected: &Ty, found: &Ty, span: Span) {
+        let message = format!(
+            "expected {}, found {}",
+            self.show(expected),
+            self.show(found)
+        );
+        self.error(span, message);
     }
 
     fn require(&mut self, ty: Ty, allowed: &'static [Kind], span: Span, message: &'static str) {
@@ -522,7 +927,9 @@ impl Inference {
                 }
             }
             StmtKind::Assign { targets, value } => {
+                self.assigned_call = Some(value.span);
                 let found = self.infer(value);
+                self.assigned_call = None;
                 for target in targets {
                     self.check_target(target, &found, value.span);
                 }
@@ -715,6 +1122,10 @@ impl Inference {
             }
             ExprKind::Subscript { value, slice, .. } => {
                 let elem = self.subscript(value, slice);
+                if matches!(slice.kind, ExprKind::Slice { .. }) {
+                    self.error(target.span, SLICE_CHANGE);
+                    return;
+                }
                 self.expect(&elem, found, value_span);
                 self.check_change(value);
             }
@@ -728,6 +1139,10 @@ impl Inference {
     /// For example, `f().append(1)` and a function's `names.append(x)` for a global `names` are
     /// errors, while `grid[0].append(1)` is fine.
     fn check_change(&mut self, list: &Expr) {
+        if has_slice(list) {
+            self.error(list.span, SLICE_CHANGE);
+            return;
+        }
         let root = place_root(list);
         let ExprKind::Name { id, .. } = &root.kind else {
             self.error(
@@ -812,48 +1227,25 @@ impl Inference {
                     self.fresh()
                 }
             },
-            ExprKind::BinOp {
-                op: Operator::Power,
-                left,
-                right,
-            } => {
-                let l = self.infer(left);
-                let r = self.infer(right);
-                // an unknown exponent, such as a parameter, becomes an int
-                if matches!(self.resolve(&r), Ty::Var(_)) {
-                    self.expect(&Ty::Int, &r, right.span);
-                }
-                self.require(
-                    l.clone(),
-                    NUMBERS,
-                    expr.span,
-                    "'**' needs an int or float base, found {}",
-                );
-                self.require(
-                    r,
-                    &[Kind::Int],
-                    right.span,
-                    "'**' needs an int exponent, found {}",
-                );
-                l
-            }
             ExprKind::BinOp { op, left, right } => {
                 let l = self.infer(left);
                 let r = self.infer(right);
-                self.expect(&l, &r, right.span);
-                let (allowed, message): (&'static [Kind], _) = match op {
-                    Operator::Add => (
-                        &[Kind::Int, Kind::Float, Kind::Str],
-                        "'+' needs int, float, or str operands, found {}",
-                    ),
-                    Operator::Subtract => (NUMBERS, "'-' needs int or float operands, found {}"),
-                    Operator::Multiply => (NUMBERS, "'*' needs int or float operands, found {}"),
-                    Operator::Divide => (NUMBERS, "'/' needs int or float operands, found {}"),
-                    Operator::Modulo => (NUMBERS, "'%' needs int or float operands, found {}"),
-                    Operator::Power => unreachable!("matched above"),
+                let one_element = |expr: &Expr| {
+                    *op == Operator::Multiply
+                        && matches!(&expr.kind, ExprKind::List { elts, .. } if elts.len() == 1)
                 };
-                self.require(l.clone(), allowed, expr.span, message);
-                l
+                let result = self.fresh();
+                self.arithmetic(Arithmetic {
+                    op: ArithmeticOp::Binary(*op),
+                    left: l,
+                    right: Some(r),
+                    result: result.clone(),
+                    span: expr.span,
+                    operand_span: right.span,
+                    literal_left: one_element(left),
+                    literal_right: one_element(right),
+                });
+                result
             }
             ExprKind::UnaryOp { op, operand } => {
                 let ty = self.infer(operand);
@@ -863,12 +1255,18 @@ impl Inference {
                         Ty::Bool
                     }
                     UnaryOp::UnaryAdd | UnaryOp::UnarySub => {
-                        let message = match op {
-                            UnaryOp::UnaryAdd => "'+' needs an int or float operand, found {}",
-                            _ => "'-' needs an int or float operand, found {}",
-                        };
-                        self.require(ty.clone(), NUMBERS, operand.span, message);
-                        ty
+                        let result = self.fresh();
+                        self.arithmetic(Arithmetic {
+                            op: ArithmeticOp::Unary(*op),
+                            left: ty,
+                            right: None,
+                            result: result.clone(),
+                            span: expr.span,
+                            operand_span: operand.span,
+                            literal_left: false,
+                            literal_right: false,
+                        });
+                        result
                     }
                 }
             }
@@ -931,14 +1329,31 @@ impl Inference {
                 }
                 Ty::List(Box::new(elem))
             }
+            // the parser only makes a slice inside a subscript, which `subscript` handles
+            ExprKind::Slice { .. } => {
+                self.error(
+                    expr.span,
+                    "a slice can only appear in brackets, as in 'xs[1:]'",
+                );
+                self.fresh()
+            }
         }
     }
 
-    /// Infers `value[slice]`, which must index a list with an int.
+    /// Infers `value[slice]`, which must index a list with an int, or slice it, giving a list of
+    /// the same type.
     fn subscript(&mut self, value: &Expr, slice: &Expr) -> Ty {
         let elem = self.fresh();
         let value_ty = self.infer(value);
-        self.expect(&Ty::List(Box::new(elem.clone())), &value_ty, value.span);
+        let list = Ty::List(Box::new(elem.clone()));
+        self.expect(&list, &value_ty, value.span);
+        if let ExprKind::Slice { lower, upper, step } = &slice.kind {
+            for bound in [lower, upper, step].into_iter().flatten() {
+                let ty = self.infer(bound);
+                self.expect(&Ty::Int, &ty, bound.span);
+            }
+            return list;
+        }
         let index = self.infer(slice);
         self.expect(&Ty::Int, &index, slice.span);
         elem
@@ -993,6 +1408,19 @@ impl Inference {
         }
     }
 
+    /// Requires `receiver` to be a list that can hold `item`, as `append` and `insert` do.
+    fn add_element(&mut self, receiver: &Expr, receiver_ty: &Ty, item: &Expr, item_ty: &Ty) {
+        let elem = self.fresh();
+        let list = Ty::List(Box::new(elem.clone()));
+        if self.unify(&list, receiver_ty) {
+            self.expect(&elem, item_ty, item.span);
+        } else {
+            // the element pins down the message, as in `expected list[int]`
+            self.unify(&elem, item_ty);
+            self.expect(&list, receiver_ty, receiver.span);
+        }
+    }
+
     /// Infers the method call `receiver.name(args)`, evaluating the receiver before the arguments.
     ///
     /// For example, `xs.append(1)` requires `xs` to be a `list[int]` and has type `none`.
@@ -1008,7 +1436,15 @@ impl Inference {
         let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
         if changes_receiver(name) {
             // inside an expression, a borrowed copy of the receiver could see the change
-            if self.statement_call != Some(call.span) {
+            if name == "pop" {
+                if ![self.statement_call, self.assigned_call].contains(&Some(call.span)) {
+                    self.error(
+                        call.span,
+                        "'pop' changes a list, so it can only be a statement of its own or the \
+                         value of an assignment, as in 'x = xs.pop()'",
+                    );
+                }
+            } else if self.statement_call != Some(call.span) {
                 self.error(
                     call.span,
                     format!(
@@ -1037,13 +1473,43 @@ impl Inference {
                     self.arity_error(call.span, name, "1", args.len());
                     return Ty::None;
                 }
+                self.add_element(receiver, &receiver_ty, &args[0], &arg_types[0]);
+                Ty::None
+            }
+            "pop" => {
+                match (args, &arg_types[..]) {
+                    ([], _) => {}
+                    ([index], [ty]) => self.expect(&Ty::Int, ty, index.span),
+                    _ => self.arity_error(call.span, name, "0 or 1", args.len()),
+                }
                 let elem = self.fresh();
-                let list = Ty::List(Box::new(elem.clone()));
+                self.expect(
+                    &Ty::List(Box::new(elem.clone())),
+                    &receiver_ty,
+                    receiver.span,
+                );
+                elem
+            }
+            "insert" => {
+                if args.len() != 2 {
+                    self.arity_error(call.span, name, "2", args.len());
+                    return Ty::None;
+                }
+                self.expect(&Ty::Int, &arg_types[0], args[0].span);
+                self.add_element(receiver, &receiver_ty, &args[1], &arg_types[1]);
+                Ty::None
+            }
+            "extend" => {
+                if args.len() != 1 {
+                    self.arity_error(call.span, name, "1", args.len());
+                    return Ty::None;
+                }
+                let list = Ty::List(Box::new(self.fresh()));
                 if self.unify(&list, &receiver_ty) {
-                    self.expect(&elem, &arg_types[0], args[0].span);
+                    self.expect(&list, &arg_types[0], args[0].span);
                 } else {
-                    // the element pins down the message, as in `expected list[int]`
-                    self.unify(&elem, &arg_types[0]);
+                    // the argument pins down the message, as in `expected list[int]`
+                    self.unify(&list, &arg_types[0]);
                     self.expect(&list, &receiver_ty, receiver.span);
                 }
                 Ty::None
@@ -1279,6 +1745,17 @@ impl Inference {
     /// Checks the deferred constraints, fills in types nothing pinned down, and builds the
     /// [`Analysis`].
     fn finish(mut self) -> Analysis {
+        // solving one operation can pin down another's operands, so force one only when none can
+        // be solved otherwise
+        let mut pending = std::mem::take(&mut self.arithmetic);
+        while !pending.is_empty() {
+            let before = pending.len();
+            pending.retain(|op| !self.solve_arithmetic(op, false));
+            if pending.len() == before {
+                let op = pending.remove(0);
+                self.solve_arithmetic(&op, true);
+            }
+        }
         for constraint in std::mem::take(&mut self.constraints) {
             let ty = self.shallow(&constraint.ty);
             let Some(kind) = Kind::of(&ty) else {
@@ -1490,6 +1967,11 @@ impl<'a> AssignmentCheck<'a> {
                     self.reads(elt, assigned);
                 }
             }
+            ExprKind::Slice { lower, upper, step } => {
+                for bound in [lower, upper, step].into_iter().flatten() {
+                    self.reads(bound, assigned);
+                }
+            }
             ExprKind::Constant { .. } => {}
         }
     }
@@ -1550,6 +2032,21 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
 /// Returns the expression the place `expr` starts from, following its subscripts.
 ///
 /// For example, the root of `grid[i][j]` is `grid`, and the root of `f()[0]` is `f()`.
+/// What the checker reports for a change to a slice, such as `xs[1:].append(2)`.
+const SLICE_CHANGE: &str = "a slice is a new list, so changing it has no effect";
+
+/// Returns whether the list `expr`, which a statement changes, is a slice or an element of one.
+///
+/// For example, `xs[1:]` and `grid[:2][0]` are, but `grid[0]` is not.
+fn has_slice(expr: &Expr) -> bool {
+    match &expr.kind {
+        ExprKind::Subscript { value, slice, .. } => {
+            matches!(slice.kind, ExprKind::Slice { .. }) || has_slice(value)
+        }
+        _ => false,
+    }
+}
+
 pub(crate) fn place_root(expr: &Expr) -> &Expr {
     match &expr.kind {
         ExprKind::Subscript { value, .. } => place_root(value),
@@ -1601,11 +2098,14 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
     };
     for stmt in body {
         match &stmt.kind {
-            StmtKind::Assign { targets, .. } => {
+            StmtKind::Assign { targets, value } => {
                 for target in targets {
                     if let ExprKind::Subscript { value, .. } = &target.kind {
                         add(value, out);
                     }
+                }
+                if let Some(receiver) = changed_receiver(value) {
+                    add(receiver, out);
                 }
             }
             StmtKind::Expr { value } => {
@@ -1661,7 +2161,7 @@ impl ParameterUse<'_> {
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Assign { targets, value } => {
-                self.expr(value);
+                self.change_or_expr(value);
                 for target in targets {
                     match &target.kind {
                         ExprKind::Name { .. } => {}
@@ -1673,15 +2173,7 @@ impl ParameterUse<'_> {
                     }
                 }
             }
-            StmtKind::Expr { value } => match (changed_receiver(value), &value.kind) {
-                (Some(receiver), ExprKind::Call { args, .. }) => {
-                    self.change(receiver);
-                    for arg in args {
-                        self.expr(arg);
-                    }
-                }
-                _ => self.expr(value),
-            },
+            StmtKind::Expr { value } => self.change_or_expr(value),
             StmtKind::Return { value } => {
                 if let Some(value) = value {
                     self.expr(value);
@@ -1704,6 +2196,20 @@ impl ParameterUse<'_> {
             | StmtKind::Use { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
+        }
+    }
+
+    /// Notes the change `value` makes if it calls a method that changes its receiver, as in
+    /// `xs.append(x)` or `x = xs.pop()`, and otherwise what it reads.
+    fn change_or_expr(&mut self, value: &Expr) {
+        match (changed_receiver(value), &value.kind) {
+            (Some(receiver), ExprKind::Call { args, .. }) => {
+                self.change(receiver);
+                for arg in args {
+                    self.expr(arg);
+                }
+            }
+            _ => self.expr(value),
         }
     }
 
@@ -1749,6 +2255,10 @@ impl ParameterUse<'_> {
                 self.expr(slice);
             }
             ExprKind::List { elts, .. } => elts.iter().for_each(|elt| self.expr(elt)),
+            ExprKind::Slice { lower, upper, step } => [lower, upper, step]
+                .into_iter()
+                .flatten()
+                .for_each(|bound| self.expr(bound)),
             ExprKind::Constant { .. } => {}
         }
     }

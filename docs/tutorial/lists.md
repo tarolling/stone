@@ -21,10 +21,38 @@ from it.
 - `items[i] = value` replaces an element.
 - `items.append(value)` adds to the end, and `items.len()` counts the elements. `append`
   returns nothing, so it is always a statement of its own.
+- `items.pop()` removes the last element and returns it, and `items.pop(i)` the one at `i`.
+  `items.insert(i, value)` puts `value` at `i`, and `items.extend(more)` adds every element of
+  `more` to the end.
+- `items[start:stop]` is a new list of part of `items`, as in Python.
 - `for item in items;` walks the list in order, as it was when the loop started. If the body
   appends to the list, the loop does not visit the new elements.
 
 An index past either end stops the program with `list index out of range`.
+
+## Slices, more methods, and arithmetic
+
+```{literalinclude} ../examples/list_math.st
+:language: stone
+```
+
+prints
+
+```{literalinclude} ../examples/list_math.out
+:language: text
+```
+
+A slice `xs[start:stop:step]` works as in Python: any part can be left out, negative bounds
+count from the end, and bounds past the end are clamped. It is a new list, so changing it never
+changes `xs`.
+
+Arithmetic on lists of ints or floats works element by element, like numpy's arrays, so
+`prices * counts` multiplies matching elements and `totals * 1.08` multiplies each one. Both
+lists must have the same length. This is the one place lists behave differently from Python,
+where `+` joins lists and `*` repeats them: use `extend` to join lists. stone compiles each such
+expression to a single loop with no intermediate lists, computing two elements at a time where
+it can, so it can outrun the same numpy code, which builds a temporary array for each operator. See [syntax](../reference/syntax.md#arithmetic-on-lists)
+for the details.
 
 ## Lists are values
 

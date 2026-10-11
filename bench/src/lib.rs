@@ -2,7 +2,8 @@
 //! formatting the results table.
 //!
 //! Each benchmark is a set of files in `bench/programs/` sharing a stem, such as `fib.st`,
-//! `fib.c`, `fib.py`, and `fib.out`, where the `.out` file holds what all three must print.
+//! `fib.c`, `fib.py`, and `fib.out`, where the `.out` file holds what all three must print. A
+//! benchmark of arithmetic on lists may also have a numpy version, such as `vector.np.py`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -25,6 +26,11 @@ impl Program {
     /// For example, `fib` in `bench/programs` with `"c"` gives `bench/programs/fib.c`.
     pub fn file(&self, extension: &str) -> PathBuf {
         self.dir.join(format!("{}.{extension}", self.name))
+    }
+
+    /// Returns whether the program has a numpy version, `<name>.np.py`.
+    pub fn has_numpy(&self) -> bool {
+        self.file("np.py").is_file()
     }
 }
 
@@ -131,6 +137,8 @@ pub struct Row {
     pub name: String,
     /// The summarized time for each implementation, in [`Implementation::ALL`] order.
     pub times: [Duration; 4],
+    /// The summarized time of the numpy version, if the benchmark has one and numpy ran.
+    pub numpy: Option<Duration>,
 }
 
 impl Row {
@@ -145,41 +153,72 @@ impl Row {
 }
 
 /// Formats `rows` as a Markdown table of times in milliseconds, with the ratios of stone to
-/// C -O2 and of Python to stone, and a final row holding the geometric mean of each ratio.
+/// C -O2 and of Python to stone, and a final row holding the geometric mean of each ratio. If any
+/// row has a numpy time, the table also has its time and the ratio of numpy to stone, left blank
+/// for the rows without one.
 ///
 /// For example, a `fib` row of 10, 30, 50, and 400 ms gives
 /// `| fib | 10.0 | 30.0 | 50.0 | 400.0 | 5.0x | 8.0x |`.
 pub fn format_table(rows: &[Row]) -> String {
+    let with_numpy = rows.iter().any(|row| row.numpy.is_some());
     let mut table = String::from("| program |");
     for implementation in Implementation::ALL {
         table.push_str(&format!(" {} (ms) |", implementation.label()));
     }
-    table.push_str(" stone / C -O2 | Python / stone |\n");
-    table.push_str("|---|");
-    table.push_str(&"---:|".repeat(Implementation::ALL.len() + 2));
+    if with_numpy {
+        table.push_str(" numpy (ms) |");
+    }
+    table.push_str(" stone / C -O2 | Python / stone |");
+    if with_numpy {
+        table.push_str(" numpy / stone |");
+    }
+    let columns = Implementation::ALL.len() + 2 + 2 * with_numpy as usize;
+    table.push_str("\n|---|");
+    table.push_str(&"---:|".repeat(columns));
     table.push('\n');
 
+    let ms = |time: Duration| format!("{:.1}", time.as_secs_f64() * 1_000.0);
     let mut stone_vs_c = Vec::new();
     let mut python_vs_stone = Vec::new();
+    let mut numpy_vs_stone = Vec::new();
     for row in rows {
         table.push_str(&format!("| {} |", row.name));
         for time in row.times {
-            table.push_str(&format!(" {:.1} |", time.as_secs_f64() * 1_000.0));
+            table.push_str(&format!(" {} |", ms(time)));
         }
         let stone = row.time(Implementation::Stone).as_secs_f64();
+        let numpy = row.numpy.map(|time| time.as_secs_f64() / stone);
+        if with_numpy {
+            match row.numpy {
+                Some(time) => table.push_str(&format!(" {} |", ms(time))),
+                None => table.push_str(" |"),
+            }
+        }
         let c = stone / row.time(Implementation::COptimized).as_secs_f64();
         let python = row.time(Implementation::Python).as_secs_f64() / stone;
-        table.push_str(&format!(" {c:.1}x | {python:.1}x |\n"));
+        table.push_str(&format!(" {c:.1}x | {python:.1}x |"));
+        if with_numpy {
+            match numpy {
+                Some(ratio) => table.push_str(&format!(" {ratio:.1}x |")),
+                None => table.push_str(" |"),
+            }
+        }
+        table.push('\n');
         stone_vs_c.push(c);
         python_vs_stone.push(python);
+        numpy_vs_stone.extend(numpy);
     }
     table.push_str("| geometric mean |");
-    table.push_str(&" |".repeat(Implementation::ALL.len()));
+    table.push_str(&" |".repeat(Implementation::ALL.len() + with_numpy as usize));
     table.push_str(&format!(
-        " {:.1}x | {:.1}x |\n",
+        " {:.1}x | {:.1}x |",
         geometric_mean(&stone_vs_c),
         geometric_mean(&python_vs_stone)
     ));
+    if with_numpy {
+        table.push_str(&format!(" {:.1}x |", geometric_mean(&numpy_vs_stone)));
+    }
+    table.push('\n');
     table
 }
 
@@ -266,10 +305,12 @@ mod tests {
             Row {
                 name: "fib".into(),
                 times: [ms(10), ms(30), ms(50), ms(400)],
+                numpy: None,
             },
             Row {
                 name: "sieve".into(),
                 times: [ms(20), ms(40), ms(400), ms(1_600)],
+                numpy: None,
             },
         ];
         let expected = "\
@@ -280,6 +321,40 @@ mod tests {
 | geometric mean | | | | | 10.0x | 5.7x |
 ";
         assert_eq!(format_table(&rows), expected);
+    }
+
+    #[test]
+    fn table_adds_numpy_columns_when_a_benchmark_has_numpy_times() {
+        let rows = [
+            Row {
+                name: "fib".into(),
+                times: [ms(10), ms(30), ms(50), ms(400)],
+                numpy: None,
+            },
+            Row {
+                name: "vector".into(),
+                times: [ms(20), ms(40), ms(25), ms(1_600)],
+                numpy: Some(ms(50)),
+            },
+        ];
+        let expected = "\
+| program | C -O2 (ms) | C -O0 (ms) | stone (ms) | Python (ms) | numpy (ms) | stone / C -O2 | Python / stone | numpy / stone |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| fib | 10.0 | 30.0 | 50.0 | 400.0 | | 5.0x | 8.0x | |
+| vector | 20.0 | 40.0 | 25.0 | 1600.0 | 50.0 | 1.2x | 64.0x | 2.0x |
+| geometric mean | | | | | | 2.5x | 22.6x | 2.0x |
+";
+        assert_eq!(format_table(&rows), expected);
+    }
+
+    #[test]
+    fn a_numpy_version_is_optional() {
+        let dir = scratch("discover_numpy");
+        touch(&dir, &["fib.st", "fib.c", "fib.py", "fib.out", "vector.st"]);
+        touch(&dir, &["vector.c", "vector.py", "vector.np.py", "vector.out"]);
+        let programs = discover(&dir).unwrap();
+        let numpy: Vec<bool> = programs.iter().map(Program::has_numpy).collect();
+        assert_eq!(numpy, [false, true]);
     }
 
     /// Every benchmark must stay valid stone, so a language change that breaks one fails here

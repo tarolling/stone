@@ -720,6 +720,294 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tret");
 }
 
+/// Emits each list routine in `labels`, which are the [`LIST_ROUTINES`] a program calls. They
+/// follow the System V calling convention, like [`list_runtime`]'s.
+///
+/// - `stone.list_slice` returns a new list of the elements of list `rdi` that the slice from `rsi`
+///   to `rdx` by `rcx` picks, as `stdlib::slice_indices` picks them, retaining them if they are
+///   counted. Bit 0 of `r8` says `rsi` is missing, bit 1 `rdx`, and bit 2 `rcx`, and the step is
+///   never 0, which the caller checks.
+/// - `stone.list_pop` removes the element at position `rsi` of list `rdi`, moving the ones after it
+///   down, and returns it in `rax` with the list's reference to it. The caller checks that `rsi`
+///   is in range.
+/// - `stone.list_insert` puts `rdx` at position `rsi` of list `rdi`, moving the elements from
+///   there on up, and the list takes the caller's reference to it. The caller checks that `rsi`
+///   is at most the length.
+/// - `stone.list_extend` appends every element of list `rsi` to list `rdi`, retaining them if
+///   they are counted. The two may be the same list.
+/// - `stone.list_reuse` takes a reference to list `rdi`, whose elements are not counted, and
+///   returns it in `rax` if nothing else refers to it, for arithmetic to write its result over.
+///   Otherwise it drops the reference and returns a new list of length `rsi` from
+///   `stone.list_new`.
+///
+/// [`LIST_ROUTINES`]: crate::codegen::context::LIST_ROUTINES
+pub fn list_methods(r#gen: &mut dyn AssemblyGenerator, labels: &[&str]) {
+    if labels.contains(&"stone.list_slice") {
+        list_slice(r#gen);
+    }
+    if labels.contains(&"stone.list_pop") {
+        list_pop(r#gen);
+    }
+    if labels.contains(&"stone.list_insert") {
+        list_insert(r#gen);
+    }
+    if labels.contains(&"stone.list_extend") {
+        list_extend(r#gen);
+    }
+    if labels.contains(&"stone.list_reuse") {
+        r#gen.emit("stone.list_reuse:");
+        r#gen.emit("\tcmp\tQWORD PTR [rdi - 8], 1");
+        r#gen.emit("\tjne\t.Llist_reuse_new");
+        r#gen.emit("\tmov\trax, rdi");
+        r#gen.emit("\tret");
+        r#gen.emit(".Llist_reuse_new:");
+        // something else still holds it, so this only drops a reference
+        r#gen.emit("\tdec\tQWORD PTR [rdi - 8]");
+        r#gen.emit("\tmov\trdi, rsi");
+        r#gen.emit("\txor\tesi, esi");
+        r#gen.emit("\tjmp\tstone.list_new");
+    }
+}
+
+/// Emits `stone.list_pop` (see [`list_methods`]).
+fn list_pop(r#gen: &mut dyn AssemblyGenerator) {
+    // rax holds the elements, rcx the new length, and r8 the element popped
+    r#gen.emit("stone.list_pop:");
+    r#gen.emit("\tmov\trax, QWORD PTR [rdi + 16]");
+    r#gen.emit("\tmov\tr8, QWORD PTR [rax + rsi * 8]");
+    r#gen.emit("\tmov\trcx, QWORD PTR [rdi]");
+    r#gen.emit("\tdec\trcx");
+    r#gen.emit("\tmov\tQWORD PTR [rdi], rcx");
+    r#gen.emit(".Llist_pop_loop:");
+    r#gen.emit("\tcmp\trsi, rcx");
+    r#gen.emit("\tjge\t.Llist_pop_done");
+    r#gen.emit("\tmov\tr9, QWORD PTR [rax + rsi * 8 + 8]");
+    r#gen.emit("\tmov\tQWORD PTR [rax + rsi * 8], r9");
+    r#gen.emit("\tinc\trsi");
+    r#gen.emit("\tjmp\t.Llist_pop_loop");
+    r#gen.emit(".Llist_pop_done:");
+    r#gen.emit("\tmov\trax, r8");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.list_insert` (see [`list_methods`]).
+fn list_insert(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the list, r12 the position, and r13 the element
+    r#gen.emit("stone.list_insert:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr12, rsi");
+    r#gen.emit("\tmov\tr13, rdx");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx]");
+    r#gen.emit("\tcmp\trax, QWORD PTR [rbx + 8]");
+    r#gen.emit("\tjl\t.Llist_insert_shift");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rbx + 8]");
+    r#gen.emit("\tshl\trsi, 1");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 8], rsi");
+    r#gen.emit("\tshl\trsi, 3");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tcall\tstone.mem_realloc");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 16], rax");
+    r#gen.emit(".Llist_insert_shift:");
+    // move each element from the end down to the position up by one
+    r#gen.emit("\tmov\trcx, QWORD PTR [rbx]");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbx + 16]");
+    r#gen.emit(".Llist_insert_loop:");
+    r#gen.emit("\tcmp\trcx, r12");
+    r#gen.emit("\tjle\t.Llist_insert_place");
+    r#gen.emit("\tmov\trax, QWORD PTR [rdx + rcx * 8 - 8]");
+    r#gen.emit("\tmov\tQWORD PTR [rdx + rcx * 8], rax");
+    r#gen.emit("\tdec\trcx");
+    r#gen.emit("\tjmp\t.Llist_insert_loop");
+    r#gen.emit(".Llist_insert_place:");
+    r#gen.emit("\tmov\tQWORD PTR [rdx + r12 * 8], r13");
+    r#gen.emit("\tinc\tQWORD PTR [rbx]");
+    r#gen.emit("\txor\teax, eax"); // insert returns none
+    r#gen.emit("\tlea\trsp, [rbp - 24]");
+    r#gen.emit("\tpop\tr13");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.list_extend` (see [`list_methods`]).
+fn list_extend(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the list, r12 the other list, and r13 how many elements it adds, read before
+    // growing, since the other list may be this one
+    r#gen.emit("stone.list_extend:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr12, rsi");
+    r#gen.emit("\tmov\tr13, QWORD PTR [r12]");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx]");
+    r#gen.emit("\tadd\trax, r13");
+    r#gen.emit("\tcmp\trax, QWORD PTR [rbx + 8]");
+    r#gen.emit("\tjle\t.Llist_extend_copy");
+    // double the capacity, or more if that is not enough
+    r#gen.emit("\tmov\trsi, QWORD PTR [rbx + 8]");
+    r#gen.emit("\tshl\trsi, 1");
+    r#gen.emit("\tcmp\trsi, rax");
+    r#gen.emit("\tcmovl\trsi, rax");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 8], rsi");
+    r#gen.emit("\tshl\trsi, 3");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tcall\tstone.mem_realloc");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 16], rax");
+    r#gen.emit(".Llist_extend_copy:");
+    // the other list's elements are read after growing, which may have moved them
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx]");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tlea\trdi, [rdi + rax * 8]");
+    r#gen.emit("\tmov\trsi, QWORD PTR [r12 + 16]");
+    r#gen.emit("\tmov\tr8, QWORD PTR [rbx + 24]");
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit(".Llist_extend_loop:");
+    r#gen.emit("\tcmp\trcx, r13");
+    r#gen.emit("\tjge\t.Llist_extend_done");
+    r#gen.emit("\tmov\trax, QWORD PTR [rsi + rcx * 8]");
+    r#gen.emit("\tmov\tQWORD PTR [rdi + rcx * 8], rax");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit("\ttest\tr8, r8");
+    r#gen.emit("\tjz\t.Llist_extend_loop"); // the elements are not counted
+    r#gen.emit("\tinc\tQWORD PTR [rax - 8]");
+    r#gen.emit("\tjmp\t.Llist_extend_loop");
+    r#gen.emit(".Llist_extend_done:");
+    r#gen.emit("\tadd\tQWORD PTR [rbx], r13");
+    r#gen.emit("\txor\teax, eax"); // extend returns none
+    r#gen.emit("\tlea\trsp, [rbp - 24]");
+    r#gen.emit("\tpop\tr13");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.list_slice` (see [`list_methods`]).
+fn list_slice(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the list, r12 the first index, r13 the step, r14 the count, and r15 the new list;
+    // r9 holds the length while the bounds are clamped
+    r#gen.emit("stone.list_slice:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    for reg in ["rbx", "r12", "r13", "r14", "r15"] {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr9, QWORD PTR [rbx]");
+    r#gen.emit("\ttest\tr8, 4");
+    r#gen.emit("\tjz\t.Llist_slice_step");
+    r#gen.emit("\tmov\trcx, 1");
+    r#gen.emit(".Llist_slice_step:");
+    // a step of MIN, the only one that doubles to 0, acts like -MAX
+    r#gen.emit("\tlea\trax, [rcx + rcx]");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjnz\t.Llist_slice_bounds");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit(".Llist_slice_bounds:");
+    r#gen.emit("\tmov\tr13, rcx");
+    // r10 is -1 for a negative step and 0 otherwise
+    r#gen.emit("\tmov\tr10, rcx");
+    r#gen.emit("\tsar\tr10, 63");
+    // a missing start is len - 1 going backward and 0 going forward
+    r#gen.emit("\tmov\trax, rsi");
+    r#gen.emit("\ttest\tr8, 1");
+    r#gen.emit("\tjz\t.Llist_slice_start");
+    r#gen.emit("\tlea\trax, [r9 - 1]");
+    r#gen.emit("\tand\trax, r10");
+    r#gen.emit("\tjmp\t.Llist_slice_start_done");
+    r#gen.emit(".Llist_slice_start:");
+    clamp_slice_bound(r#gen, "start");
+    r#gen.emit("\tmov\tr12, rax");
+    // a missing stop is -1 going backward and len going forward
+    r#gen.emit("\tmov\trax, rdx");
+    r#gen.emit("\ttest\tr8, 2");
+    r#gen.emit("\tjz\t.Llist_slice_stop");
+    r#gen.emit("\tmov\trax, r10");
+    r#gen.emit("\tnot\trax");
+    r#gen.emit("\tand\trax, r9");
+    r#gen.emit("\tadd\trax, r10");
+    r#gen.emit("\tjmp\t.Llist_slice_stop_done");
+    r#gen.emit(".Llist_slice_stop:");
+    clamp_slice_bound(r#gen, "stop");
+    // the distance to cover, start - stop going backward and stop - start going forward
+    r#gen.emit("\tsub\trax, r12");
+    r#gen.emit("\tmov\trcx, r13");
+    r#gen.emit("\ttest\tr10, r10");
+    r#gen.emit("\tjz\t.Llist_slice_count");
+    r#gen.emit("\tneg\trax");
+    r#gen.emit("\tneg\trcx");
+    r#gen.emit(".Llist_slice_count:");
+    // count = (distance - 1) / |step| + 1 for a positive distance, else 0
+    r#gen.emit("\txor\tr14d, r14d");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjle\t.Llist_slice_new");
+    r#gen.emit("\tdec\trax");
+    r#gen.emit("\txor\tedx, edx");
+    r#gen.emit("\tdiv\trcx");
+    r#gen.emit("\tlea\tr14, [rax + 1]");
+    r#gen.emit(".Llist_slice_new:");
+    r#gen.emit("\tmov\trdi, r14");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rbx + 24]");
+    r#gen.emit("\tcall\tstone.list_new");
+    r#gen.emit("\tmov\tr15, rax");
+    r#gen.emit("\tmov\trdi, QWORD PTR [r15 + 16]");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tmov\tr8, QWORD PTR [rbx + 24]");
+    r#gen.emit("\tmov\trdx, r12");
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit(".Llist_slice_loop:");
+    r#gen.emit("\tcmp\trcx, r14");
+    r#gen.emit("\tjge\t.Llist_slice_done");
+    r#gen.emit("\tmov\trax, QWORD PTR [rsi + rdx * 8]");
+    r#gen.emit("\tmov\tQWORD PTR [rdi + rcx * 8], rax");
+    r#gen.emit("\tadd\trdx, r13");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit("\ttest\tr8, r8");
+    r#gen.emit("\tjz\t.Llist_slice_loop"); // the elements are not counted
+    r#gen.emit("\tinc\tQWORD PTR [rax - 8]");
+    r#gen.emit("\tjmp\t.Llist_slice_loop");
+    r#gen.emit(".Llist_slice_done:");
+    r#gen.emit("\tmov\trax, r15");
+    r#gen.emit("\tlea\trsp, [rbp - 40]");
+    for reg in ["r15", "r14", "r13", "r12", "rbx"] {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
+/// Emits the steps of `stone.list_slice` that clamp the bound in `rax` to the list, given its
+/// length in `r9` and, in `r10`, -1 for a negative step or 0 otherwise, as
+/// `stdlib::slice_indices` does: a negative bound counts from the end, and a bound still before
+/// the start becomes -1 going backward or 0 going forward, while one at or past the end becomes
+/// len - 1 going backward or len going forward. `name` keeps the labels apart.
+fn clamp_slice_bound(r#gen: &mut dyn AssemblyGenerator, name: &str) {
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjns\t.Llist_slice_{name}_high"));
+    // len is at most 2^60, so adding it cannot overflow
+    r#gen.emit("\tadd\trax, r9");
+    r#gen.emit(&format!("\tjns\t.Llist_slice_{name}_done"));
+    r#gen.emit("\tmov\trax, r10");
+    r#gen.emit(&format!("\tjmp\t.Llist_slice_{name}_done"));
+    r#gen.emit(&format!(".Llist_slice_{name}_high:"));
+    r#gen.emit("\tcmp\trax, r9");
+    r#gen.emit(&format!("\tjl\t.Llist_slice_{name}_done"));
+    r#gen.emit("\tlea\trax, [r9 + r10]");
+    r#gen.emit(&format!(".Llist_slice_{name}_done:"));
+}
+
 /// Emits `label`, a routine that prints the list in `rdi` as `[a, b]`, calling `element` for each
 /// element.
 ///

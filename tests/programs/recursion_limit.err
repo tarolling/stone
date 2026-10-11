@@ -1,1 +1,1 @@
-recursion is too deep
+:5:13: error: recursion is too deep

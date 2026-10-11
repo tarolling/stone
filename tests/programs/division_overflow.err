@@ -1,1 +1,1 @@
-integer overflow in division
+:3:7: error: integer overflow in division

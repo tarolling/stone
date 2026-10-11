@@ -1,1 +1,1 @@
-int() argument out of range: '9223372036854775808'
+:2:7: error: int() argument out of range: '9223372036854775808'

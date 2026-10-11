@@ -1,0 +1,6 @@
+// a runtime error points at the innermost expression that failed
+a = 6
+b = 0
+print("before")
+print(1 + a / b)
+print("after")

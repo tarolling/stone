@@ -1,1 +1,1 @@
-sleep length must be non-negative
+:3:1: error: sleep length must be non-negative

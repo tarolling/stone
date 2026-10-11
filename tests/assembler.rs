@@ -137,9 +137,12 @@ fn compare(
     dir: &Path,
 ) -> Result<(), String> {
     let source = std::fs::read_to_string(program).unwrap();
-    let (_, loaded) = stone::driver::load(program, &source, &FsSources);
+    let (sources, loaded) = stone::driver::load(program, &source, &FsSources);
     let module = loaded.map_err(|e| format!("does not check: {e:?}"))?.0;
-    let text = arch.generator().assemble(&module)?;
+    // with sources, as `stone build` compiles, so runtime errors record where they are
+    let mut generator = arch.generator();
+    generator.set_sources(sources);
+    let text = generator.assemble(&module)?;
     let object = asm::assemble(&text, arch)?;
     let layout = elf::layout(&object, arch);
     let ours = sections(&elf::link(&object, arch)?);

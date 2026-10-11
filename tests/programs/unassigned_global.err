@@ -1,1 +1,1 @@
-'total' is used before it is assigned
+:3:9: error: 'total' is used before it is assigned

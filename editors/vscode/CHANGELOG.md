@@ -10,6 +10,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-11
+
 ### Changed
 
 - The extension opens `.stn` files, stone's new extension, instead of `.st` files, and a

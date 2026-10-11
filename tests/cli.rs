@@ -58,11 +58,64 @@ fn run_reports_a_syntax_error_without_running() {
 fn run_reports_a_runtime_error_and_fails() {
     let (output, file) = stone(&["run"], "div_zero", "print(1 / 0)\n");
     assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.starts_with(&format!("{}: error: ", file.display())),
-        "{stderr}"
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "{}:1:7: error: division by zero\n  |\n1 | print(1 / 0)\n  |       ^^^^^\n",
+            file.display()
+        )
     );
+}
+
+#[test]
+fn built_programs_report_runtime_errors_as_run_does() {
+    let source = "fn mean(xs: list[int]) -> int;\n    ret xs[0] / xs.len()\n\nprint(mean([4]))\nprint(mean([]))\n";
+    let (run, file) = stone(&["run"], "mean_empty", source);
+    let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mean_empty");
+    let build = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("stone should run");
+    assert!(build.status.success(), "{build:?}");
+    let built = Command::new(&exe).output().expect("program should run");
+    let expected = format!("{}:2:9: error: list index out of range", file.display());
+    for output in [&run, &built] {
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "4\n");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(stderr.starts_with(&expected), "{stderr}");
+        assert!(
+            stderr.ends_with("\n  |\n2 |     ret xs[0] / xs.len()\n  |         ^^^^^\n"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+fn built_programs_render_runtime_errors_byte_for_byte_as_run_does() {
+    let source = "fn ratio(a: int, b: int) -> int;\n    ret a / b\n\nprint(ratio(6, 3))\nprint(ratio(1, 0))\n";
+    let (run, file) = stone(&["run"], "ratio_zero", source);
+    let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ratio_zero");
+    let build = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("stone should run");
+    assert!(build.status.success(), "{build:?}");
+    let built = Command::new(&exe).output().expect("program should run");
+    let expected = format!(
+        "{}:2:9: error: division by zero\n  |\n2 |     ret a / b\n  |         ^^^^^\n",
+        file.display()
+    );
+    assert_eq!(String::from_utf8_lossy(&run.stderr), expected);
+    assert_eq!(String::from_utf8_lossy(&built.stderr), expected);
+    assert_eq!(run.status.code(), Some(1));
+    assert_eq!(built.status.code(), Some(1));
 }
 
 #[cfg(not(feature = "self-update"))]
@@ -263,7 +316,7 @@ fn no_arguments_runs_a_quiet_session_over_piped_input() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "6\n3\n");
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
-        "error: division by zero\n"
+        "<stdin>:1:1: error: division by zero\n  |\n1 | 1 / 0\n  | ^^^^^\n"
     );
 }
 

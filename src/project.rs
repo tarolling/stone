@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 
 use crate::ast::{Expr, ExprContext, ExprKind, Mod, Stmt, StmtKind};
 use crate::checker::collect_assigned;
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::span::{FileId, Pos, Span};
@@ -146,6 +146,18 @@ impl SourceMap {
     pub fn render(&self, diagnostic: &Diagnostic) -> String {
         let file = self.file(diagnostic.span.file);
         diagnostic.render(&file.path.display().to_string(), &file.source)
+    }
+
+    /// Returns what a diagnostic at `span` renders before and after its `error: message` line:
+    /// the location, such as `util.stn:2:9: `, and the excerpt of the source line with carets.
+    /// Compiled programs print a runtime error from these, so it reads exactly as
+    /// [`SourceMap::render`] would show it.
+    pub fn site(&self, span: Span) -> (String, String) {
+        let file = self.file(span.file);
+        (
+            location(&file.path.display().to_string(), span),
+            excerpt(&file.source, span),
+        )
     }
 }
 

@@ -203,7 +203,9 @@ pub fn run_module(
 /// How an interpreter thread stopped early, in a form that can leave the thread, since the
 /// interpreter's errors are not `Send`.
 enum Ending {
-    /// A runtime error, by its message.
+    /// A runtime error at a position in the program.
+    Located(Diagnostic),
+    /// Any other error, by its message, such as running out of fuel.
     Error(String),
     /// `os.exit` with a status other than 0.
     Exit(Exit),
@@ -215,15 +217,20 @@ impl Ending {
         let Err(error) = result else {
             return Ok(());
         };
-        match error.downcast::<Exit>() {
-            Ok(exit) if exit.0 == 0 => Ok(()),
-            Ok(exit) => Err(Ending::Exit(*exit)),
+        let error = match error.downcast::<Exit>() {
+            Ok(exit) if exit.0 == 0 => return Ok(()),
+            Ok(exit) => return Err(Ending::Exit(*exit)),
+            Err(error) => error,
+        };
+        match error.downcast::<Diagnostic>() {
+            Ok(diagnostic) => Err(Ending::Located(*diagnostic)),
             Err(error) => Err(Ending::Error(error.to_string())),
         }
     }
 
     fn into_error(self) -> Box<dyn Error> {
         match self {
+            Ending::Located(diagnostic) => Box::new(diagnostic),
             Ending::Error(message) => message.into(),
             Ending::Exit(exit) => Box::new(exit),
         }
@@ -244,7 +251,9 @@ pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
 /// For example, `compile_for("print(1)\n", Path::new("build/out"), Target::ARM64_LINUX)` writes
 /// arm64 assembly to `build/out.s` and links it into an arm64 Linux `build/out`.
 pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
-    compile_module(&checked(source)?, output, target)
+    let (sources, loaded) = load(Path::new(DEFAULT_ENTRY), source, &MapSources::default());
+    let (module, _) = loaded?;
+    compile_module(&module, &sources, output, target)
 }
 
 /// Compiles a checked module, such as one from [`load`], to a native executable for `target` at
@@ -252,8 +261,15 @@ pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Bo
 ///
 /// For example, compiling for [`Target::ARM64_MACOS`] on an x86-64 Linux machine writes an arm64
 /// macOS executable, with no cross toolchain installed.
-pub fn compile_module(ast: &Mod, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
-    target.generator().compile(ast, output)?;
+pub fn compile_module(
+    ast: &Mod,
+    sources: &SourceMap,
+    output: &Path,
+    target: Target,
+) -> Result<(), Box<dyn Error>> {
+    let mut generator = target.generator();
+    generator.set_sources(sources.clone());
+    generator.compile(ast, output)?;
     Ok(())
 }
 
@@ -653,11 +669,11 @@ ret y
         assert_eq!(run_limited(source), Ok("43 5.0 1.0true-3\n".to_string()));
         assert_eq!(
             run_limited("print(int(\"x\"))\n"),
-            Err("invalid literal for int() with base 10: 'x'".to_string())
+            Err("1:7: error: invalid literal for int() with base 10: 'x'".to_string())
         );
         assert_eq!(
             run_limited("print(float(\"\"))\n"),
-            Err("could not convert string to float: ''".to_string())
+            Err("1:7: error: could not convert string to float: ''".to_string())
         );
     }
 
@@ -751,7 +767,7 @@ ret y
         );
         assert_eq!(
             run_limited("print(\"a\".split(\"\"))\n"),
-            Err("empty separator".to_string())
+            Err("1:7: error: empty separator".to_string())
         );
     }
 }

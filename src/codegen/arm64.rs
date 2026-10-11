@@ -19,6 +19,8 @@ pub mod floats;
 use crate::ast::Mod;
 use crate::codegen::context::{Context, LIST_ROUTINES, global_label, immortal_string};
 use crate::codegen::{AssemblyGenerator, Os, Target};
+use crate::project::SourceMap;
+use crate::span::Span;
 use builtins::{Sys, system_call};
 use std::path::Path;
 
@@ -42,6 +44,8 @@ pub struct Arm64Generator {
     uses_fmod: bool,
     /// The system the program runs on, which decides how the runtime calls it.
     os: Os,
+    /// The span of the instruction being emitted, which its runtime errors point at.
+    span: Span,
 }
 
 impl AssemblyGenerator for Arm64Generator {
@@ -136,6 +140,10 @@ impl AssemblyGenerator for Arm64Generator {
             level: arch.baseline(),
         }
     }
+
+    fn set_sources(&mut self, sources: SourceMap) {
+        self.ctx.set_sources(sources);
+    }
 }
 
 impl Arm64Generator {
@@ -152,42 +160,88 @@ impl Arm64Generator {
         }
     }
 
-    /// Emits the code behind every [`Context::fail_label`], plus `stone.fail`, which writes
-    /// `error: `, the string in `x0`, and a newline to stderr, then exits with status 1.
+    /// Emits the code behind every [`Context::fail_label`] and [`Context::fail_at`], plus
+    /// `stone.fail`, which writes the location of the site in `stone.site` if there is one,
+    /// `error: `, the string in `x0`, a newline, and the site's excerpt to stderr, then exits
+    /// with status 1. A failure with a site records it in `stone.site` first, and so does a call
+    /// to one of the
+    /// [`FALLIBLE_ROUTINES`](crate::codegen::context::FALLIBLE_ROUTINES), whose own failures have none.
     fn emit_failures(&mut self) {
         let Some(failures) = self.ctx.failures() else {
             return;
         };
-        for (label, message) in failures {
-            let text = self.ctx.intern_string(&message);
-            self.emit(&format!("{label}:"));
+        for failure in failures {
+            let text = self.ctx.intern_string(&failure.message);
+            self.emit(&format!("{}:", failure.label));
+            if let Some(site) = &failure.site {
+                self.record_site(site);
+            }
             address(self, "x0", &text);
             self.emit("\tb\tstone.fail");
         }
         let prefix = self.ctx.intern_string("error: ");
         let newline = self.ctx.intern_string("\n");
+        let no_location = self.ctx.new_label("fail_message");
         self.emit("stone.fail:");
         self.emit("\tmov\tx19, x0");
+        self.emit("\tadrp\tx16, stone.site");
+        self.emit("\tldr\tx20, [x16, :lo12:stone.site]");
+        self.emit(&format!("\tcbz\tx20, {no_location}"));
+        self.emit("\tmov\tx1, x20");
+        self.write_stderr();
+        // the excerpt follows the location's terminating zero
+        self.emit("\tadd\tx20, x1, x2");
+        self.emit("\tadd\tx20, x20, #1");
+        self.emit(&format!("{no_location}:"));
         for text in [Some(prefix), None, Some(newline)] {
             match text {
                 Some(text) => address(self, "x1", &text),
                 None => self.emit("\tmov\tx1, x19"),
             }
-            // strlen, then write to stderr
-            self.emit("\tmov\tx2, #0");
-            let length = self.ctx.new_label("fail_length");
-            let write = self.ctx.new_label("fail_write");
-            self.emit(&format!("{length}:"));
-            self.emit("\tldrb\tw9, [x1, x2]");
-            self.emit(&format!("\tcbz\tw9, {write}"));
-            self.emit("\tadd\tx2, x2, #1");
-            self.emit(&format!("\tb\t{length}"));
-            self.emit(&format!("{write}:"));
-            self.emit("\tmov\tx0, #2"); // stderr
-            system_call(self, Sys::Write);
+            self.write_stderr();
         }
+        let done = self.ctx.new_label("fail_done");
+        self.emit(&format!("\tcbz\tx20, {done}"));
+        self.emit("\tmov\tx1, x20");
+        self.write_stderr();
+        self.emit(&format!("{done}:"));
         self.emit("\tmov\tx0, #1");
         system_call(self, Sys::Exit);
+
+        let sites = self.ctx.sites();
+        if !sites.is_empty() {
+            self.emit("\t.section\t.rodata");
+            for site in sites {
+                self.emit(&format!("{}:", site.label));
+                self.emit(&format!("\t.string \"{}\"", site.location));
+                self.emit(&format!("\t.string \"{}\"", site.excerpt));
+            }
+            self.emit("\t.text");
+        }
+    }
+
+    /// Writes the zero-terminated string at `x1` to stderr, leaving its length in `x2` and `x1`
+    /// unchanged.
+    fn write_stderr(&mut self) {
+        self.emit("\tmov\tx2, #0");
+        let length = self.ctx.new_label("fail_length");
+        let write = self.ctx.new_label("fail_write");
+        self.emit(&format!("{length}:"));
+        self.emit("\tldrb\tw9, [x1, x2]");
+        self.emit(&format!("\tcbz\tw9, {write}"));
+        self.emit("\tadd\tx2, x2, #1");
+        self.emit(&format!("\tb\t{length}"));
+        self.emit(&format!("{write}:"));
+        self.emit("\tmov\tx0, #2"); // stderr
+        system_call(self, Sys::Write);
+    }
+
+    /// Records the site record `site` in `stone.site`, for `stone.fail` to point at, using only
+    /// `x16` and `x17`.
+    fn record_site(&mut self, site: &str) {
+        address(self, "x16", site);
+        self.emit("\tadrp\tx17, stone.site");
+        self.emit("\tstr\tx16, [x17, :lo12:stone.site]");
     }
 
     /// Emits the routines behind input, `args`, the `os` module, parsing, `str`, and the string
@@ -300,6 +354,11 @@ impl Arm64Generator {
         self.emit("\t.p2align\t3");
         self.emit("stone.call_depth:");
         self.emit("\t.zero\t8");
+        if self.ctx.failures().is_some() {
+            // the site a runtime error points at, or 0
+            self.emit("stone.site:");
+            self.emit("\t.zero\t8");
+        }
         if self.ctx.counts_references {
             self.emit("stone.live:");
             self.emit("\t.zero\t8");
@@ -508,6 +567,16 @@ mod tests {
     #[test]
     fn arguments_are_computed_in_their_argument_registers() {
         let fib = function_text(&assemble(FIB).unwrap(), "fib");
+        // each call checks the depth just before it, which only uses x16 and x17
+        let fib: String = fib
+            .lines()
+            .filter(|line| {
+                !line.contains("stone.call_depth")
+                    && !line.starts_with("\tb.ge\t.Lfail")
+                    && !line.starts_with("\tcmp\tx17, ")
+            })
+            .map(|line| format!("{line}\n"))
+            .collect();
         assert!(fib.contains(", #1\n\tbl\tfn.fib"), "{fib}");
         assert!(fib.contains(", #2\n\tbl\tfn.fib"), "{fib}");
         assert!(fib.contains("\tsub\tx0, "), "{fib}");

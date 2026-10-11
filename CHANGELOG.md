@@ -10,7 +10,15 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-11
+
 ### Changed
+
+- Runtime errors print like checker errors, with the file, line, and column, then the source
+  line with carets under the expression that failed, under both `stone run` and a compiled
+  executable, which prints exactly the same text. `recursion is too deep` points at the call
+  that went one level too deep, and a change such as `grid[i][j] = v` at the subscript whose
+  index is out of range.
 
 - Source files use the extension `.stn` instead of `.st`, which Smalltalk already uses. A
   program's entry file is `main.stn`, and `use a.b` loads `a/b.stn`. Rename existing files with

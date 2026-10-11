@@ -5,7 +5,8 @@
 use crate::ast::{
     BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp,
 };
-use crate::checker::{collect_assigned, place, range_args};
+use crate::checker::{collect_assigned, place, place_spans, range_args};
+use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, last_uses};
 use crate::span::Span;
 use crate::stdlib::random::Rng;
@@ -16,6 +17,18 @@ use std::io::{BufRead, Write};
 use std::rc::Rc;
 
 type EvalResult<T> = Result<T, Box<dyn std::error::Error>>;
+
+/// Gives a runtime error the position of `span`, the expression that failed, unless it already
+/// has one from an expression inside it or is an [`Exit`], so the innermost expression wins.
+///
+/// For example, `division by zero` raised while evaluating `a / b` at 3:7 becomes a
+/// [`Diagnostic`] at 3:7, which stays there as it passes through `print(a / b)`.
+fn located(error: Box<dyn std::error::Error>, span: Span) -> Box<dyn std::error::Error> {
+    if error.is::<Diagnostic>() || error.is::<Exit>() {
+        return error;
+    }
+    Box::new(Diagnostic::error(span, error.to_string()))
+}
 
 /// The variables each statement of a body uses for the last time, which the interpreter drops
 /// after the statement so that a list nothing else holds can change in place.
@@ -810,8 +823,9 @@ impl<'out> Interpreter<'out> {
                         ExprKind::Subscript { value, slice, .. } => {
                             let (root, indexes) = self.eval_place(value)?;
                             let index = self.eval_expr(slice)?.as_int()?;
-                            let items = self.place_list(root, &indexes)?;
-                            let position = list_position(index, items.len())?;
+                            let items = self.place_list(root, &indexes, &place_spans(value))?;
+                            let position = list_position(index, items.len())
+                                .map_err(|e| located(e, target.span))?;
                             items[position] = rhs.clone();
                         }
                         _ => return Err("Invalid assignment target".into()),
@@ -916,6 +930,11 @@ impl<'out> Interpreter<'out> {
     /// For example, `a * (2 + 3)` for a list `a` evaluates `a`, then `2 + 3`, and returns a
     /// multiplication of `a` by 5 for each element.
     fn arithmetic(&mut self, expr: &Expr) -> EvalResult<Lazy> {
+        self.arithmetic_unlocated(expr)
+            .map_err(|e| located(e, expr.span))
+    }
+
+    fn arithmetic_unlocated(&mut self, expr: &Expr) -> EvalResult<Lazy> {
         self.nested(|this| match &expr.kind {
             ExprKind::BinOp { op, left, right } => {
                 let left = this.arithmetic(left)?;
@@ -942,8 +961,11 @@ impl<'out> Interpreter<'out> {
         })
     }
 
+    /// Evaluates `expr`, giving an error raised by it, rather than by an expression inside it,
+    /// the position of `expr`.
     fn eval_expr(&mut self, expr: &Expr) -> EvalResult<Value> {
         self.nested(|this| this.eval_expr_unguarded(expr))
+            .map_err(|e| located(e, expr.span))
     }
 
     fn eval_expr_unguarded(&mut self, expr: &Expr) -> EvalResult<Value> {
@@ -1012,7 +1034,7 @@ impl<'out> Interpreter<'out> {
                     for arg in args {
                         values.push(self.eval_expr(arg)?);
                     }
-                    let items = self.place_list(root, &indexes)?;
+                    let items = self.place_list(root, &indexes, &place_spans(value))?;
                     return change_list(items, attr, values);
                 }
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind {
@@ -1285,16 +1307,22 @@ impl<'out> Interpreter<'out> {
     ///
     /// Every list on the way that another value still shares is copied first, so the change shows
     /// through no other variable. The checker allows a function to change only its own variables,
-    /// so `root` is in the function's scope, or in the globals at the top level.
-    fn place_list(&mut self, root: &str, indexes: &[i64]) -> EvalResult<&mut Vec<Value>> {
+    /// so `root` is in the function's scope, or in the globals at the top level. An index out of
+    /// range fails at its subscript in `spans`, from [`place_spans`].
+    fn place_list(
+        &mut self,
+        root: &str,
+        indexes: &[i64],
+        spans: &[Span],
+    ) -> EvalResult<&mut Vec<Value>> {
         let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
         let mut value = scope
             .get_mut(root)
             .ok_or_else(|| format!("'{root}' is used before it is assigned"))?;
-        for &index in indexes {
+        for (&index, &span) in indexes.iter().zip(spans) {
             self.copies += value.is_shared() as u64;
             let items = value.as_list_mut()?;
-            let position = list_position(index, items.len())?;
+            let position = list_position(index, items.len()).map_err(|e| located(e, span))?;
             value = &mut items[position];
         }
         self.copies += value.is_shared() as u64;

@@ -47,11 +47,14 @@ prints the first average, then stops:
 
 ```text
 7
-runtime_error.stn: error: division by zero
+runtime_error.stn:5:9: error: division by zero
+  |
+5 |     ret total / values.len()
+  |         ^^^^^^^^^^^^^^^^^^^^
 ```
 
-A runtime error prints `error:` and a message to stderr and exits with status 1, with the same
-message under `stone run` and a compiled executable. See {doc}`../reference/runtime-errors` for
+A runtime error prints like a checker error, pointing at the expression that failed, then exits
+with status 1. `stone run` and a compiled executable print the same thing. See {doc}`../reference/runtime-errors` for
 every one.
 
 That is the whole tutorial. The {doc}`../reference/syntax` and {doc}`../reference/builtins`

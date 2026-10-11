@@ -8,7 +8,7 @@ use stone::codegen::Target;
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver;
 use stone::interpreter::{Exit, Limits};
-use stone::project::FsSources;
+use stone::project::{FsSources, SourceMap};
 
 mod uninstall;
 #[cfg(feature = "self-update")]
@@ -187,7 +187,7 @@ fn main() -> ExitCode {
                 },
             }
         }
-        ExecutionMode::Run { file, args } => with_program(&file, |module| {
+        ExecutionMode::Run { file, args } => with_program(&file, |module, _| {
             driver::run_module(
                 module,
                 &mut std::io::BufReader::new(std::io::stdin()),
@@ -227,7 +227,7 @@ fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCod
     }
     let mut status = ExitCode::SUCCESS;
     for file in files {
-        let code = with_program(file, |module| {
+        let code = with_program(file, |module, sources| {
             let targets = if unique.is_empty() {
                 vec![Target::host()?]
             } else {
@@ -242,7 +242,7 @@ fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCod
                         driver::output_path(entry, target)
                     }
                 };
-                driver::compile_module(module, &path, target)?;
+                driver::compile_module(module, sources, &path, target)?;
                 println!("Compiled {}", path.display());
             }
             Ok(())
@@ -317,7 +317,10 @@ fn read(file: &str) -> Option<String> {
 /// Diagnostics are rendered with the path of the file they are in, the line, and a caret under
 /// the problem, while other errors, such as runtime errors, are printed as `file: error: message`.
 /// A program that ended with `os.exit` prints nothing more and exits with its status.
-fn with_program(file: &str, action: impl FnOnce(&Mod) -> Result<(), Box<dyn Error>>) -> ExitCode {
+fn with_program(
+    file: &str,
+    action: impl FnOnce(&Mod, &SourceMap) -> Result<(), Box<dyn Error>>,
+) -> ExitCode {
     let Some(source) = read(file) else {
         return ExitCode::FAILURE;
     };
@@ -326,7 +329,7 @@ fn with_program(file: &str, action: impl FnOnce(&Mod) -> Result<(), Box<dyn Erro
         Ok((module, warnings)) => {
             let rendered: String = warnings.iter().map(|d| sources.render(d)).collect();
             eprint!("{rendered}");
-            match action(&module) {
+            match action(&module, &sources) {
                 Ok(()) => return ExitCode::SUCCESS,
                 Err(err) => err,
             }

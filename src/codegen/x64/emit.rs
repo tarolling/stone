@@ -9,7 +9,7 @@
 
 use super::{ARG_REGS, X64Generator};
 use crate::codegen::AssemblyGenerator;
-use crate::codegen::context::{function_label, global_label};
+use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label};
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::{
     BinOp, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, RcKind, Terminator, VReg,
@@ -145,6 +145,12 @@ impl Frame {
 }
 
 impl X64Generator {
+    /// Returns a label that stops the program with `message`, pointing at the instruction being
+    /// emitted.
+    fn fail_here(&mut self, message: &str) -> String {
+        self.ctx.fail_at(message, self.span)
+    }
+
     /// Allocates registers for `function` and emits it, from its label through its epilogue.
     pub(super) fn emit_function(&mut self, function: &Function) -> Result<(), String> {
         let liveness = analyze(function);
@@ -194,14 +200,8 @@ impl X64Generator {
 
         if !frame.is_main {
             // the same limit as the interpreter, rather than overflowing the stack
-            let too_deep = self.ctx.fail_label(&format!(
-                "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
-            ));
+            // each call checks the depth first, so the error points at the call
             self.emit("\tinc\tQWORD PTR [rip + stone.call_depth]");
-            self.emit(&format!(
-                "\tcmp\tQWORD PTR [rip + stone.call_depth], {MAX_CALL_DEPTH}"
-            ));
-            self.emit(&format!("\tjg\t{too_deep}"));
         }
 
         // arguments arrive in ARG_REGS and, past the sixth, on the caller's stack
@@ -227,9 +227,11 @@ impl X64Generator {
 
         for (i, block) in function.blocks.iter().enumerate() {
             self.emit(&format!("{}:", frame.blocks[i]));
-            for inst in &block.insts {
+            for (inst, span) in block.insts.iter().zip(&block.spans) {
+                self.span = *span;
                 self.emit_inst(&frame, inst)?;
             }
+            self.span = block.term_span;
             self.emit_terminator(&frame, &block.term, BlockId(i + 1))?;
         }
 
@@ -598,7 +600,7 @@ impl X64Generator {
                 }
             }
             Terminator::Fail(message) => {
-                let label = self.ctx.fail_label(message);
+                let label = self.fail_here(message);
                 self.emit(&format!("\tjmp\t{label}"));
             }
             Terminator::Return(value) => {
@@ -660,7 +662,7 @@ impl X64Generator {
                     _ => {
                         self.load("rcx", rhs);
                         // idiv traps on both of these, so report them like the interpreter
-                        let by_zero = self.ctx.fail_label("division by zero");
+                        let by_zero = self.fail_here("division by zero");
                         let divide = self.ctx.new_label("divide");
                         let done = self.ctx.new_label("divided");
                         self.emit("\ttest\trcx, rcx");
@@ -668,7 +670,7 @@ impl X64Generator {
                         self.emit("\tcmp\trcx, -1");
                         self.emit(&format!("\tjne\t{divide}"));
                         if *op == BinOp::Div {
-                            let overflow = self.ctx.fail_label("integer overflow in division");
+                            let overflow = self.fail_here("integer overflow in division");
                             // only the minimum overflows when negated
                             self.emit("\tmov\trdx, rax");
                             self.emit("\tneg\trdx");
@@ -697,7 +699,7 @@ impl X64Generator {
                 self.load("rcx", lhs);
                 self.load("rdx", rhs);
                 if !matches!(rhs, Value::Imm(n) if n >= 0) {
-                    let negative = self.ctx.fail_label("negative exponent");
+                    let negative = self.fail_here("negative exponent");
                     self.emit("\ttest\trdx, rdx");
                     self.emit(&format!("\tjs\t{negative}"));
                 }
@@ -904,9 +906,7 @@ impl X64Generator {
                 let dst = frame.reg(*dst)?;
                 let label = global_label(name);
                 if *checked {
-                    let fail = self
-                        .ctx
-                        .fail_label(&format!("'{name}' is used before it is assigned"));
+                    let fail = self.fail_here(&format!("'{name}' is used before it is assigned"));
                     self.emit(&format!("\tcmp\tQWORD PTR [rip + {label}.set], 0"));
                     self.emit(&format!("\tje\t{fail}"));
                 }
@@ -1067,6 +1067,16 @@ impl X64Generator {
             }
 
             Inst::Call { dst, callee, args } => {
+                if let Callee::User(_) = callee {
+                    // the same limit as the interpreter, rather than overflowing the stack
+                    let too_deep = self.fail_here(&format!(
+                        "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
+                    ));
+                    self.emit(&format!(
+                        "\tcmp\tQWORD PTR [rip + stone.call_depth], {MAX_CALL_DEPTH}"
+                    ));
+                    self.emit(&format!("\tjge\t{too_deep}"));
+                }
                 let mut values = Vec::new();
                 for arg in args {
                     values.push(frame.value(*arg)?);
@@ -1096,6 +1106,12 @@ impl X64Generator {
                     Callee::Runtime(label) => label.to_string(),
                     Callee::Print(ty) => self.ctx.print_routine(ty, false)?,
                 };
+                // the routine's own runtime errors point at this call
+                if FALLIBLE_ROUTINES.contains(&label.as_str())
+                    && let Some(site) = self.ctx.site_label(self.span)
+                {
+                    self.record_site(&site);
+                }
                 self.emit(&format!("\tcall\t{label}"));
                 if extra > 0 {
                     self.emit(&format!("\tadd\trsp, {}", 8 * extra));
@@ -1135,7 +1151,7 @@ impl X64Generator {
             _ => None,
         };
         if checked {
-            let out_of_range = self.ctx.fail_label("list index out of range");
+            let out_of_range = self.fail_here("list index out of range");
             match constant {
                 Some(n) => {
                     // the length is never negative, so a constant index is in range below it
@@ -1168,7 +1184,7 @@ impl X64Generator {
     /// Jumps to the `division by zero` failure if the float divisor in `xmm` is 0.0 or -0.0, as
     /// in the interpreter, rather than letting `/` or `%` give inf or nan. Clobbers `xmm2`.
     fn fail_on_float_zero(&mut self, xmm: &str) {
-        let by_zero = self.ctx.fail_label("division by zero");
+        let by_zero = self.fail_here("division by zero");
         let nonzero = self.ctx.new_label("nonzero");
         self.emit("\txorpd\txmm2, xmm2");
         self.emit(&format!("\tucomisd\t{xmm}, xmm2"));
@@ -1235,9 +1251,7 @@ impl X64Generator {
     /// `cvttsd2si` gives the minimum int for nan and for anything out of range, so that result
     /// exits with an error unless the float really was -2^63.
     fn gen_float_to_int(&mut self) {
-        let fail = self
-            .ctx
-            .fail_label("cannot convert float to int (nan or out of range)");
+        let fail = self.fail_here("cannot convert float to int (nan or out of range)");
         let done = self.ctx.new_label("to_int");
         self.emit("\tmovq\txmm0, rax");
         self.emit("\tmov\trcx, rax");

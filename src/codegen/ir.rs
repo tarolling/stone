@@ -20,6 +20,7 @@ pub mod lower;
 
 use crate::ast::CompOp;
 use crate::checker::Type;
+use crate::span::Span;
 use std::fmt;
 
 /// A virtual register, numbered from 0 within its function.
@@ -483,7 +484,12 @@ impl Terminator {
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub insts: Vec<Inst>,
+    /// The span of the source each instruction was lowered from, by index, which a runtime error
+    /// at that instruction points at.
+    pub spans: Vec<Span>,
     pub term: Terminator,
+    /// The span of the source the terminator was lowered from.
+    pub term_span: Span,
     /// How many loops the block is nested in, which weights how costly spilling is.
     pub loop_depth: u32,
 }

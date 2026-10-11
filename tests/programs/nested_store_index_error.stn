@@ -1,0 +1,6 @@
+// a store into a row reports the row's index when it is out of range
+grid = [[1, 2], [3]]
+grid[0][1] = 5
+print(grid)
+grid[1][1] = 6
+print("after")

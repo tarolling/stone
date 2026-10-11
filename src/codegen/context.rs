@@ -10,6 +10,7 @@ use crate::codegen::AssemblyGenerator;
 use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::{Callee, Inst, Program};
 use crate::diagnostic::Severity;
+use crate::project::SourceMap;
 use crate::span::Span;
 use std::collections::{HashMap, HashSet};
 
@@ -69,6 +70,39 @@ pub fn module_routine(name: &str) -> Option<&'static str> {
         .iter()
         .find(|(function, _)| *function == name)
         .map(|(_, label)| *label)
+}
+
+/// Runtime routines that can stop the program with a runtime error of their own, so a call to one
+/// first records where it is, for the error to point at.
+///
+/// For example, `int("x")` calls `stone.parse_int`, which fails with
+/// `invalid literal for int() with base 10: 'x'` at the call.
+pub const FALLIBLE_ROUTINES: &[&str] = &[
+    "stone.parse_int",
+    "stone.parse_float",
+    "stone.str_split",
+    "stone.os_cwd",
+    "stone.time_sleep",
+];
+
+/// A runtime error the code can jump to, from [`Context::fail_label`] or [`Context::fail_at`].
+#[derive(Clone, Debug, PartialEq)]
+pub struct Failure {
+    pub label: String,
+    pub message: String,
+    /// The label of the site the error points at, from [`Context::site_label`], if it has one.
+    pub site: Option<String>,
+}
+
+/// Where a runtime error points, rendered when the program is compiled: the location, such as
+/// `main.stn:3:7: `, and the excerpt that follows the message, both escaped for a `.string`
+/// directive. A backend emits the two strings one after the other behind `label`, so the
+/// excerpt starts right after the location's terminating zero.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Site {
+    pub label: String,
+    pub location: String,
+    pub excerpt: String,
 }
 
 /// The reference count of a string literal or other static object, which is never freed: no
@@ -159,8 +193,12 @@ pub struct Context {
     list_printers: Vec<Type>,
     /// Whether `print` needs `stone.print_float`, emitted after the code that uses it.
     pub prints_floats: bool,
-    /// Runtime errors the code can jump to, as `(label, message)`, emitted after `main`.
-    failures: Vec<(String, String)>,
+    /// Runtime errors the code can jump to, emitted after `main`.
+    failures: Vec<Failure>,
+    /// The program's files, which runtime errors are rendered from, if the driver gave them.
+    sources: Option<SourceMap>,
+    /// Every place a runtime error can point at, by span.
+    sites: Vec<(Span, Site)>,
     /// Whether runtime routines build messages for `stone.fail` themselves, so it is needed even
     /// without a [`Context::fail_label`].
     pub needs_fail: bool,
@@ -241,19 +279,78 @@ impl Context {
     ///
     /// For example, jumping to `self.fail_label("division by zero")` prints
     /// `error: division by zero` to stderr and exits with status 1.
+    ///
+    /// The error points at the site a fallible routine's caller recorded, if any, so runtime
+    /// routines use this label; generated code uses [`Context::fail_at`].
     pub fn fail_label(&mut self, message: &str) -> String {
-        if let Some((label, _)) = self.failures.iter().find(|(_, m)| m == message) {
-            return label.clone();
+        self.failure(message, None)
+    }
+
+    /// Returns a label that stops the program with `message`, pointing at `span` the way the
+    /// interpreter reports the same runtime error there.
+    ///
+    /// For example, jumping to the label for `division by zero` at the span of `1 / n` on line 3
+    /// of `main.stn` prints `main.stn:3:7: error: division by zero`, then the line with carets
+    /// under `1 / n`. Without sources (see [`Context::set_sources`]) it prints only the message.
+    pub fn fail_at(&mut self, message: &str, span: Span) -> String {
+        let site = self.site_label(span);
+        self.failure(message, site)
+    }
+
+    fn failure(&mut self, message: &str, site: Option<String>) -> String {
+        if let Some(failure) = self
+            .failures
+            .iter()
+            .find(|f| f.message == message && f.site == site)
+        {
+            return failure.label.clone();
         }
         let label = self.new_label("fail");
-        self.failures.push((label.clone(), message.to_string()));
+        self.failures.push(Failure {
+            label: label.clone(),
+            message: message.to_string(),
+            site,
+        });
         label
     }
 
-    /// Returns every failure asked for, as `(label, message)`, or `None` if no code can fail, so
-    /// `stone.fail` need not be emitted.
-    pub fn failures(&self) -> Option<Vec<(String, String)>> {
+    /// Returns every failure asked for, or `None` if no code can fail, so `stone.fail` need not
+    /// be emitted.
+    pub fn failures(&self) -> Option<Vec<Failure>> {
         (!self.failures.is_empty() || self.needs_fail).then(|| self.failures.clone())
+    }
+
+    /// Gives the program's files, so runtime errors point at their place in them.
+    pub fn set_sources(&mut self, sources: SourceMap) {
+        self.sources = Some(sources);
+    }
+
+    /// Returns the label of the site record for `span`, the same one for every use, or `None`
+    /// without sources or for a span that is in no source, such as code `main` adds.
+    pub fn site_label(&mut self, span: Span) -> Option<String> {
+        let sources = self.sources.as_ref()?;
+        if span.start.line == 0 {
+            return None;
+        }
+        if let Some((_, site)) = self.sites.iter().find(|(s, _)| *s == span) {
+            return Some(site.label.clone());
+        }
+        let (location, excerpt) = sources.site(span);
+        let label = self.new_label("site");
+        self.sites.push((
+            span,
+            Site {
+                label: label.clone(),
+                location: escape(&location),
+                excerpt: escape(&excerpt),
+            },
+        ));
+        Some(label)
+    }
+
+    /// Returns every site record asked for, in the order they were asked for.
+    pub fn sites(&self) -> Vec<Site> {
+        self.sites.iter().map(|(_, site)| site.clone()).collect()
     }
 
     /// Returns the routine that prints a value of type `ty`, quoting strings inside lists.
@@ -370,20 +467,23 @@ impl Context {
         let mut literals: Vec<(String, String)> = self
             .string_literals
             .iter()
-            .map(|(content, label)| {
-                // escape special characters for assembly
-                let escaped = content
-                    .replace("\\", "\\\\")
-                    .replace("\"", "\\\"")
-                    .replace("\n", "\\n")
-                    .replace("\t", "\\t")
-                    .replace("\r", "\\r");
-                (label.clone(), escaped)
-            })
+            .map(|(content, label)| (label.clone(), escape(content)))
             .collect();
         literals.sort();
         literals
     }
+}
+
+/// Escapes `content` for a `.string` directive.
+///
+/// For example, `a"b` followed by a newline becomes `a\"b\n`.
+fn escape(content: &str) -> String {
+    content
+        .replace("\\", "\\\\")
+        .replace("\"", "\\\"")
+        .replace("\n", "\\n")
+        .replace("\t", "\\t")
+        .replace("\r", "\\r")
 }
 
 /// Returns the assembly symbol for a global variable.

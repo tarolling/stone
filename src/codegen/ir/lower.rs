@@ -36,7 +36,7 @@ use super::{
 };
 use crate::ast::{Arg, BoolOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::checker::{
-    Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, range_args,
+    Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, place_spans, range_args,
 };
 use crate::codegen::context::module_routine;
 use crate::last_use::{LiveAfter, global_reads, live_after};
@@ -135,7 +135,9 @@ struct Loop {
 /// A block being built, which may not have a terminator yet.
 struct PendingBlock {
     insts: Vec<Inst>,
+    spans: Vec<Span>,
     term: Option<Terminator>,
+    term_span: Span,
     loop_depth: u32,
 }
 
@@ -171,6 +173,9 @@ struct Lowerer<'a> {
     /// The variables the expression statement being lowered uses for the last time, which an
     /// `append` it makes may move into the list.
     statement_last_uses: Vec<String>,
+    /// The innermost statement or expression being lowered, which each instruction records as
+    /// where a runtime error at it points.
+    span: Span,
 }
 
 impl<'a> Lowerer<'a> {
@@ -192,6 +197,7 @@ impl<'a> Lowerer<'a> {
             moved_globals: HashSet::new(),
             live_after: LiveAfter::new(),
             statement_last_uses: Vec::new(),
+            span: Span::default(),
         }
     }
 
@@ -389,7 +395,9 @@ impl<'a> Lowerer<'a> {
     fn new_block(&mut self) -> BlockId {
         self.blocks.push(PendingBlock {
             insts: Vec::new(),
+            spans: Vec::new(),
             term: None,
+            term_span: Span::default(),
             loop_depth: 0,
         });
         BlockId(self.blocks.len() - 1)
@@ -417,6 +425,7 @@ impl<'a> Lowerer<'a> {
             }
         };
         self.blocks[block.0].insts.push(inst);
+        self.blocks[block.0].spans.push(self.span);
     }
 
     fn terminate(&mut self, term: Terminator) {
@@ -430,6 +439,7 @@ impl<'a> Lowerer<'a> {
             }
         };
         self.blocks[block.0].term = Some(term);
+        self.blocks[block.0].term_span = self.span;
     }
 
     fn jump(&mut self, target: BlockId) {
@@ -535,14 +545,25 @@ impl<'a> Lowerer<'a> {
                 };
                 Block {
                     insts: block.insts,
+                    spans: block.spans,
                     term,
+                    term_span: block.term_span,
                     loop_depth: block.loop_depth,
                 }
             })
             .collect()
     }
 
+    /// Lowers `stmt`, whose instructions point at it unless an expression inside it is more
+    /// precise.
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
+        let outer = std::mem::replace(&mut self.span, stmt.span);
+        let result = self.stmt_unspanned(stmt);
+        self.span = outer;
+        result
+    }
+
+    fn stmt_unspanned(&mut self, stmt: &Stmt) -> Result<(), String> {
         match &stmt.kind {
             StmtKind::Assign { targets, value } => {
                 let last_uses = self.last_uses(stmt);
@@ -741,12 +762,14 @@ impl<'a> Lowerer<'a> {
                 let index = self.expr(slice)?;
                 let list = self.unique_place(list, &indexes)?;
                 let old = kind.map(|_| self.fresh());
+                let outer = std::mem::replace(&mut self.span, target.span);
                 self.push(Inst::ListStore {
                     old,
                     list,
                     index,
                     value,
                 });
+                self.span = outer;
                 if let (Some(old), Some(kind)) = (old, kind) {
                     self.push(Inst::Release {
                         src: Operand::Reg(old),
@@ -806,7 +829,10 @@ impl<'a> Lowerer<'a> {
         } else {
             return Err(format!("a function cannot change the global '{root}'"));
         };
-        for &index in indexes {
+        // an index out of range points at its own subscript
+        let outer = self.span;
+        for (&index, span) in indexes.iter().zip(place_spans(list)) {
+            self.span = span;
             let row = self.fresh();
             self.push(Inst::ListLoad {
                 dst: row,
@@ -826,6 +852,7 @@ impl<'a> Lowerer<'a> {
             });
             current = Operand::Reg(row);
         }
+        self.span = outer;
         Ok(current)
     }
 
@@ -1056,6 +1083,13 @@ impl<'a> Lowerer<'a> {
     /// A counted value comes back borrowed, or as a temporary in [`Lowerer::owned`] that the
     /// caller must release or give away.
     fn expr_into(&mut self, expr: &Expr, into: Option<VReg>) -> Result<Operand, String> {
+        let outer = std::mem::replace(&mut self.span, expr.span);
+        let result = self.expr_into_unspanned(expr, into);
+        self.span = outer;
+        result
+    }
+
+    fn expr_into_unspanned(&mut self, expr: &Expr, into: Option<VReg>) -> Result<Operand, String> {
         let kind = self.counted(expr);
         if into.is_some() && kind.is_some() {
             // computed apart, so the destination's old value is still there to release

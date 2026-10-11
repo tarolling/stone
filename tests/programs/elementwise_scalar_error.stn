@@ -1,0 +1,6 @@
+// a number in list arithmetic is computed once, before any element, and fails at its own expression
+xs = [1, 2]
+a = 1
+b = 0
+print(xs * 2)
+print(xs * (a / b))

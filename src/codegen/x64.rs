@@ -12,6 +12,8 @@ use crate::ast::Mod;
 use crate::codegen::context::{Context, LIST_ROUTINES, global_label, immortal_string};
 use crate::codegen::x64::builtins::print;
 use crate::codegen::{AssemblyGenerator, Target};
+use crate::project::SourceMap;
+use crate::span::Span;
 use std::path::Path;
 
 /// Registers that carry arguments under the System V ABI, in order.
@@ -29,6 +31,8 @@ pub struct X64Generator {
     output: String,
     /// What the backends share about the program being compiled.
     ctx: Context,
+    /// The span of the instruction being emitted, which its runtime errors point at.
+    span: Span,
 }
 
 impl AssemblyGenerator for X64Generator {
@@ -109,6 +113,10 @@ impl AssemblyGenerator for X64Generator {
     fn target(&self) -> Target {
         Target::X64_LINUX
     }
+
+    fn set_sources(&mut self, sources: SourceMap) {
+        self.ctx.set_sources(sources);
+    }
 }
 
 impl X64Generator {
@@ -116,45 +124,92 @@ impl X64Generator {
         Self::default()
     }
 
-    /// Emits the code behind every [`Context::fail_label`], plus `stone.fail`, which writes
-    /// `error: `, the string in `rdi`, and a newline to stderr, then exits with status 1.
+    /// Emits the code behind every [`Context::fail_label`] and [`Context::fail_at`], plus
+    /// `stone.fail`, which writes the location of the site in `stone.site` if there is one,
+    /// `error: `, the string in `rdi`, a newline, and the site's excerpt to stderr, then exits
+    /// with status 1. A failure with a site records it in `stone.site` first, and so does a call
+    /// to one of the
+    /// [`FALLIBLE_ROUTINES`](crate::codegen::context::FALLIBLE_ROUTINES), whose own failures have none.
     fn emit_failures(&mut self) {
         let Some(failures) = self.ctx.failures() else {
             return;
         };
-        for (label, message) in failures {
-            let text = self.ctx.intern_string(&message);
-            self.emit(&format!("{label}:"));
+        for failure in failures {
+            let text = self.ctx.intern_string(&failure.message);
+            self.emit(&format!("{}:", failure.label));
+            if let Some(site) = &failure.site {
+                self.record_site(site);
+            }
             self.emit(&format!("\tlea\trdi, [rip + {text}]"));
             self.emit("\tjmp\tstone.fail");
         }
         let prefix = self.ctx.intern_string("error: ");
         let newline = self.ctx.intern_string("\n");
+        let no_location = self.ctx.new_label("fail_message");
         self.emit("stone.fail:");
         self.emit("\tmov\tr12, rdi");
+        self.emit("\tmov\tr13, QWORD PTR [rip + stone.site]");
+        self.emit("\ttest\tr13, r13");
+        self.emit(&format!("\tje\t{no_location}"));
+        self.emit("\tmov\trsi, r13");
+        self.write_stderr();
+        // the excerpt follows the location's terminating zero
+        self.emit("\tmov\tr13, rsi");
+        self.emit("\tadd\tr13, rdx");
+        self.emit("\tinc\tr13");
+        self.emit(&format!("{no_location}:"));
         for text in [prefix, "r12".to_string(), newline] {
             if text == "r12" {
                 self.emit("\tmov\trsi, r12");
             } else {
                 self.emit(&format!("\tlea\trsi, [rip + {text}]"));
             }
-            // strlen, then write to stderr
-            self.emit("\txor\trdx, rdx");
-            let length = self.ctx.new_label("fail_length");
-            let write = self.ctx.new_label("fail_write");
-            self.emit(&format!("{length}:"));
-            self.emit("\tcmp\tbyte ptr [rsi + rdx], 0");
-            self.emit(&format!("\tje\t{write}"));
-            self.emit("\tinc\trdx");
-            self.emit(&format!("\tjmp\t{length}"));
-            self.emit(&format!("{write}:"));
-            self.emit("\tmov\trax, 1"); // sys_write
-            self.emit("\tmov\trdi, 2"); // stderr
-            self.emit("\tsyscall");
+            self.write_stderr();
         }
+        let done = self.ctx.new_label("fail_done");
+        self.emit("\ttest\tr13, r13");
+        self.emit(&format!("\tje\t{done}"));
+        self.emit("\tmov\trsi, r13");
+        self.write_stderr();
+        self.emit(&format!("{done}:"));
         self.emit("\tmov\trax, 231"); // sys_exit_group
         self.emit("\tmov\trdi, 1");
         self.emit("\tsyscall");
+
+        let sites = self.ctx.sites();
+        if !sites.is_empty() {
+            self.emit("\t.section\t.rodata");
+            for site in sites {
+                self.emit(&format!("{}:", site.label));
+                self.emit(&format!("\t.string \"{}\"", site.location));
+                self.emit(&format!("\t.string \"{}\"", site.excerpt));
+            }
+            self.emit("\t.text");
+        }
+    }
+
+    /// Writes the zero-terminated string at `rsi` to stderr, leaving its length in `rdx` and
+    /// `rsi` unchanged.
+    fn write_stderr(&mut self) {
+        self.emit("\txor\trdx, rdx");
+        let length = self.ctx.new_label("fail_length");
+        let write = self.ctx.new_label("fail_write");
+        self.emit(&format!("{length}:"));
+        self.emit("\tcmp\tbyte ptr [rsi + rdx], 0");
+        self.emit(&format!("\tje\t{write}"));
+        self.emit("\tinc\trdx");
+        self.emit(&format!("\tjmp\t{length}"));
+        self.emit(&format!("{write}:"));
+        self.emit("\tmov\trax, 1"); // sys_write
+        self.emit("\tmov\trdi, 2"); // stderr
+        self.emit("\tsyscall");
+    }
+
+    /// Records the site record `site` in `stone.site`, for `stone.fail` to point at, using only
+    /// `rax`.
+    fn record_site(&mut self, site: &str) {
+        self.emit(&format!("\tlea\trax, [rip + {site}]"));
+        self.emit("\tmov\tQWORD PTR [rip + stone.site], rax");
     }
 
     /// Emits the routines behind input, `args`, the `os` module, parsing, `str`, and the string
@@ -268,6 +323,11 @@ impl X64Generator {
         self.emit("\t.p2align\t3");
         self.emit("stone.call_depth:");
         self.emit("\t.zero\t8");
+        if self.ctx.failures().is_some() {
+            // the site a runtime error points at, or 0
+            self.emit("stone.site:");
+            self.emit("\t.zero\t8");
+        }
         if self.ctx.counts_references {
             self.emit("stone.live:");
             self.emit("\t.zero\t8");
@@ -300,6 +360,7 @@ mod tests {
     use super::*;
     use crate::codegen::context::function_label;
     use crate::driver::parse;
+    use crate::stdlib::MAX_CALL_DEPTH;
 
     /// Parses and assembles `source` without invoking gcc.
     fn assemble(source: &str) -> Result<String, String> {
@@ -515,8 +576,57 @@ mod tests {
     #[test]
     fn arguments_are_computed_in_their_argument_registers() {
         let fib = function_text(&assemble(FIB).unwrap(), "fib");
+        // each call checks the depth just before it, which touches no register
+        let fib: String = fib
+            .lines()
+            .filter(|line| !line.contains("stone.call_depth") && !line.starts_with("\tjge\t.Lfail"))
+            .map(|line| format!("{line}\n"))
+            .collect();
         assert!(fib.contains("\tsub\trdi, 1\n\tcall\tfn.fib"), "{fib}");
         assert!(fib.contains("\tsub\trdi, 2\n\tcall\tfn.fib"), "{fib}");
+    }
+
+    #[test]
+    fn runtime_errors_point_at_their_site_only_with_sources() {
+        let source = "a = 1\nb = 0\nprint(a / b, a % b)\nprint(\"\\t\" + str(a / b))\n";
+        let (sources, loaded) = crate::driver::load(
+            Path::new("main.stn"),
+            source,
+            &crate::project::MapSources::default(),
+        );
+        let module = loaded.unwrap().0;
+        let mut generator = X64Generator::new();
+        generator.set_sources(sources);
+        let assembly = generator.assemble(&module).unwrap();
+        let site = "\t.string \"main.stn:3:7: \"\n\t.string \"  |\\n3 | print(a / b, a % b)\\n  |       ^^^^^\\n\"";
+        assert!(assembly.contains(site), "{assembly}");
+        // the tab in the excerpt is escaped like any string
+        assert!(
+            assembly.contains("4 | print(\\\"\\\\t\\\" + str(a / b))"),
+            "{assembly}"
+        );
+        // one stub per message and site, each recording its site: a division can divide by
+        // zero or overflow, and a remainder only divide by zero
+        assert_eq!(assembly.matches("main.stn:3:7: ").count(), 1, "{assembly}");
+        assert_eq!(assembly.matches("main.stn:3:14: ").count(), 1, "{assembly}");
+        assert_eq!(
+            assembly.matches("], rax\n\tlea\trdi").count(),
+            5,
+            "{assembly}"
+        );
+
+        let without = assemble(source).unwrap();
+        assert!(!without.contains(".Lsite"), "{without}");
+    }
+
+    #[test]
+    fn each_call_checks_the_depth_so_the_error_points_at_it() {
+        let fib = function_text(&assemble(FIB).unwrap(), "fib");
+        let check = format!("\tcmp\tQWORD PTR [rip + stone.call_depth], {MAX_CALL_DEPTH}\n\tjge\t");
+        assert_eq!(fib.matches(&check).count(), 2, "{fib}");
+        assert_eq!(fib.matches("\tcall\tfn.fib").count(), 2, "{fib}");
+        // the prologue only counts the call
+        assert!(!fib.contains("\tjg\t"), "{fib}");
     }
 
     #[test]

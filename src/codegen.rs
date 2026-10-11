@@ -17,6 +17,7 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::ast::Mod;
+use crate::project::SourceMap;
 
 /// A processor that `stone build` can compile for.
 ///
@@ -363,6 +364,10 @@ pub trait AssemblyGenerator {
     fn emit(&mut self, code: &str);
     /// Returns the processor and operating system this generator compiles for.
     fn target(&self) -> Target;
+    /// Gives the program's files, so the runtime errors of the compiled program point at their
+    /// place in them as the interpreter's do. Without them, a runtime error prints only its
+    /// message.
+    fn set_sources(&mut self, sources: SourceMap);
 }
 
 #[cfg(test)]

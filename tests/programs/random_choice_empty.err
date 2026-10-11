@@ -1,1 +1,1 @@
-cannot choose from an empty list
+:5:7: error: cannot choose from an empty list

@@ -1,1 +1,1 @@
-integer overflow in abs
+:4:7: error: integer overflow in abs

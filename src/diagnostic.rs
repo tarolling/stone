@@ -65,29 +65,50 @@ impl Diagnostic {
     ///   |     ^
     /// ```
     pub fn render(&self, file: &str, source: &str) -> String {
-        let Span { start, end, .. } = self.span;
-        let mut out = format!(
-            "{file}:{}:{}: {}: {}\n",
-            start.line,
-            start.col,
+        format!(
+            "{}{}: {}\n{}",
+            location(file, self.span),
             self.severity.as_str(),
-            self.message
-        );
-        let Some(text) = source.lines().nth(start.line.saturating_sub(1)) else {
-            return out;
-        };
-        let gutter = " ".repeat(start.line.to_string().len());
-        let width = if end.line == start.line && end.col > start.col {
-            end.col - start.col
-        } else {
-            1
-        };
-        let indent = " ".repeat(start.col.saturating_sub(1));
-        out += &format!("{gutter} |\n");
-        out += &format!("{} | {text}\n", start.line);
-        out += &format!("{gutter} | {indent}{}\n", "^".repeat(width));
-        out
+            self.message,
+            excerpt(source, self.span)
+        )
     }
+}
+
+/// Returns where `span` starts, as the `file:line:col: ` that begins a rendered diagnostic.
+///
+/// For example, a span starting at line 3, column 7 of `main.stn` gives `main.stn:3:7: `.
+pub fn location(file: &str, span: Span) -> String {
+    format!("{file}:{}:{}: ", span.start.line, span.start.col)
+}
+
+/// Returns the lines that follow a rendered diagnostic's message: the source line `span` starts
+/// on, with carets under the span, or nothing if `source` has no such line.
+///
+/// For example, the span of `1 / 0` in `print(1 / 0)` gives:
+///
+/// ```text
+///   |
+/// 1 | print(1 / 0)
+///   |       ^^^^^
+/// ```
+pub fn excerpt(source: &str, span: Span) -> String {
+    let Span { start, end, .. } = span;
+    let Some(text) = source.lines().nth(start.line.saturating_sub(1)) else {
+        return String::new();
+    };
+    let gutter = " ".repeat(start.line.to_string().len());
+    let width = if end.line == start.line && end.col > start.col {
+        end.col - start.col
+    } else {
+        1
+    };
+    let indent = " ".repeat(start.col.saturating_sub(1));
+    format!(
+        "{gutter} |\n{} | {text}\n{gutter} | {indent}{}\n",
+        start.line,
+        "^".repeat(width)
+    )
 }
 
 impl Display for Diagnostic {

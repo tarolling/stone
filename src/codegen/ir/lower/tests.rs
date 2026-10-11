@@ -1,6 +1,7 @@
 use super::*;
 use crate::checker::TypeChecker;
 use crate::driver::parse;
+use crate::span::Pos;
 
 /// Parses, checks, and lowers `source`, returning the IR dump of every function and `main`.
 fn dump(source: &str) -> String {
@@ -663,4 +664,49 @@ fn elementwise_arithmetic_packs_pairs_when_it_can() {
     assert!(!ir.contains("packed"), "{ir}");
     let ir = first_function("fn f(a: list[float]) -> list[float];\n    ret a ** 2\nf([1.5])\n");
     assert!(!ir.contains("packed"), "{ir}");
+}
+
+/// Lowers `source` and returns the span of each instruction of its first function that matches
+/// `pick`.
+fn spans_of(source: &str, pick: impl Fn(&Inst) -> bool) -> Vec<Span> {
+    let program = lower_source(source);
+    program.functions[0]
+        .blocks
+        .iter()
+        .flat_map(|block| block.insts.iter().zip(&block.spans))
+        .filter(|(inst, _)| pick(inst))
+        .map(|(_, span)| *span)
+        .collect()
+}
+
+#[test]
+fn each_instruction_records_the_innermost_expression_it_came_from() {
+    let source = "fn f(a: int, b: int) -> int;\n    ret 1 + a / b\n";
+    let division = spans_of(source, |inst| {
+        matches!(inst, Inst::Binary { op: BinOp::Div, .. })
+    });
+    assert_eq!(division, [Span::new(Pos::new(2, 13), Pos::new(2, 18))]);
+    let addition = spans_of(source, |inst| {
+        matches!(inst, Inst::Binary { op: BinOp::Add, .. })
+    });
+    assert_eq!(addition, [Span::new(Pos::new(2, 9), Pos::new(2, 18))]);
+}
+
+#[test]
+fn a_change_records_the_subscript_whose_index_it_checks() {
+    let source =
+        "fn f(grid: list[list[int]]) -> list[list[int]];\n    grid[1][2] = 3\n    ret grid\n";
+    // the row comes from grid[1], and the store goes to grid[1][2]
+    let load = spans_of(source, |inst| matches!(inst, Inst::ListLoad { .. }));
+    assert_eq!(load, [Span::new(Pos::new(2, 5), Pos::new(2, 12))]);
+    let store = spans_of(source, |inst| {
+        matches!(
+            inst,
+            Inst::ListStore {
+                value: Operand::Imm(3),
+                ..
+            }
+        )
+    });
+    assert_eq!(store, [Span::new(Pos::new(2, 5), Pos::new(2, 15))]);
 }

@@ -66,6 +66,9 @@ struct Prepared {
     offset: usize,
     /// The entry's statements, to add to the session.
     chunks: Vec<Chunk>,
+    /// The program's files and the kept entries before this one, for rendering runtime errors.
+    files: SourceMap,
+    history: String,
 }
 
 impl Prepared {
@@ -101,10 +104,12 @@ impl Session {
         let program = format!("{history}{entry}");
         match driver::load(Path::new(ENTRY), &program, sources) {
             // a warning would repeat with every later entry, so the session leaves them out
-            (_, Ok((module, _))) => Ok(Prepared {
+            (files, Ok((module, _))) => Ok(Prepared {
                 module,
                 offset,
                 chunks,
+                files,
+                history,
             }),
             (files, Err(Diagnostics(diagnostics))) => Err(diagnostics
                 .iter()
@@ -249,19 +254,32 @@ fn submit(
         }
     };
     let statements = prepared.statements();
+    let Prepared {
+        files,
+        history,
+        offset,
+        ..
+    } = &prepared;
+    let (files, history, offset) = (files.clone(), history.clone(), *offset);
     // kept even if it fails, since the statements before the failure have already run
     session.commit(prepared);
     let result = interpreter.run_entry(&statements);
     interpreter.output().flush()?;
     match result {
         Ok(()) => Ok(None),
-        Err(e) => match e.downcast_ref::<Exit>() {
-            Some(Exit(status)) => Ok(Some(*status)),
-            None => {
-                writeln!(err, "error: {e}")?;
-                Ok(None)
+        Err(e) => {
+            if let Some(Exit(status)) = e.downcast_ref::<Exit>() {
+                return Ok(Some(*status));
             }
-        },
+            match e.downcast_ref::<Diagnostic>() {
+                Some(diagnostic) => {
+                    let rendered = render(diagnostic, &files, &history, entry, offset);
+                    err.write_all(rendered.as_bytes())?;
+                }
+                None => writeln!(err, "error: {e}")?,
+            }
+            Ok(None)
+        }
     }
 }
 
@@ -438,7 +456,19 @@ mod tests {
     fn runtime_errors_are_reported_and_the_session_continues() {
         let (out, err) = session("x = 4\n1 / 0\nx\n");
         assert_eq!(out, "4\n");
-        assert_eq!(err, "error: division by zero\n");
+        assert_eq!(
+            err,
+            "<stdin>:1:1: error: division by zero\n  |\n1 | 1 / 0\n  | ^^^^^\n"
+        );
+    }
+
+    #[test]
+    fn runtime_errors_in_earlier_entries_name_the_session() {
+        let (_, err) = session("fn f(n: int) -> int;\n    ret 1 / n\n\nf(0)\n");
+        assert!(
+            err.starts_with("<session>:2:9: error: division by zero\n"),
+            "{err}"
+        );
     }
 
     #[test]

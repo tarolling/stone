@@ -2149,6 +2149,22 @@ pub(crate) fn place(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
     }
 }
 
+/// Returns the span of each subscript in `list`, a variable or an element of one, outermost
+/// index first, matching the indexes [`place`] returns. A runtime error for an index out of
+/// range points at its subscript.
+///
+/// For example, `grid[i][j]` gives the spans of `grid[i]` and `grid[i][j]`.
+pub(crate) fn place_spans(list: &Expr) -> Vec<Span> {
+    match &list.kind {
+        ExprKind::Subscript { value, .. } => {
+            let mut spans = place_spans(value);
+            spans.push(list.span);
+            spans
+        }
+        _ => vec![],
+    }
+}
+
 /// Returns the receiver of `expr` if it calls a method that changes its receiver.
 ///
 /// For example, for `grid[0].append(1)` this returns `grid[0]`, and for `xs.len()` it returns

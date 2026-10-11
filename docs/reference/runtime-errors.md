@@ -1,20 +1,32 @@
 # Runtime errors
 
-When a program fails while running, it prints `error:` and a message to stderr and exits with
-status 1. Output printed before the error stays printed. The interpreter prefixes the message
-with the file name, and a compiled executable prints it on its own:
+When a program fails while running, it prints the error to stderr the way the checker prints
+one, with the file, line, and column, the message, and the source line with carets under the
+expression that failed, then exits with status 1. Output printed before the error stays
+printed. A compiled executable prints exactly what the interpreter does, since `stone build`
+writes each place an error can happen into the executable:
 
 ```text
 $ stone run average.stn
 7
-average.stn: error: division by zero
+average.stn:5:9: error: division by zero
+  |
+5 |     ret total / values.len()
+  |         ^^^^^^^^^^^^^^^^^^^^
 $ stone build average.stn -o average && ./average
 7
-error: division by zero
+average.stn:5:9: error: division by zero
+  |
+5 |     ret total / values.len()
+  |         ^^^^^^^^^^^^^^^^^^^^
 ```
 
 Both backends stop at the same point with the same message, since operands are evaluated left
-to right in both.
+to right in both. The error points at the innermost expression that failed: the division in
+`1 + a / b`, the subscript in `xs[i]`, the call in `int(s)`, `xs.pop()`, or `math.sqrt(x)`, and
+for `recursion is too deep`, the call that went one level too deep. A change such as
+`grid[i][j] = v` points at the subscript whose index is out of range. An executable names the
+file by the path it was built from.
 
 | message | cause |
 | --- | --- |
@@ -45,6 +57,8 @@ to right in both.
 Arithmetic on lists computes the whole expression for the first element, then the second, and
 so on, so an error comes from the first element where any of its operations fails. In
 `a / b + c / d`, a zero in `d` at index 1 stops the program before a zero in `b` at index 2.
+Such an error points at the whole list expression, `a / b + c / d`, while a number computed
+once inside it, such as `(n / m)` in `xs * (n / m)`, fails at its own expression.
 
 Integer `+`, `-`, `*`, and `**` wrap around on overflow instead of failing. Float arithmetic
 follows IEEE 754 apart from division by zero and `math.sqrt` of a negative number, so it produces `inf`, `-inf`, and `nan` instead of

@@ -46,7 +46,7 @@ These apply to stone programs, such as the examples, tests, and benchmarks.
 - Keep `docs/grammar/stone.gram` and `docs/grammar/stone.asdl` in sync with the parser and AST.
   Parser functions mirror the grammar's rule names, such as `parse_t_primary`.
 - The checker should only accept what both backends run identically.
-- Runtime error messages must match between backends.
+- Runtime error messages, and the expressions they point at, must match between backends.
 - Adding a builtin touches `BUILTINS` and `BUILTIN_DOCS` in `src/stdlib.rs`, its type rule in
   `Inference::infer_builtin`, `Interpreter::call`, its lowering in `Lowerer::call` (plus an IR
   instruction and its emission in both backends if it is not a runtime call), a program in

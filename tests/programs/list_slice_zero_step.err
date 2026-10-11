@@ -1,1 +1,1 @@
-slice step cannot be zero
+:4:7: error: slice step cannot be zero

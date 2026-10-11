@@ -10,6 +10,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-10-10
+
 ### Added
 
 - The builtin `math` module: `math.abs`, `math.min`, `math.max`, `math.sqrt`, and `math.floor`.

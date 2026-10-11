@@ -58,10 +58,23 @@ The rules for `use`:
 A function's parameters and locals may shadow a name bound by `use`, just as they shadow
 functions.
 
-`os` is a builtin module with no file, so `use os`, `use os.env`, and `use os as system` work in
-any file without an `os.st`. A program cannot have a module of its own named `os`: using it is
-the error `'os' is a builtin module, so rename os.st`. See
-[the `os` module](builtins.md#the-os-module) for its functions.
+## Builtin modules
+
+`os`, `math`, `random`, and `time` are builtin modules with no file, so `use math`,
+`use math.sqrt`, and `use math as m` work in any file without a `math.st`. A program cannot have
+a module of its own with one of those names: using it is the error
+`'math' is a builtin module, so rename math.st`. See [the builtins](builtins.md) for their
+functions:
+
+| module | for |
+| --- | --- |
+| [`os`](builtins.md#the-os-module) | the machine and process a program runs on |
+| [`math`](builtins.md#the-math-module) | absolute values, least and greatest, square roots, and rounding down |
+| [`random`](builtins.md#the-random-module) | pseudo-random numbers, the same in every backend after a seed |
+| [`time`](builtins.md#the-time-module) | the time of day, timing code, and sleeping |
+
+A builtin module's functions are only reachable through it, so a program can still name its
+own variables and functions `min`, `max`, `sleep`, or `env`.
 
 ## pub
 

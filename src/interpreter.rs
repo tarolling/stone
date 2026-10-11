@@ -8,7 +8,8 @@ use crate::ast::{
 use crate::checker::{collect_assigned, place, range_args};
 use crate::last_use::{GlobalReads, global_reads, last_uses};
 use crate::span::Span;
-use crate::stdlib::{self, MAX_CALL_DEPTH, os};
+use crate::stdlib::random::Rng;
+use crate::stdlib::{self, MAX_CALL_DEPTH, math, os, time};
 use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::io::{BufRead, Write};
@@ -79,6 +80,42 @@ pub enum Value {
 /// Makes a new list of strings, such as the pieces `split` returns.
 fn str_list(items: Vec<&str>) -> Value {
     Value::list(items.into_iter().map(|s| Value::Str(s.into())).collect())
+}
+
+/// Returns the least of `values` for `math.min`, or the greatest for `math.max`, which must all be
+/// ints or all floats, as the checker ensures.
+///
+/// For example, `min_or_max("math.max", &[Value::Int(1), Value::Int(3)])` returns `Value::Int(3)`.
+fn min_or_max(name: &str, values: &[Value]) -> EvalResult<Value> {
+    let max = name == "math.max";
+    if let Some(Value::Float(_)) = values.first() {
+        let floats: Vec<f64> = values
+            .iter()
+            .map(|value| match value {
+                Value::Float(x) => Ok(*x),
+                _ => Err(format!("{name}() takes ints or floats")),
+            })
+            .collect::<Result<_, _>>()?;
+        let result = if max {
+            math::max(&floats)
+        } else {
+            math::min(&floats)
+        };
+        return Ok(Value::Float(result?));
+    }
+    let ints: Vec<i64> = values
+        .iter()
+        .map(|value| match value {
+            Value::Int(i) => Ok(*i),
+            _ => Err(format!("{name}() takes ints or floats")),
+        })
+        .collect::<Result<_, _>>()?;
+    let result = if max {
+        math::max(&ints)
+    } else {
+        math::min(&ints)
+    };
+    Ok(Value::Int(result?))
 }
 
 impl Value {
@@ -290,6 +327,9 @@ pub struct Interpreter<'out> {
     /// How many times a change copied a list that something else still shared, which tests use
     /// to check that values move rather than being copied.
     copies: u64,
+    /// The `random` module's generator, seeded from the system's entropy on first use unless
+    /// `random.seed` seeds it first. It lasts the whole run, or the whole interactive session.
+    rng: Option<Rng>,
 }
 
 impl Default for Interpreter<'static> {
@@ -327,6 +367,7 @@ impl<'out> Interpreter<'out> {
             depth: 0,
             calls: 0,
             copies: 0,
+            rng: None,
         }
     }
 
@@ -912,6 +953,12 @@ impl<'out> Interpreter<'out> {
         }
     }
 
+    /// Returns the `random` module's generator, seeding it from the system's entropy if nothing
+    /// has seeded it yet.
+    fn rng(&mut self) -> &mut Rng {
+        self.rng.get_or_insert_with(Rng::from_entropy)
+    }
+
     /// Calls the builtin or user-defined function named `name` with already evaluated arguments.
     fn call(&mut self, name: &str, args: Vec<Value>) -> EvalResult<Value> {
         match (name, &args[..]) {
@@ -963,8 +1010,40 @@ impl<'out> Interpreter<'out> {
                 self.out.flush()?;
                 return Err(Box::new(Exit(*code as u8)));
             }
-            ("os.time", []) => return Ok(Value::Float(os::time())),
-            ("os.clock", []) => return Ok(Value::Float(os::clock())),
+            ("math.abs", [Value::Int(x)]) => return Ok(Value::Int(math::abs_int(*x)?)),
+            ("math.abs", [Value::Float(x)]) => return Ok(Value::Float(math::abs_float(*x))),
+            ("math.min" | "math.max", [Value::List(items)]) => {
+                return min_or_max(name, items);
+            }
+            ("math.min" | "math.max", [_, _, ..]) => return min_or_max(name, &args),
+            ("math.sqrt", [Value::Int(x)]) => return Ok(Value::Float(math::sqrt(*x as f64)?)),
+            ("math.sqrt", [Value::Float(x)]) => return Ok(Value::Float(math::sqrt(*x)?)),
+            ("math.floor", [Value::Int(x)]) => return Ok(Value::Int(*x)),
+            ("math.floor", [Value::Float(x)]) => return Ok(Value::Int(math::floor(*x)?)),
+            ("random.seed", [Value::Int(seed)]) => {
+                self.rng = Some(Rng::seeded(*seed));
+                return Ok(Value::None);
+            }
+            ("random.random", []) => return Ok(Value::Float(self.rng().random())),
+            ("random.randint", [Value::Int(low), Value::Int(high)]) => {
+                return Ok(Value::Int(self.rng().randint(*low, *high)?));
+            }
+            ("random.choice", [Value::List(items)]) => {
+                let index = self.rng().choice(items.len())?;
+                return Ok(items[index].clone());
+            }
+            ("time.now", []) => return Ok(Value::Float(time::now())),
+            ("time.clock", []) => return Ok(Value::Float(time::clock())),
+            ("time.sleep", [Value::Int(seconds)]) => {
+                self.out.flush()?;
+                time::sleep(*seconds as f64)?;
+                return Ok(Value::None);
+            }
+            ("time.sleep", [Value::Float(seconds)]) => {
+                self.out.flush()?;
+                time::sleep(*seconds)?;
+                return Ok(Value::None);
+            }
             _ => {}
         }
 

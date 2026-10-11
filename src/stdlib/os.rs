@@ -1,8 +1,7 @@
 //! The builtin `os` module, which tells a program about the machine and process it runs on.
 //!
-//! A program imports it like a module file, with `use os` then `os.env("HOME")`, or with
-//! `use os.env` then `env("HOME")`. Linking renames each call to the function's linked name, such
-//! as `os.env`, which no stone name can collide with since it holds a dot.
+//! A program imports it like any builtin module (see [`super::BuiltinModule`]), with `use os`
+//! then `os.env("HOME")`, or with `use os.env` then `env("HOME")`.
 //!
 //! The functions here are what the interpreter runs. Compiled code makes the system calls
 //! behind the same libc functions from `stone.os_*` routines, reading what they read, so both
@@ -10,8 +9,6 @@
 
 use super::BuiltinDoc;
 use std::ffi::{c_char, c_int, c_long};
-use std::sync::OnceLock;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 /// The name a program imports the module by, as in `use os`.
 pub const MODULE: &str = "os";
@@ -20,22 +17,7 @@ pub const MODULE: &str = "os";
 pub const MODULE_DOC: &str = "The builtin module that tells a program about the machine and \
                               process it runs on.";
 
-/// The linked name of every function of the module.
-pub static FUNCTIONS: [&str; 11] = [
-    "os.env",
-    "os.has_env",
-    "os.platform",
-    "os.arch",
-    "os.hostname",
-    "os.cpu_count",
-    "os.pid",
-    "os.cwd",
-    "os.exit",
-    "os.time",
-    "os.clock",
-];
-
-pub static DOCS: [BuiltinDoc; 11] = [
+pub static DOCS: [BuiltinDoc; 9] = [
     BuiltinDoc {
         name: "os.env",
         signature: "os.env(name: str) -> str",
@@ -87,23 +69,7 @@ pub static DOCS: [BuiltinDoc; 11] = [
         description: "Stops the program at once with the exit status `code`, of which the \
                       system keeps the low 8 bits, so `os.exit(256)` exits with 0.",
     },
-    BuiltinDoc {
-        name: "os.time",
-        signature: "os.time() -> float",
-        description: "Returns the seconds since 1970-01-01 00:00:00 UTC, with a fraction.",
-    },
-    BuiltinDoc {
-        name: "os.clock",
-        signature: "os.clock() -> float",
-        description: "Returns seconds from a fixed but arbitrary point, which never go \
-                      backward, so the difference of two calls times the code between them.",
-    },
 ];
-
-/// Returns whether `name` is the linked name of a function of the module, such as `os.env`.
-pub fn is_function(name: &str) -> bool {
-    FUNCTIONS.contains(&name)
-}
 
 /// Returns the value of the environment variable `name` the way libc's `getenv` sees it: only up
 /// to a null character, and never set if that is empty or holds `=`.
@@ -185,38 +151,9 @@ pub fn cwd() -> Result<String, String> {
         .map_err(|_| CWD_FAILURE.to_string())
 }
 
-/// Returns the seconds since the Unix epoch, as whole seconds plus nanoseconds over 1e9, which is
-/// how compiled code turns `clock_gettime`'s result into a float.
-pub fn time() -> f64 {
-    let elapsed = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default();
-    elapsed.as_secs() as f64 + elapsed.subsec_nanos() as f64 / 1e9
-}
-
-/// Returns the seconds since the first call in this process, which never go backward.
-pub fn clock() -> f64 {
-    static START: OnceLock<Instant> = OnceLock::new();
-    START.get_or_init(Instant::now).elapsed().as_secs_f64()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn every_function_is_documented() {
-        let documented: Vec<&str> = DOCS.iter().map(|doc| doc.name).collect();
-        assert_eq!(documented, FUNCTIONS);
-        for name in FUNCTIONS {
-            assert!(name.starts_with("os."), "{name}");
-            let doc = crate::stdlib::builtin_doc(name).unwrap();
-            assert!(doc.signature.starts_with(&format!("{name}(")), "{name}");
-            assert!(crate::stdlib::is_builtin(name), "{name}");
-        }
-        assert!(!is_function("os.nope"));
-        assert!(!crate::stdlib::is_builtin("env"));
-    }
 
     #[test]
     fn env_reads_the_environment() {
@@ -243,8 +180,5 @@ mod tests {
         assert!(cpu_count() >= 1);
         assert!(pid() > 0);
         assert!(cwd().unwrap().starts_with('/'));
-        assert!(time() > 1.7e9);
-        let start = clock();
-        assert!(clock() >= start);
     }
 }

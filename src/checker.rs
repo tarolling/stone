@@ -221,6 +221,8 @@ impl Kind {
 const NUMBERS: &[Kind] = &[Kind::Int, Kind::Float];
 /// What `int` and `float` convert from.
 const CONVERTIBLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
+/// What the `math` functions take.
+const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
 /// What `str` converts from.
 const PRINTABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
 
@@ -1138,16 +1140,123 @@ impl Inference {
                 }
             }
             "os.platform" | "os.arch" | "os.hostname" | "os.cpu_count" | "os.pid" | "os.cwd"
-            | "os.time" | "os.clock" => {
+            | "time.now" | "time.clock" => {
                 if !args.is_empty() {
                     self.arity_error(call.span, name, "0", args.len());
                 }
                 match name {
                     "os.cpu_count" | "os.pid" => Ty::Int,
-                    "os.time" | "os.clock" => Ty::Float,
+                    "time.now" | "time.clock" => Ty::Float,
                     _ => Ty::Str,
                 }
             }
+            "random.random" => {
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                Ty::Float
+            }
+            "random.seed" => {
+                match args {
+                    [arg] => self.expect(&Ty::Int, &arg_types[0], arg.span),
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                Ty::None
+            }
+            "random.randint" => {
+                if args.len() == 2 {
+                    for (arg, ty) in args.iter().zip(arg_types) {
+                        self.expect(&Ty::Int, ty, arg.span);
+                    }
+                } else {
+                    self.arity_error(call.span, name, "2", args.len());
+                }
+                Ty::Int
+            }
+            "random.choice" => {
+                let elem = self.fresh();
+                match args {
+                    [list] => {
+                        self.require(
+                            arg_types[0].clone(),
+                            &[Kind::List],
+                            list.span,
+                            "'random.choice' needs a list, found {}",
+                        );
+                        self.unify(&Ty::List(Box::new(elem.clone())), &arg_types[0]);
+                    }
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                elem
+            }
+            "time.sleep" => {
+                match args {
+                    [arg] => self.require(
+                        arg_types[0].clone(),
+                        NUMERIC,
+                        arg.span,
+                        "'time.sleep' needs an int or float, found {}",
+                    ),
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                Ty::None
+            }
+            "math.abs" | "math.sqrt" | "math.floor" => {
+                let [arg] = args else {
+                    self.arity_error(call.span, name, "1", args.len());
+                    return match name {
+                        "math.sqrt" => Ty::Float,
+                        "math.floor" => Ty::Int,
+                        _ => self.fresh(),
+                    };
+                };
+                let message = match name {
+                    "math.abs" => "'math.abs' needs an int or float, found {}",
+                    "math.sqrt" => "'math.sqrt' needs an int or float, found {}",
+                    _ => "'math.floor' needs an int or float, found {}",
+                };
+                self.require(arg_types[0].clone(), NUMERIC, arg.span, message);
+                match name {
+                    "math.sqrt" => Ty::Float,
+                    "math.floor" => Ty::Int,
+                    _ => arg_types[0].clone(),
+                }
+            }
+            "math.min" | "math.max" => match args {
+                [] => {
+                    self.arity_error(call.span, name, "1 or more", 0);
+                    self.fresh()
+                }
+                [list] => {
+                    self.require(
+                        arg_types[0].clone(),
+                        &[Kind::List],
+                        list.span,
+                        "one argument must be a list of numbers, found {}",
+                    );
+                    let elem = self.fresh();
+                    if self.unify(&Ty::List(Box::new(elem.clone())), &arg_types[0]) {
+                        self.require(
+                            elem.clone(),
+                            NUMERIC,
+                            list.span,
+                            "the list must hold int or float, found list[{}]",
+                        );
+                    }
+                    elem
+                }
+                [first, ..] => {
+                    let message = match name {
+                        "math.min" => "'math.min' needs ints or floats, found {}",
+                        _ => "'math.max' needs ints or floats, found {}",
+                    };
+                    self.require(arg_types[0].clone(), NUMERIC, first.span, message);
+                    for (arg, ty) in args.iter().zip(arg_types).skip(1) {
+                        self.expect(&arg_types[0], ty, arg.span);
+                    }
+                    arg_types[0].clone()
+                }
+            },
             _ => unreachable!("builtin '{name}' has no type rule"),
         }
     }

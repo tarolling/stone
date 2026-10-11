@@ -668,3 +668,62 @@ fn a_file_cannot_take_the_builtin_os_modules_name() {
         5,
     );
 }
+
+#[test]
+fn every_builtin_module_can_be_used_like_os() {
+    assert_eq!(
+        output(&[("main.st", "use math\nprint(math.max(1, 2))\n")]),
+        "2\n"
+    );
+    assert_eq!(
+        output(&[("main.st", "use math.sqrt as root\nprint(root(4))\n")]),
+        "2.0\n"
+    );
+    assert_eq!(
+        output(&[
+            ("main.st", "use util\nprint(util.biggest([3, 9, 4]))\n"),
+            (
+                "util.st",
+                "use math\n\npub def biggest(xs);\n    ret math.max(xs)\n"
+            ),
+        ]),
+        "9\n"
+    );
+    assert_error(
+        &[("main.st", "use math\nmath.nope()\n")],
+        "main.st",
+        "module 'math' has no function 'nope'",
+        2,
+        6,
+    );
+}
+
+#[test]
+fn a_file_cannot_take_a_builtin_modules_name() {
+    for module in &crate::stdlib::MODULES {
+        let name = module.name;
+        let file = format!("{name}.st");
+        let entry = format!("use {name}\n");
+        assert_error(
+            &[
+                (DEFAULT_ENTRY, &entry),
+                (&file, "pub def f();\n    ret 0\n"),
+            ],
+            DEFAULT_ENTRY,
+            &format!("'{name}' is a builtin module, so rename {name}.st"),
+            1,
+            5,
+        );
+    }
+}
+
+#[test]
+fn a_builtin_modules_functions_do_not_reserve_their_names() {
+    assert_eq!(
+        output(&[(
+            "main.st",
+            "use math\nmin = 3\nmax = math.max(min, 5)\nprint(min, max)\n"
+        )]),
+        "3 5\n"
+    );
+}

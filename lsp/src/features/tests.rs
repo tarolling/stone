@@ -629,14 +629,16 @@ fn completion_in_a_use_offers_modules_and_directories() {
         items.sort_by(|a, b| a.0.cmp(&b.0));
         items
     };
-    assert_eq!(
-        labels(at(1, 5)),
-        [
-            ("geometry".to_string(), Some(CompletionItemKind::FOLDER)),
-            ("os".to_string(), Some(CompletionItemKind::MODULE)),
-            ("util".to_string(), Some(CompletionItemKind::MODULE)),
-        ]
-    );
+    // the files and directories, plus every builtin module
+    let mut expected = vec![
+        ("geometry".to_string(), Some(CompletionItemKind::FOLDER)),
+        ("util".to_string(), Some(CompletionItemKind::MODULE)),
+    ];
+    for module in &stone::stdlib::MODULES {
+        expected.push((module.name.to_string(), Some(CompletionItemKind::MODULE)));
+    }
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(labels(at(1, 5)), expected);
     assert_eq!(
         labels(at(2, 14)),
         [("vec".to_string(), Some(CompletionItemKind::MODULE))]
@@ -730,9 +732,9 @@ fn completion_after_os_offers_its_functions() {
     let doc = doc("use os as system\nsystem.\n");
     let items = completion(&doc, at(2, 8), &MapSources::default());
     let labels: Vec<&str> = items.iter().map(|i| i.label.as_str()).collect();
-    let expected: Vec<&str> = stone::stdlib::os::FUNCTIONS
+    let expected: Vec<&str> = stone::stdlib::os::DOCS
         .iter()
-        .map(|name| name.strip_prefix("os.").unwrap())
+        .map(|doc| doc.name.strip_prefix("os.").unwrap())
         .collect();
     assert_eq!(labels, expected);
     assert_eq!(items[0].kind, Some(CompletionItemKind::FUNCTION));
@@ -761,6 +763,36 @@ fn completion_in_a_use_of_os_offers_its_functions() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    assert_eq!(labels.len(), stone::stdlib::os::FUNCTIONS.len());
+    assert_eq!(labels.len(), stone::stdlib::os::DOCS.len());
     assert!(labels.contains(&"env".to_string()), "{labels:?}");
+}
+
+#[test]
+fn every_builtin_module_has_hover_completion_and_a_definition() {
+    let reference: Uri = "file:///cache/builtins.st".parse().unwrap();
+    let builtins = Builtins::new(reference.clone());
+    for module in &stone::stdlib::MODULES {
+        let name = module.name;
+        let function = module.functions[0]
+            .name
+            .strip_prefix(&format!("{name}."))
+            .unwrap();
+        let text = format!("use {name} as m\nm.\n");
+        let doc = doc(&text);
+        // the module, in its `use`
+        let expected = format!("```stone\nmodule {name}\n```\n{}", module.doc);
+        assert_eq!(
+            hover_text(&doc, at(1, 5)).as_deref(),
+            Some(expected.as_str())
+        );
+        let location = definition(&doc, &uri(), at(1, 5), Some(&builtins)).unwrap();
+        assert_eq!(location.uri, reference, "{name}");
+        // its functions after the name it is bound to
+        let labels: Vec<String> = completion(&doc, at(2, 3), &MapSources::default())
+            .into_iter()
+            .map(|i| i.label)
+            .collect();
+        assert_eq!(labels.len(), module.functions.len(), "{name}: {labels:?}");
+        assert!(labels.iter().any(|l| l == function), "{name}: {labels:?}");
+    }
 }

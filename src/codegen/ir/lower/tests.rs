@@ -426,7 +426,7 @@ fn dump_linked(source: &str) -> String {
 fn os_functions_call_the_runtime() {
     let source = "use os\nx = os.env(\"A\")\n\
                   print(os.has_env(x), os.platform(), os.arch(), os.hostname(), os.cpu_count())\n\
-                  print(os.pid(), os.cwd(), os.time(), os.clock())\nos.exit(1)\n";
+                  print(os.pid(), os.cwd())\nos.exit(1)\n";
     let text = dump_linked(source);
     for call in [
         "call stone.os_env(",
@@ -437,8 +437,6 @@ fn os_functions_call_the_runtime() {
         "call stone.os_cpu_count()",
         "call stone.os_pid()",
         "call stone.os_cwd()",
-        "call stone.os_time()",
-        "call stone.os_clock()",
         "call stone.os_exit(1)",
     ] {
         assert!(text.contains(call), "{call} in\n{text}");
@@ -452,5 +450,130 @@ fn os_strings_are_owned_by_whoever_uses_them() {
     assert!(
         text.contains("v0 = call stone.os_cwd()") && text.contains("release_str v0"),
         "{text}"
+    );
+}
+
+/// Returns the IR of the first function of `source`, linked first so it can use `math`.
+fn first_function(source: &str) -> String {
+    dump_linked(source)
+        .split("fn main")
+        .next()
+        .unwrap()
+        .to_string()
+}
+
+#[test]
+fn math_abs_branches_instead_of_calling() {
+    let ints = "use math\ndef f(x);\n    ret math.abs(x)\nprint(f(1))\n";
+    assert_eq!(
+        first_function(ints),
+        "fn f(v0):\n\
+         b0:\n  br_eq v0, -9223372036854775808 -> b1, b2\n\
+         b1:\n  fail \"integer overflow in abs\"\n\
+         b2:\n  br_lt v0, 0 -> b3, b4\n\
+         b3:\n  v1 = neg v0\n  jmp b5\n\
+         b4:\n  v1 = copy v0\n  jmp b5\n\
+         b5:\n  ret v1\n"
+    );
+    let floats = "use math\ndef f(x);\n    ret math.abs(x)\nprint(f(1.5))\n";
+    // 0.0 - x rather than a sign flip, so -0.0 becomes 0.0
+    assert_eq!(
+        first_function(floats),
+        "fn f(v0):\n\
+         b0:\n  fbr_le v0, 0 -> b1, b2\n\
+         b1:\n  v1 = fsub 0, v0\n  jmp b3\n\
+         b2:\n  v1 = copy v0\n  jmp b3\n\
+         b3:\n  ret v1\n"
+    );
+}
+
+#[test]
+fn math_min_and_max_fold_from_the_left() {
+    let several = "use math\ndef f(a, b, c);\n    ret math.max(a, b, c)\nprint(f(1, 2, 3))\n";
+    assert_eq!(
+        first_function(several),
+        "fn f(v0, v1, v2):\n\
+         b0:\n  v3 = copy v0\n  br_gt v1, v3 -> b1, b2\n\
+         b1:\n  v3 = copy v1\n  jmp b2\n\
+         b2:\n  br_gt v2, v3 -> b3, b4\n\
+         b3:\n  v3 = copy v2\n  jmp b4\n\
+         b4:\n  ret v3\n"
+    );
+    let list = "use math\ndef f(xs);\n    ret math.min(xs)\nprint(f([1.5]))\n";
+    assert_eq!(
+        first_function(list),
+        "fn f(v0):\n\
+         b0:\n  v2 = len v0\n  br_eq v2, 0 -> b1, b2\n\
+         b1:\n  fail \"min of an empty list\"\n\
+         b2:\n  v1 = list_get v0, 0\n  v3 = copy 1\n  jmp b3\n\
+         b3:\n  br_lt v3, v2 -> b4, b7\n\
+         b4:\n  v4 = list_get v0, v3\n  fbr_lt v4, v1 -> b5, b6\n\
+         b5:\n  v1 = copy v4\n  jmp b6\n\
+         b6:\n  v3 = add v3, 1\n  jmp b3\n\
+         b7:\n  ret v1\n"
+    );
+}
+
+#[test]
+fn math_sqrt_and_floor_check_their_argument_first() {
+    let sqrt = "use math\ndef f(x);\n    ret math.sqrt(x)\nprint(f(2))\n";
+    assert_eq!(
+        first_function(sqrt),
+        "fn f(v0):\n\
+         b0:\n  v1 = int_to_float v0\n  fbr_lt v1, 0 -> b1, b2\n\
+         b1:\n  fail \"math domain error\"\n\
+         b2:\n  v2 = fsqrt v1\n  ret v2\n"
+    );
+    let floor = "use math\ndef f(x);\n    ret math.floor(x)\nprint(f(2.5))\n";
+    assert_eq!(
+        first_function(floor),
+        "fn f(v0):\n\
+         b0:\n  v1 = float_to_int v0\n  v2 = int_to_float v1\n  fbr_lt v0, v2 -> b1, b2\n\
+         b1:\n  v1 = sub v1, 1\n  jmp b2\n\
+         b2:\n  ret v1\n"
+    );
+}
+
+#[test]
+fn time_functions_call_the_runtime() {
+    let text = dump_linked("use time\nprint(time.now(), time.clock())\ntime.sleep(0.5)\n");
+    for call in [
+        "call stone.time_now()",
+        "call stone.time_clock()",
+        "call stone.time_sleep(4602678819172646912)",
+    ] {
+        assert!(text.contains(call), "{call} in\n{text}");
+    }
+    // an int length becomes a float first
+    let text = dump_linked("use time\ntime.sleep(2)\n");
+    assert!(
+        text.contains("v0 = int_to_float 2\n  call stone.time_sleep(v0)"),
+        "{text}"
+    );
+}
+
+#[test]
+fn randint_checks_its_range_then_draws_below_the_span() {
+    assert_eq!(
+        first_function("use random\ndef f(a, b);\n    ret random.randint(a, b)\nprint(f(1, 6))\n"),
+        "fn f(v0, v1):\n\
+         b0:\n  br_gt v0, v1 -> b1, b2\n\
+         b1:\n  fail \"empty range for randint\"\n\
+         b2:\n  v2 = sub v1, v0\n  v2 = add v2, 1\n  v3 = call stone.random_below(v2)\n  \
+         v4 = add v0, v3\n  ret v4\n"
+    );
+}
+
+#[test]
+fn choice_retains_a_counted_element() {
+    let text =
+        first_function("use random\ndef f(xs);\n    ret random.choice(xs)\nprint(f([\"a\"]))\n");
+    assert_eq!(
+        text,
+        "fn f(v0):\n\
+         b0:\n  v1 = len v0\n  br_eq v1, 0 -> b1, b2\n\
+         b1:\n  fail \"cannot choose from an empty list\"\n\
+         b2:\n  v2 = call stone.random_below(v1)\n  v3 = list_get v0, v2\n  retain v3\n  \
+         ret v3\n"
     );
 }

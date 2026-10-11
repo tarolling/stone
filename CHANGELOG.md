@@ -12,6 +12,28 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- The builtin `math` module: `math.abs`, `math.min`, `math.max`, `math.sqrt`, and `math.floor`.
+  `min` and `max` take two or more numbers or one list of them. Since they live in a module,
+  programs can still name their own variables `min` and `max`. `math.sqrt` of a negative number
+  stops the program with `math domain error`, as in Python, and `math.floor` returns an int.
+- The builtin `random` module: `random.seed`, `random.random`, `random.randint`, and
+  `random.choice`. After `random.seed(n)`, `stone run` and a built program draw exactly the same
+  numbers on every machine. Without a seed, each run seeds itself from the system's entropy.
+- The builtin `time` module: `time.now`, `time.clock`, and `time.sleep`, which waits for a number
+  of seconds that may have a fraction.
+
+### Changed
+
+- `os.time()` and `os.clock()` moved to the new `time` module as `time.now()` and
+  `time.clock()`, and the `os` module no longer has them.
+- A program can no longer have a module of its own named `math`, `random`, or `time`, since
+  `use math` always means the builtin module. Rename a `math.st`, `random.st`, or `time.st` next
+  to the entry file.
+
+## [0.2.0] - 2026-10-10
+
+### Added
+
 - Warnings. The first one points out a function that changes a parameter and never uses it
   afterward, since the caller cannot see the change. `stone run` and `stone build` print
   warnings and still run or build the program.

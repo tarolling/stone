@@ -579,8 +579,8 @@ ret y
             ),
             Ok(format!("{platform} true true\n"))
         );
-        let source = "use os\nprint(os.pid() > 0, os.cpu_count() > 0, os.time() > 0.0)\n\
-                      print(os.clock() >= 0.0, os.hostname() == os.hostname(), os.cwd() != \"\")\n";
+        let source = "use os\nuse time\nprint(os.pid() > 0, os.cpu_count() > 0, time.now() > 0.0)\n\
+                      print(time.clock() >= 0.0, os.hostname() == os.hostname(), os.cwd() != \"\")\n";
         assert_eq!(
             run_io(source, "", &[]),
             Ok("true true true\ntrue true true\n".to_string())

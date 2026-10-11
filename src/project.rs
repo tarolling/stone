@@ -9,9 +9,9 @@
 //! its module, such as `geometry.shapes.area`, and every use of it is rewritten to that name. The
 //! checker and both backends then run on it as they would on one file.
 //!
-//! `os` is a builtin module with no file (see [`crate::stdlib::os`]). Calls to its functions are
-//! rewritten to their linked names too, such as `os.env`, which the checker and both backends
-//! treat as builtins.
+//! Builtin modules such as `os` have no file (see [`crate::stdlib::MODULES`]). Calls to their
+//! functions are rewritten to their linked names too, such as `os.env`, which the checker and
+//! both backends treat as builtins.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -22,7 +22,7 @@ use crate::diagnostic::Diagnostic;
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::span::{FileId, Pos, Span};
-use crate::stdlib::{BUILTINS, is_builtin, os};
+use crate::stdlib::{BUILTINS, BuiltinModule, is_builtin, module_function};
 
 #[cfg(test)]
 mod tests;
@@ -236,8 +236,8 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
 /// What a name a file binds with `use` refers to while linking.
 enum Binding {
     Module(FileId),
-    /// The builtin `os` module.
-    BuiltinModule,
+    /// A builtin module, such as `os`.
+    BuiltinModule(&'static BuiltinModule),
     Function(String),
     /// A `use` that failed to resolve, which was already reported, so its uses are left alone.
     Unresolved,
@@ -350,8 +350,8 @@ impl Loader<'_> {
     fn resolve(&mut self, file: FileId, path: &[(String, Span)]) -> Result<Target, Diagnostic> {
         let names: Vec<String> = path.iter().map(|(name, _)| name.clone()).collect();
         let span = path[0].1.to(path[path.len() - 1].1);
-        if names[0] == os::MODULE {
-            return self.resolve_os(path, span);
+        if let Some(module) = crate::stdlib::module(&names[0]) {
+            return self.resolve_builtin_module(module, path, span);
         }
         let entry = self.entry_names.join(".");
         let entry_error = || {
@@ -406,34 +406,40 @@ impl Loader<'_> {
         ))
     }
 
-    /// Finds what a `use` path starting with `os` names: the builtin module, or one of its
-    /// functions, by its linked name.
+    /// Finds what a `use` path starting with the name of a builtin module names: the module, or
+    /// one of its functions, by its linked name.
     ///
     /// For example, `use os` is the module and `use os.env` is the function `os.env`. A file
     /// `os.st` next to the entry file would be ambiguous, so it is an error to import it.
-    fn resolve_os(&self, path: &[(String, Span)], span: Span) -> Result<Target, Diagnostic> {
-        let module = [os::MODULE.to_string()];
-        if !self.is_entry(&module)
+    fn resolve_builtin_module(
+        &self,
+        module: &'static BuiltinModule,
+        path: &[(String, Span)],
+        span: Span,
+    ) -> Result<Target, Diagnostic> {
+        let name = module.name;
+        let names = [name.to_string()];
+        if !self.is_entry(&names)
             && self
                 .sources
-                .read(&self.root.join(module_path(&module)))
+                .read(&self.root.join(module_path(&names)))
                 .is_some()
         {
             return Err(Diagnostic::error(
                 span,
-                format!("'{}' is a builtin module, so rename os.st", os::MODULE),
+                format!("'{name}' is a builtin module, so rename {name}.st"),
             ));
         }
         match path {
-            [_] => Ok(Target::BuiltinModule(os::MODULE.to_string())),
+            [_] => Ok(Target::BuiltinModule(name.to_string())),
             [_, (function, function_span)] => {
-                let linked = format!("{}.{function}", os::MODULE);
-                if os::is_function(&linked) {
+                let linked = format!("{name}.{function}");
+                if module_function(&linked).is_some() {
                     Ok(Target::Function(linked))
                 } else {
                     Err(Diagnostic::error(
                         *function_span,
-                        format!("module '{}' has no function '{function}'", os::MODULE),
+                        format!("module '{name}' has no function '{function}'"),
                     ))
                 }
             }
@@ -495,7 +501,9 @@ impl Loader<'_> {
                         match target {
                             Target::Module(id) => Binding::Module(*id),
                             Target::Function(name) => Binding::Function(name.clone()),
-                            Target::BuiltinModule(_) => Binding::BuiltinModule,
+                            Target::BuiltinModule(name) => Binding::BuiltinModule(
+                                crate::stdlib::module(name).expect("resolved to a builtin module"),
+                            ),
                         }
                     }
                     None => Binding::Unresolved,
@@ -719,10 +727,10 @@ impl Rewriter<'_> {
         }
         let target = match self.bindings.get(id) {
             Some(Binding::Module(target)) => target,
-            Some(Binding::BuiltinModule) => {
+            Some(Binding::BuiltinModule(module)) => {
                 let attr_span = self.attr_span(func.span, attr);
-                let linked = format!("{}.{attr}", os::MODULE);
-                if os::is_function(&linked) {
+                let linked = format!("{}.{attr}", module.name);
+                if module_function(&linked).is_some() {
                     *func = Expr::new(
                         ExprKind::Name {
                             id: linked,
@@ -733,7 +741,7 @@ impl Rewriter<'_> {
                 } else {
                     self.diagnostics.push(Diagnostic::error(
                         attr_span,
-                        format!("module '{}' has no function '{attr}'", os::MODULE),
+                        format!("module '{}' has no function '{attr}'", module.name),
                     ));
                 }
                 return true;
@@ -782,7 +790,7 @@ impl Rewriter<'_> {
         }
         match self.bindings.get(id) {
             Some(Binding::Function(name)) => *id = name.clone(),
-            Some(Binding::Module(_) | Binding::BuiltinModule) => self.diagnostics.push(
+            Some(Binding::Module(_) | Binding::BuiltinModule(_)) => self.diagnostics.push(
                 Diagnostic::error(span, format!("'{id}' is a module, not a value")),
             ),
             Some(Binding::Unresolved) => {}

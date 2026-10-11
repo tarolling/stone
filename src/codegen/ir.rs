@@ -188,6 +188,8 @@ pub enum Inst {
     Neg { dst: VReg, src: Operand },
     /// Float negation, which flips the sign bit.
     FloatNeg { dst: VReg, src: Operand },
+    /// The correctly rounded square root of a float, which is nan for a negative one.
+    FloatSqrt { dst: VReg, src: Operand },
     /// 1 if `src` is zero, else 0.
     Not { dst: VReg, src: Operand },
     /// 1 if the comparison holds, else 0. Ints compare signed, and floats compare with every
@@ -272,6 +274,7 @@ impl Inst {
             | Inst::FloatBinary { dst, .. }
             | Inst::Neg { dst, .. }
             | Inst::FloatNeg { dst, .. }
+            | Inst::FloatSqrt { dst, .. }
             | Inst::Not { dst, .. }
             | Inst::Compare { dst, .. }
             | Inst::LoadGlobal { dst, .. }
@@ -298,6 +301,7 @@ impl Inst {
             Inst::Copy { src, .. }
             | Inst::Neg { src, .. }
             | Inst::FloatNeg { src, .. }
+            | Inst::FloatSqrt { src, .. }
             | Inst::Not { src, .. }
             | Inst::IntToFloat { src, .. }
             | Inst::FloatToInt { src, .. }
@@ -354,13 +358,15 @@ pub enum Terminator {
     },
     /// Returns from the function, with `none` when there is no value.
     Return(Option<Operand>),
+    /// Stops the program with the runtime error `message`, as `fail "math domain error"`.
+    Fail(String),
 }
 
 impl Terminator {
     /// Returns the operands the terminator reads.
     pub fn operands(&self) -> Vec<Operand> {
         match self {
-            Terminator::Jump(_) | Terminator::Return(None) => vec![],
+            Terminator::Jump(_) | Terminator::Return(None) | Terminator::Fail(_) => vec![],
             Terminator::Branch { cond, .. } => vec![*cond],
             Terminator::CmpBranch { lhs, rhs, .. } => vec![*lhs, *rhs],
             Terminator::Return(Some(value)) => vec![*value],
@@ -384,7 +390,7 @@ impl Terminator {
             | Terminator::CmpBranch {
                 then, otherwise, ..
             } => vec![*then, *otherwise],
-            Terminator::Return(_) => vec![],
+            Terminator::Return(_) | Terminator::Fail(_) => vec![],
         }
     }
 }
@@ -489,6 +495,7 @@ impl fmt::Display for Inst {
             }
             Inst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
             Inst::FloatNeg { dst, src } => write!(f, "{dst} = fneg {src}"),
+            Inst::FloatSqrt { dst, src } => write!(f, "{dst} = fsqrt {src}"),
             Inst::Not { dst, src } => write!(f, "{dst} = not {src}"),
             Inst::Compare {
                 cond,
@@ -569,6 +576,7 @@ impl fmt::Display for Terminator {
             }
             Terminator::Return(None) => write!(f, "ret"),
             Terminator::Return(Some(value)) => write!(f, "ret {value}"),
+            Terminator::Fail(message) => write!(f, "fail {message:?}"),
         }
     }
 }

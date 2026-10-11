@@ -784,6 +784,23 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
                 _ => bitfield(true, rd, rn, amount, width - 1),
             })
         }
+        "ror" => {
+            count(3)?;
+            let (rd, rn) = (gpr(operands[0])?, gpr(operands[1])?);
+            same_width(&[rd, rn])?;
+            if rd.sf() == 0 {
+                return Err("'ror' only rotates x registers".to_string());
+            }
+            let amount = u32::try_from(imm(operands[2])?)
+                .ok()
+                .filter(|n| *n < 64)
+                .ok_or_else(|| format!("bad rotate amount '{}'", operands[2]))?;
+            // an alias of extr with the same register twice
+            Ok((
+                0x93c00000 | rn.num << 16 | amount << 10 | rn.num << 5 | rd.num,
+                None,
+            ))
+        }
         "ubfx" | "sbfx" => {
             count(4)?;
             let (rd, rn) = (gpr(operands[0])?, gpr(operands[1])?);
@@ -975,6 +992,11 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
                 (Kind::D, Kind::D) => Ok((0x1e604000 | rn.num << 5 | rd.num, None)),
                 _ => Err("bad operands for 'fmov'".to_string()),
             }
+        }
+        "fsqrt" => {
+            count(2)?;
+            let (rd, rn) = (dreg(operands[0])?, dreg(operands[1])?);
+            Ok((0x1e61c000 | rn.num << 5 | rd.num, None))
         }
         "fadd" | "fsub" | "fmul" | "fdiv" => {
             count(3)?;
@@ -1192,6 +1214,11 @@ mod tests {
             ("fcmp d1, #0.0", "1e602028"),
             ("fcvtzs x0, d1", "9e780020"),
             ("scvtf d0, x1", "9e620020"),
+            ("fsqrt d0, d0", "1e61c000"),
+            ("ror x0, x1, #57", "93c1e420"),
+            ("ror x9, x9, #19", "93c94d29"),
+            ("ror x10, x11, #1", "93cb056a"),
+            ("fsqrt d3, d2", "1e61c043"),
             ("scvtf d0, xzr", "9e6203e0"),
             ("ret", "d65f03c0"),
             ("svc #0", "d4000001"),

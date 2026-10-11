@@ -30,10 +30,12 @@ const STRING_ROUTINES: &[&str] = &[
     "stone.os_cwd",
 ];
 
-/// The runtime routine behind each function of the `os` module, by its linked name.
+/// The runtime routine behind each function of a builtin module that calls the runtime, by its
+/// linked name. Each module's routines share a prefix, such as `stone.os_` or `stone.time_`.
 ///
-/// For example, `os.env("HOME")` lowers to a call of `stone.os_env`.
-pub const OS_ROUTINES: [(&str, &str); 11] = [
+/// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
+/// to plain IR instead, so it has none.
+pub const MODULE_ROUTINES: [(&str, &str); 14] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -43,14 +45,17 @@ pub const OS_ROUTINES: [(&str, &str); 11] = [
     ("os.pid", "stone.os_pid"),
     ("os.cwd", "stone.os_cwd"),
     ("os.exit", "stone.os_exit"),
-    ("os.time", "stone.os_time"),
-    ("os.clock", "stone.os_clock"),
+    ("random.seed", "stone.random_seed"),
+    ("random.random", "stone.random_float"),
+    ("time.now", "stone.time_now"),
+    ("time.clock", "stone.time_clock"),
+    ("time.sleep", "stone.time_sleep"),
 ];
 
-/// Returns the runtime routine behind the `os` function with the linked name `name`, such as
-/// `stone.os_pid` for `os.pid`.
-pub fn os_routine(name: &str) -> Option<&'static str> {
-    OS_ROUTINES
+/// Returns the runtime routine behind the function of a builtin module with the linked name
+/// `name`, such as `stone.os_pid` for `os.pid`.
+pub fn module_routine(name: &str) -> Option<&'static str> {
+    MODULE_ROUTINES
         .iter()
         .find(|(function, _)| *function == name)
         .map(|(_, label)| *label)
@@ -304,21 +309,25 @@ impl Context {
         self.counts_references || self.uses(&["stone.os_env", "stone.os_has_env"])
     }
 
-    /// Returns the runtime routines of the `os` module that the program calls, such as
-    /// `stone.os_pid`.
-    pub fn os_routines(&self) -> Vec<&'static str> {
-        OS_ROUTINES
+    /// Returns the runtime routines of a builtin module that the program calls, by the prefix
+    /// their labels share, such as `stone.os_pid` for `stone.os_`.
+    pub fn module_routines(&self, prefix: &str) -> Vec<&'static str> {
+        MODULE_ROUTINES
             .iter()
             .map(|(_, label)| *label)
-            .filter(|label| self.uses(&[label]))
+            .filter(|label| label.starts_with(prefix) && self.uses(&[label]))
             .collect()
     }
 
-    /// Returns the failure label `stone.os_cwd` jumps to, if the program calls it, or an empty
-    /// string, so programs that cannot fail need no `stone.fail`.
-    pub fn os_cwd_failure(&mut self) -> String {
-        if self.uses(&["stone.os_cwd"]) {
-            self.fail_label(crate::stdlib::os::CWD_FAILURE)
+    /// Returns the failure label for `message` that the runtime routine `routine` jumps to, if
+    /// the program calls it, or an empty string, so programs that cannot fail need no
+    /// `stone.fail`.
+    ///
+    /// For example, `failure_of("stone.os_cwd", CWD_FAILURE)` is a label only in a program that
+    /// calls `os.cwd`.
+    pub fn failure_of(&mut self, routine: &str, message: &str) -> String {
+        if self.uses(&[routine]) {
+            self.fail_label(message)
         } else {
             String::new()
         }

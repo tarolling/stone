@@ -22,16 +22,24 @@ to right in both.
 | `integer overflow in division` | the smallest int divided by `-1`, which has no int result. `%` by `-1` is always `0` |
 | `negative exponent` | `**` with an int base and a negative exponent, which has no int result |
 | `list index out of range` | an index at or past the length, or a negative index before the start. The interpreter adds the index and length |
-| `cannot convert float to int (nan or out of range)` | `int()` of nan, an infinity, or a float outside the int range |
+| `cannot convert float to int (nan or out of range)` | `int()` or `math.floor()` of nan, an infinity, or a float outside the int range |
 | `invalid literal for int() with base 10: '...'` | `int()` of a string that is not a decimal int, quoted as given |
 | `int() argument out of range: '...'` | `int()` of a string holding an int too large or small to fit |
 | `could not convert string to float: '...'` | `float()` of a string that is not a float, quoted as given |
 | `empty separator` | `split("")` |
+| `integer overflow in abs` | `math.abs()` of the smallest int, whose absolute value does not fit in an int |
+| `math domain error` | `math.sqrt()` of a negative number, as in Python |
+| `min of an empty list` | `math.min()` of an empty list |
+| `max of an empty list` | `math.max()` of an empty list |
+| `empty range for randint` | `random.randint(low, high)` with `low` greater than `high` |
+| `cannot choose from an empty list` | `random.choice()` of an empty list |
+| `sleep length must be non-negative` | `time.sleep()` of a negative number or nan |
+| `sleep length is too large` | `time.sleep()` of 2^63 seconds or more |
 | `recursion is too deep (more than 1000 nested calls)` | more than 1,000 calls active at once |
 | `'name' is used before it is assigned` | a function read a global that had not been assigned yet when it ran |
 
 Integer `+`, `-`, `*`, and `**` wrap around on overflow instead of failing. Float arithmetic
-follows IEEE 754 apart from division by zero, so it produces `inf`, `-inf`, and `nan` instead of
+follows IEEE 754 apart from division by zero and `math.sqrt` of a negative number, so it produces `inf`, `-inf`, and `nan` instead of
 errors.
 A float `**` multiplies by repeated squaring and takes the reciprocal for a negative exponent, so
 `0.0 ** -1` is `inf`.

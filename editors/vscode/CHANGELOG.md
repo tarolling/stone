@@ -10,6 +10,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Support for stone's new builtin `math`, `random`, and `time` modules, which works as it does
+  for `os`: hover, completion after `use` and after the module's name, and go to definition in
+  the builtins reference.
+
+## [0.2.0] - 2026-10-10
+
 ### Changed
 
 - `stone-lsp` is built on stone 0.2.0, whose lists are values, so the editor reports the

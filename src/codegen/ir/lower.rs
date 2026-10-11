@@ -37,9 +37,10 @@ use crate::ast::{Arg, BoolOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, Stm
 use crate::checker::{
     Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, range_args,
 };
-use crate::codegen::context::os_routine;
+use crate::codegen::context::module_routine;
 use crate::last_use::{LiveAfter, global_reads, live_after};
 use crate::span::Span;
+use crate::stdlib::{math, random};
 use std::collections::{HashMap, HashSet};
 
 /// The type of each variable, keyed by the function it belongs to (`None` for globals) and name.
@@ -527,7 +528,7 @@ impl<'a> Lowerer<'a> {
                         then: renumber(then),
                         otherwise: renumber(otherwise),
                     },
-                    ret @ Terminator::Return(_) => ret,
+                    term @ (Terminator::Return(_) | Terminator::Fail(_)) => term,
                 };
                 Block {
                     insts: block.insts,
@@ -1440,6 +1441,276 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Lowers a call to a function of the `math` module, which never calls the runtime: each
+    /// becomes compares and branches that do what `stdlib::math` does, in the same order.
+    ///
+    /// For example, `math.abs(x)` of an int fails if `x` is the smallest int, then negates it if
+    /// it is negative, and `math.max(xs)` loops over the list, keeping an element only when it is
+    /// greater than the one kept so far.
+    fn math(&mut self, name: &str, args: &[Expr], into: Option<VReg>) -> Result<Operand, String> {
+        let float = match args {
+            [arg] => match self.type_of(arg)? {
+                Type::List(elem) => *elem == Type::Float,
+                ty => ty == Type::Float,
+            },
+            [first, ..] => self.type_of(first)? == Type::Float,
+            [] => return Err(format!("'{name}' takes an argument")),
+        };
+        match name {
+            "math.abs" => {
+                let x = self.expr(&args[0])?;
+                // the result is written last, since `x` may be the variable it is assigned to
+                let result = self.fresh();
+                let (negate, keep, done) = (self.new_block(), self.new_block(), self.new_block());
+                if float {
+                    // `0.0 - x` rather than flipping the sign, so -0.0 becomes 0.0
+                    self.terminate(Terminator::CmpBranch {
+                        cond: Cond::Le,
+                        float: true,
+                        lhs: x,
+                        rhs: Operand::Imm(0),
+                        then: negate,
+                        otherwise: keep,
+                    });
+                    self.start(negate);
+                    self.push(Inst::FloatBinary {
+                        op: BinOp::Sub,
+                        dst: result,
+                        lhs: Operand::Imm(0),
+                        rhs: x,
+                    });
+                } else {
+                    let (overflow, check) = (self.new_block(), self.new_block());
+                    self.terminate(Terminator::CmpBranch {
+                        cond: Cond::Eq,
+                        float: false,
+                        lhs: x,
+                        rhs: Operand::Imm(i64::MIN),
+                        then: overflow,
+                        otherwise: check,
+                    });
+                    self.start(overflow);
+                    self.terminate(Terminator::Fail(math::ABS_OVERFLOW.to_string()));
+                    self.start(check);
+                    self.terminate(Terminator::CmpBranch {
+                        cond: Cond::Lt,
+                        float: false,
+                        lhs: x,
+                        rhs: Operand::Imm(0),
+                        then: negate,
+                        otherwise: keep,
+                    });
+                    self.start(negate);
+                    self.push(Inst::Neg {
+                        dst: result,
+                        src: x,
+                    });
+                }
+                self.jump(done);
+                self.start(keep);
+                self.push(Inst::Copy {
+                    dst: result,
+                    src: x,
+                });
+                self.start(done);
+                Ok(self.finish(Operand::Reg(result), into))
+            }
+            "math.min" | "math.max" => {
+                // a later value replaces the kept one only if it is strictly better, as in Python
+                let better = if name == "math.max" {
+                    Cond::Gt
+                } else {
+                    Cond::Lt
+                };
+                let result = self.fresh();
+                if let [list] = args {
+                    let empty = if name == "math.max" {
+                        math::MAX_OF_EMPTY
+                    } else {
+                        math::MIN_OF_EMPTY
+                    };
+                    self.fold_list(list, better, float, empty, result)?;
+                } else {
+                    let mut values = Vec::new();
+                    for arg in args {
+                        values.push(self.expr(arg)?);
+                    }
+                    self.push(Inst::Copy {
+                        dst: result,
+                        src: values[0],
+                    });
+                    for &value in &values[1..] {
+                        let (replace, next) = (self.new_block(), self.new_block());
+                        self.terminate(Terminator::CmpBranch {
+                            cond: better,
+                            float,
+                            lhs: value,
+                            rhs: Operand::Reg(result),
+                            then: replace,
+                            otherwise: next,
+                        });
+                        self.start(replace);
+                        self.push(Inst::Copy {
+                            dst: result,
+                            src: value,
+                        });
+                        self.start(next);
+                    }
+                }
+                Ok(self.finish(Operand::Reg(result), into))
+            }
+            "math.sqrt" => {
+                let mut x = self.expr(&args[0])?;
+                if !float {
+                    let converted = self.fresh();
+                    self.push(Inst::IntToFloat {
+                        dst: converted,
+                        src: x,
+                    });
+                    x = Operand::Reg(converted);
+                }
+                let (negative, ok) = (self.new_block(), self.new_block());
+                self.terminate(Terminator::CmpBranch {
+                    cond: Cond::Lt,
+                    float: true,
+                    lhs: x,
+                    rhs: Operand::Imm(0),
+                    then: negative,
+                    otherwise: ok,
+                });
+                self.start(negative);
+                self.terminate(Terminator::Fail(math::DOMAIN_ERROR.to_string()));
+                self.start(ok);
+                let dst = self.dst(into);
+                self.push(Inst::FloatSqrt { dst, src: x });
+                Ok(Operand::Reg(dst))
+            }
+            "math.floor" => {
+                let x = self.expr(&args[0])?;
+                if !float {
+                    return Ok(self.finish(x, into));
+                }
+                // truncate toward zero, which fails on nan or overflow, then step down if that
+                // went up, which only happens for a negative number with a fraction
+                let truncated = self.fresh();
+                self.push(Inst::FloatToInt {
+                    dst: truncated,
+                    src: x,
+                });
+                let back = self.fresh();
+                self.push(Inst::IntToFloat {
+                    dst: back,
+                    src: Operand::Reg(truncated),
+                });
+                let (down, done) = (self.new_block(), self.new_block());
+                self.terminate(Terminator::CmpBranch {
+                    cond: Cond::Lt,
+                    float: true,
+                    lhs: x,
+                    rhs: Operand::Reg(back),
+                    then: down,
+                    otherwise: done,
+                });
+                self.start(down);
+                self.push(Inst::Binary {
+                    op: BinOp::Sub,
+                    dst: truncated,
+                    lhs: Operand::Reg(truncated),
+                    rhs: Operand::Imm(1),
+                });
+                self.start(done);
+                Ok(self.finish(Operand::Reg(truncated), into))
+            }
+            _ => Err(format!("there is no function '{name}'")),
+        }
+    }
+
+    /// Folds the numbers in the list `list` into `result` for `math.min` or `math.max`, keeping
+    /// an element only when it compares `better` than the one kept so far, and failing with
+    /// `empty` for an empty list.
+    fn fold_list(
+        &mut self,
+        list: &Expr,
+        better: Cond,
+        float: bool,
+        empty: &str,
+        result: VReg,
+    ) -> Result<(), String> {
+        let list = self.list_operand(list, &[])?;
+        let len = self.fresh();
+        self.push(Inst::ListLen { dst: len, list });
+        let (fail, first) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Eq,
+            float: false,
+            lhs: Operand::Reg(len),
+            rhs: Operand::Imm(0),
+            then: fail,
+            otherwise: first,
+        });
+        self.start(fail);
+        self.terminate(Terminator::Fail(empty.to_string()));
+        self.start(first);
+        self.push(Inst::ListGet {
+            dst: result,
+            list,
+            index: Operand::Imm(0),
+        });
+        let index = self.fresh();
+        self.push(Inst::Copy {
+            dst: index,
+            src: Operand::Imm(1),
+        });
+
+        let header = self.new_block();
+        let body = self.new_block();
+        let replace = self.new_block();
+        let next = self.new_block();
+        let exit = self.new_block();
+        self.loop_depth += 1;
+        self.start(header);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(index),
+            rhs: Operand::Reg(len),
+            then: body,
+            otherwise: exit,
+        });
+        self.start(body);
+        let element = self.fresh();
+        self.push(Inst::ListGet {
+            dst: element,
+            list,
+            index: Operand::Reg(index),
+        });
+        self.terminate(Terminator::CmpBranch {
+            cond: better,
+            float,
+            lhs: Operand::Reg(element),
+            rhs: Operand::Reg(result),
+            then: replace,
+            otherwise: next,
+        });
+        self.start(replace);
+        self.push(Inst::Copy {
+            dst: result,
+            src: Operand::Reg(element),
+        });
+        self.start(next);
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: index,
+            lhs: Operand::Reg(index),
+            rhs: Operand::Imm(1),
+        });
+        self.jump(header);
+        self.loop_depth -= 1;
+        self.start(exit);
+        self.release_temp(list);
+        Ok(())
+    }
+
     /// Calls the runtime routine `label` with `args`, returning its result.
     fn runtime_call(
         &mut self,
@@ -1550,7 +1821,95 @@ impl<'a> Lowerer<'a> {
                 });
                 Ok(self.finish(Operand::Imm(0), into))
             }
-            _ if let Some(label) = os_routine(name) => {
+            _ if name.starts_with("math.") => self.math(name, args, into),
+            "random.randint" => {
+                let low = self.expr(&args[0])?;
+                let high = self.expr(&args[1])?;
+                let (empty, ok) = (self.new_block(), self.new_block());
+                self.terminate(Terminator::CmpBranch {
+                    cond: Cond::Gt,
+                    float: false,
+                    lhs: low,
+                    rhs: high,
+                    then: empty,
+                    otherwise: ok,
+                });
+                self.start(empty);
+                self.terminate(Terminator::Fail(random::EMPTY_RANGE.to_string()));
+                self.start(ok);
+                // wraps to 0, which the runtime takes as 2^64, for the whole range of ints
+                let span = self.fresh();
+                self.push(Inst::Binary {
+                    op: BinOp::Sub,
+                    dst: span,
+                    lhs: high,
+                    rhs: low,
+                });
+                self.push(Inst::Binary {
+                    op: BinOp::Add,
+                    dst: span,
+                    lhs: Operand::Reg(span),
+                    rhs: Operand::Imm(1),
+                });
+                let offset =
+                    self.runtime_call("stone.random_below", vec![Operand::Reg(span)], None);
+                let dst = self.dst(into);
+                self.push(Inst::Binary {
+                    op: BinOp::Add,
+                    dst,
+                    lhs: low,
+                    rhs: offset,
+                });
+                Ok(Operand::Reg(dst))
+            }
+            "random.choice" => {
+                let list = self.list_operand(&args[0], &[])?;
+                let len = self.fresh();
+                self.push(Inst::ListLen { dst: len, list });
+                let (empty, ok) = (self.new_block(), self.new_block());
+                self.terminate(Terminator::CmpBranch {
+                    cond: Cond::Eq,
+                    float: false,
+                    lhs: Operand::Reg(len),
+                    rhs: Operand::Imm(0),
+                    then: empty,
+                    otherwise: ok,
+                });
+                self.start(empty);
+                self.terminate(Terminator::Fail(random::EMPTY_CHOICE.to_string()));
+                self.start(ok);
+                let index = self.runtime_call("stone.random_below", vec![Operand::Reg(len)], None);
+                let dst = self.dst(into);
+                self.push(Inst::ListGet { dst, list, index });
+                // the element gets a reference of its own, as when a subscript reads it
+                if kind.is_some() {
+                    self.push(Inst::Retain {
+                        src: Operand::Reg(dst),
+                    });
+                    self.own(Operand::Reg(dst), kind);
+                }
+                self.release_temp(list);
+                Ok(Operand::Reg(dst))
+            }
+            "time.sleep" => {
+                let mut seconds = self.expr(&args[0])?;
+                if self.type_of(&args[0])? == Type::Int {
+                    let converted = self.fresh();
+                    self.push(Inst::IntToFloat {
+                        dst: converted,
+                        src: seconds,
+                    });
+                    seconds = Operand::Reg(converted);
+                }
+                self.push(Inst::Call {
+                    dst: None,
+                    callee: Callee::Runtime("stone.time_sleep"),
+                    args: vec![seconds],
+                });
+                // sleep returns none
+                Ok(self.finish(Operand::Imm(0), into))
+            }
+            _ if let Some(label) = module_routine(name) => {
                 let mut values = Vec::new();
                 for arg in args {
                     values.push(self.expr(arg)?);

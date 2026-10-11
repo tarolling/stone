@@ -67,6 +67,9 @@ pub fn generate(u: &mut Unstructured) -> Result<String> {
     let value = generator.expression(u, &scope, 0)?;
     generator.line(0, &format!("print({value})"));
 
+    if generator.uses_math {
+        return Ok(format!("use math\n{}", generator.source));
+    }
     Ok(generator.source)
 }
 
@@ -104,6 +107,8 @@ struct Generator {
     functions: Vec<(String, usize)>,
     /// Counter for fresh variable names, so names never collide across scopes.
     next_name: usize,
+    /// Whether the program calls the `math` module, so it needs `use math` first.
+    uses_math: bool,
 }
 
 impl Generator {
@@ -463,7 +468,8 @@ impl Generator {
 
     fn primary(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
         let readable = scope.readable();
-        match u.int_in_range(0..=7)? {
+        match u.int_in_range(0..=8)? {
+            8 if nesting < MAX_NESTING => self.int_math(u, scope, nesting + 1),
             6 if !scope.lists.is_empty() => {
                 let list = u.choose(&scope.lists)?;
                 Ok(format!("{list}[{}]", u.int_in_range(-2..=1)?))
@@ -545,7 +551,8 @@ impl Generator {
         scope: &Scope,
         nesting: usize,
     ) -> Result<String> {
-        match u.int_in_range(0..=5)? {
+        match u.int_in_range(0..=6)? {
+            6 if nesting < MAX_NESTING => self.float_math(u, scope, nesting + 1),
             0 | 1 if !scope.floats.is_empty() => Ok(u.choose(&scope.floats)?.clone()),
             2 if nesting < MAX_NESTING => {
                 let inner = self.float_expression(u, scope, nesting + 1)?;
@@ -566,6 +573,56 @@ impl Generator {
                 u.int_in_range(0..=99)?,
                 u.int_in_range(0..=99)?
             )),
+        }
+    }
+
+    /// Generates an int-valued call to the `math` module, such as `math.max(g0, 3, l1)` or
+    /// `math.floor(g1)`. Its arguments are primaries, so a call uses little of the input.
+    fn int_math(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
+        self.uses_math = true;
+        let name = if u.arbitrary()? {
+            "math.min"
+        } else {
+            "math.max"
+        };
+        match u.int_in_range(0..=3)? {
+            0 => Ok(format!("math.abs({})", self.primary(u, scope, nesting)?)),
+            1 if !scope.lists.is_empty() => Ok(format!("{name}({})", u.choose(&scope.lists)?)),
+            // fails for nan and huge floats, which the differential check skips
+            2 => Ok(format!(
+                "math.floor({})",
+                self.float_primary(u, scope, nesting)?
+            )),
+            _ => {
+                let first = self.primary(u, scope, nesting)?;
+                let second = self.primary(u, scope, nesting)?;
+                Ok(format!("{name}({first}, {second})"))
+            }
+        }
+    }
+
+    /// Generates a float-valued call to the `math` module, such as `math.sqrt(g1)`.
+    fn float_math(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &Scope,
+        nesting: usize,
+    ) -> Result<String> {
+        self.uses_math = true;
+        let inner = self.float_primary(u, scope, nesting)?;
+        match u.int_in_range(0..=2)? {
+            // fails for a negative number, which the differential check skips
+            0 => Ok(format!("math.sqrt({inner})")),
+            1 => Ok(format!("math.abs({inner})")),
+            _ => {
+                let name = if u.arbitrary()? {
+                    "math.min"
+                } else {
+                    "math.max"
+                };
+                let other = self.float_primary(u, scope, nesting)?;
+                Ok(format!("{name}({inner}, {other})"))
+            }
         }
     }
 
@@ -785,6 +842,7 @@ mod tests {
             "int(",
             " % ",
             " ** ",
+            "math.",
         ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 25, "only {count} of 500 programs use {feature:?}");

@@ -514,10 +514,12 @@ mod tests {
         }
     }
 
-    /// A program that calls every runtime routine: every builtin, method, and `os` function,
-    /// plus float `%`, so its assembly holds the whole runtime.
+    /// A program that calls every runtime routine: every builtin, method, and function of a
+    /// builtin module, plus float `%`, so its assembly holds the whole runtime.
     const EVERY_ROUTINE: &str = "\
 use os
+use math
+use time
 xs = [1.5, float(\" 2.5 \")]
 xs.append(xs[0] % 0.5)
 words = input(\"> \").strip().split()
@@ -525,7 +527,9 @@ words.append(str(xs[0]) + str(int(\"-7\")) + str(true))
 parts = \"a,b\".split(\",\")
 print(xs, words, parts, eof(), args(), words.len())
 print(os.env(\"HOME\"), os.has_env(\"HOME\"), os.platform(), os.arch(), os.hostname())
-print(os.cpu_count(), os.pid(), os.cwd(), os.time(), os.clock())
+print(os.cpu_count(), os.pid(), os.cwd(), time.now(), time.clock())
+print(math.abs(-1), math.abs(-1.5), math.min(1, 2), math.max([1.5]), math.sqrt(2), math.floor(1.5))
+time.sleep(0)
 os.exit(0)
 ";
 

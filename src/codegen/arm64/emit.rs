@@ -492,6 +492,10 @@ impl Arm64Generator {
                     );
                 }
             }
+            Terminator::Fail(message) => {
+                let label = self.ctx.fail_label(message);
+                self.emit(&format!("\tb\t{label}"));
+            }
             Terminator::Return(value) => {
                 match value.map(|v| frame.value(v)).transpose()? {
                     None => self.emit("\tmov\tx0, #0"),
@@ -853,6 +857,13 @@ impl Arm64Generator {
                 self.emit("\tbl\tstone.list_copy");
                 self.emit(&format!("{skip}:"));
                 self.store(dst, "x9");
+            }
+
+            Inst::FloatSqrt { dst, src } => {
+                let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
+                self.load_float("d0", src);
+                self.emit("\tfsqrt\td0, d0");
+                self.store_float(dst, "d0");
             }
 
             Inst::IntToFloat { dst, src } => {

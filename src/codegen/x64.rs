@@ -170,10 +170,33 @@ impl X64Generator {
         if self.ctx.uses(&["stone.args"]) {
             builtins::args_runtime(self);
         }
-        let os = self.ctx.os_routines();
+        let os = self.ctx.module_routines("stone.os_");
         if !os.is_empty() {
-            let cwd_failure = self.ctx.os_cwd_failure();
+            let cwd_failure = self
+                .ctx
+                .failure_of("stone.os_cwd", crate::stdlib::os::CWD_FAILURE);
             builtins::os_runtime(self, &os, &cwd_failure);
+        }
+        let random: Vec<&str> = [
+            "stone.random_seed",
+            "stone.random_float",
+            "stone.random_below",
+        ]
+        .into_iter()
+        .filter(|label| self.ctx.uses(&[label]))
+        .collect();
+        if !random.is_empty() {
+            builtins::random_runtime(self, &random);
+        }
+        let time = self.ctx.module_routines("stone.time_");
+        if !time.is_empty() {
+            let negative = self
+                .ctx
+                .failure_of("stone.time_sleep", crate::stdlib::time::SLEEP_NEGATIVE);
+            let too_large = self
+                .ctx
+                .failure_of("stone.time_sleep", crate::stdlib::time::SLEEP_TOO_LARGE);
+            builtins::time_runtime(self, &time, (&negative, &too_large));
         }
         let parsing: Vec<&str> = ["stone.parse_int", "stone.parse_float"]
             .into_iter()
@@ -573,17 +596,65 @@ mod tests {
         assert!(arch.contains("\t.string \"x86_64\""), "{arch}");
         assert!(arch.contains("\t.string \"linux\""), "{arch}");
 
-        let rest =
-            "use os\nprint(os.hostname(), os.cpu_count(), os.time(), os.clock())\nos.exit(0)\n";
+        let rest = "use os\nprint(os.hostname(), os.cpu_count())\nos.exit(0)\n";
         let rest = assemble_linked(rest);
         for label in [
             "stone.os_hostname:",
             "stone.os_cpu_count:",
-            "stone.os_time:",
-            "stone.os_clock:",
             "stone.os_exit:",
         ] {
             assert!(rest.contains(label), "{label} in {rest}");
+        }
+    }
+
+    #[test]
+    fn random_routines_are_only_emitted_when_used() {
+        let plain = assemble_linked("use random\nprint(1)\n");
+        assert!(!plain.contains("stone.random_"), "{plain}");
+
+        let seed = assemble_linked("use random\nrandom.seed(1)\n");
+        for label in [
+            "stone.random_state:",
+            "stone.random_seed:",
+            "stone.random_next:",
+        ] {
+            assert!(seed.contains(label), "{label} in {seed}");
+        }
+        for label in ["stone.random_float:", "stone.random_below:"] {
+            assert!(!seed.contains(label), "{label} in {seed}");
+        }
+
+        let draws = assemble_linked(
+            "use random\nprint(random.random(), random.randint(1, 2), random.choice([3]))\n",
+        );
+        for label in ["stone.random_float:", "stone.random_below:"] {
+            assert!(draws.contains(label), "{label} in {draws}");
+        }
+        for message in [
+            crate::stdlib::random::EMPTY_RANGE,
+            crate::stdlib::random::EMPTY_CHOICE,
+        ] {
+            assert!(draws.contains(message), "{message} in {draws}");
+        }
+    }
+
+    #[test]
+    fn time_routines_are_only_emitted_when_used() {
+        let now = assemble_linked("use time\nprint(time.now())\n");
+        assert!(now.contains("stone.time_now:"), "{now}");
+        assert!(!now.contains("stone.time_clock:"), "{now}");
+        assert!(!now.contains("stone.fail:"), "{now}");
+
+        let sleep = assemble_linked("use time\ntime.sleep(1)\nprint(time.clock())\n");
+        for label in ["stone.time_sleep:", "stone.time_clock:"] {
+            assert!(sleep.contains(label), "{label} in {sleep}");
+        }
+        assert!(!sleep.contains("stone.time_now:"), "{sleep}");
+        for message in [
+            crate::stdlib::time::SLEEP_NEGATIVE,
+            crate::stdlib::time::SLEEP_TOO_LARGE,
+        ] {
+            assert!(sleep.contains(message), "{message} in {sleep}");
         }
     }
 

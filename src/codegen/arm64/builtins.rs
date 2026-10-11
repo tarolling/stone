@@ -36,11 +36,15 @@ pub enum Sys {
     Getcwd,
     ClockGettime,
     Sysctl,
+    Nanosleep,
+    /// Fills a buffer with entropy: `getrandom` on Linux and `getentropy` on macOS, which ignores
+    /// the flags in `x2`.
+    Getrandom,
 }
 
 impl Sys {
     /// Every call, in the order their shims are emitted.
-    pub const ALL: [Sys; 13] = [
+    pub const ALL: [Sys; 15] = [
         Sys::Read,
         Sys::Write,
         Sys::Openat,
@@ -54,6 +58,8 @@ impl Sys {
         Sys::Getcwd,
         Sys::ClockGettime,
         Sys::Sysctl,
+        Sys::Nanosleep,
+        Sys::Getrandom,
     ];
 
     /// Returns the call's Linux system call number, such as 64 for `write`, or `None` if the
@@ -72,6 +78,8 @@ impl Sys {
             Sys::Getpid => 172,
             Sys::Getcwd => 17,
             Sys::ClockGettime => 113,
+            Sys::Nanosleep => 101,
+            Sys::Getrandom => 278,
             Sys::Sysctl => return None,
         })
     }
@@ -89,6 +97,8 @@ impl Sys {
             Sys::Getcwd => "getcwd",
             Sys::ClockGettime => "clock_gettime",
             Sys::Sysctl => "sysctl",
+            Sys::Nanosleep => "nanosleep",
+            Sys::Getrandom => "getentropy",
             Sys::Openat | Sys::Close | Sys::Mremap | Sys::Uname => return None,
         })
     }
@@ -1737,9 +1747,18 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("stone.os_exit:");
         system_call(r#gen, Sys::Exit);
     }
+}
+
+/// Emits the routines behind the `time` module that the program calls, each named in `used`,
+/// under the same labels and contracts as `x64::builtins::time_runtime`, with arguments in `x0`
+/// and results in `x0`. `failures` are the labels `stone.time_sleep` jumps to for a negative
+/// length or nan, and for one of 2^63 seconds or more.
+pub fn time_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], failures: (&str, &str)) {
+    let uses = |label: &str| used.contains(&label);
+    let macos = r#gen.target().os == Os::MacOs;
     // CLOCK_REALTIME is 0 on both systems, and CLOCK_MONOTONIC is 1 on Linux but 6 on macOS
     let monotonic = if macos { 6 } else { 1 };
-    for (label, clock) in [("stone.os_time", 0), ("stone.os_clock", monotonic)] {
+    for (label, clock) in [("stone.time_now", 0), ("stone.time_clock", monotonic)] {
         if !uses(label) {
             continue;
         }
@@ -1761,5 +1780,165 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("\tfadd\td0, d0, d1");
         r#gen.emit("\tfmov\tx0, d0");
         pop_frame(r#gen, &[]);
+    }
+    if uses("stone.time_sleep") {
+        let (negative, too_large) = failures;
+        // the request is at [sp] and what is left after a signal at [sp, #16]
+        r#gen.emit("stone.time_sleep:");
+        push_frame(r#gen, &[]);
+        r#gen.emit("\tsub\tsp, sp, #32");
+        r#gen.emit("\tfmov\td0, x0");
+        // lt also holds for nan
+        r#gen.emit("\tfcmp\td0, #0.0");
+        r#gen.emit(&format!("\tb.lt\t{negative}"));
+        r#gen.emit("\tmovz\tx9, #0x43e0, lsl #48"); // 2^63
+        r#gen.emit("\tfmov\td1, x9");
+        r#gen.emit("\tfcmp\td0, d1");
+        r#gen.emit(&format!("\tb.ge\t{too_large}"));
+        r#gen.emit("\tfcvtzs\tx9, d0");
+        r#gen.emit("\tscvtf\td1, x9");
+        r#gen.emit("\tfsub\td0, d0, d1");
+        // 1e9
+        r#gen.emit("\tmovz\tx10, #0x41cd, lsl #48");
+        r#gen.emit("\tmovk\tx10, #0xcd65, lsl #32");
+        r#gen.emit("\tfmov\td1, x10");
+        r#gen.emit("\tfmul\td0, d0, d1");
+        r#gen.emit("\tfcvtzs\tx10, d0");
+        r#gen.emit("\tstp\tx9, x10, [sp]");
+        r#gen.emit(".Ltime_sleep_again:");
+        r#gen.emit("\tmov\tx0, sp");
+        r#gen.emit("\tadd\tx1, sp, #16");
+        system_call(r#gen, Sys::Nanosleep);
+        // a signal interrupted it, so sleep for what is left: Linux returns -EINTR, and
+        // libSystem returns -1, which can only mean EINTR for a valid request
+        let interrupted = if macos { 1 } else { 4 };
+        r#gen.emit(&format!("\tcmn\tx0, #{interrupted}"));
+        r#gen.emit("\tb.ne\t.Ltime_sleep_done");
+        r#gen.emit("\tldp\tx9, x10, [sp, #16]");
+        r#gen.emit("\tstp\tx9, x10, [sp]");
+        r#gen.emit("\tb\t.Ltime_sleep_again");
+        r#gen.emit(".Ltime_sleep_done:");
+        pop_frame(r#gen, &[]);
+    }
+}
+
+/// Emits code that puts the 64-bit constant `value` in `reg`: a `movz`, then a `movk` for each
+/// other halfword that is not zero.
+///
+/// For example, `constant(gen, "x9", 0x3ca0_0000_0000_0000)` emits `movz x9, #0` and
+/// `movk x9, #15520, lsl #48`.
+fn constant(r#gen: &mut dyn AssemblyGenerator, reg: &str, value: u64) {
+    r#gen.emit(&format!("\tmovz\t{reg}, #{}", value & 0xffff));
+    for shift in [16, 32, 48] {
+        let half = (value >> shift) & 0xffff;
+        if half != 0 {
+            r#gen.emit(&format!("\tmovk\t{reg}, #{half}, lsl #{shift}"));
+        }
+    }
+}
+
+/// Emits the runtime of the `random` module under the same labels and contracts as
+/// `x64::builtins::random_runtime`, with arguments and results in `x0`. An unseeded program
+/// seeds itself from `getrandom` on Linux and `getentropy` on macOS.
+pub fn random_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
+    use crate::stdlib::random::{SPLITMIX_GAMMA, SPLITMIX_MUL1, SPLITMIX_MUL2};
+    let uses = |label: &str| used.contains(&label);
+    r#gen.emit("\t.bss");
+    r#gen.emit("\t.p2align\t3");
+    r#gen.emit("stone.random_state:");
+    r#gen.emit("\t.zero\t40");
+    r#gen.emit("\t.text");
+
+    // splitmix64, unrolled for the four words of the state
+    r#gen.emit("stone.random_seed:");
+    address(r#gen, "x9", "stone.random_state");
+    constant(r#gen, "x10", SPLITMIX_GAMMA);
+    constant(r#gen, "x11", SPLITMIX_MUL1);
+    constant(r#gen, "x12", SPLITMIX_MUL2);
+    for word in 0..4 {
+        r#gen.emit("\tadd\tx0, x0, x10");
+        r#gen.emit("\tmov\tx13, x0");
+        for (shift, multiplier) in [(30, Some("x11")), (27, Some("x12")), (31, None)] {
+            r#gen.emit(&format!("\tlsr\tx14, x13, #{shift}"));
+            r#gen.emit("\teor\tx13, x13, x14");
+            if let Some(multiplier) = multiplier {
+                r#gen.emit(&format!("\tmul\tx13, x13, {multiplier}"));
+            }
+        }
+        r#gen.emit(&format!("\tstr\tx13, [x9, #{}]", 8 * word));
+    }
+    r#gen.emit("\tmov\tx13, #1");
+    r#gen.emit("\tstr\tx13, [x9, #32]");
+    r#gen.emit("\tmov\tx0, #0");
+    r#gen.emit("\tret");
+
+    // xoshiro256**, with s0 through s3 in x10 through x13
+    r#gen.emit("stone.random_next:");
+    push_frame(r#gen, &[]);
+    address(r#gen, "x9", "stone.random_state");
+    r#gen.emit("\tldr\tx10, [x9, #32]");
+    r#gen.emit("\tcbnz\tx10, .Lrandom_next_seeded");
+    r#gen.emit("\tsub\tsp, sp, #16");
+    r#gen.emit("\tstr\txzr, [sp]");
+    r#gen.emit("\tmov\tx0, sp");
+    r#gen.emit("\tmov\tx1, #8");
+    r#gen.emit("\tmov\tx2, #0");
+    system_call(r#gen, Sys::Getrandom);
+    r#gen.emit("\tldr\tx0, [sp]");
+    r#gen.emit("\tadd\tsp, sp, #16");
+    r#gen.emit("\tbl\tstone.random_seed");
+    r#gen.emit(".Lrandom_next_seeded:");
+    r#gen.emit("\tldp\tx10, x11, [x9]");
+    r#gen.emit("\tldp\tx12, x13, [x9, #16]");
+    // the result is rotl(s1 * 5, 7) * 9, and rotating left by 7 is rotating right by 57
+    r#gen.emit("\tlsl\tx14, x11, #2");
+    r#gen.emit("\tadd\tx0, x11, x14");
+    r#gen.emit("\tror\tx0, x0, #57");
+    r#gen.emit("\tlsl\tx14, x0, #3");
+    r#gen.emit("\tadd\tx0, x0, x14");
+    r#gen.emit("\tlsl\tx14, x11, #17");
+    r#gen.emit("\teor\tx12, x12, x10");
+    r#gen.emit("\teor\tx13, x13, x11");
+    r#gen.emit("\teor\tx11, x11, x12");
+    r#gen.emit("\teor\tx10, x10, x13");
+    r#gen.emit("\teor\tx12, x12, x14");
+    r#gen.emit("\tror\tx13, x13, #19");
+    r#gen.emit("\tstp\tx10, x11, [x9]");
+    r#gen.emit("\tstp\tx12, x13, [x9, #16]");
+    pop_frame(r#gen, &[]);
+
+    if uses("stone.random_float") {
+        // the top 53 bits over 2^53, which is exact
+        r#gen.emit("stone.random_float:");
+        push_frame(r#gen, &[]);
+        r#gen.emit("\tbl\tstone.random_next");
+        r#gen.emit("\tlsr\tx0, x0, #11");
+        r#gen.emit("\tscvtf\td0, x0");
+        constant(r#gen, "x9", (1.0f64 / (1u64 << 53) as f64).to_bits());
+        r#gen.emit("\tfmov\td1, x9");
+        r#gen.emit("\tfmul\td0, d0, d1");
+        r#gen.emit("\tfmov\tx0, d0");
+        pop_frame(r#gen, &[]);
+    }
+    if uses("stone.random_below") {
+        // the span stays in x19 and the smallest draw to keep, 2^64 % span, in x20
+        r#gen.emit("stone.random_below:");
+        push_frame(r#gen, &["x19", "x20"]);
+        r#gen.emit("\tmov\tx19, x0");
+        r#gen.emit("\tcbz\tx19, .Lrandom_below_any");
+        r#gen.emit("\tneg\tx9, x19");
+        r#gen.emit("\tudiv\tx10, x9, x19");
+        r#gen.emit("\tmsub\tx20, x10, x19, x9");
+        r#gen.emit(".Lrandom_below_draw:");
+        r#gen.emit("\tbl\tstone.random_next");
+        r#gen.emit("\tcmp\tx0, x20");
+        r#gen.emit("\tb.lo\t.Lrandom_below_draw");
+        r#gen.emit("\tudiv\tx10, x0, x19");
+        r#gen.emit("\tmsub\tx0, x10, x19, x0");
+        r#gen.emit("\tb\t.Lrandom_below_done");
+        r#gen.emit(".Lrandom_below_any:");
+        r#gen.emit("\tbl\tstone.random_next");
+        r#gen.emit(".Lrandom_below_done:");
+        pop_frame(r#gen, &["x19", "x20"]);
     }
 }

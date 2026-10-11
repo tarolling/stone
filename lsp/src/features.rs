@@ -19,8 +19,8 @@ use stone::project::{
 };
 use stone::span::{FileId, Pos, Span};
 use stone::stdlib::{
-    BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, builtin_doc, builtins_reference,
-    method_doc, os,
+    BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, MODULES, builtin_doc,
+    builtins_reference, method_doc,
 };
 use stone::token::RESERVED_KEYWORDS;
 
@@ -452,7 +452,10 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
     }
     if let Some((module, span)) = builtin_module_at(doc, position) {
         return Some(Hover {
-            contents: markdown(&format!("module {module}"), Some(os::MODULE_DOC)),
+            contents: markdown(
+                &format!("module {module}"),
+                stone::stdlib::module(&module).map(|m| m.doc),
+            ),
             range: Some(doc.index.range(span)),
         });
     }
@@ -493,8 +496,9 @@ pub struct Builtins {
     functions: HashMap<&'static str, (u32, u32)>,
     /// The same for each builtin method, such as `len` in `// (str | list[T]).len() -> int`.
     methods: HashMap<&'static str, (u32, u32)>,
-    /// The line and column of the `os` in the heading of the `os` module's functions.
-    os_module: Option<(u32, u32)>,
+    /// The line and column of each builtin module's name in the heading of its functions, such as
+    /// `os` in `// The os module, imported with ...`.
+    modules: HashMap<&'static str, (u32, u32)>,
 }
 
 impl Builtins {
@@ -512,29 +516,29 @@ impl Builtins {
         };
         let functions = BUILTIN_DOCS
             .iter()
-            .chain(&os::DOCS)
+            .chain(MODULES.iter().flat_map(|module| module.functions))
             .filter_map(find)
             .collect();
         let methods = METHOD_DOCS.iter().filter_map(find).collect();
-        let heading = format!("// The {} module", os::MODULE);
-        let os_module = text
-            .lines()
-            .position(|line| line.starts_with(&heading))
-            .map(|line| (line as u32, "// The ".len() as u32));
+        let modules = MODULES
+            .iter()
+            .filter_map(|module| {
+                let heading = format!("// The {} module,", module.name);
+                let line = text.lines().position(|line| line.starts_with(&heading))?;
+                Some((module.name, (line as u32, "// The ".len() as u32)))
+            })
+            .collect();
         Builtins {
             uri,
             functions,
             methods,
-            os_module,
+            modules,
         }
     }
 
     /// Returns the location of the builtin module `name` in the heading of its functions.
     fn module_location(&self, name: &str) -> Option<Location> {
-        if name != os::MODULE {
-            return None;
-        }
-        let (line, start) = self.os_module?;
+        let &(line, start) = self.modules.get(name)?;
         let end = start + name.chars().count() as u32;
         let range = Range::new(Position::new(line, start), Position::new(line, end));
         Some(Location::new(self.uri.clone(), range))
@@ -858,10 +862,14 @@ fn module_functions(doc: &Document, file: FileId) -> Vec<CompletionItem> {
 /// Returns the functions of the builtin module `module`, by their own names, such as `env` for
 /// `os.env`.
 fn builtin_module_functions(module: &str) -> Vec<CompletionItem> {
-    os::DOCS
+    let Some(module) = stone::stdlib::module(module) else {
+        return vec![];
+    };
+    module
+        .functions
         .iter()
         .filter_map(|doc| {
-            let name = doc.name.strip_prefix(module)?.strip_prefix('.')?;
+            let name = doc.name.strip_prefix(module.name)?.strip_prefix('.')?;
             Some(CompletionItem {
                 label: name.to_string(),
                 kind: Some(CompletionItemKind::FUNCTION),
@@ -905,16 +913,23 @@ fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<Comp
             ..CompletionItem::default()
         });
     }
-    if names.is_empty() && !items.iter().any(|i| i.label == os::MODULE) {
-        items.push(CompletionItem {
-            label: os::MODULE.to_string(),
-            kind: Some(CompletionItemKind::MODULE),
-            detail: Some(format!("module {}", os::MODULE)),
-            ..CompletionItem::default()
-        });
+    if names.is_empty() {
+        for module in &MODULES {
+            if items.iter().any(|i| i.label == module.name) {
+                continue;
+            }
+            items.push(CompletionItem {
+                label: module.name.to_string(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some(format!("module {}", module.name)),
+                ..CompletionItem::default()
+            });
+        }
     }
-    if names == [os::MODULE] {
-        items.extend(builtin_module_functions(os::MODULE));
+    if let [name] = names[..]
+        && stone::stdlib::module(name).is_some()
+    {
+        items.extend(builtin_module_functions(name));
     } else if !names.is_empty() {
         let module = names.join(".");
         if let Some((file, _)) = doc.sources.files().find(|(_, f)| f.module == module) {

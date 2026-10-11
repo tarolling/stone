@@ -390,6 +390,10 @@ impl X64Generator {
                     );
                 }
             }
+            Terminator::Fail(message) => {
+                let label = self.ctx.fail_label(message);
+                self.emit(&format!("\tjmp\t{label}"));
+            }
             Terminator::Return(value) => {
                 match value.map(|v| frame.value(v)).transpose()? {
                     None | Some(Value::Imm(0)) => self.emit("\txor\trax, rax"),
@@ -623,6 +627,13 @@ impl X64Generator {
                     self.emit(&format!("\tbtc\t{target}, 63"));
                 }
                 self.store(dst, target);
+            }
+
+            Inst::FloatSqrt { dst, src } => {
+                let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
+                self.load_xmm("xmm0", src);
+                self.emit("\tsqrtsd\txmm0, xmm0");
+                self.emit(&format!("\tmovq\t{dst}, xmm0"));
             }
 
             Inst::Not { dst, src } => {

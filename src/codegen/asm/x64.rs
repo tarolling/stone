@@ -552,11 +552,12 @@ const UNARY: [(&str, u8, u8, u8); 8] = [
 ];
 
 /// Scalar double instructions written `op xmm, xmm/m64`, with their prefix and opcode.
-const SSE: [(&str, u8, u8); 7] = [
+const SSE: [(&str, u8, u8); 8] = [
     ("addsd", 0xf2, 0x58),
     ("mulsd", 0xf2, 0x59),
     ("subsd", 0xf2, 0x5c),
     ("divsd", 0xf2, 0x5e),
+    ("sqrtsd", 0xf2, 0x51),
     ("ucomisd", 0x66, 0x2e),
     ("xorpd", 0x66, 0x57),
     ("movapd", 0x66, 0x28),
@@ -797,8 +798,9 @@ fn encode(mnemonic: &str, operands: &[Operand]) -> Result<Encoded, String> {
                     .finish()
             }
         }
-        ("shl" | "sal" | "shr" | "sar", [dst, count]) => {
+        ("shl" | "sal" | "shr" | "sar" | "rol", [dst, count]) => {
             let ext = match mnemonic {
+                "rol" => 0,
                 "shr" => 5,
                 "sar" => 7,
                 _ => 4,
@@ -963,6 +965,7 @@ fn is_known(mnemonic: &str) -> bool {
         "imul",
         "shl",
         "sal",
+        "rol",
         "shr",
         "sar",
         "shld",
@@ -1176,6 +1179,9 @@ mod tests {
             ("imul rcx, rdx, 1000", "48 69 ca e8 03 00 00"),
             ("shl rax, 1", "48 d1 e0"),
             ("shl rax, 3", "48 c1 e0 03"),
+            ("rol rax, 7", "48 c1 c0 07"),
+            ("rol rdx, 45", "48 c1 c2 2d"),
+            ("rol r9, 1", "49 d1 c1"),
             ("sar rdx, 63", "48 c1 fa 3f"),
             ("shr rax, cl", "48 d3 e8"),
             ("shl QWORD PTR [rdi], cl", "48 d3 27"),
@@ -1199,6 +1205,8 @@ mod tests {
             ("movq QWORD PTR [rsp], xmm0", "66 0f d6 04 24"),
             ("addsd xmm0, xmm1", "f2 0f 58 c1"),
             ("divsd xmm0, QWORD PTR [rsp + 8]", "f2 0f 5e 44 24 08"),
+            ("sqrtsd xmm0, xmm0", "f2 0f 51 c0"),
+            ("sqrtsd xmm1, xmm2", "f2 0f 51 ca"),
             ("ucomisd xmm0, xmm1", "66 0f 2e c1"),
             ("xorpd xmm2, xmm2", "66 0f 57 d2"),
             ("movapd xmm1, xmm0", "66 0f 28 c8"),

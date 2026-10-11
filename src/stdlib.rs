@@ -1,6 +1,67 @@
 //! The builtin functions shared by the interpreter and the compiler, and the limits both enforce.
 
+pub mod math;
 pub mod os;
+pub mod random;
+pub mod time;
+
+/// A module that is part of stone rather than a file of the program, such as `os`.
+///
+/// A program imports one like a module file, with `use os` then `os.env("HOME")`, or with
+/// `use os.env` then `env("HOME")`. Linking renames each call to the function's linked name,
+/// such as `os.env`, which no stone name can collide with since it holds a dot, and the checker
+/// and both backends treat that name as a builtin.
+pub struct BuiltinModule {
+    /// The name a program imports it by, as in `use os`.
+    pub name: &'static str,
+    /// What the module is for, which editors show for its name.
+    pub doc: &'static str,
+    /// Every function of the module, each named by its linked name, such as `os.env`.
+    pub functions: &'static [BuiltinDoc],
+}
+
+/// Every builtin module.
+pub static MODULES: [BuiltinModule; 4] = [
+    BuiltinModule {
+        name: os::MODULE,
+        doc: os::MODULE_DOC,
+        functions: &os::DOCS,
+    },
+    BuiltinModule {
+        name: math::MODULE,
+        doc: math::MODULE_DOC,
+        functions: &math::DOCS,
+    },
+    BuiltinModule {
+        name: random::MODULE,
+        doc: random::MODULE_DOC,
+        functions: &random::DOCS,
+    },
+    BuiltinModule {
+        name: time::MODULE,
+        doc: time::MODULE_DOC,
+        functions: &time::DOCS,
+    },
+];
+
+/// Returns the builtin module named `name`.
+///
+/// For example, `module("os")` is the `os` module, and `module("util")` is `None`.
+pub fn module(name: &str) -> Option<&'static BuiltinModule> {
+    MODULES.iter().find(|module| module.name == name)
+}
+
+/// Returns the documentation for the function of a builtin module with the linked name `name`.
+///
+/// For example, `module_function("os.env")` has the signature `os.env(name: str) -> str`, and
+/// `module_function("env")` is `None`.
+pub fn module_function(name: &str) -> Option<&'static BuiltinDoc> {
+    let (prefix, _) = name.split_once('.')?;
+    module(prefix)?
+        .functions
+        .iter()
+        .find(|doc| doc.name == name)
+}
 
 /// The most function calls that can be active at once, in both backends.
 ///
@@ -117,24 +178,24 @@ pub static METHOD_DOCS: [BuiltinDoc; 4] = [
 ];
 
 /// Returns whether `name` is a builtin function: one of [`BUILTINS`] or the linked name of a
-/// function of the builtin `os` module.
+/// function of a builtin module.
 ///
 /// For example, `is_builtin("print")` and `is_builtin("os.env")` are true, but `is_builtin("env")`
 /// is false.
 pub fn is_builtin(name: &str) -> bool {
-    BUILTINS.contains(&name) || os::is_function(name)
+    BUILTINS.contains(&name) || module_function(name).is_some()
 }
 
 /// Returns the documentation for the builtin function named `name`, which may be a function of
-/// the `os` module by its linked name.
+/// a builtin module by its linked name.
 ///
 /// For example, `builtin_doc("int")` has the signature `int(value: int | float) -> int`, and
 /// `builtin_doc("os.pid")` has `os.pid() -> int`.
 pub fn builtin_doc(name: &str) -> Option<&'static BuiltinDoc> {
     BUILTIN_DOCS
         .iter()
-        .chain(&os::DOCS)
         .find(|doc| doc.name == name)
+        .or_else(|| module_function(name))
 }
 
 /// Returns the documentation for the builtin method named `name`.
@@ -149,8 +210,8 @@ pub fn method_doc(name: &str) -> Option<&'static BuiltinDoc> {
 ///
 /// Builtins are part of the interpreter and the compiler rather than written in stone, so the
 /// file is only comments, which keeps it valid stone. Each builtin function, then each builtin
-/// method, then each function of the `os` module, gets a line holding `// ` and its signature,
-/// followed by its description.
+/// method, then each function of each builtin module, gets a line holding `// ` and its
+/// signature, followed by its description.
 pub fn builtins_reference() -> String {
     let mut text = String::from(
         "// stone's builtin functions and methods\n\
@@ -166,9 +227,12 @@ pub fn builtins_reference() -> String {
     for doc in &METHOD_DOCS {
         text += &format!("\n// {}\n//     {}\n", doc.signature, doc.description);
     }
-    text += "\n// The os module, imported with `use os`\n";
-    for doc in &os::DOCS {
-        text += &format!("\n// {}\n//     {}\n", doc.signature, doc.description);
+    for module in &MODULES {
+        let name = module.name;
+        text += &format!("\n// The {name} module, imported with `use {name}`\n");
+        for doc in module.functions {
+            text += &format!("\n// {}\n//     {}\n", doc.signature, doc.description);
+        }
     }
     text
 }
@@ -386,6 +450,24 @@ mod tests {
     }
 
     #[test]
+    fn every_module_function_is_documented_under_its_module() {
+        for module in &MODULES {
+            assert!(!module.functions.is_empty(), "{}", module.name);
+            for doc in module.functions {
+                let prefix = format!("{}.", module.name);
+                assert!(doc.name.starts_with(&prefix), "{}", doc.name);
+                assert!(doc.signature.starts_with(&format!("{}(", doc.name)));
+                assert_eq!(module_function(doc.name).unwrap().name, doc.name);
+                assert_eq!(builtin_doc(doc.name).unwrap().name, doc.name);
+                assert!(is_builtin(doc.name), "{}", doc.name);
+            }
+        }
+        assert!(module_function("os.nope").is_none());
+        assert!(module_function("env").is_none());
+        assert!(!is_builtin("env"));
+    }
+
+    #[test]
     fn int_powers_wrap_like_multiplication() {
         assert_eq!(int_pow(2, 10), 1024);
         assert_eq!(int_pow(0, 0), 1);
@@ -533,7 +615,8 @@ mod tests {
     #[test]
     fn the_reference_has_a_line_for_each_builtin() {
         let reference = builtins_reference();
-        for doc in BUILTIN_DOCS.iter().chain(&METHOD_DOCS).chain(&os::DOCS) {
+        let functions = MODULES.iter().flat_map(|module| module.functions);
+        for doc in BUILTIN_DOCS.iter().chain(&METHOD_DOCS).chain(functions) {
             let line = format!("// {}", doc.signature);
             assert_eq!(
                 reference.lines().filter(|l| *l == line).count(),

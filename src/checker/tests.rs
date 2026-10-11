@@ -1047,8 +1047,6 @@ fn os_functions_have_types() {
         ("os.pid()", "int"),
         ("os.cwd()", "str"),
         ("os.exit(0)", "none"),
-        ("os.time()", "float"),
-        ("os.clock()", "float"),
     ];
     for (call, ty) in cases {
         assert_eq!(
@@ -1097,4 +1095,169 @@ fn an_os_function_is_not_a_value() {
             5
         )]
     );
+}
+
+#[test]
+fn math_functions_have_types() {
+    let cases = [
+        ("math.abs(-1)", "int"),
+        ("math.abs(-1.5)", "float"),
+        ("math.min(1, 2)", "int"),
+        ("math.max(1.5, 2.5, 0.5)", "float"),
+        ("math.max([1, 2])", "int"),
+        ("math.min([1.5])", "float"),
+        ("math.sqrt(2)", "float"),
+        ("math.sqrt(2.0)", "float"),
+        ("math.floor(2.5)", "int"),
+        ("math.floor(2)", "int"),
+    ];
+    for (call, ty) in cases {
+        assert_eq!(
+            linked_type(&format!("use math\nx = {call}\n"), "x"),
+            ty,
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn math_functions_infer_their_parameters() {
+    let source = "use math\n\ndef f(a, b);\n    ret math.max(a, b) + 1\n\nx = f(1, 2)\n";
+    assert_eq!(linked_type(source, "f"), "def(int, int) -> int");
+    let source = "use math\n\ndef g(xs);\n    ret math.min(xs) * 2.0\n\nx = g([1.0])\n";
+    assert_eq!(linked_type(source, "g"), "def(list[float]) -> float");
+}
+
+#[test]
+fn math_functions_check_their_arguments() {
+    let cases = [
+        (
+            "math.abs(\"a\")",
+            "'math.abs' needs an int or float, found str",
+            10,
+        ),
+        (
+            "math.sqrt(true)",
+            "'math.sqrt' needs an int or float, found bool",
+            11,
+        ),
+        (
+            "math.floor([1])",
+            "'math.floor' needs an int or float, found list[int]",
+            12,
+        ),
+        ("math.max(1, 2.0)", "expected int, found float", 13),
+        ("math.min(1.0, 2.0, 3)", "expected float, found int", 20),
+        (
+            "math.max(\"a\", \"b\")",
+            "'math.max' needs ints or floats, found str",
+            10,
+        ),
+        (
+            "math.max(3)",
+            "one argument must be a list of numbers, found int",
+            10,
+        ),
+        (
+            "math.min([\"a\"])",
+            "the list must hold int or float, found list[str]",
+            10,
+        ),
+        (
+            "math.max()",
+            "'math.max' takes 1 or more arguments, but 0 were given",
+            1,
+        ),
+        (
+            "math.abs(1, 2)",
+            "'math.abs' takes 1 argument, but 2 were given",
+            1,
+        ),
+    ];
+    for (call, message, col) in cases {
+        assert_eq!(
+            linked_errors(&format!("use math\n{call}\n")),
+            [(message.to_string(), 2, col)],
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn time_functions_have_types() {
+    let cases = [
+        ("time.now()", "float"),
+        ("time.clock()", "float"),
+        ("time.sleep(1)", "none"),
+        ("time.sleep(0.5)", "none"),
+    ];
+    for (call, ty) in cases {
+        assert_eq!(
+            linked_type(&format!("use time\nx = {call}\n"), "x"),
+            ty,
+            "{call}"
+        );
+    }
+    assert_eq!(
+        linked_errors("use time\ntime.sleep(\"1\")\n"),
+        [(
+            "'time.sleep' needs an int or float, found str".to_string(),
+            2,
+            12
+        )]
+    );
+    assert_eq!(
+        linked_errors("use os\nos.time()\n"),
+        [("module 'os' has no function 'time'".to_string(), 2, 4)]
+    );
+}
+
+#[test]
+fn random_functions_have_types() {
+    let cases = [
+        ("random.seed(1)", "none"),
+        ("random.random()", "float"),
+        ("random.randint(1, 6)", "int"),
+        ("random.choice([\"a\"])", "str"),
+        ("random.choice([[1.5]])", "list[float]"),
+    ];
+    for (call, ty) in cases {
+        assert_eq!(
+            linked_type(&format!("use random\nx = {call}\n"), "x"),
+            ty,
+            "{call}"
+        );
+    }
+    let source = "use random\n\ndef pick(xs);\n    ret random.choice(xs) + 1\n\nx = pick([1])\n";
+    assert_eq!(linked_type(source, "pick"), "def(list[int]) -> int");
+}
+
+#[test]
+fn random_functions_check_their_arguments() {
+    let cases = [
+        ("random.seed(1.5)", "expected int, found float", 13),
+        ("random.randint(1, 2.0)", "expected int, found float", 19),
+        (
+            "random.choice(3)",
+            "'random.choice' needs a list, found int",
+            15,
+        ),
+        (
+            "random.random(1)",
+            "'random.random' takes 0 arguments, but 1 was given",
+            1,
+        ),
+        (
+            "random.randint(1)",
+            "'random.randint' takes 2 arguments, but 1 was given",
+            1,
+        ),
+    ];
+    for (call, message, col) in cases {
+        assert_eq!(
+            linked_errors(&format!("use random\n{call}\n")),
+            [(message.to_string(), 2, col)],
+            "{call}"
+        );
+    }
 }

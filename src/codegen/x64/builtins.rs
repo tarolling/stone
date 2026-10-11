@@ -1462,8 +1462,6 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, used: &[&str], empty_se
 /// - `stone.os_pid` returns the process id
 /// - `stone.os_cwd` returns a copy of the current directory, failing if there is none
 /// - `stone.os_exit` ends the program with the status in `rdi`, so it never returns
-/// - `stone.os_time` and `stone.os_clock` return the bits of `clock_gettime`'s seconds plus its
-///   nanoseconds over 1e9, for `CLOCK_REALTIME` and `CLOCK_MONOTONIC`
 ///
 /// The routines that return strings need the string runtime.
 pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure: &str) {
@@ -1652,7 +1650,19 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("\tmov\teax, 231"); // sys_exit_group
         r#gen.emit("\tsyscall");
     }
-    for (label, clock) in [("stone.os_time", 0), ("stone.os_clock", 1)] {
+}
+
+/// Emits the runtime routines of the `time` module that `used` lists:
+///
+/// - `stone.time_now` and `stone.time_clock` return the bits of `clock_gettime`'s seconds plus
+///   its nanoseconds over 1e9, for `CLOCK_REALTIME` and `CLOCK_MONOTONIC`
+/// - `stone.time_sleep` waits for the float whose bits are in `rdi`, splitting it into seconds
+///   and nanoseconds as `stdlib::time::split_seconds` does, and calling `nanosleep` again with
+///   what is left when a signal interrupts it. It jumps to `negative` for a negative length or
+///   nan, and to `too_large` for 2^63 seconds or more
+pub fn time_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], failures: (&str, &str)) {
+    let uses = |label: &str| used.contains(&label);
+    for (label, clock) in [("stone.time_now", 0), ("stone.time_clock", 1)] {
         if !uses(label) {
             continue;
         }
@@ -1673,6 +1683,173 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("\taddsd\txmm0, xmm1");
         r#gen.emit("\tmovq\trax, xmm0");
         r#gen.emit("\tleave");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.time_sleep") {
+        let (negative, too_large) = failures;
+        // the request is at [rsp] and what is left after a signal at [rsp + 16]
+        r#gen.emit("stone.time_sleep:");
+        r#gen.emit("\tpush\trbp");
+        r#gen.emit("\tmov\trbp, rsp");
+        r#gen.emit("\tsub\trsp, 32");
+        r#gen.emit("\tmovq\txmm0, rdi");
+        r#gen.emit("\txorpd\txmm1, xmm1");
+        // CF is set below 0, and PF and CF for nan
+        r#gen.emit("\tucomisd\txmm0, xmm1");
+        r#gen.emit(&format!("\tjb\t{negative}"));
+        r#gen.emit("\tmovabs\trax, 0x43e0000000000000"); // 2^63
+        r#gen.emit("\tmovq\txmm1, rax");
+        r#gen.emit("\tucomisd\txmm0, xmm1");
+        r#gen.emit(&format!("\tjae\t{too_large}"));
+        r#gen.emit("\tcvttsd2si\trax, xmm0");
+        r#gen.emit("\tmov\tQWORD PTR [rsp], rax");
+        r#gen.emit("\tcvtsi2sd\txmm1, rax");
+        r#gen.emit("\tsubsd\txmm0, xmm1");
+        r#gen.emit("\tmovabs\trax, 0x41cdcd6500000000"); // 1e9
+        r#gen.emit("\tmovq\txmm1, rax");
+        r#gen.emit("\tmulsd\txmm0, xmm1");
+        r#gen.emit("\tcvttsd2si\trax, xmm0");
+        r#gen.emit("\tmov\tQWORD PTR [rsp + 8], rax");
+        r#gen.emit(".Ltime_sleep_again:");
+        r#gen.emit("\tmov\trdi, rsp");
+        r#gen.emit("\tlea\trsi, [rsp + 16]");
+        r#gen.emit("\tmov\teax, 35"); // sys_nanosleep
+        r#gen.emit("\tsyscall");
+        // a signal interrupted it, so sleep for what is left
+        r#gen.emit("\tcmp\trax, -4"); // -EINTR
+        r#gen.emit("\tjne\t.Ltime_sleep_done");
+        r#gen.emit("\tmov\trax, QWORD PTR [rsp + 16]");
+        r#gen.emit("\tmov\tQWORD PTR [rsp], rax");
+        r#gen.emit("\tmov\trax, QWORD PTR [rsp + 24]");
+        r#gen.emit("\tmov\tQWORD PTR [rsp + 8], rax");
+        r#gen.emit("\tjmp\t.Ltime_sleep_again");
+        r#gen.emit(".Ltime_sleep_done:");
+        r#gen.emit("\tleave");
+        r#gen.emit("\tret");
+    }
+}
+
+/// Emits the runtime of the `random` module, for a program that calls any of `used`. It keeps
+/// the xoshiro256** state in `.bss` at `stone.random_state`, four words followed by a word that
+/// is 1 once something seeded it, and draws exactly what `stdlib::random::Rng` draws:
+///
+/// - `stone.random_seed` seeds the state from the int in `rdi` through splitmix64, returning 0
+/// - `stone.random_next` returns the next 64 bits in `rax`, first seeding the state from
+///   `getrandom` if nothing has
+/// - `stone.random_float` returns the bits of a float from 0.0 up to but not including 1.0
+/// - `stone.random_below` returns a number below the one in `rdi`, throwing away draws that
+///   would bias it, or any 64 bits for 0, which stands for 2^64
+pub fn random_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
+    use crate::stdlib::random::{SPLITMIX_GAMMA, SPLITMIX_MUL1, SPLITMIX_MUL2};
+    let uses = |label: &str| used.contains(&label);
+    r#gen.emit("\t.bss");
+    r#gen.emit("\t.p2align\t3");
+    r#gen.emit("stone.random_state:");
+    r#gen.emit("\t.zero\t40");
+    r#gen.emit("\t.text");
+
+    // splitmix64, unrolled for the four words of the state
+    r#gen.emit("stone.random_seed:");
+    r#gen.emit("\tlea\trcx, [rip + stone.random_state]");
+    r#gen.emit(&format!("\tmovabs\trsi, {}", SPLITMIX_GAMMA as i64));
+    for word in 0..4 {
+        r#gen.emit("\tadd\trdi, rsi");
+        r#gen.emit("\tmov\trax, rdi");
+        for (shift, multiplier) in [
+            (30, Some(SPLITMIX_MUL1)),
+            (27, Some(SPLITMIX_MUL2)),
+            (31, None),
+        ] {
+            r#gen.emit("\tmov\trdx, rax");
+            r#gen.emit(&format!("\tshr\trdx, {shift}"));
+            r#gen.emit("\txor\trax, rdx");
+            if let Some(multiplier) = multiplier {
+                r#gen.emit(&format!("\tmovabs\trdx, {}", multiplier as i64));
+                r#gen.emit("\timul\trax, rdx");
+            }
+        }
+        r#gen.emit(&format!("\tmov\tQWORD PTR [rcx + {}], rax", 8 * word));
+    }
+    r#gen.emit("\tmov\tQWORD PTR [rcx + 32], 1");
+    r#gen.emit("\txor\teax, eax");
+    r#gen.emit("\tret");
+
+    // xoshiro256**, with s0 through s3 in r8, rsi, r9, and r10
+    r#gen.emit("stone.random_next:");
+    r#gen.emit("\tlea\trcx, [rip + stone.random_state]");
+    r#gen.emit("\tcmp\tQWORD PTR [rcx + 32], 0");
+    r#gen.emit("\tjne\t.Lrandom_next_seeded");
+    r#gen.emit("\tsub\trsp, 16");
+    r#gen.emit("\tmov\tQWORD PTR [rsp], 0");
+    r#gen.emit("\tmov\trdi, rsp");
+    r#gen.emit("\tmov\tesi, 8");
+    r#gen.emit("\txor\tedx, edx");
+    r#gen.emit("\tmov\teax, 318"); // sys_getrandom
+    r#gen.emit("\tsyscall");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rsp]");
+    r#gen.emit("\tadd\trsp, 16");
+    r#gen.emit("\tcall\tstone.random_seed");
+    r#gen.emit(".Lrandom_next_seeded:");
+    r#gen.emit("\tmov\tr8, QWORD PTR [rcx]");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rcx + 8]");
+    r#gen.emit("\tmov\tr9, QWORD PTR [rcx + 16]");
+    r#gen.emit("\tmov\tr10, QWORD PTR [rcx + 24]");
+    // the result is rotl(s1 * 5, 7) * 9
+    r#gen.emit("\tlea\trax, [rsi + rsi * 4]");
+    r#gen.emit("\trol\trax, 7");
+    r#gen.emit("\tlea\trax, [rax + rax * 8]");
+    r#gen.emit("\tmov\trdx, rsi");
+    r#gen.emit("\tshl\trdx, 17");
+    r#gen.emit("\txor\tr9, r8");
+    r#gen.emit("\txor\tr10, rsi");
+    r#gen.emit("\txor\trsi, r9");
+    r#gen.emit("\txor\tr8, r10");
+    r#gen.emit("\txor\tr9, rdx");
+    r#gen.emit("\trol\tr10, 45");
+    r#gen.emit("\tmov\tQWORD PTR [rcx], r8");
+    r#gen.emit("\tmov\tQWORD PTR [rcx + 8], rsi");
+    r#gen.emit("\tmov\tQWORD PTR [rcx + 16], r9");
+    r#gen.emit("\tmov\tQWORD PTR [rcx + 24], r10");
+    r#gen.emit("\tret");
+
+    if uses("stone.random_float") {
+        // the top 53 bits over 2^53, which is exact
+        r#gen.emit("stone.random_float:");
+        r#gen.emit("\tcall\tstone.random_next");
+        r#gen.emit("\tshr\trax, 11");
+        r#gen.emit("\tcvtsi2sd\txmm0, rax");
+        r#gen.emit("\tmovabs\trax, 0x3ca0000000000000"); // 2^-53
+        r#gen.emit("\tmovq\txmm1, rax");
+        r#gen.emit("\tmulsd\txmm0, xmm1");
+        r#gen.emit("\tmovq\trax, xmm0");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.random_below") {
+        // the span stays in rbx and the smallest draw to keep, 2^64 % span, in r12
+        r#gen.emit("stone.random_below:");
+        r#gen.emit("\tpush\trbx");
+        r#gen.emit("\tpush\tr12");
+        r#gen.emit("\tmov\trbx, rdi");
+        r#gen.emit("\ttest\trbx, rbx");
+        r#gen.emit("\tjz\t.Lrandom_below_any");
+        r#gen.emit("\tmov\trax, rbx");
+        r#gen.emit("\tneg\trax");
+        r#gen.emit("\txor\tedx, edx");
+        r#gen.emit("\tdiv\trbx");
+        r#gen.emit("\tmov\tr12, rdx");
+        r#gen.emit(".Lrandom_below_draw:");
+        r#gen.emit("\tcall\tstone.random_next");
+        r#gen.emit("\tcmp\trax, r12");
+        r#gen.emit("\tjb\t.Lrandom_below_draw");
+        r#gen.emit("\txor\tedx, edx");
+        r#gen.emit("\tdiv\trbx");
+        r#gen.emit("\tmov\trax, rdx");
+        r#gen.emit("\tjmp\t.Lrandom_below_done");
+        r#gen.emit(".Lrandom_below_any:");
+        r#gen.emit("\tcall\tstone.random_next");
+        r#gen.emit(".Lrandom_below_done:");
+        r#gen.emit("\tpop\tr12");
+        r#gen.emit("\tpop\trbx");
         r#gen.emit("\tret");
     }
 }

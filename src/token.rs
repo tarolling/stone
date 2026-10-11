@@ -23,6 +23,8 @@ pub enum TokenType {
     Comma,
     Colon,
     Dot,
+    /// The `->` before a function's return type, as in `fn f() -> int;`.
+    Arrow,
 }
 
 /// A token and the span of source text it was lexed from.
@@ -40,8 +42,8 @@ impl Token {
     }
 }
 
-/// Words that are lexed as keywords instead of names, such as `def` and `ret`.
+/// Words that are lexed as keywords instead of names, such as `fn` and `ret`.
 pub static RESERVED_KEYWORDS: [&str; 19] = [
-    "and", "as", "break", "cont", "def", "elif", "else", "false", "for", "if", "in", "none", "not",
+    "and", "as", "break", "cont", "elif", "else", "false", "fn", "for", "if", "in", "none", "not",
     "or", "pub", "ret", "true", "use", "while",
 ];

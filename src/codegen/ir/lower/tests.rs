@@ -26,14 +26,15 @@ fn lower_source(source: &str) -> Program {
 #[test]
 fn assigning_an_expression_to_a_local_writes_it_directly() {
     assert_eq!(
-        dump("def f(x);\n    x = x + 1\n    ret x\n"),
+        dump("fn f(x: int) -> int;\n    x = x + 1\n    ret x\n"),
         "fn f(v0):\nb0:\n  v0 = add v0, 1\n  ret v0\nfn main():\nb0:\n  ret 0\n"
     );
 }
 
 #[test]
 fn a_while_test_becomes_a_compare_and_branch() {
-    let source = "def f(n);\n    i = 0\n    while i < n;\n        i = i + 1\n    ret i\n";
+    let source =
+        "fn f(n: int) -> int;\n    i = 0\n    while i < n;\n        i = i + 1\n    ret i\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0):\n\
@@ -53,7 +54,7 @@ fn a_while_test_becomes_a_compare_and_branch() {
 
 #[test]
 fn chained_compares_and_boolean_operators_in_conditions_branch_directly() {
-    let source = "def f(a, b, c);\n    if a < b < c and not a == c;\n        ret 1\n    ret 0\n";
+    let source = "fn f(a: int, b: int, c: int) -> int;\n    if a < b < c and not a == c;\n        ret 1\n    ret 0\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1, v2):\n\
@@ -67,7 +68,7 @@ fn chained_compares_and_boolean_operators_in_conditions_branch_directly() {
 
 #[test]
 fn a_range_loop_counts_with_hidden_vregs_and_copies_a_variable_bound() {
-    let source = "def f(n);\n    t = 0\n    for i in range(1, n);\n        t = t + i\n    ret t\n";
+    let source = "fn f(n: int) -> int;\n    t = 0\n    for i in range(1, n);\n        t = t + i\n    ret t\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0):\n\
@@ -80,7 +81,7 @@ fn a_range_loop_counts_with_hidden_vregs_and_copies_a_variable_bound() {
 
 #[test]
 fn a_constant_range_bound_stays_an_immediate() {
-    let dump = dump("def f();\n    for i in range(10);\n        print(i)\n");
+    let dump = dump("fn f();\n    for i in range(10);\n        print(i)\n");
     assert!(dump.contains("br_lt v1, 10 -> "), "{dump}");
 }
 
@@ -105,7 +106,7 @@ fn top_level_list_loops_hold_their_list_and_main_releases_globals() {
 #[test]
 fn and_as_a_value_short_circuits_through_a_result_vreg() {
     assert_eq!(
-        dump("def f(a, b);\n    ret a and b\nprint(f(1, 2))\n")
+        dump("fn f(a: int, b: int) -> int;\n    ret a and b\nprint(f(1, 2))\n")
             .split("fn main")
             .next()
             .unwrap(),
@@ -119,7 +120,7 @@ fn and_as_a_value_short_circuits_through_a_result_vreg() {
 #[test]
 fn a_list_literal_is_built_before_its_variable_lets_go_of_the_old_list() {
     assert_eq!(
-        dump("def f(x);\n    x = [x[0]]\n    ret x\nprint(f([1]))\n")
+        dump("fn f(x: list[int]) -> list[int];\n    x = [x[0]]\n    ret x\nprint(f([1]))\n")
             .split("fn main")
             .next()
             .unwrap(),
@@ -132,7 +133,7 @@ fn a_list_literal_is_built_before_its_variable_lets_go_of_the_old_list() {
 #[test]
 fn assigning_a_string_releases_the_old_value_after_computing_the_new_one() {
     assert_eq!(
-        dump("def f(s);\n    s = s + \"x\"\n    ret s\nprint(f(\"a\"))\n"),
+        dump("fn f(s: str) -> str;\n    s = s + \"x\"\n    ret s\nprint(f(\"a\"))\n"),
         "fn f(v0):\n\
          b0:\n  v1 = str \"x\"\n  v2 = call stone.str_concat(v0, v1)\n  \
          release_str v0\n  v0 = copy v2\n  ret v0\n\
@@ -144,8 +145,8 @@ fn assigning_a_string_releases_the_old_value_after_computing_the_new_one() {
 
 #[test]
 fn parameters_are_borrowed_unless_changed_and_temporaries_are_released_once_used() {
-    let source = "def f(xs, i);\n    xs[i] = xs[0]\n    g(xs[1] + \"!\")\n\
-                  def g(s);\n    ret s\nf([\"a\"], 0)\n";
+    let source = "fn f(xs: list[str], i: int);\n    xs[i] = xs[0]\n    g(xs[1] + \"!\")\n\
+                  fn g(s: str) -> str;\n    ret s\nf([\"a\"], 0)\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
@@ -161,7 +162,7 @@ fn parameters_are_borrowed_unless_changed_and_temporaries_are_released_once_used
 #[test]
 fn a_chain_of_string_compares_releases_its_operand_when_it_stops_early() {
     assert_eq!(
-        dump("def f(a, b, c);\n    ret a == b + \"\" == c\nprint(f(\"a\", \"b\", \"c\"))\n")
+        dump("fn f(a: str, b: str, c: str) -> bool;\n    ret a == b + \"\" == c\nprint(f(\"a\", \"b\", \"c\"))\n")
             .split("fn main")
             .next()
             .unwrap(),
@@ -176,7 +177,7 @@ fn a_chain_of_string_compares_releases_its_operand_when_it_stops_early() {
 
 #[test]
 fn returning_from_a_list_loop_releases_the_list_and_gives_up_the_local() {
-    let source = "def f(xs);\n    for x in xs;\n        if x == \"a\";\n            ret x\n    \
+    let source = "fn f(xs: list[str]) -> str;\n    for x in xs;\n        if x == \"a\";\n            ret x\n    \
                   ret \"\"\nprint(f([\"a\"]))\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
@@ -193,23 +194,23 @@ fn returning_from_a_list_loop_releases_the_list_and_gives_up_the_local() {
 
 #[test]
 fn functions_read_globals_with_a_check_and_main_without() {
-    let dump = dump("g = 1\ndef f();\n    ret g\nprint(g + f())\n");
+    let dump = dump("g = 1\nfn f() -> int;\n    ret g\nprint(g + f())\n");
     assert!(dump.contains("v0 = load_global_checked g"), "{dump}");
     assert!(dump.contains("= load_global g"), "{dump}");
 }
 
 #[test]
 fn negative_literals_fold_to_immediates() {
-    let ints = dump("def f(x);\n    ret x / -4\nprint(f(8))\n");
+    let ints = dump("fn f(x: int) -> int;\n    ret x / -4\nprint(f(8))\n");
     assert!(ints.contains("div v0, -4"), "{ints}");
-    let floats = dump("def f(x);\n    ret x * -1.5\nprint(f(2.0))\n");
+    let floats = dump("fn f(x: float) -> float;\n    ret x * -1.5\nprint(f(2.0))\n");
     let bits = (-1.5f64).to_bits() as i64;
     assert!(floats.contains(&format!("fmul v0, {bits}")), "{floats}");
 }
 
 #[test]
 fn methods_lower_to_list_and_string_operations() {
-    let source = "def f(xs, s);\n    xs.append(s.len())\n    ret xs.len()\nf([], \"a\")\n";
+    let source = "fn f(xs: list[int], s: str) -> int;\n    xs.append(s.len())\n    ret xs.len()\nf([], \"a\")\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
@@ -220,7 +221,7 @@ fn methods_lower_to_list_and_string_operations() {
 
 #[test]
 fn a_changed_parameter_is_owned_and_made_unique_before_each_change() {
-    let source = "def f(xs, i);\n    xs[i] = 0\n    xs.append(i)\n    ret xs\nprint(f([1], 0))\n";
+    let source = "fn f(xs: list[int], i: int) -> list[int];\n    xs[i] = 0\n    xs.append(i)\n    ret xs\nprint(f([1], 0))\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
@@ -239,12 +240,14 @@ fn a_nested_change_makes_every_list_on_the_way_unique() {
 }
 
 /// A function that appends to its parameter and returns it, for the tests of moves below.
-const ADD: &str = "def add(xs, x);\n    xs.append(x)\n    ret xs\n";
+const ADD: &str = "fn add(xs: list[int], x: int) -> list[int];\n    xs.append(x)\n    ret xs\n";
 
 #[test]
 fn the_caller_gives_an_owned_parameter_its_reference() {
     // a borrowed variable is retained for the call, and a temporary is given up
-    let source = format!("{ADD}def f(ys);\n    ret [add(ys, 1), add([2], 3)]\nprint(f([0]))\n");
+    let source = format!(
+        "{ADD}fn f(ys: list[int]) -> list[list[int]];\n    ret [add(ys, 1), add([2], 3)]\nprint(f([0]))\n"
+    );
     let dump = dump(&source);
     assert!(
         dump.contains(
@@ -257,7 +260,9 @@ fn the_caller_gives_an_owned_parameter_its_reference() {
 
 #[test]
 fn a_local_assigned_the_result_of_a_call_is_moved_into_it() {
-    let source = format!("{ADD}def f(xs);\n    xs = add(xs, 1)\n    ret xs\nprint(f([0]))\n");
+    let source = format!(
+        "{ADD}fn f(xs: list[int]) -> list[int];\n    xs = add(xs, 1)\n    ret xs\nprint(f([0]))\n"
+    );
     let dump = dump(&source);
     assert!(
         dump.contains("fn f(v0):\nb0:\n  v1 = call add(v0, 1)\n  v0 = copy v1\n  ret v0\n"),
@@ -267,8 +272,8 @@ fn a_local_assigned_the_result_of_a_call_is_moved_into_it() {
 
 #[test]
 fn only_one_of_two_copies_of_an_argument_moves() {
-    let source = "def two(xs, ys);\n    ys.append(2)\n    xs.append(ys.len())\n    ret xs\n\
-                  def f(xs);\n    xs = two(xs, xs)\n    ret xs\nprint(f([0]))\n";
+    let source = "fn two(xs: list[int], ys: list[int]) -> list[int];\n    ys.append(2)\n    xs.append(ys.len())\n    ret xs\n\
+                  fn f(xs: list[int]) -> list[int];\n    xs = two(xs, xs)\n    ret xs\nprint(f([0]))\n";
     let dump = dump(source);
     assert!(
         dump.contains("fn f(v0):\nb0:\n  retain v0\n  v1 = call two(v0, v0)\n  v0 = copy v1\n"),
@@ -284,8 +289,8 @@ fn a_global_moves_only_into_a_function_that_never_reads_it() {
         "{moved}"
     );
     // `peek` reads xs, so the call needs a copy
-    let source = "def peek(ys);\n    ys.append(xs[0])\n    ret ys\n\
-                  def add(ys);\n    ys.append(1)\n    ret peek(ys)\nxs = [0]\nxs = add(xs)\n";
+    let source = "fn peek(ys: list[int]) -> list[int];\n    ys.append(xs[0])\n    ret ys\n\
+                  fn add(ys: list[int]) -> list[int];\n    ys.append(1)\n    ret peek(ys)\nxs = [0]\nxs = add(xs)\n";
     let kept = dump(source);
     assert!(
         kept.contains("v2 = load_global xs\n  retain v2\n  v3 = call add(v2)\n"),
@@ -295,8 +300,9 @@ fn a_global_moves_only_into_a_function_that_never_reads_it() {
 
 #[test]
 fn a_variable_moves_into_a_call_at_its_last_use_and_is_left_null() {
-    let source =
-        format!("{ADD}def f(n);\n    xs = [n]\n    ys = add(xs, 1)\n    ret ys\nprint(f(0))\n");
+    let source = format!(
+        "{ADD}fn f(n: int) -> list[int];\n    xs = [n]\n    ys = add(xs, 1)\n    ret ys\nprint(f(0))\n"
+    );
     let dump = dump(&source);
     assert!(
         dump.contains("v4 = call add(v1, 1)\n  release_list v2\n  v2 = copy v4\n  v1 = copy 0\n"),
@@ -304,7 +310,7 @@ fn a_variable_moves_into_a_call_at_its_last_use_and_is_left_null() {
     );
     // a later read keeps the variable's own copy
     let source = format!(
-        "{ADD}def f(n);\n    xs = [n]\n    ys = add(xs, 1)\n    print(xs)\n    ret ys\n\
+        "{ADD}fn f(n: int) -> list[int];\n    xs = [n]\n    ys = add(xs, 1)\n    print(xs)\n    ret ys\n\
          print(f(0))\n"
     );
     let dump = super::tests::dump(&source);
@@ -316,14 +322,15 @@ fn a_variable_moves_into_a_call_at_its_last_use_and_is_left_null() {
 
 #[test]
 fn a_variable_moves_into_another_variable_or_a_list_at_its_last_use() {
-    let dump = dump("def f(n);\n    xs = [n]\n    ys = xs\n    ret ys\nprint(f(0))\n");
+    let dump =
+        dump("fn f(n: int) -> list[int];\n    xs = [n]\n    ys = xs\n    ret ys\nprint(f(0))\n");
     assert!(
         dump.contains(
             "release_list v2\n  v2 = copy v1\n  v1 = copy 0\n  release_list v1\n  ret v2\n"
         ),
         "{dump}"
     );
-    let source = "def f(n);\n    rows = []\n    row = [n]\n    rows.append(row)\n    \
+    let source = "fn f(n: int) -> list[list[int]];\n    rows = []\n    row = [n]\n    rows.append(row)\n    \
                   ret rows\nprint(f(0))\n";
     let dump = super::tests::dump(source);
     assert!(
@@ -344,7 +351,7 @@ fn a_global_moves_at_its_last_use_in_main() {
 
 #[test]
 fn returning_a_call_moves_the_locals_it_is_given() {
-    let source = "def fill(xs, n);\n    if n == 0;\n        ret xs\n    xs.append(n)\n    \
+    let source = "fn fill(xs: list[int], n: int) -> list[int];\n    if n == 0;\n        ret xs\n    xs.append(n)\n    \
                   ret fill(xs, n - 1)\nprint(fill([], 3))\n";
     let dump = dump(source);
     assert!(
@@ -356,14 +363,16 @@ fn returning_a_call_moves_the_locals_it_is_given() {
 #[test]
 fn modulo_and_power_lower_to_arithmetic() {
     assert_eq!(
-        dump("def f(x, n);\n    ret x % n ** 2\nprint(f(7, 2))\n")
+        dump("fn f(x: int, n: int) -> int;\n    ret x % n ** 2\nprint(f(7, 2))\n")
             .split("fn main")
             .next()
             .unwrap(),
         "fn f(v0, v1):\nb0:\n  v2 = pow v1, 2\n  v3 = rem v0, v2\n  ret v3\n"
     );
     // a float power's exponent stays an int, not float bits
-    let floats = dump("def f(x, n);\n    ret x % 1.5 ** n + x ** -2\nprint(f(2.0, 3))\n");
+    let floats = dump(
+        "fn f(x: float, n: int) -> float;\n    ret x % 1.5 ** n + x ** -2\nprint(f(2.0, 3))\n",
+    );
     let bits = 1.5f64.to_bits() as i64;
     assert!(floats.contains(&format!("fpow {bits}, v1")), "{floats}");
     assert!(floats.contains("frem v0, "), "{floats}");
@@ -372,9 +381,9 @@ fn modulo_and_power_lower_to_arithmetic() {
 
 #[test]
 fn io_and_string_builtins_call_the_runtime() {
-    let source = "def f(s, n, x, b);\n    \
+    let source = "fn f(s: str, n: int, x: float, b: bool) -> list[str];\n    \
                   ret [input(), input(s), str(n), str(x), str(b), str(s), s.strip()]\n\
-                  def g(s);\n    \
+                  fn g(s: str) -> int;\n    \
                   ret int(s) + int(float(s)) + args().len() + s.split().len() + s.split(s).len()\n\
                   f(\"a\", 1, 1.5, true)\ng(\"1\")\nprint(eof())\n";
     let text = dump(source);
@@ -398,7 +407,7 @@ fn io_and_string_builtins_call_the_runtime() {
 
 #[test]
 fn a_row_read_for_indexing_is_borrowed_unless_a_call_could_replace_it() {
-    let source = "def f(a, i, k);\n    ret a[i][k] + a[i][g(k)]\ndef g(k);\n    ret k\n\
+    let source = "fn f(a: list[list[int]], i: int, k: int) -> int;\n    ret a[i][k] + a[i][g(k)]\nfn g(k: int) -> int;\n    ret k\n\
                   print(f([[1]], 0, 0))\n";
     assert_eq!(
         dump(source).split("fn g").next().unwrap(),
@@ -412,7 +421,7 @@ fn a_row_read_for_indexing_is_borrowed_unless_a_call_could_replace_it() {
 /// Links, checks, and lowers `source` like [`dump`], so that it can `use os`.
 fn dump_linked(source: &str) -> String {
     let (_, module) = crate::driver::load(
-        std::path::Path::new("main.st"),
+        std::path::Path::new("main.stn"),
         source,
         &crate::project::MapSources::default(),
     );
@@ -464,7 +473,7 @@ fn first_function(source: &str) -> String {
 
 #[test]
 fn math_abs_branches_instead_of_calling() {
-    let ints = "use math\ndef f(x);\n    ret math.abs(x)\nprint(f(1))\n";
+    let ints = "use math\nfn f(x: int) -> int;\n    ret math.abs(x)\nprint(f(1))\n";
     assert_eq!(
         first_function(ints),
         "fn f(v0):\n\
@@ -475,7 +484,7 @@ fn math_abs_branches_instead_of_calling() {
          b4:\n  v1 = copy v0\n  jmp b5\n\
          b5:\n  ret v1\n"
     );
-    let floats = "use math\ndef f(x);\n    ret math.abs(x)\nprint(f(1.5))\n";
+    let floats = "use math\nfn f(x: float) -> float;\n    ret math.abs(x)\nprint(f(1.5))\n";
     // 0.0 - x rather than a sign flip, so -0.0 becomes 0.0
     assert_eq!(
         first_function(floats),
@@ -489,7 +498,7 @@ fn math_abs_branches_instead_of_calling() {
 
 #[test]
 fn math_min_and_max_fold_from_the_left() {
-    let several = "use math\ndef f(a, b, c);\n    ret math.max(a, b, c)\nprint(f(1, 2, 3))\n";
+    let several = "use math\nfn f(a: int, b: int, c: int) -> int;\n    ret math.max(a, b, c)\nprint(f(1, 2, 3))\n";
     assert_eq!(
         first_function(several),
         "fn f(v0, v1, v2):\n\
@@ -499,7 +508,7 @@ fn math_min_and_max_fold_from_the_left() {
          b3:\n  v3 = copy v2\n  jmp b4\n\
          b4:\n  ret v3\n"
     );
-    let list = "use math\ndef f(xs);\n    ret math.min(xs)\nprint(f([1.5]))\n";
+    let list = "use math\nfn f(xs: list[float]) -> float;\n    ret math.min(xs)\nprint(f([1.5]))\n";
     assert_eq!(
         first_function(list),
         "fn f(v0):\n\
@@ -516,7 +525,7 @@ fn math_min_and_max_fold_from_the_left() {
 
 #[test]
 fn math_sqrt_and_floor_check_their_argument_first() {
-    let sqrt = "use math\ndef f(x);\n    ret math.sqrt(x)\nprint(f(2))\n";
+    let sqrt = "use math\nfn f(x: int) -> float;\n    ret math.sqrt(x)\nprint(f(2))\n";
     assert_eq!(
         first_function(sqrt),
         "fn f(v0):\n\
@@ -524,7 +533,7 @@ fn math_sqrt_and_floor_check_their_argument_first() {
          b1:\n  fail \"math domain error\"\n\
          b2:\n  v2 = fsqrt v1\n  ret v2\n"
     );
-    let floor = "use math\ndef f(x);\n    ret math.floor(x)\nprint(f(2.5))\n";
+    let floor = "use math\nfn f(x: float) -> int;\n    ret math.floor(x)\nprint(f(2.5))\n";
     assert_eq!(
         first_function(floor),
         "fn f(v0):\n\
@@ -555,7 +564,9 @@ fn time_functions_call_the_runtime() {
 #[test]
 fn randint_checks_its_range_then_draws_below_the_span() {
     assert_eq!(
-        first_function("use random\ndef f(a, b);\n    ret random.randint(a, b)\nprint(f(1, 6))\n"),
+        first_function(
+            "use random\nfn f(a: int, b: int) -> int;\n    ret random.randint(a, b)\nprint(f(1, 6))\n"
+        ),
         "fn f(v0, v1):\n\
          b0:\n  br_gt v0, v1 -> b1, b2\n\
          b1:\n  fail \"empty range for randint\"\n\
@@ -566,8 +577,9 @@ fn randint_checks_its_range_then_draws_below_the_span() {
 
 #[test]
 fn choice_retains_a_counted_element() {
-    let text =
-        first_function("use random\ndef f(xs);\n    ret random.choice(xs)\nprint(f([\"a\"]))\n");
+    let text = first_function(
+        "use random\nfn f(xs: list[str]) -> str;\n    ret random.choice(xs)\nprint(f([\"a\"]))\n",
+    );
     assert_eq!(
         text,
         "fn f(v0):\n\
@@ -580,7 +592,9 @@ fn choice_retains_a_counted_element() {
 
 #[test]
 fn elementwise_arithmetic_is_one_loop_with_no_temporary_lists() {
-    let ir = first_function("def f(a, b);\n    ret a * 2 + b * b\nf([1], [2])\n");
+    let ir = first_function(
+        "fn f(a: list[int], b: list[int]) -> list[int];\n    ret a * 2 + b * b\nf([1], [2])\n",
+    );
     // the lengths are checked once, then each element is read, computed, and stored
     assert_eq!(ir.matches("= len ").count(), 2, "{ir}");
     // `b` is read once for both of its uses
@@ -594,7 +608,9 @@ fn elementwise_arithmetic_is_one_loop_with_no_temporary_lists() {
 
 #[test]
 fn elementwise_float_arithmetic_uses_float_instructions() {
-    let ir = first_function("def f(a, k);\n    ret -(a * k) + 1.5\nf([1.0], 2.0)\n");
+    let ir = first_function(
+        "fn f(a: list[float], k: float) -> list[float];\n    ret -(a * k) + 1.5\nf([1.0], 2.0)\n",
+    );
     assert!(ir.contains("fmul"), "{ir}");
     assert!(ir.contains("fneg"), "{ir}");
     assert!(ir.contains("fadd"), "{ir}");
@@ -603,24 +619,28 @@ fn elementwise_float_arithmetic_uses_float_instructions() {
 #[test]
 fn elementwise_arithmetic_reuses_a_list_at_its_last_use() {
     // `a` is assigned, so its old list can hold the result
-    let ir = first_function("def f(a, b);\n    a = a * 2 + b\n    ret a\nf([1], [2])\n");
+    let ir = first_function(
+        "fn f(a: list[int], b: list[int]) -> list[int];\n    a = a * 2 + b\n    ret a\nf([1], [2])\n",
+    );
     assert!(ir.contains("call stone.list_reuse"), "{ir}");
     assert!(!ir.contains("stone.list_new"), "{ir}");
     // `b` is not read afterward, so it can too, though `a`, read afterward, cannot
     let ir = first_function(
-        "def f(x);\n    a = x * 1\n    b = a * 2\n    c = b + a\n    ret [a, c]\nf([1])\n",
+        "fn f(x: list[int]) -> list[list[int]];\n    a = x * 1\n    b = a * 2\n    c = b + a\n    ret [a, c]\nf([1])\n",
     );
     assert_eq!(ir.matches("call stone.list_reuse").count(), 1, "{ir}");
     assert_eq!(ir.matches("call stone.list_new(v").count(), 2, "{ir}");
     // and a borrowed parameter belongs to the caller
-    let ir = first_function("def f(a);\n    c = a + 1\n    ret c\nf([1])\n");
+    let ir = first_function("fn f(a: list[int]) -> list[int];\n    c = a + 1\n    ret c\nf([1])\n");
     assert!(!ir.contains("stone.list_reuse"), "{ir}");
     assert!(ir.contains("call stone.list_new"), "{ir}");
 }
 
 #[test]
 fn elementwise_arithmetic_packs_pairs_when_it_can() {
-    let ir = first_function("def f(a, b);\n    ret -(a * 2.5) / b\nf([1.0], [2.0])\n");
+    let ir = first_function(
+        "fn f(a: list[float], b: list[float]) -> list[float];\n    ret -(a * 2.5) / b\nf([1.0], [2.0])\n",
+    );
     assert!(
         ir.contains("= packed v") && ir.contains("fdiv(fneg(fmul([v"),
         "{ir}"
@@ -636,11 +656,11 @@ fn elementwise_arithmetic_packs_pairs_when_it_can() {
         .unwrap();
     assert!(ir.contains(&format!("= copy {}", done.trim())), "{ir}");
     // ints add and subtract in pairs
-    let ir = first_function("def f(a);\n    ret a - 1 + a\nf([1])\n");
+    let ir = first_function("fn f(a: list[int]) -> list[int];\n    ret a - 1 + a\nf([1])\n");
     assert!(ir.contains("add(sub([v"), "{ir}");
     // but nothing else on ints packs, so the single loop does all of it
-    let ir = first_function("def f(a);\n    ret a * 3\nf([1])\n");
+    let ir = first_function("fn f(a: list[int]) -> list[int];\n    ret a * 3\nf([1])\n");
     assert!(!ir.contains("packed"), "{ir}");
-    let ir = first_function("def f(a);\n    ret a ** 2\nf([1.5])\n");
+    let ir = first_function("fn f(a: list[float]) -> list[float];\n    ret a ** 2\nf([1.5])\n");
     assert!(!ir.contains("packed"), "{ir}");
 }

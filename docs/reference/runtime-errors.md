@@ -5,10 +5,10 @@ status 1. Output printed before the error stays printed. The interpreter prefixe
 with the file name, and a compiled executable prints it on its own:
 
 ```text
-$ stone run average.st
+$ stone run average.stn
 7
-average.st: error: division by zero
-$ stone build average.st -o average && ./average
+average.stn: error: division by zero
+$ stone build average.stn -o average && ./average
 7
 error: division by zero
 ```

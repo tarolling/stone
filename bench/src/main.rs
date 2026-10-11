@@ -1,7 +1,7 @@
 //! Benchmarks stone's compiled output against C and Python.
 //!
 //! For example, `cargo run --release --manifest-path bench/Cargo.toml -- --runs 3 --filter fib`
-//! builds `bench/programs/fib.st` with `stone build`, `fib.c` with `gcc -O2` and `gcc -O0`, checks
+//! builds `bench/programs/fib.stn` with `stone build`, `fib.c` with `gcc -O2` and `gcc -O0`, checks
 //! that all of them and `python3 fib.py` print `fib.out`, then prints a table of their median
 //! times over three runs. A benchmark with a numpy version, such as `vector.np.py`, also runs it
 //! with the `--numpy` interpreter when that can import numpy.
@@ -120,7 +120,7 @@ fn prepare(program: &Program, stone: &Path, out_dir: &Path) -> Result<Vec<Vec<Os
             Implementation::Stone => vec![
                 stone.into(),
                 "build".into(),
-                program.file("st").into(),
+                program.file("stn").into(),
                 "-o".into(),
                 binary.clone().into(),
             ],

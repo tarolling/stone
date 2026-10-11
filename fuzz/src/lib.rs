@@ -2,7 +2,7 @@
 //! generator, and the differential check that compares `stone run` with `stone build`.
 //!
 //! For example, [`generate`] turns fuzzer bytes into a program such as
-//! `def f0(p0);\n    ret p0 + 1\nprint(f0(2))\n`, and [`differential`] runs it through both backends.
+//! `fn f0(p0: int) -> int;\n    ret p0 + 1\nprint(f0(2))\n`, and [`differential`] runs it through both backends.
 
 use arbitrary::{Result, Unstructured};
 use std::fs::File;
@@ -46,7 +46,7 @@ const MAX_PARAMS: usize = 8;
 /// For example, some input bytes produce:
 ///
 /// ```text
-/// def f0(p0, p1);
+/// fn f0(p0: int, p1: int) -> int;
 ///     l0 = p0 * p1
 ///     ret l0 - 3
 /// g0 = f0(4, 2)
@@ -134,7 +134,9 @@ impl Generator {
         let params: Vec<String> = (0..u.int_in_range(0..=MAX_PARAMS)?)
             .map(|_| self.fresh("p"))
             .collect();
-        self.line(0, &format!("def {name}({});", params.join(", ")));
+        // parameters hold ints, and the final `ret` is an int expression
+        let typed: Vec<String> = params.iter().map(|p| format!("{p}: int")).collect();
+        self.line(0, &format!("fn {name}({}) -> int;", typed.join(", ")));
 
         // registering before the body allows recursion, which fuel keeps bounded
         self.functions.push((name, params.len()));
@@ -698,12 +700,12 @@ impl Generator {
 /// `build_every_target("print(\"a\" + 1)\n")` fails with the checker's error.
 pub fn build_every_target(source: &str) -> std::result::Result<(), String> {
     let sources = stone::project::MapSources::default();
-    let (_, loaded) = stone::driver::load(Path::new("main.st"), source, &sources);
+    let (_, loaded) = stone::driver::load(Path::new("main.stn"), source, &sources);
     let (module, _) = loaded.map_err(|errors| {
         errors
             .0
             .iter()
-            .map(|d| d.render("main.st", source))
+            .map(|d| d.render("main.stn", source))
             .collect::<String>()
     })?;
     for target in Target::ALL {
@@ -911,7 +913,7 @@ mod tests {
             " < ",
             "not (",
             "print(\"",
-            "def ",
+            "fn ",
             ".",
             "float(",
             "int(",

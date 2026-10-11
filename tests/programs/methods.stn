@@ -1,0 +1,39 @@
+// len and append are methods, called on a value
+fn push(xs: list[int], x: int) -> list[int];
+    xs.append(x)
+    ret xs
+
+fn index(n: int) -> int;
+    print("index")
+    ret n
+
+fn value(n: int) -> int;
+    print("argument")
+    ret n
+
+fn words() -> list[str];
+    ret ["a", "bb"]
+
+xs = []
+xs = push(xs, 1)
+// the receiver's index is evaluated before the argument
+rows = [[0], []]
+rows[index(1)].append(value(2))
+print(xs, xs.len(), (xs).len(), rows)
+
+grid = [[1], []]
+grid[0].append(2)
+grid[1].append(grid[0].len())
+print(grid)
+
+print(words().len(), words()[1].len(), "".len(), [].len(), "héllo".len())
+
+floats = []
+floats.append(0.5)
+print(floats, floats.len())
+
+// len and append are ordinary names now
+len = 3
+fn append(a: int, b: int) -> int;
+    ret a + b
+print(len, append(len, 4))

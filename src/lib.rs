@@ -21,7 +21,7 @@ pub mod token;
 /// Prints to stderr in debug builds when the `STONE_DEBUG` environment variable is set, so that
 /// program output and diagnostics stay clean by default.
 ///
-/// For example, `STONE_DEBUG=1 cargo run -- run file.st` dumps the token stream and parser trace,
+/// For example, `STONE_DEBUG=1 cargo run -- run file.stn` dumps the token stream and parser trace,
 /// while plain `cargo run` and `cargo run --release` do not. It is also silent under `cargo fuzz`,
 /// which builds with debug assertions but would slow to a crawl printing traces for every input.
 #[macro_export]

@@ -247,8 +247,9 @@ mod tests {
     fn a_loop_carried_variable_lives_over_the_whole_loop() {
         // b0 starts at 0: copy 2/3, jmp 4/5; b1 at 6: br 8/9; b2 at 10: add 12/13, jmp 14/15;
         // b3 at 16: ret 18/19
-        let liveness =
-            liveness("def f(n);\n    i = 0\n    while i < n;\n        i = i + 1\n    ret i\n");
+        let liveness = liveness(
+            "fn f(n: int) -> int;\n    i = 0\n    while i < n;\n        i = i + 1\n    ret i\n",
+        );
         assert_eq!(span(&liveness, 0), (0, 15));
         assert_eq!(span(&liveness, 1), (3, 18));
         assert!(liveness.live_at_entry[0]);
@@ -258,7 +259,7 @@ mod tests {
     #[test]
     fn a_temporary_ends_where_its_last_reader_reads() {
         // mul 2/3, add 4/5, ret 6/7
-        let liveness = liveness("def f(a, b);\n    ret a * b + 1\n");
+        let liveness = liveness("fn f(a: int, b: int) -> int;\n    ret a * b + 1\n");
         assert_eq!(span(&liveness, 0), (0, 2));
         assert_eq!(span(&liveness, 2), (3, 4));
         assert_eq!(span(&liveness, 3), (5, 6));
@@ -266,7 +267,9 @@ mod tests {
 
     #[test]
     fn only_values_needed_after_a_call_cross_it() {
-        let liveness = liveness("def f(a, b);\n    ret g(a) + b\ndef g(x);\n    ret x\n");
+        let liveness = liveness(
+            "fn f(a: int, b: int) -> int;\n    ret g(a) + b\nfn g(x: int) -> int;\n    ret x\n",
+        );
         assert!(
             !crosses(&liveness, 0),
             "the argument is last read by the call"
@@ -277,7 +280,8 @@ mod tests {
 
     #[test]
     fn a_value_live_into_a_loop_crosses_a_call_at_the_top_of_the_loop() {
-        let source = "def f(n);\n    t = 0\n    while 1;\n        print(t)\n        t = t + n\n";
+        let source =
+            "fn f(n: int) -> int;\n    t = 0\n    while 1;\n        print(t)\n        t = t + n\n";
         let liveness = liveness(source);
         assert!(crosses(&liveness, 0));
         assert!(crosses(&liveness, 1));
@@ -286,7 +290,7 @@ mod tests {
     #[test]
     fn deeper_loops_weigh_more() {
         let liveness = liveness(
-            "def f(n);\n    a = 0\n    b = 0\n    for i in range(n);\n        b = b + 1\n    ret a + b\n",
+            "fn f(n: int) -> int;\n    a = 0\n    b = 0\n    for i in range(n);\n        b = b + 1\n    ret a + b\n",
         );
         let weight = |reg: u32| {
             liveness

@@ -1,8 +1,8 @@
 //! Programs of several files: loading the modules a program uses and linking them into one.
 //!
 //! The entry file's directory is the program's root, and every other file is a module named by
-//! its path from there. For example, running `app/main.st` makes `app/` the root, so
-//! `use geometry.shapes` loads `app/geometry/shapes.st` as the module `geometry.shapes`. There are
+//! its path from there. For example, running `app/main.stn` makes `app/` the root, so
+//! `use geometry.shapes` loads `app/geometry/shapes.stn` as the module `geometry.shapes`. There are
 //! no files that only declare or re-export modules: a directory is just part of a module's name.
 //!
 //! [`link`] merges every module into a single [`Mod`] in which each library function is named by
@@ -64,7 +64,7 @@ impl Sources for FsSources {
 /// Reads modules from a map of paths to sources, where a directory is any path that one of the
 /// files is under.
 ///
-/// For example, after `sources.insert("geometry/vec.st", "...")`, `geometry` is a directory.
+/// For example, after `sources.insert("geometry/vec.stn", "...")`, `geometry` is a directory.
 #[derive(Debug, Default, Clone)]
 pub struct MapSources {
     files: HashMap<PathBuf, String>,
@@ -102,7 +102,7 @@ impl Sources for MapSources {
 #[derive(Debug, Clone, PartialEq)]
 pub struct SourceFile {
     /// The path diagnostics show, which is the root joined with the module's path, such as
-    /// `app/geometry/shapes.st`.
+    /// `app/geometry/shapes.stn`.
     pub path: PathBuf,
     /// The module's dotted name, such as `geometry.shapes`, or empty for the entry file.
     pub module: String,
@@ -141,7 +141,7 @@ impl SourceMap {
 
     /// Formats a diagnostic for a terminal, naming the file its span is in.
     ///
-    /// For example, an error in `util.st` renders as `util.st:2:9: error: ...` followed by the
+    /// For example, an error in `util.stn` renders as `util.stn:2:9: error: ...` followed by the
     /// line and a caret.
     pub fn render(&self, diagnostic: &Diagnostic) -> String {
         let file = self.file(diagnostic.span.file);
@@ -189,13 +189,13 @@ pub struct Linked {
 
 /// The entry file's name for programs given as a single source string, such as by
 /// [`crate::driver::interpret`].
-pub const DEFAULT_ENTRY: &str = "main.st";
+pub const DEFAULT_ENTRY: &str = "main.stn";
 
 /// Loads the program whose entry file is at `entry` and holds `source`, reading the modules it
 /// uses from `sources`, and links them into one module.
 ///
-/// For example, linking `main.st` holding `use util` and `print(util.one())` with a `util.st`
-/// holding `pub def one(); ret 1` gives a module that defines `util.one` and calls it.
+/// For example, linking `main.stn` holding `use util` and `print(util.one())` with a `util.stn`
+/// holding `pub fn one() -> int; ret 1` gives a module that defines `util.one` and calls it.
 pub fn link(entry: &Path, source: &str, sources: &dyn Sources) -> Linked {
     let root = entry.parent().unwrap_or(Path::new(""));
     link_in(root, entry, source, sources)
@@ -204,7 +204,7 @@ pub fn link(entry: &Path, source: &str, sources: &dyn Sources) -> Linked {
 /// Links like [`link`], but with `root` as the program's root instead of the entry file's
 /// directory, so an editor can check a module that the program does not use yet.
 ///
-/// For example, with `p` as the root, the entry file `p/geometry/shapes.st` can use
+/// For example, with `p` as the root, the entry file `p/geometry/shapes.stn` can use
 /// `geometry.vec`, and is itself the module `geometry.shapes`.
 pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -> Linked {
     let relative = entry.strip_prefix(root).unwrap_or(entry).with_extension("");
@@ -288,7 +288,7 @@ impl Loader<'_> {
 
     /// Returns the file of the module with these dotted names, loading it if it exists.
     ///
-    /// For example, `["geometry", "shapes"]` loads `<root>/geometry/shapes.st`.
+    /// For example, `["geometry", "shapes"]` loads `<root>/geometry/shapes.stn`.
     fn module(&mut self, names: &[String]) -> Option<FileId> {
         if self.is_entry(names) {
             return None;
@@ -304,7 +304,7 @@ impl Loader<'_> {
         Some(id)
     }
 
-    /// Returns whether a module name refers to the entry file, such as `main` for `main.st`.
+    /// Returns whether a module name refers to the entry file, such as `main` for `main.stn`.
     fn is_entry(&self, names: &[String]) -> bool {
         names == self.entry_names
     }
@@ -345,8 +345,8 @@ impl Loader<'_> {
     /// Finds what a `use` path in `file` names: a module file if there is one, otherwise a public
     /// function of the module the path ends in.
     ///
-    /// For example, `use util.pad` is the module `util/pad.st` if it exists, and otherwise the
-    /// function `pad` of `util.st`.
+    /// For example, `use util.pad` is the module `util/pad.stn` if it exists, and otherwise the
+    /// function `pad` of `util.stn`.
     fn resolve(&mut self, file: FileId, path: &[(String, Span)]) -> Result<Target, Diagnostic> {
         let names: Vec<String> = path.iter().map(|(name, _)| name.clone()).collect();
         let span = path[0].1.to(path[path.len() - 1].1);
@@ -410,7 +410,7 @@ impl Loader<'_> {
     /// one of its functions, by its linked name.
     ///
     /// For example, `use os` is the module and `use os.env` is the function `os.env`. A file
-    /// `os.st` next to the entry file would be ambiguous, so it is an error to import it.
+    /// `os.stn` next to the entry file would be ambiguous, so it is an error to import it.
     fn resolve_builtin_module(
         &self,
         module: &'static BuiltinModule,
@@ -427,7 +427,7 @@ impl Loader<'_> {
         {
             return Err(Diagnostic::error(
                 span,
-                format!("'{name}' is a builtin module, so rename {name}.st"),
+                format!("'{name}' is a builtin module, so rename {name}.stn"),
             ));
         }
         match path {
@@ -579,11 +579,11 @@ impl Loader<'_> {
     }
 }
 
-/// Returns the path of a module's file relative to the root, such as `geometry/shapes.st` for
+/// Returns the path of a module's file relative to the root, such as `geometry/shapes.stn` for
 /// `["geometry", "shapes"]`.
 fn module_path(names: &[String]) -> PathBuf {
     let mut path: PathBuf = names.iter().collect();
-    path.set_extension("st");
+    path.set_extension("stn");
     path
 }
 
@@ -599,7 +599,7 @@ fn public_functions(module: &Mod) -> HashMap<String, bool> {
 }
 
 /// Reports a `use` after other statements, and in a library, any top-level statement that is not
-/// a `use` or `def`.
+/// a `use` or `fn`.
 fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnostic>) {
     let mut after_use = false;
     for stmt in body {
@@ -615,7 +615,7 @@ fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnosti
                 if library {
                     diagnostics.push(Diagnostic::error(
                         stmt.span,
-                        "only use and def are allowed at the top level of a module",
+                        "only use and fn are allowed at the top level of a module",
                     ));
                 }
             }

@@ -355,7 +355,7 @@ pub trait AssemblyGenerator {
     fn assemble(&mut self, module: &Mod) -> Result<String, String>;
     /// Runs the first compilation pass, which lowers the module to [`ir`] functions.
     ///
-    /// For example, scanning `def f(a); b = a + 1` lowers `f` to `v1 = add v0, 1`.
+    /// For example, scanning `fn f(a: int); b = a + 1` lowers `f` to `v1 = add v0, 1`.
     fn scan(&mut self, module: &Mod) -> Result<(), String>;
     /// Runs the second compilation pass, which allocates registers for the functions lowered by
     /// [`Self::scan`] and emits their assembly.
@@ -607,7 +607,7 @@ os.exit(0)
     #[test]
     fn compiled_programs_need_nothing_but_their_own_routines_and_the_system() {
         let (_, module) = crate::driver::load(
-            Path::new("main.st"),
+            Path::new("main.stn"),
             EVERY_ROUTINE,
             &crate::project::MapSources::default(),
         );

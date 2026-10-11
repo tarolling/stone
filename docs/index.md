@@ -5,7 +5,7 @@ a program and compiles it to a native x86-64 or arm64 executable, and the two al
 what a program prints.
 
 ```stone
-def fib(n);
+fn fib(n: int) -> int;
     if n < 2;
         ret n
     ret fib(n - 1) + fib(n - 2)
@@ -15,16 +15,16 @@ for i in range(10);
 ```
 
 ```sh
-stone run fib.st                # interpret it right away
-stone build fib.st && ./build/fib   # or compile it to a native executable
+stone run fib.stn                # interpret it right away
+stone build fib.stn && ./build/fib   # or compile it to a native executable
 ```
 
 ## Why stone
 
 **Simple to write, fast and safe to run.** stone aims for Python's simplicity with Rust's
 speed, memory safety, and error messages, by moving the complexity into the compiler: you
-write no type annotations, lifetimes, or `lazy` keywords, because the compiler works them out.
-See [Philosophy](philosophy.md).
+write types only in function signatures, and no lifetimes or `lazy` keywords, because the
+compiler works out the rest. See [Philosophy](philosophy.md).
 
 **Two backends, one behavior.** `stone run` walks the syntax tree, and `stone build` lowers it
 to an IR, allocates registers, and emits assembly. Every program in the test suite, including

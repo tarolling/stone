@@ -1,0 +1,5 @@
+// a function named main is ordinary, and runs only when called
+fn main() -> int;
+    print(1)
+    ret 0
+print(2)

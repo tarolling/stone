@@ -1,9 +1,10 @@
 //! Type checker and name resolver that validates a stone AST before it runs.
 //!
-//! Types are inferred, never written. Every expression gets one of `int`, `bool`, `str`, `none`,
-//! or `list[T]`, and every variable keeps a single type for its whole life. Functions are
-//! monomorphic: each parameter and return type is inferred from the function's body and every call
-//! to it, so after `def add(a, b); ret a + b` and `add(1, 2)`, `add` is `def(int, int) -> int`.
+//! Function signatures are written, and every other type is inferred. Every expression gets one of
+//! `int`, `float`, `bool`, `str`, `none`, or `list[T]`, and every variable keeps a single type for
+//! its whole life. Each parameter and return type comes from the function's signature, so
+//! `fn add(a: int, b: int) -> int` is `fn(int, int) -> int`, and a function without `->` returns
+//! `none`. Functions are monomorphic, and every call is checked against the signature.
 //!
 //! Scoping follows Python. Inside a function, parameters and every name the function assigns are
 //! local, and other names refer to top-level variables or functions. Functions can only be
@@ -19,7 +20,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
-use crate::ast::{CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
+use crate::ast::{
+    Arguments, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, TypeExpr,
+    TypeExprKind, UnaryOp,
+};
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::{BUILTINS, METHODS, changes_receiver, is_builtin};
@@ -27,7 +31,7 @@ use crate::stdlib::{BUILTINS, METHODS, changes_receiver, is_builtin};
 #[cfg(test)]
 mod tests;
 
-/// The type of a value or function, such as `int` or `def(int) -> bool`.
+/// The type of a value or function, such as `int` or `fn(int) -> bool`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Type {
     Int,
@@ -50,7 +54,7 @@ impl Display for Type {
             Type::List(elem) => write!(f, "list[{elem}]"),
             Type::Function { params, ret } => {
                 let params: Vec<String> = params.iter().map(Type::to_string).collect();
-                write!(f, "def({}) -> {ret}", params.join(", "))
+                write!(f, "fn({}) -> {ret}", params.join(", "))
             }
         }
     }
@@ -100,7 +104,7 @@ pub struct Analysis {
     pub symbols: Vec<Symbol>,
     /// Every appearance of every symbol, sorted by file and position.
     pub references: Vec<Reference>,
-    /// The span of each function's whole definition, from `def` to the end of its body.
+    /// The span of each function's whole definition, from `fn` to the end of its body.
     pub functions: HashMap<String, Span>,
 }
 
@@ -195,8 +199,8 @@ struct Constraint {
 /// An arithmetic operation whose operands may be lists, checked once its operands are known to be
 /// lists or not, since `xs * k` takes a list and a number while `a * b` takes two numbers.
 ///
-/// For example, in `def scale(xs, k); ret xs * k`, nothing is known about `xs` or `k` until
-/// `scale([1.5], 2.0)` is checked, which makes the result `list[float]`.
+/// For example, after `rows = []`, nothing is known about `rows[0]` in `y = rows[0] * 2.0` until
+/// `rows.append([1.5])` is checked, which makes the result `list[float]`.
 struct Arithmetic {
     op: ArithmeticOp,
     left: Ty,
@@ -214,10 +218,10 @@ struct Arithmetic {
 }
 
 /// What an unknown operand of arithmetic can still turn out to be, which unification enforces so
-/// that a wrong argument is reported where it is passed rather than inside the function.
+/// that a wrong value is reported where it is first used rather than once the operand is known.
 ///
-/// For example, in `def twice(n); ret n * 2`, `n` is an int or a list of ints, so `twice("a")`
-/// is an error at `"a"`.
+/// For example, after `xs = []`, `xs[0] * 2` makes the element an int or a list of ints, so a
+/// later `xs.append("a")` is an error at `"a"`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 enum Bound {
     /// The number, or a list of it, as `n` is in `n * 2`, where the number is `int` or `float`.
@@ -335,6 +339,8 @@ struct FunctionInfo {
     symbol: usize,
     params: Vec<Ty>,
     ret: Ty,
+    /// Whether the definition writes its return type, rather than returning `none` by default.
+    ret_written: bool,
 }
 
 /// The function whose body is being checked.
@@ -343,6 +349,7 @@ struct FunctionScope {
     /// Parameters and locals, mapped to their symbols.
     locals: HashMap<String, usize>,
     ret: Ty,
+    ret_written: bool,
 }
 
 /// State for one run of type inference over a module.
@@ -362,6 +369,12 @@ struct Inference {
     symbol_types: Vec<Ty>,
     references: Vec<Reference>,
     functions: HashMap<String, FunctionInfo>,
+    /// Each parameter written without a type, with its span and the type inferred for it, which
+    /// `finish` reports once inference can suggest a type.
+    untyped_params: Vec<(String, Span, Ty)>,
+    /// Each value returned by a function without a return type, with the function's name, which
+    /// `finish` reports once inference can suggest a type.
+    untyped_returns: Vec<(String, Span, Ty)>,
     globals: HashMap<String, usize>,
     function: Option<FunctionScope>,
     loop_depth: usize,
@@ -821,10 +834,11 @@ impl Inference {
                 name,
                 name_span,
                 args,
+                returns,
                 ..
             } = &stmt.kind
             {
-                self.declare_function(name, *name_span, args.args.len());
+                self.declare_function(name, *name_span, args, returns.as_ref());
                 self.function_spans.entry(name.clone()).or_insert(stmt.span);
             }
         }
@@ -860,7 +874,19 @@ impl Inference {
         }
     }
 
-    fn declare_function(&mut self, name: &str, name_span: Span, arity: usize) {
+    /// Declares a function with the types its signature writes, so calls anywhere in the program
+    /// are checked against them.
+    ///
+    /// For example, `fn half(x: float) -> float;` declares `half` as `fn(float) -> float`. A
+    /// parameter without a type gets an unknown one, so checking goes on, and is reported in
+    /// `finish`; a function without `->` returns `none`.
+    fn declare_function(
+        &mut self,
+        name: &str,
+        name_span: Span,
+        args: &Arguments,
+        returns: Option<&TypeExpr>,
+    ) {
         if self.functions.contains_key(name) {
             self.error(name_span, format!("function '{name}' is already defined"));
             return;
@@ -869,8 +895,20 @@ impl Inference {
             self.error(name_span, format!("cannot redefine builtin '{name}'"));
             return;
         }
-        let params = (0..arity).map(|_| self.fresh()).collect();
-        let ret = self.fresh();
+        let mut params = vec![];
+        for arg in &args.args {
+            let ty = match &arg.annotation {
+                Some(annotation) => Self::written(annotation),
+                None => {
+                    let ty = self.fresh();
+                    self.untyped_params
+                        .push((arg.arg.clone(), arg.span, ty.clone()));
+                    ty
+                }
+            };
+            params.push(ty);
+        }
+        let ret = returns.map_or(Ty::None, Self::written);
         // the symbol's type is rebuilt from `params` and `ret` in `finish`
         let symbol = self.add_symbol(name, SymbolKind::Function, name_span, Ty::None);
         self.functions.insert(
@@ -879,6 +917,7 @@ impl Inference {
                 symbol,
                 params,
                 ret,
+                ret_written: returns.is_some(),
             },
         );
     }
@@ -886,6 +925,20 @@ impl Inference {
     ////////////////////////////////////////////////////////////////
     // statements
     ////////////////////////////////////////////////////////////////
+
+    /// Converts a type written in a signature to an inference type.
+    ///
+    /// For example, `list[float]` becomes `Ty::List(Box::new(Ty::Float))`.
+    fn written(annotation: &TypeExpr) -> Ty {
+        match &annotation.kind {
+            TypeExprKind::Int => Ty::Int,
+            TypeExprKind::Float => Ty::Float,
+            TypeExprKind::Bool => Ty::Bool,
+            TypeExprKind::Str => Ty::Str,
+            TypeExprKind::None => Ty::None,
+            TypeExprKind::List(elem) => Ty::List(Box::new(Self::written(elem))),
+        }
+    }
 
     fn check_block(&mut self, body: &[Stmt]) {
         for stmt in body {
@@ -915,14 +968,19 @@ impl Inference {
                 };
                 if let Some(function) = &self.function {
                     let (name, ret) = (function.name.clone(), function.ret.clone());
+                    let ret_written = function.ret_written;
                     if !self.unify(&ret, &found) {
                         let span = value.as_ref().map_or(stmt.span, |v| v.span);
-                        let message = format!(
-                            "'{name}' returns {}, but this is {}",
-                            self.show(&ret),
-                            self.show(&found)
-                        );
-                        self.error(span, message);
+                        if ret_written {
+                            let message = format!(
+                                "'{name}' returns {}, but this is {}",
+                                self.show(&ret),
+                                self.show(&found)
+                            );
+                            self.error(span, message);
+                        } else {
+                            self.untyped_returns.push((name, span, found));
+                        }
                     }
                 }
             }
@@ -1028,11 +1086,13 @@ impl Inference {
             return;
         }
         let (params, ret) = (info.params.clone(), info.ret.clone());
+        let ret_written = info.ret_written;
 
         self.function = Some(FunctionScope {
             name: name.to_string(),
             locals: HashMap::new(),
             ret: ret.clone(),
+            ret_written,
         });
         for (arg, ty) in args.args.iter().zip(params) {
             if self.local(&arg.arg).is_some() {
@@ -1776,6 +1836,24 @@ impl Inference {
                 self.error(constraint.span, message);
             }
         }
+        // suggest the type inference found, which is what the program already relies on
+        for (name, span, ty) in std::mem::take(&mut self.untyped_params) {
+            let ty = self.finalize(&ty);
+            self.error(
+                span,
+                format!("parameter '{name}' needs a type, such as '{name}: {ty}'"),
+            );
+        }
+        for (name, span, ty) in std::mem::take(&mut self.untyped_returns) {
+            let ty = self.finalize(&ty);
+            self.error(
+                span,
+                format!(
+                    "'{name}' has no return type, so it cannot return {ty}; add '-> {ty}' after \
+                     its parameters"
+                ),
+            );
+        }
 
         let mut analysis = Analysis::default();
         for (span, ty) in std::mem::take(&mut self.expr_types) {
@@ -1810,7 +1888,7 @@ impl Inference {
 
     /// Converts an inference type to a final [`Type`], treating anything still unknown as `int`.
     ///
-    /// For example, the parameter of `def ignore(a); ret 0`, which is never called, is `int`.
+    /// For example, the elements of `xs` in `xs = []`, which nothing else uses, are `int`.
     fn finalize(&self, ty: &Ty) -> Type {
         match self.resolve(ty) {
             Ty::Int | Ty::Var(_) => Type::Int,
@@ -2130,8 +2208,8 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
 /// Returns where `body` first changes the parameter `name` if it never reads it anywhere else,
 /// since the caller cannot see the change and nothing else uses it.
 ///
-/// For example, the change in `def push(xs, x); xs.append(x)` is lost, but a later `ret xs` or
-/// `print(xs)` uses it.
+/// For example, the change in `fn push(xs: list[int], x: int); xs.append(x)` is lost, but a
+/// later `ret xs` or `print(xs)` uses it.
 fn lost_change(body: &[Stmt], name: &str) -> Option<Span> {
     let mut usage = ParameterUse {
         name,

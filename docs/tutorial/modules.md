@@ -5,31 +5,31 @@ nothing to declare and no file that only lists other files. This program has thr
 
 ```text
 modules/
-  main.st
-  stats.st
+  main.stn
+  stats.stn
   text/
-    pad.st
+    pad.stn
 ```
 
-`main.st` is the entry file, the one you run:
+`main.stn` is the entry file, the one you run:
 
-```{literalinclude} ../examples/modules/main.st
+```{literalinclude} ../examples/modules/main.stn
 :language: stone
 ```
 
-`stats.st` is the module `stats`:
+`stats.stn` is the module `stats`:
 
-```{literalinclude} ../examples/modules/stats.st
+```{literalinclude} ../examples/modules/stats.stn
 :language: stone
 ```
 
-and `text/pad.st` is the module `text.pad`:
+and `text/pad.stn` is the module `text.pad`:
 
-```{literalinclude} ../examples/modules/text/pad.st
+```{literalinclude} ../examples/modules/text/pad.stn
 :language: stone
 ```
 
-`stone run modules/main.st` prints
+`stone run modules/main.stn` prints
 
 ```{literalinclude} ../examples/modules/main.out
 :language: text
@@ -38,7 +38,7 @@ and `text/pad.st` is the module `text.pad`:
 ## Using a module
 
 The entry file's directory is the program's root, and a module's name is its path from there,
-with `.` between the parts and without `.st`. `use` loads a module by that name:
+with `.` between the parts and without `.stn`. `use` loads a module by that name:
 
 - `use stats` binds the module, and you call its functions as `stats.mean(scores)`.
 - `use text.pad.left` binds one function, `left`, which you call directly.
@@ -49,8 +49,8 @@ only changes how others name it. `use` statements come first in a file.
 
 ## pub
 
-A function is private to its file unless it starts with `pub`. `main.st` can call
-`stats.mean` and `stats.best`, but not `stats.total`, which only `stats.st` itself can use. Two
+A function is private to its file unless it starts with `pub`. `main.stn` can call
+`stats.mean` and `stats.best`, but not `stats.total`, which only `stats.stn` itself can use. Two
 modules can each have a private function with the same name without clashing.
 
 ## What a module holds

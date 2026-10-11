@@ -6,7 +6,7 @@ use std::time::Duration;
 use lsp_server::{Connection, Message, Notification, Request, RequestId, Response};
 use serde_json::{Value, json};
 
-const URI: &str = "file:///demo.st";
+const URI: &str = "file:///demo.stn";
 
 /// A running server and the client end of its connection.
 struct Session {
@@ -161,19 +161,19 @@ fn publishes_diagnostics_as_the_document_changes() {
 #[test]
 fn answers_requests_about_an_open_document() {
     let (mut session, _) = Session::start(None);
-    session.open("def twice(n);\n    ret n * 2\nprint(twice(4))\n");
+    session.open("fn twice(n: int) -> int;\n    ret n * 2\nprint(twice(4))\n");
     session.diagnostics();
 
     let hover = session.request("textDocument/hover", position(2, 7));
     assert_eq!(
         hover["contents"]["value"],
-        "```stone\ndef twice(n: int) -> int\n```"
+        "```stone\nfn twice(n: int) -> int\n```"
     );
 
     let definition = session.request("textDocument/definition", position(2, 7));
     assert_eq!(
         definition["range"]["start"],
-        json!({ "line": 0, "character": 4 })
+        json!({ "line": 0, "character": 3 })
     );
 
     let mut params = position(0, 5);
@@ -184,7 +184,7 @@ fn answers_requests_about_an_open_document() {
     let mut params = position(1, 8);
     params["newName"] = json!("count");
     let edit = session.request("textDocument/rename", params);
-    // `n` in `def twice(n)` and in `ret n * 2`
+    // `n` in `fn twice(n: int)` and in `ret n * 2`
     assert_eq!(edit["changes"][URI].as_array().unwrap().len(), 2);
 
     let symbols = session.request(
@@ -219,7 +219,7 @@ fn definition_of_a_builtin_opens_its_documentation() {
     let location = session.request("textDocument/definition", position(0, 2));
     let uri = location["uri"].as_str().unwrap();
     assert!(
-        uri.starts_with("file:///") && uri.ends_with("/builtins.st"),
+        uri.starts_with("file:///") && uri.ends_with("/builtins.stn"),
         "{uri}"
     );
     let text = std::fs::read_to_string(uri.trim_start_matches("file://")).unwrap();
@@ -262,8 +262,8 @@ fn unknown_requests_are_errors_and_the_server_keeps_going() {
 #[test]
 fn a_change_to_one_file_republishes_the_others_in_its_program() {
     // the files only exist in the editor, so the server must read them from the open documents
-    let main = "file:///stone-lsp-test-project/main.st";
-    let util = "file:///stone-lsp-test-project/util.st";
+    let main = "file:///stone-lsp-test-project/main.stn";
+    let util = "file:///stone-lsp-test-project/util.stn";
     let (session, _) = Session::start(None);
     let open = |uri: &str, text: &str| {
         session.notify(
@@ -286,17 +286,17 @@ fn a_change_to_one_file_republishes_the_others_in_its_program() {
             .collect()
     };
 
-    open(util, "pub def twice(x);\n    ret x * 2\n");
+    open(util, "pub fn twice(x: int) -> int;\n    ret x * 2\n");
     assert_eq!(published(1), [(util.to_string(), 0)]);
     open(main, "use util\nprint(util.twice(1))\n");
     assert_eq!(published(2), [(main.to_string(), 0), (util.to_string(), 0)]);
 
-    // making `twice` private breaks main.st
+    // making `twice` private breaks main.stn
     session.notify(
         "textDocument/didChange",
         json!({
             "textDocument": { "uri": util, "version": 2 },
-            "contentChanges": [{ "text": "def twice(x);\n    ret x * 2\n" }]
+            "contentChanges": [{ "text": "fn twice(x: int) -> int;\n    ret x * 2\n" }]
         }),
     );
     assert_eq!(published(2), [(util.to_string(), 0), (main.to_string(), 1)]);

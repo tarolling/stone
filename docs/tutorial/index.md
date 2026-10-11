@@ -21,21 +21,21 @@ errors
 
 ## Your first program
 
-Save this as `hello.st`:
+Save this as `hello.stn`:
 
-```{literalinclude} ../examples/hello.st
+```{literalinclude} ../examples/hello.stn
 :language: stone
 ```
 
 stone gives you three ways to handle it:
 
 ```sh
-stone run hello.st          # interpret it
-stone build hello.st && ./build/hello   # compile a native executable
-stone check hello.st        # only look for errors
+stone run hello.stn          # interpret it
+stone build hello.stn && ./build/hello   # compile a native executable
+stone check hello.stn        # only look for errors
 ```
 
-`stone hello.st` is shorthand for `stone run hello.st`. Either way, it prints:
+`stone hello.stn` is shorthand for `stone run hello.stn`. Either way, it prints:
 
 ```{literalinclude} ../examples/hello.out
 :language: text

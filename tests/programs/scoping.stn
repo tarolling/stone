@@ -1,0 +1,42 @@
+// functions can be called before their definition
+print(twice(2))
+
+fn twice(n: int) -> int;
+    ret n * 2
+
+// functions read globals, even ones assigned after the function is defined
+fn read_limit() -> int;
+    ret limit
+limit = 10
+print(read_limit())
+limit = 11
+print(read_limit())
+
+// assigning inside a function makes a local, leaving the global alone
+x = 1
+fn shadow() -> int;
+    x = 2
+    ret x
+print(shadow())
+print(x)
+
+// a callee sees globals, not its caller's locals
+fn inner() -> int;
+    ret x
+fn outer() -> int;
+    x = 3
+    ret inner()
+print(outer())
+
+// a parameter shadows a global of the same name
+fn param(x: int) -> int;
+    ret x + 100
+print(param(5))
+print(x)
+
+// globals assigned inside top-level blocks are still globals
+if x;
+    from_block = 7
+fn read_block() -> int;
+    ret from_block
+print(read_block())

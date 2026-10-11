@@ -48,7 +48,7 @@ pub fn needs_more(buffer: &str) -> bool {
 /// One top-level statement of an entry the session kept, as source text ending in a newline.
 struct Chunk {
     text: String,
-    /// The function it defines, if it is a `def`, so a later `def` of the same name replaces it.
+    /// The function it defines, if it is an `fn`, so a later `fn` of the same name replaces it.
     defines: Option<String>,
 }
 
@@ -130,8 +130,8 @@ impl Session {
 /// Splits an entry into one chunk per top-level statement, each running from the line the
 /// statement starts on to the line before the next one.
 ///
-/// For example, `x = 1\ndef f(); ret x\n` gives `x = 1\n` and `def f(); ret x\n`, the second
-/// defining `f`. An entry that does not parse gives no chunks, since it is never kept.
+/// For example, `x = 1\nfn f() -> int; ret x\n` gives `x = 1\n` and `fn f() -> int; ret x\n`, the
+/// second defining `f`. An entry that does not parse gives no chunks, since it is never kept.
 fn split(entry: &str) -> Vec<Chunk> {
     let Ok(tokens) = Lexer::new(entry).lex() else {
         return vec![];
@@ -279,7 +279,7 @@ mod tests {
     #[test]
     fn a_block_needs_more_until_a_blank_line() {
         assert!(needs_more("if x;\n"));
-        assert!(needs_more("def f();\n"));
+        assert!(needs_more("fn f();\n"));
         assert!(needs_more("if x;\n    y = 1\n"));
         assert!(!needs_more("if x;\n    y = 1\n\n"));
         assert!(!needs_more("if x;\n    y = 1\n   \n"));
@@ -287,7 +287,7 @@ mod tests {
 
     #[test]
     fn a_one_line_block_needs_nothing_more() {
-        assert!(!needs_more("def f(); ret 1\n"));
+        assert!(!needs_more("fn f() -> int; ret 1\n"));
     }
 
     #[test]
@@ -301,13 +301,13 @@ mod tests {
         assert!(!needs_more("print(\"a;\n"));
     }
 
-    /// Runs a session over `input` with `util.st` holding `pub def one(); ret 1`, returning what
-    /// it printed to stdout and to stderr.
+    /// Runs a session over `input` with `util.stn` holding `pub fn one() -> int; ret 1`, returning
+    /// what it printed to stdout and to stderr.
     ///
     /// For example, `session("x = 1\nx + 1\n")` returns `("2\n", "")`.
     fn session(input: &str) -> (String, String) {
         let mut sources = MapSources::default();
-        sources.insert("util.st", "pub def one(); ret 1\n");
+        sources.insert("util.stn", "pub fn one() -> int; ret 1\n");
         let (mut out, mut err) = (Vec::new(), Vec::new());
         driver::repl(&mut input.as_bytes(), &mut out, &mut err, false, &sources).unwrap();
         (
@@ -340,7 +340,7 @@ mod tests {
 
     #[test]
     fn a_multi_line_function_ends_at_a_blank_line() {
-        let input = "def double(n);\n    m = n * 2\n    ret m\n\ndouble(4)\n";
+        let input = "fn double(n: int) -> int;\n    m = n * 2\n    ret m\n\ndouble(4)\n";
         assert_eq!(session(input), ("8\n".into(), "".into()));
     }
 
@@ -357,7 +357,7 @@ mod tests {
 
     #[test]
     fn functions_can_be_called_from_a_later_entry() {
-        assert_eq!(session("def one(); ret 1\none() + 1\n").0, "2\n");
+        assert_eq!(session("fn one() -> int; ret 1\none() + 1\n").0, "2\n");
     }
 
     #[test]
@@ -390,16 +390,17 @@ mod tests {
 
     #[test]
     fn a_function_can_be_redefined() {
-        let (out, err) = session("def f(); ret 1\nf()\ndef f(); ret 2\nf()\n");
+        let (out, err) = session("fn f() -> int; ret 1\nf()\nfn f() -> int; ret 2\nf()\n");
         assert_eq!((out.as_str(), err.as_str()), ("1\n2\n", ""));
     }
 
     #[test]
     fn a_redefinition_that_breaks_earlier_entries_is_rejected() {
-        let (out, err) = session("def f(); ret 1\nx = f() + 1\ndef f(); ret \"a\"\nf()\n");
+        let (out, err) =
+            session("fn f() -> int; ret 1\nx = f() + 1\nfn f() -> str; ret \"a\"\nf()\n");
         assert_eq!(out, "1\n");
         assert!(
-            err.starts_with("<stdin>:1:14: error: 'f' returns int"),
+            err.starts_with("<session>:1:11: error: expected str, found int"),
             "{err}"
         );
     }
@@ -423,9 +424,12 @@ mod tests {
 
     #[test]
     fn entries_split_into_statements() {
-        let chunks = split("x = 1\ndef f();\n    ret x\n\nprint(1)\n");
+        let chunks = split("x = 1\nfn f() -> int;\n    ret x\n\nprint(1)\n");
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
-        assert_eq!(texts, ["x = 1\n", "def f();\n    ret x\n\n", "print(1)\n"]);
+        assert_eq!(
+            texts,
+            ["x = 1\n", "fn f() -> int;\n    ret x\n\n", "print(1)\n"]
+        );
         assert_eq!(chunks[1].defines.as_deref(), Some("f"));
         assert_eq!(chunks[0].defines, None);
     }

@@ -6,12 +6,12 @@
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 
-/// Writes `source` to a temporary `.st` file named after `name` and runs `stone <args> <file>`.
+/// Writes `source` to a temporary `.stn` file named after `name` and runs `stone <args> <file>`.
 ///
 /// For example, `stone(&["check"], "ok", "x = 1\n")` checks a one-line program.
 fn stone(args: &[&str], name: &str, source: &str) -> (Output, PathBuf) {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
-    let file = dir.join(format!("{name}.st"));
+    let file = dir.join(format!("{name}.stn"));
     std::fs::write(&file, source).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_stone"))
         .args(args)
@@ -144,10 +144,10 @@ fn uninstall_refuses_a_cargo_install() {
     assert!(copy.exists());
 }
 
-/// Writes `source` to a temporary `.st` file named after `name` and runs `stone <before> <file>
+/// Writes `source` to a temporary `.stn` file named after `name` and runs `stone <before> <file>
 /// <after>`, returning its stdout.
 fn stone_stdout(before: &[&str], name: &str, source: &str, after: &[&str]) -> String {
-    let file = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.st"));
+    let file = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}.stn"));
     std::fs::write(&file, source).unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_stone"))
         .args(before)
@@ -187,18 +187,18 @@ fn errors_in_an_imported_file_name_that_file() {
     let dir = project(
         "project_errors",
         &[
-            ("main.st", "use geometry.vec\nprint(vec.zero())\n"),
-            ("geometry/vec.st", "pub def zero();\n    ret 0 +\n"),
+            ("main.stn", "use geometry.vec\nprint(vec.zero())\n"),
+            ("geometry/vec.stn", "pub fn zero();\n    ret 0 +\n"),
         ],
     );
     let expected = format!(
         "{}:2:12: error: expected an expression, found end of line\n  |\n2 |     ret 0 +\n  |            ^\n",
-        dir.join("geometry/vec.st").display()
+        dir.join("geometry/vec.stn").display()
     );
     for command in ["check", "run", "build"] {
         let output = Command::new(env!("CARGO_BIN_EXE_stone"))
             .arg(command)
-            .arg(dir.join("main.st"))
+            .arg(dir.join("main.stn"))
             .output()
             .expect("stone should run");
         assert!(!output.status.success(), "{command}");
@@ -215,11 +215,11 @@ fn run_and_build_load_imported_files() {
     let dir = project(
         "project_runs",
         &[
-            ("main.st", "use util.twice\nprint(twice(21))\n"),
-            ("util.st", "pub def twice(x);\n    ret x * 2\n"),
+            ("main.stn", "use util.twice\nprint(twice(21))\n"),
+            ("util.stn", "pub fn twice(x: int) -> int;\n    ret x * 2\n"),
         ],
     );
-    let main = dir.join("main.st");
+    let main = dir.join("main.stn");
     let run = Command::new(env!("CARGO_BIN_EXE_stone"))
         .arg("run")
         .arg(&main)
@@ -251,7 +251,7 @@ fn no_arguments_runs_a_quiet_session_over_piped_input() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("stone should run");
-    let entries = "x = 2\nx * 3\n1 / 0\ndef f(n);\n    ret n + x\n\nf(1)\n";
+    let entries = "x = 2\nx * 3\n1 / 0\nfn f(n: int) -> int;\n    ret n + x\n\nf(1)\n";
     child
         .stdin
         .take()
@@ -309,19 +309,19 @@ fn build_for_the_host_target_by_name_runs() {
     assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n");
 }
 
-/// Writes `source` as `main.st` in a fresh temporary directory named after `name`, then runs it
+/// Writes `source` as `main.stn` in a fresh temporary directory named after `name`, then runs it
 /// from that directory both with `stone run` and as a binary from `stone build`, returning each
 /// run's output.
 fn run_and_build_in(name: &str, source: &str) -> (PathBuf, [Output; 2]) {
-    let dir = project(name, &[("main.st", source)]);
+    let dir = project(name, &[("main.stn", source)]);
     let run = Command::new(env!("CARGO_BIN_EXE_stone"))
         .arg("run")
-        .arg("main.st")
+        .arg("main.stn")
         .current_dir(&dir)
         .output()
         .expect("stone should run");
     let build = Command::new(env!("CARGO_BIN_EXE_stone"))
-        .args(["build", "main.st", "-o", "out"])
+        .args(["build", "main.stn", "-o", "out"])
         .current_dir(&dir)
         .output()
         .expect("stone should run");
@@ -336,12 +336,13 @@ fn run_and_build_in(name: &str, source: &str) -> (PathBuf, [Output; 2]) {
 
 #[test]
 fn run_and_build_print_warnings_and_still_succeed() {
-    let source = "def push(xs, x);\n    xs.append(x)\n\nys = [1]\npush(ys, 2)\nprint(ys)\n";
-    let warning = "main.st:2:5: warning: changes to 'xs' are lost when 'push' returns";
+    let source =
+        "fn push(xs: list[int], x: int);\n    xs.append(x)\n\nys = [1]\npush(ys, 2)\nprint(ys)\n";
+    let warning = "main.stn:2:5: warning: changes to 'xs' are lost when 'push' returns";
     for command in ["run", "build"] {
-        let dir = project(&format!("warns_{command}"), &[("main.st", source)]);
+        let dir = project(&format!("warns_{command}"), &[("main.stn", source)]);
         let output = Command::new(env!("CARGO_BIN_EXE_stone"))
-            .args([command, "main.st"])
+            .args([command, "main.stn"])
             .current_dir(&dir)
             .output()
             .expect("stone should run");
@@ -353,7 +354,8 @@ fn run_and_build_print_warnings_and_still_succeed() {
 
 #[test]
 fn exit_ends_the_program_with_its_status() {
-    let source = "use os\n\ndef stop(xs);\n    os.exit(3)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
+    let source =
+        "use os\n\nfn stop(xs: list[str]);\n    os.exit(3)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
     let (_, outputs) = run_and_build_in("os_exit_status", source);
     for output in outputs {
         assert_eq!(output.status.code(), Some(3), "{output:?}");
@@ -424,7 +426,7 @@ while not eof();
         longest = last.len()
 print(count, longest, total, last)
 ";
-    let dir = project("input_long_lines", &[("main.st", source)]);
+    let dir = project("input_long_lines", &[("main.stn", source)]);
     let mut input = "a".repeat(200_000) + "\n\n";
     for i in 0..30_000 {
         input.push_str(&format!("line {i}\n"));
@@ -432,7 +434,7 @@ print(count, longest, total, last)
     input.push_str("last");
     std::fs::write(dir.join("input.txt"), &input).unwrap();
     let build = Command::new(env!("CARGO_BIN_EXE_stone"))
-        .args(["build", "main.st", "-o", "out"])
+        .args(["build", "main.stn", "-o", "out"])
         .current_dir(&dir)
         .output()
         .expect("stone should run");
@@ -444,7 +446,7 @@ print(count, longest, total, last)
         + 4;
     let expected = format!("30003 200000 {total} last\n");
     let mut run = Command::new(env!("CARGO_BIN_EXE_stone"));
-    run.args(["run", "main.st"]);
+    run.args(["run", "main.stn"]);
     let mut built = Command::new(dir.join("out"));
     built.env("STONE_LEAK_CHECK", "1");
     for command in [&mut run, &mut built] {
@@ -566,9 +568,9 @@ fn assert_needs_only_the_system(exe: &Path) {
 #[test]
 fn built_programs_need_only_the_system_and_start_on_their_own() {
     let source = "use os\nprint(args(), os.env(\"STONE_TEST\"), os.has_env(\"HOME\"))\n";
-    let dir = project("static_start", &[("main.st", source)]);
+    let dir = project("static_start", &[("main.stn", source)]);
     let build = Command::new(env!("CARGO_BIN_EXE_stone"))
-        .args(["build", "main.st", "-o", "out"])
+        .args(["build", "main.stn", "-o", "out"])
         .current_dir(&dir)
         .output()
         .expect("stone should run");
@@ -594,7 +596,7 @@ fn built_programs_need_only_the_system_and_start_on_their_own() {
 
 /// Runs `stone <args>` in `dir`.
 ///
-/// For example, `stone_in(&dir, &["build", "main.st"])` builds `dir/main.st`.
+/// For example, `stone_in(&dir, &["build", "main.stn"])` builds `dir/main.stn`.
 fn stone_in(dir: &Path, args: &[&str]) -> Output {
     Command::new(env!("CARGO_BIN_EXE_stone"))
         .args(args)
@@ -614,9 +616,9 @@ fn stdout_of(exe: &Path) -> String {
 
 #[test]
 fn build_defaults_to_the_projects_build_directory() {
-    let dir = project("default_build", &[("app/prog.st", "print(6 * 7)\n")]);
+    let dir = project("default_build", &[("app/prog.stn", "print(6 * 7)\n")]);
     // built from outside the project, it still lands next to the entry file
-    let output = stone_in(&dir, &["build", "app/prog.st"]);
+    let output = stone_in(&dir, &["build", "app/prog.stn"]);
     assert!(output.status.success(), "{output:?}");
     let build = dir.join("app/build");
     assert_eq!(
@@ -630,15 +632,15 @@ fn build_defaults_to_the_projects_build_directory() {
 
 #[test]
 fn build_names_main_after_its_directory() {
-    let dir = project("named_proj", &[("main.st", "print(1)\n")]);
-    let output = stone_in(&dir, &["build", "main.st"]);
+    let dir = project("named_proj", &[("main.stn", "print(1)\n")]);
+    let output = stone_in(&dir, &["build", "main.stn"]);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(stdout_of(&dir.join("build/named_proj")), "1\n");
 }
 
 #[test]
 fn build_puts_other_targets_in_their_own_directory() {
-    let dir = project("several_targets", &[("p.st", "print(2)\n")]);
+    let dir = project("several_targets", &[("p.stn", "print(2)\n")]);
     let host = host_target();
     let other = if host == "aarch64-macos" {
         "x86_64-linux"
@@ -647,7 +649,7 @@ fn build_puts_other_targets_in_their_own_directory() {
     };
     let output = stone_in(
         &dir,
-        &["build", "p.st", "--target", host, "--target", other],
+        &["build", "p.stn", "--target", host, "--target", other],
     );
     assert!(output.status.success(), "{output:?}");
     assert_eq!(stdout_of(&dir.join("build/p")), "2\n");
@@ -660,15 +662,15 @@ fn build_takes_several_files_and_reports_each_failure() {
     let dir = project(
         "several_files",
         &[
-            ("a.st", "print(\"a\")\n"),
-            ("bad.st", "x = 1 + \"s\"\n"),
-            ("b.st", "print(\"b\")\n"),
+            ("a.stn", "print(\"a\")\n"),
+            ("bad.stn", "x = 1 + \"s\"\n"),
+            ("b.stn", "print(\"b\")\n"),
         ],
     );
-    let output = stone_in(&dir, &["build", "a.st", "bad.st", "b.st"]);
+    let output = stone_in(&dir, &["build", "a.stn", "bad.stn", "b.stn"]);
     assert!(!output.status.success(), "{output:?}");
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("bad.st:1:"),
+        String::from_utf8_lossy(&output.stderr).contains("bad.stn:1:"),
         "{output:?}"
     );
     assert_eq!(stdout_of(&dir.join("build/a")), "a\n");
@@ -680,14 +682,14 @@ fn build_takes_several_files_and_reports_each_failure() {
 fn build_rejects_output_with_several_files_or_targets() {
     let dir = project(
         "output_conflict",
-        &[("a.st", "print(1)\n"), ("b.st", "print(2)\n")],
+        &[("a.stn", "print(1)\n"), ("b.stn", "print(2)\n")],
     );
     let expected = "error: -o names one executable, so it needs exactly one file and one target\n";
     for args in [
-        &["build", "a.st", "b.st", "-o", "out"][..],
+        &["build", "a.stn", "b.stn", "-o", "out"][..],
         &[
             "build",
-            "a.st",
+            "a.stn",
             "--target",
             "x86_64-linux",
             "--target",
@@ -705,12 +707,12 @@ fn build_rejects_output_with_several_files_or_targets() {
 
 #[test]
 fn clean_removes_the_build_directory() {
-    let dir = project("clean_project", &[("app/main.st", "print(1)\n")]);
-    assert!(stone_in(&dir, &["build", "app/main.st"]).status.success());
+    let dir = project("clean_project", &[("app/main.stn", "print(1)\n")]);
+    assert!(stone_in(&dir, &["build", "app/main.stn"]).status.success());
     assert!(dir.join("app/build/app").is_file());
 
     // a file names its program's directory
-    let output = stone_in(&dir, &["clean", "app/main.st"]);
+    let output = stone_in(&dir, &["clean", "app/main.stn"]);
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),

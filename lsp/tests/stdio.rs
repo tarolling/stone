@@ -44,7 +44,7 @@ fn serves_diagnostics_over_stdio_and_exits_cleanly() {
             "textDocument/didOpen".to_string(),
             json!({
                 "textDocument": {
-                    "uri": "file:///bad.st",
+                    "uri": "file:///bad.stn",
                     "languageId": "stone",
                     "version": 1,
                     "text": "if 1\n    x = 1\n"

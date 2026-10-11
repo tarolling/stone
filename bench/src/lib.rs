@@ -1,14 +1,14 @@
 //! Shared pieces of the benchmark runner: finding benchmark programs, summarizing timings, and
 //! formatting the results table.
 //!
-//! Each benchmark is a set of files in `bench/programs/` sharing a stem, such as `fib.st`,
+//! Each benchmark is a set of files in `bench/programs/` sharing a stem, such as `fib.stn`,
 //! `fib.c`, `fib.py`, and `fib.out`, where the `.out` file holds what all three must print. A
 //! benchmark of arithmetic on lists may also have a numpy version, such as `vector.np.py`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-/// The file extensions every benchmark needs besides its `.st` source.
+/// The file extensions every benchmark needs besides its `.stn` source.
 pub const SIBLINGS: [&str; 3] = ["c", "py", "out"];
 
 /// One benchmark, written once in each language.
@@ -36,14 +36,14 @@ impl Program {
 
 /// Returns every benchmark in `dir`, sorted by name, or an error naming the first missing file.
 ///
-/// For example, a directory holding `fib.st`, `fib.c`, `fib.py`, and `fib.out` gives one
+/// For example, a directory holding `fib.stn`, `fib.c`, `fib.py`, and `fib.out` gives one
 /// `Program` named `fib`, and removing `fib.py` makes it an error.
 pub fn discover(dir: &Path) -> Result<Vec<Program>, String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     let mut programs = Vec::new();
     for entry in entries {
         let path = entry.map_err(|e| e.to_string())?.path();
-        if path.extension().is_none_or(|ext| ext != "st") {
+        if path.extension().is_none_or(|ext| ext != "stn") {
             continue;
         }
         let Some(name) = path.file_stem().and_then(|stem| stem.to_str()) else {
@@ -272,11 +272,11 @@ mod tests {
         touch(
             &dir,
             &[
-                "sieve.st",
+                "sieve.stn",
                 "sieve.c",
                 "sieve.py",
                 "sieve.out",
-                "fib.st",
+                "fib.stn",
                 "fib.c",
                 "fib.py",
                 "fib.out",
@@ -294,7 +294,7 @@ mod tests {
     #[test]
     fn discover_reports_a_missing_sibling() {
         let dir = scratch("discover_missing");
-        touch(&dir, &["fib.st", "fib.c", "fib.out"]);
+        touch(&dir, &["fib.stn", "fib.c", "fib.out"]);
         let error = discover(&dir).unwrap_err();
         assert!(error.contains("fib.py"), "{error}");
     }
@@ -350,7 +350,7 @@ mod tests {
     #[test]
     fn a_numpy_version_is_optional() {
         let dir = scratch("discover_numpy");
-        touch(&dir, &["fib.st", "fib.c", "fib.py", "fib.out", "vector.st"]);
+        touch(&dir, &["fib.stn", "fib.c", "fib.py", "fib.out", "vector.stn"]);
         touch(&dir, &["vector.c", "vector.py", "vector.np.py", "vector.out"]);
         let programs = discover(&dir).unwrap();
         let numpy: Vec<bool> = programs.iter().map(Program::has_numpy).collect();
@@ -365,7 +365,7 @@ mod tests {
         let programs = discover(&dir).unwrap();
         assert!(!programs.is_empty(), "no benchmarks found");
         for program in programs {
-            let source = std::fs::read_to_string(program.file("st")).unwrap();
+            let source = std::fs::read_to_string(program.file("stn")).unwrap();
             let diagnostics = stone::driver::check(&source);
             assert!(diagnostics.is_empty(), "{}: {diagnostics:?}", program.name);
         }

@@ -4,7 +4,7 @@
 stone [FILE [ARGS...]] [COMMAND]
 ```
 
-Every command reads one `.st` file, the entry file, along with every module it uses (see
+Every command reads one `.stn` file, the entry file, along with every module it uses (see
 [Modules](modules.md)), then checks them before doing anything else. If the checker
 finds errors, the command prints all of them and exits with status 1 without running anything.
 Errors print as `file:line:col: error: message`, followed by the source line and a caret under
@@ -17,8 +17,8 @@ file is passed to the program, which reads it with `args()`, even arguments that
 The program's standard input is stone's own, for `input()` and `eof()`.
 
 ```sh
-stone run examples/basics.st
-stone run sum.st 1 2 3 < numbers.txt
+stone run examples/basics.stn
+stone run sum.stn 1 2 3 < numbers.txt
 ```
 
 ## `stone build FILE... [-o OUTPUT] [--target TARGET]...`
@@ -55,9 +55,9 @@ every processor of the architecture. stone does not use the extra features yet, 
 level builds the same program.
 
 ```sh
-stone build examples/basics.st
+stone build examples/basics.stn
 ./examples/build/basics
-stone build examples/basics.st --target aarch64-linux --target aarch64-macos
+stone build examples/basics.stn --target aarch64-linux --target aarch64-macos
 ```
 
 The release archives use the same names for the machines the `stone` binary itself runs on,
@@ -65,7 +65,7 @@ such as `stone-x86_64-linux.tar.gz`, plus `stone-x86_64-macos.tar.gz` for Intel 
 runs programs but cannot build them.
 
 The executable reads its own arguments and standard input the same way, so `./build/sum 1 2 3`
-behaves like `stone run sum.st 1 2 3`.
+behaves like `stone run sum.stn 1 2 3`.
 
 ### Where executables go
 
@@ -75,7 +75,7 @@ stone:
 
 ```text
 examples/
-  basics.st
+  basics.stn
   build/
     basics              built for this machine
     basics.s
@@ -84,13 +84,13 @@ examples/
       basics.s
 ```
 
-- An executable is named after its entry file, so `basics.st` becomes `basics`. A `main.st` is
+- An executable is named after its entry file, so `basics.stn` becomes `basics`. A `main.stn` is
   named after its directory instead, as a program of several files usually is, so
-  `geometry/main.st` becomes `geometry/build/geometry`.
+  `geometry/main.stn` becomes `geometry/build/geometry`.
 - An executable for the machine stone runs on goes straight into `build/`, and one for any
   other target into `build/TARGET/`, named as `--target` names it (`aarch64-macos`,
   `x86_64v3-linux`). Builds for different targets never overwrite each other.
-- Several files, as in `stone build a.st b.st`, each build into their own executable. If one
+- Several files, as in `stone build a.stn b.stn`, each build into their own executable. If one
   has errors, stone prints them, still builds the rest, and exits with status 1.
 - `-o OUTPUT` writes the executable to exactly `OUTPUT` instead, with the assembly at
   `OUTPUT.s`, so it needs exactly one file and one target.
@@ -104,7 +104,7 @@ and defaults to the current directory. It only removes a `build` directory that 
 made; any other is an error and stays as it is.
 
 ```sh
-stone clean examples/basics.st   # removes examples/build
+stone clean examples/basics.stn   # removes examples/build
 stone clean                      # removes ./build
 ```
 
@@ -114,7 +114,7 @@ Reports every syntax and type error without running the program, and exits with 
 there are any. Warnings alone print but leave the status at 0.
 
 ```sh
-stone check examples/basics.st
+stone check examples/basics.stn
 ```
 
 ## `stone`
@@ -129,14 +129,14 @@ stone 0.2.0. Press Ctrl+D to exit.
 >>> x = 6
 >>> x * 7
 42
->>> def greet(name);
+>>> fn greet(name: str) -> str;
 ...     ret "hi " + name
 ...
 >>> greet("Ada")
 'hi Ada'
 ```
 
-A line that opens a block, such as `def f(n);` or `if x;`, continues the entry with a `...`
+A line that opens a block, such as `fn f(n: int);` or `if x;`, continues the entry with a `...`
 prompt, and a blank line ends it. Every entry is checked together with the earlier ones as if
 they were one file, so `x = "a"` after `x = 6` is an error. An entry with an error is reported as
 `<stdin>:line:col` and discarded, and one that fails at runtime prints `error: message`; the

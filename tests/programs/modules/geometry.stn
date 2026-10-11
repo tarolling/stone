@@ -1,0 +1,2 @@
+pub fn origin() -> list[int];
+    ret [0, 0]

@@ -16,8 +16,6 @@ use crate::span::Span;
 use crate::token::TokenType;
 
 type Identifier = String;
-#[allow(dead_code)] // mirrors the asdl, unused until int annotations land
-type Int = i64;
 // `String` is built in
 
 ////////////////////////////////////////////////////////////////
@@ -89,11 +87,15 @@ impl Constant {
 // custom types from the asdl
 ////////////////////////////////////////////////////////////////
 
-/// A function parameter and the span of its name, such as `a` in `def f(a);`.
+/// A function parameter, the span of its name, and its type, such as `a: int` in
+/// `fn f(a: int);`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arg {
     pub arg: Identifier,
     pub span: Span,
+    /// The parameter's type, which the checker requires but the parser accepts without, so
+    /// that a missing one is a type error and editor features keep working.
+    pub annotation: Option<TypeExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -253,7 +255,7 @@ impl Stmt {
 /// The kind of a [`Stmt`], such as an assignment or a loop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
-    /// A function definition, such as `def add(a, b); ret a + b`.
+    /// A function definition, such as `fn add(a: int, b: int) -> int; ret a + b`.
     FunctionDef {
         name: Identifier,
         /// The span of the function's name, which editor features point at.
@@ -261,6 +263,8 @@ pub enum StmtKind {
         /// Whether the definition starts with `pub`, so other modules may use it.
         public: bool,
         args: Arguments,
+        /// The type after `->`, if any; a function without one returns `none`.
+        returns: Option<TypeExpr>,
         body: Vec<Stmt>,
     },
 
@@ -337,62 +341,35 @@ impl Error for ParserError {}
 // type annotations
 ////////////////////////////////////////////////////////////////
 
-pub enum Type {
-    /// An arbitrary-precision integer that auto-promotes and never overflows, such as `42`.
-    Int,
-    // signed integers
-    I8,
-    I16,
-    I32,
-    I64,
-    I128,
-    // unsigned integers
-    U8,
-    U16,
-    U32,
-    U64,
-    U128,
-    // pointer-sized integers
-    ISize,
-    USize,
-    // floating point numbers
-    Float,
-    F32,
-    F64,
-    Decimal,
-    // boolean
-    Bool,
-    // strings and characters
-    Char,
-    String,
-    // none
-    None,
+/// A type written in a function's signature, such as `list[int]` in `fn f(xs: list[int]);`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeExpr {
+    pub kind: TypeExprKind,
+    pub span: Span,
 }
 
-impl Type {
-    pub fn as_str(&self) -> &str {
-        match self {
-            Type::Int => "int",
-            Type::I8 => "i8",
-            Type::I16 => "i16",
-            Type::I32 => "i32",
-            Type::I64 => "i64",
-            Type::I128 => "i128",
-            Type::U8 => "u8",
-            Type::U16 => "u16",
-            Type::U32 => "u32",
-            Type::U64 => "u64",
-            Type::U128 => "u128",
-            Type::ISize => "isize",
-            Type::USize => "usize",
-            Type::Float => "float",
-            Type::F32 => "f32",
-            Type::F64 => "f64",
-            Type::Decimal => "decimal",
-            Type::Bool => "bool",
-            Type::Char => "char",
-            Type::String => "str",
-            Type::None => "none",
+/// The kind of a [`TypeExpr`], one of the types the checker knows.
+#[derive(Debug, Clone, PartialEq)]
+pub enum TypeExprKind {
+    Int,
+    Float,
+    Bool,
+    Str,
+    None,
+    /// A list of the given element type, such as `list[float]`.
+    List(Box<TypeExpr>),
+}
+
+impl Display for TypeExpr {
+    /// Writes the type as it is written in source, such as `list[list[int]]`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            TypeExprKind::Int => write!(f, "int"),
+            TypeExprKind::Float => write!(f, "float"),
+            TypeExprKind::Bool => write!(f, "bool"),
+            TypeExprKind::Str => write!(f, "str"),
+            TypeExprKind::None => write!(f, "none"),
+            TypeExprKind::List(elem) => write!(f, "list[{elem}]"),
         }
     }
 }

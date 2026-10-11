@@ -2517,7 +2517,8 @@ impl<'a> Lowerer<'a> {
 /// Returns, for each function in `body`, whether it owns each of its parameters, which it does if
 /// it assigns or changes the parameter.
 ///
-/// For example, `def add(xs, x); xs.append(x); ret xs` owns `xs` but not `x`.
+/// For example, `fn add(xs: list[int], x: int) -> list[int]; xs.append(x); ret xs` owns `xs`
+/// but not `x`.
 fn owned_params(body: &[Stmt]) -> HashMap<String, Vec<bool>> {
     let mut owned = HashMap::new();
     for stmt in body {

@@ -6,6 +6,7 @@
     { "include": "#comment" },
     { "include": "#string" },
     { "include": "#function-definition" },
+    { "include": "#type-annotation" },
     { "include": "#keyword" },
     { "include": "#constant" },
     { "include": "#number" },
@@ -27,10 +28,17 @@
       "endCaptures": { "0": { "name": "punctuation.definition.string.end.stone" } }
     },
     "function-definition": {
-      "match": "\\b(def)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
         "1": { "name": "storage.type.function.stone" },
         "2": { "name": "entity.name.function.stone" }
+      }
+    },
+    "type-annotation": {
+      "match": "(->|:)\\s*((?:list\\[)*(?:int|float|bool|str|none)\\]*)(?![A-Za-z0-9_(])",
+      "captures": {
+        "1": { "name": "punctuation.separator.annotation.stone" },
+        "2": { "name": "support.type.stone" }
       }
     },
     "keyword": {

@@ -59,7 +59,7 @@ impl Document {
     /// Analyzes the file at `path` as part of its program, reading every file from `sources`, or
     /// returns `None` if there is no file at `path`.
     ///
-    /// The program is the one whose entry file is the nearest `main.st` in the file's directory or
+    /// The program is the one whose entry file is the nearest `main.stn` in the file's directory or
     /// one above it. If that program does not use the file yet, the file is checked as an entry
     /// file of its own, from the program's root if it is in a directory under it.
     pub fn in_program(path: &Path, sources: &dyn Sources, encoding: Encoding) -> Option<Self> {
@@ -206,8 +206,8 @@ pub fn diagnostics(doc: &Document) -> Vec<Diagnostic> {
         .collect()
 }
 
-/// Describes a symbol the way stone would declare it, such as `def add(a: int) -> int` or
-/// `(local) sum: int`.
+/// Describes a symbol the way stone would declare it, such as `fn add(a: int) -> int`,
+/// `fn greet(name: str)`, or `(local) sum: int`.
 fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
     match (&symbol.kind, &symbol.ty) {
         (StoneSymbolKind::Function, Type::Function { params, ret }) => {
@@ -218,7 +218,11 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 .zip(params)
                 .map(|(param, ty)| format!("{}: {ty}", param.name))
                 .collect();
-            format!("def {}({}) -> {ret}", symbol.name, params.join(", "))
+            let returns = match ret.as_ref() {
+                Type::None => String::new(),
+                ret => format!(" -> {ret}"),
+            };
+            format!("fn {}({}){returns}", symbol.name, params.join(", "))
         }
         (kind, ty) => {
             let kind = match kind {
@@ -234,7 +238,7 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
 /// Returns the `//` comment lines directly above a function's or variable's definition, without
 /// their `//` and the space after it, as Markdown for hover.
 ///
-/// For example, for `f` in `"// adds one\n// to n\ndef f(n);\n    ret n + 1\n"` this returns
+/// For example, for `f` in `"// adds one\n// to n\nfn f(n);\n    ret n + 1\n"` this returns
 /// `"adds one\nto n"`. A line that is only `//` becomes a paragraph break. A blank line between
 /// the comment and the definition detaches it, parameters are never documented, and neither is a
 /// definition that does not start its line, such as `i` in `for i in range(3);`.
@@ -249,7 +253,7 @@ fn doc_comment(text: &str, symbol: &Symbol) -> Option<String> {
         .chars()
         .take(symbol.span.start.col - 1)
         .collect();
-    if !matches!(before.trim(), "" | "def" | "pub def") {
+    if !matches!(before.trim(), "" | "fn" | "pub fn") {
         return None;
     }
     let comment: Vec<&str> = lines[..line]
@@ -268,7 +272,7 @@ fn doc_comment(text: &str, symbol: &Symbol) -> Option<String> {
 /// Returns the `//` comment lines at the very top of a module's file, without their `//` and the
 /// space after it, as Markdown for hover.
 ///
-/// For example, for `"// summary statistics\n\npub def mean(xs);\n..."` this returns
+/// For example, for `"// summary statistics\n\npub fn mean(xs);\n..."` this returns
 /// `"summary statistics"`. A comment directly above a definition documents that definition
 /// instead (see [`doc_comment`]), so only one followed by a blank line or the end of the file
 /// counts.
@@ -893,7 +897,7 @@ fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<Comp
         let Some(name) = entry.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
-        let kind = if entry.extension().is_some_and(|ext| ext == "st") {
+        let kind = if entry.extension().is_some_and(|ext| ext == "stn") {
             // the entry file cannot be imported
             if doc.sources.find(&entry) == Some(FileId(0)) {
                 continue;

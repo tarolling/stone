@@ -122,7 +122,7 @@ args() -> list[str]
 ```
 
 Returns the command-line arguments given after the program, without the program's own name.
-`stone run sum.st 1 2` and a built `./sum 1 2` both see `["1", "2"]`. Each call returns a new
+`stone run sum.stn 1 2` and a built `./sum 1 2` both see `["1", "2"]`. Each call returns a new
 list.
 
 ```stone
@@ -255,7 +255,7 @@ print("  3 4   5 ".split())                    // ['3', '4', '5']
 `os` is a builtin module: it has no file, and a program imports it like any other module, with
 `use os` to call `os.env("HOME")`, `use os.env` to call `env("HOME")`, or `use os as system` to
 call `system.env("HOME")`. Its names are only reserved once imported, so a program can still
-have its own `env` or `pid`. A file named `os.st` next to the entry file cannot be imported,
+have its own `env` or `pid`. A file named `os.stn` next to the entry file cannot be imported,
 since `use os` always means this module.
 
 Both `stone run` and a built program answer from the same C library calls, so they agree on
@@ -367,7 +367,7 @@ print("hello", args()[0])
 
 `math` is a builtin module like [`os`](#the-os-module): `use math` to call `math.sqrt(2)`, or
 `use math.sqrt` to call `sqrt(2)`. Since its functions are only reachable through the module,
-a program can still name its own variables `min`, `max`, or `abs`. A file named `math.st` next
+a program can still name its own variables `min`, `max`, or `abs`. A file named `math.stn` next
 to the entry file cannot be imported.
 
 Each function takes ints or floats, but never a mix of the two in one call: convert with
@@ -421,7 +421,7 @@ with the same rules as `math.min`. The greatest of an empty list stops the progr
 ```stone
 use math
 
-def clamp(x, low, high);
+fn clamp(x: int, low: int, high: int) -> int;
     ret math.min(math.max(x, low), high)
 
 print(clamp(12, 0, 10), math.max([4, 8, 7]))   // 10 8
@@ -441,7 +441,7 @@ of nan is nan.
 ```stone
 use math
 
-def distance(x, y);
+fn distance(x: float, y: float) -> float;
     ret math.sqrt(x * x + y * y)
 
 print(distance(3.0, 4.0))   // 5.0
@@ -468,7 +468,7 @@ print(math.floor(7.0 / 2.0), math.floor(-0.5))   // 3 -1
 
 `random` is a builtin module like [`os`](#the-os-module): `use random` to call
 `random.randint(1, 6)`, or `use random.randint` to call `randint(1, 6)`. A file named
-`random.st` next to the entry file cannot be imported.
+`random.stn` next to the entry file cannot be imported.
 
 The numbers come from xoshiro256**, a fast generator whose numbers look random but follow from
 its seed, so they are fine for games and simulations but not for passwords or keys. After
@@ -537,7 +537,7 @@ print(random.choice(["rock", "paper", "scissors"]))
 ## The `time` module
 
 `time` is a builtin module like [`os`](#the-os-module): `use time` to call `time.sleep(1)`, or
-`use time.sleep` to call `sleep(1)`. A file named `time.st` next to the entry file cannot be
+`use time.sleep` to call `sleep(1)`. A file named `time.stn` next to the entry file cannot be
 imported. In version 0.2.0, `time.now` and `time.clock` were `os.time` and `os.clock`.
 
 ### `time.now`

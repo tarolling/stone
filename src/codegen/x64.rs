@@ -325,7 +325,7 @@ mod tests {
     #[test]
     fn more_than_six_parameters_assemble() {
         assert!(
-            assemble("def f(a, b, c, d, e, g, h);\n    ret h\nprint(f(1, 2, 3, 4, 5, 6, 7))\n")
+            assemble("fn f(a: int, b: int, c: int, d: int, e: int, g: int, h: int) -> int;\n    ret h\nprint(f(1, 2, 3, 4, 5, 6, 7))\n")
                 .is_ok()
         );
     }
@@ -437,13 +437,13 @@ mod tests {
         rest[..end].to_string()
     }
 
-    const LCG: &str = "def lcg(rounds);\n    x = 1\n    total = 0\n    i = 0\n    \
+    const LCG: &str = "fn lcg(rounds: int) -> int;\n    x = 1\n    total = 0\n    i = 0\n    \
                        while i < rounds;\n        x = x * 1103515245 + 12345\n        \
                        x = x - (x / 2147483648) * 2147483648\n        \
                        total = total + x / 65536\n        i = i + 1\n    ret total\n\
                        print(lcg(20))\n";
 
-    const FIB: &str = "def fib(n);\n    if n < 2;\n        ret n\n    \
+    const FIB: &str = "fn fib(n: int) -> int;\n    if n < 2;\n        ret n\n    \
                        ret fib(n - 1) + fib(n - 2)\nprint(fib(10))\n";
 
     #[test]
@@ -456,7 +456,7 @@ mod tests {
 
     #[test]
     fn releasing_is_not_a_call_so_a_loop_keeps_caller_saved_registers() {
-        let source = "def count(xs);\n    n = 0\n    for x in xs;\n        n = n + 1\n    ret n\n\
+        let source = "fn count(xs: list[str]) -> int;\n    n = 0\n    for x in xs;\n        n = n + 1\n    ret n\n\
                       print(count([\"a\", \"b\"]))\n";
         let count = function_text(&assemble(source).unwrap(), "count");
         // each element is retained for x, and x's old value released, freeing it if it was last
@@ -538,7 +538,7 @@ mod tests {
     #[test]
     fn commutative_operations_write_their_right_operand_in_place() {
         // the product's destination is the register of its right operand
-        let source = "def f(a, b);\n    t = 0\n    for k in range(a);\n        \
+        let source = "fn f(a: int, b: int) -> int;\n    t = 0\n    for k in range(a);\n        \
                       t = t + a * (b + k)\n    ret t\nprint(f(3, 4))\n";
         let f = function_text(&assemble(source).unwrap(), "f");
         assert!(!f.contains("\timul\trax"), "{f}");
@@ -546,7 +546,8 @@ mod tests {
 
     #[test]
     fn loop_tests_compare_and_jump_without_a_bool() {
-        let source = "def f(n);\n    i = 0\n    while i < n;\n        i = i + 1\n    ret i\n";
+        let source =
+            "fn f(n: int) -> int;\n    i = 0\n    while i < n;\n        i = i + 1\n    ret i\n";
         let f = function_text(&assemble(source).unwrap(), "f");
         assert!(f.contains("\tcmp\t"), "{f}");
         assert!(f.contains("\tjge\t") || f.contains("\tjl\t"), "{f}");
@@ -569,7 +570,7 @@ mod tests {
     /// Links and assembles `source` without invoking gcc, so that it can `use os`.
     fn assemble_linked(source: &str) -> String {
         let (_, module) = crate::driver::load(
-            Path::new("main.st"),
+            Path::new("main.stn"),
             source,
             &crate::project::MapSources::default(),
         );

@@ -11,7 +11,7 @@ cargo install --path lsp      # install stone-lsp into ~/.cargo/bin
 ## How it works
 
 On every change to an open document, the server reanalyzes every open document as part of the
-program it belongs to: the one whose entry file is the nearest `main.st` in its directory or
+program it belongs to: the one whose entry file is the nearest `main.stn` in its directory or
 above. `Document::in_program` links that program with `stone::project::link`, reading open
 documents' text over what is on disk, and runs `stone::driver::analyze_linked`. A file the
 program does not use yet is checked on its own, from the program's root. Requests are answered

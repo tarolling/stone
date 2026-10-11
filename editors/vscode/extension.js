@@ -1,4 +1,4 @@
-// Starts stone-lsp for .st files and connects it to VS Code.
+// Starts stone-lsp for .stn files and connects it to VS Code.
 
 const vscode = require("vscode");
 const { LanguageClient } = require("vscode-languageclient/node");

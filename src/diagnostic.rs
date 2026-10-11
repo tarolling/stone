@@ -56,10 +56,10 @@ impl Diagnostic {
     /// Formats the diagnostic for a terminal as `file:line:col: severity: message`, followed by the
     /// offending source line and a caret under the start of the span.
     ///
-    /// For example, rendering `expected ';'` for `if x` in `main.st` gives:
+    /// For example, rendering `expected ';'` for `if x` in `main.stn` gives:
     ///
     /// ```text
-    /// main.st:1:5: error: expected ';', found end of line
+    /// main.stn:1:5: error: expected ';', found end of line
     ///   |
     /// 1 | if x
     ///   |     ^

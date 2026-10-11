@@ -30,7 +30,7 @@ done
 echo "test: installs and runs an example"
 STONE_DOWNLOAD_URL="file://$work/release" STONE_INSTALL_DIR="$work/bin" \
     sh "$root/install.sh"
-"$work/bin/stone" run "$root/examples/basics.st" | diff - "$root/examples/basics.out"
+"$work/bin/stone" run "$root/examples/basics.stn" | diff - "$root/examples/basics.out"
 
 echo "test: --dir overrides the install directory"
 STONE_DOWNLOAD_URL="file://$work/release" sh "$root/install.sh" --dir "$work/other"

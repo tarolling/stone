@@ -1,0 +1,22 @@
+// arithmetic on lists: y = a * x + y over a million floats, repeated
+fn fill(n: int, k: int) -> list[float];
+    xs = []
+    for i in range(n);
+        xs.append(float(i % k))
+    ret xs
+
+fn saxpy(a: float, x: list[float], y: list[float], reps: int) -> list[float];
+    for r in range(reps);
+        y = a * x + y
+    ret y
+
+fn total(xs: list[float]) -> float;
+    sum = 0.0
+    for v in xs;
+        sum = sum + v
+    ret sum
+
+n = 1000000
+y = saxpy(0.5, fill(n, 7), fill(n, 5), 50)
+// every value is a multiple of 0.5, so the sum is exact in any order
+print(int(total(y)))

@@ -1,0 +1,39 @@
+// slices copy part of a list, as in Python
+xs = [0, 1, 2, 3, 4]
+print(xs[1:], xs[:2], xs[:], xs[-2:], xs[:-1])
+print(xs[::-1], xs[3:0:-1], xs[1:4:2], xs[4::-2], xs[::3])
+print(xs[10:20], xs[-10:2], xs[2:2], xs[3:1])
+
+// bounds can be any int expression, evaluated left to right
+fn noisy(label: str, n: int) -> int;
+    print(label)
+    ret n
+print(xs[noisy("lower", 1):noisy("upper", 4):noisy("step", 1)])
+
+// a slice is a new list, so changing it leaves the original alone
+ys = xs[1:3]
+ys[0] = 10
+ys.append(20)
+print(xs, ys)
+
+// slicing lists of strings and of lists keeps their elements alive
+words = ["a", "b", "c", "d"]
+tail = words[2:]
+words = []
+print(tail, words)
+grid = [[1, 2], [3], [4, 5, 6]]
+rows = grid[::-1]
+rows[0].append(7)
+print(grid, rows, rows[0][3], grid[1:][0])
+
+// extreme bounds clamp
+big = 9223372036854775807
+print(xs[-big - 1:big], xs[big:-big - 1:-1], xs[::-big - 1])
+
+// a slice of nothing
+empty = []
+print(empty[:], empty[::-1], empty[1:2])
+print(len_of(xs[1:4]))
+
+fn len_of(items: list[int]) -> int;
+    ret items.len()

@@ -6,7 +6,7 @@ This crate times stone's compiled output (`stone build`) against the same progra
 cargo run --release --manifest-path bench/Cargo.toml -- [--runs 5] [--filter NAME] [--stone PATH] [--numpy PYTHON] [--min]
 ```
 
-For each benchmark, the runner builds stone in release mode, compiles the `.st` with `stone build` and the `.c` with `gcc -O2 -fwrapv` and `gcc -O0 -fwrapv`, and runs the `.py` with `python3`. It runs each implementation once untimed and requires its stdout to match the `.out` file exactly. It then times `--runs` more runs, checking the output of each, and prints a Markdown table of the median wall times, or the fastest with `--min`. Progress and warnings go to stderr, so `> results.md` captures only the table. It needs `gcc` and `python3` on `PATH`.
+For each benchmark, the runner builds stone in release mode, compiles the `.stn` with `stone build` and the `.c` with `gcc -O2 -fwrapv` and `gcc -O0 -fwrapv`, and runs the `.py` with `python3`. It runs each implementation once untimed and requires its stdout to match the `.out` file exactly. It then times `--runs` more runs, checking the output of each, and prints a Markdown table of the median wall times, or the fastest with `--min`. Progress and warnings go to stderr, so `> results.md` captures only the table. It needs `gcc` and `python3` on `PATH`.
 
 A benchmark of arithmetic on lists can also have a numpy version, `name.np.py`, which runs under the Python that `--numpy` names (`python3` by default), such as a virtualenv's `bin/python`, and adds `numpy (ms)` and `numpy / stone` columns. If that Python cannot import numpy, the runner warns and leaves numpy out.
 
@@ -37,7 +37,7 @@ Stone programs cannot read arguments or input, so each workload size is a consta
 
 The versions are meant to be written naturally in each language, not to mimic each other instruction by instruction. The main difference comes from stone having no `%` operator: stone computes `a % b` as `a - (a / b) * b`, while C and Python use `%`. Every program prints only ints and keeps values nonnegative and within 64 bits, so truncating and floor division, and Python's big ints, give the same output. `matmul_float` prints its float checksum scaled by a million and converted to an int, so C need not print floats the way stone does, and it adds in the same order in all three versions, so the floats round identically.
 
-To add a benchmark, write `name.st`, `name.c`, and `name.py`, put the hot loop inside a function, and save the shared output as `name.out`.
+To add a benchmark, write `name.stn`, `name.c`, and `name.py`, put the hot loop inside a function, and save the shared output as `name.out`.
 
 ## Baseline
 

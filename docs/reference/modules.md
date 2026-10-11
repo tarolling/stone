@@ -6,18 +6,18 @@ A program is an entry file plus every module it uses, directly or through other 
 ## Names and files
 
 The **root** is the directory of the entry file, the file given to `stone run`, `stone build`, or
-`stone check`. Every other `.st` file under the root is a module, named by its path from the root
-with `.` between the parts and without `.st`:
+`stone check`. Every other `.stn` file under the root is a module, named by its path from the root
+with `.` between the parts and without `.stn`:
 
 | file | module |
 | --- | --- |
-| `app/main.st` (entry) | none; it cannot be used |
-| `app/util.st` | `util` |
-| `app/geometry/shapes.st` | `geometry.shapes` |
-| `app/geometry.st` | `geometry` |
+| `app/main.stn` (entry) | none; it cannot be used |
+| `app/util.stn` | `util` |
+| `app/geometry/shapes.stn` | `geometry.shapes` |
+| `app/geometry.stn` | `geometry` |
 
 A directory is only part of a module's name, never a module itself, so there are no files that
-only declare or re-export others. A module and a directory can share a name, as `geometry.st` and
+only declare or re-export others. A module and a directory can share a name, as `geometry.stn` and
 `geometry/` do above. File and directory names must be valid stone names to be used.
 
 ## use
@@ -36,7 +36,7 @@ use geometry.shapes.area as shape_area
   by its own name, and it is called as `area(r)`.
 - `as` binds the name after it instead.
 
-So when both `geometry/shapes.st` and a function `shapes` in `geometry.st` exist,
+So when both `geometry/shapes.stn` and a function `shapes` in `geometry.stn` exist,
 `use geometry.shapes` is the module. Use `use geometry` and call `geometry.shapes()` to reach the
 function.
 
@@ -61,9 +61,9 @@ functions.
 ## Builtin modules
 
 `os`, `math`, `random`, and `time` are builtin modules with no file, so `use math`,
-`use math.sqrt`, and `use math as m` work in any file without a `math.st`. A program cannot have
+`use math.sqrt`, and `use math as m` work in any file without a `math.stn`. A program cannot have
 a module of its own with one of those names: using it is the error
-`'math' is a builtin module, so rename math.st`. See [the builtins](builtins.md) for their
+`'math' is a builtin module, so rename math.stn`. See [the builtins](builtins.md) for their
 functions:
 
 | module | for |
@@ -78,13 +78,13 @@ own variables and functions `min`, `max`, `sleep`, or `env`.
 
 ## pub
 
-`pub def` makes a function usable from other files. Every other function is private to the file
+`pub fn` makes a function usable from other files. Every other function is private to the file
 it is in. `pub` makes no difference in the entry file, so a module can also be run on its own.
 
 ## Module bodies
 
-A module other than the entry file holds only `use` statements and `def`s. Any other top-level
-statement is an error: `only use and def are allowed at the top level of a module`. So using a
+A module other than the entry file holds only `use` statements and `fn`s. Any other top-level
+statement is an error: `only use and fn are allowed at the top level of a module`. So using a
 module never runs code, and modules may use each other in a cycle.
 
 A module's functions see their parameters and locals, their own file's functions, builtins, and
@@ -93,7 +93,8 @@ reading one is `undefined name` or `undefined function`, as for any unknown name
 
 ## Types
 
-The checker infers types over the whole program at once, the same way it does within one file.
-A module's functions take the types they are called with, so `pub def first(xs); ret xs[0]`
-called with a `list[str]` returns a `str`. Errors point at the file they are in, as in
-`app/geometry/shapes.st:4:12: error: ...`.
+The checker checks the whole program at once, the same way it does within one file. A module's
+functions have the types their signatures write, so `pub fn first(xs: list[str]) -> str; ret xs[0]`
+can be called from any file with a `list[str]`, and a call with anything else is an error in the
+calling file. Errors point at the file they are in, as in
+`app/geometry/shapes.stn:4:12: error: ...`.

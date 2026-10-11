@@ -118,7 +118,7 @@ block:
 # --------------------
 
 function_def:
-    | ['pub'] 'def' NAME '(' [parameters] ')' ';' block 
+    | ['pub'] 'fn' NAME '(' [parameters] ')' ['->' type] ';' block 
 
 # Function parameters
 # -------------------
@@ -126,8 +126,17 @@ function_def:
 parameters:
     | ','.param+
 
+# the checker requires every parameter's type; the parser accepts a missing one
 param:
-    | NAME 
+    | NAME [':' type] 
+
+# Types
+# -----
+
+type:
+    | 'none'
+    | 'list' '[' type ']'
+    | NAME  # int, float, bool, or str
 
 # If statement
 # ------------

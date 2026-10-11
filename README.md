@@ -29,12 +29,12 @@ cargo install --git https://github.com/tarolling/stone stone
 ## usage
 
 ```sh
-cargo run --release -- run examples/basics.st    # interpret
-cargo run --release -- build examples/basics.st  # compile
+cargo run --release -- run examples/basics.stn    # interpret
+cargo run --release -- build examples/basics.stn  # compile
 ./examples/build/basics
 ```
 
-`stone <file>` is shorthand for `stone run <file>`. `build` writes the executable to a `build` directory next to the file, named after it (a `main.st` is named after its directory), with the assembly beside it (`examples/build/basics.s`). other targets go in `build/<target>/`, `-o` picks a path instead, and `stone clean` removes the directory.
+`stone <file>` is shorthand for `stone run <file>`. `build` writes the executable to a `build` directory next to the file, named after it (a `main.stn` is named after its directory), with the assembly beside it (`examples/build/basics.s`). other targets go in `build/<target>/`, `-o` picks a path instead, and `stone clean` removes the directory.
 
 ## layout
 
@@ -53,4 +53,4 @@ cargo run --release -- build examples/basics.st  # compile
 cargo test
 ```
 
-To add a golden test, drop `name.st` and `name.out` into `tests/programs/` (or `examples/`). If a backend can't handle a program yet, list it in `SKIPS` in `tests/programs.rs` and give the reason.
+To add a golden test, drop `name.stn` and `name.out` into `tests/programs/` (or `examples/`). If a backend can't handle a program yet, list it in `SKIPS` in `tests/programs.rs` and give the reason.

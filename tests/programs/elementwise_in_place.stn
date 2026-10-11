@@ -1,0 +1,47 @@
+// arithmetic writes over a list nothing else holds, and copies one that something else does
+fn step(xs: list[int], k: int) -> list[int];
+    xs = xs * k + 1
+    ret xs
+
+fn steps(n: int) -> list[int];
+    xs = [0, 1, 2]
+    for i in range(n);
+        xs = step(xs, 2)
+    ret xs
+
+print(steps(3))
+
+// a list another variable holds keeps its values
+a = [1.0, 2.0]
+b = a
+a = a * 10.0
+print(a, b)
+
+// a list in another list keeps its values
+grid = [[1, 2], [3, 4]]
+row = grid[0]
+row = row - 1
+grid[1] = grid[1] * grid[1]
+print(row, grid)
+
+// a variable's last use can give its list to the result without being assigned
+fn combine(x: list[int]) -> list[int];
+    y = x * 3
+    z = y + x
+    ret z
+print(combine([1, 2, 3]))
+
+// returning arithmetic on locals reuses them
+fn scaled(x: list[float]) -> list[float];
+    y = x * 1.5
+    ret -y
+print(scaled([2.0, 4.0]))
+
+// the same list on both sides, and as a later operand
+c = [3, 4]
+c = c * c - c
+print(c)
+d = [1, 2]
+e = [5, 6]
+e = d + e
+print(d, e)

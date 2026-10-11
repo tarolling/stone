@@ -51,6 +51,7 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
             name,
             public,
             args,
+            returns,
             body,
             ..
         } => StmtKind::FunctionDef {
@@ -64,9 +65,11 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
                     .map(|a| Arg {
                         arg: a.arg,
                         span: Span::default(),
+                        annotation: a.annotation.map(strip_type),
                     })
                     .collect(),
             },
+            returns: returns.map(strip_type),
             body: strip_all(body),
         },
         StmtKind::Return { value } => StmtKind::Return {
@@ -103,6 +106,17 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
         kind @ (StmtKind::Break | StmtKind::Continue) => kind,
     };
     kind.into()
+}
+
+fn strip_type(ty: TypeExpr) -> TypeExpr {
+    let kind = match ty.kind {
+        TypeExprKind::List(elem) => TypeExprKind::List(Box::new(strip_type(*elem))),
+        kind => kind,
+    };
+    TypeExpr {
+        kind,
+        span: Span::default(),
+    }
 }
 
 fn strip_expr(expr: Expr) -> Expr {
@@ -262,14 +276,14 @@ ret y
 /// Checks that a function with no parameters parses:
 ///
 /// ```text
-/// def testing();
+/// fn testing();
 ///     ret 52
 /// testing()
 /// ```
 #[test]
 fn simple_function_no_args() {
     let tokens = vec![
-        tok(TokenType::Keyword("def".to_string()), 1, 1),
+        tok(TokenType::Keyword("fn".to_string()), 1, 1),
         tok(TokenType::Name("testing".to_string()), 1, 5),
         tok(TokenType::LParen, 1, 12),
         tok(TokenType::RParen, 1, 13),
@@ -298,6 +312,7 @@ fn simple_function_no_args() {
                     name_span: Span::default(),
                     public: false,
                     args: Arguments { args: vec![] },
+                    returns: None,
                     body: vec![
                         StmtKind::Return {
                             value: Some(Box::new(
@@ -336,14 +351,14 @@ fn simple_function_no_args() {
 /// Checks that a function with one parameter parses:
 ///
 /// ```text
-/// def testing(a);
+/// fn testing(a);
 ///     ret a + 2
 /// testing(4)
 /// ```
 #[test]
 fn simple_function_one_arg() {
     let tokens = vec![
-        tok(TokenType::Keyword("def".to_string()), 1, 1),
+        tok(TokenType::Keyword("fn".to_string()), 1, 1),
         tok(TokenType::Name("testing".to_string()), 1, 5),
         tok(TokenType::LParen, 1, 12),
         tok(TokenType::Name("a".to_string()), 1, 13),
@@ -379,8 +394,10 @@ fn simple_function_one_arg() {
                         args: vec![Arg {
                             arg: "a".to_string(),
                             span: Span::default(),
+                            annotation: None,
                         }]
                     },
+                    returns: None,
                     body: vec![
                         StmtKind::Return {
                             value: Some(Box::new(
@@ -438,14 +455,14 @@ fn simple_function_one_arg() {
 /// Checks that a function with several parameters parses:
 ///
 /// ```text
-/// def testing(a, b, c);
+/// fn testing(a, b, c);
 ///     ret b
 /// testing(1, 2, 3)
 /// ```
 #[test]
 fn simple_function_multiple_args() {
     let tokens = vec![
-        tok(TokenType::Keyword("def".to_string()), 1, 1),
+        tok(TokenType::Keyword("fn".to_string()), 1, 1),
         tok(TokenType::Name("testing".to_string()), 1, 5),
         tok(TokenType::LParen, 1, 12),
         tok(TokenType::Name("a".to_string()), 1, 13),
@@ -488,17 +505,21 @@ fn simple_function_multiple_args() {
                             Arg {
                                 arg: "a".to_string(),
                                 span: Span::default(),
+                                annotation: None,
                             },
                             Arg {
                                 arg: "b".to_string(),
                                 span: Span::default(),
+                                annotation: None,
                             },
                             Arg {
                                 arg: "c".to_string(),
                                 span: Span::default(),
+                                annotation: None,
                             }
                         ]
                     },
+                    returns: None,
                     body: vec![
                         StmtKind::Return {
                             value: Some(Box::new(
@@ -684,7 +705,7 @@ fn calls_and_unary_operators_span_their_source_text() {
 
 #[test]
 fn function_definitions_span_their_name_and_parameters() {
-    let source = "def f(a, bc);\n    ret a\n";
+    let source = "fn f(a, bc);\n    ret a\n";
     let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
     // the block ends at its last token, not at the dedent after it
     assert_eq!(body[0].span, span(1, 1, 2, 10));
@@ -694,8 +715,106 @@ fn function_definitions_span_their_name_and_parameters() {
     else {
         panic!("expected function definition");
     };
-    assert_eq!(*name_span, span(1, 5, 1, 6));
-    assert_eq!(args.args[1].span, span(1, 10, 1, 12));
+    assert_eq!(*name_span, span(1, 4, 1, 5));
+    assert_eq!(args.args[1].span, span(1, 9, 1, 11));
+}
+
+/// Parses `source`, which must start with a function definition, and returns each parameter's
+/// written type and the written return type, as source text.
+///
+/// For example, `signature_of("fn f(a: int) -> str; ret \"\"\n")` returns
+/// `(vec![Some("int")], Some("str"))`.
+fn signature_of(source: &str) -> (Vec<Option<String>>, Option<String>) {
+    let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
+    let StmtKind::FunctionDef { args, returns, .. } = &body[0].kind else {
+        panic!("expected function definition");
+    };
+    let params = args
+        .args
+        .iter()
+        .map(|a| a.annotation.as_ref().map(TypeExpr::to_string))
+        .collect();
+    (params, returns.as_ref().map(TypeExpr::to_string))
+}
+
+#[test]
+fn parameters_and_the_return_value_have_types() {
+    assert_eq!(
+        signature_of("fn f(a: int, b: float, c: bool, d: str, e: none) -> int; ret a\n"),
+        (
+            ["int", "float", "bool", "str", "none"]
+                .map(|t| Some(t.to_string()))
+                .to_vec(),
+            Some("int".to_string())
+        )
+    );
+}
+
+#[test]
+fn list_types_nest() {
+    assert_eq!(
+        signature_of("fn f(grid: list[list[float]]) -> list[str]; ret []\n"),
+        (
+            vec![Some("list[list[float]]".to_string())],
+            Some("list[str]".to_string())
+        )
+    );
+}
+
+#[test]
+fn types_may_be_left_out_for_the_checker_to_report() {
+    assert_eq!(
+        signature_of("fn f(a, b: int); ret\n"),
+        (vec![None, Some("int".to_string())], None)
+    );
+}
+
+#[test]
+fn types_span_their_text() {
+    let source = "fn f(xs: list[int]) -> none; ret\n";
+    let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
+    let StmtKind::FunctionDef { args, returns, .. } = &body[0].kind else {
+        panic!("expected function definition");
+    };
+    let annotation = args.args[0].annotation.as_ref().unwrap();
+    assert_eq!(annotation.span, span(1, 10, 1, 19));
+    let TypeExprKind::List(elem) = &annotation.kind else {
+        panic!("expected a list type");
+    };
+    assert_eq!(elem.span, span(1, 15, 1, 18));
+    assert_eq!(returns.as_ref().unwrap().span, span(1, 24, 1, 28));
+}
+
+#[test]
+fn an_unknown_type_is_an_error() {
+    assert_eq!(
+        error_of("fn f(a: number); ret\n"),
+        ("expected a type, found 'number'".to_string(), 1, 9)
+    );
+    assert_eq!(
+        error_of("fn f(a: int) -> 3; ret\n"),
+        ("expected a type, found '3'".to_string(), 1, 17)
+    );
+}
+
+#[test]
+fn a_list_type_needs_its_element_type() {
+    assert_eq!(
+        error_of("fn f(xs: list); ret\n"),
+        ("expected '[', found ')'".to_string(), 1, 14)
+    );
+    assert_eq!(
+        error_of("fn f(xs: list[int); ret\n"),
+        ("expected ']', found ')'".to_string(), 1, 18)
+    );
+}
+
+#[test]
+fn a_colon_needs_a_type_after_it() {
+    assert_eq!(
+        error_of("fn f(a: , b: int); ret\n"),
+        ("expected a type, found ','".to_string(), 1, 9)
+    );
 }
 
 /// Parses `source`, which must fail, and returns the error message and where it starts.
@@ -737,11 +856,11 @@ fn missing_expression() {
 #[test]
 fn bad_parameter() {
     assert_eq!(
-        error_of("def f(;\n    ret 1\n"),
+        error_of("fn f(;\n    ret 1\n"),
         (
             "expected a parameter name or ')', found ';'".to_string(),
             1,
-            7
+            6
         )
     );
 }
@@ -800,8 +919,8 @@ fn failed_call_arguments_are_an_error_not_an_empty_call() {
 #[test]
 fn failed_parameters_are_an_error_not_an_empty_list() {
     assert_eq!(
-        error_of("def f(a, );\n    ret a\n"),
-        ("expected a parameter name, found ')'".to_string(), 1, 10)
+        error_of("fn f(a, );\n    ret a\n"),
+        ("expected a parameter name, found ')'".to_string(), 1, 9)
     );
 }
 
@@ -1186,7 +1305,7 @@ fn body_kinds(stmt: &Stmt) -> Vec<&'static str> {
 
 #[test]
 fn recovery_keeps_a_block_with_a_bad_statement() {
-    let (body, errors) = recover("def f();\n    x = \n    ret 1\ng = 2\n");
+    let (body, errors) = recover("fn f();\n    x = \n    ret 1\ng = 2\n");
     assert_eq!(
         errors,
         [(
@@ -1201,7 +1320,7 @@ fn recovery_keeps_a_block_with_a_bad_statement() {
 
 #[test]
 fn recovery_reports_every_bad_statement_in_a_block() {
-    let (body, errors) = recover("def f();\n    x = \n    y = 1\n    z = (\n    ret y\n");
+    let (body, errors) = recover("fn f();\n    x = \n    y = 1\n    z = (\n    ret y\n");
     let lines: Vec<usize> = errors.iter().map(|(_, line, _)| *line).collect();
     assert_eq!(lines, [2, 4]);
     assert_eq!(body_kinds(&body[0]), ["Assign", "Return"]);
@@ -1209,7 +1328,7 @@ fn recovery_reports_every_bad_statement_in_a_block() {
 
 #[test]
 fn recovery_skips_a_bad_header_with_its_block() {
-    let source = "def f(c);\n    if c\n        print(1)\n        print(2)\n    ret 2\n";
+    let source = "fn f(c);\n    if c\n        print(1)\n        print(2)\n    ret 2\n";
     let (body, errors) = recover(source);
     assert_eq!(
         errors,
@@ -1220,7 +1339,7 @@ fn recovery_skips_a_bad_header_with_its_block() {
 
 #[test]
 fn recovery_works_in_nested_blocks() {
-    let source = "def f(c);\n    if c;\n        x = \n        ret 1\n    ret 2\n";
+    let source = "fn f(c);\n    if c;\n        x = \n        ret 1\n    ret 2\n";
     let (body, errors) = recover(source);
     assert_eq!(errors.len(), 1);
     assert_eq!(body_kinds(&body[0]), ["If", "Return"]);
@@ -1228,7 +1347,7 @@ fn recovery_works_in_nested_blocks() {
 
 #[test]
 fn a_block_of_only_bad_statements_is_empty() {
-    let (body, errors) = recover("def f();\n    x = \ny = 1\n");
+    let (body, errors) = recover("fn f();\n    x = \ny = 1\n");
     assert_eq!(errors.len(), 1);
     assert_eq!(body.len(), 2);
     assert_eq!(body_kinds(&body[0]), Vec::<&str>::new());
@@ -1243,7 +1362,7 @@ fn recovery_skips_an_unexpected_indent() {
 
 #[test]
 fn recovery_of_a_valid_program_has_no_errors() {
-    let (body, errors) = recover("def f();\n    ret 1\nprint(f())\n");
+    let (body, errors) = recover("fn f();\n    ret 1\nprint(f())\n");
     assert_eq!(errors, []);
     assert_eq!(body.len(), 2);
 }
@@ -1502,7 +1621,7 @@ fn use_needs_a_name_after_as() {
 
 #[test]
 fn pub_marks_a_function_public() {
-    let body = stmts_of("pub def f(); ret 1\ndef g(); ret 2\n");
+    let body = stmts_of("pub fn f(); ret 1\nfn g(); ret 2\n");
     let StmtKind::FunctionDef { public, .. } = &body[0].kind else {
         panic!("expected function definition");
     };
@@ -1516,14 +1635,14 @@ fn pub_marks_a_function_public() {
 #[test]
 fn pub_spans_from_the_keyword() {
     let Mod::Module { body } =
-        parse_within("pub def f(); ret 1\n".to_string(), Duration::from_secs(5)).unwrap();
-    assert_eq!(body[0].span, span(1, 1, 1, 19));
+        parse_within("pub fn f(); ret 1\n".to_string(), Duration::from_secs(5)).unwrap();
+    assert_eq!(body[0].span, span(1, 1, 1, 18));
 }
 
 #[test]
 fn pub_must_come_before_def() {
     assert_eq!(
         error_of("pub x = 1\n"),
-        ("expected 'def', found 'x'".to_string(), 1, 5)
+        ("expected 'fn', found 'x'".to_string(), 1, 5)
     );
 }

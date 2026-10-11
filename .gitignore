@@ -26,11 +26,11 @@ build/
 # the documentation site built by sphinx-build
 /docs/_build/
 
-# fuzzing output; only the hand-written .st seeds in fuzz/corpus are tracked
+# fuzzing output; only the hand-written .stn seeds in fuzz/corpus are tracked
 /fuzz/artifacts/
 /fuzz/coverage/
 /fuzz/corpus/*/*
-!/fuzz/corpus/*/*.st
+!/fuzz/corpus/*/*.stn
 
 # VS Code extension dependencies and packages
 /editors/vscode/node_modules/

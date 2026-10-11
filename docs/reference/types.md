@@ -1,8 +1,8 @@
 # Types
 
-stone is statically typed, but you never write a type. The checker infers one type for every
-variable, parameter, and return value before the program runs, and reports every place they
-conflict.
+stone is statically typed. You write the type of each function's parameters and return value,
+and the checker infers every other type, for each variable and expression, before the program
+runs, reporting every place they conflict.
 
 ## The types
 
@@ -14,7 +14,26 @@ conflict.
 | `str` | immutable byte strings |
 | `none` | `none`, also what a function without `ret value` returns |
 | `list[T]` | growable lists of `T`, which are values: assigning or passing one copies it |
-| functions | each function has one signature, such as `(int, list[str]) -> bool` |
+| functions | each function has one signature, such as `fn(int, list[str]) -> bool` |
+
+## Writing types
+
+Types appear only in function signatures, after each parameter's name and after `->`:
+
+```stone
+fn scale(xs: list[float], k: float) -> list[float];
+    ret xs * k
+```
+
+`int`, `float`, `bool`, `str`, and `none` are written as their names, and a list as `list[T]`,
+so a grid of floats is `list[list[float]]`. A function without `->` returns `none`, the same as
+writing `-> none`, so returning a value from it is an error that suggests the `->` to add. A
+parameter without a type is an error too, which suggests the type the checker would infer for
+it.
+
+Writing signatures keeps each function's contract in one place: a call with a wrong argument is
+an error at that argument, and a mistake inside the function is reported inside it, against the
+signature, rather than wherever the function happens to be called.
 
 ## Inference
 
@@ -29,15 +48,14 @@ x = "one"   # error: cannot assign str to 'x', which is int
 An empty list `[]` starts with an unknown element type, which is filled in by what is appended
 to it, assigned into it, or what it is passed to.
 
-Functions are monomorphic: each parameter has a single type inferred from the function's body
-and its calls. A function called as `f(1)` cannot also be called as `f("a")`.
+Functions are monomorphic: a function has exactly the types its signature writes, so one that
+takes `xs: list[int]` cannot also be called with a `list[str]`.
 
 Arithmetic works on numbers and, element by element, on lists of them, so an operand whose type
-is not known yet can be either. In `def scale(xs, k); ret xs * k`, the call `scale([1.5], 2.0)`
-makes `xs` a `list[float]` and `k` a `float`, while `scale(3, 2)` would make both `int`. The
-operand still has to be a number or a list of numbers that fits the other operand, so in
-`def twice(n); ret n * 2`, the call `twice("a")` is an error at `"a"`. If nothing ever settles
-it, it is the same type as the other operand.
+is not known yet can be either. For example, after `xs = []`, nothing is known about `xs[0]`,
+and `xs[0] * 2` makes it an `int` or a `list[int]`. The operand still has to be a number or a
+list of numbers that fits the other operand, so a later `xs.append("a")` is an error at `"a"`.
+If nothing ever settles it, it is the same type as the other operand.
 
 ## Rules the checker enforces
 
@@ -66,9 +84,12 @@ These keep the two backends identical and catch common mistakes:
 - **`range` is only a `for` iterable.** It cannot be stored or passed around.
 - **Functions are top level, and only called.** A function cannot be assigned, stored, or
   passed as a value, and a builtin's name cannot be assigned to.
-- **Calls match.** Each call passes as many arguments as the function has parameters.
-- **Returns are consistent.** A function that returns a value on one path must return a value
-  of the same type on every path.
+- **Signatures are written.** Every parameter has a type, and a function that returns a value
+  writes its type after `->`.
+- **Calls match.** Each call passes as many arguments as the function has parameters, each of
+  the parameter's type.
+- **Returns match the signature.** Every `ret` in a function returns the type after its `->`,
+  and a function with a return type returns a value on every path.
 - **Variables are assigned before they are read.** At the top level and inside each function,
   every path to a read must assign the name first. A function reading a global is checked when
   it runs instead, since it may be called before or after the assignment.

@@ -1,6 +1,6 @@
 //! Conversion between `file://` URIs and paths.
 //!
-//! For example, `/tmp/my dir/main.st` and `file:///tmp/my%20dir/main.st` name the same file.
+//! For example, `/tmp/my dir/main.stn` and `file:///tmp/my%20dir/main.stn` name the same file.
 
 use std::path::{Path, PathBuf};
 
@@ -9,8 +9,8 @@ use lsp_types::Uri;
 /// Returns the `file://` URI of an absolute path, percent-encoding anything but unreserved
 /// characters and separators.
 ///
-/// For example, `/tmp/my dir/builtins.st` becomes `file:///tmp/my%20dir/builtins.st`, and
-/// `C:\Temp\builtins.st` becomes `file:///C:/Temp/builtins.st`.
+/// For example, `/tmp/my dir/builtins.stn` becomes `file:///tmp/my%20dir/builtins.stn`, and
+/// `C:\Temp\builtins.stn` becomes `file:///C:/Temp/builtins.stn`.
 pub fn file_uri(path: &Path) -> Option<Uri> {
     let path = path.to_str()?.replace('\\', "/");
     let path = if path.starts_with('/') {
@@ -34,8 +34,8 @@ pub fn file_uri(path: &Path) -> Option<Uri> {
 /// Returns the path a `file://` URI names, or `None` for any other kind of URI, such as an
 /// editor's unsaved `untitled:` buffer.
 ///
-/// For example, `file:///tmp/my%20dir/main.st` is `/tmp/my dir/main.st`, and
-/// `file:///C:/Temp/main.st` is `C:/Temp/main.st`.
+/// For example, `file:///tmp/my%20dir/main.stn` is `/tmp/my dir/main.stn`, and
+/// `file:///C:/Temp/main.stn` is `C:/Temp/main.stn`.
 pub fn file_path(uri: &Uri) -> Option<PathBuf> {
     let rest = uri.as_str().strip_prefix("file://")?;
     // an authority such as `localhost` may come before the path
@@ -73,33 +73,33 @@ mod tests {
 
     #[test]
     fn file_uris_encode_their_paths() {
-        let uri = file_uri(Path::new("/tmp/my dir/builtins.st")).unwrap();
-        assert_eq!(uri.as_str(), "file:///tmp/my%20dir/builtins.st");
+        let uri = file_uri(Path::new("/tmp/my dir/builtins.stn")).unwrap();
+        assert_eq!(uri.as_str(), "file:///tmp/my%20dir/builtins.stn");
     }
 
     #[test]
     fn file_paths_decode_their_uris() {
         let path = |uri: &str| file_path(&uri.parse().unwrap());
         assert_eq!(
-            path("file:///tmp/my%20dir/main.st"),
-            Some(PathBuf::from("/tmp/my dir/main.st"))
+            path("file:///tmp/my%20dir/main.stn"),
+            Some(PathBuf::from("/tmp/my dir/main.stn"))
         );
         assert_eq!(
-            path("file://localhost/tmp/main.st"),
-            Some(PathBuf::from("/tmp/main.st"))
+            path("file://localhost/tmp/main.stn"),
+            Some(PathBuf::from("/tmp/main.stn"))
         );
         assert_eq!(
-            path("file:///C:/Temp/main.st"),
-            Some(PathBuf::from("C:/Temp/main.st"))
+            path("file:///C:/Temp/main.stn"),
+            Some(PathBuf::from("C:/Temp/main.stn"))
         );
         assert_eq!(path("untitled:Untitled-1"), None);
         // not UTF-8
-        assert_eq!(path("file:///%FF.st"), None);
+        assert_eq!(path("file:///%FF.stn"), None);
     }
 
     #[test]
     fn paths_survive_a_round_trip() {
-        let original = Path::new("/home/me/my project/é.st");
+        let original = Path::new("/home/me/my project/é.stn");
         assert_eq!(
             file_path(&file_uri(original).unwrap()).as_deref(),
             Some(original)

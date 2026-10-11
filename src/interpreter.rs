@@ -54,7 +54,7 @@ impl LastUses {
 
 /// A user-defined function.
 ///
-/// For example, `def add(a, b); ret a + b` has the parameters `["a", "b"]`.
+/// For example, `fn add(a: int, b: int) -> int; ret a + b` has the parameters `["a", "b"]`.
 struct Function {
     params: Vec<String>,
     body: Vec<Stmt>,
@@ -423,7 +423,8 @@ pub struct Limits {
     /// Deepest nesting of statement and expression evaluation allowed, counting across calls.
     ///
     /// This bounds the interpreter's own recursion, and so its stack use. A recursive stone
-    /// function uses several levels per call, so `def f(n); ret f(n - 1)` uses about three.
+    /// function uses several levels per call, so `fn f(n: int) -> int; ret f(n - 1)` uses about
+    /// three.
     pub max_depth: usize,
     /// Most function calls active at once, which is part of the language, so compiled code
     /// enforces the same limit.
@@ -1317,7 +1318,7 @@ mod tests {
     }
 
     /// A function that appends to its parameter and returns it.
-    const ADD: &str = "def add(xs, x);\n    xs.append(x)\n    ret xs\n";
+    const ADD: &str = "fn add(xs: list[int], x: int) -> list[int];\n    xs.append(x)\n    ret xs\n";
 
     #[test]
     fn a_list_assigned_the_result_of_a_call_is_changed_in_place() {
@@ -1325,13 +1326,13 @@ mod tests {
             format!("{ADD}xs = []\nfor i in range(100);\n    xs = add(xs, i)\nprint(xs)\n");
         assert_eq!(copies(&source), 0);
         let source = format!(
-            "{ADD}def fill(xs, n);\n    if n == 0;\n        ret xs\n    xs.append(n)\n    \
+            "{ADD}fn fill(xs, n);\n    if n == 0;\n        ret xs\n    xs.append(n)\n    \
              ret fill(xs, n - 1)\nprint(fill([], 50))\n"
         );
         assert_eq!(copies(&source), 0);
         // a call among the arguments runs statements of its own first
         let source = format!(
-            "{ADD}def one();\n    n = 1\n    ret n\nxs = []\nfor i in range(10);\n    \
+            "{ADD}fn one();\n    n = 1\n    ret n\nxs = []\nfor i in range(10);\n    \
              xs = add(xs, one())\nprint(xs)\n"
         );
         assert_eq!(copies(&source), 0);
@@ -1348,7 +1349,7 @@ mod tests {
             copies("rows = []\nrow = [1]\nrows.append(row)\nrows[0].append(2)\nprint(rows)\n"),
             0
         );
-        let source = "def f(n);\n    xs = [n]\n    ys = xs\n    ys.append(1)\n    ret ys\n\
+        let source = "fn f(n: int) -> list[int];\n    xs = [n]\n    ys = xs\n    ys.append(1)\n    ret ys\n\
                       print(f(0))\n";
         assert_eq!(copies(source), 0);
     }
@@ -1364,7 +1365,7 @@ mod tests {
             1
         );
         // the function reads the global it is given, so it must not see the change
-        let source = "def peek(ys);\n    ys.append(xs[0])\n    ret ys\nxs = [1]\nxs = peek(xs)\n\
+        let source = "fn peek(ys: list[int]) -> list[int];\n    ys.append(xs[0])\n    ret ys\nxs = [1]\nxs = peek(xs)\n\
                       print(xs)\n";
         assert_eq!(copies(source), 1);
     }

@@ -1,6 +1,6 @@
 //! Lexer that turns stone source code into tokens.
 //!
-//! Indentation is tracked Python-style, so `def f();` followed by an indented line produces
+//! Indentation is tracked Python-style, so `fn f();` followed by an indented line produces
 //! `Newline`, `Indent`, and later `Dedent` tokens around the function body.
 
 use crate::diagnostic::Diagnostic;
@@ -406,7 +406,16 @@ impl Lexer {
                     TokenType::Operator("*".to_string())
                 }
             }
-            Some('+') | Some('-') | Some('/') | Some('%') => {
+            Some('-') => {
+                self.advance();
+                if self.peek() == Some('>') {
+                    self.advance();
+                    TokenType::Arrow
+                } else {
+                    TokenType::Operator("-".to_string())
+                }
+            }
+            Some('+') | Some('/') | Some('%') => {
                 let op = self.advance().unwrap().to_string();
                 TokenType::Operator(op)
             }
@@ -566,7 +575,7 @@ ret y
 
     #[test]
     fn simple_functions() {
-        let source = r#"def testing();
+        let source = r#"fn testing();
     ret 52
 testing()
 "#;
@@ -576,16 +585,16 @@ testing()
         assert_eq!(tokens.len(), 16);
         assert_eq!(
             start_of(&tokens[0]),
-            tok(TokenType::Keyword("def".to_string()), 1, 1)
+            tok(TokenType::Keyword("fn".to_string()), 1, 1)
         );
         assert_eq!(
             start_of(&tokens[1]),
-            tok(TokenType::Name("testing".to_string()), 1, 5)
+            tok(TokenType::Name("testing".to_string()), 1, 4)
         );
-        assert_eq!(start_of(&tokens[2]), tok(TokenType::LParen, 1, 12));
-        assert_eq!(start_of(&tokens[3]), tok(TokenType::RParen, 1, 13));
-        assert_eq!(start_of(&tokens[4]), tok(TokenType::Semi, 1, 14));
-        assert_eq!(start_of(&tokens[5]), tok(TokenType::Newline, 1, 15));
+        assert_eq!(start_of(&tokens[2]), tok(TokenType::LParen, 1, 11));
+        assert_eq!(start_of(&tokens[3]), tok(TokenType::RParen, 1, 12));
+        assert_eq!(start_of(&tokens[4]), tok(TokenType::Semi, 1, 13));
+        assert_eq!(start_of(&tokens[5]), tok(TokenType::Newline, 1, 14));
         assert_eq!(start_of(&tokens[6]), tok(TokenType::Indent, 2, 1));
         assert_eq!(
             start_of(&tokens[7]),
@@ -607,13 +616,13 @@ testing()
     /// Checks the tokens produced for a function with several parameters:
     ///
     /// ```text
-    /// def testing(a, b, c);
+    /// fn testing(a, b, c);
     ///     ret b
     /// testing(1, 2, 3)
     /// ```
     #[test]
     fn simple_function_multiple_args() {
-        let source = r#"def testing(a, b, c);
+        let source = r#"fn testing(a, b, c);
     ret b
 testing(1, 2, 3)"#;
 
@@ -622,17 +631,17 @@ testing(1, 2, 3)"#;
         assert_eq!(
             tokens.iter().map(start_of).collect::<Vec<_>>(),
             vec![
-                tok(TokenType::Keyword("def".to_string()), 1, 1),
-                tok(TokenType::Name("testing".to_string()), 1, 5),
-                tok(TokenType::LParen, 1, 12),
-                tok(TokenType::Name("a".to_string()), 1, 13),
-                tok(TokenType::Comma, 1, 14),
-                tok(TokenType::Name("b".to_string()), 1, 16),
-                tok(TokenType::Comma, 1, 17),
-                tok(TokenType::Name("c".to_string()), 1, 19),
-                tok(TokenType::RParen, 1, 20),
-                tok(TokenType::Semi, 1, 21),
-                tok(TokenType::Newline, 1, 22),
+                tok(TokenType::Keyword("fn".to_string()), 1, 1),
+                tok(TokenType::Name("testing".to_string()), 1, 4),
+                tok(TokenType::LParen, 1, 11),
+                tok(TokenType::Name("a".to_string()), 1, 12),
+                tok(TokenType::Comma, 1, 13),
+                tok(TokenType::Name("b".to_string()), 1, 15),
+                tok(TokenType::Comma, 1, 16),
+                tok(TokenType::Name("c".to_string()), 1, 18),
+                tok(TokenType::RParen, 1, 19),
+                tok(TokenType::Semi, 1, 20),
+                tok(TokenType::Newline, 1, 21),
                 tok(TokenType::Indent, 2, 1),
                 tok(TokenType::Keyword("ret".to_string()), 2, 5),
                 tok(TokenType::Name("b".to_string()), 2, 9),
@@ -843,6 +852,22 @@ testing(1, 2, 3)"#;
                 TokenType::RBracket,
                 TokenType::Newline,
                 TokenType::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn an_arrow_is_one_token() {
+        assert_eq!(
+            types_of("fn f(a: int) -> int;\n")[7..10],
+            [TokenType::Arrow, name("int"), TokenType::Semi]
+        );
+        // a minus before a separate `>` is still subtraction
+        assert_eq!(
+            types_of("a - > b\n")[1..3],
+            [
+                TokenType::Operator("-".to_string()),
+                TokenType::Operator(">".to_string())
             ]
         );
     }

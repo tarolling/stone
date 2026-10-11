@@ -1,0 +1,2 @@
+pub fn of(a: int, b: int) -> int;
+    ret a / b

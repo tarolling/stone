@@ -7,7 +7,7 @@ cargo test simple_functions # tests whose name contains the filter
 
 ## Golden programs
 
-`tests/programs.rs` runs every `.st` file in `examples/`, `tests/programs/`, and
+`tests/programs.rs` runs every `.stn` file in `examples/`, `tests/programs/`, and
 `docs/examples/` through both `stone run` and `stone build`, and compares stdout with the
 sibling `.out` file. This is the main guarantee that the interpreter and the compiler agree.
 
@@ -25,11 +25,11 @@ bytes. It needs `as` and `ld` for the host plus `aarch64-linux-gnu-as` and `-ld`
 `x86_64-linux-gnu-` pair) for the other processor, and skips a processor whose tools are
 missing.
 
-To cover new behavior, add `name.st` and the exact output it should print as `name.out`:
+To cover new behavior, add `name.stn` and the exact output it should print as `name.out`:
 
 ```text
 tests/programs/
-  strings.st
+  strings.stn
   strings.out
 ```
 
@@ -37,17 +37,17 @@ A program that should fail at runtime also gets a `name.err` file holding text i
 contain, such as `division by zero`. It must then exit with an error under both backends, after
 printing its `.out`.
 
-A program of several files is a directory instead, run from its `main.st`, with the `.out` (and
-any `.err`, `.in`, or `.args`) next to `main.st`:
+A program of several files is a directory instead, run from its `main.stn`, with the `.out` (and
+any `.err`, `.in`, or `.args`) next to `main.stn`:
 
 ```text
 tests/programs/
   module_cycle/
-    main.st
+    main.stn
     main.out
     parity/
-      even.st
-      odd.st
+      even.stn
+      odd.stn
 ```
 
 Both backends must agree on everything the checker accepts, so `SKIPS` in `tests/programs.rs`

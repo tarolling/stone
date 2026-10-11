@@ -133,7 +133,7 @@ impl Parser {
 
     /// Consumes a name token and returns it with its span, or notes that `what` was expected here.
     ///
-    /// For example, `self.expect_name("a parameter name", false)` reads `a` in `def f(a);`.
+    /// For example, `self.expect_name("a parameter name", false)` reads `a` in `fn f(a: int);`.
     fn expect_name(&mut self, what: &str, quiet: bool) -> Option<(String, Span)> {
         let tok = self.peek().clone();
         if let TokenType::Name(name) = tok.r#type {
@@ -308,7 +308,7 @@ impl Parser {
                 }
                 TokenType::Newline if depth == 0 => {
                     self.pos += 1;
-                    // a block may follow, as after `def f();`
+                    // a block may follow, as after `fn f();`
                     if self.peek().r#type != TokenType::Indent {
                         return;
                     }
@@ -352,6 +352,7 @@ fn describe_found(r#type: &TokenType) -> String {
         TokenType::Comma => "','".to_string(),
         TokenType::Colon => "':'".to_string(),
         TokenType::Dot => "'.'".to_string(),
+        TokenType::Arrow => "'->'".to_string(),
     }
 }
 
@@ -372,5 +373,6 @@ fn is_quiet(r#type: &TokenType) -> bool {
             | TokenType::Dot
             | TokenType::Comma
             | TokenType::Colon
+            | TokenType::Arrow
     )
 }

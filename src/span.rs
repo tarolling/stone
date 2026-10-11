@@ -20,7 +20,8 @@ impl Pos {
 /// Identifies one source file of a program, as an index into its list of files.
 ///
 /// The entry file is always `FileId(0)`, so a program read from a single string never needs
-/// another. For example, in a program whose `main.st` imports `util.st`, `util.st` is `FileId(1)`.
+/// another. For example, in a program whose `main.stn` imports `util.stn`, `util.stn` is
+/// `FileId(1)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct FileId(pub u32);
 

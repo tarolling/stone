@@ -146,7 +146,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     BuiltinDoc {
         name: "args",
         signature: "args() -> list[str]",
-        description: "Returns the arguments given after the program, so `stone run f.st a b` \
+        description: "Returns the arguments given after the program, so `stone run f.stn a b` \
                       and a built `./f a b` both see `[\"a\", \"b\"]`.",
     },
 ];

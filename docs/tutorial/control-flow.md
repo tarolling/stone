@@ -1,6 +1,6 @@
 # Control flow
 
-```{literalinclude} ../examples/control_flow.st
+```{literalinclude} ../examples/control_flow.stn
 :language: stone
 ```
 

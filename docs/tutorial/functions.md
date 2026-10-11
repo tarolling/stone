@@ -1,6 +1,6 @@
 # Functions
 
-```{literalinclude} ../examples/functions.st
+```{literalinclude} ../examples/functions.stn
 :language: stone
 ```
 
@@ -12,15 +12,17 @@ prints
 
 ## Defining and calling
 
-`def name(params);` opens a function, and `ret value` returns from it. `ret` on its own, or
-reaching the end of the body, returns `none`. Functions must be defined at the top level, not
-inside other functions or blocks, and they can be called from anywhere in the file, even above
-their definition.
+`fn name(param: type, ...) -> type;` opens a function, and `ret value` returns from it. Each
+parameter is written with its type, and the type after `->` is the type of the value the
+function returns. A function without `->` returns `none`: `ret` on its own, or reaching the end
+of the body, returns `none`. Functions must be defined at the top level, not inside other
+functions or blocks, and they can be called from anywhere in the file, even above their
+definition.
 
-Like variables, parameters have no type annotations. The checker infers one type per parameter
-and per return value from how the function is used, so a function called with an `int` in one
-place cannot be called with a `str` in another. A function that returns a value on some paths
-must return one on every path.
+The signature is the only place you write types. The checker infers the type of every variable
+inside the function, as it does at the top level, and checks each call against the signature,
+so `area("3", 4)` is an error at `"3"`. A function with a return type must return a value of
+that type on every path.
 
 Calls can nest 1,000 deep. The 1,001st nested call stops the program with
 `recursion is too deep (more than 1000 nested calls)`.

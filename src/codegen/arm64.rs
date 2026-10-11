@@ -399,13 +399,13 @@ mod tests {
         rest[..end].to_string()
     }
 
-    const LCG: &str = "def lcg(rounds);\n    x = 1\n    total = 0\n    i = 0\n    \
+    const LCG: &str = "fn lcg(rounds: int) -> int;\n    x = 1\n    total = 0\n    i = 0\n    \
                        while i < rounds;\n        x = x * 1103515245 + 12345\n        \
                        x = x - (x / 2147483648) * 2147483648\n        \
                        total = total + x / 65536\n        i = i + 1\n    ret total\n\
                        print(lcg(20))\n";
 
-    const FIB: &str = "def fib(n);\n    if n < 2;\n        ret n\n    \
+    const FIB: &str = "fn fib(n: int) -> int;\n    if n < 2;\n        ret n\n    \
                        ret fib(n - 1) + fib(n - 2)\nprint(fib(10))\n";
 
     #[test]
@@ -426,7 +426,7 @@ mod tests {
 
     #[test]
     fn arguments_past_the_eighth_go_on_the_stack() {
-        let source = "def f(a, b, c, d, e, g, h, i, j, k);\n    ret k - j\n\
+        let source = "fn f(a: int, b: int, c: int, d: int, e: int, g: int, h: int, i: int, j: int, k: int) -> int;\n    ret k - j\n\
                       print(f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))\n";
         let assembly = assemble(source).unwrap();
         let f = function_text(&assembly, "f");
@@ -532,7 +532,7 @@ mod tests {
 
     #[test]
     fn the_stack_pointer_only_moves_by_multiples_of_sixteen() {
-        let source = "def f(a, b, c, d, e, g, h, i, j);\n    s = \"x\" + str(j)\n    \
+        let source = "fn f(a: int, b: int, c: int, d: int, e: int, g: int, h: int, i: int, j: int) -> int;\n    s = \"x\" + str(j)\n    \
                       print(s, a + b + c + d + e + g + h + i)\n    ret 0\n\
                       f(1, 2, 3, 4, 5, 6, 7, 8, 9)\nprint(input(\"?\"), args(), 1.5 % 1.0)\n";
         let assembly = assemble(source).unwrap();
@@ -556,7 +556,7 @@ mod tests {
     /// Links and assembles `source` without invoking gcc, so that it can `use os`.
     fn assemble_linked(source: &str) -> String {
         let (_, module) = crate::driver::load(
-            Path::new("main.st"),
+            Path::new("main.stn"),
             source,
             &crate::project::MapSources::default(),
         );

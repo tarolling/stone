@@ -13,14 +13,14 @@ section says which is which.
 ## The compiler does the work
 
 If the compiler can figure something out, stone does not make the programmer write it.
-Annotations, keywords, and options that exist only to help the compiler, such as types,
-lifetimes, `mut`, `&`, `<T>`, `lazy`, or `inline`, are left out of the language. The language
-is defined so that the compiler can always infer them instead.
+Annotations, keywords, and options that exist only to help the compiler, such as lifetimes,
+`mut`, `&`, `lazy`, or `inline`, are left out of the language. The language is defined so that
+the compiler can always infer them instead.
 
 Python 3.15's `lazy import numpy` is a good example. Python needs the keyword because
 importing a module runs its top-level code, which can be slow and can have side effects, so
 the interpreter cannot delay it without being told to. stone avoids the problem by design: a
-library module holds only `use` and `def`, so importing it runs nothing, and the compiler
+library module holds only `use` and `fn`, so importing it runs nothing, and the compiler
 links in only what the program uses. Every import is effectively lazy, and there is no keyword
 for it.
 
@@ -28,10 +28,19 @@ The pattern applies to the whole language. When a feature would need a keyword t
 safe, the better fix is to change the semantics so that the compiler can always choose the
 fast, safe option on its own and the programmer never sees the difference.
 
+The one exception to this rule is a function's signature: the type of each parameter and of the
+value it returns, as in `fn mean(xs: list[float]) -> float;`. Signatures are written for the
+reader and for error messages, not for the compiler. A signature is the function's contract,
+readable without its body, and it lets the checker report a mistake where it is made: a wrong
+argument at the call, and a wrong value inside the function, rather than wherever two
+inferences happen to disagree. Everything else is still inferred, as in Rust, so no variable is
+ever annotated.
+
 What stone already infers:
 
-- **Types.** The checker infers the type of every variable, parameter, and expression, so
-  there are no annotations.
+- **Types.** The checker infers the type of every variable and expression from the values
+  assigned to it and the signatures of the functions it calls, so the only types written are
+  the parameter and return types of functions.
 - **Memory management.** Compiled programs count references, with no garbage collector. The
   compiler places every retain and release, decides which parameters are only borrowed, and
   skips counting where it can prove a count would not matter.
@@ -40,10 +49,11 @@ What stone already infers:
 
 What it should infer next:
 
-- **Generic functions.** A function is currently monomorphic: `def first(xs); ret xs[0]`
-  cannot be called on both a `list[int]` and a `list[str]`. The compiler should infer generic
-  functions and specialize them for each use, the way Rust compiles generics, without the
-  programmer writing any type parameters.
+- **Specialized generic functions.** A function is currently monomorphic:
+  `fn first(xs: list[int]) -> int; ret xs[0]` cannot be called on a `list[str]`. Generic
+  functions will write their type parameters in the signature like every other type, and the
+  compiler should specialize them for each use, the way Rust compiles generics. Their syntax is
+  not designed yet.
 - **Where values live and when they are copied.** Values that never escape a function should
   live on its stack, and an update to a value nothing else refers to should happen in place.
   See [value semantics](#value-semantics).
@@ -53,11 +63,11 @@ What it should infer next:
 ## Simple like Python
 
 The code a programmer reads and writes should look like Python's and need as few concepts.
-stone keeps Python's structure (indentation, `def`, `for x in xs`, `if`, `while`) and its
+stone keeps Python's structure (indentation, `for x in xs`, `if`, `while`) and its
 habit of having one obvious way to do something. It does not take on Python's dynamic
 features, such as `eval`, monkeypatching, or values whose type changes at run time, because a
-compiler cannot make those fast or safe. stone gets static types through inference instead of
-asking for annotations.
+compiler cannot make those fast or safe. stone gets static types by requiring the annotations
+Python makes optional on a function's parameters and return value, and inferring the rest.
 
 A feature belongs in stone only if a newcomer can understand it without knowing what the
 compiler does with it. If a feature makes sense only to someone who knows how it is compiled,

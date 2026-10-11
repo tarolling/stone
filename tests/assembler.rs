@@ -1,6 +1,6 @@
 //! Checks the built-in assembler and linker against GNU as and ld, byte for byte.
 //!
-//! For every golden program (the `.st` files `tests/programs.rs` runs) and both architectures,
+//! For every golden program (the `.stn` files `tests/programs.rs` runs) and both architectures,
 //! this assembles the backend's text with [`asm::assemble`] and links it with [`elf::link`],
 //! then assembles the same text with GNU as and links it with GNU ld at the same section
 //! addresses, and requires `.text`, `.rodata`, and `.data` to hold the same bytes and `.bss`
@@ -25,7 +25,7 @@ const PROGRAM_DIRS: [&str; 4] = [
     "bench/programs",
 ];
 
-/// Returns every `.st` file directly in [`PROGRAM_DIRS`] and the `main.st` of each of their
+/// Returns every `.stn` file directly in [`PROGRAM_DIRS`] and the `main.stn` of each of their
 /// subdirectories.
 fn programs() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -34,8 +34,8 @@ fn programs() -> Vec<PathBuf> {
         for entry in std::fs::read_dir(root.join(dir)).unwrap() {
             let path = entry.unwrap().path();
             if path.is_dir() {
-                programs.push(path.join("main.st"));
-            } else if path.extension().is_some_and(|ext| ext == "st") {
+                programs.push(path.join("main.stn"));
+            } else if path.extension().is_some_and(|ext| ext == "stn") {
                 programs.push(path);
             }
         }

@@ -42,7 +42,7 @@ enum Command {
     },
     /// Compiles files to native executables in the `build` directory next to each.
     Build {
-        /// The files to build, each into an executable named after it (or, for a `main.st`,
+        /// The files to build, each into an executable named after it (or, for a `main.stn`,
         /// after its directory).
         #[arg(required = true)]
         files: Vec<String>,
@@ -211,7 +211,7 @@ fn main() -> ExitCode {
 /// none) into its build directory, or into `output` if given. A file that fails prints its errors
 /// and the rest still build, but the exit code is then a failure.
 ///
-/// For example, building `a.st` and `b.st` on an x86-64 Linux machine writes `build/a` and
+/// For example, building `a.stn` and `b.stn` on an x86-64 Linux machine writes `build/a` and
 /// `build/b`, and adding `--target aarch64-macos` also writes `build/aarch64-macos/a` and
 /// `build/aarch64-macos/b`.
 fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCode {
@@ -257,7 +257,7 @@ fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCod
 /// Runs `stone clean`, removing the build directory of the program in `path`, an entry file or a
 /// directory, or in the current directory if there is none.
 ///
-/// For example, `stone clean examples/basics.st` and `stone clean examples` both remove
+/// For example, `stone clean examples/basics.stn` and `stone clean examples` both remove
 /// `examples/build`.
 fn clean(path: Option<&Path>) -> ExitCode {
     let dir = match path {

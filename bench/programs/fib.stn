@@ -1,0 +1,7 @@
+// recursive calls and returns
+fn fib(n: int) -> int;
+    if n < 2;
+        ret n
+    ret fib(n - 1) + fib(n - 2)
+
+print(fib(35))

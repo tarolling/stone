@@ -1,6 +1,6 @@
 # Lists
 
-```{literalinclude} ../examples/lists.st
+```{literalinclude} ../examples/lists.stn
 :language: stone
 ```
 
@@ -32,7 +32,7 @@ An index past either end stops the program with `list index out of range`.
 
 ## Slices, more methods, and arithmetic
 
-```{literalinclude} ../examples/list_math.st
+```{literalinclude} ../examples/list_math.stn
 :language: stone
 ```
 
@@ -71,7 +71,7 @@ A function that changes a list it was given changes its own copy, so it returns 
 the caller assigns the result:
 
 ```stone
-def with_total(xs);
+fn with_total(xs: list[int]) -> list[int];
     total = 0
     for x in xs;
         total = total + x
@@ -98,7 +98,7 @@ which appends to it in place. The same goes for any list at its last use, such a
 
 This program finds primes with the sieve of Eratosthenes, using a `list[bool]` of candidates:
 
-```{literalinclude} ../examples/sieve.st
+```{literalinclude} ../examples/sieve.stn
 :language: stone
 ```
 

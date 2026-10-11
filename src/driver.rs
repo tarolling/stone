@@ -45,7 +45,7 @@ fn checked(source: &str) -> Result<Mod, Diagnostics> {
 /// reading the modules it uses from `sources`. Returns the program's files, for rendering
 /// diagnostics, and its linked module with any warnings if no errors were found.
 ///
-/// For example, loading `main.st` holding `use util` without a `util.st` fails with
+/// For example, loading `main.stn` holding `use util` without a `util.stn` fails with
 /// `no module named 'util'`.
 pub fn load(
     entry: &Path,
@@ -111,8 +111,8 @@ pub fn check(source: &str) -> Vec<Diagnostic> {
 /// Checks the program whose entry file is at `entry` and holds `source` without running it,
 /// returning its files and every problem found in any of them.
 ///
-/// For example, checking a `main.st` that uses a `util.st` with a syntax error returns that error,
-/// whose span is in `util.st`.
+/// For example, checking a `main.stn` that uses a `util.stn` with a syntax error returns that error,
+/// whose span is in `util.stn`.
 pub fn check_program(
     entry: &Path,
     source: &str,
@@ -267,23 +267,23 @@ pub const MARKER: &str = ".stone";
 /// Returns the build directory of the program whose entry file is `entry`: `build` next to it,
 /// in the same directory that is the root of the program's modules.
 ///
-/// For example, `build_dir(Path::new("examples/basics.st"))` is `examples/build`, and
-/// `build_dir(Path::new("main.st"))` is `build`.
+/// For example, `build_dir(Path::new("examples/basics.stn"))` is `examples/build`, and
+/// `build_dir(Path::new("main.stn"))` is `build`.
 pub fn build_dir(entry: &Path) -> PathBuf {
     entry.parent().unwrap_or(Path::new("")).join(BUILD_DIR)
 }
 
 /// Returns the name of the executable built from the entry file `entry`: the file's stem, or,
-/// for a `main.st`, the name of the directory it is in, as a Cargo package is named.
+/// for a `main.stn`, the name of the directory it is in, as a Cargo package is named.
 ///
-/// For example, `examples/basics.st` is named `basics`, `tests/programs/modules/main.st` is
-/// named `modules`, and `/main.st`, whose directory has no name, is named `main`.
+/// For example, `examples/basics.stn` is named `basics`, `tests/programs/modules/main.stn` is
+/// named `modules`, and `/main.stn`, whose directory has no name, is named `main`.
 pub fn program_name(entry: &Path) -> String {
     let stem = entry.file_stem().unwrap_or_default().to_string_lossy();
     if entry.file_name().and_then(|name| name.to_str()) != Some(DEFAULT_ENTRY) {
         return stem.into_owned();
     }
-    // `main.st` alone, or `sub/../main.st`, names a directory only once resolved
+    // `main.stn` alone, or `sub/../main.stn`, names a directory only once resolved
     let parent = match entry.parent() {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
@@ -302,7 +302,7 @@ pub fn program_name(entry: &Path) -> String {
 /// named after the target inside it for any other target, so builds for different targets
 /// never overwrite each other.
 ///
-/// For example, on an x86-64 Linux machine, `examples/basics.st` builds to
+/// For example, on an x86-64 Linux machine, `examples/basics.stn` builds to
 /// `examples/build/basics`, and for [`Target::ARM64_MACOS`] to
 /// `examples/build/aarch64-macos/basics`.
 pub fn output_path(entry: &Path, target: Target) -> PathBuf {
@@ -334,7 +334,7 @@ pub fn prepare_build_dir(build: &Path) -> std::io::Result<()> {
 /// Deletes the build directory in `dir`, returning whether there was one. A `build` directory
 /// without the [`MARKER`] is an error and stays, since stone did not make it.
 ///
-/// For example, after `stone build examples/basics.st`, `clean(Path::new("examples"))` deletes
+/// For example, after `stone build examples/basics.stn`, `clean(Path::new("examples"))` deletes
 /// `examples/build` and returns `Ok(true)`, and a second call returns `Ok(false)`.
 pub fn clean(dir: &Path) -> std::io::Result<bool> {
     let build = dir.join(BUILD_DIR);
@@ -426,12 +426,12 @@ ret y
 
     #[test]
     fn unbounded_recursion_hits_the_depth_limit() {
-        assert!(run_limited("def f(n);\n    ret f(n)\nf(1)\n").is_err());
+        assert!(run_limited("fn f(n: int) -> int;\n    ret f(n)\nf(1)\n").is_err());
     }
 
     #[test]
     fn deep_expressions_inside_recursion_hit_the_depth_limit() {
-        let source = format!("def f(n);\n    ret {}f(n)\nf(1)\n", "-".repeat(40));
+        let source = format!("fn f(n);\n    ret {}f(n)\nf(1)\n", "-".repeat(40));
         assert!(run_limited(&source).is_err());
     }
 
@@ -456,7 +456,7 @@ ret y
 
     #[test]
     fn ret_inside_if_returns_from_the_function() {
-        let source = "def f(x);\n    if x;\n        ret 1\n    ret 0\nprint(f(5))\n";
+        let source = "fn f(x: int) -> int;\n    if x;\n        ret 1\n    ret 0\nprint(f(5))\n";
         assert_eq!(run_limited(source), Ok("1\n".to_string()));
     }
 
@@ -476,11 +476,11 @@ ret y
         let source = "x = 1\nif x\n    y = 1\n";
         let rendered: Vec<String> = check(source)
             .iter()
-            .map(|d| d.render("main.st", source))
+            .map(|d| d.render("main.stn", source))
             .collect();
         assert_eq!(
             rendered,
-            ["main.st:2:5: error: expected ';', found end of line\n  |\n2 | if x\n  |     ^\n"]
+            ["main.stn:2:5: error: expected ';', found end of line\n  |\n2 | if x\n  |     ^\n"]
         );
     }
 
@@ -489,12 +489,12 @@ ret y
         let source = "x = 99999999999999999999\n";
         let rendered: Vec<String> = check(source)
             .iter()
-            .map(|d| d.render("big.st", source))
+            .map(|d| d.render("big.stn", source))
             .collect();
         assert_eq!(
             rendered,
             [concat!(
-                "big.st:1:5: error: integer literal 99999999999999999999 is too large\n",
+                "big.stn:1:5: error: integer literal 99999999999999999999 is too large\n",
                 "  |\n",
                 "1 | x = 99999999999999999999\n",
                 "  |     ^^^^^^^^^^^^^^^^^^^^\n",
@@ -528,7 +528,7 @@ ret y
     #[test]
     fn analyze_hides_type_errors_while_there_are_syntax_errors() {
         // `f` failed to parse, so calling it would otherwise be an undefined function
-        let analysis = analyze("def f(;\n    ret 1\nprint(f())\n");
+        let analysis = analyze("fn f(;\n    ret 1\nprint(f())\n");
         assert_eq!(analysis.diagnostics.len(), 1);
     }
 
@@ -546,7 +546,7 @@ ret y
 
     #[test]
     fn parameters_do_not_overwrite_caller_variables() {
-        let source = "def f(a);\n    ret a\na = 7\nprint(f(1))\nprint(a)\n";
+        let source = "fn f(a: int) -> int;\n    ret a\na = 7\nprint(f(1))\nprint(a)\n";
         assert_eq!(run_limited(source), Ok("1\n7\n".to_string()));
     }
 
@@ -589,8 +589,7 @@ ret y
 
     #[test]
     fn exit_with_status_zero_ends_the_program_successfully() {
-        let source =
-            "use os\n\ndef stop(xs);\n    os.exit(0)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
+        let source = "use os\n\nfn stop(xs: list[str]);\n    os.exit(0)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
         assert_eq!(run_io(source, "", &[]), Ok("1\n".to_string()));
         // only the low 8 bits are the status
         let source = "use os\nprint(1)\nos.exit(256)\nprint(2)\n";
@@ -678,32 +677,32 @@ ret y
     #[test]
     fn the_build_directory_sits_next_to_the_entry_file() {
         assert_eq!(
-            build_dir(Path::new("examples/basics.st")),
+            build_dir(Path::new("examples/basics.stn")),
             Path::new("examples/build")
         );
-        assert_eq!(build_dir(Path::new("main.st")), Path::new("build"));
-        assert_eq!(build_dir(Path::new("/abs/p.st")), Path::new("/abs/build"));
+        assert_eq!(build_dir(Path::new("main.stn")), Path::new("build"));
+        assert_eq!(build_dir(Path::new("/abs/p.stn")), Path::new("/abs/build"));
     }
 
     #[test]
     fn programs_are_named_after_their_entry_file() {
-        assert_eq!(program_name(Path::new("examples/basics.st")), "basics");
+        assert_eq!(program_name(Path::new("examples/basics.stn")), "basics");
         let dir = scratch("modules");
-        std::fs::write(dir.join("main.st"), "").unwrap();
-        assert_eq!(program_name(&dir.join("main.st")), "modules");
-        // a relative main.st takes the name of the directory it resolves to
-        let nested = dir.join("sub").join("main.st");
+        std::fs::write(dir.join("main.stn"), "").unwrap();
+        assert_eq!(program_name(&dir.join("main.stn")), "modules");
+        // a relative main.stn takes the name of the directory it resolves to
+        let nested = dir.join("sub").join("main.stn");
         std::fs::create_dir_all(nested.parent().unwrap()).unwrap();
         std::fs::write(&nested, "").unwrap();
-        assert_eq!(program_name(&dir.join("sub/../main.st")), "modules");
-        assert_eq!(program_name(Path::new("/main.st")), "main");
+        assert_eq!(program_name(&dir.join("sub/../main.stn")), "modules");
+        assert_eq!(program_name(Path::new("/main.stn")), "main");
     }
 
     #[test]
     fn other_targets_build_into_directories_of_their_own() {
         let host = Target::host().unwrap();
         assert_eq!(
-            output_path(Path::new("examples/basics.st"), host),
+            output_path(Path::new("examples/basics.stn"), host),
             Path::new("examples/build/basics")
         );
         let other = if host == Target::ARM64_MACOS {
@@ -712,14 +711,14 @@ ret y
             Target::ARM64_MACOS
         };
         assert_eq!(
-            output_path(Path::new("examples/basics.st"), other),
+            output_path(Path::new("examples/basics.stn"), other),
             Path::new("examples/build")
                 .join(other.to_string())
                 .join("basics")
         );
         let leveled: Target = "x86_64v3-linux".parse().unwrap();
         assert_eq!(
-            output_path(Path::new("p.st"), leveled),
+            output_path(Path::new("p.stn"), leveled),
             Path::new("build/x86_64v3-linux/p")
         );
     }

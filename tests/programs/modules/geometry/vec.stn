@@ -1,0 +1,8 @@
+pub fn dot(a: list[int], b: list[int]) -> int;
+    total = 0
+    for i in range(a.len());
+        total = total + square(a[i], b[i])
+    ret total
+
+fn square(x: int, y: int) -> int;
+    ret x * y

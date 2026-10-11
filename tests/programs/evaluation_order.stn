@@ -1,0 +1,13 @@
+// operands and arguments are evaluated left to right, which shows when they print
+fn say(n: int) -> int;
+    print(n)
+    ret n
+
+x = say(2) - say(1)
+print(x)
+y = say(3) * say(4) + say(5) / say(6)
+print(y)
+fn pair(a: int, b: int) -> int;
+    ret a - b
+print(pair(say(8), say(7)))
+

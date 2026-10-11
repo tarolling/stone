@@ -1,0 +1,32 @@
+// arguments passed in a different order than the caller received them, which needs the
+// register moves at each call ordered so none overwrites a value another still needs
+fn pair(a: int, b: int) -> int;
+    ret a * 10 + b
+
+fn swap(a: int, b: int) -> int;
+    ret pair(b, a)
+
+fn triple(a: int, b: int, c: int) -> int;
+    ret a * 100 + b * 10 + c
+
+fn rotate(a: int, b: int, c: int) -> int;
+    ret triple(c, a, b)
+
+fn seven(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int;
+    ret a - b + c - d + e - f + g * 1000
+
+fn shuffle7(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int;
+    ret seven(g, f, e, d, c, b, a) + seven(b, c, d, e, f, g, a)
+
+fn eight(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> int;
+    ret ((((((a * 2 + b) * 2 + c) * 2 + d) * 2 + e) * 2 + f) * 2 + g) * 2 + h
+
+fn reverse8(a: int, b: int, c: int, d: int, e: int, f: int, g: int, h: int) -> int;
+    ret eight(h, g, f, e, d, c, b, a)
+
+print(swap(1, 2), rotate(1, 2, 3))
+print(shuffle7(1, 2, 3, 4, 5, 6, 7))
+print(reverse8(1, 0, 0, 0, 0, 0, 0, 0), reverse8(0, 0, 0, 0, 0, 0, 0, 1))
+print(pair(pair(1, 2), pair(3, 4)))
+big = 5000000000
+print(pair(big, 9000000000), triple(big, 1, -big))

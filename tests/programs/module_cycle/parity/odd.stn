@@ -1,0 +1,6 @@
+use parity.even
+
+pub fn odd(n: int) -> bool;
+    if n == 0;
+        ret false
+    ret even.even(n - 1)

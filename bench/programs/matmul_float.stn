@@ -1,0 +1,35 @@
+// float arithmetic in nested lists: multiplying two matrices of floats from a generator
+fn matrix(n: int, seed: int) -> list[list[float]];
+    rows = []
+    x = seed
+    for i in range(n);
+        row = []
+        for j in range(n);
+            x = x * 1103515245 + 12345
+            x = x - (x / 2147483648) * 2147483648
+            row.append(float(x) / 2147483648.0)
+        rows.append(row)
+    ret rows
+
+fn multiply(a: list[list[float]], b: list[list[float]], n: int) -> list[list[float]];
+    c = []
+    for i in range(n);
+        row = []
+        for j in range(n);
+            total = 0.0
+            for k in range(n);
+                total = total + a[i][k] * b[k][j]
+            row.append(total)
+        c.append(row)
+    ret c
+
+fn checksum(c: list[list[float]], n: int) -> float;
+    total = 0.0
+    for i in range(n);
+        for j in range(n);
+            total = total + c[i][j] * float(i + j + 1)
+    ret total
+
+n = 300
+// scaled to an int, so C need not print floats the way stone does
+print(int(checksum(multiply(matrix(n, 1), matrix(n, 2), n), n) * 1000000.0))

@@ -9,7 +9,7 @@ grammar is
 | Python | stone |
 | --- | --- |
 | `if x:` / `while x:` / `for i in xs:` | `if x;` / `while x;` / `for i in xs;` |
-| `def f(a, b):` | `def f(a, b);` |
+| `def f(a, b):`, annotations optional | `fn f(a: int, b: int) -> int;`, parameter types required |
 | `else:` / `elif x:` | `else;` / `elif x;` |
 | `return x` | `ret x` |
 | `continue` | `cont` |
@@ -27,8 +27,8 @@ These names are reserved and cannot be used for variables or functions:
 
 | keyword | meaning |
 | --- | --- |
-| `def` | defines a function |
-| `pub` | lets other files use the function after it, as in `pub def f();` |
+| `fn` | defines a function |
+| `pub` | lets other files use the function after it, as in `pub fn f() -> int;` |
 | `use`, `as` | uses a module or one of its functions, optionally under another name |
 | `ret` | returns from a function, or ends the program at the top level |
 | `if`, `elif`, `else` | conditional blocks |
@@ -42,7 +42,7 @@ These names are reserved and cannot be used for variables or functions:
 
 ## Lines and blocks
 
-A statement ends at the end of its line. A statement that opens a block (`def`, `if`, `elif`,
+A statement ends at the end of its line. A statement that opens a block (`fn`, `if`, `elif`,
 `else`, `while`, `for`) ends in `;`, followed either by an indented block on the next lines or
 by a single simple statement on the same line:
 
@@ -79,7 +79,7 @@ and a `t`.
 | --- | --- |
 | expression | `print(x)` |
 | assignment | `x = 1`, `a = b = 0`, `items[i] = x`, `grid[r][c] = 0` |
-| function definition | `def f(a, b);` plus a block |
+| function definition | `fn f(a: int, b: int) -> int;` plus a block |
 | `ret` | `ret`, `ret x` |
 | `if` / `elif` / `else` | `if x < 0;` ... `elif x == 0;` ... `else;` ... |
 | `while` | `while i < 10;` plus a block |
@@ -89,6 +89,27 @@ and a `t`.
 
 A `for` loop's variable must be a plain name. Functions can only be defined at the top level.
 `use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
+
+## Function signatures
+
+Every parameter is written with its type after a colon, and a function that returns a value
+writes its type after `->`:
+
+```stone
+fn mean(xs: list[float]) -> float;
+    total = 0.0
+    for x in xs;
+        total = total + x
+    ret total / float(xs.len())
+
+fn report(name: str, score: float);
+    print(name, score)
+```
+
+A type is `int`, `float`, `bool`, `str`, `none`, or `list[T]` for any type `T`, such as
+`list[list[int]]`. A function without `->` returns `none`, the same as writing `-> none`.
+Types are written only in signatures: variables, including a function's locals, never have
+them. See [Types](types.md).
 
 ## Operators
 

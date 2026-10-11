@@ -6,7 +6,7 @@ module stone
     mod = Module(stmt* body)
 
     stmt = FunctionDef(identifier name, bool public, arguments args,
-                       stmt* body, expr? returns)
+                       stmt* body, type? returns)
 
           | Return(expr? value)
 
@@ -48,5 +48,7 @@ module stone
 
     arguments = (arg* args)
 
-    arg = (identifier arg)
+    arg = (identifier arg, type? annotation)
+
+    type = Int | Float | Bool | Str | None | List(type elem)
 }

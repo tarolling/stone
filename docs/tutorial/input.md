@@ -17,7 +17,7 @@ print("hello, " + name)
 Once the input runs out, `input()` returns `""`. An empty line also gives `""`, so to read
 every line, loop until `eof()` says nothing is left:
 
-```{literalinclude} ../examples/input.st
+```{literalinclude} ../examples/input.stn
 :language: stone
 ```
 
@@ -36,8 +36,8 @@ it prints
 Run it with the input redirected from a file, or piped from another program:
 
 ```sh
-stone run scores.st < scores.txt
-cat scores.txt | stone run scores.st
+stone run scores.stn < scores.txt
+cat scores.txt | stone run scores.stn
 ```
 
 ## Turning text into values
@@ -66,11 +66,11 @@ print(total)
 ```
 
 ```sh
-stone run sum.st 1 2 3                        # prints 6
-stone build sum.st && ./build/sum 1 2 3       # prints 6 too
+stone run sum.stn 1 2 3                        # prints 6
+stone build sum.stn && ./build/sum 1 2 3       # prints 6 too
 ```
 
 Everything after the file belongs to the program, even arguments starting with `-`, so
-`stone run sum.st -5 --x` gives it `["-5", "--x"]`.
+`stone run sum.stn -5 --x` gives it `["-5", "--x"]`.
 
 Next, {doc}`modules`.

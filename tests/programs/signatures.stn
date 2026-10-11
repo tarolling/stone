@@ -1,0 +1,32 @@
+// every parameter has a type, and the return type follows ->
+fn transpose(grid: list[list[int]]) -> list[list[int]];
+    out = []
+    for j in range(grid[0].len());
+        row = []
+        for i in range(grid.len());
+            row.append(grid[i][j])
+        out.append(row)
+    ret out
+
+fn label(name: str, score: float, passed: bool) -> str;
+    if passed;
+        ret name + ": " + str(score) + " (passed)"
+    ret name + ": " + str(score)
+
+// without ->, a function returns none
+fn report(lines: list[str]);
+    for line in lines;
+        print(line)
+
+// -> none says the same thing explicitly
+fn shout(text: str) -> none;
+    print(text + "!")
+    ret
+
+fn nothing() -> none;
+    ret none
+
+print(transpose([[1, 2, 3], [4, 5, 6]]))
+report([label("ada", 91.5, true), label("bo", 48.0, false)])
+shout("done")
+print(nothing())

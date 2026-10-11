@@ -51,17 +51,17 @@ of one file, except that each `Span` carries the `FileId` of the file it is in.
 
 ## Language server
 
-`lsp/` is the `stone-lsp` crate, a language server built on `lsp-server` and `lsp-types`, kept out of the main crate so stone itself still depends only on `clap`. On every change it reanalyzes each open document as part of its program (the one whose entry file is the nearest `main.st` above it) with `project::link` and `driver::analyze_linked`, reading open documents' text over what is on disk, and answers requests from the resulting `checker::Analysis`: its diagnostics, the type of every expression, and every symbol with all of its references, in every file.
+`lsp/` is the `stone-lsp` crate, a language server built on `lsp-server` and `lsp-types`, kept out of the main crate so stone itself still depends only on `clap`. On every change it reanalyzes each open document as part of its program (the one whose entry file is the nearest `main.stn` above it) with `project::link` and `driver::analyze_linked`, reading open documents' text over what is on disk, and answers requests from the resulting `checker::Analysis`: its diagnostics, the type of every expression, and every symbol with all of its references, in every file.
 
 | request | answered from |
 | --- | --- |
 | diagnostics | `Analysis::diagnostics`, with a syntax error for every statement that fails to parse, in blocks too |
 | hover | the symbol's signature, a builtin's documentation, or the innermost expression's type |
-| definition, references, rename | `Analysis::reference_at` and `Analysis::references_to`, across files; a `use` path's definition is the module or function it names, and a builtin's is its line in a generated `builtins.st` reference |
+| definition, references, rename | `Analysis::reference_at` and `Analysis::references_to`, across files; a `use` path's definition is the module or function it names, and a builtin's is its line in a generated `builtins.stn` reference |
 | document symbols | globals and functions, with each function's parameters and locals |
 | completion | `Analysis::visible_at`, names bound by `use`, builtins, and keywords; a module's `pub` functions after its name and a `.`; modules and directories in a `use` |
 
-`editors/vscode/` is a VS Code extension that provides highlighting and indentation rules and starts `stone-lsp` for `.st` files.
+`editors/vscode/` is a VS Code extension that provides highlighting and indentation rules and starts `stone-lsp` for `.stn` files.
 
 ## Fuzzing
 
@@ -77,8 +77,8 @@ The `fuzz/` crate uses cargo-fuzz (libFuzzer, nightly Rust). It is a separate cr
 
 `stone_fuzz::generate` writes source text rule by rule from the grammar, tracking scope so every name and call is defined and every program passes the checker. It covers int arithmetic, comparisons, functions with up to eight parameters, `if`/`while`/`for` with `break` and `cont`, multi-argument `print` with strings and booleans, and top-level lists. Every loop is bounded, and functions never read globals, which may not be assigned yet when they run. `differential` skips a program if the interpreter rejects it (out of fuel, division by zero, an unassigned variable).
 
-Seeds for the text targets are the `.st` programs in `fuzz/corpus/<target>/`. `fuzz/stone.dict` lists stone's tokens.
+Seeds for the text targets are the `.stn` programs in `fuzz/corpus/<target>/`. `fuzz/stone.dict` lists stone's tokens.
 
 ## Benchmarks
 
-The `bench/` crate compares compiled stone with C (`gcc -O2` and `gcc -O0`) and Python. It is a separate crate, like `fuzz/`, and depends on `stone` only for its tests. Each benchmark in `bench/programs/` is written three times, as `.st`, `.c`, and `.py`, and the runner refuses to time a program unless all four builds print the same `.out` file. See `bench/README.md` for the programs and a baseline.
+The `bench/` crate compares compiled stone with C (`gcc -O2` and `gcc -O0`) and Python. It is a separate crate, like `fuzz/`, and depends on `stone` only for its tests. Each benchmark in `bench/programs/` is written three times, as `.stn`, `.c`, and `.py`, and the runner refuses to time a program unless all four builds print the same `.out` file. See `bench/README.md` for the programs and a baseline.

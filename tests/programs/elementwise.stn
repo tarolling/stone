@@ -1,0 +1,60 @@
+// arithmetic on lists works element by element, and a number applies to every element
+a = [1, 2, 3]
+b = [10, 20, 30]
+print(a + b, a - b, a * b, b / a, b % a)
+print(a * 2, 2 * a, a + 1, 100 - a, a ** 2, 2 ** a, a ** [0, 1, 2])
+print(-a, +a, -(a * 2) + b)
+print(a * 2 + b, (a + b) * (a - b))
+
+// floats, with the same rules as for single numbers
+x = [0.5, 1.5, -2.25]
+y = [2.0, 4.0, 8.0]
+print(x * y + x, x / y, -x, x ** 3, x % 1.0, 1.0 / y)
+
+// int arithmetic wraps, and division rounds toward zero, as for single ints
+big = [9223372036854775807, -7, 7]
+print(big + 1, big / 2, big % -2, [-7, 7] / [2, -2])
+
+// a list operand can be any expression, evaluated once, left to right
+fn noisy(label: str, xs: list[int]) -> list[int];
+    print(label)
+    ret xs
+print(noisy("left", a) * 2 + noisy("right", b))
+
+// functions can take and return lists or numbers
+fn scale(xs: list[int], k: int) -> list[int];
+    ret xs * k
+fn double(n: int) -> int;
+    ret n * 2
+fn axpy(alpha: float, xs: list[float], ys: list[float]) -> list[float];
+    ret alpha * xs + ys
+print(scale(a, 3), double(4), axpy(2.0, x, y))
+
+// the result is a new list, so the operands are unchanged
+c = a * 1
+c[0] = 99
+print(a, c)
+
+// a list can be updated from itself, in place when nothing else holds it
+d = [1, 2, 3, 4, 5, 6, 7, 8, 9]
+d = d * 2 + 1
+print(d)
+e = d
+d = d - 1
+print(d, e)
+
+// every length, from empty to past several pairs, gives the same answers
+f = []
+for n in range(10);
+    g = f * 3 + f
+    h = 0.5 * [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0][:n]
+    k = f + f - 1
+    m = -h / (h + 1.0) - h * h
+    print(n, g, h, k, m)
+    f.append(n)
+
+// results work anywhere a list does
+total = 0
+for v in a * a;
+    total = total + v
+print(total, (a * 3)[1], (a + b).len(), (b - a)[::-1])

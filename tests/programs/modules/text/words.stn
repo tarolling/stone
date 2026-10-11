@@ -1,0 +1,2 @@
+pub fn count(line: str) -> int;
+    ret line.split().len()

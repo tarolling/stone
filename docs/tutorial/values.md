@@ -1,6 +1,6 @@
 # Values and types
 
-```{literalinclude} ../examples/values.st
+```{literalinclude} ../examples/values.stn
 :language: stone
 ```
 
@@ -18,12 +18,12 @@ prints
 | `float` | `2.5`, `1e16`, `0.1` | IEEE 754 double |
 | `bool` | `true`, `false` | |
 | `str` | `"hello"` | double quotes only, no escape sequences, cannot span lines |
-| `none` | `none` | what a function without `ret` returns |
+| `none` | `none` | what a function without `->` returns |
 | `list[T]` | `[1, 2, 3]` | see {doc}`lists` |
 
-You never write types down. The checker infers each variable's type from what is assigned to
-it, and a variable keeps that type: assigning `"a"` to a variable that holds an `int` is an
-error.
+Variables never have types written down. The checker infers each variable's type from what is
+assigned to it, and a variable keeps that type: assigning `"a"` to a variable that holds an `int`
+is an error. The only types you write are in function signatures, as {doc}`functions` shows.
 
 ## Arithmetic
 

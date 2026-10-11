@@ -14,10 +14,10 @@ count = 3
 print(price * count)
 ```
 
-`stone check prices.st` reports
+`stone check prices.stn` reports
 
 ```text
-prices.st:3:15: error: expected float, found int
+prices.stn:3:15: error: expected float, found int
   |
 3 | print(price * count)
   |               ^^^^^
@@ -39,7 +39,7 @@ Among the things the checker reports:
 
 Some mistakes depend on values only known while running:
 
-```{literalinclude} ../examples/runtime_error.st
+```{literalinclude} ../examples/runtime_error.stn
 :language: stone
 ```
 
@@ -47,7 +47,7 @@ prints the first average, then stops:
 
 ```text
 7
-runtime_error.st: error: division by zero
+runtime_error.stn: error: division by zero
 ```
 
 A runtime error prints `error:` and a message to stderr and exits with status 1, with the same

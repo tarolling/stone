@@ -1,0 +1,26 @@
+i = 0
+while i - 3;
+    print(i)
+    i = i + 1
+
+n = 0
+while 1;
+    n = n + 1
+    if n - 5;
+        cont
+    break
+print(n)
+
+fn first_multiple(k: int) -> int;
+    m = 1
+    while 1;
+        if m * k - 12;
+            m = m + 1
+        else;
+            ret m
+print(first_multiple(4))
+
+fn pick(a: int, b: int) -> int;
+    ret b
+a = 7
+print(pick(1, a))

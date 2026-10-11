@@ -1,7 +1,7 @@
-//! Golden-output tests that run every `.st` program in `examples/`, `tests/programs/`, and
+//! Golden-output tests that run every `.stn` program in `examples/`, `tests/programs/`, and
 //! `docs/examples/` (the programs the documentation shows) through both backends and compare stdout against the sibling `.out` file.
 //!
-//! For example, `examples/basics.st` must print exactly the contents of `examples/basics.out`
+//! For example, `examples/basics.stn` must print exactly the contents of `examples/basics.out`
 //! under both `stone run` and a binary produced by `stone build`.
 //!
 //! A program that should fail at runtime, such as one indexing past the end of a list, has a
@@ -15,8 +15,8 @@
 //! which every backend sets on top of the environment the tests run in.
 //!
 //! A subdirectory of one of those directories is a program of several files, run from its
-//! `main.st`, whose `.out`, `.err`, `.in`, `.args`, and `.env` files sit next to `main.st`. For example,
-//! `tests/programs/modules/main.st` uses modules such as `tests/programs/modules/text.st`.
+//! `main.stn`, whose `.out`, `.err`, `.in`, `.args`, and `.env` files sit next to `main.stn`. For example,
+//! `tests/programs/modules/main.stn` uses modules such as `tests/programs/modules/text.stn`.
 //!
 //! The compiler is also tested for the other architecture, such as aarch64 on an x86-64 machine,
 //! by cross-compiling each program with `stone build --target` and running it under qemu-user.
@@ -36,7 +36,7 @@ const PROGRAM_DIRS: [&str; 3] = ["examples", "tests/programs", "docs/examples"];
 
 /// Programs a backend can't handle yet, as `(file stem, backend name, reason)`.
 ///
-/// For example, `("printing", "build", "...")` skips `printing.st` under `stone build` only, and
+/// For example, `("printing", "build", "...")` skips `printing.stn` under `stone build` only, and
 /// `("printing", "build-aarch64", "...")` only when cross-compiling it for aarch64.
 const SKIPS: &[(&str, &str, &str)] = &[];
 
@@ -80,7 +80,7 @@ fn runs(tool: &str) -> bool {
         .is_ok()
 }
 
-/// Returns every `.st` file directly in [`PROGRAM_DIRS`] and the `main.st` of each of their
+/// Returns every `.stn` file directly in [`PROGRAM_DIRS`] and the `main.stn` of each of their
 /// subdirectories, sorted so failures are reported in a stable order.
 fn programs() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -89,23 +89,23 @@ fn programs() -> Vec<PathBuf> {
         for entry in std::fs::read_dir(root.join(dir)).expect("program directory should exist") {
             let path = entry.unwrap().path();
             if path.is_dir() {
-                let main = path.join("main.st");
-                assert!(main.is_file(), "{} has no main.st", path.display());
+                let main = path.join("main.stn");
+                assert!(main.is_file(), "{} has no main.stn", path.display());
                 programs.push(main);
-            } else if path.extension().is_some_and(|ext| ext == "st") {
+            } else if path.extension().is_some_and(|ext| ext == "stn") {
                 programs.push(path);
             }
         }
     }
     programs.sort();
-    assert!(!programs.is_empty(), "no .st programs found");
+    assert!(!programs.is_empty(), "no .stn programs found");
     programs
 }
 
 /// Returns a program's name: its file stem, or for a program of several files, its directory's
 /// name.
 ///
-/// For example, `tests/programs/lists.st` is `lists` and `tests/programs/modules/main.st` is
+/// For example, `tests/programs/lists.stn` is `lists` and `tests/programs/modules/main.stn` is
 /// `modules`.
 fn name_of(program: &Path) -> &str {
     let path = if program

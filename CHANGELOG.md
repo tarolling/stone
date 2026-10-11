@@ -10,6 +10,21 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Changed
+
+- Source files use the extension `.stn` instead of `.st`, which Smalltalk already uses. A
+  program's entry file is `main.stn`, and `use a.b` loads `a/b.stn`. Rename existing files with
+  `for f in *.st; do mv "$f" "${f%.st}.stn"; done`.
+- Functions are defined with `fn` instead of `def`, as in `fn add(a: int, b: int) -> int;`. `fn`
+  is a keyword, and `def` is now an ordinary name.
+- Every function parameter has a type, and a function that returns a value writes its type after
+  `->`, as in `fn mean(xs: list[float]) -> float;`. A function without `->` returns `none`. Types
+  are `int`, `float`, `bool`, `str`, `none`, and `list[T]`, and they are written only in
+  signatures: variables are still inferred. A call is checked against the signature, so a wrong
+  argument is an error at that argument. A parameter without a type is an error that suggests
+  the type the checker infers for it, and returning a value from a function without `->` is an
+  error that suggests the `->` to add.
+
 ## [0.2.1] - 2026-10-10
 
 ### Added

@@ -21,7 +21,8 @@ pub(crate) type LiveAfter = HashMap<Span, HashSet<String>>;
 /// Returns, for each function in `body`, every global in `globals` that it or a function it calls,
 /// directly or not, may read.
 ///
-/// For example, after `def f(); ret g()` and `def g(); ret xs[0]`, both `f` and `g` read `xs`.
+/// For example, after `fn f() -> int; ret g()` and `fn g() -> int; ret xs[0]`, both `f` and `g`
+/// read `xs`.
 pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalReads {
     let mut reads = HashMap::new();
     let mut calls = HashMap::new();
@@ -325,7 +326,7 @@ mod tests {
     use crate::driver::parse;
 
     /// Parses `source` and returns, for each top-level statement in order, the variables live
-    /// after it, sorted, with the statements nested in the first `def`, if there is one, first.
+    /// after it, sorted, with the statements nested in the first `fn`, if there is one, first.
     fn live(source: &str) -> Vec<Vec<String>> {
         let module = parse(source).unwrap();
         let crate::ast::Mod::Module { body } = &module;
@@ -454,7 +455,8 @@ mod tests {
 
     #[test]
     fn nothing_is_live_after_a_return() {
-        let source = "def f(xs, n);\n    ys = xs\n    if n;\n        ret ys\n    ret xs\n";
+        let source =
+            "fn f(xs: int, n: int) -> int;\n    ys = xs\n    if n;\n        ret ys\n    ret xs\n";
         assert_eq!(
             live(source),
             [
@@ -468,8 +470,7 @@ mod tests {
 
     #[test]
     fn a_call_reads_the_globals_its_function_reads() {
-        let source =
-            "def f();\n    ret g()\ndef g();\n    ret xs[0]\nxs = [1]\nys = xs\nprint(f())\n";
+        let source = "fn f() -> int;\n    ret g()\nfn g() -> int;\n    ret xs[0]\nxs = [1]\nys = xs\nprint(f())\n";
         assert_eq!(
             live(source),
             [

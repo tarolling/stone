@@ -10,6 +10,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Changed
+
+- The extension opens `.stn` files, stone's new extension, instead of `.st` files, and a
+  program's entry file is the nearest `main.stn`.
+- Highlighting, hover, and completion follow stone's new `fn` keyword, which replaces `def`.
+- Highlighting of the types in function signatures, such as `list[int]` in
+  `fn total(xs: list[int]) -> int;`, which stone now requires. Hover shows a function that returns
+  `none` without `-> none`, as it is written.
+
 ## [0.2.1] - 2026-10-10
 
 ### Added

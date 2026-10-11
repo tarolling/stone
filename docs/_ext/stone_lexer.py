@@ -18,7 +18,7 @@ from pygments.token import (
 )
 
 KEYWORDS = (
-    "and", "as", "break", "cont", "def", "elif", "else", "for", "if", "in", "not", "or", "pub", "ret",
+    "and", "as", "break", "cont", "elif", "else", "fn", "for", "if", "in", "not", "or", "pub", "ret",
     "use", "while",
 )
 CONSTANTS = ("true", "false", "none")
@@ -27,19 +27,23 @@ METHODS = ("len", "append", "pop", "insert", "extend", "strip", "split")
 
 
 class StoneLexer(RegexLexer):
-    """Highlights stone source, such as `def f(a); ret a + 1`."""
+    """Highlights stone source, such as `fn f(a: int) -> int; ret a + 1`."""
 
     name = "stone"
-    aliases = ["stone", "st"]
-    filenames = ["*.st"]
+    aliases = ["stone", "stn"]
+    filenames = ["*.stn"]
 
     tokens = {
         "root": [
             (r"\s+", Whitespace),
             (r"//.*$", Comment.Single),
             (r'"[^"\n]*"', String.Double),
-            (r"(def)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
+            (r"(fn)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
             (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
+            (
+                r"(->|:)(\s*)((?:list\[)*(?:int|float|bool|str|none)\]*)(?![\w(])",
+                bygroups(Punctuation, Whitespace, Keyword.Type),
+            ),
             (words(KEYWORDS, suffix=r"\b"), Keyword),
             (words(CONSTANTS, suffix=r"\b"), Keyword.Constant),
             (words(BUILTINS, suffix=r"\b"), Name.Builtin),

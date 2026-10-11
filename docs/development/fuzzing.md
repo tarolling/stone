@@ -21,7 +21,7 @@ cargo +nightly fuzz run parse -- -dict=fuzz/stone.dict
 
 `stone_fuzz::generate` writes valid programs rule by rule from the grammar, tracking scope so
 every name and call is defined and every program passes the checker. Seeds for the text targets
-are the `.st` programs in `fuzz/corpus/<target>/`, and `fuzz/stone.dict` lists stone's tokens.
+are the `.stn` programs in `fuzz/corpus/<target>/`, and `fuzz/stone.dict` lists stone's tokens.
 
 `cargo test --manifest-path fuzz/Cargo.toml` checks the generator on stable Rust, including
 that generated programs pass the checker, that 2,000 of them assemble and link for both

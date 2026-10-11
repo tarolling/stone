@@ -83,15 +83,15 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
 /// Writes the builtins reference to a directory for this version of the server, returning its
 /// URI, so that going to the definition of a builtin like `print` has a file to open.
 ///
-/// For example, on Linux this writes `/tmp/stone-lsp-0.1.0/builtins.st`.
+/// For example, on Linux this writes `/tmp/stone-lsp-0.1.0/builtins.stn`.
 fn write_builtins_reference() -> Option<Uri> {
     let dir = std::env::temp_dir().join(format!("stone-lsp-{}", env!("CARGO_PKG_VERSION")));
     std::fs::create_dir_all(&dir).ok()?;
-    let path = dir.join("builtins.st");
+    let path = dir.join("builtins.stn");
     // several servers can start at once, so replace the file whole rather than rewriting it
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let unique = NEXT.fetch_add(1, Ordering::Relaxed);
-    let temporary = dir.join(format!("builtins.st.{}.{unique}.tmp", std::process::id()));
+    let temporary = dir.join(format!("builtins.stn.{}.{unique}.tmp", std::process::id()));
     std::fs::write(&temporary, stone::stdlib::builtins_reference()).ok()?;
     std::fs::rename(&temporary, &path).ok()?;
     file_uri(&path)

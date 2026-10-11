@@ -5,7 +5,7 @@ use stone::project::MapSources;
 
 const SOURCE: &str = "\
 total = 0
-def add(a, b);
+fn add(a: int, b: int) -> int;
     sum = a + b
     ret sum
 for i in range(3);
@@ -18,7 +18,7 @@ fn doc(text: &str) -> Document {
 }
 
 fn uri() -> Uri {
-    "file:///demo.st".parse().unwrap()
+    "file:///demo.stn".parse().unwrap()
 }
 
 /// Returns an LSP position from 1-based line and col, which are easier to read against source.
@@ -60,7 +60,7 @@ fn a_valid_document_has_no_diagnostics() {
 fn hover_shows_a_function_signature() {
     assert_eq!(
         hover_text(&doc(SOURCE), at(6, 14)).unwrap(),
-        "```stone\ndef add(a: int, b: int) -> int\n```"
+        "```stone\nfn add(a: int, b: int) -> int\n```"
     );
 }
 
@@ -89,7 +89,7 @@ limit = 3
 // before it reaches 1
 //
 // `n` must be positive.
-def halvings(n);
+fn halvings(n: int) -> int;
     // the count so far
     count = 0
     while n > 1;
@@ -104,7 +104,7 @@ fn hover_shows_the_comment_above_a_function() {
     let doc = doc(DOCUMENTED);
     assert_eq!(
         hover_text(&doc, at(8, 5)).unwrap(),
-        "```stone\ndef halvings(n: int) -> int\n```\n\
+        "```stone\nfn halvings(n: int) -> int\n```\n\
          how many times `n` halves\nbefore it reaches 1\n\n`n` must be positive."
     );
 }
@@ -165,7 +165,7 @@ fn only_a_definition_that_starts_its_line_is_documented() {
 
 #[test]
 fn parameters_have_no_documentation() {
-    let doc = doc("// about f\ndef f(n);\n    ret n\nprint(f(1))\n");
+    let doc = doc("// about f\nfn f(n: int) -> int;\n    ret n\nprint(f(1))\n");
     assert_eq!(
         hover_text(&doc, at(2, 7)).unwrap(),
         "```stone\n(parameter) n: int\n```"
@@ -214,7 +214,7 @@ fn definition_jumps_to_the_name() {
     let location = definition(&doc, &uri(), at(6, 14), None).unwrap();
     assert_eq!(
         location.range,
-        Range::new(Position::new(1, 4), Position::new(1, 7))
+        Range::new(Position::new(1, 3), Position::new(1, 6))
     );
     assert_eq!(location.uri, uri());
     // without the reference file, builtins have nowhere to go
@@ -223,7 +223,7 @@ fn definition_jumps_to_the_name() {
 
 #[test]
 fn definition_of_a_builtin_opens_the_reference_file() {
-    let reference: Uri = "file:///cache/builtins.st".parse().unwrap();
+    let reference: Uri = "file:///cache/builtins.stn".parse().unwrap();
     let builtins = Builtins::new(reference.clone());
     let doc = doc(SOURCE);
 
@@ -399,25 +399,31 @@ fn completion_details_show_types() {
         .into_iter()
         .find(|item| item.label == "add")
         .unwrap();
+    assert_eq!(add.detail.as_deref(), Some("fn add(a: int, b: int) -> int"));
+}
+
+#[test]
+fn a_function_returning_none_shows_no_return_type() {
+    let doc = doc("fn greet(name: str);\n    print(name)\ngreet(\"bo\")\n");
     assert_eq!(
-        add.detail.as_deref(),
-        Some("def add(a: int, b: int) -> int")
+        hover_text(&doc, at(3, 2)).unwrap(),
+        "```stone\nfn greet(name: str)\n```"
     );
 }
 
 #[test]
 fn features_still_work_around_a_syntax_error() {
-    let doc = doc("def f(a);\n    ret a\nx = \nprint(f(1))\n");
+    let doc = doc("fn f(a: int) -> int;\n    ret a\nx = \nprint(f(1))\n");
     assert_eq!(diagnostics(&doc).len(), 1);
     assert_eq!(
         hover_text(&doc, at(4, 7)).unwrap(),
-        "```stone\ndef f(a: int) -> int\n```"
+        "```stone\nfn f(a: int) -> int\n```"
     );
 }
 
 #[test]
 fn features_work_inside_a_function_with_a_syntax_error() {
-    let doc = doc("def f(a);\n    x = \n    ret a\nprint(f(1))\n");
+    let doc = doc("fn f(a: int) -> int;\n    x = \n    ret a\nprint(f(1))\n");
     assert_eq!(diagnostics(&doc).len(), 1);
     assert_eq!(
         hover_text(&doc, at(3, 9)).unwrap(),
@@ -436,10 +442,10 @@ print(util.twice(1), double(2))
 
 const UTIL: &str = "\
 // doubles x
-pub def twice(x);
+pub fn twice(x: int) -> int;
     ret helper(x) * 2
 
-def helper(x);
+fn helper(x: int) -> int;
     ret x
 ";
 
@@ -466,19 +472,19 @@ fn uri_of(path: &str) -> Uri {
 #[test]
 fn diagnostics_only_cover_their_own_file() {
     let files = [
-        ("main.st", MAIN),
-        ("util.st", "pub def twice(x);\n    ret x +\n"),
+        ("main.stn", MAIN),
+        ("util.stn", "pub fn twice(x);\n    ret x +\n"),
     ];
-    assert_eq!(diagnostics(&project_doc("main.st", &files)), []);
-    let in_util = diagnostics(&project_doc("util.st", &files));
+    assert_eq!(diagnostics(&project_doc("main.stn", &files)), []);
+    let in_util = diagnostics(&project_doc("util.stn", &files));
     assert_eq!(in_util.len(), 1);
     assert_eq!(in_util[0].range.start, Position::new(1, 11));
 }
 
 #[test]
 fn a_module_is_checked_as_part_of_the_program_that_uses_it() {
-    // `twice` is only called with an int from main.st, so `x` is an int in util.st
-    let doc = project_doc("util.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    // `twice` is only called with an int from main.stn, so `x` is an int in util.stn
+    let doc = project_doc("util.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
     assert_eq!(diagnostics(&doc), []);
     assert_eq!(
         hover_text(&doc, at(3, 16)).unwrap(),
@@ -489,69 +495,69 @@ fn a_module_is_checked_as_part_of_the_program_that_uses_it() {
 #[test]
 fn a_module_the_program_does_not_use_yet_is_checked_from_the_root() {
     let files = [
-        ("main.st", "print(1)\n"),
-        ("geometry/vec.st", "pub def zero();\n    ret 0\n"),
+        ("main.stn", "print(1)\n"),
+        ("geometry/vec.stn", "pub fn zero() -> int;\n    ret 0\n"),
         (
-            "geometry/shapes.st",
-            "use geometry.vec\n\npub def area();\n    ret vec.zero()\n",
+            "geometry/shapes.stn",
+            "use geometry.vec\n\npub fn area() -> int;\n    ret vec.zero()\n",
         ),
     ];
-    assert_eq!(diagnostics(&project_doc("geometry/shapes.st", &files)), []);
+    assert_eq!(diagnostics(&project_doc("geometry/shapes.stn", &files)), []);
 }
 
 #[test]
 fn definition_jumps_into_another_file() {
-    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
-    let location = definition(&doc, &uri_of("main.st"), at(4, 13), None).unwrap();
-    assert_eq!(location.uri, uri_of("util.st"));
+    let doc = project_doc("main.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
+    let location = definition(&doc, &uri_of("main.stn"), at(4, 13), None).unwrap();
+    assert_eq!(location.uri, uri_of("util.stn"));
     assert_eq!(
         location.range,
-        Range::new(Position::new(1, 8), Position::new(1, 13))
+        Range::new(Position::new(1, 7), Position::new(1, 12))
     );
 }
 
 #[test]
 fn definition_of_a_use_path_opens_what_it_names() {
-    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
-    let module = definition(&doc, &uri_of("main.st"), at(1, 6), None).unwrap();
-    assert_eq!(module.uri, uri_of("util.st"));
+    let doc = project_doc("main.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
+    let module = definition(&doc, &uri_of("main.stn"), at(1, 6), None).unwrap();
+    assert_eq!(module.uri, uri_of("util.stn"));
     assert_eq!(module.range.start, Position::new(0, 0));
 
-    let function = definition(&doc, &uri_of("main.st"), at(2, 11), None).unwrap();
-    assert_eq!(function.uri, uri_of("util.st"));
-    assert_eq!(function.range.start, Position::new(1, 8));
+    let function = definition(&doc, &uri_of("main.stn"), at(2, 11), None).unwrap();
+    assert_eq!(function.uri, uri_of("util.stn"));
+    assert_eq!(function.range.start, Position::new(1, 7));
 }
 
 #[test]
 fn hover_on_an_imported_function_shows_its_comment() {
-    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let doc = project_doc("main.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
     assert_eq!(
         hover_text(&doc, at(4, 13)).unwrap(),
-        "```stone\ndef util.twice(x: int) -> int\n```\ndoubles x"
+        "```stone\nfn util.twice(x: int) -> int\n```\ndoubles x"
     );
 }
 
 #[test]
 fn references_span_every_file() {
-    let doc = project_doc("util.st", &[("main.st", MAIN), ("util.st", UTIL)]);
-    let locations: Vec<(Uri, Position)> = references(&doc, &uri_of("util.st"), at(2, 10), true)
+    let doc = project_doc("util.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
+    let locations: Vec<(Uri, Position)> = references(&doc, &uri_of("util.stn"), at(2, 10), true)
         .into_iter()
         .map(|l| (l.uri, l.range.start))
         .collect();
     assert_eq!(
         locations,
         [
-            (uri_of("main.st"), Position::new(3, 11)),
-            (uri_of("main.st"), Position::new(3, 21)),
-            (uri_of("util.st"), Position::new(1, 8)),
+            (uri_of("main.stn"), Position::new(3, 11)),
+            (uri_of("main.stn"), Position::new(3, 21)),
+            (uri_of("util.stn"), Position::new(1, 7)),
         ]
     );
 }
 
 #[test]
 fn rename_edits_every_file_but_leaves_aliases() {
-    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
-    let edit = rename(&doc, &uri_of("main.st"), at(4, 13), "triple").unwrap();
+    let doc = project_doc("main.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
+    let edit = rename(&doc, &uri_of("main.stn"), at(4, 13), "triple").unwrap();
     let starts = |path: &str| -> Vec<Position> {
         let mut starts: Vec<Position> = edit.changes.as_ref().unwrap()[&uri_of(path)]
             .iter()
@@ -560,31 +566,31 @@ fn rename_edits_every_file_but_leaves_aliases() {
         starts.sort_by_key(|p| (p.line, p.character));
         starts
     };
-    assert_eq!(starts("util.st"), [Position::new(1, 8)]);
+    assert_eq!(starts("util.stn"), [Position::new(1, 7)]);
     // the `twice` of `use util.twice as double` and of `util.twice(1)`, but not `double(2)`
     assert_eq!(
-        starts("main.st"),
+        starts("main.stn"),
         [Position::new(1, 9), Position::new(3, 11)]
     );
 }
 
 #[test]
 fn rename_checks_names_in_the_definitions_file() {
-    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let doc = project_doc("main.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
     assert_eq!(
-        rename(&doc, &uri_of("main.st"), at(4, 13), "helper").unwrap_err(),
+        rename(&doc, &uri_of("main.stn"), at(4, 13), "helper").unwrap_err(),
         "'helper' is already defined here"
     );
 }
 
 #[test]
 fn document_symbols_of_a_module_use_its_own_names() {
-    let doc = project_doc("util.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let doc = project_doc("util.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
     let names: Vec<String> = document_symbols(&doc).into_iter().map(|s| s.name).collect();
     assert_eq!(names, ["twice", "helper"]);
     let names: Vec<String> = document_symbols(&project_doc(
-        "main.st",
-        &[("main.st", MAIN), ("util.st", UTIL)],
+        "main.stn",
+        &[("main.stn", MAIN), ("util.stn", UTIL)],
     ))
     .into_iter()
     .map(|s| s.name)
@@ -594,7 +600,7 @@ fn document_symbols_of_a_module_use_its_own_names() {
 
 #[test]
 fn completion_offers_imported_names() {
-    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let doc = project_doc("main.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
     let items = completion(&doc, at(4, 1), &MapSources::default());
     let kind_of = |label: &str| items.iter().find(|i| i.label == label).and_then(|i| i.kind);
     assert_eq!(kind_of("util"), Some(CompletionItemKind::MODULE));
@@ -604,7 +610,7 @@ fn completion_offers_imported_names() {
 
 #[test]
 fn completion_after_a_module_offers_its_public_functions() {
-    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let doc = project_doc("main.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
     let labels: Vec<String> = completion(&doc, at(4, 12), &MapSources::default())
         .into_iter()
         .map(|i| i.label)
@@ -615,11 +621,11 @@ fn completion_after_a_module_offers_its_public_functions() {
 #[test]
 fn completion_in_a_use_offers_modules_and_directories() {
     let files = [
-        ("main.st", "use \nuse geometry.\n"),
-        ("util.st", UTIL),
-        ("geometry/vec.st", "pub def zero();\n    ret 0\n"),
+        ("main.stn", "use \nuse geometry.\n"),
+        ("util.stn", UTIL),
+        ("geometry/vec.stn", "pub fn zero() -> int;\n    ret 0\n"),
     ];
-    let doc = project_doc("main.st", &files);
+    let doc = project_doc("main.stn", &files);
     let sources = project(&files);
     let labels = |pos: Position| -> Vec<(String, Option<CompletionItemKind>)> {
         let mut items: Vec<(String, Option<CompletionItemKind>)> = completion(&doc, pos, &sources)
@@ -649,14 +655,14 @@ const STATS: &str = "\
 // summary statistics
 // for lists of ints
 
-pub def mean(xs);
+pub fn mean(xs: list[int]) -> int;
     ret xs[0]
 ";
 
 #[test]
 fn hover_on_a_module_shows_the_comment_at_the_top_of_its_file() {
     let main = "use stats\nuse stats as s\nprint(stats.mean([1]), s.mean([2]))\n";
-    let doc = project_doc("main.st", &[("main.st", main), ("stats.st", STATS)]);
+    let doc = project_doc("main.stn", &[("main.stn", main), ("stats.stn", STATS)]);
     let expected = "```stone\nmodule stats\n```\nsummary statistics\nfor lists of ints";
     // the `use` path, the module before a `.`, and an alias for it
     assert_eq!(hover_text(&doc, at(1, 6)).unwrap(), expected);
@@ -666,7 +672,7 @@ fn hover_on_a_module_shows_the_comment_at_the_top_of_its_file() {
 
 #[test]
 fn a_comment_right_above_a_definition_is_not_the_modules() {
-    let doc = project_doc("main.st", &[("main.st", MAIN), ("util.st", UTIL)]);
+    let doc = project_doc("main.stn", &[("main.stn", MAIN), ("util.stn", UTIL)]);
     assert_eq!(
         hover_text(&doc, at(4, 8)).unwrap(),
         "```stone\nmodule util\n```"
@@ -700,7 +706,7 @@ fn hover_documents_the_os_module() {
 
 #[test]
 fn definition_of_the_os_module_opens_the_reference_file() {
-    let reference: Uri = "file:///cache/builtins.st".parse().unwrap();
+    let reference: Uri = "file:///cache/builtins.stn".parse().unwrap();
     let builtins = Builtins::new(reference.clone());
     let doc = doc(OS);
     let text = stone::stdlib::builtins_reference();
@@ -757,8 +763,8 @@ fn completion_offers_os_imports() {
 
 #[test]
 fn completion_in_a_use_of_os_offers_its_functions() {
-    let files = [("main.st", "use os.\n")];
-    let doc = project_doc("main.st", &files);
+    let files = [("main.stn", "use os.\n")];
+    let doc = project_doc("main.stn", &files);
     let labels: Vec<String> = completion(&doc, at(1, 8), &project(&files))
         .into_iter()
         .map(|i| i.label)
@@ -769,7 +775,7 @@ fn completion_in_a_use_of_os_offers_its_functions() {
 
 #[test]
 fn every_builtin_module_has_hover_completion_and_a_definition() {
-    let reference: Uri = "file:///cache/builtins.st".parse().unwrap();
+    let reference: Uri = "file:///cache/builtins.stn".parse().unwrap();
     let builtins = Builtins::new(reference.clone());
     for module in &stone::stdlib::MODULES {
         let name = module.name;

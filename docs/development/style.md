@@ -30,7 +30,7 @@ These apply to stone programs, such as the examples, tests, and benchmarks.
   // how many times `n` can be halved before it reaches 1
   //
   // `n` must be positive.
-  def halvings(n);
+  fn halvings(n: int) -> int;
       count = 0
       while n > 1;
           n = n / 2

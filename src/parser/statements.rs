@@ -1,7 +1,7 @@
 //! Statement rules, such as `if_stmt`, `function_def`, and `program`.
 
 use super::Parser;
-use crate::ast::{Arg, Arguments, Expr, ParserError, Stmt, StmtKind};
+use crate::ast::{Arg, Arguments, Expr, ParserError, Stmt, StmtKind, TypeExpr, TypeExprKind};
 use crate::debug;
 use crate::span::Span;
 use crate::token::TokenType;
@@ -204,18 +204,29 @@ impl Parser {
         })
     }
 
-    /// Parses one function parameter, such as `a` in `def f(a, b);`.
+    /// Parses one function parameter, such as `a: int` in `fn f(a: int, b: int);`.
     ///
     /// ```text
     /// param:
-    ///     | NAME
+    ///     | NAME [':' type]
     /// ```
     pub(super) fn parse_param(&mut self) -> Result<Arg, ParserError> {
         let mark = self.pos;
 
-        // NAME
+        // NAME [':' type]
         if let Some((arg, span)) = self.expect_name("a parameter name", false) {
-            return Ok(Arg { arg, span });
+            let annotation = if self.expect(TokenType::Colon).is_some() {
+                self.parse_type().ok().map(|ty| Some(*ty))
+            } else {
+                Some(None)
+            };
+            if let Some(annotation) = annotation {
+                return Ok(Arg {
+                    arg,
+                    span,
+                    annotation,
+                });
+            }
         }
         self.pos = mark;
 
@@ -226,7 +237,63 @@ impl Parser {
         })
     }
 
-    /// Parses a comma-separated parameter list, such as `a, b` in `def f(a, b);`.
+    /// Parses a type in a function's signature, such as `int` or `list[list[float]]`.
+    ///
+    /// ```text
+    /// type:
+    ///     | 'none'
+    ///     | 'list' '[' type ']'
+    ///     | NAME  # int, float, bool, or str
+    /// ```
+    pub(super) fn parse_type(&mut self) -> Result<Box<TypeExpr>, ParserError> {
+        let mark = self.pos;
+        let scalar = match &self.peek().r#type {
+            TokenType::Keyword(word) if word == "none" => Some(TypeExprKind::None),
+            TokenType::Name(name) => match name.as_str() {
+                "int" => Some(TypeExprKind::Int),
+                "float" => Some(TypeExprKind::Float),
+                "bool" => Some(TypeExprKind::Bool),
+                "str" => Some(TypeExprKind::Str),
+                _ => None,
+            },
+            _ => None,
+        };
+
+        // 'none' | NAME
+        if let Some(kind) = scalar {
+            self.pos += 1;
+            return Ok(Box::new(TypeExpr {
+                kind,
+                span: self.span_from(mark),
+            }));
+        }
+
+        // 'list' '[' type ']'
+        if self.peek().r#type == TokenType::Name("list".to_string()) {
+            self.pos += 1;
+            if self.expect(TokenType::LBracket).is_some()
+                && let Ok(elem) = self.nested(Self::parse_type)
+                && self.expect(TokenType::RBracket).is_some()
+            {
+                return Ok(Box::new(TypeExpr {
+                    kind: TypeExprKind::List(elem),
+                    span: self.span_from(mark),
+                }));
+            }
+        } else {
+            self.record_expected("a type".to_string(), false);
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_type".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses a comma-separated parameter list, such as `a: int, b: int` in
+    /// `fn f(a: int, b: int);`.
     ///
     /// ```text
     /// parameters:
@@ -252,7 +319,7 @@ impl Parser {
         Ok(Arguments { args })
     }
 
-    /// Parses function parameters if there are any, returning an empty list for `def f();`.
+    /// Parses function parameters if there are any, returning an empty list for `fn f();`.
     ///
     /// ```text
     /// [parameters]
@@ -265,22 +332,37 @@ impl Parser {
         })
     }
 
-    /// Parses a function definition, such as `def add(a, b); ret a + b` or `pub def f(); ret 1`.
+    /// Parses a function's return type if it has one, such as `-> int` in
+    /// `fn f(a: int) -> int;`, returning `None` for `fn f();`.
+    ///
+    /// ```text
+    /// ['->' type]
+    /// ```
+    pub(super) fn parse_return_type(&mut self) -> Result<Option<TypeExpr>, ParserError> {
+        if self.expect(TokenType::Arrow).is_none() {
+            return Ok(None);
+        }
+        self.parse_type().map(|ty| Some(*ty))
+    }
+
+    /// Parses a function definition, such as `fn add(a: int, b: int) -> int; ret a + b` or
+    /// `pub fn f() -> int; ret 1`.
     ///
     /// ```text
     /// function_def:
-    ///     | ['pub'] 'def' NAME '(' [params] ')' ';' block
+    ///     | ['pub'] 'fn' NAME '(' [params] ')' ['->' type] ';' block
     /// ```
     pub(super) fn parse_function_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // ['pub'] 'def' NAME '(' [params] ')' ';' block
+        // ['pub'] 'fn' NAME '(' [params] ')' ['->' type] ';' block
         let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
-        if self.expect(TokenType::Keyword("def".to_string())).is_some()
+        if self.expect(TokenType::Keyword("fn".to_string())).is_some()
             && let Some((name, name_span)) = self.expect_name("a function name", false)
             && self.expect(TokenType::LParen).is_some()
             && let args = self.parse_function_def_optional()
             && self.expect(TokenType::RParen).is_some()
+            && let Ok(returns) = self.parse_return_type()
             && self.expect(TokenType::Semi).is_some()
             && let Ok(body) = self.parse_block()
         {
@@ -290,6 +372,7 @@ impl Parser {
                     name_span,
                     public,
                     args,
+                    returns,
                     body,
                 },
                 self.span_from(mark),

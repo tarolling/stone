@@ -1,0 +1,7 @@
+// a function can run before the tuple global it reads is assigned
+fn first() -> int;
+    ret pair[0]
+
+print("before")
+print(first())
+pair = (1, "one")

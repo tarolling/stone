@@ -7,7 +7,7 @@ fn count_primes(limit: int) -> int;
     is_prime[1] = 0
     p = 2
     while p * p <= limit;
-        if is_prime[p];
+        if is_prime[p] == 1;
             m = p * p
             while m <= limit;
                 is_prime[m] = 0

@@ -15,7 +15,7 @@ use stone::interpreter::Limits;
 
 /// Limits for fuzzing the interpreter, small enough that every input finishes quickly.
 ///
-/// For example, `while 1;` runs out of fuel after 10,000 iterations instead of hanging.
+/// For example, `while true;` runs out of fuel after 10,000 iterations instead of hanging.
 pub const LIMITS: Limits = Limits {
     fuel: 10_000,
     max_depth: 200,
@@ -599,14 +599,18 @@ impl Generator {
         self.block(u, &inner, indent + 1, nesting + 1)
     }
 
-    /// Generates an `if` or `elif` test: an int, a comparison, or a negation of either.
+    /// Generates an `if` or `elif` test: comparisons, sometimes joined by `and` or `or`, or a
+    /// negation of them, such as `not (a < b or c == 1)`.
     fn condition(&mut self, u: &mut Unstructured, scope: &Scope) -> Result<String> {
-        let test = if u.arbitrary()? {
-            self.comparison(u, scope)?
-        } else {
-            self.expression(u, scope, 0)?
-        };
-        // parenthesized, since `not a and b` would mix a bool with an int
+        let mut test = self.comparison(u, scope)?;
+        if u.int_in_range(0..=3)? == 3 {
+            let op = if u.arbitrary()? { "and" } else { "or" };
+            for _ in 0..u.int_in_range(1..=2)? {
+                let operand = self.comparison(u, scope)?;
+                test = format!("{test} {op} {operand}");
+            }
+        }
+        // parenthesized, since `not` binds tighter than `and` and `or`
         Ok(if u.arbitrary()? {
             format!("not ({test})")
         } else {
@@ -628,7 +632,7 @@ impl Generator {
     /// Generates an integer-valued expression following the grammar's precedence levels.
     ///
     /// ```text
-    /// expression: sum ('or' sum)* | sum ('and' sum)*
+    /// expression: sum
     /// sum:        term (('+' | '-') term)*
     /// term:       factor (('*' | '/' | '%') factor)*
     /// factor:     '-' factor | primary ['**' exponent]
@@ -639,15 +643,7 @@ impl Generator {
         scope: &Scope,
         nesting: usize,
     ) -> Result<String> {
-        let mut text = self.sum(u, scope, nesting)?;
-        if u.int_in_range(0..=7)? == 7 {
-            let op = if u.arbitrary()? { "and" } else { "or" };
-            for _ in 0..u.int_in_range(1..=2)? {
-                let operand = self.sum(u, scope, nesting)?;
-                text = format!("{text} {op} {operand}");
-            }
-        }
-        Ok(text)
+        self.sum(u, scope, nesting)
     }
 
     fn sum(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {

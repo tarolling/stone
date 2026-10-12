@@ -60,7 +60,8 @@ class StoneLexer(RegexLexer):
             (r"(fn)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
             (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
             (
-                r"(->|:)(\s*)((?:list\[)*(?:int|float|bool|str|none)\]*)(?![\w(])",
+                # a type name, maybe inside list[ or tuple[, then closing brackets or more types
+                r"(->|:)(\s*)((?:(?:list|tuple)\[)*(?:int|float|bool|str|none)(?:\]|,\s*(?:(?:list|tuple)\[)*(?:int|float|bool|str|none))*)(?![\w(])",
                 bygroups(Punctuation, Whitespace, Keyword.Type),
             ),
             (words(KEYWORDS, suffix=r"\b"), Keyword),

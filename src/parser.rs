@@ -50,6 +50,17 @@ pub struct Parser {
     too_deep: Option<Span>,
     /// Syntax errors of statements that were skipped so parsing could continue.
     recovered: Vec<Diagnostic>,
+    /// Specific explanations for common mistakes, such as `x = 1, 2`, each shown instead of the
+    /// usual message when parsing fails at the token it was noted at.
+    hints: Vec<Hint>,
+}
+
+/// An explanation of a mistake a rule recognized at token `index`, such as a tuple without
+/// parentheses, with the span the error points at.
+struct Hint {
+    index: usize,
+    span: Span,
+    message: String,
 }
 
 /// Something a rule expected to find, such as `';'` or `an expression`.
@@ -73,6 +84,7 @@ impl Parser {
             expected: vec![],
             too_deep: None,
             recovered: vec![],
+            hints: vec![],
         }
     }
 
@@ -181,6 +193,23 @@ impl Parser {
         }
     }
 
+    /// Notes that the current token ends a recognized mistake, which `message` explains at `span`.
+    /// If parsing fails at this token, the first hint noted there is the error.
+    ///
+    /// For example, after reading `1, 2` in `x = 1, 2`, a hint at the end of the line says that a
+    /// tuple needs parentheses.
+    fn hint(&mut self, span: Span, message: &str) {
+        if self.pos > self.furthest {
+            self.furthest = self.pos;
+            self.expected.clear();
+        }
+        self.hints.push(Hint {
+            index: self.pos,
+            span,
+            message: message.to_string(),
+        });
+    }
+
     /// Builds the syntax error for a failed parse from what was expected at the furthest token.
     ///
     /// For example, for `print(1` this is `expected ')', found end of line` at the end of the line.
@@ -190,6 +219,9 @@ impl Parser {
                 span,
                 format!("code is nested more than {MAX_DEPTH} levels deep"),
             );
+        }
+        if let Some(hint) = self.hints.iter().find(|h| h.index == self.furthest) {
+            return Diagnostic::error(hint.span, hint.message.clone());
         }
         let found = self
             .tokens
@@ -275,6 +307,7 @@ impl Parser {
         // report each statement's own furthest failure
         self.furthest = start;
         self.expected.clear();
+        self.hints.clear();
         self.too_deep = None;
 
         match self.parse_statement() {

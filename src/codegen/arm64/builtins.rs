@@ -449,7 +449,7 @@ fn emit_mem_map(r#gen: &mut dyn AssemblyGenerator) {
 ///   written, whose bytes the caller fills in
 /// - `stone.free_str` frees the string in `x9`, whose count just reached 0
 /// - `stone.free_list` frees the list in `x9`, whose count just reached 0, along with its
-///   elements' storage, first releasing each element if its `elem` field says they are counted
+///   elements' storage, first releasing each value its `kinds` field says is counted
 /// - `stone.leak_check` exits with an error if the `STONE_LEAK_CHECK` environment variable is set
 ///   and any object is still allocated, which tests use to find leaks
 ///
@@ -504,12 +504,15 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator) {
     pop_frame(r#gen, &[]);
 
     // x19 holds the list and x20 the index of the element being released
-    let saved = ["x19", "x20"];
+    let saved = ["x19", "x20", "x21", "x22"];
     r#gen.emit("stone.free_list:");
     push_frame(r#gen, &saved);
     r#gen.emit("\tmov\tx19, x9");
     r#gen.emit("\tldr\tx10, [x19, #24]");
     r#gen.emit("\tcbz\tx10, .Lfree_list_storage"); // the elements are not counted
+    r#gen.emit("\tldr\tx10, [x19, #32]");
+    r#gen.emit("\tcmp\tx10, #1");
+    r#gen.emit("\tb.ne\t.Lfree_list_wide");
     r#gen.emit("\tmov\tx20, #0");
     r#gen.emit(".Lfree_list_loop:");
     r#gen.emit("\tldr\tx10, [x19]");
@@ -531,6 +534,38 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lfree_list_str:");
     r#gen.emit("\tbl\tstone.free_str");
     r#gen.emit("\tb\t.Lfree_list_loop");
+    // each element of a list of tuples is several slots, each counted as its field's kind says:
+    // x20 is the slot, x21 how many fields of the element are left, and x22 the kinds of the
+    // rest, two bits each
+    r#gen.emit(".Lfree_list_wide:");
+    r#gen.emit("\tmov\tx20, #0");
+    r#gen.emit("\tmov\tx21, #0");
+    r#gen.emit(".Lfree_list_wide_loop:");
+    r#gen.emit("\tldr\tx10, [x19]");
+    r#gen.emit("\tcmp\tx20, x10");
+    r#gen.emit("\tb.ge\t.Lfree_list_storage");
+    r#gen.emit("\tcbnz\tx21, .Lfree_list_wide_field");
+    r#gen.emit("\tldr\tx21, [x19, #32]");
+    r#gen.emit("\tldr\tx22, [x19, #24]");
+    r#gen.emit(".Lfree_list_wide_field:");
+    r#gen.emit("\tand\tx11, x22, #3");
+    r#gen.emit("\tlsr\tx22, x22, #2");
+    r#gen.emit("\tsub\tx21, x21, #1");
+    r#gen.emit("\tldr\tx10, [x19, #16]");
+    r#gen.emit("\tldr\tx9, [x10, x20, lsl #3]");
+    r#gen.emit("\tadd\tx20, x20, #1");
+    r#gen.emit("\tcbz\tx11, .Lfree_list_wide_loop"); // this field is not counted
+    r#gen.emit("\tldur\tx10, [x9, #-8]");
+    r#gen.emit("\tsubs\tx10, x10, #1");
+    r#gen.emit("\tstur\tx10, [x9, #-8]");
+    r#gen.emit("\tb.ne\t.Lfree_list_wide_loop");
+    r#gen.emit("\tcmp\tx11, #1");
+    r#gen.emit("\tb.eq\t.Lfree_list_wide_str");
+    r#gen.emit("\tbl\tstone.free_list");
+    r#gen.emit("\tb\t.Lfree_list_wide_loop");
+    r#gen.emit(".Lfree_list_wide_str:");
+    r#gen.emit("\tbl\tstone.free_str");
+    r#gen.emit("\tb\t.Lfree_list_wide_loop");
     r#gen.emit(".Lfree_list_storage:");
     r#gen.emit("\tldr\tx9, [x19, #16]");
     r#gen.emit("\tbl\tstone.mem_free");
@@ -906,12 +941,18 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     pop_frame(r#gen, &saved);
 }
 
-/// Emits the list runtime. A list is a pointer to a counted 32-byte header `{len, cap, data,
-/// elem}` (see [`memory_runtime`]), where `data` points to `cap` 8-byte elements and `elem` says
-/// what they are: 0 for values that are not counted, 1 for strings, and 2 for lists.
+/// Emits the list runtime. A list is a pointer to a counted 40-byte header `{len, cap, data,
+/// kinds, width}` (see [`memory_runtime`]), laid out as x64's is (see
+/// `x64::builtins::list_runtime`): `len` and `cap` count 8-byte slots, each element is `width`
+/// of them, and `kinds` says, two bits for each value of an element, whether it is a string (1),
+/// a list (2), or not counted (0).
 ///
-/// - `stone.list_new` returns a list of length `x0` whose elements the caller fills in, with
-///   `elem` set to `x1`
+/// - `stone.list_new_wide` returns a list of `x0` slots whose values the caller fills in, with
+///   `kinds` set to `x1` and `width` to `x2`
+/// - `stone.list_new` does the same for a list of one value each, whose `width` is 1
+/// - `stone.retain_slots` adds a reference to each counted value of the `x1` slots from `x0`,
+///   which start at an element and whose `kinds` and `width` are `x2` and `x3`, clobbering only
+///   `x8` to `x11`, `x16`, and `x17`
 /// - `stone.list_append` appends `x1` to list `x0`, doubling its capacity when full
 /// - `stone.list_copy` returns in `x9` a copy of the list in `x9`, retaining each element if
 ///   they are counted, and drops one reference to the original, which something else still
@@ -922,17 +963,21 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// Indexing is generated inline by `Arm64Generator::list_slot` (in `emit.rs`) rather than called
 /// here.
 pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
-    // x19 holds the list, x20 its length, and x21 what its elements are
-    let saved = ["x19", "x20", "x21"];
+    // x19 holds the list, x20 its length, x21 what its elements are, and x22 their width
+    let saved = ["x19", "x20", "x21", "x22"];
     r#gen.emit("stone.list_new:");
+    r#gen.emit("\tmov\tx2, #1");
+    r#gen.emit("stone.list_new_wide:");
     push_frame(r#gen, &saved);
     r#gen.emit("\tmov\tx20, x0");
     r#gen.emit("\tmov\tx21, x1");
-    r#gen.emit("\tmov\tx0, #32");
+    r#gen.emit("\tmov\tx22, x2");
+    r#gen.emit("\tmov\tx0, #40");
     r#gen.emit("\tbl\tstone.alloc");
     r#gen.emit("\tmov\tx19, x0");
     r#gen.emit("\tstr\tx20, [x19]");
     r#gen.emit("\tstr\tx21, [x19, #24]");
+    r#gen.emit("\tstr\tx22, [x19, #32]");
     // room for at least 4 elements, so the first appends do not reallocate
     r#gen.emit("\tmov\tx9, #4");
     r#gen.emit("\tcmp\tx20, x9");
@@ -943,6 +988,31 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tstr\tx0, [x19, #16]");
     r#gen.emit("\tmov\tx0, x19");
     pop_frame(r#gen, &saved);
+
+    // x8 counts the slots, x9 how many fields of the element are left, and x10 the kinds of the
+    // rest, two bits each
+    r#gen.emit("stone.retain_slots:");
+    r#gen.emit("\tmov\tx8, #0");
+    r#gen.emit("\tmov\tx9, #0");
+    r#gen.emit(".Lretain_slots_loop:");
+    r#gen.emit("\tcmp\tx8, x1");
+    r#gen.emit("\tb.ge\t.Lretain_slots_done");
+    r#gen.emit("\tcbnz\tx9, .Lretain_slots_field");
+    r#gen.emit("\tmov\tx9, x3");
+    r#gen.emit("\tmov\tx10, x2");
+    r#gen.emit(".Lretain_slots_field:");
+    r#gen.emit("\tand\tx11, x10, #3");
+    r#gen.emit("\tlsr\tx10, x10, #2");
+    r#gen.emit("\tsub\tx9, x9, #1");
+    r#gen.emit("\tldr\tx16, [x0, x8, lsl #3]");
+    r#gen.emit("\tadd\tx8, x8, #1");
+    r#gen.emit("\tcbz\tx11, .Lretain_slots_loop"); // this field is not counted
+    r#gen.emit("\tldur\tx17, [x16, #-8]");
+    r#gen.emit("\tadd\tx17, x17, #1");
+    r#gen.emit("\tstur\tx17, [x16, #-8]");
+    r#gen.emit("\tb\t.Lretain_slots_loop");
+    r#gen.emit(".Lretain_slots_done:");
+    r#gen.emit("\tret");
 
     let saved = ["x19", "x20"];
     r#gen.emit("stone.list_append:");
@@ -976,11 +1046,16 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx19, x9");
     r#gen.emit("\tldr\tx0, [x19]");
     r#gen.emit("\tldr\tx1, [x19, #24]");
-    r#gen.emit("\tbl\tstone.list_new");
+    r#gen.emit("\tldr\tx2, [x19, #32]");
+    r#gen.emit("\tbl\tstone.list_new_wide");
     r#gen.emit("\tmov\tx20, x0");
     r#gen.emit("\tldr\tx10, [x20, #16]");
     r#gen.emit("\tldr\tx11, [x19, #16]");
     r#gen.emit("\tldr\tx17, [x19, #24]");
+    // the values of wider elements are retained after copying
+    r#gen.emit("\tldr\tx16, [x19, #32]");
+    r#gen.emit("\tcmp\tx16, #1");
+    r#gen.emit("\tcsel\tx17, x17, xzr, eq");
     r#gen.emit("\tmov\tx8, #0");
     r#gen.emit(".Llist_copy_loop:");
     r#gen.emit("\tldr\tx9, [x19]");
@@ -995,6 +1070,14 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tstur\tx16, [x9, #-8]");
     r#gen.emit("\tb\t.Llist_copy_loop");
     r#gen.emit(".Llist_copy_done:");
+    r#gen.emit("\tldr\tx3, [x19, #32]");
+    r#gen.emit("\tcmp\tx3, #1");
+    r#gen.emit("\tb.eq\t.Llist_copy_retained");
+    r#gen.emit("\tldr\tx0, [x20, #16]");
+    r#gen.emit("\tldr\tx1, [x19]");
+    r#gen.emit("\tldr\tx2, [x19, #24]");
+    r#gen.emit("\tbl\tstone.retain_slots");
+    r#gen.emit(".Llist_copy_retained:");
     // the variable or slot that held the original now holds the copy instead
     r#gen.emit("\tldur\tx16, [x19, #-8]");
     r#gen.emit("\tsub\tx16, x16, #1");
@@ -1146,6 +1229,10 @@ fn list_extend(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tadd\tx10, x10, x9");
     r#gen.emit("\tldr\tx11, [x20, #16]");
     r#gen.emit("\tldr\tx17, [x19, #24]");
+    // the values of wider elements are retained after copying
+    r#gen.emit("\tldr\tx16, [x19, #32]");
+    r#gen.emit("\tcmp\tx16, #1");
+    r#gen.emit("\tcsel\tx17, x17, xzr, eq");
     r#gen.emit("\tmov\tx8, #0");
     r#gen.emit(".Llist_extend_loop:");
     r#gen.emit("\tcmp\tx8, x21");
@@ -1159,6 +1246,14 @@ fn list_extend(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tstur\tx16, [x9, #-8]");
     r#gen.emit("\tb\t.Llist_extend_loop");
     r#gen.emit(".Llist_extend_done:");
+    r#gen.emit("\tldr\tx3, [x19, #32]");
+    r#gen.emit("\tcmp\tx3, #1");
+    r#gen.emit("\tb.eq\t.Llist_extend_retained");
+    r#gen.emit("\tmov\tx0, x10");
+    r#gen.emit("\tmov\tx1, x21");
+    r#gen.emit("\tldr\tx2, [x19, #24]");
+    r#gen.emit("\tbl\tstone.retain_slots");
+    r#gen.emit(".Llist_extend_retained:");
     r#gen.emit("\tldr\tx9, [x19]");
     r#gen.emit("\tadd\tx9, x9, x21");
     r#gen.emit("\tstr\tx9, [x19]");
@@ -1175,7 +1270,13 @@ fn list_slice(r#gen: &mut dyn AssemblyGenerator) {
     push_frame(r#gen, &saved);
     r#gen.emit("\tmov\tx19, x0");
     r#gen.emit("\tldr\tx9, [x19]");
+    // the bounds count elements, each `width` slots
+    r#gen.emit("\tldr\tx10, [x19, #32]");
+    r#gen.emit("\tsdiv\tx9, x9, x10");
     slice_bounds(r#gen, "list_slice");
+    r#gen.emit("\tldr\tx10, [x19, #32]");
+    r#gen.emit("\tcmp\tx10, #1");
+    r#gen.emit("\tb.ne\t.Llist_slice_wide");
     r#gen.emit("\tmov\tx0, x22");
     r#gen.emit("\tldr\tx1, [x19, #24]");
     r#gen.emit("\tbl\tstone.list_new");
@@ -1198,6 +1299,44 @@ fn list_slice(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tstur\tx16, [x9, #-8]");
     r#gen.emit("\tb\t.Llist_slice_loop");
     r#gen.emit(".Llist_slice_done:");
+    r#gen.emit("\tmov\tx0, x23");
+    pop_frame(r#gen, &saved);
+    // each element picked is `width` slots, in x10, copied from x13 to x11, then retained: x12
+    // is the element picked, x8 how many are copied, and x9 the slot within one
+    r#gen.emit(".Llist_slice_wide:");
+    r#gen.emit("\tmul\tx0, x22, x10");
+    r#gen.emit("\tldr\tx1, [x19, #24]");
+    r#gen.emit("\tmov\tx2, x10");
+    r#gen.emit("\tbl\tstone.list_new_wide");
+    r#gen.emit("\tmov\tx23, x0");
+    r#gen.emit("\tldr\tx10, [x19, #32]");
+    r#gen.emit("\tldr\tx11, [x23, #16]");
+    r#gen.emit("\tmov\tx12, x20");
+    r#gen.emit("\tmov\tx8, #0");
+    r#gen.emit(".Llist_slice_wide_loop:");
+    r#gen.emit("\tcmp\tx8, x22");
+    r#gen.emit("\tb.ge\t.Llist_slice_wide_copied");
+    r#gen.emit("\tmul\tx13, x12, x10");
+    r#gen.emit("\tlsl\tx13, x13, #3");
+    r#gen.emit("\tldr\tx14, [x19, #16]");
+    r#gen.emit("\tadd\tx13, x14, x13");
+    r#gen.emit("\tmov\tx9, #0");
+    r#gen.emit(".Llist_slice_wide_slot:");
+    r#gen.emit("\tldr\tx15, [x13, x9, lsl #3]");
+    r#gen.emit("\tstr\tx15, [x11]");
+    r#gen.emit("\tadd\tx11, x11, #8");
+    r#gen.emit("\tadd\tx9, x9, #1");
+    r#gen.emit("\tcmp\tx9, x10");
+    r#gen.emit("\tb.lt\t.Llist_slice_wide_slot");
+    r#gen.emit("\tadd\tx12, x12, x21");
+    r#gen.emit("\tadd\tx8, x8, #1");
+    r#gen.emit("\tb\t.Llist_slice_wide_loop");
+    r#gen.emit(".Llist_slice_wide_copied:");
+    r#gen.emit("\tldr\tx0, [x23, #16]");
+    r#gen.emit("\tldr\tx1, [x23]");
+    r#gen.emit("\tldr\tx2, [x19, #24]");
+    r#gen.emit("\tmov\tx3, x10");
+    r#gen.emit("\tbl\tstone.retain_slots");
     r#gen.emit("\tmov\tx0, x23");
     pop_frame(r#gen, &saved);
 }

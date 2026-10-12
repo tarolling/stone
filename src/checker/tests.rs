@@ -54,7 +54,7 @@ fn every_example_and_test_program_checks_cleanly() {
 
 #[test]
 fn literals_and_operators_have_types() {
-    let source = "a = 1\nb = \"s\" + \"t\"\nc = a < 2\nd = none\ne = not a\nf = -a * 2\n";
+    let source = "a = 1\nb = \"s\" + \"t\"\nc = a < 2\nd = none\ne = not c\nf = -a * 2\n";
     assert_eq!(type_of_symbol(source, "a"), "int");
     assert_eq!(type_of_symbol(source, "b"), "str");
     assert_eq!(type_of_symbol(source, "c"), "bool");
@@ -78,7 +78,8 @@ fn a_function_without_ret_returns_none() {
 
 #[test]
 fn recursive_functions_are_typed() {
-    let source = "fn fact(n: int) -> int;\n    if n;\n        ret n * fact(n - 1)\n    ret 1\n";
+    let source =
+        "fn fact(n: int) -> int;\n    if n != 0;\n        ret n * fact(n - 1)\n    ret 1\n";
     assert_eq!(type_of_symbol(source, "fact"), "fn(int) -> int");
 }
 
@@ -498,7 +499,7 @@ fn int_and_float_convert_numbers() {
 fn floats_are_not_conditions() {
     assert_error(
         "if 1.5;\n    print(1)\n",
-        "a condition must be int or bool, found float",
+        "a condition must be bool, found float",
         1,
         4,
     );
@@ -627,19 +628,39 @@ fn endswith_takes_a_str() {
 }
 
 #[test]
-fn conditions_must_be_int_or_bool() {
+fn conditions_must_be_bool() {
     assert_error(
         "if \"yes\";\n    print(1)\n",
-        "a condition must be int or bool, found str",
+        "a condition must be bool, found str",
         1,
         4,
     );
     assert_error(
         "x = not \"s\"\n",
-        "a condition must be int or bool, found str",
+        "a condition must be bool, found str",
         1,
         9,
     );
+    assert_eq!(
+        errors("if 1 or 0;\n    print(1)\n"),
+        [
+            ("a condition must be bool, found int".to_string(), 1, 4),
+            ("a condition must be bool, found int".to_string(), 1, 9),
+        ]
+    );
+    assert_error(
+        "x = true or 0\n",
+        "a condition must be bool, found int",
+        1,
+        13,
+    );
+    assert_error(
+        "n = 3\nwhile n;\n    n -= 1\n",
+        "a condition must be bool, found int",
+        2,
+        7,
+    );
+    assert_error("x = not 0\n", "a condition must be bool, found int", 1, 9);
 }
 
 #[test]
@@ -677,7 +698,7 @@ fn calls_must_agree_on_argument_types() {
 #[test]
 fn returns_must_agree() {
     assert_error(
-        "fn f(x: int) -> int;\n    if x;\n        ret 1\n    ret \"a\"\n",
+        "fn f(x: int) -> int;\n    if x > 0;\n        ret 1\n    ret \"a\"\n",
         "'f' returns int, but this is str",
         4,
         9,
@@ -687,7 +708,7 @@ fn returns_must_agree() {
 #[test]
 fn a_value_returning_function_must_return_on_every_path() {
     assert_error(
-        "fn f(x: int) -> int;\n    if x;\n        ret 1\n",
+        "fn f(x: int) -> int;\n    if x > 0;\n        ret 1\n",
         "'f' does not return a value on every path",
         1,
         4,
@@ -696,7 +717,7 @@ fn a_value_returning_function_must_return_on_every_path() {
 
 #[test]
 fn an_endless_loop_counts_as_returning() {
-    let source = "fn f(k: int) -> int;\n    m = 1\n    while 1;\n        if m * k == 12;\n            ret m\n        m = m + 1\nprint(f(4))\n";
+    let source = "fn f(k: int) -> int;\n    m = 1\n    while true;\n        if m * k == 12;\n            ret m\n        m = m + 1\nprint(f(4))\n";
     assert_eq!(errors(source), []);
 }
 
@@ -876,7 +897,11 @@ fn for_loop_variables_must_be_names() {
         .map(|(message, _, _)| message)
         .collect();
     assert!(
-        messages.contains(&"a 'for' loop's variable must be a name".to_string()),
+        messages.contains(
+            &"a 'for' loop's variable must be a name, or names to unpack each element into, as \
+              in 'for a, b in pairs'"
+                .to_string()
+        ),
         "{messages:?}"
     );
 }
@@ -1018,9 +1043,9 @@ fn reading_before_assigning_is_an_error() {
 
 #[test]
 fn assignments_in_one_branch_are_not_enough() {
-    assert_error("c = 1\nif c;\n    x = 1\nprint(x)\n", UNASSIGNED, 4, 7);
+    assert_error("c = true\nif c;\n    x = 1\nprint(x)\n", UNASSIGNED, 4, 7);
     assert_error(
-        "fn f(c: int) -> int;\n    if c;\n        x = 1\n    ret x\n",
+        "fn f(c: bool) -> int;\n    if c;\n        x = 1\n    ret x\n",
         UNASSIGNED,
         4,
         9,
@@ -1029,17 +1054,18 @@ fn assignments_in_one_branch_are_not_enough() {
 
 #[test]
 fn assignments_in_every_branch_are_enough() {
-    let source = "c = 1\nif c;\n    x = 1\nelif c + 1;\n    x = 2\nelse;\n    x = 3\nprint(x)\n";
+    let source =
+        "c = 1\nif c == 1;\n    x = 1\nelif c == 2;\n    x = 2\nelse;\n    x = 3\nprint(x)\n";
     assert_eq!(errors(source), []);
 }
 
 #[test]
 fn branches_that_leave_do_not_count() {
     let source =
-        "fn f(c: int) -> int;\n    if c;\n        x = 1\n    else;\n        ret 0\n    ret x\n";
+        "fn f(c: bool) -> int;\n    if c;\n        x = 1\n    else;\n        ret 0\n    ret x\n";
     assert_eq!(errors(source), []);
     let source =
-        "for i in range(3);\n    if i;\n        x = i\n    else;\n        cont\n    print(x)\n";
+        "for i in range(3);\n    if i > 0;\n        x = i\n    else;\n        cont\n    print(x)\n";
     assert_eq!(errors(source), []);
 }
 
@@ -1872,4 +1898,194 @@ fn random_functions_check_their_arguments() {
             "{call}"
         );
     }
+}
+
+#[test]
+fn tuples_have_a_type_per_field() {
+    let source = "t = (1, \"a\", (2.5, [true]))\n";
+    assert_eq!(
+        type_of_symbol(source, "t"),
+        "tuple[int, str, tuple[float, list[bool]]]"
+    );
+}
+
+#[test]
+fn tuple_types_are_written_in_signatures() {
+    let source =
+        "fn divide(a: int, b: int) -> tuple[int, int];\n    ret (a / b, a % b)\nq = divide(7, 2)\n";
+    assert_eq!(type_of_symbol(source, "q"), "tuple[int, int]");
+    assert_error(
+        "fn f() -> tuple[int, str];\n    ret (1, 2)\n",
+        "'f' returns tuple[int, str], but this is tuple[int, int]",
+        2,
+        9,
+    );
+}
+
+#[test]
+fn unpacking_gives_each_name_its_field() {
+    let source = "a, (b, c) = (1, (\"x\", [2.5]))\n";
+    assert_eq!(type_of_symbol(source, "a"), "int");
+    assert_eq!(type_of_symbol(source, "b"), "str");
+    assert_eq!(type_of_symbol(source, "c"), "list[float]");
+    // a value not known yet becomes a tuple
+    let source = "xs = []\nxs.append((1, \"a\"))\nn, s = xs.pop()\n";
+    assert_eq!(type_of_symbol(source, "s"), "str");
+    let source = "fn f(pairs: list[tuple[str, int]]);\n    for name, score in pairs;\n        print(name, score + 1)\n";
+    assert_eq!(errors(source), []);
+}
+
+#[test]
+fn unpacking_needs_a_tuple_of_as_many_values() {
+    assert_error(
+        "a, b, c = (1, 2)\n",
+        "cannot unpack tuple[int, int] into 3 names; it has 2 values",
+        1,
+        1,
+    );
+    assert_error(
+        "a, b = 1\n",
+        "cannot unpack int; only a tuple can be unpacked, as in 'a, b = (1, 2)'",
+        1,
+        1,
+    );
+    assert_error(
+        "xs = [1]\nxs[0], b = (1, 2)\n",
+        "only names can be unpacked into, as in 'a, b = t'; assign an element on a line of its own",
+        2,
+        1,
+    );
+    assert_error(
+        "a, (b, a) = (1, (2, 3))\n",
+        "'a' is unpacked into more than once",
+        1,
+        8,
+    );
+    assert_error(
+        "for a, b in [1, 2];\n    print(a)\n",
+        "cannot unpack int; only a tuple can be unpacked, as in 'a, b = (1, 2)'",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn tuples_are_indexed_by_constants() {
+    let source = "t = (1, \"a\", 2.5)\na = t[0]\nb = t[-1]\nc = t[1]\n";
+    assert_eq!(type_of_symbol(source, "a"), "int");
+    assert_eq!(type_of_symbol(source, "b"), "float");
+    assert_eq!(type_of_symbol(source, "c"), "str");
+    assert_error(
+        "t = (1, 2)\ni = 0\nprint(t[i])\n",
+        "a tuple index must be a number written in the code, such as 't[0]'; unpack the tuple \
+         to name its values, as in 'a, b = t'",
+        3,
+        9,
+    );
+    assert_error(
+        "t = (1, 2)\nprint(t[2])\n",
+        "index 2 is out of range for tuple[int, int], which has 2 values",
+        2,
+        9,
+    );
+    assert_error(
+        "t = (1, 2)\nprint(t[-3])\n",
+        "index -3 is out of range for tuple[int, int], which has 2 values",
+        2,
+        9,
+    );
+    assert_error(
+        "t = (1, 2)\nprint(t[1:])\n",
+        "a tuple cannot be sliced; unpack it to name its values, as in 'a, b, c = t'",
+        2,
+        9,
+    );
+}
+
+#[test]
+fn tuples_cannot_change() {
+    let message = "a tuple cannot be changed; build a new one, as in 't = (v, t[1])'";
+    assert_error("t = (1, 2)\nt[0] = 3\n", message, 2, 1);
+    assert_error("t = (1, 2)\nt[0] += 3\n", message, 2, 1);
+    assert_error("t = ([1], 2)\nt[0].append(3)\n", message, 2, 1);
+    assert_error("t = ([1], 2)\nt[0][0] = 3\n", message, 2, 1);
+    assert_error("ps = [(1, 2)]\nps[0][1] = 3\n", message, 2, 1);
+    // replacing a whole element of a list of tuples is fine
+    assert_eq!(errors("ps = [(1, 2)]\nps[0] = (3, 4)\n"), []);
+}
+
+#[test]
+fn tuples_are_not_numbers_strings_or_lists() {
+    assert_error(
+        "t = (1, 2)\nprint(t + 1)\n",
+        "'+' needs int, float, or str operands, found tuple[int, int]",
+        2,
+        7,
+    );
+    assert_error(
+        "t = (1, 2)\nprint(t == t)\n",
+        "'==' and '!=' cannot compare tuple[int, int]",
+        2,
+        7,
+    );
+    assert_error(
+        "t = (1, 2)\nprint(str(t))\n",
+        "'str' needs an int, float, bool, or str, found tuple[int, int]",
+        2,
+        11,
+    );
+    assert_error(
+        "t = (1, 2)\nfor x in t;\n    print(x)\n",
+        "a tuple cannot be iterated; unpack it, or use a list",
+        2,
+        10,
+    );
+    assert_error(
+        "t = (1, 2)\nif t;\n    print(1)\n",
+        "a condition must be bool, found tuple[int, int]",
+        2,
+        4,
+    );
+}
+
+#[test]
+fn a_list_element_holds_at_most_32_values() {
+    let fields = vec!["1"; 33].join(", ");
+    let source = format!("xs = [({fields})]\n");
+    let (message, line, col) = errors(&source).remove(0);
+    assert_eq!(
+        (
+            message.starts_with("a list element can hold at most 32 values, but tuple[int"),
+            line,
+            col
+        ),
+        (true, 1, 6)
+    );
+    assert!(message.ends_with("holds 33"), "{message}");
+    let fields = vec!["int"; 33].join(", ");
+    let source = format!("fn f(xs: list[tuple[{fields}]]);\n    print(xs)\n");
+    assert_eq!(errors(&source).len(), 1);
+    // a tuple outside a list has no limit
+    let fields = vec!["1"; 40].join(", ");
+    assert_eq!(errors(&format!("t = ({fields})\nprint(t)\n")), []);
+}
+
+#[test]
+fn a_function_indexes_a_tuple_global_assigned_after_it() {
+    let source = "fn first() -> int;\n    ret pair[0]\nfn name() -> str;\n    ret pair[-1]\npair = (1, \"one\")\n";
+    assert_eq!(errors(source), []);
+    assert_error(
+        "fn third() -> int;\n    ret pair[2]\npair = (1, 2)\n",
+        "index 2 is out of range for tuple[int, int], which has 2 values",
+        2,
+        14,
+    );
+    assert_error(
+        "fn first() -> str;\n    ret pair[0]\npair = (1, 2)\n",
+        "expected int, found str",
+        2,
+        14,
+    );
+    // a list global still indexes as before
+    assert_eq!(errors("fn first() -> int;\n    ret xs[0]\nxs = [1]\n"), []);
 }

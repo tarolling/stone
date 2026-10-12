@@ -6,7 +6,7 @@
 //! it in place. [`live_after`] says which variables are still read after each statement, and
 //! [`last_uses`] which variables a statement uses for the last time.
 
-use crate::ast::{Expr, ExprKind, Stmt, StmtKind};
+use crate::ast::{Expr, ExprKind, Stmt, StmtKind, target_names};
 use crate::checker::collect_assigned;
 use crate::span::Span;
 use crate::stdlib::is_builtin;
@@ -121,6 +121,18 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
     }
 }
 
+/// Removes from `live` each name the target `target` assigns: a name, or every name of a tuple
+/// target, as in `a, (b, c) = t`.
+fn kill_targets(target: &Expr, live: &mut HashSet<String>) {
+    let mut names = Vec::new();
+    target_names(target, &mut names);
+    for name in names {
+        if let ExprKind::Name { id, .. } = &name.kind {
+            live.remove(id);
+        }
+    }
+}
+
 /// Collects every name `expr` mentions, including the names of called functions.
 fn expr_names<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
     match &expr.kind {
@@ -131,7 +143,9 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
             expr_names(right, out);
         }
         ExprKind::UnaryOp { operand, .. } => expr_names(operand, out),
-        ExprKind::BoolOp { values, .. } | ExprKind::List { elts: values, .. } => {
+        ExprKind::BoolOp { values, .. }
+        | ExprKind::List { elts: values, .. }
+        | ExprKind::Tuple { elts: values, .. } => {
             values.iter().for_each(|value| expr_names(value, out))
         }
         ExprKind::Compare {
@@ -239,13 +253,11 @@ impl Liveness<'_> {
             StmtKind::Assign { targets, value } => {
                 let mut live = out;
                 for target in targets {
-                    if let ExprKind::Name { id, .. } = &target.kind {
-                        live.remove(id);
-                    }
+                    kill_targets(target, &mut live);
                 }
                 // a changed list is read, along with its indexes
                 for target in targets {
-                    if !matches!(target.kind, ExprKind::Name { .. }) {
+                    if let ExprKind::Subscript { .. } = target.kind {
                         self.expr(target, &mut live);
                     }
                 }
@@ -293,9 +305,7 @@ impl Liveness<'_> {
                     self.loops.push((out.clone(), head.clone()));
                     let mut next = self.block(body, head.clone());
                     self.loops.pop();
-                    if let ExprKind::Name { id, .. } = &target.kind {
-                        next.remove(id);
-                    }
+                    kill_targets(target, &mut next);
                     next.extend(out.iter().cloned());
                     if next == head {
                         break head;
@@ -409,6 +419,19 @@ mod tests {
         assert_eq!(
             live("x = [1]\nx = [2]\nprint(x)\nx = x\n"),
             [names(&[]), names(&["x"]), names(&["x"]), names(&[])]
+        );
+    }
+
+    #[test]
+    fn unpacking_assigns_every_name() {
+        // `a` and `b` are not read before the unpacking assigns them
+        assert_eq!(
+            live("t = (1, 2)\na, (b, c) = (t, 3)\nprint(a, b, c)\n"),
+            [names(&["t"]), names(&["a", "b", "c"]), names(&[])]
+        );
+        assert_eq!(
+            live("ps = [(1, 2)]\nfor a, b in ps;\n    print(a)\nprint(ps)\n"),
+            [names(&["ps"]), names(&["ps"]), names(&["ps"]), names(&[])]
         );
     }
 

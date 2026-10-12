@@ -116,6 +116,9 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
 fn strip_type(ty: TypeExpr) -> TypeExpr {
     let kind = match ty.kind {
         TypeExprKind::List(elem) => TypeExprKind::List(Box::new(strip_type(*elem))),
+        TypeExprKind::Tuple(elts) => {
+            TypeExprKind::Tuple(elts.into_iter().map(strip_type).collect())
+        }
         kind => kind,
     };
     TypeExpr {
@@ -165,6 +168,10 @@ fn strip_expr(expr: Expr) -> Expr {
             ctx,
         },
         ExprKind::List { elts, ctx } => ExprKind::List {
+            elts: strip_all(elts),
+            ctx,
+        },
+        ExprKind::Tuple { elts, ctx } => ExprKind::Tuple {
             elts: strip_all(elts),
             ctx,
         },
@@ -1722,4 +1729,177 @@ fn pub_must_come_before_def() {
         error_of("pub x = 1\n"),
         ("expected 'fn', found 'x'".to_string(), 1, 5)
     );
+}
+
+fn tuple(elts: Vec<Expr>, ctx: ExprContext) -> Expr {
+    ExprKind::Tuple { elts, ctx }.into()
+}
+
+fn stored(id: &str) -> Expr {
+    ExprKind::Name {
+        id: id.to_string(),
+        ctx: ExprContext::Store,
+    }
+    .into()
+}
+
+#[test]
+fn tuple_literals_parse() {
+    use ExprContext::Load;
+    assert_eq!(expr_of("(1, 2)\n"), tuple(vec![*int(1), *int(2)], Load));
+    assert_eq!(
+        expr_of("(1, x, 3,)\n"),
+        tuple(vec![*int(1), *name("x"), *int(3)], Load)
+    );
+    assert_eq!(
+        expr_of("(1, (x, 2))\n"),
+        tuple(vec![*int(1), tuple(vec![*name("x"), *int(2)], Load)], Load)
+    );
+    // one value in parentheses is still a group
+    assert_eq!(expr_of("(x)\n"), *name("x"));
+}
+
+#[test]
+fn tuples_span_their_parentheses() {
+    let Mod::Module { body } =
+        parse_within("(1, 2)\n".to_string(), Duration::from_secs(5)).unwrap();
+    let StmtKind::Expr { value } = &body[0].kind else {
+        panic!("expected expression statement");
+    };
+    assert_eq!(value.span, span(1, 1, 1, 7));
+}
+
+#[test]
+fn unpacking_targets_parse() {
+    use ExprContext::Store;
+    assert_eq!(
+        assign_target_of("q, r = t\n"),
+        tuple(vec![stored("q"), stored("r")], Store)
+    );
+    assert_eq!(
+        assign_target_of("(a, b,) = t\n"),
+        tuple(vec![stored("a"), stored("b")], Store)
+    );
+    assert_eq!(
+        assign_target_of("a, (b, c) = t\n"),
+        tuple(
+            vec![stored("a"), tuple(vec![stored("b"), stored("c")], Store)],
+            Store
+        )
+    );
+    assert_eq!(assign_target_of("(a) = 1\n"), stored("a"));
+}
+
+#[test]
+fn for_loops_unpack_into_names() {
+    let Mod::Module { body } = without_spans(
+        parse_within(
+            "for name, score in pairs;\n    print(name)\n".to_string(),
+            Duration::from_secs(5),
+        )
+        .unwrap(),
+    );
+    let StmtKind::For { target, .. } = &body[0].kind else {
+        panic!("expected for loop");
+    };
+    assert_eq!(
+        **target,
+        tuple(vec![stored("name"), stored("score")], ExprContext::Store)
+    );
+}
+
+#[test]
+fn tuple_types_nest() {
+    assert_eq!(
+        signature_of("fn f(t: tuple[int, list[tuple[str, float]]]) -> tuple[int, str,]; ret t\n"),
+        (
+            vec![Some("tuple[int, list[tuple[str, float]]]".to_string())],
+            Some("tuple[int, str]".to_string())
+        )
+    );
+}
+
+#[test]
+fn values_separated_by_commas_need_parentheses() {
+    let message =
+        "values separated by commas need parentheses to make a tuple, as in '(a, b)'".to_string();
+    assert_eq!(error_of("x = 1, 2\n"), (message.clone(), 1, 5));
+    assert_eq!(error_of("x = a, b,\n"), (message.clone(), 1, 5));
+    assert_eq!(error_of("a, b\n"), (message.clone(), 1, 1));
+    assert_eq!(error_of("q, r = a, b\n"), (message.clone(), 1, 8));
+    assert_eq!(error_of("for x in a, b;\n    print(x)\n"), (message, 1, 10));
+}
+
+#[test]
+fn returning_several_values_needs_a_tuple() {
+    assert_eq!(
+        error_of("fn f() -> tuple[int, int];\n    ret 1, 2\n"),
+        (
+            "to return several values, return a tuple, as in 'ret (a, b)'".to_string(),
+            2,
+            9
+        )
+    );
+}
+
+#[test]
+fn a_tuple_needs_two_values() {
+    assert_eq!(
+        error_of("x = (1,)\n"),
+        (
+            "a tuple needs at least two values; to group one value, leave out the comma"
+                .to_string(),
+            1,
+            5
+        )
+    );
+    assert_eq!(
+        error_of("x = ()\n"),
+        (
+            "'()' is not a value; a tuple needs at least two values, as in '(a, b)'".to_string(),
+            1,
+            5
+        )
+    );
+    assert_eq!(
+        error_of("a, = t\n"),
+        (
+            "unpacking needs at least two names; to assign one value, leave out the comma"
+                .to_string(),
+            1,
+            1
+        )
+    );
+    assert_eq!(
+        error_of("fn f(t: tuple[int]);\n    print(t)\n"),
+        (
+            "a tuple type needs at least two types, as in 'tuple[int, str]'".to_string(),
+            1,
+            9
+        )
+    );
+}
+
+#[test]
+fn a_hint_gives_way_to_an_error_further_on() {
+    assert_eq!(
+        error_of("a, b = c d\n"),
+        ("expected end of line, found 'd'".to_string(), 1, 10)
+    );
+    assert_eq!(
+        error_of("x = (1, 2\n"),
+        ("expected ')', found end of line".to_string(), 1, 10)
+    );
+}
+
+#[test]
+fn nested_tuples_parse_in_linear_time() {
+    let depth = 40;
+    let value = format!("{}1, 2{}", "(".repeat(depth), ", 3)".repeat(depth));
+    assert!(parse_within(format!("x = {value}\n"), Duration::from_secs(5)).is_ok());
+    let groups = format!("{}x{}", "(".repeat(depth), ")".repeat(depth));
+    assert!(parse_within(format!("{groups} = 1\n"), Duration::from_secs(5)).is_ok());
+    assert!(parse_within(format!("y = {groups}\n"), Duration::from_secs(5)).is_ok());
+    let targets = format!("{}a, b{}", "(".repeat(depth), ", c)".repeat(depth));
+    assert!(parse_within(format!("{targets} = t\n"), Duration::from_secs(5)).is_ok());
 }

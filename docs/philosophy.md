@@ -139,6 +139,8 @@ never reads it, directly or through the functions it calls, and never in an inte
 where a later entry may read it. Arithmetic on lists, such as `xs = xs * 2.0 + ys` or
 `xs += ys`, writes its result over an operand's list when that operand is at its last use or is
 the variable being assigned and nothing else refers to its list, so it allocates nothing.
+Tuples never change, so they need nothing of this: the compiler keeps each of a tuple's values as
+a variable of its own, counting only the strings and lists among them.
 
 ## Fast like Rust
 
@@ -156,7 +158,11 @@ Status: the compiler lowers to an IR, allocates registers with linear scan, and 
 few cases such as division by a constant. Arithmetic on whole lists, such as `a * 2.0 + b`,
 compiles to one loop with no intermediate lists and no index checks, which handles two elements
 at a time with SSE2 or NEON where the operations allow, so on the `vector` benchmark it is
-about 3 times as fast as numpy, which builds a temporary array for each operator. Wider vectors
+about 3 times as fast as numpy, which builds a temporary array for each operator. A tuple is
+never allocated: its values live in registers like any other variables, a function takes and
+returns them as separate values, and a list of tuples stores each element's values side by side,
+like a Rust `Vec<(i64, String)>`, which is a first step toward choosing where every value lives.
+Wider vectors
 such as AVX2 on targets that have them, and optimization passes (inlining, constant
 propagation, removing checks and reference counts it can prove redundant) are future work.
 

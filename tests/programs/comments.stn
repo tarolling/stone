@@ -7,7 +7,7 @@ fn double(n: int) -> int; // after a header
     ret n * 2
 // back at column one inside nothing
 
-if x;
+if x == 1;
 // at column one inside a block does not end it
     print(double(x))
         // deeper than the block does not start one

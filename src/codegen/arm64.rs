@@ -18,7 +18,7 @@ pub mod floats;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
-    Context, LIST_ROUTINES, STRING_METHOD_ROUTINES, global_label, immortal_string,
+    Context, LIST_ROUTINES, STRING_METHOD_ROUTINES, escape, global_label, immortal_string,
 };
 use crate::codegen::{AssemblyGenerator, Os, Target};
 use crate::project::SourceMap;
@@ -169,23 +169,56 @@ impl Arm64Generator {
     /// with status 1. A failure with a site records it in `stone.site` first, and so does a call
     /// to one of the
     /// [`FALLIBLE_ROUTINES`](crate::codegen::context::FALLIBLE_ROUTINES), whose own failures have none.
+    ///
+    /// A failure whose message has holes jumps to `stone.fail_detail` instead, with `x0`
+    /// pointing at the three pieces of text around them, one after another, and the ints for the
+    /// holes in [`FAIL_VALUES`](emit::FAIL_VALUES), so `(index {}, length {})` prints as
+    /// `(index 5, length 2)` without allocating.
     fn emit_failures(&mut self) {
         let Some(failures) = self.ctx.failures() else {
             return;
         };
+        let mut pieces = Vec::new();
         for failure in failures {
-            let text = self.ctx.intern_string(&failure.message);
             self.emit(&format!("{}:", failure.label));
+            for line in &failure.setup {
+                self.emit(line);
+            }
             if let Some(site) = &failure.site {
                 self.record_site(site);
             }
-            address(self, "x0", &text);
-            self.emit("\tb\tstone.fail");
+            match failure.pieces() {
+                Some(texts) => {
+                    let label = self.ctx.new_label("fail_pieces");
+                    address(self, "x0", &label);
+                    self.emit("\tb\tstone.fail_detail");
+                    let texts: Vec<String> = texts.into_iter().map(escape).collect();
+                    pieces.push((label, texts));
+                }
+                None => {
+                    let text = self.ctx.intern_string(&failure.message);
+                    address(self, "x0", &text);
+                    self.emit("\tb\tstone.fail");
+                }
+            }
         }
         let prefix = self.ctx.intern_string("error: ");
         let newline = self.ctx.intern_string("\n");
         let no_location = self.ctx.new_label("fail_message");
+        let common = self.ctx.new_label("fail_common");
+        let [first, second] = emit::FAIL_VALUES;
+        // x21 says whether x0 starts the pieces of a detailed message, whose values wait in x22
+        // and x23, and x19 and x20 hold the message and the site
+        self.emit("stone.fail_detail:");
+        self.emit(&format!("\tmov\tx22, {first}"));
+        self.emit(&format!("\tmov\tx23, {second}"));
+        self.emit("\tmov\tx21, #1");
+        // room to write an int's digits in
+        self.emit("\tsub\tsp, sp, #32");
+        self.emit(&format!("\tb\t{common}"));
         self.emit("stone.fail:");
+        self.emit("\tmov\tx21, #0");
+        self.emit(&format!("{common}:"));
         self.emit("\tmov\tx19, x0");
         self.emit("\tadrp\tx16, stone.site");
         self.emit("\tldr\tx20, [x16, :lo12:stone.site]");
@@ -196,13 +229,24 @@ impl Arm64Generator {
         self.emit("\tadd\tx20, x1, x2");
         self.emit("\tadd\tx20, x20, #1");
         self.emit(&format!("{no_location}:"));
-        for text in [Some(prefix), None, Some(newline)] {
-            match text {
-                Some(text) => address(self, "x1", &text),
-                None => self.emit("\tmov\tx1, x19"),
-            }
+        address(self, "x1", &prefix);
+        self.write_stderr();
+        self.emit("\tmov\tx1, x19");
+        self.write_stderr();
+        let plain = self.ctx.new_label("fail_plain");
+        self.emit(&format!("\tcbz\tx21, {plain}"));
+        for value in ["x22", "x23"] {
+            // the next piece follows the last one's terminating zero
+            self.emit("\tadd\tx24, x1, x2");
+            self.emit("\tadd\tx24, x24, #1");
+            self.emit(&format!("\tmov\tx9, {value}"));
+            self.write_int_stderr();
+            self.emit("\tmov\tx1, x24");
             self.write_stderr();
         }
+        self.emit(&format!("{plain}:"));
+        address(self, "x1", &newline);
+        self.write_stderr();
         let done = self.ctx.new_label("fail_done");
         self.emit(&format!("\tcbz\tx20, {done}"));
         self.emit("\tmov\tx1, x20");
@@ -211,6 +255,16 @@ impl Arm64Generator {
         self.emit("\tmov\tx0, #1");
         system_call(self, Sys::Exit);
 
+        if !pieces.is_empty() {
+            self.emit("\t.section\t.rodata");
+            for (label, texts) in pieces {
+                self.emit(&format!("{label}:"));
+                for text in texts {
+                    self.emit(&format!("\t.string \"{text}\""));
+                }
+            }
+            self.emit("\t.text");
+        }
         let sites = self.ctx.sites();
         if !sites.is_empty() {
             self.emit("\t.section\t.rodata");
@@ -235,6 +289,41 @@ impl Arm64Generator {
         self.emit("\tadd\tx2, x2, #1");
         self.emit(&format!("\tb\t{length}"));
         self.emit(&format!("{write}:"));
+        self.emit("\tmov\tx0, #2"); // stderr
+        system_call(self, Sys::Write);
+    }
+
+    /// Writes the int in `x9` to stderr in decimal, as `print` writes it, into the 32 bytes at
+    /// `sp`. Clobbers `x0`-`x2` and `x9`-`x13`.
+    ///
+    /// For example, `-12` writes `-12`.
+    fn write_int_stderr(&mut self) {
+        let digits = self.ctx.new_label("fail_digits");
+        let digit = self.ctx.new_label("fail_digit");
+        let write = self.ctx.new_label("fail_int_write");
+        // digits are written backwards from the end of the room
+        self.emit("\tadd\tx1, sp, #32");
+        self.emit("\tmov\tx10, #0"); // negative flag
+        self.emit("\tcmp\tx9, #0");
+        self.emit(&format!("\tb.ge\t{digits}"));
+        // negating the minimum leaves it unchanged, which unsigned division still reads correctly
+        self.emit("\tneg\tx9, x9");
+        self.emit("\tmov\tx10, #1");
+        self.emit(&format!("{digits}:"));
+        self.emit("\tmov\tx11, #10");
+        self.emit(&format!("{digit}:"));
+        self.emit("\tudiv\tx12, x9, x11");
+        self.emit("\tmsub\tx13, x12, x11, x9");
+        self.emit("\tadd\tx13, x13, #48"); // '0'
+        self.emit("\tstrb\tw13, [x1, #-1]!");
+        self.emit("\tmov\tx9, x12");
+        self.emit(&format!("\tcbnz\tx9, {digit}"));
+        self.emit(&format!("\tcbz\tx10, {write}"));
+        self.emit("\tmov\tx13, #45"); // '-'
+        self.emit("\tstrb\tw13, [x1, #-1]!");
+        self.emit(&format!("{write}:"));
+        self.emit("\tadd\tx2, sp, #32");
+        self.emit("\tsub\tx2, x2, x1");
         self.emit("\tmov\tx0, #2"); // stderr
         system_call(self, Sys::Write);
     }

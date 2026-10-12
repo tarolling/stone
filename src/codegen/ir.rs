@@ -150,6 +150,22 @@ impl RcKind {
     }
 }
 
+/// Returns the name of value `i` of the tuple variable `name`, once nested tuples are flattened,
+/// which lowering keeps as a variable of its own.
+///
+/// For example, `leaf_name("t", 2)` is `t.2`, which no stone name can be, since names have no dots.
+pub fn leaf_name(name: &str, i: usize) -> String {
+    format!("{name}.{i}")
+}
+
+/// Returns the stone variable a variable of lowering belongs to: `name` itself, or the tuple
+/// variable whose value it is.
+///
+/// For example, `variable_of("t.2")` is `t`, and `variable_of("xs")` is `xs`.
+pub fn variable_of(name: &str) -> &str {
+    name.split_once('.').map_or(name, |(variable, _)| variable)
+}
+
 /// What a [`Inst::Call`] calls.
 #[derive(Clone, Debug, PartialEq)]
 pub enum Callee {
@@ -327,17 +343,28 @@ pub enum Inst {
     /// Drops a reference to the counted value `src`, unless it is null, freeing it when no
     /// references are left. It is not a call: freeing preserves every register a vreg can be in.
     Release { src: Operand, kind: RcKind },
-    /// Calls a function with `args` and stores its result in `dst`, if any. A call may change
-    /// globals and lists, but never a caller's vregs.
+    /// Calls a function with `args` and stores its results in `dsts`: none, one, or one for each
+    /// value of a tuple a stone function returns, as in `v2, v3 = call divide(v0, v1)`. A call may
+    /// change globals and lists, but never a caller's vregs.
     Call {
-        dst: Option<VReg>,
+        dsts: Vec<VReg>,
         callee: Callee,
         args: Vec<Operand>,
     },
 }
 
 impl Inst {
-    /// Returns the vreg this instruction writes, if any.
+    /// Returns the vregs this instruction writes.
+    ///
+    /// For example, `v2 = add v0, v1` defines `v2`, and `v2, v3 = call f()` defines both.
+    pub fn defs(&self) -> Vec<VReg> {
+        if let Inst::Call { dsts, .. } = self {
+            return dsts.clone();
+        }
+        self.def().into_iter().collect()
+    }
+
+    /// Returns the one vreg this instruction writes, if any, or the first a call writes.
     ///
     /// For example, `v2 = add v0, v1` defines `v2`.
     pub fn def(&self) -> Option<VReg> {
@@ -360,7 +387,8 @@ impl Inst {
             | Inst::ListUnique { dst, .. }
             | Inst::IntToFloat { dst, .. }
             | Inst::FloatToInt { dst, .. } => Some(*dst),
-            Inst::Call { dst, .. } | Inst::ListStore { old: dst, .. } => *dst,
+            Inst::Call { dsts, .. } => dsts.first().copied(),
+            Inst::ListStore { old: dst, .. } => *dst,
             Inst::StoreGlobal { .. }
             | Inst::ListInit { .. }
             | Inst::ListSet { .. }
@@ -441,20 +469,23 @@ pub enum Terminator {
         then: BlockId,
         otherwise: BlockId,
     },
-    /// Returns from the function, with `none` when there is no value.
-    Return(Option<Operand>),
-    /// Stops the program with the runtime error `message`, as `fail "math domain error"`.
-    Fail(String),
+    /// Returns from the function with its values: one, or one for each value of a tuple, as in
+    /// `ret v0, v1`.
+    Return(Vec<Operand>),
+    /// Stops the program with the runtime error `message`, as `fail "math domain error"`, after
+    /// filling each `{}` in it with the next of the int values, as `stdlib::fill` does, as in
+    /// `fail "list index out of range (index {}, length {})", v1, v2`.
+    Fail(String, Vec<Operand>),
 }
 
 impl Terminator {
     /// Returns the operands the terminator reads.
     pub fn operands(&self) -> Vec<Operand> {
         match self {
-            Terminator::Jump(_) | Terminator::Return(None) | Terminator::Fail(_) => vec![],
+            Terminator::Jump(_) => vec![],
             Terminator::Branch { cond, .. } => vec![*cond],
             Terminator::CmpBranch { lhs, rhs, .. } => vec![*lhs, *rhs],
-            Terminator::Return(Some(value)) => vec![*value],
+            Terminator::Return(values) | Terminator::Fail(_, values) => values.clone(),
         }
     }
 
@@ -475,7 +506,7 @@ impl Terminator {
             | Terminator::CmpBranch {
                 then, otherwise, ..
             } => vec![*then, *otherwise],
-            Terminator::Return(_) | Terminator::Fail(_) => vec![],
+            Terminator::Return(_) | Terminator::Fail(..) => vec![],
         }
     }
 }
@@ -644,9 +675,10 @@ impl fmt::Display for Inst {
                 RcKind::Str => write!(f, "release_str {src}"),
                 RcKind::List => write!(f, "release_list {src}"),
             },
-            Inst::Call { dst, callee, args } => {
-                if let Some(dst) = dst {
-                    write!(f, "{dst} = ")?;
+            Inst::Call { dsts, callee, args } => {
+                if !dsts.is_empty() {
+                    let dsts: Vec<String> = dsts.iter().map(VReg::to_string).collect();
+                    write!(f, "{} = ", dsts.join(", "))?;
                 }
                 write!(f, "call {callee}({})", list(args))
             }
@@ -678,9 +710,10 @@ impl fmt::Display for Terminator {
                     cond.name()
                 )
             }
-            Terminator::Return(None) => write!(f, "ret"),
-            Terminator::Return(Some(value)) => write!(f, "ret {value}"),
-            Terminator::Fail(message) => write!(f, "fail {message:?}"),
+            Terminator::Return(values) if values.is_empty() => write!(f, "ret"),
+            Terminator::Return(values) => write!(f, "ret {}", list(values)),
+            Terminator::Fail(message, values) if values.is_empty() => write!(f, "fail {message:?}"),
+            Terminator::Fail(message, values) => write!(f, "fail {message:?}, {}", list(values)),
         }
     }
 }

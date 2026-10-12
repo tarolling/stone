@@ -150,11 +150,14 @@ impl Parser {
         })
     }
 
-    /// Parses a bare name used as an assignment target, such as `x` in `x = 1`.
+    /// Parses a bare name used as an assignment target, such as `x` in `x = 1`, or targets in
+    /// parentheses, such as `(b, c)` in `a, (b, c) = t`. A single target in parentheses is just
+    /// that target, so `(x) = 1` assigns `x`.
     ///
     /// ```text
     /// star_atom:
     ///     | NAME
+    ///     | '(' star_targets ')'
     /// ```
     pub(super) fn parse_star_atom(&mut self) -> ParseExprResult {
         let mark = self.pos;
@@ -169,6 +172,16 @@ impl Parser {
                 },
                 span,
             )));
+        }
+        self.pos = mark;
+
+        // '(' star_targets ')'
+        if self.expect(TokenType::LParen).is_some()
+            && let Ok(mut target) = self.nested(Self::parse_star_targets)
+            && self.expect(TokenType::RParen).is_some()
+        {
+            target.span = self.span_from(mark);
+            return Ok(target);
         }
         self.pos = mark;
 
@@ -229,32 +242,55 @@ impl Parser {
         self.parse_target_with_star_atom()
     }
 
-    /// Parses the target on the left side of an assignment, such as `x` in `x = 1`.
+    /// Parses the target on the left side of an assignment or after `for`, such as `x` in
+    /// `x = 1`, or names separated by commas, such as `q, r` in `q, r = divide(7, 2)`, which
+    /// unpack a tuple.
     ///
     /// ```text
-    /// star_targets: star_target !','
+    /// star_targets:
+    ///     | star_target (',' star_target)* [',']
     /// ```
     pub(super) fn parse_star_targets(&mut self) -> ParseExprResult {
         debug!("parse_star_targets: parsing...");
-        // star_target !','
-        if let Ok(expr) = self.parse_star_target() {
-            if self.peek().r#type == TokenType::Comma {
-                return Err(ParserError {
-                    method: "parse_star_targets".to_string(),
-                    token: self.peek().r#type.clone(),
-                    span: self.peek().span,
-                });
-            }
-
-            debug!("parse_star_targets: successfully parsed: {:?}", expr);
-            return Ok(expr);
+        let mark = self.pos;
+        let first = self.parse_star_target()?;
+        if self.peek().r#type != TokenType::Comma {
+            debug!("parse_star_targets: successfully parsed: {:?}", first);
+            return Ok(first);
         }
 
-        Err(ParserError {
-            method: "parse_star_targets".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        let mut elts = vec![*first];
+        while self.expect(TokenType::Comma).is_some() {
+            let before = self.pos;
+            match self.parse_star_target() {
+                Ok(target) => elts.push(*target),
+                Err(_) => {
+                    // a trailing comma is allowed
+                    self.pos = before;
+                    break;
+                }
+            }
+        }
+        if elts.len() == 1 {
+            let span = self.span_from(mark);
+            self.hint(
+                span,
+                "unpacking needs at least two names; to assign one value, leave out the comma",
+            );
+            self.pos = mark;
+            return Err(ParserError {
+                method: "parse_star_targets".to_string(),
+                token: self.peek().r#type.clone(),
+                span: self.peek().span,
+            });
+        }
+        Ok(Box::new(Expr::new(
+            ExprKind::Tuple {
+                elts,
+                ctx: ExprContext::Store,
+            },
+            self.span_from(mark),
+        )))
     }
 
     /// Parses a comma-separated list of call arguments, such as `1, x + 2` in `f(1, x + 2)`.
@@ -376,13 +412,14 @@ impl Parser {
     ///     | strings
     ///     | NUMBER
     ///     | list
+    ///     | tuple
     ///     | group
     /// ```
     pub(super) fn parse_atom(&mut self) -> ParseExprResult {
         let mark = self.pos;
 
-        // group
-        if let Ok(expr) = self.parse_group() {
+        // tuple | group
+        if let Ok(expr) = self.parse_tuple_or_group() {
             return Ok(expr);
         }
         self.pos = mark;
@@ -483,31 +520,81 @@ impl Parser {
         })
     }
 
-    /// Parses a parenthesized expression, such as `(1 + 2)` in `(1 + 2) * 3`. The expression's span
-    /// grows to cover the parentheses.
+    /// Parses a parenthesized expression, such as `(1 + 2)` in `(1 + 2) * 3`, whose span grows to
+    /// cover the parentheses, or a tuple of two or more values, such as `(1, "a")`. Both start with
+    /// `'(' expression`, which is parsed once, so nested parentheses take linear time.
     ///
     /// ```text
+    /// tuple:
+    ///     | '(' expression (',' expression)+ [','] ')'
     /// group:
     ///     | '(' expression ')'
     /// ```
-    pub(super) fn parse_group(&mut self) -> ParseExprResult {
+    pub(super) fn parse_tuple_or_group(&mut self) -> ParseExprResult {
         let mark = self.pos;
+        let error = |parser: &mut Self| {
+            parser.pos = mark;
+            Err(ParserError {
+                method: "parse_tuple_or_group".to_string(),
+                token: parser.peek().r#type.clone(),
+                span: parser.peek().span,
+            })
+        };
+
+        if self.expect(TokenType::LParen).is_none() {
+            return error(self);
+        }
+        if self.peek().r#type == TokenType::RParen {
+            let span = self.tokens[mark].span.to(self.peek().span);
+            self.record_expected("an expression".to_string(), false);
+            self.hint(
+                span,
+                "'()' is not a value; a tuple needs at least two values, as in '(a, b)'",
+            );
+            return error(self);
+        }
+        let Ok(first) = self.parse_expression() else {
+            return error(self);
+        };
 
         // '(' expression ')'
-        if self.expect(TokenType::LParen).is_some()
-            && let Ok(mut expr) = self.parse_expression()
-            && self.expect(TokenType::RParen).is_some()
-        {
+        if self.expect(TokenType::RParen).is_some() {
+            let mut expr = first;
             expr.span = self.span_from(mark);
             return Ok(expr);
         }
-        self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_group".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        // '(' expression (',' expression)+ [','] ')'
+        let mut elts = vec![*first];
+        while self.expect(TokenType::Comma).is_some() {
+            let before = self.pos;
+            match self.parse_expression() {
+                Ok(elt) => elts.push(*elt),
+                Err(_) => {
+                    // a trailing comma is allowed
+                    self.pos = before;
+                    break;
+                }
+            }
+        }
+        if elts.len() == 1 && self.peek().r#type == TokenType::RParen {
+            let span = self.tokens[mark].span.to(self.peek().span);
+            self.hint(
+                span,
+                "a tuple needs at least two values; to group one value, leave out the comma",
+            );
+            return error(self);
+        }
+        if elts.len() > 1 && self.expect(TokenType::RParen).is_some() {
+            return Ok(Box::new(Expr::new(
+                ExprKind::Tuple {
+                    elts,
+                    ctx: ExprContext::Load,
+                },
+                self.span_from(mark),
+            )));
+        }
+        error(self)
     }
 
     /// Parses a list literal, such as `[1, 2]` or `[]`.
@@ -1181,15 +1268,43 @@ impl Parser {
         self.nested(Self::parse_disjunction)
     }
 
-    /// Parses one or more comma-separated expressions, such as `1, 2`.
+    /// Parses the expression of a statement, such as `x + 1` in `x = x + 1`.
+    ///
+    /// Values separated by commas, such as `1, 2` in `x = 1, 2`, are an error that says a tuple
+    /// needs parentheses, rather than a tuple as in Python.
     ///
     /// ```text
     /// expressions:
-    ///     | expression (',' expression )+ [',']
-    ///     | expression ','
     ///     | expression
     /// ```
     pub(super) fn parse_expressions(&mut self) -> ParseExprResult {
-        self.parse_expression()
+        self.parse_expressions_or(
+            "values separated by commas need parentheses to make a tuple, as in '(a, b)'",
+        )
+    }
+
+    /// Parses one expression like [`Self::parse_expressions`], noting `message` as the error for
+    /// values separated by commas.
+    pub(super) fn parse_expressions_or(&mut self, message: &str) -> ParseExprResult {
+        let mark = self.pos;
+        let first = self.parse_expression()?;
+        if self.peek().r#type != TokenType::Comma {
+            return Ok(first);
+        }
+        while self.expect(TokenType::Comma).is_some() {
+            let before = self.pos;
+            if self.parse_expression().is_err() {
+                self.pos = before;
+                break;
+            }
+        }
+        let span = self.span_from(mark);
+        self.hint(span, message);
+        self.pos = mark;
+        Err(ParserError {
+            method: "parse_expressions".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
     }
 }

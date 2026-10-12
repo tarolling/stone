@@ -1,0 +1,96 @@
+// a list of tuples stores each tuple's values side by side
+use random
+
+scores = [("ann", 3), ("bo", 5)]
+print(scores, scores.len(), scores[0], scores[-1][0], scores[1][1])
+for name, score in scores;
+    print(name, score * 2)
+for pair in scores;
+    print(pair)
+
+// growing past the capacity, one element at a time
+squares = []
+for i in range(100);
+    squares.append((i, i * i, str(i)))
+print(squares.len(), squares[0], squares[57], squares[-1])
+total = 0
+for n, square, text in squares;
+    total += square + text.len()
+print(total)
+
+// inserting at the front, the middle, and the end
+letters = [("b", 2)]
+letters.insert(0, ("a", 1))
+letters.insert(letters.len(), ("d", 4))
+letters.insert(-1, ("c", 3))
+letters.insert(-4, ("start", 0))
+letters.insert(5, ("end", 5))
+print(letters)
+
+// removing from the end, the front, and the middle
+last = letters.pop()
+first = letters.pop(0)
+middle = letters.pop(-2)
+print(last, first, middle, letters)
+key, value = letters.pop()
+print(key, value, letters)
+letters.pop()
+print(letters)
+
+// joining lists, including a list with itself
+more = [("x", 9)]
+more.extend([("y", 8), ("z", 7)])
+more.extend(more)
+print(more)
+
+// slices pick whole elements, with any step
+print(more[1:4], more[::-1], more[::2], more[-2:], more[5:1:-2], more[3:3])
+
+// lists are values, so a change copies a list that something else holds
+before = more
+more[0] = ("changed", 0)
+more.append(("new", 1))
+print(before)
+print(more)
+
+// replacing and reading elements by index
+people = [("ann", [1, 2]), ("bo", [])]
+people[1] = ("bo", [3])
+people[0] = (people[0][0] + "!", people[0][1])
+print(people, people[0][1][1], people[1][1])
+
+// nested lists and tuples of lists of tuples
+grid = [[(0, 0), (0, 1)], [], [(1, 0)]]
+grid[1].append((9, 9))
+grid.append([(2, 0), (2, 1), (2, 2)])
+print(grid, grid[3][2], grid[3][2][1], grid.len(), grid[1].len())
+tagged = (7, [(1, "one"), (2, "two")], "end")
+count, items, label = tagged
+items.append((3, "three"))
+print(tagged, items, label, count)
+
+// a random element, drawn as from any other list
+random.seed(4)
+picked = random.choice(scores)
+print(picked, random.choice(squares)[2])
+
+// functions take and return lists of tuples
+fn best(entries: list[tuple[str, int]]) -> tuple[str, int];
+    top = entries[0]
+    for entry in entries;
+        if entry[1] > top[1];
+            top = entry
+    ret top
+
+fn add(entries: list[tuple[str, int]], name: str, score: int) -> list[tuple[str, int]];
+    entries.append((name, score))
+    ret entries
+
+scores = add(scores, "cy", 9)
+scores = add(scores, "dee", 1)
+print(best(scores), scores)
+
+// an empty list of tuples prints as any empty list
+empty = [("none", 0)]
+empty.pop()
+print(empty, empty.len())

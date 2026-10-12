@@ -1,0 +1,7 @@
+(3, 4) ('ann', 31, ['chess', 'go']) ann go
+1 9
+right left
+ann 3
+bo 5
+cy 4
+[('ann', 3), ('bo', 5), ('cy', 4)] bo

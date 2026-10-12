@@ -17,9 +17,10 @@ use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label};
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::{
     BinOp, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, RcKind, Terminator, VReg,
+    variable_of,
 };
 use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
-use crate::stdlib::MAX_CALL_DEPTH;
+use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
 use std::collections::HashMap;
 
 /// Registers that calls preserve, which are the only ones that can hold a value across a call.
@@ -32,6 +33,17 @@ const CALLEE_SAVED: [&str; 10] = [
 pub(super) const CALLER_SAVED: [&str; 12] = [
     "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x12", "x13", "x14", "x15",
 ];
+
+/// The registers a stone function returns its first values in, which are its argument
+/// registers. A tuple's values past these go just above the arguments the caller passes on the
+/// stack, at the bottom of the caller's frame, so the callee writes result `j` at
+/// `[x29, #16 + 8 * (stack arguments + j - 8)]`.
+const RESULT_REGS: [&str; 8] = ARG_REGS;
+
+/// The registers that hold the ints a runtime error's message is filled with when code jumps to
+/// a failure whose message has holes, such as the index and the length of
+/// `list index out of range (index {}, length {})`. They are never allocated.
+pub(super) const FAIL_VALUES: [&str; 2] = ["x10", "x11"];
 
 /// The largest offset an 8-byte `ldr` or `str` can add to its base register.
 const MAX_SCALED_OFFSET: i64 = 8 * 4095;
@@ -120,10 +132,14 @@ fn float_cc(cond: Cond) -> (&'static str, &'static str) {
 /// A function being emitted: where each vreg lives, and its labels.
 struct Frame {
     locations: HashMap<VReg, Location<&'static str>>,
-    /// The bytes at the bottom of the frame for arguments past the eighth, below the spill slots.
+    /// The bytes at the bottom of the frame for arguments past the eighth, and results past
+    /// [`RESULT_REGS`], of the calls the function makes, below the spill slots.
     outgoing: i64,
     blocks: Vec<String>,
     epilogue: String,
+    /// How many parameters arrive on the stack, above which the caller has room for the results
+    /// past [`RESULT_REGS`].
+    stack_params: usize,
 }
 
 impl Frame {
@@ -174,7 +190,10 @@ impl Arm64Generator {
             .iter()
             .flat_map(|block| &block.insts)
             .filter_map(|inst| match inst {
-                Inst::Call { args, .. } => Some(args.len().saturating_sub(ARG_REGS.len())),
+                Inst::Call { args, dsts, .. } => Some(
+                    args.len().saturating_sub(ARG_REGS.len())
+                        + dsts.len().saturating_sub(RESULT_REGS.len()),
+                ),
                 _ => None,
             })
             .max()
@@ -190,6 +209,7 @@ impl Arm64Generator {
             outgoing,
             blocks,
             epilogue: self.ctx.new_label("return"),
+            stack_params: function.params.len().saturating_sub(ARG_REGS.len()),
         };
         let is_main = function.name.is_none();
 
@@ -655,14 +675,44 @@ impl Arm64Generator {
                     );
                 }
             }
-            Terminator::Fail(message) => {
+            Terminator::Fail(message, values) => {
+                if values.len() > FAIL_VALUES.len() {
+                    return Err(format!("too many values for the runtime error '{message}'"));
+                }
+                for (&reg, value) in FAIL_VALUES.iter().zip(values) {
+                    let value = frame.value(*value)?;
+                    self.load(reg, value);
+                }
                 let label = self.fail_here(message);
                 self.emit(&format!("\tb\t{label}"));
             }
-            Terminator::Return(value) => {
-                match value.map(|v| frame.value(v)).transpose()? {
-                    None => self.emit("\tmov\tx0, #0"),
-                    Some(value) => self.load("x0", value),
+            Terminator::Return(values) => {
+                let values = values
+                    .iter()
+                    .map(|value| frame.value(*value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                // results past the registers go to the caller's frame, before any is moved
+                for (j, value) in values.iter().enumerate().skip(RESULT_REGS.len()) {
+                    let offset = 16 + 8 * (frame.stack_params + j - RESULT_REGS.len()) as i64;
+                    if offset > MAX_SCALED_OFFSET {
+                        return Err("a function returns too many values".to_string());
+                    }
+                    let reg = self.operand(*value, "x9");
+                    self.emit(&format!("\tstr\t{reg}, [x29, #{offset}]"));
+                }
+                match values[..] {
+                    [] => self.emit("\tmov\tx0, #0"),
+                    [value] => self.load("x0", value),
+                    _ => {
+                        let moves: Vec<(Value, Value)> = RESULT_REGS
+                            .iter()
+                            .zip(&values)
+                            .map(|(reg, value)| (Value::Reg(reg), *value))
+                            .collect();
+                        for (to, from) in parallel_moves(&moves, Value::Reg("x9")) {
+                            self.mov(to, from);
+                        }
+                    }
                 }
                 if next.0 < frame.blocks.len() {
                     self.emit(&format!("\tb\t{}", frame.epilogue));
@@ -907,6 +957,8 @@ impl Arm64Generator {
                 let dst = frame.reg(*dst)?;
                 let label = global_label(name);
                 if *checked {
+                    // a tuple's values are its own globals, all assigned together
+                    let name = variable_of(name);
                     let fail = self.fail_here(&format!("'{name}' is used before it is assigned"));
                     self.emit(&format!("\tadrp\tx16, {label}.set"));
                     self.emit(&format!("\tldr\tx17, [x16, :lo12:{label}.set]"));
@@ -1070,7 +1122,10 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
-            Inst::Call { dst, callee, args } => {
+            Inst::Call { dsts, callee, args } => {
+                if dsts.len() > 1 && !matches!(callee, Callee::User(_)) {
+                    return Err(format!("{callee} returns one value"));
+                }
                 if let Callee::User(_) = callee {
                     // the same limit as the interpreter, rather than overflowing the stack
                     let too_deep = self.fail_here(&format!(
@@ -1110,8 +1165,27 @@ impl Arm64Generator {
                     self.record_site(&site);
                 }
                 self.emit(&format!("\tbl\t{label}"));
-                if let Some(dst) = dst {
-                    self.store(frame.reg(*dst)?, "x0");
+                match dsts[..] {
+                    [] => {}
+                    [dst] => self.store(frame.reg(dst)?, "x0"),
+                    _ => {
+                        let mut moves = Vec::new();
+                        for (dst, reg) in dsts.iter().zip(RESULT_REGS) {
+                            moves.push((frame.reg(*dst)?, Value::Reg(reg)));
+                        }
+                        for (to, from) in parallel_moves(&moves, Value::Reg("x9")) {
+                            self.mov(to, from);
+                        }
+                    }
+                }
+                // results past the registers are above the arguments, once those are moved
+                let stack_args = args.len().saturating_sub(ARG_REGS.len());
+                for (j, dst) in dsts.iter().enumerate().skip(RESULT_REGS.len()) {
+                    let dst = frame.reg(*dst)?;
+                    let target = self.target(dst);
+                    let slot = self.slot(8 * (stack_args + j - RESULT_REGS.len()) as i64);
+                    self.emit(&format!("\tldr\t{target}, {slot}"));
+                    self.store(dst, target);
                 }
             }
         }
@@ -1121,7 +1195,7 @@ impl Arm64Generator {
     /// Returns the memory operand for element `index` of `list`.
     ///
     /// When `checked`, a negative index counts from the end, and an index still out of range
-    /// exits with an error. A list is a pointer to a `{len, cap, data, elem}` header (see
+    /// exits with an error. A list is a pointer to a `{len, cap, data, kinds, width}` header (see
     /// [`super::builtins::list_runtime`]), so for example `xs[-1]` with `xs` of length 3 checks
     /// that `-1 + 3` is below 3 and returns `[x17, x11, lsl #3]` with `x17` holding `data` and
     /// `x11` holding 2. This uses `x10`, `x11`, `x16`, and `x17`.
@@ -1132,7 +1206,19 @@ impl Arm64Generator {
             _ => None,
         };
         if checked {
-            let out_of_range = self.fail_here("list index out of range");
+            // the error reports the index as written and the length, in FAIL_VALUES
+            let mut setup = match constant {
+                Some(n) => vec![format!("\tmov\tx10, #{n}")],
+                None => vec![
+                    // a negative index was counted from the end, and only a negative one is
+                    // still negative after that, so the length comes off again
+                    "\tasr\tx9, x11, #63".to_string(),
+                    "\tand\tx9, x9, x16".to_string(),
+                    "\tsub\tx10, x11, x9".to_string(),
+                ],
+            };
+            setup.push("\tmov\tx11, x16".to_string());
+            let out_of_range = self.ctx.fail_at_after(INDEX_RANGE, self.span, setup);
             self.emit(&format!("\tldr\tx16, [{base}]"));
             match constant {
                 Some(n) => {

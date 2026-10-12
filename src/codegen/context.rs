@@ -112,12 +112,30 @@ pub const FALLIBLE_ROUTINES: &[&str] = &[
 ];
 
 /// A runtime error the code can jump to, from [`Context::fail_label`] or [`Context::fail_at`].
+///
+/// A message with holes, such as `stdlib::INDEX_RANGE`, is printed with the ints the code put in
+/// the backend's two fail value registers before jumping, or that `setup` puts there, written
+/// where the holes are.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Failure {
     pub label: String,
     pub message: String,
     /// The label of the site the error points at, from [`Context::site_label`], if it has one.
     pub site: Option<String>,
+    /// Assembly lines that run first, from [`Context::fail_at_after`], such as lines that work
+    /// out the values a message's holes need from the registers at the jump.
+    pub setup: Vec<String>,
+}
+
+impl Failure {
+    /// Returns the text around the message's two holes, or `None` for a message without any.
+    ///
+    /// For example, `list index out of range (index {}, length {})` gives
+    /// `["list index out of range (index ", ", length ", ")"]`.
+    pub fn pieces(&self) -> Option<Vec<&str>> {
+        let pieces: Vec<&str> = self.message.split("{}").collect();
+        (pieces.len() > 1).then_some(pieces)
+    }
 }
 
 /// Where a runtime error points, rendered when the program is compiled: the location, such as
@@ -311,7 +329,7 @@ impl Context {
     /// The error points at the site a fallible routine's caller recorded, if any, so runtime
     /// routines use this label; generated code uses [`Context::fail_at`].
     pub fn fail_label(&mut self, message: &str) -> String {
-        self.failure(message, None)
+        self.failure(message, None, Vec::new())
     }
 
     /// Returns a label that stops the program with `message`, pointing at `span` the way the
@@ -321,15 +339,24 @@ impl Context {
     /// of `main.stn` prints `main.stn:3:7: error: division by zero`, then the line with carets
     /// under `1 / n`. Without sources (see [`Context::set_sources`]) it prints only the message.
     pub fn fail_at(&mut self, message: &str, span: Span) -> String {
-        let site = self.site_label(span);
-        self.failure(message, site)
+        self.fail_at_after(message, span, Vec::new())
     }
 
-    fn failure(&mut self, message: &str, site: Option<String>) -> String {
+    /// Returns a label that runs the assembly lines `setup`, then stops the program with
+    /// `message` pointing at `span`, as [`Context::fail_at`] does.
+    ///
+    /// For example, an inline list index check that jumps here with the length still in memory
+    /// passes lines that load it into a fail value register, for `(index {}, length {})`.
+    pub fn fail_at_after(&mut self, message: &str, span: Span, setup: Vec<String>) -> String {
+        let site = self.site_label(span);
+        self.failure(message, site, setup)
+    }
+
+    fn failure(&mut self, message: &str, site: Option<String>, setup: Vec<String>) -> String {
         if let Some(failure) = self
             .failures
             .iter()
-            .find(|f| f.message == message && f.site == site)
+            .find(|f| f.message == message && f.site == site && f.setup == setup)
         {
             return failure.label.clone();
         }
@@ -338,6 +365,7 @@ impl Context {
             label: label.clone(),
             message: message.to_string(),
             site,
+            setup,
         });
         label
     }
@@ -401,6 +429,8 @@ impl Context {
                 }
                 format!("stone.print_{}", mangle(ty))
             }
+            // lowering prints a tuple, and a list holding one, a value at a time
+            Type::Tuple(_) => return Err("a tuple is printed a value at a time".to_string()),
             Type::Function { .. } => return Err("functions cannot be printed".to_string()),
         })
     }
@@ -428,7 +458,7 @@ impl Context {
 
     /// Returns whether the program needs the string runtime.
     pub fn needs_strings(&self) -> bool {
-        self.types.values().any(|ty| *ty == Type::Str) || self.uses(STRING_ROUTINES)
+        self.types.values().any(contains_str) || self.uses(STRING_ROUTINES)
     }
 
     /// Returns whether the program needs the list runtime.
@@ -505,7 +535,7 @@ impl Context {
 ///
 /// For example, `a"b` followed by a newline becomes `a\"b\n`, and the escape character
 /// (`\x1b`) becomes `\033`.
-fn escape(content: &str) -> String {
+pub fn escape(content: &str) -> String {
     let mut escaped = String::with_capacity(content.len());
     for ch in content.chars() {
         match ch {
@@ -541,7 +571,19 @@ pub fn function_label(name: &str) -> String {
 fn contains_list(ty: &Type) -> bool {
     match ty {
         Type::List(_) => true,
+        Type::Tuple(fields) => fields.iter().any(contains_list),
         Type::Function { params, ret } => params.iter().any(contains_list) || contains_list(ret),
+        _ => false,
+    }
+}
+
+/// Returns whether a value of type `ty` is or holds a string, outside of lists.
+///
+/// For example, `str` and `tuple[int, str]` do, and `list[str]` does not.
+fn contains_str(ty: &Type) -> bool {
+    match ty {
+        Type::Str => true,
+        Type::Tuple(fields) => fields.iter().any(contains_str),
         _ => false,
     }
 }
@@ -641,7 +683,7 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
             collect_calls_from_expr(value, calls);
             collect_calls_from_expr(slice, calls);
         }
-        ExprKind::List { elts, .. } => {
+        ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
             for elt in elts {
                 collect_calls_from_expr(elt, calls);
             }

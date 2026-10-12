@@ -1,0 +1,14 @@
+(1, 'a', (2.5, ['x', 'y']), true, none)
+(1, 2) ("it's", 'q"uote') (-0.0, 1e+100, [1, 2])
+('a', ('b', ('c', 'd')))
+1 a none true 2.5 ['x', 'y'] x
+ab
+1 a 2.5 ['x', 'y'] true none
+1 two [3] [3] two
+2 1
+right left
+[2, 3] [1]
+(5, 'five') 5 five
+(3, 'three') (2, 'two')
+25 far
+(3, 'abc')

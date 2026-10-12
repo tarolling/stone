@@ -3,7 +3,7 @@
 //! For example, running `x = 42` followed by `print(x)` prints `42`.
 
 use crate::ast::{
-    BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp,
+    BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp, target_names,
 };
 use crate::checker::{collect_assigned, place, place_spans, range_args};
 use crate::diagnostic::Diagnostic;
@@ -88,6 +88,8 @@ pub enum Value {
     Str(Rc<str>),
     None,
     List(Rc<Vec<Value>>),
+    /// A tuple of two or more fields, which never changes.
+    Tuple(Rc<[Value]>),
 }
 
 /// Makes a new list of strings, such as the pieces `split` returns.
@@ -136,9 +138,10 @@ impl Value {
         Value::List(Rc::new(items))
     }
 
-    /// Formats the value the way `print` shows it, with strings inside lists quoted.
+    /// Formats the value the way `print` shows it, with strings inside lists and tuples quoted.
     ///
-    /// For example, `[1, 2]` prints as `[1, 2]` and `["a"]` as `['a']`.
+    /// For example, `[1, 2]` prints as `[1, 2]`, `["a"]` as `['a']`, and `(1, "a")` as
+    /// `(1, 'a')`.
     fn display(&self, nested: bool) -> String {
         match self {
             Value::Int(i) => i.to_string(),
@@ -151,18 +154,27 @@ impl Value {
                 let items: Vec<String> = items.iter().map(|v| v.display(true)).collect();
                 format!("[{}]", items.join(", "))
             }
+            Value::Tuple(fields) => {
+                let fields: Vec<String> = fields.iter().map(|v| v.display(true)).collect();
+                format!("({})", fields.join(", "))
+            }
         }
     }
 
-    fn is_truthy(&self) -> bool {
+    /// Returns whether this value holds a list, which a change can copy: a list, or a tuple with
+    /// one among its fields at any depth.
+    fn holds_list(&self) -> bool {
         match self {
-            Value::Int(i) => *i != 0,
-            Value::Float(x) => *x != 0.0,
-            Value::Bool(b) => *b,
-            Value::Str(s) => !s.is_empty(),
-            Value::None => false,
-            Value::List(items) => !items.is_empty(),
+            Value::List(_) => true,
+            Value::Tuple(fields) => fields.iter().any(Value::holds_list),
+            _ => false,
         }
+    }
+
+    /// Returns whether this is `true`, the only value that passes a condition, since the checker
+    /// allows only a `bool` there.
+    fn is_true(&self) -> bool {
+        matches!(self, Value::Bool(true))
     }
 
     /// Returns whether two values are equal, comparing lists by identity as compiled code does.
@@ -174,6 +186,9 @@ impl Value {
             (Value::Str(a), Value::Str(b)) => a == b,
             (Value::None, Value::None) => true,
             (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
+            (Value::Tuple(a), Value::Tuple(b)) => {
+                a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| a.equals(b))
+            }
             _ => false,
         }
     }
@@ -244,17 +259,17 @@ fn list_position(index: i64, len: usize) -> EvalResult<usize> {
 }
 
 /// Turns `index` into a position in a sequence of `len` elements or bytes, as
-/// [`list_position`] does, failing with `message` followed by the index and the length.
+/// [`list_position`] does, failing with the error `template` filled with the index and the length.
 ///
 /// For example, `position(3, 3, STRING_INDEX_RANGE)` fails with
 /// `string index out of range (index 3, length 3)`.
-fn position(index: i64, len: usize, message: &str) -> EvalResult<usize> {
+fn position(index: i64, len: usize, template: &str) -> EvalResult<usize> {
     let len = len as i64;
     let position = if index < 0 { index + len } else { index };
     if (0..len).contains(&position) {
         Ok(position as usize)
     } else {
-        Err(format!("{message} (index {index}, length {len})").into())
+        Err(stdlib::fill(template, &[index, len]).into())
     }
 }
 
@@ -302,7 +317,8 @@ fn elementwise(lazy: &Lazy) -> EvalResult<Value> {
     lazy.lists(&mut lists);
     let len = lists[0].len();
     if let Some(other) = lists.iter().find(|list| list.len() != len) {
-        return Err(format!("{} ({len} and {})", stdlib::LENGTHS_DIFFER, other.len()).into());
+        let lengths = [len as i64, other.len() as i64];
+        return Err(stdlib::fill(stdlib::LENGTHS_DIFFER, &lengths).into());
     }
     let items = (0..len)
         .map(|index| lazy.at(index))
@@ -376,7 +392,7 @@ fn binary(op: Operator, lhs: Value, rhs: Value) -> EvalResult<Value> {
 /// Applies the unary operator `op` to a value.
 fn unary(op: UnaryOp, value: Value) -> EvalResult<Value> {
     match op {
-        UnaryOp::Not => Ok(Value::Bool(!value.is_truthy())),
+        UnaryOp::Not => Ok(Value::Bool(!value.is_true())),
         UnaryOp::UnaryAdd => Ok(value),
         UnaryOp::UnarySub => match value {
             Value::Float(x) => Ok(Value::Float(-x)),
@@ -413,9 +429,7 @@ fn change_list(items: &mut Vec<Value>, name: &str, args: Vec<Value>) -> EvalResu
             let len = items.len() as i64;
             let position = if index < 0 { index + len } else { index };
             if !(0..=len).contains(&position) {
-                return Err(
-                    format!("{} (index {index}, length {len})", stdlib::INDEX_RANGE).into(),
-                );
+                return Err(stdlib::fill(stdlib::INDEX_RANGE, &[index, len]).into());
             }
             items.insert(position as usize, item.clone());
             Ok(Value::None)
@@ -629,7 +643,7 @@ impl<'out> Interpreter<'out> {
     /// Runs statements in order until one of them breaks, continues, or returns.
     ///
     /// For example, the body of `if x; ret 1` yields `ControlFlow::Return(Int(1))` when `x` is
-    /// truthy, which the enclosing function then returns.
+    /// true, which the enclosing function then returns.
     fn eval_block(&mut self, body: &[Stmt]) -> Result<ControlFlow, Box<dyn std::error::Error>> {
         for stmt in body {
             let flow = self.eval_stmt(stmt)?;
@@ -756,8 +770,12 @@ impl<'out> Interpreter<'out> {
             .cloned()
             .unwrap_or_default();
         for target in targets {
-            if let ExprKind::Name { id, .. } = &target.kind {
-                names.push(id.clone());
+            let mut assigned = Vec::new();
+            target_names(target, &mut assigned);
+            for name in assigned {
+                if let ExprKind::Name { id, .. } = &name.kind {
+                    names.push(id.clone());
+                }
             }
         }
         // a call claims only its own entry, by span, so an unclaimed one can stay
@@ -782,11 +800,11 @@ impl<'out> Interpreter<'out> {
     }
 
     /// Drops the variable `name` of the running body if it holds a list, the only value a
-    /// change can copy: a local of the running function, or a global at the top level, unless
+    /// change can copy, directly or in a tuple: a local of the running function, or a global at the top level, unless
     /// globals cannot move or the function `callee` may read it.
     fn drop_variable(&mut self, name: &str, callee: Option<&str>) {
         let holds_list =
-            |scope: &HashMap<String, Value>| matches!(scope.get(name), Some(Value::List(_)));
+            |scope: &HashMap<String, Value>| scope.get(name).is_some_and(Value::holds_list);
         match self.scopes.last_mut() {
             Some(scope) => {
                 if holds_list(scope) {
@@ -834,18 +852,17 @@ impl<'out> Interpreter<'out> {
             }
             StmtKind::Assign { targets, value } => {
                 // a target's indexes are read after the call
-                if targets
-                    .iter()
-                    .all(|target| matches!(target.kind, ExprKind::Name { .. }))
-                {
+                if targets.iter().all(|target| {
+                    matches!(target.kind, ExprKind::Name { .. } | ExprKind::Tuple { .. })
+                }) {
                     self.note_top_call(stmt.span, value, targets);
                 }
                 let rhs = self.eval_expr(value)?;
 
                 for target in targets {
                     match &target.kind {
-                        ExprKind::Name { id, .. } => {
-                            self.set_var(id, &rhs)?;
+                        ExprKind::Name { .. } | ExprKind::Tuple { .. } => {
+                            self.assign_target(target, &rhs)?;
                         }
                         ExprKind::Subscript { value, slice, .. } => {
                             let (root, indexes) = self.eval_place(value)?;
@@ -887,9 +904,6 @@ impl<'out> Interpreter<'out> {
                 Ok(ControlFlow::None)
             }
             StmtKind::For { target, iter, body } => {
-                let ExprKind::Name { id, .. } = &target.kind else {
-                    return Err("a 'for' loop's variable must be a name".into());
-                };
                 if let Some(args) = range_args(iter) {
                     // the bounds are evaluated once, left to right
                     let mut bounds = Vec::with_capacity(args.len());
@@ -902,7 +916,7 @@ impl<'out> Interpreter<'out> {
                         _ => return Err("range() takes 1 or 2 arguments".into()),
                     };
                     for i in start..end {
-                        self.set_var(id, &Value::Int(i))?;
+                        self.assign_target(target, &Value::Int(i))?;
                         if let Some(flow) = self.run_iteration(body)? {
                             return Ok(flow);
                         }
@@ -914,7 +928,7 @@ impl<'out> Interpreter<'out> {
                 let list = self.eval_expr(iter)?;
                 if let Value::Str(text) = &list {
                     for ch in text.chars() {
-                        self.set_var(id, &Value::Str(ch.to_string().into()))?;
+                        self.assign_target(target, &Value::Str(ch.to_string().into()))?;
                         if let Some(flow) = self.run_iteration(body)? {
                             return Ok(flow);
                         }
@@ -924,7 +938,7 @@ impl<'out> Interpreter<'out> {
                 // the loop holds the list as it was, so changing the variable copies it first
                 let items = list.as_list()?.clone();
                 for item in items.iter() {
-                    self.set_var(id, item)?;
+                    self.assign_target(target, item)?;
                     if let Some(flow) = self.run_iteration(body)? {
                         return Ok(flow);
                     }
@@ -933,7 +947,7 @@ impl<'out> Interpreter<'out> {
             }
             StmtKind::While { test, body } => {
                 loop {
-                    if !self.eval_expr(test)?.is_truthy() {
+                    if !self.eval_expr(test)?.is_true() {
                         break;
                     }
                     if let Some(flow) = self.run_iteration(body)? {
@@ -943,7 +957,7 @@ impl<'out> Interpreter<'out> {
                 Ok(ControlFlow::None)
             }
             StmtKind::If { test, body, orelse } => {
-                if self.eval_expr(test)?.is_truthy() {
+                if self.eval_expr(test)?.is_true() {
                     self.eval_block(body)
                 } else {
                     self.eval_block(orelse)
@@ -1076,8 +1090,8 @@ impl<'out> Interpreter<'out> {
                 let mut result = self.eval_expr(&values[0])?;
                 for value in &values[1..] {
                     let done = match op {
-                        BoolOp::And => !result.is_truthy(),
-                        BoolOp::Or => result.is_truthy(),
+                        BoolOp::And => !result.is_true(),
+                        BoolOp::Or => result.is_true(),
                     };
                     if done {
                         return Ok(result);
@@ -1198,6 +1212,11 @@ impl<'out> Interpreter<'out> {
                     return Ok(Value::list(picked));
                 }
                 let index = self.eval_expr(slice)?.as_int()?;
+                if let Value::Tuple(fields) = &list {
+                    // the checker allows only a constant index in range
+                    let position = list_position(index, fields.len())?;
+                    return Ok(fields[position].clone());
+                }
                 if let Value::Str(text) = &list {
                     let position = position(index, text.len(), stdlib::STRING_INDEX_RANGE)?;
                     return Ok(Value::Str(stdlib::str_at(text, position)?.into()));
@@ -1213,6 +1232,13 @@ impl<'out> Interpreter<'out> {
                     items.push(self.eval_expr(elt)?);
                 }
                 Ok(Value::list(items))
+            }
+            ExprKind::Tuple { elts, ctx: _ } => {
+                let mut fields = Vec::with_capacity(elts.len());
+                for elt in elts {
+                    fields.push(self.eval_expr(elt)?);
+                }
+                Ok(Value::Tuple(fields.into()))
             }
             ExprKind::Slice { .. } => Err("a slice can only appear in brackets".into()),
         }
@@ -1403,6 +1429,33 @@ impl<'out> Interpreter<'out> {
     /// Assigns a variable, which is local inside a function and global otherwise, like Python.
     ///
     /// For example, `x = 2` inside a function leaves a global `x` unchanged.
+    /// Assigns `value` to `target`, a name, or a tuple target whose names take the value's fields
+    /// in order, at any depth.
+    ///
+    /// For example, `a, (b, c)` takes `(1, (2, 3))` as `a = 1`, `b = 2`, and `c = 3`.
+    fn assign_target(&mut self, target: &Expr, value: &Value) -> EvalResult<()> {
+        match (&target.kind, value) {
+            (ExprKind::Name { id, .. }, _) => {
+                self.set_var(id, value)?;
+            }
+            (ExprKind::Tuple { elts, .. }, Value::Tuple(fields)) if elts.len() == fields.len() => {
+                for (elt, field) in elts.iter().zip(fields.iter()) {
+                    self.assign_target(elt, field)?;
+                }
+            }
+            (ExprKind::Tuple { elts, .. }, other) => {
+                return Err(format!(
+                    "cannot unpack {} into {} names",
+                    other.display(true),
+                    elts.len()
+                )
+                .into());
+            }
+            _ => return Err("Invalid assignment target".into()),
+        }
+        Ok(())
+    }
+
     fn set_var(&mut self, name: &str, value: &Value) -> EvalResult<Value> {
         let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
         scope.insert(name.to_string(), value.clone());
@@ -1545,5 +1598,55 @@ mod tests {
         let source = "fn peek(ys: list[int]) -> list[int];\n    ys.append(xs[0])\n    ret ys\nxs = [1]\nxs = peek(xs)\n\
                       print(xs)\n";
         assert_eq!(copies(source), 1);
+    }
+
+    /// Runs `source` and returns what it prints.
+    fn output(source: &str) -> String {
+        let module = parse(source).unwrap();
+        let mut out = Vec::new();
+        Interpreter::with_output(&mut out, Limits::DEFAULT)
+            .evaluate(&module)
+            .unwrap();
+        String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn tuples_print_like_python() {
+        assert_eq!(
+            output("t = (1, \"a\", (2.5, [\"x\"]), none, true)\nprint(t, t[1], t[-3][1])\n"),
+            "(1, 'a', (2.5, ['x']), none, true) a ['x']\n"
+        );
+        assert_eq!(
+            output("print([(\"a\", 1), (\"b\", 2)])\n"),
+            "[('a', 1), ('b', 2)]\n"
+        );
+    }
+
+    #[test]
+    fn unpacking_assigns_after_the_whole_value() {
+        assert_eq!(
+            output("a = 1\nb = 2\na, b = (b, a)\nprint(a, b)\n"),
+            "2 1\n"
+        );
+        assert_eq!(
+            output("a, (b, c) = (1, (\"x\", [2]))\nprint(c, b, a)\n"),
+            "[2] x 1\n"
+        );
+        assert_eq!(
+            output("for k, (v, w) in [(1, (2, 3)), (4, (5, 6))];\n    print(k + v + w)\n"),
+            "6\n15\n"
+        );
+    }
+
+    #[test]
+    fn a_list_unpacked_from_a_tuple_at_its_last_use_is_not_copied() {
+        assert_eq!(
+            copies("t = ([1], 2)\nxs, n = t\nxs.append(n)\nprint(xs)\n"),
+            0
+        );
+        assert_eq!(
+            copies("t = ([1], 2)\nxs, n = t\nxs.append(n)\nprint(xs, t)\n"),
+            1
+        );
     }
 }

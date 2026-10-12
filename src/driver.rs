@@ -141,7 +141,7 @@ pub fn interpret(source: &str, args: &[String]) -> Result<(), Box<dyn Error>> {
 /// with an error once it exceeds `limits`.
 ///
 /// For example, `interpret_with("print(1)\n", &mut buffer, limits)` appends `1\n` to `buffer`,
-/// while `interpret_with("while 1;\n    x = 1\n", ...)` returns an error once fuel runs out.
+/// while `interpret_with("while true;\n    x = 1\n", ...)` returns an error once fuel runs out.
 pub fn interpret_with(
     source: &str,
     out: &mut (impl Write + Send),
@@ -437,7 +437,7 @@ ret y
 
     #[test]
     fn infinite_loop_runs_out_of_fuel() {
-        assert!(run_limited("while 1;\n    x = 1\n").is_err());
+        assert!(run_limited("while true;\n    x = 1\n").is_err());
     }
 
     #[test]
@@ -472,13 +472,14 @@ ret y
 
     #[test]
     fn ret_inside_if_returns_from_the_function() {
-        let source = "fn f(x: int) -> int;\n    if x;\n        ret 1\n    ret 0\nprint(f(5))\n";
+        let source =
+            "fn f(x: int) -> int;\n    if x != 0;\n        ret 1\n    ret 0\nprint(f(5))\n";
         assert_eq!(run_limited(source), Ok("1\n".to_string()));
     }
 
     #[test]
     fn while_reevaluates_its_test() {
-        let source = "i = 0\nwhile i - 2;\n    i = i + 1\nprint(i)\n";
+        let source = "i = 0\nwhile i != 2;\n    i = i + 1\nprint(i)\n";
         assert_eq!(run_limited(source), Ok("2\n".to_string()));
     }
 

@@ -10,6 +10,34 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-11
+
+### Added
+
+- Tuples, stone's first record type: `(1, "a")` holds two or more values of their own types,
+  written `tuple[int, str]` in a signature, so a function can return several values, as in
+  `ret (q, r)`. Names separated by commas unpack one, as in `q, r = divide(7, 2)`,
+  `a, (b, c) = t`, and `for name, score in pairs;`, and `a, b = (b, a)` swaps. `t[0]` and
+  `t[-1]` read a value with a constant index. Tuples never change, print as Python prints them,
+  and cannot be compared, iterated, or used in arithmetic.
+- Compiled code never allocates a tuple: each value lives in a register or spill slot of its
+  own, a tuple argument is passed as its values, a tuple result comes back in several registers
+  (three on x86-64 and eight on arm64, then on the stack), and a list of tuples stores the
+  values of each element side by side, as many as 32 of them.
+- Values separated by commas without parentheses, as in `x = 1, 2` or `ret a, b`, are an error
+  that suggests the parentheses, as are `()`, `(x,)`, and `tuple[int]`.
+
+### Changed
+
+- Conditions must be `bool`. `if`, `elif`, `while`, and the operands of `and`, `or`, and `not`
+  no longer accept an `int`, so `if 1 or 0;` and `while n;` are errors (`a condition must be
+  bool, found int`); write `n != 0` or `while true;` instead. `a and b` and `a or b` are always
+  `bool`.
+- A compiled program's `list index out of range` and `string index out of range` errors give
+  the index and the length, as in `list index out of range (index 5, length 2)`, and
+  `lists have different lengths` gives both lengths, as in `(3 and 2)`, the same text
+  `stone run` prints.
+
 ## [0.2.3] - 2026-10-11
 
 ### Added

@@ -91,7 +91,7 @@ pub fn analyze(function: &Function) -> Liveness {
                     read.insert(reg);
                 }
             }
-            if let Some(reg) = inst.def() {
+            for reg in inst.defs() {
                 written.insert(reg);
             }
         }
@@ -159,7 +159,7 @@ pub fn analyze(function: &Function) -> Liveness {
             if inst.is_call() {
                 calls.push(use_pos);
             }
-            if let Some(reg) = inst.def() {
+            for reg in inst.defs() {
                 extend(reg, use_pos + 1);
                 weight[reg.0 as usize] += cost;
                 live.remove(reg);
@@ -279,9 +279,21 @@ mod tests {
     }
 
     #[test]
+    fn every_result_of_a_call_starts_where_the_call_writes() {
+        // b0 starts at 0, and `v3, v4 = call pair(v0)` reads at 2 and writes both results at 3
+        let liveness = liveness(
+            "fn f(a: int) -> int;\n    x, y = pair(a)\n    ret x + y\n\
+             fn pair(n: int) -> tuple[int, int];\n    ret (n, n)\n",
+        );
+        assert_eq!(span(&liveness, 0), (0, 2));
+        assert_eq!(span(&liveness, 3).0, 3);
+        assert_eq!(span(&liveness, 4).0, 3);
+        assert!(!crosses(&liveness, 3) && !crosses(&liveness, 4));
+    }
+
+    #[test]
     fn a_value_live_into_a_loop_crosses_a_call_at_the_top_of_the_loop() {
-        let source =
-            "fn f(n: int) -> int;\n    t = 0\n    while 1;\n        print(t)\n        t = t + n\n";
+        let source = "fn f(n: int) -> int;\n    t = 0\n    while true;\n        print(t)\n        t = t + n\n";
         let liveness = liveness(source);
         assert!(crosses(&liveness, 0));
         assert!(crosses(&liveness, 1));

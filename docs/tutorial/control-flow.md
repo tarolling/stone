@@ -12,9 +12,10 @@ prints
 
 ## Conditions
 
-`if`, `elif`, and `while` take a condition that is a `bool` or an `int`, where `0` is false and
-every other int is true. Strings, floats, and lists are not conditions, so write `s.len() > 0` or
-`x != 0.0` instead.
+`if`, `elif`, and `while` take a condition that is a `bool`: `true`, `false`, a comparison, or
+`and`, `or`, and `not` of those. No other value is true or false, so write `n != 0`,
+`s.len() > 0`, or `x != 0.0` instead of `n`, `s`, or `x`, and `while true;` for a loop that
+ends only with `break` or `ret`.
 
 Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`. They chain the way they do in Python:
 `1 < x < 10` means `1 < x and x < 10`, and evaluates `x` once. `<` and its relatives compare

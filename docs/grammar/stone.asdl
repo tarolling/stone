@@ -33,6 +33,7 @@ module stone
          | Subscript(expr value, expr slice, expr_context ctx)
          | Name(identifier id, expr_context ctx)
          | List(expr* elts, expr_context ctx)
+         | Tuple(expr* elts, expr_context ctx)
 
          -- can appear only in Subscript
          | Slice(expr? lower, expr? upper, expr? step)
@@ -51,5 +52,5 @@ module stone
 
     arg = (identifier arg, type? annotation)
 
-    type = Int | Float | Bool | Str | None | List(type elem)
+    type = Int | Float | Bool | Str | None | List(type elem) | Tuple(type* elts)
 }

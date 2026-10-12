@@ -94,6 +94,27 @@ which appends to it in place. The same goes for any list at its last use, such a
 `ys = xs` when nothing reads `xs` afterward. See
 [value semantics](../philosophy.md#value-semantics) for why stone works this way.
 
+## Tuples
+
+A tuple groups a few values of different types, such as a name and a score:
+
+```{literalinclude} ../examples/tuples.stn
+:language: stone
+```
+
+prints
+
+```{literalinclude} ../examples/tuples.out
+:language: text
+```
+
+A tuple's type lists the type of each value, as in `tuple[str, int]`, and a function that
+returns one, like `min_max` above, gives back several values at once. Names separated by
+commas unpack a tuple into variables, after `=` or `for`, and `t[0]` or `t[-1]` reads one
+value. A tuple never changes: to change a value, build a new tuple. A tuple's values always
+need their parentheses, so `x = 1, 2` is an error that suggests `x = (1, 2)`. See
+[Types](../reference/types.md#tuples) for the details.
+
 ## Putting it together
 
 This program finds primes with the sieve of Eratosthenes, using a `list[bool]` of candidates:

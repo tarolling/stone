@@ -1,0 +1,5 @@
+// inserting into a list of tuples past its end
+pairs = [("a", 1)]
+pairs.insert(1, ("b", 2))
+print(pairs)
+pairs.insert(5, ("c", 3))

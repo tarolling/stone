@@ -1,1 +1,1 @@
-:3:7: error: string index out of range
+:3:7: error: string index out of range (index 3, length 3)

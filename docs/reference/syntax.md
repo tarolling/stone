@@ -20,6 +20,9 @@ grammar is
 | `2 ** -1 == 0.5`, `2 ** 0.5` | `2.0 ** -1 == 0.5`; the exponent is always an `int` |
 | `[1, 2] + [3]` joins, `[0] * 3` repeats | `+ - * / % **` on lists work element by element, as in numpy; join with `xs.extend(ys)` |
 | `xs.insert(9, x)` clamps the index | an index past either end is an error |
+| `t = 1, 2`, `return a, b` | `t = (1, 2)`, `ret (a, b)`; a tuple's values always need parentheses |
+| `()`, `(x,)` | no empty or one-value tuples; a tuple has two or more values |
+| `t[i]`, `t[1:]` | `t[1]`, `t[-1]`: a constant index only, and no slices |
 
 ## Keywords
 
@@ -68,6 +71,7 @@ module's name in a `use` or before a `.`.
 | string | `"hello"`, `""` |
 | bool and none | `true`, `false`, `none` |
 | list | `[]`, `[1, 2, 3]`, `[[1.0], []]` |
+| tuple | `(1, "a")`, `(x, y, z,)`, `(1, ("a", [2.5]))` |
 
 Negative numbers are the unary `-` applied to a literal, as in `-7`. Strings use double quotes
 and must close on the line they open on. A backslash starts an escape sequence:
@@ -92,16 +96,19 @@ themselves, as in `"café"`.
 | --- | --- |
 | expression | `print(x)` |
 | assignment | `x = 1`, `a = b = 0`, `items[i] = x`, `grid[r][c] = 0` |
+| unpacking | `q, r = divide(7, 2)`, `a, b = (b, a)`, `(x, (y, z)) = t` |
 | augmented assignment | `x += 1`, `total -= cost`, `items[i] *= 2`, `grid[r][c] **= 2` |
 | function definition | `fn f(a: int, b: int) -> int;` plus a block |
-| `ret` | `ret`, `ret x` |
+| `ret` | `ret`, `ret x`, `ret (a, b)` |
 | `if` / `elif` / `else` | `if x < 0;` ... `elif x == 0;` ... `else;` ... |
 | `while` | `while i < 10;` plus a block |
-| `for` | `for x in items;`, `for c in text;`, `for i in range(n);`, `for i in range(a, b);` |
+| `for` | `for x in items;`, `for c in text;`, `for i in range(n);`, `for name, score in pairs;` |
 | `break`, `cont` | inside a loop only |
 | `use` | `use util`, `use geometry.shapes.area as area` |
 
-A `for` loop's variable must be a plain name. Functions can only be defined at the top level.
+A `for` loop's variable is a plain name, or names to unpack each tuple of a list into. Unpacking
+takes names only, each once, as many as the tuple has values; an element such as `xs[0]` is
+assigned on a line of its own. Functions can only be defined at the top level.
 `use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
 
 ## Augmented assignment
@@ -145,8 +152,9 @@ fn report(name: str, score: float);
     print(name, score)
 ```
 
-A type is `int`, `float`, `bool`, `str`, `none`, or `list[T]` for any type `T`, such as
-`list[list[int]]`. A function without `->` returns `none`, the same as writing `-> none`.
+A type is `int`, `float`, `bool`, `str`, `none`, `list[T]` for any type `T`, such as
+`list[list[int]]`, or `tuple[T1, T2, ...]` with a type for each of two or more values, such as
+`tuple[str, list[int]]`. A function without `->` returns `none`, the same as writing `-> none`.
 Types are written only in signatures: variables, including a function's locals, never have
 them. See [Types](types.md).
 
@@ -156,9 +164,9 @@ From lowest to highest precedence:
 
 | operators | operands |
 | --- | --- |
-| `or` | `int` or `bool` conditions |
-| `and` | `int` or `bool` conditions |
-| `not` | an `int` or `bool` condition |
+| `or` | `bool` conditions |
+| `and` | `bool` conditions |
+| `not` | a `bool` condition |
 | `==` `!=` `<` `<=` `>` `>=` | numbers; `==` and `!=` also strings, bools, and `none` |
 | `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings |
 | `*` `/` `%` | two ints or two floats, or lists of them |

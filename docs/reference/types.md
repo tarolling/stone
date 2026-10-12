@@ -14,6 +14,7 @@ runs, reporting every place they conflict.
 | `str` | immutable byte strings, ordered byte by byte |
 | `none` | `none`, also what a function without `ret value` returns |
 | `list[T]` | growable lists of `T`, which are values: assigning or passing one copies it |
+| `tuple[T1, T2, ...]` | two or more values of fixed types, such as `(1, "a")`, which never change |
 | functions | each function has one signature, such as `fn(int, list[str]) -> bool` |
 
 ## Writing types
@@ -25,8 +26,9 @@ fn scale(xs: list[float], k: float) -> list[float];
     ret xs * k
 ```
 
-`int`, `float`, `bool`, `str`, and `none` are written as their names, and a list as `list[T]`,
-so a grid of floats is `list[list[float]]`. A function without `->` returns `none`, the same as
+`int`, `float`, `bool`, `str`, and `none` are written as their names, a list as `list[T]`, so
+a grid of floats is `list[list[float]]`, and a tuple as `tuple[` and the type of each value, so
+a name and a score is `tuple[str, int]`. A function without `->` returns `none`, the same as
 writing `-> none`, so returning a value from it is an error that suggests the `->` to add. A
 parameter without a type is an error too, which suggests the type the checker would infer for
 it.
@@ -88,6 +90,46 @@ it starts, and the order of characters is the order of their Unicode code points
 Strings cannot be changed in place, so `s[0] = "x"` is an error; build a new string instead,
 as in `s = "x" + s[1:]`.
 
+## Tuples
+
+A tuple holds two or more values, each of its own type, written in parentheses. It is how a
+function returns several values:
+
+```stone
+fn divide(a: int, b: int) -> tuple[int, int];
+    ret (a / b, a % b)
+
+q, r = divide(17, 5)
+print(q, r, divide(9, 2))   // 3 2 (4, 1)
+```
+
+Names separated by commas, on the left of `=` or after `for`, unpack a tuple, one name for each
+value and at any depth, as in `a, (b, c) = t`. The whole value is computed before any name is
+assigned, so `a, b = (b, a)` swaps. A list of tuples unpacks one element at a time:
+
+```stone
+scores = [("ann", 3), ("bo", 5)]
+for name, score in scores;
+    print(name, score)
+```
+
+`t[0]` reads a tuple's first value and `t[-1]` its last. The index must be a number written in
+the code, so the checker knows the value's type, and one past the tuple's size is an error
+before the program runs. A tuple's values are only read: `t[0] = v` and `t[0].append(v)` are
+errors, and a new tuple replaces the old one, as in `t = (v, t[1])`.
+
+Values separated by commas need their parentheses everywhere else, so `x = 1, 2` and
+`ret a, b` are errors that suggest `(1, 2)` and `ret (a, b)`. A tuple has at least two values:
+`(x)` is `x` in parentheses, and `()` and `(x,)` are errors.
+
+A tuple prints as Python prints one, `(1, 'a')`, with strings inside it quoted. It cannot be
+compared, iterated, converted with `str`, or used in arithmetic or as a condition.
+
+A tuple is not stored anywhere of its own: the compiler keeps each of its values where it would
+keep a variable, passes and returns them as separate values, and stores the values of a list's
+tuples side by side in the list, so a tuple costs nothing over writing its values out by hand.
+An element of a list can hold at most 32 values, counting each value of its tuples.
+
 ## Rules the checker enforces
 
 These keep the two backends identical and catch common mistakes:
@@ -97,10 +139,12 @@ These keep the two backends identical and catch common mistakes:
   holds element by element, so `list[int] + list[float]` and `[1, 2] * 0.5` are errors. Strings
   never mix with numbers either: `int("3")` and `float("2.5")` read numbers from strings, and
   `str(3)` writes them.
-- **Conditions are `int` or `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject
-  floats, strings, lists, and `none`.
-- **Lists are not comparable.** `==` and `!=` cannot compare lists, and `<`, `<=`, `>`, and
-  `>=` compare only numbers and strings.
+- **Conditions are `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject ints,
+  floats, strings, lists, and `none`, so `if 1 or 0;` is an error; write `n != 0` instead of `n`.
+- **Lists and tuples are not comparable.** `==` and `!=` cannot compare lists or tuples, and
+  `<`, `<=`, `>`, and `>=` compare only numbers and strings.
+- **Tuples are indexed by constants and never change.** `t[i]` needs `i` written as a number,
+  and nothing changes a tuple's values or what they hold, so `t[0] = v` is an error.
 - **Arithmetic on lists needs numbers.** `+ - * / % **` apply to a list only if it holds ints
   or floats, so `["a"] + ["b"]` and `[[1]] * [[2]]` are errors.
 - **Changes are statements, made to variables.** Since lists are values, `xs.append(v)` and

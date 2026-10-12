@@ -1,0 +1,83 @@
+// strings and lists inside tuples are counted, and each is freed exactly once
+
+// a tuple moves at its last use
+fn grow(t: tuple[list[int], str]) -> tuple[list[int], str];
+    xs, s = t
+    xs.append(xs.len())
+    ret (xs, s + "!")
+
+t = ([1, 2], "a")
+t2 = t
+t2 = grow(t2)
+print(t2)
+u = ([7], "u")
+u = grow(u)
+u = grow(u)
+print(u)
+
+// an argument still read later is not changed by the call
+keep = ([5], "k")
+changed = grow(keep)
+print(keep, changed)
+
+// the same variable more than once in a returned tuple
+fn twice(s: str) -> tuple[str, str];
+    ret (s, s)
+
+fn twice_list(xs: list[int]) -> tuple[list[int], list[int]];
+    ret (xs, xs)
+
+word = "w" + "x"
+pair = twice(word)
+print(pair, word)
+lists = twice_list([1])
+a, b = lists
+a.append(2)
+print(a, b, lists)
+
+// unpacking a tuple at its last use takes its list without copying
+holder = ([1], 2)
+items, extra = holder
+items.append(extra)
+print(items)
+
+// swaps of counted values in a loop
+p = "p"
+q = "q"
+xs = [1]
+ys = [2]
+for i in range(5);
+    p, q = (q, p + "")
+    xs, ys = (ys, xs)
+print(p, q, xs, ys)
+
+// a global tuple of strings, assigned again and again
+names = ("ann", "bo")
+for i in range(3);
+    first, second = names
+    names = (second + "!", first)
+print(names)
+
+// a tuple read by a function after the top level reassigns it
+config = ("mode", [1, 2])
+
+fn show() -> str;
+    key, values = config
+    ret key + "=" + str(values.len())
+
+print(show())
+config = ("other", [3])
+print(show())
+
+// discarded tuples and fields
+fn make(n: int) -> tuple[str, list[str], int];
+    ret (str(n), [str(n), "x"], n)
+
+make(1)
+print(make(2)[1], make(3)[0], make(4)[2])
+nested = (make(5), make(6))
+print(nested[1][1], nested)
+
+// one value assigned to several targets shares its strings
+c = (d, e) = ("d" + "", ["e"])
+print(c, d, e)

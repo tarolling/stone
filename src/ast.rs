@@ -227,6 +227,9 @@ pub enum ExprKind {
     Name { id: Identifier, ctx: ExprContext },
     /// A list literal, such as `[1, 2, 3]`.
     List { elts: Vec<Expr>, ctx: ExprContext },
+    /// A tuple of two or more values, such as `(1, "a")`, or, as an assignment or `for` target,
+    /// names to unpack a tuple into, such as `q, r` in `q, r = divide(7, 2)`.
+    Tuple { elts: Vec<Expr>, ctx: ExprContext },
     /// The bounds of a slice, such as `1:` in `xs[1:]`, which can only be a
     /// [`ExprKind::Subscript`]'s `slice`. A missing bound is `None`.
     Slice {
@@ -234,6 +237,36 @@ pub enum ExprKind {
         upper: Option<Box<Expr>>,
         step: Option<Box<Expr>>,
     },
+}
+
+/// Returns the value of `expr` if it is an int literal, possibly negated.
+///
+/// For example, `8` gives `Some(8)`, `-4` gives `Some(-4)`, and `x` or `2 + 2` gives `None`.
+pub fn constant_int(expr: &Expr) -> Option<i64> {
+    match &expr.kind {
+        ExprKind::Constant { value, .. } => match **value {
+            Constant::Int(n) => Some(n),
+            _ => None,
+        },
+        ExprKind::UnaryOp {
+            op: UnaryOp::UnarySub,
+            operand,
+        } => constant_int(operand).map(i64::wrapping_neg),
+        _ => None,
+    }
+}
+
+/// Pushes the names a target assigns, in order: the name itself, or each name of a tuple target,
+/// at any depth.
+///
+/// For example, `a, (b, c)` in `a, (b, c) = t` gives `a`, `b`, and `c`, and a subscript target
+/// such as `xs[0]` gives nothing.
+pub fn target_names<'a>(target: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match &target.kind {
+        ExprKind::Name { .. } => out.push(target),
+        ExprKind::Tuple { elts, .. } => elts.iter().for_each(|elt| target_names(elt, out)),
+        _ => {}
+    }
 }
 
 /// A statement and the span of source text it was parsed from.
@@ -366,6 +399,8 @@ pub enum TypeExprKind {
     None,
     /// A list of the given element type, such as `list[float]`.
     List(Box<TypeExpr>),
+    /// A tuple of two or more types, such as `tuple[int, str]`.
+    Tuple(Vec<TypeExpr>),
 }
 
 impl Display for TypeExpr {
@@ -378,6 +413,16 @@ impl Display for TypeExpr {
             TypeExprKind::Str => write!(f, "str"),
             TypeExprKind::None => write!(f, "none"),
             TypeExprKind::List(elem) => write!(f, "list[{elem}]"),
+            TypeExprKind::Tuple(elts) => {
+                write!(f, "tuple[")?;
+                for (i, elt) in elts.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{elt}")?;
+                }
+                write!(f, "]")
+            }
         }
     }
 }

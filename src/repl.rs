@@ -370,7 +370,7 @@ mod tests {
 
     #[test]
     fn a_block_at_the_end_of_the_input_still_runs() {
-        assert_eq!(session("if 1;\n    print(5)\n").0, "5\n");
+        assert_eq!(session("if true;\n    print(5)\n").0, "5\n");
     }
 
     #[test]
@@ -499,7 +499,7 @@ mod tests {
             ("1\n".into(), "".into())
         );
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let input = "use os\nprint(1)\nif 1;\n    os.exit(4)\n\nprint(2)\n";
+        let input = "use os\nprint(1)\nif true;\n    os.exit(4)\n\nprint(2)\n";
         let error = driver::repl(
             &mut input.as_bytes(),
             &mut out,
@@ -515,7 +515,7 @@ mod tests {
     #[test]
     fn prompts_go_to_err() {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let input = "if 1;\n    print(1)\n\n";
+        let input = "if true;\n    print(1)\n\n";
         driver::repl(
             &mut input.as_bytes(),
             &mut out,

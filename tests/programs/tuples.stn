@@ -1,0 +1,63 @@
+// literals of any types, printed as Python prints them
+t = (1, "a", (2.5, ["x", "y"]), true, none)
+print(t)
+print((1, 2), ("it's", "q\"uote"), (-0.0, 1e100, [1, 2]))
+print(("a", ("b", ("c", "d"))))
+
+// constant indexes, counting from the end when negative
+print(t[0], t[1], t[-1], t[3], t[2][0], t[-3][1], t[2][1][0])
+first = t[1]
+print(first + "b")
+
+// unpacking into names, at any depth
+n, s, (x, words), flag, nothing = t
+print(n, s, x, words, flag, nothing)
+a, (b, c) = (1, ("two", [3]))
+(d, e) = (c, b)
+print(a, b, c, d, e)
+
+// every value is computed before any name changes, so this swaps
+i = 1
+j = 2
+i, j = (j, i)
+print(i, j)
+p = "left"
+q = "right"
+p, q = (q, p)
+print(p, q)
+ys = [1]
+zs = [2, 3]
+ys, zs = (zs, ys)
+print(ys, zs)
+
+// one value assigned to several targets
+k = (m, o) = (5, "five")
+print(k, m, o)
+
+// a tuple variable takes a new tuple of the same types
+pair = (1, "one")
+pair = (2, "two")
+copy = pair
+pair = (3, "three")
+print(pair, copy)
+
+// functions read tuple globals
+point = (3, 4)
+
+fn norm2() -> int;
+    px, py = point
+    ret px * px + py * py
+
+fn label() -> str;
+    if point[0] * 10 + point[1] > 30;
+        ret "far"
+    ret "near"
+
+print(norm2(), label())
+
+// tuples in loops
+total = (0, "")
+for w in ["a", "b", "c"];
+    count, text = total
+    total = (count + 1, text + w)
+print(total)

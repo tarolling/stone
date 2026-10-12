@@ -1,0 +1,5 @@
+// a negative string index before the start reports the index as written
+s = "abc"
+print(s[-3])
+print(s[-4])
+print("after")

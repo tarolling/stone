@@ -15,18 +15,18 @@
 //! of one, and a function changes only its own variables, never a global.
 //!
 //! The checker only accepts programs that the interpreter and the compiler run the same way. For
-//! example, conditions must be `int` or `bool`, because compiled code tests them for zero.
+//! example, conditions must be `bool`, since no other value is truthy.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
 use crate::ast::{
     Arguments, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, TypeExpr,
-    TypeExprKind, UnaryOp,
+    TypeExprKind, UnaryOp, constant_int, target_names,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
-use crate::stdlib::{BUILTINS, METHODS, changes_receiver, is_builtin};
+use crate::stdlib::{BUILTINS, MAX_ELEMENT_VALUES, METHODS, changes_receiver, is_builtin};
 
 #[cfg(test)]
 mod tests;
@@ -40,7 +40,38 @@ pub enum Type {
     Str,
     None,
     List(Box<Type>),
-    Function { params: Vec<Type>, ret: Box<Type> },
+    /// A tuple of two or more fields, such as `tuple[int, str]`.
+    Tuple(Vec<Type>),
+    Function {
+        params: Vec<Type>,
+        ret: Box<Type>,
+    },
+}
+
+impl Type {
+    /// Returns the values a value of this type is made of once nested tuples are flattened, in
+    /// order: the type itself unless it is a tuple.
+    ///
+    /// For example, `tuple[int, tuple[str, float]]` has the leaves `int`, `str`, and `float`, and
+    /// `list[tuple[int, int]]` is one leaf.
+    pub fn leaves(&self) -> Vec<Type> {
+        match self {
+            Type::Tuple(fields) => fields.iter().flat_map(Type::leaves).collect(),
+            other => vec![other.clone()],
+        }
+    }
+
+    /// Returns the positions among [`Type::leaves`] of field `k` of this tuple type.
+    ///
+    /// For example, field 1 of `tuple[tuple[int, str], float, bool]` is leaf 2, and field 0 is
+    /// leaves 0 and 1.
+    pub fn field_leaves(&self, k: usize) -> std::ops::Range<usize> {
+        let Type::Tuple(fields) = self else {
+            return 0..1;
+        };
+        let start: usize = fields[..k].iter().map(|f| f.leaves().len()).sum();
+        start..start + fields[k].leaves().len()
+    }
 }
 
 impl Display for Type {
@@ -52,6 +83,10 @@ impl Display for Type {
             Type::Str => write!(f, "str"),
             Type::None => write!(f, "none"),
             Type::List(elem) => write!(f, "list[{elem}]"),
+            Type::Tuple(fields) => {
+                let fields: Vec<String> = fields.iter().map(Type::to_string).collect();
+                write!(f, "tuple[{}]", fields.join(", "))
+            }
             Type::Function { params, ret } => {
                 let params: Vec<String> = params.iter().map(Type::to_string).collect();
                 write!(f, "fn({}) -> {ret}", params.join(", "))
@@ -179,6 +214,7 @@ enum Ty {
     Str,
     None,
     List(Box<Ty>),
+    Tuple(Vec<Ty>),
     /// An unknown type, identified by its index in [`Inference::vars`].
     Var(usize),
 }
@@ -300,7 +336,7 @@ impl ArithmeticOp {
     }
 }
 
-/// A kind of type, ignoring what a list holds, for [`Constraint`]s.
+/// A kind of type, ignoring what a list or tuple holds, for [`Constraint`]s.
 #[derive(Clone, Copy, PartialEq)]
 enum Kind {
     Int,
@@ -309,6 +345,7 @@ enum Kind {
     Str,
     None,
     List,
+    Tuple,
 }
 
 impl Kind {
@@ -320,6 +357,7 @@ impl Kind {
             Ty::Str => Some(Kind::Str),
             Ty::None => Some(Kind::None),
             Ty::List(_) => Some(Kind::List),
+            Ty::Tuple(_) => Some(Kind::Tuple),
             Ty::Var(_) => None,
         }
     }
@@ -387,6 +425,32 @@ struct Inference {
     /// The span of the call that is the whole value of an assignment, if it is one, where `pop`,
     /// which changes its receiver and returns a value, may also be called.
     assigned_call: Option<Span>,
+    /// The span of every tuple that is indexed, such as `t` in `t[0]`, so that a change through
+    /// one, such as `t[0].append(1)`, can be reported.
+    indexed_tuples: HashSet<Span>,
+    /// Each list literal and the type of the list, whose elements `finish` checks are not too
+    /// wide to store.
+    list_literals: Vec<(Span, Ty)>,
+    /// Constant indexes into a global a function reads before the code assigning it is checked,
+    /// which `finish` settles once the global is known to be a tuple or a list.
+    deferred_indexes: Vec<DeferredIndex>,
+}
+
+/// `value[slice]`, with a constant `slice`, where `value` is a global not yet known to be a tuple
+/// or a list, whose element or field is `result`.
+struct DeferredIndex {
+    value: Span,
+    value_ty: Ty,
+    slice: Expr,
+    result: Ty,
+}
+
+/// What [`Inference::subscript_of`] indexed.
+#[derive(Clone, Copy, PartialEq)]
+enum Indexed {
+    List,
+    Str,
+    Tuple,
 }
 
 /// What a name refers to where it is used.
@@ -462,6 +526,7 @@ impl Inference {
     fn resolve(&self, ty: &Ty) -> Ty {
         match self.shallow(ty) {
             Ty::List(elem) => Ty::List(Box::new(self.resolve(&elem))),
+            Ty::Tuple(fields) => Ty::Tuple(fields.iter().map(|f| self.resolve(f)).collect()),
             other => other,
         }
     }
@@ -470,6 +535,7 @@ impl Inference {
         match self.shallow(ty) {
             Ty::Var(v) => v == var,
             Ty::List(elem) => self.occurs(var, &elem),
+            Ty::Tuple(fields) => fields.iter().any(|f| self.occurs(var, f)),
             _ => false,
         }
     }
@@ -494,6 +560,14 @@ impl Inference {
                 true
             }
             (Ty::List(x), Ty::List(y)) => self.unify(&x, &y),
+            (Ty::Tuple(xs), Ty::Tuple(ys)) => {
+                // unify every field, so each is as solved as it can be even if one differs
+                xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(&ys)
+                        .fold(true, |same, (x, y)| self.unify(x, y) && same)
+            }
             (x, y) => x == y,
         }
     }
@@ -574,6 +648,10 @@ impl Inference {
             Ty::Str => "str".to_string(),
             Ty::None => "none".to_string(),
             Ty::List(elem) => format!("list[{}]", self.show(&elem)),
+            Ty::Tuple(fields) => {
+                let fields: Vec<String> = fields.iter().map(|f| self.show(f)).collect();
+                format!("tuple[{}]", fields.join(", "))
+            }
             Ty::Var(x) => match self.bounds.get(&x) {
                 Some(bound) => self.show(&bound.default()),
                 None => "unknown".to_string(),
@@ -633,7 +711,7 @@ impl Inference {
             return self.solve_power(op, left, right, force);
         }
         // a string, bool, or none is never a list, so an unknown other operand has its type
-        let scalar = |ty: &Ty| matches!(ty, Ty::Str | Ty::Bool | Ty::None);
+        let scalar = |ty: &Ty| matches!(ty, Ty::Str | Ty::Bool | Ty::None | Ty::Tuple(_));
         match (&left, &right) {
             (Ty::Var(_), other) | (other, Ty::Var(_)) if !force && !scalar(other) => false,
             (Ty::List(_), Ty::List(_)) => {
@@ -706,7 +784,6 @@ impl Inference {
                 let ArithmeticOp::Binary(operator) = op.op else {
                     unreachable!("unary operations are handled above")
                 };
-                self.expect(&left, &right, op.operand_span);
                 let (allowed, message): (&'static [Kind], _) = match operator {
                     Operator::Add => (
                         &[Kind::Int, Kind::Float, Kind::Str],
@@ -718,6 +795,16 @@ impl Inference {
                     Operator::Modulo => (NUMBERS, "'%' needs int or float operands, found {}"),
                     Operator::Power => unreachable!("handled by solve_power"),
                 };
+                // a tuple is never an operand, whatever the other one is
+                if let Some(tuple) = [&left, &right]
+                    .into_iter()
+                    .find(|ty| matches!(ty, Ty::Tuple(_)))
+                {
+                    self.require(tuple.clone(), allowed, op.span, message);
+                    self.unify(&op.result, &left);
+                    return true;
+                }
+                self.expect(&left, &right, op.operand_span);
                 self.require(left.clone(), allowed, op.span, message);
                 self.unify(&op.result, &left);
                 true
@@ -822,14 +909,14 @@ impl Inference {
         });
     }
 
-    /// Requires `ty` to be `int` or `bool`, as conditions and the operands of `not`, `and`, and
-    /// `or` must be.
+    /// Requires `ty` to be `bool`, as conditions and the operands of `not`, `and`, and `or` must
+    /// be, so `if 1 or 0;` is an error while `if n != 0;` is fine.
     fn require_condition(&mut self, ty: Ty, span: Span) {
         self.require(
             ty,
-            &[Kind::Int, Kind::Bool],
+            &[Kind::Bool],
             span,
-            "a condition must be int or bool, found {}",
+            "a condition must be bool, found {}",
         );
     }
 
@@ -919,6 +1006,10 @@ impl Inference {
             params.push(ty);
         }
         let ret = returns.map_or(Ty::None, Self::written);
+        let written = args.args.iter().filter_map(|arg| arg.annotation.as_ref());
+        for annotation in written.chain(returns) {
+            self.check_written_width(annotation);
+        }
         // the symbol's type is rebuilt from `params` and `ret` in `finish`
         let symbol = self.add_symbol(name, SymbolKind::Function, name_span, Ty::None);
         self.functions.insert(
@@ -930,6 +1021,37 @@ impl Inference {
                 ret_written: returns.is_some(),
             },
         );
+    }
+
+    /// Reports a list type written in `annotation` whose elements hold too many values to store.
+    fn check_written_width(&mut self, annotation: &TypeExpr) {
+        match &annotation.kind {
+            TypeExprKind::List(elem) => {
+                self.check_element_width(&Self::written(elem), annotation.span);
+                self.check_written_width(elem);
+            }
+            TypeExprKind::Tuple(fields) => fields.iter().for_each(|f| self.check_written_width(f)),
+            _ => {}
+        }
+    }
+
+    /// Reports at `span` if a list element of type `elem` holds more values than
+    /// [`MAX_ELEMENT_VALUES`], counting each field of its tuples.
+    fn check_element_width(&mut self, elem: &Ty, span: Span) {
+        fn values(inference: &Inference, ty: &Ty) -> usize {
+            match inference.shallow(ty) {
+                Ty::Tuple(fields) => fields.iter().map(|f| values(inference, f)).sum(),
+                _ => 1,
+            }
+        }
+        let count = values(self, elem);
+        if count > MAX_ELEMENT_VALUES {
+            let message = format!(
+                "a list element can hold at most {MAX_ELEMENT_VALUES} values, but {} holds {count}",
+                self.show(elem)
+            );
+            self.error(span, message);
+        }
     }
 
     ////////////////////////////////////////////////////////////////
@@ -947,6 +1069,7 @@ impl Inference {
             TypeExprKind::Str => Ty::Str,
             TypeExprKind::None => Ty::None,
             TypeExprKind::List(elem) => Ty::List(Box::new(Self::written(elem))),
+            TypeExprKind::Tuple(fields) => Ty::Tuple(fields.iter().map(Self::written).collect()),
         }
     }
 
@@ -1018,9 +1141,9 @@ impl Inference {
                     ExprKind::Subscript {
                         value: list, slice, ..
                     } => {
-                        let (elem, string) = self.subscript_of(list, slice);
-                        if string {
-                            self.error(target.span, STRING_CHANGE);
+                        let (elem, indexed) = self.subscript_of(list, slice);
+                        if let Some(message) = indexed.change_error() {
+                            self.error(target.span, message);
                             return;
                         }
                         if matches!(slice.kind, ExprKind::Slice { .. }) {
@@ -1065,6 +1188,12 @@ impl Inference {
                         // a string gives its characters, and anything else must be a list
                         if self.shallow(&iter_ty) == Ty::Str {
                             Ty::Str
+                        } else if let Ty::Tuple(_) = self.shallow(&iter_ty) {
+                            self.error(
+                                iter.span,
+                                "a tuple cannot be iterated; unpack it, or use a list",
+                            );
+                            self.fresh()
                         } else {
                             let elem = self.fresh();
                             self.expect(&Ty::List(Box::new(elem.clone())), &iter_ty, iter.span);
@@ -1072,10 +1201,14 @@ impl Inference {
                         }
                     }
                 };
-                if matches!(target.kind, ExprKind::Name { .. }) {
+                if matches!(target.kind, ExprKind::Name { .. } | ExprKind::Tuple { .. }) {
                     self.check_target(target, &elem, target.span);
                 } else {
-                    self.error(target.span, "a 'for' loop's variable must be a name");
+                    self.error(
+                        target.span,
+                        "a 'for' loop's variable must be a name, or names to unpack each element \
+                         into, as in 'for a, b in pairs'",
+                    );
                 }
                 self.check_loop_body(body);
             }
@@ -1251,9 +1384,9 @@ impl Inference {
                 }
             }
             ExprKind::Subscript { value, slice, .. } => {
-                let (elem, string) = self.subscript_of(value, slice);
-                if string {
-                    self.error(target.span, STRING_CHANGE);
+                let (elem, indexed) = self.subscript_of(value, slice);
+                if let Some(message) = indexed.change_error() {
+                    self.error(target.span, message);
                     return;
                 }
                 if matches!(slice.kind, ExprKind::Slice { .. }) {
@@ -1263,7 +1396,97 @@ impl Inference {
                 self.expect(&elem, found, value_span);
                 self.check_change(value);
             }
+            ExprKind::Tuple { .. } => {
+                if self.check_unpacking_names(target) {
+                    self.unpack(target, found, value_span);
+                } else {
+                    // still declare each name, so the error does not lead to others
+                    let mut names = Vec::new();
+                    target_names(target, &mut names);
+                    for name in names {
+                        let unknown = self.fresh();
+                        self.check_target(name, &unknown, value_span);
+                    }
+                }
+            }
             _ => self.error(target.span, "cannot assign to this expression"),
+        }
+    }
+
+    /// Checks that the tuple target `target` holds only names and nested tuples of names, each
+    /// name once, reporting the first that does not and returning whether all do.
+    ///
+    /// For example, `a, (b, c)` is fine, while `a, xs[0]` and `a, a` are errors.
+    fn check_unpacking_names(&mut self, target: &Expr) -> bool {
+        fn first_other(target: &Expr) -> Option<&Expr> {
+            match &target.kind {
+                ExprKind::Name { .. } => None,
+                ExprKind::Tuple { elts, .. } => elts.iter().find_map(first_other),
+                _ => Some(target),
+            }
+        }
+        if let Some(other) = first_other(target) {
+            self.error(
+                other.span,
+                "only names can be unpacked into, as in 'a, b = t'; assign an element on a line of \
+                 its own",
+            );
+            return false;
+        }
+        let mut names = Vec::new();
+        target_names(target, &mut names);
+        for (i, name) in names.iter().enumerate() {
+            let ExprKind::Name { id, .. } = &name.kind else {
+                continue;
+            };
+            let repeated = names[..i].iter().any(
+                |earlier| matches!(&earlier.kind, ExprKind::Name { id: other, .. } if other == id),
+            );
+            if repeated {
+                self.error(name.span, format!("'{id}' is unpacked into more than once"));
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Assigns the fields of `found` to the names of the tuple target `target`, at any depth.
+    ///
+    /// For example, `q, r = (7, "x")` makes `q` an `int` and `r` a `str`, and unpacking a value not
+    /// yet known, such as `xs.pop()` of an empty list, makes it a tuple.
+    fn unpack(&mut self, target: &Expr, found: &Ty, value_span: Span) {
+        let ExprKind::Tuple { elts, .. } = &target.kind else {
+            self.check_target(target, found, value_span);
+            return;
+        };
+        // lowering sizes each nested target from its type
+        self.expr_types.push((target.span, found.clone()));
+        let fields: Vec<Ty> = elts.iter().map(|_| self.fresh()).collect();
+        let fits = match self.shallow(found) {
+            Ty::Tuple(have) if have.len() != elts.len() => {
+                let message = format!(
+                    "cannot unpack {} into {} names; it has {} values",
+                    self.show(found),
+                    elts.len(),
+                    have.len()
+                );
+                self.error(target.span, message);
+                false
+            }
+            Ty::Tuple(_) | Ty::Var(_) => self.unify(&Ty::Tuple(fields.clone()), found),
+            _ => {
+                let message = format!(
+                    "cannot unpack {}; only a tuple can be unpacked, as in 'a, b = (1, 2)'",
+                    self.show(found)
+                );
+                self.error(target.span, message);
+                false
+            }
+        };
+        for (elt, field) in elts.iter().zip(fields) {
+            // after an error, each name is still declared, with a type nothing pins down
+            let field = if fits { field } else { self.fresh() };
+            self.unpack(elt, &field, value_span);
         }
     }
 
@@ -1276,6 +1499,15 @@ impl Inference {
         if has_slice(list) {
             self.error(list.span, SLICE_CHANGE);
             return;
+        }
+        // a list inside a tuple, as in `t[0].append(1)`, cannot change
+        let mut node = list;
+        while let ExprKind::Subscript { value, .. } = &node.kind {
+            if self.indexed_tuples.contains(&value.span) {
+                self.error(node.span, TUPLE_CHANGE);
+                return;
+            }
+            node = value;
         }
         let root = place_root(list);
         let ExprKind::Name { id, .. } = &root.kind else {
@@ -1405,14 +1637,11 @@ impl Inference {
                 }
             }
             ExprKind::BoolOp { op: _, values } => {
-                // `a or b` evaluates to one of its operands, so they share a type
-                let first = self.infer(&values[0]);
-                self.require_condition(first.clone(), values[0].span);
-                for value in &values[1..] {
+                for value in values {
                     let ty = self.infer(value);
-                    self.expect(&first, &ty, value.span);
+                    self.require_condition(ty, value.span);
                 }
-                first
+                Ty::Bool
             }
             ExprKind::Compare {
                 left,
@@ -1463,7 +1692,12 @@ impl Inference {
                     let ty = self.infer(elt);
                     self.expect(&elem, &ty, elt.span);
                 }
-                Ty::List(Box::new(elem))
+                let list = Ty::List(Box::new(elem));
+                self.list_literals.push((expr.span, list.clone()));
+                list
+            }
+            ExprKind::Tuple { elts, .. } => {
+                Ty::Tuple(elts.iter().map(|elt| self.infer(elt)).collect())
             }
             // the parser only makes a slice inside a subscript, which `subscript` handles
             ExprKind::Slice { .. } => {
@@ -1476,27 +1710,46 @@ impl Inference {
         }
     }
 
-    /// Infers `value[slice]`, which must index a list or a string with an int, or slice it. An
-    /// index gives an element of a list, or a string of one byte, and a slice gives a value of the
-    /// same type. A value not yet known to be a string is taken to be a list.
+    /// Infers `value[slice]`, which must index a list or a string with an int, or slice it, or
+    /// index a tuple with a constant. An index gives an element of a list, a string of one byte,
+    /// or a field of a tuple, and a slice gives a value of the same type. A value not yet known to
+    /// be a string or a tuple is taken to be a list.
     ///
-    /// For example, `xs[0]` of a `list[int]` is `int`, and `s[1:]` of a `str` is `str`.
+    /// For example, `xs[0]` of a `list[int]` is `int`, `s[1:]` of a `str` is `str`, and `t[-1]`
+    /// of a `tuple[int, str]` is `str`.
     fn subscript(&mut self, value: &Expr, slice: &Expr) -> Ty {
         self.subscript_of(value, slice).0
     }
 
-    /// Infers `value[slice]` as [`Inference::subscript`] does, also returning whether `value` is
-    /// a string.
-    fn subscript_of(&mut self, value: &Expr, slice: &Expr) -> (Ty, bool) {
+    /// Infers `value[slice]` as [`Inference::subscript`] does, also returning what it indexes.
+    fn subscript_of(&mut self, value: &Expr, slice: &Expr) -> (Ty, Indexed) {
         let value_ty = self.infer(value);
-        let string = self.shallow(&value_ty) == Ty::Str;
-        let (sliced, elem) = match string {
-            true => (Ty::Str, Ty::Str),
-            false => {
+        if let Ty::Var(_) = self.shallow(&value_ty)
+            && self.is_global_in_function(value)
+            && constant_int(slice).is_some()
+        {
+            // a function checked before the global's assignment, which may make it a tuple
+            let index = self.infer(slice);
+            self.expect(&Ty::Int, &index, slice.span);
+            let result = self.fresh();
+            self.deferred_indexes.push(DeferredIndex {
+                value: value.span,
+                value_ty,
+                slice: slice.clone(),
+                result: result.clone(),
+            });
+            return (result, Indexed::List);
+        }
+        let (sliced, elem, indexed) = match self.shallow(&value_ty) {
+            Ty::Str => (Ty::Str, Ty::Str, Indexed::Str),
+            Ty::Tuple(fields) => {
+                return (self.tuple_field(value.span, &fields, slice), Indexed::Tuple);
+            }
+            _ => {
                 let elem = self.fresh();
                 let list = Ty::List(Box::new(elem.clone()));
                 self.expect(&list, &value_ty, value.span);
-                (list, elem)
+                (list, elem, Indexed::List)
             }
         };
         if let ExprKind::Slice { lower, upper, step } = &slice.kind {
@@ -1504,11 +1757,72 @@ impl Inference {
                 let ty = self.infer(bound);
                 self.expect(&Ty::Int, &ty, bound.span);
             }
-            return (sliced, string);
+            return (sliced, indexed);
         }
         let index = self.infer(slice);
         self.expect(&Ty::Int, &index, slice.span);
-        (elem, string)
+        (elem, indexed)
+    }
+
+    /// Returns whether `value` names a global from inside a function.
+    fn is_global_in_function(&self, value: &Expr) -> bool {
+        let ExprKind::Name { id, .. } = &value.kind else {
+            return false;
+        };
+        self.function.is_some() && self.local(id).is_none() && self.globals.contains_key(id)
+    }
+
+    /// Settles a constant index into a global that was not known when it was found: a field if
+    /// the global turned out to be a tuple, and otherwise an element of a list.
+    fn settle_index(&mut self, deferred: DeferredIndex) {
+        match self.shallow(&deferred.value_ty) {
+            Ty::Tuple(fields) => {
+                let field = self.tuple_field(deferred.value, &fields, &deferred.slice);
+                self.expect(&field, &deferred.result, deferred.slice.span);
+            }
+            _ => {
+                let list = Ty::List(Box::new(deferred.result));
+                self.expect(&list, &deferred.value_ty, deferred.value);
+            }
+        }
+    }
+
+    /// Infers field `slice` of the tuple at `value`, whose fields are `fields`. The index must be
+    /// an int written in the code, counting from the end if it is negative, so the field's type is
+    /// known.
+    ///
+    /// For example, `t[1]` and `t[-1]` of a `tuple[int, str]` are `str`, while `t[i]` and `t[2]`
+    /// are errors.
+    fn tuple_field(&mut self, value: Span, fields: &[Ty], slice: &Expr) -> Ty {
+        self.indexed_tuples.insert(value);
+        if matches!(slice.kind, ExprKind::Slice { .. }) {
+            self.error(
+                slice.span,
+                "a tuple cannot be sliced; unpack it to name its values, as in 'a, b, c = t'",
+            );
+            return self.fresh();
+        }
+        let index = self.infer(slice);
+        self.expect(&Ty::Int, &index, slice.span);
+        let Some(k) = constant_int(slice) else {
+            self.error(
+                slice.span,
+                "a tuple index must be a number written in the code, such as 't[0]'; unpack the \
+                 tuple to name its values, as in 'a, b = t'",
+            );
+            return self.fresh();
+        };
+        let len = fields.len() as i64;
+        let position = if k < 0 { k.wrapping_add(len) } else { k };
+        if !(0..len).contains(&position) {
+            let message = format!(
+                "index {k} is out of range for {}, which has {len} values",
+                self.show(&Ty::Tuple(fields.to_vec()))
+            );
+            self.error(slice.span, message);
+            return self.fresh();
+        }
+        fields[position as usize].clone()
     }
 
     fn infer_call(&mut self, call: &Expr, func: &Expr, args: &[Expr]) -> Ty {
@@ -1915,6 +2229,9 @@ impl Inference {
     /// Checks the deferred constraints, fills in types nothing pinned down, and builds the
     /// [`Analysis`].
     fn finish(mut self) -> Analysis {
+        for deferred in std::mem::take(&mut self.deferred_indexes) {
+            self.settle_index(deferred);
+        }
         // solving one operation can pin down another's operands, so force one only when none can
         // be solved otherwise
         let mut pending = std::mem::take(&mut self.arithmetic);
@@ -1924,6 +2241,11 @@ impl Inference {
             if pending.len() == before {
                 let op = pending.remove(0);
                 self.solve_arithmetic(&op, true);
+            }
+        }
+        for (span, list) in std::mem::take(&mut self.list_literals) {
+            if let Ty::List(elem) = self.resolve(&list) {
+                self.check_element_width(&elem, span);
             }
         }
         for constraint in std::mem::take(&mut self.constraints) {
@@ -1937,6 +2259,8 @@ impl Inference {
                     Kind::Str => Ty::Str,
                     Kind::None => Ty::None,
                     Kind::List => Ty::List(Box::new(self.fresh())),
+                    // no constraint allows a tuple first, and nothing tells how many fields
+                    Kind::Tuple => continue,
                 };
                 self.unify(&ty, &default);
                 continue;
@@ -2007,6 +2331,7 @@ impl Inference {
             Ty::Str => Type::Str,
             Ty::None => Type::None,
             Ty::List(elem) => Type::List(Box::new(self.finalize(&elem))),
+            Ty::Tuple(fields) => Type::Tuple(fields.iter().map(|f| self.finalize(f)).collect()),
         }
     }
 }
@@ -2053,8 +2378,14 @@ impl<'a> AssignmentCheck<'a> {
                 self.reads(value, &assigned);
                 for target in targets {
                     match &target.kind {
-                        ExprKind::Name { id, .. } => {
-                            assigned.insert(id.clone());
+                        ExprKind::Name { .. } | ExprKind::Tuple { .. } => {
+                            let mut names = Vec::new();
+                            target_names(target, &mut names);
+                            for name in names {
+                                if let ExprKind::Name { id, .. } = &name.kind {
+                                    assigned.insert(id.clone());
+                                }
+                            }
                         }
                         _ => self.reads(target, &assigned),
                     }
@@ -2099,8 +2430,12 @@ impl<'a> AssignmentCheck<'a> {
             StmtKind::For { target, iter, body } => {
                 self.reads(iter, &assigned);
                 let mut inside = assigned.clone();
-                if let ExprKind::Name { id, .. } = &target.kind {
-                    inside.insert(id.clone());
+                let mut names = Vec::new();
+                target_names(target, &mut names);
+                for name in names {
+                    if let ExprKind::Name { id, .. } = &name.kind {
+                        inside.insert(id.clone());
+                    }
                 }
                 self.block(body, Some(inside));
                 Some(assigned)
@@ -2156,7 +2491,7 @@ impl<'a> AssignmentCheck<'a> {
                 self.reads(value, assigned);
                 self.reads(slice, assigned);
             }
-            ExprKind::List { elts, .. } => {
+            ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
                 for elt in elts {
                     self.reads(elt, assigned);
                 }
@@ -2191,10 +2526,14 @@ pub fn range_args(iter: &Expr) -> Option<&[Expr]> {
 /// For example, for `x = 1` followed by `if x; y = x`, this collects `x` and then `y`.
 pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
     let add = |target: &Expr, out: &mut Vec<(String, Span)>| {
-        if let ExprKind::Name { id, .. } = &target.kind
-            && !out.iter().any(|(name, _)| name == id)
-        {
-            out.push((id.clone(), target.span));
+        let mut names = Vec::new();
+        target_names(target, &mut names);
+        for name in names {
+            if let ExprKind::Name { id, .. } = &name.kind
+                && !out.iter().any(|(seen, _)| seen == id)
+            {
+                out.push((id.clone(), name.span));
+            }
         }
     };
     for stmt in body {
@@ -2231,6 +2570,19 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
 const SLICE_CHANGE: &str = "a slice is a new list, so changing it has no effect";
 const STRING_CHANGE: &str =
     "a string cannot be changed; build a new one, as in 's = s[:i] + c + s[i + 1:]'";
+
+const TUPLE_CHANGE: &str = "a tuple cannot be changed; build a new one, as in 't = (v, t[1])'";
+
+impl Indexed {
+    /// Returns the error for changing an element of what was indexed, if it cannot be changed.
+    fn change_error(self) -> Option<&'static str> {
+        match self {
+            Indexed::List => None,
+            Indexed::Str => Some(STRING_CHANGE),
+            Indexed::Tuple => Some(TUPLE_CHANGE),
+        }
+    }
+}
 
 /// Returns whether the list `expr`, which a statement changes, is a slice or an element of one.
 ///
@@ -2382,7 +2734,7 @@ impl ParameterUse<'_> {
                 self.change_or_expr(value);
                 for target in targets {
                     match &target.kind {
-                        ExprKind::Name { .. } => {}
+                        ExprKind::Name { .. } | ExprKind::Tuple { .. } => {}
                         ExprKind::Subscript { value, slice, .. } => {
                             self.change(value);
                             self.expr(slice);
@@ -2483,7 +2835,9 @@ impl ParameterUse<'_> {
                 self.expr(value);
                 self.expr(slice);
             }
-            ExprKind::List { elts, .. } => elts.iter().for_each(|elt| self.expr(elt)),
+            ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
+                elts.iter().for_each(|elt| self.expr(elt))
+            }
             ExprKind::Slice { lower, upper, step } => [lower, upper, step]
                 .into_iter()
                 .flatten()
@@ -2507,16 +2861,9 @@ fn always_exits(body: &[Stmt]) -> bool {
     })
 }
 
-/// Returns whether `test` is a literal that is always truthy, like `1` or `true`.
+/// Returns whether `test` is the literal `true`.
 fn is_always_true(test: &Expr) -> bool {
-    match &test.kind {
-        ExprKind::Constant { value, .. } => match **value {
-            Constant::Bool(b) => b,
-            Constant::Int(n) => n != 0,
-            _ => false,
-        },
-        _ => false,
-    }
+    matches!(&test.kind, ExprKind::Constant { value, .. } if matches!(**value, Constant::Bool(true)))
 }
 
 /// Returns whether `body` contains a `break` for the loop it belongs to, not counting `break`s of

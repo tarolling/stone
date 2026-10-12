@@ -35,7 +35,7 @@ print(param(5))
 print(x)
 
 // globals assigned inside top-level blocks are still globals
-if x;
+if x != 0;
     from_block = 7
 fn read_block() -> int;
     ret from_block

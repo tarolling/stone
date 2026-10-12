@@ -69,6 +69,12 @@ pub fn module_function(name: &str) -> Option<&'static BuiltinDoc> {
 /// 1,001st nested call stops the program with an error instead of overflowing the stack.
 pub const MAX_CALL_DEPTH: usize = 1_000;
 
+/// The most values one element of a list can hold once its tuples are flattened, since compiled
+/// code records whether each is counted in 2 bits of one 64-bit word.
+///
+/// For example, a `list[tuple[int, tuple[str, float]]]` holds 3 values in each element.
+pub const MAX_ELEMENT_VALUES: usize = 32;
+
 /// Names of the builtin functions.
 ///
 /// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3);`.
@@ -384,13 +390,17 @@ pub fn float_pow(base: f64, exp: i64) -> f64 {
 /// The runtime error for a slice whose step is 0, such as `xs[::0]`.
 pub const SLICE_STEP_ZERO: &str = "slice step cannot be zero";
 
-/// The runtime error for an index past either end of a list, as in `[1][1]`. The interpreter adds
-/// the index and the length, as in `list index out of range (index 1, length 1)`.
-pub const INDEX_RANGE: &str = "list index out of range";
+/// The runtime error for an index past either end of a list, as in `[1][1]`, with a `{}` for the
+/// index as written and one for the length, which [`fill`] fills in.
+///
+/// For example, `fill(INDEX_RANGE, &[1, 1])` is `list index out of range (index 1, length 1)`.
+pub const INDEX_RANGE: &str = "list index out of range (index {}, length {})";
 
-/// The runtime error for arithmetic on lists of different lengths, as in `[1, 2] + [3]`. The
-/// interpreter adds the lengths, as in `lists have different lengths (2 and 1)`.
-pub const LENGTHS_DIFFER: &str = "lists have different lengths";
+/// The runtime error for arithmetic on lists of different lengths, as in `[1, 2] + [3]`, with a
+/// `{}` for the first list's length and one for the first length that differs from it.
+///
+/// For example, `fill(LENGTHS_DIFFER, &[2, 1])` is `lists have different lengths (2 and 1)`.
+pub const LENGTHS_DIFFER: &str = "lists have different lengths ({} and {})";
 
 /// The runtime error for `pop` on an empty list.
 pub const POP_EMPTY: &str = "pop from empty list";
@@ -398,9 +408,23 @@ pub const POP_EMPTY: &str = "pop from empty list";
 /// The runtime error for `pop` at an index past either end of a list, as in `[1].pop(1)`.
 pub const POP_RANGE: &str = "pop index out of range";
 
-/// The runtime error for an index past either end of a string, as in `"a"[1]`. The interpreter
-/// adds the index and the length, as for lists.
-pub const STRING_INDEX_RANGE: &str = "string index out of range";
+/// The runtime error for an index past either end of a string, as in `"a"[1]`, with the index
+/// and the length filled in as for [`INDEX_RANGE`].
+pub const STRING_INDEX_RANGE: &str = "string index out of range (index {}, length {})";
+
+/// Fills each `{}` of a runtime error's `template` with the next of `values`, in order. Compiled
+/// code prints the same text, writing the values where the holes are.
+///
+/// For example, `fill(STRING_INDEX_RANGE, &[-4, 3])` is
+/// `string index out of range (index -4, length 3)`.
+pub fn fill(template: &str, values: &[i64]) -> String {
+    let mut pieces = template.split("{}");
+    let mut text = pieces.next().unwrap_or_default().to_string();
+    for (piece, value) in pieces.zip(values) {
+        text += &format!("{value}{piece}");
+    }
+    text
+}
 
 /// The runtime error for indexing or slicing a string where the result would hold only part of a
 /// character, since strings index bytes and a character outside ASCII is several bytes.
@@ -636,6 +660,19 @@ fn is_decimal(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fill_writes_each_value_into_its_hole() {
+        assert_eq!(
+            fill(INDEX_RANGE, &[-3, 2]),
+            "list index out of range (index -3, length 2)"
+        );
+        assert_eq!(
+            fill(LENGTHS_DIFFER, &[i64::MIN, 0]),
+            "lists have different lengths (-9223372036854775808 and 0)"
+        );
+        assert_eq!(fill(POP_EMPTY, &[]), POP_EMPTY);
+    }
 
     /// Returns the indexes a slice of a list of `len` elements picks, in order.
     fn sliced(len: usize, start: Option<i64>, stop: Option<i64>, step: Option<i64>) -> Vec<i64> {

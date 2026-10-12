@@ -239,12 +239,14 @@ impl Parser {
         })
     }
 
-    /// Parses a type in a function's signature, such as `int` or `list[list[float]]`.
+    /// Parses a type in a function's signature, such as `int`, `list[list[float]]`, or
+    /// `tuple[int, str]`.
     ///
     /// ```text
     /// type:
     ///     | 'none'
     ///     | 'list' '[' type ']'
+    ///     | 'tuple' '[' type (',' type)+ [','] ']'
     ///     | NAME  # int, float, bool, or str
     /// ```
     pub(super) fn parse_type(&mut self) -> Result<Box<TypeExpr>, ParserError> {
@@ -281,6 +283,37 @@ impl Parser {
                     kind: TypeExprKind::List(elem),
                     span: self.span_from(mark),
                 }));
+            }
+        } else if self.peek().r#type == TokenType::Name("tuple".to_string()) {
+            // 'tuple' '[' type (',' type)+ [','] ']'
+            self.pos += 1;
+            if self.expect(TokenType::LBracket).is_some()
+                && let Ok(first) = self.nested(Self::parse_type)
+            {
+                let mut elts = vec![*first];
+                while self.expect(TokenType::Comma).is_some() {
+                    let before = self.pos;
+                    match self.nested(Self::parse_type) {
+                        Ok(elt) => elts.push(*elt),
+                        Err(_) => {
+                            // a trailing comma is allowed
+                            self.pos = before;
+                            break;
+                        }
+                    }
+                }
+                if elts.len() == 1 && self.peek().r#type == TokenType::RBracket {
+                    let span = self.tokens[mark].span.to(self.peek().span);
+                    self.hint(
+                        span,
+                        "a tuple type needs at least two types, as in 'tuple[int, str]'",
+                    );
+                } else if self.expect(TokenType::RBracket).is_some() {
+                    return Ok(Box::new(TypeExpr {
+                        kind: TypeExprKind::Tuple(elts),
+                        span: self.span_from(mark),
+                    }));
+                }
             }
         } else {
             self.record_expected("a type".to_string(), false);
@@ -414,7 +447,8 @@ impl Parser {
     }
 
     pub(super) fn parse_return_stmt_optional(&mut self) -> Option<Box<Expr>> {
-        self.parse_expressions().ok()
+        self.parse_expressions_or("to return several values, return a tuple, as in 'ret (a, b)'")
+            .ok()
     }
 
     /// Parses a return statement, such as `ret x + 1`.

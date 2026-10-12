@@ -13,9 +13,10 @@ use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label};
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::{
     BinOp, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, RcKind, Terminator, VReg,
+    variable_of,
 };
 use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
-use crate::stdlib::MAX_CALL_DEPTH;
+use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
 use std::collections::HashMap;
 use std::fmt;
 
@@ -24,6 +25,17 @@ const CALLEE_SAVED: [&str; 5] = ["rbx", "r12", "r13", "r14", "r15"];
 
 /// Registers that calls clobber, which hold values that do not live across one.
 const CALLER_SAVED: [&str; 6] = ["rsi", "rdi", "r8", "r9", "r10", "r11"];
+
+/// The registers a stone function returns its first values in. A tuple's values past these go in
+/// an area the caller reserves just above the arguments it passes on the stack, so the callee
+/// writes result `j` at `[rbp + 16 + 8 * (stack arguments + j - 3)]`. None of them is ever
+/// allocated, so moving them into their destinations cannot overwrite one another.
+const RESULT_REGS: [&str; 3] = ["rax", "rdx", "rcx"];
+
+/// The registers that hold the ints a runtime error's message is filled with when code jumps to
+/// a failure whose message has holes, such as the index and the length of
+/// `list index out of range (index {}, length {})`. They are never allocated.
+pub(super) const FAIL_VALUES: [&str; 2] = ["rcx", "rdx"];
 
 /// Where a value is while generating code: a register, a slot in the frame, or an immediate.
 ///
@@ -125,6 +137,9 @@ struct Frame {
     blocks: Vec<String>,
     epilogue: String,
     is_main: bool,
+    /// How many parameters arrive on the stack, above which the caller reserves room for the
+    /// results past [`RESULT_REGS`].
+    stack_params: usize,
 }
 
 impl Frame {
@@ -172,6 +187,7 @@ impl X64Generator {
             blocks,
             epilogue: self.ctx.new_label("return"),
             is_main: function.name.is_none(),
+            stack_params: function.params.len().saturating_sub(ARG_REGS.len()),
         };
 
         match &function.name {
@@ -599,14 +615,34 @@ impl X64Generator {
                     );
                 }
             }
-            Terminator::Fail(message) => {
+            Terminator::Fail(message, values) => {
+                if values.len() > FAIL_VALUES.len() {
+                    return Err(format!("too many values for the runtime error '{message}'"));
+                }
+                for (&reg, value) in FAIL_VALUES.iter().zip(values) {
+                    let value = frame.value(*value)?;
+                    self.load(reg, value);
+                }
                 let label = self.fail_here(message);
                 self.emit(&format!("\tjmp\t{label}"));
             }
-            Terminator::Return(value) => {
-                match value.map(|v| frame.value(v)).transpose()? {
+            Terminator::Return(values) => {
+                let values = values
+                    .iter()
+                    .map(|value| frame.value(*value))
+                    .collect::<Result<Vec<_>, _>>()?;
+                // results past the registers go to the caller's area, through rdx, before any
+                // result register is set
+                for (j, value) in values.iter().enumerate().skip(RESULT_REGS.len()) {
+                    let offset = 16 + 8 * (frame.stack_params + j - RESULT_REGS.len());
+                    self.store_qword(&format!("[rbp + {offset}]"), *value);
+                }
+                for (reg, value) in RESULT_REGS.iter().zip(&values).skip(1) {
+                    self.load(reg, *value);
+                }
+                match values.first() {
                     None | Some(Value::Imm(0)) => self.emit("\txor\trax, rax"),
-                    Some(value) => self.load("rax", value),
+                    Some(value) => self.load("rax", *value),
                 }
                 if next.0 < frame.blocks.len() {
                     self.emit(&format!("\tjmp\t{}", frame.epilogue));
@@ -906,6 +942,8 @@ impl X64Generator {
                 let dst = frame.reg(*dst)?;
                 let label = global_label(name);
                 if *checked {
+                    // a tuple's values are its own globals, all assigned together
+                    let name = variable_of(name);
                     let fail = self.fail_here(&format!("'{name}' is used before it is assigned"));
                     self.emit(&format!("\tcmp\tQWORD PTR [rip + {label}.set], 0"));
                     self.emit(&format!("\tje\t{fail}"));
@@ -1066,7 +1104,11 @@ impl X64Generator {
                 self.store(dst, "rax");
             }
 
-            Inst::Call { dst, callee, args } => {
+            Inst::Call { dsts, callee, args } => {
+                let extra_results = dsts.len().saturating_sub(RESULT_REGS.len());
+                if dsts.len() > 1 && !matches!(callee, Callee::User(_)) {
+                    return Err(format!("{callee} returns one value"));
+                }
                 if let Callee::User(_) = callee {
                     // the same limit as the interpreter, rather than overflowing the stack
                     let too_deep = self.fail_here(&format!(
@@ -1080,6 +1122,10 @@ impl X64Generator {
                 let mut values = Vec::new();
                 for arg in args {
                     values.push(frame.value(*arg)?);
+                }
+                // room for the results past the registers, above the arguments
+                if extra_results > 0 {
+                    self.emit(&format!("\tsub\trsp, {}", 8 * extra_results));
                 }
                 // arguments past the sixth go on the stack, the first deepest
                 let extra = values.len().saturating_sub(ARG_REGS.len());
@@ -1116,8 +1162,16 @@ impl X64Generator {
                 if extra > 0 {
                     self.emit(&format!("\tadd\trsp, {}", 8 * extra));
                 }
-                if let Some(dst) = dst {
+                for (dst, reg) in dsts.iter().zip(RESULT_REGS) {
+                    self.store(frame.reg(*dst)?, reg);
+                }
+                for (j, dst) in dsts.iter().enumerate().skip(RESULT_REGS.len()) {
+                    let offset = 8 * (j - RESULT_REGS.len());
+                    self.emit(&format!("\tmov\trax, QWORD PTR [rsp + {offset}]"));
                     self.store(frame.reg(*dst)?, "rax");
+                }
+                if extra_results > 0 {
+                    self.emit(&format!("\tadd\trsp, {}", 8 * extra_results));
                 }
             }
         }
@@ -1140,7 +1194,7 @@ impl X64Generator {
     /// Returns the memory operand for element `index` of `list`, without its size prefix.
     ///
     /// When `checked`, a negative index counts from the end, and an index still out of range
-    /// exits with an error. A list is a pointer to a `{len, cap, data}` header (see
+    /// exits with an error. A list is a pointer to a `{len, cap, data, kinds, width}` header (see
     /// [`super::builtins::list_runtime`]), so for example `xs[-1]` with `xs` of length 3 checks
     /// that `-1 + 3` is below 3 and returns `[rax + rcx * 8]` with `rax` holding `data` and `rcx`
     /// holding 2. This uses `rax` and `rcx`.
@@ -1151,7 +1205,20 @@ impl X64Generator {
             _ => None,
         };
         if checked {
-            let out_of_range = self.fail_here("list index out of range");
+            // the error reports the index as written and the length, in FAIL_VALUES
+            let mut setup = vec![format!("\tmov\trdx, QWORD PTR [{base}]")];
+            match constant {
+                Some(n) => setup.push(format!("\tmov\trcx, {n}")),
+                None => {
+                    // a negative index was counted from the end, and only a negative one is
+                    // still negative after that, so the length comes off again
+                    setup.push("\tmov\trax, rcx".to_string());
+                    setup.push("\tsar\trax, 63".to_string());
+                    setup.push("\tand\trax, rdx".to_string());
+                    setup.push("\tsub\trcx, rax".to_string());
+                }
+            }
+            let out_of_range = self.ctx.fail_at_after(INDEX_RANGE, self.span, setup);
             match constant {
                 Some(n) => {
                     // the length is never negative, so a constant index is in range below it

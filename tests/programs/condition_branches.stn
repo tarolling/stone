@@ -3,6 +3,10 @@ fn note(label: str, v: int) -> int;
     print(label)
     ret v
 
+fn flag(label: str, v: bool) -> bool;
+    print(label)
+    ret v
+
 fn classify(a: int, b: int, c: int) -> int;
     if a < b < c;
         ret 1
@@ -16,11 +20,11 @@ fn classify(a: int, b: int, c: int) -> int;
 
 print(classify(1, 2, 3), classify(3, 2, 1), classify(2, 2, 3), classify(1, 2, 1), classify(2, 1, 3))
 
-if note("first", 0) and note("skipped", 1);
+if flag("first", false) and flag("skipped", true);
     print("no")
-if note("second", 1) or note("skipped", 1);
+if flag("second", true) or flag("skipped", true);
     print("yes")
-if not note("third", 0) and note("fourth", 1) < note("fifth", 2) < note("sixth", 1);
+if not flag("third", false) and note("fourth", 1) < note("fifth", 2) < note("sixth", 1);
     print("no")
 else;
     print("chain stopped")

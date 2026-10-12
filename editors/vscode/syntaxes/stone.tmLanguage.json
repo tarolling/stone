@@ -39,7 +39,7 @@
       }
     },
     "type-annotation": {
-      "match": "(->|:)\\s*((?:list\\[)*(?:int|float|bool|str|none)\\]*)(?![A-Za-z0-9_(])",
+      "match": "(->|:)\\s*((?:(?:list|tuple)\\[)*(?:int|float|bool|str|none)(?:\\]|,\\s*(?:(?:list|tuple)\\[)*(?:int|float|bool|str|none))*)(?![A-Za-z0-9_(])",
       "captures": {
         "1": { "name": "punctuation.separator.annotation.stone" },
         "2": { "name": "support.type.stone" }

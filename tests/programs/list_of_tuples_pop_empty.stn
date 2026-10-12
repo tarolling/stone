@@ -1,0 +1,5 @@
+// popping from an empty list of tuples
+pairs = [("a", 1)]
+name, n = pairs.pop()
+print(name, n)
+name, n = pairs.pop()

@@ -1,0 +1,31 @@
+// a tuple holds a few values of different types
+point = (3, 4)
+person = ("ann", 31, ["chess", "go"])
+print(point, person, person[0], person[-1][1])
+
+// a function returns several values as a tuple
+fn min_max(xs: list[int]) -> tuple[int, int];
+    low = xs[0]
+    high = xs[0]
+    for x in xs;
+        if x < low;
+            low = x
+        if x > high;
+            high = x
+    ret (low, high)
+
+low, high = min_max([4, 9, 1, 7])
+print(low, high)
+
+// names separated by commas unpack a tuple, and a swap needs no temporary
+a = "left"
+b = "right"
+a, b = (b, a)
+print(a, b)
+
+// a list of tuples unpacks one element at a time
+scores = [("ann", 3), ("bo", 5)]
+scores.append(("cy", 4))
+for name, score in scores;
+    print(name, score)
+print(scores, scores[1][0])

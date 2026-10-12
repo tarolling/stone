@@ -162,7 +162,7 @@ fn top_level_list_loops_hold_their_list_and_main_releases_globals() {
 #[test]
 fn and_as_a_value_short_circuits_through_a_result_vreg() {
     assert_eq!(
-        dump("fn f(a: int, b: int) -> int;\n    ret a and b\nprint(f(1, 2))\n")
+        dump("fn f(a: bool, b: bool) -> bool;\n    ret a and b\nprint(f(true, false))\n")
             .split("fn main")
             .next()
             .unwrap(),
@@ -470,7 +470,8 @@ fn string_indexes_check_the_length_then_call_the_runtime() {
         "v2 = call stone.str_len(v0)",
         "br_lt v3, 0",
         "v3 = add v3, v2",
-        "fail \"string index out of range\"",
+        // the error reports the index as written and the length
+        "fail \"string index out of range (index {}, length {})\", v1, v2",
         "call stone.str_at(v0, v3)",
     ] {
         assert!(f.contains(line), "{line} in\n{f}");
@@ -727,7 +728,10 @@ fn elementwise_arithmetic_is_one_loop_with_no_temporary_lists() {
     assert_eq!(ir.matches("list_set").count(), 1, "{ir}");
     assert_eq!(ir.matches("call stone.list_new").count(), 1, "{ir}");
     assert_eq!(ir.matches("call ").count(), 1, "{ir}");
-    assert!(ir.contains("fail \"lists have different lengths\""), "{ir}");
+    assert!(
+        ir.contains("fail \"lists have different lengths ({} and {})\", v2, v3"),
+        "{ir}"
+    );
     assert!(!ir.contains("list_load"), "{ir}");
 }
 
@@ -833,4 +837,58 @@ fn a_change_records_the_subscript_whose_index_it_checks() {
         )
     });
     assert_eq!(store, [Span::new(Pos::new(2, 5), Pos::new(2, 15))]);
+}
+
+#[test]
+fn a_tuple_is_returned_and_received_as_its_values() {
+    let source = "fn swap(a: int, b: int) -> tuple[int, int];\n    a, b = (b, a)\n    ret (a, b)\n\
+                  fn f() -> int;\n    x, y = swap(1, 2)\n    ret x - y\nprint(f())\n";
+    let ir = dump(source);
+    // the swap copies both values before assigning either
+    assert_eq!(
+        ir.split("fn main").next().unwrap(),
+        "fn swap(v0, v1):\nb0:\n  v2 = copy v1\n  v3 = copy v0\n  v0 = copy v2\n  v1 = copy v3\n  \
+         ret v0, v1\n\
+         fn f():\nb0:\n  v2, v3 = call swap(1, 2)\n  v0 = copy v2\n  v1 = copy v3\n  \
+         v4 = sub v0, v1\n  ret v4\n"
+    );
+}
+
+#[test]
+fn a_tuple_parameter_is_passed_as_its_values() {
+    let source = "fn first(t: tuple[int, tuple[str, float]]) -> str;\n    ret t[1][0]\n\
+                  print(first((1, (\"a\", 2.5))))\n";
+    assert_eq!(
+        dump(source).split("fn main").next().unwrap(),
+        "fn first(v0, v1, v2):\nb0:\n  retain v1\n  ret v1\n"
+    );
+}
+
+#[test]
+fn a_local_returned_twice_gives_one_reference_and_retains_the_other() {
+    let source = "fn twice(s: str) -> tuple[str, str];\n    t = s + \"!\"\n    ret (t, t)\n\
+                  print(twice(\"a\"))\n";
+    let ir = dump(source);
+    let twice = ir.split("fn main").next().unwrap();
+    assert_eq!(twice.matches("retain").count(), 1, "{twice}");
+    assert!(twice.ends_with("  retain v1\n  ret v1, v1\n"), "{twice}");
+}
+
+#[test]
+fn a_field_of_a_list_element_reads_only_its_slot() {
+    let source = "fn first(pairs: list[tuple[str, int]], i: int) -> int;\n    ret pairs[i][1]\n\
+                  print(first([(\"a\", 1)], 0))\n";
+    let ir = dump(source);
+    let first = ir.split("fn main").next().unwrap();
+    // the element's slots start at twice its position, and only the int's is read
+    assert_eq!(first.matches("list_get").count(), 1, "{first}");
+    assert!(first.contains("mul v"), "{first}");
+    assert!(!first.contains("retain"), "{first}");
+}
+
+#[test]
+fn a_list_of_tuples_records_its_width_and_kinds() {
+    let ir = dump("xs = [(1, \"a\", [2])]\nprint(xs)\n");
+    // three slots of one element: an int (0), a string (1 << 2), and a list (2 << 4)
+    assert!(ir.contains("call stone.list_new_wide(3, 36, 3)"), "{ir}");
 }

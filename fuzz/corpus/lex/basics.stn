@@ -4,9 +4,9 @@ z = x + y
 print(z)
 print(x)
 
-if 0;
+if false;
     print("i love you")
-elif 0;
+elif false;
     print("yo")
 else;
     print("WHATTTT")

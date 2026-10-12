@@ -148,6 +148,7 @@ param:
 type:
     | 'none'
     | 'list' '[' type ']'
+    | 'tuple' '[' type (',' type)+ [','] ']'
     | NAME  # int, float, bool, or str
 
 # If statement
@@ -178,9 +179,9 @@ for_stmt:
 # EXPRESSIONS
 # -----------
 
+# values separated by commas, as in `x = 1, 2`, are an error that says a tuple needs
+# parentheses, as in `x = (1, 2)`
 expressions:
-    | expression (',' expression )+ [','] 
-    | expression ',' 
     | expression
 
 expression:
@@ -257,7 +258,12 @@ atom:
     | strings
     | NUMBER
     | list
+    | tuple
     | group
+
+# a tuple has at least two values, so `()` and `(x,)` are errors
+tuple:
+    | '(' expression (',' expression )+ [','] ')' 
 
 group:
     | '(' expression ')' 
@@ -290,8 +296,9 @@ args:
 # Generic targets
 # ---------------
 
+# names separated by commas unpack a tuple, as in `q, r = divide(7, 2)`
 star_targets:
-    | star_target !',' 
+    | star_target (',' star_target )* [','] 
 
 star_target:
     | target_with_star_atom
@@ -302,6 +309,7 @@ target_with_star_atom:
 
 star_atom:
     | NAME 
+    | '(' star_targets ')' 
 
 single_subscript_attribute_target:
     | t_primary '.' NAME !t_lookahead 

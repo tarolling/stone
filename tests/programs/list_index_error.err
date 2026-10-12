@@ -1,1 +1,1 @@
-:4:7: error: list index out of range
+:4:7: error: list index out of range (index 2, length 2)

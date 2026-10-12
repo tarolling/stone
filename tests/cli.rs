@@ -42,6 +42,20 @@ fn check_reports_a_syntax_error_and_fails() {
 }
 
 #[test]
+fn check_suggests_parentheses_for_a_tuple() {
+    let (output, file) = stone(&["check"], "bare_tuple", "pair = 1, \"a\"\n");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "{}:1:8: error: values separated by commas need parentheses to make a tuple, as in \
+             '(a, b)'\n  |\n1 | pair = 1, \"a\"\n  |        ^^^^^^\n",
+            file.display()
+        )
+    );
+}
+
+#[test]
 fn run_reports_a_syntax_error_without_running() {
     let (output, file) = stone(&["run"], "run_bad", "print(1)\nprint(2\n");
     assert!(!output.status.success());
@@ -81,7 +95,10 @@ fn built_programs_report_runtime_errors_as_run_does() {
         .expect("stone should run");
     assert!(build.status.success(), "{build:?}");
     let built = Command::new(&exe).output().expect("program should run");
-    let expected = format!("{}:2:9: error: list index out of range", file.display());
+    let expected = format!(
+        "{}:2:9: error: list index out of range (index 0, length 0)\n",
+        file.display()
+    );
     for output in [&run, &built] {
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "4\n");

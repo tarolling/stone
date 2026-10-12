@@ -1,0 +1,6 @@
+// the smallest int is still reported as written, though counting from the end cannot help it
+items = [1, 2]
+print(items[-2])
+low = -9223372036854775807 - 1
+print(items[low])
+print("after")

@@ -10,7 +10,7 @@ pub mod floats;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
-    Context, LIST_ROUTINES, STRING_METHOD_ROUTINES, global_label, immortal_string,
+    Context, LIST_ROUTINES, STRING_METHOD_ROUTINES, escape, global_label, immortal_string,
 };
 use crate::codegen::x64::builtins::print;
 use crate::codegen::{AssemblyGenerator, Target};
@@ -133,23 +133,56 @@ impl X64Generator {
     /// with status 1. A failure with a site records it in `stone.site` first, and so does a call
     /// to one of the
     /// [`FALLIBLE_ROUTINES`](crate::codegen::context::FALLIBLE_ROUTINES), whose own failures have none.
+    ///
+    /// A failure whose message has holes jumps to `stone.fail_detail` instead, with `rdi`
+    /// pointing at the three pieces of text around them, one after another, and the ints for the
+    /// holes in [`FAIL_VALUES`](emit::FAIL_VALUES), so `(index {}, length {})` prints as
+    /// `(index 5, length 2)` without allocating.
     fn emit_failures(&mut self) {
         let Some(failures) = self.ctx.failures() else {
             return;
         };
+        let mut pieces = Vec::new();
         for failure in failures {
-            let text = self.ctx.intern_string(&failure.message);
             self.emit(&format!("{}:", failure.label));
+            for line in &failure.setup {
+                self.emit(line);
+            }
             if let Some(site) = &failure.site {
                 self.record_site(site);
             }
-            self.emit(&format!("\tlea\trdi, [rip + {text}]"));
-            self.emit("\tjmp\tstone.fail");
+            match failure.pieces() {
+                Some(texts) => {
+                    let label = self.ctx.new_label("fail_pieces");
+                    self.emit(&format!("\tlea\trdi, [rip + {label}]"));
+                    self.emit("\tjmp\tstone.fail_detail");
+                    let texts: Vec<String> = texts.into_iter().map(escape).collect();
+                    pieces.push((label, texts));
+                }
+                None => {
+                    let text = self.ctx.intern_string(&failure.message);
+                    self.emit(&format!("\tlea\trdi, [rip + {text}]"));
+                    self.emit("\tjmp\tstone.fail");
+                }
+            }
         }
         let prefix = self.ctx.intern_string("error: ");
         let newline = self.ctx.intern_string("\n");
         let no_location = self.ctx.new_label("fail_message");
+        let common = self.ctx.new_label("fail_common");
+        let [first, second] = emit::FAIL_VALUES;
+        // rbx says whether rdi starts the pieces of a detailed message, whose values wait in r14
+        // and r15, and r12 and r13 hold the message and the site
+        self.emit("stone.fail_detail:");
+        self.emit(&format!("\tmov\tr14, {first}"));
+        self.emit(&format!("\tmov\tr15, {second}"));
+        self.emit("\tmov\trbx, 1");
+        // room to write an int's digits in
+        self.emit("\tsub\trsp, 32");
+        self.emit(&format!("\tjmp\t{common}"));
         self.emit("stone.fail:");
+        self.emit("\txor\trbx, rbx");
+        self.emit(&format!("{common}:"));
         self.emit("\tmov\tr12, rdi");
         self.emit("\tmov\tr13, QWORD PTR [rip + stone.site]");
         self.emit("\ttest\tr13, r13");
@@ -161,14 +194,26 @@ impl X64Generator {
         self.emit("\tadd\tr13, rdx");
         self.emit("\tinc\tr13");
         self.emit(&format!("{no_location}:"));
-        for text in [prefix, "r12".to_string(), newline] {
-            if text == "r12" {
-                self.emit("\tmov\trsi, r12");
-            } else {
-                self.emit(&format!("\tlea\trsi, [rip + {text}]"));
-            }
+        self.emit(&format!("\tlea\trsi, [rip + {prefix}]"));
+        self.write_stderr();
+        self.emit("\tmov\trsi, r12");
+        self.write_stderr();
+        let plain = self.ctx.new_label("fail_plain");
+        self.emit("\ttest\trbx, rbx");
+        self.emit(&format!("\tje\t{plain}"));
+        for value in ["r14", "r15"] {
+            // the next piece follows the last one's terminating zero
+            self.emit("\tmov\trbx, rsi");
+            self.emit("\tadd\trbx, rdx");
+            self.emit("\tinc\trbx");
+            self.emit(&format!("\tmov\trax, {value}"));
+            self.write_int_stderr();
+            self.emit("\tmov\trsi, rbx");
             self.write_stderr();
         }
+        self.emit(&format!("{plain}:"));
+        self.emit(&format!("\tlea\trsi, [rip + {newline}]"));
+        self.write_stderr();
         let done = self.ctx.new_label("fail_done");
         self.emit("\ttest\tr13, r13");
         self.emit(&format!("\tje\t{done}"));
@@ -179,6 +224,16 @@ impl X64Generator {
         self.emit("\tmov\trdi, 1");
         self.emit("\tsyscall");
 
+        if !pieces.is_empty() {
+            self.emit("\t.section\t.rodata");
+            for (label, texts) in pieces {
+                self.emit(&format!("{label}:"));
+                for text in texts {
+                    self.emit(&format!("\t.string \"{text}\""));
+                }
+            }
+            self.emit("\t.text");
+        }
         let sites = self.ctx.sites();
         if !sites.is_empty() {
             self.emit("\t.section\t.rodata");
@@ -206,6 +261,42 @@ impl X64Generator {
         self.emit("\tmov\trax, 1"); // sys_write
         self.emit("\tmov\trdi, 2"); // stderr
         self.emit("\tsyscall");
+    }
+
+    /// Writes the int in `rax` to stderr in decimal, as `print` writes it, into the 32 bytes at
+    /// `rsp`. Clobbers `rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8`, and `r11`.
+    ///
+    /// For example, `-12` writes `-12`.
+    fn write_int_stderr(&mut self) {
+        let digits = self.ctx.new_label("fail_digits");
+        let digit = self.ctx.new_label("fail_digit");
+        let write = self.ctx.new_label("fail_int_write");
+        // digits are written backwards from the terminating zero
+        self.emit("\tmov\trsi, rsp");
+        self.emit("\tadd\trsi, 31");
+        self.emit("\tmov\tbyte ptr [rsi], 0");
+        self.emit("\txor\tr8, r8"); // negative flag
+        self.emit("\ttest\trax, rax");
+        self.emit(&format!("\tjns\t{digits}"));
+        // negating the minimum leaves it unchanged, which unsigned division still reads correctly
+        self.emit("\tneg\trax");
+        self.emit("\tmov\tr8, 1");
+        self.emit(&format!("{digits}:"));
+        self.emit("\tmov\trcx, 10");
+        self.emit(&format!("{digit}:"));
+        self.emit("\txor\trdx, rdx");
+        self.emit("\tdiv\trcx");
+        self.emit("\tadd\tdl, 48"); // '0'
+        self.emit("\tdec\trsi");
+        self.emit("\tmov\tbyte ptr [rsi], dl");
+        self.emit("\ttest\trax, rax");
+        self.emit(&format!("\tjnz\t{digit}"));
+        self.emit("\ttest\tr8, r8");
+        self.emit(&format!("\tjz\t{write}"));
+        self.emit("\tdec\trsi");
+        self.emit("\tmov\tbyte ptr [rsi], 45"); // '-'
+        self.emit(&format!("{write}:"));
+        self.write_stderr();
     }
 
     /// Records the site record `site` in `stone.site`, for `stone.fail` to point at, using only

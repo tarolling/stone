@@ -33,13 +33,13 @@ file by the path it was built from.
 | `division by zero` | `/` or `%` with a divisor of `0`, or `0.0` (as in Python, rather than IEEE 754's infinity or nan) |
 | `integer overflow in division` | the smallest int divided by `-1`, which has no int result. `%` by `-1` is always `0` |
 | `negative exponent` | `**` with an int base and a negative exponent, which has no int result |
-| `list index out of range` | an index at or past the length, or a negative index before the start, including `insert` at an index below `-len` or above `len`. The interpreter adds the index and length |
+| `list index out of range (index 5, length 2)` | an index at or past the length, or a negative index before the start, including `insert` at an index below `-len` or above `len`. It gives the index as written and the list's length |
 | `pop from empty list` | `pop()` or `pop(i)` on an empty list |
 | `pop index out of range` | `pop(i)` with `i` at or past the length, or before the start |
-| `string index out of range` | a string index at or past the length, or a negative index before the start. The interpreter adds the index and length |
+| `string index out of range (index -4, length 3)` | a string index at or past the length, or a negative index before the start. It gives the index as written and the string's length in bytes |
 | `cannot cut a string inside a character` | `s[i]` of a byte that is part of a character outside ASCII, or a slice that would hold only part of one (see [strings](types.md#strings)) |
 | `slice step cannot be zero` | a slice such as `xs[::0]` or `s[::0]` |
-| `lists have different lengths` | arithmetic on two lists, such as `a + b`, whose lengths differ. The interpreter adds both lengths |
+| `lists have different lengths (3 and 2)` | arithmetic on two lists, such as `a + b`, whose lengths differ. It gives the first list's length and then the first length that differs from it |
 | `cannot convert float to int (nan or out of range)` | `int()` or `math.floor()` of nan, an infinity, or a float outside the int range |
 | `invalid literal for int() with base 10: '...'` | `int()` of a string that is not a decimal int, quoted as given |
 | `int() argument out of range: '...'` | `int()` of a string holding an int too large or small to fit |

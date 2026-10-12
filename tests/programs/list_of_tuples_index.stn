@@ -1,0 +1,4 @@
+// an index past the end of a list of tuples, read for one of its values
+pairs = [("a", 1), ("b", 2)]
+print(pairs[1][0])
+print(pairs[5][0])

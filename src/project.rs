@@ -724,7 +724,9 @@ impl Rewriter<'_> {
                 self.expr(slice);
             }
             ExprKind::Attribute { value, .. } => self.expr(value),
-            ExprKind::List { elts, .. } => elts.iter_mut().for_each(|e| self.expr(e)),
+            ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
+                elts.iter_mut().for_each(|e| self.expr(e))
+            }
             ExprKind::Slice { lower, upper, step } => [lower, upper, step]
                 .into_iter()
                 .flatten()

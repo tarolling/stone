@@ -32,9 +32,12 @@ mod tests;
 
 use super::{
     BinOp, Block, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, Program, RcKind,
-    Terminator, VReg,
+    Terminator, VReg, leaf_name, variable_of,
 };
-use crate::ast::{Arg, BoolOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
+use crate::ast::{
+    Arg, BoolOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp, constant_int,
+    target_names,
+};
 use crate::checker::{
     Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, place_root, place_spans,
     range_args,
@@ -64,9 +67,8 @@ pub fn lower(
 
     let mut assigned = Vec::new();
     collect_assigned(body, &mut assigned);
-    let globals: Vec<String> = assigned.into_iter().map(|(name, _)| name).collect();
 
-    let variables: Variables = symbols
+    let mut variables: Variables = symbols
         .iter()
         .filter(|symbol| symbol.kind != SymbolKind::Function)
         .map(|symbol| {
@@ -76,13 +78,34 @@ pub fn lower(
             )
         })
         .collect();
+    // each value of a tuple is a variable of its own, so a tuple is never stored as one
+    let tuples: Vec<_> = variables
+        .iter()
+        .filter(|(_, ty)| matches!(ty, Type::Tuple(_)))
+        .map(|(key, ty)| (key.clone(), ty.clone()))
+        .collect();
+    for ((scope, name), ty) in tuples {
+        for (i, leaf) in ty.leaves().into_iter().enumerate() {
+            variables.insert((scope.clone(), leaf_name(&name, i)), leaf);
+        }
+    }
+    let stone_globals: HashSet<String> = assigned.iter().map(|(name, _)| name.clone()).collect();
+    let globals: Vec<String> = assigned
+        .into_iter()
+        .flat_map(|(name, _)| match variables.get(&(None, name.clone())) {
+            Some(ty @ Type::Tuple(_)) => (0..ty.leaves().len())
+                .map(|i| leaf_name(&name, i))
+                .collect(),
+            _ => vec![name],
+        })
+        .collect();
     let global_set: HashSet<String> = globals.iter().cloned().collect();
     let context = Context {
         types,
         variables: &variables,
         globals: &globals,
         owned_params: owned_params(body),
-        global_reads: global_reads(body, &global_set),
+        global_reads: global_reads(body, &stone_globals),
         global_set,
     };
 
@@ -107,15 +130,17 @@ pub fn lower(
 /// What lowering each function shares.
 struct Context<'a> {
     types: &'a HashMap<Span, Type>,
+    /// The type of each variable, including one for each value of a tuple variable, such as
+    /// `t.0` for `t`.
     variables: &'a Variables,
-    /// Every global, in the order they are first assigned.
+    /// Every global, in the order they are first assigned, each value of a tuple as its own.
     globals: &'a [String],
     global_set: HashSet<String>,
     /// For each function, whether it owns each parameter, which it does if it assigns or changes
     /// it. A caller gives an owned parameter a reference of its own.
     owned_params: HashMap<String, Vec<bool>>,
     /// For each function, the globals it or any function it calls may read, which a caller must
-    /// not move into it.
+    /// not move into it, by their stone names.
     global_reads: HashMap<String, HashSet<String>>,
 }
 
@@ -210,14 +235,19 @@ impl<'a> Lowerer<'a> {
         let mut assigned = Vec::new();
         let mut changed = HashSet::new();
         if self.name.is_some() {
+            // a tuple is passed as each of its values
             for arg in args {
-                let reg = self.local(&arg.arg);
-                params.push(reg);
+                for leaf in self.leaf_names(&arg.arg) {
+                    let reg = self.local(&leaf);
+                    params.push(reg);
+                }
             }
             collect_assigned(body, &mut assigned);
             collect_changed(body, &mut changed);
             for (name, _) in &assigned {
-                self.local(name);
+                for leaf in self.leaf_names(name) {
+                    self.local(&leaf);
+                }
             }
         }
 
@@ -227,16 +257,19 @@ impl<'a> Lowerer<'a> {
         // the caller gives a parameter the function assigns or changes a reference of its own to
         // release, and other counted locals start null, since they may not be assigned on every
         // path
-        let names = args
+        let names: Vec<String> = args
             .iter()
             .map(|arg| &arg.arg)
-            .chain(assigned.iter().map(|(name, _)| name));
+            .chain(assigned.iter().map(|(name, _)| name))
+            .flat_map(|name| self.leaf_names(name))
+            .collect();
         let mut seen = HashSet::new();
-        for name in names {
+        for name in &names {
             let reg = self.locals[name];
             let Some(kind) = self.variable_kind(name) else {
                 continue;
             };
+            let name = variable_of(name);
             if !seen.insert(reg) {
                 continue;
             }
@@ -258,7 +291,7 @@ impl<'a> Lowerer<'a> {
         }
         // falling off the end returns none, and main exits with 0
         if self.current.is_some() {
-            self.leave(Operand::Imm(0));
+            self.leave(&[Operand::Imm(0)]);
         }
 
         Ok(Function {
@@ -277,6 +310,38 @@ impl<'a> Lowerer<'a> {
         let reg = self.fresh();
         self.locals.insert(name.to_string(), reg);
         reg
+    }
+
+    /// Returns the type of the stone variable `name` where this code reads it: a local of this
+    /// function, or else a global.
+    fn variable_type(&self, name: &str) -> Option<&Type> {
+        self.context
+            .variables
+            .get(&(self.name.clone(), name.to_string()))
+            .or_else(|| self.context.variables.get(&(None, name.to_string())))
+    }
+
+    /// Returns the variables lowering keeps for the stone variable `name`: one for each value of
+    /// a tuple, or `name` itself.
+    ///
+    /// For example, a `t` of type `tuple[int, tuple[str, float]]` is `t.0`, `t.1`, and `t.2`.
+    fn leaf_names(&self, name: &str) -> Vec<String> {
+        match self.variable_type(name) {
+            Some(ty @ Type::Tuple(_)) => {
+                (0..ty.leaves().len()).map(|i| leaf_name(name, i)).collect()
+            }
+            _ => vec![name.to_string()],
+        }
+    }
+
+    /// Returns how each value of `expr` is counted: one for each value of a tuple, or one.
+    fn leaf_kinds(&self, expr: &Expr) -> Result<Vec<Option<RcKind>>, String> {
+        Ok(self
+            .type_of(expr)?
+            .leaves()
+            .iter()
+            .map(RcKind::of)
+            .collect())
     }
 
     /// Returns how variable `name` of this function, or global `name` in `main`, is counted.
@@ -298,6 +363,34 @@ impl<'a> Lowerer<'a> {
     /// Returns how the value of `expr` is counted.
     fn counted(&self, expr: &Expr) -> Option<RcKind> {
         self.context.types.get(&expr.span).and_then(RcKind::of)
+    }
+
+    /// Returns how many values each element of the list `expr` holds, one for each value of a
+    /// tuple, and how each is counted, two bits apiece, as the list's header records them (see
+    /// `builtins::list_runtime`).
+    ///
+    /// For example, a `list[str]` is `(1, 1)`, and a `list[tuple[int, str, list[int]]]` is
+    /// `(3, 0b10_01_00)`.
+    fn element_layout(&self, expr: &Expr) -> (usize, i64) {
+        let kinds = self.element_kinds(expr);
+        let code = kinds.iter().enumerate().fold(0, |code, (i, kind)| {
+            let bits = match kind {
+                None => 0,
+                Some(RcKind::Str) => 1,
+                Some(RcKind::List) => 2,
+            };
+            code | bits << (2 * i)
+        });
+        (kinds.len(), code)
+    }
+
+    /// Returns how each value of an element of the list `expr` is counted: one for each value of
+    /// a tuple, or one.
+    fn element_kinds(&self, expr: &Expr) -> Vec<Option<RcKind>> {
+        match self.context.types.get(&expr.span) {
+            Some(Type::List(elem)) => elem.leaves().iter().map(RcKind::of).collect(),
+            _ => vec![None],
+        }
     }
 
     /// Returns how the elements of the list `expr` are counted.
@@ -450,10 +543,11 @@ impl<'a> Lowerer<'a> {
         self.terminate(Terminator::Jump(target));
     }
 
-    /// Returns `value` from the function, first releasing the lists and strings of the loops it
-    /// is in and the references its locals own, except one that `value` is, which the caller
-    /// takes. `main` releases every global instead and exits with 0.
-    fn leave(&mut self, value: Operand) {
+    /// Returns `values` from the function, one for each value of a tuple, first releasing the
+    /// lists and strings of the loops it is in and the references its locals own, except those
+    /// among `values`, which the caller takes. `main` releases every global instead and exits
+    /// with 0.
+    fn leave(&mut self, values: &[Operand]) {
         let held: Vec<(Operand, RcKind)> = self.loops.iter().rev().filter_map(|l| l.held).collect();
         for (src, kind) in held {
             self.push(Inst::Release { src, kind });
@@ -462,7 +556,7 @@ impl<'a> Lowerer<'a> {
             let moved = std::mem::take(&mut self.moved_locals);
             for (reg, kind) in self.counted_locals.clone() {
                 // a local moved into a call no longer holds a reference
-                if value == Operand::Reg(reg) || moved.contains(&reg) {
+                if values.contains(&Operand::Reg(reg)) || moved.contains(&reg) {
                     continue;
                 }
                 self.push(Inst::Release {
@@ -470,7 +564,7 @@ impl<'a> Lowerer<'a> {
                     kind,
                 });
             }
-            self.terminate(Terminator::Return(Some(value)));
+            self.terminate(Terminator::Return(values.to_vec()));
             return;
         }
         for name in self.context.globals {
@@ -488,7 +582,7 @@ impl<'a> Lowerer<'a> {
                 kind,
             });
         }
-        self.terminate(Terminator::Return(Some(Operand::Imm(0))));
+        self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
     }
 
     /// Renumbers the blocks into the order they were started.
@@ -515,7 +609,7 @@ impl<'a> Lowerer<'a> {
                 let block = pending[id.0].take().expect("each block is placed once");
                 let term = match block
                     .term
-                    .unwrap_or(Terminator::Return(Some(Operand::Imm(0))))
+                    .unwrap_or(Terminator::Return(vec![Operand::Imm(0)]))
                 {
                     Terminator::Jump(target) => Terminator::Jump(renumber(target)),
                     Terminator::Branch {
@@ -542,7 +636,7 @@ impl<'a> Lowerer<'a> {
                         then: renumber(then),
                         otherwise: renumber(otherwise),
                     },
-                    term @ (Terminator::Return(_) | Terminator::Fail(_)) => term,
+                    term @ (Terminator::Return(_) | Terminator::Fail(..)) => term,
                 };
                 Block {
                     insts: block.insts,
@@ -566,6 +660,10 @@ impl<'a> Lowerer<'a> {
 
     fn stmt_unspanned(&mut self, stmt: &Stmt) -> Result<(), String> {
         match &stmt.kind {
+            StmtKind::Assign { targets, value } if self.is_tuple(value) => {
+                self.assign_tuple(stmt, targets, value)?;
+            }
+
             StmtKind::Assign { targets, value } => {
                 let last_uses = self.last_uses(stmt);
                 // a call can also take a target's old value, which the assignment replaces, but
@@ -619,39 +717,47 @@ impl<'a> Lowerer<'a> {
                 }
                 // `xs.append(row)` can take `row` at its last use
                 self.statement_last_uses = last_uses;
-                let result = self.expr(value)?;
+                let results = self.expr_flat(value)?;
                 self.statement_last_uses.clear();
-                self.release_temp(result);
+                for result in results {
+                    self.release_temp(result);
+                }
                 self.clear_moved();
             }
 
             StmtKind::Return { value } => {
-                let value = match value {
+                let values = match value {
                     // `ret` at the top level ends the program normally
                     Some(value) if self.name.is_none() => {
-                        let result = self.expr(value)?;
-                        self.release_temp(result);
-                        Operand::Imm(0)
+                        for result in self.expr_flat(value)? {
+                            self.release_temp(result);
+                        }
+                        vec![Operand::Imm(0)]
                     }
                     Some(value) => {
                         // returning releases every local, so a call can take any of them
                         if self.is_stone_call(value) || self.is_elementwise(value) {
                             self.movable = self.last_uses(stmt);
                         }
-                        let result = self.expr(value)?;
-                        // a counted local gives its own reference to the caller
-                        if !self
-                            .counted_locals
-                            .iter()
-                            .any(|(reg, _)| result == Operand::Reg(*reg))
-                        {
-                            self.take(result, self.counted(value));
+                        let kinds = self.leaf_kinds(value)?;
+                        let results = self.expr_flat(value)?;
+                        // a counted local gives its own reference to the caller, once, so that
+                        // `ret (s, s)` gives a second one
+                        let mut given = HashSet::new();
+                        for (&result, kind) in results.iter().zip(kinds) {
+                            let local = self
+                                .counted_locals
+                                .iter()
+                                .any(|(reg, _)| result == Operand::Reg(*reg));
+                            if !(local && given.insert(result)) {
+                                self.take(result, kind);
+                            }
                         }
-                        result
+                        results
                     }
-                    None => Operand::Imm(0),
+                    None => vec![Operand::Imm(0)],
                 };
-                self.leave(value);
+                self.leave(&values);
             }
 
             StmtKind::If { test, body, orelse } => {
@@ -737,28 +843,7 @@ impl<'a> Lowerer<'a> {
         kind: Option<RcKind>,
     ) -> Result<(), String> {
         match &target.kind {
-            ExprKind::Name { id, .. } => {
-                if let Some(&local) = self.locals.get(id) {
-                    // a value moved into the call that computed the new one is not ours to release
-                    if let Some(kind) = kind
-                        && !self.moved_locals.remove(&local)
-                    {
-                        self.push(Inst::Release {
-                            src: Operand::Reg(local),
-                            kind,
-                        });
-                    }
-                    if value != Operand::Reg(local) {
-                        self.push(Inst::Copy {
-                            dst: local,
-                            src: value,
-                        });
-                    }
-                } else if self.context.global_set.contains(id) {
-                    let kind = kind.filter(|_| !self.moved_globals.remove(id));
-                    self.store_global(id, value, kind);
-                }
-            }
+            ExprKind::Name { id, .. } => self.assign_name(id, value, kind),
             ExprKind::Subscript {
                 value: list, slice, ..
             } => {
@@ -768,6 +853,108 @@ impl<'a> Lowerer<'a> {
                 self.store_element(target, &indexes, index, value, kind)?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Stores `value` in the variable `name`, a local or a global, or a value of a tuple variable,
+    /// such as `t.0`, releasing its old value if it is counted as `kind`.
+    fn assign_name(&mut self, name: &str, value: Operand, kind: Option<RcKind>) {
+        if let Some(&local) = self.locals.get(name) {
+            // a value moved into the call that computed the new one is not ours to release
+            if let Some(kind) = kind
+                && !self.moved_locals.remove(&local)
+            {
+                self.push(Inst::Release {
+                    src: Operand::Reg(local),
+                    kind,
+                });
+            }
+            if value != Operand::Reg(local) {
+                self.push(Inst::Copy {
+                    dst: local,
+                    src: value,
+                });
+            }
+        } else if self.context.global_set.contains(name) {
+            let kind = kind.filter(|_| !self.moved_globals.remove(name));
+            self.store_global(name, value, kind);
+        }
+    }
+
+    /// Lowers `targets = value` for a tuple `value`, whose values each target takes: a tuple
+    /// variable each of its own, and names to unpack into one each, as in `q, r = divide(7, 2)`.
+    ///
+    /// Every value is computed before any target changes, so `a, b = (b, a)` swaps. A local
+    /// variable among the values is copied first, since assigning one target could change it.
+    fn assign_tuple(&mut self, stmt: &Stmt, targets: &[Expr], value: &Expr) -> Result<(), String> {
+        let last_uses = self.last_uses(stmt);
+        if self.is_stone_call(value)
+            && targets
+                .iter()
+                .all(|target| matches!(target.kind, ExprKind::Name { .. } | ExprKind::Tuple { .. }))
+        {
+            self.movable = last_uses.clone();
+            for target in targets {
+                let mut names = Vec::new();
+                target_names(target, &mut names);
+                for name in names {
+                    let ExprKind::Name { id, .. } = &name.kind else {
+                        continue;
+                    };
+                    for leaf in self.leaf_names(id) {
+                        if self.is_counted_variable(&leaf) {
+                            self.movable.push(leaf);
+                        }
+                    }
+                }
+            }
+        }
+        let kinds = self.leaf_kinds(value)?;
+        let sources = self.flat_sources(value);
+        let values = self.expr_flat(value)?;
+        let values: Vec<Operand> = values.into_iter().map(|v| self.snapshot(v)).collect();
+        // every target gets a reference of its own, the last one each temporary's
+        for (i, target) in targets.iter().enumerate() {
+            for (j, (&value, &kind)) in values.iter().zip(&kinds).enumerate() {
+                if i + 1 < targets.len() {
+                    if kind.is_some() {
+                        self.push(Inst::Retain { src: value });
+                    }
+                } else {
+                    self.take_leaf(sources[j].as_deref(), value, kind, &last_uses);
+                }
+            }
+            self.assign_flat(target, &values, &kinds)?;
+        }
+        self.clear_moved();
+        Ok(())
+    }
+
+    /// Stores the values of a tuple, which already carry the references they need, in `target`:
+    /// a tuple variable, or names to unpack them into, at any depth.
+    fn assign_flat(
+        &mut self,
+        target: &Expr,
+        values: &[Operand],
+        kinds: &[Option<RcKind>],
+    ) -> Result<(), String> {
+        match &target.kind {
+            ExprKind::Name { id, .. } => {
+                for ((leaf, &value), &kind) in self.leaf_names(id).iter().zip(values).zip(kinds) {
+                    self.assign_name(leaf, value, kind);
+                }
+            }
+            ExprKind::Tuple { elts, .. } => {
+                let mut start = 0;
+                for elt in elts {
+                    let end = start + self.type_of(elt)?.leaves().len();
+                    self.assign_flat(elt, &values[start..end], &kinds[start..end])?;
+                    start = end;
+                }
+            }
+            ExprKind::Subscript { .. } => self.store_values(target, values, kinds)?,
+            _ => return Err("only names can be unpacked into".to_string()),
         }
         Ok(())
     }
@@ -1034,9 +1221,12 @@ impl<'a> Lowerer<'a> {
             Iterable::Range(_) => (None, None),
         };
 
+        // each element of a list of tuples is several values
+        let width = self.element_layout(iter).0;
         self.loop_depth += 1;
         self.start(header);
         let end = match iterable {
+            Iterable::List(list) if width > 1 => self.element_count(list, width),
             Iterable::List(list) => {
                 let len = self.fresh();
                 self.push(Inst::ListLen { dst: len, list });
@@ -1055,6 +1245,21 @@ impl<'a> Lowerer<'a> {
         });
 
         self.start(loop_body);
+        if let Iterable::List(list) = iterable
+            && width > 1
+        {
+            // each value is retained for the variable that takes it
+            let kinds = self.element_kinds(iter);
+            let values = self.load_slots(list, Operand::Reg(next), width, 0..width, &kinds);
+            self.assign_flat(target, &values, &kinds)?;
+            self.push(Inst::Binary {
+                op: BinOp::Add,
+                dst: next,
+                lhs: Operand::Reg(next),
+                rhs: Operand::Imm(1),
+            });
+            return self.loop_body(exit, header, held, body);
+        }
         let local = match &target.kind {
             ExprKind::Name { id, .. } => self.locals.get(id).copied(),
             _ => return Err("a 'for' loop's variable must be a name".to_string()),
@@ -1088,7 +1293,7 @@ impl<'a> Lowerer<'a> {
                     unreachable!("a character is a register")
                 };
                 self.push(Inst::Call {
-                    dst: Some(dst),
+                    dsts: vec![dst],
                     callee: Callee::Runtime("stone.str_char"),
                     args: vec![text, Operand::Reg(next)],
                 });
@@ -1103,7 +1308,18 @@ impl<'a> Lowerer<'a> {
             lhs: Operand::Reg(next),
             rhs: step,
         });
+        self.loop_body(exit, header, held, body)
+    }
 
+    /// Lowers the body of a `for` loop whose variable is assigned, then the loop's end, which
+    /// releases the list or string it holds.
+    fn loop_body(
+        &mut self,
+        exit: BlockId,
+        header: BlockId,
+        held: Option<(Operand, RcKind)>,
+        body: &[Stmt],
+    ) -> Result<(), String> {
         self.loops.push(Loop { exit, header, held });
         for stmt in body {
             self.stmt(stmt)?;
@@ -1120,7 +1336,7 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    /// Lowers a test, going to `then` if it is truthy and to `otherwise` if not, and ends the
+    /// Lowers a test, going to `then` if it is true and to `otherwise` if not, and ends the
     /// current block.
     ///
     /// Comparisons branch on the flags directly, and `and`, `or`, and `not` become branches, so
@@ -1179,12 +1395,8 @@ impl<'a> Lowerer<'a> {
                 operand,
             } => self.cond(operand, otherwise, then)?,
 
-            ExprKind::Constant { value, .. }
-                if matches!(**value, Constant::Int(_) | Constant::Bool(_)) =>
-            {
-                let truthy = matches!(**value, Constant::Int(n) if n != 0)
-                    || matches!(**value, Constant::Bool(true));
-                self.jump(if truthy { then } else { otherwise });
+            ExprKind::Constant { value, .. } if let Constant::Bool(b) = **value => {
+                self.jump(if b { then } else { otherwise });
             }
 
             _ => {
@@ -1216,6 +1428,9 @@ impl<'a> Lowerer<'a> {
     }
 
     fn expr_into_unspanned(&mut self, expr: &Expr, into: Option<VReg>) -> Result<Operand, String> {
+        if self.is_tuple(expr) {
+            return Err("a tuple has several values, which `expr_flat` lowers".to_string());
+        }
         let kind = self.counted(expr);
         if into.is_some() && kind.is_some() {
             // computed apart, so the destination's old value is still there to release
@@ -1347,6 +1562,12 @@ impl<'a> Lowerer<'a> {
                 Err(format!("'{attr}' is a method, so it can only be called"))
             }
 
+            ExprKind::Subscript { value, slice, .. } if self.is_tuple(value) => {
+                // one value, since the field is not a tuple itself
+                let field = self.tuple_field(value, slice)?;
+                Ok(self.finish(field[0], into))
+            }
+
             ExprKind::Subscript { value, slice, .. } => {
                 let string = self.type_of(value)? == Type::Str;
                 if let ExprKind::Slice { lower, upper, step } = &slice.kind {
@@ -1375,25 +1596,27 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::List { elts, .. } => {
-                let elem = self.element_kind(expr);
+                let (width, kinds) = self.element_layout(expr);
+                let leaf_kinds = self.element_kinds(expr);
                 let mut values = Vec::new();
                 for elt in elts {
-                    values.push(self.expr(elt)?);
+                    values.extend(self.expr_flat(elt)?);
                 }
-                for value in &values {
-                    self.take(*value, elem);
+                for (i, value) in values.iter().enumerate() {
+                    self.take(*value, leaf_kinds[i % width]);
                 }
-                // the list's elem field, as `builtins::list_runtime` describes it
-                let code = match elem {
-                    None => 0,
-                    Some(RcKind::Str) => 1,
-                    Some(RcKind::List) => 2,
-                };
                 let list = self.fresh();
+                // a list of tuples records how wide its elements are
+                let (label, mut args) = match width {
+                    1 => ("stone.list_new", vec![]),
+                    _ => ("stone.list_new_wide", vec![Operand::Imm(width as i64)]),
+                };
+                args.insert(0, Operand::Imm(kinds));
+                args.insert(0, Operand::Imm(values.len() as i64));
                 self.push(Inst::Call {
-                    dst: Some(list),
-                    callee: Callee::Runtime("stone.list_new"),
-                    args: vec![Operand::Imm(values.len() as i64), Operand::Imm(code)],
+                    dsts: vec![list],
+                    callee: Callee::Runtime(label),
+                    args,
                 });
                 for (index, value) in values.into_iter().enumerate() {
                     self.push(Inst::ListInit {
@@ -1406,6 +1629,7 @@ impl<'a> Lowerer<'a> {
                 Ok(Operand::Reg(list))
             }
 
+            ExprKind::Tuple { .. } => Err("a tuple has several values".to_string()),
             ExprKind::Slice { .. } => Err("a slice can only appear in brackets".to_string()),
         }
     }
@@ -1457,11 +1681,12 @@ impl<'a> Lowerer<'a> {
                 dst: other,
                 list: leaf.value,
             });
-            self.fail_unless(
+            self.fail_unless_with(
                 Cond::Eq,
                 Operand::Reg(len),
                 Operand::Reg(other),
                 LENGTHS_DIFFER,
+                vec![Operand::Reg(len), Operand::Reg(other)],
             );
         }
         let reused = lists.iter().find(|leaf| {
@@ -1474,12 +1699,12 @@ impl<'a> Lowerer<'a> {
         let result = self.fresh();
         let call = match reused {
             Some(leaf) if self.mark_moved(leaf.name.as_deref().unwrap_or_default()) => Inst::Call {
-                dst: Some(result),
+                dsts: vec![result],
                 callee: Callee::Runtime("stone.list_reuse"),
                 args: vec![leaf.value, Operand::Reg(len)],
             },
             _ => Inst::Call {
-                dst: Some(result),
+                dsts: vec![result],
                 callee: Callee::Runtime("stone.list_new"),
                 args: vec![Operand::Reg(len), Operand::Imm(0)],
             },
@@ -1573,7 +1798,7 @@ impl<'a> Lowerer<'a> {
         self.push(match ty {
             // only `+` applies to strings
             Type::Str => Inst::Call {
-                dst: Some(dst),
+                dsts: vec![dst],
                 callee: Callee::Runtime("stone.str_concat"),
                 args: vec![lhs, rhs],
             },
@@ -1698,6 +1923,22 @@ impl<'a> Lowerer<'a> {
 
     /// Stops the program with the runtime error `message` unless `lhs cond rhs` holds for ints.
     fn fail_unless(&mut self, cond: Cond, lhs: Operand, rhs: Operand, message: &str) {
+        self.fail_unless_with(cond, lhs, rhs, message, Vec::new());
+    }
+
+    /// Stops the program with the runtime error `template` filled with `values` unless
+    /// `lhs cond rhs` holds for ints.
+    ///
+    /// For example, checking that two lengths are equal fails with
+    /// `fail "lists have different lengths ({} and {})", v2, v3`.
+    fn fail_unless_with(
+        &mut self,
+        cond: Cond,
+        lhs: Operand,
+        rhs: Operand,
+        template: &str,
+        values: Vec<Operand>,
+    ) {
         let (holds, fails) = (self.new_block(), self.new_block());
         self.terminate(Terminator::CmpBranch {
             cond,
@@ -1708,13 +1949,14 @@ impl<'a> Lowerer<'a> {
             otherwise: fails,
         });
         self.start(fails);
-        self.terminate(Terminator::Fail(message.to_string()));
+        self.terminate(Terminator::Fail(template.to_string(), values));
         self.start(holds);
     }
 
     /// Returns where `index` points in a list of `len` elements, counting a negative index from
     /// the end, and stops the program with `message` unless that is an element, or with `end`,
-    /// an element or the end of the list.
+    /// an element or the end of the list. A message with holes, such as [`INDEX_RANGE`], is
+    /// filled with the index as written and the length.
     ///
     /// For example, `xs.insert(-1, x)` puts `x` at position `len - 1`, and `xs.insert(len, x)` at
     /// the end, but `xs.pop(len)` fails.
@@ -1741,9 +1983,20 @@ impl<'a> Lowerer<'a> {
             rhs: len,
         });
         self.start(check);
-        self.fail_unless(Cond::Ge, Operand::Reg(position), Operand::Imm(0), message);
+        let values = match message.contains("{}") {
+            true => vec![index, len],
+            false => Vec::new(),
+        };
+        let start = Operand::Imm(0);
+        self.fail_unless_with(
+            Cond::Ge,
+            Operand::Reg(position),
+            start,
+            message,
+            values.clone(),
+        );
         let below = if end { Cond::Le } else { Cond::Lt };
-        self.fail_unless(below, Operand::Reg(position), len, message);
+        self.fail_unless_with(below, Operand::Reg(position), len, message, values);
         Operand::Reg(position)
     }
 
@@ -1810,7 +2063,7 @@ impl<'a> Lowerer<'a> {
                 otherwise: nonzero,
             });
             self.start(zero);
-            self.terminate(Terminator::Fail(SLICE_STEP_ZERO.to_string()));
+            self.terminate(Terminator::Fail(SLICE_STEP_ZERO.to_string(), Vec::new()));
             self.start(nonzero);
         }
         args.push(Operand::Imm(omitted));
@@ -1830,8 +2083,11 @@ impl<'a> Lowerer<'a> {
         let ExprKind::Subscript { value, slice, .. } = &list.kind else {
             return self.expr(list);
         };
-        // a slice is a new list, which the operation must release
-        if matches!(slice.kind, ExprKind::Slice { .. }) || before.iter().any(|expr| has_call(expr))
+        // a slice is a new list, which the operation must release, and a tuple's field is one of
+        // its values
+        if matches!(slice.kind, ExprKind::Slice { .. })
+            || before.iter().any(|expr| has_call(expr))
+            || self.is_tuple(value)
         {
             return self.expr(list);
         }
@@ -1878,7 +2134,7 @@ impl<'a> Lowerer<'a> {
                 Type::Str if cond == Cond::Ne => {
                     let equal = self.fresh();
                     self.push(Inst::Call {
-                        dst: Some(equal),
+                        dsts: vec![equal],
                         callee: Callee::Runtime("stone.str_eq"),
                         args: vec![lhs, rhs],
                     });
@@ -1888,7 +2144,7 @@ impl<'a> Lowerer<'a> {
                     });
                 }
                 Type::Str if cond == Cond::Eq => self.push(Inst::Call {
-                    dst: Some(result),
+                    dsts: vec![result],
                     callee: Callee::Runtime("stone.str_eq"),
                     args: vec![lhs, rhs],
                 }),
@@ -1960,6 +2216,13 @@ impl<'a> Lowerer<'a> {
         kind: Option<RcKind>,
     ) -> Result<Operand, String> {
         match name {
+            "len" if self.element_layout(receiver).0 > 1 => {
+                let width = self.element_layout(receiver).0;
+                let list = self.list_operand(receiver, &[])?;
+                let count = self.element_count(list, width);
+                self.release_temp(list);
+                Ok(self.finish(count, into))
+            }
             "len" if matches!(self.type_of(receiver)?, Type::List(_)) => {
                 let list = self.list_operand(receiver, &[])?;
                 let dst = self.dst(into);
@@ -1967,11 +2230,15 @@ impl<'a> Lowerer<'a> {
                 self.release_temp(list);
                 Ok(Operand::Reg(dst))
             }
+            "append" | "insert" if self.element_layout(receiver).0 > 1 => {
+                self.add_element(receiver, name, args)?;
+                Ok(self.finish(Operand::Imm(0), into))
+            }
             "len" => {
                 let text = self.expr(receiver)?;
                 let dst = self.dst(into);
                 self.push(Inst::Call {
-                    dst: Some(dst),
+                    dsts: vec![dst],
                     callee: Callee::Runtime("stone.str_len"),
                     args: vec![text],
                 });
@@ -1994,7 +2261,7 @@ impl<'a> Lowerer<'a> {
                 let list = self.unique_place(receiver, &indexes)?;
                 values.insert(0, list);
                 self.push(Inst::Call {
-                    dst: None,
+                    dsts: vec![],
                     callee: Callee::Runtime("stone.list_append"),
                     args: values,
                 });
@@ -2047,7 +2314,7 @@ impl<'a> Lowerer<'a> {
                 self.push(Inst::ListLen { dst: len, list });
                 let position = self.list_position(index, Operand::Reg(len), true, INDEX_RANGE);
                 self.push(Inst::Call {
-                    dst: None,
+                    dsts: vec![],
                     callee: Callee::Runtime("stone.list_insert"),
                     args: vec![list, position, value],
                 });
@@ -2062,7 +2329,7 @@ impl<'a> Lowerer<'a> {
                 let other = self.expr(other)?;
                 let list = self.unique_place(receiver, &indexes)?;
                 self.push(Inst::Call {
-                    dst: None,
+                    dsts: vec![],
                     callee: Callee::Runtime("stone.list_extend"),
                     args: vec![list, other],
                 });
@@ -2157,7 +2424,7 @@ impl<'a> Lowerer<'a> {
                         otherwise: check,
                     });
                     self.start(overflow);
-                    self.terminate(Terminator::Fail(math::ABS_OVERFLOW.to_string()));
+                    self.terminate(Terminator::Fail(math::ABS_OVERFLOW.to_string(), Vec::new()));
                     self.start(check);
                     self.terminate(Terminator::CmpBranch {
                         cond: Cond::Lt,
@@ -2246,7 +2513,7 @@ impl<'a> Lowerer<'a> {
                     otherwise: ok,
                 });
                 self.start(negative);
-                self.terminate(Terminator::Fail(math::DOMAIN_ERROR.to_string()));
+                self.terminate(Terminator::Fail(math::DOMAIN_ERROR.to_string(), Vec::new()));
                 self.start(ok);
                 let dst = self.dst(into);
                 self.push(Inst::FloatSqrt { dst, src: x });
@@ -2316,7 +2583,7 @@ impl<'a> Lowerer<'a> {
             otherwise: first,
         });
         self.start(fail);
-        self.terminate(Terminator::Fail(empty.to_string()));
+        self.terminate(Terminator::Fail(empty.to_string(), Vec::new()));
         self.start(first);
         self.push(Inst::ListGet {
             dst: result,
@@ -2387,7 +2654,7 @@ impl<'a> Lowerer<'a> {
     ) -> Operand {
         let dst = self.dst(into);
         self.push(Inst::Call {
-            dst: Some(dst),
+            dsts: vec![dst],
             callee: Callee::Runtime(label),
             args,
         });
@@ -2408,21 +2675,17 @@ impl<'a> Lowerer<'a> {
                 // every argument is evaluated before anything prints, like the interpreter
                 let mut values = Vec::new();
                 for arg in args {
-                    values.push((self.expr(arg)?, self.type_of(arg)?));
+                    values.push((self.expr_flat(arg)?, self.type_of(arg)?));
                 }
                 let count = values.len();
-                for (i, (value, ty)) in values.iter().cloned().enumerate() {
-                    self.push(Inst::Call {
-                        dst: None,
-                        callee: Callee::Print(ty),
-                        args: vec![value],
-                    });
+                for (i, (leaves, ty)) in values.iter().enumerate() {
+                    self.print_flat(ty, leaves, false);
                     if i + 1 < count {
                         self.print_char(' ');
                     }
                 }
                 self.print_char('\n');
-                for (value, _) in values {
+                for value in values.into_iter().flat_map(|(leaves, _)| leaves) {
                     self.release_temp(value);
                 }
                 // print returns none
@@ -2482,7 +2745,7 @@ impl<'a> Lowerer<'a> {
                 let code = self.expr(&args[0])?;
                 // it never returns, but the call is a statement like any other
                 self.push(Inst::Call {
-                    dst: None,
+                    dsts: vec![],
                     callee: Callee::Runtime("stone.os_exit"),
                     args: vec![code],
                 });
@@ -2502,7 +2765,10 @@ impl<'a> Lowerer<'a> {
                     otherwise: ok,
                 });
                 self.start(empty);
-                self.terminate(Terminator::Fail(random::EMPTY_RANGE.to_string()));
+                self.terminate(Terminator::Fail(
+                    random::EMPTY_RANGE.to_string(),
+                    Vec::new(),
+                ));
                 self.start(ok);
                 // wraps to 0, which the runtime takes as 2^64, for the whole range of ints
                 let span = self.fresh();
@@ -2543,7 +2809,10 @@ impl<'a> Lowerer<'a> {
                     otherwise: ok,
                 });
                 self.start(empty);
-                self.terminate(Terminator::Fail(random::EMPTY_CHOICE.to_string()));
+                self.terminate(Terminator::Fail(
+                    random::EMPTY_CHOICE.to_string(),
+                    Vec::new(),
+                ));
                 self.start(ok);
                 let index = self.runtime_call("stone.random_below", vec![Operand::Reg(len)], None);
                 let dst = self.dst(into);
@@ -2569,7 +2838,7 @@ impl<'a> Lowerer<'a> {
                     seconds = Operand::Reg(converted);
                 }
                 self.push(Inst::Call {
-                    dst: None,
+                    dsts: vec![],
                     callee: Callee::Runtime("stone.time_sleep"),
                     args: vec![seconds],
                 });
@@ -2588,29 +2857,48 @@ impl<'a> Lowerer<'a> {
                 self.own(result, kind);
                 Ok(result)
             }
-            _ => {
-                // taken first, so that no call among the arguments moves what a later one reads
-                let movable = std::mem::take(&mut self.movable);
-                let mut values = Vec::new();
-                for arg in args {
-                    values.push(self.expr(arg)?);
-                }
-                let given = self.give_references(name, args, &values, &movable);
-                let dst = self.dst(into);
-                self.push(Inst::Call {
-                    dst: Some(dst),
-                    callee: Callee::User(name.to_string()),
-                    args: values.clone(),
-                });
-                for (value, given) in values.into_iter().zip(given) {
-                    if !given {
-                        self.release_temp(value);
-                    }
-                }
-                self.own(Operand::Reg(dst), kind);
-                Ok(Operand::Reg(dst))
+            _ => Ok(self.user_call(name, args, into, &[kind])?[0]),
+        }
+    }
+
+    /// Calls the stone function `name`, which returns one value for each of `kinds`, how each is
+    /// counted: several for a tuple, the first in `into` if given. The call borrows its arguments,
+    /// each tuple as its values, and temporaries among them are released after it.
+    fn user_call(
+        &mut self,
+        name: &str,
+        args: &[Expr],
+        into: Option<VReg>,
+        kinds: &[Option<RcKind>],
+    ) -> Result<Vec<Operand>, String> {
+        // taken first, so that no call among the arguments moves what a later one reads
+        let movable = std::mem::take(&mut self.movable);
+        let mut values = Vec::new();
+        for arg in args {
+            values.push(self.expr_flat(arg)?);
+        }
+        let given = self.give_references(name, args, &values, &movable)?;
+        let mut dsts = vec![self.dst(into)];
+        dsts.extend((1..kinds.len()).map(|_| self.fresh()));
+        self.push(Inst::Call {
+            dsts: dsts.clone(),
+            callee: Callee::User(name.to_string()),
+            args: values.concat(),
+        });
+        for (value, given) in values
+            .into_iter()
+            .flatten()
+            .zip(given.into_iter().flatten())
+        {
+            if !given {
+                self.release_temp(value);
             }
         }
+        let results: Vec<Operand> = dsts.into_iter().map(Operand::Reg).collect();
+        for (&result, &kind) in results.iter().zip(kinds) {
+            self.own(result, kind);
+        }
+        Ok(results)
     }
 
     /// Gives a reference to each argument of the stone function `name` that it owns, once every
@@ -2625,33 +2913,40 @@ impl<'a> Lowerer<'a> {
         &mut self,
         name: &str,
         args: &[Expr],
-        values: &[Operand],
+        values: &[Vec<Operand>],
         movable: &[String],
-    ) -> Vec<bool> {
+    ) -> Result<Vec<Vec<bool>>, String> {
         let owned = self.context.owned_params.get(name);
-        let mut given = vec![false; values.len()];
-        for (i, (arg, &value)) in args.iter().zip(values).enumerate() {
-            if owned.is_none_or(|owned| owned.get(i) != Some(&true)) || self.counted(arg).is_none()
-            {
-                continue;
+        let mut given = Vec::new();
+        for (i, (arg, leaves)) in args.iter().zip(values).enumerate() {
+            let mut leaves_given = vec![false; leaves.len()];
+            let owns = owned.is_some_and(|owned| owned.get(i) == Some(&true));
+            let kinds = self.leaf_kinds(arg)?;
+            let sources = self.flat_sources(arg);
+            for (j, &value) in leaves.iter().enumerate() {
+                if !owns || kinds[j].is_none() {
+                    continue;
+                }
+                leaves_given[j] = true;
+                if let Operand::Reg(reg) = value
+                    && self.owned.remove(&reg).is_some()
+                {
+                    continue;
+                }
+                // a global the function may read must keep its own copy while it runs
+                if let Some(id) = &sources[j]
+                    && movable.contains(id)
+                    && (self.locals.contains_key(id)
+                        || !self.context.global_reads[name].contains(variable_of(id)))
+                    && self.mark_moved(id)
+                {
+                    continue;
+                }
+                self.push(Inst::Retain { src: value });
             }
-            given[i] = true;
-            if let Operand::Reg(reg) = value
-                && self.owned.remove(&reg).is_some()
-            {
-                continue;
-            }
-            // a global the function may read must keep its own copy while it runs
-            if let ExprKind::Name { id, .. } = &arg.kind
-                && movable.contains(id)
-                && (self.locals.contains_key(id) || !self.context.global_reads[name].contains(id))
-                && self.mark_moved(id)
-            {
-                continue;
-            }
-            self.push(Inst::Retain { src: value });
+            given.push(leaves_given);
         }
-        given
+        Ok(given)
     }
 
     /// Returns the counted variables this function owns, or the counted globals in `main`, that
@@ -2675,7 +2970,8 @@ impl<'a> Lowerer<'a> {
                 .cloned()
                 .collect(),
         };
-        names.retain(|name| live.is_none_or(|live| !live.contains(name)));
+        // liveness knows the stone variables, of which a tuple's values are part
+        names.retain(|name| live.is_none_or(|live| !live.contains(variable_of(name))));
         names.sort();
         names
     }
@@ -2715,6 +3011,483 @@ impl<'a> Lowerer<'a> {
             return;
         }
         self.take(value, kind);
+    }
+
+    /// Like [`Lowerer::take_from`] for one value of a tuple, which came from the variable
+    /// `source`, if any, such as `t.0` or `xs` in `(xs, 1)`.
+    fn take_leaf(
+        &mut self,
+        source: Option<&str>,
+        value: Operand,
+        kind: Option<RcKind>,
+        last_uses: &[String],
+    ) {
+        if kind.is_some()
+            && let Some(name) = source
+            && last_uses.iter().any(|used| used == name)
+            && self.mark_moved(name)
+        {
+            return;
+        }
+        self.take(value, kind);
+    }
+
+    /// Returns, for each value [`Lowerer::expr_flat`] gives for `expr`, the variable it is read
+    /// from, if it is one.
+    ///
+    /// For example, `(xs, f(), t)` with `t` a pair gives `xs`, nothing, `t.0`, and `t.1`.
+    fn flat_sources(&self, expr: &Expr) -> Vec<Option<String>> {
+        match &expr.kind {
+            ExprKind::Name { id, .. } => self.leaf_names(id).into_iter().map(Some).collect(),
+            ExprKind::Tuple { elts, .. } => {
+                elts.iter().flat_map(|elt| self.flat_sources(elt)).collect()
+            }
+            _ => vec![None; self.type_of(expr).map_or(1, |ty| ty.leaves().len())],
+        }
+    }
+
+    /// Returns whether `expr` is a tuple, which lowers to several values.
+    fn is_tuple(&self, expr: &Expr) -> bool {
+        matches!(self.context.types.get(&expr.span), Some(Type::Tuple(_)))
+    }
+
+    /// Lowers `expr` to its values: one for each value of a tuple, nested tuples flattened, or
+    /// its one value. Each is borrowed, like a variable's, or a temporary that owns a reference,
+    /// like a call's result.
+    ///
+    /// For example, `(x, ("a", f()))` gives `x`'s vreg, the string's address, and the call's
+    /// result.
+    fn expr_flat(&mut self, expr: &Expr) -> Result<Vec<Operand>, String> {
+        if !self.is_tuple(expr) {
+            return Ok(vec![self.expr(expr)?]);
+        }
+        let outer = std::mem::replace(&mut self.span, expr.span);
+        let result = self.tuple_values(expr);
+        self.span = outer;
+        result
+    }
+
+    fn tuple_values(&mut self, expr: &Expr) -> Result<Vec<Operand>, String> {
+        match &expr.kind {
+            ExprKind::Tuple { elts, .. } => {
+                let mut values = Vec::new();
+                for elt in elts {
+                    values.extend(self.expr_flat(elt)?);
+                }
+                Ok(values)
+            }
+            ExprKind::Name { id, .. } => {
+                let mut values = Vec::new();
+                for (i, leaf) in self.leaf_names(id).iter().enumerate() {
+                    if let Some(&local) = self.locals.get(leaf) {
+                        values.push(Operand::Reg(local));
+                        continue;
+                    }
+                    // the values are assigned together, so checking the first checks them all
+                    let dst = self.fresh();
+                    self.push(Inst::LoadGlobal {
+                        dst,
+                        name: leaf.clone(),
+                        checked: self.name.is_some() && i == 0,
+                    });
+                    values.push(Operand::Reg(dst));
+                }
+                Ok(values)
+            }
+            ExprKind::Subscript { value, slice, .. } if self.is_tuple(value) => {
+                self.tuple_field(value, slice)
+            }
+            ExprKind::Subscript { value, slice, .. } => {
+                let width = self.element_layout(value).0;
+                self.element_values(value, slice, 0..width)
+            }
+            ExprKind::Call { func, args } => match &func.kind {
+                ExprKind::Name { id, .. } if id == "random.choice" => self.choose_element(&args[0]),
+                ExprKind::Name { id, .. } => {
+                    let kinds = self.leaf_kinds(expr)?;
+                    self.user_call(id, args, None, &kinds)
+                }
+                ExprKind::Attribute { value, attr, .. } if attr == "pop" => {
+                    self.pop_element(value, args)
+                }
+                _ => Err("this method does not return a tuple".to_string()),
+            },
+            _ => Err("this expression cannot be a tuple".to_string()),
+        }
+    }
+
+    /// Lowers `value[slice]` for a tuple `value`, whose index the checker made sure is a constant
+    /// in range, to the field's values, releasing the temporaries of the other fields.
+    ///
+    /// For example, `t[1]` of a `tuple[int, tuple[str, float]]` gives `t.1` and `t.2`.
+    fn tuple_field(&mut self, value: &Expr, slice: &Expr) -> Result<Vec<Operand>, String> {
+        let ty = self.type_of(value)?;
+        let Type::Tuple(fields) = &ty else {
+            return Err("only a tuple has fields".to_string());
+        };
+        let index = constant_int(slice).ok_or("a tuple index is a constant")?;
+        let index = if index < 0 {
+            index + fields.len() as i64
+        } else {
+            index
+        };
+        let leaves = ty.field_leaves(index as usize);
+        // a field of a list's element is read on its own, as in `pairs[i][0]`
+        if let ExprKind::Subscript {
+            value: list,
+            slice: position,
+            ..
+        } = &value.kind
+            && matches!(self.context.types.get(&list.span), Some(Type::List(_)))
+        {
+            let outer = std::mem::replace(&mut self.span, value.span);
+            let picked = self.element_values(list, position, leaves);
+            self.span = outer;
+            return picked;
+        }
+        let mut picked = Vec::new();
+        for (i, leaf) in self.expr_flat(value)?.into_iter().enumerate() {
+            if leaves.contains(&i) {
+                picked.push(leaf);
+            } else {
+                self.release_temp(leaf);
+            }
+        }
+        Ok(picked)
+    }
+
+    /// Lowers `receiver.append(value)` or `receiver.insert(index, value)` for a list of tuples,
+    /// which adds the tuple's values one slot at a time: appended in order, or inserted at the
+    /// slot where the element starts, last first.
+    fn add_element(&mut self, receiver: &Expr, name: &str, args: &[Expr]) -> Result<(), String> {
+        let width = self.element_layout(receiver).0;
+        let kinds = self.element_kinds(receiver);
+        // the receiver's indexes, then the arguments, then the change
+        let indexes = self.place_indexes(receiver)?;
+        let (index, item) = match args {
+            [item] => (None, item),
+            [index, item] => (Some(self.expr(index)?), item),
+            _ => return Err(format!("{name}() takes a value")),
+        };
+        let sources = self.flat_sources(item);
+        let values = self.expr_flat(item)?;
+        // the list keeps a reference to what it holds
+        let last_uses = std::mem::take(&mut self.statement_last_uses);
+        for ((&value, &kind), source) in values.iter().zip(&kinds).zip(&sources) {
+            self.take_leaf(source.as_deref(), value, kind, &last_uses);
+        }
+        self.statement_last_uses = last_uses;
+        let list = self.unique_place(receiver, &indexes)?;
+        let Some(index) = index else {
+            for value in values {
+                self.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Runtime("stone.list_append"),
+                    args: vec![list, value],
+                });
+            }
+            return Ok(());
+        };
+        let count = self.element_count(list, width);
+        let position = self.list_position(index, count, true, INDEX_RANGE);
+        let first = self.first_slot(position, width);
+        for value in values.into_iter().rev() {
+            self.push(Inst::Call {
+                dsts: vec![],
+                callee: Callee::Runtime("stone.list_insert"),
+                args: vec![list, first, value],
+            });
+        }
+        Ok(())
+    }
+
+    /// Returns how many elements the list `list` holds, whose elements are `width` slots each.
+    fn element_count(&mut self, list: Operand, width: usize) -> Operand {
+        let slots = self.fresh();
+        self.push(Inst::ListLen { dst: slots, list });
+        if width == 1 {
+            return Operand::Reg(slots);
+        }
+        let count = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Div,
+            dst: count,
+            lhs: Operand::Reg(slots),
+            rhs: Operand::Imm(width as i64),
+        });
+        Operand::Reg(count)
+    }
+
+    /// Returns the slot where element `position` of a list starts, whose elements are `width`
+    /// slots each.
+    fn first_slot(&mut self, position: Operand, width: usize) -> Operand {
+        if width == 1 {
+            return position;
+        }
+        let slot = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Mul,
+            dst: slot,
+            lhs: position,
+            rhs: Operand::Imm(width as i64),
+        });
+        Operand::Reg(slot)
+    }
+
+    /// Returns slot `field` of the element starting at slot `first`.
+    fn slot(&mut self, first: Operand, field: usize) -> Operand {
+        if field == 0 {
+            return first;
+        }
+        let slot = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: slot,
+            lhs: first,
+            rhs: Operand::Imm(field as i64),
+        });
+        Operand::Reg(slot)
+    }
+
+    /// Reads `leaves`, the values of element `position` of `list` that are wanted, whose
+    /// elements are `width` slots and whose values are counted as `kinds` say. Each counted value
+    /// is retained, and the caller owns or stores it.
+    fn load_slots(
+        &mut self,
+        list: Operand,
+        position: Operand,
+        width: usize,
+        leaves: std::ops::Range<usize>,
+        kinds: &[Option<RcKind>],
+    ) -> Vec<Operand> {
+        let first = self.first_slot(position, width);
+        let mut values = Vec::new();
+        for field in leaves {
+            let index = self.slot(first, field);
+            let dst = self.fresh();
+            self.push(Inst::ListGet { dst, list, index });
+            if kinds[field].is_some() {
+                self.push(Inst::Retain {
+                    src: Operand::Reg(dst),
+                });
+            }
+            values.push(Operand::Reg(dst));
+        }
+        values
+    }
+
+    /// Lowers `list[index]` for a list of tuples to the values of the element in `leaves`, each
+    /// a temporary that owns a reference, as when a subscript reads one value. The index is
+    /// checked against the number of elements, failing as `xs[i]` does.
+    fn element_values(
+        &mut self,
+        list_expr: &Expr,
+        index: &Expr,
+        leaves: std::ops::Range<usize>,
+    ) -> Result<Vec<Operand>, String> {
+        let width = self.element_layout(list_expr).0;
+        let kinds = self.element_kinds(list_expr);
+        let list = self.list_operand(list_expr, &[index])?;
+        let index = self.expr(index)?;
+        let count = self.element_count(list, width);
+        let position = self.list_position(index, count, false, INDEX_RANGE);
+        let values = self.load_slots(list, position, width, leaves.clone(), &kinds);
+        for (&value, field) in values.iter().zip(leaves) {
+            self.own(value, kinds[field]);
+        }
+        self.release_temp(list);
+        Ok(values)
+    }
+
+    /// Lowers `random.choice(list)` for a list of tuples to the values of the element it picks,
+    /// drawing as for any other list.
+    fn choose_element(&mut self, list_expr: &Expr) -> Result<Vec<Operand>, String> {
+        let width = self.element_layout(list_expr).0;
+        let kinds = self.element_kinds(list_expr);
+        let list = self.list_operand(list_expr, &[])?;
+        let count = self.element_count(list, width);
+        self.fail_unless(Cond::Ne, count, Operand::Imm(0), random::EMPTY_CHOICE);
+        let position = self.runtime_call("stone.random_below", vec![count], None);
+        let values = self.load_slots(list, position, width, 0..width, &kinds);
+        for (&value, &kind) in values.iter().zip(&kinds) {
+            self.own(value, kind);
+        }
+        self.release_temp(list);
+        Ok(values)
+    }
+
+    /// Lowers `receiver.pop(index)` for a list of tuples, which removes an element's values one
+    /// at a time from the slot where it starts, each with the list's reference to it.
+    fn pop_element(&mut self, receiver: &Expr, args: &[Expr]) -> Result<Vec<Operand>, String> {
+        let width = self.element_layout(receiver).0;
+        let kinds = self.element_kinds(receiver);
+        // the receiver's indexes, then the index, then the change
+        let indexes = self.place_indexes(receiver)?;
+        let index = match args.first() {
+            Some(arg) => Some(self.expr(arg)?),
+            None => None,
+        };
+        let list = self.unique_place(receiver, &indexes)?;
+        let count = self.element_count(list, width);
+        self.fail_unless(Cond::Ne, count, Operand::Imm(0), POP_EMPTY);
+        let position = match index {
+            Some(index) => self.list_position(index, count, false, POP_RANGE),
+            None => {
+                let last = self.fresh();
+                self.push(Inst::Binary {
+                    op: BinOp::Sub,
+                    dst: last,
+                    lhs: count,
+                    rhs: Operand::Imm(1),
+                });
+                Operand::Reg(last)
+            }
+        };
+        let first = self.first_slot(position, width);
+        let mut values = Vec::new();
+        for kind in kinds {
+            let value = self.runtime_call("stone.list_pop", vec![list, first], None);
+            self.own(value, kind);
+            values.push(value);
+        }
+        Ok(values)
+    }
+
+    /// Stores the values of a tuple, which already carry the references the list takes, in the
+    /// element `target` of a list of tuples, evaluating its indexes first, then releasing the
+    /// element's old values.
+    fn store_values(
+        &mut self,
+        target: &Expr,
+        values: &[Operand],
+        kinds: &[Option<RcKind>],
+    ) -> Result<(), String> {
+        let ExprKind::Subscript {
+            value: list_expr,
+            slice,
+            ..
+        } = &target.kind
+        else {
+            return Err("only an element of a list can be changed".to_string());
+        };
+        let width = self.element_layout(list_expr).0;
+        let indexes = self.place_indexes(list_expr)?;
+        let index = self.expr(slice)?;
+        let list = self.unique_place(list_expr, &indexes)?;
+        let outer = std::mem::replace(&mut self.span, target.span);
+        let count = self.element_count(list, width);
+        let position = self.list_position(index, count, false, INDEX_RANGE);
+        self.span = outer;
+        let first = self.first_slot(position, width);
+        let mut old = Vec::new();
+        for (field, (&value, &kind)) in values.iter().zip(kinds).enumerate() {
+            let index = self.slot(first, field);
+            if let Some(kind) = kind {
+                let dst = self.fresh();
+                self.push(Inst::ListGet { dst, list, index });
+                old.push((dst, kind));
+            }
+            self.push(Inst::ListSet { list, index, value });
+        }
+        for (src, kind) in old {
+            self.push(Inst::Release {
+                src: Operand::Reg(src),
+                kind,
+            });
+        }
+        Ok(())
+    }
+
+    /// Prints a value of type `ty`, given as its values: a tuple as Python writes one, with its
+    /// strings quoted, as strings `nested` in a list or tuple are.
+    ///
+    /// For example, `(1, "a")` prints `(1, 'a')`.
+    fn print_flat(&mut self, ty: &Type, values: &[Operand], nested: bool) {
+        match ty {
+            Type::Tuple(fields) => {
+                self.print_char('(');
+                let mut start = 0;
+                for (k, field) in fields.iter().enumerate() {
+                    if k > 0 {
+                        self.print_char(',');
+                        self.print_char(' ');
+                    }
+                    let end = start + field.leaves().len();
+                    self.print_flat(field, &values[start..end], true);
+                    start = end;
+                }
+                self.print_char(')');
+            }
+            Type::List(elem) if holds_tuple(elem) => self.print_elements(elem, values[0]),
+            Type::Str if nested => self.push(Inst::Call {
+                dsts: vec![],
+                callee: Callee::Runtime("stone.print_str_quoted"),
+                args: vec![values[0]],
+            }),
+            _ => self.push(Inst::Call {
+                dsts: vec![],
+                callee: Callee::Print(ty.clone()),
+                args: vec![values[0]],
+            }),
+        }
+    }
+
+    /// Prints the list `list`, whose elements are of type `elem` and hold a tuple, as `[a, b]`,
+    /// with a loop over its elements, since the runtime's list printers take one value each.
+    fn print_elements(&mut self, elem: &Type, list: Operand) {
+        let leaves = elem.leaves();
+        let width = leaves.len();
+        let (header, body, separate, element, exit) = (
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+        );
+        self.print_char('[');
+        let count = self.element_count(list, width);
+        let next = self.fresh();
+        self.push(Inst::Copy {
+            dst: next,
+            src: Operand::Imm(0),
+        });
+        self.loop_depth += 1;
+        self.start(header);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(next),
+            rhs: count,
+            then: body,
+            otherwise: exit,
+        });
+        self.start(body);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Eq,
+            float: false,
+            lhs: Operand::Reg(next),
+            rhs: Operand::Imm(0),
+            then: element,
+            otherwise: separate,
+        });
+        self.start(separate);
+        self.print_char(',');
+        self.print_char(' ');
+        self.start(element);
+        // printing changes nothing, so the list's values are borrowed
+        let kinds = vec![None; width];
+        let values = self.load_slots(list, Operand::Reg(next), width, 0..width, &kinds);
+        self.print_flat(elem, &values, true);
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: next,
+            lhs: Operand::Reg(next),
+            rhs: Operand::Imm(1),
+        });
+        self.jump(header);
+        self.loop_depth -= 1;
+        self.start(exit);
+        self.print_char(']');
     }
 
     /// Leaves null in each variable that gave its reference away and that its statement did not
@@ -2759,10 +3532,22 @@ impl<'a> Lowerer<'a> {
 
     fn print_char(&mut self, c: char) {
         self.push(Inst::Call {
-            dst: None,
+            dsts: vec![],
             callee: Callee::Runtime("stone.print_char"),
             args: vec![Operand::Imm(c as i64)],
         });
+    }
+}
+
+/// Returns whether a value of type `ty` is or holds a tuple, directly or in a list, which
+/// lowering prints a value at a time rather than with a runtime printer.
+///
+/// For example, `tuple[int, str]` and `list[list[tuple[int, int]]]` do, and `list[int]` does not.
+fn holds_tuple(ty: &Type) -> bool {
+    match ty {
+        Type::Tuple(_) => true,
+        Type::List(elem) => holds_tuple(elem),
+        _ => false,
     }
 }
 
@@ -2915,9 +3700,9 @@ fn has_call(expr: &Expr) -> bool {
         ExprKind::Constant { .. } | ExprKind::Name { .. } => false,
         ExprKind::BinOp { left, right, .. } => has_call(left) || has_call(right),
         ExprKind::UnaryOp { operand, .. } => has_call(operand),
-        ExprKind::BoolOp { values, .. } | ExprKind::List { elts: values, .. } => {
-            values.iter().any(has_call)
-        }
+        ExprKind::BoolOp { values, .. }
+        | ExprKind::List { elts: values, .. }
+        | ExprKind::Tuple { elts: values, .. } => values.iter().any(has_call),
         ExprKind::Compare {
             left, comparators, ..
         } => has_call(left) || comparators.iter().any(has_call),
@@ -2927,22 +3712,5 @@ fn has_call(expr: &Expr) -> bool {
             .into_iter()
             .flatten()
             .any(|b| has_call(b)),
-    }
-}
-
-/// Returns the value of `expr` if it is an int literal, possibly negated.
-///
-/// For example, `8` gives `Some(8)`, `-4` gives `Some(-4)`, and `x` or `2 + 2` gives `None`.
-pub fn constant_int(expr: &Expr) -> Option<i64> {
-    match &expr.kind {
-        ExprKind::Constant { value, .. } => match **value {
-            Constant::Int(n) => Some(n),
-            _ => None,
-        },
-        ExprKind::UnaryOp {
-            op: UnaryOp::UnarySub,
-            operand,
-        } => constant_int(operand).map(i64::wrapping_neg),
-        _ => None,
     }
 }

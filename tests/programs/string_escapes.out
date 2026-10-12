@@ -1,0 +1,8 @@
+say "hi"
+one
+two
+a	b back\slash it's ABC
+15 1 4
+1 1 true
+tab:	||
+['x', 'y', 'z'] ['x', 'y', 'z']

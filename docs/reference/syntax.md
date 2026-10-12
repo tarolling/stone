@@ -69,9 +69,22 @@ module's name in a `use` or before a `.`.
 | bool and none | `true`, `false`, `none` |
 | list | `[]`, `[1, 2, 3]`, `[[1.0], []]` |
 
-Negative numbers are the unary `-` applied to a literal, as in `-7`. Strings use double quotes,
-must close on the line they open on, and have no escape sequences, so `"a\tb"` holds a backslash
-and a `t`.
+Negative numbers are the unary `-` applied to a literal, as in `-7`. Strings use double quotes
+and must close on the line they open on. A backslash starts an escape sequence:
+
+| escape | means |
+| --- | --- |
+| `\"` | a double quote |
+| `\'` | a single quote |
+| `\\` | a backslash |
+| `\n` | a line break |
+| `\t` | a tab |
+| `\r` | a carriage return |
+| `\xhh` | the ASCII character with hex code `hh`, from `\x01` to `\x7f` |
+
+So `"say \"hi\"\n"` holds `say "hi"` and a line break. Any other escape is an error, and so is
+`\x00`, since a string cannot hold a null byte. Characters outside ASCII are written as
+themselves, as in `"café"`.
 
 ## Statements
 
@@ -83,7 +96,7 @@ and a `t`.
 | `ret` | `ret`, `ret x` |
 | `if` / `elif` / `else` | `if x < 0;` ... `elif x == 0;` ... `else;` ... |
 | `while` | `while i < 10;` plus a block |
-| `for` | `for x in items;`, `for i in range(n);`, `for i in range(a, b);` |
+| `for` | `for x in items;`, `for c in text;`, `for i in range(n);`, `for i in range(a, b);` |
 | `break`, `cont` | inside a loop only |
 | `use` | `use util`, `use geometry.shapes.area as area` |
 

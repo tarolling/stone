@@ -1,0 +1,5 @@
+// strings inside a list print like Python's repr
+print(["plain", "it's", "say \"hi\"", "both ' and \""])
+print(["a\nb", "tab\there", "back\\slash", "cr\r"])
+print(["\x01\x1b\x7f", "café", ""])
+print([["nested", "it's"], []])

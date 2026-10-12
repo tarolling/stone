@@ -1,0 +1,28 @@
+// join puts a string between each pair
+print(", ".join(["a", "b", "c"]), "-".join(["one"]), "[" + "x".join([]) + "]")
+print("".join(["s", "t", "o", "n", "e"]), "\n".join(["line 1", "line 2"]))
+words = "the quick brown fox".split()
+print(" ".join(words) == "the quick brown fox", "_".join(words))
+
+// find gives the byte index of the first match, or -1
+s = "banana"
+print(s.find("na"), s.find("a"), s.find("x"), s.find(""), s.find("banana"), s.find("bananas"))
+print("".find(""), "".find("a"), "café au lait".find("au"))
+
+// startswith
+print(s.startswith("ban"), s.startswith(""), s.startswith("an"), s.startswith("bananas"))
+print("".startswith(""), "".startswith("a"))
+
+// together
+line = "key=value"
+at = line.find("=")
+print(line[:at], line[at + 1:])
+for entry in ["# comment", "name=stone", "  # indented"];
+    if entry.strip().startswith("#");
+        print("skip")
+    else;
+        print(entry.split("=")[1])
+
+// endswith
+print(s.endswith("ana"), s.endswith(""), s.endswith("ban"), s.endswith("xbanana"))
+print("".endswith(""), "".endswith("a"), "café".endswith("é"), "main.stn".endswith(".stn"))

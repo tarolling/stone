@@ -38,8 +38,10 @@ const MAX_PARAMS: usize = 8;
 /// implement the same way.
 ///
 /// Every program passes the checker. Variables hold ints or floats, except top-level lists of
-/// ints that always have at least two elements, so indexes from -2 to 1 are always in range.
-/// Strings and booleans appear in `print` and in conditions. Functions never read globals, which may not be
+/// ints that always have at least two elements, so indexes from -2 to 1 are always in range, and
+/// strings. Strings outside ASCII are only compared, searched, split, joined, and looped over,
+/// while words, ASCII strings of at least two bytes, are also indexed from -2 to 1 and sliced,
+/// so no string operation fails. Booleans appear in `print` and in conditions. Functions never read globals, which may not be
 /// assigned yet when they run, and every loop is bounded: `while` loops by a counter, `for` loops
 /// by a small `range` or by a list that nothing appends to while it is iterated.
 ///
@@ -88,6 +90,11 @@ struct Scope {
     lists: Vec<String>,
     /// Loop counters, which can be read but never assigned so every loop terminates.
     counters: Vec<String>,
+    /// String variables, which may hold characters outside ASCII.
+    strings: Vec<String>,
+    /// String variables that always hold at least two ASCII bytes, so they can be indexed from -2
+    /// to 1 and sliced without cutting a character.
+    words: Vec<String>,
     /// Whether this scope is a function body, so names are local and `ret` is allowed.
     in_function: bool,
     /// Whether this point is inside a `while` loop, so `break` and `cont` are allowed.
@@ -165,7 +172,7 @@ impl Generator {
         nesting: usize,
     ) -> Result<()> {
         let nested = nesting < MAX_NESTING;
-        match u.int_in_range(0..=13)? {
+        match u.int_in_range(0..=15)? {
             0 | 1 => {
                 let value = self.expression(u, scope, 0)?;
                 let target = if !scope.variables.is_empty() && u.arbitrary()? {
@@ -210,6 +217,7 @@ impl Generator {
                 self.line(indent, &call);
             }
             10..=13 if !scope.in_function => self.list_statement(u, scope, indent)?,
+            14 | 15 => self.string_statement(u, scope, indent, nesting)?,
             _ => {
                 let value = self.expression(u, scope, 0)?;
                 self.line(indent, &format!("print({value})"));
@@ -303,6 +311,169 @@ impl Generator {
             }
         }
         Ok(())
+    }
+
+    /// Emits a statement that makes, prints, or loops over a string, such as `word2 = "ab" + word1`,
+    /// `print(word1[-1], s3.find("a"))`, or `for ch4 in s3;` and a block.
+    fn string_statement(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &mut Scope,
+        indent: usize,
+        nesting: usize,
+    ) -> Result<()> {
+        match u.int_in_range(0..=5)? {
+            1 if nesting < MAX_NESTING => {
+                let text = self.text(u, scope, 0)?;
+                let variable = self.fresh("ch");
+                self.line(indent, &format!("for {variable} in {text};"));
+                let mut inner = scope.clone();
+                inner.strings.push(variable);
+                inner.in_loop = true;
+                self.block(u, &inner, indent + 1, nesting + 1)?;
+            }
+            2 if !scope.words.is_empty() => {
+                let word = u.choose(&scope.words)?.clone();
+                let index = u.int_in_range(-2..=1)?;
+                let bound = |u: &mut Unstructured| -> Result<String> {
+                    Ok(match u.arbitrary()? {
+                        true => u.int_in_range(-4..=4)?.to_string(),
+                        false => String::new(),
+                    })
+                };
+                let (lower, upper) = (bound(u)?, bound(u)?);
+                let step = *u.choose(&["", "1", "2", "-1", "-2"])?;
+                self.line(
+                    indent,
+                    &format!("print({word}[{index}], {word}[{lower}:{upper}:{step}])"),
+                );
+            }
+            3 => {
+                let (a, b) = (self.text(u, scope, 0)?, self.text(u, scope, 0)?);
+                let op = *u.choose(&["==", "!=", "<", "<=", ">", ">="])?;
+                self.line(
+                    indent,
+                    &format!(
+                        "print({a}, ({a}).len(), {a} {op} {b}, ({a}).find({b}), \
+                         ({a}).startswith({b}), ({a}).endswith({b}))"
+                    ),
+                );
+            }
+            4 => {
+                // a list of strings prints each one quoted and escaped
+                let (a, b) = (self.text(u, scope, 0)?, self.text(u, scope, 0)?);
+                let separator = *u.choose(&["\",\"", "\" \"", "\"\\n\"", "\"ab\""])?;
+                self.line(
+                    indent,
+                    &format!("print([{a}, {b}], ({a}).split({separator}), ({b}).split())"),
+                );
+            }
+            _ => {
+                // a word can always take a word, and any string any string
+                if u.arbitrary()? {
+                    let value = self.word(u, scope, 0)?;
+                    let target = match !scope.words.is_empty() && u.arbitrary()? {
+                        true => u.choose(&scope.words)?.clone(),
+                        false => {
+                            let name = self.fresh("word");
+                            scope.words.push(name.clone());
+                            name
+                        }
+                    };
+                    self.line(indent, &format!("{target} = {value}"));
+                } else {
+                    let value = self.text(u, scope, 0)?;
+                    let target = match !scope.strings.is_empty() && u.arbitrary()? {
+                        true => u.choose(&scope.strings)?.clone(),
+                        false => {
+                            let name = self.fresh("s");
+                            scope.strings.push(name.clone());
+                            name
+                        }
+                    };
+                    self.line(indent, &format!("{target} = {value}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Generates a string of at least two ASCII bytes, such as `"stone"`, `word3`, or
+    /// `str(g1) + "ab"`.
+    fn word(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
+        match u.int_in_range(0..=4)? {
+            1 if !scope.words.is_empty() => Ok(u.choose(&scope.words)?.clone()),
+            2 if nesting < MAX_NESTING => {
+                // only the left side nests, so a chain of `+` stays short
+                let a = self.word(u, scope, nesting + 1)?;
+                let b = self.word(u, scope, MAX_NESTING)?;
+                Ok(format!("{a} + {b}"))
+            }
+            3 if nesting < MAX_NESTING => {
+                let value = self.expression(u, scope, nesting + 1)?;
+                Ok(format!("str({value}) + \"ab\""))
+            }
+            _ => Ok(u
+                .choose(&[
+                    "\"ab\"",
+                    "\"stone\"",
+                    "\"a\\tb\"",
+                    "\"x,y,,z\"",
+                    "\"say \\\"hi\\\"\"",
+                    "\"  pad  \"",
+                    "\"it's\"",
+                    "\"a\\nb\\\\c\"",
+                ])?
+                .to_string()),
+        }
+    }
+
+    /// Generates any string, which may be empty or hold characters outside ASCII, such as
+    /// `"caf\u{e9}"`, `s2.strip()`, or `word1[1:]`.
+    fn text(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
+        let nested = nesting < MAX_NESTING;
+        match u.int_in_range(0..=9)? {
+            0 => self.word(u, scope, nesting),
+            1 if !scope.strings.is_empty() => Ok(u.choose(&scope.strings)?.clone()),
+            2 if nested => {
+                // only the left side nests, so a chain of `+` stays short
+                let a = self.text(u, scope, nesting + 1)?;
+                let b = self.word(u, scope, MAX_NESTING)?;
+                Ok(format!("{a} + {b}"))
+            }
+            3 if nested && !scope.words.is_empty() => {
+                let word = u.choose(&scope.words)?;
+                let index = u.int_in_range(-2..=1)?;
+                Ok(format!("{word}[{index}]"))
+            }
+            4 if nested && !scope.words.is_empty() => {
+                let word = u.choose(&scope.words)?;
+                let lower = u.int_in_range(-3..=3)?;
+                Ok(format!("{word}[{lower}:]"))
+            }
+            5 if nested => {
+                let inner = self.text(u, scope, nesting + 1)?;
+                Ok(format!("({inner}).strip()"))
+            }
+            6 if nested => {
+                let inner = self.text(u, scope, nesting + 1)?;
+                let separator = *u.choose(&["\"-\"", "\"\"", "\", \""])?;
+                Ok(format!("{separator}.join(({inner}).split())"))
+            }
+            7 if nested => {
+                let value = self.expression(u, scope, nesting + 1)?;
+                Ok(format!("str({value})"))
+            }
+            _ => Ok(u
+                .choose(&[
+                    "\"\"",
+                    "\"caf\u{e9}\"",
+                    "\"na\u{ef}ve \u{20ac}5\"",
+                    "\"a\"",
+                    "\"\u{e9}\"",
+                ])?
+                .to_string()),
+        }
     }
 
     /// Emits a statement that assigns a float variable or prints floats, such as `g0 = 2.5 * g1`
@@ -938,6 +1109,38 @@ mod tests {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
         }
+    }
+
+    /// Strings index, slice, compare, and loop like lists, and have methods of their own.
+    #[test]
+    fn generated_programs_work_with_strings() {
+        let sources: Vec<String> = (0..500)
+            .map(|seed| generate(&mut Unstructured::new(&bytes(seed, 4096))).unwrap())
+            .collect();
+        for feature in [
+            "for ch",
+            ".find(",
+            ".startswith(",
+            ".endswith(",
+            ".join(",
+            ".split(",
+            ".strip()",
+            "\\",
+            "\u{e9}",
+            "str(",
+        ] {
+            let count = sources.iter().filter(|s| s.contains(feature)).count();
+            assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
+        }
+        // a word, such as word3, is indexed or sliced
+        let indexed = |source: &&String| {
+            source.split("word").skip(1).any(|rest| {
+                let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+                rest.starts_with('[')
+            })
+        };
+        let count = sources.iter().filter(indexed).count();
+        assert!(count >= 5, "only {count} of 500 programs index a string");
     }
 
     #[test]

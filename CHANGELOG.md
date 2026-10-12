@@ -10,6 +10,31 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- String literals take escape sequences: `\"`, `\'`, `\\`, `\n`, `\t`, `\r`, and `\xhh` for an
+  ASCII character, so `print("say \"hi\"")` prints a quote. Any other escape is an error, as is
+  `\x00`.
+- Strings can be indexed and sliced like lists, as in `s[0]`, `s[-1]`, `s[1:]`, and `s[::-1]`.
+  Indexes count bytes, as `len` does, and a result that would cut a character outside ASCII in
+  two stops the program with `cannot cut a string inside a character`. An index past either end
+  is `string index out of range`.
+- `<`, `<=`, `>`, and `>=` compare strings, byte by byte, which orders characters by code point
+  as Python does.
+- The string methods `join`, `find`, `startswith`, and `endswith`, as in `", ".join(words)`,
+  `line.find("=")`, which returns a byte index or -1, `name.startswith("#")`, and
+  `path.endswith(".stn")`.
+- A `for` loop walks a string one character at a time, as in `for c in "naïve";`, where each
+  character is a string of the one to four bytes that make it up.
+
+### Changed
+
+- A compiled string records its length, so `len`, comparing strings of different lengths with
+  `==`, and the bounds check of `s[i]` take the same time for a string of any length, and a loop
+  over `range(s.len())` that indexes `s` is no longer quadratic.
+- A string inside a printed list is written as Python's `repr` writes it, so `["it's", "a\nb"]`
+  prints as `["it's", 'a\nb']` rather than splitting the line.
+
 ## [0.2.2] - 2026-10-11
 
 ### Changed

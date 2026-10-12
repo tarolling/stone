@@ -310,7 +310,8 @@ impl Lexer {
     /// Lexes a string literal starting at its opening quote and returns its contents.
     ///
     /// For example, `"hi"` returns `hi`. A string must close on the line it opens on, so `"abc`
-    /// followed by a newline is an error spanning `"abc`.
+    /// followed by a newline is an error spanning `"abc`. A backslash starts an escape sequence,
+    /// so `"say \"hi\"\n"` returns `say "hi"` and a newline.
     fn lex_string(&mut self) -> Result<String, LexError> {
         let start = self.pos();
         self.advance();
@@ -322,6 +323,9 @@ impl Lexer {
                     return Ok(s);
                 }
                 '\n' => break,
+                '\\' if self.peek_at(1).is_some_and(|next| next != '\n') => {
+                    s.push(self.lex_escape()?);
+                }
                 _ => {
                     s.push(ch);
                     self.advance();
@@ -332,6 +336,53 @@ impl Lexer {
             message: "unterminated string".to_string(),
             span: Span::new(start, self.pos()),
         })
+    }
+
+    /// Lexes the escape sequence starting at a backslash inside a string and returns the
+    /// character it stands for.
+    ///
+    /// For example, `\n` returns a newline and `\x41` returns `A`. `\x` only reaches `\x7f`, and
+    /// never `\x00`, since compiled strings end at a zero byte.
+    fn lex_escape(&mut self) -> Result<char, LexError> {
+        let start = self.pos();
+        self.advance();
+        let error = |lexer: &Self, message: String| LexError {
+            message,
+            span: Span::new(start, lexer.pos()),
+        };
+        let ch = self.advance().expect("lex_string checked for a character");
+        let escaped = match ch {
+            '\\' | '"' | '\'' => ch,
+            'n' => '\n',
+            't' => '\t',
+            'r' => '\r',
+            'x' => {
+                let digits: String = (0..2).filter_map(|i| self.peek_at(i)).collect();
+                if digits.len() != 2 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
+                    while self.peek().is_some_and(|c| c.is_ascii_hexdigit()) {
+                        self.advance();
+                    }
+                    return Err(error(
+                        self,
+                        "'\\x' needs two hex digits, as in '\\x41'".to_string(),
+                    ));
+                }
+                self.advance();
+                self.advance();
+                match u8::from_str_radix(&digits, 16).expect("two hex digits") {
+                    0 => return Err(error(self, "a string cannot hold a null byte".to_string())),
+                    byte @ 1..=0x7f => byte as char,
+                    _ => {
+                        return Err(error(
+                            self,
+                            "'\\x' escapes stop at \\x7f; write the character itself".to_string(),
+                        ));
+                    }
+                }
+            }
+            other => return Err(error(self, format!("unknown escape '\\{other}'"))),
+        };
+        Ok(escaped)
     }
 
     fn lex_name(&mut self) -> String {
@@ -930,6 +981,59 @@ testing(1, 2, 3)"#;
         let err = Lexer::new("x = \"abc\ny = 1\n").lex().unwrap_err();
         assert_eq!(err.message, "unterminated string");
         assert_eq!(err.span, Span::new(Pos::new(1, 5), Pos::new(1, 9)));
+    }
+
+    #[test]
+    fn strings_read_escape_sequences() {
+        assert_eq!(
+            types_of(r#""a\"b\\c\nd\te\rf\'g\x41\x7f""#)[0],
+            TokenType::String("a\"b\\c\nd\te\rf'gA\x7f".to_string())
+        );
+    }
+
+    #[test]
+    fn an_escaped_quote_does_not_end_a_string() {
+        let tokens = Lexer::new("x = \"\\\"\" + y\n").lex().unwrap();
+        assert_eq!(tokens[2].r#type, TokenType::String("\"".to_string()));
+        assert_eq!(tokens[2].span, Span::new(Pos::new(1, 5), Pos::new(1, 9)));
+        assert_eq!(tokens[4].r#type, name("y"));
+    }
+
+    #[test]
+    fn bad_escapes_are_errors_at_the_escape() {
+        for (source, message, cols) in [
+            ("x = \"a\\qb\"\n", "unknown escape '\\q'", (7, 9)),
+            (
+                "x = \"\\x00\"\n",
+                "a string cannot hold a null byte",
+                (6, 10),
+            ),
+            (
+                "x = \"\\xe9\"\n",
+                "'\\x' escapes stop at \\x7f; write the character itself",
+                (6, 10),
+            ),
+            (
+                "x = \"\\x4\"\n",
+                "'\\x' needs two hex digits, as in '\\x41'",
+                (6, 9),
+            ),
+        ] {
+            let err = Lexer::new(source).lex().unwrap_err();
+            assert_eq!(err.message, message, "{source}");
+            assert_eq!(
+                err.span,
+                Span::new(Pos::new(1, cols.0), Pos::new(1, cols.1)),
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_backslash_at_the_end_of_a_line_leaves_the_string_unterminated() {
+        let err = Lexer::new("x = \"abc\\\ny = 1\n").lex().unwrap_err();
+        assert_eq!(err.message, "unterminated string");
+        assert_eq!(err.span, Span::new(Pos::new(1, 5), Pos::new(1, 10)));
     }
 
     #[test]

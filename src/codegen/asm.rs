@@ -644,8 +644,8 @@ pub fn parse_sum(text: &str) -> Option<i64> {
     }
 }
 
-/// Parses a quoted string with the escapes `Context::string_literals` writes, returning its
-/// bytes.
+/// Parses a quoted string with the escapes `Context::string_literals` writes, including octal
+/// ones such as `\033`, returning its bytes.
 ///
 /// For example, `parse_string("\"a\\n\"")` is `Ok(b"a\n".to_vec())`.
 fn parse_string(text: &str) -> Result<Vec<u8>, String> {
@@ -654,13 +654,24 @@ fn parse_string(text: &str) -> Result<Vec<u8>, String> {
         .and_then(|rest| rest.strip_suffix('"'))
         .ok_or_else(|| format!("bad string {text}"))?;
     let mut bytes = Vec::with_capacity(inner.len());
-    let mut chars = inner.bytes();
+    let mut chars = inner.bytes().peekable();
     while let Some(b) = chars.next() {
         if b != b'\\' {
             bytes.push(b);
             continue;
         }
         bytes.push(match chars.next() {
+            // up to three octal digits, as GNU as reads them
+            Some(digit @ b'0'..=b'7') => {
+                let mut value = u32::from(digit - b'0');
+                for _ in 0..2 {
+                    match chars.next_if(|b| (b'0'..=b'7').contains(b)) {
+                        Some(digit) => value = value * 8 + u32::from(digit - b'0'),
+                        None => break,
+                    }
+                }
+                value as u8
+            }
             Some(b'n') => b'\n',
             Some(b't') => b'\t',
             Some(b'r') => b'\r',
@@ -738,6 +749,12 @@ mod tests {
             object.data,
             [b'a', b'"', b'\n', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x40]
         );
+    }
+
+    #[test]
+    fn strings_read_octal_escapes() {
+        let object = x64("\t.data\n\t.string \"\\001\\0337\\177\"\n").unwrap();
+        assert_eq!(object.data, [1, 0o33, b'7', 0x7f, 0]);
     }
 
     #[test]

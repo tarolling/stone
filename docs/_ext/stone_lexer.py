@@ -23,7 +23,19 @@ KEYWORDS = (
 )
 CONSTANTS = ("true", "false", "none")
 BUILTINS = ("print", "range", "int", "float", "str", "input", "eof", "args")
-METHODS = ("len", "append", "pop", "insert", "extend", "strip", "split")
+METHODS = (
+    "len",
+    "append",
+    "pop",
+    "insert",
+    "extend",
+    "strip",
+    "split",
+    "join",
+    "find",
+    "startswith",
+    "endswith",
+)
 
 
 class StoneLexer(RegexLexer):
@@ -34,10 +46,17 @@ class StoneLexer(RegexLexer):
     filenames = ["*.stn"]
 
     tokens = {
+        "string": [
+            (r'"', String.Double, "#pop"),
+            (r"\\(x[0-9a-fA-F]{2}|.)", String.Escape),
+            (r'[^"\\\n]+', String.Double),
+            # a string that never closes ends at the line break
+            (r"\n", Whitespace, "#pop"),
+        ],
         "root": [
             (r"\s+", Whitespace),
             (r"//.*$", Comment.Single),
-            (r'"[^"\n]*"', String.Double),
+            (r'"', String.Double, "string"),
             (r"(fn)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
             (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
             (

@@ -1,0 +1,28 @@
+// strings order byte by byte, so a prefix comes first
+print("a" < "b", "b" < "a", "abc" < "abd", "ab" < "abc", "" < "a")
+print("a" <= "a", "a" >= "b", "b" > "a", "B" < "a", "Z" < "a")
+print("apple" < "apple", "apple" <= "apple", "zebra" > "apple")
+// chains
+print("a" < "b" < "c", "a" < "c" < "b", "c" > "b" >= "b")
+// characters outside ascii order by code point
+print("é" > "z", "é" < "ê", "naïve" < "nb")
+
+// comparisons decide branches
+fn smallest(words: list[str]) -> str;
+    best = words[0]
+    for w in words;
+        if w < best;
+            best = w
+    ret best
+print(smallest(["pear", "apple", "fig", "applesauce"]))
+
+// a simple insertion sort
+names = ["mia", "ann", "zoe", "bo", "ann", "al"]
+for i in range(1, names.len());
+    j = i
+    while j > 0 and names[j - 1] > names[j];
+        t = names[j - 1]
+        names[j - 1] = names[j]
+        names[j] = t
+        j = j - 1
+print(names)

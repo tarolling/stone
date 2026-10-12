@@ -42,7 +42,8 @@ use crate::codegen::context::module_routine;
 use crate::last_use::{LiveAfter, global_reads, live_after};
 use crate::span::Span;
 use crate::stdlib::{
-    INDEX_RANGE, LENGTHS_DIFFER, POP_EMPTY, POP_RANGE, SLICE_STEP_ZERO, math, random,
+    INDEX_RANGE, LENGTHS_DIFFER, POP_EMPTY, POP_RANGE, SLICE_STEP_ZERO, STRING_INDEX_RANGE, math,
+    random,
 };
 use std::collections::{HashMap, HashSet};
 
@@ -122,14 +123,16 @@ struct Context<'a> {
 enum Iterable {
     Range(Operand),
     List(Operand),
+    /// A string and its length, which cannot change while the loop holds it.
+    Str(Operand, Operand),
 }
 
 /// A loop that `break` and `cont` can leave.
 struct Loop {
     exit: BlockId,
     header: BlockId,
-    /// The list a `for` loop walks, which it holds a reference to until it ends.
-    list: Option<Operand>,
+    /// The list or string a `for` loop walks, which it holds a reference to until it ends.
+    held: Option<(Operand, RcKind)>,
 }
 
 /// A block being built, which may not have a terminator yet.
@@ -446,16 +449,13 @@ impl<'a> Lowerer<'a> {
         self.terminate(Terminator::Jump(target));
     }
 
-    /// Returns `value` from the function, first releasing the lists of the loops it is in and
-    /// the references its locals own, except one that `value` is, which the caller takes. `main`
-    /// releases every global instead and exits with 0.
+    /// Returns `value` from the function, first releasing the lists and strings of the loops it
+    /// is in and the references its locals own, except one that `value` is, which the caller
+    /// takes. `main` releases every global instead and exits with 0.
     fn leave(&mut self, value: Operand) {
-        let lists: Vec<Operand> = self.loops.iter().rev().filter_map(|l| l.list).collect();
-        for list in lists {
-            self.push(Inst::Release {
-                src: list,
-                kind: RcKind::List,
-            });
+        let held: Vec<(Operand, RcKind)> = self.loops.iter().rev().filter_map(|l| l.held).collect();
+        for (src, kind) in held {
+            self.push(Inst::Release { src, kind });
         }
         if self.name.is_some() {
             let moved = std::mem::take(&mut self.moved_locals);
@@ -685,7 +685,7 @@ impl<'a> Lowerer<'a> {
                 self.loops.push(Loop {
                     exit,
                     header,
-                    list: None,
+                    held: None,
                 });
                 for stmt in body {
                     self.stmt(stmt)?;
@@ -883,8 +883,9 @@ impl<'a> Lowerer<'a> {
     ///
     /// A range's bounds are evaluated once, left to right. A list's length is reread every
     /// iteration, so a list that grows while it is iterated keeps going, like in the interpreter.
-    /// The loop holds a reference to the list until it ends, so reassigning the variable it came
-    /// from cannot free it.
+    /// A string steps by whole characters: `stone.str_char` returns the one at the position, and
+    /// its length is the step. The loop holds a reference to the list or string until it ends, so
+    /// reassigning the variable it came from cannot free it.
     fn for_loop(&mut self, target: &Expr, iter: &Expr, body: &[Stmt]) -> Result<(), String> {
         let header = self.new_block();
         let loop_body = self.new_block();
@@ -906,6 +907,17 @@ impl<'a> Lowerer<'a> {
                 Iterable::Range(self.snapshot(end))
             }
             Some(_) => return Err("range() takes 1 or 2 arguments".to_string()),
+            None if self.type_of(iter)? == Type::Str => {
+                let text = self.expr(iter)?;
+                let text = self.snapshot(text);
+                self.take(text, Some(RcKind::Str));
+                let len = self.runtime_call("stone.str_len", vec![text], None);
+                self.push(Inst::Copy {
+                    dst: next,
+                    src: Operand::Imm(0),
+                });
+                Iterable::Str(text, len)
+            }
             None => {
                 let list = self.expr(iter)?;
                 let list = self.snapshot(list);
@@ -917,8 +929,9 @@ impl<'a> Lowerer<'a> {
                 Iterable::List(list)
             }
         };
-        let (list, elem) = match iterable {
-            Iterable::List(list) => (Some(list), self.element_kind(iter)),
+        let (held, elem) = match iterable {
+            Iterable::List(list) => (Some((list, RcKind::List)), self.element_kind(iter)),
+            Iterable::Str(text, _) => (Some((text, RcKind::Str)), Some(RcKind::Str)),
             Iterable::Range(_) => (None, None),
         };
 
@@ -930,6 +943,7 @@ impl<'a> Lowerer<'a> {
                 self.push(Inst::ListLen { dst: len, list });
                 Operand::Reg(len)
             }
+            Iterable::Str(_, len) => len,
             Iterable::Range(end) => end,
         };
         self.terminate(Terminator::CmpBranch {
@@ -965,17 +979,33 @@ impl<'a> Lowerer<'a> {
                 }
                 Operand::Reg(dst)
             }
+            Iterable::Str(..) => Operand::Reg(self.fresh()),
             Iterable::Range(_) => Operand::Reg(next),
+        };
+        let step = match iterable {
+            Iterable::Str(text, _) => {
+                // the character is a new reference, which the variable takes
+                let Operand::Reg(dst) = value else {
+                    unreachable!("a character is a register")
+                };
+                self.push(Inst::Call {
+                    dst: Some(dst),
+                    callee: Callee::Runtime("stone.str_char"),
+                    args: vec![text, Operand::Reg(next)],
+                });
+                self.runtime_call("stone.str_len", vec![value], None)
+            }
+            _ => Operand::Imm(1),
         };
         self.assign(target, value, elem)?;
         self.push(Inst::Binary {
             op: BinOp::Add,
             dst: next,
             lhs: Operand::Reg(next),
-            rhs: Operand::Imm(1),
+            rhs: step,
         });
 
-        self.loops.push(Loop { exit, header, list });
+        self.loops.push(Loop { exit, header, held });
         for stmt in body {
             self.stmt(stmt)?;
         }
@@ -985,11 +1015,8 @@ impl<'a> Lowerer<'a> {
         }
         self.loop_depth -= 1;
         self.start(exit);
-        if let Some(list) = list {
-            self.push(Inst::Release {
-                src: list,
-                kind: RcKind::List,
-            });
+        if let Some((src, kind)) = held {
+            self.push(Inst::Release { src, kind });
         }
         Ok(())
     }
@@ -1237,8 +1264,16 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::Subscript { value, slice, .. } => {
+                let string = self.type_of(value)? == Type::Str;
                 if let ExprKind::Slice { lower, upper, step } = &slice.kind {
-                    return self.slice(value, [lower, upper, step], into, kind);
+                    let label = match string {
+                        true => "stone.str_slice_of",
+                        false => "stone.list_slice",
+                    };
+                    return self.slice(value, [lower, upper, step], label, into, kind);
+                }
+                if string {
+                    return self.string_index(value, slice, into, kind);
                 }
                 let list = self.list_operand(value, &[slice])?;
                 let index = self.expr(slice)?;
@@ -1583,15 +1618,40 @@ impl<'a> Lowerer<'a> {
         Operand::Reg(position)
     }
 
-    /// Lowers the slice `list[lower:upper:step]`, evaluating the list and then each bound that is
-    /// there, then failing on a step of 0, into a call to `stone.list_slice`. A missing bound is passed as 0 with its bit set in
-    /// the last argument: 1 for `lower`, 2 for `upper`, and 4 for `step`.
+    /// Lowers the string index `text[index]`, evaluating the string and then the index, into a
+    /// check that the index is in range followed by a call to `stone.str_at`, which fails if the
+    /// byte there is part of a longer character.
+    ///
+    /// For example, `s[i]` becomes `v2 = call stone.str_len(v0)`, the steps of
+    /// [`Lowerer::list_position`], and `v4 = call stone.str_at(v0, v3)`.
+    fn string_index(
+        &mut self,
+        text: &Expr,
+        index: &Expr,
+        into: Option<VReg>,
+        kind: Option<RcKind>,
+    ) -> Result<Operand, String> {
+        let text = self.list_operand(text, &[index])?;
+        let index = self.expr(index)?;
+        let len = self.runtime_call("stone.str_len", vec![text], None);
+        let position = self.list_position(index, len, false, STRING_INDEX_RANGE);
+        let result = self.runtime_call("stone.str_at", vec![text, position], into);
+        self.release_temp(text);
+        self.own(result, kind);
+        Ok(result)
+    }
+
+    /// Lowers the slice `list[lower:upper:step]` of a list or a string, evaluating it and then
+    /// each bound that is there, then failing on a step of 0, into a call to `label`:
+    /// `stone.list_slice` or `stone.str_slice_of`. A missing bound is passed as 0 with its bit set
+    /// in the last argument: 1 for `lower`, 2 for `upper`, and 4 for `step`.
     ///
     /// For example, `xs[1:]` becomes `v1 = call stone.list_slice(v0, 1, 0, 0, 6)`.
     fn slice(
         &mut self,
         list: &Expr,
         bounds: [&Option<Box<Expr>>; 3],
+        label: &'static str,
         into: Option<VReg>,
         kind: Option<RcKind>,
     ) -> Result<Operand, String> {
@@ -1625,7 +1685,7 @@ impl<'a> Lowerer<'a> {
             self.start(nonzero);
         }
         args.push(Operand::Imm(omitted));
-        let result = self.runtime_call("stone.list_slice", args, into);
+        let result = self.runtime_call(label, args, into);
         self.release_temp(list);
         self.own(result, kind);
         Ok(result)
@@ -1685,7 +1745,7 @@ impl<'a> Lowerer<'a> {
             let rhs = self.expr(comparator)?;
             let cond = Cond::from(op);
             match self.type_of(comparator)? {
-                // strings compare by contents, and only with == and !=
+                // strings compare by contents
                 Type::Str if cond == Cond::Ne => {
                     let equal = self.fresh();
                     self.push(Inst::Call {
@@ -1698,11 +1758,22 @@ impl<'a> Lowerer<'a> {
                         src: Operand::Reg(equal),
                     });
                 }
-                Type::Str => self.push(Inst::Call {
+                Type::Str if cond == Cond::Eq => self.push(Inst::Call {
                     dst: Some(result),
                     callee: Callee::Runtime("stone.str_eq"),
                     args: vec![lhs, rhs],
                 }),
+                // ordered by a call that returns -1, 0, or 1
+                Type::Str => {
+                    let order = self.runtime_call("stone.str_cmp", vec![lhs, rhs], None);
+                    self.push(Inst::Compare {
+                        cond,
+                        float: false,
+                        dst: result,
+                        lhs: order,
+                        rhs: Operand::Imm(0),
+                    });
+                }
                 ty => self.push(Inst::Compare {
                     cond,
                     float: ty == Type::Float,
@@ -1878,6 +1949,24 @@ impl<'a> Lowerer<'a> {
                     ("strip", _) => "stone.str_strip",
                     (_, 1) => "stone.str_split_ws",
                     _ => "stone.str_split",
+                };
+                let result = self.runtime_call(label, values.clone(), into);
+                for value in values {
+                    self.release_temp(value);
+                }
+                self.own(result, kind);
+                Ok(result)
+            }
+            "join" | "find" | "startswith" | "endswith" => {
+                let mut values = vec![self.expr(receiver)?];
+                for arg in args {
+                    values.push(self.expr(arg)?);
+                }
+                let label = match name {
+                    "join" => "stone.str_join",
+                    "find" => "stone.str_position",
+                    "startswith" => "stone.str_starts",
+                    _ => "stone.str_ends",
                 };
                 let result = self.runtime_call(label, values.clone(), into);
                 for value in values {

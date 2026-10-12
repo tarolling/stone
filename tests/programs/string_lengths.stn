@@ -1,0 +1,36 @@
+// every way to make a string records its length, which len reads
+use os
+fn show(name: str, s: str);
+    print(name, s.len(), "[" + s + "]")
+
+show("literal", "stone")
+show("empty", "")
+show("escapes", "a\tb\n\x41")
+show("bytes", "café")
+show("concat", "ab" + "cde")
+show("int", str(-1234567))
+show("float", str(2.5))
+show("small float", str(1e-7))
+show("bool", str(false))
+show("input", input())
+show("prompted", input("> "))
+show("arg", args()[1])
+show("env", os.env("STONE_GREETING"))
+show("missing env", os.env("STONE_NOT_SET"))
+print("platform", os.platform().len() >= 5)
+print("hostname", os.hostname().len() > 0, "cwd", os.cwd().len() > 0)
+show("strip", "  padded \t".strip())
+for piece in "x,yy,,zzz".split(",");
+    show("split", piece)
+for word in "  one two  ".split();
+    show("split ws", word)
+show("join", "-".join(["a", "bb", "ccc"]))
+show("index", "hello"[1])
+show("slice", "hello"[1:4])
+show("step", "hello"[::-2])
+show("whole slice", "hello"[:])
+s = ""
+for i in range(5);
+    s = s + str(i)
+show("built", s)
+print(s.len() + "abc".len(), (s + s).len(), s[2:].len(), s == "01234")

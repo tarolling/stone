@@ -17,10 +17,13 @@ mod emit;
 pub mod floats;
 
 use crate::ast::Mod;
-use crate::codegen::context::{Context, LIST_ROUTINES, global_label, immortal_string};
+use crate::codegen::context::{
+    Context, LIST_ROUTINES, STRING_METHOD_ROUTINES, global_label, immortal_string,
+};
 use crate::codegen::{AssemblyGenerator, Os, Target};
 use crate::project::SourceMap;
 use crate::span::Span;
+use crate::stdlib::CUT_CHARACTER;
 use builtins::{Sys, system_call};
 use std::path::Path;
 
@@ -296,17 +299,18 @@ impl Arm64Generator {
         if self.ctx.uses(&["stone.str_int", "stone.str_bool"]) {
             builtins::conversion_runtime(self);
         }
-        let methods: Vec<&str> = ["stone.str_strip", "stone.str_split_ws", "stone.str_split"]
-            .into_iter()
+        let methods: Vec<&str> = STRING_METHOD_ROUTINES
+            .iter()
+            .copied()
             .filter(|label| self.ctx.uses(&[label]))
             .collect();
         if !methods.is_empty() {
-            let empty_separator = if self.ctx.uses(&["stone.str_split"]) {
-                self.ctx.fail_label("empty separator")
-            } else {
-                String::new()
+            let empty_separator = self.ctx.failure_of("stone.str_split", "empty separator");
+            let cut_character = match self.ctx.uses(&["stone.str_at", "stone.str_slice_of"]) {
+                true => self.ctx.fail_label(CUT_CHARACTER),
+                false => String::new(),
             };
-            builtins::string_methods(self, &methods, &empty_separator);
+            builtins::string_methods(self, &methods, &empty_separator, &cut_character);
         }
     }
 
@@ -338,8 +342,8 @@ impl Arm64Generator {
 
         self.emit("");
         self.emit("\t.data");
-        for (label, escaped) in literals {
-            immortal_string(self, &label, &escaped);
+        for (label, text) in literals {
+            immortal_string(self, &label, &text);
         }
         self.emit("");
     }

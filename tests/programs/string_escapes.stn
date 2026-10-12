@@ -1,0 +1,8 @@
+// escape sequences in string literals
+print("say \"hi\"")
+print("one\ntwo")
+print("a\tb", "back\\slash", "it\'s", "\x41\x42\x43")
+print("carriage\rreturn".len(), "\x7f".len(), "\x1b[0m".len())
+print("\"".len(), "\\".len(), "\n" == "\x0a")
+print("tab:\t|" + "\t".strip() + "|")
+print("x\ny\nz".split("\n"), "x\ny z".split())

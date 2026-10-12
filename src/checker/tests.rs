@@ -356,7 +356,7 @@ fn elementwise_operands_must_agree() {
     // lists still cannot be compared
     assert_error(
         "x = [1] < [2]\n",
-        "'<' needs int or float operands, found list[int]",
+        "'<' needs int, float, or str operands, found list[int]",
         1,
         5,
     );
@@ -509,8 +509,118 @@ fn comparisons_need_matching_operands() {
     assert_error("x = 1 == \"a\"\n", "expected int, found str", 1, 10);
     assert_error("x = 1 < 2.5\n", "expected int, found float", 1, 9);
     assert_error(
-        "x = \"a\" < \"b\"\n",
-        "'<' needs int or float operands, found str",
+        "x = none < none\n",
+        "'<' needs int, float, or str operands, found none",
+        1,
+        5,
+    );
+    assert_error("x = \"a\" >= 1\n", "expected str, found int", 1, 12);
+}
+
+#[test]
+fn strings_are_ordered() {
+    let source = "a = \"a\" < \"b\"\nb = \"b\" <= \"c\" > \"a\" >= \"\"\n";
+    assert_eq!(type_of_symbol(source, "a"), "bool");
+    assert_eq!(type_of_symbol(source, "b"), "bool");
+    assert_eq!(errors("fn f(s: str, t: str) -> bool;\n    ret s < t\n"), []);
+}
+
+#[test]
+fn strings_index_and_slice_to_strings() {
+    let source = "s = \"hello\"\na = s[0]\nb = s[1:3]\nc = s[::-1][0]\n";
+    assert_eq!(type_of_symbol(source, "a"), "str");
+    assert_eq!(type_of_symbol(source, "b"), "str");
+    assert_eq!(type_of_symbol(source, "c"), "str");
+    let source = "fn first(s: str) -> str;\n    ret s[0]\nwords = [\"ab\"]\nw = words[0][1:]\n";
+    assert_eq!(type_of_symbol(source, "w"), "str");
+    assert_error("x = \"ab\"[\"a\"]\n", "expected int, found str", 1, 10);
+    assert_error("x = \"ab\"[1.5:]\n", "expected int, found float", 1, 10);
+}
+
+#[test]
+fn strings_cannot_be_changed() {
+    let message = "a string cannot be changed; build a new one, as in 's = s[:i] + c + s[i + 1:]'";
+    assert_error("s = \"ab\"\ns[0] = \"c\"\n", message, 2, 1);
+    assert_error("words = [\"ab\"]\nwords[0][0] = \"c\"\n", message, 2, 1);
+    // an element of a list of strings is still replaced as a whole
+    assert_eq!(errors("words = [\"ab\"]\nwords[0] = \"c\"\n"), []);
+}
+
+#[test]
+fn for_loops_walk_the_characters_of_strings() {
+    let source = "for c in \"abc\";\n    print(c)\nfn count(s: str) -> int;\n    n = 0\n    for ch in s;\n        n = n + ch.len()\n    ret n\n";
+    assert_eq!(type_of_symbol(source, "c"), "str");
+    assert_eq!(type_of_symbol(source, "ch"), "str");
+    assert_error(
+        "for x in 5;\n    print(x)\n",
+        "expected list[unknown], found int",
+        1,
+        10,
+    );
+}
+
+#[test]
+fn join_find_and_startswith_take_strs() {
+    let source =
+        "s = \", \".join([\"a\", \"b\"])\nn = \"abc\".find(\"c\")\nb = \"abc\".startswith(\"a\")\n";
+    assert_eq!(type_of_symbol(source, "s"), "str");
+    assert_eq!(type_of_symbol(source, "n"), "int");
+    assert_eq!(type_of_symbol(source, "b"), "bool");
+    // the element type of an empty list comes from join
+    assert_eq!(
+        type_of_symbol("xs = []\ns = \"\".join(xs)\n", "xs"),
+        "list[str]"
+    );
+    assert_error(
+        "x = \",\".join([1])\n",
+        "expected list[str], found list[int]",
+        1,
+        14,
+    );
+    assert_error(
+        "x = [1].join([\"a\"])\n",
+        "'join' needs a str, found list[int]",
+        1,
+        5,
+    );
+    assert_error("x = \"a\".find(1)\n", "expected str, found int", 1, 14);
+    assert_error(
+        "x = \"a\".startswith(1)\n",
+        "expected str, found int",
+        1,
+        20,
+    );
+    assert_error(
+        "x = \"a\".find()\n",
+        "'find' takes 1 argument, but 0 were given",
+        1,
+        5,
+    );
+    assert_error(
+        "x = \"a\".startswith(\"a\", \"b\")\n",
+        "'startswith' takes 1 argument, but 2 were given",
+        1,
+        5,
+    );
+    assert_error("x = 1.find(\"a\")\n", "'find' needs a str, found int", 1, 5);
+}
+
+#[test]
+fn endswith_takes_a_str() {
+    assert_eq!(
+        type_of_symbol("b = \"stone\".endswith(\"one\")\n", "b"),
+        "bool"
+    );
+    assert_error("x = \"a\".endswith(1)\n", "expected str, found int", 1, 18);
+    assert_error(
+        "x = [1].endswith(\"a\")\n",
+        "'endswith' needs a str, found list[int]",
+        1,
+        5,
+    );
+    assert_error(
+        "x = \"a\".endswith()\n",
+        "'endswith' takes 1 argument, but 0 were given",
         1,
         5,
     );
@@ -815,11 +925,11 @@ fn list_elements_must_agree() {
 }
 
 #[test]
-fn indexes_must_be_ints_and_values_lists() {
+fn indexes_must_be_ints_and_values_lists_or_strs() {
     assert_error("a = [1]\nx = a[\"0\"]\n", "expected int, found str", 2, 7);
     assert_error(
-        "s = \"abc\"\nx = s[0]\n",
-        "expected list[unknown], found str",
+        "n = 5\nx = n[0]\n",
+        "expected list[unknown], found int",
         2,
         5,
     );

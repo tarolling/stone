@@ -407,6 +407,75 @@ fn io_and_string_builtins_call_the_runtime() {
 }
 
 #[test]
+fn string_indexes_check_the_length_then_call_the_runtime() {
+    let source = "fn f(s: str, i: int) -> str;\n    ret s[i]\nprint(f(\"a\", 0))\n";
+    let text = dump(source);
+    let f = text.split("fn main").next().unwrap();
+    for line in [
+        "v2 = call stone.str_len(v0)",
+        "br_lt v3, 0",
+        "v3 = add v3, v2",
+        "fail \"string index out of range\"",
+        "call stone.str_at(v0, v3)",
+    ] {
+        assert!(f.contains(line), "{line} in\n{f}");
+    }
+}
+
+#[test]
+fn string_slices_and_methods_call_the_runtime() {
+    let source = "fn f(s: str, xs: list[str]) -> list[str];\n    \
+                  ret [s[1:], s[::-1], s.join(xs), str(s.find(s)), str(s.startswith(s))]\n\
+                  print(f(\"a\", []))\n";
+    let text = dump(source);
+    for call in [
+        "call stone.str_slice_of(v0, 1, 0, 0, 6)",
+        "call stone.str_slice_of(v0, 0, 0, -1, 3)",
+        "call stone.str_join(v0, v1)",
+        "call stone.str_position(v0, v0)",
+        "call stone.str_starts(v0, v0)",
+    ] {
+        assert!(text.contains(call), "{call} in\n{text}");
+    }
+    assert!(!text.contains("list_slice"), "{text}");
+}
+
+#[test]
+fn a_for_loop_over_a_string_steps_by_each_character() {
+    let source = "fn f(s: str) -> int;\n    n = 0\n    for c in s;\n        n = n + 1\n    ret n\n\
+                  print(f(\"a\"))\n";
+    let text = dump(source);
+    let f = text.split("fn main").next().unwrap();
+    // the length once, then a character and its length each time around
+    assert_eq!(f.matches("call stone.str_len").count(), 2, "{f}");
+    for line in ["call stone.str_char(", "release_str"] {
+        assert!(f.contains(line), "{line} in\n{f}");
+    }
+}
+
+#[test]
+fn endswith_calls_the_runtime() {
+    let text = dump("fn f(s: str) -> bool;\n    ret s.endswith(s)\nprint(f(\"a\"))\n");
+    assert!(text.contains("call stone.str_ends(v0, v0)"), "{text}");
+}
+
+#[test]
+fn string_order_compares_the_runtime_result_with_zero() {
+    let source = "fn f(a: str, b: str) -> bool;\n    ret a <= b\n\
+                  fn g(a: str, b: str) -> int;\n    if a > b;\n        ret 1\n    ret 0\n\
+                  print(f(\"a\", \"b\"), g(\"a\", \"b\"))\n";
+    let text = dump(source);
+    assert!(
+        text.contains("v3 = call stone.str_cmp(v0, v1)\n  v2 = le v3, 0"),
+        "{text}"
+    );
+    assert!(
+        text.contains("v3 = call stone.str_cmp(v0, v1)\n  v2 = gt v3, 0"),
+        "{text}"
+    );
+}
+
+#[test]
 fn a_row_read_for_indexing_is_borrowed_unless_a_call_could_replace_it() {
     let source = "fn f(a: list[list[int]], i: int, k: int) -> int;\n    ret a[i][k] + a[i][g(k)]\nfn g(k: int) -> int;\n    ret k\n\
                   print(f([[1]], 0, 0))\n";

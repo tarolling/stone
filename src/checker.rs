@@ -325,8 +325,10 @@ impl Kind {
     }
 }
 
-/// The kinds arithmetic and ordering comparisons accept, with `int` the default.
+/// The kinds arithmetic accepts, with `int` the default.
 const NUMBERS: &[Kind] = &[Kind::Int, Kind::Float];
+/// The kinds ordering comparisons accept: numbers, and strings, which compare byte by byte.
+const ORDERED: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
 /// What `int` and `float` convert from.
 const CONVERTIBLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
 /// What the `math` functions take.
@@ -996,10 +998,15 @@ impl Inference {
                 let elem = match range_args(iter) {
                     Some(args) => self.check_range(iter, args),
                     None => {
-                        let elem = self.fresh();
                         let iter_ty = self.infer(iter);
-                        self.expect(&Ty::List(Box::new(elem.clone())), &iter_ty, iter.span);
-                        elem
+                        // a string gives its characters, and anything else must be a list
+                        if self.shallow(&iter_ty) == Ty::Str {
+                            Ty::Str
+                        } else {
+                            let elem = self.fresh();
+                            self.expect(&Ty::List(Box::new(elem.clone())), &iter_ty, iter.span);
+                            elem
+                        }
                     }
                 };
                 if matches!(target.kind, ExprKind::Name { .. }) {
@@ -1181,7 +1188,11 @@ impl Inference {
                 }
             }
             ExprKind::Subscript { value, slice, .. } => {
-                let elem = self.subscript(value, slice);
+                let (elem, string) = self.subscript_of(value, slice);
+                if string {
+                    self.error(target.span, STRING_CHANGE);
+                    return;
+                }
                 if matches!(slice.kind, ExprKind::Slice { .. }) {
                     self.error(target.span, SLICE_CHANGE);
                     return;
@@ -1355,15 +1366,17 @@ impl Inference {
                             &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str, Kind::None],
                             "'==' and '!=' cannot compare {}",
                         ),
-                        CompOp::LessThan => (NUMBERS, "'<' needs int or float operands, found {}"),
+                        CompOp::LessThan => {
+                            (ORDERED, "'<' needs int, float, or str operands, found {}")
+                        }
                         CompOp::LessThanEqual => {
-                            (NUMBERS, "'<=' needs int or float operands, found {}")
+                            (ORDERED, "'<=' needs int, float, or str operands, found {}")
                         }
                         CompOp::GreaterThan => {
-                            (NUMBERS, "'>' needs int or float operands, found {}")
+                            (ORDERED, "'>' needs int, float, or str operands, found {}")
                         }
                         CompOp::GreaterThanEqual => {
-                            (NUMBERS, "'>=' needs int or float operands, found {}")
+                            (ORDERED, "'>=' needs int, float, or str operands, found {}")
                         }
                     };
                     self.require(ty.clone(), allowed, expr.span, message);
@@ -1400,23 +1413,39 @@ impl Inference {
         }
     }
 
-    /// Infers `value[slice]`, which must index a list with an int, or slice it, giving a list of
-    /// the same type.
+    /// Infers `value[slice]`, which must index a list or a string with an int, or slice it. An
+    /// index gives an element of a list, or a string of one byte, and a slice gives a value of the
+    /// same type. A value not yet known to be a string is taken to be a list.
+    ///
+    /// For example, `xs[0]` of a `list[int]` is `int`, and `s[1:]` of a `str` is `str`.
     fn subscript(&mut self, value: &Expr, slice: &Expr) -> Ty {
-        let elem = self.fresh();
+        self.subscript_of(value, slice).0
+    }
+
+    /// Infers `value[slice]` as [`Inference::subscript`] does, also returning whether `value` is
+    /// a string.
+    fn subscript_of(&mut self, value: &Expr, slice: &Expr) -> (Ty, bool) {
         let value_ty = self.infer(value);
-        let list = Ty::List(Box::new(elem.clone()));
-        self.expect(&list, &value_ty, value.span);
+        let string = self.shallow(&value_ty) == Ty::Str;
+        let (sliced, elem) = match string {
+            true => (Ty::Str, Ty::Str),
+            false => {
+                let elem = self.fresh();
+                let list = Ty::List(Box::new(elem.clone()));
+                self.expect(&list, &value_ty, value.span);
+                (list, elem)
+            }
+        };
         if let ExprKind::Slice { lower, upper, step } = &slice.kind {
             for bound in [lower, upper, step].into_iter().flatten() {
                 let ty = self.infer(bound);
                 self.expect(&Ty::Int, &ty, bound.span);
             }
-            return list;
+            return (sliced, string);
         }
         let index = self.infer(slice);
         self.expect(&Ty::Int, &index, slice.span);
-        elem
+        (elem, string)
     }
 
     fn infer_call(&mut self, call: &Expr, func: &Expr, args: &[Expr]) -> Ty {
@@ -1591,6 +1620,24 @@ impl Inference {
                 } else {
                     Ty::List(Box::new(Ty::Str))
                 }
+            }
+            "join" | "find" | "startswith" | "endswith" => {
+                let (message, arg, result) = match name {
+                    "join" => (
+                        "'join' needs a str, found {}",
+                        Ty::List(Box::new(Ty::Str)),
+                        Ty::Str,
+                    ),
+                    "find" => ("'find' needs a str, found {}", Ty::Str, Ty::Int),
+                    "startswith" => ("'startswith' needs a str, found {}", Ty::Str, Ty::Bool),
+                    _ => ("'endswith' needs a str, found {}", Ty::Str, Ty::Bool),
+                };
+                self.require(receiver_ty, &[Kind::Str], receiver.span, message);
+                match args {
+                    [only] => self.expect(&arg, &arg_types[0], only.span),
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                result
             }
             _ => {
                 // the name is the last token of `func`
@@ -2112,6 +2159,8 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
 /// For example, the root of `grid[i][j]` is `grid`, and the root of `f()[0]` is `f()`.
 /// What the checker reports for a change to a slice, such as `xs[1:].append(2)`.
 const SLICE_CHANGE: &str = "a slice is a new list, so changing it has no effect";
+const STRING_CHANGE: &str =
+    "a string cannot be changed; build a new one, as in 's = s[:i] + c + s[i + 1:]'";
 
 /// Returns whether the list `expr`, which a statement changes, is a slice or an element of one.
 ///

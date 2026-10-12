@@ -1,0 +1,28 @@
+// indexing a string gives a string of one byte
+s = "hello, world"
+print(s[0], s[4], s[-1], s[-12], s[s.len() - 1])
+
+// a loop over every index
+fn count(text: str, letter: str) -> int;
+    n = 0
+    for i in range(text.len());
+        if text[i] == letter;
+            n = n + 1
+    ret n
+print(count(s, "o"), count(s, "l"), count(s, "z"))
+
+// reversing by hand
+backward = ""
+i = s.len() - 1
+while i >= 0;
+    backward = backward + s[i]
+    i = i - 1
+print(backward)
+
+// indexes of elements and of results
+words = ["stone", "rust"]
+print(words[1][0], words[0][-1], ("a" + "b")[1], str(42)[0])
+
+// ascii bytes next to other characters are fine
+text = "café!"
+print(text[0], text[2], text[-1], text.len())

@@ -11,7 +11,7 @@ runs, reporting every place they conflict.
 | `int` | 64-bit signed integers. `+`, `-`, `*`, and `**` wrap around on overflow |
 | `float` | IEEE 754 doubles, including `inf`, `-inf`, and `nan` |
 | `bool` | `true` and `false` |
-| `str` | immutable byte strings |
+| `str` | immutable byte strings, ordered byte by byte |
 | `none` | `none`, also what a function without `ret value` returns |
 | `list[T]` | growable lists of `T`, which are values: assigning or passing one copies it |
 | functions | each function has one signature, such as `fn(int, list[str]) -> bool` |
@@ -57,6 +57,37 @@ and `xs[0] * 2` makes it an `int` or a `list[int]`. The operand still has to be 
 list of numbers that fits the other operand, so a later `xs.append("a")` is an error at `"a"`.
 If nothing ever settles it, it is the same type as the other operand.
 
+## Strings
+
+A string is a sequence of bytes holding UTF-8 text, so a character outside ASCII, such as `é`,
+is more than one byte. `s.len()` counts bytes, and indexes count bytes too: `s[i]` is the
+one-byte string at index `i`, counting a negative index from the end, and `s[a:b:c]` slices
+bytes the way a list slice picks elements. Neither may cut a character in two, which stops the
+program with `cannot cut a string inside a character`: `s[i]` must be an ASCII byte, a slice
+with a step of 1 must start and stop between characters, and a slice with any other step must
+pick only ASCII bytes. Text that is all ASCII therefore indexes and slices exactly as in
+Python:
+
+```stone
+s = "naïve"
+print(s[0], s[-1], s[:2], s[2:4], s.len())   // n e na ï 6
+```
+
+A `for` loop over a string takes one character at a time, each a string of the one to four
+bytes that make it up, so it never cuts one, and `for c in "naïve"` runs five times:
+
+```stone
+for c in "aé€";
+    print(c, c.len())   // a 1, then é 2, then € 3
+```
+
+A string knows its length, so `s.len()` takes the same time for any string.
+
+`<`, `<=`, `>`, and `>=` order strings byte by byte, so a string orders before any longer string
+it starts, and the order of characters is the order of their Unicode code points, as in Python.
+Strings cannot be changed in place, so `s[0] = "x"` is an error; build a new string instead,
+as in `s = "x" + s[1:]`.
+
 ## Rules the checker enforces
 
 These keep the two backends identical and catch common mistakes:
@@ -68,7 +99,8 @@ These keep the two backends identical and catch common mistakes:
   `str(3)` writes them.
 - **Conditions are `int` or `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject
   floats, strings, lists, and `none`.
-- **Lists are not comparable.** `==` and `!=` cannot compare lists.
+- **Lists are not comparable.** `==` and `!=` cannot compare lists, and `<`, `<=`, `>`, and
+  `>=` compare only numbers and strings.
 - **Arithmetic on lists needs numbers.** `+ - * / % **` apply to a list only if it holds ints
   or floats, so `["a"] + ["b"]` and `[[1]] * [[2]]` are errors.
 - **Changes are statements, made to variables.** Since lists are values, `xs.append(v)` and

@@ -17,7 +17,7 @@ prints
 | `int` | `0`, `42`, `-7` | 64-bit signed; overflow wraps, but dividing `MIN` by `-1` is an error |
 | `float` | `2.5`, `1e16`, `0.1` | IEEE 754 double |
 | `bool` | `true`, `false` | |
-| `str` | `"hello"` | double quotes only, no escape sequences, cannot span lines |
+| `str` | `"hello"`, `"a\tb\n"` | double quotes only, cannot span lines; `\n`, `\"`, and other escapes |
 | `none` | `none` | what a function without `->` returns |
 | `list[T]` | `[1, 2, 3]` | see {doc}`lists` |
 
@@ -42,6 +42,23 @@ always an `int`, even for a float base, so `2.0 ** -1` is `0.5` but `2.0 ** 0.5`
 An int raised to a negative exponent has no int result, so `2 ** -1` stops the program with
 `negative exponent`. As in Python, `**` groups right to left and binds tighter than a minus sign
 before it, so `2 ** 3 ** 2` is `512` and `-2 ** 2` is `-4`.
+
+## Strings
+
+Strings index and slice like lists, compare in dictionary order with `<` and `>`, can be
+walked one character at a time with `for`, and have methods such as `split`, `join`, `find`,
+`startswith`, and `endswith`:
+
+```stone
+line = "name=stone"
+at = line.find("=")
+print(line[:at], line[at + 1:], line[0], line[-1])   // name stone n e
+print("apple" < "banana", line.startswith("name"))   // true true
+print("-".join(line.split("=")))                     // name-stone
+```
+
+Indexes count bytes, so a character outside ASCII, such as `é`, takes more than one. See
+{doc}`../reference/types` for the details.
 
 ## Printing
 

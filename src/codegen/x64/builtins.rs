@@ -221,10 +221,13 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
 }
 
 /// Emits the memory runtime. Every string and list `p` is counted: `[p - 8]` holds how many
-/// variables, list slots, and temporaries refer to it, and it is freed when that reaches 0.
-/// `stone.live` counts the objects allocated and not yet freed.
+/// variables, list slots, and temporaries refer to it, and it is freed when that reaches 0. A
+/// string also holds its length in bytes at `[p - 16]`, so measuring it takes no scan, and its
+/// bytes end with a terminator. `stone.live` counts the objects allocated and not yet freed.
 ///
 /// - `stone.alloc` returns a new object with room for `rdi` bytes and a count of 1
+/// - `stone.str_new` returns a new string of length `rdi` with a count of 1 and its terminator
+///   written, whose bytes the caller fills in
 /// - `stone.free_str` frees the string in `rax`, whose count just reached 0
 /// - `stone.free_list` frees the list in `rax`, whose count just reached 0, along with its
 ///   elements' storage, first releasing each element if its `elem` field says they are counted
@@ -256,9 +259,21 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tadd\trax, 8");
     r#gen.emit("\tret");
 
-    // the count is where the allocation starts
+    // the length, then the count, then the bytes and a terminator
+    r#gen.emit("stone.str_new:");
+    r#gen.emit("\tadd\trdi, 17");
+    r#gen.emit("\tcall\tstone.mem_alloc"); // which leaves rdi alone
+    r#gen.emit("\tsub\trdi, 17");
+    r#gen.emit("\tmov\tQWORD PTR [rax], rdi");
+    r#gen.emit("\tmov\tQWORD PTR [rax + 8], 1");
+    r#gen.emit("\tinc\tQWORD PTR [rip + stone.live]");
+    r#gen.emit("\tadd\trax, 16");
+    r#gen.emit("\tmov\tbyte ptr [rax + rdi], 0");
+    r#gen.emit("\tret");
+
+    // the length is where the allocation starts
     r#gen.emit("stone.free_str:");
-    r#gen.emit("\tsub\trax, 8");
+    r#gen.emit("\tsub\trax, 16");
     r#gen.emit("\tcall\tstone.mem_free");
     r#gen.emit("\tdec\tQWORD PTR [rip + stone.live]");
     r#gen.emit("\tret");
@@ -386,8 +401,8 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.print_bool` writes `true` if `rdi` is nonzero and `false` otherwise
 /// - `stone.print_none` writes `none`
 /// - `stone.print_char` writes the byte in `dil`
-/// - `stone.print_str_quoted` writes the string `rdi` points to in single quotes, as a
-///   printed list shows its strings
+/// - `stone.print_str_quoted` writes the string `rdi` points to as a printed list shows its
+///   strings, quoted and escaped like Python's `repr`
 ///
 /// They write with the `write` syscall and clobber `rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8`, and
 /// `r11`.
@@ -479,14 +494,123 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tleave");
     r#gen.emit("\tret");
 
-    // strings inside a printed list are quoted, like ['a']
+    print_str_quoted(r#gen);
+}
+
+/// Emits `stone.print_str_quoted`, which prints a string inside a list the way
+/// `stdlib::repr_in_list` writes it: in single quotes, or double quotes if it holds a `'` but no
+/// `"`, with backslashes, the quote, and control characters escaped. Each run of bytes that needs
+/// no escape is one `write`.
+fn print_str_quoted(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds where the run starts, r12 the quote, and r13 where the run ends, then the byte
+    // that ended it
     r#gen.emit("stone.print_str_quoted:");
-    r#gen.emit("\tpush\trdi");
-    r#gen.emit("\tmov\trdi, 39"); // '\''
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
+    r#gen.emit("\tmov\trbx, rdi");
+    // ecx is set by a ' and edx by a "
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit("\txor\tedx, edx");
+    r#gen.emit(".Lprint_quoted_scan:");
+    r#gen.emit("\tmovzx\teax, byte ptr [rdi]");
+    r#gen.emit("\ttest\teax, eax");
+    r#gen.emit("\tjz\t.Lprint_quoted_choose");
+    r#gen.emit("\tinc\trdi");
+    r#gen.emit("\tcmp\teax, 39"); // '\''
+    r#gen.emit("\tjne\t.Lprint_quoted_double");
+    r#gen.emit("\tmov\tecx, 1");
+    r#gen.emit("\tjmp\t.Lprint_quoted_scan");
+    r#gen.emit(".Lprint_quoted_double:");
+    r#gen.emit("\tcmp\teax, 34"); // '"'
+    r#gen.emit("\tjne\t.Lprint_quoted_scan");
+    r#gen.emit("\tmov\tedx, 1");
+    r#gen.emit("\tjmp\t.Lprint_quoted_scan");
+    r#gen.emit(".Lprint_quoted_choose:");
+    r#gen.emit("\tmov\tr12d, 39");
+    r#gen.emit("\ttest\tecx, ecx");
+    r#gen.emit("\tjz\t.Lprint_quoted_open");
+    r#gen.emit("\ttest\tedx, edx");
+    r#gen.emit("\tjnz\t.Lprint_quoted_open");
+    r#gen.emit("\tmov\tr12d, 34");
+    r#gen.emit(".Lprint_quoted_open:");
+    r#gen.emit("\tmov\tedi, r12d");
     r#gen.emit("\tcall\tstone.print_char");
-    r#gen.emit("\tpop\trdi");
-    r#gen.emit("\tcall\tstone.print_str");
-    r#gen.emit("\tmov\trdi, 39");
+    // a run ends at the terminator or a byte that needs an escape
+    r#gen.emit(".Lprint_quoted_run:");
+    r#gen.emit("\tmov\tr13, rbx");
+    r#gen.emit(".Lprint_quoted_plain:");
+    r#gen.emit("\tmovzx\teax, byte ptr [r13]");
+    r#gen.emit("\tcmp\teax, 92"); // '\\'
+    r#gen.emit("\tje\t.Lprint_quoted_flush");
+    r#gen.emit("\tcmp\teax, r12d");
+    r#gen.emit("\tje\t.Lprint_quoted_flush");
+    r#gen.emit("\tcmp\teax, 32");
+    r#gen.emit("\tjb\t.Lprint_quoted_flush"); // a control character or the terminator
+    r#gen.emit("\tcmp\teax, 127");
+    r#gen.emit("\tje\t.Lprint_quoted_flush");
+    r#gen.emit("\tinc\tr13");
+    r#gen.emit("\tjmp\t.Lprint_quoted_plain");
+    r#gen.emit(".Lprint_quoted_flush:");
+    r#gen.emit("\tmov\trdx, r13");
+    r#gen.emit("\tsub\trdx, rbx");
+    r#gen.emit("\tjz\t.Lprint_quoted_special");
+    r#gen.emit("\tmov\trsi, rbx");
+    r#gen.emit("\tmov\teax, 1"); // sys_write
+    r#gen.emit("\tmov\tedi, 1"); // stdout
+    r#gen.emit("\tsyscall");
+    r#gen.emit(".Lprint_quoted_special:");
+    r#gen.emit("\tmovzx\teax, byte ptr [r13]");
+    r#gen.emit("\ttest\teax, eax");
+    r#gen.emit("\tjz\t.Lprint_quoted_close");
+    r#gen.emit("\tlea\trbx, [r13 + 1]");
+    r#gen.emit("\tmov\tr13d, eax");
+    r#gen.emit("\tmov\tedi, 92");
+    r#gen.emit("\tcall\tstone.print_char");
+    // what follows the backslash: n, t, r, the byte itself, or x and two hex digits
+    r#gen.emit("\tmov\tedi, 110"); // 'n'
+    r#gen.emit("\tcmp\tr13d, 10");
+    r#gen.emit("\tje\t.Lprint_quoted_code");
+    r#gen.emit("\tmov\tedi, 116"); // 't'
+    r#gen.emit("\tcmp\tr13d, 9");
+    r#gen.emit("\tje\t.Lprint_quoted_code");
+    r#gen.emit("\tmov\tedi, 114"); // 'r'
+    r#gen.emit("\tcmp\tr13d, 13");
+    r#gen.emit("\tje\t.Lprint_quoted_code");
+    r#gen.emit("\tmov\tedi, r13d");
+    r#gen.emit("\tcmp\tr13d, 92");
+    r#gen.emit("\tje\t.Lprint_quoted_code");
+    r#gen.emit("\tcmp\tr13d, r12d");
+    r#gen.emit("\tje\t.Lprint_quoted_code");
+    r#gen.emit("\tmov\tedi, 120"); // 'x'
+    r#gen.emit("\tcall\tstone.print_char");
+    r#gen.emit("\tmov\tedi, r13d");
+    r#gen.emit("\tshr\tedi, 4");
+    r#gen.emit("\tcall\t.Lprint_quoted_hex");
+    r#gen.emit("\tmov\tedi, r13d");
+    r#gen.emit("\tand\tedi, 15");
+    r#gen.emit("\tcall\t.Lprint_quoted_hex");
+    r#gen.emit("\tjmp\t.Lprint_quoted_run");
+    r#gen.emit(".Lprint_quoted_code:");
+    r#gen.emit("\tcall\tstone.print_char");
+    r#gen.emit("\tjmp\t.Lprint_quoted_run");
+    r#gen.emit(".Lprint_quoted_close:");
+    r#gen.emit("\tmov\tedi, r12d");
+    r#gen.emit("\tcall\tstone.print_char");
+    r#gen.emit("\tpop\tr13");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+    // prints the hex digit in edi, from 0 to 15, in lowercase
+    r#gen.emit(".Lprint_quoted_hex:");
+    r#gen.emit("\tlea\teax, [rdi + 48]"); // '0'
+    r#gen.emit("\tlea\tecx, [rdi + 87]"); // 'a' - 10
+    r#gen.emit("\tcmp\tedi, 10");
+    r#gen.emit("\tcmovae\teax, ecx");
+    r#gen.emit("\tmov\tedi, eax");
     r#gen.emit("\tjmp\tstone.print_char");
 }
 
@@ -500,37 +624,52 @@ pub fn str_float_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tpush\trbx");
     r#gen.emit("\tand\trsp, -16");
     r#gen.emit("\tmov\trbx, rdi");
-    r#gen.emit("\tmov\tedi, 64");
-    r#gen.emit("\tcall\tstone.alloc");
+    r#gen.emit("\tmov\tedi, 63"); // more than any float's text
+    r#gen.emit("\tcall\tstone.str_new");
     r#gen.emit("\tmov\trdi, rbx");
     r#gen.emit("\tmov\trsi, rax");
     r#gen.emit("\tmov\trbx, rax");
     r#gen.emit("\tcall\tstone.format_float");
+    // the text is shorter than the room it was given
+    r#gen.emit("\tmov\trdi, rbx");
+    r#gen.emit("\tcall\tstone.cstr_len");
+    r#gen.emit("\tmov\tQWORD PTR [rbx - 16], rax");
     r#gen.emit("\tmov\trax, rbx");
     r#gen.emit("\tmov\trbx, QWORD PTR [rbp - 8]");
     r#gen.emit("\tleave");
     r#gen.emit("\tret");
 }
 
-/// Emits the string runtime. Strings are null-terminated and counted (see [`memory_runtime`]), and
-/// `+` makes a new one with `stone.alloc`.
+/// Emits the string runtime. Strings are null-terminated, counted, and carry their length (see
+/// [`memory_runtime`]), and `+` makes a new one with `stone.str_new`.
 ///
-/// - `stone.str_len` returns the length in bytes of the string in `rdi`
+/// - `stone.str_len` returns the length in bytes of the string in `rdi`, from its header, and
+///   changes only `rax`
+/// - `stone.cstr_len` returns the length of the null-terminated bytes at `rdi`, such as a
+///   program argument or a pointer into a string, by scanning them, and changes only `rax`
 /// - `stone.str_eq` returns 1 if the strings in `rdi` and `rsi` hold the same bytes, else 0
 /// - `stone.str_concat` returns a new string holding `rdi` followed by `rsi`
 /// - `stone.str_slice` returns a new string holding the `rsi` bytes at `rdi`
 pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("stone.str_len:");
-    r#gen.emit("\txor\trax, rax");
-    r#gen.emit(".Lstr_len_loop:");
+    r#gen.emit("\tmov\trax, QWORD PTR [rdi - 16]");
+    r#gen.emit("\tret");
+
+    r#gen.emit("stone.cstr_len:");
+    r#gen.emit("\txor\teax, eax");
+    r#gen.emit(".Lcstr_len_loop:");
     r#gen.emit("\tcmp\tbyte ptr [rdi + rax], 0");
-    r#gen.emit("\tje\t.Lstr_len_done");
+    r#gen.emit("\tje\t.Lcstr_len_done");
     r#gen.emit("\tinc\trax");
-    r#gen.emit("\tjmp\t.Lstr_len_loop");
-    r#gen.emit(".Lstr_len_done:");
+    r#gen.emit("\tjmp\t.Lcstr_len_loop");
+    r#gen.emit(".Lcstr_len_done:");
     r#gen.emit("\tret");
 
     r#gen.emit("stone.str_eq:");
+    // strings of different lengths differ without a look at their bytes
+    r#gen.emit("\tmov\trax, QWORD PTR [rdi - 16]");
+    r#gen.emit("\tcmp\trax, QWORD PTR [rsi - 16]");
+    r#gen.emit("\tjne\t.Lstr_eq_differ");
     r#gen.emit(".Lstr_eq_loop:");
     r#gen.emit("\tmov\tal, byte ptr [rdi]");
     r#gen.emit("\tcmp\tal, byte ptr [rsi]");
@@ -563,8 +702,8 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trdi, r13");
     r#gen.emit("\tcall\tstone.str_len");
     r#gen.emit("\tmov\tr15, rax");
-    r#gen.emit("\tlea\trdi, [r14 + r15 + 1]"); // room for the terminator
-    r#gen.emit("\tcall\tstone.alloc");
+    r#gen.emit("\tlea\trdi, [r14 + r15]");
+    r#gen.emit("\tcall\tstone.str_new");
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, r12");
     r#gen.emit("\tmov\trcx, r14");
@@ -579,7 +718,7 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbp");
     r#gen.emit("\tret");
-    // rbx and r12 hold the bytes and their count across stone.alloc
+    // rbx and r12 hold the bytes and their count across stone.str_new
     r#gen.emit("stone.str_slice:");
     r#gen.emit("\tpush\trbp");
     r#gen.emit("\tmov\trbp, rsp");
@@ -588,8 +727,8 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tand\trsp, -16");
     r#gen.emit("\tmov\trbx, rdi");
     r#gen.emit("\tmov\tr12, rsi");
-    r#gen.emit("\tlea\trdi, [rsi + 1]"); // room for the terminator
-    r#gen.emit("\tcall\tstone.alloc");
+    r#gen.emit("\tmov\trdi, rsi");
+    r#gen.emit("\tcall\tstone.str_new");
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit("\tmov\trcx, r12");
@@ -906,58 +1045,7 @@ fn list_slice(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tand\trsp, -16");
     r#gen.emit("\tmov\trbx, rdi");
     r#gen.emit("\tmov\tr9, QWORD PTR [rbx]");
-    r#gen.emit("\ttest\tr8, 4");
-    r#gen.emit("\tjz\t.Llist_slice_step");
-    r#gen.emit("\tmov\trcx, 1");
-    r#gen.emit(".Llist_slice_step:");
-    // a step of MIN, the only one that doubles to 0, acts like -MAX
-    r#gen.emit("\tlea\trax, [rcx + rcx]");
-    r#gen.emit("\ttest\trax, rax");
-    r#gen.emit("\tjnz\t.Llist_slice_bounds");
-    r#gen.emit("\tinc\trcx");
-    r#gen.emit(".Llist_slice_bounds:");
-    r#gen.emit("\tmov\tr13, rcx");
-    // r10 is -1 for a negative step and 0 otherwise
-    r#gen.emit("\tmov\tr10, rcx");
-    r#gen.emit("\tsar\tr10, 63");
-    // a missing start is len - 1 going backward and 0 going forward
-    r#gen.emit("\tmov\trax, rsi");
-    r#gen.emit("\ttest\tr8, 1");
-    r#gen.emit("\tjz\t.Llist_slice_start");
-    r#gen.emit("\tlea\trax, [r9 - 1]");
-    r#gen.emit("\tand\trax, r10");
-    r#gen.emit("\tjmp\t.Llist_slice_start_done");
-    r#gen.emit(".Llist_slice_start:");
-    clamp_slice_bound(r#gen, "start");
-    r#gen.emit("\tmov\tr12, rax");
-    // a missing stop is -1 going backward and len going forward
-    r#gen.emit("\tmov\trax, rdx");
-    r#gen.emit("\ttest\tr8, 2");
-    r#gen.emit("\tjz\t.Llist_slice_stop");
-    r#gen.emit("\tmov\trax, r10");
-    r#gen.emit("\tnot\trax");
-    r#gen.emit("\tand\trax, r9");
-    r#gen.emit("\tadd\trax, r10");
-    r#gen.emit("\tjmp\t.Llist_slice_stop_done");
-    r#gen.emit(".Llist_slice_stop:");
-    clamp_slice_bound(r#gen, "stop");
-    // the distance to cover, start - stop going backward and stop - start going forward
-    r#gen.emit("\tsub\trax, r12");
-    r#gen.emit("\tmov\trcx, r13");
-    r#gen.emit("\ttest\tr10, r10");
-    r#gen.emit("\tjz\t.Llist_slice_count");
-    r#gen.emit("\tneg\trax");
-    r#gen.emit("\tneg\trcx");
-    r#gen.emit(".Llist_slice_count:");
-    // count = (distance - 1) / |step| + 1 for a positive distance, else 0
-    r#gen.emit("\txor\tr14d, r14d");
-    r#gen.emit("\ttest\trax, rax");
-    r#gen.emit("\tjle\t.Llist_slice_new");
-    r#gen.emit("\tdec\trax");
-    r#gen.emit("\txor\tedx, edx");
-    r#gen.emit("\tdiv\trcx");
-    r#gen.emit("\tlea\tr14, [rax + 1]");
-    r#gen.emit(".Llist_slice_new:");
+    slice_bounds(r#gen, "list_slice");
     r#gen.emit("\tmov\trdi, r14");
     r#gen.emit("\tmov\trsi, QWORD PTR [rbx + 24]");
     r#gen.emit("\tcall\tstone.list_new");
@@ -988,24 +1076,85 @@ fn list_slice(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tret");
 }
 
-/// Emits the steps of `stone.list_slice` that clamp the bound in `rax` to the list, given its
-/// length in `r9` and, in `r10`, -1 for a negative step or 0 otherwise, as
-/// `stdlib::slice_indices` does: a negative bound counts from the end, and a bound still before
-/// the start becomes -1 going backward or 0 going forward, while one at or past the end becomes
-/// len - 1 going backward or len going forward. `name` keeps the labels apart.
-fn clamp_slice_bound(r#gen: &mut dyn AssemblyGenerator, name: &str) {
+/// Emits the steps of a slice routine that pick what the slice from `rsi` to `rdx` by `rcx`
+/// takes from a list or string of length `r9`, as `stdlib::slice_indices` does, leaving the first
+/// index in `r12`, the step in `r13`, and the count in `r14`. Bit 0 of `r8` says `rsi` is
+/// missing, bit 1 `rdx`, and bit 2 `rcx`, and the step is never 0. It clobbers `rax`, `rcx`,
+/// `rdx`, and `r10`, and `routine` keeps the labels of each routine apart.
+fn slice_bounds(r#gen: &mut dyn AssemblyGenerator, routine: &str) {
+    let label = |name: &str| format!(".L{routine}_{name}");
+    r#gen.emit("\ttest\tr8, 4");
+    r#gen.emit(&format!("\tjz\t{}", label("step")));
+    r#gen.emit("\tmov\trcx, 1");
+    r#gen.emit(&format!("{}:", label("step")));
+    // a step of MIN, the only one that doubles to 0, acts like -MAX
+    r#gen.emit("\tlea\trax, [rcx + rcx]");
     r#gen.emit("\ttest\trax, rax");
-    r#gen.emit(&format!("\tjns\t.Llist_slice_{name}_high"));
+    r#gen.emit(&format!("\tjnz\t{}", label("bounds")));
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit(&format!("{}:", label("bounds")));
+    r#gen.emit("\tmov\tr13, rcx");
+    // r10 is -1 for a negative step and 0 otherwise
+    r#gen.emit("\tmov\tr10, rcx");
+    r#gen.emit("\tsar\tr10, 63");
+    // a missing start is len - 1 going backward and 0 going forward
+    r#gen.emit("\tmov\trax, rsi");
+    r#gen.emit("\ttest\tr8, 1");
+    r#gen.emit(&format!("\tjz\t{}", label("start")));
+    r#gen.emit("\tlea\trax, [r9 - 1]");
+    r#gen.emit("\tand\trax, r10");
+    r#gen.emit(&format!("\tjmp\t{}", label("start_done")));
+    r#gen.emit(&format!("{}:", label("start")));
+    clamp_slice_bound(r#gen, &label("start"));
+    r#gen.emit("\tmov\tr12, rax");
+    // a missing stop is -1 going backward and len going forward
+    r#gen.emit("\tmov\trax, rdx");
+    r#gen.emit("\ttest\tr8, 2");
+    r#gen.emit(&format!("\tjz\t{}", label("stop")));
+    r#gen.emit("\tmov\trax, r10");
+    r#gen.emit("\tnot\trax");
+    r#gen.emit("\tand\trax, r9");
+    r#gen.emit("\tadd\trax, r10");
+    r#gen.emit(&format!("\tjmp\t{}", label("stop_done")));
+    r#gen.emit(&format!("{}:", label("stop")));
+    clamp_slice_bound(r#gen, &label("stop"));
+    // the distance to cover, start - stop going backward and stop - start going forward
+    r#gen.emit("\tsub\trax, r12");
+    r#gen.emit("\tmov\trcx, r13");
+    r#gen.emit("\ttest\tr10, r10");
+    r#gen.emit(&format!("\tjz\t{}", label("count")));
+    r#gen.emit("\tneg\trax");
+    r#gen.emit("\tneg\trcx");
+    r#gen.emit(&format!("{}:", label("count")));
+    // count = (distance - 1) / |step| + 1 for a positive distance, else 0
+    r#gen.emit("\txor\tr14d, r14d");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjle\t{}", label("counted")));
+    r#gen.emit("\tdec\trax");
+    r#gen.emit("\txor\tedx, edx");
+    r#gen.emit("\tdiv\trcx");
+    r#gen.emit("\tlea\tr14, [rax + 1]");
+    r#gen.emit(&format!("{}:", label("counted")));
+}
+
+/// Emits the steps of [`slice_bounds`] that clamp the bound in `rax` to a list or string of
+/// length `r9`, given, in `r10`, -1 for a negative step or 0 otherwise: a negative bound counts
+/// from the end, and a bound still before the start becomes -1 going backward or 0 going
+/// forward, while one at or past the end becomes len - 1 going backward or len going forward.
+/// The labels start with `prefix`, and the steps end at `<prefix>_done`.
+fn clamp_slice_bound(r#gen: &mut dyn AssemblyGenerator, prefix: &str) {
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjns\t{prefix}_high"));
     // len is at most 2^60, so adding it cannot overflow
     r#gen.emit("\tadd\trax, r9");
-    r#gen.emit(&format!("\tjns\t.Llist_slice_{name}_done"));
+    r#gen.emit(&format!("\tjns\t{prefix}_done"));
     r#gen.emit("\tmov\trax, r10");
-    r#gen.emit(&format!("\tjmp\t.Llist_slice_{name}_done"));
-    r#gen.emit(&format!(".Llist_slice_{name}_high:"));
+    r#gen.emit(&format!("\tjmp\t{prefix}_done"));
+    r#gen.emit(&format!("{prefix}_high:"));
     r#gen.emit("\tcmp\trax, r9");
-    r#gen.emit(&format!("\tjl\t.Llist_slice_{name}_done"));
+    r#gen.emit(&format!("\tjl\t{prefix}_done"));
     r#gen.emit("\tlea\trax, [r9 + r10]");
-    r#gen.emit(&format!(".Llist_slice_{name}_done:"));
+    r#gen.emit(&format!("{prefix}_done:"));
 }
 
 /// Emits `label`, a routine that prints the list in `rdi` as `[a, b]`, calling `element` for each
@@ -1264,7 +1413,7 @@ pub fn args_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tdec\tr12");
     r#gen.emit("\tpush\trdi");
     r#gen.emit("\tsub\trsp, 8");
-    r#gen.emit("\tcall\tstone.str_len");
+    r#gen.emit("\tcall\tstone.cstr_len");
     r#gen.emit("\tmov\trsi, rax");
     r#gen.emit("\tadd\trsp, 8");
     r#gen.emit("\tpop\trdi");
@@ -1291,15 +1440,23 @@ pub fn args_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.fail_quoted` stops the program with the message `rdi` followed by the string `rsi`
 ///   and a closing quote
 pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
+    // the pieces of a message are joined with stone.str_concat, so they are strings
+    r#gen.emit("\t.data");
+    for (label, text) in [
+        (
+            ".Lstone_int_invalid",
+            "invalid literal for int() with base 10: '",
+        ),
+        (".Lstone_int_range", "int() argument out of range: '"),
+        (
+            ".Lstone_float_invalid",
+            "could not convert string to float: '",
+        ),
+        (".Lstone_quote", "'"),
+    ] {
+        immortal_string(r#gen, label, text);
+    }
     r#gen.emit("\t.section\t.rodata");
-    r#gen.emit(".Lstone_int_invalid:");
-    r#gen.emit("\t.string \"invalid literal for int() with base 10: '\"");
-    r#gen.emit(".Lstone_int_range:");
-    r#gen.emit("\t.string \"int() argument out of range: '\"");
-    r#gen.emit(".Lstone_float_invalid:");
-    r#gen.emit("\t.string \"could not convert string to float: '\"");
-    r#gen.emit(".Lstone_quote:");
-    r#gen.emit("\t.string \"'\"");
     r#gen.emit(".Lstone_infinity:");
     r#gen.emit("\t.string \"infinity\"");
     r#gen.emit(".Lstone_parse_inf:");
@@ -1502,7 +1659,7 @@ pub fn conversion_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\t.text");
 
     // digits are written backwards from the terminator at [rbp - 17], and rbx and r12 hold the
-    // text and its size across stone.alloc
+    // text and its size across stone.str_new
     r#gen.emit("stone.str_int:");
     r#gen.emit("\tpush\trbp");
     r#gen.emit("\tmov\trbp, rsp");
@@ -1537,8 +1694,8 @@ pub fn conversion_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trbx, rsi");
     r#gen.emit("\tlea\tr12, [rbp - 16]");
     r#gen.emit("\tsub\tr12, rbx"); // the size, counting the terminator
-    r#gen.emit("\tmov\trdi, r12");
-    r#gen.emit("\tcall\tstone.alloc");
+    r#gen.emit("\tlea\trdi, [r12 - 1]");
+    r#gen.emit("\tcall\tstone.str_new");
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit("\tmov\trcx, r12");
@@ -1557,15 +1714,37 @@ pub fn conversion_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tret");
 }
 
-/// Emits the `strip` and `split` methods, which follow `stdlib::strip`, `stdlib::split_whitespace`,
-/// and `stdlib::split`, each emitted only if named in `used`. They need the string runtime, the
-/// `split` routines need the list runtime too, and `stone.str_split` jumps to `empty_separator`, a
-/// failure label, when given an empty separator.
+/// Emits the string methods and the routines behind indexing, slicing, and ordering strings,
+/// each emitted only if named in `used`. `strip` and `split` follow `stdlib::strip`,
+/// `stdlib::split_whitespace`, and `stdlib::split`, and indexes and slices follow
+/// `stdlib::str_at` and `stdlib::str_slice`. They need the string runtime, and the `split`
+/// routines need the list runtime too. `stone.str_split` jumps to `empty_separator`, a failure
+/// label, when given an empty separator, and `stone.str_at` and `stone.str_slice_of` jump to
+/// `cut_character` when the result would hold part of a character.
 ///
 /// - `stone.str_strip` returns the string in `rdi` without whitespace at either end
 /// - `stone.str_split_ws` returns a list of the pieces of `rdi` between runs of whitespace
 /// - `stone.str_split` returns a list of the pieces of `rdi` between each `rsi`
-pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, used: &[&str], empty_separator: &str) {
+/// - `stone.str_at` returns the byte at position `rsi` of the string in `rdi` as a string of one
+///   byte, from a table of immortal ones, so it allocates nothing. The caller checks that `rsi`
+///   is in range.
+/// - `stone.str_slice_of` returns a new string of the bytes of `rdi` that the slice from `rsi` to
+///   `rdx` by `rcx` picks, with the missing bounds in `r8` as `stone.list_slice` takes them
+/// - `stone.str_cmp` returns -1, 0, or 1 as the string in `rdi` orders before, the same as, or
+///   after the one in `rsi`, comparing bytes as unsigned numbers
+/// - `stone.str_join` returns a new string of the strings in list `rsi` with `rdi` between each
+///   pair
+/// - `stone.str_position` returns the byte index where `rsi` first appears in `rdi`, or -1
+/// - `stone.str_starts` returns 1 if the string in `rdi` begins with the one in `rsi`, else 0
+/// - `stone.str_ends` returns 1 if the string in `rdi` ends with the one in `rsi`, else 0
+/// - `stone.str_char` returns the character that starts at byte `rsi` of the string in `rdi`, a
+///   string of its 1 to 4 bytes, for a `for` loop over a string
+pub fn string_methods(
+    r#gen: &mut dyn AssemblyGenerator,
+    used: &[&str],
+    empty_separator: &str,
+    cut_character: &str,
+) {
     let uses = |label: &str| used.contains(&label);
     if uses("stone.str_strip") {
         // rbx holds the start and r12 the end
@@ -1576,14 +1755,13 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, used: &[&str], empty_se
         r#gen.emit("\tpush\tr12");
         r#gen.emit("\tand\trsp, -16");
         r#gen.emit("\tmov\trbx, rdi");
+        r#gen.emit("\tcall\tstone.str_len");
+        r#gen.emit("\tlea\tr12, [rbx + rax]");
         r#gen.emit(".Lstr_strip_lead:");
         r#gen.emit("\tmovzx\tecx, byte ptr [rbx]");
         r#gen.emit("\tinc\trbx");
         jump_if_space(r#gen, "ecx", ".Lstr_strip_lead");
         r#gen.emit("\tdec\trbx");
-        r#gen.emit("\tmov\trdi, rbx");
-        r#gen.emit("\tcall\tstone.str_len");
-        r#gen.emit("\tlea\tr12, [rbx + rax]");
         r#gen.emit(".Lstr_strip_trail:");
         r#gen.emit("\tcmp\tr12, rbx");
         r#gen.emit("\tje\t.Lstr_strip_copy");
@@ -1649,9 +1827,7 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, used: &[&str], empty_se
         r#gen.emit("\tpop\trbp");
         r#gen.emit("\tret");
     }
-    if uses("stone.str_split") {
-        // rbx holds where the piece starts, r12 the list, r13 the separator, r14 its length, and r15
-        // where it was found
+    if uses("stone.str_split") || uses("stone.str_position") {
         // returns where the string in rsi first appears in the one in rdi, or 0, like strstr
         r#gen.emit("stone.str_find:");
         r#gen.emit("\txor\tecx, ecx");
@@ -1674,7 +1850,10 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, used: &[&str], empty_se
         r#gen.emit(".Lstr_find_none:");
         r#gen.emit("\txor\teax, eax");
         r#gen.emit("\tret");
-
+    }
+    if uses("stone.str_split") {
+        // rbx holds where the piece starts, r12 the list, r13 the separator, r14 its length, and r15
+        // where it was found
         r#gen.emit("stone.str_split:");
         r#gen.emit("\tcmp\tbyte ptr [rsi], 0");
         r#gen.emit(&format!("\tje\t{empty_separator}"));
@@ -1714,7 +1893,7 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, used: &[&str], empty_se
         // whatever follows the last separator is a piece too, even if empty
         r#gen.emit(".Lstr_split_last:");
         r#gen.emit("\tmov\trdi, rbx");
-        r#gen.emit("\tcall\tstone.str_len");
+        r#gen.emit("\tcall\tstone.cstr_len"); // rbx points inside the string
         r#gen.emit("\tmov\trdi, rbx");
         r#gen.emit("\tmov\trsi, rax");
         r#gen.emit("\tcall\tstone.str_slice");
@@ -1731,6 +1910,278 @@ pub fn string_methods(r#gen: &mut dyn AssemblyGenerator, used: &[&str], empty_se
         r#gen.emit("\tpop\trbp");
         r#gen.emit("\tret");
     }
+    if uses("stone.str_at") || uses("stone.str_char") {
+        byte_strings(r#gen);
+    }
+    if uses("stone.str_at") {
+        r#gen.emit("stone.str_at:");
+        r#gen.emit("\tmovzx\teax, byte ptr [rdi + rsi]");
+        r#gen.emit("\ttest\tal, al");
+        r#gen.emit(&format!("\tjs\t{cut_character}")); // past ascii, so part of a character
+        byte_string(r#gen);
+    }
+    if uses("stone.str_char") {
+        r#gen.emit("stone.str_char:");
+        r#gen.emit("\tmovzx\teax, byte ptr [rdi + rsi]");
+        r#gen.emit("\ttest\tal, al");
+        r#gen.emit("\tjs\t.Lstr_char_long");
+        byte_string(r#gen);
+        // a lead byte 110xxxxx starts 2 bytes, 1110xxxx 3, and 11110xxx 4, and a byte of any other
+        // form is taken alone; rdx is how many bytes are left, which bounds the step
+        r#gen.emit(".Lstr_char_long:");
+        r#gen.emit("\tmov\trdx, QWORD PTR [rdi - 16]");
+        r#gen.emit("\tsub\trdx, rsi");
+        r#gen.emit("\tadd\trdi, rsi");
+        r#gen.emit("\tmov\tesi, 1");
+        for (below, width) in [(192, 2), (224, 3), (240, 4)] {
+            r#gen.emit(&format!("\tcmp\teax, {below}"));
+            r#gen.emit("\tjb\t.Lstr_char_copy");
+            r#gen.emit(&format!("\tmov\tesi, {width}"));
+        }
+        r#gen.emit(".Lstr_char_copy:");
+        r#gen.emit("\tcmp\trsi, rdx");
+        r#gen.emit("\tcmova\trsi, rdx");
+        r#gen.emit("\tjmp\tstone.str_slice");
+    }
+    if uses("stone.str_slice_of") {
+        str_slice_of(r#gen, cut_character);
+    }
+    if uses("stone.str_cmp") {
+        r#gen.emit("stone.str_cmp:");
+        r#gen.emit("\tmovzx\teax, byte ptr [rdi]");
+        r#gen.emit("\tmovzx\tecx, byte ptr [rsi]");
+        r#gen.emit("\tcmp\teax, ecx");
+        r#gen.emit("\tjne\t.Lstr_cmp_differ");
+        r#gen.emit("\ttest\teax, eax");
+        r#gen.emit("\tjz\t.Lstr_cmp_done"); // both ended together, so rax is 0
+        r#gen.emit("\tinc\trdi");
+        r#gen.emit("\tinc\trsi");
+        r#gen.emit("\tjmp\tstone.str_cmp");
+        // a string that ends first has the smaller byte, its terminator
+        r#gen.emit(".Lstr_cmp_differ:");
+        r#gen.emit("\tmov\teax, 1");
+        r#gen.emit("\tmov\trcx, -1");
+        r#gen.emit("\tcmovb\trax, rcx");
+        r#gen.emit(".Lstr_cmp_done:");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.str_join") {
+        str_join(r#gen);
+    }
+    if uses("stone.str_position") {
+        // stone.str_find leaves r8 alone, so it keeps the start
+        r#gen.emit("stone.str_position:");
+        r#gen.emit("\tmov\tr8, rdi");
+        r#gen.emit("\tcall\tstone.str_find");
+        r#gen.emit("\ttest\trax, rax");
+        r#gen.emit("\tjz\t.Lstr_position_none");
+        r#gen.emit("\tsub\trax, r8");
+        r#gen.emit("\tret");
+        r#gen.emit(".Lstr_position_none:");
+        r#gen.emit("\tmov\trax, -1");
+        r#gen.emit("\tret");
+    }
+    if uses("stone.str_ends") {
+        // the suffix must start where the string has exactly its length left
+        r#gen.emit("stone.str_ends:");
+        r#gen.emit("\tmov\trax, QWORD PTR [rdi - 16]");
+        r#gen.emit("\tsub\trax, QWORD PTR [rsi - 16]");
+        r#gen.emit("\tjb\t.Lstr_starts_no"); // the suffix is longer
+        r#gen.emit("\tadd\trdi, rax");
+        r#gen.emit("\tjmp\tstone.str_starts");
+    }
+    if uses("stone.str_starts") || uses("stone.str_ends") {
+        r#gen.emit("stone.str_starts:");
+        r#gen.emit("\tmovzx\teax, byte ptr [rsi]");
+        r#gen.emit("\ttest\teax, eax");
+        r#gen.emit("\tjz\t.Lstr_starts_yes");
+        r#gen.emit("\tcmp\tal, byte ptr [rdi]");
+        r#gen.emit("\tjne\t.Lstr_starts_no");
+        r#gen.emit("\tinc\trdi");
+        r#gen.emit("\tinc\trsi");
+        r#gen.emit("\tjmp\tstone.str_starts");
+        r#gen.emit(".Lstr_starts_yes:");
+        r#gen.emit("\tmov\teax, 1");
+        r#gen.emit("\tret");
+        r#gen.emit(".Lstr_starts_no:");
+        r#gen.emit("\txor\teax, eax");
+        r#gen.emit("\tret");
+    }
+}
+
+/// Emits the table of the 128 one-byte strings that `stone.str_at` and `stone.str_char` (see
+/// [`string_methods`]) return for an ASCII byte, so neither allocates for one. Each entry is 32
+/// bytes: a length of 1, an immortal reference count, then the byte and its terminator as one
+/// little-endian quad, and a quad of padding, so entry `b` starts at `32 * b` and its string 16
+/// bytes later. Entry 0 would be a null byte, which neither returns, since no string holds one.
+fn byte_strings(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\t.data");
+    r#gen.emit("\t.balign\t8");
+    r#gen.emit(".Lstone_bytes:");
+    for byte in 0..128 {
+        r#gen.emit("\t.quad\t1");
+        r#gen.emit(&format!("\t.quad\t{IMMORTAL}"));
+        r#gen.emit(&format!("\t.quad\t{byte}"));
+        r#gen.emit("\t.quad\t0");
+    }
+    r#gen.emit("\t.text");
+}
+
+/// Emits the end of a routine that returns the string of the ASCII byte in `eax` from the table
+/// [`byte_strings`] emits.
+fn byte_string(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\tshl\teax, 5");
+    r#gen.emit("\tlea\trcx, [rip + .Lstone_bytes]");
+    r#gen.emit("\tlea\trax, [rcx + rax + 16]");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.str_slice_of` (see [`string_methods`]), which follows `stdlib::str_slice`: a
+/// slice by 1 copies the bytes between its ends once both are between characters, and any other
+/// slice copies the bytes it picks once each is known to be ascii.
+fn str_slice_of(r#gen: &mut dyn AssemblyGenerator, cut_character: &str) {
+    // rbx holds the string, r12 the first index, r13 the step, r14 the count, and r15 the new
+    // string; r9 holds the length while the bounds are clamped
+    r#gen.emit("stone.str_slice_of:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    for reg in ["rbx", "r12", "r13", "r14", "r15"] {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rdi");
+    // stone.str_len only changes rax
+    r#gen.emit("\tcall\tstone.str_len");
+    r#gen.emit("\tmov\tr9, rax");
+    slice_bounds(r#gen, "str_slice_of");
+    r#gen.emit("\ttest\tr14, r14");
+    r#gen.emit("\tjz\t.Lstr_slice_of_copy"); // an empty slice cuts nothing
+    r#gen.emit("\tcmp\tr13, 1");
+    r#gen.emit("\tjne\t.Lstr_slice_of_check");
+    // a byte of the form 10xxxxxx continues a character, so neither end may be one
+    r#gen.emit("\tmovzx\teax, byte ptr [rbx + r12]");
+    r#gen.emit("\tand\teax, 192");
+    r#gen.emit("\tcmp\teax, 128");
+    r#gen.emit(&format!("\tje\t{cut_character}"));
+    r#gen.emit("\tlea\trcx, [r12 + r14]");
+    r#gen.emit("\tmovzx\teax, byte ptr [rbx + rcx]");
+    r#gen.emit("\tand\teax, 192");
+    r#gen.emit("\tcmp\teax, 128");
+    r#gen.emit(&format!("\tje\t{cut_character}"));
+    r#gen.emit("\tlea\trdi, [rbx + r12]");
+    r#gen.emit("\tmov\trsi, r14");
+    r#gen.emit("\tcall\tstone.str_slice");
+    r#gen.emit("\tjmp\t.Lstr_slice_of_done");
+    // any other step needs every byte it picks to be ascii
+    r#gen.emit(".Lstr_slice_of_check:");
+    r#gen.emit("\tmov\trdx, r12");
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit(".Lstr_slice_of_check_loop:");
+    r#gen.emit("\tcmp\trcx, r14");
+    r#gen.emit("\tjge\t.Lstr_slice_of_copy");
+    r#gen.emit("\tmovzx\teax, byte ptr [rbx + rdx]");
+    r#gen.emit("\ttest\tal, al");
+    r#gen.emit(&format!("\tjs\t{cut_character}"));
+    r#gen.emit("\tadd\trdx, r13");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit("\tjmp\t.Lstr_slice_of_check_loop");
+    r#gen.emit(".Lstr_slice_of_copy:");
+    r#gen.emit("\tmov\trdi, r14");
+    r#gen.emit("\tcall\tstone.str_new");
+    r#gen.emit("\tmov\tr15, rax");
+    r#gen.emit("\tmov\trdx, r12");
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit(".Lstr_slice_of_loop:");
+    r#gen.emit("\tcmp\trcx, r14");
+    r#gen.emit("\tjge\t.Lstr_slice_of_end");
+    r#gen.emit("\tmovzx\teax, byte ptr [rbx + rdx]");
+    r#gen.emit("\tmov\tbyte ptr [r15 + rcx], al");
+    r#gen.emit("\tadd\trdx, r13");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit("\tjmp\t.Lstr_slice_of_loop");
+    r#gen.emit(".Lstr_slice_of_end:");
+    r#gen.emit("\tmov\tbyte ptr [r15 + rcx], 0");
+    r#gen.emit("\tmov\trax, r15");
+    r#gen.emit(".Lstr_slice_of_done:");
+    r#gen.emit("\tlea\trsp, [rbp - 40]");
+    for reg in ["r15", "r14", "r13", "r12", "rbx"] {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.str_join` (see [`string_methods`]), which measures every piece, allocates the
+/// result once, and then copies the pieces and separators into it.
+fn str_join(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the separator, r12 the list, r13 the separator's length, r14 the total length and
+    // then the new string, and r15 the index
+    r#gen.emit("stone.str_join:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    for reg in ["rbx", "r12", "r13", "r14", "r15"] {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr12, rsi");
+    r#gen.emit("\tcall\tstone.str_len");
+    r#gen.emit("\tmov\tr13, rax");
+    r#gen.emit("\txor\tr14d, r14d");
+    r#gen.emit("\txor\tr15d, r15d");
+    // each piece and a separator after it
+    r#gen.emit(".Lstr_join_measure:");
+    r#gen.emit("\tcmp\tr15, QWORD PTR [r12]");
+    r#gen.emit("\tjge\t.Lstr_join_measured");
+    r#gen.emit("\tmov\trax, QWORD PTR [r12 + 16]");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rax + r15 * 8]");
+    r#gen.emit("\tcall\tstone.str_len");
+    r#gen.emit("\tlea\tr14, [r14 + r13]");
+    r#gen.emit("\tadd\tr14, rax");
+    r#gen.emit("\tinc\tr15");
+    r#gen.emit("\tjmp\t.Lstr_join_measure");
+    // less the separator after the last piece, if there is one
+    r#gen.emit(".Lstr_join_measured:");
+    r#gen.emit("\ttest\tr15, r15");
+    r#gen.emit("\tjz\t.Lstr_join_alloc");
+    r#gen.emit("\tsub\tr14, r13");
+    r#gen.emit(".Lstr_join_alloc:");
+    r#gen.emit("\tmov\trdi, r14");
+    r#gen.emit("\tcall\tstone.str_new");
+    r#gen.emit("\tmov\tr14, rax");
+    r#gen.emit("\tmov\trdi, rax"); // where the next byte goes
+    r#gen.emit("\txor\tr15d, r15d");
+    r#gen.emit(".Lstr_join_piece:");
+    r#gen.emit("\tcmp\tr15, QWORD PTR [r12]");
+    r#gen.emit("\tjge\t.Lstr_join_done");
+    r#gen.emit("\ttest\tr15, r15");
+    r#gen.emit("\tjz\t.Lstr_join_item");
+    r#gen.emit("\tmov\trsi, rbx");
+    r#gen.emit("\tmov\trcx, r13");
+    r#gen.emit("\trep\tmovsb");
+    r#gen.emit(".Lstr_join_item:");
+    r#gen.emit("\tmov\trax, QWORD PTR [r12 + 16]");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rax + r15 * 8]");
+    r#gen.emit(".Lstr_join_byte:");
+    r#gen.emit("\tmovzx\teax, byte ptr [rsi]");
+    r#gen.emit("\ttest\teax, eax");
+    r#gen.emit("\tjz\t.Lstr_join_next");
+    r#gen.emit("\tmov\tbyte ptr [rdi], al");
+    r#gen.emit("\tinc\trsi");
+    r#gen.emit("\tinc\trdi");
+    r#gen.emit("\tjmp\t.Lstr_join_byte");
+    r#gen.emit(".Lstr_join_next:");
+    r#gen.emit("\tinc\tr15");
+    r#gen.emit("\tjmp\t.Lstr_join_piece");
+    r#gen.emit(".Lstr_join_done:");
+    r#gen.emit("\tmov\tbyte ptr [rdi], 0");
+    r#gen.emit("\tmov\trax, r14");
+    r#gen.emit("\tlea\trsp, [rbp - 40]");
+    for reg in ["r15", "r14", "r13", "r12", "rbx"] {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
 }
 
 /// Emits the routines behind the `os` module that the program calls, each named in `used`, such
@@ -1794,12 +2245,12 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("\tret");
     }
     if uses("stone.os_env") || uses("stone.os_hostname") || uses("stone.os_cwd") {
-        // returns a counted copy of the C string in rax, which rbx holds across str_len
+        // returns a counted copy of the C string in rax, which rbx holds across cstr_len
         r#gen.emit("stone.os_copy:");
         r#gen.emit("\tpush\trbx");
         r#gen.emit("\tmov\trbx, rax");
         r#gen.emit("\tmov\trdi, rax");
-        r#gen.emit("\tcall\tstone.str_len");
+        r#gen.emit("\tcall\tstone.cstr_len");
         r#gen.emit("\tmov\trsi, rax");
         r#gen.emit("\tmov\trdi, rbx");
         r#gen.emit("\tcall\tstone.str_slice");

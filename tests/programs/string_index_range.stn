@@ -1,0 +1,4 @@
+s = "abc"
+print(s[2])
+print(s[3])
+print("after")

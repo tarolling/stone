@@ -9,11 +9,14 @@ mod emit;
 pub mod floats;
 
 use crate::ast::Mod;
-use crate::codegen::context::{Context, LIST_ROUTINES, global_label, immortal_string};
+use crate::codegen::context::{
+    Context, LIST_ROUTINES, STRING_METHOD_ROUTINES, global_label, immortal_string,
+};
 use crate::codegen::x64::builtins::print;
 use crate::codegen::{AssemblyGenerator, Target};
 use crate::project::SourceMap;
 use crate::span::Span;
+use crate::stdlib::CUT_CHARACTER;
 use std::path::Path;
 
 /// Registers that carry arguments under the System V ABI, in order.
@@ -264,17 +267,18 @@ impl X64Generator {
         if self.ctx.uses(&["stone.str_int", "stone.str_bool"]) {
             builtins::conversion_runtime(self);
         }
-        let methods: Vec<&str> = ["stone.str_strip", "stone.str_split_ws", "stone.str_split"]
-            .into_iter()
+        let methods: Vec<&str> = STRING_METHOD_ROUTINES
+            .iter()
+            .copied()
             .filter(|label| self.ctx.uses(&[label]))
             .collect();
         if !methods.is_empty() {
-            let empty_separator = if self.ctx.uses(&["stone.str_split"]) {
-                self.ctx.fail_label("empty separator")
-            } else {
-                String::new()
+            let empty_separator = self.ctx.failure_of("stone.str_split", "empty separator");
+            let cut_character = match self.ctx.uses(&["stone.str_at", "stone.str_slice_of"]) {
+                true => self.ctx.fail_label(CUT_CHARACTER),
+                false => String::new(),
             };
-            builtins::string_methods(self, &methods, &empty_separator);
+            builtins::string_methods(self, &methods, &empty_separator, &cut_character);
         }
     }
 
@@ -307,8 +311,8 @@ impl X64Generator {
 
         self.emit("");
         self.emit("\t.data");
-        for (label, escaped) in literals {
-            immortal_string(self, &label, &escaped);
+        for (label, text) in literals {
+            immortal_string(self, &label, &text);
         }
         self.emit("");
     }
@@ -542,6 +546,26 @@ mod tests {
         );
         assert!(data.contains("\t.string \"hi\""), "{data}");
         assert!(text.contains("\tcall\tstone.leak_check"), "{text}");
+    }
+
+    #[test]
+    fn strings_carry_their_length_before_their_count() {
+        let text = assemble("print(\"h\\x01!\" + \"caf\u{e9}\", \"\".len())\n").unwrap();
+        // lengths count bytes, so the two bytes of \u{e9} count twice
+        for (literal, length) in [("h\\001!", 3), ("caf\u{e9}", 5), ("", 0)] {
+            let header = format!("\t.quad\t{length}\n\t.quad\t{}\n", builtins::IMMORTAL);
+            let string = format!(":\n\t.string \"{literal}\"\n");
+            // the header is right before the label, which is right before the text
+            let before = &text[..text.find(&string).expect(literal)];
+            let label = before.rfind('\n').unwrap() + 1;
+            assert!(before[..label].ends_with(&header), "{literal} in\n{text}");
+        }
+        // so measuring a string reads its header rather than scanning it
+        let len = text.split("stone.str_len:\n").nth(1).unwrap();
+        assert!(
+            len.starts_with("\tmov\trax, QWORD PTR [rdi - 16]\n\tret\n"),
+            "{len}"
+        );
     }
 
     #[test]

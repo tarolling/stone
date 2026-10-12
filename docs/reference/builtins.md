@@ -250,6 +250,59 @@ print("a,,b".split(","), "a::b".split("::"))   // ['a', '', 'b'] ['a', 'b']
 print("  3 4   5 ".split())                    // ['3', '4', '5']
 ```
 
+### `join`
+
+```text
+str.join(items: list[str]) -> str
+```
+
+Returns the strings in `items` with this string between each pair, so joining one item gives
+that item and joining none gives `""`. It undoes `split` with the same separator.
+
+```stone
+print(", ".join(["a", "b", "c"]))      // a, b, c
+print("-".join("1 2 3".split()))        // 1-2-3
+```
+
+### `find`
+
+```text
+str.find(text: str) -> int
+```
+
+Returns the index where `text` first appears in the string, or `-1` if it never does. Like
+`len` and indexes, it counts bytes. An empty `text` is found at `0`.
+
+```stone
+line = "key=value"
+at = line.find("=")
+print(at, line[:at], line[at + 1:], line.find("?"))   // 3 key value -1
+```
+
+### `startswith`
+
+```text
+str.startswith(prefix: str) -> bool
+```
+
+Returns whether the string begins with `prefix`. Every string starts with `""`.
+
+```stone
+print("stone".startswith("st"), "stone".startswith("one"))   // true false
+```
+
+### `endswith`
+
+```text
+str.endswith(suffix: str) -> bool
+```
+
+Returns whether the string ends with `suffix`. Every string ends with `""`.
+
+```stone
+print("main.stn".endswith(".stn"), "main.stn".endswith("main"))   // true false
+```
+
 ## The `os` module
 
 `os` is a builtin module: it has no file, and a program imports it like any other module, with

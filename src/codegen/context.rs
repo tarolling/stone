@@ -24,6 +24,22 @@ pub const LIST_ROUTINES: &[&str] = &[
     "stone.list_reuse",
 ];
 
+/// The runtime routines behind string methods, indexes, slices, and ordering, which each
+/// backend's `builtins::string_methods` emits when the program calls them.
+pub const STRING_METHOD_ROUTINES: &[&str] = &[
+    "stone.str_strip",
+    "stone.str_split_ws",
+    "stone.str_split",
+    "stone.str_at",
+    "stone.str_slice_of",
+    "stone.str_cmp",
+    "stone.str_join",
+    "stone.str_position",
+    "stone.str_starts",
+    "stone.str_ends",
+    "stone.str_char",
+];
+
 /// Runtime routines that need the string runtime, even in a program where no expression is a
 /// `str`, such as one that only prints `args()`.
 const STRING_ROUTINES: &[&str] = &[
@@ -32,6 +48,14 @@ const STRING_ROUTINES: &[&str] = &[
     "stone.str_strip",
     "stone.str_split_ws",
     "stone.str_split",
+    "stone.str_at",
+    "stone.str_slice_of",
+    "stone.str_cmp",
+    "stone.str_join",
+    "stone.str_position",
+    "stone.str_starts",
+    "stone.str_ends",
+    "stone.str_char",
     "stone.input",
     "stone.args",
     "stone.os_env",
@@ -81,6 +105,8 @@ pub const FALLIBLE_ROUTINES: &[&str] = &[
     "stone.parse_int",
     "stone.parse_float",
     "stone.str_split",
+    "stone.str_at",
+    "stone.str_slice_of",
     "stone.os_cwd",
     "stone.time_sleep",
 ];
@@ -166,16 +192,18 @@ pub const OUT_OF_MEMORY: &str = "error: out of memory\\n";
 /// The length in bytes of [`OUT_OF_MEMORY`] once assembled, where `\\n` is one newline.
 pub const OUT_OF_MEMORY_LENGTH: usize = OUT_OF_MEMORY.len() - 1;
 
-/// Emits a string that lives as long as the program, preceded by the reference count every
-/// string has at `[label - 8]`, so retaining and releasing it works like any other string's.
+/// Emits the string `text` so that it lives as long as the program, preceded by the header
+/// every string has: its length in bytes at `[label - 16]` and its reference count at
+/// `[label - 8]`, so measuring, retaining, and releasing it works like any other string's.
 ///
 /// For example, `immortal_string(gen, ".Lstone_empty", "")` emits the empty string `stone.input`
 /// returns at the end of the input. The caller picks the section, which must be writable.
-pub fn immortal_string(r#gen: &mut dyn AssemblyGenerator, label: &str, escaped: &str) {
+pub fn immortal_string(r#gen: &mut dyn AssemblyGenerator, label: &str, text: &str) {
     r#gen.emit("\t.balign\t8");
+    r#gen.emit(&format!("\t.quad\t{}", text.len()));
     r#gen.emit(&format!("\t.quad\t{IMMORTAL}"));
     r#gen.emit(&format!("{label}:"));
-    r#gen.emit(&format!("\t.string \"{escaped}\""));
+    r#gen.emit(&format!("\t.string \"{}\"", escape(text)));
 }
 
 /// What a backend knows about the program it is compiling, apart from the assembly it writes.
@@ -459,31 +487,38 @@ impl Context {
         calls.contains("print") || self.uses(&["stone.input", "stone.str_float"])
     }
 
-    /// Returns every interned string literal as `(label, text)`, with the text escaped for a
-    /// `.string` directive, sorted by label so the output is stable.
-    ///
-    /// For example, the literal holding `a"b` and a newline is returned as `a\"b\n`.
+    /// Returns every interned string literal as `(label, text)`, sorted by label so the output
+    /// is stable, for [`immortal_string`] to emit.
     pub fn string_literals(&self) -> Vec<(String, String)> {
         let mut literals: Vec<(String, String)> = self
             .string_literals
             .iter()
-            .map(|(content, label)| (label.clone(), escape(content)))
+            .map(|(content, label)| (label.clone(), content.clone()))
             .collect();
         literals.sort();
         literals
     }
 }
 
-/// Escapes `content` for a `.string` directive.
+/// Escapes `content` for a `.string` directive. Other control characters are written as three
+/// octal digits, which GNU as reads, since its `\x` would also take any hex digits that follow.
 ///
-/// For example, `a"b` followed by a newline becomes `a\"b\n`.
+/// For example, `a"b` followed by a newline becomes `a\"b\n`, and the escape character
+/// (`\x1b`) becomes `\033`.
 fn escape(content: &str) -> String {
-    content
-        .replace("\\", "\\\\")
-        .replace("\"", "\\\"")
-        .replace("\n", "\\n")
-        .replace("\t", "\\t")
-        .replace("\r", "\\r")
+    let mut escaped = String::with_capacity(content.len());
+    for ch in content.chars() {
+        match ch {
+            '\\' => escaped.push_str("\\\\"),
+            '"' => escaped.push_str("\\\""),
+            '\n' => escaped.push_str("\\n"),
+            '\t' => escaped.push_str("\\t"),
+            '\r' => escaped.push_str("\\r"),
+            '\0'..='\x1f' | '\x7f' => escaped.push_str(&format!("\\{:03o}", ch as u32)),
+            _ => escaped.push(ch),
+        }
+    }
+    escaped
 }
 
 /// Returns the assembly symbol for a global variable.
@@ -614,5 +649,18 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
             }
         }
         ExprKind::Constant { .. } | ExprKind::Name { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn escape_writes_control_bytes_in_octal() {
+        assert_eq!(escape("a\"b\\\n\t\r"), "a\\\"b\\\\\\n\\t\\r");
+        // three digits always, so a digit after the escape stays a digit
+        assert_eq!(escape("\x01\x1b7\x7f"), "\\001\\0337\\177");
+        assert_eq!(escape("é"), "é");
     }
 }

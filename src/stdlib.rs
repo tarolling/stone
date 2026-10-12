@@ -77,7 +77,19 @@ pub static BUILTINS: [&str; 8] = [
 ];
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 7] = ["len", "append", "pop", "insert", "extend", "strip", "split"];
+pub static METHODS: [&str; 11] = [
+    "len",
+    "append",
+    "pop",
+    "insert",
+    "extend",
+    "strip",
+    "split",
+    "join",
+    "find",
+    "startswith",
+    "endswith",
+];
 
 /// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
 /// rather than only reading it.
@@ -151,7 +163,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 7] = [
+pub static METHOD_DOCS: [BuiltinDoc; 11] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T]).len() -> int",
@@ -198,6 +210,31 @@ pub static METHOD_DOCS: [BuiltinDoc; 7] = [
                       `\"a,,b\".split(\",\")` is `[\"a\", \"\", \"b\"]`. Without a separator it \
                       splits at runs of whitespace and drops empty pieces, so \
                       `\" a  b \".split()` is `[\"a\", \"b\"]`. An empty separator stops the program.",
+    },
+    BuiltinDoc {
+        name: "join",
+        signature: "str.join(items: list[str]) -> str",
+        description: "Returns the strings in `items` with this string between each pair, so \
+                      `\", \".join([\"a\", \"b\"])` is `\"a, b\"`.",
+    },
+    BuiltinDoc {
+        name: "find",
+        signature: "str.find(text: str) -> int",
+        description: "Returns the byte index where `text` first appears in the string, or -1 if \
+                      it never does, so `\"banana\".find(\"na\")` is 2. An empty `text` is found \
+                      at 0.",
+    },
+    BuiltinDoc {
+        name: "startswith",
+        signature: "str.startswith(prefix: str) -> bool",
+        description: "Returns whether the string begins with `prefix`, so \
+                      `\"stone\".startswith(\"st\")` is `true`.",
+    },
+    BuiltinDoc {
+        name: "endswith",
+        signature: "str.endswith(suffix: str) -> bool",
+        description: "Returns whether the string ends with `suffix`, so \
+                      `\"main.stn\".endswith(\".stn\")` is `true`.",
     },
 ];
 
@@ -360,6 +397,87 @@ pub const POP_EMPTY: &str = "pop from empty list";
 
 /// The runtime error for `pop` at an index past either end of a list, as in `[1].pop(1)`.
 pub const POP_RANGE: &str = "pop index out of range";
+
+/// The runtime error for an index past either end of a string, as in `"a"[1]`. The interpreter
+/// adds the index and the length, as for lists.
+pub const STRING_INDEX_RANGE: &str = "string index out of range";
+
+/// The runtime error for indexing or slicing a string where the result would hold only part of a
+/// character, since strings index bytes and a character outside ASCII is several bytes.
+pub const CUT_CHARACTER: &str = "cannot cut a string inside a character";
+
+/// Returns the one-byte string at byte `position` of `text`, which must be in range, as `s[i]`
+/// does. The byte must be ASCII, since any other byte is part of a longer character.
+///
+/// For example, `str_at("abc", 1)` returns `"b"`, and `str_at("é", 0)` fails with
+/// [`CUT_CHARACTER`]. Compiled code runs the same check in `stone.str_at`.
+pub fn str_at(text: &str, position: usize) -> Result<&str, &'static str> {
+    match text.as_bytes()[position] {
+        byte if byte.is_ascii() => Ok(&text[position..=position]),
+        _ => Err(CUT_CHARACTER),
+    }
+}
+
+/// Returns the bytes of `text` that a slice picks, given the first index, step, and count from
+/// [`slice_indices`]. The result must not cut a character: with a step of 1, both ends must fall
+/// between characters, and with any other step, every byte picked must be ASCII. An empty result
+/// is always fine.
+///
+/// For example, `"aé b"[1:3]` is `"é"`, while `"aé b"[2:]` and `"aé b"[::-1]` fail with
+/// [`CUT_CHARACTER`]. Compiled code runs the same checks in `stone.str_slice_of`.
+pub fn str_slice(text: &str, start: i64, step: i64, count: usize) -> Result<String, &'static str> {
+    if count == 0 {
+        return Ok(String::new());
+    }
+    if step == 1 {
+        let start = start as usize;
+        return text
+            .get(start..start + count)
+            .map(str::to_string)
+            .ok_or(CUT_CHARACTER);
+    }
+    let bytes = text.as_bytes();
+    (0..count as i64)
+        .map(|k| bytes[(start + k * step) as usize])
+        .map(|byte| match byte.is_ascii() {
+            true => Ok(byte as char),
+            false => Err(CUT_CHARACTER),
+        })
+        .collect()
+}
+
+/// Returns `text` as Python's `repr` writes it, which is how a string prints inside a list: in
+/// single quotes, or double quotes if it holds a `'` but no `"`, with backslashes, the quote,
+/// line breaks, tabs, and other control characters escaped. Characters outside ASCII print as
+/// they are.
+///
+/// For example, `repr_in_list("it's")` returns `"it's"` in double quotes, and
+/// `repr_in_list("a\nb")` returns `'a\nb'` with a backslash and an `n`. Compiled code prints
+/// the same through `stone.print_str_quoted`.
+pub fn repr_in_list(text: &str) -> String {
+    let quote = match text.contains('\'') && !text.contains('"') {
+        true => '"',
+        false => '\'',
+    };
+    let mut repr = String::with_capacity(text.len() + 2);
+    repr.push(quote);
+    for ch in text.chars() {
+        match ch {
+            '\\' => repr.push_str("\\\\"),
+            '\n' => repr.push_str("\\n"),
+            '\t' => repr.push_str("\\t"),
+            '\r' => repr.push_str("\\r"),
+            _ if ch == quote => {
+                repr.push('\\');
+                repr.push(ch);
+            }
+            '\0'..='\x1f' | '\x7f' => repr.push_str(&format!("\\x{:02x}", ch as u32)),
+            _ => repr.push(ch),
+        }
+    }
+    repr.push(quote);
+    repr
+}
 
 /// Picks the elements a slice such as `xs[start:stop:step]` takes from a list of `len` elements,
 /// as Python's `slice.indices` does, returning the first index, the step, and how many elements
@@ -558,6 +676,65 @@ mod tests {
         }
         assert_eq!(sliced(0, None, None, Some(-1)), []);
         assert_eq!(sliced(0, Some(3), Some(-3), None), []);
+    }
+
+    /// Slices `text` as `text[start:stop:step]` does.
+    fn str_sliced(
+        text: &str,
+        start: Option<i64>,
+        stop: Option<i64>,
+        step: Option<i64>,
+    ) -> Result<String, &'static str> {
+        let (first, step, count) = slice_indices(text.len(), start, stop, step)?;
+        str_slice(text, first, step, count)
+    }
+
+    #[test]
+    fn string_indexes_pick_ascii_bytes() {
+        assert_eq!(str_at("abc", 1), Ok("b"));
+        assert_eq!(str_at("a\tc", 1), Ok("\t"));
+        // "é" is the two bytes c3 a9
+        assert_eq!(str_at("é!", 0), Err(CUT_CHARACTER));
+        assert_eq!(str_at("é!", 1), Err(CUT_CHARACTER));
+        assert_eq!(str_at("é!", 2), Ok("!"));
+    }
+
+    #[test]
+    fn string_slices_never_cut_a_character() {
+        assert_eq!(str_sliced("hello", Some(1), Some(3), None), Ok("el".into()));
+        assert_eq!(
+            str_sliced("hello", None, None, Some(-1)),
+            Ok("olleh".into())
+        );
+        assert_eq!(str_sliced("hello", None, None, Some(2)), Ok("hlo".into()));
+        assert_eq!(str_sliced("hello", Some(9), None, None), Ok("".into()));
+        // a step of 1 may hold whole characters
+        assert_eq!(str_sliced("aé b", Some(1), Some(3), None), Ok("é".into()));
+        assert_eq!(str_sliced("aé b", Some(1), None, None), Ok("é b".into()));
+        assert_eq!(str_sliced("aé b", Some(2), None, None), Err(CUT_CHARACTER));
+        assert_eq!(str_sliced("aé b", None, Some(2), None), Err(CUT_CHARACTER));
+        // an empty slice cuts nothing
+        assert_eq!(str_sliced("aé b", Some(2), Some(2), None), Ok("".into()));
+        // any other step needs every byte it picks to be ascii
+        assert_eq!(str_sliced("aé b", None, None, Some(-1)), Err(CUT_CHARACTER));
+        assert_eq!(
+            str_sliced("aé b", Some(4), Some(2), Some(-1)),
+            Ok("b ".into())
+        );
+        assert_eq!(str_sliced("aé b", None, None, Some(3)), Ok("a ".into()));
+        assert_eq!(str_sliced("aé b", None, None, Some(2)), Err(CUT_CHARACTER));
+    }
+
+    #[test]
+    fn strings_in_lists_print_like_python_repr() {
+        assert_eq!(repr_in_list("abc"), "'abc'");
+        assert_eq!(repr_in_list(""), "''");
+        assert_eq!(repr_in_list("it's"), "\"it's\"");
+        assert_eq!(repr_in_list("say \"hi\""), "'say \"hi\"'");
+        assert_eq!(repr_in_list("it's \"x\""), "'it\\'s \"x\"'");
+        assert_eq!(repr_in_list("a\nb\tc\rd\\e"), "'a\\nb\\tc\\rd\\\\e'");
+        assert_eq!(repr_in_list("\x01\x1b\x7f"), "'\\x01\\x1b\\x7f'");
+        assert_eq!(repr_in_list("café"), "'café'");
     }
 
     #[test]

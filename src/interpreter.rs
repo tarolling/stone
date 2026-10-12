@@ -144,7 +144,7 @@ impl Value {
             Value::Int(i) => i.to_string(),
             Value::Float(x) => stdlib::format_float(*x),
             Value::Bool(b) => b.to_string(),
-            Value::Str(s) if nested => format!("'{s}'"),
+            Value::Str(s) if nested => stdlib::repr_in_list(s),
             Value::Str(s) => s.to_string(),
             Value::None => "none".to_string(),
             Value::List(items) => {
@@ -190,6 +190,8 @@ impl Value {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => Ok(Some(a.cmp(b))),
             (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b)),
+            // byte order, which is also the order of the characters' code points
+            (Value::Str(a), Value::Str(b)) => Ok(Some(a.as_bytes().cmp(b.as_bytes()))),
             (a, b) => {
                 Err(format!("cannot order {} and {}", a.display(true), b.display(true)).into())
             }
@@ -238,12 +240,21 @@ impl From<&Constant> for Value {
 ///
 /// For example, index `-1` of a 3-element list is position 2, and index 3 is an error.
 fn list_position(index: i64, len: usize) -> EvalResult<usize> {
+    position(index, len, stdlib::INDEX_RANGE)
+}
+
+/// Turns `index` into a position in a sequence of `len` elements or bytes, as
+/// [`list_position`] does, failing with `message` followed by the index and the length.
+///
+/// For example, `position(3, 3, STRING_INDEX_RANGE)` fails with
+/// `string index out of range (index 3, length 3)`.
+fn position(index: i64, len: usize, message: &str) -> EvalResult<usize> {
     let len = len as i64;
     let position = if index < 0 { index + len } else { index };
     if (0..len).contains(&position) {
         Ok(position as usize)
     } else {
-        Err(format!("list index out of range (index {index}, length {len})").into())
+        Err(format!("{message} (index {index}, length {len})").into())
     }
 }
 
@@ -857,8 +868,18 @@ impl<'out> Interpreter<'out> {
                     return Ok(ControlFlow::None);
                 }
 
-                // the loop holds the list as it was, so changing the variable copies it first
+                // a string gives each character, as a string of the bytes that make it up
                 let list = self.eval_expr(iter)?;
+                if let Value::Str(text) = &list {
+                    for ch in text.chars() {
+                        self.set_var(id, &Value::Str(ch.to_string().into()))?;
+                        if let Some(flow) = self.run_iteration(body)? {
+                            return Ok(flow);
+                        }
+                    }
+                    return Ok(ControlFlow::None);
+                }
+                // the loop holds the list as it was, so changing the variable copies it first
                 let items = list.as_list()?.clone();
                 for item in items.iter() {
                     self.set_var(id, item)?;
@@ -1082,6 +1103,12 @@ impl<'out> Interpreter<'out> {
                             .transpose()
                     };
                     let (lower, upper, step) = (bound(lower)?, bound(upper)?, bound(step)?);
+                    if let Value::Str(text) = &list {
+                        let (start, step, count) =
+                            stdlib::slice_indices(text.len(), lower, upper, step)?;
+                        let sliced = stdlib::str_slice(text, start, step, count)?;
+                        return Ok(Value::Str(sliced.into()));
+                    }
                     let items = list.as_list()?;
                     let (start, step, count) =
                         stdlib::slice_indices(items.len(), lower, upper, step)?;
@@ -1091,6 +1118,10 @@ impl<'out> Interpreter<'out> {
                     return Ok(Value::list(picked));
                 }
                 let index = self.eval_expr(slice)?.as_int()?;
+                if let Value::Str(text) = &list {
+                    let position = position(index, text.len(), stdlib::STRING_INDEX_RANGE)?;
+                    return Ok(Value::Str(stdlib::str_at(text, position)?.into()));
+                }
                 let items = list.as_list()?;
                 let position = list_position(index, items.len())?;
                 Ok(items[position].clone())
@@ -1123,6 +1154,30 @@ impl<'out> Interpreter<'out> {
                 Ok(str_list(stdlib::split(s, separator)?))
             }
             ("split", _, _) => Err("split() is called on a str, with at most one str".into()),
+            ("join", Value::Str(separator), [Value::List(items)]) => {
+                let pieces = items
+                    .iter()
+                    .map(|item| match item {
+                        Value::Str(piece) => Ok(&**piece),
+                        _ => Err("join() takes a list of strs"),
+                    })
+                    .collect::<Result<Vec<&str>, _>>()?;
+                Ok(Value::Str(pieces.join(separator).into()))
+            }
+            ("join", _, _) => Err("join() is called on a str, with a list of strs".into()),
+            // a byte index, like len
+            ("find", Value::Str(s), [Value::Str(text)]) => {
+                Ok(Value::Int(s.find(&**text).map_or(-1, |at| at as i64)))
+            }
+            ("find", _, _) => Err("find() is called on a str, with a str".into()),
+            ("startswith", Value::Str(s), [Value::Str(prefix)]) => {
+                Ok(Value::Bool(s.starts_with(&**prefix)))
+            }
+            ("startswith", _, _) => Err("startswith() is called on a str, with a str".into()),
+            ("endswith", Value::Str(s), [Value::Str(suffix)]) => {
+                Ok(Value::Bool(s.ends_with(&**suffix)))
+            }
+            ("endswith", _, _) => Err("endswith() is called on a str, with a str".into()),
             _ => Err(format!("there is no method '{name}'").into()),
         }
     }

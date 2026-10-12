@@ -1,0 +1,49 @@
+// a for loop over a string takes one character at a time
+for c in "abc";
+    print(c, c.len())
+
+// a character outside ascii is one step of several bytes
+word = "naïve €5"
+steps = 0
+for c in word;
+    steps = steps + 1
+    print("[" + c + "]", c.len())
+print(steps, word.len())
+
+// the loop walks the string as it was, even if the variable changes
+s = "xyz"
+for c in s;
+    s = s + c
+print(s)
+
+// a temporary, break, cont, and ret all release what the loop holds
+for c in "ab" + "cd";
+    if c == "b";
+        cont
+    if c == "d";
+        break
+    print(c)
+
+fn first_vowel(text: str) -> str;
+    for c in text;
+        if "aeiou".find(c) >= 0;
+            ret c
+    ret ""
+print(first_vowel("rhythm and blues"), "[" + first_vowel("xyz") + "]")
+
+// reversing by characters keeps them whole
+fn reverse(text: str) -> str;
+    out = ""
+    for c in text;
+        out = c + out
+    ret out
+print(reverse("café"), reverse(""))
+
+// nested loops and an empty string
+pairs = []
+for a in "ab";
+    for b in "12";
+        pairs.append(a + b)
+print(pairs)
+for c in "";
+    print("never")

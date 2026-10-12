@@ -1,0 +1,4 @@
+['plain', "it's", 'say "hi"', 'both \' and "']
+['a\nb', 'tab\there', 'back\\slash', 'cr\r']
+['\x01\x1b\x7f', 'café', '']
+[['nested', "it's"], []]

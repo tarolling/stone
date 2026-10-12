@@ -36,7 +36,9 @@ file by the path it was built from.
 | `list index out of range` | an index at or past the length, or a negative index before the start, including `insert` at an index below `-len` or above `len`. The interpreter adds the index and length |
 | `pop from empty list` | `pop()` or `pop(i)` on an empty list |
 | `pop index out of range` | `pop(i)` with `i` at or past the length, or before the start |
-| `slice step cannot be zero` | a slice such as `xs[::0]` |
+| `string index out of range` | a string index at or past the length, or a negative index before the start. The interpreter adds the index and length |
+| `cannot cut a string inside a character` | `s[i]` of a byte that is part of a character outside ASCII, or a slice that would hold only part of one (see [strings](types.md#strings)) |
+| `slice step cannot be zero` | a slice such as `xs[::0]` or `s[::0]` |
 | `lists have different lengths` | arithmetic on two lists, such as `a + b`, whose lengths differ. The interpreter adds both lengths |
 | `cannot convert float to int (nan or out of range)` | `int()` or `math.floor()` of nan, an infinity, or a float outside the int range |
 | `invalid literal for int() with base 10: '...'` | `int()` of a string that is not a decimal int, quoted as given |

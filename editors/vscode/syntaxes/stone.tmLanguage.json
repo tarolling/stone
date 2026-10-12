@@ -25,7 +25,11 @@
       "begin": "\"",
       "end": "\"|$",
       "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.stone" } },
-      "endCaptures": { "0": { "name": "punctuation.definition.string.end.stone" } }
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.stone" } },
+      "patterns": [
+        { "name": "constant.character.escape.stone", "match": "\\\\(x[0-9a-fA-F]{2}|[\"'\\\\ntr])" },
+        { "name": "invalid.illegal.escape.stone", "match": "\\\\." }
+      ]
     },
     "function-definition": {
       "match": "\\b(fn)\\s+([A-Za-z_][A-Za-z0-9_]*)",

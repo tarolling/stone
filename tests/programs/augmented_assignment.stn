@@ -1,0 +1,105 @@
+// every operator on ints and floats
+n = 7
+n += 3
+n -= 1
+n *= 4
+n /= 5
+n %= 4
+n **= 3
+print(n)
+
+x = 2.5
+x += 0.5
+x -= 1.0
+x *= 3.0
+x /= 4.0
+x %= 1.0
+x **= 2
+print(x)
+
+// strings join
+s = "ab"
+s += "cd"
+s += s
+print(s)
+
+// lists work element by element, with a number applying to every element
+a = [1.0, 2.0, 3.0]
+b = [10.0, 20.0, 30.0]
+a += b
+a *= 2.0
+a -= [1.0, 1.0, 1.0]
+print(a, b)
+
+// assignment copies, so the other variable keeps its value
+ys = [1, 2, 3]
+zs = ys
+ys += 10
+print(ys, zs)
+
+// elements, including rows of a grid and whole rows
+grid = [[1, 2], [3, 4]]
+grid[0][1] += 10
+grid[1][-1] *= 3
+grid[1] += 100
+grid[-2] -= grid[1]
+print(grid)
+row = grid[0]
+grid[0] **= 2
+print(row, grid[0])
+
+// the index is evaluated once, before the value
+fn pick(i: int) -> int;
+    print("pick", i)
+    ret i
+
+fn amount() -> int;
+    print("amount")
+    ret 5
+
+counts = [0, 0, 0]
+counts[pick(1)] += amount()
+counts[pick(-1)] -= 2
+print(counts)
+
+// a counter in a loop
+total = 0
+for i in range(1, 11);
+    total += i
+print(total)
+words = ["a", "bb", "ccc"]
+line = ""
+for w in words;
+    line += w
+    line += " "
+print(line.strip())
+
+// a function's locals and parameters
+fn scale(xs: list[float], k: float) -> list[float];
+    xs *= k
+    ret xs
+
+fn square_all(rows: list[list[int]]) -> list[list[int]];
+    for i in range(rows.len());
+        rows[i] **= 2
+    ret rows
+
+fn sum_to(m: int) -> int;
+    acc = 0
+    while m > 0;
+        acc += m
+        m -= 1
+    ret acc
+
+data = [1.5, 2.5]
+print(scale(data, 2.0), data)
+print(square_all([[1, 2], [3]]))
+print(sum_to(100))
+
+// strings in a list, where the old string is released once replaced
+names = ["ann", "bo"]
+first = names[0]
+names[1] += "b"
+names[-1] += names[0]
+names[0] += "e"
+print(names, first)

@@ -33,6 +33,61 @@ fn assigning_an_expression_to_a_local_writes_it_directly() {
 }
 
 #[test]
+fn an_augmented_local_writes_it_directly() {
+    assert_eq!(
+        dump("fn f(x: int) -> int;\n    x += 1\n    ret x\n"),
+        dump("fn f(x: int) -> int;\n    x = x + 1\n    ret x\n")
+    );
+}
+
+#[test]
+fn an_augmented_element_reads_it_then_changes_it() {
+    let source =
+        "fn f(xs: list[int], i: int) -> list[int];\n    xs[i] *= 3\n    ret xs\nprint(f([1], 0))\n";
+    assert_eq!(
+        dump(source).split("fn main").next().unwrap(),
+        "fn f(v0, v1):\n\
+         b0:\n  v2 = list_load v0, v1\n  v3 = mul v2, 3\n  v0 = list_unique v0\n  \
+         list_store v0, v1, v3\n  ret v0\n"
+    );
+}
+
+#[test]
+fn an_augmented_element_evaluates_its_index_once() {
+    let source = "fn pick() -> int;\n    ret 0\nfn f(xs: list[int]) -> list[int];\n    xs[pick()] += 1\n    ret xs\nprint(f([1]))\n";
+    let ir = dump(source);
+    let f = ir
+        .split("fn f(")
+        .nth(1)
+        .unwrap()
+        .split("fn main")
+        .next()
+        .unwrap();
+    assert_eq!(f.matches("pick").count(), 1, "{f}");
+}
+
+#[test]
+fn an_augmented_list_is_changed_in_place() {
+    let ir = first_function(
+        "fn f(a: list[int], b: list[int]) -> list[int];\n    a += b\n    ret a\nf([1], [2])\n",
+    );
+    assert!(ir.contains("call stone.list_reuse"), "{ir}");
+    assert!(!ir.contains("stone.list_new"), "{ir}");
+}
+
+#[test]
+fn an_augmented_row_is_replaced_by_a_new_one() {
+    let ir = first_function(
+        "fn f(rows: list[list[int]]) -> list[list[int]];\n    rows[0] += 1\n    ret rows\nf([[1]])\n",
+    );
+    // one loop over the row, stored over the old row, which is released
+    assert_eq!(ir.matches("list_set").count(), 1, "{ir}");
+    assert!(ir.contains("call stone.list_new"), "{ir}");
+    assert!(ir.contains("= list_store v0, 0, v"), "{ir}");
+    assert!(ir.contains("release_list"), "{ir}");
+}
+
+#[test]
 fn a_while_test_becomes_a_compare_and_branch() {
     let source =
         "fn f(n: int) -> int;\n    i = 0\n    while i < n;\n        i = i + 1\n    ret i\n";

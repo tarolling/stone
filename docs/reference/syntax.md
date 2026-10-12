@@ -92,6 +92,7 @@ themselves, as in `"café"`.
 | --- | --- |
 | expression | `print(x)` |
 | assignment | `x = 1`, `a = b = 0`, `items[i] = x`, `grid[r][c] = 0` |
+| augmented assignment | `x += 1`, `total -= cost`, `items[i] *= 2`, `grid[r][c] **= 2` |
 | function definition | `fn f(a: int, b: int) -> int;` plus a block |
 | `ret` | `ret`, `ret x` |
 | `if` / `elif` / `else` | `if x < 0;` ... `elif x == 0;` ... `else;` ... |
@@ -103,6 +104,31 @@ themselves, as in `"café"`.
 A `for` loop's variable must be a plain name. Functions can only be defined at the top level.
 `use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
 
+## Augmented assignment
+
+`x op= v`, where `op=` is one of `+=`, `-=`, `*=`, `/=`, `%=`, and `**=`, means
+`x = x op v`, with the same types and errors as `op`:
+
+```stone
+total = 0
+for price in [3, 4, 5];
+    total += price
+total *= 2
+print(total)   // 24
+```
+
+The target can be a variable or an element, as in `counts[i] += 1` or `grid[r][c] **= 2`. An
+element's indexes are evaluated once, from the outermost, then the element is read, so an index
+out of range stops the program before the value runs, then the value is evaluated and the result
+stored. So `counts[random.randint(0, 5)] += 1` picks one position and adds 1 to it. A variable
+assigned with `op=` is assigned like any other, so inside a function it is a local, and
+`x += 1` in a function with a global `x` is an error, as in Python.
+
+`+=` on lists adds element by element, as `+` does: `xs += ys` is `xs = xs + ys`, and
+`xs += 1` adds 1 to every element. It never appends; use `xs.append(x)` or `xs.extend(ys)` for
+that. Because the result replaces the list, it is computed in place when nothing else holds it.
+Strings join with `s += t`, the same as `s = s + t`.
+
 ## Function signatures
 
 Every parameter is written with its type after a colon, and a function that returns a value
@@ -112,7 +138,7 @@ writes its type after `->`:
 fn mean(xs: list[float]) -> float;
     total = 0.0
     for x in xs;
-        total = total + x
+        total += x
     ret total / float(xs.len())
 
 fn report(name: str, score: float);
@@ -190,4 +216,4 @@ Python, and the checker warns about it. Join two lists with `xs.extend(ys)`.
 
 Arithmetic on lists compiles to one loop over the elements, with no list for any intermediate
 result, two elements at a time where the processor allows. When the result replaces a list
-nothing else holds, as in `xs = xs * 2.0 + ys`, the loop writes over it in place.
+nothing else holds, as in `xs = xs * 2.0 + ys` or `xs += ys`, the loop writes over it in place.

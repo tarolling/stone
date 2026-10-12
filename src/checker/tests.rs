@@ -1368,6 +1368,114 @@ fn functions_cannot_change_globals() {
 }
 
 #[test]
+fn augmented_assignments_follow_their_operators() {
+    let source = "a = 1\na += 2\nb = 1.5\nb **= 2\nc = \"x\"\nc += \"y\"\nd = [1, 2]\nd *= 3\n\
+                  e = [1.0]\ne -= [2.0]\nf = [[1], [2]]\nf[0] += 1\nf[1][0] %= 2\n";
+    assert_eq!(type_of_symbol(source, "a"), "int");
+    assert_eq!(type_of_symbol(source, "b"), "float");
+    assert_eq!(type_of_symbol(source, "c"), "str");
+    assert_eq!(type_of_symbol(source, "d"), "list[int]");
+    assert_eq!(type_of_symbol(source, "e"), "list[float]");
+    assert_eq!(type_of_symbol(source, "f"), "list[list[int]]");
+    // an empty list learns its element type from the operation
+    assert_eq!(type_of_symbol("g = []\ng += 1.0\n", "g"), "list[float]");
+}
+
+#[test]
+fn augmented_assignments_report_what_the_long_form_does() {
+    assert_error("x = 1\nx += 1.0\n", "expected int, found float", 2, 6);
+    assert_error(
+        "s = \"a\"\ns -= \"b\"\n",
+        "'-' needs int or float operands, found str",
+        2,
+        1,
+    );
+    assert_error(
+        "x = 2\nx **= 0.5\n",
+        "'**' needs an int exponent, found float",
+        2,
+        7,
+    );
+    assert_error(
+        "xs = [1]\nxs[0] += \"a\"\n",
+        "expected int, found str",
+        2,
+        10,
+    );
+    assert_error(
+        "xs = [1]\nxs += [1.0]\n",
+        "expected list[int], found list[float]",
+        2,
+        7,
+    );
+    assert_error("x += 1\n", "'x' might be used before it is assigned", 1, 1);
+    // a function's augmented name is its own local, as in Python
+    assert_error(
+        "x = 1\nfn f();\n    x += 1\nf()\n",
+        "'x' might be used before it is assigned",
+        3,
+        5,
+    );
+    assert_error(
+        "fn g();\n    ret\ng += 1\n",
+        "cannot assign to function 'g'",
+        3,
+        1,
+    );
+    assert_error("print += 1\n", "cannot assign to builtin 'print'", 1, 1);
+    assert_error(
+        "s = \"ab\"\ns[0] += \"c\"\n",
+        "a string cannot be changed; build a new one, as in 's = s[:i] + c + s[i + 1:]'",
+        2,
+        1,
+    );
+    assert_error(
+        "xs = [1, 2]\nxs[0:1] += 1\n",
+        "a slice is a new list, so changing it has no effect",
+        2,
+        1,
+    );
+    assert_error(
+        "xs = [1]\nfn f();\n    xs[0] += 1\nf()\n",
+        "a function cannot change the global 'xs'; pass it as an argument and return the changed \
+         value",
+        3,
+        5,
+    );
+}
+
+#[test]
+fn an_augmented_name_is_one_reference() {
+    let analysis = analyze_source("total = 0\ntotal += 2\nprint(total)\n");
+    assert_eq!(analysis.diagnostics, []);
+    let spans: Vec<Pos> = analysis
+        .references
+        .iter()
+        .map(|reference| reference.span.start)
+        .collect();
+    assert_eq!(spans, [Pos::new(1, 1), Pos::new(2, 1), Pos::new(3, 7)]);
+}
+
+#[test]
+fn changing_a_parameter_by_augmented_assignment_can_be_lost() {
+    let diagnostics =
+        analyze_source("fn bump(xs: list[int]);\n    xs[0] += 1\nbump([1])\n").diagnostics;
+    assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
+    assert_eq!(
+        diagnostics[0].severity,
+        crate::diagnostic::Severity::Warning
+    );
+    assert_eq!(diagnostics[0].span.start, Pos::new(2, 5));
+    // rebinding a parameter is no change to the caller's list
+    assert_eq!(
+        errors(
+            "fn twice(xs: list[int]) -> list[int];\n    xs *= 2\n    ret xs\nprint(twice([1]))\n"
+        ),
+        []
+    );
+}
+
+#[test]
 fn changing_a_parameter_that_is_never_used_again_is_a_warning() {
     let source = "fn push(xs: list[int], x: int);\n    xs.append(x)\nys = [1]\npush(ys, 2)\n";
     let diagnostics = analyze_source(source).diagnostics;

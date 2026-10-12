@@ -79,6 +79,11 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
             targets: targets.into_iter().map(strip_expr).collect(),
             value: Box::new(strip_expr(*value)),
         },
+        StmtKind::AugAssign { target, op, value } => StmtKind::AugAssign {
+            target: Box::new(strip_expr(*target)),
+            op,
+            value: Box::new(strip_expr(*value)),
+        },
         StmtKind::For { target, iter, body } => StmtKind::For {
             target: Box::new(strip_expr(*target)),
             iter: Box::new(strip_expr(*iter)),
@@ -1444,6 +1449,78 @@ fn attribute_needs_a_name() {
             "expected a method name, found end of line".to_string(),
             1,
             4
+        )
+    );
+}
+
+#[test]
+fn augmented_assignments_parse() {
+    let parsed = |source: &str| {
+        let Mod::Module { mut body } =
+            without_spans(parse_within(source.to_string(), Duration::from_secs(5)).unwrap());
+        body.remove(0).kind
+    };
+    let store = |id: &str| -> Box<Expr> {
+        Box::new(
+            ExprKind::Name {
+                id: id.to_string(),
+                ctx: ExprContext::Store,
+            }
+            .into(),
+        )
+    };
+    for (text, op) in [
+        ("+=", Operator::Add),
+        ("-=", Operator::Subtract),
+        ("*=", Operator::Multiply),
+        ("/=", Operator::Divide),
+        ("%=", Operator::Modulo),
+        ("**=", Operator::Power),
+    ] {
+        assert_eq!(
+            parsed(&format!("x {text} y + 1\n")),
+            StmtKind::AugAssign {
+                target: store("x"),
+                op,
+                value: binop(name("y"), Operator::Add, int(1)),
+            }
+        );
+    }
+    assert_eq!(
+        parsed("a[i][j] **= 2\n"),
+        StmtKind::AugAssign {
+            target: subscript(
+                subscript(name("a"), name("i"), ExprContext::Load),
+                name("j"),
+                ExprContext::Store
+            ),
+            op: Operator::Power,
+            value: int(2),
+        }
+    );
+}
+
+#[test]
+fn an_augmented_assignment_spans_its_statement() {
+    let Mod::Module { body } =
+        parse_within("total += 10\n".to_string(), Duration::from_secs(5)).unwrap();
+    assert_eq!(body[0].span, Span::new(Pos::new(1, 1), Pos::new(1, 12)));
+}
+
+#[test]
+fn augmented_assignments_do_not_chain() {
+    let at = |source: &str| {
+        let (_, line, col) = error_of(source);
+        (line, col)
+    };
+    assert_eq!(at("a += b += 1\n"), (1, 8));
+    assert_eq!(at("a = b += 1\n"), (1, 7));
+    assert_eq!(
+        error_of("x +=\n"),
+        (
+            "expected an expression, found end of line".to_string(),
+            1,
+            5
         )
     );
 }

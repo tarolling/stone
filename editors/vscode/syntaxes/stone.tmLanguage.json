@@ -93,6 +93,10 @@
     "operator": {
       "patterns": [
         {
+          "name": "keyword.operator.assignment.augmented.stone",
+          "match": "\\*\\*=|\\+=|-=|\\*=|/=|%="
+        },
+        {
           "name": "keyword.operator.comparison.stone",
           "match": "==|!=|<=|>=|<|>"
         },

@@ -566,6 +566,10 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
             }
             collect_calls_from_expr(value, calls);
         }
+        StmtKind::AugAssign { target, value, .. } => {
+            collect_calls_from_expr(target, calls);
+            collect_calls_from_expr(value, calls);
+        }
         StmtKind::Return { value } => {
             if let Some(v) = value {
                 collect_calls_from_expr(v, calls);

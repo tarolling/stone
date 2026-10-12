@@ -431,6 +431,14 @@ impl Inference {
     }
 
     fn add_reference(&mut self, span: Span, symbol: usize) {
+        // the name in `x += 1` is read and assigned, but is one reference
+        if self
+            .references
+            .last()
+            .is_some_and(|last| last.span == span && last.symbol == symbol)
+        {
+            return;
+        }
         self.references.push(Reference { span, symbol });
     }
 
@@ -992,6 +1000,61 @@ impl Inference {
                 self.assigned_call = None;
                 for target in targets {
                     self.check_target(target, &found, value.span);
+                }
+            }
+            StmtKind::AugAssign { target, op, value } => {
+                // the old value comes first, then the value, as `target = target op value`
+                // reads them, but a subscript's indexes are inferred once
+                let old = match &target.kind {
+                    ExprKind::Name { id, .. }
+                        if !matches!(self.resolve_name(id), Resolved::Variable(_)) =>
+                    {
+                        // a function or builtin, which `check_target` reports once
+                        let found = self.infer(value);
+                        self.check_target(target, &found, value.span);
+                        return;
+                    }
+                    ExprKind::Name { .. } => self.infer(target),
+                    ExprKind::Subscript {
+                        value: list, slice, ..
+                    } => {
+                        let (elem, string) = self.subscript_of(list, slice);
+                        if string {
+                            self.error(target.span, STRING_CHANGE);
+                            return;
+                        }
+                        if matches!(slice.kind, ExprKind::Slice { .. }) {
+                            self.error(target.span, SLICE_CHANGE);
+                            return;
+                        }
+                        self.expr_types.push((target.span, elem.clone()));
+                        elem
+                    }
+                    _ => {
+                        self.error(target.span, "cannot assign to this expression");
+                        return;
+                    }
+                };
+                let found = self.infer(value);
+                let result = self.fresh();
+                // the operation's type, which no expression spans, for lowering
+                self.expr_types.push((stmt.span, result.clone()));
+                self.arithmetic(Arithmetic {
+                    op: ArithmeticOp::Binary(*op),
+                    left: old.clone(),
+                    right: Some(found),
+                    result: result.clone(),
+                    span: stmt.span,
+                    operand_span: value.span,
+                    literal_left: false,
+                    literal_right: false,
+                });
+                match &target.kind {
+                    ExprKind::Subscript { value: list, .. } => {
+                        self.expect(&old, &result, value.span);
+                        self.check_change(list);
+                    }
+                    _ => self.check_target(target, &result, value.span),
                 }
             }
             StmtKind::For { target, iter, body } => {
@@ -1998,6 +2061,12 @@ impl<'a> AssignmentCheck<'a> {
                 }
                 Some(assigned)
             }
+            // the target's old value is read first
+            StmtKind::AugAssign { target, value, .. } => {
+                self.reads(target, &assigned);
+                self.reads(value, &assigned);
+                Some(assigned)
+            }
             StmtKind::Expr { value } => {
                 self.reads(value, &assigned);
                 Some(assigned)
@@ -2135,6 +2204,7 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
                     add(target, out);
                 }
             }
+            StmtKind::AugAssign { target, .. } => add(target, out),
             StmtKind::For { target, body, .. } => {
                 add(target, out);
                 collect_assigned(body, out);
@@ -2251,6 +2321,11 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
                     add(receiver, out);
                 }
             }
+            StmtKind::AugAssign { target, .. } => {
+                if let ExprKind::Subscript { value, .. } = &target.kind {
+                    add(value, out);
+                }
+            }
             StmtKind::Expr { value } => {
                 if let Some(receiver) = changed_receiver(value) {
                     add(receiver, out);
@@ -2315,6 +2390,17 @@ impl ParameterUse<'_> {
                         _ => self.expr(target),
                     }
                 }
+            }
+            // reading an element only to change it still loses the change
+            StmtKind::AugAssign { target, value, .. } => {
+                match &target.kind {
+                    ExprKind::Subscript { value, slice, .. } => {
+                        self.change(value);
+                        self.expr(slice);
+                    }
+                    _ => self.expr(target),
+                }
+                self.expr(value);
             }
             StmtKind::Expr { value } => self.change_or_expr(value),
             StmtKind::Return { value } => {

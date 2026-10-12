@@ -136,9 +136,9 @@ place. More generally, both backends find each variable's last use, and a value 
 instead of being copied: into a call (`ys = f(xs)`), another variable (`ys = xs`), or a list
 (`rows.append(row)`) when nothing reads it afterward. A global moves only into a function that
 never reads it, directly or through the functions it calls, and never in an interactive session,
-where a later entry may read it. Arithmetic on lists, such as `xs = xs * 2.0 + ys`, writes its
-result over an operand's list when that operand is at its last use or is the variable being
-assigned and nothing else refers to its list, so it allocates nothing.
+where a later entry may read it. Arithmetic on lists, such as `xs = xs * 2.0 + ys` or
+`xs += ys`, writes its result over an operand's list when that operand is at its last use or is
+the variable being assigned and nothing else refers to its list, so it allocates nothing.
 
 ## Fast like Rust
 

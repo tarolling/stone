@@ -10,6 +10,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-11
+
 ### Added
 
 - String literals take escape sequences: `\"`, `\'`, `\\`, `\n`, `\t`, `\r`, and `\xhh` for an
@@ -26,6 +28,10 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `path.endswith(".stn")`.
 - A `for` loop walks a string one character at a time, as in `for c in "naïve";`, where each
   character is a string of the one to four bytes that make it up.
+- Augmented assignment: `x += 1`, `total -= cost`, `xs[i] *= 2`, `grid[r][c] **= 2`, and `/=`
+  and `%=`, each meaning `x = x op v`. An element's indexes are evaluated once, then the element
+  is read, then the value. On lists, `+=` adds element by element as `+` does, never appending,
+  and writes over the list in place when nothing else holds it.
 
 ### Changed
 

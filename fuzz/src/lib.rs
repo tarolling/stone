@@ -175,15 +175,17 @@ impl Generator {
         match u.int_in_range(0..=15)? {
             0 | 1 => {
                 let value = self.expression(u, scope, 0)?;
-                let target = if !scope.variables.is_empty() && u.arbitrary()? {
-                    u.choose(&scope.variables)?.clone()
+                if !scope.variables.is_empty() && u.arbitrary()? {
+                    // an existing variable is assigned or updated, as in `g0 += 1`
+                    let target = u.choose(&scope.variables)?.clone();
+                    let op = *u.choose(&["", "+", "-", "*", "/", "%"])?;
+                    self.line(indent, &format!("{target} {op}= {value}"));
                 } else {
                     let prefix = if scope.in_function { "l" } else { "g" };
                     let name = self.fresh(prefix);
                     scope.variables.push(name.clone());
-                    name
-                };
-                self.line(indent, &format!("{target} = {value}"));
+                    self.line(indent, &format!("{name} = {value}"));
+                }
             }
             2 => self.float_statement(u, scope, indent)?,
             3 | 4 => {
@@ -301,7 +303,8 @@ impl Generator {
             1 => {
                 let index = u.int_in_range(-2..=1)?;
                 let value = self.expression(u, scope, 0)?;
-                self.line(indent, &format!("{list}[{index}] = {value}"));
+                let op = *u.choose(&["", "+", "-", "*", "%"])?;
+                self.line(indent, &format!("{list}[{index}] {op}= {value}"));
             }
             2 => self.line(indent, &format!("print({list}, {list}.len())")),
             _ => {
@@ -486,15 +489,16 @@ impl Generator {
     ) -> Result<()> {
         let value = self.float_expression(u, scope, 0)?;
         if u.arbitrary()? {
-            let target = if !scope.floats.is_empty() && u.arbitrary()? {
-                u.choose(&scope.floats)?.clone()
+            if !scope.floats.is_empty() && u.arbitrary()? {
+                let target = u.choose(&scope.floats)?.clone();
+                let op = *u.choose(&["", "+", "-", "*", "/"])?;
+                self.line(indent, &format!("{target} {op}= {value}"));
             } else {
                 let prefix = if scope.in_function { "l" } else { "g" };
                 let name = self.fresh(prefix);
                 scope.floats.push(name.clone());
-                name
-            };
-            self.line(indent, &format!("{target} = {value}"));
+                self.line(indent, &format!("{name} = {value}"));
+            }
         } else {
             let op = *u.choose(&["==", "!=", "<", "<=", ">", ">="])?;
             let operand = self.float_expression(u, scope, 0)?;
@@ -1070,6 +1074,14 @@ mod tests {
         }
     }
 
+    /// Returns whether `source` has an augmented assignment, such as `g0 += 1`, whose target ends
+    /// with `end`: `"]"` for an element, as in `list1[0] *= 2`, or `""` for any target.
+    fn uses_augmented(source: &str, end: &str) -> bool {
+        ["+=", "-=", "*=", "/=", "%="]
+            .iter()
+            .any(|op| source.contains(&format!("{end} {op} ")))
+    }
+
     #[test]
     fn generated_programs_cover_the_language() {
         let sources: Vec<String> = (0..500)
@@ -1095,6 +1107,11 @@ mod tests {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 25, "only {count} of 500 programs use {feature:?}");
         }
+        let count = sources.iter().filter(|s| uses_augmented(s, "")).count();
+        assert!(
+            count >= 25,
+            "only {count} of 500 programs use an augmented assignment"
+        );
     }
 
     /// Changing a list, slicing it, and arithmetic on it need a list to exist first, which short
@@ -1109,6 +1126,8 @@ mod tests {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
         }
+        let count = sources.iter().filter(|s| uses_augmented(s, "]")).count();
+        assert!(count >= 5, "only {count} of 500 programs update an element");
     }
 
     /// Strings index, slice, compare, and loop like lists, and have methods of their own.

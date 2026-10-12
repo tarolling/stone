@@ -284,6 +284,22 @@ fn rename_edits_every_reference() {
 }
 
 #[test]
+fn rename_edits_an_augmented_name_once() {
+    let doc = doc("total = 0\ntotal += 2\nprint(total)\n");
+    let edit = rename(&doc, &uri(), at(2, 1), "sum").unwrap();
+    let edits = &edit.changes.unwrap()[&uri()];
+    let starts: Vec<Position> = edits.iter().map(|e| e.range.start).collect();
+    assert_eq!(
+        starts,
+        [
+            Position::new(0, 0),
+            Position::new(1, 0),
+            Position::new(2, 6)
+        ]
+    );
+}
+
+#[test]
 fn rename_rejects_bad_names() {
     let doc = doc(SOURCE);
     assert_eq!(

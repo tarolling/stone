@@ -1,7 +1,9 @@
 //! Statement rules, such as `if_stmt`, `function_def`, and `program`.
 
 use super::Parser;
-use crate::ast::{Arg, Arguments, Expr, ParserError, Stmt, StmtKind, TypeExpr, TypeExprKind};
+use crate::ast::{
+    Arg, Arguments, Expr, Operator, ParserError, Stmt, StmtKind, TypeExpr, TypeExprKind,
+};
 use crate::debug;
 use crate::span::Span;
 use crate::token::TokenType;
@@ -500,6 +502,57 @@ impl Parser {
         })
     }
 
+    /// Parses an augmented assignment, such as `x += 1` or `grid[i][j] *= 2`.
+    ///
+    /// ```text
+    /// aug_assignment: single_target augassign expressions
+    /// augassign: '+=' | '-=' | '*=' | '/=' | '%=' | '**='
+    /// ```
+    pub(super) fn parse_aug_assignment(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
+        // single_target augassign expressions
+        if let Ok(target) = self.parse_target_with_star_atom()
+            && let Some(op) = self.parse_augassign()
+            && let Ok(value) = self.parse_expressions()
+        {
+            return Ok(Box::new(Stmt::new(
+                StmtKind::AugAssign { target, op, value },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_aug_assignment".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses the operator of an augmented assignment, such as `+=`, returning the arithmetic
+    /// operator it applies (`Operator::Add`).
+    ///
+    /// ```text
+    /// augassign: '+=' | '-=' | '*=' | '/=' | '%=' | '**='
+    /// ```
+    fn parse_augassign(&mut self) -> Option<Operator> {
+        let TokenType::Operator(text) = &self.peek().r#type else {
+            return None;
+        };
+        let op = match text.as_str() {
+            "+=" => Operator::Add,
+            "-=" => Operator::Subtract,
+            "*=" => Operator::Multiply,
+            "/=" => Operator::Divide,
+            "%=" => Operator::Modulo,
+            "**=" => Operator::Power,
+            _ => return None,
+        };
+        self.pos += 1;
+        Some(op)
+    }
+
     /// Parses an import, such as `use geometry.shapes` or `use util.pad as lpad`.
     ///
     /// ```text
@@ -596,11 +649,12 @@ impl Parser {
         })
     }
 
-    /// Parses a statement without a block, such as `x = 1`, `print(x)`, or `ret x`.
+    /// Parses a statement without a block, such as `x = 1`, `x += 1`, `print(x)`, or `ret x`.
     ///
     /// ```text
     /// simple_stmt:
     ///     | assignment
+    ///     | aug_assignment
     ///     | expressions
     ///     | return_stmt
     ///     | use_stmt
@@ -614,6 +668,12 @@ impl Parser {
         debug!("parse_simple_stmt: trying to parse assignment");
         if let Ok(stmt) = self.parse_assignment() {
             debug!("parse_simple_stmt: successfully parsed assignment");
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
+        // aug_assignment
+        if let Ok(stmt) = self.parse_aug_assignment() {
             return Ok(stmt);
         }
         self.pos = mark;

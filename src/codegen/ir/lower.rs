@@ -36,7 +36,8 @@ use super::{
 };
 use crate::ast::{Arg, BoolOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::checker::{
-    Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, place_spans, range_args,
+    Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, place_root, place_spans,
+    range_args,
 };
 use crate::codegen::context::module_routine;
 use crate::last_use::{LiveAfter, global_reads, live_after};
@@ -607,6 +608,10 @@ impl<'a> Lowerer<'a> {
                 self.clear_moved();
             }
 
+            StmtKind::AugAssign { target, op, value } => {
+                self.aug_assign(stmt, target, *op, value)?;
+            }
+
             StmtKind::Expr { value } => {
                 let last_uses = self.last_uses(stmt);
                 if self.is_stone_call(value) {
@@ -760,24 +765,118 @@ impl<'a> Lowerer<'a> {
                 // the value was evaluated first, then the indexes, like the interpreter
                 let indexes = self.place_indexes(list)?;
                 let index = self.expr(slice)?;
-                let list = self.unique_place(list, &indexes)?;
-                let old = kind.map(|_| self.fresh());
-                let outer = std::mem::replace(&mut self.span, target.span);
-                self.push(Inst::ListStore {
-                    old,
-                    list,
-                    index,
-                    value,
-                });
-                self.span = outer;
-                if let (Some(old), Some(kind)) = (old, kind) {
-                    self.push(Inst::Release {
-                        src: Operand::Reg(old),
-                        kind,
-                    });
-                }
+                self.store_element(target, &indexes, index, value, kind)?;
             }
             _ => {}
+        }
+        Ok(())
+    }
+
+    /// Lowers the augmented assignment `stmt`, `target op= value`.
+    ///
+    /// A name has no indexes to evaluate twice, so `x += v` lowers as `x = x + v`, which writes
+    /// an int's vreg directly and lets `a += b` on lists write over `a`. An element evaluates its
+    /// indexes once, then reads the old element, borrowed since nothing the value runs can change
+    /// the list holding it, then the value, then computes the new element and stores it. For
+    /// example, `xs[i] *= 3` lowers to `v2 = list_load v0, v1`, `v3 = mul v2, 3`,
+    /// `v0 = list_unique v0`, and `list_store v0, v1, v3`.
+    fn aug_assign(
+        &mut self,
+        stmt: &Stmt,
+        target: &Expr,
+        op: Operator,
+        value: &Expr,
+    ) -> Result<(), String> {
+        let ExprKind::Subscript {
+            value: list, slice, ..
+        } = &target.kind
+        else {
+            // the checker gives the operation the statement's span
+            let operation = ExprKind::BinOp {
+                op,
+                left: Box::new(target.clone()),
+                right: Box::new(value.clone()),
+            };
+            let assign = StmtKind::Assign {
+                targets: vec![target.clone()],
+                value: Box::new(Expr::new(operation, stmt.span)),
+            };
+            return self.stmt_unspanned(&Stmt::new(assign, stmt.span));
+        };
+        let indexes = self.place_indexes(list)?;
+        let index = self.expr(slice)?;
+        // an index out of range points at its own subscript, as when reading it
+        let mut current = self.expr(place_root(list))?;
+        let spans = place_spans(list).into_iter().chain([target.span]);
+        for (&index, span) in indexes.iter().chain([&index]).zip(spans) {
+            let outer = std::mem::replace(&mut self.span, span);
+            let element = self.fresh();
+            self.push(Inst::ListLoad {
+                dst: element,
+                list: current,
+                index,
+            });
+            self.span = outer;
+            current = Operand::Reg(element);
+        }
+        let old = current;
+        let ty = self.type_of(target)?;
+        let kind = RcKind::of(&ty);
+        let new = match &ty {
+            Type::List(elem) => {
+                let float = **elem == Type::Float;
+                let rhs = self.fused(value)?;
+                let tree = Fused::Binary {
+                    op: bin_op(op),
+                    float,
+                    lhs: Box::new(Fused::List(FusedList {
+                        value: old,
+                        float,
+                        name: None,
+                    })),
+                    rhs: Box::new(rhs),
+                };
+                self.elementwise_tree(&tree, float, &[], kind)?
+            }
+            _ => {
+                let rhs = self.expr(value)?;
+                self.binary(op, &ty, old, rhs, None)
+            }
+        };
+        self.take(new, kind);
+        self.store_element(target, &indexes, index, new, kind)
+    }
+
+    /// Stores `value` at `index` of the list that the subscript `target` changes, whose other
+    /// indexes, from [`Lowerer::place_indexes`], are `indexes`, making every list on the way
+    /// unique first. A value counted as `kind` carries the reference the element takes, and the
+    /// old element is released.
+    fn store_element(
+        &mut self,
+        target: &Expr,
+        indexes: &[Operand],
+        index: Operand,
+        value: Operand,
+        kind: Option<RcKind>,
+    ) -> Result<(), String> {
+        let ExprKind::Subscript { value: list, .. } = &target.kind else {
+            return Err("only an element of a list can be changed".to_string());
+        };
+        let list = self.unique_place(list, indexes)?;
+        let old = kind.map(|_| self.fresh());
+        let outer = std::mem::replace(&mut self.span, target.span);
+        self.push(Inst::ListStore {
+            old,
+            list,
+            index,
+            value,
+        });
+        self.span = outer;
+        if let (Some(old), Some(kind)) = (old, kind) {
+            self.push(Inst::Release {
+                src: Operand::Reg(old),
+                kind,
+            });
         }
         Ok(())
     }
@@ -1170,22 +1269,7 @@ impl<'a> Lowerer<'a> {
                 let ty = self.type_of(expr)?;
                 let lhs = self.expr(left)?;
                 let rhs = self.expr(right)?;
-                let dst = self.dst(into);
-                let op = bin_op(*op);
-                self.push(match ty {
-                    // only `+` applies to strings
-                    Type::Str => Inst::Call {
-                        dst: Some(dst),
-                        callee: Callee::Runtime("stone.str_concat"),
-                        args: vec![lhs, rhs],
-                    },
-                    Type::Float => Inst::FloatBinary { op, dst, lhs, rhs },
-                    _ => Inst::Binary { op, dst, lhs, rhs },
-                });
-                self.release_temp(lhs);
-                self.release_temp(rhs);
-                self.own(Operand::Reg(dst), kind);
-                Ok(Operand::Reg(dst))
+                Ok(self.binary(*op, &ty, lhs, rhs, into))
             }
 
             ExprKind::UnaryOp { op, operand } => {
@@ -1340,6 +1424,19 @@ impl<'a> Lowerer<'a> {
         let movable = std::mem::take(&mut self.movable);
         let tree = self.fused(expr)?;
         let float = matches!(self.type_of(expr)?, Type::List(elem) if *elem == Type::Float);
+        self.elementwise_tree(&tree, float, &movable, kind)
+    }
+
+    /// Computes `tree`, from [`Lowerer::fused`], for each element, as [`Lowerer::elementwise`]
+    /// describes, into a list of floats if `float` and of ints otherwise. The result may reuse
+    /// the list of a variable in `movable`.
+    fn elementwise_tree(
+        &mut self,
+        tree: &Fused,
+        float: bool,
+        movable: &[String],
+        kind: Option<RcKind>,
+    ) -> Result<Operand, String> {
         let mut lists = Vec::new();
         tree.lists(&mut lists);
         // a list used twice, as in `a * a`, is checked and read once
@@ -1435,7 +1532,7 @@ impl<'a> Lowerer<'a> {
             otherwise: exit,
         });
         self.start(body);
-        let value = self.element(&tree, Operand::Reg(index), &mut HashMap::new());
+        let value = self.element(tree, Operand::Reg(index), &mut HashMap::new());
         self.push(Inst::ListSet {
             list: Operand::Reg(result),
             index: Operand::Reg(index),
@@ -1455,6 +1552,38 @@ impl<'a> Lowerer<'a> {
         }
         self.own(Operand::Reg(result), kind);
         Ok(Operand::Reg(result))
+    }
+
+    /// Computes `lhs op rhs` on two numbers or, for `+`, two strings, both of type `ty`, into
+    /// `into` if given, and releases either operand that is a temporary. A string result is a
+    /// temporary.
+    ///
+    /// For example, adding two ints is `v2 = add v0, v1`, and two strings call
+    /// `stone.str_concat`.
+    fn binary(
+        &mut self,
+        op: Operator,
+        ty: &Type,
+        lhs: Operand,
+        rhs: Operand,
+        into: Option<VReg>,
+    ) -> Operand {
+        let dst = self.dst(into);
+        let op = bin_op(op);
+        self.push(match ty {
+            // only `+` applies to strings
+            Type::Str => Inst::Call {
+                dst: Some(dst),
+                callee: Callee::Runtime("stone.str_concat"),
+                args: vec![lhs, rhs],
+            },
+            Type::Float => Inst::FloatBinary { op, dst, lhs, rhs },
+            _ => Inst::Binary { op, dst, lhs, rhs },
+        });
+        self.release_temp(lhs);
+        self.release_temp(rhs);
+        self.own(Operand::Reg(dst), RcKind::of(ty));
+        Operand::Reg(dst)
     }
 
     /// Evaluates the operands of the arithmetic on lists `expr`, left to right, into a tree that

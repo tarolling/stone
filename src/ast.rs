@@ -275,6 +275,14 @@ pub enum StmtKind {
         targets: Vec<Expr>,
         value: Box<Expr>,
     },
+    /// An augmented assignment, such as `x += 1` or `grid[i][j] *= 2`, which means
+    /// `target = target op value` except that the target's indexes are evaluated once: first the
+    /// indexes, then the target's old value, then `value`.
+    AugAssign {
+        target: Box<Expr>,
+        op: Operator,
+        value: Box<Expr>,
+    },
     /// A `for` loop, such as `for i in 10; print(i)`.
     For {
         target: Box<Expr>,

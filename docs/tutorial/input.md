@@ -61,7 +61,7 @@ own name:
 ```stone
 total = 0
 for a in args();
-    total = total + int(a)
+    total += int(a)
 print(total)
 ```
 

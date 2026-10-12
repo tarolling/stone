@@ -311,6 +311,22 @@ fn elementwise(lazy: &Lazy) -> EvalResult<Value> {
 }
 
 /// Applies the binary operator `op` to two numbers, or `+` to two strings.
+/// Applies `op` to two evaluated operands, computing it at once when both are numbers or
+/// strings and leaving it for [`elementwise`] when either holds a list.
+///
+/// For example, `combine(Add, 2, 3)` is the value 5, while `combine(Add, [1, 2], 3)` is a
+/// `Lazy::Binary` that adds 3 to each element.
+fn combine(op: Operator, left: Lazy, right: Lazy) -> EvalResult<Lazy> {
+    match (left, right) {
+        (Lazy::Value(lhs), Lazy::Value(rhs))
+            if !matches!(lhs, Value::List(_)) && !matches!(rhs, Value::List(_)) =>
+        {
+            Ok(Lazy::Value(binary(op, lhs, rhs)?))
+        }
+        (left, right) => Ok(Lazy::Binary(op, Box::new(left), Box::new(right))),
+    }
+}
+
 fn binary(op: Operator, lhs: Value, rhs: Value) -> EvalResult<Value> {
     match (lhs, rhs) {
         // the exponent is always an int, even for a float base
@@ -844,6 +860,32 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(ControlFlow::None)
             }
+            StmtKind::AugAssign { target, op, value } => {
+                match &target.kind {
+                    ExprKind::Name { id, .. } => {
+                        let old = self.eval_expr(target)?;
+                        let new = self.augmented(*op, old, value, stmt.span)?;
+                        self.set_var(id, &new)?;
+                    }
+                    ExprKind::Subscript {
+                        value: list, slice, ..
+                    } => {
+                        // the indexes once, then the old element, then the value
+                        let (root, indexes) = self.eval_place(list)?;
+                        let index = self.eval_expr(slice)?.as_int()?;
+                        let spans = place_spans(list);
+                        let old = self.element(root, &indexes, &spans, index, target.span)?;
+                        let new = self.augmented(*op, old, value, stmt.span)?;
+                        // the value cannot change the list, which only this statement can
+                        let items = self.place_list(root, &indexes, &spans)?;
+                        let position = list_position(index, items.len())
+                            .map_err(|e| located(e, target.span))?;
+                        items[position] = new;
+                    }
+                    _ => return Err("Invalid assignment target".into()),
+                }
+                Ok(ControlFlow::None)
+            }
             StmtKind::For { target, iter, body } => {
                 let ExprKind::Name { id, .. } = &target.kind else {
                     return Err("a 'for' loop's variable must be a name".into());
@@ -960,14 +1002,7 @@ impl<'out> Interpreter<'out> {
             ExprKind::BinOp { op, left, right } => {
                 let left = this.arithmetic(left)?;
                 let right = this.arithmetic(right)?;
-                match (left, right) {
-                    (Lazy::Value(lhs), Lazy::Value(rhs))
-                        if !matches!(lhs, Value::List(_)) && !matches!(rhs, Value::List(_)) =>
-                    {
-                        Ok(Lazy::Value(binary(*op, lhs, rhs)?))
-                    }
-                    (left, right) => Ok(Lazy::Binary(*op, Box::new(left), Box::new(right))),
-                }
+                combine(*op, left, right)
             }
             ExprKind::UnaryOp {
                 op: op @ (UnaryOp::UnaryAdd | UnaryOp::UnarySub),
@@ -980,6 +1015,51 @@ impl<'out> Interpreter<'out> {
             },
             _ => Ok(Lazy::Value(this.eval_expr(expr)?)),
         })
+    }
+
+    /// Computes `old op value` for an augmented assignment such as `x += value`, evaluating
+    /// `value` after `old` was read, as `x = x + value` would. An error the operation itself
+    /// raises points at the statement, `span`.
+    fn augmented(
+        &mut self,
+        op: Operator,
+        old: Value,
+        value: &Expr,
+        span: Span,
+    ) -> EvalResult<Value> {
+        let right = self.arithmetic(value)?;
+        let result = match combine(op, Lazy::Value(old), right) {
+            Ok(Lazy::Value(value)) => Ok(value),
+            Ok(lazy) => elementwise(&lazy),
+            Err(e) => Err(e),
+        };
+        result.map_err(|e| located(e, span))
+    }
+
+    /// Reads the element at `index` of the list that `root` leads to through `indexes`, as
+    /// [`Interpreter::place_list`] walks it, failing at the same spans, but without changing
+    /// anything: `target` is where an `index` out of range fails.
+    ///
+    /// For example, `grid[1][0] += 3` reads `grid[1][0]` with `root` `"grid"`, `indexes` `[1]`,
+    /// and `index` 0.
+    fn element(
+        &self,
+        root: &str,
+        indexes: &[i64],
+        spans: &[Span],
+        index: i64,
+        target: Span,
+    ) -> EvalResult<Value> {
+        let mut current = self.get_var(root)?;
+        for (&i, &span) in indexes.iter().zip(spans) {
+            let items = current.as_list()?;
+            let position = list_position(i, items.len()).map_err(|e| located(e, span))?;
+            let row = items[position].clone();
+            current = row;
+        }
+        let items = current.as_list()?;
+        let position = list_position(index, items.len()).map_err(|e| located(e, target))?;
+        Ok(items[position].clone())
     }
 
     /// Evaluates `expr`, giving an error raised by it, rather than by an expression inside it,
@@ -1402,6 +1482,20 @@ mod tests {
 
     /// A function that appends to its parameter and returns it.
     const ADD: &str = "fn add(xs: list[int], x: int) -> list[int];\n    xs.append(x)\n    ret xs\n";
+
+    #[test]
+    fn an_augmented_element_copies_only_a_shared_list() {
+        assert_eq!(copies("xs = [1, 2]\nxs[0] += 1\nprint(xs)\n"), 0);
+        assert_eq!(
+            copies("grid = [[1], [2]]\ngrid[1][0] *= 3\nprint(grid)\n"),
+            0
+        );
+        assert_eq!(copies("grid = [[1], [2]]\ngrid[1] += 3\nprint(grid)\n"), 0);
+        assert_eq!(
+            copies("xs = [1, 2]\nys = xs\nxs[0] += 1\nprint(xs, ys)\n"),
+            1
+        );
+    }
 
     #[test]
     fn a_list_assigned_the_result_of_a_call_is_changed_in_place() {

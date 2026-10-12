@@ -128,7 +128,7 @@ list.
 ```stone
 total = 0
 for a in args();
-    total = total + int(a)
+    total += int(a)
 print(total)
 ```
 
@@ -623,7 +623,7 @@ use time
 start = time.clock()
 total = 0
 for i in range(1000000);
-    total = total + i
+    total += i
 print("took", time.clock() - start, "seconds")
 ```
 

@@ -9,8 +9,8 @@ while not eof();
         cont
     fields = line.split()
     score = float(fields[1])
-    total = total + score
-    count = count + 1
+    total += score
+    count += 1
     if count == 1 or score > best;
         best_name = fields[0]
         best = score

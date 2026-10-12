@@ -10,10 +10,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-11
+
 ### Added
 
 - Highlighting of escape sequences in strings, such as `\n` and `\"`, so an escaped quote no
   longer ends the string, and of unknown escapes as errors.
+- Highlighting of the augmented assignment operators `+=`, `-=`, `*=`, `/=`, `%=`, and `**=`,
+  and diagnostics, hover, and rename for them through `stone-lsp`.
 - Completion and hover for the string methods `join`, `find`, `startswith`, and `endswith`.
 
 ## [0.2.2] - 2026-10-11

@@ -385,6 +385,18 @@ impl Lexer {
         Ok(escaped)
     }
 
+    /// Returns the arithmetic operator `op`, just lexed, or its augmented assignment form when an
+    /// `=` follows it directly.
+    ///
+    /// For example, `+` followed by `=` becomes `+=`, and `**` followed by `=` becomes `**=`.
+    fn augmented(&mut self, mut op: String) -> TokenType {
+        if self.peek() == Some('=') {
+            self.advance();
+            op.push('=');
+        }
+        TokenType::Operator(op)
+    }
+
     fn lex_name(&mut self) -> String {
         let mut ident = String::new();
         while let Some(ch) = self.peek() {
@@ -450,12 +462,12 @@ impl Lexer {
             }
             Some('*') => {
                 self.advance();
+                let mut op = "*".to_string();
                 if self.peek() == Some('*') {
                     self.advance();
-                    TokenType::Operator("**".to_string())
-                } else {
-                    TokenType::Operator("*".to_string())
+                    op.push('*');
                 }
+                self.augmented(op)
             }
             Some('-') => {
                 self.advance();
@@ -463,12 +475,12 @@ impl Lexer {
                     self.advance();
                     TokenType::Arrow
                 } else {
-                    TokenType::Operator("-".to_string())
+                    self.augmented("-".to_string())
                 }
             }
             Some('+') | Some('/') | Some('%') => {
                 let op = self.advance().unwrap().to_string();
-                TokenType::Operator(op)
+                self.augmented(op)
             }
             Some(first @ ('=' | '<' | '>' | '!')) => {
                 self.advance();
@@ -948,6 +960,24 @@ testing(1, 2, 3)"#;
                 .collect::<Vec<_>>(),
             ["%", "**", "*", "*"].map(op)
         );
+    }
+
+    #[test]
+    fn augmented_assignment_operators_are_one_token() {
+        assert_eq!(
+            types_of("a += b -= c *= d /= e %= f **= g\n")
+                .into_iter()
+                .filter(|t| matches!(t, TokenType::Operator(_)))
+                .collect::<Vec<_>>(),
+            ["+=", "-=", "*=", "/=", "%=", "**="].map(op)
+        );
+        // no spaces needed, and `->` is still an arrow
+        assert_eq!(
+            types_of("x-=1\n")[..3],
+            [name("x"), op("-="), TokenType::Number(1)]
+        );
+        assert_eq!(types_of("a**=2\n")[1], op("**="));
+        assert_eq!(types_of("a ** = 2\n")[1..3], [op("**"), op("=")]);
     }
 
     #[test]

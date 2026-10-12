@@ -1,0 +1,9 @@
+// the element is read before the value, so a bad index stops the program first
+fn amount() -> int;
+    print("amount")
+    ret 1
+
+xs = [1, 2]
+xs[1] += amount()
+print(xs)
+xs[5] += amount()

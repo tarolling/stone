@@ -92,6 +92,10 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
             targets.iter().for_each(|target| expr_names(target, out));
             expr_names(value, out);
         }
+        StmtKind::AugAssign { target, value, .. } => {
+            expr_names(target, out);
+            expr_names(value, out);
+        }
         StmtKind::Expr { value } | StmtKind::Return { value: Some(value) } => {
             expr_names(value, out)
         }
@@ -248,6 +252,13 @@ impl Liveness<'_> {
                 self.expr(value, &mut live);
                 live
             }
+            // the target is read before it is written, along with any indexes
+            StmtKind::AugAssign { target, value, .. } => {
+                let mut live = out;
+                self.expr(target, &mut live);
+                self.expr(value, &mut live);
+                live
+            }
             StmtKind::Expr { value } | StmtKind::Return { value: Some(value) } => {
                 let mut live = out;
                 self.expr(value, &mut live);
@@ -398,6 +409,18 @@ mod tests {
         assert_eq!(
             live("x = [1]\nx = [2]\nprint(x)\nx = x\n"),
             [names(&[]), names(&["x"]), names(&["x"]), names(&[])]
+        );
+    }
+
+    #[test]
+    fn an_augmented_assignment_reads_its_target() {
+        assert_eq!(
+            live("x = [1]\ny = [2]\nx += y\nprint(x)\n"),
+            [names(&["x"]), names(&["x", "y"]), names(&["x"]), names(&[])]
+        );
+        assert_eq!(
+            live("xs = [1]\ni = 0\nxs[i] += 1\n"),
+            [names(&["xs"]), names(&["i", "xs"]), names(&[])]
         );
     }
 

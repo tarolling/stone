@@ -79,6 +79,7 @@ simple_stmts[vec_stmt]:
 # will throw a SyntaxError.
 simple_stmt:
     | assignment
+    | aug_assignment
     | expressions 
     | return_stmt
     | use_stmt
@@ -96,6 +97,17 @@ compound_stmt:
 
 assignment:
     | (star_targets '=' )+ expressions !'=' 
+
+# `x op= v` is `x = x op v`, except that the target's indexes are evaluated once
+aug_assignment:
+    | single_target augassign expressions
+
+single_target:
+    | t_primary '[' slices ']' !t_lookahead
+    | NAME
+
+augassign:
+    | '+=' | '-=' | '*=' | '/=' | '%=' | '**='
 
 return_stmt:
     | 'ret' [expressions] 

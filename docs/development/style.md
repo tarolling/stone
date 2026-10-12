@@ -33,8 +33,8 @@ These apply to stone programs, such as the examples, tests, and benchmarks.
   fn halvings(n: int) -> int;
       count = 0
       while n > 1;
-          n = n / 2
-          count = count + 1
+          n /= 2
+          count += 1
       ret count
   ```
 

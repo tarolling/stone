@@ -672,6 +672,10 @@ impl Rewriter<'_> {
                 targets.iter_mut().for_each(|t| self.expr(t));
                 self.expr(value);
             }
+            StmtKind::AugAssign { target, value, .. } => {
+                self.expr(target);
+                self.expr(value);
+            }
             StmtKind::For { target, iter, body } => {
                 self.expr(target);
                 self.expr(iter);

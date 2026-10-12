@@ -11,6 +11,7 @@ module stone
           | Return(expr? value)
 
           | Assign(expr* targets, expr value)
+          | AugAssign(expr target, operator op, expr value)
 
           -- use 'orelse' because else is a keyword in target languages
           | For(expr target, expr iter, stmt* body, stmt* orelse)

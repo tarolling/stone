@@ -74,7 +74,7 @@ the caller assigns the result:
 fn with_total(xs: list[int]) -> list[int];
     total = 0
     for x in xs;
-        total = total + x
+        total += x
     xs.append(total)
     ret xs
 

@@ -14,7 +14,7 @@ print(primes)
 // for walks a list in order
 total = 0
 for p in primes;
-    total = total + p
+    total += p
 print(total)
 
 // assigning a list copies it, so changing the copy leaves the original alone

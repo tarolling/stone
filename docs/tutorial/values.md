@@ -43,6 +43,10 @@ An int raised to a negative exponent has no int result, so `2 ** -1` stops the p
 `negative exponent`. As in Python, `**` groups right to left and binds tighter than a minus sign
 before it, so `2 ** 3 ** 2` is `512` and `-2 ** 2` is `-4`.
 
+Each operator also updates a variable in place: `count += 1` is `count = count + 1`, and `-=`,
+`*=`, `/=`, `%=`, and `**=` work the same way, on list elements too, as in `scores[i] *= 2`.
+See [augmented assignment](../reference/syntax.md#augmented-assignment).
+
 ## Strings
 
 Strings index and slice like lists, compare in dictionary order with `<` and `>`, can be

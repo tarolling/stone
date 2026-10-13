@@ -13,7 +13,10 @@ grammar is
 | `else:` / `elif x:` | `else;` / `elif x;` |
 | `return x` | `ret x` |
 | `continue` | `cont` |
-| `True`, `False`, `None` | `true`, `false`, `none` |
+| `True`, `False` | `true`, `false` |
+| `None`, `Optional[int]` | `none` and `some(x)`, of type `option[int]` |
+| `class Shape(Enum):` | `enum Shape;`, whose variants can hold values, as in Rust |
+| `match x:` / `case P:` | `match x;` / `case P;`, which must cover every value |
 | `'single'` or `"double"` quotes | `"double"` quotes only |
 | `-7 // 2 == -4` | `-7 / 2 == -3` (truncates) |
 | `-7 % 2 == 1` | `-7 % 2 == -1` (takes the dividend's sign, like `/`) |
@@ -31,23 +34,26 @@ These names are reserved and cannot be used for variables or functions:
 | keyword | meaning |
 | --- | --- |
 | `fn` | defines a function |
-| `pub` | lets other files use the function after it, as in `pub fn f() -> int;` |
+| `enum` | defines an enum |
+| `pub` | lets other files use the function or enum after it, as in `pub fn f() -> int;` |
 | `use`, `as` | uses a module or one of its functions, optionally under another name |
 | `ret` | returns from a function, or ends the program at the top level |
 | `if`, `elif`, `else` | conditional blocks |
 | `while` | loops while a condition holds |
 | `for`, `in` | loops over a list or a `range` |
+| `match`, `case` | runs the first case whose pattern fits a value |
 | `break` | leaves the innermost loop |
 | `cont` | skips to the next iteration of the innermost loop |
 | `and`, `or`, `not` | boolean operators, with short-circuiting `and` and `or` |
 | `true`, `false` | the `bool` values |
-| `none` | the only value of type `none` |
+| `none` | the option that holds no value |
 
 ## Lines and blocks
 
 A statement ends at the end of its line. A statement that opens a block (`fn`, `if`, `elif`,
-`else`, `while`, `for`) ends in `;`, followed either by an indented block on the next lines or
-by a single simple statement on the same line:
+`else`, `while`, `for`, `case`) ends in `;`, followed either by an indented block on the next
+lines or by a single simple statement on the same line. `enum` and `match` end in `;` too, and
+are always followed by an indented block: of variants, one per line, or of `case`s:
 
 ```stone
 for i in range(3);
@@ -69,7 +75,8 @@ module's name in a `use` or before a `.`.
 | int | `0`, `42`, `9223372036854775807` |
 | float | `1.5`, `2.5e-3`, `1e9`, `1E+9` |
 | string | `"hello"`, `""` |
-| bool and none | `true`, `false`, `none` |
+| bool | `true`, `false` |
+| option | `none`, `some(1)` |
 | list | `[]`, `[1, 2, 3]`, `[[1.0], []]` |
 | tuple | `(1, "a")`, `(x, y, z,)`, `(1, ("a", [2.5]))` |
 
@@ -99,6 +106,8 @@ themselves, as in `"café"`.
 | unpacking | `q, r = divide(7, 2)`, `a, b = (b, a)`, `(x, (y, z)) = t` |
 | augmented assignment | `x += 1`, `total -= cost`, `items[i] *= 2`, `grid[r][c] **= 2` |
 | function definition | `fn f(a: int, b: int) -> int;` plus a block |
+| enum definition | `enum Shape;` plus a block of variants, such as `Circle(float)` and `Empty` |
+| `match` | `match s;` plus a block of cases, such as `case Shape.Circle(r);` plus a block |
 | `ret` | `ret`, `ret x`, `ret (a, b)` |
 | `if` / `elif` / `else` | `if x < 0;` ... `elif x == 0;` ... `else;` ... |
 | `while` | `while i < 10;` plus a block |
@@ -108,7 +117,7 @@ themselves, as in `"café"`.
 
 A `for` loop's variable is a plain name, or names to unpack each tuple of a list into. Unpacking
 takes names only, each once, as many as the tuple has values; an element such as `xs[0]` is
-assigned on a line of its own. Functions can only be defined at the top level.
+assigned on a line of its own. Functions and enums can only be defined at the top level.
 `use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
 
 ## Augmented assignment
@@ -152,11 +161,12 @@ fn report(name: str, score: float);
     print(name, score)
 ```
 
-A type is `int`, `float`, `bool`, `str`, `none`, `list[T]` for any type `T`, such as
-`list[list[int]]`, or `tuple[T1, T2, ...]` with a type for each of two or more values, such as
-`tuple[str, list[int]]`. A function without `->` returns `none`, the same as writing `-> none`.
-Types are written only in signatures: variables, including a function's locals, never have
-them. See [Types](types.md).
+A type is `int`, `float`, `bool`, `str`, `list[T]` for any type `T`, such as
+`list[list[int]]`, `tuple[T1, T2, ...]` with a type for each of two or more values, such as
+`tuple[str, list[int]]`, `option[T]`, or an enum's name, such as `Shape`, or `shapes.Shape` for
+an enum of a module. A function without `->` returns no value, so a call to it can only be a
+statement of its own, and its `ret` takes no value. Types are written only in signatures:
+variables, including a function's locals, never have them. See [Types](types.md).
 
 ## Operators
 
@@ -167,7 +177,7 @@ From lowest to highest precedence:
 | `or` | `bool` conditions |
 | `and` | `bool` conditions |
 | `not` | a `bool` condition |
-| `==` `!=` `<` `<=` `>` `>=` | numbers; `==` and `!=` also strings, bools, and `none` |
+| `==` `!=` `<` `<=` `>` `>=` | numbers and strings; `==` and `!=` also bools |
 | `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings |
 | `*` `/` `%` | two ints or two floats, or lists of them |
 | unary `+` `-` | an int or a float, or a list of them |
@@ -182,9 +192,39 @@ Parentheses group as usual. Operands are evaluated left to right.
 A method call such as `xs.len()` evaluates the value before the `.` first, then the
 arguments. A change, `xs[i][j] = v` or `xs[i].append(v)`, evaluates the assigned value, then
 each index from the outermost, then the arguments, and only then checks the indexes against the
-lists and makes the change. The builtin methods are `len`, `append`, `pop`, `insert`, `extend`,
-`strip`, and `split`, documented in [Builtins](builtins.md#methods). A `.` right after an int starts a method call, so `1.` is not a
+lists and makes the change. The builtin methods, such as `len`, `append`, `split`, and an option's
+`unwrap`, are documented in [Builtins](builtins.md#methods). A `.` right after an int starts a method call, so `1.` is not a
 float; write `1.0`.
+
+## Enums and match
+
+An enum lists its variants, one per line, each with the types of the values it holds in
+parentheses, or none:
+
+```stone
+enum Shape;
+    Circle(float)
+    Rect(float, float)
+    Empty
+```
+
+`Shape.Circle(1.0)` and `Shape.Empty` make values of it. `match` runs the first case whose pattern
+fits a value:
+
+```stone
+match s;
+    case Shape.Circle(r);
+        print("a circle of radius", r)
+    case Shape.Rect(w, _);
+        print("a rectangle", w, "wide")
+    case _;
+        print("empty")
+```
+
+A pattern is a variant with a pattern for each of its values, such as `Shape.Rect(w, _)` or
+`some(Shape.Circle(r))`, a name, which matches any value and binds it, or `_`, which matches any
+value and binds nothing. `some(p)` and `none` are the patterns of an option. The cases must cover
+every value. See [Types](types.md#enums).
 
 ## Slices
 

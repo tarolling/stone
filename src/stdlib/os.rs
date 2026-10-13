@@ -65,7 +65,7 @@ pub static DOCS: [BuiltinDoc; 9] = [
     },
     BuiltinDoc {
         name: "os.exit",
-        signature: "os.exit(code: int) -> none",
+        signature: "os.exit(code: int)",
         description: "Stops the program at once with the exit status `code`, of which the \
                       system keeps the low 8 bits, so `os.exit(256)` exits with 0.",
     },

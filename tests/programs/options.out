@@ -1,0 +1,16 @@
+cat is at 2
+dog is missing
+some(1) none true false false true
+1 1 -1
+one of each
+[some('x'), none, some('z')]
+x-z
+x z!
+[1, 2, 3] [some([1, 2]), none] [0]
+1 one [some((1, 'one')), none]
+0 zero
+two, then none
+three 5
+(some(2.5), 2)
+[none, some('now')]
+some('abc') none

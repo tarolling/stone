@@ -3,7 +3,8 @@
 //! For example, running `x = 42` followed by `print(x)` prints `42`.
 
 use crate::ast::{
-    BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp, target_names,
+    BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Pattern, PatternKind, Stmt, StmtKind,
+    UnaryOp, target_names,
 };
 use crate::checker::{collect_assigned, place, place_spans, range_args};
 use crate::diagnostic::Diagnostic;
@@ -86,11 +87,74 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Str(Rc<str>),
-    None,
+    /// No value, what a function without `->` returns, which no variable can hold.
+    Unit,
     List(Rc<Vec<Value>>),
     /// A tuple of two or more fields, which never changes.
     Tuple(Rc<[Value]>),
+    /// A value of an enum, which never changes, such as `Shape.Circle(1.0)` or `some(3)`.
+    Enum(Rc<EnumValue>),
 }
+
+/// A variant of an enum and the values it holds, such as `Shape.Rect(2.0, 3.0)`.
+#[derive(Debug)]
+pub struct EnumValue {
+    /// How the variant prints before its values, such as `Shape.Rect` or `some`.
+    pub name: Rc<str>,
+    /// The variant's position in its enum's definition, which tells variants apart.
+    pub tag: usize,
+    pub fields: Vec<Value>,
+}
+
+impl Drop for EnumValue {
+    /// Drops the values this one holds with a loop rather than recursion, so dropping a long
+    /// chain of values, such as a linked list of a million nodes, cannot overflow the stack.
+    fn drop(&mut self) {
+        let mut pending = std::mem::take(&mut self.fields);
+        while let Some(value) = pending.pop() {
+            match value {
+                Value::Enum(mut inner) => {
+                    if let Some(inner) = Rc::get_mut(&mut inner) {
+                        pending.append(&mut inner.fields);
+                    }
+                }
+                Value::List(mut items) => {
+                    if let Some(items) = Rc::get_mut(&mut items) {
+                        pending.append(items);
+                    }
+                }
+                Value::Tuple(mut fields) => {
+                    if let Some(fields) = Rc::get_mut(&mut fields) {
+                        pending
+                            .extend(fields.iter_mut().map(|f| std::mem::replace(f, Value::Unit)));
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+/// Makes the option `none`.
+fn none() -> Value {
+    Value::Enum(Rc::new(EnumValue {
+        name: "none".into(),
+        tag: 0,
+        fields: vec![],
+    }))
+}
+
+/// Makes the option `some(value)`.
+fn some(value: Value) -> Value {
+    Value::Enum(Rc::new(EnumValue {
+        name: "some".into(),
+        tag: 1,
+        fields: vec![value],
+    }))
+}
+
+/// Printing stopped because an enum value is nested more than [`stdlib::MAX_PRINT_DEPTH`] deep.
+struct TooDeep;
 
 /// Makes a new list of strings, such as the pieces `split` returns.
 fn str_list(items: Vec<&str>) -> Value {
@@ -143,29 +207,69 @@ impl Value {
     /// For example, `[1, 2]` prints as `[1, 2]`, `["a"]` as `['a']`, and `(1, "a")` as
     /// `(1, 'a')`.
     fn display(&self, nested: bool) -> String {
-        match self {
-            Value::Int(i) => i.to_string(),
-            Value::Float(x) => stdlib::format_float(*x),
-            Value::Bool(b) => b.to_string(),
-            Value::Str(s) if nested => stdlib::repr_in_list(s),
-            Value::Str(s) => s.to_string(),
-            Value::None => "none".to_string(),
-            Value::List(items) => {
-                let items: Vec<String> = items.iter().map(|v| v.display(true)).collect();
-                format!("[{}]", items.join(", "))
-            }
-            Value::Tuple(fields) => {
-                let fields: Vec<String> = fields.iter().map(|v| v.display(true)).collect();
-                format!("({})", fields.join(", "))
-            }
-        }
+        let mut out = String::new();
+        // only `print` stops at a value nested too deeply, and writes what it has first
+        let _ = self.write(&mut out, nested, 0);
+        out
     }
 
-    /// Returns whether this value holds a list, which a change can copy: a list, or a tuple with
-    /// one among its fields at any depth.
+    /// Writes the value as [`Value::display`] does to `out`, inside `depth` enum values, stopping
+    /// at an enum value nested more than [`stdlib::MAX_PRINT_DEPTH`] deep.
+    ///
+    /// For example, `some(Shape.Circle(1.0))` writes `some(Shape.Circle(1.0))`.
+    fn write(&self, out: &mut String, nested: bool, depth: usize) -> Result<(), TooDeep> {
+        match self {
+            Value::Int(i) => out.push_str(&i.to_string()),
+            Value::Float(x) => out.push_str(&stdlib::format_float(*x)),
+            Value::Bool(b) => out.push_str(&b.to_string()),
+            Value::Str(s) if nested => out.push_str(&stdlib::repr_in_list(s)),
+            Value::Str(s) => out.push_str(s),
+            Value::Unit => {}
+            Value::List(items) => {
+                out.push('[');
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    item.write(out, true, depth)?;
+                }
+                out.push(']');
+            }
+            Value::Tuple(fields) => {
+                out.push('(');
+                for (i, field) in fields.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    field.write(out, true, depth)?;
+                }
+                out.push(')');
+            }
+            Value::Enum(value) => {
+                if depth >= stdlib::MAX_PRINT_DEPTH {
+                    return Err(TooDeep);
+                }
+                out.push_str(&value.name);
+                if !value.fields.is_empty() {
+                    out.push('(');
+                    for (i, field) in value.fields.iter().enumerate() {
+                        if i > 0 {
+                            out.push_str(", ");
+                        }
+                        field.write(out, true, depth + 1)?;
+                    }
+                    out.push(')');
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// Returns whether this value may hold a list, which a change can copy: a list, a tuple with
+    /// one among its fields at any depth, or an enum value.
     fn holds_list(&self) -> bool {
         match self {
-            Value::List(_) => true,
+            Value::List(_) | Value::Enum(_) => true,
             Value::Tuple(fields) => fields.iter().any(Value::holds_list),
             _ => false,
         }
@@ -184,7 +288,7 @@ impl Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::None, Value::None) => true,
+            (Value::Unit, Value::Unit) => true,
             (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
             (Value::Tuple(a), Value::Tuple(b)) => {
                 a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| a.equals(b))
@@ -241,11 +345,11 @@ impl From<&Constant> for Value {
             Constant::Bool(b) => Value::Bool(*b),
             Constant::Str(s) => Value::Str(s.as_str().into()),
             Constant::Char(c) => Value::Str(c.to_string().into()),
-            Constant::None => Value::None,
+            Constant::None => none(),
             Constant::Int(i) | Constant::I64(i) => Value::Int(*i),
             Constant::Float(x) | Constant::F64(x) => Value::Float(*x),
             // other literal kinds are not lexed yet
-            _ => Value::None,
+            _ => Value::Unit,
         }
     }
 }
@@ -403,13 +507,13 @@ fn unary(op: UnaryOp, value: Value) -> EvalResult<Value> {
 
 /// Calls the method `name`, which changes its receiver, on `items` with `args`.
 ///
-/// For example, `append` with `[Value::Int(1)]` pushes 1 and returns `Value::None`, and `pop`
+/// For example, `append` with `[Value::Int(1)]` pushes 1 and returns `Value::Unit`, and `pop`
 /// with no arguments removes and returns the last element.
 fn change_list(items: &mut Vec<Value>, name: &str, args: Vec<Value>) -> EvalResult<Value> {
     match (name, &args[..]) {
         ("append", [item]) => {
             items.push(item.clone());
-            Ok(Value::None)
+            Ok(Value::Unit)
         }
         ("pop", []) => items.pop().ok_or_else(|| stdlib::POP_EMPTY.into()),
         ("pop", [index]) => {
@@ -432,11 +536,11 @@ fn change_list(items: &mut Vec<Value>, name: &str, args: Vec<Value>) -> EvalResu
                 return Err(stdlib::fill(stdlib::INDEX_RANGE, &[index, len]).into());
             }
             items.insert(position as usize, item.clone());
-            Ok(Value::None)
+            Ok(Value::Unit)
         }
         ("extend", [other]) => {
             items.extend(other.as_list()?.iter().cloned());
-            Ok(Value::None)
+            Ok(Value::Unit)
         }
         _ => Err(format!("{name}() is called on a list with the wrong arguments").into()),
     }
@@ -508,6 +612,9 @@ pub struct Interpreter<'out> {
     scopes: Vec<HashMap<String, Value>>,
     /// User-defined functions by name.
     functions: HashMap<String, Rc<Function>>,
+    /// The enums the program defines, by linked name, each with how its variants print, in the
+    /// order of their tags.
+    enums: HashMap<String, Vec<(String, Rc<str>)>>,
     /// The variables each statement of the running body uses for the last time, innermost call
     /// last. A variable is dropped after its last use, so a list that nothing else holds can be
     /// changed in place.
@@ -564,6 +671,7 @@ impl<'out> Interpreter<'out> {
             globals: HashMap::new(),
             scopes: vec![],
             functions: HashMap::new(),
+            enums: HashMap::new(),
             last_uses: vec![],
             global_reads: GlobalReads::new(),
             moves_globals: false,
@@ -663,9 +771,9 @@ impl<'out> Interpreter<'out> {
                 self.global_reads = global_reads(body, &globals);
                 self.moves_globals = true;
                 self.last_uses = vec![Rc::new(LastUses::new(body, &self.global_reads))];
-                // functions can be called before their definition
+                // functions and enums can be used before their definition
                 for stmt in body {
-                    if let StmtKind::FunctionDef { .. } = stmt.kind {
+                    if let StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } = stmt.kind {
                         self.eval_stmt(stmt)?;
                     }
                 }
@@ -689,18 +797,18 @@ impl<'out> Interpreter<'out> {
         // a later entry may read any global, so none moves
         self.moves_globals = false;
         self.last_uses = vec![Rc::default()];
-        // functions can be called before their definition
+        // functions and enums can be used before their definition
         for stmt in body {
-            if let StmtKind::FunctionDef { .. } = stmt.kind {
+            if let StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } = stmt.kind {
                 self.eval_stmt(stmt)?;
             }
         }
         for stmt in body {
             match &stmt.kind {
-                StmtKind::FunctionDef { .. } => {}
+                StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } => {}
                 StmtKind::Expr { value } => {
                     let value = self.eval_expr(value)?;
-                    if !matches!(value, Value::None) {
+                    if !matches!(value, Value::Unit) {
                         writeln!(self.out, "{}", value.display(true))?;
                     }
                 }
@@ -846,7 +954,7 @@ impl<'out> Interpreter<'out> {
                     self.note_top_call(stmt.span, expr, &[]);
                     self.eval_expr(expr)?
                 } else {
-                    Value::None
+                    Value::Unit
                 };
                 Ok(ControlFlow::Return(val))
             }
@@ -968,10 +1076,91 @@ impl<'out> Interpreter<'out> {
                 self.eval_expr(value)?;
                 Ok(ControlFlow::None)
             }
+            StmtKind::EnumDef { name, variants, .. } => {
+                let short = name.rsplit('.').next().unwrap_or(name);
+                let variants = variants
+                    .iter()
+                    .map(|v| (v.name.clone(), format!("{short}.{}", v.name).into()))
+                    .collect();
+                self.enums.insert(name.clone(), variants);
+                Ok(ControlFlow::None)
+            }
+            StmtKind::Match { subject, cases } => {
+                let value = self.eval_expr(subject)?;
+                for case in cases {
+                    let mut bindings = vec![];
+                    if self.pattern_matches(&case.pattern, &value, &mut bindings) {
+                        for (name, value) in bindings {
+                            self.set_var(name, &value)?;
+                        }
+                        return self.eval_block(&case.body);
+                    }
+                }
+                Err("no case of the match fits the value".into())
+            }
             StmtKind::Break => Ok(ControlFlow::Break),
             StmtKind::Continue => Ok(ControlFlow::Continue),
             StmtKind::Use { .. } => Err("use is only allowed at the top level of a file".into()),
         }
+    }
+
+    /// Returns whether `pattern` matches `value`, pushing the value each of its names binds to
+    /// `bindings`.
+    ///
+    /// For example, `some(x)` matches `some(3)` and binds `x` to 3, but does not match `none`.
+    fn pattern_matches<'p>(
+        &self,
+        pattern: &'p Pattern,
+        value: &Value,
+        bindings: &mut Vec<(&'p str, Value)>,
+    ) -> bool {
+        match &pattern.kind {
+            PatternKind::Wildcard => true,
+            PatternKind::Name(name) => {
+                bindings.push((name, value.clone()));
+                true
+            }
+            PatternKind::Variant { path, fields } => {
+                let Value::Enum(found) = value else {
+                    return false;
+                };
+                let tag = match path.as_slice() {
+                    [(name, _)] => usize::from(name == "some"),
+                    [(enum_name, _), (variant, _)] => {
+                        match self.enums.get(enum_name).and_then(|variants| {
+                            variants.iter().position(|(name, _)| name == variant)
+                        }) {
+                            Some(tag) => tag,
+                            None => return false,
+                        }
+                    }
+                    _ => return false,
+                };
+                found.tag == tag
+                    && found.fields.len() == fields.len()
+                    && fields
+                        .iter()
+                        .zip(&found.fields)
+                        .all(|(field, value)| self.pattern_matches(field, value, bindings))
+            }
+        }
+    }
+
+    /// Makes the variant `variant` of the enum `enum_name` holding `fields`.
+    fn variant(&self, enum_name: &str, variant: &str, fields: Vec<Value>) -> EvalResult<Value> {
+        let variants = self
+            .enums
+            .get(enum_name)
+            .ok_or_else(|| format!("'{enum_name}' is not an enum"))?;
+        let tag = variants
+            .iter()
+            .position(|(name, _)| name == variant)
+            .ok_or_else(|| format!("'{enum_name}' has no variant '{variant}'"))?;
+        Ok(Value::Enum(Rc::new(EnumValue {
+            name: variants[tag].1.clone(),
+            tag,
+            fields,
+        })))
     }
 
     /// Evaluates one expression to a constant, so `1 + 2` evaluates to `Int(3)`.
@@ -1141,6 +1330,16 @@ impl<'out> Interpreter<'out> {
             }
             ExprKind::Call { func, args } => {
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind
+                    && let ExprKind::Name { id, .. } = &value.kind
+                    && self.enums.contains_key(id)
+                {
+                    let mut values = Vec::with_capacity(args.len());
+                    for arg in args {
+                        values.push(self.eval_expr(arg)?);
+                    }
+                    return self.variant(id, attr, values);
+                }
+                if let ExprKind::Attribute { value, attr, .. } = &func.kind
                     && stdlib::changes_receiver(attr)
                 {
                     // the receiver's indexes, then the arguments, then the change
@@ -1183,9 +1382,12 @@ impl<'out> Interpreter<'out> {
                 }
                 self.call(id, values)
             }
-            ExprKind::Attribute { attr, .. } => {
-                Err(format!("'{attr}' is a method, so it can only be called").into())
-            }
+            ExprKind::Attribute { value, attr, .. } => match &value.kind {
+                ExprKind::Name { id, .. } if self.enums.contains_key(id) => {
+                    self.variant(id, attr, vec![])
+                }
+                _ => Err(format!("'{attr}' is a method, so it can only be called").into()),
+            },
             ExprKind::Constant { value, kind: _ } => Ok(Value::from(&**value)),
             ExprKind::Subscript { value, slice, .. } => {
                 let list = self.eval_expr(value)?;
@@ -1284,6 +1486,15 @@ impl<'out> Interpreter<'out> {
                 Ok(Value::Bool(s.ends_with(&**suffix)))
             }
             ("endswith", _, _) => Err("endswith() is called on a str, with a str".into()),
+            ("is_some", Value::Enum(option), []) => Ok(Value::Bool(option.tag == 1)),
+            ("is_none", Value::Enum(option), []) => Ok(Value::Bool(option.tag == 0)),
+            ("unwrap", Value::Enum(option), []) => match option.fields.first() {
+                Some(value) => Ok(value.clone()),
+                None => Err(stdlib::UNWRAP_NONE.into()),
+            },
+            ("unwrap_or", Value::Enum(option), [default]) => {
+                Ok(option.fields.first().unwrap_or(default).clone())
+            }
             _ => Err(format!("there is no method '{name}'").into()),
         }
     }
@@ -1298,10 +1509,21 @@ impl<'out> Interpreter<'out> {
     fn call(&mut self, name: &str, args: Vec<Value>) -> EvalResult<Value> {
         match (name, &args[..]) {
             ("print", _) => {
-                let parts: Vec<String> = args.iter().map(|v| v.display(false)).collect();
-                writeln!(self.out, "{}", parts.join(" "))?;
-                return Ok(Value::None);
+                let mut line = String::new();
+                for (i, value) in args.iter().enumerate() {
+                    if i > 0 {
+                        line.push(' ');
+                    }
+                    if value.write(&mut line, false, 0).is_err() {
+                        // what was written before the value nested too deeply stays written
+                        write!(self.out, "{line}")?;
+                        return Err(stdlib::PRINT_DEPTH.into());
+                    }
+                }
+                writeln!(self.out, "{line}")?;
+                return Ok(Value::Unit);
             }
+            ("some", [value]) => return Ok(some(value.clone())),
             ("float", [Value::Int(i)]) => return Ok(Value::Float(*i as f64)),
             ("float", [Value::Float(x)]) => return Ok(Value::Float(*x)),
             ("float", [Value::Str(s)]) => return Ok(Value::Float(stdlib::parse_float(s)?)),
@@ -1357,7 +1579,7 @@ impl<'out> Interpreter<'out> {
             ("math.floor", [Value::Float(x)]) => return Ok(Value::Int(math::floor(*x)?)),
             ("random.seed", [Value::Int(seed)]) => {
                 self.rng = Some(Rng::seeded(*seed));
-                return Ok(Value::None);
+                return Ok(Value::Unit);
             }
             ("random.random", []) => return Ok(Value::Float(self.rng().random())),
             ("random.randint", [Value::Int(low), Value::Int(high)]) => {
@@ -1372,12 +1594,12 @@ impl<'out> Interpreter<'out> {
             ("time.sleep", [Value::Int(seconds)]) => {
                 self.out.flush()?;
                 time::sleep(*seconds as f64)?;
-                return Ok(Value::None);
+                return Ok(Value::Unit);
             }
             ("time.sleep", [Value::Float(seconds)]) => {
                 self.out.flush()?;
                 time::sleep(*seconds)?;
-                return Ok(Value::None);
+                return Ok(Value::Unit);
             }
             _ => {}
         }
@@ -1414,7 +1636,7 @@ impl<'out> Interpreter<'out> {
 
         Ok(match flow? {
             ControlFlow::Return(value) => value,
-            _ => Value::None,
+            _ => Value::Unit,
         })
     }
 
@@ -1522,6 +1744,18 @@ impl<'out> Interpreter<'out> {
 mod tests {
     use super::*;
     use crate::driver::parse;
+
+    #[test]
+    fn dropping_a_long_chain_of_enum_values_takes_no_stack() {
+        // on a test thread's small stack, dropping each value inside the one holding it would
+        // overflow long before a million
+        let mut chain = none();
+        for i in 0..1_000_000 {
+            let link = Value::List(Rc::new(vec![Value::Int(i), chain]));
+            chain = some(Value::Tuple(Rc::from([link, Value::Unit])));
+        }
+        drop(chain);
+    }
 
     /// Runs `source` and returns how many times a change copied a list that something else
     /// still shared.

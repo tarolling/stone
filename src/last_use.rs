@@ -113,8 +113,18 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
             expr_names(iter, out);
             block(body, out);
         }
+        StmtKind::Match { subject, cases } => {
+            expr_names(subject, out);
+            for case in cases {
+                let mut names = Vec::new();
+                case.pattern.names(&mut names);
+                out.extend(names.into_iter().map(|(name, _)| name));
+                block(&case.body, out);
+            }
+        }
         StmtKind::Return { value: None }
         | StmtKind::FunctionDef { .. }
+        | StmtKind::EnumDef { .. }
         | StmtKind::Use { .. }
         | StmtKind::Break
         | StmtKind::Continue => {}
@@ -200,6 +210,9 @@ pub(crate) fn last_uses(body: &[Stmt], reads: &GlobalReads) -> HashMap<Span, Vec
         match &stmt.kind {
             StmtKind::If { body, orelse, .. } => statements.extend(body.iter().chain(orelse)),
             StmtKind::While { body, .. } | StmtKind::For { body, .. } => statements.extend(body),
+            StmtKind::Match { cases, .. } => {
+                statements.extend(cases.iter().flat_map(|case| &case.body))
+            }
             _ => {}
         }
         let Some(live) = after.get(&stmt.span) else {
@@ -316,10 +329,25 @@ impl Liveness<'_> {
                 self.expr(iter, &mut live);
                 live
             }
+            StmtKind::Match { subject, cases } => {
+                let mut live = HashSet::new();
+                for case in cases {
+                    let mut inside = self.block(&case.body, out.clone());
+                    let mut names = Vec::new();
+                    case.pattern.names(&mut names);
+                    for (name, _) in names {
+                        inside.remove(name);
+                    }
+                    live.extend(inside);
+                }
+                self.expr(subject, &mut live);
+                live
+            }
             StmtKind::Return { value: None }
             | StmtKind::Break
             | StmtKind::Continue
             | StmtKind::FunctionDef { .. }
+            | StmtKind::EnumDef { .. }
             | StmtKind::Use { .. } => out,
         }
     }

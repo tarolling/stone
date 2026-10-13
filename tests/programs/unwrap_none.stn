@@ -1,0 +1,9 @@
+// unwrap stops the program when the option is none, pointing at the call
+fn lookup(xs: list[int], i: int) -> option[int];
+    if i < xs.len();
+        ret some(xs[i])
+    ret none
+
+print(lookup([4, 5], 1).unwrap())
+print(lookup([4, 5], 2).unwrap())
+print("never printed")

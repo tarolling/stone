@@ -58,7 +58,7 @@ fn literals_and_operators_have_types() {
     assert_eq!(type_of_symbol(source, "a"), "int");
     assert_eq!(type_of_symbol(source, "b"), "str");
     assert_eq!(type_of_symbol(source, "c"), "bool");
-    assert_eq!(type_of_symbol(source, "d"), "none");
+    assert_eq!(type_of_symbol(source, "d"), "option[int]");
     assert_eq!(type_of_symbol(source, "e"), "bool");
     assert_eq!(type_of_symbol(source, "f"), "int");
 }
@@ -71,9 +71,9 @@ fn function_types_come_from_their_calls_and_returns() {
 }
 
 #[test]
-fn a_function_without_ret_returns_none() {
+fn a_function_without_ret_returns_no_value() {
     let source = "fn greet(name: str);\n    print(\"hi\", name)\ngreet(\"bo\")\n";
-    assert_eq!(type_of_symbol(source, "greet"), "fn(str) -> none");
+    assert_eq!(type_of_symbol(source, "greet"), "fn(str)");
 }
 
 #[test]
@@ -105,11 +105,35 @@ fn parameters_and_returns_take_their_written_types() {
 }
 
 #[test]
-fn a_function_without_a_return_type_returns_none() {
+fn a_function_without_a_return_type_returns_no_value() {
     let source = "fn greet(name: str);\n    print(\"hi\", name)\n";
-    assert_eq!(type_of_symbol(source, "greet"), "fn(str) -> none");
-    let source = "fn greet(name: str) -> none;\n    print(\"hi\", name)\n";
-    assert_eq!(type_of_symbol(source, "greet"), "fn(str) -> none");
+    assert_eq!(type_of_symbol(source, "greet"), "fn(str)");
+}
+
+#[test]
+fn a_call_that_returns_no_value_is_only_a_statement() {
+    let message = "'greet' returns no value, so it can only be called as a statement of its own";
+    let greet = "fn greet(name: str);\n    print(\"hi\", name)\n";
+    assert_error(&format!("{greet}x = greet(\"bo\")\n"), message, 3, 5);
+    assert_error(&format!("{greet}print(greet(\"bo\"))\n"), message, 3, 7);
+    assert_error(&format!("{greet}xs = [greet(\"bo\")]\n"), message, 3, 7);
+    assert_eq!(errors(&format!("{greet}greet(\"bo\")\n")), []);
+    assert_error(
+        "x = print(1)\n",
+        "'print' returns no value, so it can only be called as a statement of its own",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn ret_without_a_value_needs_a_function_without_a_return_type() {
+    assert_error(
+        "fn f() -> int;\n    ret\n",
+        "'f' returns int, so 'ret' needs a value",
+        2,
+        5,
+    );
 }
 
 #[test]
@@ -171,8 +195,8 @@ fn the_body_must_match_the_written_types() {
         9,
     );
     assert_error(
-        "fn f() -> none;\n    ret 1\n",
-        "'f' returns none, but this is int",
+        "fn f() -> option[int];\n    ret 1\n",
+        "'f' returns option[int], but this is int",
         2,
         9,
     );
@@ -216,8 +240,8 @@ fn arithmetic_needs_numbers() {
         5,
     );
     assert_error(
-        "x = none * none\n",
-        "'*' needs int or float operands, found none",
+        "x = true * true\n",
+        "'*' needs int or float operands, found bool",
         1,
         5,
     );
@@ -510,8 +534,8 @@ fn comparisons_need_matching_operands() {
     assert_error("x = 1 == \"a\"\n", "expected int, found str", 1, 10);
     assert_error("x = 1 < 2.5\n", "expected int, found float", 1, 9);
     assert_error(
-        "x = none < none\n",
-        "'<' needs int, float, or str operands, found none",
+        "x = true < false\n",
+        "'<' needs int, float, or str operands, found bool",
         1,
         5,
     );
@@ -1682,7 +1706,6 @@ fn os_functions_have_types() {
         ("os.cpu_count()", "int"),
         ("os.pid()", "int"),
         ("os.cwd()", "str"),
-        ("os.exit(0)", "none"),
     ];
     for (call, ty) in cases {
         assert_eq!(
@@ -1823,12 +1846,7 @@ fn math_functions_check_their_arguments() {
 
 #[test]
 fn time_functions_have_types() {
-    let cases = [
-        ("time.now()", "float"),
-        ("time.clock()", "float"),
-        ("time.sleep(1)", "none"),
-        ("time.sleep(0.5)", "none"),
-    ];
+    let cases = [("time.now()", "float"), ("time.clock()", "float")];
     for (call, ty) in cases {
         assert_eq!(
             linked_type(&format!("use time\nx = {call}\n"), "x"),
@@ -1853,7 +1871,6 @@ fn time_functions_have_types() {
 #[test]
 fn random_functions_have_types() {
     let cases = [
-        ("random.seed(1)", "none"),
         ("random.random()", "float"),
         ("random.randint(1, 6)", "int"),
         ("random.choice([\"a\"])", "str"),
@@ -2088,4 +2105,309 @@ fn a_function_indexes_a_tuple_global_assigned_after_it() {
     );
     // a list global still indexes as before
     assert_eq!(errors("fn first() -> int;\n    ret xs[0]\nxs = [1]\n"), []);
+}
+
+const SHAPE: &str = "enum Shape;\n    Circle(float)\n    Rect(float, float)\n    Empty\n";
+
+#[test]
+fn variants_make_values_of_their_enum() {
+    let source = format!("{SHAPE}a = Shape.Circle(1.0)\nb = Shape.Empty\nc = [a, b]\n");
+    assert_eq!(type_of_symbol(&source, "a"), "Shape");
+    assert_eq!(type_of_symbol(&source, "b"), "Shape");
+    assert_eq!(type_of_symbol(&source, "c"), "list[Shape]");
+    assert_eq!(type_of_symbol(&source, "Rect"), "fn(float, float) -> Shape");
+}
+
+#[test]
+fn enums_can_be_used_before_their_definition_and_hold_themselves() {
+    let source = "fn leaf(n: int) -> Tree;\n    ret Tree.Leaf(n)\n\
+                  t = Tree.Node(leaf(1), leaf(2))\n\
+                  enum Tree;\n    Leaf(int)\n    Node(Tree, Tree)\n";
+    assert_eq!(type_of_symbol(source, "t"), "Tree");
+    assert_eq!(type_of_symbol(source, "leaf"), "fn(int) -> Tree");
+}
+
+#[test]
+fn variants_check_their_values() {
+    assert_error(
+        &format!("{SHAPE}a = Shape.Circle(\"one\")\n"),
+        "expected float, found str",
+        5,
+        18,
+    );
+    assert_error(
+        &format!("{SHAPE}a = Shape.Rect(1.0)\n"),
+        "'Shape.Rect' holds 2 values, but 1 was given",
+        5,
+        5,
+    );
+    assert_error(
+        &format!("{SHAPE}a = Shape.Circle\n"),
+        "'Shape.Circle' holds 1 value, so make one with a call, as in 'Shape.Circle(...)'",
+        5,
+        5,
+    );
+    assert_error(
+        &format!("{SHAPE}a = Shape.Empty()\n"),
+        "'Shape.Empty' holds no values, so it is written without parentheses, as 'Shape.Empty'",
+        5,
+        5,
+    );
+    assert_error(
+        &format!("{SHAPE}a = Shape.Square(2.0)\n"),
+        "'Shape' has no variant 'Square'",
+        5,
+        11,
+    );
+    assert_error(
+        &format!("{SHAPE}a = Shape\n"),
+        "'Shape' is an enum, so a value of it is one of its variants, as in 'Shape.Circle'",
+        5,
+        5,
+    );
+}
+
+#[test]
+fn enum_definitions_are_checked() {
+    assert_error(
+        "enum A;\n    X\nenum A;\n    Y\n",
+        "enum 'A' is already defined",
+        3,
+        6,
+    );
+    assert_error(
+        "enum A;\n    X\n    X(int)\n",
+        "'A' already has a variant 'X'",
+        3,
+        5,
+    );
+    assert_error(
+        "enum option;\n    X\n",
+        "cannot redefine builtin 'option'",
+        1,
+        6,
+    );
+    assert_error(
+        "enum list;\n    X\n",
+        "cannot redefine builtin 'list'",
+        1,
+        6,
+    );
+    assert_error(
+        "enum A;\n    X(Missing)\n",
+        "there is no type 'Missing'",
+        2,
+        7,
+    );
+    assert_error(
+        "if true;\n    enum A;\n        X\n",
+        "enums can only be defined at the top level",
+        2,
+        10,
+    );
+    assert_error(
+        "enum A;\n    X\nfn A();\n    ret\n",
+        "'A' is already defined as an enum",
+        3,
+        4,
+    );
+    assert_error("enum A;\n    X\nA = 1\n", "cannot assign to enum 'A'", 3, 1);
+    let wide = vec!["int"; 33].join(", ");
+    assert_error(
+        &format!("enum A;\n    X({wide})\n"),
+        "a variant can hold at most 32 values, but 'A.X' holds 33",
+        2,
+        5,
+    );
+}
+
+#[test]
+fn written_types_name_enums_and_options() {
+    let source =
+        format!("{SHAPE}fn first(xs: list[Shape]) -> option[Shape];\n    ret some(xs[0])\n");
+    assert_eq!(
+        type_of_symbol(&source, "first"),
+        "fn(list[Shape]) -> option[Shape]"
+    );
+    assert_error(
+        "fn f(x: option) -> int;\n    ret 1\n",
+        "'option' takes one type, as in 'option[int]'",
+        1,
+        9,
+    );
+    assert_error(
+        &format!("{SHAPE}fn f(x: Shape[int]) -> int;\n    ret 1\n"),
+        "'Shape' takes no types",
+        5,
+        9,
+    );
+}
+
+#[test]
+fn options_hold_a_value_or_none() {
+    let source = "a = some(1)\nb = none\nb = some(\"x\")\nc = a.unwrap()\nd = b.unwrap_or(\"y\")\n\
+                  e = a.is_some()\nf = a.is_none()\n";
+    assert_eq!(type_of_symbol(source, "a"), "option[int]");
+    assert_eq!(type_of_symbol(source, "b"), "option[str]");
+    assert_eq!(type_of_symbol(source, "c"), "int");
+    assert_eq!(type_of_symbol(source, "d"), "str");
+    assert_eq!(type_of_symbol(source, "e"), "bool");
+    assert_eq!(type_of_symbol(source, "f"), "bool");
+    assert_error(
+        "a = some(1)\na = some(2.5)\n",
+        "cannot assign option[float] to 'a', which is option[int]",
+        2,
+        5,
+    );
+    assert_error(
+        "x = [1].unwrap()\n",
+        "'unwrap' needs an option, found list[int]",
+        1,
+        5,
+    );
+    assert_error(
+        "x = some(1).unwrap_or(\"a\")\n",
+        "expected int, found str",
+        1,
+        23,
+    );
+}
+
+#[test]
+fn enums_and_options_cannot_be_compared() {
+    assert_error(
+        "x = some(1)\nprint(x == none)\n",
+        "'==' and '!=' cannot compare option[int]; tell its variants apart with 'match', or an \
+         option's with 'is_some()' and 'is_none()'",
+        2,
+        7,
+    );
+    assert_error(
+        "x = some(1)\nif x;\n    print(1)\n",
+        "a condition must be bool, found option[int]",
+        2,
+        4,
+    );
+}
+
+#[test]
+fn a_match_binds_the_values_of_each_case() {
+    let source = format!(
+        "{SHAPE}fn area(s: Shape) -> float;\n    match s;\n        case Shape.Circle(r);\n            \
+         ret 3.0 * r * r\n        case Shape.Rect(w, _);\n            ret w\n        case \
+         Shape.Empty;\n            ret 0.0\n"
+    );
+    let analysis = analyze_source(&source);
+    assert_eq!(analysis.diagnostics, []);
+    let r = analysis.symbols.iter().find(|s| s.name == "r").unwrap();
+    assert_eq!(r.ty, Type::Float);
+    assert_eq!(r.kind, SymbolKind::Local);
+}
+
+#[test]
+fn nested_patterns_match_options_of_enums() {
+    let source = format!(
+        "{SHAPE}x = some(Shape.Circle(1.0))\nmatch x;\n    case some(Shape.Circle(r));\n        \
+         print(r)\n    case some(_);\n        print(0)\n    case none;\n        print(1)\n"
+    );
+    assert_eq!(errors(&source), []);
+}
+
+#[test]
+fn a_match_must_cover_every_value() {
+    assert_error(
+        &format!("{SHAPE}s = Shape.Empty\nmatch s;\n    case Shape.Circle(_);\n        print(1)\n"),
+        "'match' does not cover Shape.Rect(_, _); add 'case Shape.Rect(_, _);' or 'case _;'",
+        6,
+        7,
+    );
+    assert_error(
+        "x = some(some(1))\nmatch x;\n    case some(some(n));\n        print(n)\n    case none;\n        \
+         print(0)\n",
+        "'match' does not cover some(none); add 'case some(none);' or 'case _;'",
+        2,
+        7,
+    );
+    assert_eq!(
+        errors(&format!(
+            "{SHAPE}s = Shape.Empty\nmatch s;\n    case Shape.Empty;\n        print(1)\n    case other;\n        print(2)\n"
+        )),
+        []
+    );
+}
+
+#[test]
+fn a_case_after_one_that_matches_everything_never_runs() {
+    let source =
+        "x = some(1)\nmatch x;\n    case _;\n        print(1)\n    case none;\n        print(0)\n";
+    let analysis = analyze_source(source);
+    assert_eq!(analysis.diagnostics.len(), 1);
+    let warning = &analysis.diagnostics[0];
+    assert_eq!(warning.severity, crate::diagnostic::Severity::Warning);
+    assert_eq!(
+        warning.message,
+        "this case never runs, since the cases before it match every value it would"
+    );
+    assert_eq!(warning.span.start, Pos::new(5, 10));
+}
+
+#[test]
+fn patterns_are_checked_against_the_value() {
+    assert_error(
+        &format!("{SHAPE}s = Shape.Empty\nmatch s;\n    case Empty;\n        print(1)\n"),
+        "'Empty' here is a new variable that matches any value; to match the variant, write \
+         'Shape.Empty'",
+        7,
+        10,
+    );
+    assert_error(
+        &format!(
+            "{SHAPE}s = Shape.Empty\nmatch s;\n    case some(x);\n        print(x)\n    case _;\n        print(0)\n"
+        ),
+        "this pattern matches option[unknown], but the value is Shape",
+        7,
+        10,
+    );
+    assert_error(
+        &format!(
+            "{SHAPE}s = Shape.Empty\nmatch s;\n    case Shape.Rect(w);\n        print(w)\n    case _;\n        print(0)\n"
+        ),
+        "'Shape.Rect' holds 2 values, but this pattern has 1",
+        7,
+        10,
+    );
+    assert_error(
+        &format!(
+            "{SHAPE}s = Shape.Empty\nmatch s;\n    case Shape.Rect(w, w);\n        print(w)\n    case _;\n        print(0)\n"
+        ),
+        "'w' is bound more than once in this pattern",
+        7,
+        24,
+    );
+    assert_error(
+        "match 3;\n    case n;\n        print(n)\n",
+        "'match' needs an enum or option value, found int",
+        1,
+        7,
+    );
+    assert_error(
+        "x = some(1)\nmatch x;\n    case other(y);\n        print(y)\n    case _;\n        print(0)\n",
+        "'other' is not a variant; write a variant with its enum, as in 'Shape.Circle(r)', or 'some(x)'",
+        3,
+        10,
+    );
+}
+
+#[test]
+fn a_name_bound_in_every_case_is_assigned_after_the_match() {
+    let both = "x = some(1)\nmatch x;\n    case some(n);\n        y = n\n    case none;\n        y = 0\nprint(y)\n";
+    assert_eq!(errors(both), []);
+    let one = "x = some(1)\nmatch x;\n    case some(n);\n        y = n\n    case none;\n        print(0)\nprint(y)\n";
+    assert_error(one, "'y' might be used before it is assigned", 7, 7);
+}
+
+#[test]
+fn a_match_whose_cases_all_return_returns() {
+    let source = "fn f(x: option[int]) -> int;\n    match x;\n        case some(n);\n            ret n\n        case none;\n            ret 0\n";
+    assert_eq!(errors(source), []);
 }

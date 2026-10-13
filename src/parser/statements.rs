@@ -2,7 +2,8 @@
 
 use super::Parser;
 use crate::ast::{
-    Arg, Arguments, Expr, Operator, ParserError, Stmt, StmtKind, TypeExpr, TypeExprKind,
+    Arg, Arguments, Expr, MatchCase, Operator, ParserError, Pattern, PatternKind, Stmt, StmtKind,
+    TypeExpr, TypeExprKind, Variant,
 };
 use crate::debug;
 use crate::span::Span;
@@ -239,20 +240,18 @@ impl Parser {
         })
     }
 
-    /// Parses a type in a function's signature, such as `int`, `list[list[float]]`, or
-    /// `tuple[int, str]`.
+    /// Parses a type in a function's signature, such as `int`, `list[list[float]]`,
+    /// `tuple[int, str]`, `option[int]`, or an enum such as `Shape` or `shapes.Shape`.
     ///
     /// ```text
     /// type:
-    ///     | 'none'
     ///     | 'list' '[' type ']'
     ///     | 'tuple' '[' type (',' type)+ [','] ']'
-    ///     | NAME  # int, float, bool, or str
+    ///     | NAME ('.' NAME)* ['[' ','.type+ [','] ']']
     /// ```
     pub(super) fn parse_type(&mut self) -> Result<Box<TypeExpr>, ParserError> {
         let mark = self.pos;
         let scalar = match &self.peek().r#type {
-            TokenType::Keyword(word) if word == "none" => Some(TypeExprKind::None),
             TokenType::Name(name) => match name.as_str() {
                 "int" => Some(TypeExprKind::Int),
                 "float" => Some(TypeExprKind::Float),
@@ -263,7 +262,7 @@ impl Parser {
             _ => None,
         };
 
-        // 'none' | NAME
+        // NAME for int, float, bool, or str
         if let Some(kind) = scalar {
             self.pos += 1;
             return Ok(Box::new(TypeExpr {
@@ -272,8 +271,14 @@ impl Parser {
             }));
         }
 
-        // 'list' '[' type ']'
-        if self.peek().r#type == TokenType::Name("list".to_string()) {
+        if self.peek().r#type == TokenType::Keyword("none".to_string()) {
+            let span = self.peek().span;
+            self.hint(
+                span,
+                "'none' is not a type: a function without '->' returns no value, and 'option[T]' holds a value or none",
+            );
+        } else if self.peek().r#type == TokenType::Name("list".to_string()) {
+            // 'list' '[' type ']'
             self.pos += 1;
             if self.expect(TokenType::LBracket).is_some()
                 && let Ok(elem) = self.nested(Self::parse_type)
@@ -288,20 +293,8 @@ impl Parser {
             // 'tuple' '[' type (',' type)+ [','] ']'
             self.pos += 1;
             if self.expect(TokenType::LBracket).is_some()
-                && let Ok(first) = self.nested(Self::parse_type)
+                && let Some(elts) = self.parse_types()
             {
-                let mut elts = vec![*first];
-                while self.expect(TokenType::Comma).is_some() {
-                    let before = self.pos;
-                    match self.nested(Self::parse_type) {
-                        Ok(elt) => elts.push(*elt),
-                        Err(_) => {
-                            // a trailing comma is allowed
-                            self.pos = before;
-                            break;
-                        }
-                    }
-                }
                 if elts.len() == 1 && self.peek().r#type == TokenType::RBracket {
                     let span = self.tokens[mark].span.to(self.peek().span);
                     self.hint(
@@ -315,8 +308,34 @@ impl Parser {
                     }));
                 }
             }
-        } else {
-            self.record_expected("a type".to_string(), false);
+        } else if let Some((first, _)) = self.expect_name("a type", false) {
+            // NAME ('.' NAME)* ['[' ','.type+ [','] ']']
+            let mut name = first;
+            loop {
+                let before = self.pos;
+                if self.expect(TokenType::Dot).is_some()
+                    && let Some((part, _)) = self.expect_name("a type name", false)
+                {
+                    name = format!("{name}.{part}");
+                    continue;
+                }
+                self.pos = before;
+                break;
+            }
+            let args = if self.expect(TokenType::LBracket).is_some() {
+                match self.parse_types() {
+                    Some(args) if self.expect(TokenType::RBracket).is_some() => Some(args),
+                    _ => None,
+                }
+            } else {
+                Some(vec![])
+            };
+            if let Some(args) = args {
+                return Ok(Box::new(TypeExpr {
+                    kind: TypeExprKind::Named { name, args },
+                    span: self.span_from(mark),
+                }));
+            }
         }
         self.pos = mark;
 
@@ -325,6 +344,280 @@ impl Parser {
             token: self.peek().r#type.clone(),
             span: self.peek().span,
         })
+    }
+
+    /// Parses one or more types separated by commas, allowing a trailing comma, such as
+    /// `int, str` in `tuple[int, str]`. Returns `None` if the first type fails.
+    fn parse_types(&mut self) -> Option<Vec<TypeExpr>> {
+        let first = self.nested(Self::parse_type).ok()?;
+        let mut types = vec![*first];
+        while self.expect(TokenType::Comma).is_some() {
+            let before = self.pos;
+            match self.nested(Self::parse_type) {
+                Ok(ty) => types.push(*ty),
+                Err(_) => {
+                    // a trailing comma is allowed
+                    self.pos = before;
+                    break;
+                }
+            }
+        }
+        Some(types)
+    }
+
+    /// Parses an enum definition, such as `enum Shape;` followed by an indented line for each
+    /// variant, like `Circle(float)` or `Empty`.
+    ///
+    /// ```text
+    /// enum_def:
+    ///     | ['pub'] 'enum' NAME ';' NEWLINE INDENT variant+ DEDENT
+    /// ```
+    pub(super) fn parse_enum_def(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
+        // ['pub'] 'enum' NAME ';' NEWLINE INDENT variant+ DEDENT
+        let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
+        if self
+            .expect(TokenType::Keyword("enum".to_string()))
+            .is_some()
+            && let Some((name, name_span)) = self.expect_name("an enum name", false)
+            && self.expect(TokenType::Semi).is_some()
+            && self.expect(TokenType::Newline).is_some()
+            && self.expect(TokenType::Indent).is_some()
+            && let Ok(variants) = self.nested(Self::parse_variants)
+            && self.expect(TokenType::Dedent).is_some()
+        {
+            return Ok(Box::new(Stmt::new(
+                StmtKind::EnumDef {
+                    name,
+                    name_span,
+                    public,
+                    variants,
+                },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_enum_def".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses the variants of an enum, one per line, up to the `Dedent` that ends them.
+    ///
+    /// ```text
+    /// variant:
+    ///     | NAME ['(' ','.type+ [','] ')'] NEWLINE
+    /// ```
+    fn parse_variants(&mut self) -> Result<Vec<Variant>, ParserError> {
+        let mut variants = vec![];
+        loop {
+            let mark = self.pos;
+            let Some((name, span)) = self.expect_name("a variant name", false) else {
+                break;
+            };
+            let fields = if self.expect(TokenType::LParen).is_some() {
+                if self.peek().r#type == TokenType::RParen {
+                    self.hint(
+                        span,
+                        &format!(
+                            "a variant without values is written without parentheses, as in '{name}'"
+                        ),
+                    );
+                    None
+                } else {
+                    match self.parse_types() {
+                        Some(fields) if self.expect(TokenType::RParen).is_some() => Some(fields),
+                        _ => None,
+                    }
+                }
+            } else {
+                Some(vec![])
+            };
+            match fields {
+                Some(fields) if self.expect(TokenType::Newline).is_some() => {
+                    variants.push(Variant { name, span, fields });
+                }
+                _ => {
+                    self.pos = mark;
+                    break;
+                }
+            }
+            if self.peek().r#type == TokenType::Dedent {
+                return Ok(variants);
+            }
+        }
+
+        Err(ParserError {
+            method: "parse_variants".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses a `match` statement, such as `match s;` followed by an indented `case` for each
+    /// pattern, like `case Shape.Circle(r); print(r)`.
+    ///
+    /// ```text
+    /// match_stmt:
+    ///     | 'match' expression ';' NEWLINE INDENT case_block+ DEDENT
+    /// case_block:
+    ///     | 'case' pattern ';' block
+    /// ```
+    pub(super) fn parse_match_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
+        // 'match' expression ';' NEWLINE INDENT case_block+ DEDENT
+        if self
+            .expect(TokenType::Keyword("match".to_string()))
+            .is_some()
+            && let Ok(subject) = self.parse_expression()
+            && self.expect(TokenType::Semi).is_some()
+            && self.expect(TokenType::Newline).is_some()
+            && self.expect(TokenType::Indent).is_some()
+            && let Ok(cases) = self.nested(Self::parse_cases)
+            && self.expect(TokenType::Dedent).is_some()
+        {
+            return Ok(Box::new(Stmt::new(
+                StmtKind::Match { subject, cases },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_match_stmt".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses the cases of a `match`, up to the `Dedent` that ends them.
+    fn parse_cases(&mut self) -> Result<Vec<MatchCase>, ParserError> {
+        let mut cases = vec![];
+        loop {
+            let mark = self.pos;
+            if self
+                .expect(TokenType::Keyword("case".to_string()))
+                .is_some()
+                && let Ok(pattern) = self.parse_pattern()
+                && self.expect(TokenType::Semi).is_some()
+                && let Ok(body) = self.nested(Self::parse_block)
+            {
+                cases.push(MatchCase { pattern, body });
+                if self.peek().r#type == TokenType::Dedent {
+                    return Ok(cases);
+                }
+                continue;
+            }
+            self.pos = mark;
+            break;
+        }
+
+        Err(ParserError {
+            method: "parse_cases".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses a pattern after `case`, such as `Shape.Rect(w, _)`, `some(x)`, `none`, a name, or
+    /// `_`.
+    ///
+    /// ```text
+    /// pattern:
+    ///     | 'none'
+    ///     | NAME ('.' NAME)* ['(' ','.pattern+ [','] ')']
+    /// ```
+    pub(super) fn parse_pattern(&mut self) -> Result<Pattern, ParserError> {
+        let mark = self.pos;
+
+        // 'none'
+        if let Some(token) = self.expect(TokenType::Keyword("none".to_string())) {
+            return Ok(Pattern {
+                kind: PatternKind::Variant {
+                    path: vec![("none".to_string(), token.span)],
+                    fields: vec![],
+                },
+                span: token.span,
+            });
+        }
+
+        // NAME ('.' NAME)* ['(' ','.pattern+ [','] ')']
+        if let Some(first) = self.expect_name("a pattern", false) {
+            let mut path = vec![first];
+            loop {
+                let before = self.pos;
+                if self.expect(TokenType::Dot).is_some()
+                    && let Some(part) = self.expect_name("a variant name", false)
+                {
+                    path.push(part);
+                    continue;
+                }
+                self.pos = before;
+                break;
+            }
+            let called = self.expect(TokenType::LParen).is_some();
+            let fields = if called {
+                match self.parse_patterns() {
+                    Some(fields) if self.expect(TokenType::RParen).is_some() => Some(fields),
+                    _ => None,
+                }
+            } else {
+                Some(vec![])
+            };
+            if let Some(fields) = fields {
+                let kind = match path.as_slice() {
+                    [(name, _)] if !called && name == "_" => PatternKind::Wildcard,
+                    [(name, _)] if !called => PatternKind::Name(name.clone()),
+                    _ => PatternKind::Variant { path, fields },
+                };
+                return Ok(Pattern {
+                    kind,
+                    span: self.span_from(mark),
+                });
+            }
+        } else if matches!(
+            self.peek().r#type,
+            TokenType::Number(_) | TokenType::Float(_) | TokenType::String(_)
+        ) || matches!(&self.peek().r#type, TokenType::Keyword(word) if word == "true" || word == "false")
+            || matches!(&self.peek().r#type, TokenType::Operator(op) if op == "-")
+        {
+            let span = self.peek().span;
+            self.hint(
+                span,
+                "a pattern is a variant such as 'Shape.Circle(r)', 'some(x)', or 'none', a name, or '_'",
+            );
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_pattern".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses one or more patterns separated by commas, allowing a trailing comma, such as
+    /// `w, _` in `Shape.Rect(w, _)`. Returns `None` if the first pattern fails.
+    fn parse_patterns(&mut self) -> Option<Vec<Pattern>> {
+        let first = self.nested(Self::parse_pattern).ok()?;
+        let mut patterns = vec![first];
+        while self.expect(TokenType::Comma).is_some() {
+            let before = self.pos;
+            match self.nested(Self::parse_pattern) {
+                Ok(pattern) => patterns.push(pattern),
+                Err(_) => {
+                    // a trailing comma is allowed
+                    self.pos = before;
+                    break;
+                }
+            }
+        }
+        Some(patterns)
     }
 
     /// Parses a comma-separated parameter list, such as `a: int, b: int` in
@@ -645,15 +938,29 @@ impl Parser {
     /// ```text
     /// compound_stmt:
     ///     | function_def
+    ///     | enum_def
     ///     | if_stmt
     ///     | for_stmt
     ///     | while_stmt
+    ///     | match_stmt
     /// ```
     pub(super) fn parse_compound_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
         // function_def
         if let Ok(stmt) = self.parse_function_def() {
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
+        // enum_def
+        if let Ok(stmt) = self.parse_enum_def() {
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
+        // match_stmt
+        if let Ok(stmt) = self.parse_match_stmt() {
             return Ok(stmt);
         }
         self.pos = mark;

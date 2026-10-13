@@ -88,6 +88,8 @@ simple_stmt:
 
 compound_stmt:
     | function_def
+    | enum_def
+    | match_stmt
     | if_stmt
     | for_stmt
     | while_stmt
@@ -145,11 +147,36 @@ param:
 # Types
 # -----
 
+# a name is int, float, bool, or str, or else an enum, which the checker looks up, or
+# 'option' '[' type ']'; 'none' is not a type
 type:
-    | 'none'
     | 'list' '[' type ']'
     | 'tuple' '[' type (',' type)+ [','] ']'
-    | NAME  # int, float, bool, or str
+    | NAME ('.' NAME)* ['[' ','.type+ [','] ']']
+
+# Enum definitions
+# ----------------
+
+enum_def:
+    | ['pub'] 'enum' NAME ';' NEWLINE INDENT variant+ DEDENT
+
+variant:
+    | NAME ['(' ','.type+ [','] ')'] NEWLINE
+
+# Match statement
+# ---------------
+
+match_stmt:
+    | 'match' expression ';' NEWLINE INDENT case_block+ DEDENT
+
+case_block:
+    | 'case' pattern ';' block
+
+# a single NAME without parentheses binds, and '_' matches anything; any other is a variant,
+# as in Shape.Circle(r), some(x), or Shape.Empty
+pattern:
+    | 'none'
+    | NAME ('.' NAME)* ['(' ','.pattern+ [','] ')']
 
 # If statement
 # ------------

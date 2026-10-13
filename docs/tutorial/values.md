@@ -18,8 +18,8 @@ prints
 | `float` | `2.5`, `1e16`, `0.1` | IEEE 754 double |
 | `bool` | `true`, `false` | |
 | `str` | `"hello"`, `"a\tb\n"` | double quotes only, cannot span lines; `\n`, `\"`, and other escapes |
-| `none` | `none` | what a function without `->` returns |
 | `list[T]` | `[1, 2, 3]` | see {doc}`lists` |
+| `option[T]` | `some(1)`, `none` | a value that may be missing; see {doc}`enums` |
 
 Variables never have types written down. The checker infers each variable's type from what is
 assigned to it, and a variable keeps that type: assigning `"a"` to a variable that holds an `int`

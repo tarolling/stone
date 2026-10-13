@@ -9,16 +9,18 @@ as in `use math`. The same descriptions appear on hover in the editor.
 ## `print`
 
 ```text
-print(values...) -> none
+print(values...)
 ```
 
 Prints the values separated by spaces, followed by a newline. `print()` prints an empty line.
-Floats print like Python's `repr`, bools as `true` and `false`, and lists with their elements
-in brackets, with strings inside a list in single quotes:
+Floats print like Python's `repr`, bools as `true` and `false`, lists with their elements in
+brackets, with strings inside a list in single quotes, and enum values as they are written:
 
 ```stone
-print("total", 3, 0.5, true, none, [1, 2], ["a"])   // total 3 0.5 true none [1, 2] ['a']
+print("total", 3, 0.5, true, some(1), [1, 2], ["a"])   // total 3 0.5 true some(1) [1, 2] ['a']
 ```
+
+`print` returns no value, so a call to it is a statement of its own.
 
 ## `range`
 
@@ -132,6 +134,24 @@ for a in args();
 print(total)
 ```
 
+## `some`
+
+```text
+some(value: T) -> option[T]
+```
+
+Returns an option that holds `value`. The other option is `none`, which holds nothing, so a
+function that may have no answer returns `option[T]`, and `match` reads one with the patterns
+`some(x)` and `none`. See [Types](types.md#options).
+
+```stone
+fn first(xs: list[int]) -> option[int];
+    if xs.len() > 0;
+        ret some(xs[0])
+    ret none
+print(first([7, 8]), first([]))   // some(7) none
+```
+
 ## Methods
 
 A method is called on a value with a `.`, as in `items.append(4)`. The value before the `.` is
@@ -154,7 +174,7 @@ print("stone".len(), [1, 2, 3].len(), [].len())   // 5 3 0
 ### `append`
 
 ```text
-list[T].append(item: T) -> none
+list[T].append(item: T)
 ```
 
 Adds `item` to the end of the list. Since lists are values, this changes only the variable
@@ -189,7 +209,7 @@ print(top, first, stack)   // 3 1 [2]
 ### `insert`
 
 ```text
-list[T].insert(index: int, item: T) -> none
+list[T].insert(index: int, item: T)
 ```
 
 Puts `item` at `index`, moving the elements from there on up by one, so `xs.insert(0, x)` adds
@@ -207,7 +227,7 @@ print(xs)   // [0, 1, 2, 3]
 ### `extend`
 
 ```text
-list[T].extend(items: list[T]) -> none
+list[T].extend(items: list[T])
 ```
 
 Adds every element of `items` to the end of the list, in order. A list can extend itself. It is
@@ -301,6 +321,51 @@ Returns whether the string ends with `suffix`. Every string ends with `""`.
 
 ```stone
 print("main.stn".endswith(".stn"), "main.stn".endswith("main"))   // true false
+```
+
+### `is_some`
+
+```text
+option[T].is_some() -> bool
+```
+
+Returns whether the option holds a value.
+
+### `is_none`
+
+```text
+option[T].is_none() -> bool
+```
+
+Returns whether the option is `none`.
+
+```stone
+print(some(1).is_some(), some(1).is_none(), none.is_none())   // true false true
+```
+
+### `unwrap`
+
+```text
+option[T].unwrap() -> T
+```
+
+Returns the value the option holds. It stops the program with `cannot unwrap none` if the option
+is `none`, so use it where the option cannot be `none`, and `match` or `unwrap_or` elsewhere.
+
+```stone
+print(some("a").unwrap())   // a
+```
+
+### `unwrap_or`
+
+```text
+option[T].unwrap_or(default: T) -> T
+```
+
+Returns the value the option holds, or `default` if it is `none`.
+
+```stone
+print(some(3).unwrap_or(0), none.unwrap_or(0))   // 3 0
 ```
 
 ## The `os` module
@@ -400,7 +465,7 @@ deleted.
 ### `os.exit`
 
 ```text
-os.exit(code: int) -> none
+os.exit(code: int)
 ```
 
 Stops the program at once with the exit status `code`. Nothing after it runs, and it prints
@@ -532,7 +597,7 @@ run differs.
 ### `random.seed`
 
 ```text
-random.seed(n: int) -> none
+random.seed(n: int)
 ```
 
 Starts the numbers over from `n`, so the same seed always gives the same numbers.
@@ -630,7 +695,7 @@ print("took", time.clock() - start, "seconds")
 ### `time.sleep`
 
 ```text
-time.sleep(seconds: int | float) -> none
+time.sleep(seconds: int | float)
 ```
 
 Waits for at least `seconds`, which may have a fraction, so `time.sleep(0.25)` waits a quarter

@@ -19,6 +19,7 @@ pub mod floats;
 use crate::ast::Mod;
 use crate::codegen::context::{
     Context, LIST_ROUTINES, STRING_METHOD_ROUTINES, escape, global_label, immortal_string,
+    variant_statics,
 };
 use crate::codegen::{AssemblyGenerator, Os, Target};
 use crate::project::SourceMap;
@@ -108,7 +109,11 @@ impl AssemblyGenerator for Arm64Generator {
             builtins::string_runtime(self);
         }
         if self.ctx.counts_references {
-            builtins::memory_runtime(self);
+            let enums = self.ctx.needs_enums();
+            builtins::memory_runtime(self, enums);
+            if enums {
+                builtins::enum_runtime(self);
+            }
         }
         if self.ctx.needs_env() {
             builtins::env_runtime(self);
@@ -425,7 +430,8 @@ impl Arm64Generator {
     /// `.data`, since retaining and releasing a string writes its count.
     fn emit_string_literals(&mut self) {
         let literals = self.ctx.string_literals();
-        if literals.is_empty() {
+        let statics = std::mem::take(&mut self.ctx.variant_statics);
+        if literals.is_empty() && statics.is_empty() {
             return;
         }
 
@@ -434,6 +440,7 @@ impl Arm64Generator {
         for (label, text) in literals {
             immortal_string(self, &label, &text);
         }
+        variant_statics(self, &statics);
         self.emit("");
     }
 
@@ -454,6 +461,14 @@ impl Arm64Generator {
         }
         if self.ctx.counts_references {
             self.emit("stone.live:");
+            self.emit("\t.zero\t8");
+        }
+        if self.ctx.counts_references && self.ctx.needs_enums() {
+            // the enum values waiting to be freed, linked through their tags, and whether
+            // `stone.free_enum` is freeing them
+            self.emit("stone.free_pending:");
+            self.emit("\t.zero\t8");
+            self.emit("stone.freeing:");
             self.emit("\t.zero\t8");
         }
         if self.ctx.uses(&["stone.args"]) {

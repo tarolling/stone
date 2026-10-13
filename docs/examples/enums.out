@@ -1,0 +1,5 @@
+Shape.Circle(1.0) 3.0
+Shape.Rect(2.0, 3.0) 6.0
+Shape.Empty 0.0
+bo is at 1
+none 0

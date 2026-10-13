@@ -13,10 +13,10 @@ print(1 < 2, 2 < 1)
 print("with spaces", "", "and after an empty string")
 print()
 
-// a function without ret returns none
+// a function without ret returns no value, so its call is a statement
 fn nothing();
     x = 1
-print(nothing())
+nothing()
 
 // arguments are all evaluated before anything on the line is printed
 fn loud(n: int) -> int;

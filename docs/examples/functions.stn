@@ -12,11 +12,11 @@ fn fib(n: int) -> int;
         ret n
     ret fib(n - 1) + fib(n - 2)
 
-// a function without -> returns none
+// a function without -> returns no value, so calling it is a statement of its own
 fn greet(name: str);
     print("hi " + name)
 
-print(greet("ada"))
+greet("ada")
 
 // assigning inside a function makes a local; other names are globals
 counter = 10

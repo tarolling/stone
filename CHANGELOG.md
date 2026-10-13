@@ -10,6 +10,35 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-12
+
+### Added
+
+- Enums, like Rust's: `enum Shape;` lists its variants, one per line, each holding values of the
+  types in its parentheses, as in `Circle(float)`, or none, as in `Empty`. `Shape.Circle(1.0)`
+  and `Shape.Empty` make values, which never change and print as they are written. A variant can
+  hold any type, including its own enum, so enums make trees and linked lists, and a library
+  module shares one with `pub enum`, imported with `use shapes.Shape`.
+- `match`, which runs the first `case` whose pattern fits a value: a variant with a pattern for
+  each of its values, as in `case Shape.Rect(w, _);` or `case some(Shape.Circle(r));`, a name,
+  which binds the value, or `_`. The checker requires the cases to cover every value, naming
+  one they miss, and warns about a case that can never run.
+- Options: `option[T]` is either `some(x)` or `none`, so a value that may be missing has a type
+  that says so. Options have the methods `is_some`, `is_none`, `unwrap`, which stops the program
+  with `cannot unwrap none` on `none`, and `unwrap_or(default)`.
+- `match`, `case`, and `enum` are keywords, and names may start with `_`.
+- Compiled enum values are counted like strings and lists, and freeing one, however long the
+  chain of values it holds, takes constant stack. `print` stops at an enum value nested more
+  than 10,000 deep, with `value is nested too deeply to print`, in both backends.
+
+### Changed
+
+- `none` is now only the option that holds no value, of type `option[T]`, rather than a value of
+  a type of its own. A function without `->` returns no value, so a call to it can only be a
+  statement of its own: `x = f()` and `print(f())` are errors, and `-> none` is no longer a
+  type.
+- `==` and `!=` no longer compare `none`; use `is_none()` or `match`.
+
 ## [0.2.4] - 2026-10-11
 
 ### Added

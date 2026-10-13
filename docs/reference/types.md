@@ -12,9 +12,10 @@ runs, reporting every place they conflict.
 | `float` | IEEE 754 doubles, including `inf`, `-inf`, and `nan` |
 | `bool` | `true` and `false` |
 | `str` | immutable byte strings, ordered byte by byte |
-| `none` | `none`, also what a function without `ret value` returns |
 | `list[T]` | growable lists of `T`, which are values: assigning or passing one copies it |
 | `tuple[T1, T2, ...]` | two or more values of fixed types, such as `(1, "a")`, which never change |
+| `option[T]` | `some(x)`, which holds a `T`, or `none`, which holds nothing |
+| enums | the variants an `enum` lists, such as `Shape.Circle(1.0)`, which never change |
 | functions | each function has one signature, such as `fn(int, list[str]) -> bool` |
 
 ## Writing types
@@ -26,12 +27,13 @@ fn scale(xs: list[float], k: float) -> list[float];
     ret xs * k
 ```
 
-`int`, `float`, `bool`, `str`, and `none` are written as their names, a list as `list[T]`, so
-a grid of floats is `list[list[float]]`, and a tuple as `tuple[` and the type of each value, so
-a name and a score is `tuple[str, int]`. A function without `->` returns `none`, the same as
-writing `-> none`, so returning a value from it is an error that suggests the `->` to add. A
-parameter without a type is an error too, which suggests the type the checker would infer for
-it.
+`int`, `float`, `bool`, and `str` are written as their names, a list as `list[T]`, so a grid
+of floats is `list[list[float]]`, a tuple as `tuple[` and the type of each value, so a name and a
+score is `tuple[str, int]`, an option as `option[T]`, and an enum by its name, such as `Shape`, or
+`shapes.Shape` for one of the module `shapes`. A function without `->` returns no value: a call
+to it can only be a statement of its own, so `x = f()` and `print(f())` are errors, and returning
+a value from it is an error that suggests the `->` to add. A parameter without a type is an error
+too, which suggests the type the checker would infer for it.
 
 Writing signatures keeps each function's contract in one place: a call with a wrong argument is
 an error at that argument, and a mistake inside the function is reported inside it, against the
@@ -130,6 +132,85 @@ keep a variable, passes and returns them as separate values, and stores the valu
 tuples side by side in the list, so a tuple costs nothing over writing its values out by hand.
 An element of a list can hold at most 32 values, counting each value of its tuples.
 
+## Enums
+
+An enum is a type whose values are one of the variants it lists, each holding the values its
+parentheses give the types of, or none, like an enum in Rust:
+
+```stone
+enum Shape;
+    Circle(float)
+    Rect(float, float)
+    Empty
+```
+
+A variant is written with its enum's name, so `Shape.Circle(1.0)` and `Shape.Rect(2.0, 3.0)` are
+values of `Shape`, and so is `Shape.Empty`, without parentheses. `match` tells the variants apart
+and names the values they hold:
+
+```{literalinclude} ../examples/enums.stn
+:language: stone
+:lines: 1-16
+```
+
+`match` runs the first case whose pattern fits, and the cases must cover every value: leaving
+out `Shape.Empty` above is an error that names it, `'match' does not cover Shape.Empty`. A case
+that can never run, because the ones before it cover every value it would, is a warning. A
+pattern is one of:
+
+- a variant with a pattern for each of its values, as in `Shape.Rect(w, h)`, which fits a value
+  of that variant whose values fit those patterns, at any depth, as in `some(Shape.Circle(r))`
+- a name, which fits any value and assigns it to that variable, like `=`
+- `_`, which fits any value and assigns nothing
+
+So `case Empty;`, without `Shape.`, would assign any value to a variable named `Empty`, which is
+an error that suggests `Shape.Empty`. The names a case assigns are ordinary variables, so a name
+every case assigns can be read after the `match`.
+
+A variant can hold any type, including lists, tuples, and the enum itself, so enums make trees
+and linked lists:
+
+```stone
+enum Tree;
+    Leaf(int)
+    Node(Tree, Tree)
+```
+
+Enum values never change: a new one replaces the old, as with tuples, and the values a `match`
+names are copies, so changing one, as in `xs.append(1)` for a list it named, changes only that
+variable. Values print as they are written, as in `Shape.Rect(2.0, 3.0)`, with the strings they
+hold quoted. They cannot be compared with `==`, converted with `str`, or used in arithmetic or as
+conditions; `match` tells them apart.
+
+Enums are defined at the top level, and can be used before their definition. A library module
+makes one usable from other files with `pub enum`, and `use shapes.Shape` imports it, or
+`shapes.Shape.Circle(1.0)` names it through its module. See [Modules](modules.md).
+
+A value of an enum is stored once and shared by every variable that holds it, with a count of
+the variables that do, like a list, so passing one around never copies it. A variant without
+values is stored once for the whole program. Freeing a long chain of values, such as a linked
+list of a million nodes, takes no more stack than freeing one. An enum value can print at most
+10,000 enum values deep: `print` stops the program at a deeper one, after printing what comes
+before it, with `value is nested too deeply to print (more than 10000 levels)`.
+
+## Options
+
+`option[T]` is the enum built into the language for a value that may be missing: `some(x)` holds
+a `T`, and `none` holds nothing. A function that may have no answer returns one:
+
+```{literalinclude} ../examples/enums.stn
+:language: stone
+:lines: 18-
+```
+
+`match` reads an option with the patterns `some(x)` and `none`, and its methods read it too:
+`x.is_some()` and `x.is_none()` say which it is, `x.unwrap()` returns the value it holds and stops
+the program with `cannot unwrap none` if there is none, and `x.unwrap_or(default)` returns
+`default` instead. An option prints as `some(1)` or `none`.
+
+`none` on its own has an unknown type until its use settles it, as an empty list does, so after
+`best = none`, `best = some("a")` makes `best` an `option[str]`.
+
 ## Rules the checker enforces
 
 These keep the two backends identical and catch common mistakes:
@@ -141,8 +222,13 @@ These keep the two backends identical and catch common mistakes:
   `str(3)` writes them.
 - **Conditions are `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject ints,
   floats, strings, lists, and `none`, so `if 1 or 0;` is an error; write `n != 0` instead of `n`.
-- **Lists and tuples are not comparable.** `==` and `!=` cannot compare lists or tuples, and
-  `<`, `<=`, `>`, and `>=` compare only numbers and strings.
+- **Lists, tuples, and enums are not comparable.** `==` and `!=` cannot compare lists, tuples,
+  options, or enum values, and `<`, `<=`, `>`, and `>=` compare only numbers and strings. Tell
+  enum values apart with `match`, and options with `is_some()` and `is_none()`.
+- **A call without a value is a statement.** A function without `->`, and builtins such as
+  `print`, return no value, so their calls can only be statements of their own.
+- **Matches cover every value.** The cases of a `match` must fit every value of its subject,
+  which must be an enum or an option.
 - **Tuples are indexed by constants and never change.** `t[i]` needs `i` written as a number,
   and nothing changes a tuple's values or what they hold, so `t[0] = v` is an error.
 - **Arithmetic on lists needs numbers.** `+ - * / % **` apply to a list only if it holds ints

@@ -129,4 +129,4 @@ prints
 :language: text
 ```
 
-Next, {doc}`input`.
+Next, {doc}`enums`.

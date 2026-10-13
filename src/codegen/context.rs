@@ -5,14 +5,14 @@
 //! label back every time, and later emit one stub behind it that prints the message.
 
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
-use crate::checker::{Symbol, Type, TypeChecker};
+use crate::checker::{Enums, Symbol, Type, TypeChecker};
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::{Callee, Inst, Program};
 use crate::diagnostic::Severity;
 use crate::project::SourceMap;
 use crate::span::Span;
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Runtime routines for list methods and slices, which `builtins::list_methods` emits in each
 /// backend for the ones a program calls.
@@ -235,6 +235,11 @@ pub struct Context {
     types: HashMap<Span, Type>,
     /// Every function and variable, with its type, from the checker.
     symbols: Vec<Symbol>,
+    /// The variants of every enum the program defines, from the checker.
+    enums: Enums,
+    /// The tag of every variant without values that the code uses, each of which gets a static
+    /// value.
+    pub variant_statics: BTreeSet<usize>,
     /// List types that `print` needs a printer for, emitted after the code that uses them.
     list_printers: Vec<Type>,
     /// Whether `print` needs `stone.print_float`, emitted after the code that uses it.
@@ -272,28 +277,35 @@ impl Context {
         }
         self.types = analysis.types;
         self.symbols = analysis.symbols;
+        self.enums = analysis.enums;
         Ok(())
     }
 
     /// Lowers the checked `module` to IR, then notes every runtime routine it calls and whether it
     /// counts references.
     pub fn lower(&mut self, module: &Mod) -> Result<(), String> {
-        self.program = lower(module, &self.types, &self.symbols)?;
-        self.runtime = self
+        self.program = lower(module, &self.types, &self.symbols, &self.enums)?;
+        let insts = self
             .program
             .functions
             .iter()
             .flat_map(|function| &function.blocks)
-            .flat_map(|block| &block.insts)
-            .filter_map(|inst| match inst {
+            .flat_map(|block| &block.insts);
+        for inst in insts {
+            match inst {
                 Inst::Call {
                     callee: Callee::Runtime(label),
                     ..
-                } => Some(*label),
-                _ => None,
-            })
-            .collect();
-        self.counts_references = self.needs_strings() || self.needs_lists();
+                } => {
+                    self.runtime.insert(label);
+                }
+                Inst::VariantStatic { tag, .. } => {
+                    self.variant_statics.insert(*tag);
+                }
+                _ => {}
+            }
+        }
+        self.counts_references = self.needs_strings() || self.needs_lists() || self.needs_enums();
         Ok(())
     }
 
@@ -422,7 +434,6 @@ impl Context {
             Type::Bool => "stone.print_bool".to_string(),
             Type::Str if nested => "stone.print_str_quoted".to_string(),
             Type::Str => "stone.print_str".to_string(),
-            Type::None => "stone.print_none".to_string(),
             Type::List(_) => {
                 if !self.list_printers.contains(ty) {
                     self.list_printers.push(ty.clone());
@@ -431,6 +442,9 @@ impl Context {
             }
             // lowering prints a tuple, and a list holding one, a value at a time
             Type::Tuple(_) => return Err("a tuple is printed a value at a time".to_string()),
+            // lowering prints an enum, and a list holding one, through a function of its own
+            Type::Enum { .. } => return Err("an enum is printed by its own function".to_string()),
+            Type::Unit => return Err("no value cannot be printed".to_string()),
             Type::Function { .. } => return Err("functions cannot be printed".to_string()),
         })
     }
@@ -465,6 +479,11 @@ impl Context {
     pub fn needs_lists(&self) -> bool {
         self.types.values().any(contains_list)
             || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
+    }
+
+    /// Returns whether the program has enum values, which need `stone.free_enum`.
+    pub fn needs_enums(&self) -> bool {
+        self.types.values().any(contains_enum)
     }
 
     /// Returns whether the program reads its environment: through `os.env` or `os.has_env`, or
@@ -559,6 +578,27 @@ pub fn global_label(name: &str) -> String {
     format!("g.{name}")
 }
 
+/// Returns the assembly symbol of the static value of every variant without values whose tag is
+/// `tag`, which enums share, since such a value holds nothing but its tag.
+///
+/// For example, `none` and the first variant of any enum without values are both `stone.variant_0`.
+pub fn variant_label(tag: usize) -> String {
+    format!("stone.variant_{tag}")
+}
+
+/// Emits the static value of each variant without values in `tags`, a tag and the kinds of no
+/// slots behind an immortal count, like a string literal's (see [`immortal_string`]). The caller
+/// picks the section, which must be writable.
+pub fn variant_statics(r#gen: &mut dyn AssemblyGenerator, tags: &BTreeSet<usize>) {
+    for &tag in tags {
+        r#gen.emit("\t.balign\t8");
+        r#gen.emit(&format!("\t.quad\t{IMMORTAL}"));
+        r#gen.emit(&format!("{}:", variant_label(tag)));
+        r#gen.emit(&format!("\t.quad\t{tag}"));
+        r#gen.emit("\t.quad\t0");
+    }
+}
+
 /// Returns the assembly symbol for a user-defined function.
 ///
 /// The prefix keeps stone functions from colliding with `main` or with C library functions, so
@@ -573,6 +613,18 @@ fn contains_list(ty: &Type) -> bool {
         Type::List(_) => true,
         Type::Tuple(fields) => fields.iter().any(contains_list),
         Type::Function { params, ret } => params.iter().any(contains_list) || contains_list(ret),
+        _ => false,
+    }
+}
+
+/// Returns whether a value of type `ty` involves an enum value, which means `stone.free_enum` is
+/// needed.
+fn contains_enum(ty: &Type) -> bool {
+    match ty {
+        Type::Enum { .. } => true,
+        Type::List(elem) => contains_enum(elem),
+        Type::Tuple(fields) => fields.iter().any(contains_enum),
+        Type::Function { params, ret } => params.iter().any(contains_enum) || contains_enum(ret),
         _ => false,
     }
 }
@@ -641,7 +693,13 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
                 collect_calls_from_stmt(s, calls);
             }
         }
-        StmtKind::Break | StmtKind::Continue | StmtKind::Use { .. } => {}
+        StmtKind::Match { subject, cases } => {
+            collect_calls_from_expr(subject, calls);
+            for s in cases.iter().flat_map(|case| &case.body) {
+                collect_calls_from_stmt(s, calls);
+            }
+        }
+        StmtKind::EnumDef { .. } | StmtKind::Break | StmtKind::Continue | StmtKind::Use { .. } => {}
     }
 }
 

@@ -13,11 +13,11 @@
 
 use super::{ARG_REGS, Arm64Generator, pop_frame, push_frame};
 use crate::codegen::AssemblyGenerator;
-use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label};
+use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label, variant_label};
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::{
-    BinOp, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, RcKind, Terminator, VReg,
-    variable_of,
+    BinOp, BlockId, Callee, Cond, FIELDS_OFFSET, Function, Inst, Kernel, Operand, RcKind,
+    Terminator, VReg, variable_of,
 };
 use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
 use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
@@ -214,6 +214,7 @@ impl Arm64Generator {
         let is_main = function.name.is_none();
 
         match &function.name {
+            Some(name) if function.helper => self.emit(&format!("{name}:")),
             Some(name) => self.emit(&format!("{}:", function_label(name))),
             None => {
                 self.emit("\t.globl\tmain");
@@ -236,7 +237,7 @@ impl Arm64Generator {
             self.emit("\tstr\tx2, [x16, :lo12:stone.envp]");
         }
 
-        if !is_main {
+        if !is_main && !function.helper {
             // the same limit as the interpreter, rather than overflowing the stack
             // each call checks the depth first, so the error points at the call
             self.emit("\tadrp\tx16, stone.call_depth");
@@ -280,7 +281,7 @@ impl Arm64Generator {
         if is_main && self.ctx.counts_references {
             self.emit("\tbl\tstone.leak_check");
         }
-        if !is_main {
+        if !is_main && !function.helper {
             self.emit("\tadrp\tx16, stone.call_depth");
             self.emit("\tldr\tx17, [x16, :lo12:stone.call_depth]");
             self.emit("\tsub\tx17, x17, #1");
@@ -989,6 +990,38 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
+            Inst::EnumTag { dst, value } => {
+                let (dst, value) = (frame.reg(*dst)?, frame.value(*value)?);
+                let base = self.base(value, "x10");
+                let target = self.target(dst);
+                self.emit(&format!("\tldr\t{target}, [{base}]"));
+                self.store(dst, target);
+            }
+
+            Inst::FieldGet { dst, value, slot } => {
+                let (dst, value) = (frame.reg(*dst)?, frame.value(*value)?);
+                let base = self.base(value, "x10");
+                let target = self.target(dst);
+                let offset = FIELDS_OFFSET + 8 * *slot as i64;
+                self.emit(&format!("\tldr\t{target}, [{base}, #{offset}]"));
+                self.store(dst, target);
+            }
+
+            Inst::FieldInit { value, slot, src } => {
+                let (value, src) = (frame.value(*value)?, frame.value(*src)?);
+                let base = self.base(value, "x10");
+                let reg = self.operand(src, "x16");
+                let offset = FIELDS_OFFSET + 8 * *slot as i64;
+                self.emit(&format!("\tstr\t{reg}, [{base}, #{offset}]"));
+            }
+
+            Inst::VariantStatic { dst, tag } => {
+                let dst = frame.reg(*dst)?;
+                let target = self.target(dst);
+                super::address(self, target, &variant_label(*tag));
+                self.store(dst, target);
+            }
+
             Inst::ListLen { dst, list } => {
                 let (dst, list) = (frame.reg(*dst)?, frame.value(*list)?);
                 let base = self.base(list, "x10");
@@ -1079,6 +1112,7 @@ impl Arm64Generator {
                     let routine = match kind {
                         RcKind::Str => "stone.free_str",
                         RcKind::List => "stone.free_list",
+                        RcKind::Enum => "stone.free_enum",
                     };
                     self.emit(&format!("\tbl\t{routine}"));
                     self.emit(&format!("{skip}:"));
@@ -1157,9 +1191,11 @@ impl Arm64Generator {
                     Callee::User(name) => function_label(name),
                     Callee::Runtime(label) => label.to_string(),
                     Callee::Print(ty) => self.ctx.print_routine(ty, false)?,
+                    Callee::Helper(label) => label.clone(),
                 };
                 // the routine's own runtime errors point at this call
-                if FALLIBLE_ROUTINES.contains(&label.as_str())
+                if (FALLIBLE_ROUTINES.contains(&label.as_str())
+                    || matches!(callee, Callee::Helper(_)))
                     && let Some(site) = self.ctx.site_label(self.span)
                 {
                     self.record_site(&site);

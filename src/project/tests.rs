@@ -371,7 +371,7 @@ fn a_module_only_holds_use_and_def() {
             ("util.stn", "print(1)\n\npub fn f() -> int;\n    ret 1\n"),
         ],
         "util.stn",
-        "only use and fn are allowed at the top level of a module",
+        "only use, fn, and enum are allowed at the top level of a module",
         1,
         1,
     );
@@ -738,5 +738,60 @@ fn a_builtin_modules_functions_do_not_reserve_their_names() {
             "use math\nmin = 3\nmax = math.max(min, 5)\nprint(min, max)\n"
         )]),
         "3 5\n"
+    );
+}
+
+const ZOO: (&str, &str) = (
+    "zoo.stn",
+    "pub enum Animal;\n    Dog(str)\n    Fish\nenum Secret;\n    Hidden\n\
+     pub fn name(a: Animal) -> str;\n    match a;\n        case Animal.Dog(n);\n            ret n\n\
+     \x20       case Animal.Fish;\n            ret \"fish\"\n",
+);
+
+#[test]
+fn a_public_enum_is_used_by_name_or_through_its_module() {
+    let main = "use zoo\nuse zoo.Animal\nfn twice(a: zoo.Animal) -> list[Animal];\n    ret [a, a]\n\
+                print(twice(Animal.Dog(\"rex\")), zoo.name(zoo.Animal.Fish))\n\
+                match twice(Animal.Fish)[0];\n    case zoo.Animal.Fish;\n        print(\"fish\")\n\
+                \x20   case Animal.Dog(_);\n        print(\"dog\")\n";
+    assert_eq!(
+        output(&[("main.stn", main), ZOO]),
+        "[Animal.Dog('rex'), Animal.Dog('rex')] fish\nfish\n"
+    );
+}
+
+#[test]
+fn a_private_enum_cannot_be_used_from_another_file() {
+    assert_error(
+        &[("main.stn", "use zoo.Secret\n"), ZOO],
+        "main.stn",
+        "'Secret' is private to module 'zoo'",
+        1,
+        9,
+    );
+    assert_error(
+        &[("main.stn", "use zoo\nx = zoo.Secret.Hidden\n"), ZOO],
+        "main.stn",
+        "'Secret' is private to module 'zoo'",
+        2,
+        5,
+    );
+    assert_error(
+        &[("main.stn", "use zoo\nfn f(x: zoo.Bird);\n    ret\n"), ZOO],
+        "main.stn",
+        "module 'zoo' has no enum 'Bird'",
+        2,
+        9,
+    );
+}
+
+#[test]
+fn an_imported_enum_cannot_share_a_name_with_one_the_file_defines() {
+    assert_error(
+        &[("main.stn", "use zoo.Animal\nenum Animal;\n    Cat\n"), ZOO],
+        "main.stn",
+        "'Animal' is already defined in this file",
+        1,
+        9,
     );
 }

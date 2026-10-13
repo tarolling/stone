@@ -121,7 +121,8 @@ stone check examples/basics.stn
 
 With no file, stone starts an interactive session. Each entry runs as soon as it is complete,
 and variables, functions, and modules from earlier entries stay available. An expression on its
-own prints its value unless the value is `none`, with strings quoted as they are inside a list.
+own prints its value, with strings quoted as they are inside a list, unless it is a call that
+returns no value, such as `print(1)`.
 
 ```text
 $ stone

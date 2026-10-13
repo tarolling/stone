@@ -6,6 +6,7 @@
     { "include": "#comment" },
     { "include": "#string" },
     { "include": "#function-definition" },
+    { "include": "#enum-definition" },
     { "include": "#type-annotation" },
     { "include": "#keyword" },
     { "include": "#constant" },
@@ -38,8 +39,15 @@
         "2": { "name": "entity.name.function.stone" }
       }
     },
+    "enum-definition": {
+      "match": "\\b(enum)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.enum.stone" },
+        "2": { "name": "entity.name.type.enum.stone" }
+      }
+    },
     "type-annotation": {
-      "match": "(->|:)\\s*((?:(?:list|tuple)\\[)*(?:int|float|bool|str|none)(?:\\]|,\\s*(?:(?:list|tuple)\\[)*(?:int|float|bool|str|none))*)(?![A-Za-z0-9_(])",
+      "match": "(->|:)\\s*((?:(?:list|tuple|option)\\[)*(?:int|float|bool|str)(?:\\]|,\\s*(?:(?:list|tuple|option)\\[)*(?:int|float|bool|str))*)(?![A-Za-z0-9_(])",
       "captures": {
         "1": { "name": "punctuation.separator.annotation.stone" },
         "2": { "name": "support.type.stone" }
@@ -64,7 +72,7 @@
         },
         {
           "name": "keyword.control.stone",
-          "match": "\\b(if|elif|else|while|for|in|break|cont|ret)\\b"
+          "match": "\\b(if|elif|else|while|for|in|break|cont|ret|match|case)\\b"
         },
         {
           "name": "keyword.operator.logical.stone",
@@ -82,7 +90,7 @@
     },
     "builtin": {
       "name": "support.function.builtin.stone",
-      "match": "\\b(print|len|range|append)\\b(?=\\s*\\()"
+      "match": "\\b(print|len|range|append|some)\\b(?=\\s*\\()"
     },
     "function-call": {
       "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",

@@ -449,7 +449,8 @@ fn emit_mem_map(r#gen: &mut dyn AssemblyGenerator) {
 ///   written, whose bytes the caller fills in
 /// - `stone.free_str` frees the string in `x9`, whose count just reached 0
 /// - `stone.free_list` frees the list in `x9`, whose count just reached 0, along with its
-///   elements' storage, first releasing each value its `kinds` field says is counted
+///   elements' storage, first releasing each value its `kinds` field says is counted, through
+///   `stone.free_enum` for enum values if `enums`
 /// - `stone.leak_check` exits with an error if the `STONE_LEAK_CHECK` environment variable is set
 ///   and any object is still allocated, which tests use to find leaks
 ///
@@ -457,7 +458,7 @@ fn emit_mem_map(r#gen: &mut dyn AssemblyGenerator) {
 /// preserve every register a vreg can be in, clobbering only `x8` to `x11`, `x16`, `x17`, `x30`,
 /// and the float registers. `stone.leak_check` also preserves `x0`, which holds `main`'s exit
 /// status. Memory comes from [`allocator`].
-pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator) {
+pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit("\t.section\t.rodata");
     r#gen.emit(".Lstone_leak_env:");
     r#gen.emit("\t.string \"STONE_LEAK_CHECK\"");
@@ -528,12 +529,23 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tldr\tx10, [x19, #24]");
     r#gen.emit("\tcmp\tx10, #1");
     r#gen.emit("\tb.eq\t.Lfree_list_str");
+    if enums {
+        r#gen.emit("\tcmp\tx10, #3");
+        r#gen.emit("\tb.eq\t.Lfree_list_enum");
+    }
     // nesting is bounded by the element type, so this recursion is shallow
     r#gen.emit("\tbl\tstone.free_list");
     r#gen.emit("\tb\t.Lfree_list_loop");
     r#gen.emit(".Lfree_list_str:");
     r#gen.emit("\tbl\tstone.free_str");
     r#gen.emit("\tb\t.Lfree_list_loop");
+    if enums {
+        // freeing an enum value only queues it while another is being freed, so this
+        // recursion stays shallow too
+        r#gen.emit(".Lfree_list_enum:");
+        r#gen.emit("\tbl\tstone.free_enum");
+        r#gen.emit("\tb\t.Lfree_list_loop");
+    }
     // each element of a list of tuples is several slots, each counted as its field's kind says:
     // x20 is the slot, x21 how many fields of the element are left, and x22 the kinds of the
     // rest, two bits each
@@ -561,11 +573,20 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tb.ne\t.Lfree_list_wide_loop");
     r#gen.emit("\tcmp\tx11, #1");
     r#gen.emit("\tb.eq\t.Lfree_list_wide_str");
+    if enums {
+        r#gen.emit("\tcmp\tx11, #3");
+        r#gen.emit("\tb.eq\t.Lfree_list_wide_enum");
+    }
     r#gen.emit("\tbl\tstone.free_list");
     r#gen.emit("\tb\t.Lfree_list_wide_loop");
     r#gen.emit(".Lfree_list_wide_str:");
     r#gen.emit("\tbl\tstone.free_str");
     r#gen.emit("\tb\t.Lfree_list_wide_loop");
+    if enums {
+        r#gen.emit(".Lfree_list_wide_enum:");
+        r#gen.emit("\tbl\tstone.free_enum");
+        r#gen.emit("\tb\t.Lfree_list_wide_loop");
+    }
     r#gen.emit(".Lfree_list_storage:");
     r#gen.emit("\tldr\tx9, [x19, #16]");
     r#gen.emit("\tbl\tstone.mem_free");
@@ -605,6 +626,90 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator) {
     system_call(r#gen, Sys::Exit);
     r#gen.emit(".Lleak_check_done:");
     pop_frame(r#gen, &["x0"]);
+}
+
+/// Emits the routines for enum values, ported from the x86-64 runtime's `enum_runtime` under the
+/// same labels and layout: the tag at `[p]`, the kinds of the slots at `[p + 8]`, and the slots
+/// from `[p + 16]`.
+///
+/// - `stone.enum_new` returns a new enum value with tag `x0`, kinds `x1`, and `x2` slots, for the
+///   caller to fill in
+/// - `stone.free_enum` frees the enum value in `x9`, whose count just reached 0, first releasing
+///   each value its kinds say is counted, and queuing enum values on `stone.free_pending` rather
+///   than recursing into them, so freeing a long chain takes no more stack than freeing one. It
+///   clobbers only the registers the other free routines do.
+pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator) {
+    // x19 holds the tag and x20 the kinds while stone.alloc runs
+    r#gen.emit("stone.enum_new:");
+    push_frame(r#gen, &["x19", "x20"]);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    r#gen.emit("\tlsl\tx0, x2, #3");
+    r#gen.emit("\tadd\tx0, x0, #16");
+    r#gen.emit("\tbl\tstone.alloc");
+    r#gen.emit("\tstp\tx19, x20, [x0]");
+    pop_frame(r#gen, &["x19", "x20"]);
+
+    // x19 holds the value being freed, x20 the kinds of its slots left, and x21 the next slot
+    let saved = ["x19", "x20", "x21", "x22"];
+    r#gen.emit("stone.free_enum:");
+    r#gen.emit("\tadrp\tx16, stone.free_pending");
+    r#gen.emit("\tldr\tx17, [x16, :lo12:stone.free_pending]");
+    r#gen.emit("\tstr\tx17, [x9]");
+    r#gen.emit("\tstr\tx9, [x16, :lo12:stone.free_pending]");
+    r#gen.emit("\tadrp\tx16, stone.freeing");
+    r#gen.emit("\tldr\tx17, [x16, :lo12:stone.freeing]");
+    r#gen.emit("\tcbnz\tx17, .Lfree_enum_queued");
+    r#gen.emit("\tmov\tx17, #1");
+    r#gen.emit("\tstr\tx17, [x16, :lo12:stone.freeing]");
+    push_frame(r#gen, &saved);
+    r#gen.emit(".Lfree_enum_next:");
+    r#gen.emit("\tadrp\tx16, stone.free_pending");
+    r#gen.emit("\tldr\tx19, [x16, :lo12:stone.free_pending]");
+    r#gen.emit("\tcbz\tx19, .Lfree_enum_done");
+    r#gen.emit("\tldr\tx17, [x19]");
+    r#gen.emit("\tstr\tx17, [x16, :lo12:stone.free_pending]");
+    r#gen.emit("\tldr\tx20, [x19, #8]");
+    r#gen.emit("\tadd\tx21, x19, #16");
+    r#gen.emit(".Lfree_enum_slot:");
+    r#gen.emit("\tcbz\tx20, .Lfree_enum_storage"); // no counted slots are left
+    r#gen.emit("\tand\tx11, x20, #3");
+    r#gen.emit("\tlsr\tx20, x20, #2");
+    r#gen.emit("\tldr\tx9, [x21]");
+    r#gen.emit("\tadd\tx21, x21, #8");
+    r#gen.emit("\tcbz\tx11, .Lfree_enum_slot"); // this slot is not counted
+    r#gen.emit("\tldur\tx10, [x9, #-8]");
+    r#gen.emit("\tsubs\tx10, x10, #1");
+    r#gen.emit("\tstur\tx10, [x9, #-8]");
+    r#gen.emit("\tb.ne\t.Lfree_enum_slot");
+    r#gen.emit("\tcmp\tx11, #1");
+    r#gen.emit("\tb.eq\t.Lfree_enum_str");
+    r#gen.emit("\tcmp\tx11, #2");
+    r#gen.emit("\tb.eq\t.Lfree_enum_list");
+    // an enum value joins the queue
+    r#gen.emit("\tadrp\tx16, stone.free_pending");
+    r#gen.emit("\tldr\tx17, [x16, :lo12:stone.free_pending]");
+    r#gen.emit("\tstr\tx17, [x9]");
+    r#gen.emit("\tstr\tx9, [x16, :lo12:stone.free_pending]");
+    r#gen.emit("\tb\t.Lfree_enum_slot");
+    r#gen.emit(".Lfree_enum_str:");
+    r#gen.emit("\tbl\tstone.free_str");
+    r#gen.emit("\tb\t.Lfree_enum_slot");
+    r#gen.emit(".Lfree_enum_list:");
+    r#gen.emit("\tbl\tstone.free_list");
+    r#gen.emit("\tb\t.Lfree_enum_slot");
+    r#gen.emit(".Lfree_enum_storage:");
+    r#gen.emit("\tsub\tx9, x19, #8");
+    r#gen.emit("\tbl\tstone.mem_free");
+    count_live(r#gen, -1);
+    r#gen.emit("\tb\t.Lfree_enum_next");
+    r#gen.emit(".Lfree_enum_done:");
+    r#gen.emit("\tadrp\tx16, stone.freeing");
+    r#gen.emit("\tmov\tx17, #0");
+    r#gen.emit("\tstr\tx17, [x16, :lo12:stone.freeing]");
+    pop_frame(r#gen, &saved);
+    r#gen.emit(".Lfree_enum_queued:");
+    r#gen.emit("\tret");
 }
 
 /// Emits code that writes the `length` bytes at `label` to stderr, clobbering `x0` to `x2` and
@@ -654,7 +759,6 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.print_int` writes the signed integer in `x0`
 /// - `stone.print_str` writes the null-terminated string `x0` points to
 /// - `stone.print_bool` writes `true` if `x0` is nonzero and `false` otherwise
-/// - `stone.print_none` writes `none`
 /// - `stone.print_char` writes the byte in `w0`
 /// - `stone.print_str_quoted` writes the string `x0` points to as a printed list shows its
 ///   strings, quoted and escaped like Python's `repr`
@@ -666,8 +770,6 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\t.string \"true\"");
     r#gen.emit(".Lstone_false:");
     r#gen.emit("\t.string \"false\"");
-    r#gen.emit(".Lstone_none:");
-    r#gen.emit("\t.string \"none\"");
     r#gen.emit("\t.text");
 
     // digits are written backwards from the end of 32 bytes, which holds all 20 and a sign
@@ -722,10 +824,6 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     address(r#gen, "x0", ".Lstone_true");
     address(r#gen, "x9", ".Lstone_false");
     r#gen.emit("\tcsel\tx0, x0, x9, ne");
-    r#gen.emit("\tb\tstone.print_str");
-
-    r#gen.emit("stone.print_none:");
-    address(r#gen, "x0", ".Lstone_none");
     r#gen.emit("\tb\tstone.print_str");
 
     r#gen.emit("stone.print_char:");

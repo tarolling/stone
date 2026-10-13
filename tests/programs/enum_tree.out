@@ -1,0 +1,5 @@
+Tree.Node(Tree.Node(Tree.Leaf(1), Tree.Leaf(2)), Tree.Node(Tree.Leaf(3), Tree.Leaf(4)))
+524800
+300000 44999850000
+Chain.End
+5 Rose.Node('root', [Rose.Node('leaf', []), Rose.Node('mid', [Rose.Node('leaf', []), Rose.Node('leaf', [])])])

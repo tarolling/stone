@@ -13,17 +13,18 @@ fn label(name: str, score: float, passed: bool) -> str;
         ret name + ": " + str(score) + " (passed)"
     ret name + ": " + str(score)
 
-// without ->, a function returns none
+// without ->, a function returns no value
 fn report(lines: list[str]);
     for line in lines;
         print(line)
 
-// -> none says the same thing explicitly
-fn shout(text: str) -> none;
+// a bare ret leaves such a function early
+fn shout(text: str);
     print(text + "!")
     ret
 
-fn nothing() -> none;
+// an option holds a value or none
+fn nothing() -> option[int];
     ret none
 
 print(transpose([[1, 2, 3], [4, 5, 6]]))

@@ -7,6 +7,7 @@ module stone
 
     stmt = FunctionDef(identifier name, bool public, arguments args,
                        stmt* body, type? returns)
+          | EnumDef(identifier name, bool public, variant* variants)
 
           | Return(expr? value)
 
@@ -17,6 +18,8 @@ module stone
           | For(expr target, expr iter, stmt* body, stmt* orelse)
           | While(expr test, stmt* body, stmt* orelse)
           | If(expr test, stmt* body, stmt* orelse)
+
+          | Match(expr subject, match_case* cases)
 
           | Expr(expr value)
           | Use(identifier* path, identifier? alias)
@@ -52,5 +55,16 @@ module stone
 
     arg = (identifier arg, type? annotation)
 
-    type = Int | Float | Bool | Str | None | List(type elem) | Tuple(type* elts)
+    variant = (identifier name, type* fields)
+
+    match_case = (pattern pattern, stmt* body)
+
+    pattern = MatchWildcard
+            | MatchName(identifier name)
+            -- path names the variant, such as Shape.Circle, some, or none
+            | MatchVariant(identifier* path, pattern* fields)
+
+    type = Int | Float | Bool | Str | List(type elem) | Tuple(type* elts)
+         -- an enum, such as Shape, or option[T]
+         | Named(identifier name, type* args)
 }

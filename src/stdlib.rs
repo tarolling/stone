@@ -78,12 +78,12 @@ pub const MAX_ELEMENT_VALUES: usize = 32;
 /// Names of the builtin functions.
 ///
 /// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3);`.
-pub static BUILTINS: [&str; 8] = [
-    "print", "range", "int", "float", "str", "input", "eof", "args",
+pub static BUILTINS: [&str; 9] = [
+    "print", "range", "int", "float", "str", "input", "eof", "args", "some",
 ];
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 11] = [
+pub static METHODS: [&str; 15] = [
     "len",
     "append",
     "pop",
@@ -95,6 +95,10 @@ pub static METHODS: [&str; 11] = [
     "find",
     "startswith",
     "endswith",
+    "is_some",
+    "is_none",
+    "unwrap",
+    "unwrap_or",
 ];
 
 /// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
@@ -116,10 +120,10 @@ pub struct BuiltinDoc {
     pub description: &'static str,
 }
 
-pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
+pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
     BuiltinDoc {
         name: "print",
-        signature: "print(values...) -> none",
+        signature: "print(values...)",
         description: "Prints the values separated by spaces, followed by a newline.",
     },
     BuiltinDoc {
@@ -167,9 +171,16 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
         description: "Returns the arguments given after the program, so `stone run f.stn a b` \
                       and a built `./f a b` both see `[\"a\", \"b\"]`.",
     },
+    BuiltinDoc {
+        name: "some",
+        signature: "some(value: T) -> option[T]",
+        description: "Returns an option that holds `value`. The other option is `none`, which \
+                      holds nothing, so a function that may have no answer returns \
+                      `option[T]` and a `match` with `case some(x);` and `case none;` reads it.",
+    },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 11] = [
+pub static METHOD_DOCS: [BuiltinDoc; 15] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T]).len() -> int",
@@ -177,7 +188,7 @@ pub static METHOD_DOCS: [BuiltinDoc; 11] = [
     },
     BuiltinDoc {
         name: "append",
-        signature: "list[T].append(item: T) -> none",
+        signature: "list[T].append(item: T)",
         description: "Adds `item` to the end of the list, changing only the variable it is \
                       called on, since lists are values. It is a statement of its own.",
     },
@@ -192,7 +203,7 @@ pub static METHOD_DOCS: [BuiltinDoc; 11] = [
     },
     BuiltinDoc {
         name: "insert",
-        signature: "list[T].insert(index: int, item: T) -> none",
+        signature: "list[T].insert(index: int, item: T)",
         description: "Puts `item` at `index`, moving the elements from there on up by one, so \
                       `xs.insert(0, x)` adds `x` at the front and `xs.insert(xs.len(), x)` at the \
                       end. A negative `index` counts from the end. Unlike Python, it stops the \
@@ -200,7 +211,7 @@ pub static METHOD_DOCS: [BuiltinDoc; 11] = [
     },
     BuiltinDoc {
         name: "extend",
-        signature: "list[T].extend(items: list[T]) -> none",
+        signature: "list[T].extend(items: list[T])",
         description: "Adds every element of `items` to the end of the list, in order. It is a \
                       statement of its own.",
     },
@@ -241,6 +252,29 @@ pub static METHOD_DOCS: [BuiltinDoc; 11] = [
         signature: "str.endswith(suffix: str) -> bool",
         description: "Returns whether the string ends with `suffix`, so \
                       `\"main.stn\".endswith(\".stn\")` is `true`.",
+    },
+    BuiltinDoc {
+        name: "is_some",
+        signature: "option[T].is_some() -> bool",
+        description: "Returns whether the option holds a value, so `some(1).is_some()` is `true` \
+                      and `none.is_some()` is `false`.",
+    },
+    BuiltinDoc {
+        name: "is_none",
+        signature: "option[T].is_none() -> bool",
+        description: "Returns whether the option is `none`.",
+    },
+    BuiltinDoc {
+        name: "unwrap",
+        signature: "option[T].unwrap() -> T",
+        description: "Returns the value the option holds, so `some(3).unwrap()` is 3. It stops \
+                      the program if the option is `none`.",
+    },
+    BuiltinDoc {
+        name: "unwrap_or",
+        signature: "option[T].unwrap_or(default: T) -> T",
+        description: "Returns the value the option holds, or `default` if it is `none`, so \
+                      `none.unwrap_or(0)` is 0.",
     },
 ];
 
@@ -388,6 +422,19 @@ pub fn float_pow(base: f64, exp: i64) -> f64 {
 }
 
 /// The runtime error for a slice whose step is 0, such as `xs[::0]`.
+/// What `unwrap` stops the program with when the option is `none`.
+pub const UNWRAP_NONE: &str = "cannot unwrap none";
+
+/// The most enum values nested inside one another that `print` writes, in both backends, since
+/// printing one inside another takes stack.
+///
+/// For example, a list of 10,000 `Node`s each holding the next prints, but one of 10,001 stops
+/// the program with [`PRINT_DEPTH`].
+pub const MAX_PRINT_DEPTH: usize = 10_000;
+
+/// What printing an enum value nested more than [`MAX_PRINT_DEPTH`] deep stops the program with.
+pub const PRINT_DEPTH: &str = "value is nested too deeply to print (more than 10000 levels)";
+
 pub const SLICE_STEP_ZERO: &str = "slice step cannot be zero";
 
 /// The runtime error for an index past either end of a list, as in `[1][1]`, with a `{}` for the

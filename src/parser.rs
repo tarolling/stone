@@ -393,10 +393,10 @@ fn describe_found(r#type: &TokenType) -> String {
 /// continue, such as the `+` that could follow `1` in `print(1`.
 ///
 /// Keywords are quiet because they start optional clauses or alternative statements, except `in`,
-/// which a `for` loop always requires.
+/// which a `for` loop always requires, and `case`, which starts every line of a `match`.
 fn is_quiet(r#type: &TokenType) -> bool {
     if let TokenType::Keyword(word) = r#type {
-        return word != "in";
+        return word != "in" && word != "case";
     }
     matches!(
         r#type,

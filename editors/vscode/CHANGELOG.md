@@ -10,6 +10,20 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-12
+
+### Added
+
+- Highlighting of `enum`, `match`, and `case`, of an enum's name where it is defined, and of
+  `option[T]` in signatures.
+- Hover, go to definition, references, and rename for enums and their variants through
+  `stone-lsp`, which outlines an enum with its variants and offers the variants after an enum's
+  name and a `.`, and the option methods after any other value.
+
+### Changed
+
+- `none` is no longer highlighted as a type in signatures, since it is now an option's value.
+
 ## [0.2.4] - 2026-10-11
 
 ### Added

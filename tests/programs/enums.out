@@ -1,0 +1,16 @@
+Shape.Circle(1.0) 3.0 not a rect
+Shape.Rect(2.0, 3.0) 6.0 rect 2.0
+Shape.Empty 0.0 not a rect
+9.0
+[Shape.Circle(1.0), Shape.Rect(2.0, 3.0), Shape.Empty] Shape.Rect(2.0, 3.0)
+ab [1, 2, 3]
+7 seven 0.5
+nothing
+[Item.Named('ab', [1, 2]), Item.Pair((7, 'seven'), Shape.Circle(0.5)), Item.Nothing]
+['n0', 'n1', 'n2', '?']
+4.0 3.0 0.0
+Shape.Circle(11.0)
+n9 [9, 81]
+n4
+stopped at 4
+[Shape.Empty, Shape.Empty] not a rect

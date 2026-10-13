@@ -18,11 +18,11 @@ from pygments.token import (
 )
 
 KEYWORDS = (
-    "and", "as", "break", "cont", "elif", "else", "fn", "for", "if", "in", "not", "or", "pub", "ret",
-    "use", "while",
+    "and", "as", "break", "case", "cont", "elif", "else", "enum", "fn", "for", "if", "in", "match",
+    "not", "or", "pub", "ret", "use", "while",
 )
 CONSTANTS = ("true", "false", "none")
-BUILTINS = ("print", "range", "int", "float", "str", "input", "eof", "args")
+BUILTINS = ("print", "range", "int", "float", "str", "input", "eof", "args", "some")
 METHODS = (
     "len",
     "append",
@@ -35,6 +35,10 @@ METHODS = (
     "find",
     "startswith",
     "endswith",
+    "is_some",
+    "is_none",
+    "unwrap",
+    "unwrap_or",
 )
 
 
@@ -58,10 +62,12 @@ class StoneLexer(RegexLexer):
             (r"//.*$", Comment.Single),
             (r'"', String.Double, "string"),
             (r"(fn)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
+            (r"(enum)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Class)),
             (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
             (
-                # a type name, maybe inside list[ or tuple[, then closing brackets or more types
-                r"(->|:)(\s*)((?:(?:list|tuple)\[)*(?:int|float|bool|str|none)(?:\]|,\s*(?:(?:list|tuple)\[)*(?:int|float|bool|str|none))*)(?![\w(])",
+                # a type name, maybe inside list[, tuple[, or option[, then closing brackets or more
+                # types
+                r"(->|:)(\s*)((?:(?:list|tuple|option)\[)*(?:int|float|bool|str)(?:\]|,\s*(?:(?:list|tuple|option)\[)*(?:int|float|bool|str))*)(?![\w(])",
                 bygroups(Punctuation, Whitespace, Keyword.Type),
             ),
             (words(KEYWORDS, suffix=r"\b"), Keyword),

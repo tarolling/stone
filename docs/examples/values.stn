@@ -14,11 +14,11 @@ print(2 ** 10, 2.5 ** 2, 2.0 ** -1, -2 ** 2)
 total = price * float(count)
 print(total, int(total))
 
-// bools, strings, and none
+// bools, strings, and options, which hold a value or none
 ready = count > 2
 name = "stone"
 print(ready, not ready, name + "!", name.len())
-print(none)
+print(some(name), none)
 
 // floats print the way Python shows them
 print(0.1 + 0.2, 1e16, 1.0 / 3.0)

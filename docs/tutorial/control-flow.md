@@ -19,7 +19,7 @@ ends only with `break` or `ret`.
 
 Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`. They chain the way they do in Python:
 `1 < x < 10` means `1 < x and x < 10`, and evaluates `x` once. `<` and its relatives compare
-numbers; `==` and `!=` also compare strings, bools, and `none`, but not lists.
+numbers and strings; `==` and `!=` also compare bools, but not lists, tuples, or options.
 
 `and`, `or`, and `not` combine conditions and short-circuit, so `x != 0 and 10 / x > 1` never
 divides by zero.

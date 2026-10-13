@@ -118,7 +118,7 @@ impl Session {
         }
     }
 
-    /// Keeps a prepared entry, replacing any function it defines again.
+    /// Keeps a prepared entry, replacing any function or enum it defines again.
     fn commit(&mut self, prepared: Prepared) {
         self.chunks.retain(|old| {
             old.defines.as_ref().is_none_or(|name| {
@@ -153,7 +153,9 @@ fn split(entry: &str) -> Vec<Chunk> {
                 .map(|line| format!("{line}\n"))
                 .collect();
             let defines = match &stmt.kind {
-                StmtKind::FunctionDef { name, .. } => Some(name.clone()),
+                StmtKind::FunctionDef { name, .. } | StmtKind::EnumDef { name, .. } => {
+                    Some(name.clone())
+                }
                 _ => None,
             };
             Chunk { text, defines }
@@ -347,8 +349,21 @@ mod tests {
     }
 
     #[test]
-    fn none_values_do_not_echo() {
+    fn calls_without_a_value_do_not_echo() {
         assert_eq!(session("print(1)\n"), ("1\n".into(), "".into()));
+    }
+
+    #[test]
+    fn options_and_enum_values_echo() {
+        assert_eq!(session("none\nsome(\"a\")\n").0, "none\nsome('a')\n");
+        let input = "enum Coin;\n    Heads\n    Tails\n\nc = Coin.Tails\nc\n";
+        assert_eq!(session(input), ("Coin.Tails\n".into(), "".into()));
+    }
+
+    #[test]
+    fn an_enum_defined_again_replaces_the_old_one() {
+        let input = "enum Coin;\n    Heads\n\nenum Coin;\n    Edge\n\nCoin.Edge\n";
+        assert_eq!(session(input), ("Coin.Edge\n".into(), "".into()));
     }
 
     #[test]

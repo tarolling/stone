@@ -498,7 +498,7 @@ impl Lexer {
             }
             Some('"') => TokenType::String(self.lex_string()?),
             Some(ch) if ch.is_ascii_digit() => self.lex_number()?,
-            Some(ch) if ch.is_alphabetic() => {
+            Some(ch) if ch.is_alphabetic() || ch == '_' => {
                 let ident = self.lex_name();
                 if RESERVED_KEYWORDS.contains(&ident.as_str()) {
                     TokenType::Keyword(ident)
@@ -810,6 +810,13 @@ testing(1, 2, 3)"#;
             .into_iter()
             .map(|t| t.r#type)
             .collect()
+    }
+
+    #[test]
+    fn names_may_start_with_an_underscore() {
+        let tokens = Lexer::new("_ _x a_1\n").lex().unwrap();
+        let types: Vec<TokenType> = tokens.into_iter().map(|t| t.r#type).collect();
+        assert_eq!(types[..3], [name("_"), name("_x"), name("a_1")]);
     }
 
     fn name(id: &str) -> TokenType {

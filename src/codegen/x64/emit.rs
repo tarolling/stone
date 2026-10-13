@@ -9,11 +9,11 @@
 
 use super::{ARG_REGS, X64Generator};
 use crate::codegen::AssemblyGenerator;
-use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label};
+use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label, variant_label};
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::{
-    BinOp, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, RcKind, Terminator, VReg,
-    variable_of,
+    BinOp, BlockId, Callee, Cond, FIELDS_OFFSET, Function, Inst, Kernel, Operand, RcKind,
+    Terminator, VReg, variable_of,
 };
 use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
 use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
@@ -191,6 +191,7 @@ impl X64Generator {
         };
 
         match &function.name {
+            Some(name) if function.helper => self.emit(&format!("{name}:")),
             Some(name) => self.emit(&format!("{}:", function_label(name))),
             None => {
                 self.emit("\t.globl\tmain");
@@ -214,7 +215,7 @@ impl X64Generator {
             self.emit(&format!("\tsub\trsp, {}", 8 * allocation.spill_slots));
         }
 
-        if !frame.is_main {
+        if !frame.is_main && !function.helper {
             // the same limit as the interpreter, rather than overflowing the stack
             // each call checks the depth first, so the error points at the call
             self.emit("\tinc\tQWORD PTR [rip + stone.call_depth]");
@@ -255,7 +256,7 @@ impl X64Generator {
         if frame.is_main && self.ctx.counts_references {
             self.emit("\tcall\tstone.leak_check");
         }
-        if !frame.is_main {
+        if !frame.is_main && !function.helper {
             self.emit("\tdec\tQWORD PTR [rip + stone.call_depth]");
         }
         if allocation.used_callee_saved.is_empty() {
@@ -978,6 +979,37 @@ impl X64Generator {
                 self.store(dst, target);
             }
 
+            Inst::EnumTag { dst, value } => {
+                let (dst, value) = (frame.reg(*dst)?, frame.value(*value)?);
+                let base = self.base(value, "rax");
+                let target = self.target(dst, None);
+                self.emit(&format!("\tmov\t{target}, QWORD PTR [{base}]"));
+                self.store(dst, target);
+            }
+
+            Inst::FieldGet { dst, value, slot } => {
+                let (dst, value) = (frame.reg(*dst)?, frame.value(*value)?);
+                let base = self.base(value, "rax");
+                let target = self.target(dst, None);
+                let offset = FIELDS_OFFSET + 8 * *slot as i64;
+                self.emit(&format!("\tmov\t{target}, QWORD PTR [{base} + {offset}]"));
+                self.store(dst, target);
+            }
+
+            Inst::FieldInit { value, slot, src } => {
+                let (value, src) = (frame.value(*value)?, frame.value(*src)?);
+                let base = self.base(value, "rax");
+                let offset = FIELDS_OFFSET + 8 * *slot as i64;
+                self.store_qword(&format!("[{base} + {offset}]"), src);
+            }
+
+            Inst::VariantStatic { dst, tag } => {
+                let dst = frame.reg(*dst)?;
+                let target = self.target(dst, None);
+                self.emit(&format!("\tlea\t{target}, [rip + {}]", variant_label(*tag)));
+                self.store(dst, target);
+            }
+
             Inst::ListLen { dst, list } => {
                 let (dst, list) = (frame.reg(*dst)?, frame.value(*list)?);
                 let base = self.base(list, "rax");
@@ -1059,6 +1091,7 @@ impl X64Generator {
                     let routine = match kind {
                         RcKind::Str => "stone.free_str",
                         RcKind::List => "stone.free_list",
+                        RcKind::Enum => "stone.free_enum",
                     };
                     self.emit(&format!("\tcall\t{routine}"));
                     self.emit(&format!("{skip}:"));
@@ -1151,9 +1184,11 @@ impl X64Generator {
                     Callee::User(name) => function_label(name),
                     Callee::Runtime(label) => label.to_string(),
                     Callee::Print(ty) => self.ctx.print_routine(ty, false)?,
+                    Callee::Helper(label) => label.clone(),
                 };
                 // the routine's own runtime errors point at this call
-                if FALLIBLE_ROUTINES.contains(&label.as_str())
+                if (FALLIBLE_ROUTINES.contains(&label.as_str())
+                    || matches!(callee, Callee::Helper(_)))
                     && let Some(site) = self.ctx.site_label(self.span)
                 {
                     self.record_site(&site);

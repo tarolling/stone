@@ -108,9 +108,54 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
                 .collect(),
             alias: alias.map(|(name, _)| (name, Span::default())),
         },
+        StmtKind::EnumDef {
+            name,
+            public,
+            variants,
+            ..
+        } => StmtKind::EnumDef {
+            name,
+            name_span: Span::default(),
+            public,
+            variants: variants
+                .into_iter()
+                .map(|v| Variant {
+                    name: v.name,
+                    span: Span::default(),
+                    fields: v.fields.into_iter().map(strip_type).collect(),
+                })
+                .collect(),
+        },
+        StmtKind::Match { subject, cases } => StmtKind::Match {
+            subject: Box::new(strip_expr(*subject)),
+            cases: cases
+                .into_iter()
+                .map(|case| MatchCase {
+                    pattern: strip_pattern(case.pattern),
+                    body: strip_all(case.body),
+                })
+                .collect(),
+        },
         kind @ (StmtKind::Break | StmtKind::Continue) => kind,
     };
     kind.into()
+}
+
+fn strip_pattern(pattern: Pattern) -> Pattern {
+    let kind = match pattern.kind {
+        PatternKind::Variant { path, fields } => PatternKind::Variant {
+            path: path
+                .into_iter()
+                .map(|(name, _)| (name, Span::default()))
+                .collect(),
+            fields: fields.into_iter().map(strip_pattern).collect(),
+        },
+        kind => kind,
+    };
+    Pattern {
+        kind,
+        span: Span::default(),
+    }
 }
 
 fn strip_type(ty: TypeExpr) -> TypeExpr {
@@ -119,6 +164,10 @@ fn strip_type(ty: TypeExpr) -> TypeExpr {
         TypeExprKind::Tuple(elts) => {
             TypeExprKind::Tuple(elts.into_iter().map(strip_type).collect())
         }
+        TypeExprKind::Named { name, args } => TypeExprKind::Named {
+            name,
+            args: args.into_iter().map(strip_type).collect(),
+        },
         kind => kind,
     };
     TypeExpr {
@@ -752,9 +801,9 @@ fn signature_of(source: &str) -> (Vec<Option<String>>, Option<String>) {
 #[test]
 fn parameters_and_the_return_value_have_types() {
     assert_eq!(
-        signature_of("fn f(a: int, b: float, c: bool, d: str, e: none) -> int; ret a\n"),
+        signature_of("fn f(a: int, b: float, c: bool, d: str) -> int; ret a\n"),
         (
-            ["int", "float", "bool", "str", "none"]
+            ["int", "float", "bool", "str"]
                 .map(|t| Some(t.to_string()))
                 .to_vec(),
             Some("int".to_string())
@@ -783,7 +832,7 @@ fn types_may_be_left_out_for_the_checker_to_report() {
 
 #[test]
 fn types_span_their_text() {
-    let source = "fn f(xs: list[int]) -> none; ret\n";
+    let source = "fn f(xs: list[int]) -> bool; ret\n";
     let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
     let StmtKind::FunctionDef { args, returns, .. } = &body[0].kind else {
         panic!("expected function definition");
@@ -799,10 +848,6 @@ fn types_span_their_text() {
 
 #[test]
 fn an_unknown_type_is_an_error() {
-    assert_eq!(
-        error_of("fn f(a: number); ret\n"),
-        ("expected a type, found 'number'".to_string(), 1, 9)
-    );
     assert_eq!(
         error_of("fn f(a: int) -> 3; ret\n"),
         ("expected a type, found '3'".to_string(), 1, 17)
@@ -1727,12 +1772,20 @@ fn pub_spans_from_the_keyword() {
 fn pub_must_come_before_def() {
     assert_eq!(
         error_of("pub x = 1\n"),
-        ("expected 'fn', found 'x'".to_string(), 1, 5)
+        ("expected 'fn' or 'enum', found 'x'".to_string(), 1, 5)
     );
 }
 
 fn tuple(elts: Vec<Expr>, ctx: ExprContext) -> Expr {
     ExprKind::Tuple { elts, ctx }.into()
+}
+
+fn load(id: &str) -> Expr {
+    ExprKind::Name {
+        id: id.to_string(),
+        ctx: ExprContext::Load,
+    }
+    .into()
 }
 
 fn stored(id: &str) -> Expr {
@@ -1902,4 +1955,257 @@ fn nested_tuples_parse_in_linear_time() {
     assert!(parse_within(format!("y = {groups}\n"), Duration::from_secs(5)).is_ok());
     let targets = format!("{}a, b{}", "(".repeat(depth), ", c)".repeat(depth));
     assert!(parse_within(format!("{targets} = t\n"), Duration::from_secs(5)).is_ok());
+}
+
+/// Builds a type written as `name` with no type arguments, such as `float`, for expected trees.
+fn named_type(name: &str) -> TypeExpr {
+    let kind = match name {
+        "int" => TypeExprKind::Int,
+        "float" => TypeExprKind::Float,
+        "bool" => TypeExprKind::Bool,
+        "str" => TypeExprKind::Str,
+        _ => TypeExprKind::Named {
+            name: name.to_string(),
+            args: vec![],
+        },
+    };
+    TypeExpr {
+        kind,
+        span: Span::default(),
+    }
+}
+
+fn variant(name: &str, fields: &[&str]) -> Variant {
+    Variant {
+        name: name.to_string(),
+        span: Span::default(),
+        fields: fields.iter().map(|f| named_type(f)).collect(),
+    }
+}
+
+#[test]
+fn an_enum_lists_its_variants() {
+    let module = Parser::new(
+        &Lexer::new("pub enum Shape;\n    Circle(float)\n    Rect(float, float,)\n    Empty\n    Group(list[Shape])\n")
+            .lex()
+            .unwrap(),
+    )
+    .parse()
+    .unwrap();
+    let Mod::Module { body } = without_spans(module);
+    assert_eq!(
+        body,
+        vec![
+            StmtKind::EnumDef {
+                name: "Shape".to_string(),
+                name_span: Span::default(),
+                public: true,
+                variants: vec![
+                    variant("Circle", &["float"]),
+                    variant("Rect", &["float", "float"]),
+                    variant("Empty", &[]),
+                    Variant {
+                        name: "Group".to_string(),
+                        span: Span::default(),
+                        fields: vec![TypeExpr {
+                            kind: TypeExprKind::List(Box::new(named_type("Shape"))),
+                            span: Span::default(),
+                        }],
+                    },
+                ],
+            }
+            .into()
+        ]
+    );
+}
+
+#[test]
+fn an_enum_needs_a_block_of_variants() {
+    assert_eq!(
+        error_of("enum Shape;\nx = 1\n"),
+        ("expected an indented block, found 'x'".to_string(), 2, 1)
+    );
+    assert_eq!(
+        error_of("enum Shape;\n    Circle(\n"),
+        ("expected a type, found end of line".to_string(), 2, 12)
+    );
+    assert_eq!(
+        error_of("enum Shape;\n    Circle()\n"),
+        (
+            "a variant without values is written without parentheses, as in 'Circle'".to_string(),
+            2,
+            5
+        )
+    );
+}
+
+#[test]
+fn named_types_take_type_arguments() {
+    assert_eq!(
+        signature_of(
+            "fn f(a: option[int], b: Shape, c: shapes.Shape) -> option[list[Shape]]; ret none\n"
+        ),
+        (
+            ["option[int]", "Shape", "shapes.Shape"]
+                .map(|t| Some(t.to_string()))
+                .to_vec(),
+            Some("option[list[Shape]]".to_string())
+        )
+    );
+}
+
+#[test]
+fn none_is_not_a_type() {
+    assert_eq!(
+        error_of("fn f(a: none); ret\n"),
+        (
+            "'none' is not a type: a function without '->' returns no value, and 'option[T]' holds a value or none"
+                .to_string(),
+            1,
+            9
+        )
+    );
+}
+
+fn pattern(kind: PatternKind) -> Pattern {
+    Pattern {
+        kind,
+        span: Span::default(),
+    }
+}
+
+fn variant_pattern(path: &[&str], fields: Vec<Pattern>) -> Pattern {
+    pattern(PatternKind::Variant {
+        path: path
+            .iter()
+            .map(|name| (name.to_string(), Span::default()))
+            .collect(),
+        fields,
+    })
+}
+
+#[test]
+fn match_runs_the_first_case_that_fits() {
+    let source = "match s;\n    case Shape.Rect(w, _);\n        print(w)\n    case some(Tree.Leaf(n));\n        print(n)\n    case none; print(0)\n    case other;\n        break\n";
+    let module = Parser::new(&Lexer::new(source).lex().unwrap())
+        .parse()
+        .unwrap();
+    let Mod::Module { body } = without_spans(module);
+    let print = |name: &str| -> Stmt {
+        StmtKind::Expr {
+            value: Box::new(
+                ExprKind::Call {
+                    func: Box::new(load("print")),
+                    args: vec![load(name)],
+                }
+                .into(),
+            ),
+        }
+        .into()
+    };
+    let zero: Stmt = StmtKind::Expr {
+        value: Box::new(
+            ExprKind::Call {
+                func: Box::new(load("print")),
+                args: vec![
+                    ExprKind::Constant {
+                        value: Box::new(Constant::Int(0)),
+                        kind: None,
+                    }
+                    .into(),
+                ],
+            }
+            .into(),
+        ),
+    }
+    .into();
+    assert_eq!(
+        body,
+        vec![
+            StmtKind::Match {
+                subject: Box::new(load("s")),
+                cases: vec![
+                    MatchCase {
+                        pattern: variant_pattern(
+                            &["Shape", "Rect"],
+                            vec![
+                                pattern(PatternKind::Name("w".to_string())),
+                                pattern(PatternKind::Wildcard),
+                            ]
+                        ),
+                        body: vec![print("w")],
+                    },
+                    MatchCase {
+                        pattern: variant_pattern(
+                            &["some"],
+                            vec![variant_pattern(
+                                &["Tree", "Leaf"],
+                                vec![pattern(PatternKind::Name("n".to_string()))]
+                            )]
+                        ),
+                        body: vec![print("n")],
+                    },
+                    MatchCase {
+                        pattern: variant_pattern(&["none"], vec![]),
+                        body: vec![zero],
+                    },
+                    MatchCase {
+                        pattern: pattern(PatternKind::Name("other".to_string())),
+                        body: vec![StmtKind::Break.into()],
+                    },
+                ],
+            }
+            .into()
+        ]
+    );
+}
+
+#[test]
+fn patterns_span_their_text() {
+    let source = "match s;\n    case Shape.Rect(w, _);\n        print(w)\n";
+    let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
+    let StmtKind::Match { cases, .. } = &body[0].kind else {
+        panic!("expected match");
+    };
+    let pattern = &cases[0].pattern;
+    assert_eq!(pattern.span, span(2, 10, 2, 26));
+    assert_eq!(pattern.to_string(), "Shape.Rect(w, _)");
+    let PatternKind::Variant { path, fields } = &pattern.kind else {
+        panic!("expected a variant pattern");
+    };
+    assert_eq!(path[1].1, span(2, 16, 2, 20));
+    assert_eq!(fields[0].span, span(2, 21, 2, 22));
+}
+
+#[test]
+fn match_needs_cases() {
+    assert_eq!(
+        error_of("match s;\n    print(s)\n"),
+        ("expected 'case', found 'print'".to_string(), 2, 5)
+    );
+    assert_eq!(
+        error_of("match s;\n    case 1;\n        print(s)\n"),
+        (
+            "a pattern is a variant such as 'Shape.Circle(r)', 'some(x)', or 'none', a name, or '_'"
+                .to_string(),
+            2,
+            10
+        )
+    );
+    assert_eq!(
+        error_of("match s;\n    case some();\n        print(s)\n"),
+        ("expected a pattern, found ')'".to_string(), 2, 15)
+    );
+}
+
+#[test]
+fn a_bad_case_is_skipped_with_its_match() {
+    let tokens = Lexer::new("match s;\n    case 1;\n        print(s)\nx = 1\n")
+        .lex()
+        .unwrap();
+    let (module, diagnostics) = Parser::new(&tokens).parse_recovering();
+    assert_eq!(diagnostics.len(), 1);
+    let Mod::Module { body } = module;
+    assert_eq!(body.len(), 1);
+    assert!(matches!(body[0].kind, StmtKind::Assign { .. }));
 }

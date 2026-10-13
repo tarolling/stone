@@ -37,8 +37,9 @@ pub struct BlockId(pub usize);
 
 /// An instruction input: a vreg, or an immediate 64-bit value.
 ///
-/// Floats are immediates of their bits, bools are 0 or 1, and `none` is 0, so for example the
-/// literal `1.5` is `Imm(4609434218613702656)`.
+/// Floats are immediates of their bits and bools are 0 or 1, so for example the literal `1.5` is
+/// `Imm(4609434218613702656)`. A counted value that is null, such as a variable whose value moved
+/// away, is 0.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Operand {
     Reg(VReg),
@@ -128,12 +129,13 @@ impl From<&CompOp> for Cond {
 
 /// What a counted value is, which tells [`Inst::Release`] how to free it.
 ///
-/// Strings and lists are counted: each holds how many variables, list slots, and temporaries
-/// refer to it, and is freed when the last one lets go. Other values are not counted.
+/// Strings, lists, and enum values are counted: each holds how many variables, list slots, and
+/// temporaries refer to it, and is freed when the last one lets go. Other values are not counted.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RcKind {
     Str,
     List,
+    Enum,
 }
 
 impl RcKind {
@@ -145,10 +147,36 @@ impl RcKind {
         match ty {
             Type::Str => Some(RcKind::Str),
             Type::List(_) => Some(RcKind::List),
+            Type::Enum { .. } => Some(RcKind::Enum),
             _ => None,
         }
     }
+
+    /// Returns the two bits that record how a slot of a list or an enum value is counted, which
+    /// the runtime's free routines read: 0 for a value that is not counted, then 1 for a string,
+    /// 2 for a list, and 3 for an enum value.
+    pub fn code(kind: Option<RcKind>) -> i64 {
+        match kind {
+            None => 0,
+            Some(RcKind::Str) => 1,
+            Some(RcKind::List) => 2,
+            Some(RcKind::Enum) => 3,
+        }
+    }
+
+    /// Returns the codes of `kinds` side by side, two bits apiece, the first lowest.
+    ///
+    /// For example, `[None, Some(RcKind::Str), Some(RcKind::Enum)]` is `0b11_01_00`.
+    pub fn codes(kinds: &[Option<RcKind>]) -> i64 {
+        kinds
+            .iter()
+            .enumerate()
+            .fold(0, |code, (i, kind)| code | RcKind::code(*kind) << (2 * i))
+    }
 }
+
+/// Where the values of an enum value start: after its tag and the kinds of its slots.
+pub const FIELDS_OFFSET: i64 = 16;
 
 /// Returns the name of value `i` of the tuple variable `name`, once nested tuples are flattened,
 /// which lowering keeps as a variable of its own.
@@ -175,6 +203,9 @@ pub enum Callee {
     Runtime(&'static str),
     /// The routine that prints one value of the type, which the backend picks and emits.
     Print(Type),
+    /// A function lowering made for the program, such as the one that prints an enum, by its
+    /// assembly label. Calling one is not counted as a call of a stone function.
+    Helper(String),
 }
 
 /// What a [`Inst::Packed`] loop computes for each element, over list data pointers from
@@ -338,6 +369,25 @@ pub enum Inst {
     IntToFloat { dst: VReg, src: Operand },
     /// Converts a float's bits to an int, dropping the fraction and failing on nan or overflow.
     FloatToInt { dst: VReg, src: Operand },
+    /// The tag of the enum value `value`, which says which of its enum's variants it is, numbered
+    /// from 0 in the order the enum lists them.
+    EnumTag { dst: VReg, value: Operand },
+    /// Reads slot `slot` of the enum value `value`, a value of its variant, or one value of a
+    /// tuple among them.
+    FieldGet {
+        dst: VReg,
+        value: Operand,
+        slot: usize,
+    },
+    /// Fills slot `slot` of an enum value that was just made with room for it.
+    FieldInit {
+        value: Operand,
+        slot: usize,
+        src: Operand,
+    },
+    /// The address of the value of a variant without values whose tag is `tag`, which lives as
+    /// long as the program, like a string literal, so it is borrowed.
+    VariantStatic { dst: VReg, tag: usize },
     /// Adds a reference to the counted value `src`, unless it is null.
     Retain { src: Operand },
     /// Drops a reference to the counted value `src`, unless it is null, freeing it when no
@@ -386,12 +436,16 @@ impl Inst {
             | Inst::Packed { done: dst, .. }
             | Inst::ListUnique { dst, .. }
             | Inst::IntToFloat { dst, .. }
-            | Inst::FloatToInt { dst, .. } => Some(*dst),
+            | Inst::FloatToInt { dst, .. }
+            | Inst::EnumTag { dst, .. }
+            | Inst::FieldGet { dst, .. }
+            | Inst::VariantStatic { dst, .. } => Some(*dst),
             Inst::Call { dsts, .. } => dsts.first().copied(),
             Inst::ListStore { old: dst, .. } => *dst,
             Inst::StoreGlobal { .. }
             | Inst::ListInit { .. }
             | Inst::ListSet { .. }
+            | Inst::FieldInit { .. }
             | Inst::Retain { .. }
             | Inst::Release { .. } => None,
         }
@@ -413,6 +467,9 @@ impl Inst {
             | Inst::Retain { src }
             | Inst::Release { src, .. }
             | Inst::ListUnique { src, .. } => vec![*src],
+            Inst::EnumTag { value, .. } | Inst::FieldGet { value, .. } => vec![*value],
+            Inst::FieldInit { value, src, .. } => vec![*value, *src],
+            Inst::VariantStatic { .. } => vec![],
             Inst::Binary { lhs, rhs, .. }
             | Inst::FloatBinary { lhs, rhs, .. }
             | Inst::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
@@ -535,6 +592,10 @@ pub struct Function {
     pub blocks: Vec<Block>,
     /// How many vregs the function uses, numbered `v0` up to this.
     pub vreg_count: u32,
+    /// Whether lowering made the function, rather than the program defining it, in which case
+    /// `name` is its assembly label and calling it does not count toward the limit on nested
+    /// calls.
+    pub helper: bool,
 }
 
 /// The lowered module: every function, then `main`, plus the names of every global.
@@ -581,6 +642,7 @@ impl fmt::Display for Callee {
             Callee::User(name) => write!(f, "{name}"),
             Callee::Runtime(label) => write!(f, "{label}"),
             Callee::Print(ty) => write!(f, "print[{ty}]"),
+            Callee::Helper(label) => write!(f, "{label}"),
         }
     }
 }
@@ -670,10 +732,17 @@ impl fmt::Display for Inst {
             }
             Inst::IntToFloat { dst, src } => write!(f, "{dst} = int_to_float {src}"),
             Inst::FloatToInt { dst, src } => write!(f, "{dst} = float_to_int {src}"),
+            Inst::EnumTag { dst, value } => write!(f, "{dst} = enum_tag {value}"),
+            Inst::FieldGet { dst, value, slot } => write!(f, "{dst} = field_get {value}, {slot}"),
+            Inst::FieldInit { value, slot, src } => {
+                write!(f, "field_init {value}[{slot}], {src}")
+            }
+            Inst::VariantStatic { dst, tag } => write!(f, "{dst} = variant {tag}"),
             Inst::Retain { src } => write!(f, "retain {src}"),
             Inst::Release { src, kind } => match kind {
                 RcKind::Str => write!(f, "release_str {src}"),
                 RcKind::List => write!(f, "release_list {src}"),
+                RcKind::Enum => write!(f, "release_enum {src}"),
             },
             Inst::Call { dsts, callee, args } => {
                 if !dsts.is_empty() {

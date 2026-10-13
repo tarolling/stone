@@ -22,7 +22,7 @@ pub const MODULE_DOC: &str = "The builtin module of pseudo-random numbers, which
 pub static DOCS: [BuiltinDoc; 4] = [
     BuiltinDoc {
         name: "random.seed",
-        signature: "random.seed(n: int) -> none",
+        signature: "random.seed(n: int)",
         description: "Starts the numbers over from `n`, so the same seed always gives the same \
                       numbers, in `stone run` and in a built program alike. Without a seed, \
                       each run draws different numbers.",

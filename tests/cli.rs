@@ -810,3 +810,26 @@ fn clean_refuses_a_build_directory_stone_did_not_make() {
     );
     assert!(dir.join("build/notes.txt").is_file());
 }
+
+#[test]
+fn printing_stops_at_an_enum_value_nested_too_deeply_in_both_backends() {
+    // `N.Z` inside 9,999 `N.S`s is 10,000 levels, which prints, and one more does not
+    let source = "enum N;\n    S(N)\n    Z\n\nn = N.Z\nfor i in range(9999);\n    n = N.S(n)\n\
+                  print(n)\nn = N.S(n)\nprint(\"start\", n)\n";
+    let (_, [run, built]) = run_and_build_in("print_too_deep", source);
+    let expected = format!(
+        "{}N.Z{}\nstart {}",
+        "N.S(".repeat(9999),
+        ")".repeat(9999),
+        "N.S(".repeat(10000)
+    );
+    for output in [&run, &built] {
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert!(String::from_utf8_lossy(&output.stdout) == expected);
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "main.stn:10:1: error: value is nested too deeply to print (more than 10000 levels)\n   \
+             |\n10 | print(\"start\", n)\n   | ^^^^^^^^^^^^^^^^^\n"
+        );
+    }
+}

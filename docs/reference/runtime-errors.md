@@ -23,7 +23,8 @@ average.stn:5:9: error: division by zero
 
 Both backends stop at the same point with the same message, since operands are evaluated left
 to right in both. The error points at the innermost expression that failed: the division in
-`1 + a / b`, the subscript in `xs[i]`, the call in `int(s)`, `xs.pop()`, or `math.sqrt(x)`, and
+`1 + a / b`, the subscript in `xs[i]`, the call in `int(s)`, `xs.pop()`, `x.unwrap()`, `print(x)`, or
+`math.sqrt(x)`, and
 for `recursion is too deep`, the call that went one level too deep. A change such as
 `grid[i][j] = v` points at the subscript whose index is out of range. An executable names the
 file by the path it was built from.
@@ -54,6 +55,8 @@ file by the path it was built from.
 | `sleep length must be non-negative` | `time.sleep()` of a negative number or nan |
 | `sleep length is too large` | `time.sleep()` of 2^63 seconds or more |
 | `recursion is too deep (more than 1000 nested calls)` | more than 1,000 calls active at once |
+| `cannot unwrap none` | `unwrap()` of an option that is `none` |
+| `value is nested too deeply to print (more than 10000 levels)` | `print` of an enum value inside more than 9,999 others, as in a long linked list. What comes before it on the line stays printed |
 | `'name' is used before it is assigned` | a function read a global that had not been assigned yet when it ran |
 
 Arithmetic on lists computes the whole expression for the first element, then the second, and

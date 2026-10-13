@@ -5,7 +5,8 @@
 //! in memory. Evaluation is left to right, like the interpreter, so runtime errors happen in the
 //! same order. For example, `x = x + 1` in a function lowers to `v0 = add v0, 1`.
 //!
-//! Strings and lists are counted (see [`RcKind`]), and lowering keeps every count exact:
+//! Strings, lists, and enum values are counted (see [`RcKind`]), and lowering keeps every count
+//! exact:
 //!
 //! - every variable and list slot owns one reference to the value it holds
 //! - an expression's value is either borrowed, like a variable's or a literal's, or a temporary
@@ -20,7 +21,8 @@
 //! - lists are values, so before a statement changes one (`xs[i] = v` or `xs.append(v)`), each
 //!   list from the variable to it is made unique (`list_unique`): copied if anything else refers
 //!   to it, so the change shows through no other variable
-//! - returning releases every local, and every list a `for` loop is walking
+//! - returning releases every local, every list a `for` loop is walking, and every value a
+//!   `match` holds
 //! - the end of `main` releases every global, so nothing is left when the program ends
 //!
 //! Globals can be borrowed because only top-level statements assign them, and a statement's
@@ -35,33 +37,37 @@ use super::{
     Terminator, VReg, leaf_name, variable_of,
 };
 use crate::ast::{
-    Arg, BoolOp, Constant, Expr, ExprKind, Mod, Operator, Stmt, StmtKind, UnaryOp, constant_int,
-    target_names,
+    Arg, BoolOp, Constant, Expr, ExprKind, MatchCase, Mod, Operator, Pattern, PatternKind, Stmt,
+    StmtKind, UnaryOp, constant_int, target_names,
 };
 use crate::checker::{
-    Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, place_root, place_spans,
-    range_args,
+    Enums, Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, place_root,
+    place_spans, range_args, variant_display, variants,
 };
 use crate::codegen::context::module_routine;
 use crate::last_use::{LiveAfter, global_reads, live_after};
 use crate::span::Span;
 use crate::stdlib::{
-    INDEX_RANGE, LENGTHS_DIFFER, POP_EMPTY, POP_RANGE, SLICE_STEP_ZERO, STRING_INDEX_RANGE, math,
-    random,
+    INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRINT_DEPTH,
+    SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_NONE, math, random,
 };
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 /// The type of each variable, keyed by the function it belongs to (`None` for globals) and name.
 type Variables = HashMap<(Option<String>, String), Type>;
 
 /// Lowers every function in `module`, then its top-level code as `main`, using the types the
-/// checker inferred for every expression and for every variable in `symbols`.
+/// checker inferred for every expression, for every variable in `symbols`, and for the values of
+/// every variant of `enums`. Last come the functions that print enum values, which lowering makes
+/// for each enum type the program prints.
 ///
 /// Fails only on input the checker rejects, such as a constant type no backend supports.
 pub fn lower(
     module: &Mod,
     types: &HashMap<Span, Type>,
     symbols: &[Symbol],
+    enums: &Enums,
 ) -> Result<Program, String> {
     let Mod::Module { body } = module;
 
@@ -70,7 +76,12 @@ pub fn lower(
 
     let mut variables: Variables = symbols
         .iter()
-        .filter(|symbol| symbol.kind != SymbolKind::Function)
+        .filter(|symbol| {
+            !matches!(
+                symbol.kind,
+                SymbolKind::Function | SymbolKind::Enum | SymbolKind::Variant
+            )
+        })
         .map(|symbol| {
             (
                 (symbol.scope.clone(), symbol.name.clone()),
@@ -107,6 +118,8 @@ pub fn lower(
         owned_params: owned_params(body),
         global_reads: global_reads(body, &stone_globals),
         global_set,
+        enums,
+        printers: RefCell::new(Vec::new()),
     };
 
     let mut functions = Vec::new();
@@ -123,8 +136,42 @@ pub fn lower(
         }
     }
     functions.push(Lowerer::new(&context, None).function(&[], &top_level)?);
+    // a printer can ask for the printers of the enums its values hold, so this runs until none
+    // is left
+    let mut printed = 0;
+    loop {
+        let next = context.printers.borrow().get(printed).cloned();
+        let Some(ty) = next else {
+            break;
+        };
+        printed += 1;
+        let label = printer_label(&ty);
+        functions.push(Lowerer::new(&context, Some(label)).enum_printer(&ty)?);
+    }
 
     Ok(Program { functions, globals })
+}
+
+/// Returns the label of the function that prints values of the enum type `ty`.
+///
+/// For example, `option[list[int]]` is printed by `stone.print_enum.option.list_int`.
+fn printer_label(ty: &Type) -> String {
+    fn mangle(ty: &Type) -> String {
+        match ty {
+            Type::List(elem) => format!("list_{}", mangle(elem)),
+            Type::Tuple(fields) => {
+                let fields: Vec<String> = fields.iter().map(mangle).collect();
+                format!("tuple{}_{}", fields.len(), fields.join("_"))
+            }
+            Type::Enum { name, args } if args.is_empty() => name.clone(),
+            Type::Enum { name, args } => {
+                let args: Vec<String> = args.iter().map(mangle).collect();
+                format!("{name}.{}", args.join("_"))
+            }
+            other => other.to_string(),
+        }
+    }
+    format!("stone.print_enum.{}", mangle(ty))
 }
 
 /// What lowering each function shares.
@@ -142,7 +189,16 @@ struct Context<'a> {
     /// For each function, the globals it or any function it calls may read, which a caller must
     /// not move into it, by their stone names.
     global_reads: HashMap<String, HashSet<String>>,
+    /// The variants of every enum the program defines.
+    enums: &'a Enums,
+    /// Each enum type some code prints, in the order it was first printed, which gets a function
+    /// that prints its values.
+    printers: RefCell<Vec<Type>>,
 }
+
+/// A name a `match` case binds, the values it takes, one for each value of a tuple, and how each
+/// is counted.
+type Binding = (String, Vec<Operand>, Vec<Option<RcKind>>);
 
 /// What a `for` loop walks: a range up to an end, or a list.
 #[derive(Clone, Copy)]
@@ -205,6 +261,13 @@ struct Lowerer<'a> {
     /// The innermost statement or expression being lowered, which each instruction records as
     /// where a runtime error at it points.
     span: Span,
+    /// The values the `match` statements being lowered hold, which they release when they end,
+    /// each with how many loops enclose it, so `ret` releases them all and `break` and `cont`
+    /// those inside the loop they leave.
+    held: Vec<(Operand, usize)>,
+    /// How many enum values the value being printed is inside, which a printer of an enum
+    /// passes on to the printers of the enum values it holds.
+    print_depth: Operand,
 }
 
 impl<'a> Lowerer<'a> {
@@ -227,6 +290,8 @@ impl<'a> Lowerer<'a> {
             live_after: LiveAfter::new(),
             statement_last_uses: Vec::new(),
             span: Span::default(),
+            held: Vec::new(),
+            print_depth: Operand::Imm(0),
         }
     }
 
@@ -299,7 +364,114 @@ impl<'a> Lowerer<'a> {
             params,
             blocks: self.layout(),
             vreg_count: self.vreg_count,
+            helper: false,
         })
+    }
+
+    /// Makes the function that prints a value of the enum type `ty` as the interpreter does, such
+    /// as `Shape.Rect(2.0, 3.0)` or `some('a')`, given the value and how many enum values it is
+    /// inside. Printing one nested too deeply stops the program, pointing at the `print` that
+    /// called it, which recorded its site.
+    fn enum_printer(mut self, ty: &Type) -> Result<Function, String> {
+        let (value, depth) = (self.fresh(), self.fresh());
+        let entry = self.new_block();
+        self.start(entry);
+        let (deep, shallow) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Ge,
+            float: false,
+            lhs: Operand::Reg(depth),
+            rhs: Operand::Imm(MAX_PRINT_DEPTH as i64),
+            then: deep,
+            otherwise: shallow,
+        });
+        self.start(deep);
+        self.terminate(Terminator::Fail(PRINT_DEPTH.to_string(), vec![]));
+        self.start(shallow);
+        let inner = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: inner,
+            lhs: Operand::Reg(depth),
+            rhs: Operand::Imm(1),
+        });
+        self.print_depth = Operand::Reg(inner);
+        let all = variants(self.context.enums, ty);
+        let tag = self.fresh();
+        self.push(Inst::EnumTag {
+            dst: tag,
+            value: Operand::Reg(value),
+        });
+        for (k, (name, fields)) in all.iter().enumerate() {
+            if k + 1 < all.len() {
+                let (this, next) = (self.new_block(), self.new_block());
+                self.terminate(Terminator::CmpBranch {
+                    cond: Cond::Eq,
+                    float: false,
+                    lhs: Operand::Reg(tag),
+                    rhs: Operand::Imm(k as i64),
+                    then: this,
+                    otherwise: next,
+                });
+                self.start(this);
+                self.print_variant(ty, name, fields, Operand::Reg(value));
+                self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
+                self.start(next);
+            } else {
+                self.print_variant(ty, name, fields, Operand::Reg(value));
+                self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
+            }
+        }
+        Ok(Function {
+            name: self.name.clone(),
+            params: vec![value, depth],
+            blocks: self.layout(),
+            vreg_count: self.vreg_count,
+            helper: true,
+        })
+    }
+
+    /// Prints `value`, a value of the variant `name` of the enum type `ty` whose values have the
+    /// types `fields`, with its values in parentheses, the way the interpreter writes it.
+    fn print_variant(&mut self, ty: &Type, name: &str, fields: &[Type], value: Operand) {
+        let text = self.fresh();
+        self.push(Inst::StrAddr {
+            dst: text,
+            text: variant_display(ty, name),
+        });
+        self.push(Inst::Call {
+            dsts: vec![],
+            callee: Callee::Print(Type::Str),
+            args: vec![Operand::Reg(text)],
+        });
+        if fields.is_empty() {
+            return;
+        }
+        self.print_char('(');
+        let mut slot = 0;
+        for (k, field) in fields.iter().enumerate() {
+            if k > 0 {
+                self.print_char(',');
+                self.print_char(' ');
+            }
+            // printing changes nothing, so the values are borrowed
+            let width = field.leaves().len();
+            let values = self.field_values(value, slot, width);
+            self.print_flat(field, &values, true);
+            slot += width;
+        }
+        self.print_char(')');
+    }
+
+    /// Reads slots `slot` up to `slot + width` of the enum value `value`, borrowed.
+    fn field_values(&mut self, value: Operand, slot: usize, width: usize) -> Vec<Operand> {
+        (slot..slot + width)
+            .map(|slot| {
+                let dst = self.fresh();
+                self.push(Inst::FieldGet { dst, value, slot });
+                Operand::Reg(dst)
+            })
+            .collect()
     }
 
     /// Returns the vreg of local `name`, creating it the first time.
@@ -373,15 +545,7 @@ impl<'a> Lowerer<'a> {
     /// `(3, 0b10_01_00)`.
     fn element_layout(&self, expr: &Expr) -> (usize, i64) {
         let kinds = self.element_kinds(expr);
-        let code = kinds.iter().enumerate().fold(0, |code, (i, kind)| {
-            let bits = match kind {
-                None => 0,
-                Some(RcKind::Str) => 1,
-                Some(RcKind::List) => 2,
-            };
-            code | bits << (2 * i)
-        });
-        (kinds.len(), code)
+        (kinds.len(), RcKind::codes(&kinds))
     }
 
     /// Returns how each value of an element of the list `expr` is counted: one for each value of
@@ -552,6 +716,7 @@ impl<'a> Lowerer<'a> {
         for (src, kind) in held {
             self.push(Inst::Release { src, kind });
         }
+        self.release_held(0);
         if self.name.is_some() {
             let moved = std::mem::take(&mut self.moved_locals);
             for (reg, kind) in self.counted_locals.clone() {
@@ -583,6 +748,24 @@ impl<'a> Lowerer<'a> {
             });
         }
         self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
+    }
+
+    /// Releases each value a `match` holds inside at least `loops` loops, innermost first, where
+    /// `ret` leaves them all and `break` or `cont` the innermost loop.
+    fn release_held(&mut self, loops: usize) {
+        let held: Vec<Operand> = self
+            .held
+            .iter()
+            .rev()
+            .filter(|(_, depth)| *depth >= loops)
+            .map(|(value, _)| *value)
+            .collect();
+        for src in held {
+            self.push(Inst::Release {
+                src,
+                kind: RcKind::Enum,
+            });
+        }
     }
 
     /// Renumbers the blocks into the order they were started.
@@ -813,12 +996,14 @@ impl<'a> Lowerer<'a> {
 
             StmtKind::Break => {
                 if let Some(exit) = self.loops.last().map(|l| l.exit) {
+                    self.release_held(self.loops.len());
                     self.jump(exit);
                 }
             }
 
             StmtKind::Continue => {
                 if let Some(header) = self.loops.last().map(|l| l.header) {
+                    self.release_held(self.loops.len());
                     self.jump(header);
                 }
             }
@@ -826,11 +1011,298 @@ impl<'a> Lowerer<'a> {
             StmtKind::FunctionDef { .. } => {
                 return Err("functions must be defined at the top level".to_string());
             }
+            StmtKind::EnumDef { .. } => {}
+            StmtKind::Match { subject, cases } => self.match_stmt(subject, cases)?,
             StmtKind::Use { .. } => {
                 return Err("use is only allowed at the top level of a file".to_string());
             }
         }
         Ok(())
+    }
+
+    /// Lowers a `match`: its subject once, then each case's pattern in turn, a chain of tag
+    /// checks down the variants it names, and the first case whose pattern fits binds its names
+    /// and runs. A subject that is not a variable is held until the `match` ends, so the values
+    /// bound from it are retained before anything can release it.
+    ///
+    /// For example, `case some(x);` checks `enum_tag v0` against 1, then binds `x` to
+    /// `field_get v0, 0`.
+    fn match_stmt(&mut self, subject: &Expr, cases: &[MatchCase]) -> Result<(), String> {
+        let ty = self.type_of(subject)?;
+        let value = self.expr(subject)?;
+        // a case can assign the variable it matches, so it is read through a copy
+        let value = self.snapshot(value);
+        let held = match value {
+            Operand::Reg(reg) if self.owned.remove(&reg).is_some() => {
+                self.held.push((value, self.loops.len()));
+                true
+            }
+            _ => false,
+        };
+        let end = self.new_block();
+        for case in cases {
+            let next = self.new_block();
+            self.pattern_test(&case.pattern, value, &ty, next);
+            // every value is read and retained before any name is assigned, since assigning
+            // one can release the value the others come from
+            let mut bindings = Vec::new();
+            self.pattern_bindings(&case.pattern, &[value], &ty, &mut bindings);
+            for (_, values, kinds) in &bindings {
+                for (&value, &kind) in values.iter().zip(kinds) {
+                    self.take(value, kind);
+                }
+            }
+            for (name, values, kinds) in bindings {
+                let leaves = self.leaf_names(&name);
+                for ((leaf, value), kind) in leaves.iter().zip(values).zip(kinds) {
+                    self.assign_name(leaf, value, kind);
+                }
+            }
+            for stmt in &case.body {
+                self.stmt(stmt)?;
+            }
+            if self.current.is_some() {
+                self.jump(end);
+            }
+            self.start(next);
+        }
+        // the checker made sure some case fits every value
+        self.terminate(Terminator::Fail(
+            "no case of the match fits the value".to_string(),
+            vec![],
+        ));
+        self.start(end);
+        if held {
+            self.held.pop();
+            self.push(Inst::Release {
+                src: value,
+                kind: RcKind::Enum,
+            });
+        }
+        Ok(())
+    }
+
+    /// Checks that `value`, of type `ty`, fits `pattern`, going on in a new block if it does and
+    /// to `otherwise` if not. Only variants check anything, each its tag, then its values that
+    /// are variants in turn.
+    fn pattern_test(&mut self, pattern: &Pattern, value: Operand, ty: &Type, otherwise: BlockId) {
+        let PatternKind::Variant { path, fields } = &pattern.kind else {
+            return;
+        };
+        let all = variants(self.context.enums, ty);
+        let Some(tag) = path
+            .last()
+            .and_then(|(name, _)| all.iter().position(|(variant, _)| variant == name))
+        else {
+            return;
+        };
+        if all.len() > 1 {
+            let found = self.fresh();
+            self.push(Inst::EnumTag { dst: found, value });
+            let fits = self.new_block();
+            self.terminate(Terminator::CmpBranch {
+                cond: Cond::Eq,
+                float: false,
+                lhs: Operand::Reg(found),
+                rhs: Operand::Imm(tag as i64),
+                then: fits,
+                otherwise,
+            });
+            self.start(fits);
+        }
+        let mut slot = 0;
+        for (field, field_ty) in fields.iter().zip(&all[tag].1) {
+            if let PatternKind::Variant { .. } = field.kind {
+                // a variant's type is an enum, which is one slot
+                let inner = self.fresh();
+                self.push(Inst::FieldGet {
+                    dst: inner,
+                    value,
+                    slot,
+                });
+                self.pattern_test(field, Operand::Reg(inner), field_ty, otherwise);
+            }
+            slot += field_ty.leaves().len();
+        }
+    }
+
+    /// Pushes each name `pattern` binds, with the values of `values`, of type `ty`, it takes,
+    /// borrowed, and how each is counted.
+    fn pattern_bindings(
+        &mut self,
+        pattern: &Pattern,
+        values: &[Operand],
+        ty: &Type,
+        out: &mut Vec<Binding>,
+    ) {
+        match &pattern.kind {
+            PatternKind::Wildcard => {}
+            PatternKind::Name(name) => {
+                let kinds = ty.leaves().iter().map(RcKind::of).collect();
+                out.push((name.clone(), values.to_vec(), kinds));
+            }
+            PatternKind::Variant { path, fields } => {
+                let all = variants(self.context.enums, ty);
+                let Some(tag) = path
+                    .last()
+                    .and_then(|(name, _)| all.iter().position(|(variant, _)| variant == name))
+                else {
+                    return;
+                };
+                let mut slot = 0;
+                for (field, field_ty) in fields.iter().zip(&all[tag].1) {
+                    let width = field_ty.leaves().len();
+                    if !matches!(field.kind, PatternKind::Wildcard) {
+                        let field_values = self.field_values(values[0], slot, width);
+                        self.pattern_bindings(field, &field_values, field_ty, out);
+                    }
+                    slot += width;
+                }
+            }
+        }
+    }
+
+    /// Makes a value of the variant `tag` of the enum type `ty` holding `args`, evaluated left to
+    /// right: a new value with a count of 1, or the static value of a variant without values.
+    fn variant(
+        &mut self,
+        ty: &Type,
+        tag: usize,
+        args: &[Expr],
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let all = variants(self.context.enums, ty);
+        let kinds: Vec<Option<RcKind>> = all[tag]
+            .1
+            .iter()
+            .flat_map(Type::leaves)
+            .map(|leaf| RcKind::of(&leaf))
+            .collect();
+        if kinds.is_empty() {
+            let dst = self.fresh();
+            self.push(Inst::VariantStatic { dst, tag });
+            return Ok(self.finish(Operand::Reg(dst), into));
+        }
+        let mut values = Vec::new();
+        for arg in args {
+            values.extend(self.expr_flat(arg)?);
+        }
+        // the value keeps a reference to what it holds
+        for (&value, &kind) in values.iter().zip(&kinds) {
+            self.take(value, kind);
+        }
+        let dst = self.fresh();
+        self.push(Inst::Call {
+            dsts: vec![dst],
+            callee: Callee::Runtime("stone.enum_new"),
+            args: vec![
+                Operand::Imm(tag as i64),
+                Operand::Imm(RcKind::codes(&kinds)),
+                Operand::Imm(kinds.len() as i64),
+            ],
+        });
+        for (slot, src) in values.into_iter().enumerate() {
+            self.push(Inst::FieldInit {
+                value: Operand::Reg(dst),
+                slot,
+                src,
+            });
+        }
+        self.own(Operand::Reg(dst), Some(RcKind::Enum));
+        Ok(self.finish(Operand::Reg(dst), into))
+    }
+
+    /// Returns the tag of the variant `variant` of the enum the program calls `enum_name`.
+    fn tag_of(&self, enum_name: &str, variant: &str) -> Result<usize, String> {
+        self.context
+            .enums
+            .get(enum_name)
+            .and_then(|all| all.iter().position(|(name, _)| name == variant))
+            .ok_or_else(|| format!("'{enum_name}' has no variant '{variant}'"))
+    }
+
+    /// Lowers `receiver.unwrap()`, or `receiver.unwrap_or(default)` with a `default`, to the
+    /// values the option holds, owned, one for each value of a tuple: the receiver is evaluated,
+    /// then the default, and `unwrap` of `none` stops the program.
+    fn option_value(
+        &mut self,
+        receiver: &Expr,
+        default: Option<&Expr>,
+    ) -> Result<Vec<Operand>, String> {
+        let ty = self.type_of(receiver)?;
+        let Type::Enum { args, .. } = &ty else {
+            return Err("only an option holds a value".to_string());
+        };
+        let held = args.first().cloned().unwrap_or(Type::Int);
+        let kinds: Vec<Option<RcKind>> = held.leaves().iter().map(RcKind::of).collect();
+        let option = self.expr(receiver)?;
+        let defaults = match default {
+            Some(default) => {
+                let values = self.expr_flat(default)?;
+                // the default carries a reference, which a `some` gives up
+                for (&value, &kind) in values.iter().zip(&kinds) {
+                    self.take(value, kind);
+                }
+                Some(values)
+            }
+            None => None,
+        };
+        let tag = self.fresh();
+        self.push(Inst::EnumTag {
+            dst: tag,
+            value: option,
+        });
+        let results: Vec<VReg> = kinds.iter().map(|_| self.fresh()).collect();
+        let (holds, empty, end) = (self.new_block(), self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Eq,
+            float: false,
+            lhs: Operand::Reg(tag),
+            rhs: Operand::Imm(1),
+            then: holds,
+            otherwise: empty,
+        });
+        self.start(holds);
+        let values = self.field_values(option, 0, kinds.len());
+        for ((&result, value), &kind) in results.iter().zip(values).zip(&kinds) {
+            self.push(Inst::Copy {
+                dst: result,
+                src: value,
+            });
+            if kind.is_some() {
+                self.push(Inst::Retain {
+                    src: Operand::Reg(result),
+                });
+            }
+        }
+        if let Some(defaults) = &defaults {
+            for (&value, &kind) in defaults.iter().zip(&kinds) {
+                if let Some(kind) = kind {
+                    self.push(Inst::Release { src: value, kind });
+                }
+            }
+        }
+        self.jump(end);
+        self.start(empty);
+        match &defaults {
+            Some(defaults) => {
+                for (&result, &value) in results.iter().zip(defaults) {
+                    self.push(Inst::Copy {
+                        dst: result,
+                        src: value,
+                    });
+                }
+                self.jump(end);
+            }
+            None => self.terminate(Terminator::Fail(UNWRAP_NONE.to_string(), vec![])),
+        }
+        self.start(end);
+        self.release_temp(option);
+        let results: Vec<Operand> = results.into_iter().map(Operand::Reg).collect();
+        for (&result, &kind) in results.iter().zip(&kinds) {
+            self.own(result, kind);
+        }
+        Ok(results)
     }
 
     /// Stores `value` in an assignment target: a local, a global, or a list element. A value
@@ -1443,7 +1915,12 @@ impl<'a> Lowerer<'a> {
                     Constant::Int(n) => Operand::Imm(*n),
                     Constant::Float(x) => Operand::Imm(x.to_bits() as i64),
                     Constant::Bool(b) => Operand::Imm(*b as i64),
-                    Constant::None => Operand::Imm(0),
+                    Constant::None => {
+                        // like a string literal, it lives as long as the program
+                        let dst = self.fresh();
+                        self.push(Inst::VariantStatic { dst, tag: 0 });
+                        Operand::Reg(dst)
+                    }
                     Constant::Str(s) => {
                         // literals are never freed, so they are borrowed
                         let dst = self.fresh();
@@ -1550,6 +2027,13 @@ impl<'a> Lowerer<'a> {
 
             ExprKind::Call { func, args } => {
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind {
+                    if let ExprKind::Name { id, .. } = &value.kind
+                        && self.context.enums.contains_key(id)
+                    {
+                        let ty = self.type_of(expr)?;
+                        let tag = self.tag_of(id, attr)?;
+                        return self.variant(&ty, tag, args, into);
+                    }
                     return self.method(value, attr, args, into, kind);
                 }
                 let ExprKind::Name { id, .. } = &func.kind else {
@@ -1558,9 +2042,14 @@ impl<'a> Lowerer<'a> {
                 self.call(id, args, into, kind)
             }
 
-            ExprKind::Attribute { attr, .. } => {
-                Err(format!("'{attr}' is a method, so it can only be called"))
-            }
+            ExprKind::Attribute { value, attr, .. } => match &value.kind {
+                ExprKind::Name { id, .. } if self.context.enums.contains_key(id) => {
+                    let ty = self.type_of(expr)?;
+                    let tag = self.tag_of(id, attr)?;
+                    self.variant(&ty, tag, &[], into)
+                }
+                _ => Err(format!("'{attr}' is a method, so it can only be called")),
+            },
 
             ExprKind::Subscript { value, slice, .. } if self.is_tuple(value) => {
                 // one value, since the field is not a tuple itself
@@ -2216,6 +2705,28 @@ impl<'a> Lowerer<'a> {
         kind: Option<RcKind>,
     ) -> Result<Operand, String> {
         match name {
+            "is_some" | "is_none" => {
+                let option = self.expr(receiver)?;
+                let tag = self.fresh();
+                self.push(Inst::EnumTag {
+                    dst: tag,
+                    value: option,
+                });
+                let dst = self.dst(into);
+                self.push(Inst::Compare {
+                    cond: Cond::Eq,
+                    float: false,
+                    dst,
+                    lhs: Operand::Reg(tag),
+                    rhs: Operand::Imm(i64::from(name == "is_some")),
+                });
+                self.release_temp(option);
+                Ok(Operand::Reg(dst))
+            }
+            "unwrap" | "unwrap_or" => {
+                let values = self.option_value(receiver, args.first())?;
+                Ok(self.finish(values[0], into))
+            }
             "len" if self.element_layout(receiver).0 > 1 => {
                 let width = self.element_layout(receiver).0;
                 let list = self.list_operand(receiver, &[])?;
@@ -2671,6 +3182,13 @@ impl<'a> Lowerer<'a> {
         kind: Option<RcKind>,
     ) -> Result<Operand, String> {
         match name {
+            "some" => {
+                let ty = Type::Enum {
+                    name: crate::checker::OPTION.to_string(),
+                    args: vec![self.type_of(&args[0])?],
+                };
+                self.variant(&ty, 1, args, into)
+            }
             "print" => {
                 // every argument is evaluated before anything prints, like the interpreter
                 let mut values = Vec::new();
@@ -3110,6 +3628,11 @@ impl<'a> Lowerer<'a> {
                 ExprKind::Attribute { value, attr, .. } if attr == "pop" => {
                     self.pop_element(value, args)
                 }
+                ExprKind::Attribute { value, attr, .. }
+                    if attr == "unwrap" || attr == "unwrap_or" =>
+                {
+                    self.option_value(value, args.first())
+                }
                 _ => Err("this method does not return a tuple".to_string()),
             },
             _ => Err("this expression cannot be a tuple".to_string()),
@@ -3418,7 +3941,21 @@ impl<'a> Lowerer<'a> {
                 }
                 self.print_char(')');
             }
-            Type::List(elem) if holds_tuple(elem) => self.print_elements(elem, values[0]),
+            Type::List(elem) if holds_tuple(elem) || holds_enum(elem) => {
+                self.print_elements(elem, values[0])
+            }
+            Type::Enum { .. } => {
+                let mut printers = self.context.printers.borrow_mut();
+                if !printers.contains(ty) {
+                    printers.push(ty.clone());
+                }
+                drop(printers);
+                self.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Helper(printer_label(ty)),
+                    args: vec![values[0], self.print_depth],
+                });
+            }
             Type::Str if nested => self.push(Inst::Call {
                 dsts: vec![],
                 callee: Callee::Runtime("stone.print_str_quoted"),
@@ -3547,6 +4084,19 @@ fn holds_tuple(ty: &Type) -> bool {
     match ty {
         Type::Tuple(_) => true,
         Type::List(elem) => holds_tuple(elem),
+        _ => false,
+    }
+}
+
+/// Returns whether a value of type `ty` is or holds an enum value, in a list or tuple, which
+/// lowering prints with a function it makes for the enum's type.
+///
+/// For example, `option[int]` and `list[tuple[int, Shape]]` do, and `list[int]` does not.
+fn holds_enum(ty: &Type) -> bool {
+    match ty {
+        Type::Enum { .. } => true,
+        Type::List(elem) => holds_enum(elem),
+        Type::Tuple(fields) => fields.iter().any(holds_enum),
         _ => false,
     }
 }

@@ -14,10 +14,10 @@ prints
 
 `fn name(param: type, ...) -> type;` opens a function, and `ret value` returns from it. Each
 parameter is written with its type, and the type after `->` is the type of the value the
-function returns. A function without `->` returns `none`: `ret` on its own, or reaching the end
-of the body, returns `none`. Functions must be defined at the top level, not inside other
-functions or blocks, and they can be called from anywhere in the file, even above their
-definition.
+function returns. A function without `->` returns no value: `ret` on its own, or reaching the
+end of the body, leaves it, and a call to it can only be a statement of its own, as
+`greet("ada")` is above. Functions must be defined at the top level, not inside other functions
+or blocks, and they can be called from anywhere in the file, even above their definition.
 
 The signature is the only place you write types. The checker infers the type of every variable
 inside the function, as it does at the top level, and checks each call against the signature,

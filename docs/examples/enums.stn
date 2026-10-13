@@ -1,0 +1,30 @@
+enum Shape;
+    Circle(float)
+    Rect(float, float)
+    Empty
+
+fn area(s: Shape) -> float;
+    match s;
+        case Shape.Circle(r);
+            ret 3.0 * r * r
+        case Shape.Rect(w, h);
+            ret w * h
+        case Shape.Empty;
+            ret 0.0
+
+for s in [Shape.Circle(1.0), Shape.Rect(2.0, 3.0), Shape.Empty];
+    print(s, area(s))
+
+fn find(names: list[str], name: str) -> option[int];
+    for i in range(names.len());
+        if names[i] == name;
+            ret some(i)
+    ret none
+
+names = ["ada", "bo"]
+match find(names, "bo");
+    case some(i);
+        print("bo is at", i)
+    case none;
+        print("bo is missing")
+print(find(names, "cy"), find(names, "ada").unwrap_or(-1))

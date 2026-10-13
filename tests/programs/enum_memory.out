@@ -1,0 +1,14 @@
+xyz3true
+a
+(b c)
+[Token.Number(7), Token.Word('a'), Token.Group([Token.Word('b'), Token.Word('c')]), Token.End]
+.
+(((deep)))
+kept (kept)
+b 2
+solo 0
+some(2) none none
+4
+end
+other
+[some(Token.End), none]

@@ -21,7 +21,7 @@ fn lower_source(source: &str) -> Program {
         "{:?}",
         analysis.diagnostics
     );
-    lower(&module, &analysis.types, &analysis.symbols).unwrap()
+    lower(&module, &analysis.types, &analysis.symbols, &analysis.enums).unwrap()
 }
 
 #[test]
@@ -553,7 +553,7 @@ fn dump_linked(source: &str) -> String {
     );
     let (module, _) = module.unwrap();
     let analysis = TypeChecker::new().analyze(&module);
-    let program = lower(&module, &analysis.types, &analysis.symbols).unwrap();
+    let program = lower(&module, &analysis.types, &analysis.symbols, &analysis.enums).unwrap();
     program.functions.iter().map(ToString::to_string).collect()
 }
 
@@ -891,4 +891,68 @@ fn a_list_of_tuples_records_its_width_and_kinds() {
     let ir = dump("xs = [(1, \"a\", [2])]\nprint(xs)\n");
     // three slots of one element: an int (0), a string (1 << 2), and a list (2 << 4)
     assert!(ir.contains("call stone.list_new_wide(3, 36, 3)"), "{ir}");
+}
+
+#[test]
+fn a_variant_with_values_is_a_new_value_and_one_without_is_static() {
+    let source = "enum Shape;\n    Circle(float)\n    Named(str, int)\n    Empty\n\
+                  fn f(s: str) -> Shape;\n    ret Shape.Named(s, 2)\n\
+                  fn g() -> Shape;\n    ret Shape.Empty\n";
+    let ir = dump(source);
+    let f = ir.split("fn g").next().unwrap();
+    // the string is counted, as the kinds 0b00_01 say, so the value keeps its own reference
+    assert_eq!(
+        f,
+        "fn f(v0):\nb0:\n  retain v0\n  v1 = call stone.enum_new(1, 1, 2)\n  \
+         field_init v1[0], v0\n  field_init v1[1], 2\n  ret v1\n"
+    );
+    let g = ir
+        .split("fn g")
+        .nth(1)
+        .unwrap()
+        .split("fn main")
+        .next()
+        .unwrap();
+    assert_eq!(g, "():\nb0:\n  v0 = variant 2\n  retain v0\n  ret v0\n");
+}
+
+#[test]
+fn a_match_checks_tags_then_binds_retained_values() {
+    let source = "fn f(x: option[str]) -> str;\n    match x;\n        case some(s);\n            \
+                  ret s\n        case none;\n            ret \"\"\n";
+    let ir = dump(source);
+    let f = ir.split("fn main").next().unwrap();
+    // the subject is read through a copy, since a case may assign the variable it came from
+    assert!(
+        f.contains("v2 = copy v0\n  v3 = enum_tag v2\n  br_eq v3, 1 -> b1, b2"),
+        "{f}"
+    );
+    assert!(
+        f.contains("b1:\n  v4 = field_get v2, 0\n  retain v4\n  release_str v1\n  v1 = copy v4"),
+        "{f}"
+    );
+}
+
+#[test]
+fn unwrap_of_none_stops_the_program() {
+    let ir =
+        first_function("fn f(x: option[int]) -> int;\n    ret x.unwrap()\nprint(f(some(1)))\n");
+    assert!(ir.contains("fail \"cannot unwrap none\""), "{ir}");
+}
+
+#[test]
+fn printing_an_enum_calls_a_function_made_for_its_type() {
+    let ir = dump("print(some([1]), [none, some([2])])\n");
+    assert!(
+        ir.contains("call stone.print_enum.option.list_int(v"),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("fn stone.print_enum.option.list_int(v0, v1):"),
+        "{ir}"
+    );
+    assert!(
+        ir.contains("fail \"value is nested too deeply to print (more than 10000 levels)\""),
+        "{ir}"
+    );
 }

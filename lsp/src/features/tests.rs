@@ -176,7 +176,7 @@ fn parameters_have_no_documentation() {
 fn hover_documents_builtins() {
     let text = hover_text(&doc(SOURCE), at(7, 2)).unwrap();
     assert!(
-        text.starts_with("```stone\nprint(values...) -> none\n```\n"),
+        text.starts_with("```stone\nprint(values...)\n```\n"),
         "{text}"
     );
 }
@@ -409,6 +409,10 @@ fn completion_after_a_dot_offers_methods() {
         "find",
         "startswith",
         "endswith",
+        "is_some",
+        "is_none",
+        "unwrap",
+        "unwrap_or",
     ]
     .iter()
     .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
@@ -829,4 +833,90 @@ fn every_builtin_module_has_hover_completion_and_a_definition() {
         assert_eq!(labels.len(), module.functions.len(), "{name}: {labels:?}");
         assert!(labels.iter().any(|l| l == function), "{name}: {labels:?}");
     }
+}
+
+const ENUMS: &str = "\
+enum Shape;
+    Circle(float)
+    Empty
+s = Shape.Circle(1.0)
+match s;
+    case Shape.Circle(r);
+        print(r)
+    case Shape.Empty;
+        print(0)
+";
+
+#[test]
+fn hover_shows_an_enum_with_its_variants() {
+    let doc = doc(ENUMS);
+    assert_eq!(
+        hover_text(&doc, at(1, 6)).unwrap(),
+        "```stone\nenum Shape\n    Circle(float)\n    Empty\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(4, 12)).unwrap(),
+        "```stone\nShape.Circle(float)\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(8, 16)).unwrap(),
+        "```stone\nShape.Empty\n```"
+    );
+}
+
+#[test]
+fn a_variant_leads_to_its_definition_and_renames_everywhere() {
+    let doc = doc(ENUMS);
+    let location = definition(&doc, &uri(), at(6, 16), None).unwrap();
+    assert_eq!(location.range.start, Position::new(1, 4));
+    let edit = rename(&doc, &uri(), at(2, 5), "Round").unwrap();
+    let edits = &edit.changes.unwrap()[&uri()];
+    let mut starts: Vec<Position> = edits.iter().map(|e| e.range.start).collect();
+    starts.sort_by_key(|p| (p.line, p.character));
+    assert_eq!(
+        starts,
+        [
+            Position::new(1, 4),
+            Position::new(3, 10),
+            Position::new(5, 15)
+        ]
+    );
+}
+
+#[test]
+fn an_enum_is_outlined_with_its_variants() {
+    let symbols = document_symbols(&doc(ENUMS));
+    let shape = symbols.iter().find(|s| s.name == "Shape").unwrap();
+    assert_eq!(shape.kind, SymbolKind::ENUM);
+    let children: Vec<(&str, SymbolKind)> = shape
+        .children
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|c| (c.name.as_str(), c.kind))
+        .collect();
+    assert_eq!(
+        children,
+        [
+            ("Circle", SymbolKind::ENUM_MEMBER),
+            ("Empty", SymbolKind::ENUM_MEMBER)
+        ]
+    );
+}
+
+#[test]
+fn completion_after_an_enum_offers_its_variants() {
+    let doc = doc(&format!("{ENUMS}t = Shape.\n"));
+    let labels: Vec<(String, Option<CompletionItemKind>)> =
+        completion(&doc, at(10, 11), &MapSources::default())
+            .into_iter()
+            .map(|item| (item.label, item.kind))
+            .collect();
+    assert_eq!(
+        labels,
+        [
+            ("Circle".to_string(), Some(CompletionItemKind::ENUM_MEMBER)),
+            ("Empty".to_string(), Some(CompletionItemKind::ENUM_MEMBER))
+        ]
+    );
 }

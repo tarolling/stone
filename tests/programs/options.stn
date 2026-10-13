@@ -1,0 +1,79 @@
+// an option holds a value or none
+fn find(xs: list[str], x: str) -> option[int];
+    for i in range(xs.len());
+        if xs[i] == x;
+            ret some(i)
+    ret none
+
+words = ["ant", "bee", "cat"]
+for w in ["cat", "dog"];
+    match find(words, w);
+        case some(i);
+            print(w, "is at", i)
+        case none;
+            print(w, "is missing")
+
+a = find(words, "bee")
+b = find(words, "eel")
+print(a, b, a.is_some(), a.is_none(), b.is_some(), b.is_none())
+print(a.unwrap(), a.unwrap_or(-1), b.unwrap_or(-1))
+if b.is_none() and a.is_some();
+    print("one of each")
+
+// options of counted values, which unwrap and unwrap_or hand out references to
+names = [some("x"), none, some("z")]
+print(names)
+joined = ""
+for n in names;
+    joined = joined + n.unwrap_or("-")
+print(joined)
+first = names[0].unwrap()
+print(first, names[2].unwrap() + "!")
+lists = [some([1, 2]), none]
+grown = lists[0].unwrap()
+grown.append(3)
+print(grown, lists, lists[1].unwrap_or([0]))
+
+// options of tuples and of options
+pairs = [some((1, "one")), none]
+count, word = pairs[0].unwrap()
+print(count, word, pairs)
+k, label = pairs[1].unwrap_or((0, "zero"))
+print(k, label)
+deep = some(some(none))
+match deep;
+    case some(some(some(x)));
+        print("three", x)
+    case some(some(none));
+        print("two, then none")
+    case some(none);
+        print("one, then none")
+    case none;
+        print("none")
+deep = some(some(some(5)))
+match deep;
+    case some(some(some(x)));
+        print("three", x)
+    case _;
+        print("less")
+
+// none in tuples and lists starts with an unknown type that use settles
+t = (none, 1)
+t = (some(2.5), 2)
+print(t)
+maybe = [none]
+maybe.append(some("now"))
+print(maybe)
+
+// a function that returns an option of a counted value
+fn longest(xs: list[str]) -> option[str];
+    best = none
+    for x in xs;
+        match best;
+            case some(b);
+                if x.len() > b.len();
+                    best = some(x)
+            case none;
+                best = some(x)
+    ret best
+print(longest(["a", "abc", "ab"]), longest([]))

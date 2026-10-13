@@ -296,7 +296,7 @@ pub enum StmtKind {
         /// Whether the definition starts with `pub`, so other modules may use it.
         public: bool,
         args: Arguments,
-        /// The type after `->`, if any; a function without one returns `none`.
+        /// The type after `->`, if any; a function without one returns no value.
         returns: Option<TypeExpr>,
         body: Vec<Stmt>,
     },
@@ -338,10 +338,103 @@ pub enum StmtKind {
         path: Vec<(Identifier, Span)>,
         alias: Option<(Identifier, Span)>,
     },
+    /// An enum definition, such as `enum Shape;` followed by an indented line for each variant,
+    /// like `Circle(float)` or `Empty`.
+    EnumDef {
+        name: Identifier,
+        /// The span of the enum's name, which editor features point at.
+        name_span: Span,
+        /// Whether the definition starts with `pub`, so other modules may use it.
+        public: bool,
+        variants: Vec<Variant>,
+    },
+    /// A `match` statement, which runs the first case whose pattern matches `subject`, such as
+    /// `match s;` followed by `case Shape.Circle(r); print(r)`.
+    Match {
+        subject: Box<Expr>,
+        cases: Vec<MatchCase>,
+    },
     /// A `break` statement.
     Break,
     /// A `cont` statement, which continues to the next loop iteration.
     Continue,
+}
+
+/// One variant of an enum, such as `Rect(float, float)`, with the types of its values in order.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Variant {
+    pub name: Identifier,
+    /// The span of the variant's name.
+    pub span: Span,
+    pub fields: Vec<TypeExpr>,
+}
+
+/// One case of a `match` statement, such as `case some(x); print(x)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct MatchCase {
+    pub pattern: Pattern,
+    pub body: Vec<Stmt>,
+}
+
+/// A pattern after `case`, such as `Shape.Rect(w, _)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Pattern {
+    pub kind: PatternKind,
+    pub span: Span,
+}
+
+/// The kind of a [`Pattern`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum PatternKind {
+    /// `_`, which matches anything and binds nothing.
+    Wildcard,
+    /// A name, which matches anything and binds it, such as `r` in `Shape.Circle(r)`.
+    Name(Identifier),
+    /// A variant and a pattern for each of its values: `path` is the variant's name with what
+    /// qualifies it, such as `["Shape", "Circle"]` for `Shape.Circle(r)`, `["some"]` for
+    /// `some(x)`, and `["none"]` for `none`.
+    Variant {
+        path: Vec<(Identifier, Span)>,
+        fields: Vec<Pattern>,
+    },
+}
+
+impl Pattern {
+    /// Pushes the names the pattern binds, with their spans, in order.
+    ///
+    /// For example, `Shape.Rect(w, _)` gives `w`, and `some(Tree.Node(a, b))` gives `a` and `b`.
+    pub fn names<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
+        match &self.kind {
+            PatternKind::Wildcard => {}
+            PatternKind::Name(name) => out.push((name, self.span)),
+            PatternKind::Variant { fields, .. } => fields.iter().for_each(|f| f.names(out)),
+        }
+    }
+}
+
+impl Display for Pattern {
+    /// Writes the pattern as it is written in source, such as `Shape.Rect(w, _)`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match &self.kind {
+            PatternKind::Wildcard => write!(f, "_"),
+            PatternKind::Name(name) => write!(f, "{name}"),
+            PatternKind::Variant { path, fields } => {
+                let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
+                write!(f, "{}", names.join("."))?;
+                if !fields.is_empty() {
+                    write!(f, "(")?;
+                    for (i, field) in fields.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{field}")?;
+                    }
+                    write!(f, ")")?;
+                }
+                Ok(())
+            }
+        }
+    }
 }
 
 #[derive(Debug, PartialEq)]
@@ -396,11 +489,16 @@ pub enum TypeExprKind {
     Float,
     Bool,
     Str,
-    None,
     /// A list of the given element type, such as `list[float]`.
     List(Box<TypeExpr>),
     /// A tuple of two or more types, such as `tuple[int, str]`.
     Tuple(Vec<TypeExpr>),
+    /// Any other type by name, with its type arguments: an enum such as `Shape` or
+    /// `shapes.Shape`, or `option[int]`.
+    Named {
+        name: String,
+        args: Vec<TypeExpr>,
+    },
 }
 
 impl Display for TypeExpr {
@@ -411,7 +509,6 @@ impl Display for TypeExpr {
             TypeExprKind::Float => write!(f, "float"),
             TypeExprKind::Bool => write!(f, "bool"),
             TypeExprKind::Str => write!(f, "str"),
-            TypeExprKind::None => write!(f, "none"),
             TypeExprKind::List(elem) => write!(f, "list[{elem}]"),
             TypeExprKind::Tuple(elts) => {
                 write!(f, "tuple[")?;
@@ -422,6 +519,20 @@ impl Display for TypeExpr {
                     write!(f, "{elt}")?;
                 }
                 write!(f, "]")
+            }
+            TypeExprKind::Named { name, args } => {
+                write!(f, "{name}")?;
+                if !args.is_empty() {
+                    write!(f, "[")?;
+                    for (i, arg) in args.iter().enumerate() {
+                        if i > 0 {
+                            write!(f, ", ")?;
+                        }
+                        write!(f, "{arg}")?;
+                    }
+                    write!(f, "]")?;
+                }
+                Ok(())
             }
         }
     }

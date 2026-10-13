@@ -1,0 +1,106 @@
+// enum values held in every kind of place, which the leak check makes sure are all freed
+use random
+
+enum Token;
+    Word(str)
+    Number(int)
+    Group(list[Token])
+    Wide(int, str, float, list[int], str, int, bool, str)
+    End
+
+fn show(t: Token) -> str;
+    match t;
+        case Token.Word(w);
+            ret w
+        case Token.Number(n);
+            ret str(n)
+        case Token.Group(items);
+            parts = []
+            for item in items;
+                parts.append(show(item))
+            ret "(" + " ".join(parts) + ")"
+        case Token.Wide(a, b, _, xs, e, _, g, h);
+            ret b + e + h + str(a + xs.len()) + str(g)
+        case Token.End;
+            ret "."
+
+// stored into, replaced in, popped from, and sliced out of lists
+tokens = [Token.Word("a"), Token.Number(1), Token.End]
+tokens[1] = Token.Group([Token.Word("b"), Token.Word("c")])
+tokens.append(Token.Wide(1, "x", 2.5, [1, 2], "y", 3, true, "z"))
+last = tokens.pop()
+print(show(last))
+tokens.insert(0, Token.Number(7))
+middle = tokens[1:3]
+for t in middle;
+    print(show(t))
+print(tokens)
+random.seed(4)
+print(show(random.choice(tokens)))
+
+// a function that assigns its parameter owns it, so the caller's value moves in
+fn wrap(t: Token, times: int) -> Token;
+    for i in range(times);
+        t = Token.Group([t])
+    ret t
+w = Token.Word("deep")
+w = wrap(w, 3)
+print(show(w))
+kept = Token.Word("kept")
+other = wrap(kept, 1)
+print(show(kept), show(other))
+
+// returned inside a tuple, and unpacked
+fn split(t: Token) -> tuple[Token, int];
+    match t;
+        case Token.Group(items);
+            ret (items[0], items.len())
+        case _;
+            ret (t, 0)
+first, count = split(tokens[2])
+print(show(first), count)
+pair = split(Token.Word("solo"))
+print(show(pair[0]), pair[1])
+
+// a global the functions read, and nested matches that return and break out of loops
+greeting = Token.Group([Token.Word("hi"), Token.Number(2)])
+fn first_number(t: Token) -> option[int];
+    match t;
+        case Token.Group(items);
+            for item in items;
+                match item;
+                    case Token.Number(n);
+                        ret some(n)
+                    case Token.Group(_);
+                        match first_number(item);
+                            case some(n);
+                                ret some(n)
+                            case none;
+                                cont
+                    case _;
+                        cont
+            ret none
+        case Token.Number(n);
+            ret some(n)
+        case _;
+            ret none
+print(first_number(greeting), first_number(Token.End), first_number(w))
+found = 0
+for t in [greeting, Token.Group([greeting]), Token.Word("no")];
+    match first_number(t);
+        case some(n);
+            found += n
+        case none;
+            break
+print(found)
+
+// a list of options of enums, replaced while a loop walks it
+slots = [some(Token.End), none]
+for s in slots;
+    slots[1] = s
+    match s;
+        case some(Token.End);
+            print("end")
+        case _;
+            print("other")
+print(slots)

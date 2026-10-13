@@ -31,7 +31,7 @@ pub static DOCS: [BuiltinDoc; 3] = [
     },
     BuiltinDoc {
         name: "time.sleep",
-        signature: "time.sleep(seconds: int | float) -> none",
+        signature: "time.sleep(seconds: int | float)",
         description: "Waits for at least `seconds`, which may have a fraction, such as \
                       `time.sleep(0.25)`. It stops the program if `seconds` is negative or nan.",
     },

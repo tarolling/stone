@@ -219,19 +219,47 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 .map(|(param, ty)| format!("{}: {ty}", param.name))
                 .collect();
             let returns = match ret.as_ref() {
-                Type::None => String::new(),
+                Type::Unit => String::new(),
                 ret => format!(" -> {ret}"),
             };
             format!("fn {}({}){returns}", symbol.name, params.join(", "))
+        }
+        (StoneSymbolKind::Enum, _) => {
+            let variants: Vec<String> = analysis
+                .symbols
+                .iter()
+                .filter(|s| {
+                    s.kind == StoneSymbolKind::Variant && s.scope.as_deref() == Some(&symbol.name)
+                })
+                .map(|variant| format!("\n    {}", variant_signature(variant)))
+                .collect();
+            format!("enum {}{}", symbol.name, variants.concat())
+        }
+        (StoneSymbolKind::Variant, Type::Function { ret, .. }) => {
+            format!("{ret}.{}", variant_signature(symbol))
         }
         (kind, ty) => {
             let kind = match kind {
                 StoneSymbolKind::Parameter => "parameter",
                 StoneSymbolKind::Local => "local",
-                StoneSymbolKind::Global | StoneSymbolKind::Function => "global",
+                StoneSymbolKind::Global
+                | StoneSymbolKind::Function
+                | StoneSymbolKind::Enum
+                | StoneSymbolKind::Variant => "global",
             };
             format!("({kind}) {}: {ty}", symbol.name)
         }
+    }
+}
+
+/// Writes a variant as its enum declares it, such as `Rect(float, float)` or `Empty`.
+fn variant_signature(variant: &Symbol) -> String {
+    match &variant.ty {
+        Type::Function { params, .. } if !params.is_empty() => {
+            let params: Vec<String> = params.iter().map(Type::to_string).collect();
+            format!("{}({})", variant.name, params.join(", "))
+        }
+        _ => variant.name.clone(),
     }
 }
 
@@ -297,7 +325,7 @@ fn module_at(doc: &Document, position: Position) -> Option<(FileId, Span)> {
     if let Some(import) = doc.import_at(position) {
         return match import.target {
             Target::Module(file) => Some((file, import.span)),
-            Target::Function(_) | Target::BuiltinModule(_) => None,
+            Target::Function(_) | Target::BuiltinModule(_) | Target::Enum(_) => None,
         };
     }
     let (word, span) = word_at(doc, doc.index.pos(position))?;
@@ -697,6 +725,8 @@ fn document_symbol(doc: &Document, symbol: &Symbol, range: Span) -> DocumentSymb
         detail: Some(signature(&doc.analysis, symbol)),
         kind: match symbol.kind {
             StoneSymbolKind::Function => SymbolKind::FUNCTION,
+            StoneSymbolKind::Enum => SymbolKind::ENUM,
+            StoneSymbolKind::Variant => SymbolKind::ENUM_MEMBER,
             _ => SymbolKind::VARIABLE,
         },
         tags: None,
@@ -716,6 +746,15 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
         .iter()
         .filter(|s| s.scope.is_none() && s.span.file == doc.file)
         .map(|symbol| {
+            if symbol.kind == StoneSymbolKind::Enum {
+                let mut outline = document_symbol(doc, symbol, symbol.span);
+                outline.children = Some(
+                    enum_variants(analysis, &symbol.name)
+                        .map(|s| document_symbol(doc, s, s.span))
+                        .collect(),
+                );
+                return outline;
+            }
             let Some(&extent) = analysis.functions.get(&symbol.name) else {
                 return document_symbol(doc, symbol, symbol.span);
             };
@@ -732,6 +771,14 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
         .collect();
     outline.sort_by_key(|s| (s.range.start.line, s.range.start.character));
     outline
+}
+
+/// Returns the variants of the enum with the linked name `name`, in order.
+fn enum_variants<'a>(analysis: &'a Analysis, name: &'a str) -> impl Iterator<Item = &'a Symbol> {
+    analysis
+        .symbols
+        .iter()
+        .filter(move |s| s.kind == StoneSymbolKind::Variant && s.scope.as_deref() == Some(name))
 }
 
 /// Returns the names that can be written at `position`: symbols in scope, imported names,
@@ -777,6 +824,27 @@ pub fn completion(
         if let Some(module) = doc.builtin_module(&receiver) {
             return builtin_module_functions(module);
         }
+        let imported = doc.imports.iter().find_map(|i| match &i.target {
+            Target::Enum(name) if i.span.file == doc.file && i.name == receiver => {
+                Some(name.clone())
+            }
+            _ => None,
+        });
+        let own = doc.analysis.symbols.iter().find(|s| {
+            s.kind == StoneSymbolKind::Enum
+                && s.span.file == doc.file
+                && doc.local_name(s) == receiver
+        });
+        if let Some(name) = imported.or_else(|| own.map(|s| s.name.clone())) {
+            return enum_variants(&doc.analysis, &name)
+                .map(|variant| CompletionItem {
+                    label: variant.name.clone(),
+                    kind: Some(CompletionItemKind::ENUM_MEMBER),
+                    detail: Some(signature(&doc.analysis, variant)),
+                    ..CompletionItem::default()
+                })
+                .collect();
+        }
         return METHODS
             .iter()
             .map(|method| CompletionItem {
@@ -800,6 +868,7 @@ pub fn completion(
             label: label.to_string(),
             kind: Some(match symbol.kind {
                 StoneSymbolKind::Function => CompletionItemKind::FUNCTION,
+                StoneSymbolKind::Enum => CompletionItemKind::ENUM,
                 _ => CompletionItemKind::VARIABLE,
             }),
             detail: Some(signature(&doc.analysis, symbol)),
@@ -821,6 +890,7 @@ pub fn completion(
             Target::BuiltinModule(module) => {
                 (CompletionItemKind::MODULE, Some(format!("module {module}")))
             }
+            Target::Enum(name) => (CompletionItemKind::ENUM, Some(format!("enum {name}"))),
         };
         items.push(CompletionItem {
             label: import.name.clone(),

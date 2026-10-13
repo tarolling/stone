@@ -5,9 +5,9 @@
 //! `use geometry.shapes` loads `app/geometry/shapes.stn` as the module `geometry.shapes`. There are
 //! no files that only declare or re-export modules: a directory is just part of a module's name.
 //!
-//! [`link`] merges every module into a single [`Mod`] in which each library function is named by
-//! its module, such as `geometry.shapes.area`, and every use of it is rewritten to that name. The
-//! checker and both backends then run on it as they would on one file.
+//! [`link`] merges every module into a single [`Mod`] in which each library function and enum is
+//! named by its module, such as `geometry.shapes.area`, and every use of it is rewritten to that
+//! name. The checker and both backends then run on it as they would on one file.
 //!
 //! Builtin modules such as `os` have no file (see [`crate::stdlib::MODULES`]). Calls to their
 //! functions are rewritten to their linked names too, such as `os.env`, which the checker and
@@ -16,7 +16,9 @@
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
-use crate::ast::{Expr, ExprContext, ExprKind, Mod, Stmt, StmtKind};
+use crate::ast::{
+    Expr, ExprContext, ExprKind, Mod, Pattern, PatternKind, Stmt, StmtKind, TypeExpr, TypeExprKind,
+};
 use crate::checker::collect_assigned;
 use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
@@ -171,6 +173,8 @@ pub enum Target {
     Function(String),
     /// A builtin module, which has no file, by its name, such as `os`.
     BuiltinModule(String),
+    /// A library enum, by its linked name, such as `geometry.Shape`.
+    Enum(String),
 }
 
 /// A name a `use` binds, for editor tooling.
@@ -251,6 +255,8 @@ enum Binding {
     /// A builtin module, such as `os`.
     BuiltinModule(&'static BuiltinModule),
     Function(String),
+    /// A library enum, by its linked name.
+    Enum(String),
     /// A `use` that failed to resolve, which was already reported, so its uses are left alone.
     Unresolved,
 }
@@ -388,7 +394,18 @@ impl Loader<'_> {
             }
             if let Some(id) = self.module(parent_names) {
                 let module = parent_names.join(".");
-                return match public_functions(&self.modules[id.0 as usize]).get(function) {
+                let parsed = &self.modules[id.0 as usize];
+                if let Some(&public) = public_enums(parsed).get(function) {
+                    return if public || id == file {
+                        Ok(Target::Enum(format!("{module}.{function}")))
+                    } else {
+                        Err(Diagnostic::error(
+                            *function_span,
+                            format!("'{function}' is private to module '{module}'"),
+                        ))
+                    };
+                }
+                return match public_functions(parsed).get(function) {
                     Some(&public) if public || id == file => {
                         Ok(Target::Function(format!("{module}.{function}")))
                     }
@@ -469,6 +486,7 @@ impl Loader<'_> {
     fn link(mut self) -> Linked {
         let functions: Vec<HashMap<String, bool>> =
             self.modules.iter().map(public_functions).collect();
+        let enums: Vec<HashMap<String, bool>> = self.modules.iter().map(public_enums).collect();
         let module_names: Vec<String> = self.files.iter().map(|f| f.module.clone()).collect();
         let mut imports = vec![];
         let mut library_body = vec![];
@@ -482,6 +500,7 @@ impl Loader<'_> {
             check_top_level(&body, library, &mut self.diagnostics);
 
             let mut defined: HashSet<String> = functions[i].keys().cloned().collect();
+            defined.extend(enums[i].keys().cloned());
             if !library {
                 let mut globals = vec![];
                 collect_assigned(&body, &mut globals);
@@ -513,6 +532,7 @@ impl Loader<'_> {
                         match target {
                             Target::Module(id) => Binding::Module(*id),
                             Target::Function(name) => Binding::Function(name.clone()),
+                            Target::Enum(name) => Binding::Enum(name.clone()),
                             Target::BuiltinModule(name) => Binding::BuiltinModule(
                                 crate::stdlib::module(name).expect("resolved to a builtin module"),
                             ),
@@ -528,8 +548,10 @@ impl Loader<'_> {
                 library,
                 module: &module_names[i],
                 own: &functions[i],
+                own_enums: &enums[i],
                 bindings: &bindings,
                 functions: &functions,
+                enums: &enums,
                 module_names: &module_names,
                 locals: HashSet::new(),
                 diagnostics: &mut self.diagnostics,
@@ -538,7 +560,11 @@ impl Loader<'_> {
                 match &mut stmt.kind {
                     StmtKind::Use { .. } => continue,
                     StmtKind::FunctionDef {
-                        name, args, body, ..
+                        name,
+                        args,
+                        returns,
+                        body,
+                        ..
                     } => {
                         let mut locals = vec![];
                         collect_assigned(body, &mut locals);
@@ -546,7 +572,26 @@ impl Loader<'_> {
                         rewriter
                             .locals
                             .extend(args.args.iter().map(|arg| arg.arg.clone()));
+                        for annotation in args.args.iter_mut().filter_map(|a| a.annotation.as_mut())
+                        {
+                            rewriter.type_expr(annotation);
+                        }
+                        if let Some(returns) = returns {
+                            rewriter.type_expr(returns);
+                        }
                         rewriter.block(body);
+                        if library {
+                            *name = format!("{}.{name}", module_names[i]);
+                        }
+                    }
+                    StmtKind::EnumDef { name, variants, .. } => {
+                        rewriter.locals.clear();
+                        for variant in variants.iter_mut() {
+                            variant
+                                .fields
+                                .iter_mut()
+                                .for_each(|f| rewriter.type_expr(f));
+                        }
                         if library {
                             *name = format!("{}.{name}", module_names[i]);
                         }
@@ -599,6 +644,17 @@ fn module_path(names: &[String]) -> PathBuf {
     path
 }
 
+/// Returns each enum a module defines at the top level, mapped to whether it is `pub`.
+fn public_enums(module: &Mod) -> HashMap<String, bool> {
+    let Mod::Module { body } = module;
+    body.iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::EnumDef { name, public, .. } => Some((name.clone(), *public)),
+            _ => None,
+        })
+        .collect()
+}
+
 /// Returns each function a module defines at the top level, mapped to whether it is `pub`.
 fn public_functions(module: &Mod) -> HashMap<String, bool> {
     let Mod::Module { body } = module;
@@ -611,7 +667,7 @@ fn public_functions(module: &Mod) -> HashMap<String, bool> {
 }
 
 /// Reports a `use` after other statements, and in a library, any top-level statement that is not
-/// a `use` or `fn`.
+/// a `use`, `fn`, or `enum`.
 fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnostic>) {
     let mut after_use = false;
     for stmt in body {
@@ -621,13 +677,13 @@ fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnosti
                 "use must come before other statements",
             )),
             StmtKind::Use { .. } => {}
-            StmtKind::FunctionDef { .. } => after_use = true,
+            StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } => after_use = true,
             _ => {
                 after_use = true;
                 if library {
                     diagnostics.push(Diagnostic::error(
                         stmt.span,
-                        "only use and fn are allowed at the top level of a module",
+                        "only use, fn, and enum are allowed at the top level of a module",
                     ));
                 }
             }
@@ -644,9 +700,13 @@ struct Rewriter<'a> {
     module: &'a str,
     /// The functions the file defines, which in a library are renamed to `<module>.<name>`.
     own: &'a HashMap<String, bool>,
+    /// The enums the file defines, which in a library are renamed like its functions.
+    own_enums: &'a HashMap<String, bool>,
     bindings: &'a HashMap<String, Binding>,
     /// Every file's functions, mapped to whether they are `pub`.
     functions: &'a [HashMap<String, bool>],
+    /// Every file's enums, mapped to whether they are `pub`.
+    enums: &'a [HashMap<String, bool>],
     module_names: &'a [String],
     /// The parameters and locals of the function being rewritten, which shadow everything else.
     locals: HashSet<String>,
@@ -691,7 +751,139 @@ impl Rewriter<'_> {
                 self.block(orelse);
             }
             StmtKind::Expr { value } => self.expr(value),
-            StmtKind::Use { .. } | StmtKind::Break | StmtKind::Continue => {}
+            StmtKind::Match { subject, cases } => {
+                self.expr(subject);
+                for case in cases {
+                    self.pattern(&mut case.pattern);
+                    self.block(&mut case.body);
+                }
+            }
+            StmtKind::EnumDef { .. }
+            | StmtKind::Use { .. }
+            | StmtKind::Break
+            | StmtKind::Continue => {}
+        }
+    }
+
+    /// Rewrites the enums a type written in a signature or variant names to their linked names.
+    ///
+    /// For example, `list[Shape]` becomes `list[geometry.Shape]` after `use geometry.Shape`, and
+    /// `shapes.Shape` becomes `geometry.shapes.Shape` after `use geometry.shapes`.
+    fn type_expr(&mut self, ty: &mut TypeExpr) {
+        match &mut ty.kind {
+            TypeExprKind::List(elem) => self.type_expr(elem),
+            TypeExprKind::Tuple(fields) => fields.iter_mut().for_each(|f| self.type_expr(f)),
+            TypeExprKind::Named { name, args } => {
+                args.iter_mut().for_each(|a| self.type_expr(a));
+                match name.rsplit_once('.') {
+                    Some((module, enum_name)) => {
+                        if let Some(linked) = self.module_enum(module, enum_name, ty.span) {
+                            *name = linked;
+                        }
+                    }
+                    None => {
+                        if let Some(linked) = self.enum_name(name) {
+                            *name = linked;
+                        }
+                    }
+                }
+            }
+            TypeExprKind::Int | TypeExprKind::Float | TypeExprKind::Bool | TypeExprKind::Str => {}
+        }
+    }
+
+    /// Returns the linked name of the enum this file calls `name`, if it is one it imports or,
+    /// in a library, one it defines.
+    fn enum_name(&self, name: &str) -> Option<String> {
+        match self.bindings.get(name) {
+            Some(Binding::Enum(linked)) => Some(linked.clone()),
+            _ if self.library && self.own_enums.contains_key(name) => {
+                Some(format!("{}.{name}", self.module))
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the linked name of the enum `enum_name` of the module this file imports as
+    /// `module`, reporting at `span` if it is private or missing. Returns `None` if `module` is not
+    /// an imported module.
+    fn module_enum(&mut self, module: &str, enum_name: &str, span: Span) -> Option<String> {
+        let Some(Binding::Module(target)) = self.bindings.get(module) else {
+            return None;
+        };
+        let module = &self.module_names[target.0 as usize];
+        match self.enums[target.0 as usize].get(enum_name) {
+            Some(&public) if public || *target == self.file => {
+                Some(format!("{module}.{enum_name}"))
+            }
+            Some(_) => {
+                self.diagnostics.push(Diagnostic::error(
+                    span,
+                    format!("'{enum_name}' is private to module '{module}'"),
+                ));
+                None
+            }
+            None => {
+                self.diagnostics.push(Diagnostic::error(
+                    span,
+                    format!("module '{module}' has no enum '{enum_name}'"),
+                ));
+                None
+            }
+        }
+    }
+
+    /// Rewrites `value`, the enum in front of a variant, from `module.Enum` to the enum's linked
+    /// name, and returns whether it did.
+    ///
+    /// For example, `shapes.Shape` in `shapes.Shape.Circle(1.0)` becomes `geometry.shapes.Shape`.
+    fn qualified_enum(&mut self, value: &mut Expr) -> bool {
+        let ExprKind::Attribute {
+            value: module,
+            attr,
+            ..
+        } = &value.kind
+        else {
+            return false;
+        };
+        let ExprKind::Name { id, .. } = &module.kind else {
+            return false;
+        };
+        if self.locals.contains(id) || !matches!(self.bindings.get(id), Some(Binding::Module(_))) {
+            return false;
+        }
+        let span = value.span;
+        if let Some(linked) = self.module_enum(&id.clone(), &attr.clone(), span) {
+            *value = Expr::new(
+                ExprKind::Name {
+                    id: linked,
+                    ctx: ExprContext::Load,
+                },
+                span,
+            );
+        }
+        true
+    }
+
+    /// Rewrites the enum each variant in `pattern` names to its linked name.
+    fn pattern(&mut self, pattern: &mut Pattern) {
+        let PatternKind::Variant { path, fields } = &mut pattern.kind else {
+            return;
+        };
+        fields.iter_mut().for_each(|f| self.pattern(f));
+        match path.as_mut_slice() {
+            [(name, _), _] => {
+                if let Some(linked) = self.enum_name(name) {
+                    *name = linked;
+                }
+            }
+            [(module, module_span), (enum_name, enum_span), _] => {
+                let span = module_span.to(*enum_span);
+                if let Some(linked) = self.module_enum(module, enum_name, span) {
+                    path.splice(0..2, [(linked, span)]);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -723,7 +915,11 @@ impl Rewriter<'_> {
                 self.expr(value);
                 self.expr(slice);
             }
-            ExprKind::Attribute { value, .. } => self.expr(value),
+            ExprKind::Attribute { value, .. } => {
+                if !self.qualified_enum(value) {
+                    self.expr(value);
+                }
+            }
             ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
                 elts.iter_mut().for_each(|e| self.expr(e))
             }
@@ -811,13 +1007,15 @@ impl Rewriter<'_> {
             return;
         }
         match self.bindings.get(id) {
-            Some(Binding::Function(name)) => *id = name.clone(),
+            Some(Binding::Function(name) | Binding::Enum(name)) => *id = name.clone(),
             Some(Binding::Module(_) | Binding::BuiltinModule(_)) => self.diagnostics.push(
                 Diagnostic::error(span, format!("'{id}' is a module, not a value")),
             ),
             Some(Binding::Unresolved) => {}
             None if !self.library => {}
-            None if self.own.contains_key(id) => *id = format!("{}.{id}", self.module),
+            None if self.own.contains_key(id) || self.own_enums.contains_key(id) => {
+                *id = format!("{}.{id}", self.module)
+            }
             None if is_builtin(id) => {}
             None => {
                 let what = if called { "function" } else { "name" };

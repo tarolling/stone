@@ -10,6 +10,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Highlighting of `struct` and of a struct's name where it is defined.
+- Hover, go to definition, references, and rename for structs and their fields through
+  `stone-lsp`, including the field names in `Point(x=1.0, y=2.0)`. It outlines a struct with its
+  fields, and offers a variable's fields after its name and a `.`.
+
 ## [0.2.5] - 2026-10-12
 
 ### Added

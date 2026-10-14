@@ -129,4 +129,4 @@ prints
 :language: text
 ```
 
-Next, {doc}`enums`.
+Next, {doc}`structs`.

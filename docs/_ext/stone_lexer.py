@@ -19,7 +19,7 @@ from pygments.token import (
 
 KEYWORDS = (
     "and", "as", "break", "case", "cont", "elif", "else", "enum", "fn", "for", "if", "in", "match",
-    "not", "or", "pub", "ret", "use", "while",
+    "not", "or", "pub", "ret", "struct", "use", "while",
 )
 CONSTANTS = ("true", "false", "none")
 BUILTINS = ("print", "range", "int", "float", "str", "input", "eof", "args", "some")
@@ -62,7 +62,7 @@ class StoneLexer(RegexLexer):
             (r"//.*$", Comment.Single),
             (r'"', String.Double, "string"),
             (r"(fn)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
-            (r"(enum)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Class)),
+            (r"(enum|struct)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Class)),
             (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
             (
                 # a type name, maybe inside list[, tuple[, or option[, then closing brackets or more

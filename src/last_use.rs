@@ -125,6 +125,7 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
         StmtKind::Return { value: None }
         | StmtKind::FunctionDef { .. }
         | StmtKind::EnumDef { .. }
+        | StmtKind::StructDef { .. }
         | StmtKind::Use { .. }
         | StmtKind::Break
         | StmtKind::Continue => {}
@@ -164,9 +165,14 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
             expr_names(left, out);
             comparators.iter().for_each(|value| expr_names(value, out));
         }
-        ExprKind::Call { func, args } => {
+        ExprKind::Call {
+            func,
+            args,
+            keywords,
+        } => {
             expr_names(func, out);
             args.iter().for_each(|arg| expr_names(arg, out));
+            keywords.iter().for_each(|k| expr_names(&k.value, out));
         }
         ExprKind::Subscript { value, slice, .. } => {
             expr_names(value, out);
@@ -268,9 +274,9 @@ impl Liveness<'_> {
                 for target in targets {
                     kill_targets(target, &mut live);
                 }
-                // a changed list is read, along with its indexes
+                // a changed list or struct is read, along with its indexes
                 for target in targets {
-                    if let ExprKind::Subscript { .. } = target.kind {
+                    if let ExprKind::Subscript { .. } | ExprKind::Attribute { .. } = target.kind {
                         self.expr(target, &mut live);
                     }
                 }
@@ -348,6 +354,7 @@ impl Liveness<'_> {
             | StmtKind::Continue
             | StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. }
             | StmtKind::Use { .. } => out,
         }
     }

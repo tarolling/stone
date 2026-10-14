@@ -2,8 +2,8 @@
 
 use super::Parser;
 use crate::ast::{
-    Arg, Arguments, Expr, MatchCase, Operator, ParserError, Pattern, PatternKind, Stmt, StmtKind,
-    TypeExpr, TypeExprKind, Variant,
+    Arg, Arguments, Expr, Field, MatchCase, Operator, ParserError, Pattern, PatternKind, Stmt,
+    StmtKind, TypeExpr, TypeExprKind, Variant,
 };
 use crate::debug;
 use crate::span::Span;
@@ -401,6 +401,83 @@ impl Parser {
 
         Err(ParserError {
             method: "parse_enum_def".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses a struct definition, such as `struct Point;` followed by an indented line for each
+    /// field, like `x: float`.
+    ///
+    /// ```text
+    /// struct_def:
+    ///     | ['pub'] 'struct' NAME ';' NEWLINE INDENT field+ DEDENT
+    /// ```
+    pub(super) fn parse_struct_def(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
+        // ['pub'] 'struct' NAME ';' NEWLINE INDENT field+ DEDENT
+        let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
+        if self
+            .expect(TokenType::Keyword("struct".to_string()))
+            .is_some()
+            && let Some((name, name_span)) = self.expect_name("a struct name", false)
+            && self.expect(TokenType::Semi).is_some()
+            && self.expect(TokenType::Newline).is_some()
+            && self.expect(TokenType::Indent).is_some()
+            && let Ok(fields) = self.nested(Self::parse_fields)
+            && self.expect(TokenType::Dedent).is_some()
+        {
+            return Ok(Box::new(Stmt::new(
+                StmtKind::StructDef {
+                    name,
+                    name_span,
+                    public,
+                    fields,
+                },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_struct_def".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses the fields of a struct, one per line, up to the `Dedent` that ends them.
+    ///
+    /// ```text
+    /// field:
+    ///     | NAME ':' type NEWLINE
+    /// ```
+    fn parse_fields(&mut self) -> Result<Vec<Field>, ParserError> {
+        let mut fields = vec![];
+        loop {
+            let mark = self.pos;
+            if let Some((name, span)) = self.expect_name("a field name", false)
+                && self.expect(TokenType::Colon).is_some()
+                && let Ok(annotation) = self.parse_type()
+                && self.expect(TokenType::Newline).is_some()
+            {
+                fields.push(Field {
+                    name,
+                    span,
+                    annotation: *annotation,
+                });
+            } else {
+                self.pos = mark;
+                break;
+            }
+            if self.peek().r#type == TokenType::Dedent {
+                return Ok(fields);
+            }
+        }
+
+        Err(ParserError {
+            method: "parse_fields".to_string(),
             token: self.peek().r#type.clone(),
             span: self.peek().span,
         })
@@ -939,6 +1016,7 @@ impl Parser {
     /// compound_stmt:
     ///     | function_def
     ///     | enum_def
+    ///     | struct_def
     ///     | if_stmt
     ///     | for_stmt
     ///     | while_stmt
@@ -955,6 +1033,12 @@ impl Parser {
 
         // enum_def
         if let Ok(stmt) = self.parse_enum_def() {
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
+        // struct_def
+        if let Ok(stmt) = self.parse_struct_def() {
             return Ok(stmt);
         }
         self.pos = mark;

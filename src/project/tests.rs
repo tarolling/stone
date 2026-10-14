@@ -371,7 +371,7 @@ fn a_module_only_holds_use_and_def() {
             ("util.stn", "print(1)\n\npub fn f() -> int;\n    ret 1\n"),
         ],
         "util.stn",
-        "only use, fn, and enum are allowed at the top level of a module",
+        "only use, fn, enum, and struct are allowed at the top level of a module",
         1,
         1,
     );
@@ -779,7 +779,7 @@ fn a_private_enum_cannot_be_used_from_another_file() {
     assert_error(
         &[("main.stn", "use zoo\nfn f(x: zoo.Bird);\n    ret\n"), ZOO],
         "main.stn",
-        "module 'zoo' has no enum 'Bird'",
+        "module 'zoo' has no type 'Bird'",
         2,
         9,
     );
@@ -791,6 +791,77 @@ fn an_imported_enum_cannot_share_a_name_with_one_the_file_defines() {
         &[("main.stn", "use zoo.Animal\nenum Animal;\n    Cat\n"), ZOO],
         "main.stn",
         "'Animal' is already defined in this file",
+        1,
+        9,
+    );
+}
+
+const GEO: (&str, &str) = (
+    "geo.stn",
+    "pub struct Point;\n    x: int\n    y: int\nstruct Secret;\n    code: int\n\
+     pub fn shift(p: Point, dx: int) -> Point;\n    p.x += dx\n    ret p\n\
+     pub fn origin() -> Point;\n    ret Point(x=0, y=0)\n",
+);
+
+#[test]
+fn a_public_struct_is_used_by_name_or_through_its_module() {
+    let main = "use geo\nuse geo.Point\nfn pair(a: geo.Point) -> list[Point];\n    ret [a, a]\n\
+                p = geo.Point(x=1, y=2)\nq = Point(y=4, x=3)\nq.y = 5\n\
+                print(pair(p), geo.shift(q, 10), geo.origin().y)\n";
+    assert_eq!(
+        output(&[("main.stn", main), GEO]),
+        "[Point(x=1, y=2), Point(x=1, y=2)] Point(x=13, y=5) 0\n"
+    );
+}
+
+#[test]
+fn a_struct_import_binds_the_struct() {
+    let linked = link(
+        Path::new("main.stn"),
+        "use geo.Point\n",
+        &sources_of(&[GEO]),
+    );
+    assert!(linked.diagnostics.is_empty());
+    assert_eq!(
+        linked.imports[0].target,
+        Target::Struct("geo.Point".to_string())
+    );
+}
+
+#[test]
+fn a_private_struct_cannot_be_used_from_another_file() {
+    assert_error(
+        &[("main.stn", "use geo.Secret\n"), GEO],
+        "main.stn",
+        "'Secret' is private to module 'geo'",
+        1,
+        9,
+    );
+    assert_error(
+        &[("main.stn", "use geo\nx = geo.Secret(code=1)\n"), GEO],
+        "main.stn",
+        "'Secret' is private to module 'geo'",
+        2,
+        9,
+    );
+    assert_error(
+        &[("main.stn", "use geo\nfn f(p: geo.Spot);\n    ret\n"), GEO],
+        "main.stn",
+        "module 'geo' has no type 'Spot'",
+        2,
+        9,
+    );
+}
+
+#[test]
+fn an_imported_struct_cannot_share_a_name_with_one_the_file_defines() {
+    assert_error(
+        &[
+            ("main.stn", "use geo.Point\nstruct Point;\n    z: int\n"),
+            GEO,
+        ],
+        "main.stn",
+        "'Point' is already defined in this file",
         1,
         9,
     );

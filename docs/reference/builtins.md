@@ -14,7 +14,8 @@ print(values...)
 
 Prints the values separated by spaces, followed by a newline. `print()` prints an empty line.
 Floats print like Python's `repr`, bools as `true` and `false`, lists with their elements in
-brackets, with strings inside a list in single quotes, and enum values as they are written:
+brackets, with strings inside a list in single quotes, enum values as they are written, and
+struct values with their fields named, as in `Point(x=1.0, y=2.0)`:
 
 ```stone
 print("total", 3, 0.5, true, some(1), [1, 2], ["a"])   // total 3 0.5 true some(1) [1, 2] ['a']

@@ -1,0 +1,4 @@
+44999850000
+Node(value=1, next=some(Node(value=2, next=none)))
+6 Tree(label='mid', kids=[Tree(label='changed', kids=[]), Tree(label='leaf', kids=[])]) Tree(label='leaf', kids=[])
+n 300000

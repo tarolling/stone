@@ -126,6 +126,24 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
                 })
                 .collect(),
         },
+        StmtKind::StructDef {
+            name,
+            public,
+            fields,
+            ..
+        } => StmtKind::StructDef {
+            name,
+            name_span: Span::default(),
+            public,
+            fields: fields
+                .into_iter()
+                .map(|f| Field {
+                    name: f.name,
+                    span: Span::default(),
+                    annotation: strip_type(f.annotation),
+                })
+                .collect(),
+        },
         StmtKind::Match { subject, cases } => StmtKind::Match {
             subject: Box::new(strip_expr(*subject)),
             cases: cases
@@ -202,9 +220,21 @@ fn strip_expr(expr: Expr) -> Expr {
             ops,
             comparators: strip_all(comparators),
         },
-        ExprKind::Call { func, args } => ExprKind::Call {
+        ExprKind::Call {
+            func,
+            args,
+            keywords,
+        } => ExprKind::Call {
             func: strip_box(func),
             args: strip_all(args),
+            keywords: keywords
+                .into_iter()
+                .map(|k| Keyword {
+                    arg: k.arg,
+                    arg_span: Span::default(),
+                    value: strip_expr(k.value),
+                })
+                .collect(),
         },
         ExprKind::Subscript { value, slice, ctx } => ExprKind::Subscript {
             value: strip_box(value),
@@ -398,7 +428,8 @@ fn simple_function_no_args() {
                                 }
                                 .into()
                             ),
-                            args: vec![]
+                            args: vec![],
+                            keywords: vec![],
                         }
                         .into()
                     )
@@ -502,7 +533,8 @@ fn simple_function_one_arg() {
                                     kind: None
                                 }
                                 .into()
-                            ]
+                            ],
+                            keywords: vec![],
                         }
                         .into()
                     )
@@ -621,7 +653,8 @@ fn simple_function_multiple_args() {
                                     kind: None
                                 }
                                 .into()
-                            ]
+                            ],
+                            keywords: vec![],
                         }
                         .into()
                     )
@@ -1172,7 +1205,8 @@ fn for_loops_parse() {
         **iter,
         ExprKind::Call {
             func: name("range"),
-            args: vec![*int(3)]
+            args: vec![*int(3)],
+            keywords: vec![],
         }
         .into()
     );
@@ -1436,6 +1470,7 @@ fn method_call(value: Box<Expr>, attr: &str, args: Vec<Expr>) -> Expr {
             .into(),
         ),
         args,
+        keywords: vec![],
     }
     .into()
 }
@@ -1465,6 +1500,7 @@ fn method_calls_chain_after_subscripts_and_calls() {
     let f_call = ExprKind::Call {
         func: name("f"),
         args: vec![],
+        keywords: vec![],
     };
     assert_eq!(
         expr_of("f().len()\n"),
@@ -1578,9 +1614,51 @@ fn augmented_assignments_do_not_chain() {
 }
 
 #[test]
-fn attribute_is_not_an_assignment_target() {
-    let (message, line, col) = error_of("xs.len = 1\n");
-    assert_eq!((line, col), (1, 8), "{message}");
+fn a_field_is_an_assignment_target() {
+    let field = |value: Box<Expr>, attr: &str| -> Expr {
+        ExprKind::Attribute {
+            value,
+            attr: attr.to_string(),
+            ctx: ExprContext::Store,
+        }
+        .into()
+    };
+    assert_eq!(
+        parse_ok("p.x = 1\n"),
+        Mod::Module {
+            body: vec![
+                StmtKind::Assign {
+                    targets: vec![field(name("p"), "x")],
+                    value: int(1),
+                }
+                .into()
+            ]
+        }
+    );
+    let element = Box::new(
+        ExprKind::Subscript {
+            value: name("ps"),
+            slice: int(0),
+            ctx: ExprContext::Load,
+        }
+        .into(),
+    );
+    assert_eq!(
+        parse_ok("ps[0].x += 2\n"),
+        Mod::Module {
+            body: vec![
+                StmtKind::AugAssign {
+                    target: Box::new(field(element, "x")),
+                    op: Operator::Add,
+                    value: int(2),
+                }
+                .into()
+            ]
+        }
+    );
+    // a call cannot be assigned to
+    let (message, line, col) = error_of("p.f() = 1\n");
+    assert_eq!((line, col), (1, 7), "{message}");
 }
 
 /// Builds the boxed expression `left op right`, for expected trees.
@@ -1772,7 +1850,11 @@ fn pub_spans_from_the_keyword() {
 fn pub_must_come_before_def() {
     assert_eq!(
         error_of("pub x = 1\n"),
-        ("expected 'fn' or 'enum', found 'x'".to_string(), 1, 5)
+        (
+            "expected 'fn', 'enum' or 'struct', found 'x'".to_string(),
+            1,
+            5
+        )
     );
 }
 
@@ -2097,6 +2179,7 @@ fn match_runs_the_first_case_that_fits() {
                 ExprKind::Call {
                     func: Box::new(load("print")),
                     args: vec![load(name)],
+                    keywords: vec![],
                 }
                 .into(),
             ),
@@ -2114,6 +2197,7 @@ fn match_runs_the_first_case_that_fits() {
                     }
                     .into(),
                 ],
+                keywords: vec![],
             }
             .into(),
         ),
@@ -2208,4 +2292,104 @@ fn a_bad_case_is_skipped_with_its_match() {
     let Mod::Module { body } = module;
     assert_eq!(body.len(), 1);
     assert!(matches!(body[0].kind, StmtKind::Assign { .. }));
+}
+
+/// Parses `source`, which must succeed, without spans, for comparing with expected trees.
+fn parse_ok(source: &str) -> Mod {
+    without_spans(parse_within(source.to_string(), Duration::from_secs(5)).unwrap())
+}
+
+#[test]
+fn a_struct_definition_holds_its_fields() {
+    let field = |name: &str, kind: TypeExprKind| Field {
+        name: name.to_string(),
+        span: Span::default(),
+        annotation: TypeExpr {
+            kind,
+            span: Span::default(),
+        },
+    };
+    let list_of_int = TypeExprKind::List(Box::new(TypeExpr {
+        kind: TypeExprKind::Int,
+        span: Span::default(),
+    }));
+    assert_eq!(
+        parse_ok("pub struct Point;\n    x: float\n    ys: list[int]\n"),
+        Mod::Module {
+            body: vec![
+                StmtKind::StructDef {
+                    name: "Point".to_string(),
+                    name_span: Span::default(),
+                    public: true,
+                    fields: vec![field("x", TypeExprKind::Float), field("ys", list_of_int)],
+                }
+                .into()
+            ]
+        }
+    );
+}
+
+#[test]
+fn a_struct_needs_typed_fields() {
+    assert_eq!(
+        error_of("struct Point;\n    x\n"),
+        ("expected ':', found end of line".to_string(), 2, 6)
+    );
+    assert_eq!(
+        error_of("struct Point;\n    x = 1\n"),
+        ("expected ':', found '='".to_string(), 2, 7)
+    );
+    assert_eq!(
+        error_of("struct Point;\nx = 1\n"),
+        ("expected an indented block, found 'x'".to_string(), 2, 1)
+    );
+}
+
+#[test]
+fn named_values_follow_the_others_in_a_call() {
+    let keyword = |arg: &str, value: Box<Expr>| Keyword {
+        arg: arg.to_string(),
+        arg_span: Span::default(),
+        value: *value,
+    };
+    let call = |args: Vec<Expr>, keywords: Vec<Keyword>| -> Mod {
+        Mod::Module {
+            body: vec![
+                StmtKind::Expr {
+                    value: Box::new(
+                        ExprKind::Call {
+                            func: name("f"),
+                            args,
+                            keywords,
+                        }
+                        .into(),
+                    ),
+                }
+                .into(),
+            ],
+        }
+    };
+    assert_eq!(
+        parse_ok("f(x=1, y=2,)\n"),
+        call(vec![], vec![keyword("x", int(1)), keyword("y", int(2))])
+    );
+    assert_eq!(
+        parse_ok("f(1, y=2)\n"),
+        call(vec![*int(1)], vec![keyword("y", int(2))])
+    );
+    // `==` compares, so this is one value without a name
+    assert!(matches!(
+        &parse_ok("f(x == 1)\n"),
+        Mod::Module { body } if matches!(&body[0].kind, StmtKind::Expr { value }
+            if matches!(&value.kind, ExprKind::Call { args, keywords, .. }
+                if args.len() == 1 && keywords.is_empty()))
+    ));
+    assert_eq!(
+        error_of("f(x=1, 2)\n"),
+        (
+            "a value without a name cannot follow a named one, as in 'x=1'".to_string(),
+            1,
+            8
+        )
+    );
 }

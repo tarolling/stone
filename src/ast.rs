@@ -202,8 +202,13 @@ pub enum ExprKind {
         ops: Vec<CompOp>,
         comparators: Vec<Expr>,
     },
-    /// A function call, such as `f(1, 2)`.
-    Call { func: Box<Expr>, args: Vec<Expr> },
+    /// A call, such as `f(1, 2)`, with any named values after the others, such as `x=1.0` in
+    /// `Point(x=1.0, y=2.0)`, which only a struct takes.
+    Call {
+        func: Box<Expr>,
+        args: Vec<Expr>,
+        keywords: Vec<Keyword>,
+    },
     /// A literal value, such as `42`, `"hi"`, or `true`.
     Constant {
         value: Box<Constant>,
@@ -215,9 +220,9 @@ pub enum ExprKind {
         slice: Box<Expr>,
         ctx: ExprContext,
     },
-    /// An attribute of a value, such as `xs.len` in `xs.len()`.
-    ///
-    /// Attributes are only meaningful as the function of a call, which calls a method.
+    /// An attribute of a value: a struct's field, such as `p.x`, which an assignment can also
+    /// change (ctx `Store`), or, as the function of a call, a method, such as `xs.len` in
+    /// `xs.len()`.
     Attribute {
         value: Box<Expr>,
         attr: Identifier,
@@ -237,6 +242,15 @@ pub enum ExprKind {
         upper: Option<Box<Expr>>,
         step: Option<Box<Expr>>,
     },
+}
+
+/// A named value in a call, such as `x=1.0` in `Point(x=1.0, y=2.0)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Keyword {
+    pub arg: Identifier,
+    /// The span of the name before `=`.
+    pub arg_span: Span,
+    pub value: Expr,
 }
 
 /// Returns the value of `expr` if it is an int literal, possibly negated.
@@ -348,6 +362,16 @@ pub enum StmtKind {
         public: bool,
         variants: Vec<Variant>,
     },
+    /// A struct definition, such as `struct Point;` followed by an indented line for each
+    /// field, like `x: float`.
+    StructDef {
+        name: Identifier,
+        /// The span of the struct's name, which editor features point at.
+        name_span: Span,
+        /// Whether the definition starts with `pub`, so other modules may use it.
+        public: bool,
+        fields: Vec<Field>,
+    },
     /// A `match` statement, which runs the first case whose pattern matches `subject`, such as
     /// `match s;` followed by `case Shape.Circle(r); print(r)`.
     Match {
@@ -367,6 +391,15 @@ pub struct Variant {
     /// The span of the variant's name.
     pub span: Span,
     pub fields: Vec<TypeExpr>,
+}
+
+/// One field of a struct, such as `x: float`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Field {
+    pub name: Identifier,
+    /// The span of the field's name.
+    pub span: Span,
+    pub annotation: TypeExpr,
 }
 
 /// One case of a `match` statement, such as `case some(x); print(x)`.
@@ -448,7 +481,7 @@ pub enum Mod {
 /// an `Attribute` whose span covers `len`.
 pub enum PrimaryOp {
     Subscript(Box<Expr>, Span),
-    Call(Vec<Expr>, Span),
+    Call(Vec<Expr>, Vec<Keyword>, Span),
     Attribute(Identifier, Span),
 }
 
@@ -493,7 +526,7 @@ pub enum TypeExprKind {
     List(Box<TypeExpr>),
     /// A tuple of two or more types, such as `tuple[int, str]`.
     Tuple(Vec<TypeExpr>),
-    /// Any other type by name, with its type arguments: an enum such as `Shape` or
+    /// Any other type by name, with its type arguments: a struct or enum such as `Shape` or
     /// `shapes.Shape`, or `option[int]`.
     Named {
         name: String,

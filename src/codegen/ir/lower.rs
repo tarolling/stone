@@ -37,12 +37,12 @@ use super::{
     Terminator, VReg, leaf_name, variable_of,
 };
 use crate::ast::{
-    Arg, BoolOp, Constant, Expr, ExprKind, MatchCase, Mod, Operator, Pattern, PatternKind, Stmt,
-    StmtKind, UnaryOp, constant_int, target_names,
+    Arg, BoolOp, Constant, Expr, ExprKind, Keyword, MatchCase, Mod, Operator, Pattern, PatternKind,
+    Stmt, StmtKind, UnaryOp, constant_int,
 };
 use crate::checker::{
-    Enums, Symbol, SymbolKind, Type, collect_assigned, collect_changed, place, place_root,
-    place_spans, range_args, variant_display, variants,
+    Enums, Step, Structs, Symbol, SymbolKind, Type, collect_assigned, collect_changed, place,
+    place_root, place_spans, range_args, struct_display, variant_display, variants,
 };
 use crate::codegen::context::module_routine;
 use crate::last_use::{LiveAfter, global_reads, live_after};
@@ -58,9 +58,9 @@ use std::collections::{HashMap, HashSet};
 type Variables = HashMap<(Option<String>, String), Type>;
 
 /// Lowers every function in `module`, then its top-level code as `main`, using the types the
-/// checker inferred for every expression, for every variable in `symbols`, and for the values of
-/// every variant of `enums`. Last come the functions that print enum values, which lowering makes
-/// for each enum type the program prints.
+/// checker inferred for every expression, for every variable in `symbols`, for the values of
+/// every variant of `enums`, and for the fields of every struct of `structs`. Last come the
+/// functions that print enum values, which lowering makes for each enum type the program prints.
 ///
 /// Fails only on input the checker rejects, such as a constant type no backend supports.
 pub fn lower(
@@ -68,6 +68,7 @@ pub fn lower(
     types: &HashMap<Span, Type>,
     symbols: &[Symbol],
     enums: &Enums,
+    structs: &Structs,
 ) -> Result<Program, String> {
     let Mod::Module { body } = module;
 
@@ -79,7 +80,11 @@ pub fn lower(
         .filter(|symbol| {
             !matches!(
                 symbol.kind,
-                SymbolKind::Function | SymbolKind::Enum | SymbolKind::Variant
+                SymbolKind::Function
+                    | SymbolKind::Enum
+                    | SymbolKind::Variant
+                    | SymbolKind::Struct
+                    | SymbolKind::Field
             )
         })
         .map(|symbol| {
@@ -89,14 +94,14 @@ pub fn lower(
             )
         })
         .collect();
-    // each value of a tuple is a variable of its own, so a tuple is never stored as one
+    // each value of a tuple or struct is a variable of its own, so neither is ever stored as one
     let tuples: Vec<_> = variables
         .iter()
-        .filter(|(_, ty)| matches!(ty, Type::Tuple(_)))
+        .filter(|(_, ty)| ty.is_flat())
         .map(|(key, ty)| (key.clone(), ty.clone()))
         .collect();
     for ((scope, name), ty) in tuples {
-        for (i, leaf) in ty.leaves().into_iter().enumerate() {
+        for (i, leaf) in ty.leaves(structs).into_iter().enumerate() {
             variables.insert((scope.clone(), leaf_name(&name, i)), leaf);
         }
     }
@@ -104,7 +109,7 @@ pub fn lower(
     let globals: Vec<String> = assigned
         .into_iter()
         .flat_map(|(name, _)| match variables.get(&(None, name.clone())) {
-            Some(ty @ Type::Tuple(_)) => (0..ty.leaves().len())
+            Some(ty) if ty.is_flat() => (0..ty.leaves(structs).len())
                 .map(|i| leaf_name(&name, i))
                 .collect(),
             _ => vec![name],
@@ -119,6 +124,7 @@ pub fn lower(
         global_reads: global_reads(body, &stone_globals),
         global_set,
         enums,
+        structs,
         printers: RefCell::new(Vec::new()),
     };
 
@@ -136,8 +142,8 @@ pub fn lower(
         }
     }
     functions.push(Lowerer::new(&context, None).function(&[], &top_level)?);
-    // a printer can ask for the printers of the enums its values hold, so this runs until none
-    // is left
+    // a printer can ask for the printers of the enums and structs its values hold, so this runs
+    // until none is left
     let mut printed = 0;
     loop {
         let next = context.printers.borrow().get(printed).cloned();
@@ -146,15 +152,20 @@ pub fn lower(
         };
         printed += 1;
         let label = printer_label(&ty);
-        functions.push(Lowerer::new(&context, Some(label)).enum_printer(&ty)?);
+        let lowerer = Lowerer::new(&context, Some(label));
+        functions.push(match ty {
+            Type::Struct(_) => lowerer.struct_printer(&ty)?,
+            _ => lowerer.enum_printer(&ty)?,
+        });
     }
 
     Ok(Program { functions, globals })
 }
 
-/// Returns the label of the function that prints values of the enum type `ty`.
+/// Returns the label of the function that prints values of the enum or struct type `ty`.
 ///
-/// For example, `option[list[int]]` is printed by `stone.print_enum.option.list_int`.
+/// For example, `option[list[int]]` is printed by `stone.print_enum.option.list_int`, and
+/// `Point` by `stone.print_struct.Point`.
 fn printer_label(ty: &Type) -> String {
     fn mangle(ty: &Type) -> String {
         match ty {
@@ -171,7 +182,10 @@ fn printer_label(ty: &Type) -> String {
             other => other.to_string(),
         }
     }
-    format!("stone.print_enum.{}", mangle(ty))
+    match ty {
+        Type::Struct(name) => format!("stone.print_struct.{name}"),
+        _ => format!("stone.print_enum.{}", mangle(ty)),
+    }
 }
 
 /// What lowering each function shares.
@@ -191,8 +205,10 @@ struct Context<'a> {
     global_reads: HashMap<String, HashSet<String>>,
     /// The variants of every enum the program defines.
     enums: &'a Enums,
-    /// Each enum type some code prints, in the order it was first printed, which gets a function
-    /// that prints its values.
+    /// The fields of every struct the program defines.
+    structs: &'a Structs,
+    /// Each enum and struct type some code prints, in the order it was first printed, which gets
+    /// a function that prints its values.
     printers: RefCell<Vec<Type>>,
 }
 
@@ -376,26 +392,7 @@ impl<'a> Lowerer<'a> {
         let (value, depth) = (self.fresh(), self.fresh());
         let entry = self.new_block();
         self.start(entry);
-        let (deep, shallow) = (self.new_block(), self.new_block());
-        self.terminate(Terminator::CmpBranch {
-            cond: Cond::Ge,
-            float: false,
-            lhs: Operand::Reg(depth),
-            rhs: Operand::Imm(MAX_PRINT_DEPTH as i64),
-            then: deep,
-            otherwise: shallow,
-        });
-        self.start(deep);
-        self.terminate(Terminator::Fail(PRINT_DEPTH.to_string(), vec![]));
-        self.start(shallow);
-        let inner = self.fresh();
-        self.push(Inst::Binary {
-            op: BinOp::Add,
-            dst: inner,
-            lhs: Operand::Reg(depth),
-            rhs: Operand::Imm(1),
-        });
-        self.print_depth = Operand::Reg(inner);
+        self.enter_print_level(Operand::Reg(depth));
         let all = variants(self.context.enums, ty);
         let tag = self.fresh();
         self.push(Inst::EnumTag {
@@ -431,6 +428,73 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Makes the function that prints a value of the struct type `ty` as the interpreter does,
+    /// such as `Point(x=1.0, y=2.0)`, given the struct's values and how many enum and struct
+    /// values it is inside. Printing one nested too deeply stops the program, as for enums.
+    fn struct_printer(mut self, ty: &Type) -> Result<Function, String> {
+        let Type::Struct(name) = ty else {
+            return Err("only a struct has fields to print".to_string());
+        };
+        let values: Vec<VReg> = self.leaves(ty).iter().map(|_| self.fresh()).collect();
+        let depth = self.fresh();
+        let entry = self.new_block();
+        self.start(entry);
+        self.enter_print_level(Operand::Reg(depth));
+        self.print_text(&format!("{}(", struct_display(name)));
+        let mut start = 0;
+        for (k, (field, field_ty)) in self.context.structs[name].iter().enumerate() {
+            if k > 0 {
+                self.print_char(',');
+                self.print_char(' ');
+            }
+            self.print_text(&format!("{field}="));
+            let end = start + self.leaves(field_ty).len();
+            let field_values: Vec<Operand> = values[start..end]
+                .iter()
+                .copied()
+                .map(Operand::Reg)
+                .collect();
+            self.print_flat(field_ty, &field_values, true);
+            start = end;
+        }
+        self.print_char(')');
+        self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
+        let mut params = values;
+        params.push(depth);
+        Ok(Function {
+            name: self.name.clone(),
+            params,
+            blocks: self.layout(),
+            vreg_count: self.vreg_count,
+            helper: true,
+        })
+    }
+
+    /// Stops the program if a printer was called inside `depth` enum and struct values, which is
+    /// more than it may print, and otherwise passes one level deeper on to the printers it calls.
+    fn enter_print_level(&mut self, depth: Operand) {
+        let (deep, shallow) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Ge,
+            float: false,
+            lhs: depth,
+            rhs: Operand::Imm(MAX_PRINT_DEPTH as i64),
+            then: deep,
+            otherwise: shallow,
+        });
+        self.start(deep);
+        self.terminate(Terminator::Fail(PRINT_DEPTH.to_string(), vec![]));
+        self.start(shallow);
+        let inner = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: inner,
+            lhs: depth,
+            rhs: Operand::Imm(1),
+        });
+        self.print_depth = Operand::Reg(inner);
+    }
+
     /// Prints `value`, a value of the variant `name` of the enum type `ty` whose values have the
     /// types `fields`, with its values in parentheses, the way the interpreter writes it.
     fn print_variant(&mut self, ty: &Type, name: &str, fields: &[Type], value: Operand) {
@@ -455,7 +519,7 @@ impl<'a> Lowerer<'a> {
                 self.print_char(' ');
             }
             // printing changes nothing, so the values are borrowed
-            let width = field.leaves().len();
+            let width = field.leaves(self.context.structs).len();
             let values = self.field_values(value, slot, width);
             self.print_flat(field, &values, true);
             slot += width;
@@ -494,26 +558,28 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Returns the variables lowering keeps for the stone variable `name`: one for each value of
-    /// a tuple, or `name` itself.
+    /// a tuple or struct, or `name` itself.
     ///
     /// For example, a `t` of type `tuple[int, tuple[str, float]]` is `t.0`, `t.1`, and `t.2`.
     fn leaf_names(&self, name: &str) -> Vec<String> {
         match self.variable_type(name) {
-            Some(ty @ Type::Tuple(_)) => {
-                (0..ty.leaves().len()).map(|i| leaf_name(name, i)).collect()
-            }
+            Some(ty) if ty.is_flat() => (0..self.leaves(ty).len())
+                .map(|i| leaf_name(name, i))
+                .collect(),
             _ => vec![name.to_string()],
         }
     }
 
-    /// Returns how each value of `expr` is counted: one for each value of a tuple, or one.
+    /// Returns the values a value of type `ty` is made of, from [`Type::leaves`].
+    fn leaves(&self, ty: &Type) -> Vec<Type> {
+        ty.leaves(self.context.structs)
+    }
+
+    /// Returns how each value of `expr` is counted: one for each value of a tuple or struct, or
+    /// one.
     fn leaf_kinds(&self, expr: &Expr) -> Result<Vec<Option<RcKind>>, String> {
-        Ok(self
-            .type_of(expr)?
-            .leaves()
-            .iter()
-            .map(RcKind::of)
-            .collect())
+        let ty = self.type_of(expr)?;
+        Ok(self.leaves(&ty).iter().map(RcKind::of).collect())
     }
 
     /// Returns how variable `name` of this function, or global `name` in `main`, is counted.
@@ -552,9 +618,15 @@ impl<'a> Lowerer<'a> {
     /// a tuple, or one.
     fn element_kinds(&self, expr: &Expr) -> Vec<Option<RcKind>> {
         match self.context.types.get(&expr.span) {
-            Some(Type::List(elem)) => elem.leaves().iter().map(RcKind::of).collect(),
+            Some(Type::List(elem)) => self.leaves(elem).iter().map(RcKind::of).collect(),
             _ => vec![None],
         }
+    }
+
+    /// Returns whether each element of the list `expr` is several values lowering keeps apart:
+    /// a tuple or a struct.
+    fn holds_flat(&self, expr: &Expr) -> bool {
+        matches!(self.context.types.get(&expr.span), Some(Type::List(elem)) if elem.is_flat())
     }
 
     /// Returns how the elements of the list `expr` are counted.
@@ -843,7 +915,7 @@ impl<'a> Lowerer<'a> {
 
     fn stmt_unspanned(&mut self, stmt: &Stmt) -> Result<(), String> {
         match &stmt.kind {
-            StmtKind::Assign { targets, value } if self.is_tuple(value) => {
+            StmtKind::Assign { targets, value } if self.is_flat(value) => {
                 self.assign_tuple(stmt, targets, value)?;
             }
 
@@ -852,16 +924,14 @@ impl<'a> Lowerer<'a> {
                 // a call can also take a target's old value, which the assignment replaces, but
                 // not what a target's indexes read after it
                 if (self.is_stone_call(value) || self.is_elementwise(value))
-                    && targets
-                        .iter()
-                        .all(|target| matches!(target.kind, ExprKind::Name { .. }))
+                    && targets.iter().all(is_variable_target)
                 {
                     self.movable = last_uses.clone();
                     for target in targets {
-                        if let ExprKind::Name { id, .. } = &target.kind
-                            && self.is_counted_variable(id)
-                        {
-                            self.movable.push(id.clone());
+                        for source in self.flat_sources(target).into_iter().flatten() {
+                            if self.is_counted_variable(&source) {
+                                self.movable.push(source);
+                            }
                         }
                     }
                 }
@@ -1011,7 +1081,7 @@ impl<'a> Lowerer<'a> {
             StmtKind::FunctionDef { .. } => {
                 return Err("functions must be defined at the top level".to_string());
             }
-            StmtKind::EnumDef { .. } => {}
+            StmtKind::EnumDef { .. } | StmtKind::StructDef { .. } => {}
             StmtKind::Match { subject, cases } => self.match_stmt(subject, cases)?,
             StmtKind::Use { .. } => {
                 return Err("use is only allowed at the top level of a file".to_string());
@@ -1122,7 +1192,7 @@ impl<'a> Lowerer<'a> {
                 });
                 self.pattern_test(field, Operand::Reg(inner), field_ty, otherwise);
             }
-            slot += field_ty.leaves().len();
+            slot += self.leaves(field_ty).len();
         }
     }
 
@@ -1138,7 +1208,7 @@ impl<'a> Lowerer<'a> {
         match &pattern.kind {
             PatternKind::Wildcard => {}
             PatternKind::Name(name) => {
-                let kinds = ty.leaves().iter().map(RcKind::of).collect();
+                let kinds = self.leaves(ty).iter().map(RcKind::of).collect();
                 out.push((name.clone(), values.to_vec(), kinds));
             }
             PatternKind::Variant { path, fields } => {
@@ -1151,7 +1221,7 @@ impl<'a> Lowerer<'a> {
                 };
                 let mut slot = 0;
                 for (field, field_ty) in fields.iter().zip(&all[tag].1) {
-                    let width = field_ty.leaves().len();
+                    let width = self.leaves(field_ty).len();
                     if !matches!(field.kind, PatternKind::Wildcard) {
                         let field_values = self.field_values(values[0], slot, width);
                         self.pattern_bindings(field, &field_values, field_ty, out);
@@ -1175,7 +1245,7 @@ impl<'a> Lowerer<'a> {
         let kinds: Vec<Option<RcKind>> = all[tag]
             .1
             .iter()
-            .flat_map(Type::leaves)
+            .flat_map(|field| self.leaves(field))
             .map(|leaf| RcKind::of(&leaf))
             .collect();
         if kinds.is_empty() {
@@ -1234,7 +1304,7 @@ impl<'a> Lowerer<'a> {
             return Err("only an option holds a value".to_string());
         };
         let held = args.first().cloned().unwrap_or(Type::Int);
-        let kinds: Vec<Option<RcKind>> = held.leaves().iter().map(RcKind::of).collect();
+        let kinds: Vec<Option<RcKind>> = self.leaves(&held).iter().map(RcKind::of).collect();
         let option = self.expr(receiver)?;
         let defaults = match default {
             Some(default) => {
@@ -1305,9 +1375,9 @@ impl<'a> Lowerer<'a> {
         Ok(results)
     }
 
-    /// Stores `value` in an assignment target: a local, a global, or a list element. A value
-    /// counted as `kind` already carries the reference the target takes, and the target's old
-    /// value is released once it is replaced.
+    /// Stores `value` in an assignment target: a local, a global, a list element, or a struct's
+    /// field. A value counted as `kind` already carries the reference the target takes, and the
+    /// target's old value is released once it is replaced.
     fn assign(
         &mut self,
         target: &Expr,
@@ -1324,7 +1394,8 @@ impl<'a> Lowerer<'a> {
                 let index = self.expr(slice)?;
                 self.store_element(target, &indexes, index, value, kind)?;
             }
-            _ => {}
+            ExprKind::Attribute { .. } => self.store_place(target, &[value], &[kind])?,
+            _ => return Err("cannot assign to this expression".to_string()),
         }
         Ok(())
     }
@@ -1361,23 +1432,12 @@ impl<'a> Lowerer<'a> {
     /// variable among the values is copied first, since assigning one target could change it.
     fn assign_tuple(&mut self, stmt: &Stmt, targets: &[Expr], value: &Expr) -> Result<(), String> {
         let last_uses = self.last_uses(stmt);
-        if self.is_stone_call(value)
-            && targets
-                .iter()
-                .all(|target| matches!(target.kind, ExprKind::Name { .. } | ExprKind::Tuple { .. }))
-        {
+        if self.is_stone_call(value) && targets.iter().all(is_variable_target) {
             self.movable = last_uses.clone();
             for target in targets {
-                let mut names = Vec::new();
-                target_names(target, &mut names);
-                for name in names {
-                    let ExprKind::Name { id, .. } = &name.kind else {
-                        continue;
-                    };
-                    for leaf in self.leaf_names(id) {
-                        if self.is_counted_variable(&leaf) {
-                            self.movable.push(leaf);
-                        }
+                for leaf in self.flat_sources(target).into_iter().flatten() {
+                    if self.is_counted_variable(&leaf) {
+                        self.movable.push(leaf);
                     }
                 }
             }
@@ -1403,8 +1463,9 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    /// Stores the values of a tuple, which already carry the references they need, in `target`:
-    /// a tuple variable, or names to unpack them into, at any depth.
+    /// Stores the values of a tuple or struct, which already carry the references they need, in
+    /// `target`: a variable, names to unpack them into, at any depth, a list element, or a
+    /// field.
     fn assign_flat(
         &mut self,
         target: &Expr,
@@ -1420,12 +1481,16 @@ impl<'a> Lowerer<'a> {
             ExprKind::Tuple { elts, .. } => {
                 let mut start = 0;
                 for elt in elts {
-                    let end = start + self.type_of(elt)?.leaves().len();
+                    let end = start + self.leaves(&self.type_of(elt)?).len();
                     self.assign_flat(elt, &values[start..end], &kinds[start..end])?;
                     start = end;
                 }
             }
-            ExprKind::Subscript { .. } => self.store_values(target, values, kinds)?,
+            ExprKind::Subscript { value: list, .. } if self.holds_flat(list) => {
+                self.store_values(target, values, kinds)?
+            }
+            ExprKind::Subscript { .. } => self.assign(target, values[0], kinds[0])?,
+            ExprKind::Attribute { .. } => self.store_place(target, values, kinds)?,
             _ => return Err("only names can be unpacked into".to_string()),
         }
         Ok(())
@@ -1446,6 +1511,9 @@ impl<'a> Lowerer<'a> {
         op: Operator,
         value: &Expr,
     ) -> Result<(), String> {
+        if has_field(target) {
+            return self.aug_assign_place(target, op, value);
+        }
         let ExprKind::Subscript {
             value: list, slice, ..
         } = &target.kind
@@ -1506,6 +1574,242 @@ impl<'a> Lowerer<'a> {
         self.store_element(target, &indexes, index, new, kind)
     }
 
+    /// Lowers `target op= value` for a target reached through a struct's field, such as
+    /// `p.x += 1.0` or `ps[i].x *= 2.0`: the indexes once, then the old value, which an index out
+    /// of range fails at, then the value, then the new value is stored.
+    fn aug_assign_place(
+        &mut self,
+        target: &Expr,
+        op: Operator,
+        value: &Expr,
+    ) -> Result<(), String> {
+        let indexes = self.place_indexes(target)?;
+        let location = self.locate(target, &indexes)?;
+        // borrowed, since nothing the value runs can change the variable holding it
+        let old = self.location_values(&location)[0];
+        let ty = self.type_of(target)?;
+        let kind = RcKind::of(&ty);
+        let new = match &ty {
+            Type::List(elem) => {
+                let float = **elem == Type::Float;
+                let rhs = self.fused(value)?;
+                let tree = Fused::Binary {
+                    op: bin_op(op),
+                    float,
+                    lhs: Box::new(Fused::List(FusedList {
+                        value: old,
+                        float,
+                        name: None,
+                    })),
+                    rhs: Box::new(rhs),
+                };
+                self.elementwise_tree(&tree, float, &[], kind)?
+            }
+            _ => {
+                let rhs = self.expr(value)?;
+                self.binary(op, &ty, old, rhs, None)
+            }
+        };
+        self.take(new, kind);
+        self.store_location(location, &[new], &[kind]);
+        Ok(())
+    }
+
+    /// Stores `values`, which already carry the references they need, in `target`, a place
+    /// reached through a struct's field, such as `p.x` or `ps[i].x`, evaluating its indexes first.
+    fn store_place(
+        &mut self,
+        target: &Expr,
+        values: &[Operand],
+        kinds: &[Option<RcKind>],
+    ) -> Result<(), String> {
+        let indexes = self.place_indexes(target)?;
+        let location = self.locate(target, &indexes)?;
+        self.store_location(location, values, kinds);
+        Ok(())
+    }
+
+    /// Walks from the variable `place_expr` starts from through its steps, with the values of its
+    /// indexes from [`Lowerer::place_indexes`], to where the value it names lives, making each
+    /// list on the way unique, as [`Lowerer::unique_place`] does, and checking each index.
+    ///
+    /// For example, `p.y` of a local `Point` is the variable `p.1`, and `ps[i].y` is slot
+    /// `i * 2 + 1` of the list `ps`, made unique.
+    fn locate(&mut self, place_expr: &Expr, indexes: &[Operand]) -> Result<Location, String> {
+        let Some((root, steps)) = place(place_expr) else {
+            return Err("only a value in a variable can be changed".to_string());
+        };
+        let mut ty = self
+            .variable_type(root)
+            .cloned()
+            .ok_or_else(|| format!("'{root}' has no type"))?;
+        let mut location = Location::Leaves(self.leaf_names(root));
+        let mut indexes = indexes.iter().copied();
+        let outer = self.span;
+        for (step, span) in steps.into_iter().zip(place_spans(place_expr)) {
+            match step {
+                Step::Field(name) => {
+                    let (range, field) = ty
+                        .struct_field(name, self.context.structs)
+                        .ok_or_else(|| format!("{ty} has no field '{name}'"))?;
+                    location = match location {
+                        Location::Leaves(names) => Location::Leaves(names[range].to_vec()),
+                        Location::Slots { list, first, .. } => Location::Slots {
+                            list,
+                            first: self.slot(first, range.start),
+                            count: range.len(),
+                        },
+                    };
+                    ty = field;
+                }
+                Step::Index(_) => {
+                    let index = indexes.next().ok_or("an index was not evaluated")?;
+                    let Type::List(elem) = ty else {
+                        return Err(format!("{ty} cannot be indexed"));
+                    };
+                    let list = self.unique_location(location)?;
+                    let width = self.leaves(&elem).len();
+                    // an index out of range points at its own subscript
+                    self.span = span;
+                    let count = self.element_count(list, width);
+                    let position = self.list_position(index, count, false, INDEX_RANGE);
+                    self.span = outer;
+                    let first = self.first_slot(position, width);
+                    location = Location::Slots {
+                        list,
+                        first,
+                        count: width,
+                    };
+                    ty = *elem;
+                }
+            }
+        }
+        Ok(location)
+    }
+
+    /// Makes the list at `location`, one value, unique, writing it back where it came from, and
+    /// returns it, borrowed. Only `main` changes globals.
+    fn unique_location(&mut self, location: Location) -> Result<Operand, String> {
+        match location {
+            Location::Leaves(names) => {
+                let [name] = names.as_slice() else {
+                    return Err("only a list can be indexed".to_string());
+                };
+                if let Some(&local) = self.locals.get(name) {
+                    self.push(Inst::ListUnique {
+                        dst: local,
+                        src: Operand::Reg(local),
+                    });
+                    return Ok(Operand::Reg(local));
+                }
+                if self.name.is_some() || !self.context.global_set.contains(name) {
+                    return Err(format!(
+                        "a function cannot change the global '{}'",
+                        variable_of(name)
+                    ));
+                }
+                let loaded = self.fresh();
+                self.push(Inst::LoadGlobal {
+                    dst: loaded,
+                    name: name.clone(),
+                    checked: false,
+                });
+                let unique = self.fresh();
+                self.push(Inst::ListUnique {
+                    dst: unique,
+                    src: Operand::Reg(loaded),
+                });
+                self.push(Inst::StoreGlobal {
+                    name: name.clone(),
+                    src: Operand::Reg(unique),
+                });
+                Ok(Operand::Reg(unique))
+            }
+            Location::Slots { list, first, .. } => {
+                let row = self.fresh();
+                self.push(Inst::ListGet {
+                    dst: row,
+                    list,
+                    index: first,
+                });
+                self.push(Inst::ListUnique {
+                    dst: row,
+                    src: Operand::Reg(row),
+                });
+                // the slot's reference moves to the unique row, which may be a copy
+                self.push(Inst::ListSet {
+                    list,
+                    index: first,
+                    value: Operand::Reg(row),
+                });
+                Ok(Operand::Reg(row))
+            }
+        }
+    }
+
+    /// Reads the values at `location`, borrowed.
+    fn location_values(&mut self, location: &Location) -> Vec<Operand> {
+        match location {
+            Location::Leaves(names) => names
+                .iter()
+                .map(|name| {
+                    if let Some(&local) = self.locals.get(name) {
+                        return Operand::Reg(local);
+                    }
+                    let dst = self.fresh();
+                    self.push(Inst::LoadGlobal {
+                        dst,
+                        name: name.clone(),
+                        checked: false,
+                    });
+                    Operand::Reg(dst)
+                })
+                .collect(),
+            Location::Slots { list, first, count } => (0..*count)
+                .map(|field| {
+                    let index = self.slot(*first, field);
+                    let dst = self.fresh();
+                    self.push(Inst::ListGet {
+                        dst,
+                        list: *list,
+                        index,
+                    });
+                    Operand::Reg(dst)
+                })
+                .collect(),
+        }
+    }
+
+    /// Stores `values`, counted as `kinds`, which already carry the references they need, at
+    /// `location`, releasing the values they replace.
+    fn store_location(&mut self, location: Location, values: &[Operand], kinds: &[Option<RcKind>]) {
+        match location {
+            Location::Leaves(names) => {
+                for ((name, &value), &kind) in names.iter().zip(values).zip(kinds) {
+                    self.assign_name(name, value, kind);
+                }
+            }
+            Location::Slots { list, first, .. } => {
+                let mut old = Vec::new();
+                for (field, (&value, &kind)) in values.iter().zip(kinds).enumerate() {
+                    let index = self.slot(first, field);
+                    if let Some(kind) = kind {
+                        let dst = self.fresh();
+                        self.push(Inst::ListGet { dst, list, index });
+                        old.push((dst, kind));
+                    }
+                    self.push(Inst::ListSet { list, index, value });
+                }
+                for (src, kind) in old {
+                    self.push(Inst::Release {
+                        src: Operand::Reg(src),
+                        kind,
+                    });
+                }
+            }
+        }
+    }
+
     /// Stores `value` at `index` of the list that the subscript `target` changes, whose other
     /// indexes, from [`Lowerer::place_indexes`], are `indexes`, making every list on the way
     /// unique first. A value counted as `kind` carries the reference the element takes, and the
@@ -1541,12 +1845,19 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Evaluates the indexes that lead from a variable to `list`, which a statement is about to
-    /// change, outermost first. For example, `grid[i][j]` evaluates `i` and `j`.
+    /// change, outermost first. For example, `grid[i][j]` and `ps[i].items[j]` evaluate `i` and
+    /// `j`.
     fn place_indexes(&mut self, list: &Expr) -> Result<Vec<Operand>, String> {
-        let Some((_, indexes)) = place(list) else {
-            return Err("only a list in a variable can be changed".to_string());
+        let Some((_, steps)) = place(list) else {
+            return Err("only a value in a variable can be changed".to_string());
         };
-        indexes.into_iter().map(|index| self.expr(index)).collect()
+        let mut indexes = Vec::new();
+        for step in steps {
+            if let Step::Index(index) = step {
+                indexes.push(self.expr(index)?);
+            }
+        }
+        Ok(indexes)
     }
 
     /// Walks from the variable `list` starts from through `indexes`, from
@@ -1558,6 +1869,10 @@ impl<'a> Lowerer<'a> {
     /// `v0 = list_unique v0`, `v1 = list_load v0, 0`, `v1 = list_unique v1`, and
     /// `list_store v0, 0, v1` before the append. Only `main` changes globals.
     fn unique_place(&mut self, list: &Expr, indexes: &[Operand]) -> Result<Operand, String> {
+        if has_field(list) {
+            let location = self.locate(list, indexes)?;
+            return self.unique_location(location);
+        }
         let Some((root, _)) = place(list) else {
             return Err("only a list in a variable can be changed".to_string());
         };
@@ -1693,12 +2008,13 @@ impl<'a> Lowerer<'a> {
             Iterable::Range(_) => (None, None),
         };
 
-        // each element of a list of tuples is several values
+        // each element of a list of tuples or structs is several values
         let width = self.element_layout(iter).0;
+        let flat = self.holds_flat(iter);
         self.loop_depth += 1;
         self.start(header);
         let end = match iterable {
-            Iterable::List(list) if width > 1 => self.element_count(list, width),
+            Iterable::List(list) if flat => self.element_count(list, width),
             Iterable::List(list) => {
                 let len = self.fresh();
                 self.push(Inst::ListLen { dst: len, list });
@@ -1718,7 +2034,7 @@ impl<'a> Lowerer<'a> {
 
         self.start(loop_body);
         if let Iterable::List(list) = iterable
-            && width > 1
+            && flat
         {
             // each value is retained for the variable that takes it
             let kinds = self.element_kinds(iter);
@@ -1900,8 +2216,10 @@ impl<'a> Lowerer<'a> {
     }
 
     fn expr_into_unspanned(&mut self, expr: &Expr, into: Option<VReg>) -> Result<Operand, String> {
-        if self.is_tuple(expr) {
-            return Err("a tuple has several values, which `expr_flat` lowers".to_string());
+        if self.is_flat(expr) {
+            return Err(
+                "a tuple or struct has several values, which `expr_flat` lowers".to_string(),
+            );
         }
         let kind = self.counted(expr);
         if into.is_some() && kind.is_some() {
@@ -2025,7 +2343,7 @@ impl<'a> Lowerer<'a> {
                 comparators,
             } => self.compare(left, ops, comparators, into),
 
-            ExprKind::Call { func, args } => {
+            ExprKind::Call { func, args, .. } => {
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind {
                     if let ExprKind::Name { id, .. } = &value.kind
                         && self.context.enums.contains_key(id)
@@ -2048,10 +2366,14 @@ impl<'a> Lowerer<'a> {
                     let tag = self.tag_of(id, attr)?;
                     self.variant(&ty, tag, &[], into)
                 }
-                _ => Err(format!("'{attr}' is a method, so it can only be called")),
+                // one value, since the field is not a tuple or struct itself
+                _ => {
+                    let field = self.struct_field(value, attr)?;
+                    Ok(self.finish(field[0], into))
+                }
             },
 
-            ExprKind::Subscript { value, slice, .. } if self.is_tuple(value) => {
+            ExprKind::Subscript { value, slice, .. } if self.is_flat(value) => {
                 // one value, since the field is not a tuple itself
                 let field = self.tuple_field(value, slice)?;
                 Ok(self.finish(field[0], into))
@@ -2576,7 +2898,7 @@ impl<'a> Lowerer<'a> {
         // its values
         if matches!(slice.kind, ExprKind::Slice { .. })
             || before.iter().any(|expr| has_call(expr))
-            || self.is_tuple(value)
+            || self.is_flat(value)
         {
             return self.expr(list);
         }
@@ -2727,7 +3049,7 @@ impl<'a> Lowerer<'a> {
                 let values = self.option_value(receiver, args.first())?;
                 Ok(self.finish(values[0], into))
             }
-            "len" if self.element_layout(receiver).0 > 1 => {
+            "len" if self.holds_flat(receiver) => {
                 let width = self.element_layout(receiver).0;
                 let list = self.list_operand(receiver, &[])?;
                 let count = self.element_count(list, width);
@@ -2741,7 +3063,7 @@ impl<'a> Lowerer<'a> {
                 self.release_temp(list);
                 Ok(Operand::Reg(dst))
             }
-            "append" | "insert" if self.element_layout(receiver).0 > 1 => {
+            "append" | "insert" if self.holds_flat(receiver) => {
                 self.add_element(receiver, name, args)?;
                 Ok(self.finish(Operand::Imm(0), into))
             }
@@ -3555,18 +3877,50 @@ impl<'a> Lowerer<'a> {
     ///
     /// For example, `(xs, f(), t)` with `t` a pair gives `xs`, nothing, `t.0`, and `t.1`.
     fn flat_sources(&self, expr: &Expr) -> Vec<Option<String>> {
+        let unknown = || vec![None; self.type_of(expr).map_or(1, |ty| self.leaves(&ty).len())];
         match &expr.kind {
             ExprKind::Name { id, .. } => self.leaf_names(id).into_iter().map(Some).collect(),
             ExprKind::Tuple { elts, .. } => {
                 elts.iter().flat_map(|elt| self.flat_sources(elt)).collect()
             }
-            _ => vec![None; self.type_of(expr).map_or(1, |ty| ty.leaves().len())],
+            // a field of a variable, such as `p.items`, is some of the variable's values
+            ExprKind::Attribute { value, attr, .. } => {
+                let field = self
+                    .type_of(value)
+                    .ok()
+                    .and_then(|ty| ty.struct_field(attr, self.context.structs));
+                let sources = self.flat_sources(value);
+                match field {
+                    Some((range, _)) if range.end <= sources.len() => sources[range].to_vec(),
+                    _ => unknown(),
+                }
+            }
+            // a struct's values, in the order of its fields
+            ExprKind::Call { func, keywords, .. } => match &func.kind {
+                ExprKind::Name { id, .. } if self.context.structs.contains_key(id) => {
+                    self.context.structs[id]
+                        .iter()
+                        .flat_map(|(field, _)| {
+                            keywords
+                                .iter()
+                                .find(|k| k.arg == *field)
+                                .map(|k| self.flat_sources(&k.value))
+                                .unwrap_or_default()
+                        })
+                        .collect()
+                }
+                _ => unknown(),
+            },
+            _ => unknown(),
         }
     }
 
-    /// Returns whether `expr` is a tuple, which lowers to several values.
-    fn is_tuple(&self, expr: &Expr) -> bool {
-        matches!(self.context.types.get(&expr.span), Some(Type::Tuple(_)))
+    /// Returns whether `expr` is a tuple or a struct, which lowers to several values.
+    fn is_flat(&self, expr: &Expr) -> bool {
+        self.context
+            .types
+            .get(&expr.span)
+            .is_some_and(Type::is_flat)
     }
 
     /// Lowers `expr` to its values: one for each value of a tuple, nested tuples flattened, or
@@ -3576,7 +3930,7 @@ impl<'a> Lowerer<'a> {
     /// For example, `(x, ("a", f()))` gives `x`'s vreg, the string's address, and the call's
     /// result.
     fn expr_flat(&mut self, expr: &Expr) -> Result<Vec<Operand>, String> {
-        if !self.is_tuple(expr) {
+        if !self.is_flat(expr) {
             return Ok(vec![self.expr(expr)?]);
         }
         let outer = std::mem::replace(&mut self.span, expr.span);
@@ -3612,14 +3966,22 @@ impl<'a> Lowerer<'a> {
                 }
                 Ok(values)
             }
-            ExprKind::Subscript { value, slice, .. } if self.is_tuple(value) => {
+            ExprKind::Subscript { value, slice, .. } if self.is_flat(value) => {
                 self.tuple_field(value, slice)
             }
             ExprKind::Subscript { value, slice, .. } => {
                 let width = self.element_layout(value).0;
                 self.element_values(value, slice, 0..width)
             }
-            ExprKind::Call { func, args } => match &func.kind {
+            ExprKind::Attribute { value, attr, .. } => self.struct_field(value, attr),
+            ExprKind::Call {
+                func,
+                args,
+                keywords,
+            } => match &func.kind {
+                ExprKind::Name { id, .. } if self.context.structs.contains_key(id) => {
+                    self.construct(id, keywords)
+                }
                 ExprKind::Name { id, .. } if id == "random.choice" => self.choose_element(&args[0]),
                 ExprKind::Name { id, .. } => {
                     let kinds = self.leaf_kinds(expr)?;
@@ -3654,7 +4016,7 @@ impl<'a> Lowerer<'a> {
         } else {
             index
         };
-        let leaves = ty.field_leaves(index as usize);
+        let leaves = ty.field_leaves(index as usize, self.context.structs);
         // a field of a list's element is read on its own, as in `pairs[i][0]`
         if let ExprKind::Subscript {
             value: list,
@@ -3662,6 +4024,63 @@ impl<'a> Lowerer<'a> {
             ..
         } = &value.kind
             && matches!(self.context.types.get(&list.span), Some(Type::List(_)))
+        {
+            let outer = std::mem::replace(&mut self.span, value.span);
+            let picked = self.element_values(list, position, leaves);
+            self.span = outer;
+            return picked;
+        }
+        let mut picked = Vec::new();
+        for (i, leaf) in self.expr_flat(value)?.into_iter().enumerate() {
+            if leaves.contains(&i) {
+                picked.push(leaf);
+            } else {
+                self.release_temp(leaf);
+            }
+        }
+        Ok(picked)
+    }
+
+    /// Lowers `Name(field=value, ...)`, a value of the struct `name`, to its values in the order of
+    /// its fields, evaluating the values in the order they are written. Each is borrowed or a
+    /// temporary, as a tuple's values are.
+    ///
+    /// For example, `Point(y=f(), x=1.0)` calls `f` and gives `1.0`, then the call's result.
+    fn construct(&mut self, name: &str, keywords: &[Keyword]) -> Result<Vec<Operand>, String> {
+        let fields = &self.context.structs[name];
+        let mut given: Vec<Option<Vec<Operand>>> = vec![None; fields.len()];
+        for keyword in keywords {
+            let values = self.expr_flat(&keyword.value)?;
+            let position = self.context.structs[name]
+                .iter()
+                .position(|(field, _)| *field == keyword.arg)
+                .ok_or_else(|| format!("'{name}' has no field '{}'", keyword.arg))?;
+            given[position] = Some(values);
+        }
+        let mut values = Vec::new();
+        for (field, (name, _)) in given.into_iter().zip(&self.context.structs[name]) {
+            values.extend(field.ok_or_else(|| format!("field '{name}' has no value"))?);
+        }
+        Ok(values)
+    }
+
+    /// Lowers `value.attr`, a field of the struct `value`, to the field's values, releasing the
+    /// temporaries of the other fields.
+    ///
+    /// For example, `p.y` of a local `Point` is `p.1`'s vreg, and `ps[i].y` reads only that slot
+    /// of the element.
+    fn struct_field(&mut self, value: &Expr, attr: &str) -> Result<Vec<Operand>, String> {
+        let ty = self.type_of(value)?;
+        let (leaves, _) = ty
+            .struct_field(attr, self.context.structs)
+            .ok_or_else(|| format!("{ty} has no field '{attr}'"))?;
+        // a field of a list's element is read on its own, as in `ps[i].y`
+        if let ExprKind::Subscript {
+            value: list,
+            slice: position,
+            ..
+        } = &value.kind
+            && self.holds_flat(list)
         {
             let outer = std::mem::replace(&mut self.span, value.span);
             let picked = self.element_values(list, position, leaves);
@@ -3935,25 +4354,27 @@ impl<'a> Lowerer<'a> {
                         self.print_char(',');
                         self.print_char(' ');
                     }
-                    let end = start + field.leaves().len();
+                    let end = start + self.leaves(field).len();
                     self.print_flat(field, &values[start..end], true);
                     start = end;
                 }
                 self.print_char(')');
             }
-            Type::List(elem) if holds_tuple(elem) || holds_enum(elem) => {
+            Type::List(elem) if holds_flat(elem) || holds_enum(elem) => {
                 self.print_elements(elem, values[0])
             }
-            Type::Enum { .. } => {
+            Type::Struct(_) | Type::Enum { .. } => {
                 let mut printers = self.context.printers.borrow_mut();
                 if !printers.contains(ty) {
                     printers.push(ty.clone());
                 }
                 drop(printers);
+                let mut args = values.to_vec();
+                args.push(self.print_depth);
                 self.push(Inst::Call {
                     dsts: vec![],
                     callee: Callee::Helper(printer_label(ty)),
-                    args: vec![values[0], self.print_depth],
+                    args,
                 });
             }
             Type::Str if nested => self.push(Inst::Call {
@@ -3972,7 +4393,7 @@ impl<'a> Lowerer<'a> {
     /// Prints the list `list`, whose elements are of type `elem` and hold a tuple, as `[a, b]`,
     /// with a loop over its elements, since the runtime's list printers take one value each.
     fn print_elements(&mut self, elem: &Type, list: Operand) {
-        let leaves = elem.leaves();
+        let leaves = self.leaves(elem);
         let width = leaves.len();
         let (header, body, separate, element, exit) = (
             self.new_block(),
@@ -4067,6 +4488,20 @@ impl<'a> Lowerer<'a> {
                 if self.context.owned_params.contains_key(id)))
     }
 
+    /// Prints `text` as it is, through the string printer.
+    fn print_text(&mut self, text: &str) {
+        let dst = self.fresh();
+        self.push(Inst::StrAddr {
+            dst,
+            text: text.to_string(),
+        });
+        self.push(Inst::Call {
+            dsts: vec![],
+            callee: Callee::Print(Type::Str),
+            args: vec![Operand::Reg(dst)],
+        });
+    }
+
     fn print_char(&mut self, c: char) {
         self.push(Inst::Call {
             dsts: vec![],
@@ -4076,16 +4511,46 @@ impl<'a> Lowerer<'a> {
     }
 }
 
-/// Returns whether a value of type `ty` is or holds a tuple, directly or in a list, which
-/// lowering prints a value at a time rather than with a runtime printer.
+/// Returns whether a value of type `ty` is or holds a tuple or struct, directly or in a list,
+/// which lowering prints a value at a time rather than with a runtime printer.
 ///
-/// For example, `tuple[int, str]` and `list[list[tuple[int, int]]]` do, and `list[int]` does not.
-fn holds_tuple(ty: &Type) -> bool {
+/// For example, `tuple[int, str]` and `list[list[Point]]` do, and `list[int]` does not.
+fn holds_flat(ty: &Type) -> bool {
     match ty {
-        Type::Tuple(_) => true,
-        Type::List(elem) => holds_tuple(elem),
+        Type::Tuple(_) | Type::Struct(_) => true,
+        Type::List(elem) => holds_flat(elem),
         _ => false,
     }
+}
+
+/// Returns whether `target` is a variable or values of variables an assignment replaces as a
+/// whole: a name, names to unpack into, or a field of a variable, such as `p.items`, but not a
+/// list element, whose indexes are read after a call.
+fn is_variable_target(target: &Expr) -> bool {
+    match &target.kind {
+        ExprKind::Name { .. } => true,
+        ExprKind::Tuple { elts, .. } => elts.iter().all(is_variable_target),
+        ExprKind::Attribute { value, .. } => is_variable_target(value),
+        _ => false,
+    }
+}
+
+/// Returns whether the place `expr` is reached through a struct's field, as `ps[i].x` and
+/// `p.items[0]` are.
+fn has_field(expr: &Expr) -> bool {
+    place(expr).is_some_and(|(_, steps)| steps.iter().any(|s| matches!(s, Step::Field(_))))
+}
+
+/// Where the value a change reaches lives, from [`Lowerer::locate`].
+enum Location {
+    /// Variables of lowering, locals or globals, one for each value, such as `p.1`.
+    Leaves(Vec<String>),
+    /// `count` slots of the unique list `list`, from slot `first`.
+    Slots {
+        list: Operand,
+        first: Operand,
+        count: usize,
+    },
 }
 
 /// Returns whether a value of type `ty` is or holds an enum value, in a list or tuple, which

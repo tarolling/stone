@@ -433,6 +433,12 @@ impl X64Generator {
         if self.ctx.counts_references {
             self.emit("stone.live:");
             self.emit("\t.zero\t8");
+            // the lists waiting to be freed, linked through their capacities, and whether
+            // `stone.free_list` is freeing them
+            self.emit("stone.lists_pending:");
+            self.emit("\t.zero\t8");
+            self.emit("stone.freeing_lists:");
+            self.emit("\t.zero\t8");
         }
         if self.ctx.counts_references && self.ctx.needs_enums() {
             // the enum values waiting to be freed, linked through their tags, and whether

@@ -238,6 +238,16 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
         (StoneSymbolKind::Variant, Type::Function { ret, .. }) => {
             format!("{ret}.{}", variant_signature(symbol))
         }
+        (StoneSymbolKind::Struct, _) => {
+            let fields: Vec<String> = struct_fields(analysis, &symbol.name)
+                .map(|field| format!("\n    {}: {}", field.name, field.ty))
+                .collect();
+            format!("struct {}{}", symbol.name, fields.concat())
+        }
+        (StoneSymbolKind::Field, ty) => {
+            let owner = symbol.scope.as_deref().unwrap_or_default();
+            format!("{owner}.{}: {ty}", symbol.name)
+        }
         (kind, ty) => {
             let kind = match kind {
                 StoneSymbolKind::Parameter => "parameter",
@@ -245,7 +255,9 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 StoneSymbolKind::Global
                 | StoneSymbolKind::Function
                 | StoneSymbolKind::Enum
-                | StoneSymbolKind::Variant => "global",
+                | StoneSymbolKind::Variant
+                | StoneSymbolKind::Struct
+                | StoneSymbolKind::Field => "global",
             };
             format!("({kind}) {}: {ty}", symbol.name)
         }
@@ -325,7 +337,10 @@ fn module_at(doc: &Document, position: Position) -> Option<(FileId, Span)> {
     if let Some(import) = doc.import_at(position) {
         return match import.target {
             Target::Module(file) => Some((file, import.span)),
-            Target::Function(_) | Target::BuiltinModule(_) | Target::Enum(_) => None,
+            Target::Function(_)
+            | Target::BuiltinModule(_)
+            | Target::Enum(_)
+            | Target::Struct(_) => None,
         };
     }
     let (word, span) = word_at(doc, doc.index.pos(position))?;
@@ -727,6 +742,8 @@ fn document_symbol(doc: &Document, symbol: &Symbol, range: Span) -> DocumentSymb
             StoneSymbolKind::Function => SymbolKind::FUNCTION,
             StoneSymbolKind::Enum => SymbolKind::ENUM,
             StoneSymbolKind::Variant => SymbolKind::ENUM_MEMBER,
+            StoneSymbolKind::Struct => SymbolKind::STRUCT,
+            StoneSymbolKind::Field => SymbolKind::FIELD,
             _ => SymbolKind::VARIABLE,
         },
         tags: None,
@@ -750,6 +767,15 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
                 let mut outline = document_symbol(doc, symbol, symbol.span);
                 outline.children = Some(
                     enum_variants(analysis, &symbol.name)
+                        .map(|s| document_symbol(doc, s, s.span))
+                        .collect(),
+                );
+                return outline;
+            }
+            if symbol.kind == StoneSymbolKind::Struct {
+                let mut outline = document_symbol(doc, symbol, symbol.span);
+                outline.children = Some(
+                    struct_fields(analysis, &symbol.name)
                         .map(|s| document_symbol(doc, s, s.span))
                         .collect(),
                 );
@@ -779,6 +805,14 @@ fn enum_variants<'a>(analysis: &'a Analysis, name: &'a str) -> impl Iterator<Ite
         .symbols
         .iter()
         .filter(move |s| s.kind == StoneSymbolKind::Variant && s.scope.as_deref() == Some(name))
+}
+
+/// Returns the fields of the struct with the linked name `name`, in order.
+fn struct_fields<'a>(analysis: &'a Analysis, name: &'a str) -> impl Iterator<Item = &'a Symbol> {
+    analysis
+        .symbols
+        .iter()
+        .filter(move |s| s.kind == StoneSymbolKind::Field && s.scope.as_deref() == Some(name))
 }
 
 /// Returns the names that can be written at `position`: symbols in scope, imported names,
@@ -845,6 +879,23 @@ pub fn completion(
                 })
                 .collect();
         }
+        // a variable holding a struct offers its fields
+        let mut visible: Vec<&Symbol> = doc.analysis.visible_at(doc.file, pos).collect();
+        visible.sort_by_key(|s| s.scope.is_none());
+        let held = visible.iter().find_map(|s| match &s.ty {
+            Type::Struct(name) if s.name == receiver => Some(name.clone()),
+            _ => None,
+        });
+        if let Some(name) = held {
+            return struct_fields(&doc.analysis, &name)
+                .map(|field| CompletionItem {
+                    label: field.name.clone(),
+                    kind: Some(CompletionItemKind::FIELD),
+                    detail: Some(signature(&doc.analysis, field)),
+                    ..CompletionItem::default()
+                })
+                .collect();
+        }
         return METHODS
             .iter()
             .map(|method| CompletionItem {
@@ -869,6 +920,7 @@ pub fn completion(
             kind: Some(match symbol.kind {
                 StoneSymbolKind::Function => CompletionItemKind::FUNCTION,
                 StoneSymbolKind::Enum => CompletionItemKind::ENUM,
+                StoneSymbolKind::Struct => CompletionItemKind::STRUCT,
                 _ => CompletionItemKind::VARIABLE,
             }),
             detail: Some(signature(&doc.analysis, symbol)),
@@ -891,6 +943,7 @@ pub fn completion(
                 (CompletionItemKind::MODULE, Some(format!("module {module}")))
             }
             Target::Enum(name) => (CompletionItemKind::ENUM, Some(format!("enum {name}"))),
+            Target::Struct(name) => (CompletionItemKind::STRUCT, Some(format!("struct {name}"))),
         };
         items.push(CompletionItem {
             label: import.name.clone(),

@@ -15,6 +15,7 @@ runs, reporting every place they conflict.
 | `list[T]` | growable lists of `T`, which are values: assigning or passing one copies it |
 | `tuple[T1, T2, ...]` | two or more values of fixed types, such as `(1, "a")`, which never change |
 | `option[T]` | `some(x)`, which holds a `T`, or `none`, which holds nothing |
+| structs | the named, typed fields a `struct` lists, such as `Point(x=1.0, y=2.0)`, which are values |
 | enums | the variants an `enum` lists, such as `Shape.Circle(1.0)`, which never change |
 | functions | each function has one signature, such as `fn(int, list[str]) -> bool` |
 
@@ -29,8 +30,8 @@ fn scale(xs: list[float], k: float) -> list[float];
 
 `int`, `float`, `bool`, and `str` are written as their names, a list as `list[T]`, so a grid
 of floats is `list[list[float]]`, a tuple as `tuple[` and the type of each value, so a name and a
-score is `tuple[str, int]`, an option as `option[T]`, and an enum by its name, such as `Shape`, or
-`shapes.Shape` for one of the module `shapes`. A function without `->` returns no value: a call
+score is `tuple[str, int]`, an option as `option[T]`, and a struct or an enum by its name, such
+as `Point` or `Shape`, or `shapes.Shape` for one of the module `shapes`. A function without `->` returns no value: a call
 to it can only be a statement of its own, so `x = f()` and `print(f())` are errors, and returning
 a value from it is an error that suggests the `->` to add. A parameter without a type is an error
 too, which suggests the type the checker would infer for it.
@@ -132,6 +133,48 @@ keep a variable, passes and returns them as separate values, and stores the valu
 tuples side by side in the list, so a tuple costs nothing over writing its values out by hand.
 An element of a list can hold at most 32 values, counting each value of its tuples.
 
+## Structs
+
+A struct is a type whose values hold a value for each field it lists, each of the type written
+after its name, like a struct in Rust:
+
+```{literalinclude} ../examples/structs.stn
+:language: stone
+:lines: 3-9
+```
+
+`Point(x=1.0, y=2.0)` makes a value of it. Every field gets a value, named as in the definition,
+once each and in any order, and the values run in the order they are written. Leaving a field
+out, naming one twice or one the struct does not have, and giving values without names are all
+errors before the program runs. The name alone, without a call, is not a value.
+
+`p.x` reads a field, and a field of a struct in a variable can change: `p.x = 3.0`,
+`p.x += 1.0`, `ps[i].y = 0.0`, `path.points.append(q)`, and `path.points[0].x = 2.0` are
+changes, made as `xs[i] = v` is. Like lists, structs are values: `q = p` and passing `p` to a
+function copy it, so changing `q` leaves `p` as it was, and a function changes its caller's
+struct only by returning it, as in `p = moved(p, 1.0)`. As with lists, the change must be to a
+variable: `f().x = 1.0` is an error, since the change would be lost, and a function cannot change
+a global's fields.
+
+A field can hold any type, including other structs. A struct can hold itself only through a list,
+an option, or an enum, as in `kids: list[Tree]` or `next: option[Node]`, since a value that held
+itself directly would never end; `next: Node` is an error that suggests `option[Node]`.
+
+A struct prints with its name and fields, as in `Point(x=1.0, y=2.0)`, with the strings it holds
+quoted. It cannot be compared with `==`, converted with `str`, iterated, or used in arithmetic or
+as a condition; compare its fields instead.
+
+Structs are defined at the top level, and can be used before their definition. A library module
+makes one usable from other files with `pub struct`, and `use shapes.Point` imports it, or
+`shapes.Point(x=1.0, y=2.0)` names it through its module. See [Modules](modules.md).
+
+A struct is not stored anywhere of its own: as with a tuple, the compiler keeps each of its
+fields where it would keep a variable, passes and returns them as separate values, and stores the
+fields of a list's structs side by side in the list, so changing a field of a struct in a
+variable is as cheap as assigning a variable. An element of a list or a variant can hold at most
+32 values, counting each field of its structs. A value can print at most 10,000 struct and enum
+values deep.
+
 ## Enums
 
 An enum is a type whose values are one of the variants it lists, each holding the values its
@@ -222,9 +265,10 @@ These keep the two backends identical and catch common mistakes:
   `str(3)` writes them.
 - **Conditions are `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject ints,
   floats, strings, lists, and `none`, so `if 1 or 0;` is an error; write `n != 0` instead of `n`.
-- **Lists, tuples, and enums are not comparable.** `==` and `!=` cannot compare lists, tuples,
-  options, or enum values, and `<`, `<=`, `>`, and `>=` compare only numbers and strings. Tell
-  enum values apart with `match`, and options with `is_some()` and `is_none()`.
+- **Lists, tuples, structs, and enums are not comparable.** `==` and `!=` cannot compare lists,
+  tuples, structs, options, or enum values, and `<`, `<=`, `>`, and `>=` compare only numbers
+  and strings. Tell enum values apart with `match`, and options with `is_some()` and
+  `is_none()`, and compare structs by their fields.
 - **A call without a value is a statement.** A function without `->`, and builtins such as
   `print`, return no value, so their calls can only be statements of their own.
 - **Matches cover every value.** The cases of a `match` must fit every value of its subject,
@@ -233,14 +277,15 @@ These keep the two backends identical and catch common mistakes:
   and nothing changes a tuple's values or what they hold, so `t[0] = v` is an error.
 - **Arithmetic on lists needs numbers.** `+ - * / % **` apply to a list only if it holds ints
   or floats, so `["a"] + ["b"]` and `[[1]] * [[2]]` are errors.
-- **Changes are statements, made to variables.** Since lists are values, `xs.append(v)` and
-  `xs[i] = v` change only the variable they start from. Each is a statement of its own, so
-  `ys = xs.append(1)` is an error, and the list must be in a variable or an element of one, so
-  `f().append(1)` and `xs[1:].append(1)` are errors too, since the change would be lost. `pop`,
+- **Changes are statements, made to variables.** Since lists and structs are values,
+  `xs.append(v)`, `xs[i] = v`, and `p.x = v` change only the variable they start from. Each is a
+  statement of its own, so `ys = xs.append(1)` is an error, and the list or struct must be in a
+  variable or an element or field of one, so `f().append(1)` and `xs[1:].append(1)` are errors
+  too, since the change would be lost. `pop`,
   which also returns what it removes, may instead be the whole value of an assignment, as in
   `x = xs.pop()`.
 - **Functions change only their own variables.** A function can read a global but cannot
-  change it, with `append` or an index, just as it cannot assign it. It takes the list as an
+  change it, with `append`, an index, or a field, just as it cannot assign it. It takes the list as an
   argument and returns the changed one instead. A function that changes a parameter and then
   never uses it gets a warning, since its caller cannot see the change.
 - **`range` is only a `for` iterable.** It cannot be stored or passed around.
@@ -249,7 +294,8 @@ These keep the two backends identical and catch common mistakes:
 - **Signatures are written.** Every parameter has a type, and a function that returns a value
   writes its type after `->`.
 - **Calls match.** Each call passes as many arguments as the function has parameters, each of
-  the parameter's type.
+  the parameter's type. Only a struct takes named values, as in `Point(x=1.0, y=2.0)`, and a
+  struct takes nothing else.
 - **Returns match the signature.** Every `ret` in a function returns the type after its `->`,
   and a function with a return type returns a value on every path.
 - **Variables are assigned before they are read.** At the top level and inside each function,

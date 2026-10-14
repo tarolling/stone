@@ -1,7 +1,7 @@
 //! Type checker and name resolver that validates a stone AST before it runs.
 //!
 //! Function signatures are written, and every other type is inferred. Every expression gets one of
-//! `int`, `float`, `bool`, `str`, `list[T]`, `tuple[...]`, an enum, or `option[T]`, and every
+//! `int`, `float`, `bool`, `str`, `list[T]`, `tuple[...]`, a struct, an enum, or `option[T]`, and every
 //! variable keeps a single type for its whole life. Each parameter and return type comes from the
 //! function's signature, so `fn add(a: int, b: int) -> int` is `fn(int, int) -> int`, and a
 //! function without `->` returns no value, so its call can only be a statement. Functions are
@@ -22,8 +22,9 @@ use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
 
 use crate::ast::{
-    Arguments, CompOp, Constant, Expr, ExprKind, MatchCase, Mod, Operator, Pattern, PatternKind,
-    Stmt, StmtKind, TypeExpr, TypeExprKind, UnaryOp, Variant, constant_int, target_names,
+    Arguments, CompOp, Constant, Expr, ExprKind, Field, Keyword, MatchCase, Mod, Operator, Pattern,
+    PatternKind, Stmt, StmtKind, TypeExpr, TypeExprKind, UnaryOp, Variant, constant_int,
+    target_names,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
@@ -50,6 +51,9 @@ pub enum Type {
         name: String,
         args: Vec<Type>,
     },
+    /// A struct by its linked name, such as `Point` or `geometry.Point`, whose fields are in
+    /// [`Analysis::structs`].
+    Struct(String),
     Function {
         params: Vec<Type>,
         ret: Box<Type>,
@@ -57,28 +61,62 @@ pub enum Type {
 }
 
 impl Type {
-    /// Returns the values a value of this type is made of once nested tuples are flattened, in
-    /// order: the type itself unless it is a tuple.
+    /// Returns the values a value of this type is made of once nested tuples and structs, whose
+    /// fields are in `structs`, are flattened, in order: the type itself unless it is a tuple or
+    /// a struct.
     ///
     /// For example, `tuple[int, tuple[str, float]]` has the leaves `int`, `str`, and `float`, and
     /// `list[tuple[int, int]]` is one leaf.
-    pub fn leaves(&self) -> Vec<Type> {
+    pub fn leaves(&self, structs: &Structs) -> Vec<Type> {
         match self {
-            Type::Tuple(fields) => fields.iter().flat_map(Type::leaves).collect(),
+            Type::Tuple(fields) => fields.iter().flat_map(|f| f.leaves(structs)).collect(),
+            Type::Struct(name) => structs
+                .get(name)
+                .map(|fields| fields.iter().flat_map(|(_, f)| f.leaves(structs)).collect())
+                .unwrap_or_default(),
             other => vec![other.clone()],
         }
+    }
+
+    /// Returns whether a value of this type is flattened into [`Type::leaves`] of its own: a
+    /// tuple or a struct.
+    pub fn is_flat(&self) -> bool {
+        matches!(self, Type::Tuple(_) | Type::Struct(_))
     }
 
     /// Returns the positions among [`Type::leaves`] of field `k` of this tuple type.
     ///
     /// For example, field 1 of `tuple[tuple[int, str], float, bool]` is leaf 2, and field 0 is
     /// leaves 0 and 1.
-    pub fn field_leaves(&self, k: usize) -> std::ops::Range<usize> {
+    pub fn field_leaves(&self, k: usize, structs: &Structs) -> std::ops::Range<usize> {
         let Type::Tuple(fields) = self else {
             return 0..1;
         };
-        let start: usize = fields[..k].iter().map(|f| f.leaves().len()).sum();
-        start..start + fields[k].leaves().len()
+        let start: usize = fields[..k].iter().map(|f| f.leaves(structs).len()).sum();
+        start..start + fields[k].leaves(structs).len()
+    }
+
+    /// Returns the positions among [`Type::leaves`] of the field `name` of this struct type, and
+    /// the field's type, or `None` if it has no such field.
+    ///
+    /// For example, `y` of `Point`, with fields `x: float` and `y: float`, is leaf 1, a `float`.
+    pub fn struct_field(
+        &self,
+        name: &str,
+        structs: &Structs,
+    ) -> Option<(std::ops::Range<usize>, Type)> {
+        let Type::Struct(struct_name) = self else {
+            return None;
+        };
+        let mut start = 0;
+        for (field, ty) in structs.get(struct_name)? {
+            let width = ty.leaves(structs).len();
+            if field == name {
+                return Some((start..start + width, ty.clone()));
+            }
+            start += width;
+        }
+        None
     }
 }
 
@@ -100,6 +138,7 @@ impl Display for Type {
                 let args: Vec<String> = args.iter().map(Type::to_string).collect();
                 write!(f, "{name}[{}]", args.join(", "))
             }
+            Type::Struct(name) => write!(f, "{name}"),
             Type::Function { params, ret } => {
                 let params: Vec<String> = params.iter().map(Type::to_string).collect();
                 match **ret {
@@ -149,6 +188,18 @@ pub fn variant_display(ty: &Type, name: &str) -> String {
     }
 }
 
+/// The fields of every struct a program defines, keyed by linked name, each with its type, in
+/// the order they are written, as in `Point` holding `x: float` and `y: float`.
+pub type Structs = HashMap<String, Vec<(String, Type)>>;
+
+/// Returns how the struct `name` prints before its fields: its own name, without the module
+/// it is in.
+///
+/// For example, `geometry.Point` prints as `Point`.
+pub fn struct_display(name: &str) -> &str {
+    name.rsplit('.').next().unwrap_or(name)
+}
+
 /// What a [`Symbol`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
@@ -157,6 +208,11 @@ pub enum SymbolKind {
     Enum,
     /// A variant of an enum, such as `Circle`, whose [`Symbol::scope`] is the enum's name.
     Variant,
+    /// A struct, such as `Point` in `struct Point;`.
+    Struct,
+    /// A field of a struct, such as `x` in `x: float`, whose [`Symbol::scope`] is the struct's
+    /// name.
+    Field,
     Parameter,
     /// A variable assigned inside a function.
     Local,
@@ -201,6 +257,8 @@ pub struct Analysis {
     pub functions: HashMap<String, Span>,
     /// The variants of every enum the program defines.
     pub enums: Enums,
+    /// The fields of every struct the program defines.
+    pub structs: Structs,
 }
 
 impl Analysis {
@@ -230,7 +288,7 @@ impl Analysis {
             .find(|(_, span)| span.file == file && span.contains(pos))
             .map(|(name, _)| name.as_str());
         self.symbols.iter().filter(move |s| match &s.scope {
-            _ if s.kind == SymbolKind::Variant => false,
+            _ if matches!(s.kind, SymbolKind::Variant | SymbolKind::Field) => false,
             None => s.span.file == file,
             Some(scope) => Some(scope.as_str()) == function,
         })
@@ -277,6 +335,7 @@ enum Ty {
     List(Box<Ty>),
     Tuple(Vec<Ty>),
     Enum(String, Vec<Ty>),
+    Struct(String),
     /// An unknown type, identified by its index in [`Inference::vars`].
     Var(usize),
 }
@@ -409,6 +468,7 @@ enum Kind {
     List,
     Tuple,
     Enum,
+    Struct,
 }
 
 impl Kind {
@@ -422,6 +482,7 @@ impl Kind {
             Ty::List(_) => Some(Kind::List),
             Ty::Tuple(_) => Some(Kind::Tuple),
             Ty::Enum(..) => Some(Kind::Enum),
+            Ty::Struct(_) => Some(Kind::Struct),
             Ty::Var(_) => None,
         }
     }
@@ -437,7 +498,7 @@ const CONVERTIBLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
 const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
 /// What `str` converts from.
 const PRINTABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
-/// The names of the types built into the language, which no enum may take.
+/// The names of the types built into the language, which no enum or struct may take.
 const BUILTIN_TYPES: &[&str] = &["int", "float", "bool", "str", "list", "tuple", OPTION];
 /// What `==` and `!=` compare. Compiled code compares lists by address, so only values compare.
 const EQUATABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
@@ -453,6 +514,18 @@ struct VariantInfo {
     name: String,
     symbol: usize,
     fields: Vec<Ty>,
+}
+
+/// A struct a program defines: its symbol and its fields, each with its symbol and type.
+struct StructInfo {
+    symbol: usize,
+    fields: Vec<FieldInfo>,
+}
+
+struct FieldInfo {
+    name: String,
+    symbol: usize,
+    ty: Ty,
 }
 
 /// A `match` statement, kept so `finish` can check that its cases cover every value once the
@@ -527,6 +600,14 @@ struct Inference {
     enums: HashMap<String, EnumInfo>,
     /// The span of every enum definition declared at the top level, so a nested one is reported.
     enum_spans: HashSet<Span>,
+    /// Every struct the program defines, by name.
+    structs: HashMap<String, StructInfo>,
+    /// The span of every struct definition declared at the top level, so a nested one is
+    /// reported.
+    struct_spans: HashSet<Span>,
+    /// Fields read from a global a function reads before the code assigning it is checked,
+    /// which `finish` settles once the global's type is known.
+    deferred_fields: Vec<DeferredField>,
     /// Every `match`, whose cases `finish` checks.
     matches: Vec<PendingMatch>,
 }
@@ -537,6 +618,15 @@ struct DeferredIndex {
     value: Span,
     value_ty: Ty,
     slice: Expr,
+    result: Ty,
+}
+
+/// `value.attr`, where `value` is a global not yet known to be a struct, whose field is
+/// `result`.
+struct DeferredField {
+    value_ty: Ty,
+    attr: String,
+    attr_span: Span,
     result: Ty,
 }
 
@@ -553,6 +643,7 @@ enum Resolved {
     Variable(usize),
     Function(String),
     Enum(String),
+    Struct(String),
     Builtin,
     Undefined,
 }
@@ -572,9 +663,11 @@ impl Inference {
             SymbolKind::Parameter | SymbolKind::Local => {
                 self.function.as_ref().map(|f| f.name.clone())
             }
-            SymbolKind::Function | SymbolKind::Enum | SymbolKind::Global => None,
+            SymbolKind::Function | SymbolKind::Enum | SymbolKind::Struct | SymbolKind::Global => {
+                None
+            }
             // set by the caller
-            SymbolKind::Variant => None,
+            SymbolKind::Variant | SymbolKind::Field => None,
         };
         self.symbols.push(Symbol {
             name: name.to_string(),
@@ -764,6 +857,7 @@ impl Inference {
                 let args: Vec<String> = args.iter().map(|a| self.show(a)).collect();
                 format!("{name}[{}]", args.join(", "))
             }
+            Ty::Struct(name) => name,
             Ty::Var(x) => match self.bounds.get(&x) {
                 Some(bound) => self.show(&bound.default()),
                 None => "unknown".to_string(),
@@ -826,7 +920,7 @@ impl Inference {
         let scalar = |ty: &Ty| {
             matches!(
                 ty,
-                Ty::Str | Ty::Bool | Ty::Unit | Ty::Tuple(_) | Ty::Enum(..)
+                Ty::Str | Ty::Bool | Ty::Unit | Ty::Tuple(_) | Ty::Enum(..) | Ty::Struct(_)
             )
         };
         match (&left, &right) {
@@ -912,10 +1006,10 @@ impl Inference {
                     Operator::Modulo => (NUMBERS, "'%' needs int or float operands, found {}"),
                     Operator::Power => unreachable!("handled by solve_power"),
                 };
-                // a tuple or enum is never an operand, whatever the other one is
+                // a tuple, enum, or struct is never an operand, whatever the other one is
                 if let Some(tuple) = [&left, &right]
                     .into_iter()
-                    .find(|ty| matches!(ty, Ty::Tuple(_) | Ty::Enum(..)))
+                    .find(|ty| matches!(ty, Ty::Tuple(_) | Ty::Enum(..) | Ty::Struct(_)))
                 {
                     self.require(tuple.clone(), allowed, op.span, message);
                     self.unify(&op.result, &left);
@@ -1042,9 +1136,9 @@ impl Inference {
     ////////////////////////////////////////////////////////////////
 
     fn check_module(&mut self, body: &[Stmt]) {
-        // enums, functions, and globals are visible everywhere, so declare them all first, enums
-        // before the signatures that name them
-        self.declare_enums(body);
+        // structs, enums, functions, and globals are visible everywhere, so declare them all
+        // first, types before the signatures that name them
+        self.declare_types(body);
         for stmt in body {
             if let StmtKind::FunctionDef {
                 name,
@@ -1064,6 +1158,7 @@ impl Inference {
             if !self.globals.contains_key(&name)
                 && !self.functions.contains_key(&name)
                 && !self.enums.contains_key(&name)
+                && !self.structs.contains_key(&name)
                 && !BUILTINS.contains(&name.as_str())
             {
                 let ty = self.fresh();
@@ -1116,6 +1211,13 @@ impl Inference {
             self.error(name_span, format!("'{name}' is already defined as an enum"));
             return;
         }
+        if self.structs.contains_key(name) {
+            self.error(
+                name_span,
+                format!("'{name}' is already defined as a struct"),
+            );
+            return;
+        }
         let mut params = vec![];
         for arg in &args.args {
             let ty = match &arg.annotation {
@@ -1147,12 +1249,22 @@ impl Inference {
         );
     }
 
-    /// Declares every enum defined at the top level of `body`: first their names, so variants can
-    /// hold any enum, including their own, then their variants.
+    /// Declares every enum and struct defined at the top level of `body`: first their names, so
+    /// variants and fields can hold any of them, including their own, then their variants and
+    /// fields.
     ///
     /// For example, `enum Tree;` with variants `Leaf(int)` and `Node(Tree, Tree)` declares `Tree`
     /// with a variant `Node` that holds two `Tree`s.
-    fn declare_enums(&mut self, body: &[Stmt]) {
+    fn declare_types(&mut self, body: &[Stmt]) {
+        let enums = self.declare_enum_names(body);
+        let structs = self.declare_struct_names(body);
+        self.declare_variants(enums);
+        self.declare_fields(structs);
+    }
+
+    /// Declares the name of every enum defined at the top level of `body`, returning each with
+    /// its variants.
+    fn declare_enum_names<'a>(&mut self, body: &'a [Stmt]) -> Vec<(&'a String, &'a Vec<Variant>)> {
         let mut declared = vec![];
         for stmt in body {
             let StmtKind::EnumDef {
@@ -1184,6 +1296,11 @@ impl Inference {
             );
             declared.push((name, variants));
         }
+        declared
+    }
+
+    /// Declares the variants of each enum in `declared`, from [`Inference::declare_enum_names`].
+    fn declare_variants(&mut self, declared: Vec<(&String, &Vec<Variant>)>) {
         for (name, variants) in declared {
             let mut infos: Vec<VariantInfo> = vec![];
             for variant in variants {
@@ -1218,6 +1335,135 @@ impl Inference {
         }
     }
 
+    /// Declares the name of every struct defined at the top level of `body`, returning each with
+    /// its fields.
+    fn declare_struct_names<'a>(&mut self, body: &'a [Stmt]) -> Vec<(&'a String, &'a Vec<Field>)> {
+        let mut declared = vec![];
+        for stmt in body {
+            let StmtKind::StructDef {
+                name,
+                name_span,
+                fields,
+                ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            self.struct_spans.insert(stmt.span);
+            if self.structs.contains_key(name) {
+                self.error(*name_span, format!("struct '{name}' is already defined"));
+                continue;
+            }
+            if self.enums.contains_key(name) {
+                self.error(
+                    *name_span,
+                    format!("'{name}' is already defined as an enum"),
+                );
+                continue;
+            }
+            if BUILTINS.contains(&name.as_str()) || BUILTIN_TYPES.contains(&name.as_str()) {
+                self.error(*name_span, format!("cannot redefine builtin '{name}'"));
+                continue;
+            }
+            let ty = Ty::Struct(name.clone());
+            let symbol = self.add_symbol(name, SymbolKind::Struct, *name_span, ty);
+            self.structs.insert(
+                name.clone(),
+                StructInfo {
+                    symbol,
+                    fields: vec![],
+                },
+            );
+            declared.push((name, fields));
+        }
+        declared
+    }
+
+    /// Declares the fields of each struct in `declared`, from
+    /// [`Inference::declare_struct_names`], then reports any struct that holds itself without a
+    /// list, option, or enum in between, since such a value would never end.
+    fn declare_fields(&mut self, declared: Vec<(&String, &Vec<Field>)>) {
+        for (name, fields) in &declared {
+            let mut infos: Vec<FieldInfo> = vec![];
+            for field in fields.iter() {
+                if infos.iter().any(|info| info.name == field.name) {
+                    self.error(
+                        field.span,
+                        format!("'{name}' already has a field '{}'", field.name),
+                    );
+                    continue;
+                }
+                let ty = self.written(&field.annotation);
+                self.check_written_width(&field.annotation);
+                let symbol =
+                    self.add_symbol(&field.name, SymbolKind::Field, field.span, ty.clone());
+                self.symbols[symbol].scope = Some(name.to_string());
+                infos.push(FieldInfo {
+                    name: field.name.clone(),
+                    symbol,
+                    ty,
+                });
+            }
+            if let Some(info) = self.structs.get_mut(*name) {
+                info.fields = infos;
+            }
+        }
+        for (name, fields) in declared {
+            for field in fields {
+                let Some(ty) = self.struct_field_ty(name, &field.name) else {
+                    continue;
+                };
+                if !self.reaches(&ty, name, &mut HashSet::new()) {
+                    continue;
+                }
+                self.error(
+                    field.span,
+                    format!(
+                        "'{name}' holds itself through '{}', so a value of it would never end; \
+                         hold it in a list or an option, as in '{}: option[{name}]'",
+                        field.name, field.name
+                    ),
+                );
+                // so nothing that follows the struct's fields goes around forever
+                let unknown = self.fresh();
+                if let Some(info) = self.structs.get_mut(name)
+                    && let Some(field) = info.fields.iter_mut().find(|f| f.name == field.name)
+                {
+                    field.ty = unknown;
+                }
+            }
+        }
+    }
+
+    /// Returns the type of field `field` of the struct `name`, if it has one.
+    fn struct_field_ty(&self, name: &str, field: &str) -> Option<Ty> {
+        let info = self.structs.get(name)?;
+        let field = info.fields.iter().find(|f| f.name == field)?;
+        Some(field.ty.clone())
+    }
+
+    /// Returns whether a value of type `ty` holds a value of the struct `target` directly, as a
+    /// field of its own or of the tuples and structs it holds, rather than in a list or an enum.
+    /// `seen` holds the structs already looked through.
+    fn reaches(&self, ty: &Ty, target: &str, seen: &mut HashSet<String>) -> bool {
+        match self.shallow(ty) {
+            Ty::Struct(name) if name == target => true,
+            Ty::Struct(name) => {
+                if !seen.insert(name.clone()) {
+                    return false;
+                }
+                let fields: Vec<Ty> = self
+                    .structs
+                    .get(&name)
+                    .map(|info| info.fields.iter().map(|f| f.ty.clone()).collect())
+                    .unwrap_or_default();
+                fields.iter().any(|f| self.reaches(f, target, seen))
+            }
+            Ty::Tuple(fields) => fields.iter().any(|f| self.reaches(f, target, seen)),
+            _ => false,
+        }
+    }
+
     /// Reports a variant whose values, counting each value of its tuples, are more than an enum
     /// value can hold.
     fn check_variant_width(&mut self, name: &str, variant: &Variant, fields: &[Ty]) {
@@ -1234,10 +1480,14 @@ impl Inference {
         }
     }
 
-    /// Counts the values a value of type `ty` is made of, counting each value of its tuples.
+    /// Counts the values a value of type `ty` is made of, counting each value of its tuples and
+    /// structs.
     fn values(&self, ty: &Ty) -> usize {
         match self.shallow(ty) {
             Ty::Tuple(fields) => fields.iter().map(|f| self.values(f)).sum(),
+            Ty::Struct(name) => self.structs.get(&name).map_or(1, |info| {
+                info.fields.iter().map(|f| self.values(&f.ty)).sum()
+            }),
             _ => 1,
         }
     }
@@ -1259,7 +1509,7 @@ impl Inference {
     }
 
     /// Reports at `span` if a list element of type `elem` holds more values than
-    /// [`MAX_ELEMENT_VALUES`], counting each field of its tuples.
+    /// [`MAX_ELEMENT_VALUES`], counting each field of its tuples and structs.
     fn check_element_width(&mut self, elem: &Ty, span: Span) {
         let count = self.values(elem);
         if count > MAX_ELEMENT_VALUES {
@@ -1311,6 +1561,13 @@ impl Inference {
                     // a type that takes no types is only its name
                     self.add_reference(annotation.span, info.symbol);
                     0
+                } else if let Some(info) = self.structs.get(name) {
+                    self.add_reference(annotation.span, info.symbol);
+                    if !args.is_empty() {
+                        errors.push((annotation.span, format!("'{name}' takes no types")));
+                        return self.fresh();
+                    }
+                    return Ty::Struct(name.clone());
                 } else {
                     errors.push((annotation.span, format!("there is no type '{name}'")));
                     return self.fresh();
@@ -1414,6 +1671,13 @@ impl Inference {
                         self.expr_types.push((target.span, elem.clone()));
                         elem
                     }
+                    ExprKind::Attribute {
+                        value: base, attr, ..
+                    } => {
+                        let field = self.field_of(target, base, attr);
+                        self.expr_types.push((target.span, field.clone()));
+                        field
+                    }
                     _ => {
                         self.error(target.span, "cannot assign to this expression");
                         return;
@@ -1437,6 +1701,10 @@ impl Inference {
                     ExprKind::Subscript { value: list, .. } => {
                         self.expect(&old, &result, value.span);
                         self.check_change(list);
+                    }
+                    ExprKind::Attribute { .. } => {
+                        self.expect(&old, &result, value.span);
+                        self.check_change(target);
                     }
                     _ => self.check_target(target, &result, value.span),
                 }
@@ -1494,6 +1762,11 @@ impl Inference {
             StmtKind::EnumDef { name_span, .. } => {
                 if !self.enum_spans.contains(&stmt.span) {
                     self.error(*name_span, "enums can only be defined at the top level");
+                }
+            }
+            StmtKind::StructDef { name_span, .. } => {
+                if !self.struct_spans.contains(&stmt.span) {
+                    self.error(*name_span, "structs can only be defined at the top level");
                 }
             }
             StmtKind::Match { subject, cases } => self.check_match(subject, cases),
@@ -1577,8 +1850,11 @@ impl Inference {
         let mut assigned = vec![];
         collect_assigned(body, &mut assigned);
         for (local, span) in assigned {
-            // assigning an enum's name is reported where it happens
-            if self.local(&local).is_none() && !self.enums.contains_key(&local) {
+            // assigning an enum's or struct's name is reported where it happens
+            if self.local(&local).is_none()
+                && !self.enums.contains_key(&local)
+                && !self.structs.contains_key(&local)
+            {
                 let ty = self.fresh();
                 let symbol = self.add_symbol(&local, SymbolKind::Local, span, ty);
                 self.set_local(&local, symbol);
@@ -1640,6 +1916,10 @@ impl Inference {
                         self.error(target.span, format!("cannot assign to enum '{id}'"));
                         return;
                     }
+                    Resolved::Struct(_) => {
+                        self.error(target.span, format!("cannot assign to struct '{id}'"));
+                        return;
+                    }
                     // unreachable, since every assigned name is declared up front
                     Resolved::Undefined => return,
                 };
@@ -1669,6 +1949,12 @@ impl Inference {
                 }
                 self.expect(&elem, found, value_span);
                 self.check_change(value);
+            }
+            ExprKind::Attribute { value, attr, .. } => {
+                let field = self.field_of(target, value, attr);
+                self.expr_types.push((target.span, field.clone()));
+                self.expect(&field, found, value_span);
+                self.check_change(target);
             }
             ExprKind::Tuple { .. } => {
                 if self.check_unpacking_names(target) {
@@ -1764,31 +2050,43 @@ impl Inference {
         }
     }
 
-    /// Checks that `list`, which a statement changes, is a variable or an element of one, since a
-    /// change to any other list would be lost, and that a function changes only its own variables.
+    /// Checks that `list`, which a statement changes, is a variable, an element of one, or a
+    /// field of one, since a change to any other value would be lost, and that a function changes
+    /// only its own variables.
     ///
     /// For example, `f().append(1)` and a function's `names.append(x)` for a global `names` are
-    /// errors, while `grid[0].append(1)` is fine.
+    /// errors, while `grid[0].append(1)` and `p.items.append(1)` are fine.
     fn check_change(&mut self, list: &Expr) {
         if has_slice(list) {
             self.error(list.span, SLICE_CHANGE);
             return;
         }
-        // a list inside a tuple, as in `t[0].append(1)`, cannot change
+        // a value inside a tuple, as in `t[0].append(1)`, cannot change
         let mut node = list;
-        while let ExprKind::Subscript { value, .. } = &node.kind {
-            if self.indexed_tuples.contains(&value.span) {
-                self.error(node.span, TUPLE_CHANGE);
-                return;
+        let mut field = false;
+        loop {
+            match &node.kind {
+                ExprKind::Subscript { value, .. } => {
+                    if self.indexed_tuples.contains(&value.span) {
+                        self.error(node.span, TUPLE_CHANGE);
+                        return;
+                    }
+                    node = value;
+                }
+                ExprKind::Attribute { value, .. } => {
+                    field = true;
+                    node = value;
+                }
+                _ => break,
             }
-            node = value;
         }
         let root = place_root(list);
         let ExprKind::Name { id, .. } = &root.kind else {
-            self.error(
-                root.span,
-                "this list is not stored in a variable, so changing it has no effect",
-            );
+            let message = match field {
+                true => "this value is not stored in a variable, so changing it has no effect",
+                false => "this list is not stored in a variable, so changing it has no effect",
+            };
+            self.error(root.span, message);
             return;
         };
         if self.function.is_some() && self.local(id).is_none() && self.globals.contains_key(id) {
@@ -1815,6 +2113,9 @@ impl Inference {
         }
         if self.enums.contains_key(name) {
             return Resolved::Enum(name.to_string());
+        }
+        if self.structs.contains_key(name) {
+            return Resolved::Struct(name.to_string());
         }
         if is_builtin(name) {
             return Resolved::Builtin;
@@ -1879,6 +2180,185 @@ impl Inference {
             span,
             format!("'{id}' is an enum, so a value of it is one of its variants{example}"),
         );
+    }
+
+    /// Reports a use of the struct `id` as a value, which only a call of it makes.
+    fn struct_as_value(&mut self, span: Span, id: &str) {
+        if let Some(info) = self.structs.get(id) {
+            let symbol = info.symbol;
+            self.add_reference(span, symbol);
+        }
+        let example = self.struct_example(id);
+        self.error(
+            span,
+            format!("'{id}' is a struct, so a value of it is made with a call, as in '{example}'"),
+        );
+    }
+
+    /// Writes a call that makes a value of the struct `id`, naming each field, such as
+    /// `Point(x=..., y=...)`.
+    fn struct_example(&self, id: &str) -> String {
+        let fields: Vec<String> = self.structs.get(id).map_or_else(Vec::new, |info| {
+            info.fields
+                .iter()
+                .map(|f| format!("{}=...", f.name))
+                .collect()
+        });
+        format!("{id}({})", fields.join(", "))
+    }
+
+    /// Infers `Name(field=value, ...)`, which makes a value of the struct `name` from a value for
+    /// each of its fields, given in any order, and returns the struct's type. Each value is
+    /// inferred in the order it is written, which is the order both backends evaluate them in.
+    ///
+    /// For example, `Point(y=2.0, x=1.0)` is a `Point` if both of its fields are floats.
+    fn infer_struct(
+        &mut self,
+        call: &Expr,
+        func: &Expr,
+        name: &str,
+        args: &[Expr],
+        keywords: &[Keyword],
+    ) -> Ty {
+        let symbol = self.structs[name].symbol;
+        self.add_reference(func.span, symbol);
+        self.expr_types.push((func.span, Ty::Unit));
+        for arg in args {
+            self.infer(arg);
+        }
+        let mut given: Vec<&str> = vec![];
+        for keyword in keywords {
+            let found = self.infer(&keyword.value);
+            let field = self.structs[name]
+                .fields
+                .iter()
+                .find(|f| f.name == keyword.arg)
+                .map(|f| (f.symbol, f.ty.clone()));
+            let Some((field_symbol, ty)) = field else {
+                self.error(
+                    keyword.arg_span,
+                    format!("'{name}' has no field '{}'", keyword.arg),
+                );
+                continue;
+            };
+            self.add_reference(keyword.arg_span, field_symbol);
+            if given.contains(&keyword.arg.as_str()) {
+                self.error(
+                    keyword.arg_span,
+                    format!("field '{}' is given more than once", keyword.arg),
+                );
+                continue;
+            }
+            given.push(&keyword.arg);
+            self.expect(&ty, &found, keyword.value.span);
+        }
+        if !args.is_empty() {
+            let example = self.struct_example(name);
+            self.error(
+                call.span,
+                format!("a struct's values are named, as in '{example}'"),
+            );
+            return Ty::Struct(name.to_string());
+        }
+        let missing: Vec<String> = self.structs[name]
+            .fields
+            .iter()
+            .filter(|f| !given.contains(&f.name.as_str()))
+            .map(|f| format!("'{}'", f.name))
+            .collect();
+        if !missing.is_empty() {
+            let (noun, names) = match &missing[..] {
+                [only] => ("field", only.clone()),
+                [rest @ .., last] => ("fields", format!("{} and {last}", rest.join(", "))),
+                [] => unreachable!(),
+            };
+            self.error(call.span, format!("missing {noun} {names} for '{name}'"));
+        }
+        Ty::Struct(name.to_string())
+    }
+
+    /// Infers `base.attr`, the field `attr` of a struct, written as `expr`, and returns the
+    /// field's type.
+    ///
+    /// For example, `p.x` is a `float` if `p` is a `Point` whose `x` is a `float`.
+    fn field_of(&mut self, expr: &Expr, base: &Expr, attr: &str) -> Ty {
+        let base_ty = self.infer(base);
+        let attr_span = Self::attr_span(expr, attr);
+        match self.shallow(&base_ty) {
+            Ty::Struct(name) => self.struct_field(&name, attr, attr_span),
+            Ty::Var(_) if self.is_global_in_function(base) => {
+                // a function checked before the global's assignment, which makes it a struct
+                let result = self.fresh();
+                self.deferred_fields.push(DeferredField {
+                    value_ty: base_ty,
+                    attr: attr.to_string(),
+                    attr_span,
+                    result: result.clone(),
+                });
+                result
+            }
+            Ty::Var(_) => {
+                self.error(
+                    base.span,
+                    format!(
+                        "the type of this value must be known before its field '{attr}' is read"
+                    ),
+                );
+                self.fresh()
+            }
+            other => {
+                if METHODS.contains(&attr) {
+                    self.error(
+                        expr.span,
+                        format!("'{attr}' is a method, so it can only be called"),
+                    );
+                } else {
+                    let message = format!("{} has no field '{attr}'", self.show(&other));
+                    self.error(attr_span, message);
+                }
+                self.fresh()
+            }
+        }
+    }
+
+    /// Returns the type of field `attr` of the struct `name`, recording the reference to it at
+    /// `attr_span`, or reports that there is no such field.
+    fn struct_field(&mut self, name: &str, attr: &str, attr_span: Span) -> Ty {
+        let field = self.structs.get(name).and_then(|info| {
+            info.fields
+                .iter()
+                .find(|f| f.name == attr)
+                .map(|f| (f.symbol, f.ty.clone()))
+        });
+        match field {
+            Some((symbol, ty)) => {
+                self.add_reference(attr_span, symbol);
+                ty
+            }
+            None => {
+                let message = if METHODS.contains(&attr) {
+                    format!("'{attr}' is a method, so it can only be called")
+                } else {
+                    format!("'{name}' has no field '{attr}'")
+                };
+                self.error(attr_span, message);
+                self.fresh()
+            }
+        }
+    }
+
+    /// Settles a field read from a global that was not known when it was found.
+    fn settle_field(&mut self, deferred: DeferredField) {
+        match self.shallow(&deferred.value_ty) {
+            Ty::Struct(name) => {
+                let field = self.struct_field(&name, &deferred.attr, deferred.attr_span);
+                self.expect(&field, &deferred.result, deferred.attr_span);
+            }
+            other => {
+                let message = format!("{} has no field '{}'", self.show(&other), deferred.attr);
+                self.error(deferred.attr_span, message);
+            }
+        }
     }
 
     /// Infers the variant `enum_name.variant` of an enum the program defines, written as `func`
@@ -2009,6 +2489,10 @@ impl Inference {
                     self.enum_as_value(expr.span, id);
                     self.fresh()
                 }
+                Resolved::Struct(_) => {
+                    self.struct_as_value(expr.span, id);
+                    self.fresh()
+                }
                 Resolved::Undefined => {
                     self.error(expr.span, format!("undefined name '{id}'"));
                     self.fresh()
@@ -2095,17 +2579,16 @@ impl Inference {
                 }
                 Ty::Bool
             }
-            ExprKind::Call { func, args } => self.infer_call(expr, func, args),
+            ExprKind::Call {
+                func,
+                args,
+                keywords,
+            } => self.infer_call(expr, func, args, keywords),
             ExprKind::Attribute { value, attr, .. } => {
                 if let Some(name) = self.enum_named(value) {
                     return self.infer_variant(expr, expr, &name, attr, None);
                 }
-                self.infer(value);
-                self.error(
-                    expr.span,
-                    format!("'{attr}' is a method, so it can only be called"),
-                );
-                self.fresh()
+                self.field_of(expr, value, attr)
             }
             ExprKind::Subscript { value, slice, .. } => self.subscript(value, slice),
             ExprKind::List { elts, .. } => {
@@ -2247,7 +2730,26 @@ impl Inference {
         fields[position as usize].clone()
     }
 
-    fn infer_call(&mut self, call: &Expr, func: &Expr, args: &[Expr]) -> Ty {
+    fn infer_call(&mut self, call: &Expr, func: &Expr, args: &[Expr], keywords: &[Keyword]) -> Ty {
+        if let ExprKind::Name { id, .. } = &func.kind
+            && let Resolved::Struct(name) = self.resolve_name(id)
+        {
+            return self.infer_struct(call, func, &name, args, keywords);
+        }
+        if let Some(keyword) = keywords.first() {
+            // a struct's values are the only named ones, so nothing else is checked
+            for arg in args {
+                self.infer(arg);
+            }
+            for keyword in keywords {
+                self.infer(&keyword.value);
+            }
+            self.error(
+                keyword.arg_span,
+                "only a struct is made with named values; pass this value without its name",
+            );
+            return self.fresh();
+        }
         if let ExprKind::Attribute { value, attr, .. } = &func.kind {
             if let Some(name) = self.enum_named(value) {
                 return self.infer_variant(call, func, &name, attr, Some(args));
@@ -2283,6 +2785,8 @@ impl Inference {
                 self.enum_as_value(func.span, id);
                 self.fresh()
             }
+            // made by `infer_struct`, above
+            Resolved::Struct(_) => self.fresh(),
             Resolved::Variable(symbol) => {
                 self.add_reference(func.span, symbol);
                 self.error(func.span, format!("'{id}' is not a function"));
@@ -2629,10 +3133,15 @@ impl Inference {
                 // the name is the last token of `func`
                 let end = func.span.end;
                 let start = Pos::new(end.line, end.col - name.chars().count());
-                self.error(
-                    Span::new(start, end).in_file(func.span.file),
-                    format!("there is no method '{name}'"),
-                );
+                let mut message = format!("there is no method '{name}'");
+                if let Ty::Struct(struct_name) = self.shallow(&receiver_ty)
+                    && self.struct_field_ty(&struct_name, name).is_some()
+                {
+                    message.push_str(&format!(
+                        "; '{name}' is a field of '{struct_name}', so read it without parentheses"
+                    ));
+                }
+                self.error(Span::new(start, end).in_file(func.span.file), message);
                 self.fresh()
             }
         }
@@ -2848,6 +3357,9 @@ impl Inference {
         for deferred in std::mem::take(&mut self.deferred_indexes) {
             self.settle_index(deferred);
         }
+        for deferred in std::mem::take(&mut self.deferred_fields) {
+            self.settle_field(deferred);
+        }
         // solving one operation can pin down another's operands, so force one only when none can
         // be solved otherwise
         let mut pending = std::mem::take(&mut self.arithmetic);
@@ -2875,19 +3387,23 @@ impl Inference {
                     Kind::Str => Ty::Str,
                     Kind::Unit => Ty::Unit,
                     Kind::List => Ty::List(Box::new(self.fresh())),
-                    // no constraint allows a tuple or enum first, and nothing tells which
-                    Kind::Tuple | Kind::Enum => continue,
+                    // no constraint allows a tuple, enum, or struct first, and nothing tells which
+                    Kind::Tuple | Kind::Enum | Kind::Struct => continue,
                 };
                 self.unify(&ty, &default);
                 continue;
             };
             if !constraint.allowed.contains(&kind) {
                 let mut message = constraint.message.replace("{}", &self.show(&ty));
-                if kind == Kind::Enum && constraint.allowed == EQUATABLE {
+                let equality = constraint.message.starts_with("'==' and '!='");
+                if kind == Kind::Enum && equality {
                     message.push_str(
                         "; tell its variants apart with 'match', or an option's with 'is_some()' \
                          and 'is_none()'",
                     );
+                }
+                if kind == Kind::Struct && equality {
+                    message.push_str("; compare their fields instead");
                 }
                 self.error(constraint.span, message);
             }
@@ -2944,6 +3460,14 @@ impl Inference {
                         }),
                     }
                 }
+                SymbolKind::Field => {
+                    let struct_name = symbol.scope.clone().unwrap_or_default();
+                    self.structs[&struct_name]
+                        .fields
+                        .iter()
+                        .find(|f| f.symbol == i)
+                        .map_or(Type::Int, |f| self.finalize(&f.ty))
+                }
                 _ => self.finalize(&self.symbol_types[i]),
             };
             analysis.symbols.push(Symbol {
@@ -2961,6 +3485,14 @@ impl Inference {
                 })
                 .collect();
             analysis.enums.insert(name.clone(), variants);
+        }
+        for (name, info) in &self.structs {
+            let fields = info
+                .fields
+                .iter()
+                .map(|f| (f.name.clone(), self.finalize(&f.ty)))
+                .collect();
+            analysis.structs.insert(name.clone(), fields);
         }
         analysis.references = self.references;
         analysis
@@ -2991,6 +3523,7 @@ impl Inference {
                 name,
                 args: args.iter().map(|a| self.finalize(a)).collect(),
             },
+            Ty::Struct(name) => Type::Struct(name),
         }
     }
 
@@ -3356,9 +3889,10 @@ impl<'a> AssignmentCheck<'a> {
                 after
             }
             StmtKind::Break | StmtKind::Continue => None,
-            StmtKind::FunctionDef { .. } | StmtKind::Use { .. } | StmtKind::EnumDef { .. } => {
-                Some(assigned)
-            }
+            StmtKind::FunctionDef { .. }
+            | StmtKind::Use { .. }
+            | StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. } => Some(assigned),
         }
     }
 
@@ -3394,13 +3928,20 @@ impl<'a> AssignmentCheck<'a> {
                     self.reads(comparator, assigned);
                 }
             }
-            ExprKind::Call { func, args } => {
+            ExprKind::Call {
+                func,
+                args,
+                keywords,
+            } => {
                 // a called name is a function, but a method's receiver is read
                 if let ExprKind::Attribute { .. } = &func.kind {
                     self.reads(func, assigned);
                 }
                 for arg in args {
                     self.reads(arg, assigned);
+                }
+                for keyword in keywords {
+                    self.reads(&keyword.value, assigned);
                 }
             }
             ExprKind::Attribute { value, .. } => self.reads(value, assigned),
@@ -3429,7 +3970,7 @@ impl<'a> AssignmentCheck<'a> {
 /// meaning as a `for` loop's iterable.
 pub fn range_args(iter: &Expr) -> Option<&[Expr]> {
     match &iter.kind {
-        ExprKind::Call { func, args } => match &func.kind {
+        ExprKind::Call { func, args, .. } => match &func.kind {
             ExprKind::Name { id, .. } if id == "range" => Some(args),
             _ => None,
         },
@@ -3484,6 +4025,7 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
             }
             StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Return { .. }
             | StmtKind::Expr { .. }
@@ -3493,9 +4035,6 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
     }
 }
 
-/// Returns the expression the place `expr` starts from, following its subscripts.
-///
-/// For example, the root of `grid[i][j]` is `grid`, and the root of `f()[0]` is `f()`.
 /// What the checker reports for a change to a slice, such as `xs[1:].append(2)`.
 const SLICE_CHANGE: &str = "a slice is a new list, so changing it has no effect";
 const STRING_CHANGE: &str =
@@ -3514,7 +4053,7 @@ impl Indexed {
     }
 }
 
-/// Returns whether the list `expr`, which a statement changes, is a slice or an element of one.
+/// Returns whether the value `expr`, which a statement changes, is a slice or inside one.
 ///
 /// For example, `xs[1:]` and `grid[:2][0]` are, but `grid[0]` is not.
 fn has_slice(expr: &Expr) -> bool {
@@ -3522,44 +4061,62 @@ fn has_slice(expr: &Expr) -> bool {
         ExprKind::Subscript { value, slice, .. } => {
             matches!(slice.kind, ExprKind::Slice { .. }) || has_slice(value)
         }
+        ExprKind::Attribute { value, .. } => has_slice(value),
         _ => false,
     }
 }
 
+/// Returns the expression the place `expr` starts from, following its subscripts and fields.
+///
+/// For example, the root of `grid[i][j]` and of `ps[i].x` is `grid` or `ps`, and the root of
+/// `f()[0]` is `f()`.
 pub(crate) fn place_root(expr: &Expr) -> &Expr {
     match &expr.kind {
-        ExprKind::Subscript { value, .. } => place_root(value),
+        ExprKind::Subscript { value, .. } | ExprKind::Attribute { value, .. } => place_root(value),
         _ => expr,
     }
 }
 
-/// Splits a list that a statement changes into the variable it starts from and the indexes that
+/// One step from a variable toward the value a statement changes: an index into a list, or a
+/// field of a struct.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub(crate) enum Step<'a> {
+    Index(&'a Expr),
+    Field(&'a str),
+}
+
+/// Splits a value that a statement changes into the variable it starts from and the steps that
 /// lead from that variable to it, outermost first, or returns `None` if it is not in a variable.
 ///
-/// For example, `grid[i][j]` gives `grid` and `[i, j]`, `xs` gives `xs` and no indexes, and
-/// `f()[0]` gives `None`.
-pub(crate) fn place(expr: &Expr) -> Option<(&str, Vec<&Expr>)> {
+/// For example, `grid[i][j]` gives `grid` and the indexes `i` and `j`, `ps[i].x` gives `ps`, the
+/// index `i`, and the field `x`, `xs` gives `xs` and no steps, and `f()[0]` gives `None`.
+pub(crate) fn place(expr: &Expr) -> Option<(&str, Vec<Step<'_>>)> {
     match &expr.kind {
         ExprKind::Name { id, .. } => Some((id, vec![])),
         ExprKind::Subscript { value, slice, .. } => {
-            let (root, mut indexes) = place(value)?;
-            indexes.push(slice);
-            Some((root, indexes))
+            let (root, mut steps) = place(value)?;
+            steps.push(Step::Index(slice));
+            Some((root, steps))
+        }
+        ExprKind::Attribute { value, attr, .. } => {
+            let (root, mut steps) = place(value)?;
+            steps.push(Step::Field(attr));
+            Some((root, steps))
         }
         _ => None,
     }
 }
 
-/// Returns the span of each subscript in `list`, a variable or an element of one, outermost
-/// index first, matching the indexes [`place`] returns. A runtime error for an index out of
-/// range points at its subscript.
+/// Returns the span of each step in `place`, a variable or a value inside one, outermost first,
+/// matching the steps [`place`] returns: a subscript's or a field's whole expression. A runtime
+/// error for an index out of range points at its subscript.
 ///
 /// For example, `grid[i][j]` gives the spans of `grid[i]` and `grid[i][j]`.
-pub(crate) fn place_spans(list: &Expr) -> Vec<Span> {
-    match &list.kind {
-        ExprKind::Subscript { value, .. } => {
+pub(crate) fn place_spans(place: &Expr) -> Vec<Span> {
+    match &place.kind {
+        ExprKind::Subscript { value, .. } | ExprKind::Attribute { value, .. } => {
             let mut spans = place_spans(value);
-            spans.push(list.span);
+            spans.push(place.span);
             spans
         }
         _ => vec![],
@@ -3580,8 +4137,8 @@ pub(crate) fn changed_receiver(expr: &Expr) -> Option<&Expr> {
     }
 }
 
-/// Collects the name of every variable that `body` changes in place, through `xs[i] = v` or
-/// `xs.append(v)`, without looking inside function definitions.
+/// Collects the name of every variable that `body` changes in place, through `xs[i] = v`,
+/// `p.x = v`, or `xs.append(v)`, without looking inside function definitions.
 ///
 /// For example, for `grid[0][1] = 2` followed by `if x; ys.append(1)`, this collects `grid` and
 /// `ys`.
@@ -3595,19 +4152,21 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
         match &stmt.kind {
             StmtKind::Assign { targets, value } => {
                 for target in targets {
-                    if let ExprKind::Subscript { value, .. } = &target.kind {
-                        add(value, out);
+                    match &target.kind {
+                        ExprKind::Subscript { value, .. } => add(value, out),
+                        ExprKind::Attribute { .. } => add(target, out),
+                        _ => {}
                     }
                 }
                 if let Some(receiver) = changed_receiver(value) {
                     add(receiver, out);
                 }
             }
-            StmtKind::AugAssign { target, .. } => {
-                if let ExprKind::Subscript { value, .. } = &target.kind {
-                    add(value, out);
-                }
-            }
+            StmtKind::AugAssign { target, .. } => match &target.kind {
+                ExprKind::Subscript { value, .. } => add(value, out),
+                ExprKind::Attribute { .. } => add(target, out),
+                _ => {}
+            },
             StmtKind::Expr { value } => {
                 if let Some(receiver) = changed_receiver(value) {
                     add(receiver, out);
@@ -3625,6 +4184,7 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
             }
             StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Return { .. }
             | StmtKind::Break
@@ -3675,6 +4235,7 @@ impl ParameterUse<'_> {
                             self.change(value);
                             self.expr(slice);
                         }
+                        ExprKind::Attribute { .. } => self.change(target),
                         _ => self.expr(target),
                     }
                 }
@@ -3686,6 +4247,7 @@ impl ParameterUse<'_> {
                         self.change(value);
                         self.expr(slice);
                     }
+                    ExprKind::Attribute { .. } => self.change(target),
                     _ => self.expr(target),
                 }
                 self.expr(value);
@@ -3717,6 +4279,7 @@ impl ParameterUse<'_> {
             }
             StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
@@ -3740,10 +4303,12 @@ impl ParameterUse<'_> {
     /// Notes a change to `list`, which changes the parameter if `list` starts from it.
     fn change(&mut self, list: &Expr) {
         match place(list) {
-            Some((root, indexes)) if root == self.name => {
+            Some((root, steps)) if root == self.name => {
                 self.changed.get_or_insert(place_root(list).span);
-                for index in indexes {
-                    self.expr(index);
+                for step in steps {
+                    if let Step::Index(index) = step {
+                        self.expr(index);
+                    }
                 }
             }
             _ => self.expr(list),
@@ -3766,12 +4331,17 @@ impl ParameterUse<'_> {
                 self.expr(left);
                 comparators.iter().for_each(|value| self.expr(value));
             }
-            ExprKind::Call { func, args } => {
+            ExprKind::Call {
+                func,
+                args,
+                keywords,
+            } => {
                 // a called name is a function, but a method's receiver is read
                 if let ExprKind::Attribute { .. } = &func.kind {
                     self.expr(func);
                 }
                 args.iter().for_each(|arg| self.expr(arg));
+                keywords.iter().for_each(|k| self.expr(&k.value));
             }
             ExprKind::Attribute { value, .. } => self.expr(value),
             ExprKind::Subscript { value, slice, .. } => {

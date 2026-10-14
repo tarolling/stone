@@ -7,6 +7,7 @@
     { "include": "#string" },
     { "include": "#function-definition" },
     { "include": "#enum-definition" },
+    { "include": "#struct-definition" },
     { "include": "#type-annotation" },
     { "include": "#keyword" },
     { "include": "#constant" },
@@ -44,6 +45,13 @@
       "captures": {
         "1": { "name": "storage.type.enum.stone" },
         "2": { "name": "entity.name.type.enum.stone" }
+      }
+    },
+    "struct-definition": {
+      "match": "\\b(struct)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "captures": {
+        "1": { "name": "storage.type.struct.stone" },
+        "2": { "name": "entity.name.type.struct.stone" }
       }
     },
     "type-annotation": {

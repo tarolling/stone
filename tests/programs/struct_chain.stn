@@ -1,0 +1,51 @@
+// a struct holds itself through an option or a list, never directly
+
+struct Node;
+    value: int
+    next: option[Node]
+
+struct Tree;
+    label: str
+    kids: list[Tree]
+
+fn sum(node: Node) -> int;
+    total = 0
+    current = some(node)
+    while current.is_some();
+        n = current.unwrap()
+        total += n.value
+        current = n.next
+    ret total
+
+fn count(tree: Tree) -> int;
+    n = 1
+    for kid in tree.kids;
+        n += count(kid)
+    ret n
+
+// a long chain is freed without running out of stack
+head = Node(value=0, next=none)
+for i in range(1, 300000);
+    head = Node(value=i, next=some(head))
+print(sum(head))
+print(Node(value=1, next=some(Node(value=2, next=none))))
+
+leaf = Tree(label="leaf", kids=[])
+tree = Tree(label="root", kids=[leaf, Tree(label="mid", kids=[leaf, leaf])])
+tree.kids[1].kids[0].label = "changed"
+tree.kids.append(leaf)
+print(count(tree), tree.kids[1], leaf)
+
+// a chain through lists is freed without running out of stack too
+deep = Tree(label="leaf", kids=[])
+for i in range(300000);
+    deep = Tree(label="n", kids=[deep])
+
+fn depth(t: Tree) -> int;
+    n = 0
+    while t.kids.len() > 0;
+        t = t.kids[0]
+        n += 1
+    ret n
+
+print(deep.kids[0].label, depth(deep))

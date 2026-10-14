@@ -141,7 +141,10 @@ where a later entry may read it. Arithmetic on lists, such as `xs = xs * 2.0 + y
 `xs += ys`, writes its result over an operand's list when that operand is at its last use or is
 the variable being assigned and nothing else refers to its list, so it allocates nothing.
 Tuples never change, so they need nothing of this: the compiler keeps each of a tuple's values as
-a variable of its own, counting only the strings and lists among them. Enum values never change
+a variable of its own, counting only the strings and lists among them. Structs are kept the same
+way, so changing a field of a struct in a variable (`p.x = 1.0`) is an assignment to that
+field's variable, and a field holding a list follows the rules for lists, including moving into
+a call that replaces it (`p.items = f(p.items)`). Enum values never change
 either, so they are shared freely: each is stored once, with a count of the variables that hold
 it, and a `match` hands out its values with a reference each.
 
@@ -165,6 +168,7 @@ about 3 times as fast as numpy, which builds a temporary array for each operator
 never allocated: its values live in registers like any other variables, a function takes and
 returns them as separate values, and a list of tuples stores each element's values side by side,
 like a Rust `Vec<(i64, String)>`, which is a first step toward choosing where every value lives.
+Structs are compiled the same way, so a `list[Point]` is a flat array of coordinates.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.

@@ -21,7 +21,14 @@ fn lower_source(source: &str) -> Program {
         "{:?}",
         analysis.diagnostics
     );
-    lower(&module, &analysis.types, &analysis.symbols, &analysis.enums).unwrap()
+    lower(
+        &module,
+        &analysis.types,
+        &analysis.symbols,
+        &analysis.enums,
+        &analysis.structs,
+    )
+    .unwrap()
 }
 
 #[test]
@@ -553,7 +560,14 @@ fn dump_linked(source: &str) -> String {
     );
     let (module, _) = module.unwrap();
     let analysis = TypeChecker::new().analyze(&module);
-    let program = lower(&module, &analysis.types, &analysis.symbols, &analysis.enums).unwrap();
+    let program = lower(
+        &module,
+        &analysis.types,
+        &analysis.symbols,
+        &analysis.enums,
+        &analysis.structs,
+    )
+    .unwrap();
     program.functions.iter().map(ToString::to_string).collect()
 }
 
@@ -954,5 +968,61 @@ fn printing_an_enum_calls_a_function_made_for_its_type() {
     assert!(
         ir.contains("fail \"value is nested too deeply to print (more than 10000 levels)\""),
         "{ir}"
+    );
+}
+
+const POINT: &str = "struct Point;\n    x: int\n    y: int\n";
+
+#[test]
+fn a_struct_field_is_a_variable_of_its_own() {
+    assert_eq!(
+        dump(&format!(
+            "{POINT}fn f(p: Point) -> Point;\n    p.y = 7\n    p.x += p.y\n    ret p\n"
+        ))
+        .split("fn main")
+        .next()
+        .unwrap(),
+        "fn f(v0, v1):\nb0:\n  v1 = copy 7\n  v2 = add v0, v1\n  v0 = copy v2\n  ret v0, v1\n"
+    );
+}
+
+#[test]
+fn a_field_of_a_list_element_is_one_slot_of_it() {
+    assert_eq!(
+        dump(&format!(
+            "{POINT}fn f(ps: list[Point], i: int) -> list[Point];\n    ps[i].y = 7\n    ret ps\n"
+        ))
+        .split("fn main")
+        .next()
+        .unwrap(),
+        "fn f(v0, v1):\n\
+         b0:\n  v0 = list_unique v0\n  v2 = len v0\n  v3 = div v2, 2\n  v4 = copy v1\n  \
+         br_lt v4, 0 -> b1, b2\n\
+         b1:\n  v4 = add v4, v3\n  jmp b2\n\
+         b2:\n  br_ge v4, 0 -> b4, b3\n\
+         b3:\n  fail \"list index out of range (index {}, length {})\", v1, v3\n\
+         b4:\n  br_lt v4, v3 -> b6, b5\n\
+         b5:\n  fail \"list index out of range (index {}, length {})\", v1, v3\n\
+         b6:\n  v5 = mul v4, 2\n  v6 = add v5, 1\n  list_set v0, v6, 7\n  ret v0\n"
+    );
+}
+
+#[test]
+fn a_field_assigned_the_result_of_a_call_moves_into_it() {
+    let bag = "struct Bag;\n    items: list[int]\n    n: int\n";
+    let add = "fn add(xs: list[int], x: int) -> list[int];\n    xs.append(x)\n    ret xs\n";
+    let source =
+        format!("{bag}{add}fn f(b: Bag) -> Bag;\n    b.items = add(b.items, 1)\n    ret b\n");
+    let dumped = dump(&source);
+    let f = dumped
+        .split("fn f")
+        .nth(1)
+        .unwrap()
+        .split("fn main")
+        .next()
+        .unwrap();
+    assert_eq!(
+        f,
+        "(v0, v1):\nb0:\n  v2 = call add(v0, 1)\n  v0 = copy v2\n  ret v0, v1\n"
     );
 }

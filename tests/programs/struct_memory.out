@@ -1,0 +1,11 @@
+Item(name='a2', inner=Inner(tags=['fresh'], note='new'), count=1, maybe=some('back'))
+['b-a']
+Item(name='c2', inner=Inner(tags=['c-a', 'more', 'c2'], note='n'), count=1, maybe=some('c')) c2 ['c-a', 'more', 'c2']
+n u
+[Item(name='z!', inner=Inner(tags=['z-a'], note='n'), count=1, maybe=some('z')), Item(name='b', inner=Inner(tags=['b-a'], note='n'), count=1, maybe=some('b')), Item(name='y2', inner=Inner(tags=['y-0', 'y-b'], note='n'), count=1, maybe=some('y'))]
+a2 [Item(name='b', inner=Inner(tags=['b-a'], note='n'), count=1, maybe=some('b'))] copied n
+['m-a', 'seen']
+empty
+true true
+g/changed ['g-a', 'g-b']
+g2

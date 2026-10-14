@@ -450,7 +450,8 @@ fn emit_mem_map(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.free_str` frees the string in `x9`, whose count just reached 0
 /// - `stone.free_list` frees the list in `x9`, whose count just reached 0, along with its
 ///   elements' storage, first releasing each value its `kinds` field says is counted, through
-///   `stone.free_enum` for enum values if `enums`
+///   `stone.free_enum` for enum values if `enums`; a list it releases that dies too waits on
+///   `stone.lists_pending` for the same loop, so freeing never recurses through lists
 /// - `stone.leak_check` exits with an error if the `STONE_LEAK_CHECK` environment variable is set
 ///   and any object is still allocated, which tests use to find leaks
 ///
@@ -504,11 +505,28 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     count_live(r#gen, -1);
     pop_frame(r#gen, &[]);
 
-    // x19 holds the list and x20 the index of the element being released
+    // a list whose count reached 0 joins the lists waiting on stone.lists_pending, linked through
+    // their capacity, and the first call frees them in a loop, so freeing lists nested any number
+    // of levels deep, as a struct holding a list of itself makes them, never recurses; x19 holds
+    // the list being freed and x20 the index of the element being released
     let saved = ["x19", "x20", "x21", "x22"];
     r#gen.emit("stone.free_list:");
+    r#gen.emit("\tadrp\tx16, stone.lists_pending");
+    r#gen.emit("\tldr\tx17, [x16, :lo12:stone.lists_pending]");
+    r#gen.emit("\tstr\tx17, [x9, #8]");
+    r#gen.emit("\tstr\tx9, [x16, :lo12:stone.lists_pending]");
+    r#gen.emit("\tadrp\tx16, stone.freeing_lists");
+    r#gen.emit("\tldr\tx17, [x16, :lo12:stone.freeing_lists]");
+    r#gen.emit("\tcbnz\tx17, .Lfree_list_queued");
+    r#gen.emit("\tmov\tx17, #1");
+    r#gen.emit("\tstr\tx17, [x16, :lo12:stone.freeing_lists]");
     push_frame(r#gen, &saved);
-    r#gen.emit("\tmov\tx19, x9");
+    r#gen.emit(".Lfree_list_next:");
+    r#gen.emit("\tadrp\tx16, stone.lists_pending");
+    r#gen.emit("\tldr\tx19, [x16, :lo12:stone.lists_pending]");
+    r#gen.emit("\tcbz\tx19, .Lfree_list_done");
+    r#gen.emit("\tldr\tx17, [x19, #8]");
+    r#gen.emit("\tstr\tx17, [x16, :lo12:stone.lists_pending]");
     r#gen.emit("\tldr\tx10, [x19, #24]");
     r#gen.emit("\tcbz\tx10, .Lfree_list_storage"); // the elements are not counted
     r#gen.emit("\tldr\tx10, [x19, #32]");
@@ -533,7 +551,7 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
         r#gen.emit("\tcmp\tx10, #3");
         r#gen.emit("\tb.eq\t.Lfree_list_enum");
     }
-    // nesting is bounded by the element type, so this recursion is shallow
+    // only queues the list, since this call is freeing lists already
     r#gen.emit("\tbl\tstone.free_list");
     r#gen.emit("\tb\t.Lfree_list_loop");
     r#gen.emit(".Lfree_list_str:");
@@ -593,7 +611,14 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit("\tsub\tx9, x19, #8");
     r#gen.emit("\tbl\tstone.mem_free");
     count_live(r#gen, -1);
+    r#gen.emit("\tb\t.Lfree_list_next");
+    r#gen.emit(".Lfree_list_done:");
+    r#gen.emit("\tadrp\tx16, stone.freeing_lists");
+    r#gen.emit("\tmov\tx17, #0");
+    r#gen.emit("\tstr\tx17, [x16, :lo12:stone.freeing_lists]");
     pop_frame(r#gen, &saved);
+    r#gen.emit(".Lfree_list_queued:");
+    r#gen.emit("\tret");
 
     // the count's digits are written backwards into 32 bytes of stack
     r#gen.emit("stone.leak_check:");

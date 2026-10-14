@@ -1,0 +1,13 @@
+struct Point;
+    x: float
+    y: float
+
+fn value() -> float;
+    print("value runs")
+    ret 1.0
+
+ps = [Point(x=1.0, y=2.0)]
+ps[0].y += value()
+print(ps)
+// the index fails before the value runs
+ps[-2].y += value()

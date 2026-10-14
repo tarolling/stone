@@ -37,6 +37,9 @@ use geometry.shapes.area as shape_area
 - If that module defines an enum by the last name, `use` binds the enum, as in
   `use geometry.shapes.Shape`, and its values are written `Shape.Circle(1.0)`. Through the module,
   they are `shapes.Shape.Circle(1.0)`, and its type is `shapes.Shape`.
+- If that module defines a struct by the last name, `use` binds the struct, as in
+  `use geometry.shapes.Point`, and its values are written `Point(x=1.0, y=2.0)`. Through the
+  module, they are `shapes.Point(x=1.0, y=2.0)`, and its type is `shapes.Point`.
 - `as` binds the name after it instead.
 
 So when both `geometry/shapes.stn` and a function `shapes` in `geometry.stn` exist,
@@ -81,15 +84,15 @@ own variables and functions `min`, `max`, `sleep`, or `env`.
 
 ## pub
 
-`pub fn` makes a function usable from other files, and `pub enum` an enum. Every other function
-and enum is private to the file it is in. `pub` makes no difference in the entry file, so a
+`pub fn` makes a function usable from other files, `pub enum` an enum, and `pub struct` a struct.
+Every other function, enum, and struct is private to the file it is in. `pub` makes no difference in the entry file, so a
 module can also be run on its own.
 
 ## Module bodies
 
-A module other than the entry file holds only `use` statements, `fn`s, and `enum`s. Any other
-top-level statement is an error: `only use, fn, and enum are allowed at the top level of a
-module`. So using a module never runs code, and modules may use each other in a cycle.
+A module other than the entry file holds only `use` statements, `fn`s, `enum`s, and `struct`s.
+Any other top-level statement is an error: `only use, fn, enum, and struct are allowed at the top
+level of a module`. So using a module never runs code, and modules may use each other in a cycle.
 
 A module's functions see their parameters and locals, their own file's functions, builtins, and
 the names their file binds with `use`. They never see the entry file's variables or functions:

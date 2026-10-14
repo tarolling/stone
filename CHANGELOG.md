@@ -10,6 +10,25 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Structs, like Rust's: `struct Point;` lists its fields, one per line, each with its type, as in
+  `x: float`. `Point(x=1.0, y=2.0)` makes a value, naming a value for every field once, in any
+  order, and the values run in the order they are written. `p.x` reads a field, and `p.x = v`,
+  `p.x += v`, `ps[i].x = v`, and `p.items.append(v)` change one in a variable. Structs are values,
+  like lists: assigning or passing one copies it, so a function changes its caller's struct only
+  by returning it, and `p.items = f(p.items)` changes the list in place. A struct prints with its
+  fields named, as in `Point(x=1.0, y=2.0)`, can hold itself through a list, an option, or an
+  enum, and a library module shares one with `pub struct`, imported with `use shapes.Point`.
+- Compiled structs are never allocated: the compiler keeps each field as a variable of its own and
+  stores the fields of a list's structs side by side in the list, as it does for tuples. Freeing
+  lists nested any number of levels deep, as a struct holding a list of itself makes them, takes
+  constant stack, and `print` counts struct values toward its limit of 10,000 levels.
+
+### Changed
+
+- `struct` is a keyword, so it can no longer name a variable or function.
+
 ## [0.2.5] - 2026-10-12
 
 ### Added

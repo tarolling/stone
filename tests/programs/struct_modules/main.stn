@@ -1,0 +1,15 @@
+use geo
+use geo.Point
+use geo.shapes as sh
+
+fn pair(a: geo.Point) -> list[Point];
+    ret [a, a]
+
+p = geo.Point(x=1, y=2)
+q = Point(y=4, x=3)
+q.y = 5
+print(pair(p), geo.shift(q, 10), geo.origin().y)
+r = sh.Rect(corner=p, size=geo.Point(x=2, y=3))
+print(r, sh.area(r), sh.far(r))
+r.corner.x = 7
+print(r.corner, sh.far(r).x)

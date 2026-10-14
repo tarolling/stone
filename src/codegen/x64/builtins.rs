@@ -231,7 +231,8 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.free_str` frees the string in `rax`, whose count just reached 0
 /// - `stone.free_list` frees the list in `rax`, whose count just reached 0, along with its
 ///   elements' storage, first releasing each value its `kinds` field says is counted, through
-///   `stone.free_enum` for enum values if `enums`
+///   `stone.free_enum` for enum values if `enums`; a list it releases that dies too waits on
+///   `stone.lists_pending` for the same loop, so freeing never recurses through lists
 /// - `stone.leak_check` exits with an error if the `STONE_LEAK_CHECK` environment variable is set
 ///   and any object is still allocated, which tests use to find leaks
 ///
@@ -279,11 +280,27 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit("\tdec\tQWORD PTR [rip + stone.live]");
     r#gen.emit("\tret");
 
-    // rbx holds the list and r12 the index of the element being released
+    // a list whose count reached 0 joins the lists waiting on stone.lists_pending, linked through
+    // their capacity, and the first call frees them in a loop, so freeing lists nested any number
+    // of levels deep, as a struct holding a list of itself makes them, never recurses; rbx holds
+    // the list being freed and r12 the index of the element being released
     r#gen.emit("stone.free_list:");
+    r#gen.emit("\tmov\trcx, QWORD PTR [rip + stone.lists_pending]");
+    r#gen.emit("\tmov\tQWORD PTR [rax + 8], rcx");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.lists_pending], rax");
+    r#gen.emit("\tcmp\tQWORD PTR [rip + stone.freeing_lists], 0");
+    r#gen.emit("\tjne\t.Lfree_list_queued");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.freeing_lists], 1");
     r#gen.emit("\tpush\trbx");
     r#gen.emit("\tpush\tr12");
-    r#gen.emit("\tmov\trbx, rax");
+    r#gen.emit("\tpush\tr13");
+    r#gen.emit("\tpush\tr14");
+    r#gen.emit(".Lfree_list_next:");
+    r#gen.emit("\tmov\trbx, QWORD PTR [rip + stone.lists_pending]");
+    r#gen.emit("\ttest\trbx, rbx");
+    r#gen.emit("\tjz\t.Lfree_list_done");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 8]");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.lists_pending], rax");
     r#gen.emit("\tcmp\tQWORD PTR [rbx + 24], 0");
     r#gen.emit("\tje\t.Lfree_list_storage"); // the elements are not counted
     r#gen.emit("\tcmp\tQWORD PTR [rbx + 32], 1");
@@ -303,7 +320,7 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
         r#gen.emit("\tcmp\tQWORD PTR [rbx + 24], 3");
         r#gen.emit("\tje\t.Lfree_list_enum");
     }
-    // nesting is bounded by the element type, so this recursion is shallow
+    // only queues the list, since this call is freeing lists already
     r#gen.emit("\tcall\tstone.free_list");
     r#gen.emit("\tjmp\t.Lfree_list_loop");
     r#gen.emit(".Lfree_list_str:");
@@ -320,8 +337,6 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     // r12 is the slot, r13 how many fields of the element are left, and r14 the kinds of the
     // rest, two bits each
     r#gen.emit(".Lfree_list_wide:");
-    r#gen.emit("\tpush\tr13");
-    r#gen.emit("\tpush\tr14");
     r#gen.emit("\txor\tr12, r12");
     r#gen.emit("\txor\tr13, r13");
     r#gen.emit(".Lfree_list_wide_loop:");
@@ -360,16 +375,20 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
         r#gen.emit("\tjmp\t.Lfree_list_wide_loop");
     }
     r#gen.emit(".Lfree_list_wide_done:");
-    r#gen.emit("\tpop\tr14");
-    r#gen.emit("\tpop\tr13");
     r#gen.emit(".Lfree_list_storage:");
     r#gen.emit("\tmov\trax, QWORD PTR [rbx + 16]");
     r#gen.emit("\tcall\tstone.mem_free");
     r#gen.emit("\tlea\trax, [rbx - 8]");
     r#gen.emit("\tcall\tstone.mem_free");
     r#gen.emit("\tdec\tQWORD PTR [rip + stone.live]");
+    r#gen.emit("\tjmp\t.Lfree_list_next");
+    r#gen.emit(".Lfree_list_done:");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.freeing_lists], 0");
+    r#gen.emit("\tpop\tr14");
+    r#gen.emit("\tpop\tr13");
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbx");
+    r#gen.emit(".Lfree_list_queued:");
     r#gen.emit("\tret");
 
     // the count's digits are written backwards into 24 bytes below the saved status

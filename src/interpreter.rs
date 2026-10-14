@@ -6,7 +6,7 @@ use crate::ast::{
     BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Pattern, PatternKind, Stmt, StmtKind,
     UnaryOp, target_names,
 };
-use crate::checker::{collect_assigned, place, place_spans, range_args};
+use crate::checker::{Step, collect_assigned, place, place_spans, range_args, struct_display};
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, last_uses};
 use crate::span::Span;
@@ -94,6 +94,44 @@ pub enum Value {
     Tuple(Rc<[Value]>),
     /// A value of an enum, which never changes, such as `Shape.Circle(1.0)` or `some(3)`.
     Enum(Rc<EnumValue>),
+    /// A value of a struct, such as `Point(x=1.0, y=2.0)`, whose fields a change copies first
+    /// if anything else shares it, as a list's elements are.
+    Struct(Rc<StructValue>),
+}
+
+/// A struct's definition, as the interpreter needs it: how it prints and its fields' names, in
+/// the order they are written.
+#[derive(Debug)]
+pub struct StructDef {
+    /// The struct's name without its module, such as `Point`.
+    pub name: Rc<str>,
+    pub fields: Vec<String>,
+}
+
+/// The values of a struct's fields, in the order its definition writes them.
+#[derive(Debug, Clone)]
+pub struct StructValue {
+    pub def: Rc<StructDef>,
+    pub fields: Vec<Value>,
+}
+
+impl StructValue {
+    /// Returns the position of the field `name`.
+    fn field(&self, name: &str) -> EvalResult<usize> {
+        self.def
+            .fields
+            .iter()
+            .position(|field| field == name)
+            .ok_or_else(|| format!("'{}' has no field '{name}'", self.def.name).into())
+    }
+}
+
+impl Drop for StructValue {
+    /// Drops the values this one holds with a loop, as [`EnumValue`]'s drop does, since a struct
+    /// can hold a chain of values through an option.
+    fn drop(&mut self) {
+        drop_values(std::mem::take(&mut self.fields));
+    }
 }
 
 /// A variant of an enum and the values it holds, such as `Shape.Rect(2.0, 3.0)`.
@@ -110,10 +148,22 @@ impl Drop for EnumValue {
     /// Drops the values this one holds with a loop rather than recursion, so dropping a long
     /// chain of values, such as a linked list of a million nodes, cannot overflow the stack.
     fn drop(&mut self) {
-        let mut pending = std::mem::take(&mut self.fields);
+        drop_values(std::mem::take(&mut self.fields));
+    }
+}
+
+/// Drops `pending` with a loop rather than recursion, emptying each enum value, struct value,
+/// list, and tuple that nothing else holds into the worklist before it is dropped.
+fn drop_values(mut pending: Vec<Value>) {
+    {
         while let Some(value) = pending.pop() {
             match value {
                 Value::Enum(mut inner) => {
+                    if let Some(inner) = Rc::get_mut(&mut inner) {
+                        pending.append(&mut inner.fields);
+                    }
+                }
+                Value::Struct(mut inner) => {
                     if let Some(inner) = Rc::get_mut(&mut inner) {
                         pending.append(&mut inner.fields);
                     }
@@ -213,10 +263,11 @@ impl Value {
         out
     }
 
-    /// Writes the value as [`Value::display`] does to `out`, inside `depth` enum values, stopping
-    /// at an enum value nested more than [`stdlib::MAX_PRINT_DEPTH`] deep.
+    /// Writes the value as [`Value::display`] does to `out`, inside `depth` enum and struct
+    /// values, stopping at one nested more than [`stdlib::MAX_PRINT_DEPTH`] deep.
     ///
-    /// For example, `some(Shape.Circle(1.0))` writes `some(Shape.Circle(1.0))`.
+    /// For example, `some(Shape.Circle(1.0))` writes `some(Shape.Circle(1.0))`, and a struct
+    /// writes its name and each field's, as in `Point(x=1.0, y=2.0)`.
     fn write(&self, out: &mut String, nested: bool, depth: usize) -> Result<(), TooDeep> {
         match self {
             Value::Int(i) => out.push_str(&i.to_string()),
@@ -261,16 +312,33 @@ impl Value {
                     out.push(')');
                 }
             }
+            Value::Struct(value) => {
+                if depth >= stdlib::MAX_PRINT_DEPTH {
+                    return Err(TooDeep);
+                }
+                out.push_str(&value.def.name);
+                out.push('(');
+                for (i, (name, field)) in value.def.fields.iter().zip(&value.fields).enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    out.push_str(name);
+                    out.push('=');
+                    field.write(out, true, depth + 1)?;
+                }
+                out.push(')');
+            }
         }
         Ok(())
     }
 
-    /// Returns whether this value may hold a list, which a change can copy: a list, a tuple with
-    /// one among its fields at any depth, or an enum value.
+    /// Returns whether this value may hold a list, which a change can copy: a list, a tuple or
+    /// struct with one among its fields at any depth, or an enum value.
     fn holds_list(&self) -> bool {
         match self {
             Value::List(_) | Value::Enum(_) => true,
             Value::Tuple(fields) => fields.iter().any(Value::holds_list),
+            Value::Struct(value) => value.fields.iter().any(Value::holds_list),
             _ => false,
         }
     }
@@ -314,6 +382,13 @@ impl Value {
             (a, b) => {
                 Err(format!("cannot order {} and {}", a.display(true), b.display(true)).into())
             }
+        }
+    }
+
+    fn as_struct(&self) -> EvalResult<&StructValue> {
+        match self {
+            Value::Struct(value) => Ok(value),
+            other => Err(format!("expected a struct, found {}", other.display(true)).into()),
         }
     }
 
@@ -615,6 +690,8 @@ pub struct Interpreter<'out> {
     /// The enums the program defines, by linked name, each with how its variants print, in the
     /// order of their tags.
     enums: HashMap<String, Vec<(String, Rc<str>)>>,
+    /// The structs the program defines, by linked name.
+    structs: HashMap<String, Rc<StructDef>>,
     /// The variables each statement of the running body uses for the last time, innermost call
     /// last. A variable is dropped after its last use, so a list that nothing else holds can be
     /// changed in place.
@@ -672,6 +749,7 @@ impl<'out> Interpreter<'out> {
             scopes: vec![],
             functions: HashMap::new(),
             enums: HashMap::new(),
+            structs: HashMap::new(),
             last_uses: vec![],
             global_reads: GlobalReads::new(),
             moves_globals: false,
@@ -771,9 +849,9 @@ impl<'out> Interpreter<'out> {
                 self.global_reads = global_reads(body, &globals);
                 self.moves_globals = true;
                 self.last_uses = vec![Rc::new(LastUses::new(body, &self.global_reads))];
-                // functions and enums can be used before their definition
+                // functions, enums, and structs can be used before their definition
                 for stmt in body {
-                    if let StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } = stmt.kind {
+                    if is_definition(stmt) {
                         self.eval_stmt(stmt)?;
                     }
                 }
@@ -797,15 +875,15 @@ impl<'out> Interpreter<'out> {
         // a later entry may read any global, so none moves
         self.moves_globals = false;
         self.last_uses = vec![Rc::default()];
-        // functions and enums can be used before their definition
+        // functions, enums, and structs can be used before their definition
         for stmt in body {
-            if let StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } = stmt.kind {
+            if is_definition(stmt) {
                 self.eval_stmt(stmt)?;
             }
         }
         for stmt in body {
             match &stmt.kind {
-                StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } => {}
+                _ if is_definition(stmt) => {}
                 StmtKind::Expr { value } => {
                     let value = self.eval_expr(value)?;
                     if !matches!(value, Value::Unit) {
@@ -858,7 +936,7 @@ impl<'out> Interpreter<'out> {
 
     /// Notes `value`, the value of the statement at `span`, if it calls a stone function, with
     /// the variables the call may take its arguments from: those the statement uses for the last
-    /// time, and `targets`, the names it assigns.
+    /// time, and `targets`, the names and fields it assigns, such as `b.items`.
     ///
     /// For example, `xs = add(xs, 1)` may take `xs`, since the assignment replaces it.
     fn note_top_call(&mut self, span: Span, value: &Expr, targets: &[Expr]) {
@@ -878,6 +956,9 @@ impl<'out> Interpreter<'out> {
             .cloned()
             .unwrap_or_default();
         for target in targets {
+            if let Some(path) = field_path(target) {
+                names.push(path);
+            }
             let mut assigned = Vec::new();
             target_names(target, &mut assigned);
             for name in assigned {
@@ -933,6 +1014,43 @@ impl<'out> Interpreter<'out> {
         }
     }
 
+    /// Takes the value of `field`, a field of a variable such as `b.items`, out of the variable
+    /// if it may hold a list, leaving no value in its place, so that the call to `callee` it is
+    /// passed to holds the only reference, as [`Interpreter::drop_variable`] does for a whole
+    /// variable.
+    fn take_field(&mut self, field: &Expr, callee: &str) {
+        let Some((root, steps)) = place(field) else {
+            return;
+        };
+        let global = self.scopes.is_empty();
+        if global
+            && (!self.moves_globals
+                || self
+                    .global_reads
+                    .get(callee)
+                    .is_some_and(|reads| reads.contains(root)))
+        {
+            return;
+        }
+        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
+        let Some(mut value) = scope.get_mut(root) else {
+            return;
+        };
+        for step in steps {
+            let (Step::Field(name), Value::Struct(inner)) = (step, value) else {
+                return;
+            };
+            let inner = Rc::make_mut(inner);
+            let Ok(position) = inner.field(name) else {
+                return;
+            };
+            value = &mut inner.fields[position];
+        }
+        if value.holds_list() {
+            *value = Value::Unit;
+        }
+    }
+
     fn eval_stmt_unguarded(
         &mut self,
         stmt: &Stmt,
@@ -962,6 +1080,7 @@ impl<'out> Interpreter<'out> {
                 // a target's indexes are read after the call
                 if targets.iter().all(|target| {
                     matches!(target.kind, ExprKind::Name { .. } | ExprKind::Tuple { .. })
+                        || field_path(target).is_some()
                 }) {
                     self.note_top_call(stmt.span, value, targets);
                 }
@@ -979,6 +1098,11 @@ impl<'out> Interpreter<'out> {
                             let position = list_position(index, items.len())
                                 .map_err(|e| located(e, target.span))?;
                             items[position] = rhs.clone();
+                        }
+                        ExprKind::Attribute { .. } => {
+                            let (root, steps) = self.eval_place(target)?;
+                            let field = self.place_value(root, &steps, &place_spans(target))?;
+                            *field = rhs.clone();
                         }
                         _ => return Err("Invalid assignment target".into()),
                     }
@@ -999,13 +1123,23 @@ impl<'out> Interpreter<'out> {
                         let (root, indexes) = self.eval_place(list)?;
                         let index = self.eval_expr(slice)?.as_int()?;
                         let spans = place_spans(list);
-                        let old = self.element(root, &indexes, &spans, index, target.span)?;
+                        let mut steps = indexes.clone();
+                        steps.push(PlaceStep::Index(index));
+                        let old = self.read_place(root, &steps, &place_spans(target))?;
                         let new = self.augmented(*op, old, value, stmt.span)?;
                         // the value cannot change the list, which only this statement can
                         let items = self.place_list(root, &indexes, &spans)?;
                         let position = list_position(index, items.len())
                             .map_err(|e| located(e, target.span))?;
                         items[position] = new;
+                    }
+                    ExprKind::Attribute { .. } => {
+                        // the indexes once, then the old field, then the value
+                        let (root, steps) = self.eval_place(target)?;
+                        let spans = place_spans(target);
+                        let old = self.read_place(root, &steps, &spans)?;
+                        let new = self.augmented(*op, old, value, stmt.span)?;
+                        *self.place_value(root, &steps, &spans)? = new;
                     }
                     _ => return Err("Invalid assignment target".into()),
                 }
@@ -1083,6 +1217,14 @@ impl<'out> Interpreter<'out> {
                     .map(|v| (v.name.clone(), format!("{short}.{}", v.name).into()))
                     .collect();
                 self.enums.insert(name.clone(), variants);
+                Ok(ControlFlow::None)
+            }
+            StmtKind::StructDef { name, fields, .. } => {
+                let def = StructDef {
+                    name: struct_display(name).into(),
+                    fields: fields.iter().map(|f| f.name.clone()).collect(),
+                };
+                self.structs.insert(name.clone(), Rc::new(def));
                 Ok(ControlFlow::None)
             }
             StmtKind::Match { subject, cases } => {
@@ -1239,30 +1381,28 @@ impl<'out> Interpreter<'out> {
         result.map_err(|e| located(e, span))
     }
 
-    /// Reads the element at `index` of the list that `root` leads to through `indexes`, as
-    /// [`Interpreter::place_list`] walks it, failing at the same spans, but without changing
-    /// anything: `target` is where an `index` out of range fails.
+    /// Reads the value that `root` leads to through `steps`, as [`Interpreter::place_value`]
+    /// walks it, failing at the same `spans`, but without changing anything.
     ///
-    /// For example, `grid[1][0] += 3` reads `grid[1][0]` with `root` `"grid"`, `indexes` `[1]`,
-    /// and `index` 0.
-    fn element(
-        &self,
-        root: &str,
-        indexes: &[i64],
-        spans: &[Span],
-        index: i64,
-        target: Span,
-    ) -> EvalResult<Value> {
+    /// For example, `grid[1][0] += 3` reads `grid[1][0]` with `root` `"grid"` and the indexes 1
+    /// and 0.
+    fn read_place(&self, root: &str, steps: &[PlaceStep], spans: &[Span]) -> EvalResult<Value> {
         let mut current = self.get_var(root)?;
-        for (&i, &span) in indexes.iter().zip(spans) {
-            let items = current.as_list()?;
-            let position = list_position(i, items.len()).map_err(|e| located(e, span))?;
-            let row = items[position].clone();
-            current = row;
+        for (step, &span) in steps.iter().zip(spans) {
+            let next = match step {
+                PlaceStep::Index(i) => {
+                    let items = current.as_list()?;
+                    let position = list_position(*i, items.len()).map_err(|e| located(e, span))?;
+                    items[position].clone()
+                }
+                PlaceStep::Field(name) => {
+                    let value = current.as_struct()?;
+                    value.fields[value.field(name)?].clone()
+                }
+            };
+            current = next;
         }
-        let items = current.as_list()?;
-        let position = list_position(index, items.len()).map_err(|e| located(e, target))?;
-        Ok(items[position].clone())
+        Ok(current)
     }
 
     /// Evaluates `expr`, giving an error raised by it, rather than by an expression inside it,
@@ -1328,7 +1468,27 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(Value::Bool(true))
             }
-            ExprKind::Call { func, args } => {
+            ExprKind::Call {
+                func,
+                args,
+                keywords,
+            } => {
+                if let ExprKind::Name { id, .. } = &func.kind
+                    && let Some(def) = self.structs.get(id).cloned()
+                {
+                    // the values in the order they are written, each into its field
+                    let mut fields = vec![Value::Unit; def.fields.len()];
+                    for keyword in keywords {
+                        let value = self.eval_expr(&keyword.value)?;
+                        let position = def
+                            .fields
+                            .iter()
+                            .position(|field| *field == keyword.arg)
+                            .ok_or_else(|| format!("'{id}' has no field '{}'", keyword.arg))?;
+                        fields[position] = value;
+                    }
+                    return Ok(Value::Struct(Rc::new(StructValue { def, fields })));
+                }
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind
                     && let ExprKind::Name { id, .. } = &value.kind
                     && self.enums.contains_key(id)
@@ -1343,12 +1503,12 @@ impl<'out> Interpreter<'out> {
                     && stdlib::changes_receiver(attr)
                 {
                     // the receiver's indexes, then the arguments, then the change
-                    let (root, indexes) = self.eval_place(value)?;
+                    let (root, steps) = self.eval_place(value)?;
                     let mut values = Vec::with_capacity(args.len());
                     for arg in args {
                         values.push(self.eval_expr(arg)?);
                     }
-                    let items = self.place_list(root, &indexes, &place_spans(value))?;
+                    let items = self.place_list(root, &steps, &place_spans(value))?;
                     return change_list(items, attr, values);
                 }
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind {
@@ -1378,6 +1538,12 @@ impl<'out> Interpreter<'out> {
                         {
                             self.drop_variable(name, Some(id));
                         }
+                        if let Some(path) = field_path(arg)
+                            && let Some((root, _)) = path.split_once('.')
+                            && (names.contains(&path) || names.iter().any(|name| name == root))
+                        {
+                            self.take_field(arg, id);
+                        }
                     }
                 }
                 self.call(id, values)
@@ -1386,7 +1552,11 @@ impl<'out> Interpreter<'out> {
                 ExprKind::Name { id, .. } if self.enums.contains_key(id) => {
                     self.variant(id, attr, vec![])
                 }
-                _ => Err(format!("'{attr}' is a method, so it can only be called").into()),
+                _ => {
+                    let value = self.eval_expr(value)?;
+                    let value = value.as_struct()?;
+                    Ok(value.fields[value.field(attr)?].clone())
+                }
             },
             ExprKind::Constant { value, kind: _ } => Ok(Value::from(&**value)),
             ExprKind::Subscript { value, slice, .. } => {
@@ -1696,48 +1866,131 @@ impl<'out> Interpreter<'out> {
             .ok_or_else(|| format!("'{name}' is used before it is assigned").into())
     }
 
-    /// Evaluates the indexes of `list`, a variable or an element of one that a statement is about
-    /// to change, and returns the variable's name with the indexes, outermost first.
+    /// Evaluates the indexes of `place`, a variable or a value inside one that a statement is
+    /// about to change, and returns the variable's name with the steps to the value, outermost
+    /// first.
     ///
-    /// For example, `grid[i][j]` gives `"grid"` and the values of `i` and `j`. Nothing is checked
-    /// against the lists yet: [`Interpreter::place_list`] does that once the change is ready.
-    fn eval_place<'e>(&mut self, list: &'e Expr) -> EvalResult<(&'e str, Vec<i64>)> {
-        let Some((root, exprs)) = place(list) else {
-            return Err("only a list in a variable can be changed".into());
+    /// For example, `grid[i][j]` gives `"grid"` and the values of `i` and `j`, and `ps[i].x`
+    /// gives `"ps"`, the value of `i`, and the field `x`. Nothing is checked against the values
+    /// yet: [`Interpreter::place_value`] does that once the change is ready.
+    fn eval_place<'e>(
+        &mut self,
+        place_expr: &'e Expr,
+    ) -> EvalResult<(&'e str, Vec<PlaceStep<'e>>)> {
+        let Some((root, exprs)) = place(place_expr) else {
+            return Err("only a value in a variable can be changed".into());
         };
-        let mut indexes = Vec::with_capacity(exprs.len());
-        for index in exprs {
-            indexes.push(self.eval_expr(index)?.as_int()?);
+        let mut steps = Vec::with_capacity(exprs.len());
+        for step in exprs {
+            steps.push(match step {
+                Step::Index(index) => PlaceStep::Index(self.eval_expr(index)?.as_int()?),
+                Step::Field(name) => PlaceStep::Field(name),
+            });
         }
-        Ok((root, indexes))
+        Ok((root, steps))
     }
 
-    /// Walks from the variable `root` through `indexes` to the list a statement changes, and
-    /// returns its elements for changing.
+    /// Walks from the variable `root` through `steps` to the value a statement changes, and
+    /// returns it for changing.
     ///
-    /// Every list on the way that another value still shares is copied first, so the change shows
-    /// through no other variable. The checker allows a function to change only its own variables,
-    /// so `root` is in the function's scope, or in the globals at the top level. An index out of
-    /// range fails at its subscript in `spans`, from [`place_spans`].
+    /// Every list and struct on the way that another value still shares is copied first, so the
+    /// change shows through no other variable. The checker allows a function to change only its
+    /// own variables, so `root` is in the function's scope, or in the globals at the top level.
+    /// An index out of range fails at its subscript in `spans`, from [`place_spans`].
+    fn place_value(
+        &mut self,
+        root: &str,
+        steps: &[PlaceStep],
+        spans: &[Span],
+    ) -> EvalResult<&mut Value> {
+        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
+        let value = scope
+            .get_mut(root)
+            .ok_or_else(|| format!("'{root}' is used before it is assigned"))?;
+        walk_place(value, steps, spans, &mut self.copies)
+    }
+
+    /// Walks to the list a statement changes, as [`Interpreter::place_value`] does, and returns
+    /// its elements for changing, copying them first if another value still shares them.
     fn place_list(
         &mut self,
         root: &str,
-        indexes: &[i64],
+        steps: &[PlaceStep],
         spans: &[Span],
     ) -> EvalResult<&mut Vec<Value>> {
         let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
-        let mut value = scope
+        let value = scope
             .get_mut(root)
             .ok_or_else(|| format!("'{root}' is used before it is assigned"))?;
-        for (&index, &span) in indexes.iter().zip(spans) {
-            self.copies += value.is_shared() as u64;
-            let items = value.as_list_mut()?;
-            let position = list_position(index, items.len()).map_err(|e| located(e, span))?;
-            value = &mut items[position];
-        }
+        let value = walk_place(value, steps, spans, &mut self.copies)?;
         self.copies += value.is_shared() as u64;
         value.as_list_mut()
     }
+}
+
+/// Walks from `value` through `steps` for [`Interpreter::place_value`], counting in `copies`
+/// each shared list it copies on the way.
+fn walk_place<'v>(
+    mut value: &'v mut Value,
+    steps: &[PlaceStep],
+    spans: &[Span],
+    copies: &mut u64,
+) -> EvalResult<&'v mut Value> {
+    for (step, &span) in steps.iter().zip(spans) {
+        match step {
+            PlaceStep::Index(index) => {
+                *copies += value.is_shared() as u64;
+                let items = value.as_list_mut()?;
+                let position = list_position(*index, items.len()).map_err(|e| located(e, span))?;
+                value = &mut items[position];
+            }
+            PlaceStep::Field(name) => {
+                let Value::Struct(inner) = value else {
+                    let found = value.display(true);
+                    return Err(format!("expected a struct, found {found}").into());
+                };
+                let inner = Rc::make_mut(inner);
+                let position = inner.field(name)?;
+                value = &mut inner.fields[position];
+            }
+        }
+    }
+    Ok(value)
+}
+
+/// One step of an evaluated place, from [`Interpreter::eval_place`]: the index of a list's
+/// element, or the name of a struct's field.
+#[derive(Debug, Clone, Copy)]
+enum PlaceStep<'a> {
+    Index(i64),
+    Field(&'a str),
+}
+
+/// Returns `expr` written out if it is a field of a variable reached through fields alone, such
+/// as `b.items` or `line.start.x`, which a call may take as it takes a variable.
+fn field_path(expr: &Expr) -> Option<String> {
+    let (root, steps) = place(expr)?;
+    if steps.is_empty() {
+        return None;
+    }
+    let mut path = root.to_string();
+    for step in steps {
+        let Step::Field(name) = step else {
+            return None;
+        };
+        path.push('.');
+        path.push_str(name);
+    }
+    Some(path)
+}
+
+/// Returns whether `stmt` defines something code can use before the definition: a function, an
+/// enum, or a struct.
+fn is_definition(stmt: &Stmt) -> bool {
+    matches!(
+        stmt.kind,
+        StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } | StmtKind::StructDef { .. }
+    )
 }
 
 #[cfg(test)]
@@ -1798,6 +2051,38 @@ mod tests {
         let source = format!(
             "{ADD}fn one();\n    n = 1\n    ret n\nxs = []\nfor i in range(10);\n    \
              xs = add(xs, one())\nprint(xs)\n"
+        );
+        assert_eq!(copies(&source), 0);
+    }
+
+    #[test]
+    fn a_field_changes_in_place_unless_another_value_shares_it() {
+        let bag = "struct Bag;\n    items: list[int]\n    n: int\n";
+        let make = "b = Bag(items=[1], n=0)\n";
+        assert_eq!(
+            copies(&format!("{bag}{make}b.items.append(2)\nprint(b)\n")),
+            0
+        );
+        assert_eq!(
+            copies(&format!(
+                "{bag}{make}bs = [b]\nbs[0].items[0] = 2\nprint(bs)\n"
+            )),
+            0
+        );
+        assert_eq!(
+            copies(&format!(
+                "{bag}{make}c = b\nc.items.append(2)\nc.n = 1\nprint(b, c)\n"
+            )),
+            1
+        );
+        // a field assigned the result of a call moves into it
+        let source = format!(
+            "{ADD}{bag}{make}for i in range(100);\n    b.items = add(b.items, i)\nprint(b.n)\n"
+        );
+        assert_eq!(copies(&source), 0);
+        let source = format!(
+            "{ADD}{bag}fn grow(b: Bag) -> Bag;\n    b.items = add(b.items, 1)\n    ret b\n\
+             {make}for i in range(10);\n    b = grow(b)\nprint(b)\n"
         );
         assert_eq!(copies(&source), 0);
     }

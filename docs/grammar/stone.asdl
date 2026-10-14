@@ -8,6 +8,7 @@ module stone
     stmt = FunctionDef(identifier name, bool public, arguments args,
                        stmt* body, type? returns)
           | EnumDef(identifier name, bool public, variant* variants)
+          | StructDef(identifier name, bool public, field* fields)
 
           | Return(expr? value)
 
@@ -29,7 +30,7 @@ module stone
          | BinOp(expr left, operator op, expr right)
          | UnaryOp(unaryop op, expr operand)
          | Compare(expr left, cmpop* ops, expr* comparators)
-         | Call(expr func, expr* args)
+         | Call(expr func, expr* args, keyword* keywords)
          | Constant(constant value, string? kind)
 
          | Attribute(expr value, identifier attr, expr_context ctx)
@@ -57,6 +58,11 @@ module stone
 
     variant = (identifier name, type* fields)
 
+    field = (identifier name, type annotation)
+
+    -- a named value in a call, such as x=1.0 in Point(x=1.0, y=2.0)
+    keyword = (identifier arg, expr value)
+
     match_case = (pattern pattern, stmt* body)
 
     pattern = MatchWildcard
@@ -65,6 +71,6 @@ module stone
             | MatchVariant(identifier* path, pattern* fields)
 
     type = Int | Float | Bool | Str | List(type elem) | Tuple(type* elts)
-         -- an enum, such as Shape, or option[T]
+         -- a struct, such as Point, an enum, such as Shape, or option[T]
          | Named(identifier name, type* args)
 }

@@ -1,0 +1,20 @@
+Point(x=1.0, y=2.0)
+1.0 2.0
+Line(start=Point(x=0.0, y=0.0), end=Point(x=3.0, y=4.0), label='diag')
+4.0 diag 25.0
+Point(x=1.0, y=2.0) Point(x=10.0, y=2.5)
+Line(start=Point(x=-1.0, y=0.0), end=Point(x=4.0, y=4.0), label='diag')
+Bag(name='bag!', items=[19, 22, 33], pair=(7, 'seven'))
+Bag(name='bag!', items=[19, 22, 33, 4], pair=(7, 'seven')) 19 seven
+[Point(x=5.0, y=1.0), Point(x=2.0, y=6.0), Point(x=0.0, y=2.0)] 6.0 3
+7.0 5.0
+Point(x=0.0, y=2.0) [Point(x=5.0, y=1.0), Point(x=2.0, y=6.0)]
+[19, 22, 33, 5] 3 (8, 'eight')
+(Point(x=1.0, y=2.0), 1) 2.0
+dot Point(x=100.0, y=2.0)
+segment diag
+nothing
+Shape.Dot(Point(x=1.0, y=2.0))
+some(Point(x=1.0, y=2.0)) 1.0
+some(Point(x=0.0, y=0.0))
+11.0

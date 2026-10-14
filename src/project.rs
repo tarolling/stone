@@ -175,6 +175,8 @@ pub enum Target {
     BuiltinModule(String),
     /// A library enum, by its linked name, such as `geometry.Shape`.
     Enum(String),
+    /// A library struct, by its linked name, such as `geometry.Point`.
+    Struct(String),
 }
 
 /// A name a `use` binds, for editor tooling.
@@ -255,8 +257,8 @@ enum Binding {
     /// A builtin module, such as `os`.
     BuiltinModule(&'static BuiltinModule),
     Function(String),
-    /// A library enum, by its linked name.
-    Enum(String),
+    /// A library enum or struct, by its linked name.
+    Type(String),
     /// A `use` that failed to resolve, which was already reported, so its uses are left alone.
     Unresolved,
 }
@@ -395,14 +397,17 @@ impl Loader<'_> {
             if let Some(id) = self.module(parent_names) {
                 let module = parent_names.join(".");
                 let parsed = &self.modules[id.0 as usize];
-                if let Some(&public) = public_enums(parsed).get(function) {
-                    return if public || id == file {
-                        Ok(Target::Enum(format!("{module}.{function}")))
-                    } else {
+                if let Some(&public) = public_types(parsed).get(function) {
+                    let linked = format!("{module}.{function}");
+                    return if !(public || id == file) {
                         Err(Diagnostic::error(
                             *function_span,
                             format!("'{function}' is private to module '{module}'"),
                         ))
+                    } else if is_struct(parsed, function) {
+                        Ok(Target::Struct(linked))
+                    } else {
+                        Ok(Target::Enum(linked))
                     };
                 }
                 return match public_functions(parsed).get(function) {
@@ -486,7 +491,7 @@ impl Loader<'_> {
     fn link(mut self) -> Linked {
         let functions: Vec<HashMap<String, bool>> =
             self.modules.iter().map(public_functions).collect();
-        let enums: Vec<HashMap<String, bool>> = self.modules.iter().map(public_enums).collect();
+        let types: Vec<HashMap<String, bool>> = self.modules.iter().map(public_types).collect();
         let module_names: Vec<String> = self.files.iter().map(|f| f.module.clone()).collect();
         let mut imports = vec![];
         let mut library_body = vec![];
@@ -500,7 +505,7 @@ impl Loader<'_> {
             check_top_level(&body, library, &mut self.diagnostics);
 
             let mut defined: HashSet<String> = functions[i].keys().cloned().collect();
-            defined.extend(enums[i].keys().cloned());
+            defined.extend(types[i].keys().cloned());
             if !library {
                 let mut globals = vec![];
                 collect_assigned(&body, &mut globals);
@@ -532,7 +537,9 @@ impl Loader<'_> {
                         match target {
                             Target::Module(id) => Binding::Module(*id),
                             Target::Function(name) => Binding::Function(name.clone()),
-                            Target::Enum(name) => Binding::Enum(name.clone()),
+                            Target::Enum(name) | Target::Struct(name) => {
+                                Binding::Type(name.clone())
+                            }
                             Target::BuiltinModule(name) => Binding::BuiltinModule(
                                 crate::stdlib::module(name).expect("resolved to a builtin module"),
                             ),
@@ -548,10 +555,10 @@ impl Loader<'_> {
                 library,
                 module: &module_names[i],
                 own: &functions[i],
-                own_enums: &enums[i],
+                own_types: &types[i],
                 bindings: &bindings,
                 functions: &functions,
-                enums: &enums,
+                types: &types,
                 module_names: &module_names,
                 locals: HashSet::new(),
                 diagnostics: &mut self.diagnostics,
@@ -592,6 +599,15 @@ impl Loader<'_> {
                                 .iter_mut()
                                 .for_each(|f| rewriter.type_expr(f));
                         }
+                        if library {
+                            *name = format!("{}.{name}", module_names[i]);
+                        }
+                    }
+                    StmtKind::StructDef { name, fields, .. } => {
+                        rewriter.locals.clear();
+                        fields
+                            .iter_mut()
+                            .for_each(|f| rewriter.type_expr(&mut f.annotation));
                         if library {
                             *name = format!("{}.{name}", module_names[i]);
                         }
@@ -644,15 +660,25 @@ fn module_path(names: &[String]) -> PathBuf {
     path
 }
 
-/// Returns each enum a module defines at the top level, mapped to whether it is `pub`.
-fn public_enums(module: &Mod) -> HashMap<String, bool> {
+/// Returns each enum and struct a module defines at the top level, mapped to whether it is
+/// `pub`.
+fn public_types(module: &Mod) -> HashMap<String, bool> {
     let Mod::Module { body } = module;
     body.iter()
         .filter_map(|stmt| match &stmt.kind {
-            StmtKind::EnumDef { name, public, .. } => Some((name.clone(), *public)),
+            StmtKind::EnumDef { name, public, .. } | StmtKind::StructDef { name, public, .. } => {
+                Some((name.clone(), *public))
+            }
             _ => None,
         })
         .collect()
+}
+
+/// Returns whether a module defines a struct called `name` at the top level.
+fn is_struct(module: &Mod, name: &str) -> bool {
+    let Mod::Module { body } = module;
+    body.iter()
+        .any(|stmt| matches!(&stmt.kind, StmtKind::StructDef { name: n, .. } if n == name))
 }
 
 /// Returns each function a module defines at the top level, mapped to whether it is `pub`.
@@ -667,7 +693,7 @@ fn public_functions(module: &Mod) -> HashMap<String, bool> {
 }
 
 /// Reports a `use` after other statements, and in a library, any top-level statement that is not
-/// a `use`, `fn`, or `enum`.
+/// a `use`, `fn`, `enum`, or `struct`.
 fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnostic>) {
     let mut after_use = false;
     for stmt in body {
@@ -677,13 +703,15 @@ fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnosti
                 "use must come before other statements",
             )),
             StmtKind::Use { .. } => {}
-            StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } => after_use = true,
+            StmtKind::FunctionDef { .. }
+            | StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. } => after_use = true,
             _ => {
                 after_use = true;
                 if library {
                     diagnostics.push(Diagnostic::error(
                         stmt.span,
-                        "only use, fn, and enum are allowed at the top level of a module",
+                        "only use, fn, enum, and struct are allowed at the top level of a module",
                     ));
                 }
             }
@@ -700,13 +728,14 @@ struct Rewriter<'a> {
     module: &'a str,
     /// The functions the file defines, which in a library are renamed to `<module>.<name>`.
     own: &'a HashMap<String, bool>,
-    /// The enums the file defines, which in a library are renamed like its functions.
-    own_enums: &'a HashMap<String, bool>,
+    /// The enums and structs the file defines, which in a library are renamed like its
+    /// functions.
+    own_types: &'a HashMap<String, bool>,
     bindings: &'a HashMap<String, Binding>,
     /// Every file's functions, mapped to whether they are `pub`.
     functions: &'a [HashMap<String, bool>],
-    /// Every file's enums, mapped to whether they are `pub`.
-    enums: &'a [HashMap<String, bool>],
+    /// Every file's enums and structs, mapped to whether they are `pub`.
+    types: &'a [HashMap<String, bool>],
     module_names: &'a [String],
     /// The parameters and locals of the function being rewritten, which shadow everything else.
     locals: HashSet<String>,
@@ -759,13 +788,15 @@ impl Rewriter<'_> {
                 }
             }
             StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
         }
     }
 
-    /// Rewrites the enums a type written in a signature or variant names to their linked names.
+    /// Rewrites the enums and structs a type written in a signature, variant, or field names to
+    /// their linked names.
     ///
     /// For example, `list[Shape]` becomes `list[geometry.Shape]` after `use geometry.Shape`, and
     /// `shapes.Shape` becomes `geometry.shapes.Shape` after `use geometry.shapes`.
@@ -776,8 +807,8 @@ impl Rewriter<'_> {
             TypeExprKind::Named { name, args } => {
                 args.iter_mut().for_each(|a| self.type_expr(a));
                 match name.rsplit_once('.') {
-                    Some((module, enum_name)) => {
-                        if let Some(linked) = self.module_enum(module, enum_name, ty.span) {
+                    Some((module, type_name)) => {
+                        if let Some(linked) = self.module_type(module, type_name, ty.span, "type") {
                             *name = linked;
                         }
                     }
@@ -792,27 +823,33 @@ impl Rewriter<'_> {
         }
     }
 
-    /// Returns the linked name of the enum this file calls `name`, if it is one it imports or,
-    /// in a library, one it defines.
+    /// Returns the linked name of the enum or struct this file calls `name`, if it is one it
+    /// imports or, in a library, one it defines.
     fn enum_name(&self, name: &str) -> Option<String> {
         match self.bindings.get(name) {
-            Some(Binding::Enum(linked)) => Some(linked.clone()),
-            _ if self.library && self.own_enums.contains_key(name) => {
+            Some(Binding::Type(linked)) => Some(linked.clone()),
+            _ if self.library && self.own_types.contains_key(name) => {
                 Some(format!("{}.{name}", self.module))
             }
             _ => None,
         }
     }
 
-    /// Returns the linked name of the enum `enum_name` of the module this file imports as
-    /// `module`, reporting at `span` if it is private or missing. Returns `None` if `module` is not
-    /// an imported module.
-    fn module_enum(&mut self, module: &str, enum_name: &str, span: Span) -> Option<String> {
+    /// Returns the linked name of the enum or struct `enum_name` of the module this file imports
+    /// as `module`, reporting at `span` if it is private or missing, as a `what`, such as
+    /// `enum`. Returns `None` if `module` is not an imported module.
+    fn module_type(
+        &mut self,
+        module: &str,
+        enum_name: &str,
+        span: Span,
+        what: &str,
+    ) -> Option<String> {
         let Some(Binding::Module(target)) = self.bindings.get(module) else {
             return None;
         };
         let module = &self.module_names[target.0 as usize];
-        match self.enums[target.0 as usize].get(enum_name) {
+        match self.types[target.0 as usize].get(enum_name) {
             Some(&public) if public || *target == self.file => {
                 Some(format!("{module}.{enum_name}"))
             }
@@ -826,7 +863,7 @@ impl Rewriter<'_> {
             None => {
                 self.diagnostics.push(Diagnostic::error(
                     span,
-                    format!("module '{module}' has no enum '{enum_name}'"),
+                    format!("module '{module}' has no {what} '{enum_name}'"),
                 ));
                 None
             }
@@ -853,7 +890,7 @@ impl Rewriter<'_> {
             return false;
         }
         let span = value.span;
-        if let Some(linked) = self.module_enum(&id.clone(), &attr.clone(), span) {
+        if let Some(linked) = self.module_type(&id.clone(), &attr.clone(), span, "enum") {
             *value = Expr::new(
                 ExprKind::Name {
                     id: linked,
@@ -879,7 +916,7 @@ impl Rewriter<'_> {
             }
             [(module, module_span), (enum_name, enum_span), _] => {
                 let span = module_span.to(*enum_span);
-                if let Some(linked) = self.module_enum(module, enum_name, span) {
+                if let Some(linked) = self.module_type(module, enum_name, span, "enum") {
                     path.splice(0..2, [(linked, span)]);
                 }
             }
@@ -889,7 +926,11 @@ impl Rewriter<'_> {
 
     fn expr(&mut self, expr: &mut Expr) {
         match &mut expr.kind {
-            ExprKind::Call { func, args } => {
+            ExprKind::Call {
+                func,
+                args,
+                keywords,
+            } => {
                 if !self.module_call(func) {
                     match &mut func.kind {
                         ExprKind::Name { id, .. } => self.name(id, func.span, true),
@@ -897,6 +938,7 @@ impl Rewriter<'_> {
                     }
                 }
                 args.iter_mut().for_each(|a| self.expr(a));
+                keywords.iter_mut().for_each(|k| self.expr(&mut k.value));
             }
             ExprKind::Name { id, .. } => self.name(id, expr.span, false),
             ExprKind::BoolOp { values, .. } => values.iter_mut().for_each(|v| self.expr(v)),
@@ -969,6 +1011,20 @@ impl Rewriter<'_> {
 
         let attr_span = self.attr_span(func.span, attr);
         let module = &self.module_names[target.0 as usize];
+        // a struct of the module, as in `geometry.Point(x=1, y=2)`, or an enum used wrongly
+        if self.types[target.0 as usize].contains_key(attr.as_str()) {
+            let (id, attr) = (id.clone(), attr.clone());
+            if let Some(linked) = self.module_type(&id, &attr, attr_span, "type") {
+                *func = Expr::new(
+                    ExprKind::Name {
+                        id: linked,
+                        ctx: ExprContext::Load,
+                    },
+                    func.span,
+                );
+            }
+            return true;
+        }
         match self.functions[target.0 as usize].get(attr) {
             Some(&public) if public || *target == self.file => {
                 *func = Expr::new(
@@ -1007,13 +1063,13 @@ impl Rewriter<'_> {
             return;
         }
         match self.bindings.get(id) {
-            Some(Binding::Function(name) | Binding::Enum(name)) => *id = name.clone(),
+            Some(Binding::Function(name) | Binding::Type(name)) => *id = name.clone(),
             Some(Binding::Module(_) | Binding::BuiltinModule(_)) => self.diagnostics.push(
                 Diagnostic::error(span, format!("'{id}' is a module, not a value")),
             ),
             Some(Binding::Unresolved) => {}
             None if !self.library => {}
-            None if self.own.contains_key(id) || self.own_enums.contains_key(id) => {
+            None if self.own.contains_key(id) || self.own_types.contains_key(id) => {
                 *id = format!("{}.{id}", self.module)
             }
             None if is_builtin(id) => {}

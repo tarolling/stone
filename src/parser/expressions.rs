@@ -2,8 +2,8 @@
 
 use super::{ParseExprResult, Parser};
 use crate::ast::{
-    BoolOp, CompOp, Constant, Expr, ExprContext, ExprKind, Operator, ParserError, PrimaryOp,
-    UnaryOp,
+    BoolOp, CompOp, Constant, Expr, ExprContext, ExprKind, Keyword, Operator, ParserError,
+    PrimaryOp, UnaryOp,
 };
 use crate::debug;
 use crate::token::TokenType;
@@ -74,7 +74,8 @@ impl Parser {
                 && self.expect(TokenType::RParen).is_some()
                 && self.parse_t_lookahead()
             {
-                results.push(PrimaryOp::Call(arguments, self.last_span()));
+                let (args, keywords) = arguments;
+                results.push(PrimaryOp::Call(args, keywords, self.last_span()));
                 continue;
             }
             self.pos = mark;
@@ -123,8 +124,12 @@ impl Parser {
                         },
                         start.to(end),
                     )),
-                    PrimaryOp::Call(args, end) => Box::new(Expr::new(
-                        ExprKind::Call { func: result, args },
+                    PrimaryOp::Call(args, keywords, end) => Box::new(Expr::new(
+                        ExprKind::Call {
+                            func: result,
+                            args,
+                            keywords,
+                        },
                         start.to(end),
                     )),
                     PrimaryOp::Attribute(attr, end) => Box::new(Expr::new(
@@ -192,10 +197,12 @@ impl Parser {
         })
     }
 
-    /// Parses a single assignment target, which is either a subscript like `a[0]` or a name like `x`.
+    /// Parses a single assignment target: a subscript like `a[0]`, a field like `p.x`, or a name
+    /// like `x`.
     ///
     /// ```text
     /// target_with_star_atom:
+    ///     | t_primary '.' NAME !t_lookahead
     ///     | t_primary '[' slices ']' !t_lookahead
     ///     | star_atom
     /// ```
@@ -223,6 +230,23 @@ impl Parser {
                 res
             );
             return Ok(res);
+        }
+        self.pos = mark;
+
+        // t_primary '.' NAME !t_lookahead
+        if let Ok(value) = self.parse_t_primary()
+            && self.expect(TokenType::Dot).is_some()
+            && let Some((attr, _)) = self.expect_name("a field name", true)
+            && !self.parse_t_lookahead()
+        {
+            return Ok(Box::new(Expr::new(
+                ExprKind::Attribute {
+                    value,
+                    attr,
+                    ctx: ExprContext::Store,
+                },
+                self.span_from(mark),
+            )));
         }
         self.pos = mark;
         debug!("parse_target_with_star_atom: reset pos to {}", self.pos);
@@ -293,31 +317,84 @@ impl Parser {
         )))
     }
 
-    /// Parses a comma-separated list of call arguments, such as `1, x + 2` in `f(1, x + 2)`.
+    /// Parses a comma-separated list of call arguments, such as `1, x + 2` in `f(1, x + 2)`, where
+    /// named values, such as `x=1.0` in `Point(x=1.0, y=2.0)`, come after the others.
     ///
     /// ```text
     /// args:
-    ///     | ','.expression+
+    ///     | ','.(kwarg | expression)+
+    /// kwarg:
+    ///     | NAME '=' expression
     /// ```
-    pub(super) fn parse_args(&mut self) -> Result<Vec<Expr>, ParserError> {
+    pub(super) fn parse_args(&mut self) -> Result<(Vec<Expr>, Vec<Keyword>), ParserError> {
         let mut args = vec![];
+        let mut keywords = vec![];
 
-        let expr = self.parse_expression()?;
-        args.push(*expr);
+        let mut first = true;
         loop {
             let mark = self.pos;
-            // a comma with no expression after it belongs to `arguments` as a trailing comma
-            if self.expect(TokenType::Comma).is_some()
-                && let Ok(expr) = self.parse_expression()
-            {
-                args.push(*expr);
-                continue;
+            // a comma with no argument after it belongs to `arguments` as a trailing comma
+            if !first && self.expect(TokenType::Comma).is_none() {
+                break;
             }
-            self.pos = mark;
-            break;
+            let start = self.pos;
+            if let Some(keyword) = self.parse_kwarg() {
+                keywords.push(keyword);
+            } else if let Ok(expr) = self.parse_expression() {
+                if !keywords.is_empty() {
+                    let span = self.span_from(start);
+                    self.hint(
+                        span,
+                        "a value without a name cannot follow a named one, as in 'x=1'",
+                    );
+                    self.pos = mark;
+                    return Err(ParserError {
+                        method: "parse_args".to_string(),
+                        token: self.peek().r#type.clone(),
+                        span: self.peek().span,
+                    });
+                }
+                args.push(*expr);
+            } else if first {
+                return Err(ParserError {
+                    method: "parse_args".to_string(),
+                    token: self.peek().r#type.clone(),
+                    span: self.peek().span,
+                });
+            } else {
+                self.pos = mark;
+                break;
+            }
+            first = false;
         }
 
-        Ok(args)
+        Ok((args, keywords))
+    }
+
+    /// Parses a named value in a call, such as `x=1.0` in `Point(x=1.0, y=2.0)`.
+    ///
+    /// ```text
+    /// kwarg:
+    ///     | NAME '=' expression
+    /// ```
+    fn parse_kwarg(&mut self) -> Option<Keyword> {
+        let mark = self.pos;
+        if let TokenType::Name(arg) = self.peek().r#type.clone()
+            && self.tokens.get(self.pos + 1).map(|t| &t.r#type)
+                == Some(&TokenType::Operator("=".to_string()))
+        {
+            let arg_span = self.peek().span;
+            self.pos += 2;
+            if let Ok(value) = self.parse_expression() {
+                return Some(Keyword {
+                    arg,
+                    arg_span,
+                    value: *value,
+                });
+            }
+        }
+        self.pos = mark;
+        None
     }
 
     /// Parses call arguments with an optional trailing comma, such as `1, 2,` in `f(1, 2,)`.
@@ -325,7 +402,7 @@ impl Parser {
     /// ```text
     /// arguments: args [','] &')'
     /// ```
-    pub(super) fn parse_arguments(&mut self) -> Result<Vec<Expr>, ParserError> {
+    pub(super) fn parse_arguments(&mut self) -> Result<(Vec<Expr>, Vec<Keyword>), ParserError> {
         let args = self.parse_args()?;
         self.expect(TokenType::Comma);
 
@@ -710,11 +787,11 @@ impl Parser {
     /// ```text
     /// [arguments]
     /// ```
-    pub(super) fn parse_arguments_optional(&mut self) -> Vec<Expr> {
+    pub(super) fn parse_arguments_optional(&mut self) -> (Vec<Expr>, Vec<Keyword>) {
         let mark = self.pos;
         self.parse_arguments().unwrap_or_else(|_| {
             self.pos = mark;
-            vec![]
+            (vec![], vec![])
         })
     }
 
@@ -734,7 +811,8 @@ impl Parser {
                 && let arguments = self.parse_arguments_optional()
                 && self.expect(TokenType::RParen).is_some()
             {
-                results.push(PrimaryOp::Call(arguments, self.last_span()));
+                let (args, keywords) = arguments;
+                results.push(PrimaryOp::Call(args, keywords, self.last_span()));
                 continue;
             }
             self.pos = mark;
@@ -791,8 +869,12 @@ impl Parser {
                         },
                         start.to(end),
                     )),
-                    PrimaryOp::Call(args, end) => Box::new(Expr::new(
-                        ExprKind::Call { func: result, args },
+                    PrimaryOp::Call(args, keywords, end) => Box::new(Expr::new(
+                        ExprKind::Call {
+                            func: result,
+                            args,
+                            keywords,
+                        },
                         start.to(end),
                     )),
                     PrimaryOp::Attribute(attr, end) => Box::new(Expr::new(

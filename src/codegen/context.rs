@@ -5,7 +5,7 @@
 //! label back every time, and later emit one stub behind it that prints the message.
 
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
-use crate::checker::{Enums, Symbol, Type, TypeChecker};
+use crate::checker::{Enums, Structs, Symbol, Type, TypeChecker};
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::{Callee, Inst, Program};
@@ -237,6 +237,8 @@ pub struct Context {
     symbols: Vec<Symbol>,
     /// The variants of every enum the program defines, from the checker.
     enums: Enums,
+    /// The fields of every struct the program defines, from the checker.
+    structs: Structs,
     /// The tag of every variant without values that the code uses, each of which gets a static
     /// value.
     pub variant_statics: BTreeSet<usize>,
@@ -278,13 +280,20 @@ impl Context {
         self.types = analysis.types;
         self.symbols = analysis.symbols;
         self.enums = analysis.enums;
+        self.structs = analysis.structs;
         Ok(())
     }
 
     /// Lowers the checked `module` to IR, then notes every runtime routine it calls and whether it
     /// counts references.
     pub fn lower(&mut self, module: &Mod) -> Result<(), String> {
-        self.program = lower(module, &self.types, &self.symbols, &self.enums)?;
+        self.program = lower(
+            module,
+            &self.types,
+            &self.symbols,
+            &self.enums,
+            &self.structs,
+        )?;
         let insts = self
             .program
             .functions
@@ -440,8 +449,10 @@ impl Context {
                 }
                 format!("stone.print_{}", mangle(ty))
             }
-            // lowering prints a tuple, and a list holding one, a value at a time
-            Type::Tuple(_) => return Err("a tuple is printed a value at a time".to_string()),
+            // lowering prints a tuple or struct, and a list holding one, a value at a time
+            Type::Tuple(_) | Type::Struct(_) => {
+                return Err("a tuple or struct is printed a value at a time".to_string());
+            }
             // lowering prints an enum, and a list holding one, through a function of its own
             Type::Enum { .. } => return Err("an enum is printed by its own function".to_string()),
             Type::Unit => return Err("no value cannot be printed".to_string()),
@@ -472,18 +483,25 @@ impl Context {
 
     /// Returns whether the program needs the string runtime.
     pub fn needs_strings(&self) -> bool {
-        self.types.values().any(contains_str) || self.uses(STRING_ROUTINES)
+        self.types
+            .values()
+            .any(|ty| contains_str(ty, &self.structs, &mut HashSet::new()))
+            || self.uses(STRING_ROUTINES)
     }
 
     /// Returns whether the program needs the list runtime.
     pub fn needs_lists(&self) -> bool {
-        self.types.values().any(contains_list)
+        self.types
+            .values()
+            .any(|ty| contains_list(ty, &self.structs, &mut HashSet::new()))
             || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
     }
 
     /// Returns whether the program has enum values, which need `stone.free_enum`.
     pub fn needs_enums(&self) -> bool {
-        self.types.values().any(contains_enum)
+        self.types
+            .values()
+            .any(|ty| contains_enum(ty, &self.structs, &mut HashSet::new()))
     }
 
     /// Returns whether the program reads its environment: through `os.env` or `os.has_env`, or
@@ -607,35 +625,61 @@ pub fn function_label(name: &str) -> String {
     format!("fn.{name}")
 }
 
+/// Returns whether the fields of the struct `name`, from `structs`, include one for which `has`
+/// returns true, unless `seen` shows the struct was already looked through.
+fn struct_has(
+    name: &str,
+    structs: &Structs,
+    seen: &mut HashSet<String>,
+    has: fn(&Type, &Structs, &mut HashSet<String>) -> bool,
+) -> bool {
+    if !seen.insert(name.to_string()) {
+        return false;
+    }
+    let fields = structs.get(name).map(Vec::as_slice).unwrap_or_default();
+    fields.iter().any(|(_, ty)| has(ty, structs, seen))
+}
+
 /// Returns whether a value of type `ty` involves a list, which means the list runtime is needed.
-fn contains_list(ty: &Type) -> bool {
+/// `seen` holds the structs already looked through.
+fn contains_list(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bool {
     match ty {
         Type::List(_) => true,
-        Type::Tuple(fields) => fields.iter().any(contains_list),
-        Type::Function { params, ret } => params.iter().any(contains_list) || contains_list(ret),
+        Type::Tuple(fields) => fields.iter().any(|f| contains_list(f, structs, seen)),
+        Type::Struct(name) => struct_has(name, structs, seen, contains_list),
+        Type::Function { params, ret } => {
+            params.iter().any(|p| contains_list(p, structs, seen))
+                || contains_list(ret, structs, seen)
+        }
         _ => false,
     }
 }
 
 /// Returns whether a value of type `ty` involves an enum value, which means `stone.free_enum` is
-/// needed.
-fn contains_enum(ty: &Type) -> bool {
+/// needed. `seen` holds the structs already looked through.
+fn contains_enum(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bool {
     match ty {
         Type::Enum { .. } => true,
-        Type::List(elem) => contains_enum(elem),
-        Type::Tuple(fields) => fields.iter().any(contains_enum),
-        Type::Function { params, ret } => params.iter().any(contains_enum) || contains_enum(ret),
+        Type::List(elem) => contains_enum(elem, structs, seen),
+        Type::Tuple(fields) => fields.iter().any(|f| contains_enum(f, structs, seen)),
+        Type::Struct(name) => struct_has(name, structs, seen, contains_enum),
+        Type::Function { params, ret } => {
+            params.iter().any(|p| contains_enum(p, structs, seen))
+                || contains_enum(ret, structs, seen)
+        }
         _ => false,
     }
 }
 
-/// Returns whether a value of type `ty` is or holds a string, outside of lists.
+/// Returns whether a value of type `ty` is or holds a string, outside of lists. `seen` holds the
+/// structs already looked through.
 ///
 /// For example, `str` and `tuple[int, str]` do, and `list[str]` does not.
-fn contains_str(ty: &Type) -> bool {
+fn contains_str(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bool {
     match ty {
         Type::Str => true,
-        Type::Tuple(fields) => fields.iter().any(contains_str),
+        Type::Tuple(fields) => fields.iter().any(|f| contains_str(f, structs, seen)),
+        Type::Struct(name) => struct_has(name, structs, seen, contains_str),
         _ => false,
     }
 }
@@ -699,14 +743,22 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
                 collect_calls_from_stmt(s, calls);
             }
         }
-        StmtKind::EnumDef { .. } | StmtKind::Break | StmtKind::Continue | StmtKind::Use { .. } => {}
+        StmtKind::EnumDef { .. }
+        | StmtKind::StructDef { .. }
+        | StmtKind::Break
+        | StmtKind::Continue
+        | StmtKind::Use { .. } => {}
     }
 }
 
 /// Adds the name of every builtin that `expr` calls to `calls`.
 fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
     match &expr.kind {
-        ExprKind::Call { func, args } => {
+        ExprKind::Call {
+            func,
+            args,
+            keywords,
+        } => {
             if let ExprKind::Name { id, .. } = &func.kind
                 && crate::stdlib::is_builtin(id)
             {
@@ -717,6 +769,9 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
             collect_calls_from_expr(func, calls);
             for arg in args {
                 collect_calls_from_expr(arg, calls);
+            }
+            for keyword in keywords {
+                collect_calls_from_expr(&keyword.value, calls);
             }
         }
         ExprKind::BinOp { left, right, .. } => {

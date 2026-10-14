@@ -16,6 +16,7 @@ grammar is
 | `True`, `False` | `true`, `false` |
 | `None`, `Optional[int]` | `none` and `some(x)`, of type `option[int]` |
 | `class Shape(Enum):` | `enum Shape;`, whose variants can hold values, as in Rust |
+| `@dataclass class Point:` | `struct Point;` with a typed field per line, made as `Point(x=1.0, y=2.0)` |
 | `match x:` / `case P:` | `match x;` / `case P;`, which must cover every value |
 | `'single'` or `"double"` quotes | `"double"` quotes only |
 | `-7 // 2 == -4` | `-7 / 2 == -3` (truncates) |
@@ -35,7 +36,8 @@ These names are reserved and cannot be used for variables or functions:
 | --- | --- |
 | `fn` | defines a function |
 | `enum` | defines an enum |
-| `pub` | lets other files use the function or enum after it, as in `pub fn f() -> int;` |
+| `struct` | defines a struct |
+| `pub` | lets other files use the function, enum, or struct after it, as in `pub fn f() -> int;` |
 | `use`, `as` | uses a module or one of its functions, optionally under another name |
 | `ret` | returns from a function, or ends the program at the top level |
 | `if`, `elif`, `else` | conditional blocks |
@@ -52,8 +54,9 @@ These names are reserved and cannot be used for variables or functions:
 
 A statement ends at the end of its line. A statement that opens a block (`fn`, `if`, `elif`,
 `else`, `while`, `for`, `case`) ends in `;`, followed either by an indented block on the next
-lines or by a single simple statement on the same line. `enum` and `match` end in `;` too, and
-are always followed by an indented block: of variants, one per line, or of `case`s:
+lines or by a single simple statement on the same line. `enum`, `struct`, and `match` end in `;`
+too, and are always followed by an indented block: of variants or fields, one per line, or of
+`case`s:
 
 ```stone
 for i in range(3);
@@ -79,6 +82,7 @@ module's name in a `use` or before a `.`.
 | option | `none`, `some(1)` |
 | list | `[]`, `[1, 2, 3]`, `[[1.0], []]` |
 | tuple | `(1, "a")`, `(x, y, z,)`, `(1, ("a", [2.5]))` |
+| struct | `Point(x=1.0, y=2.0)`, `Line(end=q, start=p)` |
 
 Negative numbers are the unary `-` applied to a literal, as in `-7`. Strings use double quotes
 and must close on the line they open on. A backslash starts an escape sequence:
@@ -102,11 +106,12 @@ themselves, as in `"café"`.
 | statement | example |
 | --- | --- |
 | expression | `print(x)` |
-| assignment | `x = 1`, `a = b = 0`, `items[i] = x`, `grid[r][c] = 0` |
+| assignment | `x = 1`, `a = b = 0`, `items[i] = x`, `grid[r][c] = 0`, `p.x = 1.0`, `ps[i].y = 0.0` |
 | unpacking | `q, r = divide(7, 2)`, `a, b = (b, a)`, `(x, (y, z)) = t` |
-| augmented assignment | `x += 1`, `total -= cost`, `items[i] *= 2`, `grid[r][c] **= 2` |
+| augmented assignment | `x += 1`, `total -= cost`, `items[i] *= 2`, `grid[r][c] **= 2`, `p.x += 0.5` |
 | function definition | `fn f(a: int, b: int) -> int;` plus a block |
 | enum definition | `enum Shape;` plus a block of variants, such as `Circle(float)` and `Empty` |
+| struct definition | `struct Point;` plus a block of fields, such as `x: float` and `y: float` |
 | `match` | `match s;` plus a block of cases, such as `case Shape.Circle(r);` plus a block |
 | `ret` | `ret`, `ret x`, `ret (a, b)` |
 | `if` / `elif` / `else` | `if x < 0;` ... `elif x == 0;` ... `else;` ... |
@@ -117,7 +122,8 @@ themselves, as in `"café"`.
 
 A `for` loop's variable is a plain name, or names to unpack each tuple of a list into. Unpacking
 takes names only, each once, as many as the tuple has values; an element such as `xs[0]` is
-assigned on a line of its own. Functions and enums can only be defined at the top level.
+assigned on a line of its own. Functions, enums, and structs can only be defined at the top
+level.
 `use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
 
 ## Augmented assignment
@@ -133,8 +139,9 @@ total *= 2
 print(total)   // 24
 ```
 
-The target can be a variable or an element, as in `counts[i] += 1` or `grid[r][c] **= 2`. An
-element's indexes are evaluated once, from the outermost, then the element is read, so an index
+The target can be a variable, an element, or a field, as in `counts[i] += 1`,
+`grid[r][c] **= 2`, or `ps[i].x += 0.5`. An element's indexes are evaluated once, from the
+outermost, then the element is read, so an index
 out of range stops the program before the value runs, then the value is evaluated and the result
 stored. So `counts[random.randint(0, 5)] += 1` picks one position and adds 1 to it. A variable
 assigned with `op=` is assigned like any other, so inside a function it is a local, and
@@ -163,8 +170,8 @@ fn report(name: str, score: float);
 
 A type is `int`, `float`, `bool`, `str`, `list[T]` for any type `T`, such as
 `list[list[int]]`, `tuple[T1, T2, ...]` with a type for each of two or more values, such as
-`tuple[str, list[int]]`, `option[T]`, or an enum's name, such as `Shape`, or `shapes.Shape` for
-an enum of a module. A function without `->` returns no value, so a call to it can only be a
+`tuple[str, list[int]]`, `option[T]`, or a struct's or enum's name, such as `Shape`, or
+`shapes.Shape` for one of a module. A function without `->` returns no value, so a call to it can only be a
 statement of its own, and its `ret` takes no value. Types are written only in signatures:
 variables, including a function's locals, never have them. See [Types](types.md).
 
@@ -182,7 +189,7 @@ From lowest to highest precedence:
 | `*` `/` `%` | two ints or two floats, or lists of them |
 | unary `+` `-` | an int or a float, or a list of them |
 | `**` | an int or float base and an `int` exponent, or lists of them |
-| calls `f(x)`, method calls `xs.len()`, indexing `xs[i]`, slicing `xs[i:j:k]` | |
+| calls `f(x)`, method calls `xs.len()`, fields `p.x`, indexing `xs[i]`, slicing `xs[i:j:k]` | |
 
 Comparisons chain, so `a < b <= c` means `a < b and b <= c` with `b` evaluated once.
 `**` groups right to left and binds tighter than a unary sign on its left, as in Python, so
@@ -190,9 +197,10 @@ Comparisons chain, so `a < b <= c` means `a < b and b <= c` with `b` evaluated o
 Parentheses group as usual. Operands are evaluated left to right.
 
 A method call such as `xs.len()` evaluates the value before the `.` first, then the
-arguments. A change, `xs[i][j] = v` or `xs[i].append(v)`, evaluates the assigned value, then
-each index from the outermost, then the arguments, and only then checks the indexes against the
-lists and makes the change. The builtin methods, such as `len`, `append`, `split`, and an option's
+arguments. A change, `xs[i][j] = v`, `ps[i].x = v`, or `xs[i].append(v)`, evaluates the assigned
+value, then each index from the outermost, then the arguments, and only then checks the indexes
+against the lists and makes the change. A struct's named values are evaluated in the order they
+are written. The builtin methods, such as `len`, `append`, `split`, and an option's
 `unwrap`, are documented in [Builtins](builtins.md#methods). A `.` right after an int starts a method call, so `1.` is not a
 float; write `1.0`.
 
@@ -225,6 +233,20 @@ A pattern is a variant with a pattern for each of its values, such as `Shape.Rec
 `some(Shape.Circle(r))`, a name, which matches any value and binds it, or `_`, which matches any
 value and binds nothing. `some(p)` and `none` are the patterns of an option. The cases must cover
 every value. See [Types](types.md#enums).
+
+## Structs
+
+A struct lists its fields, one per line, each with its type:
+
+```stone
+struct Point;
+    x: float
+    y: float
+```
+
+`Point(x=1.0, y=2.0)` makes a value of it, naming a value for every field once, in any order.
+`p.x` reads a field, and `p.x = 3.0`, `p.x += 1.0`, and `ps[i].y = 0.0` change one, as long as
+the struct is stored in a variable. See [Types](types.md#structs).
 
 ## Slices
 

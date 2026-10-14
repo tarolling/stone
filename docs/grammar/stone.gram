@@ -89,6 +89,7 @@ simple_stmt:
 compound_stmt:
     | function_def
     | enum_def
+    | struct_def
     | match_stmt
     | if_stmt
     | for_stmt
@@ -105,7 +106,7 @@ aug_assignment:
     | single_target augassign expressions
 
 single_target:
-    | t_primary '[' slices ']' !t_lookahead
+    | single_subscript_attribute_target
     | NAME
 
 augassign:
@@ -147,8 +148,8 @@ param:
 # Types
 # -----
 
-# a name is int, float, bool, or str, or else an enum, which the checker looks up, or
-# 'option' '[' type ']'; 'none' is not a type
+# a name is int, float, bool, or str, or else a struct or an enum, which the checker looks up,
+# or 'option' '[' type ']'; 'none' is not a type
 type:
     | 'list' '[' type ']'
     | 'tuple' '[' type (',' type)+ [','] ']'
@@ -162,6 +163,15 @@ enum_def:
 
 variant:
     | NAME ['(' ','.type+ [','] ')'] NEWLINE
+
+# Struct definitions
+# ------------------
+
+struct_def:
+    | ['pub'] 'struct' NAME ';' NEWLINE INDENT field+ DEDENT
+
+field:
+    | NAME ':' type NEWLINE
 
 # Match statement
 # ---------------
@@ -313,8 +323,12 @@ list:
 arguments:
     | args [','] &')' 
 
+# named values come last, and only a struct takes them, as in `Point(x=1.0, y=2.0)`
 args:
-    | ','.expression+
+    | ','.(kwarg | expression)+
+
+kwarg:
+    | NAME '=' expression
 
 
 # ASSIGNMENT TARGETS
@@ -331,6 +345,7 @@ star_target:
     | target_with_star_atom
 
 target_with_star_atom:
+    | t_primary '.' NAME !t_lookahead 
     | t_primary '[' slices ']' !t_lookahead 
     | star_atom
 

@@ -1,0 +1,17 @@
+// named values run in the order they are written, whatever the order of the fields
+
+struct Trio;
+    a: int
+    b: int
+    c: int
+
+fn note(n: int) -> int;
+    print("value", n)
+    ret n
+
+t = Trio(c=note(3), a=note(1), b=note(2))
+print(t)
+ts = [t]
+ts[note(0)].b = note(20)
+ts[note(0)].c += note(30)
+print(ts)

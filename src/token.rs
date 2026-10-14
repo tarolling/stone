@@ -43,7 +43,7 @@ impl Token {
 }
 
 /// Words that are lexed as keywords instead of names, such as `fn` and `ret`.
-pub static RESERVED_KEYWORDS: [&str; 22] = [
+pub static RESERVED_KEYWORDS: [&str; 23] = [
     "and", "as", "break", "case", "cont", "elif", "else", "enum", "false", "fn", "for", "if", "in",
-    "match", "none", "not", "or", "pub", "ret", "true", "use", "while",
+    "match", "none", "not", "or", "pub", "ret", "struct", "true", "use", "while",
 ];

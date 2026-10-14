@@ -2411,3 +2411,305 @@ fn a_match_whose_cases_all_return_returns() {
     let source = "fn f(x: option[int]) -> int;\n    match x;\n        case some(n);\n            ret n\n        case none;\n            ret 0\n";
     assert_eq!(errors(source), []);
 }
+
+const POINT: &str = "struct Point;\n    x: float\n    y: float\n";
+
+#[test]
+fn structs_are_made_from_named_values_in_any_order() {
+    let source = format!("{POINT}p = Point(y=2.0, x=1.0)\na = p.x\n");
+    assert_eq!(type_of_symbol(&source, "p"), "Point");
+    assert_eq!(type_of_symbol(&source, "a"), "float");
+    let source = format!("{POINT}fn f(p: Point) -> list[Point];\n    ret [p]\n");
+    assert_eq!(type_of_symbol(&source, "f"), "fn(Point) -> list[Point]");
+}
+
+#[test]
+fn struct_values_are_checked() {
+    assert_error(
+        &format!("{POINT}p = Point(1.0, 2.0)\n"),
+        "a struct's values are named, as in 'Point(x=..., y=...)'",
+        4,
+        5,
+    );
+    assert_error(
+        &format!("{POINT}p = Point(x=1.0, y=2.0, z=3.0)\n"),
+        "'Point' has no field 'z'",
+        4,
+        25,
+    );
+    assert_error(
+        &format!("{POINT}p = Point(x=1.0, x=2.0, y=0.0)\n"),
+        "field 'x' is given more than once",
+        4,
+        18,
+    );
+    assert_error(
+        &format!("{POINT}p = Point(x=1.0)\n"),
+        "missing field 'y' for 'Point'",
+        4,
+        5,
+    );
+    assert_error(
+        "struct T;\n    a: int\n    b: int\n    c: int\nt = T(b=1)\n",
+        "missing fields 'a' and 'c' for 'T'",
+        5,
+        5,
+    );
+    assert_error(
+        &format!("{POINT}p = Point(x=1, y=2.0)\n"),
+        "expected float, found int",
+        4,
+        13,
+    );
+    assert_error(
+        "fn f(a: int) -> int;\n    ret a\nprint(f(a=1))\n",
+        "only a struct is made with named values; pass this value without its name",
+        3,
+        9,
+    );
+    assert_error(
+        "xs = [1]\nxs.append(x=1)\n",
+        "only a struct is made with named values; pass this value without its name",
+        2,
+        11,
+    );
+    assert_error(
+        &format!("{POINT}q = Point\n"),
+        "'Point' is a struct, so a value of it is made with a call, as in 'Point(x=..., y=...)'",
+        4,
+        5,
+    );
+}
+
+#[test]
+fn struct_definitions_are_checked() {
+    assert_error(
+        "struct A;\n    x: int\nstruct A;\n    y: int\n",
+        "struct 'A' is already defined",
+        3,
+        8,
+    );
+    assert_error(
+        "struct A;\n    x: int\n    x: str\n",
+        "'A' already has a field 'x'",
+        3,
+        5,
+    );
+    assert_error(
+        "struct list;\n    x: int\n",
+        "cannot redefine builtin 'list'",
+        1,
+        8,
+    );
+    assert_error(
+        "struct A;\n    x: Missing\n",
+        "there is no type 'Missing'",
+        2,
+        8,
+    );
+    assert_error(
+        "if true;\n    struct A;\n        x: int\n",
+        "structs can only be defined at the top level",
+        2,
+        12,
+    );
+    assert_error(
+        "struct A;\n    x: int\nfn A();\n    ret\n",
+        "'A' is already defined as a struct",
+        3,
+        4,
+    );
+    assert_error(
+        "enum A;\n    X\nstruct A;\n    x: int\n",
+        "'A' is already defined as an enum",
+        3,
+        8,
+    );
+    assert_error(
+        "struct A;\n    x: int\nA = 1\n",
+        "cannot assign to struct 'A'",
+        3,
+        1,
+    );
+}
+
+#[test]
+fn a_struct_holds_itself_only_through_a_list_or_an_enum() {
+    assert_error(
+        "struct Node;\n    value: int\n    next: Node\n",
+        "'Node' holds itself through 'next', so a value of it would never end; hold it in a \
+         list or an option, as in 'next: option[Node]'",
+        3,
+        5,
+    );
+    // through a tuple and another struct, reported once
+    assert_error(
+        "struct A;\n    b: tuple[int, B]\nstruct B;\n    a: A\n",
+        "'A' holds itself through 'b', so a value of it would never end; hold it in a list or \
+         an option, as in 'b: option[A]'",
+        2,
+        5,
+    );
+    assert_eq!(
+        errors(
+            "struct Node;\n    kids: list[Node]\n    next: option[Node]\n\
+             n = Node(kids=[], next=none)\nm = Node(kids=[n], next=some(n))\nprint(m)\n"
+        ),
+        []
+    );
+}
+
+#[test]
+fn fields_are_read_and_changed() {
+    let p = format!("{POINT}p = Point(x=1.0, y=2.0)\n");
+    assert_eq!(
+        errors(&format!(
+            "{p}p.x = 3.0\np.y += p.x\nps = [p]\nps[0].x = 2.0\nps[0].y *= 2.0\nprint(p, ps)\n"
+        )),
+        []
+    );
+    assert_error(&format!("{p}p.x = 3\n"), "expected float, found int", 5, 7);
+    assert_error(
+        &format!("{p}print(p.z)\n"),
+        "'Point' has no field 'z'",
+        5,
+        9,
+    );
+    assert_error("n = 1\nprint(n.x)\n", "int has no field 'x'", 2, 9);
+    assert_error(
+        &format!("{p}print(p.x())\n"),
+        "there is no method 'x'; 'x' is a field of 'Point', so read it without parentheses",
+        5,
+        9,
+    );
+    assert_error(&format!("{p}p.x += 1\n"), "expected float, found int", 5, 8);
+}
+
+#[test]
+fn a_change_reaches_a_field_of_a_variable() {
+    let bag = "struct Bag;\n    items: list[int]\n    name: str\n";
+    assert_eq!(
+        errors(&format!(
+            "{bag}b = Bag(items=[], name=\"b\")\nb.items.append(1)\nb.items[0] = 2\n\
+             bs = [b]\nbs[0].items.append(3)\nbs[0].name = \"c\"\nprint(bs)\n"
+        )),
+        []
+    );
+    assert_error(
+        &format!("{POINT}fn f() -> Point;\n    ret Point(x=1.0, y=2.0)\nf().x = 1.0\n"),
+        "this value is not stored in a variable, so changing it has no effect",
+        6,
+        1,
+    );
+    assert_error(
+        &format!("{POINT}p = Point(x=1.0, y=2.0)\nfn f();\n    p.x = 1.0\n"),
+        "a function cannot change the global 'p'; pass it as an argument and return the changed \
+         value",
+        6,
+        5,
+    );
+    assert_error(
+        &format!("{POINT}t = (Point(x=1.0, y=2.0), 1)\nt[0].x = 2.0\n"),
+        "a tuple cannot be changed; build a new one, as in 't = (v, t[1])'",
+        5,
+        1,
+    );
+    assert_error(
+        &format!("{bag}b = Bag(items=[], name=\"b\")\nb.items[:1].append(1)\n"),
+        "a slice is a new list, so changing it has no effect",
+        5,
+        1,
+    );
+}
+
+#[test]
+fn a_change_to_a_fields_parameter_is_lost_unless_it_is_read() {
+    let source = format!("{POINT}fn f(p: Point);\n    p.x = 1.0\n");
+    let analysis = analyze_source(&source);
+    let warnings: Vec<(String, usize, usize)> = analysis
+        .diagnostics
+        .into_iter()
+        .map(|d| (d.message, d.span.start.line, d.span.start.col))
+        .collect();
+    assert_eq!(
+        warnings,
+        [(
+            "changes to 'p' are lost when 'f' returns, since parameters are copies; return it and \
+             assign the result where 'f' is called"
+                .to_string(),
+            5,
+            5
+        )]
+    );
+    assert_eq!(
+        errors(&format!(
+            "{POINT}fn f(p: Point) -> Point;\n    p.x = 1.0\n    ret p\n"
+        )),
+        []
+    );
+    let mut changed = HashSet::new();
+    let module = parse("p.x = 1.0\nq.items.append(1)\nr[0].y += 1\n").unwrap();
+    let Mod::Module { body } = &module;
+    collect_changed(body, &mut changed);
+    let mut changed: Vec<String> = changed.into_iter().collect();
+    changed.sort();
+    assert_eq!(changed, ["p", "q", "r"]);
+}
+
+#[test]
+fn structs_are_not_numbers_strings_or_comparable() {
+    let p = format!("{POINT}p = Point(x=1.0, y=2.0)\n");
+    assert_error(
+        &format!("{p}print(p + 1)\n"),
+        "'+' needs int, float, or str operands, found Point",
+        5,
+        7,
+    );
+    assert_error(
+        &format!("{p}print(p == p)\n"),
+        "'==' and '!=' cannot compare Point; compare their fields instead",
+        5,
+        7,
+    );
+    assert_error(
+        &format!("{p}print(str(p))\n"),
+        "'str' needs an int, float, bool, or str, found Point",
+        5,
+        11,
+    );
+    assert_error(
+        &format!("{p}if p;\n    print(1)\n"),
+        "a condition must be bool, found Point",
+        5,
+        4,
+    );
+}
+
+#[test]
+fn a_list_element_of_a_struct_holds_at_most_32_values() {
+    let wide = vec!["int"; 33].join(", ");
+    assert_error(
+        &format!("struct W;\n    t: tuple[{wide}]\nfn f(ws: list[W]);\n    print(ws)\n"),
+        "a list element can hold at most 32 values, but W holds 33",
+        3,
+        10,
+    );
+}
+
+#[test]
+fn a_function_reads_a_field_of_a_global_assigned_after_it() {
+    let source = format!("{POINT}fn f() -> float;\n    ret p.x\np = Point(x=1.0, y=2.0)\n");
+    assert_eq!(errors(&source), []);
+    assert_error(
+        &format!("{POINT}fn f() -> str;\n    ret p.x\np = Point(x=1.0, y=2.0)\n"),
+        "expected float, found str",
+        5,
+        11,
+    );
+    assert_error(
+        &format!("{POINT}fn f() -> float;\n    ret p.x\np = 1\n"),
+        "int has no field 'x'",
+        5,
+        11,
+    );
+}

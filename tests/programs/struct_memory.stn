@@ -1,0 +1,105 @@
+// every string, list, and enum value a struct holds is freed exactly once
+
+struct Inner;
+    tags: list[str]
+    note: str
+
+struct Item;
+    name: str
+    inner: Inner
+    count: int
+    maybe: option[str]
+
+fn make(name: str) -> Item;
+    ret Item(name=name, inner=Inner(tags=[name + "-a"], note="n"), count=1, maybe=some(name))
+
+fn add_tag(tags: list[str], tag: str) -> list[str];
+    tags.append(tag)
+    ret tags
+
+fn renamed(item: Item, name: str) -> Item;
+    item.name = name
+    item.inner.tags.append(name)
+    ret item
+
+fn name_of(item: Item) -> str;
+    ret item.name
+
+fn tags_of(item: Item) -> list[str];
+    ret item.inner.tags
+
+// replacing counted fields of a local
+a = make("a")
+a.name = "a2"
+a.inner.note = a.inner.note + "!"
+a.inner = Inner(tags=["fresh"], note="new")
+a.maybe = none
+a.maybe = some("back")
+print(a)
+
+// a field moves out at its variable's last use
+b = make("b")
+tags = b.inner.tags
+print(tags)
+
+// a field moves into a call and back
+c = make("c")
+c.inner.tags = add_tag(c.inner.tags, "more")
+c = renamed(c, "c2")
+print(c, name_of(c), tags_of(c))
+
+// a field of a temporary
+print(make("t").inner.note, make("u").name)
+
+// lists of structs: replace, change in place, pop, insert, slice
+items = [make("x"), make("y")]
+items[0] = make("z")
+items[1].name = "y2"
+items[1].inner.tags.append("y-b")
+items[1].inner.tags[0] = "y-0"
+items[0].name += "!"
+items.append(a)
+items.insert(1, b)
+popped = items.pop()
+middle = items[1:2]
+copied = items
+copied[0].inner.note = "copied"
+print(items)
+print(popped.name, middle, copied[0].inner.note, items[0].inner.note)
+
+// matching an enum that holds a struct
+enum Box;
+    Full(Item)
+    Empty
+
+boxes = [Box.Full(make("m")), Box.Empty]
+for box in boxes;
+    match box;
+        case Box.Full(item);
+            item.inner.tags.append("seen")
+            print(item.inner.tags)
+        case Box.Empty;
+            print("empty")
+
+// leaving loops early releases what they hold
+fn find(items: list[Item], name: str) -> option[Item];
+    for item in items;
+        if item.name == name;
+            ret some(item)
+    ret none
+
+print(find(items, "y2").is_some(), find(items, "nope").is_none())
+for item in items;
+    if item.count == 1;
+        cont
+    break
+
+// a global struct changes only at the top level, and functions read it
+g = make("g")
+fn global_name() -> str;
+    ret g.name + "/" + g.inner.note
+g.inner.tags.append("g-b")
+g.inner.note = "changed"
+print(global_name(), g.inner.tags)
+g = make("g2")
+print(g.name)

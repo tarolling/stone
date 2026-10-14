@@ -1,0 +1,4 @@
+walk 5.0
+Path(name='walk', points=[Point(x=0.0, y=0.0), Point(x=3.0, y=4.0)])
+Path(name='back', points=[Point(x=0.0, y=0.0), Point(x=4.0, y=4.0), Point(x=0.0, y=0.0)])
+back 11.313708498984761

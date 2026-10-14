@@ -1,0 +1,9 @@
+value 3
+value 1
+value 2
+Trio(a=1, b=2, c=3)
+value 20
+value 0
+value 0
+value 30
+[Trio(a=1, b=20, c=33)]

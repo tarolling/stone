@@ -920,3 +920,88 @@ fn completion_after_an_enum_offers_its_variants() {
         ]
     );
 }
+
+const STRUCTS: &str = "\
+struct Point;
+    x: float
+    y: float
+p = Point(x=1.0, y=2.0)
+p.x += p.y
+print(p.x)
+";
+
+#[test]
+fn hover_shows_a_struct_with_its_fields() {
+    let doc = doc(STRUCTS);
+    assert_eq!(
+        hover_text(&doc, at(1, 8)).unwrap(),
+        "```stone\nstruct Point\n    x: float\n    y: float\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(4, 5)).unwrap(),
+        "```stone\nstruct Point\n    x: float\n    y: float\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(5, 3)).unwrap(),
+        "```stone\nPoint.x: float\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(4, 18)).unwrap(),
+        "```stone\nPoint.y: float\n```"
+    );
+}
+
+#[test]
+fn a_field_leads_to_its_definition_and_renames_everywhere() {
+    let doc = doc(STRUCTS);
+    let location = definition(&doc, &uri(), at(6, 9), None).unwrap();
+    assert_eq!(location.range.start, Position::new(1, 4));
+    let edit = rename(&doc, &uri(), at(2, 5), "left").unwrap();
+    let edits = &edit.changes.unwrap()[&uri()];
+    let mut starts: Vec<Position> = edits.iter().map(|e| e.range.start).collect();
+    starts.sort_by_key(|p| (p.line, p.character));
+    assert_eq!(
+        starts,
+        [
+            Position::new(1, 4),
+            Position::new(3, 10),
+            Position::new(4, 2),
+            Position::new(5, 8)
+        ]
+    );
+}
+
+#[test]
+fn a_struct_is_outlined_with_its_fields() {
+    let symbols = document_symbols(&doc(STRUCTS));
+    let point = symbols.iter().find(|s| s.name == "Point").unwrap();
+    assert_eq!(point.kind, SymbolKind::STRUCT);
+    let children: Vec<(&str, SymbolKind)> = point
+        .children
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|c| (c.name.as_str(), c.kind))
+        .collect();
+    assert_eq!(
+        children,
+        [("x", SymbolKind::FIELD), ("y", SymbolKind::FIELD)]
+    );
+}
+
+#[test]
+fn completion_after_a_struct_value_offers_its_fields() {
+    let doc = doc(&format!("{STRUCTS}q = p.\n"));
+    let labels: Vec<(String, Option<CompletionItemKind>)> =
+        completion(&doc, at(7, 7), &MapSources::default())
+            .into_iter()
+            .map(|item| (item.label, item.kind))
+            .collect();
+    assert_eq!(
+        labels,
+        [
+            ("x".to_string(), Some(CompletionItemKind::FIELD)),
+            ("y".to_string(), Some(CompletionItemKind::FIELD))
+        ]
+    );
+}

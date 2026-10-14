@@ -1,0 +1,14 @@
+pub struct Point;
+    x: int
+    y: int
+
+struct Secret;
+    code: int
+
+pub fn shift(p: Point, dx: int) -> Point;
+    p.x += dx
+    ret p
+
+pub fn origin() -> Point;
+    s = Secret(code=0)
+    ret Point(x=s.code, y=s.code)

@@ -1,0 +1,109 @@
+// structs: named fields, made from named values in any order
+struct Point;
+    x: float
+    y: float
+
+struct Line;
+    start: Point
+    end: Point
+    label: str
+
+struct Bag;
+    name: str
+    items: list[int]
+    pair: tuple[int, str]
+
+enum Shape;
+    Dot(Point)
+    Segment(Line)
+    Nothing
+
+fn length(line: Line) -> float;
+    dx = line.end.x - line.start.x
+    dy = line.end.y - line.start.y
+    ret dx * dx + dy * dy
+
+fn moved(p: Point, dx: float) -> Point;
+    p.x += dx
+    ret p
+
+fn origin() -> Point;
+    ret Point(y=0.0, x=0.0)
+
+fn first_item(b: Bag) -> int;
+    ret b.items[0]
+
+// printing, with strings quoted inside
+p = Point(y=2.0, x=1.0)
+print(p)
+print(p.x, p.y)
+line = Line(label="diag", end=Point(x=3.0, y=4.0), start=origin())
+print(line)
+print(line.end.y, line.label, length(line))
+
+// a field changes in place, and copies stay apart
+q = p
+q.x = 10.0
+q.y += 0.5
+print(p, q)
+line.start.x = -1.0
+line.end = moved(line.end, 1.0)
+print(line)
+
+// fields of other types
+b = Bag(name="bag", items=[1, 2], pair=(7, "seven"))
+b.items.append(3)
+b.items[0] = 9
+b.name += "!"
+b.items += [10, 20, 30]
+c = b
+c.items.append(4)
+print(b)
+print(c, first_item(c), b.pair[1])
+
+// lists of structs
+ps = [Point(x=1.0, y=1.0), Point(x=2.0, y=2.0)]
+ps.append(p)
+ps[0].x = 5.0
+ps[1].y *= 3.0
+ps[-1].x -= 1.0
+print(ps, ps[1].y, ps.len())
+total = 0.0
+for point in ps;
+    total += point.x
+    point.x = 0.0
+print(total, ps[0].x)
+last = ps.pop()
+ps.insert(0, last)
+print(ps[0], ps[1:])
+
+bags = [b]
+bags[0].items.append(5)
+bags[0].pair = (8, "eight")
+print(bags[0].items, b.items.len(), bags[0].pair)
+
+// structs in tuples, enums, and options
+t = (p, 1)
+print(t, t[0].y)
+shapes = [Shape.Dot(p), Shape.Segment(line), Shape.Nothing]
+for s in shapes;
+    match s;
+        case Shape.Dot(d);
+            d.x = 100.0
+            print("dot", d)
+        case Shape.Segment(l);
+            print("segment", l.label)
+        case Shape.Nothing;
+            print("nothing")
+print(shapes[0])
+maybe = some(p)
+print(maybe, maybe.unwrap().x)
+none_point = none
+none_point = some(origin())
+print(none_point)
+
+// a global read by a function defined before it is assigned
+fn far() -> float;
+    ret corner.x + corner.y
+corner = Point(x=5.0, y=6.0)
+print(far())

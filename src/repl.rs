@@ -153,9 +153,9 @@ fn split(entry: &str) -> Vec<Chunk> {
                 .map(|line| format!("{line}\n"))
                 .collect();
             let defines = match &stmt.kind {
-                StmtKind::FunctionDef { name, .. } | StmtKind::EnumDef { name, .. } => {
-                    Some(name.clone())
-                }
+                StmtKind::FunctionDef { name, .. }
+                | StmtKind::EnumDef { name, .. }
+                | StmtKind::StructDef { name, .. } => Some(name.clone()),
                 _ => None,
             };
             Chunk { text, defines }
@@ -364,6 +364,18 @@ mod tests {
     fn an_enum_defined_again_replaces_the_old_one() {
         let input = "enum Coin;\n    Heads\n\nenum Coin;\n    Edge\n\nCoin.Edge\n";
         assert_eq!(session(input), ("Coin.Edge\n".into(), "".into()));
+    }
+
+    #[test]
+    fn struct_values_echo_and_change() {
+        let input = "struct P;\n    x: int\n    s: str\n\np = P(s=\"a\", x=1)\np.x += 2\np\np.s\n";
+        assert_eq!(session(input), ("P(x=3, s='a')\n'a'\n".into(), "".into()));
+    }
+
+    #[test]
+    fn a_struct_defined_again_replaces_the_old_one() {
+        let input = "struct P;\n    x: int\n\nstruct P;\n    y: str\n\nP(y=\"b\")\n";
+        assert_eq!(session(input), ("P(y='b')\n".into(), "".into()));
     }
 
     #[test]

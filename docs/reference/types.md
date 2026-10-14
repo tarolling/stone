@@ -13,6 +13,7 @@ runs, reporting every place they conflict.
 | `bool` | `true` and `false` |
 | `str` | immutable byte strings, ordered byte by byte |
 | `list[T]` | growable lists of `T`, which are values: assigning or passing one copies it |
+| `map[K, V]` | maps from keys of type `K`, which are `int`, `str`, or `bool`, to values of type `V`, which are values like lists |
 | `tuple[T1, T2, ...]` | two or more values of fixed types, such as `(1, "a")`, which never change |
 | `option[T]` | `some(x)`, which holds a `T`, or `none`, which holds nothing |
 | structs | the named, typed fields a `struct` lists, such as `Point(x=1.0, y=2.0)`, which are values |
@@ -29,7 +30,8 @@ fn scale(xs: list[float], k: float) -> list[float];
 ```
 
 `int`, `float`, `bool`, and `str` are written as their names, a list as `list[T]`, so a grid
-of floats is `list[list[float]]`, a tuple as `tuple[` and the type of each value, so a name and a
+of floats is `list[list[float]]`, a map as `map[K, V]`, so word counts are `map[str, int]`, a
+tuple as `tuple[` and the type of each value, so a name and a
 score is `tuple[str, int]`, an option as `option[T]`, and a struct or an enum by its name, such
 as `Point` or `Shape`, or `shapes.Shape` for one of the module `shapes`. A function without `->` returns no value: a call
 to it can only be a statement of its own, so `x = f()` and `print(f())` are errors, and returning
@@ -174,6 +176,37 @@ fields of a list's structs side by side in the list, so changing a field of a st
 variable is as cheap as assigning a variable. An element of a list or a variant can hold at most
 32 values, counting each field of its structs. A value can print at most 10,000 struct and enum
 values deep.
+
+## Maps
+
+A map holds a value for each of its keys, like a `dict` in Python or a `HashMap` in Rust:
+
+```stone
+ages = {"ann": 31, "bob": 27}
+ages["cy"] = 45      // adds an entry
+ages["ann"] = 32     // changes one, which keeps its place
+print(ages["bob"], ages.len(), ages.contains("dee"))   // 27 3 false
+print(ages)          // {'ann': 32, 'bob': 27, 'cy': 45}
+```
+
+Keys are `int`, `str`, or `bool`, all of one type, and values can be any type, all of one type
+too. `{}` is an empty map, whose types come from how it is used. A map keeps its entries in the
+order their keys were first added, which is the order it prints in, and a literal that names a
+key twice keeps the later value, as in Python. `m[k]` stops the program with
+`key not found: 'dee'` if `m` has no entry for `k`, so check with `m.contains(k)` first where it
+might not.
+
+Like lists, maps are values: `b = a` and passing `a` to a function copy it, so a function
+changes its caller's map only by returning it, as in `counts = add(counts, word)`, which changes
+it in place. A change must be to a map in a variable, and for now it can only be an assignment,
+`m[k] = v`: `m[k] += 1` and `m[k].append(x)` are errors, so write `m[k] = m[k] + 1`. A map
+cannot be compared with `==`, converted with `str`, iterated, or used in arithmetic or as a
+condition.
+
+An entry is stored as a key and its value's values side by side, as a list stores tuples, in
+insertion order, with a hash table to find each key, so reading and setting an entry takes
+about the same time however large the map is. An entry can hold at most 32 values, counting its
+key and each field of its value's tuples and structs.
 
 ## Enums
 

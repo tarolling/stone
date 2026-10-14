@@ -83,7 +83,7 @@ pub static BUILTINS: [&str; 9] = [
 ];
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 15] = [
+pub static METHODS: [&str; 16] = [
     "len",
     "append",
     "pop",
@@ -99,6 +99,7 @@ pub static METHODS: [&str; 15] = [
     "is_none",
     "unwrap",
     "unwrap_or",
+    "contains",
 ];
 
 /// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
@@ -180,11 +181,12 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 15] = [
+pub static METHOD_DOCS: [BuiltinDoc; 16] = [
     BuiltinDoc {
         name: "len",
-        signature: "(str | list[T]).len() -> int",
-        description: "Returns the number of bytes in a string or elements in a list.",
+        signature: "(str | list[T] | map[K, V]).len() -> int",
+        description: "Returns the number of bytes in a string, elements in a list, or entries \
+                      in a map.",
     },
     BuiltinDoc {
         name: "append",
@@ -275,6 +277,11 @@ pub static METHOD_DOCS: [BuiltinDoc; 15] = [
         signature: "option[T].unwrap_or(default: T) -> T",
         description: "Returns the value the option holds, or `default` if it is `none`, so \
                       `none.unwrap_or(0)` is 0.",
+    },
+    BuiltinDoc {
+        name: "contains",
+        signature: "map[K, V].contains(key: K) -> bool",
+        description: "Returns whether the map has an entry for `key`.",
     },
 ];
 

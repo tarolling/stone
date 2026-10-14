@@ -159,6 +159,12 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
         | ExprKind::Tuple { elts: values, .. } => {
             values.iter().for_each(|value| expr_names(value, out))
         }
+        ExprKind::Dict { keys, values } => {
+            for (key, value) in keys.iter().zip(values) {
+                expr_names(key, out);
+                expr_names(value, out);
+            }
+        }
         ExprKind::Compare {
             left, comparators, ..
         } => {

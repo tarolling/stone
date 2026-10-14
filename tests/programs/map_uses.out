@@ -1,0 +1,6 @@
+20
+3 Inventory(name='shop', stock={'apple': 3})
+{'the': 3, 'cat': 1, 'and': 2, 'hat': 1, 'bat': 1}
+{'1a': ['x', 'y']} y
+z
+{}

@@ -146,7 +146,8 @@ impl RcKind {
     pub fn of(ty: &Type) -> Option<RcKind> {
         match ty {
             Type::Str => Some(RcKind::Str),
-            Type::List(_) => Some(RcKind::List),
+            // a map is a list of its entries
+            Type::List(_) | Type::Map(..) => Some(RcKind::List),
             Type::Enum { .. } => Some(RcKind::Enum),
             _ => None,
         }

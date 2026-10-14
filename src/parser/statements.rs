@@ -289,6 +289,27 @@ impl Parser {
                     span: self.span_from(mark),
                 }));
             }
+        } else if self.peek().r#type == TokenType::Name("map".to_string()) {
+            // 'map' '[' type ',' type [','] ']'
+            self.pos += 1;
+            if self.expect(TokenType::LBracket).is_some()
+                && let Some(mut elts) = self.parse_types()
+            {
+                if elts.len() != 2 && self.peek().r#type == TokenType::RBracket {
+                    let span = self.tokens[mark].span.to(self.peek().span);
+                    self.hint(
+                        span,
+                        "a map type needs a key type and a value type, as in 'map[str, int]'",
+                    );
+                } else if self.expect(TokenType::RBracket).is_some() {
+                    let value = elts.pop().unwrap();
+                    let key = elts.pop().unwrap();
+                    return Ok(Box::new(TypeExpr {
+                        kind: TypeExprKind::Map(Box::new(key), Box::new(value)),
+                        span: self.span_from(mark),
+                    }));
+                }
+            }
         } else if self.peek().r#type == TokenType::Name("tuple".to_string()) {
             // 'tuple' '[' type (',' type)+ [','] ']'
             self.pos += 1;

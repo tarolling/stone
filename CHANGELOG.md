@@ -10,8 +10,15 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-10-13
+
 ### Added
 
+- Maps: `map[K, V]` with `int`, `str`, or `bool` keys, written `{"a": 1, "b": 2}`, or `{}` for an
+  empty one. `m[k]` reads an entry, failing with `key not found: 'k'` if there is none,
+  `m[k] = v` adds or changes one, `m.len()` counts them, and `m.contains(k)` tests for a key.
+  Maps keep their entries in insertion order, print like Python's dicts, and are values like
+  lists. Compiled maps are lists of entries with a hash table beside them.
 - Structs, like Rust's: `struct Point;` lists its fields, one per line, each with its type, as in
   `x: float`. `Point(x=1.0, y=2.0)` makes a value, naming a value for every field once, in any
   order, and the values run in the order they are written. `p.x` reads a field, and `p.x = v`,

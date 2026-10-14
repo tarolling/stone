@@ -37,6 +37,7 @@ module stone
          | Subscript(expr value, expr slice, expr_context ctx)
          | Name(identifier id, expr_context ctx)
          | List(expr* elts, expr_context ctx)
+         | Dict(expr* keys, expr* values)
          | Tuple(expr* elts, expr_context ctx)
 
          -- can appear only in Subscript
@@ -70,7 +71,8 @@ module stone
             -- path names the variant, such as Shape.Circle, some, or none
             | MatchVariant(identifier* path, pattern* fields)
 
-    type = Int | Float | Bool | Str | List(type elem) | Tuple(type* elts)
+    type = Int | Float | Bool | Str | List(type elem) | Map(type key, type value)
+         | Tuple(type* elts)
          -- a struct, such as Point, an enum, such as Shape, or option[T]
          | Named(identifier name, type* args)
 }

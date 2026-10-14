@@ -35,6 +35,7 @@ file by the path it was built from.
 | `integer overflow in division` | the smallest int divided by `-1`, which has no int result. `%` by `-1` is always `0` |
 | `negative exponent` | `**` with an int base and a negative exponent, which has no int result |
 | `list index out of range (index 5, length 2)` | an index at or past the length, or a negative index before the start, including `insert` at an index below `-len` or above `len`. It gives the index as written and the list's length |
+| `key not found: 'pear'` | `m[k]` for a key `m` has no entry for. It gives the key, quoted if it is a string |
 | `pop from empty list` | `pop()` or `pop(i)` on an empty list |
 | `pop index out of range` | `pop(i)` with `i` at or past the length, or before the start |
 | `string index out of range (index -4, length 3)` | a string index at or past the length, or a negative index before the start. It gives the index as written and the string's length in bytes |

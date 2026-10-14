@@ -452,6 +452,14 @@ impl Lexer {
                 self.advance();
                 TokenType::RBracket
             }
+            Some('{') => {
+                self.advance();
+                TokenType::LBrace
+            }
+            Some('}') => {
+                self.advance();
+                TokenType::RBrace
+            }
             Some('.') => {
                 self.advance();
                 TokenType::Dot
@@ -902,6 +910,22 @@ testing(1, 2, 3)"#;
                 TokenType::RBracket,
                 TokenType::Dot,
                 name("b"),
+                TokenType::Newline,
+                TokenType::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn braces_are_tokens() {
+        assert_eq!(
+            types_of("{1: 2}\n"),
+            [
+                TokenType::LBrace,
+                TokenType::Number(1),
+                TokenType::Colon,
+                TokenType::Number(2),
+                TokenType::RBrace,
                 TokenType::Newline,
                 TokenType::Eof
             ]

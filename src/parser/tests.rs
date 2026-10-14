@@ -179,6 +179,9 @@ fn strip_pattern(pattern: Pattern) -> Pattern {
 fn strip_type(ty: TypeExpr) -> TypeExpr {
     let kind = match ty.kind {
         TypeExprKind::List(elem) => TypeExprKind::List(Box::new(strip_type(*elem))),
+        TypeExprKind::Map(key, value) => {
+            TypeExprKind::Map(Box::new(strip_type(*key)), Box::new(strip_type(*value)))
+        }
         TypeExprKind::Tuple(elts) => {
             TypeExprKind::Tuple(elts.into_iter().map(strip_type).collect())
         }
@@ -249,6 +252,10 @@ fn strip_expr(expr: Expr) -> Expr {
         ExprKind::List { elts, ctx } => ExprKind::List {
             elts: strip_all(elts),
             ctx,
+        },
+        ExprKind::Dict { keys, values } => ExprKind::Dict {
+            keys: strip_all(keys),
+            values: strip_all(values),
         },
         ExprKind::Tuple { elts, ctx } => ExprKind::Tuple {
             elts: strip_all(elts),
@@ -1333,6 +1340,68 @@ fn list_literals_parse() {
     assert_eq!(
         expr_of("[[1], x]\n"),
         list(vec![list(vec![*int(1)]), *name("x")])
+    );
+}
+
+#[test]
+fn dict_literals_parse() {
+    let dict = |pairs: Vec<(Expr, Expr)>| -> Expr {
+        let (keys, values) = pairs.into_iter().unzip();
+        ExprKind::Dict { keys, values }.into()
+    };
+    assert_eq!(expr_of("{}\n"), dict(vec![]));
+    assert_eq!(
+        expr_of("{1: x, 2: [3],}\n"),
+        dict(vec![
+            (*int(1), *name("x")),
+            (
+                *int(2),
+                ExprKind::List {
+                    elts: vec![*int(3)],
+                    ctx: ExprContext::Load,
+                }
+                .into()
+            ),
+        ])
+    );
+    assert_eq!(
+        expr_of("{1: {2: 3}}\n"),
+        dict(vec![(*int(1), dict(vec![(*int(2), *int(3))]))])
+    );
+}
+
+#[test]
+fn unclosed_dict_is_an_error() {
+    assert_eq!(
+        error_of("x = {1: 2\n"),
+        ("expected '}', found end of line".to_string(), 1, 10)
+    );
+    assert_eq!(
+        error_of("x = {1, 2}\n"),
+        (
+            "a map entry is a key, ':', and a value, as in '{\"a\": 1}'".to_string(),
+            1,
+            7
+        )
+    );
+}
+
+#[test]
+fn map_types_parse() {
+    assert_eq!(
+        signature_of("fn f(m: map[str, list[int]]) -> map[int, str]; ret\n"),
+        (
+            vec![Some("map[str, list[int]]".to_string())],
+            Some("map[int, str]".to_string())
+        )
+    );
+}
+
+#[test]
+fn a_map_type_needs_two_types() {
+    assert_eq!(
+        error_of("fn f(m: map[int]); ret\n").0,
+        "a map type needs a key type and a value type, as in 'map[str, int]'"
     );
 }
 

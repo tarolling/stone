@@ -606,6 +606,11 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
         r#gen.emit("\tb\t.Lfree_list_wide_loop");
     }
     r#gen.emit(".Lfree_list_storage:");
+    // a map's hash index
+    r#gen.emit("\tldr\tx9, [x19, #40]");
+    r#gen.emit("\tcbz\tx9, .Lfree_list_unindexed");
+    r#gen.emit("\tbl\tstone.mem_free");
+    r#gen.emit(".Lfree_list_unindexed:");
     r#gen.emit("\tldr\tx9, [x19, #16]");
     r#gen.emit("\tbl\tstone.mem_free");
     r#gen.emit("\tsub\tx9, x19, #8");
@@ -1095,10 +1100,11 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx20, x0");
     r#gen.emit("\tmov\tx21, x1");
     r#gen.emit("\tmov\tx22, x2");
-    r#gen.emit("\tmov\tx0, #40");
+    r#gen.emit("\tmov\tx0, #48");
     r#gen.emit("\tbl\tstone.alloc");
     r#gen.emit("\tmov\tx19, x0");
     r#gen.emit("\tstr\tx20, [x19]");
+    r#gen.emit("\tstr\txzr, [x19, #40]");
     r#gen.emit("\tstr\tx21, [x19, #24]");
     r#gen.emit("\tstr\tx22, [x19, #32]");
     // room for at least 4 elements, so the first appends do not reallocate
@@ -1207,6 +1213,188 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tstur\tx16, [x19, #-8]");
     r#gen.emit("\tmov\tx9, x20");
     pop_frame(r#gen, &saved);
+}
+
+/// Emits the map runtime, the port of x64's `map_runtime` with the same layout and contracts:
+///
+/// - `stone.map_find` returns the first slot of the entry of key `x1` in map `x0`, or -1 if there
+///   is none, with `x2` 1 for a string key
+/// - `stone.map_add` adds an entry for key `x1`, which the map does not have, at the end of map
+///   `x0`, retaining a string key, and returns its first slot. The caller fills in its values.
+pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
+    // x19 holds the map, x20 the key, and x21 whether it is a string
+    let saved = ["x19", "x20", "x21", "x22", "x23"];
+    let enter = |r#gen: &mut dyn AssemblyGenerator| {
+        push_frame(r#gen, &saved);
+        r#gen.emit("\tmov\tx19, x0");
+        r#gen.emit("\tmov\tx20, x1");
+        r#gen.emit("\tmov\tx21, x2");
+    };
+    // loads a 64-bit constant in four pieces
+    let constant = |r#gen: &mut dyn AssemblyGenerator, reg: &str, value: u64| {
+        r#gen.emit(&format!("\tmovz\t{reg}, #{:#x}", value & 0xffff));
+        for shift in [16, 32, 48] {
+            r#gen.emit(&format!(
+                "\tmovk\t{reg}, #{:#x}, lsl #{shift}",
+                (value >> shift) & 0xffff
+            ));
+        }
+    };
+
+    r#gen.emit("stone.map_find:");
+    enter(r#gen);
+    r#gen.emit("\tldr\tx9, [x19, #40]");
+    r#gen.emit("\tcbnz\tx9, .Lmap_find_indexed");
+    r#gen.emit("\tbl\t.Lmap_rebuild");
+    r#gen.emit(".Lmap_find_indexed:");
+    r#gen.emit("\tbl\t.Lmap_probe");
+    // an empty slot holds 0, which becomes -1
+    r#gen.emit("\tldr\tx0, [x0]");
+    r#gen.emit("\tsub\tx0, x0, #1");
+    pop_frame(r#gen, &saved);
+
+    // x22 is the first slot of the new entry, and x23 counts the slots appended
+    r#gen.emit("stone.map_add:");
+    enter(r#gen);
+    // a bigger index when one more entry would fill more than half of it: 2 * (len + width)
+    // slots must be at most capacity * width
+    r#gen.emit("\tldr\tx9, [x19, #40]");
+    r#gen.emit("\tcbz\tx9, .Lmap_add_rebuild");
+    r#gen.emit("\tldr\tx10, [x19]");
+    r#gen.emit("\tldr\tx11, [x19, #32]");
+    r#gen.emit("\tadd\tx10, x10, x11");
+    r#gen.emit("\tadd\tx10, x10, x10");
+    r#gen.emit("\tldr\tx16, [x9]");
+    r#gen.emit("\tmul\tx16, x16, x11");
+    r#gen.emit("\tcmp\tx10, x16");
+    r#gen.emit("\tb.le\t.Lmap_add_room");
+    r#gen.emit(".Lmap_add_rebuild:");
+    r#gen.emit("\tbl\t.Lmap_rebuild");
+    r#gen.emit(".Lmap_add_room:");
+    r#gen.emit("\tldr\tx22, [x19]");
+    r#gen.emit("\tldr\tx23, [x19, #32]");
+    r#gen.emit("\tmov\tx1, x20");
+    r#gen.emit(".Lmap_add_slot:");
+    r#gen.emit("\tmov\tx0, x19");
+    r#gen.emit("\tbl\tstone.list_append");
+    r#gen.emit("\tmov\tx1, #0"); // the values are filled in by the caller
+    r#gen.emit("\tsub\tx23, x23, #1");
+    r#gen.emit("\tcbnz\tx23, .Lmap_add_slot");
+    r#gen.emit("\tcbz\tx21, .Lmap_add_key");
+    r#gen.emit("\tldur\tx9, [x20, #-8]");
+    r#gen.emit("\tadd\tx9, x9, #1");
+    r#gen.emit("\tstur\tx9, [x20, #-8]");
+    r#gen.emit(".Lmap_add_key:");
+    r#gen.emit("\tbl\t.Lmap_probe");
+    r#gen.emit("\tadd\tx9, x22, #1");
+    r#gen.emit("\tstr\tx9, [x0]");
+    r#gen.emit("\tmov\tx0, x22");
+    pop_frame(r#gen, &saved);
+
+    // replaces map x19's index with one for its entries and one more, keeping x20 and x21 for its
+    // caller: x22 is the first slot of each entry in turn, and x23 the capacity
+    let kept = ["x20", "x22", "x23"];
+    r#gen.emit(".Lmap_rebuild:");
+    push_frame(r#gen, &kept);
+    r#gen.emit("\tldr\tx9, [x19, #40]");
+    r#gen.emit("\tcbz\tx9, .Lmap_rebuild_size");
+    r#gen.emit("\tbl\tstone.mem_free");
+    r#gen.emit(".Lmap_rebuild_size:");
+    r#gen.emit("\tmov\tx23, #8");
+    r#gen.emit("\tldr\tx10, [x19]");
+    r#gen.emit("\tldr\tx11, [x19, #32]");
+    r#gen.emit("\tadd\tx10, x10, x11");
+    r#gen.emit("\tadd\tx10, x10, x10");
+    r#gen.emit(".Lmap_rebuild_grow:");
+    r#gen.emit("\tmul\tx16, x23, x11");
+    r#gen.emit("\tcmp\tx10, x16");
+    r#gen.emit("\tb.le\t.Lmap_rebuild_alloc");
+    r#gen.emit("\tadd\tx23, x23, x23");
+    r#gen.emit("\tb\t.Lmap_rebuild_grow");
+    r#gen.emit(".Lmap_rebuild_alloc:");
+    r#gen.emit("\tlsl\tx0, x23, #3");
+    r#gen.emit("\tadd\tx0, x0, #8");
+    r#gen.emit("\tbl\tstone.mem_alloc");
+    r#gen.emit("\tstr\tx0, [x19, #40]");
+    r#gen.emit("\tstr\tx23, [x0]");
+    r#gen.emit("\tmov\tx9, x23");
+    r#gen.emit(".Lmap_rebuild_zero:");
+    r#gen.emit("\tstr\txzr, [x0, x9, lsl #3]");
+    r#gen.emit("\tsub\tx9, x9, #1");
+    r#gen.emit("\tcbnz\tx9, .Lmap_rebuild_zero");
+    r#gen.emit("\tmov\tx22, #0");
+    r#gen.emit(".Lmap_rebuild_next:");
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\tcmp\tx22, x9");
+    r#gen.emit("\tb.ge\t.Lmap_rebuild_done");
+    r#gen.emit("\tldr\tx9, [x19, #16]");
+    r#gen.emit("\tldr\tx20, [x9, x22, lsl #3]");
+    // the keys differ, so this finds an empty slot
+    r#gen.emit("\tbl\t.Lmap_probe");
+    r#gen.emit("\tadd\tx9, x22, #1");
+    r#gen.emit("\tstr\tx9, [x0]");
+    r#gen.emit("\tldr\tx9, [x19, #32]");
+    r#gen.emit("\tadd\tx22, x22, x9");
+    r#gen.emit("\tb\t.Lmap_rebuild_next");
+    r#gen.emit(".Lmap_rebuild_done:");
+    pop_frame(r#gen, &kept);
+
+    // returns in x0 the address of the slot of map x19's index that holds key x20's entry, or
+    // of the empty slot where it would go, probing one slot after another: x9 is the slot
+    // number, x13 the index's first slot, x14 the mask of a slot number, x15 the slot's address,
+    // and x16 what it holds
+    r#gen.emit(".Lmap_probe:");
+    push_frame(r#gen, &[]);
+    // the hash, FNV-1a over a string's bytes, then mixed by Fibonacci hashing
+    r#gen.emit("\tmov\tx9, x20");
+    if strings {
+        r#gen.emit("\tcbz\tx21, .Lmap_probe_mix");
+        constant(r#gen, "x9", 0xcbf2_9ce4_8422_2325);
+        constant(r#gen, "x10", 0x0000_0100_0000_01b3);
+        r#gen.emit("\tmov\tx11, x20");
+        r#gen.emit(".Lmap_probe_byte:");
+        r#gen.emit("\tldrb\tw12, [x11], #1");
+        r#gen.emit("\tcbz\tw12, .Lmap_probe_mix");
+        r#gen.emit("\teor\tx9, x9, x12");
+        r#gen.emit("\tmul\tx9, x9, x10");
+        r#gen.emit("\tb\t.Lmap_probe_byte");
+    }
+    r#gen.emit(".Lmap_probe_mix:");
+    constant(r#gen, "x10", 0x9e37_79b9_7f4a_7c15);
+    r#gen.emit("\tmul\tx9, x9, x10");
+    r#gen.emit("\tlsr\tx10, x9, #32");
+    r#gen.emit("\teor\tx9, x9, x10");
+    r#gen.emit("\tldr\tx13, [x19, #40]");
+    r#gen.emit("\tldr\tx14, [x13]");
+    r#gen.emit("\tsub\tx14, x14, #1");
+    r#gen.emit("\tadd\tx13, x13, #8");
+    r#gen.emit(".Lmap_probe_slot:");
+    r#gen.emit("\tand\tx9, x9, x14");
+    r#gen.emit("\tlsl\tx15, x9, #3");
+    r#gen.emit("\tadd\tx15, x13, x15");
+    r#gen.emit("\tldr\tx16, [x15]");
+    r#gen.emit("\tcbz\tx16, .Lmap_probe_done");
+    r#gen.emit("\tldr\tx17, [x19, #16]");
+    r#gen.emit("\tsub\tx16, x16, #1");
+    r#gen.emit("\tldr\tx17, [x17, x16, lsl #3]");
+    r#gen.emit("\tcmp\tx17, x20");
+    r#gen.emit("\tb.eq\t.Lmap_probe_done"); // the same int, or the same string
+    if strings {
+        r#gen.emit("\tcbz\tx21, .Lmap_probe_next");
+        // stone.str_eq changes only x0, x1, x9, and x10
+        r#gen.emit("\tmov\tx12, x9");
+        r#gen.emit("\tmov\tx0, x20");
+        r#gen.emit("\tmov\tx1, x17");
+        r#gen.emit("\tbl\tstone.str_eq");
+        r#gen.emit("\tmov\tx9, x12");
+        r#gen.emit("\tcbnz\tx0, .Lmap_probe_done");
+        r#gen.emit(".Lmap_probe_next:");
+    }
+    r#gen.emit("\tadd\tx9, x9, #1");
+    r#gen.emit("\tb\t.Lmap_probe_slot");
+    r#gen.emit(".Lmap_probe_done:");
+    r#gen.emit("\tmov\tx0, x15");
+    pop_frame(r#gen, &[]);
 }
 
 /// Emits each list routine in `labels`, which are the [`LIST_ROUTINES`] a program calls, under
@@ -1800,6 +1988,7 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
             "could not convert string to float: '",
         ),
         (".Lstone_quote", "'"),
+        (".Lstone_key_missing", "key not found: '"),
     ] {
         immortal_string(r#gen, label, text);
     }
@@ -1818,6 +2007,13 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     address(r#gen, "x1", ".Lstone_quote");
     r#gen.emit("\tbl\tstone.str_concat");
     r#gen.emit("\tb\tstone.fail");
+
+    if used.contains(&"stone.map_missing_str") {
+        r#gen.emit("stone.map_missing_str:");
+        r#gen.emit("\tmov\tx1, x0");
+        address(r#gen, "x0", ".Lstone_key_missing");
+        r#gen.emit("\tb\tstone.fail_quoted");
+    }
 
     if used.contains(&"stone.parse_int") {
         // x0 keeps the text, x9 is the cursor, x12 where the digits start, x13 the value so far,

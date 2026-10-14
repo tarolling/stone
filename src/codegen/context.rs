@@ -24,6 +24,10 @@ pub const LIST_ROUTINES: &[&str] = &[
     "stone.list_reuse",
 ];
 
+/// The runtime routines behind maps, which each backend's `builtins::map_runtime` emits when the
+/// program calls them.
+pub const MAP_ROUTINES: &[&str] = &["stone.map_find", "stone.map_add"];
+
 /// The runtime routines behind string methods, indexes, slices, and ordering, which each
 /// backend's `builtins::string_methods` emits when the program calls them.
 pub const STRING_METHOD_ROUTINES: &[&str] = &[
@@ -109,6 +113,7 @@ pub const FALLIBLE_ROUTINES: &[&str] = &[
     "stone.str_slice_of",
     "stone.os_cwd",
     "stone.time_sleep",
+    "stone.map_missing_str",
 ];
 
 /// A runtime error the code can jump to, from [`Context::fail_label`] or [`Context::fail_at`].
@@ -128,7 +133,8 @@ pub struct Failure {
 }
 
 impl Failure {
-    /// Returns the text around the message's two holes, or `None` for a message without any.
+    /// Returns the text around the message's one or two holes, or `None` for a message without
+    /// any.
     ///
     /// For example, `list index out of range (index {}, length {})` gives
     /// `["list index out of range (index ", ", length ", ")"]`.
@@ -455,6 +461,8 @@ impl Context {
             }
             // lowering prints an enum, and a list holding one, through a function of its own
             Type::Enum { .. } => return Err("an enum is printed by its own function".to_string()),
+            // lowering prints a map, and a list holding one, an entry at a time
+            Type::Map(..) => return Err("a map is printed an entry at a time".to_string()),
             Type::Unit => return Err("no value cannot be printed".to_string()),
             Type::Function { .. } => return Err("functions cannot be printed".to_string()),
         })
@@ -644,7 +652,7 @@ fn struct_has(
 /// `seen` holds the structs already looked through.
 fn contains_list(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bool {
     match ty {
-        Type::List(_) => true,
+        Type::List(_) | Type::Map(..) => true,
         Type::Tuple(fields) => fields.iter().any(|f| contains_list(f, structs, seen)),
         Type::Struct(name) => struct_has(name, structs, seen, contains_list),
         Type::Function { params, ret } => {
@@ -661,6 +669,7 @@ fn contains_enum(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bo
     match ty {
         Type::Enum { .. } => true,
         Type::List(elem) => contains_enum(elem, structs, seen),
+        Type::Map(_, value) => contains_enum(value, structs, seen),
         Type::Tuple(fields) => fields.iter().any(|f| contains_enum(f, structs, seen)),
         Type::Struct(name) => struct_has(name, structs, seen, contains_enum),
         Type::Function { params, ret } => {
@@ -798,6 +807,11 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
         }
         ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
             for elt in elts {
+                collect_calls_from_expr(elt, calls);
+            }
+        }
+        ExprKind::Dict { keys, values } => {
+            for elt in keys.iter().chain(values) {
                 collect_calls_from_expr(elt, calls);
             }
         }

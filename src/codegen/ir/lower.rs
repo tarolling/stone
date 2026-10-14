@@ -619,6 +619,10 @@ impl<'a> Lowerer<'a> {
     fn element_kinds(&self, expr: &Expr) -> Vec<Option<RcKind>> {
         match self.context.types.get(&expr.span) {
             Some(Type::List(elem)) => self.leaves(elem).iter().map(RcKind::of).collect(),
+            // an entry of a map is its key, then its value
+            Some(Type::Map(key, value)) => std::iter::once(RcKind::of(key))
+                .chain(self.leaves(value).iter().map(RcKind::of))
+                .collect(),
             _ => vec![None],
         }
     }
@@ -627,6 +631,14 @@ impl<'a> Lowerer<'a> {
     /// a tuple or a struct.
     fn holds_flat(&self, expr: &Expr) -> bool {
         matches!(self.context.types.get(&expr.span), Some(Type::List(elem)) if elem.is_flat())
+    }
+
+    /// Returns the type of the keys of `expr` if it is a map.
+    fn map_key(&self, expr: &Expr) -> Option<Type> {
+        match self.context.types.get(&expr.span) {
+            Some(Type::Map(key, _)) => Some((**key).clone()),
+            _ => None,
+        }
     }
 
     /// Returns how the elements of the list `expr` are counted.
@@ -1386,6 +1398,9 @@ impl<'a> Lowerer<'a> {
     ) -> Result<(), String> {
         match &target.kind {
             ExprKind::Name { id, .. } => self.assign_name(id, value, kind),
+            ExprKind::Subscript { value: map, .. } if self.map_key(map).is_some() => {
+                self.map_store(target, &[value])?
+            }
             ExprKind::Subscript {
                 value: list, slice, ..
             } => {
@@ -1485,6 +1500,9 @@ impl<'a> Lowerer<'a> {
                     self.assign_flat(elt, &values[start..end], &kinds[start..end])?;
                     start = end;
                 }
+            }
+            ExprKind::Subscript { value: map, .. } if self.map_key(map).is_some() => {
+                self.map_store(target, values)?
             }
             ExprKind::Subscript { value: list, .. } if self.holds_flat(list) => {
                 self.store_values(target, values, kinds)?
@@ -2228,6 +2246,33 @@ impl<'a> Lowerer<'a> {
             return Ok(self.finish(value, into));
         }
         match &expr.kind {
+            ExprKind::Dict { keys, values } => {
+                let (width, codes) = self.element_layout(expr);
+                let kinds = self.element_kinds(expr);
+                let key_ty = self.map_key(expr).ok_or("a map literal is a map")?;
+                let map = self.fresh();
+                self.push(Inst::Call {
+                    dsts: vec![map],
+                    callee: Callee::Runtime("stone.list_new_wide"),
+                    args: vec![
+                        Operand::Imm(0),
+                        Operand::Imm(codes),
+                        Operand::Imm(width as i64),
+                    ],
+                });
+                // each key, then its value, left to right, and a later key wins
+                for (key_expr, value) in keys.iter().zip(values) {
+                    let key = self.expr(key_expr)?;
+                    let values = self.expr_flat(value)?;
+                    for (&value, &kind) in values.iter().zip(&kinds[1..]) {
+                        self.take(value, kind);
+                    }
+                    self.map_put(Operand::Reg(map), key, &key_ty, &values, &kinds);
+                    self.release_temp(key);
+                }
+                self.own(Operand::Reg(map), kind);
+                Ok(Operand::Reg(map))
+            }
             ExprKind::Constant { value, .. } => {
                 let value = match &**value {
                     Constant::Int(n) => Operand::Imm(*n),
@@ -2377,6 +2422,11 @@ impl<'a> Lowerer<'a> {
                 // one value, since the field is not a tuple itself
                 let field = self.tuple_field(value, slice)?;
                 Ok(self.finish(field[0], into))
+            }
+
+            ExprKind::Subscript { value, slice, .. } if self.map_key(value).is_some() => {
+                let values = self.map_values(expr, 0..1)?;
+                Ok(self.finish(values[0], into))
             }
 
             ExprKind::Subscript { value, slice, .. } => {
@@ -2899,6 +2949,7 @@ impl<'a> Lowerer<'a> {
         if matches!(slice.kind, ExprKind::Slice { .. })
             || before.iter().any(|expr| has_call(expr))
             || self.is_flat(value)
+            || self.map_key(value).is_some()
         {
             return self.expr(list);
         }
@@ -3049,7 +3100,24 @@ impl<'a> Lowerer<'a> {
                 let values = self.option_value(receiver, args.first())?;
                 Ok(self.finish(values[0], into))
             }
-            "len" if self.holds_flat(receiver) => {
+            "contains" => {
+                let key_ty = self.map_key(receiver).ok_or("only a map has 'contains'")?;
+                let map = self.list_operand(receiver, &args.iter().collect::<Vec<_>>())?;
+                let key = self.expr(&args[0])?;
+                let first = self.map_find(map, key, &key_ty, None);
+                self.release_temp(key);
+                self.release_temp(map);
+                let dst = self.dst(into);
+                self.push(Inst::Compare {
+                    cond: Cond::Ge,
+                    float: false,
+                    dst,
+                    lhs: first,
+                    rhs: Operand::Imm(0),
+                });
+                Ok(Operand::Reg(dst))
+            }
+            "len" if self.holds_flat(receiver) || self.map_key(receiver).is_some() => {
                 let width = self.element_layout(receiver).0;
                 let list = self.list_operand(receiver, &[])?;
                 let count = self.element_count(list, width);
@@ -3969,6 +4037,10 @@ impl<'a> Lowerer<'a> {
             ExprKind::Subscript { value, slice, .. } if self.is_flat(value) => {
                 self.tuple_field(value, slice)
             }
+            ExprKind::Subscript { value, .. } if self.map_key(value).is_some() => {
+                let width = self.element_layout(value).0;
+                self.map_values(expr, 0..width - 1)
+            }
             ExprKind::Subscript { value, slice, .. } => {
                 let width = self.element_layout(value).0;
                 self.element_values(value, slice, 0..width)
@@ -4340,6 +4412,167 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
+    /// Returns the first slot of the entry of `key`, of type `key_ty`, in `map`, or -1 if it has
+    /// none, into `into` if given.
+    fn map_find(
+        &mut self,
+        map: Operand,
+        key: Operand,
+        key_ty: &Type,
+        into: Option<VReg>,
+    ) -> Operand {
+        let string = Operand::Imm((*key_ty == Type::Str) as i64);
+        self.runtime_call("stone.map_find", vec![map, key, string], into)
+    }
+
+    /// Lowers `subscript`, `map[key]`, to the values in `leaves` of the value of `key`'s entry,
+    /// each a temporary that owns a reference, as [`Lowerer::element_values`] does for a list.
+    /// A missing key stops the program as the interpreter does, such as with
+    /// `key not found: 'pear'`.
+    fn map_values(
+        &mut self,
+        subscript: &Expr,
+        leaves: std::ops::Range<usize>,
+    ) -> Result<Vec<Operand>, String> {
+        let ExprKind::Subscript {
+            value: map_expr,
+            slice,
+            ..
+        } = &subscript.kind
+        else {
+            return Err("only a subscript reads a map".to_string());
+        };
+        let key_ty = self.map_key(map_expr).ok_or("only a map has entries")?;
+        let kinds = self.element_kinds(map_expr);
+        let map = self.list_operand(map_expr, &[slice])?;
+        let key = self.expr(slice)?;
+        let outer = std::mem::replace(&mut self.span, subscript.span);
+        let first = self.map_find(map, key, &key_ty, None);
+        let (found, missing) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Ge,
+            float: false,
+            lhs: first,
+            rhs: Operand::Imm(0),
+            then: found,
+            otherwise: missing,
+        });
+        self.start(missing);
+        match key_ty {
+            Type::Str => {
+                self.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Runtime("stone.map_missing_str"),
+                    args: vec![key],
+                });
+                // the routine stops the program
+                self.terminate(Terminator::Fail("key not found".to_string(), vec![]));
+            }
+            Type::Bool => {
+                let (falsy, truthy) = (self.new_block(), self.new_block());
+                self.terminate(Terminator::CmpBranch {
+                    cond: Cond::Eq,
+                    float: false,
+                    lhs: key,
+                    rhs: Operand::Imm(0),
+                    then: falsy,
+                    otherwise: truthy,
+                });
+                self.start(falsy);
+                self.terminate(Terminator::Fail("key not found: false".to_string(), vec![]));
+                self.start(truthy);
+                self.terminate(Terminator::Fail("key not found: true".to_string(), vec![]));
+            }
+            _ => self.terminate(Terminator::Fail("key not found: {}".to_string(), vec![key])),
+        }
+        self.start(found);
+        self.span = outer;
+        self.release_temp(key);
+        // the key is slot 0 of an entry
+        let fields = leaves.start + 1..leaves.end + 1;
+        let values = self.load_slots(map, first, 1, fields.clone(), &kinds);
+        for (&value, field) in values.iter().zip(fields) {
+            self.own(value, kinds[field]);
+        }
+        self.release_temp(map);
+        Ok(values)
+    }
+
+    /// Stores `values`, which already carry the references the map takes, as the value of the
+    /// entry `target`, `map[key]`, evaluating the key first. An entry the map has keeps its place
+    /// and releases its old values, and a new one goes at the end.
+    fn map_store(&mut self, target: &Expr, values: &[Operand]) -> Result<(), String> {
+        let ExprKind::Subscript {
+            value: map_expr,
+            slice,
+            ..
+        } = &target.kind
+        else {
+            return Err("only a subscript changes a map".to_string());
+        };
+        let key_ty = self.map_key(map_expr).ok_or("only a map has entries")?;
+        let kinds = self.element_kinds(map_expr);
+        let key = self.expr(slice)?;
+        let map = self.unique_place(map_expr, &[])?;
+        self.map_put(map, key, &key_ty, values, &kinds);
+        self.release_temp(key);
+        Ok(())
+    }
+
+    /// Sets the value of `key`'s entry in `map`, which nothing else refers to, to `values`,
+    /// which carry the references the map takes. The entries are counted as `kinds` say, the key
+    /// first.
+    fn map_put(
+        &mut self,
+        map: Operand,
+        key: Operand,
+        key_ty: &Type,
+        values: &[Operand],
+        kinds: &[Option<RcKind>],
+    ) {
+        let first = self.fresh();
+        self.map_find(map, key, key_ty, Some(first));
+        let (found, missing, store) = (self.new_block(), self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Ge,
+            float: false,
+            lhs: Operand::Reg(first),
+            rhs: Operand::Imm(0),
+            then: found,
+            otherwise: missing,
+        });
+        self.start(missing);
+        let string = Operand::Imm((*key_ty == Type::Str) as i64);
+        self.runtime_call("stone.map_add", vec![map, key, string], Some(first));
+        self.jump(store);
+        self.start(found);
+        for (field, kind) in kinds.iter().enumerate().skip(1) {
+            if let Some(kind) = *kind {
+                let index = self.slot(Operand::Reg(first), field);
+                let old = self.fresh();
+                self.push(Inst::ListGet {
+                    dst: old,
+                    list: map,
+                    index,
+                });
+                self.push(Inst::Release {
+                    src: Operand::Reg(old),
+                    kind,
+                });
+            }
+        }
+        self.jump(store);
+        self.start(store);
+        for (field, &value) in values.iter().enumerate() {
+            let index = self.slot(Operand::Reg(first), field + 1);
+            self.push(Inst::ListSet {
+                list: map,
+                index,
+                value,
+            });
+        }
+    }
+
     /// Prints a value of type `ty`, given as its values: a tuple as Python writes one, with its
     /// strings quoted, as strings `nested` in a list or tuple are.
     ///
@@ -4363,6 +4596,7 @@ impl<'a> Lowerer<'a> {
             Type::List(elem) if holds_flat(elem) || holds_enum(elem) => {
                 self.print_elements(elem, values[0])
             }
+            Type::Map(key, value) => self.print_entries(Some(key), value, values[0]),
             Type::Struct(_) | Type::Enum { .. } => {
                 let mut printers = self.context.printers.borrow_mut();
                 if !printers.contains(ty) {
@@ -4393,8 +4627,18 @@ impl<'a> Lowerer<'a> {
     /// Prints the list `list`, whose elements are of type `elem` and hold a tuple, as `[a, b]`,
     /// with a loop over its elements, since the runtime's list printers take one value each.
     fn print_elements(&mut self, elem: &Type, list: Operand) {
-        let leaves = self.leaves(elem);
-        let width = leaves.len();
+        self.print_entries(None, elem, list);
+    }
+
+    /// Prints the elements of `list` of type `elem` as [`Lowerer::print_elements`] does, or, with
+    /// a `key` type, the entries of a map whose values are of type `elem`, as `{k: v, ...}`.
+    fn print_entries(&mut self, key: Option<&Type>, elem: &Type, list: Operand) {
+        let keyed = key.is_some() as usize;
+        let width = keyed + self.leaves(elem).len();
+        let (open, close) = match key {
+            Some(_) => ('{', '}'),
+            None => ('[', ']'),
+        };
         let (header, body, separate, element, exit) = (
             self.new_block(),
             self.new_block(),
@@ -4402,7 +4646,7 @@ impl<'a> Lowerer<'a> {
             self.new_block(),
             self.new_block(),
         );
-        self.print_char('[');
+        self.print_char(open);
         let count = self.element_count(list, width);
         let next = self.fresh();
         self.push(Inst::Copy {
@@ -4435,7 +4679,12 @@ impl<'a> Lowerer<'a> {
         // printing changes nothing, so the list's values are borrowed
         let kinds = vec![None; width];
         let values = self.load_slots(list, Operand::Reg(next), width, 0..width, &kinds);
-        self.print_flat(elem, &values, true);
+        if let Some(key) = key {
+            self.print_flat(key, &values[..1], true);
+            self.print_char(':');
+            self.print_char(' ');
+        }
+        self.print_flat(elem, &values[keyed..], true);
         self.push(Inst::Binary {
             op: BinOp::Add,
             dst: next,
@@ -4445,7 +4694,7 @@ impl<'a> Lowerer<'a> {
         self.jump(header);
         self.loop_depth -= 1;
         self.start(exit);
-        self.print_char(']');
+        self.print_char(close);
     }
 
     /// Leaves null in each variable that gave its reference away and that its statement did not
@@ -4517,7 +4766,7 @@ impl<'a> Lowerer<'a> {
 /// For example, `tuple[int, str]` and `list[list[Point]]` do, and `list[int]` does not.
 fn holds_flat(ty: &Type) -> bool {
     match ty {
-        Type::Tuple(_) | Type::Struct(_) => true,
+        Type::Tuple(_) | Type::Struct(_) | Type::Map(..) => true,
         Type::List(elem) => holds_flat(elem),
         _ => false,
     }
@@ -4561,6 +4810,7 @@ fn holds_enum(ty: &Type) -> bool {
     match ty {
         Type::Enum { .. } => true,
         Type::List(elem) => holds_enum(elem),
+        Type::Map(_, value) => holds_enum(value),
         Type::Tuple(fields) => fields.iter().any(holds_enum),
         _ => false,
     }
@@ -4718,6 +4968,7 @@ fn has_call(expr: &Expr) -> bool {
         ExprKind::BoolOp { values, .. }
         | ExprKind::List { elts: values, .. }
         | ExprKind::Tuple { elts: values, .. } => values.iter().any(has_call),
+        ExprKind::Dict { keys, values } => keys.iter().chain(values).any(has_call),
         ExprKind::Compare {
             left, comparators, ..
         } => has_call(left) || comparators.iter().any(has_call),

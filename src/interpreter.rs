@@ -97,6 +97,69 @@ pub enum Value {
     /// A value of a struct, such as `Point(x=1.0, y=2.0)`, whose fields a change copies first
     /// if anything else shares it, as a list's elements are.
     Struct(Rc<StructValue>),
+    /// A map, such as `{"a": 1}`, whose entries a change copies first if anything else shares
+    /// them, as a list's elements are.
+    Map(Rc<MapValue>),
+}
+
+/// A map key, which is an int, a string, or a bool, since those hash and compare exactly.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub enum MapKey {
+    Int(i64),
+    Str(Rc<str>),
+    Bool(bool),
+}
+
+impl MapKey {
+    /// Returns the key a value is, or an error for a value the checker allows no map to hold.
+    fn of(value: &Value) -> EvalResult<MapKey> {
+        match value {
+            Value::Int(i) => Ok(MapKey::Int(*i)),
+            Value::Str(s) => Ok(MapKey::Str(s.clone())),
+            Value::Bool(b) => Ok(MapKey::Bool(*b)),
+            other => Err(format!("a map key cannot be {}", other.display(true)).into()),
+        }
+    }
+
+    fn value(&self) -> Value {
+        match self {
+            MapKey::Int(i) => Value::Int(*i),
+            MapKey::Str(s) => Value::Str(s.clone()),
+            MapKey::Bool(b) => Value::Bool(*b),
+        }
+    }
+}
+
+/// The entries of a map in the order their keys were first added, with the position of each
+/// key's entry.
+///
+/// For example, `{"b": 1, "a": 2}` keeps `"b"` first, and assigning `m["b"] = 3` keeps its place.
+#[derive(Debug, Clone, Default)]
+pub struct MapValue {
+    entries: Vec<(MapKey, Value)>,
+    positions: HashMap<MapKey, usize>,
+}
+
+impl MapValue {
+    /// Returns the value of `key`'s entry, or the error compiled code also gives if there is
+    /// none, such as `key not found: 'apple'`.
+    fn get(&self, key: &MapKey) -> EvalResult<&Value> {
+        match self.positions.get(key) {
+            Some(&position) => Ok(&self.entries[position].1),
+            None => Err(format!("key not found: {}", key.value().display(true)).into()),
+        }
+    }
+
+    /// Sets `key`'s entry to `value`, adding it at the end if there is none.
+    fn insert(&mut self, key: MapKey, value: Value) {
+        match self.positions.get(&key) {
+            Some(&position) => self.entries[position].1 = value,
+            None => {
+                self.positions.insert(key.clone(), self.entries.len());
+                self.entries.push((key, value));
+            }
+        }
+    }
 }
 
 /// A struct's definition, as the interpreter needs it: how it prints and its fields' names, in
@@ -171,6 +234,11 @@ fn drop_values(mut pending: Vec<Value>) {
                 Value::List(mut items) => {
                     if let Some(items) = Rc::get_mut(&mut items) {
                         pending.append(items);
+                    }
+                }
+                Value::Map(mut map) => {
+                    if let Some(map) = Rc::get_mut(&mut map) {
+                        pending.extend(map.entries.drain(..).map(|(_, value)| value));
                     }
                 }
                 Value::Tuple(mut fields) => {
@@ -286,6 +354,18 @@ impl Value {
                 }
                 out.push(']');
             }
+            Value::Map(map) => {
+                out.push('{');
+                for (i, (key, value)) in map.entries.iter().enumerate() {
+                    if i > 0 {
+                        out.push_str(", ");
+                    }
+                    key.value().write(out, true, depth)?;
+                    out.push_str(": ");
+                    value.write(out, true, depth)?;
+                }
+                out.push('}');
+            }
             Value::Tuple(fields) => {
                 out.push('(');
                 for (i, field) in fields.iter().enumerate() {
@@ -336,7 +416,7 @@ impl Value {
     /// struct with one among its fields at any depth, or an enum value.
     fn holds_list(&self) -> bool {
         match self {
-            Value::List(_) | Value::Enum(_) => true,
+            Value::List(_) | Value::Map(_) | Value::Enum(_) => true,
             Value::Tuple(fields) => fields.iter().any(Value::holds_list),
             Value::Struct(value) => value.fields.iter().any(Value::holds_list),
             _ => false,
@@ -401,7 +481,11 @@ impl Value {
 
     /// Returns whether this is a list that another value shares, so changing it copies it.
     fn is_shared(&self) -> bool {
-        matches!(self, Value::List(items) if Rc::strong_count(items) > 1)
+        match self {
+            Value::List(items) => Rc::strong_count(items) > 1,
+            Value::Map(map) => Rc::strong_count(map) > 1,
+            _ => false,
+        }
     }
 
     /// Returns the elements of a list for changing, copying them first if another value still
@@ -1093,7 +1177,16 @@ impl<'out> Interpreter<'out> {
                         }
                         ExprKind::Subscript { value, slice, .. } => {
                             let (root, indexes) = self.eval_place(value)?;
-                            let index = self.eval_expr(slice)?.as_int()?;
+                            let index = self.eval_expr(slice)?;
+                            // the checker allows a change to a map's entry only through its name
+                            if indexes.is_empty()
+                                && let Value::Map(map) = self.place_value(root, &[], &[])?
+                            {
+                                let key = MapKey::of(&index)?;
+                                Rc::make_mut(map).insert(key, rhs.clone());
+                                continue;
+                            }
+                            let index = index.as_int()?;
                             let items = self.place_list(root, &indexes, &place_spans(value))?;
                             let position = list_position(index, items.len())
                                 .map_err(|e| located(e, target.span))?;
@@ -1414,6 +1507,14 @@ impl<'out> Interpreter<'out> {
 
     fn eval_expr_unguarded(&mut self, expr: &Expr) -> EvalResult<Value> {
         match &expr.kind {
+            ExprKind::Dict { keys, values } => {
+                let mut map = MapValue::default();
+                for (key, value) in keys.iter().zip(values) {
+                    let key = MapKey::of(&self.eval_expr(key)?)?;
+                    map.insert(key, self.eval_expr(value)?);
+                }
+                Ok(Value::Map(Rc::new(map)))
+            }
             // short-circuiting
             ExprKind::BoolOp { op, values } => {
                 let mut result = self.eval_expr(&values[0])?;
@@ -1561,6 +1662,10 @@ impl<'out> Interpreter<'out> {
             ExprKind::Constant { value, kind: _ } => Ok(Value::from(&**value)),
             ExprKind::Subscript { value, slice, .. } => {
                 let list = self.eval_expr(value)?;
+                if let Value::Map(map) = &list {
+                    let key = MapKey::of(&self.eval_expr(slice)?)?;
+                    return Ok(map.get(&key)?.clone());
+                }
                 if let ExprKind::Slice { lower, upper, step } = &slice.kind {
                     let mut bound = |bound: &Option<Box<Expr>>| -> EvalResult<Option<i64>> {
                         bound
@@ -1624,7 +1729,14 @@ impl<'out> Interpreter<'out> {
             // len counts bytes, like the compiled strlen
             ("len", Value::Str(s), []) => Ok(Value::Int(s.len() as i64)),
             ("len", Value::List(items), []) => Ok(Value::Int(items.len() as i64)),
-            ("len", _, _) => Err("len() is called on a str or list, with no arguments".into()),
+            ("len", Value::Map(map), []) => Ok(Value::Int(map.entries.len() as i64)),
+            ("len", _, _) => {
+                Err("len() is called on a str, list, or map, with no arguments".into())
+            }
+            ("contains", Value::Map(map), [key]) => {
+                Ok(Value::Bool(map.positions.contains_key(&MapKey::of(key)?)))
+            }
+            ("contains", _, _) => Err("contains() is called on a map, with one key".into()),
             ("strip", Value::Str(s), []) => Ok(Value::Str(stdlib::strip(s).into())),
             ("strip", _, _) => Err("strip() is called on a str, with no arguments".into()),
             ("split", Value::Str(s), []) => Ok(str_list(stdlib::split_whitespace(s))),

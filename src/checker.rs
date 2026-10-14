@@ -43,6 +43,8 @@ pub enum Type {
     /// No value, which is what a function without `->` returns. No variable can hold it.
     Unit,
     List(Box<Type>),
+    /// A map from keys of the first type to values of the second, such as `map[str, int]`.
+    Map(Box<Type>, Box<Type>),
     /// A tuple of two or more fields, such as `tuple[int, str]`.
     Tuple(Vec<Type>),
     /// An enum by its linked name, with its type arguments: `Shape`, or `option[int]`, the enum
@@ -129,6 +131,7 @@ impl Display for Type {
             Type::Str => write!(f, "str"),
             Type::Unit => write!(f, "no value"),
             Type::List(elem) => write!(f, "list[{elem}]"),
+            Type::Map(key, value) => write!(f, "map[{key}, {value}]"),
             Type::Tuple(fields) => {
                 let fields: Vec<String> = fields.iter().map(Type::to_string).collect();
                 write!(f, "tuple[{}]", fields.join(", "))
@@ -333,6 +336,7 @@ enum Ty {
     Str,
     Unit,
     List(Box<Ty>),
+    Map(Box<Ty>, Box<Ty>),
     Tuple(Vec<Ty>),
     Enum(String, Vec<Ty>),
     Struct(String),
@@ -466,6 +470,7 @@ enum Kind {
     Str,
     Unit,
     List,
+    Map,
     Tuple,
     Enum,
     Struct,
@@ -480,6 +485,7 @@ impl Kind {
             Ty::Str => Some(Kind::Str),
             Ty::Unit => Some(Kind::Unit),
             Ty::List(_) => Some(Kind::List),
+            Ty::Map(..) => Some(Kind::Map),
             Ty::Tuple(_) => Some(Kind::Tuple),
             Ty::Enum(..) => Some(Kind::Enum),
             Ty::Struct(_) => Some(Kind::Struct),
@@ -501,6 +507,8 @@ const PRINTABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
 /// The names of the types built into the language, which no enum or struct may take.
 const BUILTIN_TYPES: &[&str] = &["int", "float", "bool", "str", "list", "tuple", OPTION];
 /// What `==` and `!=` compare. Compiled code compares lists by address, so only values compare.
+/// The message for a map key of another kind.
+const MAP_KEY: &str = "a map key must be int, str, or bool, found {}";
 const EQUATABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
 
 /// An enum a program defines: its symbol and its variants, each with its symbol and the types of
@@ -590,6 +598,12 @@ struct Inference {
     /// The span of every tuple that is indexed, such as `t` in `t[0]`, so that a change through
     /// one, such as `t[0].append(1)`, can be reported.
     indexed_tuples: HashSet<Span>,
+    /// The span of every map that is indexed, such as `m` in `m[k]`, so that a change through an
+    /// entry, such as `m[k].append(1)`, can be reported.
+    indexed_maps: HashSet<Span>,
+    /// Each map literal and the type of the map, whose entries `finish` checks are not too wide
+    /// to store.
+    map_literals: Vec<(Span, Ty)>,
     /// Each list literal and the type of the list, whose elements `finish` checks are not too
     /// wide to store.
     list_literals: Vec<(Span, Ty)>,
@@ -618,6 +632,8 @@ struct DeferredIndex {
     value: Span,
     value_ty: Ty,
     slice: Expr,
+    /// The type of the index, an int unless the global turns out to be a map.
+    index_ty: Ty,
     result: Ty,
 }
 
@@ -636,6 +652,7 @@ enum Indexed {
     List,
     Str,
     Tuple,
+    Map,
 }
 
 /// What a name refers to where it is used.
@@ -717,6 +734,9 @@ impl Inference {
     fn resolve(&self, ty: &Ty) -> Ty {
         match self.shallow(ty) {
             Ty::List(elem) => Ty::List(Box::new(self.resolve(&elem))),
+            Ty::Map(key, value) => {
+                Ty::Map(Box::new(self.resolve(&key)), Box::new(self.resolve(&value)))
+            }
             Ty::Tuple(fields) => Ty::Tuple(fields.iter().map(|f| self.resolve(f)).collect()),
             Ty::Enum(name, args) => Ty::Enum(name, args.iter().map(|a| self.resolve(a)).collect()),
             other => other,
@@ -727,6 +747,7 @@ impl Inference {
         match self.shallow(ty) {
             Ty::Var(v) => v == var,
             Ty::List(elem) => self.occurs(var, &elem),
+            Ty::Map(key, value) => self.occurs(var, &key) || self.occurs(var, &value),
             Ty::Tuple(fields) | Ty::Enum(_, fields) => fields.iter().any(|f| self.occurs(var, f)),
             _ => false,
         }
@@ -752,6 +773,10 @@ impl Inference {
                 true
             }
             (Ty::List(x), Ty::List(y)) => self.unify(&x, &y),
+            (Ty::Map(xk, xv), Ty::Map(yk, yv)) => {
+                let keys = self.unify(&xk, &yk);
+                self.unify(&xv, &yv) && keys
+            }
             (Ty::Tuple(xs), Ty::Tuple(ys)) => {
                 // unify every field, so each is as solved as it can be even if one differs
                 xs.len() == ys.len()
@@ -848,6 +873,7 @@ impl Inference {
             Ty::Str => "str".to_string(),
             Ty::Unit => "no value".to_string(),
             Ty::List(elem) => format!("list[{}]", self.show(&elem)),
+            Ty::Map(key, value) => format!("map[{}, {}]", self.show(&key), self.show(&value)),
             Ty::Tuple(fields) => {
                 let fields: Vec<String> = fields.iter().map(|f| self.show(f)).collect();
                 format!("tuple[{}]", fields.join(", "))
@@ -1501,10 +1527,30 @@ impl Inference {
                 self.check_written_width(elem);
             }
             TypeExprKind::Tuple(fields) => fields.iter().for_each(|f| self.check_written_width(f)),
+            TypeExprKind::Map(key, value) => {
+                let value_ty = self.written_type(value, &mut vec![]);
+                self.check_entry_width(&value_ty, annotation.span);
+                self.check_written_width(key);
+                self.check_written_width(value);
+            }
             TypeExprKind::Named { args, .. } => {
                 args.iter().for_each(|a| self.check_written_width(a))
             }
             _ => {}
+        }
+    }
+
+    /// Reports at `span` if an entry of a map whose values are of type `value` holds more values
+    /// than [`MAX_ELEMENT_VALUES`], counting its key and each field of its tuples and structs.
+    fn check_entry_width(&mut self, value: &Ty, span: Span) {
+        let count = 1 + self.values(value);
+        if count > MAX_ELEMENT_VALUES {
+            let message = format!(
+                "a map entry can hold at most {MAX_ELEMENT_VALUES} values, but a key and {} hold \
+                 {count}",
+                self.show(value)
+            );
+            self.error(span, message);
         }
     }
 
@@ -1547,6 +1593,11 @@ impl Inference {
             TypeExprKind::Bool => Ty::Bool,
             TypeExprKind::Str => Ty::Str,
             TypeExprKind::List(elem) => Ty::List(Box::new(self.written_type(elem, errors))),
+            TypeExprKind::Map(key, value) => {
+                let key_ty = self.written_type(key, errors);
+                self.require(key_ty.clone(), MAP_KEYS, key.span, MAP_KEY);
+                Ty::Map(Box::new(key_ty), Box::new(self.written_type(value, errors)))
+            }
             TypeExprKind::Tuple(fields) => Ty::Tuple(
                 fields
                     .iter()
@@ -1698,6 +1749,11 @@ impl Inference {
                     literal_right: false,
                 });
                 match &target.kind {
+                    ExprKind::Subscript { value: list, .. }
+                        if self.indexed_maps.contains(&list.span) =>
+                    {
+                        self.error(target.span, MAP_CHANGE);
+                    }
                     ExprKind::Subscript { value: list, .. } => {
                         self.expect(&old, &result, value.span);
                         self.check_change(list);
@@ -1722,6 +1778,9 @@ impl Inference {
                                 iter.span,
                                 "a tuple cannot be iterated; unpack it, or use a list",
                             );
+                            self.fresh()
+                        } else if let Ty::Map(..) = self.shallow(&iter_ty) {
+                            self.error(iter.span, "a map cannot be iterated, for now");
                             self.fresh()
                         } else {
                             let elem = self.fresh();
@@ -1947,6 +2006,10 @@ impl Inference {
                     self.error(target.span, SLICE_CHANGE);
                     return;
                 }
+                if matches!(indexed, Indexed::Map) && !matches!(value.kind, ExprKind::Name { .. }) {
+                    self.error(target.span, MAP_CHANGE);
+                    return;
+                }
                 self.expect(&elem, found, value_span);
                 self.check_change(value);
             }
@@ -2069,6 +2132,10 @@ impl Inference {
                 ExprKind::Subscript { value, .. } => {
                     if self.indexed_tuples.contains(&value.span) {
                         self.error(node.span, TUPLE_CHANGE);
+                        return;
+                    }
+                    if self.indexed_maps.contains(&value.span) {
+                        self.error(node.span, MAP_CHANGE);
                         return;
                     }
                     node = value;
@@ -2601,6 +2668,21 @@ impl Inference {
                 self.list_literals.push((expr.span, list.clone()));
                 list
             }
+            ExprKind::Dict { keys, values } => {
+                let key_ty = self.fresh();
+                let value_ty = self.fresh();
+                for (key, value) in keys.iter().zip(values) {
+                    let ty = self.infer(key);
+                    self.expect(&key_ty, &ty, key.span);
+                    let ty = self.infer(value);
+                    self.expect(&value_ty, &ty, value.span);
+                }
+                let key_span = keys.first().map_or(expr.span, |key| key.span);
+                self.require(key_ty.clone(), MAP_KEYS, key_span, MAP_KEY);
+                let map = Ty::Map(Box::new(key_ty), Box::new(value_ty));
+                self.map_literals.push((expr.span, map.clone()));
+                map
+            }
             ExprKind::Tuple { elts, .. } => {
                 Ty::Tuple(elts.iter().map(|elt| self.infer(elt)).collect())
             }
@@ -2631,24 +2713,40 @@ impl Inference {
         let value_ty = self.infer(value);
         if let Ty::Var(_) = self.shallow(&value_ty)
             && self.is_global_in_function(value)
-            && constant_int(slice).is_some()
+            && !matches!(slice.kind, ExprKind::Slice { .. })
         {
-            // a function checked before the global's assignment, which may make it a tuple
-            let index = self.infer(slice);
-            self.expect(&Ty::Int, &index, slice.span);
-            let result = self.fresh();
-            self.deferred_indexes.push(DeferredIndex {
-                value: value.span,
-                value_ty,
-                slice: slice.clone(),
-                result: result.clone(),
-            });
-            return (result, Indexed::List);
+            // a function checked before the global's assignment, which may make it a tuple, or,
+            // for an index not known to be an int, a map
+            let index_ty = self.infer(slice);
+            if constant_int(slice).is_some() || self.shallow(&index_ty) != Ty::Int {
+                let result = self.fresh();
+                self.deferred_indexes.push(DeferredIndex {
+                    value: value.span,
+                    value_ty,
+                    slice: slice.clone(),
+                    index_ty,
+                    result: result.clone(),
+                });
+                return (result, Indexed::List);
+            }
+            let elem = self.fresh();
+            self.expect(&Ty::List(Box::new(elem.clone())), &value_ty, value.span);
+            return (elem, Indexed::List);
         }
         let (sliced, elem, indexed) = match self.shallow(&value_ty) {
             Ty::Str => (Ty::Str, Ty::Str, Indexed::Str),
             Ty::Tuple(fields) => {
                 return (self.tuple_field(value.span, &fields, slice), Indexed::Tuple);
+            }
+            Ty::Map(key, entry) => {
+                self.indexed_maps.insert(value.span);
+                if matches!(slice.kind, ExprKind::Slice { .. }) {
+                    self.error(slice.span, "a map cannot be sliced");
+                    return (*entry, Indexed::Map);
+                }
+                let index = self.infer(slice);
+                self.expect(&key, &index, slice.span);
+                return (*entry, Indexed::Map);
             }
             _ => {
                 let elem = self.fresh();
@@ -2685,7 +2783,13 @@ impl Inference {
                 let field = self.tuple_field(deferred.value, &fields, &deferred.slice);
                 self.expect(&field, &deferred.result, deferred.slice.span);
             }
+            Ty::Map(key, value) => {
+                self.indexed_maps.insert(deferred.value);
+                self.expect(&key, &deferred.index_ty, deferred.slice.span);
+                self.expect(&value, &deferred.result, deferred.slice.span);
+            }
             _ => {
+                self.expect(&Ty::Int, &deferred.index_ty, deferred.slice.span);
                 let list = Ty::List(Box::new(deferred.result));
                 self.expect(&list, &deferred.value_ty, deferred.value);
             }
@@ -3020,11 +3124,22 @@ impl Inference {
                 }
                 self.require(
                     receiver_ty,
-                    &[Kind::Str, Kind::List],
+                    &[Kind::Str, Kind::List, Kind::Map],
                     receiver.span,
-                    "'len' needs a str or list, found {}",
+                    "'len' needs a str, list, or map, found {}",
                 );
                 Ty::Int
+            }
+            "contains" => {
+                let key = self.fresh();
+                let map = Ty::Map(Box::new(key.clone()), Box::new(self.fresh()));
+                self.expect(&map, &receiver_ty, receiver.span);
+                if args.len() != 1 {
+                    self.arity_error(call.span, name, "1", args.len());
+                    return Ty::Bool;
+                }
+                self.expect(&key, &arg_types[0], args[0].span);
+                Ty::Bool
             }
             "append" => {
                 if args.len() != 1 {
@@ -3376,6 +3491,11 @@ impl Inference {
                 self.check_element_width(&elem, span);
             }
         }
+        for (span, map) in std::mem::take(&mut self.map_literals) {
+            if let Ty::Map(_, value) = self.resolve(&map) {
+                self.check_entry_width(&value, span);
+            }
+        }
         for constraint in std::mem::take(&mut self.constraints) {
             let ty = self.shallow(&constraint.ty);
             let Some(kind) = Kind::of(&ty) else {
@@ -3387,8 +3507,9 @@ impl Inference {
                     Kind::Str => Ty::Str,
                     Kind::Unit => Ty::Unit,
                     Kind::List => Ty::List(Box::new(self.fresh())),
-                    // no constraint allows a tuple, enum, or struct first, and nothing tells which
-                    Kind::Tuple | Kind::Enum | Kind::Struct => continue,
+                    // no constraint allows a map, tuple, enum, or struct first, and nothing tells
+                    // which
+                    Kind::Map | Kind::Tuple | Kind::Enum | Kind::Struct => continue,
                 };
                 self.unify(&ty, &default);
                 continue;
@@ -3518,6 +3639,10 @@ impl Inference {
             Ty::Str => Type::Str,
             Ty::Unit => Type::Unit,
             Ty::List(elem) => Type::List(Box::new(self.finalize(&elem))),
+            Ty::Map(key, value) => Type::Map(
+                Box::new(self.finalize(&key)),
+                Box::new(self.finalize(&value)),
+            ),
             Ty::Tuple(fields) => Type::Tuple(fields.iter().map(|f| self.finalize(f)).collect()),
             Ty::Enum(name, args) => Type::Enum {
                 name,
@@ -3954,6 +4079,12 @@ impl<'a> AssignmentCheck<'a> {
                     self.reads(elt, assigned);
                 }
             }
+            ExprKind::Dict { keys, values } => {
+                for (key, value) in keys.iter().zip(values) {
+                    self.reads(key, assigned);
+                    self.reads(value, assigned);
+                }
+            }
             ExprKind::Slice { lower, upper, step } => {
                 for bound in [lower, upper, step].into_iter().flatten() {
                     self.reads(bound, assigned);
@@ -4041,6 +4172,11 @@ const STRING_CHANGE: &str =
     "a string cannot be changed; build a new one, as in 's = s[:i] + c + s[i + 1:]'";
 
 const TUPLE_CHANGE: &str = "a tuple cannot be changed; build a new one, as in 't = (v, t[1])'";
+/// The error for changing a map entry other than by assigning it, as in `m[k] += 1`, or a map
+/// that is not a variable, as in `p.m[k] = 1`.
+const MAP_CHANGE: &str = "a map entry can only be assigned, as in 'm[key] = value', for now";
+/// The kinds a map's keys may be, which hash and compare exactly.
+const MAP_KEYS: &[Kind] = &[Kind::Int, Kind::Str, Kind::Bool];
 
 impl Indexed {
     /// Returns the error for changing an element of what was indexed, if it cannot be changed.
@@ -4049,6 +4185,7 @@ impl Indexed {
             Indexed::List => None,
             Indexed::Str => Some(STRING_CHANGE),
             Indexed::Tuple => Some(TUPLE_CHANGE),
+            Indexed::Map => None,
         }
     }
 }
@@ -4350,6 +4487,9 @@ impl ParameterUse<'_> {
             }
             ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
                 elts.iter().for_each(|elt| self.expr(elt))
+            }
+            ExprKind::Dict { keys, values } => {
+                keys.iter().chain(values).for_each(|elt| self.expr(elt))
             }
             ExprKind::Slice { lower, upper, step } => [lower, upper, step]
                 .into_iter()

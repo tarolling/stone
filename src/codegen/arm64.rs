@@ -18,8 +18,8 @@ pub mod floats;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
-    Context, LIST_ROUTINES, STRING_METHOD_ROUTINES, escape, global_label, immortal_string,
-    variant_statics,
+    Context, LIST_ROUTINES, MAP_ROUTINES, STRING_METHOD_ROUTINES, escape, global_label,
+    immortal_string, variant_statics,
 };
 use crate::codegen::{AssemblyGenerator, Os, Target};
 use crate::project::SourceMap;
@@ -196,7 +196,10 @@ impl Arm64Generator {
                 Some(texts) => {
                     let label = self.ctx.new_label("fail_pieces");
                     address(self, "x0", &label);
-                    self.emit("\tb\tstone.fail_detail");
+                    match texts.len() {
+                        2 => self.emit("\tb\tstone.fail_detail1"),
+                        _ => self.emit("\tb\tstone.fail_detail"),
+                    }
                     let texts: Vec<String> = texts.into_iter().map(escape).collect();
                     pieces.push((label, texts));
                 }
@@ -212,12 +215,17 @@ impl Arm64Generator {
         let no_location = self.ctx.new_label("fail_message");
         let common = self.ctx.new_label("fail_common");
         let [first, second] = emit::FAIL_VALUES;
-        // x21 says whether x0 starts the pieces of a detailed message, whose values wait in x22
-        // and x23, and x19 and x20 hold the message and the site
+        // x21 is 0, or the number of holes of a detailed message whose pieces x0 starts and
+        // whose values wait in x22 and x23, and x19 and x20 hold the message and the site
+        self.emit("stone.fail_detail1:");
+        self.emit("\tmov\tx21, #1");
+        let detailed = self.ctx.new_label("fail_detailed");
+        self.emit(&format!("\tb\t{detailed}"));
         self.emit("stone.fail_detail:");
+        self.emit("\tmov\tx21, #2");
+        self.emit(&format!("{detailed}:"));
         self.emit(&format!("\tmov\tx22, {first}"));
         self.emit(&format!("\tmov\tx23, {second}"));
-        self.emit("\tmov\tx21, #1");
         // room to write an int's digits in
         self.emit("\tsub\tsp, sp, #32");
         self.emit(&format!("\tb\t{common}"));
@@ -241,6 +249,10 @@ impl Arm64Generator {
         let plain = self.ctx.new_label("fail_plain");
         self.emit(&format!("\tcbz\tx21, {plain}"));
         for value in ["x22", "x23"] {
+            if value == "x23" {
+                self.emit("\tcmp\tx21, #1");
+                self.emit(&format!("\tb.eq\t{plain}"));
+            }
             // the next piece follows the last one's terminating zero
             self.emit("\tadd\tx24, x1, x2");
             self.emit("\tadd\tx24, x24, #1");
@@ -382,10 +394,14 @@ impl Arm64Generator {
                 .failure_of("stone.time_sleep", crate::stdlib::time::SLEEP_TOO_LARGE);
             builtins::time_runtime(self, &time, (&negative, &too_large));
         }
-        let parsing: Vec<&str> = ["stone.parse_int", "stone.parse_float"]
-            .into_iter()
-            .filter(|label| self.ctx.uses(&[label]))
-            .collect();
+        let parsing: Vec<&str> = [
+            "stone.parse_int",
+            "stone.parse_float",
+            "stone.map_missing_str",
+        ]
+        .into_iter()
+        .filter(|label| self.ctx.uses(&[label]))
+        .collect();
         if !parsing.is_empty() {
             builtins::parse_runtime(self, &parsing);
             self.ctx.needs_fail = true;
@@ -420,6 +436,10 @@ impl Arm64Generator {
             .filter(|label| self.ctx.uses(&[label]))
             .collect();
         builtins::list_methods(self, &methods);
+        if self.ctx.uses(MAP_ROUTINES) {
+            let strings = self.ctx.needs_strings();
+            builtins::map_runtime(self, strings);
+        }
         for (label, element) in self.ctx.list_printers()? {
             builtins::print_list(self, &label, &element);
         }

@@ -507,6 +507,12 @@ impl Parser {
         }
         self.pos = mark;
 
+        // dict
+        if let Ok(expr) = self.parse_dict() {
+            return Ok(expr);
+        }
+        self.pos = mark;
+
         // NAME
         if let TokenType::Name(name) = self.advance().r#type {
             return Ok(Box::new(Expr::new(
@@ -672,6 +678,66 @@ impl Parser {
             )));
         }
         error(self)
+    }
+
+    /// Parses a map literal, a key and its value per entry.
+    ///
+    /// ```text
+    /// dict:
+    ///     | '{' [kvpair (',' kvpair)* [',']] '}'
+    /// kvpair:
+    ///     | expression ':' expression
+    /// ```
+    pub(super) fn parse_dict(&mut self) -> ParseExprResult {
+        let mark = self.pos;
+
+        if self.expect(TokenType::LBrace).is_some() {
+            let mut keys = vec![];
+            let mut values = vec![];
+            loop {
+                let before = self.pos;
+                if let Ok(key) = self.parse_expression() {
+                    if self.expect(TokenType::Colon).is_some()
+                        && let Ok(value) = self.parse_expression()
+                    {
+                        keys.push(*key);
+                        values.push(*value);
+                        if self.expect(TokenType::Comma).is_some() {
+                            continue;
+                        }
+                        break;
+                    }
+                    if self.peek().r#type != TokenType::Colon {
+                        let span = self.peek().span;
+                        self.hint(
+                            span,
+                            "a map entry is a key, ':', and a value, as in '{\"a\": 1}'",
+                        );
+                    }
+                    self.pos = mark;
+                    return Err(ParserError {
+                        method: "parse_dict".to_string(),
+                        token: self.peek().r#type.clone(),
+                        span: self.peek().span,
+                    });
+                }
+                self.pos = before;
+                break;
+            }
+            if self.expect(TokenType::RBrace).is_some() {
+                return Ok(Box::new(Expr::new(
+                    ExprKind::Dict { keys, values },
+                    self.span_from(mark),
+                )));
+            }
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_dict".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
     }
 
     /// Parses a list literal, such as `[1, 2]` or `[]`.

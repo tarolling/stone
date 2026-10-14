@@ -803,6 +803,10 @@ impl Rewriter<'_> {
     fn type_expr(&mut self, ty: &mut TypeExpr) {
         match &mut ty.kind {
             TypeExprKind::List(elem) => self.type_expr(elem),
+            TypeExprKind::Map(key, value) => {
+                self.type_expr(key);
+                self.type_expr(value);
+            }
             TypeExprKind::Tuple(fields) => fields.iter_mut().for_each(|f| self.type_expr(f)),
             TypeExprKind::Named { name, args } => {
                 args.iter_mut().for_each(|a| self.type_expr(a));
@@ -964,6 +968,10 @@ impl Rewriter<'_> {
             }
             ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
                 elts.iter_mut().for_each(|e| self.expr(e))
+            }
+            ExprKind::Dict { keys, values } => {
+                keys.iter_mut().for_each(|e| self.expr(e));
+                values.iter_mut().for_each(|e| self.expr(e));
             }
             ExprKind::Slice { lower, upper, step } => [lower, upper, step]
                 .into_iter()

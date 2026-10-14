@@ -152,6 +152,7 @@ param:
 # or 'option' '[' type ']'; 'none' is not a type
 type:
     | 'list' '[' type ']'
+    | 'map' '[' type ',' type [','] ']'
     | 'tuple' '[' type (',' type)+ [','] ']'
     | NAME ('.' NAME)* ['[' ','.type+ [','] ']']
 
@@ -295,6 +296,7 @@ atom:
     | strings
     | NUMBER
     | list
+    | dict
     | tuple
     | group
 
@@ -316,6 +318,12 @@ string[expr]:
 
 list:
     | '[' [named_expressions] ']' 
+
+dict:
+    | '{' [kvpair (',' kvpair)* [',']] '}' 
+
+kvpair:
+    | expression ':' expression 
 
 # FUNCTION CALL ARGUMENTS
 # =======================

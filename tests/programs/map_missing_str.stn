@@ -1,0 +1,3 @@
+print("before")
+m = {"apple": 1}
+print(m["pear"])

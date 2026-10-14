@@ -186,7 +186,7 @@ fn hover_documents_methods() {
     // the `len` in `"é".len()`
     let text = hover_text(&doc(SOURCE), at(7, 18)).unwrap();
     assert!(
-        text.starts_with("```stone\n(str | list[T]).len() -> int\n```\n"),
+        text.starts_with("```stone\n(str | list[T] | map[K, V]).len() -> int\n```\n"),
         "{text}"
     );
     // a variable named like a method is still a variable
@@ -240,15 +240,15 @@ fn definition_of_a_builtin_opens_the_reference_file() {
         Range::new(Position::new(line, 3), Position::new(line, 8))
     );
 
-    // the `len` in the reference's `// (str | list[T]).len() -> int` line
+    // the `len` in the reference's `// (str | list[T] | map[K, V]).len() -> int` line
     let len = definition(&doc, &uri(), at(7, 18), Some(&builtins)).unwrap();
     let line = text
         .lines()
-        .position(|l| l.starts_with("// (str | list[T]).len("))
+        .position(|l| l.starts_with("// (str | list[T] | map[K, V]).len("))
         .unwrap() as u32;
     assert_eq!(
         len.range,
-        Range::new(Position::new(line, 19), Position::new(line, 22))
+        Range::new(Position::new(line, 31), Position::new(line, 34))
     );
 }
 
@@ -413,6 +413,7 @@ fn completion_after_a_dot_offers_methods() {
         "is_none",
         "unwrap",
         "unwrap_or",
+        "contains",
     ]
     .iter()
     .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))

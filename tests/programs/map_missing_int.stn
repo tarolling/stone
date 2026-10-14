@@ -1,0 +1,4 @@
+m = {1: "a"}
+print(m[1])
+k = 2
+print(m[k * 3])

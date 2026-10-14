@@ -232,6 +232,9 @@ pub enum ExprKind {
     Name { id: Identifier, ctx: ExprContext },
     /// A list literal, such as `[1, 2, 3]`.
     List { elts: Vec<Expr>, ctx: ExprContext },
+    /// A map literal, such as `{"a": 1, "b": 2}`, with each key and the value after it at the
+    /// same position. `{}` is an empty map.
+    Dict { keys: Vec<Expr>, values: Vec<Expr> },
     /// A tuple of two or more values, such as `(1, "a")`, or, as an assignment or `for` target,
     /// names to unpack a tuple into, such as `q, r` in `q, r = divide(7, 2)`.
     Tuple { elts: Vec<Expr>, ctx: ExprContext },
@@ -524,6 +527,8 @@ pub enum TypeExprKind {
     Str,
     /// A list of the given element type, such as `list[float]`.
     List(Box<TypeExpr>),
+    /// A map from the first type to the second, such as `map[str, int]`.
+    Map(Box<TypeExpr>, Box<TypeExpr>),
     /// A tuple of two or more types, such as `tuple[int, str]`.
     Tuple(Vec<TypeExpr>),
     /// Any other type by name, with its type arguments: a struct or enum such as `Shape` or
@@ -543,6 +548,7 @@ impl Display for TypeExpr {
             TypeExprKind::Bool => write!(f, "bool"),
             TypeExprKind::Str => write!(f, "str"),
             TypeExprKind::List(elem) => write!(f, "list[{elem}]"),
+            TypeExprKind::Map(key, value) => write!(f, "map[{key}, {value}]"),
             TypeExprKind::Tuple(elts) => {
                 write!(f, "tuple[")?;
                 for (i, elt) in elts.iter().enumerate() {

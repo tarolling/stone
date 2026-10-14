@@ -89,8 +89,6 @@ values), reading an unassigned variable is a checker error or a runtime error, a
 counting frees every string, list, and enum value exactly once. The checker rules out cyclic
 values, and enum values never change, so reference counting never leaks.
 
-(value-semantics)=
-
 ### Value semantics
 
 stone has value semantics: assigning a value, passing it to a function, or putting it in a list
@@ -127,7 +125,8 @@ do instead:
 - A `for` loop walks the list as it was when the loop started, so appending to the list inside
   the loop does not make the loop run longer.
 
-Status: lists have value semantics in both backends. Compiled code checks a list's reference
+Status: lists, and maps, which compiled code stores as lists of entries with a hash table
+beside them, have value semantics in both backends. Compiled code checks a list's reference
 count before changing it and copies the list only when something else refers to it
 (`list_unique` in the IR), so changing a list that only one variable holds is still done in
 place. A function owns each parameter it assigns or changes, and the caller hands it a reference

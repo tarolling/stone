@@ -65,9 +65,9 @@ class StoneLexer(RegexLexer):
             (r"(enum|struct)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Class)),
             (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
             (
-                # a type name, maybe inside list[, tuple[, or option[, then closing brackets or more
+                # a type name, maybe inside list[, map[, tuple[, or option[, then closing brackets or more
                 # types
-                r"(->|:)(\s*)((?:(?:list|tuple|option)\[)*(?:int|float|bool|str)(?:\]|,\s*(?:(?:list|tuple|option)\[)*(?:int|float|bool|str))*)(?![\w(])",
+                r"(->|:)(\s*)((?:(?:list|map|tuple|option)\[)*(?:int|float|bool|str)(?:\]|,\s*(?:(?:list|map|tuple|option)\[)*(?:int|float|bool|str))*)(?![\w(])",
                 bygroups(Punctuation, Whitespace, Keyword.Type),
             ),
             (words(KEYWORDS, suffix=r"\b"), Keyword),

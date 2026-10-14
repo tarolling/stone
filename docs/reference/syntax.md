@@ -81,6 +81,7 @@ module's name in a `use` or before a `.`.
 | bool | `true`, `false` |
 | option | `none`, `some(1)` |
 | list | `[]`, `[1, 2, 3]`, `[[1.0], []]` |
+| map | `{}`, `{"a": 1, "b": 2}`, `{1: [2.5], 3: [],}` |
 | tuple | `(1, "a")`, `(x, y, z,)`, `(1, ("a", [2.5]))` |
 | struct | `Point(x=1.0, y=2.0)`, `Line(end=q, start=p)` |
 
@@ -169,7 +170,8 @@ fn report(name: str, score: float);
 ```
 
 A type is `int`, `float`, `bool`, `str`, `list[T]` for any type `T`, such as
-`list[list[int]]`, `tuple[T1, T2, ...]` with a type for each of two or more values, such as
+`list[list[int]]`, `map[K, V]` with keys of type `K` and values of type `V`, such as
+`map[str, list[int]]`, `tuple[T1, T2, ...]` with a type for each of two or more values, such as
 `tuple[str, list[int]]`, `option[T]`, or a struct's or enum's name, such as `Shape`, or
 `shapes.Shape` for one of a module. A function without `->` returns no value, so a call to it can only be a
 statement of its own, and its `ret` takes no value. Types are written only in signatures:
@@ -247,6 +249,12 @@ struct Point;
 `Point(x=1.0, y=2.0)` makes a value of it, naming a value for every field once, in any order.
 `p.x` reads a field, and `p.x = 3.0`, `p.x += 1.0`, and `ps[i].y = 0.0` change one, as long as
 the struct is stored in a variable. See [Types](types.md#structs).
+
+## Maps
+
+A map literal is a key, `:`, and a value for each entry, separated by commas, in braces:
+`{"ann": 31, "bob": 27}`. `m[k]` reads the value of `k`'s entry, and `m[k] = v` sets it, adding
+the entry if `m` has none. See [Types](types.md#maps).
 
 ## Slices
 

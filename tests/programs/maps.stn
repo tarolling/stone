@@ -1,0 +1,77 @@
+// maps: literals, reads, inserts, overwrites, len, contains, and printing in insertion order
+struct Point;
+    x: int
+    y: int
+
+enum Shape;
+    Circle(float)
+    Square(int)
+
+fn with_entry(m: map[str, int], key: str, value: int) -> map[str, int];
+    m[key] = value
+    ret m
+
+fn changed_copy(m: map[str, int]);
+    m["changed"] = 1
+    print(m.len())
+
+fn total(m: map[int, int], n: int) -> int;
+    sum = 0
+    for i in range(n);
+        sum += m[i]
+    ret sum
+
+// literals, with a trailing comma and a duplicate key, which keeps the later value
+ages = {"ann": 31, "bob": 27,}
+print(ages)
+print(ages["ann"], ages["bob"])
+print({1: "one", 1: "uno", 2: "two"})
+empty = {}
+print(empty, empty.len())
+empty["first"] = true
+print(empty)
+
+// inserts keep their order, and an overwrite keeps its place
+ages["cy"] = 45
+ages["ann"] = 32
+print(ages, ages.len())
+print(ages.contains("bob"), ages.contains("dee"))
+
+// bool keys
+flags = {true: "yes", false: "no"}
+print(flags[1 > 2], flags)
+
+// values of every kind
+lists = {"evens": [2, 4], "odds": [1, 3]}
+print(lists["odds"][1], lists)
+pairs = {7: (1, "a"), 8: (2, "b")}
+print(pairs[8], pairs[7][1])
+points = {"origin": Point(x=0, y=0), "unit": Point(x=1, y=1)}
+print(points["unit"].y, points)
+shapes = {1: Shape.Circle(1.5), 2: Shape.Square(3)}
+print(shapes)
+maybe = {"some": some(1), "none": none}
+print(maybe)
+nested = {"a": {"x": 1}, "b": {"y": 2, "z": 3}}
+print(nested["b"]["z"], nested)
+print([{1: 2}, {3: 4}], ({"k": "v"}, 1))
+
+// maps are values: a function changes only its own copy unless it returns it
+counts = {"a": 1}
+changed_copy(counts)
+print(counts)
+counts = with_entry(counts, "b", 2)
+print(counts)
+copy = counts
+copy["c"] = 3
+print(counts, copy)
+
+// many entries, so the index grows
+squares = {}
+for i in range(10000);
+    squares[i] = i * i
+print(squares.len(), squares[9999], total(squares, 10000))
+words = {}
+for i in range(1000);
+    words[str(i)] = i
+print(words.len(), words["500"], words.contains("1000"), words.contains("999"))

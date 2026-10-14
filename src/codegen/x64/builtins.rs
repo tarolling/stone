@@ -376,6 +376,12 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     }
     r#gen.emit(".Lfree_list_wide_done:");
     r#gen.emit(".Lfree_list_storage:");
+    // a map's hash index
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 40]");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lfree_list_unindexed");
+    r#gen.emit("\tcall\tstone.mem_free");
+    r#gen.emit(".Lfree_list_unindexed:");
     r#gen.emit("\tmov\trax, QWORD PTR [rbx + 16]");
     r#gen.emit("\tcall\tstone.mem_free");
     r#gen.emit("\tlea\trax, [rbx - 8]");
@@ -902,13 +908,14 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tret");
 }
 
-/// Emits the list runtime. A list is a pointer to a counted 40-byte header `{len, cap, data,
-/// kinds, width}` (see [`memory_runtime`]), where `data` points to `cap` 8-byte slots, `len` of
+/// Emits the list runtime. A list is a pointer to a counted 48-byte header `{len, cap, data,
+/// kinds, width, index}` (see [`memory_runtime`]), where `data` points to `cap` 8-byte slots, `len` of
 /// them in use. Each element is `width` slots: one, or one for each value of a tuple, stored side
 /// by side, so a `list[tuple[int, str]]` of 3 elements has a `len` of 6. `kinds` says what each
 /// value of an element is, two bits for each: 0 for values that are not counted, 1 for strings,
-/// and 2 for lists, so it is 0, 1, or 2 for a list of one value each. The routines follow the
-/// System V calling convention, and take their memory from [`allocator`].
+/// and 2 for lists, so it is 0, 1, or 2 for a list of one value each. `index` is 0 except in a
+/// map, which is a list of entries that may point to its hash index (see [`map_runtime`]). The
+/// routines follow the System V calling convention, and take their memory from [`allocator`].
 ///
 /// - `stone.list_new_wide` returns a list of `rdi` slots whose values the caller fills in, with
 ///   `kinds` set to `rsi` and `width` to `rdx`
@@ -939,10 +946,11 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tr12, rdi");
     r#gen.emit("\tmov\tr13, rsi");
     r#gen.emit("\tmov\tr14, rdx");
-    r#gen.emit("\tmov\trdi, 40");
+    r#gen.emit("\tmov\trdi, 48");
     r#gen.emit("\tcall\tstone.alloc");
     r#gen.emit("\tmov\trbx, rax");
     r#gen.emit("\tmov\tQWORD PTR [rbx], r12");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 40], 0");
     r#gen.emit("\tmov\tQWORD PTR [rbx + 24], r13");
     r#gen.emit("\tmov\tQWORD PTR [rbx + 32], r14");
     // room for at least 4 elements, so the first appends do not reallocate
@@ -1074,6 +1082,200 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
         r#gen.emit(&format!("\tpop\t{reg}"));
     }
     r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
+/// Emits the map runtime. A map is a list (see [`list_runtime`]) whose elements are its entries in
+/// the order their keys were first added, each a key followed by the values of its value, so a
+/// `map[str, tuple[int, int]]` has a `width` of 3. Its `index` is 0 until the first lookup, and
+/// then points to a hash table: its capacity, a power of two from 8, followed by that many slots,
+/// each 0 if empty or else 1 more than the first slot of an entry. The table stays at most half
+/// full. A copy of a map (`stone.list_copy`) has no index, and builds one when it is first used.
+/// Keys are ints, bools, or strings, which `rdx` says by being 1. Strings are equal if their
+/// bytes are, which needs the string runtime only if `strings`.
+///
+/// - `stone.map_find` returns the first slot of the entry of key `rsi` in map `rdi`, or -1 if
+///   there is none
+/// - `stone.map_add` adds an entry for key `rsi`, which the map does not have, at the end of map
+///   `rdi`, retaining a string key, and returns its first slot. The caller fills in its values.
+pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
+    // rbx holds the map, r12 the key, and r13 whether it is a string
+    let saved = ["rbx", "r12", "r13", "r14", "r15"];
+    let enter = |r#gen: &mut dyn AssemblyGenerator| {
+        r#gen.emit("\tpush\trbp");
+        r#gen.emit("\tmov\trbp, rsp");
+        for reg in saved {
+            r#gen.emit(&format!("\tpush\t{reg}"));
+        }
+        r#gen.emit("\tand\trsp, -16");
+        r#gen.emit("\tmov\trbx, rdi");
+        r#gen.emit("\tmov\tr12, rsi");
+        r#gen.emit("\tmov\tr13, rdx");
+    };
+    let leave = |r#gen: &mut dyn AssemblyGenerator| {
+        r#gen.emit(&format!("\tlea\trsp, [rbp - {}]", 8 * saved.len()));
+        for reg in saved.iter().rev() {
+            r#gen.emit(&format!("\tpop\t{reg}"));
+        }
+        r#gen.emit("\tpop\trbp");
+        r#gen.emit("\tret");
+    };
+
+    r#gen.emit("stone.map_find:");
+    enter(r#gen);
+    r#gen.emit("\tcmp\tQWORD PTR [rbx + 40], 0");
+    r#gen.emit("\tjne\t.Lmap_find_indexed");
+    r#gen.emit("\tcall\t.Lmap_rebuild");
+    r#gen.emit(".Lmap_find_indexed:");
+    r#gen.emit("\tcall\t.Lmap_probe");
+    // an empty slot holds 0, which becomes -1
+    r#gen.emit("\tmov\trax, QWORD PTR [rax]");
+    r#gen.emit("\tdec\trax");
+    leave(r#gen);
+
+    // r14 is the first slot of the new entry, and r15 counts the slots appended
+    r#gen.emit("stone.map_add:");
+    enter(r#gen);
+    // a bigger index when one more entry would fill more than half of it: 2 * (len + width)
+    // slots must be at most capacity * width
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 40]");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lmap_add_rebuild");
+    r#gen.emit("\tmov\trcx, QWORD PTR [rbx]");
+    r#gen.emit("\tadd\trcx, QWORD PTR [rbx + 32]");
+    r#gen.emit("\tadd\trcx, rcx");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbx + 32]");
+    r#gen.emit("\timul\trdx, QWORD PTR [rax]");
+    r#gen.emit("\tcmp\trcx, rdx");
+    r#gen.emit("\tjle\t.Lmap_add_room");
+    r#gen.emit(".Lmap_add_rebuild:");
+    r#gen.emit("\tcall\t.Lmap_rebuild");
+    r#gen.emit(".Lmap_add_room:");
+    r#gen.emit("\tmov\tr14, QWORD PTR [rbx]");
+    r#gen.emit("\tmov\tr15, QWORD PTR [rbx + 32]");
+    r#gen.emit("\tmov\trsi, r12");
+    r#gen.emit(".Lmap_add_slot:");
+    r#gen.emit("\tmov\trdi, rbx");
+    r#gen.emit("\tcall\tstone.list_append");
+    r#gen.emit("\txor\tesi, esi"); // the values are filled in by the caller
+    r#gen.emit("\tdec\tr15");
+    r#gen.emit("\tjnz\t.Lmap_add_slot");
+    r#gen.emit("\ttest\tr13, r13");
+    r#gen.emit("\tjz\t.Lmap_add_key");
+    r#gen.emit("\tinc\tQWORD PTR [r12 - 8]");
+    r#gen.emit(".Lmap_add_key:");
+    r#gen.emit("\tcall\t.Lmap_probe");
+    r#gen.emit("\tlea\trcx, [r14 + 1]");
+    r#gen.emit("\tmov\tQWORD PTR [rax], rcx");
+    r#gen.emit("\tmov\trax, r14");
+    leave(r#gen);
+
+    // replaces map rbx's index with one for its entries and one more, keeping r12 and r13 for its
+    // caller: r14 is the first slot of each entry in turn, and r15 the capacity
+    r#gen.emit(".Lmap_rebuild:");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr14");
+    r#gen.emit("\tpush\tr15");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 40]");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lmap_rebuild_size");
+    r#gen.emit("\tcall\tstone.mem_free");
+    r#gen.emit(".Lmap_rebuild_size:");
+    r#gen.emit("\tmov\tr15, 8");
+    r#gen.emit("\tmov\trcx, QWORD PTR [rbx]");
+    r#gen.emit("\tadd\trcx, QWORD PTR [rbx + 32]");
+    r#gen.emit("\tadd\trcx, rcx");
+    r#gen.emit(".Lmap_rebuild_grow:");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbx + 32]");
+    r#gen.emit("\timul\trdx, r15");
+    r#gen.emit("\tcmp\trcx, rdx");
+    r#gen.emit("\tjle\t.Lmap_rebuild_alloc");
+    r#gen.emit("\tadd\tr15, r15");
+    r#gen.emit("\tjmp\t.Lmap_rebuild_grow");
+    r#gen.emit(".Lmap_rebuild_alloc:");
+    r#gen.emit("\tlea\trdi, [r15 * 8 + 8]");
+    r#gen.emit("\tcall\tstone.mem_alloc");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 40], rax");
+    r#gen.emit("\tmov\tQWORD PTR [rax], r15");
+    r#gen.emit("\tmov\trcx, r15");
+    r#gen.emit(".Lmap_rebuild_zero:");
+    r#gen.emit("\tmov\tQWORD PTR [rax + rcx * 8], 0");
+    r#gen.emit("\tdec\trcx");
+    r#gen.emit("\tjnz\t.Lmap_rebuild_zero");
+    r#gen.emit("\txor\tr14d, r14d");
+    r#gen.emit(".Lmap_rebuild_next:");
+    r#gen.emit("\tcmp\tr14, QWORD PTR [rbx]");
+    r#gen.emit("\tjge\t.Lmap_rebuild_done");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tmov\tr12, QWORD PTR [rax + r14 * 8]");
+    // the keys differ, so this finds an empty slot
+    r#gen.emit("\tcall\t.Lmap_probe");
+    r#gen.emit("\tlea\trcx, [r14 + 1]");
+    r#gen.emit("\tmov\tQWORD PTR [rax], rcx");
+    r#gen.emit("\tadd\tr14, QWORD PTR [rbx + 32]");
+    r#gen.emit("\tjmp\t.Lmap_rebuild_next");
+    r#gen.emit(".Lmap_rebuild_done:");
+    r#gen.emit("\tpop\tr15");
+    r#gen.emit("\tpop\tr14");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tret");
+
+    // returns in rax the address of the slot of map rbx's index that holds key r12's entry, or
+    // of the empty slot where it would go, probing one slot after another: r8 is the index, r9
+    // the mask of a slot number, r10 the slot's address, and r11 what it holds
+    r#gen.emit(".Lmap_probe:");
+    // the hash, FNV-1a over a string's bytes, then mixed by Fibonacci hashing
+    r#gen.emit("\tmov\trax, r12");
+    if strings {
+        r#gen.emit("\ttest\tr13, r13");
+        r#gen.emit("\tjz\t.Lmap_probe_mix");
+        r#gen.emit("\tmovabs\trax, 0xcbf29ce484222325");
+        r#gen.emit("\tmovabs\trcx, 0x100000001b3");
+        r#gen.emit("\tmov\trdx, r12");
+        r#gen.emit(".Lmap_probe_byte:");
+        r#gen.emit("\tmovzx\tr8d, byte ptr [rdx]");
+        r#gen.emit("\ttest\tr8d, r8d");
+        r#gen.emit("\tjz\t.Lmap_probe_mix");
+        r#gen.emit("\txor\trax, r8");
+        r#gen.emit("\timul\trax, rcx");
+        r#gen.emit("\tinc\trdx");
+        r#gen.emit("\tjmp\t.Lmap_probe_byte");
+    }
+    r#gen.emit(".Lmap_probe_mix:");
+    r#gen.emit("\tmovabs\trcx, 0x9e3779b97f4a7c15");
+    r#gen.emit("\timul\trax, rcx");
+    r#gen.emit("\tmov\trcx, rax");
+    r#gen.emit("\tshr\trcx, 32");
+    r#gen.emit("\txor\trax, rcx");
+    r#gen.emit("\tmov\tr8, QWORD PTR [rbx + 40]");
+    r#gen.emit("\tmov\tr9, QWORD PTR [r8]");
+    r#gen.emit("\tdec\tr9");
+    r#gen.emit(".Lmap_probe_slot:");
+    r#gen.emit("\tand\trax, r9");
+    r#gen.emit("\tlea\tr10, [r8 + rax * 8 + 8]");
+    r#gen.emit("\tmov\tr11, QWORD PTR [r10]");
+    r#gen.emit("\ttest\tr11, r11");
+    r#gen.emit("\tjz\t.Lmap_probe_done");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rdx + r11 * 8 - 8]");
+    r#gen.emit("\tcmp\trsi, r12");
+    r#gen.emit("\tje\t.Lmap_probe_done"); // the same int, or the same string
+    if strings {
+        r#gen.emit("\ttest\tr13, r13");
+        r#gen.emit("\tjz\t.Lmap_probe_next");
+        // stone.str_eq changes only rax, rdi, and rsi
+        r#gen.emit("\tmov\trcx, rax");
+        r#gen.emit("\tmov\trdi, r12");
+        r#gen.emit("\tcall\tstone.str_eq");
+        r#gen.emit("\ttest\trax, rax");
+        r#gen.emit("\tmov\trax, rcx");
+        r#gen.emit("\tjnz\t.Lmap_probe_done");
+        r#gen.emit(".Lmap_probe_next:");
+    }
+    r#gen.emit("\tinc\trax");
+    r#gen.emit("\tjmp\t.Lmap_probe_slot");
+    r#gen.emit(".Lmap_probe_done:");
+    r#gen.emit("\tmov\trax, r10");
     r#gen.emit("\tret");
 }
 
@@ -1727,6 +1929,8 @@ pub fn args_runtime(r#gen: &mut dyn AssemblyGenerator) {
 ///   grammar before `stone.decimal_to_float` reads it
 /// - `stone.fail_quoted` stops the program with the message `rdi` followed by the string `rsi`
 ///   and a closing quote
+/// - `stone.map_missing_str` stops the program because a map has no entry for the string key
+///   `rdi`, as in `key not found: 'pear'`
 pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     // the pieces of a message are joined with stone.str_concat, so they are strings
     r#gen.emit("\t.data");
@@ -1741,6 +1945,7 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
             "could not convert string to float: '",
         ),
         (".Lstone_quote", "'"),
+        (".Lstone_key_missing", "key not found: '"),
     ] {
         immortal_string(r#gen, label, text);
     }
@@ -1763,6 +1968,13 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     r#gen.emit("\tcall\tstone.str_concat");
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tjmp\tstone.fail");
+
+    if used.contains(&"stone.map_missing_str") {
+        r#gen.emit("stone.map_missing_str:");
+        r#gen.emit("\tmov\trsi, rdi");
+        r#gen.emit("\tlea\trdi, [rip + .Lstone_key_missing]");
+        r#gen.emit("\tjmp\tstone.fail_quoted");
+    }
 
     if used.contains(&"stone.parse_int") {
         // rdi keeps the text, rsi is the cursor, rdx where the digits start, r10 the value so far,

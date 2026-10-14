@@ -163,13 +163,13 @@ own is an error. Method names are not reserved, so they also work as ordinary na
 ### `len`
 
 ```text
-(str | list[T]).len() -> int
+(str | list[T] | map[K, V]).len() -> int
 ```
 
-Returns the number of bytes in a string or elements in a list.
+Returns the number of bytes in a string, elements in a list, or entries in a map.
 
 ```stone
-print("stone".len(), [1, 2, 3].len(), [].len())   // 5 3 0
+print("stone".len(), [1, 2, 3].len(), {"a": 1}.len())   // 5 3 1
 ```
 
 ### `append`
@@ -367,6 +367,19 @@ Returns the value the option holds, or `default` if it is `none`.
 
 ```stone
 print(some(3).unwrap_or(0), none.unwrap_or(0))   // 3 0
+```
+
+### `contains`
+
+```text
+map[K, V].contains(key: K) -> bool
+```
+
+Returns whether the map has an entry for `key`.
+
+```stone
+ages = {"ann": 31}
+print(ages.contains("ann"), ages.contains("bob"))   // true false
 ```
 
 ## The `os` module

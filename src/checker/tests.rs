@@ -827,7 +827,7 @@ fn parameters_must_be_unique() {
 fn len_needs_a_str() {
     assert_error(
         "x = 5.len()\n",
-        "'len' needs a str or list, found int",
+        "'len' needs a str, list, or map, found int",
         1,
         5,
     );
@@ -2711,5 +2711,129 @@ fn a_function_reads_a_field_of_a_global_assigned_after_it() {
         "int has no field 'x'",
         5,
         11,
+    );
+}
+
+#[test]
+fn map_literals_have_types() {
+    assert_eq!(type_of_symbol("m = {\"a\": 1}\n", "m"), "map[str, int]");
+    assert_eq!(
+        type_of_symbol("m = {}\nm[1] = [true]\n", "m"),
+        "map[int, list[bool]]"
+    );
+    assert_eq!(type_of_symbol("m = {}\n", "m"), "map[int, int]");
+    assert_eq!(
+        type_of_symbol("m = {1: {\"a\": 1.5}}\nx = m[1][\"a\"]\n", "x"),
+        "float"
+    );
+}
+
+#[test]
+fn map_entries_have_one_type() {
+    assert_error("m = {1: 2, 3: \"a\"}\n", "expected int, found str", 1, 15);
+    assert_error("m = {1: 2, \"a\": 3}\n", "expected int, found str", 1, 12);
+}
+
+#[test]
+fn map_keys_are_int_str_or_bool() {
+    assert_error(
+        "m = {1.5: 2}\n",
+        "a map key must be int, str, or bool, found float",
+        1,
+        6,
+    );
+    assert_error(
+        "fn f(m: map[list[int], int]); ret\n",
+        "a map key must be int, str, or bool, found list[int]",
+        1,
+        13,
+    );
+}
+
+#[test]
+fn maps_are_indexed_by_their_key_type() {
+    assert_error(
+        "m = {\"a\": 1}\nx = m[0]\n",
+        "expected str, found int",
+        2,
+        7,
+    );
+    assert_error(
+        "m = {\"a\": 1}\nm[\"b\"] = \"c\"\n",
+        "expected int, found str",
+        2,
+        10,
+    );
+    assert_error("m = {1: 1}\nx = m[0:1]\n", "a map cannot be sliced", 2, 7);
+}
+
+#[test]
+fn a_map_entry_changes_only_by_assignment_for_now() {
+    assert_error(
+        "m = {1: 1}\nm[1] += 1\n",
+        "a map entry can only be assigned, as in 'm[key] = value', for now",
+        2,
+        1,
+    );
+    assert_error(
+        "m = {1: [1]}\nm[1].append(2)\n",
+        "a map entry can only be assigned, as in 'm[key] = value', for now",
+        2,
+        1,
+    );
+}
+
+#[test]
+fn maps_have_len_and_contains() {
+    assert_eq!(type_of_symbol("m = {1: 1}\nn = m.len()\n", "n"), "int");
+    assert_eq!(
+        type_of_symbol("m = {1: 1}\nb = m.contains(2)\n", "b"),
+        "bool"
+    );
+    assert_error(
+        "m = {1: 1}\nb = m.contains(\"a\")\n",
+        "expected int, found str",
+        2,
+        16,
+    );
+}
+
+#[test]
+fn maps_cannot_be_compared_or_iterated() {
+    assert_error(
+        "x = {1: 1} == {1: 1}\n",
+        "'==' and '!=' cannot compare map[int, int]",
+        1,
+        5,
+    );
+    assert_error(
+        "for k in {1: 1};\n    print(k)\n",
+        "a map cannot be iterated, for now",
+        1,
+        10,
+    );
+}
+
+#[test]
+fn a_function_changing_a_map_owns_it() {
+    assert!(
+        errors(
+            "fn f(m: map[str, int]) -> map[str, int];\n    m[\"a\"] = 1\n    ret m\nprint(f({}))\n"
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn a_function_can_index_a_global_map_assigned_after_it() {
+    assert!(
+        errors("fn f(k: str) -> int;\n    ret table[k]\ntable = {\"a\": 1}\nprint(f(\"a\"))\n")
+            .is_empty()
+    );
+    assert_error(
+        "fn f(k: str) -> int;\n    ret table[k]\ntable = [1]\nprint(f(\"a\"))\n",
+        "expected int, found str",
+        2,
+        15,
     );
 }

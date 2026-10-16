@@ -188,7 +188,7 @@ From lowest to highest precedence:
 | `or` | `bool` conditions |
 | `and` | `bool` conditions |
 | `not` | a `bool` condition |
-| `==` `!=` `<` `<=` `>` `>=` | numbers and strings; `==` and `!=` also bools |
+| `==` `!=` `<` `<=` `>` `>=` | numbers and strings; `==` and `!=` also bools, tuples, structs, options, and enums |
 | `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings |
 | `*` `/` `%` | two ints or two floats, or lists of them |
 | unary `+` `-` | an int or a float, or a list of them |

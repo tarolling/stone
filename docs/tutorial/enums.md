@@ -47,7 +47,8 @@ null: a value that may be missing is an option, `option[T]`, which is either `so
 
 An option also has methods: `unwrap_or(-1)` gives the value or `-1` when there is none,
 `is_some()` and `is_none()` say which it is, and `unwrap()` gives the value, stopping the
-program with `cannot unwrap none` when there is none. See
+program with `cannot unwrap none` when there is none. Options compare with `==` and `!=`, so
+`x == some(3)` and `x != none` work too, as do values of your own enums. See
 [Types](../reference/types.md#enums) for the details.
 
 Next, {doc}`input`.

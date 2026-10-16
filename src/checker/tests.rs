@@ -2040,12 +2040,6 @@ fn tuples_are_not_numbers_strings_or_lists() {
         7,
     );
     assert_error(
-        "t = (1, 2)\nprint(t == t)\n",
-        "'==' and '!=' cannot compare tuple[int, int]",
-        2,
-        7,
-    );
-    assert_error(
         "t = (1, 2)\nprint(str(t))\n",
         "'str' needs an int, float, bool, or str, found tuple[int, int]",
         2,
@@ -2274,14 +2268,7 @@ fn options_hold_a_value_or_none() {
 }
 
 #[test]
-fn enums_and_options_cannot_be_compared() {
-    assert_error(
-        "x = some(1)\nprint(x == none)\n",
-        "'==' and '!=' cannot compare option[int]; tell its variants apart with 'match', or an \
-         option's with 'is_some()' and 'is_none()'",
-        2,
-        7,
-    );
+fn enums_and_options_are_not_conditions() {
     assert_error(
         "x = some(1)\nif x;\n    print(1)\n",
         "a condition must be bool, found option[int]",
@@ -2657,17 +2644,11 @@ fn a_change_to_a_fields_parameter_is_lost_unless_it_is_read() {
 }
 
 #[test]
-fn structs_are_not_numbers_strings_or_comparable() {
+fn structs_are_not_numbers_or_strings() {
     let p = format!("{POINT}p = Point(x=1.0, y=2.0)\n");
     assert_error(
         &format!("{p}print(p + 1)\n"),
         "'+' needs int, float, or str operands, found Point",
-        5,
-        7,
-    );
-    assert_error(
-        &format!("{p}print(p == p)\n"),
-        "'==' and '!=' cannot compare Point; compare their fields instead",
         5,
         7,
     );
@@ -2795,6 +2776,75 @@ fn maps_have_len_and_contains() {
         "expected int, found str",
         2,
         16,
+    );
+}
+
+#[test]
+fn tuples_structs_options_and_enums_compare_by_value() {
+    let sources = [
+        "t = (1, (\"a\", 2.0))\nprint(t == t, t != (1, (\"b\", 2.0)))\n".to_string(),
+        format!("{POINT}p = Point(x=1.0, y=2.0)\nprint(p == p, p != Point(x=0.0, y=2.0))\n"),
+        "x = some(1)\nprint(x == none, x != some(2), none == none)\n".to_string(),
+        "enum List;\n    Nil\n    Cons(int, List)\nl = List.Cons(1, List.Nil)\n\
+         print(l == List.Nil, l == l == l)\n"
+            .to_string(),
+        "struct Named;\n    name: str\n    shape: option[tuple[int, float]]\n\
+         n = Named(name=\"a\", shape=none)\nif n != n;\n    print(n)\n"
+            .to_string(),
+    ];
+    for source in &sources {
+        assert_eq!(errors(source), [], "{source}");
+    }
+}
+
+#[test]
+fn compared_values_must_have_one_type() {
+    assert_error(
+        "print((1, 2) == (1, \"a\"))\n",
+        "expected tuple[int, int], found tuple[int, str]",
+        1,
+        17,
+    );
+    assert_error(
+        "print(some(1) == some(\"a\"))\n",
+        "expected option[int], found option[str]",
+        1,
+        18,
+    );
+}
+
+#[test]
+fn values_holding_lists_or_maps_cannot_be_compared() {
+    assert_error(
+        "struct Bag;\n    items: list[int]\nb = Bag(items=[])\nprint(b == b)\n",
+        "'==' and '!=' cannot compare Bag, since field 'Bag.items' holds list[int]",
+        4,
+        7,
+    );
+    assert_error(
+        "struct Bag;\n    items: list[int]\nstruct Box;\n    bag: tuple[int, Bag]\n\
+         b = Box(bag=(1, Bag(items=[])))\nprint(b != b)\n",
+        "'==' and '!=' cannot compare Box, since field 'Bag.items' holds list[int]",
+        6,
+        7,
+    );
+    assert_error(
+        "t = (1, [2])\nprint(t == t)\n",
+        "'==' and '!=' cannot compare tuple[int, list[int]], since it holds list[int]",
+        2,
+        7,
+    );
+    assert_error(
+        "x = some({1: 2})\nprint(x == none)\n",
+        "'==' and '!=' cannot compare option[map[int, int]], since it holds map[int, int]",
+        2,
+        7,
+    );
+    assert_error(
+        "enum Tree;\n    Leaf\n    Node(int, list[Tree])\nt = Tree.Leaf\nprint(t == t)\n",
+        "'==' and '!=' cannot compare Tree, since it holds list[Tree]",
+        5,
+        7,
     );
 }
 

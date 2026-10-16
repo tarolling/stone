@@ -127,8 +127,10 @@ Values separated by commas need their parentheses everywhere else, so `x = 1, 2`
 `ret a, b` are errors that suggest `(1, 2)` and `ret (a, b)`. A tuple has at least two values:
 `(x)` is `x` in parentheses, and `()` and `(x,)` are errors.
 
-A tuple prints as Python prints one, `(1, 'a')`, with strings inside it quoted. It cannot be
-compared, iterated, converted with `str`, or used in arithmetic or as a condition.
+A tuple prints as Python prints one, `(1, 'a')`, with strings inside it quoted. `==` and `!=`
+compare two tuples value by value, so `(1, "a") == (1, "a")` is `true`, as long as no value is a
+list or a map. A tuple cannot be ordered with `<`, iterated, converted with `str`, or used in
+arithmetic or as a condition.
 
 A tuple is not stored anywhere of its own: the compiler keeps each of its values where it would
 keep a variable, passes and returns them as separate values, and stores the values of a list's
@@ -164,8 +166,9 @@ an option, or an enum, as in `kids: list[Tree]` or `next: option[Node]`, since a
 itself directly would never end; `next: Node` is an error that suggests `option[Node]`.
 
 A struct prints with its name and fields, as in `Point(x=1.0, y=2.0)`, with the strings it holds
-quoted. It cannot be compared with `==`, converted with `str`, iterated, or used in arithmetic or
-as a condition; compare its fields instead.
+quoted. `==` and `!=` compare two structs field by field, as long as no field holds a list or a
+map. A struct cannot be ordered with `<`, converted with `str`, iterated, or used in arithmetic or
+as a condition.
 
 Structs are defined at the top level, and can be used before their definition. A library module
 makes one usable from other files with `pub struct`, and `use shapes.Point` imports it, or
@@ -289,8 +292,11 @@ enum Tree;
 Enum values never change: a new one replaces the old, as with tuples, and the values a `match`
 names are copies, so changing one, as in `xs.append(1)` for a list it named, changes only that
 variable. Values print as they are written, as in `Shape.Rect(2.0, 3.0)`, with the strings they
-hold quoted. They cannot be compared with `==`, converted with `str`, or used in arithmetic or as
-conditions; `match` tells them apart.
+hold quoted. `==` and `!=` compare two values of an enum, or two options, by variant and then by
+the values they hold, so `some(1) == some(1)` and `x != none` work, as long as no variant holds a
+list or a map. Comparing values nested more than 10,000 deep stops the program, as printing them
+does. They cannot be ordered with `<`, converted with `str`, or used in arithmetic or as
+conditions; `match` tells them apart and names their values.
 
 Enums are defined at the top level, and can be used before their definition. A library module
 makes one usable from other files with `pub enum`, and `use shapes.Shape` imports it, or
@@ -332,10 +338,9 @@ These keep the two backends identical and catch common mistakes:
   `str(3)` writes them.
 - **Conditions are `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject ints,
   floats, strings, lists, and `none`, so `if 1 or 0;` is an error; write `n != 0` instead of `n`.
-- **Lists, tuples, structs, and enums are not comparable.** `==` and `!=` cannot compare lists,
-  tuples, structs, options, or enum values, and `<`, `<=`, `>`, and `>=` compare only numbers
-  and strings. Tell enum values apart with `match`, and options with `is_some()` and
-  `is_none()`, and compare structs by their fields.
+- **Lists and maps are not comparable.** `==` and `!=` compare numbers, bools, strings, and
+  tuples, structs, options, and enum values of them, part by part, but not lists or maps, even
+  inside another value, and `<`, `<=`, `>`, and `>=` compare only numbers and strings.
 - **A call without a value is a statement.** A function without `->`, and builtins such as
   `print`, return no value, so their calls can only be statements of their own.
 - **Matches cover every value.** The cases of a `match` must fit every value of its subject,

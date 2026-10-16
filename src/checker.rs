@@ -537,10 +537,18 @@ const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
 const PRINTABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
 /// The names of the types built into the language, which no enum or struct may take.
 const BUILTIN_TYPES: &[&str] = &["int", "float", "bool", "str", "list", "tuple", OPTION];
-/// What `==` and `!=` compare. Compiled code compares lists by address, so only values compare.
 /// The message for a map key of another kind.
 const MAP_KEY: &str = "a map key must be int, str, or bool, found {}";
-const EQUATABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
+
+/// A list or map inside a type, which keeps `==` from comparing it, and the innermost struct
+/// field that holds it, if any, as the struct's name and the field's.
+///
+/// For example, in `tuple[int, Bag]`, where `Bag` has a field `items: list[int]`, it is
+/// `list[int]` in `Bag.items`.
+struct Uncomparable {
+    ty: Ty,
+    field: Option<(String, String)>,
+}
 
 /// An enum a program defines: its symbol and its variants, each with its symbol and the types of
 /// its values.
@@ -610,6 +618,9 @@ struct Inference {
     vars: Vec<Option<Ty>>,
     diagnostics: Vec<Diagnostic>,
     constraints: Vec<Constraint>,
+    /// The type each `==` and `!=` compares, with the comparison's span, checked once inference
+    /// is done for a list or map anywhere inside it.
+    equalities: Vec<(Ty, Span)>,
     /// Arithmetic whose operands were not yet known to be lists or numbers when it was found.
     arithmetic: Vec<Arithmetic>,
     /// What each type variable that is an operand of such arithmetic can still be.
@@ -3253,7 +3264,9 @@ impl Inference {
                     self.expect(&prev, &ty, comparator.span);
                     let (allowed, message): (&'static [Kind], _) = match op {
                         CompOp::Equal | CompOp::NotEqual => {
-                            (EQUATABLE, "'==' and '!=' cannot compare {}")
+                            self.equalities.push((ty.clone(), expr.span));
+                            prev = ty;
+                            continue;
                         }
                         CompOp::LessThan => {
                             (ORDERED, "'<' needs int, float, or str operands, found {}")
@@ -4120,6 +4133,78 @@ impl Inference {
 
     /// Checks the deferred constraints, fills in types nothing pinned down, and builds the
     /// [`Analysis`].
+    /// Checks that `==` and `!=` can compare values of type `ty`: numbers, bools, strings, and
+    /// tuples, structs, and enums of them, but no list or map, even inside another value, since
+    /// compiled code would compare them by address.
+    ///
+    /// For example, `(1, "a") == t` is fine, while `(1, [2]) == t` is an error naming `list[int]`.
+    fn check_equality(&mut self, ty: &Ty, span: Span) {
+        let ty = self.shallow(ty);
+        match ty {
+            // never pinned down, so take the default
+            Ty::Var(_) => {
+                self.unify(&ty, &Ty::Int);
+            }
+            Ty::List(_) | Ty::Map(..) | Ty::Unit => {
+                let message = format!("'==' and '!=' cannot compare {}", self.show(&ty));
+                self.error(span, message);
+            }
+            _ => {
+                let Some(found) = self.uncomparable(&ty, &mut HashSet::new()) else {
+                    return;
+                };
+                let holder = match &found.field {
+                    Some((owner, field)) => format!("field '{}.{field}'", struct_display(owner)),
+                    None => "it".to_string(),
+                };
+                let message = format!(
+                    "'==' and '!=' cannot compare {}, since {holder} holds {}",
+                    self.show(&ty),
+                    self.show(&found.ty)
+                );
+                self.error(span, message);
+            }
+        }
+    }
+
+    /// Finds a list or map inside `ty`, looking into tuples, the fields of structs, and the values
+    /// of every variant of enums, each enum and struct once, by its name in `seen`.
+    fn uncomparable(&self, ty: &Ty, seen: &mut HashSet<String>) -> Option<Uncomparable> {
+        match self.shallow(ty) {
+            ty @ (Ty::List(_) | Ty::Map(..)) => Some(Uncomparable { ty, field: None }),
+            Ty::Tuple(fields) => fields
+                .iter()
+                .find_map(|field| self.uncomparable(field, seen)),
+            Ty::Enum(name, args) if name == OPTION => {
+                args.iter().find_map(|arg| self.uncomparable(arg, seen))
+            }
+            Ty::Enum(name, _) => {
+                let info = self.enums.get(&name)?;
+                if !seen.insert(name) {
+                    return None;
+                }
+                info.variants
+                    .iter()
+                    .flat_map(|variant| &variant.fields)
+                    .find_map(|field| self.uncomparable(field, seen))
+            }
+            Ty::Struct(name) => {
+                let info = self.structs.get(&name)?;
+                if !seen.insert(name.clone()) {
+                    return None;
+                }
+                info.fields.iter().find_map(|field| {
+                    let mut found = self.uncomparable(&field.ty, seen)?;
+                    found
+                        .field
+                        .get_or_insert_with(|| (name.clone(), field.name.clone()));
+                    Some(found)
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn finish(mut self) -> Analysis {
         for deferred in std::mem::take(&mut self.deferred_indexes) {
             self.settle_index(deferred);
@@ -4171,19 +4256,12 @@ impl Inference {
                 continue;
             };
             if !constraint.allowed.contains(&kind) {
-                let mut message = constraint.message.replace("{}", &self.show(&ty));
-                let equality = constraint.message.starts_with("'==' and '!='");
-                if kind == Kind::Enum && equality {
-                    message.push_str(
-                        "; tell its variants apart with 'match', or an option's with 'is_some()' \
-                         and 'is_none()'",
-                    );
-                }
-                if kind == Kind::Struct && equality {
-                    message.push_str("; compare their fields instead");
-                }
+                let message = constraint.message.replace("{}", &self.show(&ty));
                 self.error(constraint.span, message);
             }
+        }
+        for (ty, span) in std::mem::take(&mut self.equalities) {
+            self.check_equality(&ty, span);
         }
         for pending in std::mem::take(&mut self.matches) {
             self.check_cases(pending);

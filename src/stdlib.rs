@@ -442,6 +442,10 @@ pub const MAX_PRINT_DEPTH: usize = 10_000;
 /// What printing an enum value nested more than [`MAX_PRINT_DEPTH`] deep stops the program with.
 pub const PRINT_DEPTH: &str = "value is nested too deeply to print (more than 10000 levels)";
 
+/// What comparing enum values nested more than [`MAX_PRINT_DEPTH`] deep with `==` or `!=` stops
+/// the program with, since comparing one inside another takes stack too.
+pub const COMPARE_DEPTH: &str = "value is nested too deeply to compare (more than 10000 levels)";
+
 pub const SLICE_STEP_ZERO: &str = "slice step cannot be zero";
 
 /// The runtime error for an index past either end of a list, as in `[1][1]`, with a `{}` for the

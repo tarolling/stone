@@ -49,7 +49,7 @@ use crate::codegen::context::module_routine;
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::Span;
 use crate::stdlib::{
-    INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRINT_DEPTH,
+    COMPARE_DEPTH, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRINT_DEPTH,
     SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_NONE, math, random,
 };
 use std::cell::RefCell;
@@ -131,7 +131,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         enums,
         structs,
         methods,
-        printers: RefCell::new(Vec::new()),
+        helpers: RefCell::new(Vec::new()),
     };
 
     let mut functions = Vec::new();
@@ -162,49 +162,67 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         }
     }
     functions.push(Lowerer::new(&context, None).function(&[], &top_level)?);
-    // a printer can ask for the printers of the enums and structs its values hold, so this runs
+    // a helper can ask for the helpers of the enums and structs its values hold, so this runs
     // until none is left
-    let mut printed = 0;
+    let mut made = 0;
     loop {
-        let next = context.printers.borrow().get(printed).cloned();
-        let Some(ty) = next else {
+        let next = context.helpers.borrow().get(made).cloned();
+        let Some(helper) = next else {
             break;
         };
-        printed += 1;
-        let label = printer_label(&ty);
-        let lowerer = Lowerer::new(&context, Some(label));
-        functions.push(match ty {
-            Type::Struct(_) => lowerer.struct_printer(&ty)?,
-            _ => lowerer.enum_printer(&ty)?,
+        made += 1;
+        let lowerer = Lowerer::new(&context, Some(helper.label()));
+        functions.push(match helper {
+            Helper::Print(ty @ Type::Struct(_)) => lowerer.struct_printer(&ty)?,
+            Helper::Print(ty) => lowerer.enum_printer(&ty)?,
+            Helper::Equal(ty) => lowerer.enum_comparer(&ty)?,
         });
     }
 
     Ok(Program { functions, globals })
 }
 
-/// Returns the label of the function that prints values of the enum or struct type `ty`.
-///
-/// For example, `option[list[int]]` is printed by `stone.print_enum.option.list_int`, and
-/// `Point` by `stone.print_struct.Point`.
-fn printer_label(ty: &Type) -> String {
-    fn mangle(ty: &Type) -> String {
-        match ty {
-            Type::List(elem) => format!("list_{}", mangle(elem)),
-            Type::Tuple(fields) => {
-                let fields: Vec<String> = fields.iter().map(mangle).collect();
-                format!("tuple{}_{}", fields.len(), fields.join("_"))
-            }
-            Type::Enum { name, args } if args.is_empty() => name.clone(),
-            Type::Enum { name, args } => {
-                let args: Vec<String> = args.iter().map(mangle).collect();
-                format!("{name}.{}", args.join("_"))
-            }
-            other => other.to_string(),
+/// A function lowering makes for a type some code needs it for, called through
+/// [`Callee::Helper`].
+#[derive(Clone, PartialEq)]
+enum Helper {
+    /// Prints a value of an enum or struct type.
+    Print(Type),
+    /// Compares two values of an enum type with `==`.
+    Equal(Type),
+}
+
+impl Helper {
+    /// Returns the helper's label.
+    ///
+    /// For example, `option[list[int]]` is printed by `stone.print_enum.option.list_int`, `Point`
+    /// by `stone.print_struct.Point`, and two `option[int]`s are compared by
+    /// `stone.eq_enum.option.int`.
+    fn label(&self) -> String {
+        match self {
+            Helper::Print(Type::Struct(name)) => format!("stone.print_struct.{name}"),
+            Helper::Print(ty) => format!("stone.print_enum.{}", mangle(ty)),
+            Helper::Equal(ty) => format!("stone.eq_enum.{}", mangle(ty)),
         }
     }
+}
+
+/// Names the type `ty` in a label.
+///
+/// For example, `option[tuple[int, str]]` is `option.tuple2_int_str`.
+fn mangle(ty: &Type) -> String {
     match ty {
-        Type::Struct(name) => format!("stone.print_struct.{name}"),
-        _ => format!("stone.print_enum.{}", mangle(ty)),
+        Type::List(elem) => format!("list_{}", mangle(elem)),
+        Type::Tuple(fields) => {
+            let fields: Vec<String> = fields.iter().map(mangle).collect();
+            format!("tuple{}_{}", fields.len(), fields.join("_"))
+        }
+        Type::Enum { name, args } if args.is_empty() => name.clone(),
+        Type::Enum { name, args } => {
+            let args: Vec<String> = args.iter().map(mangle).collect();
+            format!("{name}.{}", args.join("_"))
+        }
+        other => other.to_string(),
     }
 }
 
@@ -229,9 +247,10 @@ struct Context<'a> {
     structs: &'a Structs,
     /// How every call of a function of an `impl` block was resolved, by the call's span.
     methods: &'a Methods,
-    /// Each enum and struct type some code prints, in the order it was first printed, which gets
-    /// a function that prints its values.
-    printers: RefCell<Vec<Type>>,
+    /// Each helper some code calls, in the order it was first called: one that prints values of
+    /// each enum and struct type the program prints, and one that compares values of each enum
+    /// type it compares.
+    helpers: RefCell<Vec<Helper>>,
 }
 
 /// A name a `match` case binds, the values it takes, one for each value of a tuple, and how each
@@ -306,6 +325,9 @@ struct Lowerer<'a> {
     /// How many enum values the value being printed is inside, which a printer of an enum
     /// passes on to the printers of the enum values it holds.
     print_depth: Operand,
+    /// How many enum values the values being compared are inside, which a comparer of an enum
+    /// passes on to the comparers of the enum values it holds.
+    compare_depth: Operand,
     /// Whether this is a method that changes `self`, which returns the values of `self` after
     /// its own, for the caller to store back into the receiver.
     returns_self: bool,
@@ -333,6 +355,7 @@ impl<'a> Lowerer<'a> {
             span: Span::default(),
             held: Vec::new(),
             print_depth: Operand::Imm(0),
+            compare_depth: Operand::Imm(0),
             returns_self: false,
         }
     }
@@ -426,7 +449,7 @@ impl<'a> Lowerer<'a> {
         let (value, depth) = (self.fresh(), self.fresh());
         let entry = self.new_block();
         self.start(entry);
-        self.enter_print_level(Operand::Reg(depth));
+        self.print_depth = self.enter_level(Operand::Reg(depth), PRINT_DEPTH);
         let all = variants(self.context.enums, ty);
         let tag = self.fresh();
         self.push(Inst::EnumTag {
@@ -473,7 +496,7 @@ impl<'a> Lowerer<'a> {
         let depth = self.fresh();
         let entry = self.new_block();
         self.start(entry);
-        self.enter_print_level(Operand::Reg(depth));
+        self.print_depth = self.enter_level(Operand::Reg(depth), PRINT_DEPTH);
         self.print_text(&format!("{}(", struct_display(name)));
         let mut start = 0;
         for (k, (field, field_ty)) in self.context.structs[name].iter().enumerate() {
@@ -504,9 +527,10 @@ impl<'a> Lowerer<'a> {
         })
     }
 
-    /// Stops the program if a printer was called inside `depth` enum and struct values, which is
-    /// more than it may print, and otherwise passes one level deeper on to the printers it calls.
-    fn enter_print_level(&mut self, depth: Operand) {
+    /// Stops the program with `message` if a printer or comparer was called inside `depth` enum
+    /// and struct values, which is more than it may go into, and otherwise returns the depth one
+    /// level deeper, for the helpers it calls.
+    fn enter_level(&mut self, depth: Operand, message: &str) -> Operand {
         let (deep, shallow) = (self.new_block(), self.new_block());
         self.terminate(Terminator::CmpBranch {
             cond: Cond::Ge,
@@ -517,7 +541,7 @@ impl<'a> Lowerer<'a> {
             otherwise: shallow,
         });
         self.start(deep);
-        self.terminate(Terminator::Fail(PRINT_DEPTH.to_string(), vec![]));
+        self.terminate(Terminator::Fail(message.to_string(), vec![]));
         self.start(shallow);
         let inner = self.fresh();
         self.push(Inst::Binary {
@@ -526,7 +550,156 @@ impl<'a> Lowerer<'a> {
             lhs: depth,
             rhs: Operand::Imm(1),
         });
-        self.print_depth = Operand::Reg(inner);
+        Operand::Reg(inner)
+    }
+
+    /// Makes the function that compares two values of the enum type `ty` with `==`, given the two
+    /// and how many enum values they are inside, returning 1 if they are equal and 0 if not: the
+    /// same variant, and then the same values, compared in turn until two differ. Comparing ones
+    /// nested too deeply stops the program, pointing at the comparison that called it, which
+    /// recorded its site.
+    fn enum_comparer(mut self, ty: &Type) -> Result<Function, String> {
+        let (a, b, depth) = (self.fresh(), self.fresh(), self.fresh());
+        let entry = self.new_block();
+        self.start(entry);
+        self.compare_depth = self.enter_level(Operand::Reg(depth), COMPARE_DEPTH);
+        let (tag_a, tag_b) = (self.fresh(), self.fresh());
+        self.push(Inst::EnumTag {
+            dst: tag_a,
+            value: Operand::Reg(a),
+        });
+        self.push(Inst::EnumTag {
+            dst: tag_b,
+            value: Operand::Reg(b),
+        });
+        let (same, equal, differ) = (self.new_block(), self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Eq,
+            float: false,
+            lhs: Operand::Reg(tag_a),
+            rhs: Operand::Reg(tag_b),
+            then: same,
+            otherwise: differ,
+        });
+        self.start(same);
+        // a variant without values is equal to itself, so only the others need their own block
+        for (k, (_, fields)) in variants(self.context.enums, ty).iter().enumerate() {
+            let leaves: Vec<Type> = fields.iter().flat_map(|field| self.leaves(field)).collect();
+            if leaves.is_empty() {
+                continue;
+            }
+            let (this, next) = (self.new_block(), self.new_block());
+            self.terminate(Terminator::CmpBranch {
+                cond: Cond::Eq,
+                float: false,
+                lhs: Operand::Reg(tag_a),
+                rhs: Operand::Imm(k as i64),
+                then: this,
+                otherwise: next,
+            });
+            self.start(this);
+            // comparing changes nothing, so the values are borrowed
+            let lhs = self.field_values(Operand::Reg(a), 0, leaves.len());
+            let rhs = self.field_values(Operand::Reg(b), 0, leaves.len());
+            self.equal_leaves(&leaves, &lhs, &rhs, equal, differ);
+            self.start(next);
+        }
+        self.jump(equal);
+        self.start(equal);
+        self.terminate(Terminator::Return(vec![Operand::Imm(1)]));
+        self.start(differ);
+        self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
+        Ok(Function {
+            name: self.name.clone(),
+            params: vec![a, b, depth],
+            blocks: self.layout(),
+            vreg_count: self.vreg_count,
+            helper: true,
+        })
+    }
+
+    /// Asks for `helper` to be made, unless something asked for it before, and returns its label.
+    fn helper(&self, helper: Helper) -> String {
+        let label = helper.label();
+        let mut helpers = self.context.helpers.borrow_mut();
+        if !helpers.contains(&helper) {
+            helpers.push(helper);
+        }
+        label
+    }
+
+    /// Jumps to `then` if `lhs` and `rhs`, the values of two values of type `ty`, are equal, and
+    /// to `otherwise` as soon as two of them differ, comparing them in turn.
+    fn equal_branch(
+        &mut self,
+        ty: &Type,
+        lhs: &[Operand],
+        rhs: &[Operand],
+        then: BlockId,
+        otherwise: BlockId,
+    ) {
+        let leaves = self.leaves(ty);
+        self.equal_leaves(&leaves, lhs, rhs, then, otherwise);
+    }
+
+    /// Jumps to `then` if each of `lhs` equals the one of `rhs` in the same place, where each
+    /// pair is of the type in `leaves`, and to `otherwise` at the first pair that differs:
+    /// numbers and bools compare directly, strings by their contents, and enum values through a
+    /// comparer made for their type.
+    fn equal_leaves(
+        &mut self,
+        leaves: &[Type],
+        lhs: &[Operand],
+        rhs: &[Operand],
+        then: BlockId,
+        otherwise: BlockId,
+    ) {
+        if leaves.is_empty() {
+            self.jump(then);
+            return;
+        }
+        for (k, leaf) in leaves.iter().enumerate() {
+            let next = if k + 1 < leaves.len() {
+                self.new_block()
+            } else {
+                then
+            };
+            match leaf {
+                Type::Str => {
+                    let equal = self.runtime_call("stone.str_eq", vec![lhs[k], rhs[k]], None);
+                    self.terminate(Terminator::Branch {
+                        cond: equal,
+                        then: next,
+                        otherwise,
+                    });
+                }
+                Type::Enum { .. } => {
+                    let label = self.helper(Helper::Equal(leaf.clone()));
+                    let equal = self.fresh();
+                    self.push(Inst::Call {
+                        dsts: vec![equal],
+                        callee: Callee::Helper(label),
+                        args: vec![lhs[k], rhs[k], self.compare_depth],
+                    });
+                    self.terminate(Terminator::Branch {
+                        cond: Operand::Reg(equal),
+                        then: next,
+                        otherwise,
+                    });
+                }
+                _ => self.terminate(Terminator::CmpBranch {
+                    cond: Cond::Eq,
+                    float: *leaf == Type::Float,
+                    lhs: lhs[k],
+                    rhs: rhs[k],
+                    then: next,
+                    otherwise,
+                }),
+            }
+            if next != then {
+                self.start(next);
+            }
+        }
     }
 
     /// Prints `value`, a value of the variant `name` of the enum type `ty` whose values have the
@@ -718,6 +891,18 @@ impl<'a> Lowerer<'a> {
         if let (Operand::Reg(reg), Some(kind)) = (value, kind) {
             self.owned.insert(reg, kind);
         }
+    }
+
+    /// Returns each of `values` that is a temporary owning a reference, with how it is counted,
+    /// still owned.
+    fn owned_values(&self, values: &[Operand]) -> Vec<(Operand, RcKind)> {
+        values
+            .iter()
+            .filter_map(|&value| match value {
+                Operand::Reg(reg) => self.owned.get(&reg).map(|&kind| (value, kind)),
+                Operand::Imm(_) => None,
+            })
+            .collect()
     }
 
     /// Releases `value` if it is a temporary that owns a reference, once nothing needs it.
@@ -2201,14 +2386,56 @@ impl<'a> Lowerer<'a> {
     /// `if a < b and c;` never materializes a bool.
     fn cond(&mut self, test: &Expr, then: BlockId, otherwise: BlockId) -> Result<(), String> {
         match &test.kind {
-            // strings are compared by a call, which compare handles with their references
+            // a single == or != of tuples, structs, or enum values branches as it compares, then
+            // releases the temporaries it compared on either way out
             ExprKind::Compare {
                 left,
                 ops,
                 comparators,
-            } if comparators
-                .iter()
-                .all(|c| self.type_of(c).is_ok_and(|ty| ty != Type::Str)) =>
+            } if ops.len() == 1
+                && self
+                    .type_of(&comparators[0])
+                    .is_ok_and(|ty| is_compound(&ty)) =>
+            {
+                let ty = self.type_of(&comparators[0])?;
+                let lhs = self.expr_flat(left)?;
+                let rhs = self.expr_flat(&comparators[0])?;
+                let (then, otherwise) = match ops[0] {
+                    crate::ast::CompOp::NotEqual => (otherwise, then),
+                    _ => (then, otherwise),
+                };
+                let values: Vec<Operand> = lhs.iter().chain(&rhs).copied().collect();
+                let owned = self.owned_values(&values);
+                if owned.is_empty() {
+                    self.equal_branch(&ty, &lhs, &rhs, then, otherwise);
+                    return Ok(());
+                }
+                for (value, _) in &owned {
+                    if let Operand::Reg(reg) = value {
+                        self.owned.remove(reg);
+                    }
+                }
+                let (yes, no) = (self.new_block(), self.new_block());
+                self.equal_branch(&ty, &lhs, &rhs, yes, no);
+                for (block, target) in [(yes, then), (no, otherwise)] {
+                    self.start(block);
+                    for &(src, kind) in &owned {
+                        self.push(Inst::Release { src, kind });
+                    }
+                    self.jump(target);
+                }
+            }
+
+            // strings are compared by a call, which compare handles with their references, and
+            // tuples, structs, and enum values by several
+            ExprKind::Compare {
+                left,
+                ops,
+                comparators,
+            } if comparators.iter().all(|c| {
+                self.type_of(c)
+                    .is_ok_and(|ty| ty != Type::Str && !is_compound(&ty))
+            }) =>
             {
                 // a < b < c means a < b and b < c, with b evaluated once and c skipped once false
                 let mut lhs = self.expr(left)?;
@@ -3044,11 +3271,31 @@ impl<'a> Lowerer<'a> {
             self.fresh()
         };
         let end = (ops.len() > 1).then(|| self.new_block());
-        let mut lhs = self.expr(left)?;
+        // a tuple or struct is several values, and each other value one
+        let mut lhs_values = self.expr_flat(left)?;
         for (i, (op, comparator)) in ops.iter().zip(comparators).enumerate() {
-            let rhs = self.expr(comparator)?;
+            let rhs_values = self.expr_flat(comparator)?;
+            let (lhs, rhs) = (lhs_values[0], rhs_values[0]);
             let cond = Cond::from(op);
             match self.type_of(comparator)? {
+                // compared value by value, which only == and != do
+                ty if is_compound(&ty) => {
+                    let (yes, no, join) = (self.new_block(), self.new_block(), self.new_block());
+                    self.equal_branch(&ty, &lhs_values, &rhs_values, yes, no);
+                    let equal = i64::from(cond == Cond::Eq);
+                    self.start(yes);
+                    self.push(Inst::Copy {
+                        dst: result,
+                        src: Operand::Imm(equal),
+                    });
+                    self.jump(join);
+                    self.start(no);
+                    self.push(Inst::Copy {
+                        dst: result,
+                        src: Operand::Imm(1 - equal),
+                    });
+                    self.start(join);
+                }
                 // strings compare by contents
                 Type::Str if cond == Cond::Ne => {
                     let equal = self.fresh();
@@ -3086,34 +3333,40 @@ impl<'a> Lowerer<'a> {
                     rhs,
                 }),
             }
-            self.release_temp(lhs);
+            for value in lhs_values {
+                self.release_temp(value);
+            }
             match end {
                 Some(end) if i + 1 < ops.len() => {
                     // the next link reads rhs, so stopping here releases it on the way out
-                    let owned = match rhs {
-                        Operand::Reg(reg) => self.owned.get(&reg).copied(),
-                        Operand::Imm(_) => None,
-                    };
+                    let owned = self.owned_values(&rhs_values);
                     let next = self.new_block();
-                    let stop = match owned {
-                        Some(_) => self.new_block(),
-                        None => end,
+                    let stop = if owned.is_empty() {
+                        end
+                    } else {
+                        self.new_block()
                     };
                     self.terminate(Terminator::Branch {
                         cond: Operand::Reg(result),
                         then: next,
                         otherwise: stop,
                     });
-                    if let Some(kind) = owned {
+                    if !owned.is_empty() {
                         self.start(stop);
-                        self.push(Inst::Release { src: rhs, kind });
+                        for (src, kind) in owned {
+                            self.push(Inst::Release { src, kind });
+                        }
                         self.jump(end);
                     }
                     self.start(next);
                 }
-                _ => self.release_temp(rhs),
+                _ => {
+                    for &value in &rhs_values {
+                        self.release_temp(value);
+                    }
+                }
             }
-            lhs = rhs;
+            lhs_values = rhs_values;
         }
         if let Some(end) = end {
             self.start(end);
@@ -4762,16 +5015,12 @@ impl<'a> Lowerer<'a> {
             }
             Type::Map(key, value) => self.print_entries(Some(key), value, values[0]),
             Type::Struct(_) | Type::Enum { .. } => {
-                let mut printers = self.context.printers.borrow_mut();
-                if !printers.contains(ty) {
-                    printers.push(ty.clone());
-                }
-                drop(printers);
+                let label = self.helper(Helper::Print(ty.clone()));
                 let mut args = values.to_vec();
                 args.push(self.print_depth);
                 self.push(Inst::Call {
                     dsts: vec![],
-                    callee: Callee::Helper(printer_label(ty)),
+                    callee: Callee::Helper(label),
                     args,
                 });
             }
@@ -4969,6 +5218,12 @@ enum Location {
         first: Operand,
         count: usize,
     },
+}
+
+/// Returns whether `==` compares values of type `ty` value by value: a tuple, a struct, or an
+/// enum value, rather than one number, bool, or string.
+fn is_compound(ty: &Type) -> bool {
+    matches!(ty, Type::Tuple(_) | Type::Struct(_) | Type::Enum { .. })
 }
 
 /// Returns whether a value of type `ty` is or holds an enum value, in a list or tuple, which

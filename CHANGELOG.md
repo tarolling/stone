@@ -10,6 +10,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-15
+
 ### Added
 
 - Methods: an `impl Point;` block, in the struct's own file, holds functions for a struct. One
@@ -21,6 +23,13 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   assignment, as in `x = s.pop_top()`. Methods belong to their struct, so one can be named like a
   builtin method, and they can be used wherever their struct can, with no `pub`.
 - `impl` is a keyword.
+- `==` and `!=` compare tuples, structs, options, and enum values, part by part: tuples and
+  structs value by value, and enum values by variant and then by the values they hold, so
+  `(1, "a") == t`, `p != Point(x=0.0, y=0.0)`, `x == none`, and `s == Shape.Circle(1.0)` work.
+  Floats inside compare as they do alone, so `(nan, 1) != (nan, 1)`. A value holding a list or a
+  map anywhere still cannot be compared, and the error names the struct field that holds it.
+  Comparing enum values nested more than 10,000 deep stops the program with
+  `value is nested too deeply to compare (more than 10000 levels)`.
 
 ### Changed
 

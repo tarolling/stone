@@ -10,6 +10,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.2.7] - 2026-10-15
+
 ### Added
 
 - Highlighting of `impl`, of the struct's name after it, and of `self`.

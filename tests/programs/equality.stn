@@ -1,0 +1,106 @@
+// == and != compare tuples, structs, options, and enums part by part
+
+struct Point;
+    x: float
+    y: float
+
+enum Shape;
+    Circle(Point, float)
+    Rect(Point, Point)
+    Named(str, option[Shape])
+    Empty
+
+struct Label;
+    text: str
+    at: Point
+    shape: option[Shape]
+    pair: tuple[int, str]
+
+enum IntList;
+    Nil
+    Cons(int, IntList)
+
+fn word(n: int) -> str;
+    ret "w" + str(n)
+
+fn pair(n: int) -> tuple[int, str];
+    ret (n, word(n))
+
+fn numbers(n: int) -> IntList;
+    l = IntList.Nil
+    for i in range(n);
+        l = IntList.Cons(i, l)
+    ret l
+
+fn label(text: str) -> Label;
+    ret Label(text=text, at=Point(x=1.0, y=2.0), shape=some(Shape.Empty), pair=(1, "a"))
+
+// tuples, nested, with strings built at runtime
+t = (1, ("w1", 2.5))
+print(t == (1, (word(1), 2.5)), t != (1, (word(1), 2.5)))
+print(t == (1, (word(2), 2.5)), t == (2, ("w1", 2.5)), t == (1, ("w1", 2.0)))
+print(pair(3) == pair(3), pair(3) == pair(4), pair(3) != (3, "w3"))
+
+// floats compare as IEEE numbers inside too
+inf = float("inf")
+nan = inf - inf
+print((nan, 1) == (nan, 1), (nan, 1) != (nan, 1), (0.0, 1) == (-0.0, 1))
+
+// structs, field by field
+p = Point(x=1.0, y=2.0)
+print(p == Point(y=2.0, x=1.0), p == Point(x=1.0, y=3.0), p != Point(x=0.0, y=2.0))
+a = label("hi")
+b = label("h" + "i")
+print(a == b, a == label("ho"))
+b.shape = some(Shape.Named(word(5), none))
+print(a == b, a != b)
+b.shape = some(Shape.Empty)
+b.pair = (1, word(1))
+print(a == b)
+
+// options
+x = some(3)
+print(x == some(3), x == some(4), x == none, none == x, x != none)
+n = none
+n = some("w2")
+print(n == some(word(2)), n == none, some((1, word(1))) == some((1, "w1")))
+print(some(p) == some(Point(x=1.0, y=2.0)), some(some(1)) == some(none))
+
+// enums, by variant and then by values
+c = Shape.Circle(Point(x=0.0, y=0.0), 1.5)
+print(c == Shape.Circle(Point(x=0.0, y=0.0), 1.5), c == Shape.Circle(p, 1.5))
+print(c == Shape.Empty, Shape.Empty == Shape.Empty, c != Shape.Rect(p, p))
+named = Shape.Named("outer", some(Shape.Named(word(7), some(c))))
+same = Shape.Named("outer", some(Shape.Named("w7", some(Shape.Circle(Point(x=0.0, y=0.0), 1.5)))))
+other = Shape.Named("outer", some(Shape.Named("w7", none)))
+print(named == same, named == other, named != other)
+
+// a recursive enum, compared all the way down
+print(numbers(100) == numbers(100), numbers(100) == numbers(99), numbers(3) != numbers(3))
+l = numbers(50)
+m = numbers(50)
+print(l == m)
+
+// in conditions, chained, and in loops
+if p == Point(x=1.0, y=2.0) and x != none;
+    print("equal")
+if not (c == Shape.Empty);
+    print("not empty")
+print(p == p == Point(x=1.0, y=2.0), t == t == (1, ("w1", 3.0)))
+print(word(1) == word(1) == "w1", pair(1) == pair(1) == pair(2))
+count = 0
+k = numbers(0)
+while k != numbers(5);
+    count += 1
+    match k;
+        case IntList.Nil;
+            k = IntList.Cons(0, k)
+        case IntList.Cons(head, _);
+            k = IntList.Cons(head + 1, k)
+print(count)
+labels = [label("a"), label("b"), label("a")]
+found = 0
+for item in labels;
+    if item == label("a");
+        found += 1
+print(found)

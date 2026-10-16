@@ -434,20 +434,37 @@ impl Value {
         matches!(self, Value::Bool(true))
     }
 
-    /// Returns whether two values are equal, comparing lists by identity as compiled code does.
-    fn equals(&self, other: &Value) -> bool {
-        match (self, other) {
+    /// Returns whether two values are equal, comparing tuples, structs, and enum values part by
+    /// part, left to right, until two parts differ, and enum values by variant first. `depth` is
+    /// how many enum values the two are inside, and comparing one more than
+    /// [`stdlib::MAX_PRINT_DEPTH`] deep fails, as compiled code does.
+    ///
+    /// For example, `some((1, "a"))` equals `some((1, "a"))` but not `some((1, "b"))` or `none`.
+    fn equals(&self, other: &Value, depth: usize) -> EvalResult<bool> {
+        fn all_equal(a: &[Value], b: &[Value], depth: usize) -> EvalResult<bool> {
+            for (a, b) in a.iter().zip(b) {
+                if !a.equals(b, depth)? {
+                    return Ok(false);
+                }
+            }
+            Ok(a.len() == b.len())
+        }
+        Ok(match (self, other) {
             (Value::Int(a), Value::Int(b)) => a == b,
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
-            (Value::Unit, Value::Unit) => true,
-            (Value::List(a), Value::List(b)) => Rc::ptr_eq(a, b),
-            (Value::Tuple(a), Value::Tuple(b)) => {
-                a.len() == b.len() && a.iter().zip(b.iter()).all(|(a, b)| a.equals(b))
+            (Value::Tuple(a), Value::Tuple(b)) => all_equal(a, b, depth)?,
+            (Value::Struct(a), Value::Struct(b)) => all_equal(&a.fields, &b.fields, depth)?,
+            (Value::Enum(a), Value::Enum(b)) => {
+                if depth >= stdlib::MAX_PRINT_DEPTH {
+                    return Err(stdlib::COMPARE_DEPTH.into());
+                }
+                a.tag == b.tag && all_equal(&a.fields, &b.fields, depth + 1)?
             }
+            // the checker compares nothing else
             _ => false,
-        }
+        })
     }
 
     fn as_int(&self) -> EvalResult<i64> {
@@ -1592,8 +1609,8 @@ impl<'out> Interpreter<'out> {
                 for (op, comparator) in ops.iter().zip(comparators) {
                     let next = self.eval_expr(comparator)?;
                     let holds = match op {
-                        CompOp::Equal => current.equals(&next),
-                        CompOp::NotEqual => !current.equals(&next),
+                        CompOp::Equal => current.equals(&next, 0)?,
+                        CompOp::NotEqual => !current.equals(&next, 0)?,
                         CompOp::LessThan => current.compare(&next)?.is_some_and(Ordering::is_lt),
                         CompOp::LessThanEqual => {
                             current.compare(&next)?.is_some_and(Ordering::is_le)

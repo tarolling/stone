@@ -1053,3 +1053,49 @@ fn a_method_that_changes_self_returns_it_for_its_caller_to_store() {
          v1 = copy v4\n  v5 = call Bag.size(v0, v1)\n  release_list v0\n  ret v5"
     );
 }
+
+#[test]
+fn comparing_structs_in_a_condition_branches_on_each_value() {
+    let ir = dump(&format!(
+        "{POINT}fn f(a: Point, b: Point) -> int;\n    if a == b;\n        ret 1\n    ret 0\n"
+    ));
+    let f = ir.split("fn main").next().unwrap();
+    assert!(f.contains("br_eq v0, v2 -> b"), "{f}");
+    assert!(f.contains("br_eq v1, v3 -> b"), "{f}");
+    assert!(!f.contains("call"), "{f}");
+}
+
+#[test]
+fn comparing_tuples_as_a_value_writes_one_or_zero() {
+    let ir = dump(
+        "fn f(a: tuple[str, float], b: tuple[str, float]) -> bool;\n    ret a != b\n\
+         print(f((\"a\", 1.0), (\"a\", 1.0)))\n",
+    );
+    let f = ir.split("fn main").next().unwrap();
+    assert!(f.contains("call stone.str_eq(v0, v2)"), "{f}");
+    assert!(f.contains("fbr_eq v1, v3 -> b"), "{f}");
+}
+
+#[test]
+fn comparing_enums_calls_a_function_made_for_their_type() {
+    let ir = dump(
+        "fn f(a: option[int], b: option[int]) -> bool;\n    ret a == b\nprint(f(none, none))\n",
+    );
+    assert!(
+        ir.contains("call stone.eq_enum.option.int(v0, v1, 0)"),
+        "{ir}"
+    );
+    let helper = ir.split("fn stone.eq_enum.option.int(v0, v1, v2):").nth(1);
+    let helper = helper.unwrap_or_else(|| panic!("{ir}"));
+    for line in [
+        "fail \"value is nested too deeply to compare (more than 10000 levels)\"",
+        "= enum_tag v0",
+        "= enum_tag v1",
+        "= field_get v0, 0",
+        "= field_get v1, 0",
+        "ret 1",
+        "ret 0",
+    ] {
+        assert!(helper.contains(line), "{line} in {helper}");
+    }
+}

@@ -1,0 +1,57 @@
+struct Bag;
+    names: list[str]
+    counts: list[int]
+
+impl Bag;
+    fn empty() -> Bag;
+        ret Bag(names=[], counts=[])
+
+    fn add(self, name: str);
+        self.names.append(name)
+        self.counts.append(name.len())
+
+    fn total(self) -> int;
+        t = 0
+        for c in self.counts;
+            t += c
+        ret t
+
+    fn take_names(self) -> list[str];
+        names = self.names
+        self.names = []
+        ret names
+
+    fn first(self) -> str;
+        ret self.names[0]
+
+    fn with_extra(self) -> Bag;
+        self.add("extra")
+        ret self
+
+    fn mirror(self);
+        self.add(shared.first())
+
+fn build(n: int) -> Bag;
+    b = Bag.empty()
+    for i in range(n);
+        b.add("n" + str(i))
+    c = b
+    c.add("only c")
+    ret b
+
+shared = Bag.empty()
+shared.add("alpha")
+shared.mirror()
+print(shared)
+copy = shared.with_extra()
+copy.add("copy")
+print(shared, copy)
+bags = [Bag.empty(), shared]
+bags[0].add("x")
+bags[1].add("yy")
+print(bags, shared.total())
+for i in range(3);
+    bags[0].add(str(i))
+names = bags[0].take_names()
+print(names, bags[0], bags[0].total(), bags[1].first())
+print(build(2), build(0).total())

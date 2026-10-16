@@ -1,0 +1,5 @@
+Bag(names=['alpha', 'alpha'], counts=[5, 5])
+Bag(names=['alpha', 'alpha', 'extra'], counts=[5, 5, 5]) Bag(names=['alpha', 'alpha', 'extra', 'copy'], counts=[5, 5, 5, 4])
+[Bag(names=['x'], counts=[1]), Bag(names=['alpha', 'alpha', 'extra', 'yy'], counts=[5, 5, 5, 2])] 15
+['x', '0', '1', '2'] Bag(names=[], counts=[1, 1, 1, 1]) 4 alpha
+Bag(names=['n0', 'n1'], counts=[2, 2]) 0

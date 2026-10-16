@@ -9,6 +9,8 @@ module stone
                        stmt* body, type? returns)
           | EnumDef(identifier name, bool public, variant* variants)
           | StructDef(identifier name, bool public, field* fields)
+          -- each method is a FunctionDef
+          | ImplDef(identifier name, stmt* methods)
 
           | Return(expr? value)
 

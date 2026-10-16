@@ -12,8 +12,90 @@ use crate::span::Span;
 use crate::stdlib::is_builtin;
 use std::collections::{HashMap, HashSet};
 
-/// For each function, the globals it or any function it calls may read.
-pub(crate) type GlobalReads = HashMap<String, HashSet<String>>;
+/// For each function, the globals it or any function it calls may read, by the function's name,
+/// which for a function of an `impl` block is its struct's name, a dot, and its own name.
+#[derive(Debug, Default)]
+pub(crate) struct GlobalReads {
+    functions: HashMap<String, HashSet<String>>,
+    /// The name of every function of an `impl` block, by its own name, since a call such as
+    /// `x.get()` may call any of them named `get`: which struct `x` is, nothing here knows.
+    methods: HashMap<String, Vec<String>>,
+}
+
+impl GlobalReads {
+    /// Returns the globals the function `name` may read, if it is a function of the program.
+    pub(crate) fn get(&self, name: &str) -> Option<&HashSet<String>> {
+        self.functions.get(name)
+    }
+
+    /// Returns whether `name` is a function of the program.
+    pub(crate) fn contains_key(&self, name: &str) -> bool {
+        self.functions.contains_key(name)
+    }
+
+    /// Returns the functions of `impl` blocks a call of `name` after a dot may call, as in
+    /// `p.get()` or `Point.origin()`.
+    fn methods_named(&self, name: &str) -> &[String] {
+        self.methods.get(name).map_or(&[], Vec::as_slice)
+    }
+}
+
+impl std::ops::Index<&str> for GlobalReads {
+    type Output = HashSet<String>;
+
+    fn index(&self, name: &str) -> &HashSet<String> {
+        &self.functions[name]
+    }
+}
+
+/// Returns what a function with the parameters `args` returns besides its value, which must stay
+/// live to its end: `self`, for a method, since one that changes `self` returns it to its caller.
+///
+/// For example, `fn push(self, x: int)` keeps `self`, and `fn f(x: int)` nothing.
+pub(crate) fn kept_at_exit(args: &[crate::ast::Arg]) -> HashSet<String> {
+    args.first()
+        .filter(|arg| arg.arg == "self")
+        .map(|arg| arg.arg.clone())
+        .into_iter()
+        .collect()
+}
+
+/// The names code mentions: variables and functions, and the names after a dot of the methods
+/// it calls, as `get` in `p.get()`.
+#[derive(Default)]
+pub(crate) struct Names<'a> {
+    pub(crate) names: Vec<&'a str>,
+    methods: Vec<&'a str>,
+}
+
+/// Returns every function `body` defines, with its parameters and body: each top-level `fn`,
+/// and each function of an `impl` block, named by its struct's name, a dot, and its own name.
+fn functions(body: &[Stmt]) -> Vec<(String, &crate::ast::Arguments, &[Stmt])> {
+    let mut functions = vec![];
+    for stmt in body {
+        match &stmt.kind {
+            StmtKind::FunctionDef {
+                name, args, body, ..
+            } => functions.push((name.clone(), args, body.as_slice())),
+            StmtKind::ImplDef {
+                name: owner,
+                methods,
+                ..
+            } => {
+                for method in methods {
+                    if let StmtKind::FunctionDef {
+                        name, args, body, ..
+                    } = &method.kind
+                    {
+                        functions.push((format!("{owner}.{name}"), args, body.as_slice()));
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    functions
+}
 
 /// For each statement, by its span, the variables that some later code may still read.
 pub(crate) type LiveAfter = HashMap<Span, HashSet<String>>;
@@ -24,41 +106,45 @@ pub(crate) type LiveAfter = HashMap<Span, HashSet<String>>;
 /// For example, after `fn f() -> int; ret g()` and `fn g() -> int; ret xs[0]`, both `f` and `g`
 /// read `xs`.
 pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalReads {
-    let mut reads = HashMap::new();
+    let mut reads = GlobalReads::default();
     let mut calls = HashMap::new();
-    let functions: HashSet<&str> = body
-        .iter()
-        .filter_map(|stmt| match &stmt.kind {
-            StmtKind::FunctionDef { name, .. } => Some(name.as_str()),
-            _ => None,
-        })
-        .collect();
-    for stmt in body {
-        let StmtKind::FunctionDef {
-            name, args, body, ..
-        } = &stmt.kind
-        else {
-            continue;
-        };
+    let functions = functions(body);
+    for (name, _, _) in &functions {
+        if let Some((_, method)) = name.rsplit_once('.')
+            && is_method(body, name)
+        {
+            reads
+                .methods
+                .entry(method.to_string())
+                .or_default()
+                .push(name.clone());
+        }
+    }
+    for (name, args, body) in &functions {
         let mut locals: HashSet<String> = args.args.iter().map(|arg| arg.arg.clone()).collect();
         let mut assigned = Vec::new();
         collect_assigned(body, &mut assigned);
         locals.extend(assigned.into_iter().map(|(name, _)| name));
-        let mut names = Vec::new();
-        for stmt in body {
+        let mut names = Names::default();
+        for stmt in *body {
             stmt_names(stmt, &mut names);
         }
         let read: HashSet<String> = names
+            .names
             .iter()
             .filter(|name| globals.contains(**name) && !locals.contains(**name))
             .map(|name| name.to_string())
             .collect();
-        let called: HashSet<String> = names
+        let mut called: HashSet<String> = names
+            .names
             .iter()
-            .filter(|name| functions.contains(**name))
+            .filter(|name| functions.iter().any(|(f, _, _)| f == *name))
             .map(|name| name.to_string())
             .collect();
-        reads.insert(name.clone(), read);
+        for method in &names.methods {
+            called.extend(reads.methods_named(method).iter().cloned());
+        }
+        reads.functions.insert(name.clone(), read);
         calls.insert(name.clone(), called);
     }
     // a function reads whatever the functions it calls read, until nothing more is added
@@ -68,9 +154,12 @@ pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalRe
         for (name, called) in &calls {
             let inherited: HashSet<String> = called
                 .iter()
-                .flat_map(|callee| reads[callee].iter().cloned())
+                .flat_map(|callee| reads.functions[callee].iter().cloned())
                 .collect();
-            let read = reads.get_mut(name).expect("every function has reads");
+            let read = reads
+                .functions
+                .get_mut(name)
+                .expect("every function has reads");
             let before = read.len();
             read.extend(inherited);
             changed |= read.len() != before;
@@ -79,10 +168,24 @@ pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalRe
     reads
 }
 
+/// Returns whether `name` is the name of a function of an `impl` block in `body`.
+fn is_method(body: &[Stmt], name: &str) -> bool {
+    body.iter().any(|stmt| match &stmt.kind {
+        StmtKind::ImplDef {
+            name: owner,
+            methods,
+            ..
+        } => methods.iter().any(|method| {
+            matches!(&method.kind, StmtKind::FunctionDef { name: m, .. } if format!("{owner}.{m}") == name)
+        }),
+        _ => false,
+    })
+}
+
 /// Collects every name `stmt` mentions, including in nested blocks, assignment targets, and
 /// called functions.
-pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
-    let block = |body: &'a [Stmt], out: &mut Vec<&'a str>| {
+pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Names<'a>) {
+    let block = |body: &'a [Stmt], out: &mut Names<'a>| {
         for stmt in body {
             stmt_names(stmt, out);
         }
@@ -118,7 +221,7 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
             for case in cases {
                 let mut names = Vec::new();
                 case.pattern.names(&mut names);
-                out.extend(names.into_iter().map(|(name, _)| name));
+                out.names.extend(names.into_iter().map(|(name, _)| name));
                 block(&case.body, out);
             }
         }
@@ -126,6 +229,7 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Vec<&'a str>) {
         | StmtKind::FunctionDef { .. }
         | StmtKind::EnumDef { .. }
         | StmtKind::StructDef { .. }
+        | StmtKind::ImplDef { .. }
         | StmtKind::Use { .. }
         | StmtKind::Break
         | StmtKind::Continue => {}
@@ -144,10 +248,10 @@ fn kill_targets(target: &Expr, live: &mut HashSet<String>) {
     }
 }
 
-/// Collects every name `expr` mentions, including the names of called functions.
-fn expr_names<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
+/// Collects every name `expr` mentions, including the names of called functions and methods.
+fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
     match &expr.kind {
-        ExprKind::Name { id, .. } => out.push(id),
+        ExprKind::Name { id, .. } => out.names.push(id),
         ExprKind::Constant { .. } => {}
         ExprKind::BinOp { left, right, .. } => {
             expr_names(left, out);
@@ -176,6 +280,9 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
             args,
             keywords,
         } => {
+            if let ExprKind::Attribute { attr, .. } = &func.kind {
+                out.methods.push(attr);
+            }
             expr_names(func, out);
             args.iter().for_each(|arg| expr_names(arg, out));
             keywords.iter().for_each(|k| expr_names(&k.value, out));
@@ -196,16 +303,18 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Vec<&'a str>) {
 /// running after it may read before assigning them again. A call reads every global its function
 /// may read, from `reads`.
 ///
-/// Nothing is read after `ret`, and after `break` and `cont` whatever is read where they jump
-/// to. For example, in `x = [1]` followed by `y = x` and `print(y)`, `x` is live after the first
-/// statement only, and `y` after the second.
-pub(crate) fn live_after(body: &[Stmt], reads: &GlobalReads) -> LiveAfter {
+/// Nothing is read after `ret` but `exit`, what the function returns besides its value, as a
+/// method that changes `self` returns `self`; and after `break` and `cont` whatever is read where
+/// they jump to. For example, in `x = [1]` followed by `y = x` and `print(y)`, `x` is live after
+/// the first statement only, and `y` after the second.
+pub(crate) fn live_after(body: &[Stmt], reads: &GlobalReads, exit: &HashSet<String>) -> LiveAfter {
     let mut liveness = Liveness {
         reads,
+        exit,
         after: LiveAfter::new(),
         loops: Vec::new(),
     };
-    liveness.block(body, HashSet::new());
+    liveness.block(body, exit.clone());
     liveness.after
 }
 
@@ -214,8 +323,12 @@ pub(crate) fn live_after(body: &[Stmt], reads: &GlobalReads) -> LiveAfter {
 ///
 /// For example, in `x = [1]` followed by `y = x` and `print(y)`, the second statement is the last
 /// use of `x`, and the third of `y`.
-pub(crate) fn last_uses(body: &[Stmt], reads: &GlobalReads) -> HashMap<Span, Vec<String>> {
-    let after = live_after(body, reads);
+pub(crate) fn last_uses(
+    body: &[Stmt],
+    reads: &GlobalReads,
+    exit: &HashSet<String>,
+) -> HashMap<Span, Vec<String>> {
+    let after = live_after(body, reads, exit);
     let mut uses = HashMap::new();
     let mut statements: Vec<&Stmt> = body.iter().collect();
     while let Some(stmt) = statements.pop() {
@@ -230,10 +343,10 @@ pub(crate) fn last_uses(body: &[Stmt], reads: &GlobalReads) -> HashMap<Span, Vec
         let Some(live) = after.get(&stmt.span) else {
             continue;
         };
-        let mut names = Vec::new();
+        let mut names = Names::default();
         stmt_names(stmt, &mut names);
         let mut last: Vec<String> = Vec::new();
-        for name in names {
+        for name in names.names {
             let variable = !is_builtin(name) && !reads.contains_key(name);
             if variable && !live.contains(name) && !last.iter().any(|seen| seen == name) {
                 last.push(name.to_string());
@@ -249,6 +362,8 @@ pub(crate) fn last_uses(body: &[Stmt], reads: &GlobalReads) -> HashMap<Span, Vec
 /// The state of [`live_after`], which walks each block backward from what is live at its end.
 struct Liveness<'a> {
     reads: &'a GlobalReads,
+    /// What is live where the function returns, besides its value.
+    exit: &'a HashSet<String>,
     after: LiveAfter,
     /// For each enclosing loop, innermost last, what is live where `break` and `cont` go.
     loops: Vec<(HashSet<String>, HashSet<String>)>,
@@ -268,7 +383,7 @@ impl Liveness<'_> {
     fn stmt(&mut self, stmt: &Stmt, next: HashSet<String>) -> HashSet<String> {
         // nothing after a jump runs, but what runs where it lands
         let out = match &stmt.kind {
-            StmtKind::Return { .. } => HashSet::new(),
+            StmtKind::Return { .. } => self.exit.clone(),
             StmtKind::Break => self.loops.last().map(|l| l.0.clone()).unwrap_or_default(),
             StmtKind::Continue => self.loops.last().map(|l| l.1.clone()).unwrap_or_default(),
             _ => next,
@@ -361,6 +476,7 @@ impl Liveness<'_> {
             | StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
+            | StmtKind::ImplDef { .. }
             | StmtKind::Use { .. } => out,
         }
     }
@@ -368,9 +484,14 @@ impl Liveness<'_> {
     /// Adds every variable `expr` reads to `live`, including the globals each function it calls
     /// may read.
     fn expr(&self, expr: &Expr, live: &mut HashSet<String>) {
-        let mut names = Vec::new();
+        let mut names = Names::default();
         expr_names(expr, &mut names);
-        for name in names {
+        for method in names.methods {
+            for function in self.reads.methods_named(method) {
+                live.extend(self.reads[function].iter().cloned());
+            }
+        }
+        for name in names.names {
             match self.reads.get(name) {
                 Some(globals) => live.extend(globals.iter().cloned()),
                 None if is_builtin(name) => {}
@@ -405,10 +526,10 @@ mod tests {
             })
             .collect();
         let reads = global_reads(body, &globals);
-        let mut after = live_after(body, &reads);
+        let mut after = live_after(body, &reads, &HashSet::new());
         for stmt in body {
             if let StmtKind::FunctionDef { body, .. } = &stmt.kind {
-                after.extend(live_after(body, &reads));
+                after.extend(live_after(body, &reads, &HashSet::new()));
             }
         }
         statements
@@ -575,11 +696,44 @@ mod tests {
         let source = "x = [1]\ny = x\nprint(y, x)\n";
         let module = parse(source).unwrap();
         let crate::ast::Mod::Module { body } = &module;
-        let uses = last_uses(body, &GlobalReads::new());
+        let uses = last_uses(body, &GlobalReads::default(), &HashSet::new());
         let mut last: Vec<String> = uses[&body[2].span].clone();
         last.sort();
         assert_eq!(last, names(&["x", "y"]));
         assert!(!uses.contains_key(&body[0].span));
         assert!(!uses.contains_key(&body[1].span));
+    }
+
+    #[test]
+    fn a_method_call_reads_the_globals_every_method_of_its_name_reads() {
+        let source = "struct S;\n    n: int\nimpl S;\n    fn get(self) -> int;\n        ret xs[0]\n\
+                      fn f(s: S) -> int;\n    ret s.get()\nfn g() -> S;\n    ret S.make()\n\
+                      xs = [1]\n";
+        let module = parse(source).unwrap();
+        let crate::ast::Mod::Module { body } = &module;
+        let reads = global_reads(body, &HashSet::from(["xs".to_string()]));
+        assert_eq!(reads["S.get"], HashSet::from(["xs".to_string()]));
+        assert_eq!(reads["f"], HashSet::from(["xs".to_string()]));
+        assert!(reads["g"].is_empty());
+    }
+
+    #[test]
+    fn what_a_function_returns_besides_its_value_is_live_at_every_exit() {
+        let source = "if c;\n    ret 1\nx = self.n\nret x\n";
+        let module = parse(source).unwrap();
+        let crate::ast::Mod::Module { body } = &module;
+        let exit = HashSet::from(["self".to_string()]);
+        let after = live_after(body, &GlobalReads::default(), &exit);
+        let StmtKind::If { body: then, .. } = &body[0].kind else {
+            panic!("expected an if");
+        };
+        assert!(after[&then[0].span].contains("self"));
+        assert!(after[&body[1].span].contains("self"));
+        assert!(after[&body[2].span].contains("self"));
+        let uses = last_uses(body, &GlobalReads::default(), &exit);
+        assert!(
+            uses.get(&body[1].span)
+                .is_none_or(|last| !last.contains(&"self".to_string()))
+        );
     }
 }

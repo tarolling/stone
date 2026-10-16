@@ -468,6 +468,82 @@ impl Parser {
         })
     }
 
+    /// Parses an `impl` block, such as `impl Point;` followed by an indented function for each
+    /// method, like `fn norm(self) -> float; ret self.x`.
+    ///
+    /// ```text
+    /// impl_def:
+    ///     | 'impl' NAME ';' NEWLINE INDENT function_def+ DEDENT
+    /// ```
+    pub(super) fn parse_impl_def(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
+        // 'impl' NAME ';' NEWLINE INDENT function_def+ DEDENT
+        if self
+            .expect(TokenType::Keyword("impl".to_string()))
+            .is_some()
+            && let Some((name, name_span)) = self.expect_name("a struct name", false)
+            && self.expect(TokenType::Semi).is_some()
+            && self.expect(TokenType::Newline).is_some()
+            && self.expect(TokenType::Indent).is_some()
+            && let Ok(methods) = self.nested(Self::parse_methods)
+            && self.expect(TokenType::Dedent).is_some()
+        {
+            return Ok(Box::new(Stmt::new(
+                StmtKind::ImplDef {
+                    name,
+                    name_span,
+                    methods,
+                },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_impl_def".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses the functions of an `impl` block up to the `Dedent` that ends them.
+    ///
+    /// ```text
+    /// methods:
+    ///     | function_def+
+    /// ```
+    fn parse_methods(&mut self) -> Result<Vec<Stmt>, ParserError> {
+        let mut methods = vec![];
+        loop {
+            let token = self.peek().clone();
+            if token.r#type == TokenType::Keyword("pub".to_string()) {
+                self.hint(
+                    token.span,
+                    "a method needs no 'pub', since it is visible wherever its struct is",
+                );
+                break;
+            }
+            if token.r#type != TokenType::Keyword("fn".to_string()) {
+                self.record_expected("'fn'".to_string(), false);
+                break;
+            }
+            let Ok(method) = self.parse_function_def() else {
+                break;
+            };
+            methods.push(*method);
+            if self.peek().r#type == TokenType::Dedent {
+                return Ok(methods);
+            }
+        }
+
+        Err(ParserError {
+            method: "parse_methods".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
     /// Parses the fields of a struct, one per line, up to the `Dedent` that ends them.
     ///
     /// ```text
@@ -1038,6 +1114,7 @@ impl Parser {
     ///     | function_def
     ///     | enum_def
     ///     | struct_def
+    ///     | impl_def
     ///     | if_stmt
     ///     | for_stmt
     ///     | while_stmt
@@ -1060,6 +1137,12 @@ impl Parser {
 
         // struct_def
         if let Ok(stmt) = self.parse_struct_def() {
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
+        // impl_def
+        if let Ok(stmt) = self.parse_impl_def() {
             return Ok(stmt);
         }
         self.pos = mark;

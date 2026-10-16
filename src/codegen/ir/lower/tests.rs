@@ -21,14 +21,7 @@ fn lower_source(source: &str) -> Program {
         "{:?}",
         analysis.diagnostics
     );
-    lower(
-        &module,
-        &analysis.types,
-        &analysis.symbols,
-        &analysis.enums,
-        &analysis.structs,
-    )
-    .unwrap()
+    lower(&module, &analysis).unwrap()
 }
 
 #[test]
@@ -558,16 +551,9 @@ fn dump_linked(source: &str) -> String {
         source,
         &crate::project::MapSources::default(),
     );
-    let (module, _) = module.unwrap();
+    let module = module.unwrap().module;
     let analysis = TypeChecker::new().analyze(&module);
-    let program = lower(
-        &module,
-        &analysis.types,
-        &analysis.symbols,
-        &analysis.enums,
-        &analysis.structs,
-    )
-    .unwrap();
+    let program = lower(&module, &analysis).unwrap();
     program.functions.iter().map(ToString::to_string).collect()
 }
 
@@ -1024,5 +1010,46 @@ fn a_field_assigned_the_result_of_a_call_moves_into_it() {
     assert_eq!(
         f,
         "(v0, v1):\nb0:\n  v2 = call add(v0, 1)\n  v0 = copy v2\n  ret v0, v1\n"
+    );
+}
+
+#[test]
+fn a_method_that_changes_self_returns_it_for_its_caller_to_store() {
+    let source = "struct Bag;\n    items: list[int]\n    n: int\nimpl Bag;\n    \
+                  fn size(self) -> int;\n        ret self.items.len()\n    \
+                  fn add(self, x: int);\n        self.items.append(x)\n    \
+                  fn items_of(self) -> list[int];\n        self.n += 1\n        ret self.items\n\
+                  fn f(b: Bag) -> int;\n    b.add(1)\n    ret b.size()\n";
+    let dumped = dump(source);
+    let function = |name: &str| {
+        dumped
+            .split(&format!("fn {name}("))
+            .nth(1)
+            .unwrap()
+            .split("\nfn ")
+            .next()
+            .unwrap()
+            .to_string()
+    };
+    // a method that does not change `self` borrows it
+    assert_eq!(
+        function("Bag.size"),
+        "v0, v1):\nb0:\n  v2 = len v0\n  ret v2"
+    );
+    assert_eq!(
+        function("Bag.add"),
+        "v0, v1, v2):\nb0:\n  v0 = list_unique v0\n  call stone.list_append(v0, v2)\n  \
+         ret 0, v0, v1"
+    );
+    // returning a value of `self` retains it, since `self` gives its own reference back
+    assert_eq!(
+        function("Bag.items_of"),
+        "v0, v1):\nb0:\n  v2 = add v1, 1\n  v1 = copy v2\n  retain v0\n  ret v0, v0, v1"
+    );
+    // the receiver moves into the call and its new values replace it, unreleased
+    assert_eq!(
+        function("f"),
+        "v0, v1):\nb0:\n  v2, v3, v4 = call Bag.add(v0, v1, 1)\n  v0 = copy v3\n  \
+         v1 = copy v4\n  v5 = call Bag.size(v0, v1)\n  release_list v0\n  ret v5"
     );
 }

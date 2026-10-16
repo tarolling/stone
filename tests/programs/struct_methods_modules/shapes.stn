@@ -1,0 +1,19 @@
+use shapes.units
+
+pub struct Square;
+    side: int
+    label: str
+
+impl Square;
+    fn unit() -> Square;
+        ret Square(side=units.one(), label=name())
+
+    fn area(self) -> int;
+        ret self.side * self.side
+
+    fn grow(self, by: int);
+        self.side += by
+        self.label = self.label + "+"
+
+fn name() -> str;
+    ret "square"

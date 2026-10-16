@@ -5,6 +5,7 @@
 //! and then `x + 1` prints `2`.
 
 use crate::ast::{Mod, Stmt, StmtKind};
+use crate::checker::Methods;
 use crate::diagnostic::{Diagnostic, Diagnostics};
 use crate::driver;
 use crate::interpreter::{Exit, Interpreter};
@@ -48,8 +49,9 @@ pub fn needs_more(buffer: &str) -> bool {
 /// One top-level statement of an entry the session kept, as source text ending in a newline.
 struct Chunk {
     text: String,
-    /// The function it defines, if it is an `fn`, so a later `fn` of the same name replaces it.
-    defines: Option<String>,
+    /// What it defines: a function, enum, or struct by its name, and an `impl` block each of its
+    /// functions, as `S.get`, so that a later definition of any of them replaces the chunk.
+    defines: Vec<String>,
 }
 
 /// Every entry the session has kept, which each new entry is checked together with.
@@ -62,6 +64,8 @@ struct Session {
 struct Prepared {
     /// The linked program of the session and the entry.
     module: Mod,
+    /// How the program's method calls were resolved.
+    methods: Methods,
     /// How many lines of the program come before the entry.
     offset: usize,
     /// The entry's statements, to add to the session.
@@ -93,19 +97,16 @@ impl Session {
         let history: String = self
             .chunks
             .iter()
-            .filter(|old| {
-                old.defines
-                    .as_ref()
-                    .is_none_or(|name| !chunks.iter().any(|new| new.defines.as_ref() == Some(name)))
-            })
+            .filter(|old| !redefined(old, &chunks))
             .map(|old| old.text.as_str())
             .collect();
         let offset = history.lines().count();
         let program = format!("{history}{entry}");
         match driver::load(Path::new(ENTRY), &program, sources) {
             // a warning would repeat with every later entry, so the session leaves them out
-            (files, Ok((module, _))) => Ok(Prepared {
-                module,
+            (files, Ok(checked)) => Ok(Prepared {
+                module: checked.module,
+                methods: checked.methods,
                 offset,
                 chunks,
                 files,
@@ -118,18 +119,19 @@ impl Session {
         }
     }
 
-    /// Keeps a prepared entry, replacing any function or enum it defines again.
+    /// Keeps a prepared entry, replacing any function, enum, struct, or `impl` block it defines
+    /// again.
     fn commit(&mut self, prepared: Prepared) {
-        self.chunks.retain(|old| {
-            old.defines.as_ref().is_none_or(|name| {
-                !prepared
-                    .chunks
-                    .iter()
-                    .any(|new| new.defines.as_ref() == Some(name))
-            })
-        });
+        self.chunks.retain(|old| !redefined(old, &prepared.chunks));
         self.chunks.extend(prepared.chunks);
     }
+}
+
+/// Returns whether one of `chunks` defines anything `old` defines, which it replaces.
+fn redefined(old: &Chunk, chunks: &[Chunk]) -> bool {
+    old.defines
+        .iter()
+        .any(|name| chunks.iter().any(|new| new.defines.contains(name)))
 }
 
 /// Splits an entry into one chunk per top-level statement, each running from the line the
@@ -155,8 +157,17 @@ fn split(entry: &str) -> Vec<Chunk> {
             let defines = match &stmt.kind {
                 StmtKind::FunctionDef { name, .. }
                 | StmtKind::EnumDef { name, .. }
-                | StmtKind::StructDef { name, .. } => Some(name.clone()),
-                _ => None,
+                | StmtKind::StructDef { name, .. } => vec![name.clone()],
+                StmtKind::ImplDef { name, methods, .. } => methods
+                    .iter()
+                    .filter_map(|method| match &method.kind {
+                        StmtKind::FunctionDef { name: method, .. } => {
+                            Some(format!("{name}.{method}"))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+                _ => vec![],
             };
             Chunk { text, defines }
         })
@@ -248,7 +259,7 @@ fn submit(
     err: &mut dyn Write,
     sources: &dyn Sources,
 ) -> std::io::Result<Option<u8>> {
-    let prepared = match session.prepare(entry, sources) {
+    let mut prepared = match session.prepare(entry, sources) {
         Ok(prepared) => prepared,
         Err(rendered) => {
             err.write_all(rendered.as_bytes())?;
@@ -256,6 +267,7 @@ fn submit(
         }
     };
     let statements = prepared.statements();
+    let methods = std::mem::take(&mut prepared.methods);
     let Prepared {
         files,
         history,
@@ -265,7 +277,7 @@ fn submit(
     let (files, history, offset) = (files.clone(), history.clone(), *offset);
     // kept even if it fails, since the statements before the failure have already run
     session.commit(prepared);
-    let result = interpreter.run_entry(&statements);
+    let result = interpreter.run_entry(&statements, methods);
     interpreter.output().flush()?;
     match result {
         Ok(()) => Ok(None),
@@ -358,6 +370,35 @@ mod tests {
         assert_eq!(session("none\nsome(\"a\")\n").0, "none\nsome('a')\n");
         let input = "enum Coin;\n    Heads\n    Tails\n\nc = Coin.Tails\nc\n";
         assert_eq!(session(input), ("Coin.Tails\n".into(), "".into()));
+    }
+
+    #[test]
+    fn methods_carry_over_and_change_their_receivers() {
+        let input = "struct S;\n    n: int\n\nimpl S;\n    fn bump(self);\n        self.n += 1\n\n\
+                     s = S(n=0)\ns.bump()\ns.bump()\ns\n";
+        assert_eq!(session(input), ("S(n=2)\n".into(), "".into()));
+    }
+
+    #[test]
+    fn an_impl_block_defined_again_replaces_the_one_with_its_methods() {
+        let s = "struct S;\n    n: int\n\n";
+        let get = |n: i32| format!("impl S;\n    fn get(self) -> int;\n        ret {n}\n\n");
+        let other = "impl S;\n    fn other(self) -> int;\n        ret 3\n\n";
+        let input = format!(
+            "{s}{}{other}{}S(n=0).get() + S(n=0).other()\n",
+            get(1),
+            get(2)
+        );
+        assert_eq!(session(&input), ("5\n".into(), "".into()));
+    }
+
+    #[test]
+    fn a_function_keeps_its_methods_when_earlier_entries_move() {
+        // redefining `f` drops its first definition, so the lines of the entries after it move
+        let input = "fn f() -> int;\n    ret 1\n\nstruct S;\n    n: int\n\nimpl S;\n    \
+                     fn bump(self);\n        self.n += 10\n\nfn g(s: S) -> S;\n    s.bump()\n    \
+                     ret s\n\nfn f() -> int;\n    ret 2\n\ng(S(n=f()))\n";
+        assert_eq!(session(input), ("S(n=12)\n".into(), "".into()));
     }
 
     #[test]
@@ -475,8 +516,10 @@ mod tests {
             texts,
             ["x = 1\n", "fn f() -> int;\n    ret x\n\n", "print(1)\n"]
         );
-        assert_eq!(chunks[1].defines.as_deref(), Some("f"));
-        assert_eq!(chunks[0].defines, None);
+        assert_eq!(chunks[1].defines, ["f"]);
+        assert!(chunks[0].defines.is_empty());
+        let chunks = split("impl S;\n    fn a(self);\n        ret\n    fn b(self);\n        ret\n");
+        assert_eq!(chunks[0].defines, ["S.a", "S.b"]);
     }
 
     #[test]

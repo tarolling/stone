@@ -119,7 +119,10 @@ do instead:
 - A function changes a value that belongs to its caller by returning it: `xs = add(xs, 1)`.
   A function can read globals but never change them, just as it cannot assign them. The checker
   warns when a function changes a parameter and then never uses it, since the caller would not
-  see the change.
+  see the change. The one exception is a method that changes `self`, which changes the value it
+  is called on, as `append` changes a list: `p.shift(1.0)` means `p = Point.shift(p, 1.0)`, so
+  it is still a change made by returning, written the way Python programmers expect. The
+  compiler sees which methods change `self`, so no `mut` keyword marks them.
 - A change is a statement of its own (`xs.append(1)`, `grid[i][j] = 0`) made to a variable or
   an element of one. Changing a temporary, as in `f().append(1)`, would have no effect.
 - A `for` loop walks the list as it was when the loop started, so appending to the list inside
@@ -143,7 +146,11 @@ Tuples never change, so they need nothing of this: the compiler keeps each of a 
 a variable of its own, counting only the strings and lists among them. Structs are kept the same
 way, so changing a field of a struct in a variable (`p.x = 1.0`) is an assignment to that
 field's variable, and a field holding a list follows the rules for lists, including moving into
-a call that replaces it (`p.items = f(p.items)`). Enum values never change
+a call that replaces it (`p.items = f(p.items)`). A method that changes `self` takes the
+receiver's values moved in, as from a variable at its last use, and returns them after its result
+for the caller to store back where they came from, a variable, an element, or a field, so
+`stack.push(x)` changes the stack in place; a method that only reads `self` borrows it. Enum
+values never change
 either, so they are shared freely: each is stored once, with a count of the variables that hold
 it, and a `match` hands out its values with a reference each.
 

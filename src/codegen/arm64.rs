@@ -763,7 +763,9 @@ mod tests {
             source,
             &crate::project::MapSources::default(),
         );
-        Arm64Generator::new().assemble(&module.unwrap().0).unwrap()
+        Arm64Generator::new()
+            .assemble(&module.unwrap().module)
+            .unwrap()
     }
 
     #[test]

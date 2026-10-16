@@ -221,14 +221,7 @@ mod tests {
             "{:?}",
             analysis.diagnostics
         );
-        let program = lower(
-            &module,
-            &analysis.types,
-            &analysis.symbols,
-            &analysis.enums,
-            &analysis.structs,
-        )
-        .unwrap();
+        let program = lower(&module, &analysis).unwrap();
         analyze(&program.functions[0])
     }
 

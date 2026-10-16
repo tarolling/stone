@@ -616,7 +616,7 @@ os.exit(0)
             EVERY_ROUTINE,
             &crate::project::MapSources::default(),
         );
-        let module = module.unwrap().0;
+        let module = module.unwrap().module;
         let system: Vec<&str> = arm64::builtins::Sys::ALL
             .iter()
             .filter_map(|call| call.macos())

@@ -88,10 +88,16 @@ own variables and functions `min`, `max`, `sleep`, or `env`.
 Every other function, enum, and struct is private to the file it is in. `pub` makes no difference in the entry file, so a
 module can also be run on its own.
 
+A struct's `impl` blocks are in the file that defines the struct, and its methods and associated
+functions need no `pub`: they can be used wherever the struct can, as `p.area()` and
+`shapes.Square.unit()` or, after `use shapes.Square`, `Square.unit()`. An `impl` block for a
+struct of another file is an error.
+
 ## Module bodies
 
-A module other than the entry file holds only `use` statements, `fn`s, `enum`s, and `struct`s.
-Any other top-level statement is an error: `only use, fn, enum, and struct are allowed at the top
+A module other than the entry file holds only `use` statements, `fn`s, `enum`s, `struct`s, and
+`impl` blocks.
+Any other top-level statement is an error: `only use, fn, enum, struct, and impl are allowed at the top
 level of a module`. So using a module never runs code, and modules may use each other in a cycle.
 
 A module's functions see their parameters and locals, their own file's functions, builtins, and

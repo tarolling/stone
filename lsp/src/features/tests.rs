@@ -1006,3 +1006,96 @@ fn completion_after_a_struct_value_offers_its_fields() {
         ]
     );
 }
+
+const METHODS_SOURCE: &str = "\
+struct Point;
+    x: float
+impl Point;
+    fn origin() -> Point;
+        ret Point(x=0.0)
+    fn shift(self, dx: float);
+        self.x += dx
+p = Point.origin()
+p.shift(1.0)
+";
+
+#[test]
+fn hover_shows_a_method_or_associated_function_with_its_struct() {
+    let doc = doc(METHODS_SOURCE);
+    let shift = "```stone\nfn Point.shift(self, dx: float)\n```";
+    assert_eq!(hover_text(&doc, at(9, 3)).unwrap(), shift);
+    assert_eq!(hover_text(&doc, at(6, 8)).unwrap(), shift);
+    assert_eq!(
+        hover_text(&doc, at(8, 11)).unwrap(),
+        "```stone\nfn Point.origin() -> Point\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(7, 9)).unwrap(),
+        "```stone\n(parameter) self: Point\n```"
+    );
+}
+
+#[test]
+fn a_method_leads_to_its_definition_and_renames_everywhere() {
+    let doc = doc(METHODS_SOURCE);
+    let location = definition(&doc, &uri(), at(9, 3), None).unwrap();
+    assert_eq!(location.range.start, Position::new(5, 7));
+    let edit = rename(&doc, &uri(), at(6, 9), "move").unwrap();
+    let edits = &edit.changes.unwrap()[&uri()];
+    let mut starts: Vec<Position> = edits.iter().map(|e| e.range.start).collect();
+    starts.sort_by_key(|p| (p.line, p.character));
+    assert_eq!(starts, [Position::new(5, 7), Position::new(8, 2)]);
+}
+
+#[test]
+fn a_struct_is_outlined_with_its_fields_and_methods() {
+    let symbols = document_symbols(&doc(METHODS_SOURCE));
+    let point = symbols.iter().find(|s| s.name == "Point").unwrap();
+    let children: Vec<(&str, SymbolKind)> = point
+        .children
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|c| (c.name.as_str(), c.kind))
+        .collect();
+    assert_eq!(
+        children,
+        [
+            ("x", SymbolKind::FIELD),
+            ("origin", SymbolKind::FUNCTION),
+            ("shift", SymbolKind::METHOD)
+        ]
+    );
+    let shift = &point.children.as_ref().unwrap()[2];
+    let locals: Vec<&str> = shift
+        .children
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(locals, ["self", "dx"]);
+    assert!(!symbols.iter().any(|s| s.name == "shift"));
+}
+
+#[test]
+fn completion_after_a_struct_value_offers_its_methods_and_after_the_struct_its_functions() {
+    let labels =
+        |source: String, position: Position| -> Vec<(String, Option<CompletionItemKind>)> {
+            completion(&doc(&source), position, &MapSources::default())
+                .into_iter()
+                .map(|item| (item.label, item.kind))
+                .collect()
+        };
+    assert_eq!(
+        labels(format!("{METHODS_SOURCE}q = p.\n"), at(10, 7)),
+        [
+            ("x".to_string(), Some(CompletionItemKind::FIELD)),
+            ("shift".to_string(), Some(CompletionItemKind::METHOD))
+        ]
+    );
+    assert_eq!(
+        labels(format!("{METHODS_SOURCE}q = Point.\n"), at(10, 11)),
+        [("origin".to_string(), Some(CompletionItemKind::FUNCTION))]
+    );
+}

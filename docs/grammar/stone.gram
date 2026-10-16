@@ -90,6 +90,7 @@ compound_stmt:
     | function_def
     | enum_def
     | struct_def
+    | impl_def
     | match_stmt
     | if_stmt
     | for_stmt
@@ -173,6 +174,14 @@ struct_def:
 
 field:
     | NAME ':' type NEWLINE
+
+# Impl blocks
+# -----------
+
+# methods take 'self', without a type, as their first parameter; the others are associated
+# functions, called on the struct
+impl_def:
+    | 'impl' NAME ';' NEWLINE INDENT function_def+ DEDENT
 
 # Match statement
 # ---------------

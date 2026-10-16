@@ -44,3 +44,9 @@ build/
 venv/
 __pycache__/
 *.py[cod]
+
+# Graphify
+graphify-out
+
+# claude
+.claude/

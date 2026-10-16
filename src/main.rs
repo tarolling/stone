@@ -3,10 +3,9 @@ use std::error::Error;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use stone::ast::Mod;
 use stone::codegen::Target;
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
-use stone::driver;
+use stone::driver::{self, Checked};
 use stone::interpreter::{Exit, Limits};
 use stone::project::{FsSources, SourceMap};
 
@@ -187,9 +186,10 @@ fn main() -> ExitCode {
                 },
             }
         }
-        ExecutionMode::Run { file, args } => with_program(&file, |module, _| {
+        ExecutionMode::Run { file, args } => with_program(&file, |checked, _| {
             driver::run_module(
-                module,
+                &checked.module,
+                &checked.methods,
                 &mut std::io::BufReader::new(std::io::stdin()),
                 &mut std::io::stdout(),
                 &args,
@@ -227,7 +227,8 @@ fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCod
     }
     let mut status = ExitCode::SUCCESS;
     for file in files {
-        let code = with_program(file, |module, sources| {
+        let code = with_program(file, |checked, sources| {
+            let module = &checked.module;
             let targets = if unique.is_empty() {
                 vec![Target::host()?]
             } else {
@@ -319,17 +320,17 @@ fn read(file: &str) -> Option<String> {
 /// A program that ended with `os.exit` prints nothing more and exits with its status.
 fn with_program(
     file: &str,
-    action: impl FnOnce(&Mod, &SourceMap) -> Result<(), Box<dyn Error>>,
+    action: impl FnOnce(&Checked, &SourceMap) -> Result<(), Box<dyn Error>>,
 ) -> ExitCode {
     let Some(source) = read(file) else {
         return ExitCode::FAILURE;
     };
     let (sources, result) = driver::load(Path::new(file), &source, &FsSources);
     let err = match result {
-        Ok((module, warnings)) => {
-            let rendered: String = warnings.iter().map(|d| sources.render(d)).collect();
+        Ok(checked) => {
+            let rendered: String = checked.warnings.iter().map(|d| sources.render(d)).collect();
             eprint!("{rendered}");
-            match action(&module, &sources) {
+            match action(&checked, &sources) {
                 Ok(()) => return ExitCode::SUCCESS,
                 Err(err) => err,
             }

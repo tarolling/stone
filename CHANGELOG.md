@@ -10,6 +10,23 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Methods: an `impl Point;` block, in the struct's own file, holds functions for a struct. One
+  whose first parameter is `self`, written without a type, is a method, called on a value as
+  `p.norm()`; any other is an associated function, called on the struct as `Point.origin()` or
+  `geo.Point.origin()`. A method that changes `self` changes the value it is called on, as
+  `append` changes a list, with no keyword: `s.push(1)` and `ps[i].shift(1.0)` change `s` and
+  `ps[i]` in place, and a call of one is a statement of its own or the whole value of an
+  assignment, as in `x = s.pop_top()`. Methods belong to their struct, so one can be named like a
+  builtin method, and they can be used wherever their struct can, with no `pub`.
+- `impl` is a keyword.
+
+### Changed
+
+- `driver::load` returns a `Checked` program, holding the module, its warnings, and how its method
+  calls were resolved, which `driver::run_module` takes too.
+
 ## [0.2.6] - 2026-10-13
 
 ### Added

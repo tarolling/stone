@@ -37,6 +37,7 @@ These names are reserved and cannot be used for variables or functions:
 | `fn` | defines a function |
 | `enum` | defines an enum |
 | `struct` | defines a struct |
+| `impl` | defines the methods and associated functions of a struct |
 | `pub` | lets other files use the function, enum, or struct after it, as in `pub fn f() -> int;` |
 | `use`, `as` | uses a module or one of its functions, optionally under another name |
 | `ret` | returns from a function, or ends the program at the top level |
@@ -54,9 +55,9 @@ These names are reserved and cannot be used for variables or functions:
 
 A statement ends at the end of its line. A statement that opens a block (`fn`, `if`, `elif`,
 `else`, `while`, `for`, `case`) ends in `;`, followed either by an indented block on the next
-lines or by a single simple statement on the same line. `enum`, `struct`, and `match` end in `;`
-too, and are always followed by an indented block: of variants or fields, one per line, or of
-`case`s:
+lines or by a single simple statement on the same line. `enum`, `struct`, `impl`, and `match`
+end in `;` too, and are always followed by an indented block: of variants or fields, one per
+line, of `fn`s, or of `case`s:
 
 ```stone
 for i in range(3);
@@ -113,6 +114,7 @@ themselves, as in `"café"`.
 | function definition | `fn f(a: int, b: int) -> int;` plus a block |
 | enum definition | `enum Shape;` plus a block of variants, such as `Circle(float)` and `Empty` |
 | struct definition | `struct Point;` plus a block of fields, such as `x: float` and `y: float` |
+| `impl` block | `impl Point;` plus a block of `fn`s, such as `fn norm(self) -> float;` plus a block |
 | `match` | `match s;` plus a block of cases, such as `case Shape.Circle(r);` plus a block |
 | `ret` | `ret`, `ret x`, `ret (a, b)` |
 | `if` / `elif` / `else` | `if x < 0;` ... `elif x == 0;` ... `else;` ... |
@@ -123,8 +125,8 @@ themselves, as in `"café"`.
 
 A `for` loop's variable is a plain name, or names to unpack each tuple of a list into. Unpacking
 takes names only, each once, as many as the tuple has values; an element such as `xs[0]` is
-assigned on a line of its own. Functions, enums, and structs can only be defined at the top
-level.
+assigned on a line of its own. Functions, enums, structs, and `impl` blocks can only be defined
+at the top level.
 `use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
 
 ## Augmented assignment
@@ -249,6 +251,22 @@ struct Point;
 `Point(x=1.0, y=2.0)` makes a value of it, naming a value for every field once, in any order.
 `p.x` reads a field, and `p.x = 3.0`, `p.x += 1.0`, and `ps[i].y = 0.0` change one, as long as
 the struct is stored in a variable. See [Types](types.md#structs).
+
+An `impl` block, in the same file as the struct, holds its functions:
+
+```stone
+impl Point;
+    fn origin() -> Point;
+        ret Point(x=0.0, y=0.0)
+
+    fn shift(self, dx: float);
+        self.x += dx
+```
+
+A function whose first parameter is `self`, with no type, is a method, called on a value as
+`p.shift(1.0)`; any other is an associated function, called on the struct as `Point.origin()`.
+`self` is the only parameter written without a type, and only as a method's first. See
+[Types](types.md#methods).
 
 ## Maps
 

@@ -203,6 +203,26 @@ pub fn struct_display(name: &str) -> &str {
     name.rsplit('.').next().unwrap_or(name)
 }
 
+/// How a call of a function of an `impl` block was resolved, which [`Methods`] holds by the
+/// call's span.
+///
+/// For example, `p.shift(1.0)` calls `Point.shift` with `p` as `self`, changing `p` if `shift`
+/// changes `self`, and `Point.origin()` calls `Point.origin` without a receiver.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Method {
+    /// The function's linked name: its struct's linked name, a dot, and its own name, such as
+    /// `geo.Point.shift`.
+    pub function: String,
+    /// Whether the call passes the value before the dot as `self`, rather than calling an
+    /// associated function on the struct.
+    pub receiver: bool,
+    /// Whether the method changes `self`, and so the receiver, in place.
+    pub changes: bool,
+}
+
+/// Every call of a function of an `impl` block, keyed by the call's span.
+pub type Methods = HashMap<Span, Method>;
+
 /// What a [`Symbol`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
@@ -216,6 +236,9 @@ pub enum SymbolKind {
     /// A field of a struct, such as `x` in `x: float`, whose [`Symbol::scope`] is the struct's
     /// name.
     Field,
+    /// A function of an `impl` block, such as `norm` in `fn norm(self) -> float;`, whose
+    /// [`Symbol::scope`] is the struct's name.
+    Method,
     Parameter,
     /// A variable assigned inside a function.
     Local,
@@ -262,6 +285,8 @@ pub struct Analysis {
     pub enums: Enums,
     /// The fields of every struct the program defines.
     pub structs: Structs,
+    /// How every call of a function of an `impl` block was resolved.
+    pub methods: Methods,
 }
 
 impl Analysis {
@@ -291,7 +316,13 @@ impl Analysis {
             .find(|(_, span)| span.file == file && span.contains(pos))
             .map(|(name, _)| name.as_str());
         self.symbols.iter().filter(move |s| match &s.scope {
-            _ if matches!(s.kind, SymbolKind::Variant | SymbolKind::Field) => false,
+            _ if matches!(
+                s.kind,
+                SymbolKind::Variant | SymbolKind::Field | SymbolKind::Method
+            ) =>
+            {
+                false
+            }
             None => s.span.file == file,
             Some(scope) => Some(scope.as_str()) == function,
         })
@@ -536,6 +567,16 @@ struct FieldInfo {
     ty: Ty,
 }
 
+/// A function of an `impl` block, whose signature is in [`Inference::functions`] under its
+/// struct's name, a dot, and its own name.
+struct MethodInfo {
+    symbol: usize,
+    /// Whether its first parameter is `self`, so it is called on a value rather than the struct.
+    has_self: bool,
+    /// Whether it changes `self`, found by [`Inference::find_changing_methods`].
+    changes: bool,
+}
+
 /// A `match` statement, kept so `finish` can check that its cases cover every value once the
 /// subject's type is known.
 struct PendingMatch {
@@ -619,6 +660,15 @@ struct Inference {
     /// The span of every struct definition declared at the top level, so a nested one is
     /// reported.
     struct_spans: HashSet<Span>,
+    /// The span of every `impl` block at the top level, so a nested one is reported.
+    impl_spans: HashSet<Span>,
+    /// The functions of every struct's `impl` blocks, by struct and function name.
+    struct_methods: HashMap<String, HashMap<String, MethodInfo>>,
+    /// How each call of a function of an `impl` block was resolved, by the call's span.
+    methods: Methods,
+    /// Methods called on a global a function reads before the code assigning it is checked,
+    /// which `finish` settles once the global's type is known.
+    deferred_methods: Vec<DeferredMethod>,
     /// Fields read from a global a function reads before the code assigning it is checked,
     /// which `finish` settles once the global's type is known.
     deferred_fields: Vec<DeferredField>,
@@ -643,6 +693,25 @@ struct DeferredField {
     value_ty: Ty,
     attr: String,
     attr_span: Span,
+    result: Ty,
+}
+
+/// `receiver.name(args)`, where `receiver` is not yet known to be a struct, as a global a function
+/// reads before the code assigning it is checked may not be, whose result is `result`.
+struct DeferredMethod {
+    call: Span,
+    receiver: Expr,
+    /// Whether changing the receiver would change a global from inside a function.
+    global: bool,
+    /// Whether the call is a statement of its own, or the whole value of an assignment, where a
+    /// method that changes its receiver may be called.
+    statement: bool,
+    assigned: bool,
+    value_ty: Ty,
+    name: String,
+    name_span: Span,
+    /// The type and span of each argument.
+    args: Vec<(Ty, Span)>,
     result: Ty,
 }
 
@@ -684,7 +753,7 @@ impl Inference {
                 None
             }
             // set by the caller
-            SymbolKind::Variant | SymbolKind::Field => None,
+            SymbolKind::Variant | SymbolKind::Field | SymbolKind::Method => None,
         };
         self.symbols.push(Symbol {
             name: name.to_string(),
@@ -1165,6 +1234,8 @@ impl Inference {
         // structs, enums, functions, and globals are visible everywhere, so declare them all
         // first, types before the signatures that name them
         self.declare_types(body);
+        self.declare_methods(body);
+        self.find_changing_methods(body);
         for stmt in body {
             if let StmtKind::FunctionDef {
                 name,
@@ -1200,7 +1271,11 @@ impl Inference {
         // top-level code must assign globals before reading them
         let globals = self.globals.keys().cloned().collect();
         AssignmentCheck::new(globals, &mut self.diagnostics).block(body, Some(HashSet::new()));
-        for stmt in body {
+        let methods = body.iter().flat_map(|stmt| match &stmt.kind {
+            StmtKind::ImplDef { methods, .. } => methods.as_slice(),
+            _ => &[],
+        });
+        for stmt in body.iter().chain(methods) {
             if let StmtKind::FunctionDef { args, body, .. } = &stmt.kind {
                 let params: HashSet<String> = args.args.iter().map(|a| a.arg.clone()).collect();
                 let mut locals = params.clone();
@@ -1244,11 +1319,62 @@ impl Inference {
             );
             return;
         }
+        let (params, ret) = self.signature(args, returns, None);
+        // the symbol's type is rebuilt from `params` and `ret` in `finish`
+        let symbol = self.add_symbol(name, SymbolKind::Function, name_span, Ty::Unit);
+        self.functions.insert(
+            name.to_string(),
+            FunctionInfo {
+                symbol,
+                params,
+                ret,
+                ret_written: returns.is_some(),
+            },
+        );
+    }
+
+    /// Returns the parameter types and return type a signature writes. In a function of the
+    /// `impl` block of a struct of type `this`, a first parameter `self` is that struct.
+    ///
+    /// For example, `(x: float) -> float` gives `[float]` and `float`. A parameter without a type
+    /// gets an unknown one, so checking goes on, and is reported in `finish`.
+    fn signature(
+        &mut self,
+        args: &Arguments,
+        returns: Option<&TypeExpr>,
+        this: Option<&Ty>,
+    ) -> (Vec<Ty>, Ty) {
         let mut params = vec![];
-        for arg in &args.args {
-            let ty = match &arg.annotation {
-                Some(annotation) => self.written(annotation),
-                None => {
+        for (i, arg) in args.args.iter().enumerate() {
+            let ty = match (&arg.annotation, this) {
+                (annotation, Some(this)) if arg.arg == "self" && i == 0 => {
+                    if annotation.is_some() {
+                        let name = match this {
+                            Ty::Struct(name) => struct_display(name).to_string(),
+                            _ => String::new(),
+                        };
+                        self.error(
+                            arg.span,
+                            format!(
+                                "'self' needs no type, since it is the '{name}' the method is \
+                                 called on"
+                            ),
+                        );
+                    }
+                    this.clone()
+                }
+                (annotation, _) if arg.arg == "self" => {
+                    self.error(
+                        arg.span,
+                        "'self' can only be the first parameter of a method",
+                    );
+                    match annotation {
+                        Some(annotation) => self.written(annotation),
+                        None => self.fresh(),
+                    }
+                }
+                (Some(annotation), _) => self.written(annotation),
+                (None, _) => {
                     let ty = self.fresh();
                     self.untyped_params
                         .push((arg.arg.clone(), arg.span, ty.clone()));
@@ -1262,17 +1388,220 @@ impl Inference {
         for annotation in written.chain(returns) {
             self.check_written_width(annotation);
         }
-        // the symbol's type is rebuilt from `params` and `ret` in `finish`
-        let symbol = self.add_symbol(name, SymbolKind::Function, name_span, Ty::Unit);
-        self.functions.insert(
-            name.to_string(),
-            FunctionInfo {
-                symbol,
-                params,
-                ret,
-                ret_written: returns.is_some(),
-            },
-        );
+        (params, ret)
+    }
+
+    /// Declares the functions of every `impl` block at the top level of `body`, each under its
+    /// struct's name, a dot, and its own name, so calls anywhere in the program are checked
+    /// against them.
+    ///
+    /// For example, `impl Point;` holding `fn norm(self) -> float;` declares `Point.norm` as
+    /// `fn(Point) -> float`, called as `p.norm()`.
+    fn declare_methods(&mut self, body: &[Stmt]) {
+        for stmt in body {
+            let StmtKind::ImplDef {
+                name: owner,
+                methods,
+                ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            self.impl_spans.insert(stmt.span);
+            // the linker reports an impl block for anything but a struct of its file
+            if !self.structs.contains_key(owner) {
+                continue;
+            }
+            for method in methods {
+                let StmtKind::FunctionDef {
+                    name,
+                    name_span,
+                    args,
+                    returns,
+                    ..
+                } = &method.kind
+                else {
+                    continue;
+                };
+                let short = struct_display(owner);
+                if self
+                    .struct_methods
+                    .get(owner)
+                    .is_some_and(|methods| methods.contains_key(name))
+                {
+                    self.error(
+                        *name_span,
+                        format!("'{short}' already has a method '{name}'"),
+                    );
+                    continue;
+                }
+                if self.struct_field_ty(owner, name).is_some() {
+                    self.error(
+                        *name_span,
+                        format!(
+                            "'{name}' is a field of '{short}', so a method cannot have its name"
+                        ),
+                    );
+                    continue;
+                }
+                let this = Ty::Struct(owner.clone());
+                let (params, ret) = self.signature(args, returns.as_ref(), Some(&this));
+                let has_self = args.args.first().is_some_and(|arg| arg.arg == "self");
+                // the symbol's type is rebuilt from `params` and `ret` in `finish`
+                let symbol = self.add_symbol(name, SymbolKind::Method, *name_span, Ty::Unit);
+                self.symbols[symbol].scope = Some(owner.clone());
+                let function = format!("{owner}.{name}");
+                self.functions.insert(
+                    function.clone(),
+                    FunctionInfo {
+                        symbol,
+                        params,
+                        ret,
+                        ret_written: returns.is_some(),
+                    },
+                );
+                self.function_spans.insert(function, method.span);
+                self.struct_methods
+                    .entry(owner.clone())
+                    .or_default()
+                    .insert(
+                        name.clone(),
+                        MethodInfo {
+                            symbol,
+                            has_self,
+                            changes: false,
+                        },
+                    );
+            }
+        }
+    }
+
+    /// Finds which methods change `self`: those that assign it or a place in it, call a builtin
+    /// method that changes such a place, as `self.items.append(x)` does, or call a method that
+    /// changes `self` on such a place. Repeats until no more are found, since methods can call
+    /// each other in any order. The type of a place in `self` comes from the fields' written
+    /// types alone, so this needs nothing inferred.
+    ///
+    /// For example, in `fn push(self, x: int); self.items.append(x)`, `push` changes `self`, and
+    /// so does `fn twice(self); self.push(1); self.push(2)`.
+    fn find_changing_methods(&mut self, body: &[Stmt]) {
+        let mut methods = vec![];
+        for stmt in body {
+            let StmtKind::ImplDef {
+                name: owner,
+                methods: defs,
+                ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            for def in defs {
+                // a method defined twice was reported, and only its first definition counts
+                if let StmtKind::FunctionDef {
+                    name,
+                    name_span,
+                    body,
+                    ..
+                } = &def.kind
+                    && let Some(info) = self.struct_methods.get(owner).and_then(|m| m.get(name))
+                    && self.symbols[info.symbol].span == *name_span
+                    && info.has_self
+                {
+                    methods.push((owner, name, body));
+                }
+            }
+        }
+        loop {
+            let mut found = false;
+            for &(owner, name, body) in &methods {
+                if !self.struct_methods[owner][name].changes && self.changes_self(owner, body) {
+                    if let Some(info) = self
+                        .struct_methods
+                        .get_mut(owner)
+                        .and_then(|methods| methods.get_mut(name))
+                    {
+                        info.changes = true;
+                    }
+                    found = true;
+                }
+            }
+            if !found {
+                break;
+            }
+        }
+    }
+
+    /// Returns whether `body`, a method of the struct `owner`, changes `self`, given the methods
+    /// found to change it so far.
+    fn changes_self(&self, owner: &str, body: &[Stmt]) -> bool {
+        let mut assigned = vec![];
+        collect_assigned(body, &mut assigned);
+        if assigned.iter().any(|(name, _)| name == "self") {
+            return true;
+        }
+        self.block_changes_self(owner, body)
+    }
+
+    fn block_changes_self(&self, owner: &str, body: &[Stmt]) -> bool {
+        let in_self = |place_expr: &Expr| place(place_expr).is_some_and(|(root, _)| root == "self");
+        body.iter().any(|stmt| match &stmt.kind {
+            StmtKind::Assign { targets, value } => {
+                targets.iter().any(|target| {
+                    matches!(
+                        target.kind,
+                        ExprKind::Subscript { .. } | ExprKind::Attribute { .. }
+                    ) && in_self(target)
+                }) || self.call_changes_self(owner, value)
+            }
+            StmtKind::AugAssign { target, .. } => {
+                matches!(
+                    target.kind,
+                    ExprKind::Subscript { .. } | ExprKind::Attribute { .. }
+                ) && in_self(target)
+            }
+            StmtKind::Expr { value } => self.call_changes_self(owner, value),
+            StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
+                self.block_changes_self(owner, body)
+            }
+            StmtKind::If { body, orelse, .. } => {
+                self.block_changes_self(owner, body) || self.block_changes_self(owner, orelse)
+            }
+            StmtKind::Match { cases, .. } => cases
+                .iter()
+                .any(|case| self.block_changes_self(owner, &case.body)),
+            _ => false,
+        })
+    }
+
+    /// Returns whether `expr`, in a method of the struct `owner`, calls a method that changes
+    /// its receiver on `self` or a place in it.
+    fn call_changes_self(&self, owner: &str, expr: &Expr) -> bool {
+        let ExprKind::Call { func, .. } = &expr.kind else {
+            return false;
+        };
+        let ExprKind::Attribute { value, attr, .. } = &func.kind else {
+            return false;
+        };
+        let Some(("self", steps)) = place(value) else {
+            return false;
+        };
+        // the place's type, from the fields' written types
+        let mut ty = Some(Ty::Struct(owner.to_string()));
+        for step in steps {
+            ty = match (step, ty) {
+                (Step::Field(field), Some(Ty::Struct(name))) => self.struct_field_ty(&name, field),
+                (Step::Index(_), Some(Ty::List(elem))) => Some(*elem),
+                _ => None,
+            };
+        }
+        match ty {
+            Some(Ty::Struct(name)) => self
+                .struct_methods
+                .get(&name)
+                .and_then(|methods| methods.get(attr.as_str()))
+                .is_some_and(|method| method.changes),
+            _ => changes_receiver(attr),
+        }
     }
 
     /// Declares every enum and struct defined at the top level of `body`: first their names, so
@@ -1828,6 +2157,28 @@ impl Inference {
                     self.error(*name_span, "structs can only be defined at the top level");
                 }
             }
+            StmtKind::ImplDef {
+                name,
+                name_span,
+                methods,
+            } => {
+                if !self.impl_spans.contains(&stmt.span) {
+                    self.error(*name_span, "impl blocks can only be at the top level");
+                    return;
+                }
+                for method in methods {
+                    if let StmtKind::FunctionDef {
+                        name: method,
+                        name_span,
+                        args,
+                        body,
+                        ..
+                    } = &method.kind
+                    {
+                        self.check_function(&format!("{name}.{method}"), *name_span, args, body);
+                    }
+                }
+            }
             StmtKind::Match { subject, cases } => self.check_match(subject, cases),
             StmtKind::Break => {
                 if self.loop_depth == 0 {
@@ -1924,8 +2275,9 @@ impl Inference {
         self.check_block(body);
         self.loop_depth = saved_loops;
 
-        for arg in &args.args {
-            if let Some(span) = lost_change(body, &arg.arg) {
+        // a method's changes to `self` are its receiver's
+        for arg in args.args.iter().filter(|arg| arg.arg != "self") {
+            if let Some(span) = lost_change(body, &arg.arg, &self.methods) {
                 let param = &arg.arg;
                 self.diagnostics.push(Diagnostic::warning(
                     span,
@@ -2120,13 +2472,36 @@ impl Inference {
     /// For example, `f().append(1)` and a function's `names.append(x)` for a global `names` are
     /// errors, while `grid[0].append(1)` and `p.items.append(1)` are fine.
     fn check_change(&mut self, list: &Expr) {
+        self.check_change_of(list, false);
+    }
+
+    /// Checks a change like [`Inference::check_change`] does, to a struct if `is_struct`, which
+    /// errors call a value rather than a list.
+    fn check_change_of(&mut self, list: &Expr, is_struct: bool) {
+        let global = self.changes_global(list);
+        self.check_change_with(list, is_struct, global);
+    }
+
+    /// Returns whether a change to `list` would change a global from inside a function.
+    fn changes_global(&self, list: &Expr) -> bool {
+        match &place_root(list).kind {
+            ExprKind::Name { id, .. } => {
+                self.function.is_some() && self.local(id).is_none() && self.globals.contains_key(id)
+            }
+            _ => false,
+        }
+    }
+
+    /// Checks a change like [`Inference::check_change_of`] does, given whether it changes a
+    /// global from inside a function, `global`, which `finish` cannot find out itself.
+    fn check_change_with(&mut self, list: &Expr, is_struct: bool, global: bool) {
         if has_slice(list) {
             self.error(list.span, SLICE_CHANGE);
             return;
         }
         // a value inside a tuple, as in `t[0].append(1)`, cannot change
         let mut node = list;
-        let mut field = false;
+        let mut field = is_struct;
         loop {
             match &node.kind {
                 ExprKind::Subscript { value, .. } => {
@@ -2156,7 +2531,7 @@ impl Inference {
             self.error(root.span, message);
             return;
         };
-        if self.function.is_some() && self.local(id).is_none() && self.globals.contains_key(id) {
+        if global {
             self.error(
                 root.span,
                 format!(
@@ -2200,7 +2575,7 @@ impl Inference {
         let ty = self.infer_kind(expr);
         self.expr_types.push((expr.span, ty.clone()));
         if self.shallow(&ty) == Ty::Unit {
-            if changed_receiver(expr).is_some() {
+            if changed_receiver(expr, &self.methods).is_some() {
                 // a method that changes a list already said it can only be a statement
                 return self.fresh();
             }
@@ -2403,7 +2778,11 @@ impl Inference {
                 ty
             }
             None => {
-                let message = if METHODS.contains(&attr) {
+                let is_method = self
+                    .struct_methods
+                    .get(name)
+                    .is_some_and(|methods| methods.contains_key(attr));
+                let message = if METHODS.contains(&attr) || is_method {
                     format!("'{attr}' is a method, so it can only be called")
                 } else {
                     format!("'{name}' has no field '{attr}'")
@@ -2518,6 +2897,254 @@ impl Inference {
             Resolved::Enum(name) => Some(name),
             _ => None,
         }
+    }
+
+    /// Returns the name of the struct `value` names, if it is one, as in `Point` in
+    /// `Point.origin()`.
+    fn struct_named(&self, value: &Expr) -> Option<String> {
+        let ExprKind::Name { id, .. } = &value.kind else {
+            return None;
+        };
+        match self.resolve_name(id) {
+            Resolved::Struct(name) => Some(name),
+            _ => None,
+        }
+    }
+
+    /// Infers a call of the associated function `name` of the struct `owner`, written as `func`
+    /// (whose value names the struct), and returns its result's type.
+    ///
+    /// For example, `Point.origin()` is a `Point` if `impl Point;` holds
+    /// `fn origin() -> Point;`.
+    fn infer_associated(
+        &mut self,
+        call: &Expr,
+        func: &Expr,
+        value: &Expr,
+        owner: &str,
+        name: &str,
+        args: &[Expr],
+    ) -> Ty {
+        let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+        let name_span = Self::attr_span(func, name);
+        let symbol = self.structs[owner].symbol;
+        self.add_reference(value.span, symbol);
+        self.expr_types.push((func.span, Ty::Unit));
+        let method = self
+            .struct_methods
+            .get(owner)
+            .and_then(|methods| methods.get(name))
+            .map(|method| (method.symbol, method.has_self));
+        let short = struct_display(owner);
+        let symbol = match method {
+            None => {
+                self.error(name_span, format!("'{short}' has no function '{name}'"));
+                return self.fresh();
+            }
+            Some((_, true)) => {
+                self.error(
+                    name_span,
+                    format!("'{name}' is a method, so call it on a value, as in 'value.{name}()'"),
+                );
+                return self.fresh();
+            }
+            Some((symbol, false)) => symbol,
+        };
+        self.add_reference(name_span, symbol);
+        let function = format!("{owner}.{name}");
+        let info = &self.functions[&function];
+        let (params, ret) = (info.params.clone(), info.ret.clone());
+        self.methods.insert(
+            call.span,
+            Method {
+                function,
+                receiver: false,
+                changes: false,
+            },
+        );
+        if params.len() != args.len() {
+            self.arity_error(call.span, name, &params.len().to_string(), args.len());
+            return ret;
+        }
+        for ((param, arg_ty), arg) in params.iter().zip(&arg_types).zip(args) {
+            self.expect(param, arg_ty, arg.span);
+        }
+        ret
+    }
+
+    /// Infers a call of the method `name` on `receiver`, a value of the struct `owner`, and
+    /// returns its result's type. A method that changes `self` changes the receiver, so the call
+    /// must be a statement of its own or the value of an assignment, and the receiver a variable
+    /// or a place in one, as for `append`.
+    ///
+    /// For example, `p.norm()` is a `float` if `impl Point;` holds `fn norm(self) -> float;`.
+    fn infer_struct_method(
+        &mut self,
+        call: &Expr,
+        func: &Expr,
+        receiver: &Expr,
+        owner: &str,
+        name: &str,
+        args: &[Expr],
+    ) -> Ty {
+        let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+        let name_span = Self::attr_span(func, name);
+        let short = struct_display(owner);
+        let method = self
+            .struct_methods
+            .get(owner)
+            .and_then(|methods| methods.get(name))
+            .map(|method| (method.symbol, method.has_self, method.changes));
+        let (symbol, changes) = match method {
+            None => {
+                let mut message = format!("'{short}' has no method '{name}'");
+                if self.struct_field_ty(owner, name).is_some() {
+                    message.push_str(&format!(
+                        "; '{name}' is a field of '{short}', so read it without parentheses"
+                    ));
+                }
+                self.error(name_span, message);
+                return self.fresh();
+            }
+            Some((_, false, _)) => {
+                self.error(
+                    name_span,
+                    format!(
+                        "'{name}' has no 'self', so call it on the struct, as in \
+                         '{short}.{name}()'"
+                    ),
+                );
+                return self.fresh();
+            }
+            Some((symbol, true, changes)) => (symbol, changes),
+        };
+        self.add_reference(name_span, symbol);
+        let function = format!("{owner}.{name}");
+        let info = &self.functions[&function];
+        let (params, ret) = (info.params[1..].to_vec(), info.ret.clone());
+        self.methods.insert(
+            call.span,
+            Method {
+                function,
+                receiver: true,
+                changes,
+            },
+        );
+        if params.len() != args.len() {
+            self.arity_error(call.span, name, &params.len().to_string(), args.len());
+        } else {
+            for ((param, arg_ty), arg) in params.iter().zip(&arg_types).zip(args) {
+                self.expect(param, arg_ty, arg.span);
+            }
+        }
+        if changes {
+            // inside an expression, a borrowed copy of the receiver could see the change
+            if ret == Ty::Unit {
+                if self.statement_call != Some(call.span) {
+                    self.error(
+                        call.span,
+                        format!(
+                            "'{name}' changes its receiver and returns no value, so it can only \
+                             be a statement of its own"
+                        ),
+                    );
+                }
+            } else if ![self.statement_call, self.assigned_call].contains(&Some(call.span)) {
+                self.error(
+                    call.span,
+                    format!(
+                        "'{name}' changes its receiver, so it can only be a statement of its own \
+                         or the value of an assignment"
+                    ),
+                );
+            }
+            self.check_change_of(receiver, true);
+        }
+        ret
+    }
+
+    /// Settles a method called on a value whose type was not known when it was found.
+    fn settle_method(&mut self, deferred: DeferredMethod) {
+        let name = &deferred.name;
+        let owner = match self.shallow(&deferred.value_ty) {
+            Ty::Struct(owner) => owner,
+            Ty::Var(_) => {
+                self.error(
+                    deferred.receiver.span,
+                    format!(
+                        "the type of this value must be known before its method '{name}' is called"
+                    ),
+                );
+                return;
+            }
+            other => {
+                let message = format!("{} has no method '{}'", self.show(&other), deferred.name);
+                self.error(deferred.name_span, message);
+                return;
+            }
+        };
+        let method = self
+            .struct_methods
+            .get(&owner)
+            .and_then(|methods| methods.get(name))
+            .map(|method| (method.symbol, method.has_self, method.changes));
+        let Some((symbol, true, changes)) = method else {
+            let message = format!("'{}' has no method '{name}'", struct_display(&owner));
+            self.error(deferred.name_span, message);
+            return;
+        };
+        self.add_reference(deferred.name_span, symbol);
+        let function = format!("{owner}.{name}");
+        let info = &self.functions[&function];
+        let (params, ret) = (info.params[1..].to_vec(), info.ret.clone());
+        if changes {
+            if ret == Ty::Unit && !deferred.statement {
+                self.error(
+                    deferred.call,
+                    format!(
+                        "'{name}' changes its receiver and returns no value, so it can only be a \
+                         statement of its own"
+                    ),
+                );
+            } else if !deferred.statement && !deferred.assigned {
+                self.error(
+                    deferred.call,
+                    format!(
+                        "'{name}' changes its receiver, so it can only be a statement of its own \
+                         or the value of an assignment"
+                    ),
+                );
+            }
+            self.check_change_with(&deferred.receiver, true, deferred.global);
+        } else if ret == Ty::Unit && !deferred.statement {
+            self.error(
+                deferred.call,
+                format!(
+                    "'{name}' returns no value, so it can only be called as a statement of its own"
+                ),
+            );
+        }
+        self.methods.insert(
+            deferred.call,
+            Method {
+                function,
+                receiver: true,
+                changes,
+            },
+        );
+        if params.len() != deferred.args.len() {
+            self.arity_error(
+                deferred.call,
+                name,
+                &params.len().to_string(),
+                deferred.args.len(),
+            );
+        } else {
+            for (param, (arg_ty, span)) in params.iter().zip(&deferred.args) {
+                self.expect(param, arg_ty, *span);
+            }
+        }
+        self.expect(&ret, &deferred.result, deferred.call);
     }
 
     fn infer_kind(&mut self, expr: &Expr) -> Ty {
@@ -2858,6 +3485,9 @@ impl Inference {
             if let Some(name) = self.enum_named(value) {
                 return self.infer_variant(call, func, &name, attr, Some(args));
             }
+            if let Some(name) = self.struct_named(value) {
+                return self.infer_associated(call, func, value, &name, attr, args);
+            }
             return self.infer_method(call, func, value, attr, args);
         }
         let ExprKind::Name { id, .. } = &func.kind else {
@@ -3095,6 +3725,34 @@ impl Inference {
         args: &[Expr],
     ) -> Ty {
         let receiver_ty = self.infer(receiver);
+        match self.shallow(&receiver_ty) {
+            Ty::Struct(owner) => {
+                return self.infer_struct_method(call, func, receiver, &owner, name, args);
+            }
+            Ty::Var(_) if !METHODS.contains(&name) => {
+                // as a global a function checked before the global's assignment reads, which
+                // makes it a struct
+                let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+                let result = self.fresh();
+                self.deferred_methods.push(DeferredMethod {
+                    call: call.span,
+                    receiver: receiver.clone(),
+                    global: self.changes_global(receiver),
+                    statement: self.statement_call == Some(call.span),
+                    assigned: self.assigned_call == Some(call.span),
+                    value_ty: receiver_ty,
+                    name: name.to_string(),
+                    name_span: Self::attr_span(func, name),
+                    args: arg_types
+                        .into_iter()
+                        .zip(args.iter().map(|a| a.span))
+                        .collect(),
+                    result: result.clone(),
+                });
+                return result;
+            }
+            _ => {}
+        }
         let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
         if changes_receiver(name) {
             // inside an expression, a borrowed copy of the receiver could see the change
@@ -3248,14 +3906,8 @@ impl Inference {
                 // the name is the last token of `func`
                 let end = func.span.end;
                 let start = Pos::new(end.line, end.col - name.chars().count());
-                let mut message = format!("there is no method '{name}'");
-                if let Ty::Struct(struct_name) = self.shallow(&receiver_ty)
-                    && self.struct_field_ty(&struct_name, name).is_some()
-                {
-                    message.push_str(&format!(
-                        "; '{name}' is a field of '{struct_name}', so read it without parentheses"
-                    ));
-                }
+                // a struct's methods are found by `infer_struct_method`
+                let message = format!("there is no method '{name}'");
                 self.error(Span::new(start, end).in_file(func.span.file), message);
                 self.fresh()
             }
@@ -3475,6 +4127,10 @@ impl Inference {
         for deferred in std::mem::take(&mut self.deferred_fields) {
             self.settle_field(deferred);
         }
+        // a method's receiver may be a deferred field, as in `g.inner.get()`
+        for deferred in std::mem::take(&mut self.deferred_methods) {
+            self.settle_method(deferred);
+        }
         // solving one operation can pin down another's operands, so force one only when none can
         // be solved otherwise
         let mut pending = std::mem::take(&mut self.arithmetic);
@@ -3558,8 +4214,13 @@ impl Inference {
         }
         for (i, symbol) in self.symbols.iter().enumerate() {
             let ty = match symbol.kind {
-                SymbolKind::Function => {
-                    let info = &self.functions[&symbol.name];
+                SymbolKind::Function | SymbolKind::Method => {
+                    let info = match (&symbol.kind, &symbol.scope) {
+                        (SymbolKind::Method, Some(owner)) => {
+                            &self.functions[&format!("{owner}.{}", symbol.name)]
+                        }
+                        _ => &self.functions[&symbol.name],
+                    };
                     Type::Function {
                         params: info.params.iter().map(|p| self.finalize(p)).collect(),
                         ret: Box::new(self.finalize(&info.ret)),
@@ -3622,6 +4283,7 @@ impl Inference {
         // a written type can be read more than once
         analysis.references.dedup();
         analysis.functions = self.function_spans;
+        analysis.methods = self.methods;
         self.diagnostics
             .sort_by_key(|d| (d.span.file, d.span.start));
         analysis.diagnostics = self.diagnostics;
@@ -4017,7 +4679,8 @@ impl<'a> AssignmentCheck<'a> {
             StmtKind::FunctionDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::EnumDef { .. }
-            | StmtKind::StructDef { .. } => Some(assigned),
+            | StmtKind::StructDef { .. }
+            | StmtKind::ImplDef { .. } => Some(assigned),
         }
     }
 
@@ -4157,6 +4820,7 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
             StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
+            | StmtKind::ImplDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Return { .. }
             | StmtKind::Expr { .. }
@@ -4260,26 +4924,32 @@ pub(crate) fn place_spans(place: &Expr) -> Vec<Span> {
     }
 }
 
-/// Returns the receiver of `expr` if it calls a method that changes its receiver.
+/// Returns the receiver of `expr` if it calls a method that changes its receiver: a builtin one,
+/// or one of a struct's that changes `self`, as `methods` resolved it.
 ///
 /// For example, for `grid[0].append(1)` this returns `grid[0]`, and for `xs.len()` it returns
 /// `None`.
-pub(crate) fn changed_receiver(expr: &Expr) -> Option<&Expr> {
+pub(crate) fn changed_receiver<'a>(expr: &'a Expr, methods: &Methods) -> Option<&'a Expr> {
     let ExprKind::Call { func, .. } = &expr.kind else {
         return None;
     };
-    match &func.kind {
-        ExprKind::Attribute { value, attr, .. } if changes_receiver(attr) => Some(value),
-        _ => None,
-    }
+    let ExprKind::Attribute { value, attr, .. } = &func.kind else {
+        return None;
+    };
+    let changes = match methods.get(&expr.span) {
+        Some(method) => method.receiver && method.changes,
+        None => changes_receiver(attr),
+    };
+    changes.then_some(value.as_ref())
 }
 
 /// Collects the name of every variable that `body` changes in place, through `xs[i] = v`,
-/// `p.x = v`, or `xs.append(v)`, without looking inside function definitions.
+/// `p.x = v`, `xs.append(v)`, or a method that changes `self`, as `methods` resolved it, without
+/// looking inside function definitions.
 ///
 /// For example, for `grid[0][1] = 2` followed by `if x; ys.append(1)`, this collects `grid` and
 /// `ys`.
-pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
+pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>, methods: &Methods) {
     let add = |list: &Expr, out: &mut HashSet<String>| {
         if let Some((root, _)) = place(list) {
             out.insert(root.to_string());
@@ -4295,7 +4965,7 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
                         _ => {}
                     }
                 }
-                if let Some(receiver) = changed_receiver(value) {
+                if let Some(receiver) = changed_receiver(value, methods) {
                     add(receiver, out);
                 }
             }
@@ -4305,23 +4975,26 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
                 _ => {}
             },
             StmtKind::Expr { value } => {
-                if let Some(receiver) = changed_receiver(value) {
+                if let Some(receiver) = changed_receiver(value, methods) {
                     add(receiver, out);
                 }
             }
-            StmtKind::For { body, .. } | StmtKind::While { body, .. } => collect_changed(body, out),
+            StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
+                collect_changed(body, out, methods)
+            }
             StmtKind::If { body, orelse, .. } => {
-                collect_changed(body, out);
-                collect_changed(orelse, out);
+                collect_changed(body, out, methods);
+                collect_changed(orelse, out, methods);
             }
             StmtKind::Match { cases, .. } => {
                 for case in cases {
-                    collect_changed(&case.body, out);
+                    collect_changed(&case.body, out, methods);
                 }
             }
             StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
+            | StmtKind::ImplDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Return { .. }
             | StmtKind::Break
@@ -4335,9 +5008,10 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>) {
 ///
 /// For example, the change in `fn push(xs: list[int], x: int); xs.append(x)` is lost, but a
 /// later `ret xs` or `print(xs)` uses it.
-fn lost_change(body: &[Stmt], name: &str) -> Option<Span> {
+fn lost_change(body: &[Stmt], name: &str, methods: &Methods) -> Option<Span> {
     let mut usage = ParameterUse {
         name,
+        methods,
         changed: None,
         read: false,
     };
@@ -4348,6 +5022,7 @@ fn lost_change(body: &[Stmt], name: &str) -> Option<Span> {
 /// How a function body uses one of its parameters, for [`lost_change`].
 struct ParameterUse<'a> {
     name: &'a str,
+    methods: &'a Methods,
     /// Where the body first changes the parameter in place.
     changed: Option<Span>,
     /// Whether the body reads the parameter anywhere other than to change it.
@@ -4417,6 +5092,7 @@ impl ParameterUse<'_> {
             StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
+            | StmtKind::ImplDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
@@ -4426,7 +5102,7 @@ impl ParameterUse<'_> {
     /// Notes the change `value` makes if it calls a method that changes its receiver, as in
     /// `xs.append(x)` or `x = xs.pop()`, and otherwise what it reads.
     fn change_or_expr(&mut self, value: &Expr) {
-        match (changed_receiver(value), &value.kind) {
+        match (changed_receiver(value, self.methods), &value.kind) {
             (Some(receiver), ExprKind::Call { args, .. }) => {
                 self.change(receiver);
                 for arg in args {

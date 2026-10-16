@@ -375,6 +375,16 @@ pub enum StmtKind {
         public: bool,
         fields: Vec<Field>,
     },
+    /// An `impl` block, such as `impl Point;` followed by indented functions: methods, whose
+    /// first parameter is `self` (`fn norm(self) -> float;`), called on a value as `p.norm()`,
+    /// and associated functions without `self`, called on the struct as `Point.origin()`.
+    ImplDef {
+        name: Identifier,
+        /// The span of the struct's name after `impl`, which editor features point at.
+        name_span: Span,
+        /// The functions of the block, each a [`StmtKind::FunctionDef`].
+        methods: Vec<Stmt>,
+    },
     /// A `match` statement, which runs the first case whose pattern matches `subject`, such as
     /// `match s;` followed by `case Shape.Circle(r); print(r)`.
     Match {

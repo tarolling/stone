@@ -1,0 +1,9 @@
+use shapes
+use shapes.Square
+
+s = Square.unit()
+s.grow(2)
+t = shapes.Square.unit()
+squares = [s, t]
+squares[1].grow(4)
+print(s, s.area(), squares, squares[1].area())

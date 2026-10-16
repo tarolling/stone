@@ -872,7 +872,7 @@ impl Generator {
 pub fn build_every_target(source: &str) -> std::result::Result<(), String> {
     let sources = stone::project::MapSources::default();
     let (_, loaded) = stone::driver::load(Path::new("main.stn"), source, &sources);
-    let (module, _) = loaded.map_err(|errors| {
+    let checked = loaded.map_err(|errors| {
         errors
             .0
             .iter()
@@ -882,7 +882,7 @@ pub fn build_every_target(source: &str) -> std::result::Result<(), String> {
     for target in Target::ALL {
         let text = target
             .generator()
-            .assemble(&module)
+            .assemble(&checked.module)
             .map_err(|e| format!("failed to compile for {target} ({e})"))?;
         stone::codegen::executable(&text, target, "out")
             .map_err(|e| format!("failed to assemble for {target} ({e})"))?;

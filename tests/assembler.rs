@@ -138,7 +138,7 @@ fn compare(
 ) -> Result<(), String> {
     let source = std::fs::read_to_string(program).unwrap();
     let (sources, loaded) = stone::driver::load(program, &source, &FsSources);
-    let module = loaded.map_err(|e| format!("does not check: {e:?}"))?.0;
+    let module = loaded.map_err(|e| format!("does not check: {e:?}"))?.module;
     // with sources, as `stone build` compiles, so runtime errors record where they are
     let mut generator = arch.generator();
     generator.set_sources(sources);

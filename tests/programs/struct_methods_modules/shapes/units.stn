@@ -1,0 +1,2 @@
+pub fn one() -> int;
+    ret 1

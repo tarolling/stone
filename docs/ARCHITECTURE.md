@@ -19,6 +19,11 @@ merges them into one module in which each library function is renamed to its mod
 as `geometry.shapes.area`, and every use of it points there. Everything after it sees a program
 of one file, except that each `Span` carries the `FileId` of the file it is in.
 
+The functions of a struct's `impl` blocks are named by the struct's linked name and their own,
+as `geometry.Point.shift`. Which one a call such as `p.shift(1.0)` calls depends on the type of
+`p`, so the checker resolves every such call and records it, by the call's span, in
+`Analysis::methods`, which both the interpreter and lowering follow.
+
 ## Source map
 
 | module | role |

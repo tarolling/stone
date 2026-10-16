@@ -10,6 +10,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Highlighting of `impl`, of the struct's name after it, and of `self`.
+- Hover, go to definition, references, and rename for methods and associated functions through
+  `stone-lsp`, shown as `fn Point.shift(self, dx: float)`. It outlines a struct with its methods
+  after its fields, offers a variable's methods after its fields following a `.`, and a struct's
+  associated functions after its name and a `.`.
+
 ## [0.2.6] - 2026-10-13
 
 ### Added

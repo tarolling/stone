@@ -48,7 +48,7 @@
       }
     },
     "struct-definition": {
-      "match": "\\b(struct)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "match": "\\b(struct|impl)\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
         "1": { "name": "storage.type.struct.stone" },
         "2": { "name": "entity.name.type.struct.stone" }
@@ -63,6 +63,10 @@
     },
     "keyword": {
       "patterns": [
+        {
+          "name": "variable.language.self.stone",
+          "match": "\\bself\\b"
+        },
         {
           "match": "\\b(use)\\s+([A-Za-z_][A-Za-z0-9_.]*)",
           "captures": {

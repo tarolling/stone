@@ -20,13 +20,20 @@ fn sources_of(files: &[(&str, &str)]) -> MapSources {
 fn output(files: &[(&str, &str)]) -> String {
     let (entry, source) = files[0];
     let (map, result) = driver::load(Path::new(entry), source, &sources_of(&files[1..]));
-    let (ast, _) = result.unwrap_or_else(|errors| {
+    let checked = result.unwrap_or_else(|errors| {
         let rendered: String = errors.0.iter().map(|d| map.render(d)).collect();
         panic!("program should have no errors:\n{rendered}")
     });
     let mut out = vec![];
-    driver::run_module(&ast, &mut std::io::empty(), &mut out, &[], Limits::DEFAULT)
-        .expect("program should run");
+    driver::run_module(
+        &checked.module,
+        &checked.methods,
+        &mut std::io::empty(),
+        &mut out,
+        &[],
+        Limits::DEFAULT,
+    )
+    .expect("program should run");
     String::from_utf8(out).unwrap()
 }
 
@@ -371,7 +378,7 @@ fn a_module_only_holds_use_and_def() {
             ("util.stn", "print(1)\n\npub fn f() -> int;\n    ret 1\n"),
         ],
         "util.stn",
-        "only use, fn, enum, and struct are allowed at the top level of a module",
+        "only use, fn, enum, struct, and impl are allowed at the top level of a module",
         1,
         1,
     );
@@ -864,5 +871,115 @@ fn an_imported_struct_cannot_share_a_name_with_one_the_file_defines() {
         "'Point' is already defined in this file",
         1,
         9,
+    );
+}
+
+const SHAPES: (&str, &str) = (
+    "shapes.stn",
+    "pub struct Square;\n    side: int\nimpl Square;\n    fn unit() -> Square;\n        \
+     ret Square(side=one())\n    fn area(self) -> int;\n        ret self.side * self.side\n\
+     fn one() -> int;\n    ret 1\n",
+);
+
+#[test]
+fn an_impl_in_a_library_names_its_struct_and_functions_by_their_linked_names() {
+    let linked = link(
+        Path::new("main.stn"),
+        "use shapes\nprint(shapes.Square.unit())\n",
+        &sources_of(&[SHAPES]),
+    );
+    assert_eq!(linked.diagnostics, []);
+    let Mod::Module { body } = &linked.module;
+    let Some(StmtKind::ImplDef { name, methods, .. }) = body
+        .iter()
+        .map(|stmt| &stmt.kind)
+        .find(|kind| matches!(kind, StmtKind::ImplDef { .. }))
+    else {
+        panic!("expected an impl block");
+    };
+    assert_eq!(name, "shapes.Square");
+    let StmtKind::FunctionDef {
+        name, body: unit, ..
+    } = &methods[0].kind
+    else {
+        panic!("expected a method");
+    };
+    assert_eq!(name, "unit");
+    let StmtKind::Return { value: Some(value) } = &unit[0].kind else {
+        panic!("expected a return");
+    };
+    let ExprKind::Call { func, keywords, .. } = &value.kind else {
+        panic!("expected a call");
+    };
+    assert!(matches!(&func.kind, ExprKind::Name { id, .. } if id == "shapes.Square"));
+    assert!(matches!(
+        &keywords[0].value.kind,
+        ExprKind::Call { func, .. } if matches!(&func.kind, ExprKind::Name { id, .. } if id == "shapes.one")
+    ));
+
+    // the call through the module names the struct by its linked name
+    let StmtKind::Expr { value } = &body.last().unwrap().kind else {
+        panic!("expected a call");
+    };
+    let ExprKind::Call { args, .. } = &value.kind else {
+        panic!("expected a call");
+    };
+    let ExprKind::Call { func, .. } = &args[0].kind else {
+        panic!("expected a call");
+    };
+    let ExprKind::Attribute { value, attr, .. } = &func.kind else {
+        panic!("expected an associated function");
+    };
+    assert_eq!(attr, "unit");
+    assert!(matches!(&value.kind, ExprKind::Name { id, .. } if id == "shapes.Square"));
+}
+
+#[test]
+fn an_impl_is_for_a_struct_of_its_own_file() {
+    assert_error(
+        &[("main.stn", "impl Point;\n    fn f(self);\n        ret\n")],
+        "main.stn",
+        "no struct named 'Point' is defined in this file",
+        1,
+        6,
+    );
+    assert_error(
+        &[(
+            "main.stn",
+            "enum Shape;\n    Dot\nimpl Shape;\n    fn f(self);\n        ret\n",
+        )],
+        "main.stn",
+        "'Shape' is an enum, and only a struct has an impl block for now",
+        3,
+        6,
+    );
+    assert_error(
+        &[
+            (
+                "main.stn",
+                "use geo.Point\nimpl Point;\n    fn f(self);\n        ret\n",
+            ),
+            GEO,
+        ],
+        "main.stn",
+        "'Point' is defined in module 'geo', so its impl block goes in that file",
+        2,
+        6,
+    );
+}
+
+#[test]
+fn a_method_cannot_share_its_linked_name_with_a_module_function() {
+    assert_error(
+        &[
+            ("main.stn", "use shapes\nuse shapes.Square.unit\n"),
+            SHAPES,
+            ("shapes/Square.stn", "pub fn unit() -> int;\n    ret 1\n"),
+        ],
+        "shapes/Square.stn",
+        "'shapes.Square.unit' is both a function of this module and a method of 'Square' in \
+         module 'shapes'",
+        1,
+        8,
     );
 }

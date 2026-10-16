@@ -144,6 +144,11 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
                 })
                 .collect(),
         },
+        StmtKind::ImplDef { name, methods, .. } => StmtKind::ImplDef {
+            name,
+            name_span: Span::default(),
+            methods: strip_all(methods),
+        },
         StmtKind::Match { subject, cases } => StmtKind::Match {
             subject: Box::new(strip_expr(*subject)),
             cases: cases
@@ -2410,6 +2415,89 @@ fn a_struct_needs_typed_fields() {
     );
     assert_eq!(
         error_of("struct Point;\nx = 1\n"),
+        ("expected an indented block, found 'x'".to_string(), 2, 1)
+    );
+}
+
+#[test]
+fn an_impl_block_holds_its_methods() {
+    let method = |name: &str, args: Vec<&str>, body: Vec<Stmt>| -> Stmt {
+        StmtKind::FunctionDef {
+            name: name.to_string(),
+            name_span: Span::default(),
+            public: false,
+            args: Arguments {
+                args: args
+                    .into_iter()
+                    .map(|arg| Arg {
+                        arg: arg.to_string(),
+                        span: Span::default(),
+                        annotation: None,
+                    })
+                    .collect(),
+            },
+            returns: None,
+            body,
+        }
+        .into()
+    };
+    let pass = |value: Box<Expr>| -> Stmt { StmtKind::Expr { value }.into() };
+    assert_eq!(
+        parse_ok("impl Point;\n    fn origin();\n        f()\n    fn show(self); print(self)\n"),
+        Mod::Module {
+            body: vec![
+                StmtKind::ImplDef {
+                    name: "Point".to_string(),
+                    name_span: Span::default(),
+                    methods: vec![
+                        method(
+                            "origin",
+                            vec![],
+                            vec![pass(Box::new(
+                                ExprKind::Call {
+                                    func: name("f"),
+                                    args: vec![],
+                                    keywords: vec![],
+                                }
+                                .into()
+                            ))]
+                        ),
+                        method(
+                            "show",
+                            vec!["self"],
+                            vec![pass(Box::new(
+                                ExprKind::Call {
+                                    func: name("print"),
+                                    args: vec![*name("self")],
+                                    keywords: vec![],
+                                }
+                                .into()
+                            ))]
+                        ),
+                    ],
+                }
+                .into()
+            ]
+        }
+    );
+}
+
+#[test]
+fn an_impl_block_holds_only_functions() {
+    assert_eq!(
+        error_of("impl Point;\n    x = 1\n"),
+        ("expected 'fn', found 'x'".to_string(), 2, 5)
+    );
+    assert_eq!(
+        error_of("impl Point;\n    pub fn f(self);\n        print(1)\n"),
+        (
+            "a method needs no 'pub', since it is visible wherever its struct is".to_string(),
+            2,
+            5
+        )
+    );
+    assert_eq!(
+        error_of("impl Point;\nx = 1\n"),
         ("expected an indented block, found 'x'".to_string(), 2, 1)
     );
 }

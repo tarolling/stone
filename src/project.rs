@@ -550,6 +550,13 @@ impl Loader<'_> {
                 bindings.insert(u.name.clone(), binding);
             }
 
+            let own_structs: HashSet<String> = body
+                .iter()
+                .filter_map(|stmt| match &stmt.kind {
+                    StmtKind::StructDef { name, .. } => Some(name.clone()),
+                    _ => None,
+                })
+                .collect();
             let mut rewriter = Rewriter {
                 file,
                 library,
@@ -566,30 +573,42 @@ impl Loader<'_> {
             for mut stmt in body {
                 match &mut stmt.kind {
                     StmtKind::Use { .. } => continue,
-                    StmtKind::FunctionDef {
-                        name,
-                        args,
-                        returns,
-                        body,
-                        ..
-                    } => {
-                        let mut locals = vec![];
-                        collect_assigned(body, &mut locals);
-                        rewriter.locals = locals.into_iter().map(|(name, _)| name).collect();
-                        rewriter
-                            .locals
-                            .extend(args.args.iter().map(|arg| arg.arg.clone()));
-                        for annotation in args.args.iter_mut().filter_map(|a| a.annotation.as_mut())
-                        {
-                            rewriter.type_expr(annotation);
-                        }
-                        if let Some(returns) = returns {
-                            rewriter.type_expr(returns);
-                        }
-                        rewriter.block(body);
+                    StmtKind::FunctionDef { name, .. } => {
                         if library {
                             *name = format!("{}.{name}", module_names[i]);
                         }
+                        rewriter.function(&mut stmt);
+                    }
+                    StmtKind::ImplDef {
+                        name,
+                        name_span,
+                        methods,
+                    } => {
+                        let error = if own_structs.contains(name.as_str()) {
+                            None
+                        } else if types[i].contains_key(name.as_str()) {
+                            Some(format!(
+                                "'{name}' is an enum, and only a struct has an impl block for now"
+                            ))
+                        } else if let Some(Binding::Type(linked)) = bindings.get(name.as_str()) {
+                            let module = linked.rsplit_once('.').map_or("", |(m, _)| m);
+                            Some(format!(
+                                "'{name}' is defined in module '{module}', so its impl block \
+                                 goes in that file"
+                            ))
+                        } else {
+                            Some(format!("no struct named '{name}' is defined in this file"))
+                        };
+                        if let Some(message) = error {
+                            rewriter
+                                .diagnostics
+                                .push(Diagnostic::error(*name_span, message));
+                            continue;
+                        }
+                        if library {
+                            *name = format!("{}.{name}", module_names[i]);
+                        }
+                        methods.iter_mut().for_each(|m| rewriter.function(m));
                     }
                     StmtKind::EnumDef { name, variants, .. } => {
                         rewriter.locals.clear();
@@ -627,6 +646,7 @@ impl Loader<'_> {
             }
         }
 
+        report_method_collisions(&library_body, &entry_body, &mut self.diagnostics);
         let public = functions
             .iter()
             .zip(&module_names)
@@ -648,6 +668,41 @@ impl Loader<'_> {
             diagnostics: self.diagnostics,
             imports,
             public,
+        }
+    }
+}
+
+/// Reports a library function whose linked name is also the name of a method, which is its
+/// struct's linked name and the method's, as `geo.Point.origin` is for both `origin` of the
+/// module `geo.Point` and the method `origin` of the struct `Point` of the module `geo`.
+fn report_method_collisions(library: &[Stmt], entry: &[Stmt], diagnostics: &mut Vec<Diagnostic>) {
+    let mut methods = HashMap::new();
+    for stmt in library.iter().chain(entry) {
+        if let StmtKind::ImplDef {
+            name, methods: m, ..
+        } = &stmt.kind
+        {
+            for method in m {
+                if let StmtKind::FunctionDef { name: method, .. } = &method.kind {
+                    methods.insert(format!("{name}.{method}"), name.clone());
+                }
+            }
+        }
+    }
+    for stmt in library {
+        if let StmtKind::FunctionDef {
+            name, name_span, ..
+        } = &stmt.kind
+            && let Some(owner) = methods.get(name)
+        {
+            let owner = match owner.rsplit_once('.') {
+                Some((module, short)) => format!("'{short}' in module '{module}'"),
+                None => format!("'{owner}'"),
+            };
+            diagnostics.push(Diagnostic::error(
+                *name_span,
+                format!("'{name}' is both a function of this module and a method of {owner}"),
+            ));
         }
     }
 }
@@ -693,7 +748,7 @@ fn public_functions(module: &Mod) -> HashMap<String, bool> {
 }
 
 /// Reports a `use` after other statements, and in a library, any top-level statement that is not
-/// a `use`, `fn`, `enum`, or `struct`.
+/// a `use`, `fn`, `enum`, `struct`, or `impl`.
 fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnostic>) {
     let mut after_use = false;
     for stmt in body {
@@ -705,13 +760,15 @@ fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnosti
             StmtKind::Use { .. } => {}
             StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
-            | StmtKind::StructDef { .. } => after_use = true,
+            | StmtKind::StructDef { .. }
+            | StmtKind::ImplDef { .. } => after_use = true,
             _ => {
                 after_use = true;
                 if library {
                     diagnostics.push(Diagnostic::error(
                         stmt.span,
-                        "only use, fn, enum, and struct are allowed at the top level of a module",
+                        "only use, fn, enum, struct, and impl are allowed at the top level of a \
+                         module",
                     ));
                 }
             }
@@ -743,6 +800,32 @@ struct Rewriter<'a> {
 }
 
 impl Rewriter<'_> {
+    /// Rewrites a function definition's signature and body, with its parameters and assigned
+    /// names as locals, leaving its name alone.
+    fn function(&mut self, stmt: &mut Stmt) {
+        let StmtKind::FunctionDef {
+            args,
+            returns,
+            body,
+            ..
+        } = &mut stmt.kind
+        else {
+            return;
+        };
+        let mut locals = vec![];
+        collect_assigned(body, &mut locals);
+        self.locals = locals.into_iter().map(|(name, _)| name).collect();
+        self.locals
+            .extend(args.args.iter().map(|arg| arg.arg.clone()));
+        for annotation in args.args.iter_mut().filter_map(|a| a.annotation.as_mut()) {
+            self.type_expr(annotation);
+        }
+        if let Some(returns) = returns {
+            self.type_expr(returns);
+        }
+        self.block(body);
+    }
+
     fn block(&mut self, body: &mut [Stmt]) {
         for stmt in body {
             self.stmt(stmt);
@@ -789,6 +872,7 @@ impl Rewriter<'_> {
             }
             StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
+            | StmtKind::ImplDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
@@ -894,7 +978,7 @@ impl Rewriter<'_> {
             return false;
         }
         let span = value.span;
-        if let Some(linked) = self.module_type(&id.clone(), &attr.clone(), span, "enum") {
+        if let Some(linked) = self.module_type(&id.clone(), &attr.clone(), span, "type") {
             *value = Expr::new(
                 ExprKind::Name {
                     id: linked,

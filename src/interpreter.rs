@@ -3,17 +3,19 @@
 //! For example, running `x = 42` followed by `print(x)` prints `42`.
 
 use crate::ast::{
-    BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Pattern, PatternKind, Stmt, StmtKind,
-    UnaryOp, target_names,
+    Arg, BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Pattern, PatternKind, Stmt,
+    StmtKind, UnaryOp, target_names,
 };
-use crate::checker::{Step, collect_assigned, place, place_spans, range_args, struct_display};
+use crate::checker::{
+    Method, Methods, Step, collect_assigned, place, place_spans, range_args, struct_display,
+};
 use crate::diagnostic::Diagnostic;
-use crate::last_use::{GlobalReads, global_reads, last_uses};
+use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
 use crate::span::Span;
 use crate::stdlib::random::Rng;
 use crate::stdlib::{self, MAX_CALL_DEPTH, math, os, time};
 use std::cmp::Ordering;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::rc::Rc;
 
@@ -43,9 +45,9 @@ struct LastUses {
 
 impl LastUses {
     /// Finds the last uses in `body`, a function's or the program's, given what each function
-    /// reads.
-    fn new(body: &[Stmt], reads: &GlobalReads) -> Self {
-        let by_span = last_uses(body, reads);
+    /// reads and what the function returns besides its value, `exit`.
+    fn new(body: &[Stmt], reads: &GlobalReads, exit: &HashSet<String>) -> Self {
+        let by_span = last_uses(body, reads, exit);
         let mut lines = Vec::new();
         for span in by_span.keys() {
             let line = span.start.line;
@@ -74,6 +76,9 @@ struct Function {
     body: Vec<Stmt>,
     /// The variables each statement of the body uses for the last time.
     last_uses: Rc<LastUses>,
+    /// How the method calls of the check that saw this body were resolved, since in an
+    /// interactive session a later entry's check can place the same code at other lines.
+    methods: Rc<Methods>,
 }
 
 /// A value a running program works with.
@@ -782,6 +787,8 @@ pub struct Interpreter<'out> {
     last_uses: Vec<Rc<LastUses>>,
     /// For each function, the globals it may read, which must not move into a call to it.
     global_reads: GlobalReads,
+    /// How each method call of the running body was resolved, by the call's span.
+    methods: Rc<Methods>,
     /// Whether globals can move at their last use, which is never in an interactive session,
     /// since a later entry may read them.
     moves_globals: bool,
@@ -835,7 +842,8 @@ impl<'out> Interpreter<'out> {
             enums: HashMap::new(),
             structs: HashMap::new(),
             last_uses: vec![],
-            global_reads: GlobalReads::new(),
+            global_reads: GlobalReads::default(),
+            methods: Rc::default(),
             moves_globals: false,
             top_call: None,
             out: Box::new(out),
@@ -856,6 +864,13 @@ impl<'out> Interpreter<'out> {
     /// reads the program's stdin.
     pub fn with_input(mut self, input: impl BufRead + 'out) -> Self {
         self.input = Box::new(input);
+        self
+    }
+
+    /// Calls the functions of `impl` blocks as `methods`, the checker's resolution of each method
+    /// call, says, which a program with an `impl` block needs.
+    pub fn with_methods(mut self, methods: Methods) -> Self {
+        self.methods = Rc::new(methods);
         self
     }
 
@@ -932,7 +947,11 @@ impl<'out> Interpreter<'out> {
                 let globals = assigned.into_iter().map(|(name, _)| name).collect();
                 self.global_reads = global_reads(body, &globals);
                 self.moves_globals = true;
-                self.last_uses = vec![Rc::new(LastUses::new(body, &self.global_reads))];
+                self.last_uses = vec![Rc::new(LastUses::new(
+                    body,
+                    &self.global_reads,
+                    &HashSet::new(),
+                ))];
                 // functions, enums, and structs can be used before their definition
                 for stmt in body {
                     if is_definition(stmt) {
@@ -955,9 +974,10 @@ impl<'out> Interpreter<'out> {
     ///
     /// For example, after an entry `x = 1`, running the entry `x + 1` prints `2`, and running
     /// `"hi"` prints `'hi'`, quoted as it would be inside a list.
-    pub fn run_entry(&mut self, body: &[Stmt]) -> EvalResult<()> {
+    pub fn run_entry(&mut self, body: &[Stmt], methods: Methods) -> EvalResult<()> {
         // a later entry may read any global, so none moves
         self.moves_globals = false;
+        self.methods = Rc::new(methods);
         self.last_uses = vec![Rc::default()];
         // functions, enums, and structs can be used before their definition
         for stmt in body {
@@ -1018,6 +1038,17 @@ impl<'out> Interpreter<'out> {
         })
     }
 
+    /// Defines the function `name` with the parameters `args` and the body `body`.
+    fn define(&mut self, name: String, args: &[Arg], body: &[Stmt]) {
+        let function = Function {
+            params: args.iter().map(|arg| arg.arg.clone()).collect(),
+            last_uses: Rc::new(LastUses::new(body, &self.global_reads, &kept_at_exit(args))),
+            body: body.to_vec(),
+            methods: self.methods.clone(),
+        };
+        self.functions.insert(name, Rc::new(function));
+    }
+
     /// Notes `value`, the value of the statement at `span`, if it calls a stone function, with
     /// the variables the call may take its arguments from: those the statement uses for the last
     /// time, and `targets`, the names and fields it assigns, such as `b.items`.
@@ -1027,10 +1058,11 @@ impl<'out> Interpreter<'out> {
         let ExprKind::Call { func, .. } = &value.kind else {
             return;
         };
-        let ExprKind::Name { id, .. } = &func.kind else {
-            return;
+        let stone = match &func.kind {
+            ExprKind::Name { id, .. } => self.functions.contains_key(id),
+            _ => self.methods.contains_key(&value.span),
         };
-        if !self.functions.contains_key(id) {
+        if !stone {
             return;
         }
         let mut names = self
@@ -1143,12 +1175,21 @@ impl<'out> Interpreter<'out> {
             StmtKind::FunctionDef {
                 name, args, body, ..
             } => {
-                let function = Function {
-                    params: args.args.iter().map(|arg| arg.arg.clone()).collect(),
-                    last_uses: Rc::new(LastUses::new(body, &self.global_reads)),
-                    body: body.clone(),
-                };
-                self.functions.insert(name.clone(), Rc::new(function));
+                self.define(name.clone(), &args.args, body);
+                Ok(ControlFlow::None)
+            }
+            StmtKind::ImplDef { name, methods, .. } => {
+                for method in methods {
+                    if let StmtKind::FunctionDef {
+                        name: method,
+                        args,
+                        body,
+                        ..
+                    } = &method.kind
+                    {
+                        self.define(format!("{name}.{method}"), &args.args, body);
+                    }
+                }
                 Ok(ControlFlow::None)
             }
             StmtKind::Return { value } => {
@@ -1600,6 +1641,11 @@ impl<'out> Interpreter<'out> {
                     }
                     return self.variant(id, attr, values);
                 }
+                if let ExprKind::Attribute { value, .. } = &func.kind
+                    && let Some(method) = self.methods.get(&expr.span).cloned()
+                {
+                    return self.call_method_of_struct(expr.span, &method, value, args);
+                }
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind
                     && stdlib::changes_receiver(attr)
                 {
@@ -1631,21 +1677,8 @@ impl<'out> Interpreter<'out> {
                 for arg in args {
                     values.push(self.eval_expr(arg)?);
                 }
-                // an argument nothing reads after its statement's call moves into it
                 if let Some((_, names)) = movable {
-                    for arg in args {
-                        if let ExprKind::Name { id: name, .. } = &arg.kind
-                            && names.contains(name)
-                        {
-                            self.drop_variable(name, Some(id));
-                        }
-                        if let Some(path) = field_path(arg)
-                            && let Some((root, _)) = path.split_once('.')
-                            && (names.contains(&path) || names.iter().any(|name| name == root))
-                        {
-                            self.take_field(arg, id);
-                        }
-                    }
+                    self.move_arguments(args, &names, id, None);
                 }
                 self.call(id, values)
             }
@@ -1788,6 +1821,99 @@ impl<'out> Interpreter<'out> {
     }
 
     /// Calls the builtin or user-defined function named `name` with already evaluated arguments.
+    /// Moves each argument in `args` that is a variable or a field of one in `names`, which
+    /// nothing reads after the statement's call to `callee`, into the call, except one that starts
+    /// from `keep`, the variable a method changes.
+    fn move_arguments(
+        &mut self,
+        args: &[Expr],
+        names: &[String],
+        callee: &str,
+        keep: Option<&str>,
+    ) {
+        for arg in args {
+            if let ExprKind::Name { id: name, .. } = &arg.kind
+                && names.contains(name)
+                && keep != Some(name.as_str())
+            {
+                self.drop_variable(name, Some(callee));
+            }
+            if let Some(path) = field_path(arg)
+                && let Some((root, _)) = path.split_once('.')
+                && keep != Some(root)
+                && (names.contains(&path) || names.iter().any(|name| name == root))
+            {
+                self.take_field(arg, callee);
+            }
+        }
+    }
+
+    /// Calls a function of an `impl` block as `method` resolved the call at `span`: an associated
+    /// function with `args`, or a method with the value of `receiver` as `self` and then `args`.
+    ///
+    /// A method that changes `self` changes the receiver: its indexes are evaluated, then the
+    /// arguments, then the receiver moves into the call, unless the method may read the global it
+    /// is in, and what the method leaves in `self` replaces it.
+    fn call_method_of_struct(
+        &mut self,
+        span: Span,
+        method: &Method,
+        receiver: &Expr,
+        args: &[Expr],
+    ) -> EvalResult<Value> {
+        let function = method.function.as_str();
+        // claimed first, since a call among the arguments runs statements of its own
+        let movable = self.top_call.take_if(|(call, _)| *call == span);
+        if !method.receiver {
+            let mut values = Vec::with_capacity(args.len());
+            for arg in args {
+                values.push(self.eval_expr(arg)?);
+            }
+            if let Some((_, names)) = movable {
+                self.move_arguments(args, &names, function, None);
+            }
+            return Ok(self.invoke(function, values, false)?.0);
+        }
+        if !method.changes {
+            let mut values = Vec::with_capacity(args.len() + 1);
+            values.push(self.eval_expr(receiver)?);
+            for arg in args {
+                values.push(self.eval_expr(arg)?);
+            }
+            if let Some((_, names)) = movable {
+                self.move_arguments(args, &names, function, None);
+            }
+            return Ok(self.invoke(function, values, false)?.0);
+        }
+        let (root, steps) = self.eval_place(receiver)?;
+        let mut values = Vec::with_capacity(args.len() + 1);
+        values.push(Value::Unit);
+        for arg in args {
+            values.push(self.eval_expr(arg)?);
+        }
+        if let Some((_, names)) = movable {
+            self.move_arguments(args, &names, function, Some(root));
+        }
+        // a global the method may read stays, and a failed call in a session leaves it as it was
+        let keep = self.scopes.is_empty()
+            && (!self.moves_globals
+                || self
+                    .global_reads
+                    .get(function)
+                    .is_some_and(|reads| reads.contains(root)));
+        let spans = place_spans(receiver);
+        let place = self.place_value(root, &steps, &spans)?;
+        values[0] = match keep {
+            true => place.clone(),
+            false => std::mem::replace(place, Value::Unit),
+        };
+        let (result, changed) = self.invoke(function, values, true)?;
+        if let Some(changed) = changed {
+            *self.place_value(root, &steps, &spans)? = changed;
+        }
+        Ok(result)
+    }
+
     fn call(&mut self, name: &str, args: Vec<Value>) -> EvalResult<Value> {
         match (name, &args[..]) {
             ("print", _) => {
@@ -1886,6 +2012,17 @@ impl<'out> Interpreter<'out> {
             _ => {}
         }
 
+        Ok(self.invoke(name, args, false)?.0)
+    }
+
+    /// Calls the stone function `name` with `args`, returning its value and, if `keep_self`,
+    /// what it leaves in `self`, which a method that changes `self` gives back to its caller.
+    fn invoke(
+        &mut self,
+        name: &str,
+        args: Vec<Value>,
+        keep_self: bool,
+    ) -> EvalResult<(Value, Option<Value>)> {
         let Some(function) = self.functions.get(name).cloned() else {
             return Err(format!("Function '{name}' not found").into());
         };
@@ -1906,20 +2043,30 @@ impl<'out> Interpreter<'out> {
         // bind parameters directly so they shadow globals of the same name
         self.calls += 1;
         self.last_uses.push(function.last_uses.clone());
+        let methods = std::mem::replace(&mut self.methods, function.methods.clone());
         self.enter_scope();
         let scope = self.scopes.last_mut().expect("scope was just entered");
         for (param, value) in function.params.iter().zip(args) {
             scope.insert(param.clone(), value);
         }
         let flow = self.eval_block(&function.body);
+        let this = match keep_self {
+            true => self
+                .scopes
+                .last_mut()
+                .and_then(|scope| scope.remove("self")),
+            false => None,
+        };
         self.exit_scope();
+        self.methods = methods;
         self.last_uses.pop();
         self.calls -= 1;
 
-        Ok(match flow? {
+        let value = match flow? {
             ControlFlow::Return(value) => value,
             _ => Value::Unit,
-        })
+        };
+        Ok((value, this))
     }
 
     fn enter_scope(&mut self) {
@@ -2097,11 +2244,14 @@ fn field_path(expr: &Expr) -> Option<String> {
 }
 
 /// Returns whether `stmt` defines something code can use before the definition: a function, an
-/// enum, or a struct.
+/// enum, a struct, or the functions of an `impl` block.
 fn is_definition(stmt: &Stmt) -> bool {
     matches!(
         stmt.kind,
-        StmtKind::FunctionDef { .. } | StmtKind::EnumDef { .. } | StmtKind::StructDef { .. }
+        StmtKind::FunctionDef { .. }
+            | StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. }
+            | StmtKind::ImplDef { .. }
     )
 }
 
@@ -2125,11 +2275,74 @@ mod tests {
     /// Runs `source` and returns how many times a change copied a list that something else
     /// still shared.
     fn copies(source: &str) -> u64 {
+        run(source).1
+    }
+
+    /// Checks and runs `source`, returning what it prints and how many times a change copied a
+    /// list that something else still shared.
+    fn run(source: &str) -> (String, u64) {
         let module = parse(source).unwrap();
+        // some programs here leave out parameter types, which only the checker requires
+        let analysis = crate::checker::TypeChecker::new().analyze(&module);
         let mut out = Vec::new();
-        let mut interpreter = Interpreter::with_output(&mut out, Limits::DEFAULT);
+        let mut interpreter =
+            Interpreter::with_output(&mut out, Limits::DEFAULT).with_methods(analysis.methods);
         interpreter.evaluate(&module).unwrap();
-        interpreter.copies
+        let copies = interpreter.copies;
+        drop(interpreter);
+        (String::from_utf8(out).unwrap(), copies)
+    }
+
+    /// A stack whose methods change it in place.
+    const STACK: &str = "struct Stack;\n    items: list[int]\nimpl Stack;\n    fn new() -> Stack;\n        \
+                         ret Stack(items=[])\n    fn push(self, x: int);\n        self.items.append(x)\n    \
+                         fn size(self) -> int;\n        ret self.items.len()\n    \
+                         fn pop_top(self) -> int;\n        x = self.items.pop()\n        ret x\n";
+
+    #[test]
+    fn methods_are_called_on_values_and_associated_functions_on_structs() {
+        let source = format!(
+            "{STACK}s = Stack.new()\ns.push(1)\ns.push(2)\nt = s.pop_top()\nprint(s.size(), t, s)\n"
+        );
+        assert_eq!(run(&source).0, "1 2 Stack(items=[1])\n");
+        // a method named like a builtin one is the struct's
+        let source = "struct Bag;\n    n: int\nimpl Bag;\n    fn append(self, x: int) -> int;\n        \
+                      ret self.n + x\nb = Bag(n=1)\nb.append(5)\nprint(b.append(2), b)\n";
+        assert_eq!(run(source).0, "3 Bag(n=1)\n");
+    }
+
+    #[test]
+    fn a_method_changes_its_receiver_in_place_unless_another_value_shares_it() {
+        let source = format!(
+            "{STACK}s = Stack.new()\nfor i in range(100);\n    s.push(i)\nprint(s.size())\n"
+        );
+        assert_eq!(run(&source), ("100\n".to_string(), 0));
+        let source = format!(
+            "{STACK}ss = [Stack.new(), Stack.new()]\nss[1].push(1)\nss[1].push(2)\n\
+             x = ss[1].pop_top()\nprint(ss, x)\n"
+        );
+        assert_eq!(
+            run(&source),
+            ("[Stack(items=[]), Stack(items=[1])] 2\n".to_string(), 0)
+        );
+        let source = format!("{STACK}s = Stack.new()\nt = s\ns.push(1)\nprint(s, t)\n");
+        assert_eq!(
+            run(&source),
+            ("Stack(items=[1]) Stack(items=[])\n".to_string(), 1)
+        );
+        // a receiver that is also an argument is read before the change
+        let source = "struct P;\n    xs: list[int]\nimpl P;\n    fn absorb(self, ys: list[int]);\n        \
+                      for y in ys;\n            self.xs.append(y)\np = P(xs=[1, 2])\np.absorb(p.xs)\nprint(p)\n";
+        assert_eq!(run(source).0, "P(xs=[1, 2, 1, 2])\n");
+    }
+
+    #[test]
+    fn a_method_that_reads_the_global_it_changes_sees_it_unchanged() {
+        let source = format!(
+            "{STACK}impl Box;\n    fn grow(self);\n        self.s.push(g.s.size())\n\
+             struct Box;\n    s: Stack\ng = Box(s=Stack.new())\ng.grow()\ng.grow()\nprint(g)\n"
+        );
+        assert_eq!(run(&source).0, "Box(s=Stack(items=[0, 1]))\n");
     }
 
     /// A function that appends to its parameter and returns it.

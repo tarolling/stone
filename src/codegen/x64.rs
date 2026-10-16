@@ -752,7 +752,7 @@ mod tests {
             source,
             &crate::project::MapSources::default(),
         );
-        let module = loaded.unwrap().0;
+        let module = loaded.unwrap().module;
         let mut generator = X64Generator::new();
         generator.set_sources(sources);
         let assembly = generator.assemble(&module).unwrap();
@@ -842,7 +842,9 @@ mod tests {
             source,
             &crate::project::MapSources::default(),
         );
-        X64Generator::new().assemble(&module.unwrap().0).unwrap()
+        X64Generator::new()
+            .assemble(&module.unwrap().module)
+            .unwrap()
     }
 
     #[test]

@@ -12,7 +12,7 @@ use lsp_types::{
     HoverContents, Location, MarkupContent, MarkupKind, Position, PrepareRenameResponse, Range,
     SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
-use stone::checker::{Analysis, Symbol, SymbolKind as StoneSymbolKind, Type};
+use stone::checker::{Analysis, Symbol, SymbolKind as StoneSymbolKind, Type, struct_display};
 use stone::diagnostic::Severity;
 use stone::project::{
     DEFAULT_ENTRY, Import, Linked, MapSources, SourceMap, Sources, Target, link, link_in,
@@ -211,18 +211,13 @@ pub fn diagnostics(doc: &Document) -> Vec<Diagnostic> {
 fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
     match (&symbol.kind, &symbol.ty) {
         (StoneSymbolKind::Function, Type::Function { params, ret }) => {
-            let names = analysis.symbols.iter().filter(|s| {
-                s.kind == StoneSymbolKind::Parameter && s.scope.as_deref() == Some(&symbol.name)
-            });
-            let params: Vec<String> = names
-                .zip(params)
-                .map(|(param, ty)| format!("{}: {ty}", param.name))
-                .collect();
-            let returns = match ret.as_ref() {
-                Type::Unit => String::new(),
-                ret => format!(" -> {ret}"),
-            };
-            format!("fn {}({}){returns}", symbol.name, params.join(", "))
+            function_signature(analysis, &symbol.name, &symbol.name, params, ret)
+        }
+        (StoneSymbolKind::Method, Type::Function { params, ret }) => {
+            let owner = symbol.scope.as_deref().unwrap_or_default();
+            let function = format!("{owner}.{}", symbol.name);
+            let shown = format!("{}.{}", struct_display(owner), symbol.name);
+            function_signature(analysis, &function, &shown, params, ret)
         }
         (StoneSymbolKind::Enum, _) => {
             let variants: Vec<String> = analysis
@@ -257,11 +252,41 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 | StoneSymbolKind::Enum
                 | StoneSymbolKind::Variant
                 | StoneSymbolKind::Struct
-                | StoneSymbolKind::Field => "global",
+                | StoneSymbolKind::Field
+                | StoneSymbolKind::Method => "global",
             };
             format!("({kind}) {}: {ty}", symbol.name)
         }
     }
+}
+
+/// Describes the function `function` as its definition declares it, named `shown`, such as
+/// `fn add(a: int) -> int`, with a method's `self` without its type, as in
+/// `fn Point.norm(self) -> float`.
+fn function_signature(
+    analysis: &Analysis,
+    function: &str,
+    shown: &str,
+    params: &[Type],
+    ret: &Type,
+) -> String {
+    let names = analysis
+        .symbols
+        .iter()
+        .filter(|s| s.kind == StoneSymbolKind::Parameter && s.scope.as_deref() == Some(function));
+    let params: Vec<String> = names
+        .zip(params)
+        .enumerate()
+        .map(|(i, (param, ty))| match param.name.as_str() {
+            "self" if i == 0 => "self".to_string(),
+            name => format!("{name}: {ty}"),
+        })
+        .collect();
+    let returns = match ret {
+        Type::Unit => String::new(),
+        ret => format!(" -> {ret}"),
+    };
+    format!("fn {shown}({}){returns}", params.join(", "))
 }
 
 /// Writes a variant as its enum declares it, such as `Rect(float, float)` or `Empty`.
@@ -744,6 +769,8 @@ fn document_symbol(doc: &Document, symbol: &Symbol, range: Span) -> DocumentSymb
             StoneSymbolKind::Variant => SymbolKind::ENUM_MEMBER,
             StoneSymbolKind::Struct => SymbolKind::STRUCT,
             StoneSymbolKind::Field => SymbolKind::FIELD,
+            StoneSymbolKind::Method if has_self(&doc.analysis, symbol) => SymbolKind::METHOD,
+            StoneSymbolKind::Method => SymbolKind::FUNCTION,
             _ => SymbolKind::VARIABLE,
         },
         tags: None,
@@ -774,29 +801,57 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
             }
             if symbol.kind == StoneSymbolKind::Struct {
                 let mut outline = document_symbol(doc, symbol, symbol.span);
-                outline.children = Some(
-                    struct_fields(analysis, &symbol.name)
-                        .map(|s| document_symbol(doc, s, s.span))
-                        .collect(),
-                );
+                let fields =
+                    struct_fields(analysis, &symbol.name).map(|s| document_symbol(doc, s, s.span));
+                let methods = struct_methods(analysis, &symbol.name)
+                    .map(|s| function_outline(doc, s, &format!("{}.{}", symbol.name, s.name)));
+                outline.children = Some(fields.chain(methods).collect());
                 return outline;
             }
-            let Some(&extent) = analysis.functions.get(&symbol.name) else {
-                return document_symbol(doc, symbol, symbol.span);
-            };
-            let mut outline = document_symbol(doc, symbol, extent);
-            let children = analysis
-                .symbols
-                .iter()
-                .filter(|s| s.scope.as_deref() == Some(&symbol.name))
-                .map(|s| document_symbol(doc, s, s.span))
-                .collect();
-            outline.children = Some(children);
-            outline
+            function_outline(doc, symbol, &symbol.name)
         })
         .collect();
     outline.sort_by_key(|s| (s.range.start.line, s.range.start.character));
     outline
+}
+
+/// Outlines `symbol`, the function `function`, over its whole definition, with its parameters
+/// and locals as children, or any other symbol at its name.
+fn function_outline(doc: &Document, symbol: &Symbol, function: &str) -> DocumentSymbol {
+    let analysis = &doc.analysis;
+    let Some(&extent) = analysis.functions.get(function) else {
+        return document_symbol(doc, symbol, symbol.span);
+    };
+    let mut outline = document_symbol(doc, symbol, extent);
+    let children = analysis
+        .symbols
+        .iter()
+        .filter(|s| s.scope.as_deref() == Some(function))
+        .map(|s| document_symbol(doc, s, s.span))
+        .collect();
+    outline.children = Some(children);
+    outline
+}
+
+/// Returns the functions of the `impl` blocks of the struct with the linked name `name`, in
+/// order.
+fn struct_methods<'a>(analysis: &'a Analysis, name: &'a str) -> impl Iterator<Item = &'a Symbol> {
+    analysis
+        .symbols
+        .iter()
+        .filter(move |s| s.kind == StoneSymbolKind::Method && s.scope.as_deref() == Some(name))
+}
+
+/// Returns whether `method`, a function of an `impl` block, takes `self`, so it is called on a
+/// value rather than on its struct.
+fn has_self(analysis: &Analysis, method: &Symbol) -> bool {
+    let owner = method.scope.as_deref().unwrap_or_default();
+    let function = format!("{owner}.{}", method.name);
+    analysis
+        .symbols
+        .iter()
+        .find(|s| s.kind == StoneSymbolKind::Parameter && s.scope.as_deref() == Some(&function))
+        .is_some_and(|param| param.name == "self")
 }
 
 /// Returns the variants of the enum with the linked name `name`, in order.
@@ -816,7 +871,8 @@ fn struct_fields<'a>(analysis: &'a Analysis, name: &'a str) -> impl Iterator<Ite
 }
 
 /// Returns the names that can be written at `position`: symbols in scope, imported names,
-/// builtins, and keywords. Right after a `.`, it is the public functions of an imported module, or
+/// builtins, and keywords. Right after a `.`, it is the public functions of an imported module,
+/// a struct's associated functions, an enum's variants, a struct value's fields and methods, or
 /// otherwise the builtin methods, and in a `use`, the modules and directories there are.
 ///
 /// The client filters them by what has been typed so far.
@@ -858,6 +914,29 @@ pub fn completion(
         if let Some(module) = doc.builtin_module(&receiver) {
             return builtin_module_functions(module);
         }
+        // a struct offers its associated functions
+        let imported = doc.imports.iter().find_map(|i| match &i.target {
+            Target::Struct(name) if i.span.file == doc.file && i.name == receiver => {
+                Some(name.clone())
+            }
+            _ => None,
+        });
+        let own = doc.analysis.symbols.iter().find(|s| {
+            s.kind == StoneSymbolKind::Struct
+                && s.span.file == doc.file
+                && doc.local_name(s) == receiver
+        });
+        if let Some(name) = imported.or_else(|| own.map(|s| s.name.clone())) {
+            return struct_methods(&doc.analysis, &name)
+                .filter(|method| !has_self(&doc.analysis, method))
+                .map(|method| CompletionItem {
+                    label: method.name.clone(),
+                    kind: Some(CompletionItemKind::FUNCTION),
+                    detail: Some(signature(&doc.analysis, method)),
+                    ..CompletionItem::default()
+                })
+                .collect();
+        }
         let imported = doc.imports.iter().find_map(|i| match &i.target {
             Target::Enum(name) if i.span.file == doc.file && i.name == receiver => {
                 Some(name.clone())
@@ -879,7 +958,7 @@ pub fn completion(
                 })
                 .collect();
         }
-        // a variable holding a struct offers its fields
+        // a variable holding a struct offers its fields and methods
         let mut visible: Vec<&Symbol> = doc.analysis.visible_at(doc.file, pos).collect();
         visible.sort_by_key(|s| s.scope.is_none());
         let held = visible.iter().find_map(|s| match &s.ty {
@@ -887,14 +966,21 @@ pub fn completion(
             _ => None,
         });
         if let Some(name) = held {
-            return struct_fields(&doc.analysis, &name)
-                .map(|field| CompletionItem {
-                    label: field.name.clone(),
-                    kind: Some(CompletionItemKind::FIELD),
-                    detail: Some(signature(&doc.analysis, field)),
+            let fields = struct_fields(&doc.analysis, &name).map(|field| CompletionItem {
+                label: field.name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(signature(&doc.analysis, field)),
+                ..CompletionItem::default()
+            });
+            let methods = struct_methods(&doc.analysis, &name)
+                .filter(|method| has_self(&doc.analysis, method))
+                .map(|method| CompletionItem {
+                    label: method.name.clone(),
+                    kind: Some(CompletionItemKind::METHOD),
+                    detail: Some(signature(&doc.analysis, method)),
                     ..CompletionItem::default()
-                })
-                .collect();
+                });
+            return fields.chain(methods).collect();
         }
         return METHODS
             .iter()

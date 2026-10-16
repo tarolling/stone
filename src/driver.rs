@@ -3,7 +3,7 @@
 //! For example, `interpret("print(1)\n")` lexes, parses, checks, and evaluates the source, printing `1`.
 
 use crate::ast::Mod;
-use crate::checker::{Analysis, TypeChecker};
+use crate::checker::{Analysis, Methods, TypeChecker};
 use crate::codegen::Target;
 use crate::debug;
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
@@ -34,16 +34,25 @@ pub fn parse(source: &str) -> Result<Mod, Diagnostic> {
 /// no other files, returning the module only if no errors were found.
 ///
 /// For example, `checked("x = \n")` fails with the syntax error, while a program that parses
-/// returns its module.
-fn checked(source: &str) -> Result<Mod, Diagnostics> {
-    load(Path::new(DEFAULT_ENTRY), source, &MapSources::default())
-        .1
-        .map(|(module, _)| module)
+/// returns it checked.
+fn checked(source: &str) -> Result<Checked, Diagnostics> {
+    load(Path::new(DEFAULT_ENTRY), source, &MapSources::default()).1
+}
+
+/// A linked program that passed the checker.
+#[derive(Debug)]
+pub struct Checked {
+    pub module: Mod,
+    /// The checker's warnings, which `run` and `build` print before going on.
+    pub warnings: Vec<Diagnostic>,
+    /// How every call of a function of an `impl` block was resolved, which the interpreter
+    /// needs.
+    pub methods: Methods,
 }
 
 /// Loads, links, and checks the program whose entry file is at `entry` and holds `source`,
 /// reading the modules it uses from `sources`. Returns the program's files, for rendering
-/// diagnostics, and its linked module with any warnings if no errors were found.
+/// diagnostics, and the checked program if no errors were found.
 ///
 /// For example, loading `main.stn` holding `use util` without a `util.stn` fails with
 /// `no module named 'util'`.
@@ -51,7 +60,7 @@ pub fn load(
     entry: &Path,
     source: &str,
     sources: &dyn Sources,
-) -> (SourceMap, Result<(Mod, Vec<Diagnostic>), Diagnostics>) {
+) -> (SourceMap, Result<Checked, Diagnostics>) {
     let Linked {
         module,
         sources,
@@ -61,11 +70,16 @@ pub fn load(
     if has_errors(&diagnostics) {
         return (sources, Err(Diagnostics(diagnostics)));
     }
-    let diagnostics = TypeChecker::new().check(&module);
-    if has_errors(&diagnostics) {
-        return (sources, Err(Diagnostics(diagnostics)));
+    let analysis = TypeChecker::new().analyze(&module);
+    if has_errors(&analysis.diagnostics) {
+        return (sources, Err(Diagnostics(analysis.diagnostics)));
     }
-    (sources, Ok((module, diagnostics)))
+    let checked = Checked {
+        module,
+        warnings: analysis.diagnostics,
+        methods: analysis.methods,
+    };
+    (sources, Ok(checked))
 }
 
 fn has_errors(diagnostics: &[Diagnostic]) -> bool {
@@ -162,8 +176,8 @@ pub fn interpret_with_io(
     args: &[String],
     limits: Limits,
 ) -> Result<(), Box<dyn Error>> {
-    let ast = checked(source)?;
-    run_module(&ast, input, out, args, limits)
+    let checked = checked(source)?;
+    run_module(&checked.module, &checked.methods, input, out, args, limits)
 }
 
 /// Runs a checked module, such as one from [`load`], with the tree-walking interpreter. It reads
@@ -176,6 +190,7 @@ pub fn interpret_with_io(
 /// callers report by exiting with that status, while `os.exit(0)` ends it successfully.
 pub fn run_module(
     ast: &Mod,
+    methods: &Methods,
     input: &mut (impl BufRead + Send),
     out: &mut (impl Write + Send),
     args: &[String],
@@ -189,6 +204,7 @@ pub fn run_module(
                 let result = Interpreter::with_output(out, limits)
                     .with_input(input)
                     .with_args(args.to_vec())
+                    .with_methods(methods.clone())
                     .evaluate(ast);
                 Ending::of(result)
             })
@@ -252,8 +268,7 @@ pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
 /// arm64 assembly to `build/out.s` and links it into an arm64 Linux `build/out`.
 pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
     let (sources, loaded) = load(Path::new(DEFAULT_ENTRY), source, &MapSources::default());
-    let (module, _) = loaded?;
-    compile_module(&module, &sources, output, target)
+    compile_module(&loaded?.module, &sources, output, target)
 }
 
 /// Compiles a checked module, such as one from [`load`], to a native executable for `target` at

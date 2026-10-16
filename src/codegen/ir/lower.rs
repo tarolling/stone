@@ -41,11 +41,12 @@ use crate::ast::{
     Stmt, StmtKind, UnaryOp, constant_int,
 };
 use crate::checker::{
-    Enums, Step, Structs, Symbol, SymbolKind, Type, collect_assigned, collect_changed, place,
-    place_root, place_spans, range_args, struct_display, variant_display, variants,
+    Analysis, Enums, Method, Methods, Step, Structs, SymbolKind, Type, collect_assigned,
+    collect_changed, place, place_root, place_spans, range_args, struct_display, variant_display,
+    variants,
 };
 use crate::codegen::context::module_routine;
-use crate::last_use::{LiveAfter, global_reads, live_after};
+use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::Span;
 use crate::stdlib::{
     INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRINT_DEPTH,
@@ -57,20 +58,23 @@ use std::collections::{HashMap, HashSet};
 /// The type of each variable, keyed by the function it belongs to (`None` for globals) and name.
 type Variables = HashMap<(Option<String>, String), Type>;
 
-/// Lowers every function in `module`, then its top-level code as `main`, using the types the
-/// checker inferred for every expression, for every variable in `symbols`, for the values of
-/// every variant of `enums`, and for the fields of every struct of `structs`. Last come the
-/// functions that print enum values, which lowering makes for each enum type the program prints.
+/// Lowers every function in `module`, then its top-level code as `main`, using what the checker
+/// learned about it in `analysis`: the types it inferred for every expression, for every
+/// variable, for the values of every variant, and for the fields of every struct, and the
+/// function each method call calls. Last come the functions that print enum values, which
+/// lowering makes for each enum type the program prints.
 ///
 /// Fails only on input the checker rejects, such as a constant type no backend supports.
-pub fn lower(
-    module: &Mod,
-    types: &HashMap<Span, Type>,
-    symbols: &[Symbol],
-    enums: &Enums,
-    structs: &Structs,
-) -> Result<Program, String> {
+pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
     let Mod::Module { body } = module;
+    let Analysis {
+        types,
+        symbols,
+        enums,
+        structs,
+        methods,
+        ..
+    } = analysis;
 
     let mut assigned = Vec::new();
     collect_assigned(body, &mut assigned);
@@ -85,6 +89,7 @@ pub fn lower(
                     | SymbolKind::Variant
                     | SymbolKind::Struct
                     | SymbolKind::Field
+                    | SymbolKind::Method
             )
         })
         .map(|symbol| {
@@ -120,11 +125,12 @@ pub fn lower(
         types,
         variables: &variables,
         globals: &globals,
-        owned_params: owned_params(body),
+        owned_params: owned_params(body, methods),
         global_reads: global_reads(body, &stone_globals),
         global_set,
         enums,
         structs,
+        methods,
         printers: RefCell::new(Vec::new()),
     };
 
@@ -137,6 +143,20 @@ pub fn lower(
             } => {
                 let lowerer = Lowerer::new(&context, Some(name.clone()));
                 functions.push(lowerer.function(&args.args, body)?);
+            }
+            StmtKind::ImplDef { name, methods, .. } => {
+                for method in methods {
+                    if let StmtKind::FunctionDef {
+                        name: method,
+                        args,
+                        body,
+                        ..
+                    } = &method.kind
+                    {
+                        let lowerer = Lowerer::new(&context, Some(format!("{name}.{method}")));
+                        functions.push(lowerer.function(&args.args, body)?);
+                    }
+                }
             }
             _ => top_level.push(stmt.clone()),
         }
@@ -202,11 +222,13 @@ struct Context<'a> {
     owned_params: HashMap<String, Vec<bool>>,
     /// For each function, the globals it or any function it calls may read, which a caller must
     /// not move into it, by their stone names.
-    global_reads: HashMap<String, HashSet<String>>,
+    global_reads: GlobalReads,
     /// The variants of every enum the program defines.
     enums: &'a Enums,
     /// The fields of every struct the program defines.
     structs: &'a Structs,
+    /// How every call of a function of an `impl` block was resolved, by the call's span.
+    methods: &'a Methods,
     /// Each enum and struct type some code prints, in the order it was first printed, which gets
     /// a function that prints its values.
     printers: RefCell<Vec<Type>>,
@@ -284,6 +306,9 @@ struct Lowerer<'a> {
     /// How many enum values the value being printed is inside, which a printer of an enum
     /// passes on to the printers of the enum values it holds.
     print_depth: Operand,
+    /// Whether this is a method that changes `self`, which returns the values of `self` after
+    /// its own, for the caller to store back into the receiver.
+    returns_self: bool,
 }
 
 impl<'a> Lowerer<'a> {
@@ -308,6 +333,7 @@ impl<'a> Lowerer<'a> {
             span: Span::default(),
             held: Vec::new(),
             print_depth: Operand::Imm(0),
+            returns_self: false,
         }
     }
 
@@ -324,7 +350,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
             collect_assigned(body, &mut assigned);
-            collect_changed(body, &mut changed);
+            collect_changed(body, &mut changed, self.context.methods);
             for (name, _) in &assigned {
                 for leaf in self.leaf_names(name) {
                     self.local(&leaf);
@@ -332,7 +358,15 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        self.live_after = live_after(body, &self.context.global_reads);
+        self.live_after = live_after(body, &self.context.global_reads, &kept_at_exit(args));
+        // a method owns `self` exactly when it changes it
+        self.returns_self = args.first().is_some_and(|arg| arg.arg == "self")
+            && self.name.as_ref().is_some_and(|name| {
+                self.context
+                    .owned_params
+                    .get(name)
+                    .is_some_and(|owned| owned.first() == Some(&true))
+            });
         let entry = self.new_block();
         self.start(entry);
         // the caller gives a parameter the function assigns or changes a reference of its own to
@@ -796,6 +830,11 @@ impl<'a> Lowerer<'a> {
     /// among `values`, which the caller takes. `main` releases every global instead and exits
     /// with 0.
     fn leave(&mut self, values: &[Operand]) {
+        let mut values = values.to_vec();
+        if self.returns_self {
+            values.extend(self.self_leaves());
+        }
+        let values = values.as_slice();
         let held: Vec<(Operand, RcKind)> = self.loops.iter().rev().filter_map(|l| l.held).collect();
         for (src, kind) in held {
             self.push(Inst::Release { src, kind });
@@ -832,6 +871,15 @@ impl<'a> Lowerer<'a> {
             });
         }
         self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
+    }
+
+    /// Returns the values of `self` in a method, each a local.
+    fn self_leaves(&self) -> Vec<Operand> {
+        self.leaf_names("self")
+            .iter()
+            .filter_map(|name| self.locals.get(name))
+            .map(|&local| Operand::Reg(local))
+            .collect()
     }
 
     /// Releases each value a `match` holds inside at least `loops` loops, innermost first, where
@@ -1007,8 +1055,12 @@ impl<'a> Lowerer<'a> {
                         let kinds = self.leaf_kinds(value)?;
                         let results = self.expr_flat(value)?;
                         // a counted local gives its own reference to the caller, once, so that
-                        // `ret (s, s)` gives a second one
-                        let mut given = HashSet::new();
+                        // `ret (s, s)` gives a second one, and `self`, which a method that
+                        // changes it returns too, gives its own there
+                        let mut given: HashSet<Operand> = match self.returns_self {
+                            true => self.self_leaves().into_iter().collect(),
+                            false => HashSet::new(),
+                        };
                         for (&result, kind) in results.iter().zip(kinds) {
                             let local = self
                                 .counted_locals
@@ -1090,7 +1142,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            StmtKind::FunctionDef { .. } => {
+            StmtKind::FunctionDef { .. } | StmtKind::ImplDef { .. } => {
                 return Err("functions must be defined at the top level".to_string());
             }
             StmtKind::EnumDef { .. } | StmtKind::StructDef { .. } => {}
@@ -2389,6 +2441,11 @@ impl<'a> Lowerer<'a> {
             } => self.compare(left, ops, comparators, into),
 
             ExprKind::Call { func, args, .. } => {
+                if let ExprKind::Attribute { value, .. } = &func.kind
+                    && let Some(method) = self.context.methods.get(&expr.span)
+                {
+                    return Ok(self.struct_call(expr, method, value, args, into)?[0]);
+                }
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind {
                     if let ExprKind::Name { id, .. } = &value.kind
                         && self.context.enums.contains_key(id)
@@ -3769,6 +3826,105 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Calls a function of an `impl` block as `method` resolved `call`, returning one value for
+    /// each value of the result: an associated function with `args`, or a method with `receiver`
+    /// as `self` and then `args`. A method that does not change `self` borrows the receiver, and
+    /// one that does changes it, as [`Lowerer::changing_call`] lowers.
+    fn struct_call(
+        &mut self,
+        call: &Expr,
+        method: &Method,
+        receiver: &Expr,
+        args: &[Expr],
+        into: Option<VReg>,
+    ) -> Result<Vec<Operand>, String> {
+        let kinds = self.leaf_kinds(call)?;
+        let function = method.function.as_str();
+        if !method.receiver {
+            return self.user_call(function, args, into, &kinds);
+        }
+        if !method.changes {
+            let mut all = Vec::with_capacity(args.len() + 1);
+            all.push(receiver.clone());
+            all.extend(args.iter().cloned());
+            return self.user_call(function, &all, into, &kinds);
+        }
+        self.changing_call(function, receiver, args, into, &kinds)
+    }
+
+    /// Calls `function`, a method that changes `self`, on `receiver`, a variable or a place in
+    /// one, returning one value for each of `kinds`, how the result's values are counted.
+    ///
+    /// As for `append`, the receiver's indexes are evaluated, then the arguments, then every list
+    /// on the way to the receiver is made unique. The receiver's values then move into the call,
+    /// which returns them changed after its result, and are stored back where they came from.
+    /// A global the method may read keeps its values while it runs, so they are retained
+    /// instead, and the old ones released once the new ones are stored.
+    fn changing_call(
+        &mut self,
+        function: &str,
+        receiver: &Expr,
+        args: &[Expr],
+        into: Option<VReg>,
+        kinds: &[Option<RcKind>],
+    ) -> Result<Vec<Operand>, String> {
+        let Some((root, _)) = place(receiver) else {
+            return Err("only a value in a variable can be changed".to_string());
+        };
+        // taken first, so that no call among the arguments moves what a later one reads, and
+        // never the receiver, which moves into the call apart
+        let mut movable = std::mem::take(&mut self.movable);
+        movable.retain(|name| variable_of(name) != root);
+        let indexes = self.place_indexes(receiver)?;
+        let mut values = Vec::new();
+        for arg in args {
+            values.push(self.expr_flat(arg)?);
+        }
+        let given = self.give_references(function, args, &values, &movable, 1)?;
+        let location = self.locate(receiver, &indexes)?;
+        let this = self.location_values(&location);
+        let this_kinds = self.leaf_kinds(receiver)?;
+        let keep = self.name.is_none() && self.context.global_reads[function].contains(root);
+        if keep {
+            for (&value, kind) in this.iter().zip(&this_kinds) {
+                if kind.is_some() {
+                    self.push(Inst::Retain { src: value });
+                }
+            }
+        }
+        let mut dsts = vec![self.dst(into)];
+        dsts.extend((1..kinds.len() + this.len()).map(|_| self.fresh()));
+        let mut call_args = this.clone();
+        call_args.extend(values.iter().flatten());
+        self.push(Inst::Call {
+            dsts: dsts.clone(),
+            callee: Callee::User(function.to_string()),
+            args: call_args,
+        });
+        for (value, given) in values
+            .into_iter()
+            .flatten()
+            .zip(given.into_iter().flatten())
+        {
+            if !given {
+                self.release_temp(value);
+            }
+        }
+        let (results, changed) = dsts.split_at(kinds.len());
+        let changed: Vec<Operand> = changed.iter().map(|&reg| Operand::Reg(reg)).collect();
+        // moved, the old values are the call's, so only kept ones are released
+        let stored_kinds = match keep {
+            true => this_kinds,
+            false => vec![None; this.len()],
+        };
+        self.store_location(location, &changed, &stored_kinds);
+        let results: Vec<Operand> = results.iter().map(|&reg| Operand::Reg(reg)).collect();
+        for (&result, &kind) in results.iter().zip(kinds) {
+            self.own(result, kind);
+        }
+        Ok(results)
+    }
+
     /// Calls the stone function `name`, which returns one value for each of `kinds`, how each is
     /// counted: several for a tuple, the first in `into` if given. The call borrows its arguments,
     /// each tuple as its values, and temporaries among them are released after it.
@@ -3785,7 +3941,7 @@ impl<'a> Lowerer<'a> {
         for arg in args {
             values.push(self.expr_flat(arg)?);
         }
-        let given = self.give_references(name, args, &values, &movable)?;
+        let given = self.give_references(name, args, &values, &movable, 0)?;
         let mut dsts = vec![self.dst(into)];
         dsts.extend((1..kinds.len()).map(|_| self.fresh()));
         self.push(Inst::Call {
@@ -3810,7 +3966,8 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Gives a reference to each argument of the stone function `name` that it owns, once every
-    /// argument is evaluated, and returns which arguments got one.
+    /// argument is evaluated, and returns which arguments got one. The first argument is
+    /// parameter `first`, which is 1 when the receiver of a method that changes it is given apart.
     ///
     /// A temporary gives its own. A variable in `movable` gives its own too, which moves its
     /// value into the call, unless it is a global the function may read, or it was already given
@@ -3823,12 +3980,13 @@ impl<'a> Lowerer<'a> {
         args: &[Expr],
         values: &[Vec<Operand>],
         movable: &[String],
+        first: usize,
     ) -> Result<Vec<Vec<bool>>, String> {
         let owned = self.context.owned_params.get(name);
         let mut given = Vec::new();
         for (i, (arg, leaves)) in args.iter().zip(values).enumerate() {
             let mut leaves_given = vec![false; leaves.len()];
-            let owns = owned.is_some_and(|owned| owned.get(i) == Some(&true));
+            let owns = owned.is_some_and(|owned| owned.get(first + i) == Some(&true));
             let kinds = self.leaf_kinds(arg)?;
             let sources = self.flat_sources(arg);
             for (j, &value) in leaves.iter().enumerate() {
@@ -4058,6 +4216,12 @@ impl<'a> Lowerer<'a> {
                 ExprKind::Name { id, .. } => {
                     let kinds = self.leaf_kinds(expr)?;
                     self.user_call(id, args, None, &kinds)
+                }
+                ExprKind::Attribute { value, .. }
+                    if self.context.methods.contains_key(&expr.span) =>
+                {
+                    let method = &self.context.methods[&expr.span];
+                    self.struct_call(expr, method, value, args, None)
                 }
                 ExprKind::Attribute { value, attr, .. } if attr == "pop" => {
                     self.pop_element(value, args)
@@ -4730,11 +4894,16 @@ impl<'a> Lowerer<'a> {
         ) && matches!(self.context.types.get(&expr.span), Some(Type::List(_)))
     }
 
-    /// Returns whether `expr` is a call to a stone function, rather than a builtin or a method.
+    /// Returns whether `expr` is a call to a stone function, rather than a builtin or a builtin
+    /// method: a function, or a function of an `impl` block.
     fn is_stone_call(&self, expr: &Expr) -> bool {
-        matches!(&expr.kind, ExprKind::Call { func, .. }
-            if matches!(&func.kind, ExprKind::Name { id, .. }
-                if self.context.owned_params.contains_key(id)))
+        let ExprKind::Call { func, .. } = &expr.kind else {
+            return false;
+        };
+        match &func.kind {
+            ExprKind::Name { id, .. } => self.context.owned_params.contains_key(id),
+            _ => self.context.methods.contains_key(&expr.span),
+        }
     }
 
     /// Prints `text` as it is, through the string printer.
@@ -4821,25 +4990,42 @@ fn holds_enum(ty: &Type) -> bool {
 ///
 /// For example, `fn add(xs: list[int], x: int) -> list[int]; xs.append(x); ret xs` owns `xs`
 /// but not `x`.
-fn owned_params(body: &[Stmt]) -> HashMap<String, Vec<bool>> {
+fn owned_params(body: &[Stmt], methods: &Methods) -> HashMap<String, Vec<bool>> {
     let mut owned = HashMap::new();
+    let mut add = |name: String, args: &crate::ast::Arguments, body: &[Stmt]| {
+        let mut assigned = Vec::new();
+        collect_assigned(body, &mut assigned);
+        let mut changed = HashSet::new();
+        collect_changed(body, &mut changed, methods);
+        let params = args
+            .args
+            .iter()
+            .map(|arg| {
+                changed.contains(&arg.arg) || assigned.iter().any(|(name, _)| *name == arg.arg)
+            })
+            .collect();
+        owned.insert(name, params);
+    };
     for stmt in body {
-        if let StmtKind::FunctionDef {
-            name, args, body, ..
-        } = &stmt.kind
-        {
-            let mut assigned = Vec::new();
-            collect_assigned(body, &mut assigned);
-            let mut changed = HashSet::new();
-            collect_changed(body, &mut changed);
-            let params = args
-                .args
-                .iter()
-                .map(|arg| {
-                    changed.contains(&arg.arg) || assigned.iter().any(|(name, _)| *name == arg.arg)
-                })
-                .collect();
-            owned.insert(name.clone(), params);
+        match &stmt.kind {
+            StmtKind::FunctionDef {
+                name, args, body, ..
+            } => add(name.clone(), args, body),
+            StmtKind::ImplDef {
+                name: owner,
+                methods: defs,
+                ..
+            } => {
+                for def in defs {
+                    if let StmtKind::FunctionDef {
+                        name, args, body, ..
+                    } = &def.kind
+                    {
+                        add(format!("{owner}.{name}"), args, body);
+                    }
+                }
+            }
+            _ => {}
         }
     }
     owned

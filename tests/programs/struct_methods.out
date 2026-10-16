@@ -1,0 +1,11 @@
+5 some(5) Stack(items=[1, 2, 3, 4, 5])
+5 Stack(items=[1, 2, 3, 4])
+Stack(items=[1, 2, 3, 4, 3, 2, 1])
+30 Stack(items=[0, 1, 4])
+[Stack(items=[]), Stack(items=[7])] 8
+Point(x=1.0, y=2.0) Point(x=11.0, y=12.0) Point(x=2.0, y=4.0) 265.0
+Point(x=0.0, y=0.0)
+Line(start=Point(x=1.0, y=1.0), end=Point(x=4.0, y=4.0), tags=['a']) 18.0
+[Line(start=Point(x=1.0, y=1.0), end=Point(x=4.0, y=4.0), tags=['a', 'b']), Line(start=Point(x=1.0, y=1.0), end=Point(x=5.0, y=5.0), tags=['a'])]
+Line(start=Point(x=1.0, y=1.0), end=Point(x=4.0, y=4.0), tags=['a'])
+none 0

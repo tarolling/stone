@@ -1,0 +1,123 @@
+struct Stack;
+    items: list[int]
+
+impl Stack;
+    fn new() -> Stack;
+        ret Stack(items=[])
+
+    fn size(self) -> int;
+        ret self.items.len()
+
+    fn push(self, x: int);
+        self.items.append(x)
+
+    fn pop_top(self) -> int;
+        x = self.items.pop()
+        ret x
+
+    fn push_all(self, xs: list[int]);
+        for x in xs;
+            self.push(x)
+
+    fn count_down(self, n: int);
+        if n == 0;
+            ret
+        self.push(n)
+        self.count_down(n - 1)
+
+    fn top(self) -> option[int];
+        if self.items.len() == 0;
+            ret none
+        ret some(self.items[-1])
+
+struct Point;
+    x: float
+    y: float
+
+impl Point;
+    fn origin() -> Point;
+        ret Point(x=0.0, y=0.0)
+
+    fn shift(self, dx: float, dy: float);
+        self.x += dx
+        self.y += dy
+
+    fn scaled(self, k: float) -> Point;
+        ret Point(x=self.x * k, y=self.y * k)
+
+    fn len(self) -> float;
+        ret self.x * self.x + self.y * self.y
+
+    fn reset(self);
+        self = Point.origin()
+
+struct Line;
+    start: Point
+    end: Point
+    tags: list[str]
+
+impl Line;
+    fn shift(self, dx: float);
+        self.start.shift(dx, 0.0)
+        self.end.shift(dx, 0.0)
+
+    fn tag(self, t: str);
+        self.tags.append(t)
+
+    fn length2(self) -> float;
+        dx = self.end.x - self.start.x
+        dy = self.end.y - self.start.y
+        ret dx * dx + dy * dy
+
+fn fill(n: int) -> Stack;
+    s = Stack.new()
+    for i in range(n);
+        s.push(i * i)
+    ret s
+
+fn drain(s: Stack) -> int;
+    total = 0
+    while s.size() > 0;
+        x = s.pop_top()
+        total += x
+    ret total
+
+s = Stack.new()
+s.push(1)
+s.push(2)
+s.push_all([3, 4, 5])
+print(s.size(), s.top(), s)
+x = s.pop_top()
+print(x, s)
+s.count_down(3)
+print(s)
+print(drain(fill(5)), fill(3))
+
+stacks = [Stack.new(), Stack.new()]
+stacks[1].push(7)
+stacks[1].push(8)
+y = stacks[1].pop_top()
+print(stacks, y)
+
+p = Point.origin()
+p.shift(1.0, 2.0)
+q = p
+q.shift(10.0, 10.0)
+print(p, q, p.scaled(2.0), q.len())
+p.reset()
+print(p)
+
+line = Line(start=Point(x=0.0, y=0.0), end=Point(x=3.0, y=4.0), tags=[])
+line.shift(1.0)
+line.tag("a")
+line.start.shift(0.0, 1.0)
+print(line, line.length2())
+
+lines = [line, line]
+lines[0].tag("b")
+lines[1].end.shift(1.0, 1.0)
+print(lines)
+print(line)
+
+e = Stack.new()
+print(e.top(), e.size())

@@ -154,7 +154,8 @@ errors before the program runs. The name alone, without a call, is not a value.
 `p.x += 1.0`, `ps[i].y = 0.0`, `path.points.append(q)`, and `path.points[0].x = 2.0` are
 changes, made as `xs[i] = v` is. Like lists, structs are values: `q = p` and passing `p` to a
 function copy it, so changing `q` leaves `p` as it was, and a function changes its caller's
-struct only by returning it, as in `p = moved(p, 1.0)`. As with lists, the change must be to a
+struct only by returning it, as in `p = moved(p, 1.0)`, unless it is a method that changes
+`self` (see [Methods](#methods)). As with lists, the change must be to a
 variable: `f().x = 1.0` is an error, since the change would be lost, and a function cannot change
 a global's fields.
 
@@ -176,6 +177,39 @@ fields of a list's structs side by side in the list, so changing a field of a st
 variable is as cheap as assigning a variable. An element of a list or a variant can hold at most
 32 values, counting each field of its structs. A value can print at most 10,000 struct and enum
 values deep.
+
+### Methods
+
+An `impl` block names a struct and holds functions for it, each written as any other function:
+
+```{literalinclude} ../examples/methods.stn
+:language: stone
+:lines: 7-16
+```
+
+A function whose first parameter is `self`, written without a type, is a method of the struct,
+and `self` is a value of it. `a.dist(b)` calls the method `dist` with `a` as `self`, evaluating
+`a` and then the arguments. Any other function of the block is an associated function, called on
+the struct by name, as `Point.origin()` is. Calling a method on the struct or an associated
+function on a value is an error, as is a parameter named `self` anywhere but first in a method.
+A struct may have several `impl` blocks, but each function's name once, and a method cannot share
+a field's name. Methods belong to their struct, so a method may have the name of a builtin one,
+such as `len`, and `p.len()` calls the struct's.
+
+A method that changes `self`, by assigning `self`, one of its fields, or anything inside them, or
+by calling something that changes one of those, such as `self.points.append(p)` or another such
+method, changes the value it is called on, as `append` changes a list. stone finds these methods
+itself, with no keyword. A call of one is a statement of its own or, if the method returns a
+value, the whole value of an assignment, as in `x = s.pop_top()`, and the value it is called on
+is a variable, an element, or a field, which a function may change only if it is the function's
+own: `p.shift(1.0)`, `ps[i].shift(1.0)`, and `path.start.shift(1.0)` all change what they name,
+while `Point.origin().shift(1.0)` is an error, since the change would be lost. The receiver's
+indexes are evaluated first, then the arguments, then the method runs, so an index out of range
+fails after the arguments, as for `append`.
+
+A method that changes `self` moves the value into the call and back, so it changes the value in
+place; a method that only reads `self` borrows it. Neither copies the struct or the lists it
+holds unless another variable still shares them.
 
 ## Maps
 
@@ -316,7 +350,8 @@ These keep the two backends identical and catch common mistakes:
   variable or an element or field of one, so `f().append(1)` and `xs[1:].append(1)` are errors
   too, since the change would be lost. `pop`,
   which also returns what it removes, may instead be the whole value of an assignment, as in
-  `x = xs.pop()`.
+  `x = xs.pop()`. A method that changes `self` follows the same rules, as in `s.push(1)` and
+  `x = s.pop_top()`.
 - **Functions change only their own variables.** A function can read a global but cannot
   change it, with `append`, an index, or a field, just as it cannot assign it. It takes the list as an
   argument and returns the changed one instead. A function that changes a parameter and then

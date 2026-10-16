@@ -1,0 +1,43 @@
+use math
+
+struct Point;
+    x: float
+    y: float
+
+impl Point;
+    fn origin() -> Point;
+        ret Point(x=0.0, y=0.0)
+
+    fn dist(self, other: Point) -> float;
+        ret math.sqrt((other.x - self.x) ** 2 + (other.y - self.y) ** 2)
+
+    fn shift(self, dx: float, dy: float);
+        self.x += dx
+        self.y += dy
+
+struct Path;
+    points: list[Point]
+
+impl Path;
+    fn new() -> Path;
+        ret Path(points=[Point.origin()])
+
+    fn go(self, dx: float, dy: float);
+        last = self.points[-1]
+        last.shift(dx, dy)
+        self.points.append(last)
+
+    fn length(self) -> float;
+        total = 0.0
+        for i in range(1, self.points.len());
+            total += self.points[i - 1].dist(self.points[i])
+        ret total
+
+walk = Path.new()
+walk.go(3.0, 4.0)
+walk.go(0.0, -4.0)
+print(walk.length(), walk.points.len())
+
+back = walk
+back.points[0].shift(1.0, 0.0)
+print(walk.points[0], back.points[0])

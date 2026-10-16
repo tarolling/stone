@@ -2578,7 +2578,7 @@ fn fields_are_read_and_changed() {
     assert_error("n = 1\nprint(n.x)\n", "int has no field 'x'", 2, 9);
     assert_error(
         &format!("{p}print(p.x())\n"),
-        "there is no method 'x'; 'x' is a field of 'Point', so read it without parentheses",
+        "'Point' has no method 'x'; 'x' is a field of 'Point', so read it without parentheses",
         5,
         9,
     );
@@ -2650,7 +2650,7 @@ fn a_change_to_a_fields_parameter_is_lost_unless_it_is_read() {
     let mut changed = HashSet::new();
     let module = parse("p.x = 1.0\nq.items.append(1)\nr[0].y += 1\n").unwrap();
     let Mod::Module { body } = &module;
-    collect_changed(body, &mut changed);
+    collect_changed(body, &mut changed, &Methods::new());
     let mut changed: Vec<String> = changed.into_iter().collect();
     changed.sort();
     assert_eq!(changed, ["p", "q", "r"]);
@@ -2836,4 +2836,262 @@ fn a_function_can_index_a_global_map_assigned_after_it() {
         2,
         15,
     );
+}
+
+const STACK: &str = "struct Stack;\n    items: list[int]\nimpl Stack;\n    fn new() -> Stack;\n        \
+                     ret Stack(items=[])\n    fn size(self) -> int;\n        ret self.items.len()\n    \
+                     fn push(self, x: int);\n        self.items.append(x)\n    \
+                     fn pop_top(self) -> int;\n        x = self.items.pop()\n        ret x\n";
+
+/// Returns each method call of `source` as the function it calls, whether it has a receiver,
+/// and whether it changes it, sorted.
+fn method_calls(source: &str) -> Vec<(String, bool, bool)> {
+    let analysis = analyze_source(source);
+    assert_eq!(analysis.diagnostics, [], "{source}");
+    let mut calls: Vec<(String, bool, bool)> = analysis
+        .methods
+        .values()
+        .map(|m| (m.function.clone(), m.receiver, m.changes))
+        .collect();
+    calls.sort();
+    calls.dedup();
+    calls
+}
+
+#[test]
+fn methods_and_associated_functions_are_typed() {
+    let source = format!("{STACK}s = Stack.new()\ns.push(1)\nn = s.size()\nt = s.pop_top()\n");
+    assert_eq!(type_of_symbol(&source, "s"), "Stack");
+    assert_eq!(type_of_symbol(&source, "n"), "int");
+    assert_eq!(type_of_symbol(&source, "t"), "int");
+    assert_eq!(type_of_symbol(&source, "size"), "fn(Stack) -> int");
+    assert_eq!(type_of_symbol(&source, "new"), "fn() -> Stack");
+    assert_eq!(
+        method_calls(&source),
+        [
+            ("Stack.new".to_string(), false, false),
+            ("Stack.pop_top".to_string(), true, true),
+            ("Stack.push".to_string(), true, true),
+            ("Stack.size".to_string(), true, false),
+        ]
+    );
+    let analysis = analyze_source(&source);
+    let method = analysis.symbols.iter().find(|s| s.name == "push").unwrap();
+    assert_eq!(method.kind, SymbolKind::Method);
+    assert_eq!(method.scope.as_deref(), Some("Stack"));
+    let this = analysis
+        .symbols
+        .iter()
+        .find(|s| s.name == "self" && s.scope.as_deref() == Some("Stack.push"))
+        .unwrap();
+    assert_eq!(this.ty.to_string(), "Stack");
+}
+
+#[test]
+fn a_method_changes_self_through_its_fields_and_other_methods() {
+    let source = format!(
+        "{STACK}struct Pair;\n    a: Stack\n    rest: list[Stack]\nimpl Pair;\n    \
+         fn both(self);\n        self.a.push(1)\n        self.rest[0].push(2)\n    \
+         fn twice(self);\n        self.both()\n        self.both()\n    \
+         fn total(self) -> int;\n        ret self.a.size() + self.rest[0].size()\n    \
+         fn reset(self);\n        self = Pair(a=Stack.new(), rest=[])\n\
+         p = Pair(a=Stack.new(), rest=[])\np.twice()\np.reset()\nprint(p.total())\n"
+    );
+    let calls = method_calls(&source);
+    for (function, changes) in [
+        ("Pair.both", true),
+        ("Pair.twice", true),
+        ("Pair.total", false),
+        ("Pair.reset", true),
+        ("Stack.size", false),
+    ] {
+        assert!(
+            calls.iter().any(|(f, _, c)| f == function && *c == changes),
+            "{function} {calls:?}"
+        );
+    }
+}
+
+#[test]
+fn a_struct_method_is_not_the_builtin_of_the_same_name() {
+    let source = "struct Bag;\n    n: int\nimpl Bag;\n    fn append(self, x: int) -> int;\n        \
+                  ret self.n + x\n    fn len(self) -> int;\n        ret self.n\n\
+                  b = Bag(n=1)\nb.append(2)\nprint(b.append(3), b.len())\n";
+    assert_eq!(
+        method_calls(source),
+        [
+            ("Bag.append".to_string(), true, false),
+            ("Bag.len".to_string(), true, false),
+        ]
+    );
+}
+
+#[test]
+fn a_method_that_changes_its_receiver_is_a_statement_or_an_assigned_value() {
+    let s = format!("{STACK}s = Stack.new()\n");
+    assert_error(
+        &format!("{s}print(s.push(1))\n"),
+        "'push' changes its receiver and returns no value, so it can only be a statement of its \
+         own",
+        14,
+        7,
+    );
+    assert_error(
+        &format!("{s}print(s.pop_top())\n"),
+        "'pop_top' changes its receiver, so it can only be a statement of its own or the value of \
+         an assignment",
+        14,
+        7,
+    );
+    assert_error(
+        &format!("{s}Stack.new().push(1)\n"),
+        "this value is not stored in a variable, so changing it has no effect",
+        14,
+        1,
+    );
+    assert_error(
+        &format!("{s}fn f();\n    s.push(1)\n"),
+        "a function cannot change the global 's'; pass it as an argument and return the changed \
+         value",
+        15,
+        5,
+    );
+    assert_eq!(
+        errors(&format!(
+            "{s}ss = [s]\nss[0].push(1)\nx = ss[0].pop_top()\n"
+        )),
+        []
+    );
+}
+
+#[test]
+fn method_calls_are_checked() {
+    let s = format!("{STACK}s = Stack.new()\n");
+    assert_error(
+        &format!("{s}s.nope()\n"),
+        "'Stack' has no method 'nope'",
+        14,
+        3,
+    );
+    assert_error(
+        &format!("{s}s.items()\n"),
+        "'Stack' has no method 'items'; 'items' is a field of 'Stack', so read it without \
+         parentheses",
+        14,
+        3,
+    );
+    assert_error(
+        &format!("{s}s.new()\n"),
+        "'new' has no 'self', so call it on the struct, as in 'Stack.new()'",
+        14,
+        3,
+    );
+    assert_error(
+        &format!("{s}print(Stack.size(s))\n"),
+        "'size' is a method, so call it on a value, as in 'value.size()'",
+        14,
+        13,
+    );
+    assert_error(
+        &format!("{s}Stack.nope()\n"),
+        "'Stack' has no function 'nope'",
+        14,
+        7,
+    );
+    assert_error(
+        &format!("{s}s.push()\n"),
+        "'push' takes 1 argument, but 0 were given",
+        14,
+        1,
+    );
+    assert_error(
+        &format!("{s}s.push(\"a\")\n"),
+        "expected int, found str",
+        14,
+        8,
+    );
+    assert_error(
+        &format!("{s}n = s.size\n"),
+        "'size' is a method, so it can only be called",
+        14,
+        7,
+    );
+    assert_eq!(
+        errors(&format!(
+            "{STACK}fn f() -> int;\n    ret g.size()\ng = Stack.new()\nprint(f())\n"
+        )),
+        []
+    );
+}
+
+#[test]
+fn impl_blocks_are_checked() {
+    let s = "struct S;\n    n: int\n";
+    assert_error(
+        &format!(
+            "{s}impl S;\n    fn f(self);\n        ret\nimpl S;\n    fn f(self);\n        ret\n"
+        ),
+        "'S' already has a method 'f'",
+        7,
+        8,
+    );
+    assert_error(
+        &format!("{s}impl S;\n    fn n(self) -> int;\n        ret 1\n"),
+        "'n' is a field of 'S', so a method cannot have its name",
+        4,
+        8,
+    );
+    assert_error(
+        &format!("{s}impl S;\n    fn f(self: S);\n        ret\n"),
+        "'self' needs no type, since it is the 'S' the method is called on",
+        4,
+        10,
+    );
+    assert_error(
+        &format!("{s}impl S;\n    fn f(x: int, self);\n        ret\n"),
+        "'self' can only be the first parameter of a method",
+        4,
+        18,
+    );
+    assert_error(
+        "fn f(self);\n    ret\n",
+        "'self' can only be the first parameter of a method",
+        1,
+        6,
+    );
+    assert_error(
+        &format!("{s}fn f();\n    impl S;\n        fn g(self);\n            ret\n"),
+        "impl blocks can only be at the top level",
+        4,
+        10,
+    );
+}
+
+#[test]
+fn a_change_through_a_method_is_lost_on_a_parameter_but_not_on_self() {
+    let source = format!("{STACK}fn f(s: Stack);\n    s.push(1)\n");
+    let analysis = analyze_source(&source);
+    let warnings: Vec<(String, usize, usize)> = analysis
+        .diagnostics
+        .into_iter()
+        .map(|d| (d.message, d.span.start.line, d.span.start.col))
+        .collect();
+    assert_eq!(
+        warnings,
+        [(
+            "changes to 's' are lost when 'f' returns, since parameters are copies; return it and \
+             assign the result where 'f' is called"
+                .to_string(),
+            14,
+            5
+        )]
+    );
+
+    let source = format!("{STACK}s = Stack.new()\ns.push(1)\nn = s.size()\n");
+    let analysis = analyze_source(&source);
+    let module = parse(&source).unwrap();
+    let Mod::Module { body } = &module;
+    let mut changed = HashSet::new();
+    collect_changed(&body[3..], &mut changed, &analysis.methods);
+    assert_eq!(changed, HashSet::from(["s".to_string()]));
 }

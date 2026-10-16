@@ -5,7 +5,7 @@
 //! label back every time, and later emit one stub behind it that prints the message.
 
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
-use crate::checker::{Enums, Structs, Symbol, Type, TypeChecker};
+use crate::checker::{Analysis, Structs, Type, TypeChecker};
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::{Callee, Inst, Program};
@@ -237,14 +237,9 @@ pub struct Context {
     /// The lowered module, produced by [`Context::lower`].
     pub program: Program,
     string_literals: HashMap<String, String>,
-    /// The type of every expression, keyed by span, from the checker.
-    types: HashMap<Span, Type>,
-    /// Every function and variable, with its type, from the checker.
-    symbols: Vec<Symbol>,
-    /// The variants of every enum the program defines, from the checker.
-    enums: Enums,
-    /// The fields of every struct the program defines, from the checker.
-    structs: Structs,
+    /// What the checker learned about the program: the type of every expression, every symbol,
+    /// enum, and struct, and how every method call was resolved.
+    analysis: Analysis,
     /// The tag of every variant without values that the code uses, each of which gets a static
     /// value.
     pub variant_statics: BTreeSet<usize>,
@@ -283,23 +278,14 @@ impl Context {
         {
             return Err(error.to_string());
         }
-        self.types = analysis.types;
-        self.symbols = analysis.symbols;
-        self.enums = analysis.enums;
-        self.structs = analysis.structs;
+        self.analysis = analysis;
         Ok(())
     }
 
     /// Lowers the checked `module` to IR, then notes every runtime routine it calls and whether it
     /// counts references.
     pub fn lower(&mut self, module: &Mod) -> Result<(), String> {
-        self.program = lower(
-            module,
-            &self.types,
-            &self.symbols,
-            &self.enums,
-            &self.structs,
-        )?;
+        self.program = lower(module, &self.analysis)?;
         let insts = self
             .program
             .functions
@@ -491,25 +477,28 @@ impl Context {
 
     /// Returns whether the program needs the string runtime.
     pub fn needs_strings(&self) -> bool {
-        self.types
+        self.analysis
+            .types
             .values()
-            .any(|ty| contains_str(ty, &self.structs, &mut HashSet::new()))
+            .any(|ty| contains_str(ty, &self.analysis.structs, &mut HashSet::new()))
             || self.uses(STRING_ROUTINES)
     }
 
     /// Returns whether the program needs the list runtime.
     pub fn needs_lists(&self) -> bool {
-        self.types
+        self.analysis
+            .types
             .values()
-            .any(|ty| contains_list(ty, &self.structs, &mut HashSet::new()))
+            .any(|ty| contains_list(ty, &self.analysis.structs, &mut HashSet::new()))
             || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
     }
 
     /// Returns whether the program has enum values, which need `stone.free_enum`.
     pub fn needs_enums(&self) -> bool {
-        self.types
+        self.analysis
+            .types
             .values()
-            .any(|ty| contains_enum(ty, &self.structs, &mut HashSet::new()))
+            .any(|ty| contains_enum(ty, &self.analysis.structs, &mut HashSet::new()))
     }
 
     /// Returns whether the program reads its environment: through `os.env` or `os.has_env`, or
@@ -743,6 +732,11 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
         }
         StmtKind::FunctionDef { body, .. } => {
             for s in body {
+                collect_calls_from_stmt(s, calls);
+            }
+        }
+        StmtKind::ImplDef { methods, .. } => {
+            for s in methods {
                 collect_calls_from_stmt(s, calls);
             }
         }

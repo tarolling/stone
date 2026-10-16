@@ -21,6 +21,8 @@
 "pub"
 "ret"
 "struct"
+"impl"
+"self"
 "true"
 "use"
 "while"

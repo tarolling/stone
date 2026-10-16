@@ -53,4 +53,4 @@ cargo run --release -- build examples/basics.stn  # compile
 cargo test
 ```
 
-To add a golden test, drop `name.stn` and `name.out` into `tests/programs/` (or `examples/`). If a backend can't handle a program yet, list it in `SKIPS` in `tests/programs.rs` and give the reason.
+To add a golden test, drop `name.stn` and `name.out` into `tests/programs/` (or `examples/`). Every program runs under both `stone run` and `stone build`, which must print the same, so `SKIPS` in `tests/programs.rs` stays empty. See [CONTRIBUTING.md](CONTRIBUTING.md) for how to send a change.

@@ -1,0 +1,57 @@
+name: Feature
+description: Suggest an idea
+labels: [enhancement]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Some general tips:
+
+        * Is this really a problem?
+        * Is this a problem stone should solve? Read [the philosophy](https://github.com/tarolling/stone/blob/main/docs/philosophy.md) first: stone aims for Python's simplicity with Rust's safety and speed, moves complexity into the compiler rather than asking the programmer to write it, and prefers changing semantics over adding a keyword.
+  - type: checkboxes
+    id: initial-checklist
+    attributes:
+      label: Initial checklist
+      options:
+        - label: I read the [contributing guide](https://github.com/tarolling/stone/blob/main/CONTRIBUTING.md) and [the philosophy](https://github.com/tarolling/stone/blob/main/docs/philosophy.md)
+          required: true
+        - label: I agree to follow the [Code of Conduct](https://github.com/tarolling/stone/blob/main/CODE_OF_CONDUCT.md)
+          required: true
+        - label: I searched [issues](https://github.com/tarolling/stone/issues?q=is%3Aissue) and couldn't find anything (or linked relevant results below)
+          required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: Problem
+      description: |
+        Please describe the problem.
+
+        Forget about the particular solution you have in mind.
+        Solution time is later!
+
+        What is missing? What are the use cases?
+        Describe which use cases are important and which are nice to have.
+        Convince the maintainers that there is a real problem.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Current solutions
+      description: |
+        Are there existing solutions?
+        Can these use cases be addressed in stone already, even awkwardly? Show the code.
+        How do other languages, such as Python or Rust, handle them?
+    validations:
+      required: true
+  - type: textarea
+    id: solution
+    attributes:
+      label: Proposed solutions
+      description: |
+        What is a better solution?
+        Why is that better than current solutions at addressing the use cases?
+        If it changes the language, show example stone code, and say how it fits the philosophy's ranking: safety, then programmer simplicity, then clear errors, then speed, then compiler simplicity.
+    validations:
+      required: true

@@ -41,7 +41,7 @@ STONE_DEBUG=1 cargo run -- build examples/basics.stn
 
 ## What CI runs
 
-Every push and pull request runs, and must pass:
+Every push and pull request runs, and must pass, on x86-64 Linux:
 
 ```sh
 cargo fmt --check
@@ -49,12 +49,22 @@ cargo clippy --all-targets -- -D warnings
 cargo clippy --all-targets --features self-update -- -D warnings
 cargo test
 cargo test --features self-update --bin stone
-shellcheck install.sh scripts/test-install.sh
+shellcheck install.sh scripts/*.sh
 sh scripts/test-install.sh
+sh scripts/test-bump-version.sh
+sh scripts/test-changelog.sh
 (cd editors/vscode && npm test)
 ```
 
-A separate job tests the fuzz program generator and fuzzes each crash target briefly.
+with `qemu-user` and `binutils-aarch64-linux-gnu` installed, so every golden program is also
+cross-built for arm64 and run under qemu, and the built-in assembler is compared with GNU as for
+both processors. Other jobs run:
+
+- `cargo test` natively on arm64 Linux (`ubuntu-24.04-arm`), with `qemu-user` and
+  `binutils-x86-64-linux-gnu` for the x86-64 cross pass.
+- `cargo test` and `cargo test --manifest-path fuzz/Cargo.toml` natively on arm64 macOS
+  (`macos-15`), so every golden program runs as a signed Mach-O.
+- The fuzz program generator's tests, then each crash target fuzzed for a minute on nightly.
 
 ## Workflow
 

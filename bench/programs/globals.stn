@@ -7,12 +7,9 @@ modulus = 2147483648
 fn lcg(rounds: int) -> int:
     x = 1
     total = 0
-    i = 0
-    while i < rounds:
-        x = x * multiplier + increment
-        x = x - (x / modulus) * modulus
-        total = total + x / 65536
-        i = i + 1
+    for i in range(rounds):
+        x = (x * multiplier + increment) % modulus
+        total += x / 65536
     ret total
 
-print(lcg(20000000))
+print(lcg(int(args()[0])))

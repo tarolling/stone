@@ -1,0 +1,13 @@
+// an index into a list of elements three values wide is checked without dividing by the width,
+// and an index so large that multiplying it by the width wraps around is still out of range
+struct V:
+    x: int
+    y: int
+    z: int
+
+vs = [V(x=1, y=2, z=3), V(x=4, y=5, z=6)]
+print(vs[-1].z, vs[-2].x, vs[1].y)
+vs[-1].x += 10
+print(vs)
+huge = 3074457345618258603
+print(vs[huge].x)

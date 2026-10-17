@@ -167,14 +167,16 @@ stay in the language, and the compiler's job is to prove them unnecessary and re
 to let the programmer turn them off.
 
 Status: the compiler lowers to an IR, allocates registers with linear scan, and specializes a
-few cases such as division by a constant. Arithmetic on whole lists, such as `a * 2.0 + b`,
+few cases such as division and remainder by a constant. Arithmetic on whole lists, such as `a * 2.0 + b`,
 compiles to one loop with no intermediate lists and no index checks, which handles two elements
 at a time with SSE2 or NEON where the operations allow, so on the `vector` benchmark it is
-about 3 times as fast as numpy, which builds a temporary array for each operator. A tuple is
+about 2.7 times as fast as numpy, which builds a temporary array for each operator. A tuple is
 never allocated: its values live in registers like any other variables, a function takes and
 returns them as separate values, and a list of tuples stores each element's values side by side,
 like a Rust `Vec<(i64, String)>`, which is a first step toward choosing where every value lives.
-Structs are compiled the same way, so a `list[Point]` is a flat array of coordinates.
+Structs are compiled the same way, so a `list[Point]` is a flat array of coordinates, though each
+change to a field of one still checks the list's bounds and that it is not shared, which keeps
+the `nbody` benchmark about 5 times slower than C.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.

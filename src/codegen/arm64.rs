@@ -637,6 +637,14 @@ mod tests {
     }
 
     #[test]
+    fn modulo_by_a_power_of_two_shifts_instead_of_dividing() {
+        let assembly = assemble("x = 7\nprint(x % 8, x % -2, x % 1)\n").unwrap();
+        assert!(!assembly.contains("sdiv"), "{assembly}");
+        assert!(assembly.contains("\tlsl\tx9, x9, #3"), "{assembly}");
+        assert!(!assembly.contains("division by zero"), "{assembly}");
+    }
+
+    #[test]
     fn division_by_a_variable_keeps_both_checks() {
         for divisor in ["y", "0", "-1"] {
             let source = format!("x = 7\ny = 2\nprint(x / {divisor}, x % {divisor})\n");

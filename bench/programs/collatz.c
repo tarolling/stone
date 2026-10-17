@@ -1,10 +1,11 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 long chain(long n) {
     long steps = 0;
     while (n != 1) {
         if (n % 2 == 0)
-            n = n / 2;
+            n /= 2;
         else
             n = 3 * n + 1;
         steps++;
@@ -25,7 +26,7 @@ long longest(long limit) {
     return best_start;
 }
 
-int main(void) {
-    printf("%ld\n", longest(300000));
+int main(int argc, char **argv) {
+    printf("%ld\n", longest(atol(argv[1])));
     return 0;
 }

@@ -20,7 +20,7 @@ long count_primes(long limit) {
     return count;
 }
 
-int main(void) {
-    printf("%ld\n", count_primes(5000000));
+int main(int argc, char **argv) {
+    printf("%ld\n", count_primes(atol(argv[1])));
     return 0;
 }

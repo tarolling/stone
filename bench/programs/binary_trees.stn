@@ -1,0 +1,31 @@
+// enums holding themselves: building, walking, and freeing many binary trees
+enum Tree:
+    Leaf
+    Node(Tree, Tree)
+
+fn make(depth: int) -> Tree:
+    if depth == 0:
+        ret Tree.Node(Tree.Leaf, Tree.Leaf)
+    ret Tree.Node(make(depth - 1), make(depth - 1))
+
+fn check(t: Tree) -> int:
+    match t:
+        case Tree.Leaf:
+            ret 0
+        case Tree.Node(left, right):
+            ret 1 + check(left) + check(right)
+
+fn run(max_depth: int):
+    print(max_depth + 1, check(make(max_depth + 1)))
+    long_lived = make(max_depth)
+    depth = 4
+    while depth <= max_depth:
+        iterations = 2 ** (max_depth - depth + 4)
+        total = 0
+        for i in range(iterations):
+            total += check(make(depth))
+        print(depth, iterations, total)
+        depth += 2
+    print(max_depth, check(long_lived))
+
+run(int(args()[0]))

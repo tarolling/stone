@@ -1,8 +1,10 @@
 // compiled code divides by constants without idiv or runtime checks where it can,
-// so these must still round toward zero like the interpreter
+// so these must still round toward zero like the interpreter, and remainders must take the
+// dividend's sign
 
 fn show(x: int):
     print(x, x / 1, x / 2, x / -2, x / 8, x / -8, x / 3, x / -7)
+    print(x % 1, x % 2, x % -2, x % 8, x % -8, x % 3, x % -7, x % 4096, x % -4611686018427387904)
 
 show(0)
 show(1)
@@ -21,6 +23,8 @@ show(biggest)
 show(smallest)
 print(biggest / 4611686018427387904, smallest / 4611686018427387904)
 print(smallest / -4611686018427387904, smallest / 2147483648)
+print(biggest % 4611686018427387904, smallest % 4611686018427387904, smallest % 2147483648)
+print(biggest % -4611686018427387904, smallest % -4611686018427387904, smallest % 2)
 
 // the checks stay for 0 and -1, which can fail
 print(biggest / -1)

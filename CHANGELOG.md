@@ -14,9 +14,16 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 - `m.get(k)` reads a map's value for `k` as an option: `some` of the value, or `none` if the map
   has no entry for `k`, where `m[k]` stops the program.
+- Benchmarks of strings (`strings`), maps (`wordcount`), structs and methods (`nbody`), and enums
+  (`binary_trees`). Every benchmark reads its workload size from a `.args` file that the runner
+  passes to each version, and the existing programs use `%` and `+=`.
 
 ### Changed
 
+- `%` by a constant power of two compiles to shifts instead of `idiv`, as `/` already did, which
+  makes the `lcg` benchmark about 3.7 times as fast.
+- An index into a list of structs or tuples is checked without dividing the list's length by the
+  element's width, which makes the `nbody` benchmark about 3.9 times as fast.
 - Blocks open with `:`, as in Python, instead of `;`: `if x:`, `fn add(a: int, b: int) -> int:`,
   `enum Shape:`, `struct Point:`, `impl Point:`, `match s:`, and `case Shape.Circle(r):`. `;` is
   no longer valid anywhere and reports `unexpected character ';'`. Since `;` only ever opened a

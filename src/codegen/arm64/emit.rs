@@ -759,9 +759,7 @@ impl Arm64Generator {
                         if *op == BinOp::Div {
                             self.divide_by_constant(dividend, divisor);
                         } else {
-                            self.mov_imm("x11", divisor);
-                            self.emit(&format!("\tsdiv\tx9, {dividend}, x11"));
-                            self.emit(&format!("\tmsub\tx9, x9, x11, {dividend}"));
+                            self.remainder_by_constant(dividend, divisor);
                         }
                     }
                     _ => {
@@ -1342,6 +1340,35 @@ impl Arm64Generator {
             // the quotient is never the minimum here, so negating it cannot overflow
             self.emit("\tneg\tx9, x9");
         }
+    }
+
+    /// Leaves in `x9` the remainder of `dividend` divided by a constant that is neither 0 nor -1,
+    /// taking the dividend's sign.
+    ///
+    /// A power of two becomes shifts: the quotient rounded toward zero, as `divide_by_constant`
+    /// computes it, shifted back and subtracted. The sign of the divisor never matters. For
+    /// example, `x % 8` shifts right by 3, left by 3, and subtracts, and `x % 10` emits `sdiv`
+    /// and `msub`.
+    fn remainder_by_constant(&mut self, dividend: &str, divisor: i64) {
+        let magnitude = divisor.unsigned_abs();
+        if !magnitude.is_power_of_two() {
+            self.mov_imm("x11", divisor);
+            self.emit(&format!("\tsdiv\tx9, {dividend}, x11"));
+            self.emit(&format!("\tmsub\tx9, x9, x11, {dividend}"));
+            return;
+        }
+
+        let shift = magnitude.trailing_zeros();
+        if shift == 0 {
+            self.emit("\tmov\tx9, #0");
+            return;
+        }
+        // an arithmetic shift rounds down, so first add 2^shift - 1 to a negative dividend
+        self.emit(&format!("\tasr\tx9, {dividend}, #63")); // all ones if negative
+        self.emit(&format!("\tadd\tx9, {dividend}, x9, lsr #{}", 64 - shift));
+        self.emit(&format!("\tasr\tx9, x9, #{shift}"));
+        self.emit(&format!("\tlsl\tx9, x9, #{shift}"));
+        self.emit(&format!("\tsub\tx9, {dividend}, x9"));
     }
 
     /// Jumps to the conversion failure unless the float in `d0` truncates to an int, which is

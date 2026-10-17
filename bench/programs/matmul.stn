@@ -5,8 +5,7 @@ fn matrix(n: int, seed: int) -> list[list[int]]:
     for i in range(n):
         row = []
         for j in range(n):
-            x = x * 1103515245 + 12345
-            x = x - (x / 2147483648) * 2147483648
+            x = (x * 1103515245 + 12345) % 2147483648
             row.append(x / 2097152)
         rows.append(row)
     ret rows
@@ -18,7 +17,7 @@ fn multiply(a: list[list[int]], b: list[list[int]], n: int) -> list[list[int]]:
         for j in range(n):
             total = 0
             for k in range(n):
-                total = total + a[i][k] * b[k][j]
+                total += a[i][k] * b[k][j]
             row.append(total)
         c.append(row)
     ret c
@@ -27,8 +26,8 @@ fn checksum(c: list[list[int]], n: int) -> int:
     total = 0
     for i in range(n):
         for j in range(n):
-            total = total + c[i][j] * (i + j + 1)
+            total += c[i][j] * (i + j + 1)
     ret total
 
-n = 300
+n = int(args()[0])
 print(checksum(multiply(matrix(n, 1), matrix(n, 2), n), n))

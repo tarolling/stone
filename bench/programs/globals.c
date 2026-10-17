@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 
 long multiplier = 1103515245;
 long increment = 12345;
@@ -14,7 +15,7 @@ long lcg(long rounds) {
     return total;
 }
 
-int main(void) {
-    printf("%ld\n", lcg(20000000));
+int main(int argc, char **argv) {
+    printf("%ld\n", lcg(atol(argv[1])));
     return 0;
 }

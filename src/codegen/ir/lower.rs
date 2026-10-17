@@ -1979,10 +1979,8 @@ impl<'a> Lowerer<'a> {
                     let width = self.leaves(&elem).len();
                     // an index out of range points at its own subscript
                     self.span = span;
-                    let count = self.element_count(list, width);
-                    let position = self.list_position(index, count, false, INDEX_RANGE);
+                    let first = self.element_slot(list, index, width, INDEX_RANGE);
                     self.span = outer;
-                    let first = self.first_slot(position, width);
                     location = Location::Slots {
                         list,
                         first,
@@ -4742,6 +4740,107 @@ impl<'a> Lowerer<'a> {
         Operand::Reg(slot)
     }
 
+    /// Returns the slot where element `index` of `list` starts, whose elements are `width` slots
+    /// each, counting a negative index from the end and stopping the program with `message`
+    /// unless that is an element, as [`Lowerer::list_position`] does.
+    ///
+    /// Only a negative index or a failure divides the slot count by `width` for the element
+    /// count, since an index from 0 is in range exactly when the slot it starts at is below the
+    /// slot count. Checking it against the slot count first keeps that multiplication from
+    /// overflowing.
+    fn element_slot(
+        &mut self,
+        list: Operand,
+        index: Operand,
+        width: usize,
+        message: &str,
+    ) -> Operand {
+        if width == 1 {
+            let count = self.element_count(list, width);
+            return self.list_position(index, count, false, message);
+        }
+        let slots = self.fresh();
+        self.push(Inst::ListLen { dst: slots, list });
+        let position = self.fresh();
+        self.push(Inst::Copy {
+            dst: position,
+            src: index,
+        });
+        let (negative, check, bounded, fails, holds) = (
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+        );
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(position),
+            rhs: Operand::Imm(0),
+            then: negative,
+            otherwise: check,
+        });
+        self.start(negative);
+        let count = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Div,
+            dst: count,
+            lhs: Operand::Reg(slots),
+            rhs: Operand::Imm(width as i64),
+        });
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: position,
+            lhs: Operand::Reg(position),
+            rhs: Operand::Reg(count),
+        });
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(position),
+            rhs: Operand::Imm(0),
+            then: fails,
+            otherwise: check,
+        });
+        self.start(check);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(position),
+            rhs: Operand::Reg(slots),
+            then: bounded,
+            otherwise: fails,
+        });
+        self.start(bounded);
+        let first = self.first_slot(Operand::Reg(position), width);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: first,
+            rhs: Operand::Reg(slots),
+            then: holds,
+            otherwise: fails,
+        });
+        self.start(fails);
+        let values = match message.contains("{}") {
+            true => {
+                let count = self.fresh();
+                self.push(Inst::Binary {
+                    op: BinOp::Div,
+                    dst: count,
+                    lhs: Operand::Reg(slots),
+                    rhs: Operand::Imm(width as i64),
+                });
+                vec![index, Operand::Reg(count)]
+            }
+            false => Vec::new(),
+        };
+        self.terminate(Terminator::Fail(message.to_string(), values));
+        self.start(holds);
+        first
+    }
+
     /// Returns slot `field` of the element starting at slot `first`.
     fn slot(&mut self, first: Operand, field: usize) -> Operand {
         if field == 0 {
@@ -4769,6 +4868,18 @@ impl<'a> Lowerer<'a> {
         kinds: &[Option<RcKind>],
     ) -> Vec<Operand> {
         let first = self.first_slot(position, width);
+        self.load_slots_from(list, first, leaves, kinds)
+    }
+
+    /// Reads `leaves`, the values wanted of the element of `list` that starts at slot `first`,
+    /// retaining each counted value as [`Lowerer::load_slots`] does.
+    fn load_slots_from(
+        &mut self,
+        list: Operand,
+        first: Operand,
+        leaves: std::ops::Range<usize>,
+        kinds: &[Option<RcKind>],
+    ) -> Vec<Operand> {
         let mut values = Vec::new();
         for field in leaves {
             let index = self.slot(first, field);
@@ -4797,9 +4908,8 @@ impl<'a> Lowerer<'a> {
         let kinds = self.element_kinds(list_expr);
         let list = self.list_operand(list_expr, &[index])?;
         let index = self.expr(index)?;
-        let count = self.element_count(list, width);
-        let position = self.list_position(index, count, false, INDEX_RANGE);
-        let values = self.load_slots(list, position, width, leaves.clone(), &kinds);
+        let first = self.element_slot(list, index, width, INDEX_RANGE);
+        let values = self.load_slots_from(list, first, leaves.clone(), &kinds);
         for (&value, field) in values.iter().zip(leaves) {
             self.own(value, kinds[field]);
         }

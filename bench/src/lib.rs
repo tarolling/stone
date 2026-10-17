@@ -3,7 +3,9 @@
 //!
 //! Each benchmark is a set of files in `bench/programs/` sharing a stem, such as `fib.stn`,
 //! `fib.c`, `fib.py`, and `fib.out`, where the `.out` file holds what all three must print. A
-//! benchmark of arithmetic on lists may also have a numpy version, such as `vector.np.py`.
+//! benchmark may also have a `.args` file, such as `fib.args`, whose lines are the command-line
+//! arguments every version runs with, and a benchmark of arithmetic on lists may have a numpy
+//! version, such as `vector.np.py`.
 
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -31,6 +33,20 @@ impl Program {
     /// Returns whether the program has a numpy version, `<name>.np.py`.
     pub fn has_numpy(&self) -> bool {
         self.file("np.py").is_file()
+    }
+
+    /// Returns the arguments every version of the program runs with, one per line of
+    /// `<name>.args`, or none if there is no such file.
+    ///
+    /// For example, a `fib.args` holding `35` gives `["35"]`.
+    pub fn args(&self) -> Result<Vec<String>, String> {
+        let path = self.file("args");
+        if !path.is_file() {
+            return Ok(Vec::new());
+        }
+        let text =
+            std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        Ok(text.lines().map(str::to_string).collect())
     }
 }
 
@@ -350,11 +366,34 @@ mod tests {
     #[test]
     fn a_numpy_version_is_optional() {
         let dir = scratch("discover_numpy");
-        touch(&dir, &["fib.stn", "fib.c", "fib.py", "fib.out", "vector.stn"]);
-        touch(&dir, &["vector.c", "vector.py", "vector.np.py", "vector.out"]);
+        touch(
+            &dir,
+            &["fib.stn", "fib.c", "fib.py", "fib.out", "vector.stn"],
+        );
+        touch(
+            &dir,
+            &["vector.c", "vector.py", "vector.np.py", "vector.out"],
+        );
         let programs = discover(&dir).unwrap();
         let numpy: Vec<bool> = programs.iter().map(Program::has_numpy).collect();
         assert_eq!(numpy, [false, true]);
+    }
+
+    #[test]
+    fn args_are_read_one_per_line() {
+        let dir = scratch("args_lines");
+        touch(&dir, &["fib.stn", "fib.c", "fib.py", "fib.out"]);
+        std::fs::write(dir.join("fib.args"), "35\n10\n").unwrap();
+        let programs = discover(&dir).unwrap();
+        assert_eq!(programs[0].args().unwrap(), ["35", "10"]);
+    }
+
+    #[test]
+    fn args_are_optional() {
+        let dir = scratch("args_optional");
+        touch(&dir, &["fib.stn", "fib.c", "fib.py", "fib.out"]);
+        let programs = discover(&dir).unwrap();
+        assert_eq!(programs[0].args().unwrap(), Vec::<String>::new());
     }
 
     /// Every benchmark must stay valid stone, so a language change that breaks one fails here

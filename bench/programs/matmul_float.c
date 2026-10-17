@@ -32,8 +32,8 @@ double checksum(const double *c, long n) {
     return total;
 }
 
-int main(void) {
-    long n = 300;
+int main(int argc, char **argv) {
+    long n = atol(argv[1]);
     double *a = matrix(n, 1);
     double *b = matrix(n, 2);
     double *c = multiply(a, b, n);

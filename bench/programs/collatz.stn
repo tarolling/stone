@@ -2,11 +2,11 @@
 fn chain(n: int) -> int:
     steps = 0
     while n != 1:
-        if n - (n / 2) * 2 == 0:
-            n = n / 2
+        if n % 2 == 0:
+            n /= 2
         else:
             n = 3 * n + 1
-        steps = steps + 1
+        steps += 1
     ret steps
 
 fn longest(limit: int) -> int:
@@ -19,4 +19,4 @@ fn longest(limit: int) -> int:
             best_start = start
     ret best_start
 
-print(longest(300000))
+print(longest(int(args()[0])))

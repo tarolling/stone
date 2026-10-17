@@ -1025,14 +1025,12 @@ fn a_field_of_a_list_element_is_one_slot_of_it() {
         .next()
         .unwrap(),
         "fn f(v0, v1):\n\
-         b0:\n  v0 = list_unique v0\n  v2 = len v0\n  v3 = div v2, 2\n  v4 = copy v1\n  \
-         br_lt v4, 0 -> b1, b2\n\
-         b1:\n  v4 = add v4, v3\n  jmp b2\n\
-         b2:\n  br_ge v4, 0 -> b4, b3\n\
-         b3:\n  fail \"list index out of range (index {}, length {})\", v1, v3\n\
-         b4:\n  br_lt v4, v3 -> b6, b5\n\
-         b5:\n  fail \"list index out of range (index {}, length {})\", v1, v3\n\
-         b6:\n  v5 = mul v4, 2\n  v6 = add v5, 1\n  list_set v0, v6, 7\n  ret v0\n"
+         b0:\n  v0 = list_unique v0\n  v2 = len v0\n  v3 = copy v1\n  br_lt v3, 0 -> b1, b2\n\
+         b1:\n  v4 = div v2, 2\n  v3 = add v3, v4\n  br_lt v3, 0 -> b4, b2\n\
+         b2:\n  br_lt v3, v2 -> b3, b4\n\
+         b3:\n  v5 = mul v3, 2\n  br_lt v5, v2 -> b5, b4\n\
+         b4:\n  v6 = div v2, 2\n  fail \"list index out of range (index {}, length {})\", v1, v6\n\
+         b5:\n  v7 = add v5, 1\n  list_set v0, v7, 7\n  ret v0\n"
     );
 }
 
@@ -1140,5 +1138,39 @@ fn comparing_enums_calls_a_function_made_for_their_type() {
         "ret 0",
     ] {
         assert!(helper.contains(line), "{line} in {helper}");
+    }
+}
+
+/// Returns whether every division in `function` either stops the program, computing the length
+/// a failure message prints, or counts a negative index from the end, so an index that is in
+/// range never divides.
+fn divides_only_off_the_in_range_path(function: &Function) -> bool {
+    function.blocks.iter().all(|block| {
+        block.insts.iter().all(|inst| {
+            let Inst::Binary {
+                op: BinOp::Div,
+                dst,
+                ..
+            } = inst
+            else {
+                return true;
+            };
+            let adjusts = block.insts.iter().any(|other| {
+                matches!(other, Inst::Binary { op: BinOp::Add, rhs, .. } if *rhs == Operand::Reg(*dst))
+            });
+            adjusts || matches!(block.term, Terminator::Fail(..))
+        })
+    })
+}
+
+#[test]
+fn an_index_into_a_list_of_wide_elements_divides_only_when_negative_or_failing() {
+    let read = "fn f(ps: list[tuple[int, int, int]], i: int) -> int:\n    ret ps[i][1]\n";
+    let change = "struct P:\n    x: float\n    y: float\n    z: float\n\n\
+                  fn g(ps: list[P], i: int) -> list[P]:\n    ps[i].y += 1.0\n    ret ps\n";
+    for source in [read, change] {
+        let program = lower_source(source);
+        let function = &program.functions[0];
+        assert!(divides_only_off_the_in_range_path(function), "{function}");
     }
 }

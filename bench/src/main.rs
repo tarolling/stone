@@ -3,8 +3,9 @@
 //! For example, `cargo run --release --manifest-path bench/Cargo.toml -- --runs 3 --filter fib`
 //! builds `bench/programs/fib.stn` with `stone build`, `fib.c` with `gcc -O2` and `gcc -O0`, checks
 //! that all of them and `python3 fib.py` print `fib.out`, then prints a table of their median
-//! times over three runs. A benchmark with a numpy version, such as `vector.np.py`, also runs it
-//! with the `--numpy` interpreter when that can import numpy.
+//! times over three runs. Every version runs with the arguments in the benchmark's `.args` file,
+//! such as `fib.args`, if it has one. A benchmark with a numpy version, such as `vector.np.py`,
+//! also runs it with the `--numpy` interpreter when that can import numpy.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -104,8 +105,13 @@ fn build_stone(root: &Path) -> Result<PathBuf, String> {
 }
 
 /// Builds `program` for every implementation that needs building, and returns the command that
-/// runs each one, in [`Implementation::ALL`] order.
-fn prepare(program: &Program, stone: &Path, out_dir: &Path) -> Result<Vec<Vec<OsString>>, String> {
+/// runs each one with `args`, in [`Implementation::ALL`] order.
+fn prepare(
+    program: &Program,
+    args: &[String],
+    stone: &Path,
+    out_dir: &Path,
+) -> Result<Vec<Vec<OsString>>, String> {
     let mut commands = Vec::new();
     for implementation in Implementation::ALL {
         // stone build also writes <binary>.s next to the binary, e.g. collatz-stone.s
@@ -134,9 +140,13 @@ fn prepare(program: &Program, stone: &Path, out_dir: &Path) -> Result<Vec<Vec<Os
                     "gcc".into(),
                     level.into(),
                     "-fwrapv".into(),
+                    // stone never fuses a multiply and an add, so neither may C
+                    "-ffp-contract=off".into(),
                     program.file("c").into(),
                     "-o".into(),
                     binary.clone().into(),
+                    // for sqrt in nbody
+                    "-lm".into(),
                 ]
             }
             Implementation::Python => {
@@ -146,6 +156,9 @@ fn prepare(program: &Program, stone: &Path, out_dir: &Path) -> Result<Vec<Vec<Os
         };
         run_command(&build)?;
         commands.push(vec![binary.into()]);
+    }
+    for command in &mut commands {
+        command.extend(args.iter().map(OsString::from));
     }
     Ok(commands)
 }
@@ -208,7 +221,8 @@ fn run() -> Result<(), String> {
 
     let mut rows = Vec::new();
     for program in &programs {
-        let commands = prepare(program, &stone, &out_dir)?;
+        let args = program.args()?;
+        let commands = prepare(program, &args, &stone, &out_dir)?;
         let expected = std::fs::read_to_string(program.file("out"))
             .map_err(|e| format!("{}: {e}", program.file("out").display()))?;
         let mut times = [Duration::ZERO; 4];
@@ -232,7 +246,8 @@ fn run() -> Result<(), String> {
             true => {
                 let what = format!("{} under numpy", program.name);
                 eprintln!("running {what}");
-                let argv = [options.numpy.clone(), program.file("np.py").into()];
+                let mut argv = vec![options.numpy.clone(), program.file("np.py").into()];
+                argv.extend(args.iter().map(OsString::from));
                 let samples = measure(&argv, options.runs, &expected, &what)?;
                 Some(if options.use_min {
                     min(&samples)

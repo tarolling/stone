@@ -1,3 +1,6 @@
+import sys
+
+
 def count_primes(limit):
     is_prime = []
     for i in range(limit + 1):
@@ -10,12 +13,12 @@ def count_primes(limit):
             m = p * p
             while m <= limit:
                 is_prime[m] = 0
-                m = m + p
-        p = p + 1
+                m += p
+        p += 1
     count = 0
     for i in range(limit + 1):
-        count = count + is_prime[i]
+        count += is_prime[i]
     return count
 
 
-print(count_primes(5000000))
+print(count_primes(int(sys.argv[1])))

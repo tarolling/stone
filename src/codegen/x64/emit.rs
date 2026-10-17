@@ -691,9 +691,7 @@ impl X64Generator {
                         if *op == BinOp::Div {
                             self.divide_by_constant(divisor);
                         } else {
-                            self.emit(&format!("\tmov\trcx, {divisor}"));
-                            self.emit("\tcqo"); // sign-extend rax into rdx
-                            self.emit("\tidiv\trcx");
+                            self.remainder_by_constant(divisor);
                         }
                     }
                     _ => {
@@ -1346,6 +1344,38 @@ impl X64Generator {
             // the quotient is never the minimum here, so negating it cannot overflow
             self.emit("\tneg\trax");
         }
+    }
+
+    /// Leaves in `rdx` the remainder of `rax` divided by a constant that is neither 0 nor -1,
+    /// taking the dividend's sign like `idiv`.
+    ///
+    /// A power of two becomes shifts: the quotient rounded toward zero, as `divide_by_constant`
+    /// computes it, shifted back and subtracted. The sign of the divisor never matters. For
+    /// example, `x % 8` emits `sar rcx, 3`, `shl rcx, 3`, and `sub rdx, rcx`, and `x % 10` emits
+    /// a plain `idiv`.
+    fn remainder_by_constant(&mut self, divisor: i64) {
+        let magnitude = divisor.unsigned_abs();
+        if !magnitude.is_power_of_two() {
+            self.emit(&format!("\tmov\trcx, {divisor}"));
+            self.emit("\tcqo"); // sign-extend rax into rdx
+            self.emit("\tidiv\trcx");
+            return;
+        }
+
+        let shift = magnitude.trailing_zeros();
+        if shift == 0 {
+            self.emit("\txor\tedx, edx");
+            return;
+        }
+        // an arithmetic shift rounds down, so first add 2^shift - 1 to a negative dividend
+        self.emit("\tmov\trcx, rax");
+        self.emit("\tsar\trcx, 63"); // all ones if negative
+        self.emit(&format!("\tshr\trcx, {}", 64 - shift));
+        self.emit("\tadd\trcx, rax");
+        self.emit(&format!("\tsar\trcx, {shift}"));
+        self.emit(&format!("\tshl\trcx, {shift}"));
+        self.emit("\tmov\trdx, rax");
+        self.emit("\tsub\trdx, rcx");
     }
 
     /// Converts the float whose bits are in `rax` to an int in `rax`, dropping any fraction.

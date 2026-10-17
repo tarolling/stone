@@ -551,8 +551,16 @@ mod tests {
     }
 
     #[test]
+    fn modulo_by_a_power_of_two_shifts_instead_of_dividing() {
+        let assembly = assemble("x = 7\nprint(x % 8, x % -2, x % 1)\n").unwrap();
+        assert!(!assembly.contains("idiv"), "{assembly}");
+        assert!(assembly.contains("\tshl\trcx, 3"), "{assembly}");
+        assert!(!assembly.contains("division by zero"), "{assembly}");
+    }
+
+    #[test]
     fn modulo_by_a_safe_constant_skips_the_checks() {
-        let assembly = assemble("x = 7\nprint(x % 10, x % -8)\n").unwrap();
+        let assembly = assemble("x = 7\nprint(x % 10, x % -3)\n").unwrap();
         assert!(assembly.contains("\tidiv\trcx"), "{assembly}");
         assert!(!assembly.contains("division by zero"), "{assembly}");
         let checked = assemble("x = 7\ny = 3\nprint(x % y)\n").unwrap();

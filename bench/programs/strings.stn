@@ -1,0 +1,29 @@
+// strings: formatting numbers, joining them into a sentence, and splitting it back into words
+fn sentence(n: int, seed: int) -> str:
+    words = []
+    x = seed
+    for i in range(n):
+        x = (x * 1103515245 + 12345) % 2147483648
+        words.append(str(x / 65536))
+    ret " ".join(words)
+
+fn score(text: str) -> int:
+    total = 0
+    for word in text.split():
+        total += word.len()
+        if word.startswith("1"):
+            total += 1
+        if word.endswith("7"):
+            total += 2
+        if word[0] == word[-1]:
+            total += 3
+    ret total
+
+fn run(rounds: int, n: int) -> int:
+    total = 0
+    for r in range(rounds):
+        text = sentence(n, r + 1)
+        total += score(text) + text.find("4242").unwrap_or(-1)
+    ret total
+
+print(run(int(args()[0]), int(args()[1])))

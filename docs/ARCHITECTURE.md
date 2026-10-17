@@ -81,4 +81,4 @@ Seeds for the text targets are the `.stn` programs in `fuzz/corpus/<target>/`. `
 
 ## Benchmarks
 
-The `bench/` crate compares compiled stone with C (`gcc -O2` and `gcc -O0`) and Python. It is a separate crate, like `fuzz/`, and depends on `stone` only for its tests. Each benchmark in `bench/programs/` is written three times, as `.stn`, `.c`, and `.py`, and the runner refuses to time a program unless all four builds print the same `.out` file. See `bench/README.md` for the programs and a baseline.
+The `bench/` crate compares compiled stone with C (`gcc -O2` and `gcc -O0`) and Python. It is a separate crate, like `fuzz/`, and depends on `stone` only for its tests. Each benchmark in `bench/programs/` is written three times, as `.stn`, `.c`, and `.py`, which all read the workload size from the arguments in a `.args` file, and the runner refuses to time a program unless all four builds print the same `.out` file. See `bench/README.md` for the programs and a baseline.

@@ -12,6 +12,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Changed
 
+- Typing `.` after a value opens completion right away, without Ctrl+Space, and a list, string,
+  map, or option offers only the builtin methods of its type.
 - Blocks open with `:`, as stone now writes them: a line ending in `:` indents the next line and
   highlights as the start of a block.
 

@@ -390,6 +390,7 @@ fn completion_offers_what_is_in_scope() {
 
 #[test]
 fn completion_after_a_dot_offers_methods() {
+    let untyped = doc("ys.\n");
     let doc = doc("xs = []\nxs.\nxs.le\n");
     let labels = |pos: Position| -> Vec<(String, Option<CompletionItemKind>)> {
         completion(&doc, pos, &MapSources::default())
@@ -419,11 +420,52 @@ fn completion_after_a_dot_offers_methods() {
     .iter()
     .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
     .collect();
-    assert_eq!(labels(at(2, 4)), methods);
-    assert_eq!(labels(at(3, 6)), methods);
+    // a list offers the list methods, even once a name is started
+    let list_methods = &methods[..5];
+    assert_eq!(labels(at(2, 4)), list_methods);
+    assert_eq!(labels(at(3, 6)), list_methods);
+    // and a receiver of unknown type offers every method
+    let unknown: Vec<_> = completion(&untyped, at(1, 4), &MapSources::default())
+        .into_iter()
+        .map(|item| (item.label, item.kind))
+        .collect();
+    assert_eq!(unknown, methods);
     // and methods are not offered as functions
     let outside = labels(at(1, 1));
     assert!(!outside.iter().any(|(label, _)| label == "len"));
+}
+
+#[test]
+fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
+    let doc = doc("xs = [1]\nxs.\ns = \"a\"\ns.\nm = {\"a\": 1}\nm.\no = some(1)\no.\nn = 1\nn.\n");
+    let labels = |pos: Position| -> Vec<String> {
+        completion(&doc, pos, &MapSources::default())
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    };
+    assert_eq!(
+        labels(at(2, 4)),
+        ["len", "append", "pop", "insert", "extend"]
+    );
+    assert_eq!(
+        labels(at(4, 3)),
+        [
+            "len",
+            "strip",
+            "split",
+            "join",
+            "find",
+            "startswith",
+            "endswith"
+        ]
+    );
+    assert_eq!(labels(at(6, 3)), ["len", "contains", "get"]);
+    assert_eq!(
+        labels(at(8, 3)),
+        ["is_some", "is_none", "unwrap", "unwrap_or"]
+    );
+    assert!(labels(at(10, 3)).is_empty());
 }
 
 #[test]

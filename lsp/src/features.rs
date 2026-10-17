@@ -961,18 +961,15 @@ pub fn completion(
         // a variable holding a struct offers its fields and methods
         let mut visible: Vec<&Symbol> = doc.analysis.visible_at(doc.file, pos).collect();
         visible.sort_by_key(|s| s.scope.is_none());
-        let held = visible.iter().find_map(|s| match &s.ty {
-            Type::Struct(name) if s.name == receiver => Some(name.clone()),
-            _ => None,
-        });
-        if let Some(name) = held {
-            let fields = struct_fields(&doc.analysis, &name).map(|field| CompletionItem {
+        let held = visible.iter().find(|s| s.name == receiver).map(|s| &s.ty);
+        if let Some(Type::Struct(name)) = held {
+            let fields = struct_fields(&doc.analysis, name).map(|field| CompletionItem {
                 label: field.name.clone(),
                 kind: Some(CompletionItemKind::FIELD),
                 detail: Some(signature(&doc.analysis, field)),
                 ..CompletionItem::default()
             });
-            let methods = struct_methods(&doc.analysis, &name)
+            let methods = struct_methods(&doc.analysis, name)
                 .filter(|method| has_self(&doc.analysis, method))
                 .map(|method| CompletionItem {
                     label: method.name.clone(),
@@ -982,8 +979,11 @@ pub fn completion(
                 });
             return fields.chain(methods).collect();
         }
+        // a variable of another type offers the builtin methods of its type, and an unknown
+        // receiver every builtin method
         return METHODS
             .iter()
+            .filter(|method| held.is_none_or(|ty| method_applies(method, ty)))
             .map(|method| CompletionItem {
                 label: method.to_string(),
                 kind: Some(CompletionItemKind::METHOD),
@@ -1054,6 +1054,32 @@ pub fn completion(
         });
     }
     items
+}
+
+/// Returns whether the builtin method `method` can be called on a value of type `ty`, from the
+/// receiver its signature names.
+///
+/// For example, `len` (`(str | list[T] | map[K, V]).len() -> int`) applies to a `str`, a list,
+/// and a map, and `append` (`list[T].append(item: T)`) only to a list.
+fn method_applies(method: &str, ty: &Type) -> bool {
+    let kind = match ty {
+        Type::Str => "str",
+        Type::List(_) => "list",
+        Type::Map(..) => "map",
+        Type::Enum { name, .. } if name == stone::checker::OPTION => "option",
+        _ => return false,
+    };
+    let Some(doc) = method_doc(method) else {
+        return false;
+    };
+    let Some((receivers, _)) = doc.signature.split_once(&format!(".{method}(")) else {
+        return false;
+    };
+    receivers
+        .trim_start_matches('(')
+        .trim_end_matches(')')
+        .split('|')
+        .any(|receiver| receiver.trim().split('[').next() == Some(kind))
 }
 
 /// Returns the public functions of the module in `file`, by their own names.

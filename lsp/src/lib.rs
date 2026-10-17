@@ -126,7 +126,11 @@ fn capabilities(encoding: Encoding) -> ServerCapabilities {
             work_done_progress_options: WorkDoneProgressOptions::default(),
         })),
         document_symbol_provider: Some(OneOf::Left(true)),
-        completion_provider: Some(CompletionOptions::default()),
+        // a `.` asks for completion, so a value's fields and methods show as it is typed
+        completion_provider: Some(CompletionOptions {
+            trigger_characters: Some(vec![".".to_string()]),
+            ..CompletionOptions::default()
+        }),
         ..ServerCapabilities::default()
     }
 }

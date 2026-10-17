@@ -114,6 +114,16 @@ fn prefers_utf8_positions_when_offered() {
 }
 
 #[test]
+fn asks_for_completion_after_a_dot() {
+    let (session, capabilities) = Session::start(None);
+    assert_eq!(
+        capabilities["completionProvider"]["triggerCharacters"],
+        json!(["."])
+    );
+    session.shut_down();
+}
+
+#[test]
 fn falls_back_to_utf16_positions() {
     let (session, capabilities) = Session::start(None);
     assert_eq!(capabilities["positionEncoding"], "utf-16");

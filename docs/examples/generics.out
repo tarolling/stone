@@ -1,0 +1,7 @@
+3
+a
+('one', 1)
+['ab', 'ab', 'ab']
+1.5 nothing
+Pair(first=1, second='one') Pair(first='one', second=1) 2
+2 1

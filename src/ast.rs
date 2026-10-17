@@ -51,8 +51,6 @@ pub enum Constant {
     // strings and characters
     Char(char),
     Str(String),
-    // none
-    None,
 }
 
 impl Constant {
@@ -78,7 +76,6 @@ impl Constant {
             Constant::Bool(_) => "bool",
             Constant::Char(_) => "char",
             Constant::Str(_) => "str",
-            Constant::None => "none",
         }
     }
 }
@@ -96,6 +93,14 @@ pub struct Arg {
     /// The parameter's type, which the checker requires but the parser accepts without, so
     /// that a missing one is a type error and editor features keep working.
     pub annotation: Option<TypeExpr>,
+}
+
+/// A type parameter of a generic function, struct, or enum, and the span of its name, such as `T`
+/// in `fn first[T](xs: list[T]) -> T:` or `enum Tree[T]:`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TypeParam {
+    pub name: Identifier,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -312,6 +317,9 @@ pub enum StmtKind {
         name_span: Span,
         /// Whether the definition starts with `pub`, so other modules may use it.
         public: bool,
+        /// The type parameters in brackets after the name, such as `T` in
+        /// `fn first[T](xs: list[T]) -> T:`, empty for a function that is not generic.
+        type_params: Vec<TypeParam>,
         args: Arguments,
         /// The type after `->`, if any; a function without one returns no value.
         returns: Option<TypeExpr>,
@@ -363,6 +371,9 @@ pub enum StmtKind {
         name_span: Span,
         /// Whether the definition starts with `pub`, so other modules may use it.
         public: bool,
+        /// The type parameters in brackets after the name, such as `T` in `enum Tree[T]:`, empty
+        /// for an enum that is not generic.
+        type_params: Vec<TypeParam>,
         variants: Vec<Variant>,
     },
     /// A struct definition, such as `struct Point:` followed by an indented line for each
@@ -373,6 +384,9 @@ pub enum StmtKind {
         name_span: Span,
         /// Whether the definition starts with `pub`, so other modules may use it.
         public: bool,
+        /// The type parameters in brackets after the name, such as `A` and `B` in
+        /// `struct Pair[A, B]:`, empty for a struct that is not generic.
+        type_params: Vec<TypeParam>,
         fields: Vec<Field>,
     },
     /// An `impl` block, such as `impl Point:` followed by indented functions: methods, whose

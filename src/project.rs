@@ -9,22 +9,31 @@
 //! named by its module, such as `geometry.shapes.area`, and every use of it is rewritten to that
 //! name. The checker and both backends then run on it as they would on one file.
 //!
+//! Every program is also linked with the prelude, [`crate::stdlib::PRELUDE`], whose `option`
+//! enum comes first in the linked module under its own name. Its variants are written alone in
+//! every file, so `some(x)` and `none` are rewritten to `option.some(x)` and `option.none`, which
+//! the checker and both backends treat like any other enum's variants.
+//!
 //! Builtin modules such as `os` have no file (see [`crate::stdlib::MODULES`]). Calls to their
 //! functions are rewritten to their linked names too, such as `os.env`, which the checker and
 //! both backends treat as builtins.
 
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 
 use crate::ast::{
     Expr, ExprContext, ExprKind, Mod, Pattern, PatternKind, Stmt, StmtKind, TypeExpr, TypeExprKind,
+    TypeParam,
 };
-use crate::checker::collect_assigned;
+use crate::checker::{OPTION, collect_assigned};
 use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::span::{FileId, Pos, Span};
-use crate::stdlib::{BUILTINS, BuiltinModule, is_builtin, module_function};
+use crate::stdlib::{
+    BuiltinModule, PRELUDE, PRELUDE_VARIANTS, is_builtin, is_reserved, module_function,
+};
 
 #[cfg(test)]
 mod tests;
@@ -117,15 +126,27 @@ pub struct SourceMap {
     files: Vec<SourceFile>,
 }
 
+/// The prelude as a file, which every [`SourceMap`] returns for [`FileId::PRELUDE`].
+static PRELUDE_FILE: LazyLock<SourceFile> = LazyLock::new(|| SourceFile {
+    path: PathBuf::from("<prelude>"),
+    module: String::new(),
+    source: PRELUDE.to_string(),
+});
+
 impl SourceMap {
-    /// Returns the file `id` names, or the entry file if there is no such file.
+    /// Returns the file `id` names, which is the prelude for [`FileId::PRELUDE`], or the entry
+    /// file if there is no such file.
     pub fn file(&self, id: FileId) -> &SourceFile {
+        if id == FileId::PRELUDE {
+            return &PRELUDE_FILE;
+        }
         self.files
             .get(id.0 as usize)
             .unwrap_or_else(|| &self.files[0])
     }
 
-    /// Returns every file with its id, the entry file first.
+    /// Returns every file of the program with its id, the entry file first. The prelude is not
+    /// one of them.
     pub fn files(&self) -> impl Iterator<Item = (FileId, &SourceFile)> {
         self.files
             .iter()
@@ -250,6 +271,9 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
     }
     loader.link()
 }
+
+/// The error for a variant of the prelude written with its enum's name, as in `option.some(1)`.
+const PRELUDE_QUALIFIED: &str = "write 'some(x)' or 'none' without 'option.'";
 
 /// What a name a file binds with `use` refers to while linking.
 enum Binding {
@@ -513,7 +537,7 @@ impl Loader<'_> {
             }
             let mut bindings = HashMap::new();
             for u in &self.uses[i] {
-                let error = if BUILTINS.contains(&u.name.as_str()) {
+                let error = if is_reserved(&u.name) {
                     Some(format!("'{}' is a builtin, so rename it with 'as'", u.name))
                 } else if bindings.contains_key(&u.name) {
                     Some(format!("'{}' is already imported", u.name))
@@ -550,10 +574,13 @@ impl Loader<'_> {
                 bindings.insert(u.name.clone(), binding);
             }
 
-            let own_structs: HashSet<String> = body
+            // each struct with its type parameters, which its impl blocks' functions can name
+            let own_structs: HashMap<String, Vec<TypeParam>> = body
                 .iter()
                 .filter_map(|stmt| match &stmt.kind {
-                    StmtKind::StructDef { name, .. } => Some(name.clone()),
+                    StmtKind::StructDef {
+                        name, type_params, ..
+                    } => Some((name.clone(), type_params.clone())),
                     _ => None,
                 })
                 .collect();
@@ -568,6 +595,7 @@ impl Loader<'_> {
                 types: &types,
                 module_names: &module_names,
                 locals: HashSet::new(),
+                type_params: HashSet::new(),
                 diagnostics: &mut self.diagnostics,
             };
             for mut stmt in body {
@@ -577,14 +605,14 @@ impl Loader<'_> {
                         if library {
                             *name = format!("{}.{name}", module_names[i]);
                         }
-                        rewriter.function(&mut stmt);
+                        rewriter.function(&mut stmt, &[]);
                     }
                     StmtKind::ImplDef {
                         name,
                         name_span,
                         methods,
                     } => {
-                        let error = if own_structs.contains(name.as_str()) {
+                        let error = if own_structs.contains_key(name.as_str()) {
                             None
                         } else if types[i].contains_key(name.as_str()) {
                             Some(format!(
@@ -605,13 +633,22 @@ impl Loader<'_> {
                                 .push(Diagnostic::error(*name_span, message));
                             continue;
                         }
+                        let outer = own_structs[name.as_str()].clone();
                         if library {
                             *name = format!("{}.{name}", module_names[i]);
                         }
-                        methods.iter_mut().for_each(|m| rewriter.function(m));
+                        methods
+                            .iter_mut()
+                            .for_each(|m| rewriter.function(m, &outer));
                     }
-                    StmtKind::EnumDef { name, variants, .. } => {
+                    StmtKind::EnumDef {
+                        name,
+                        type_params,
+                        variants,
+                        ..
+                    } => {
                         rewriter.locals.clear();
+                        rewriter.set_type_params(&[], type_params);
                         for variant in variants.iter_mut() {
                             variant
                                 .fields
@@ -622,8 +659,14 @@ impl Loader<'_> {
                             *name = format!("{}.{name}", module_names[i]);
                         }
                     }
-                    StmtKind::StructDef { name, fields, .. } => {
+                    StmtKind::StructDef {
+                        name,
+                        type_params,
+                        fields,
+                        ..
+                    } => {
                         rewriter.locals.clear();
+                        rewriter.set_type_params(&[], type_params);
                         fields
                             .iter_mut()
                             .for_each(|f| rewriter.type_expr(&mut f.annotation));
@@ -635,6 +678,7 @@ impl Loader<'_> {
                     _ if library => continue,
                     _ => {
                         rewriter.locals.clear();
+                        rewriter.type_params.clear();
                         rewriter.stmt(&mut stmt);
                     }
                 }
@@ -647,6 +691,7 @@ impl Loader<'_> {
         }
 
         report_method_collisions(&library_body, &entry_body, &mut self.diagnostics);
+        let mut body = prelude(&mut self.diagnostics);
         let public = functions
             .iter()
             .zip(&module_names)
@@ -658,16 +703,34 @@ impl Loader<'_> {
                     .map(move |(name, _)| format!("{module}.{name}"))
             })
             .collect();
-        library_body.extend(entry_body);
+        body.extend(library_body);
+        body.extend(entry_body);
         self.diagnostics
             .sort_by_key(|d| (d.span.file, d.span.start));
         Linked {
             root: self.root,
-            module: Mod::Module { body: library_body },
+            module: Mod::Module { body },
             sources: SourceMap { files: self.files },
             diagnostics: self.diagnostics,
             imports,
             public,
+        }
+    }
+}
+
+/// Parses the prelude, whose definitions every program is linked with and which keep their own
+/// names, such as `option`. It always parses, so an error in it is a bug in the compiler, but one
+/// is still reported rather than lost.
+fn prelude(diagnostics: &mut Vec<Diagnostic>) -> Vec<Stmt> {
+    let parsed = Lexer::with_file(PRELUDE, FileId::PRELUDE)
+        .lex()
+        .map_err(Diagnostic::from)
+        .and_then(|tokens| Parser::new(&tokens).parse());
+    match parsed {
+        Ok(Mod::Module { body }) => body,
+        Err(error) => {
+            diagnostics.push(error);
+            vec![]
         }
     }
 }
@@ -796,14 +859,18 @@ struct Rewriter<'a> {
     module_names: &'a [String],
     /// The parameters and locals of the function being rewritten, which shadow everything else.
     locals: HashSet<String>,
+    /// The type parameters of the function being rewritten, such as `T` in
+    /// `fn first[T](xs: list[T]) -> T:`, which its types never rename.
+    type_params: HashSet<String>,
     diagnostics: &'a mut Vec<Diagnostic>,
 }
 
 impl Rewriter<'_> {
     /// Rewrites a function definition's signature and body, with its parameters and assigned
     /// names as locals, leaving its name alone.
-    fn function(&mut self, stmt: &mut Stmt) {
+    fn function(&mut self, stmt: &mut Stmt, outer: &[TypeParam]) {
         let StmtKind::FunctionDef {
+            type_params,
             args,
             returns,
             body,
@@ -812,6 +879,7 @@ impl Rewriter<'_> {
         else {
             return;
         };
+        self.set_type_params(outer, type_params);
         let mut locals = vec![];
         collect_assigned(body, &mut locals);
         self.locals = locals.into_iter().map(|(name, _)| name).collect();
@@ -824,6 +892,24 @@ impl Rewriter<'_> {
             self.type_expr(returns);
         }
         self.block(body);
+    }
+
+    /// Makes `outer`, the type parameters of the struct whose `impl` block is being rewritten,
+    /// and `own`, those of the definition being rewritten, the names its types never rename,
+    /// reporting any of `own` named like a type this file imports or, in a library, defines.
+    fn set_type_params(&mut self, outer: &[TypeParam], own: &[TypeParam]) {
+        self.type_params.clear();
+        for param in own {
+            // the checker reports the file's own types in the entry file, whose names stay
+            if self.enum_name(&param.name).is_some() {
+                self.diagnostics.push(Diagnostic::error(
+                    param.span,
+                    format!("'{}' is already a type", param.name),
+                ));
+            }
+        }
+        self.type_params
+            .extend(outer.iter().chain(own).map(|p| p.name.clone()));
     }
 
     fn block(&mut self, body: &mut [Stmt]) {
@@ -900,6 +986,7 @@ impl Rewriter<'_> {
                             *name = linked;
                         }
                     }
+                    None if self.type_params.contains(name) => {}
                     None => {
                         if let Some(linked) = self.enum_name(name) {
                             *name = linked;
@@ -997,6 +1084,14 @@ impl Rewriter<'_> {
         };
         fields.iter_mut().for_each(|f| self.pattern(f));
         match path.as_mut_slice() {
+            [(name, span), ..] if name == OPTION => {
+                self.diagnostics
+                    .push(Diagnostic::error(*span, PRELUDE_QUALIFIED));
+            }
+            [(name, span)] if PRELUDE_VARIANTS.contains(&name.as_str()) => {
+                let unwritten = Span::new(span.start, span.start).in_file(span.file);
+                path.insert(0, (OPTION.to_string(), unwritten));
+            }
             [(name, _), _] => {
                 if let Some(linked) = self.enum_name(name) {
                     *name = linked;
@@ -1013,13 +1108,23 @@ impl Rewriter<'_> {
     }
 
     fn expr(&mut self, expr: &mut Expr) {
+        if self.prelude_variant(expr) {
+            return;
+        }
+        if let ExprKind::Attribute { value, .. } = &expr.kind
+            && matches!(&value.kind, ExprKind::Name { id, .. } if id == OPTION)
+        {
+            self.diagnostics
+                .push(Diagnostic::error(expr.span, PRELUDE_QUALIFIED));
+            return;
+        }
         match &mut expr.kind {
             ExprKind::Call {
                 func,
                 args,
                 keywords,
             } => {
-                if !self.module_call(func) {
+                if !self.prelude_variant(func) && !self.module_call(func) {
                     match &mut func.kind {
                         ExprKind::Name { id, .. } => self.name(id, func.span, true),
                         _ => self.expr(func),
@@ -1063,6 +1168,42 @@ impl Rewriter<'_> {
                 .for_each(|b| self.expr(b)),
             ExprKind::Constant { .. } => {}
         }
+    }
+
+    /// Rewrites `expr` if it is a variant of the prelude written alone, such as `some` in
+    /// `some(1)` or `none`, to that variant of its enum, `option.some` or `option.none`, and
+    /// returns whether it did. The enum's name was never written, so its span covers no text,
+    /// and editors find only the variant there.
+    fn prelude_variant(&mut self, expr: &mut Expr) -> bool {
+        let ExprKind::Name {
+            id,
+            ctx: ExprContext::Load,
+        } = &expr.kind
+        else {
+            return false;
+        };
+        // a parameter may shadow it, as one may shadow a builtin
+        if !PRELUDE_VARIANTS.contains(&id.as_str()) || self.locals.contains(id) {
+            return false;
+        }
+        let span = expr.span;
+        let unwritten = Span::new(span.start, span.start).in_file(span.file);
+        let enum_name = Expr::new(
+            ExprKind::Name {
+                id: OPTION.to_string(),
+                ctx: ExprContext::Load,
+            },
+            unwritten,
+        );
+        *expr = Expr::new(
+            ExprKind::Attribute {
+                value: Box::new(enum_name),
+                attr: id.clone(),
+                ctx: ExprContext::Load,
+            },
+            span,
+        );
+        true
     }
 
     /// Rewrites `func` if it calls a function of an imported module, such as `shapes.area` in

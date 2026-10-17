@@ -5,7 +5,7 @@
 //! `fn f0(p0: int) -> int:\n    ret p0 + 1\nprint(f0(2))\n`, and [`differential`] runs it through both backends.
 
 use arbitrary::{Result, Unstructured};
-use compound::{Signature, Ty, TypeDef, Var};
+use compound::{GenericRet, Signature, Ty, TypeDef, Var};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -69,6 +69,9 @@ pub fn generate(u: &mut Unstructured) -> Result<String> {
     }
     // before the int functions, whose nested calls can use up the input
     generator.impls(u)?;
+    for index in 0..u.int_in_range(0..=2)? {
+        generator.generic_function(u, index)?;
+    }
     for index in 0..u.int_in_range(0..=2)? {
         generator.typed_function(u, index)?;
     }
@@ -149,6 +152,10 @@ struct Generator {
     types: Vec<TypeDef>,
     /// Functions with typed parameters defined so far, as `t<n>` for the `n`th.
     typed_functions: Vec<Signature>,
+    /// Generic functions defined so far, as `u<n>` for the `n`th, by what each returns.
+    generics: Vec<GenericRet>,
+    /// Whether the program declares [`GENERIC_TYPES`], so values may be `G[T]` and `H[T]`.
+    generic_types: bool,
     /// Variables the function being generated has changed in place, so it can read any changed
     /// parameter before returning.
     changed: Vec<String>,
@@ -1289,6 +1296,74 @@ mod tests {
         };
         let count = sources.iter().filter(called).count();
         assert!(count >= 5, "only {count} of 500 programs call a method");
+    }
+
+    /// Generic functions are defined, call each other, and are called at several types.
+    #[test]
+    fn generated_programs_use_generic_functions() {
+        let sources = compound_sources(500);
+        for feature in ["[T](p: T, q: list[T])", "-> option[T]", "    l"] {
+            let count = sources.iter().filter(|s| s.contains(feature)).count();
+            assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
+        }
+        // a generic function is called outside one, such as `u0(1, [2, 3])`
+        let calls = |line: &str| {
+            line.match_indices('u').any(|(i, _)| {
+                let rest = &line[i + 1..];
+                let digits =
+                    rest.len() - rest.trim_start_matches(|c: char| c.is_ascii_digit()).len();
+                let word_start = i == 0 || !line.as_bytes()[i - 1].is_ascii_alphanumeric();
+                word_start && digits > 0 && rest[digits..].starts_with('(')
+            })
+        };
+        let called = |inside: bool| {
+            move |source: &&String| {
+                source.lines().any(|line| {
+                    line.starts_with("    ") == inside && !line.starts_with("fn ") && calls(line)
+                })
+            }
+        };
+        let count = sources.iter().filter(called(false)).count();
+        assert!(
+            count >= 5,
+            "only {count} of 500 programs call a generic function"
+        );
+        let count = sources
+            .iter()
+            .filter(|s| {
+                s.lines()
+                    .any(|l| l.starts_with("    ") && l.contains("= u0("))
+            })
+            .count();
+        assert!(
+            count >= 5,
+            "only {count} of 500 generic functions call another"
+        );
+    }
+
+    /// Generic structs and enums are made, read, changed through their methods, matched, and
+    /// compared, at several types.
+    #[test]
+    fn generated_programs_use_generic_types() {
+        let sources = compound_sources(500);
+        // past the declarations, which every such program starts with
+        let uses = |feature: &str| {
+            sources
+                .iter()
+                .filter(|s| {
+                    s.split("    Both(T, T)\n")
+                        .nth(1)
+                        .is_some_and(|rest| rest.contains(feature))
+                })
+                .count()
+        };
+        for feature in [
+            "G.wrap(", "G(v=", ".add(", ".get()", "H.Just(", "H.Both(", "case H.", ": G[", "H[",
+            " == H.",
+        ] {
+            let count = uses(feature);
+            assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
+        }
     }
 
     #[test]

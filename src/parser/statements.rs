@@ -3,10 +3,10 @@
 use super::Parser;
 use crate::ast::{
     Arg, Arguments, Expr, Field, MatchCase, Operator, ParserError, Pattern, PatternKind, Stmt,
-    StmtKind, TypeExpr, TypeExprKind, Variant,
+    StmtKind, TypeExpr, TypeExprKind, TypeParam, Variant,
 };
 use crate::debug;
-use crate::span::Span;
+use crate::span::{FileId, Span};
 use crate::token::TokenType;
 
 impl Parser {
@@ -391,17 +391,18 @@ impl Parser {
     ///
     /// ```text
     /// enum_def:
-    ///     | ['pub'] 'enum' NAME ':' NEWLINE INDENT variant+ DEDENT
+    ///     | ['pub'] 'enum' NAME [type_params] ':' NEWLINE INDENT variant+ DEDENT
     /// ```
     pub(super) fn parse_enum_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // ['pub'] 'enum' NAME ':' NEWLINE INDENT variant+ DEDENT
+        // ['pub'] 'enum' NAME [type_params] ':' NEWLINE INDENT variant+ DEDENT
         let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
         if self
             .expect(TokenType::Keyword("enum".to_string()))
             .is_some()
             && let Some((name, name_span)) = self.expect_name("an enum name", false)
+            && let Ok(type_params) = self.parse_type_params("an enum's", "enum Tree[T]:")
             && self.expect_block_start().is_some()
             && self.expect(TokenType::Newline).is_some()
             && self.expect(TokenType::Indent).is_some()
@@ -413,6 +414,7 @@ impl Parser {
                     name,
                     name_span,
                     public,
+                    type_params,
                     variants,
                 },
                 self.span_from(mark),
@@ -432,17 +434,18 @@ impl Parser {
     ///
     /// ```text
     /// struct_def:
-    ///     | ['pub'] 'struct' NAME ':' NEWLINE INDENT field+ DEDENT
+    ///     | ['pub'] 'struct' NAME [type_params] ':' NEWLINE INDENT field+ DEDENT
     /// ```
     pub(super) fn parse_struct_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // ['pub'] 'struct' NAME ':' NEWLINE INDENT field+ DEDENT
+        // ['pub'] 'struct' NAME [type_params] ':' NEWLINE INDENT field+ DEDENT
         let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
         if self
             .expect(TokenType::Keyword("struct".to_string()))
             .is_some()
             && let Some((name, name_span)) = self.expect_name("a struct name", false)
+            && let Ok(type_params) = self.parse_type_params("a struct's", "struct Pair[A, B]:")
             && self.expect_block_start().is_some()
             && self.expect(TokenType::Newline).is_some()
             && self.expect(TokenType::Indent).is_some()
@@ -454,6 +457,7 @@ impl Parser {
                     name,
                     name_span,
                     public,
+                    type_params,
                     fields,
                 },
                 self.span_from(mark),
@@ -590,7 +594,15 @@ impl Parser {
         let mut variants = vec![];
         loop {
             let mark = self.pos;
-            let Some((name, span)) = self.expect_name("a variant name", false) else {
+            // only the prelude names a variant `none`, which is a keyword everywhere else
+            let none = TokenType::Keyword("none".to_string());
+            let named = if self.peek().span.file == FileId::PRELUDE && self.peek().r#type == none {
+                let token = self.advance();
+                Some(("none".to_string(), token.span))
+            } else {
+                self.expect_name("a variant name", false)
+            };
+            let Some((name, span)) = named else {
                 break;
             };
             let fields = if self.expect(TokenType::LParen).is_some() {
@@ -847,20 +859,66 @@ impl Parser {
         self.parse_type().map(|ty| Some(*ty))
     }
 
-    /// Parses a function definition, such as `fn add(a: int, b: int) -> int: ret a + b` or
-    /// `pub fn f() -> int: ret 1`.
+    /// Parses the type parameters of a generic function, struct, or enum if it has any, such as
+    /// `[A, B]` in `fn swap[A, B](p: tuple[A, B]) -> tuple[B, A]:`, returning an empty list for
+    /// `fn f():`. `owner` names what has them in the hint for empty brackets, such as
+    /// `"a function's"`, and `example` shows them, such as `"fn first[T](xs: list[T]) -> T"`.
+    ///
+    /// ```text
+    /// type_params:
+    ///     | '[' ','.NAME+ [','] ']'
+    /// ```
+    pub(super) fn parse_type_params(
+        &mut self,
+        owner: &str,
+        example: &str,
+    ) -> Result<Vec<TypeParam>, ParserError> {
+        let open = self.peek().span;
+        if self.expect(TokenType::LBracket).is_none() {
+            return Ok(vec![]);
+        }
+        if self.peek().r#type == TokenType::RBracket {
+            let span = open.to(self.peek().span);
+            self.hint(
+                span,
+                &format!("{owner} type parameters need at least one name, as in '{example}'"),
+            );
+        } else if let Some((name, span)) = self.expect_name("a type parameter name", false) {
+            let mut params = vec![TypeParam { name, span }];
+            while self.expect(TokenType::Comma).is_some() {
+                match self.expect_name("a type parameter name", false) {
+                    Some((name, span)) => params.push(TypeParam { name, span }),
+                    // a trailing comma is allowed
+                    None => break,
+                }
+            }
+            if self.expect(TokenType::RBracket).is_some() {
+                return Ok(params);
+            }
+        }
+        Err(ParserError {
+            method: "parse_type_params".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses a function definition, such as `fn add(a: int, b: int) -> int: ret a + b`,
+    /// `pub fn f() -> int: ret 1`, or `fn first[T](xs: list[T]) -> T: ret xs[0]`.
     ///
     /// ```text
     /// function_def:
-    ///     | ['pub'] 'fn' NAME '(' [params] ')' ['->' type] ':' block
+    ///     | ['pub'] 'fn' NAME [type_params] '(' [params] ')' ['->' type] ':' block
     /// ```
     pub(super) fn parse_function_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // ['pub'] 'fn' NAME '(' [params] ')' ['->' type] ':' block
+        // ['pub'] 'fn' NAME [type_params] '(' [params] ')' ['->' type] ':' block
         let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
         if self.expect(TokenType::Keyword("fn".to_string())).is_some()
             && let Some((name, name_span)) = self.expect_name("a function name", false)
+            && let Ok(type_params) =
+                self.parse_type_params("a function's", "fn first[T](xs: list[T]) -> T")
             && self.expect(TokenType::LParen).is_some()
             && let args = self.parse_function_def_optional()
             && self.expect(TokenType::RParen).is_some()
@@ -873,6 +931,7 @@ impl Parser {
                     name,
                     name_span,
                     public,
+                    type_params,
                     args,
                     returns,
                     body,

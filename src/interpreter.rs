@@ -7,7 +7,8 @@ use crate::ast::{
     StmtKind, UnaryOp, target_names,
 };
 use crate::checker::{
-    Method, Methods, Step, collect_assigned, place, place_spans, range_args, struct_display,
+    Method, Methods, Step, collect_assigned, place, place_spans, prints_bare, range_args,
+    struct_display,
 };
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
@@ -258,7 +259,7 @@ fn drop_values(mut pending: Vec<Value>) {
     }
 }
 
-/// Makes the option `none`.
+/// Makes the option `none`, the prelude's first variant, for builtins that may find nothing.
 fn none() -> Value {
     Value::Enum(Rc::new(EnumValue {
         name: "none".into(),
@@ -267,7 +268,7 @@ fn none() -> Value {
     }))
 }
 
-/// Makes the option `some(value)`.
+/// Makes the option `some(value)`, the prelude's second variant.
 fn some(value: Value) -> Value {
     Value::Enum(Rc::new(EnumValue {
         name: "some".into(),
@@ -526,7 +527,6 @@ impl From<&Constant> for Value {
             Constant::Bool(b) => Value::Bool(*b),
             Constant::Str(s) => Value::Str(s.as_str().into()),
             Constant::Char(c) => Value::Str(c.to_string().into()),
-            Constant::None => none(),
             Constant::Int(i) | Constant::I64(i) => Value::Int(*i),
             Constant::Float(x) | Constant::F64(x) => Value::Float(*x),
             // other literal kinds are not lexed yet
@@ -1366,7 +1366,14 @@ impl<'out> Interpreter<'out> {
                 let short = name.rsplit('.').next().unwrap_or(name);
                 let variants = variants
                     .iter()
-                    .map(|v| (v.name.clone(), format!("{short}.{}", v.name).into()))
+                    .map(|v| {
+                        let shown = if prints_bare(name) {
+                            v.name.clone()
+                        } else {
+                            format!("{short}.{}", v.name)
+                        };
+                        (v.name.clone(), shown.into())
+                    })
                     .collect();
                 self.enums.insert(name.clone(), variants);
                 Ok(ControlFlow::None)
@@ -1419,7 +1426,6 @@ impl<'out> Interpreter<'out> {
                     return false;
                 };
                 let tag = match path.as_slice() {
-                    [(name, _)] => usize::from(name == "some"),
                     [(enum_name, _), (variant, _)] => {
                         match self.enums.get(enum_name).and_then(|variants| {
                             variants.iter().position(|(name, _)| name == variant)
@@ -1954,7 +1960,6 @@ impl<'out> Interpreter<'out> {
                 writeln!(self.out, "{line}")?;
                 return Ok(Value::Unit);
             }
-            ("some", [value]) => return Ok(some(value.clone())),
             ("float", [Value::Int(i)]) => return Ok(Value::Float(*i as f64)),
             ("float", [Value::Float(x)]) => return Ok(Value::Float(*x)),
             ("float", [Value::Str(s)]) => return Ok(Value::Float(stdlib::parse_float(s)?)),
@@ -2283,7 +2288,7 @@ fn is_definition(stmt: &Stmt) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::driver::parse;
+    use crate::driver::parse_program;
 
     #[test]
     fn dropping_a_long_chain_of_enum_values_takes_no_stack() {
@@ -2306,7 +2311,7 @@ mod tests {
     /// Checks and runs `source`, returning what it prints and how many times a change copied a
     /// list that something else still shared.
     fn run(source: &str) -> (String, u64) {
-        let module = parse(source).unwrap();
+        let module = parse_program(source).unwrap();
         // some programs here leave out parameter types, which only the checker requires
         let analysis = crate::checker::TypeChecker::new().analyze(&module);
         let mut out = Vec::new();
@@ -2471,7 +2476,7 @@ mod tests {
 
     /// Runs `source` and returns what it prints.
     fn output(source: &str) -> String {
-        let module = parse(source).unwrap();
+        let module = parse_program(source).unwrap();
         let mut out = Vec::new();
         Interpreter::with_output(&mut out, Limits::DEFAULT)
             .evaluate(&module)

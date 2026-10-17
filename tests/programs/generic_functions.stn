@@ -1,0 +1,49 @@
+// the same generic function at many types, each compiled as a copy of its own
+struct Point:
+    x: float
+    y: float
+
+enum Shape:
+    Circle(float)
+    Square(float)
+
+fn first[T](xs: list[T]) -> T:
+    ret xs[0]
+
+fn last[T](xs: list[T]) -> T:
+    ret xs[-1]
+
+fn swap[A, B](p: tuple[A, B]) -> tuple[B, A]:
+    a, b = p
+    ret (b, a)
+
+fn twice[T](x: T) -> list[T]:
+    ret [x, x]
+
+fn or_default[T](x: option[T], default: T) -> T:
+    match x:
+        case some(v):
+            ret v
+        case none:
+            ret default
+
+fn show[T](label: str, x: T):
+    print(label, x)
+
+print(first([1, 2, 3]), last([1, 2, 3]))
+print(first(["a", "b"]), last(["a", "b"]))
+print(first([[1.5], [2.5]]))
+print(first([(1, "one"), (2, "two")]))
+print(first([Point(x=1.0, y=2.0)]))
+print(last([Shape.Circle(1.0), Shape.Square(2.0)]))
+print(first([some(3), none]))
+print(swap((1, "a")))
+print(swap(("a", [1, 2])))
+print(twice("ab"), twice(Point(y=0.5, x=0.25)))
+print(twice(twice(1)))
+print(or_default(some("x"), "y"), or_default(none, "y"), or_default(none, 7))
+show("int", 1)
+show("str", "s")
+show("list", [[1], [2]])
+show("map", {"a": 1})
+show("tuple", (1, (2.5, "x")))

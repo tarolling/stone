@@ -47,7 +47,35 @@ pub(crate) enum Ty {
     Map(Key, Box<Ty>),
     Struct(usize),
     Enum(usize),
+    /// `G[T]`, the generic struct of [`GENERIC_TYPES`], holding a `T` and a list of them.
+    G(Box<Ty>),
+    /// `H[T]`, the generic enum of [`GENERIC_TYPES`]: `H.Nothing`, `H.Just(T)`, or
+    /// `H.Both(T, T)`.
+    H(Box<Ty>),
 }
+
+/// A generic struct and enum, with methods that read, change, and make a `G`, which a program
+/// declares first when it uses them.
+pub(crate) const GENERIC_TYPES: &str = "\
+struct G[T]:
+    v: T
+    vs: list[T]
+
+impl G:
+    fn get(self) -> T:
+        ret self.v
+
+    fn add(self, x: T):
+        self.vs.append(x)
+
+    fn wrap(x: T) -> G[T]:
+        ret G(v=x, vs=[x, x])
+
+enum H[T]:
+    Nothing
+    Just(T)
+    Both(T, T)
+";
 
 impl Ty {
     fn is_leaf(&self) -> bool {
@@ -105,6 +133,52 @@ pub(crate) struct Method {
     changes: bool,
 }
 
+/// What a generic function `u<n>[T](p: T, q: list[T])` returns, in terms of `T`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) enum GenericRet {
+    Param,
+    List,
+    Option,
+    Int,
+    Nothing,
+}
+
+impl GenericRet {
+    /// Returns the result type of a call that gives `T` the type `t`, or `None` without one.
+    fn of(self, t: &Ty) -> Option<Ty> {
+        match self {
+            GenericRet::Param => Some(t.clone()),
+            GenericRet::List => Some(Ty::List(Box::new(t.clone()))),
+            GenericRet::Option => Some(Ty::Option(Box::new(t.clone()))),
+            GenericRet::Int => Some(Ty::Int),
+            GenericRet::Nothing => None,
+        }
+    }
+
+    /// Returns the type `T` must be for a call to give `ty`, or `None` if any type does, or
+    /// `Some(None)` if no call can.
+    fn param_for(self, ty: &Ty) -> Option<Option<Ty>> {
+        match (self, ty) {
+            (GenericRet::Param, ty) => Some(Some(ty.clone())),
+            (GenericRet::List, Ty::List(t)) | (GenericRet::Option, Ty::Option(t)) => {
+                Some(Some((**t).clone()))
+            }
+            (GenericRet::Int, Ty::Int) => Some(None),
+            _ => None,
+        }
+    }
+
+    fn written(self) -> &'static str {
+        match self {
+            GenericRet::Param => " -> T",
+            GenericRet::List => " -> list[T]",
+            GenericRet::Option => " -> option[T]",
+            GenericRet::Int => " -> int",
+            GenericRet::Nothing => "",
+        }
+    }
+}
+
 /// A top-level function with typed parameters, named `t<n>`.
 pub(crate) struct Signature {
     params: Vec<Ty>,
@@ -156,6 +230,19 @@ enum Source {
     Associated(usize, usize),
     /// A typed function.
     Call(usize),
+    /// A generic function, with the type its `T` must be, if a particular one.
+    Generic(usize, Option<Ty>),
+    /// `path.get()` of a `G` path.
+    Value(usize),
+}
+
+/// Returns the variants of `H[t]`, each as its pattern's head and the types of its values.
+fn generic_variants(t: &Ty) -> Vec<(String, Vec<Ty>)> {
+    vec![
+        ("H.Nothing".to_string(), vec![]),
+        ("H.Just".to_string(), vec![t.clone()]),
+        ("H.Both".to_string(), vec![t.clone(), t.clone()]),
+    ]
 }
 
 /// Replaces each `#` in a path with an index that is always in range.
@@ -216,6 +303,8 @@ impl Generator {
             Ty::Map(k, v) => format!("map[{}, {}]", k.name(), self.type_name(v)),
             Ty::Struct(i) => format!("S{i}"),
             Ty::Enum(i) => format!("E{i}"),
+            Ty::G(t) => format!("G[{}]", self.type_name(t)),
+            Ty::H(t) => format!("H[{}]", self.type_name(t)),
         }
     }
 
@@ -224,6 +313,8 @@ impl Generator {
     fn values_in(&self, ty: &Ty) -> usize {
         match ty {
             Ty::Struct(i) => self.fields(*i).iter().map(|t| self.values_in(t)).sum(),
+            // its value, then its list
+            Ty::G(t) => self.values_in(t) + 1,
             _ => 1,
         }
     }
@@ -235,8 +326,8 @@ impl Generator {
 
     fn comparable_in(&self, ty: &Ty, seen: &mut Vec<usize>) -> bool {
         match ty {
-            Ty::List(_) | Ty::Map(..) => false,
-            Ty::Option(t) => self.comparable_in(t, seen),
+            Ty::List(_) | Ty::Map(..) | Ty::G(_) => false,
+            Ty::Option(t) | Ty::H(t) => self.comparable_in(t, seen),
             Ty::Struct(i) | Ty::Enum(i) => {
                 // an enum holding itself is comparable if the rest of it is, and one still being
                 // declared only holds comparable types
@@ -258,8 +349,14 @@ impl Generator {
 
     /// Emits one to four `struct` and `enum` declarations, such as `struct S0:` with
     /// `x0: option[int]`, then `enum E1:` with `V0` and `V1(S0, E1)`. About half hold no list or
-    /// map, so `==` can compare them.
+    /// map, so `==` can compare them. About half the time [`GENERIC_TYPES`] come first, which
+    /// the declarations may then hold.
     pub(crate) fn declarations(&mut self, u: &mut Unstructured) -> Result<()> {
+        // decided here, so programs without declarations are generated as before
+        if u.arbitrary()? {
+            self.generic_types = true;
+            self.source.push_str(GENERIC_TYPES);
+        }
         for _ in 0..u.int_in_range(1..=4)? {
             let index = self.types.len();
             self.plain = u.arbitrary()?;
@@ -309,7 +406,8 @@ impl Generator {
     fn field_type(&mut self, u: &mut Unstructured, own: Option<usize>, depth: usize) -> Result<Ty> {
         let nested = depth < MAX_TYPE_DEPTH;
         let lists = !self.plain;
-        let ty = match u.int_in_range(0..=10)? {
+        let last = if self.generic_types { 11 } else { 10 };
+        let ty = match u.int_in_range(0..=last)? {
             1 => Ty::Float,
             2 => Ty::Str,
             3 => Ty::Bool,
@@ -321,6 +419,13 @@ impl Generator {
                 Ty::Map(key, Box::new(self.part_type(u, own, depth + 1)?))
             }
             9 if nested && lists => Ty::List(Box::new(self.part_type(u, own, depth + 1)?)),
+            11 if nested && self.generic_types => {
+                let inner = Box::new(self.part_type(u, own, depth + 1)?);
+                match u.arbitrary()? {
+                    true if lists => Ty::G(inner),
+                    _ => Ty::H(inner),
+                }
+            }
             10 if own.is_some() => {
                 let own = Ty::Enum(own.unwrap());
                 match u.int_in_range(0..=2)? {
@@ -364,7 +469,9 @@ impl Generator {
     /// Generates the type of a new variable: always compound, such as `option[int]` or `S1`.
     fn any_type(&mut self, u: &mut Unstructured) -> Result<Ty> {
         let declared = !self.types.is_empty();
-        Ok(match u.int_in_range(0..=7)? {
+        // generic types widen the range, so programs without them choose as before
+        let last = if self.generic_types { 11 } else { 7 };
+        Ok(match u.int_in_range(0..=last)? {
             1..=3 if declared => self.declared_type(u)?,
             4 => {
                 let key = *u.choose(&[Key::Str, Key::Int, Key::Bool])?;
@@ -372,6 +479,13 @@ impl Generator {
             }
             5 => Ty::List(Box::new(self.part_type(u, None, 1)?)),
             6 if declared => Ty::Option(Box::new(self.declared_type(u)?)),
+            8..=11 if self.generic_types => {
+                let inner = Box::new(self.part_type(u, None, 1)?);
+                match u.arbitrary()? {
+                    true => Ty::G(inner),
+                    false => Ty::H(inner),
+                }
+            }
             7 => Ty::Option(Box::new(Ty::Str)),
             _ => Ty::Option(Box::new(Ty::Int)),
         })
@@ -515,6 +629,129 @@ impl Generator {
         Ok(())
     }
 
+    /// Generates a call of the generic function `u<g>` with `t` for its `T`, such as
+    /// `u0(some(2), [none, some(1)])`. Neither argument is pinned, since `T` is inferred.
+    fn generic_call(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &Scope,
+        g: usize,
+        t: &Ty,
+        nesting: usize,
+    ) -> Result<String> {
+        let p = self.value(u, scope, t, nesting, false)?;
+        let q = self.value(u, scope, &Ty::List(Box::new(t.clone())), nesting, false)?;
+        Ok(format!("u{g}({p}, {q})"))
+    }
+
+    /// Emits a generic function `u<n>[T](p: T, q: list[T])`, whose body only does what any `T`
+    /// allows: it moves values of type `T` into lists, options, and tuples, reads `q`'s elements,
+    /// length, and items, prints, and calls the generic functions before it. Lists only grow,
+    /// and a caller's `q` has at least two elements, so every index is in range.
+    pub(crate) fn generic_function(&mut self, u: &mut Unstructured, index: usize) -> Result<()> {
+        let ret = *u.choose(&[
+            GenericRet::Param,
+            GenericRet::List,
+            GenericRet::Option,
+            GenericRet::Int,
+            GenericRet::Nothing,
+        ])?;
+        self.line(
+            0,
+            &format!("fn u{index}[T](p: T, q: list[T]){}:", ret.written()),
+        );
+        // the names holding a T, and a list[T]
+        let mut values = vec!["p".to_string()];
+        let mut lists = vec!["q".to_string()];
+        let mut emitted = 0;
+        for _ in 0..u.int_in_range(0..=6)? {
+            let value = u.choose(&values)?.clone();
+            let list = u.choose(&lists)?.clone();
+            let k = u.int_in_range(-2..=1)?;
+            match u.int_in_range(0..=8)? {
+                0 => {
+                    let name = self.fresh("l");
+                    self.line(1, &format!("{name} = [{value}, {list}[{k}]]"));
+                    lists.push(name);
+                }
+                1 if lists.len() > 1 => {
+                    // only a local list changes, so no change to a parameter is lost
+                    let local = u.choose(&lists[1..])?.clone();
+                    self.line(1, &format!("{local}.append({value})"));
+                }
+                2 => self.line(1, &format!("print({value}, {list})")),
+                3 => {
+                    let name = self.fresh("l");
+                    self.line(1, &format!("{name} = {list}.len()"));
+                    self.line(1, &format!("print({name})"));
+                    emitted += 1;
+                }
+                4 => {
+                    let name = self.fresh("l");
+                    self.line(1, &format!("{name} = some({value})"));
+                    self.line(1, &format!("print({name}.is_some(), {name})"));
+                    emitted += 1;
+                }
+                5 => {
+                    let (a, b) = (self.fresh("l"), self.fresh("l"));
+                    self.line(1, &format!("{a}, {b} = ({value}, {k})"));
+                    self.line(1, &format!("print({b})"));
+                    emitted += 1;
+                    values.push(a);
+                }
+                6 => {
+                    let name = self.fresh("l");
+                    self.line(1, &format!("for {name} in {list}:"));
+                    self.line(2, &format!("print({name})"));
+                }
+                7 if index > 0 => {
+                    let g = u.int_in_range(0..=index - 1)?;
+                    let call = format!("u{g}({value}, {list})");
+                    match self.generics[g] {
+                        GenericRet::Nothing => self.line(1, &call),
+                        other => {
+                            let name = self.fresh("l");
+                            self.line(1, &format!("{name} = {call}"));
+                            match other {
+                                GenericRet::Param => values.push(name),
+                                GenericRet::List => lists.push(name),
+                                _ => {
+                                    self.line(1, &format!("print({name})"));
+                                    emitted += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {
+                    let name = self.fresh("l");
+                    self.line(1, &format!("{name} = {list}[{k}]"));
+                    values.push(name);
+                }
+            }
+            emitted += 1;
+        }
+        let value = u.choose(&values)?.clone();
+        match ret {
+            GenericRet::Param => self.line(1, &format!("ret {value}")),
+            GenericRet::List => {
+                let list = u.choose(&lists)?.clone();
+                self.line(1, &format!("ret {list}"));
+            }
+            GenericRet::Option if u.arbitrary()? => self.line(1, "ret none"),
+            GenericRet::Option => self.line(1, &format!("ret some({value})")),
+            GenericRet::Int => {
+                let list = u.choose(&lists)?.clone();
+                self.line(1, &format!("ret {list}.len()"));
+            }
+            GenericRet::Nothing if emitted == 0 => self.line(1, "ret"),
+            GenericRet::Nothing => {}
+        }
+        // registered after the body, so a function never calls itself
+        self.generics.push(ret);
+        Ok(())
+    }
+
     /// Emits the body of a method or typed function: a change to `self` first if `change_self`,
     /// then statements, a `print` of each parameter they changed, and a final `ret` if the
     /// function returns a value.
@@ -591,6 +828,11 @@ impl Generator {
                 }
             }
             Ty::List(t) => self.walk(&format!("{text}[#]"), t, root, place, depth + 1, out),
+            Ty::G(t) => {
+                self.walk(&format!("{text}.v"), t, root, place, depth + 1, out);
+                let list = Ty::List(t.clone());
+                self.walk(&format!("{text}.vs"), &list, root, place, depth + 1, out);
+            }
             _ => {}
         }
     }
@@ -622,6 +864,7 @@ impl Generator {
                     }
                 }
                 Ty::List(_) if *ty == Ty::Int => out.push(Source::Len(i)),
+                Ty::G(t) if **t == *ty => out.push(Source::Value(i)),
                 Ty::Struct(s) => {
                     for (m, method) in self.methods(*s).iter().enumerate() {
                         if method.has_self && !method.changes && method.ret.as_ref() == Some(ty) {
@@ -642,6 +885,15 @@ impl Generator {
         for (f, signature) in self.typed_functions.iter().enumerate() {
             if signature.ret.as_ref() == Some(ty) {
                 out.push(Source::Call(f));
+            }
+        }
+        for (g, ret) in self.generics.iter().enumerate() {
+            match ret.param_for(ty) {
+                Some(Some(t)) if self.values_in(&t) <= MAX_PART_VALUES => {
+                    out.push(Source::Generic(g, Some(t)))
+                }
+                Some(None) => out.push(Source::Generic(g, None)),
+                _ => {}
             }
         }
         if let Ty::Struct(s) = ty {
@@ -682,6 +934,7 @@ impl Generator {
                 format!("{}.{method}()", fill(u, &paths[i].text)?)
             }
             Source::Get(i, key) => format!("{}.get({})", fill(u, &paths[i].text)?, key.literal(u)?),
+            Source::Value(i) => format!("{}.get()", fill(u, &paths[i].text)?),
             Source::Len(i) => format!("{}.len()", fill(u, &paths[i].text)?),
             Source::Contains(i, key) => {
                 format!("{}.contains({})", fill(u, &paths[i].text)?, key.literal(u)?)
@@ -708,6 +961,13 @@ impl Generator {
                 let params = self.typed_functions[f].params.clone();
                 let args = self.arguments(u, scope, &params, inner)?;
                 format!("t{f}({args})")
+            }
+            Source::Generic(g, t) => {
+                let t = match t {
+                    Some(t) => t,
+                    None => self.part_type(u, None, 1)?,
+                };
+                self.generic_call(u, scope, g, &t, inner)?
             }
         };
         Ok(Some(text))
@@ -803,6 +1063,34 @@ impl Generator {
                 let args = self.arguments(u, scope, &fields, nesting + 1)?;
                 Ok(format!("E{i}.V{k}({args})"))
             }
+            // the values of a generic type fix its type argument only as much as `pinned` says
+            Ty::G(t) => match if deep { 0 } else { u.int_in_range(0..=2)? } {
+                0 => {
+                    let v = self.value(u, scope, t, nesting + 1, pinned)?;
+                    Ok(format!("G.wrap({v})"))
+                }
+                _ => {
+                    let v = self.value(u, scope, t, nesting + 1, pinned)?;
+                    let list = Ty::List(t.clone());
+                    let vs = self.value(u, scope, &list, nesting + 1, pinned)?;
+                    Ok(match u.arbitrary()? {
+                        true => format!("G(v={v}, vs={vs})"),
+                        false => format!("G(vs={vs}, v={v})"),
+                    })
+                }
+            },
+            Ty::H(t) => match if deep { 0 } else { u.int_in_range(0..=3)? } {
+                1 if pinned => Ok("H.Nothing".to_string()),
+                2 => {
+                    let a = self.value(u, scope, t, nesting + 1, pinned)?;
+                    let b = self.value(u, scope, t, nesting + 1, pinned)?;
+                    Ok(format!("H.Both({a}, {b})"))
+                }
+                _ => {
+                    let a = self.value(u, scope, t, nesting + 1, pinned)?;
+                    Ok(format!("H.Just({a})"))
+                }
+            },
         }
     }
 
@@ -977,7 +1265,12 @@ impl Generator {
         if paths.is_empty() {
             return Ok(false);
         }
-        let path = &paths[u.choose_index(paths.len())?];
+        // a `G` is one of several paths into its variable, so it is picked on its own too
+        let generic: Vec<&Path> = paths.iter().filter(|p| matches!(p.ty, Ty::G(_))).collect();
+        let path = match !generic.is_empty() && u.arbitrary()? {
+            true => generic[u.choose_index(generic.len())?],
+            false => &paths[u.choose_index(paths.len())?],
+        };
         let target = fill(u, &path.text)?;
         let root_name = scope.values[path.root].name.clone();
         match &path.ty {
@@ -1004,6 +1297,10 @@ impl Generator {
                 if !keys.contains(&key_text) {
                     keys.push(key_text);
                 }
+            }
+            Ty::G(t) => {
+                let value = self.value(u, scope, t, 0, true)?;
+                self.line(indent, &format!("{target}.add({value})"));
             }
             Ty::Struct(s) if self.methods(*s).iter().any(|m| m.changes) && u.arbitrary()? => {
                 let changing: Vec<usize> = (0..self.methods(*s).len())
@@ -1066,6 +1363,14 @@ impl Generator {
     /// Generates a comparable type for `==`, such as `option[int]` or a struct with no list or
     /// map inside it.
     fn comparable_type(&mut self, u: &mut Unstructured) -> Result<Ty> {
+        // only programs with generic types take a byte for them, so others choose as before
+        if self.generic_types && u.int_in_range(0..=3)? == 0 {
+            let inner = match u.arbitrary()? {
+                true => Ty::Int,
+                false => Ty::Option(Box::new(Ty::Str)),
+            };
+            return Ok(Ty::H(Box::new(inner)));
+        }
         let mut choices = vec![Ty::Option(Box::new(Ty::Int)), Ty::Option(Box::new(Ty::Str))];
         for i in 0..self.types.len() {
             let ty = match self.types[i] {
@@ -1122,7 +1427,7 @@ impl Generator {
         let paths = self.paths(scope);
         let subjects: Vec<&Path> = paths
             .iter()
-            .filter(|p| matches!(p.ty, Ty::Enum(_) | Ty::Option(_)))
+            .filter(|p| matches!(p.ty, Ty::Enum(_) | Ty::Option(_) | Ty::H(_)))
             .collect();
         let (subject, ty) = if !subjects.is_empty() && u.arbitrary()? {
             let path = subjects[u.choose_index(subjects.len())?];
@@ -1131,9 +1436,10 @@ impl Generator {
             let enums: Vec<usize> = (0..self.types.len())
                 .filter(|&i| matches!(self.types[i], TypeDef::Enum { .. }))
                 .collect();
-            let ty = match !enums.is_empty() && u.arbitrary()? {
-                true => Ty::Enum(*u.choose(&enums)?),
-                false => Ty::Option(Box::new(self.part_type(u, None, 1)?)),
+            let ty = match u.int_in_range(0..=2)? {
+                0 if !enums.is_empty() => Ty::Enum(*u.choose(&enums)?),
+                1 if self.generic_types => Ty::H(Box::new(self.part_type(u, None, 1)?)),
+                _ => Ty::Option(Box::new(self.part_type(u, None, 1)?)),
             };
             (self.value(u, scope, &ty, 0, false)?, ty)
         };
@@ -1150,6 +1456,7 @@ impl Generator {
                 .enumerate()
                 .map(|(k, fields)| (format!("E{i}.V{k}"), fields.clone()))
                 .collect(),
+            Ty::H(t) => generic_variants(t),
             _ => unreachable!(),
         };
         self.line(indent, &format!("match {subject}:"));
@@ -1205,7 +1512,7 @@ impl Generator {
     ) -> Result<Option<String>> {
         let refinable: Vec<usize> = (0..fields.len())
             .filter(|&k| match &fields[k] {
-                Ty::Option(_) => true,
+                Ty::Option(_) | Ty::H(_) => true,
                 Ty::Enum(j) => self.variants(*j).len() >= 2,
                 _ => false,
             })
@@ -1216,6 +1523,9 @@ impl Generator {
         let k = *u.choose(&refinable)?;
         let nested = match &fields[k] {
             Ty::Option(_) => u.choose(&["none", "some(_)"])?.to_string(),
+            Ty::H(_) => u
+                .choose(&["H.Nothing", "H.Just(_)", "H.Both(_, _)"])?
+                .to_string(),
             Ty::Enum(j) => {
                 let w = u.choose_index(self.variants(*j).len())?;
                 match self.variants(*j)[w].len() {
@@ -1277,11 +1587,18 @@ impl Generator {
         for f in 0..self.typed_functions.len() {
             calls.push((usize::MAX, 0, f));
         }
+        for g in 0..self.generics.len() {
+            calls.push((usize::MAX - 1, 0, g));
+        }
         if calls.is_empty() {
             return Ok(false);
         }
         let (i, s, m) = calls[u.choose_index(calls.len())?];
-        let (call, ret) = if i == usize::MAX {
+        let (call, ret) = if i == usize::MAX - 1 {
+            let t = self.part_type(u, None, 1)?;
+            let call = self.generic_call(u, scope, m, &t, 0)?;
+            (call, self.generics[m].of(&t))
+        } else if i == usize::MAX {
             let (params, ret) = {
                 let signature = &self.typed_functions[m];
                 (signature.params.clone(), signature.ret.clone())

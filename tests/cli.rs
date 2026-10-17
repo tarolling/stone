@@ -869,3 +869,21 @@ fn printing_counts_struct_values_toward_the_depth_limit_in_both_backends() {
         );
     }
 }
+
+#[test]
+fn check_reports_a_mistake_inside_a_generic_function() {
+    let (output, file) = stone(
+        &["check"],
+        "generic_add",
+        "fn total[T](xs: list[T]) -> T:\n    ret xs[0] + xs[1]\nprint(total([1, 2]))\n",
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "{}:2:9: error: '+' needs int, float, or str operands, found T\n  |\n2 |     ret \
+             xs[0] + xs[1]\n  |         ^^^^^^^^^^^^^\n",
+            file.display()
+        )
+    );
+}

@@ -210,11 +210,11 @@ mod tests {
     use super::*;
     use crate::checker::TypeChecker;
     use crate::codegen::ir::lower::lower;
-    use crate::driver::parse;
+    use crate::driver::parse_program;
 
     /// Lowers `source` and analyzes its first function.
     fn liveness(source: &str) -> Liveness {
-        let module = parse(source).unwrap();
+        let module = parse_program(source).unwrap();
         let analysis = TypeChecker::new().analyze(&module);
         assert!(
             analysis.diagnostics.is_empty(),

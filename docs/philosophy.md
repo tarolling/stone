@@ -41,6 +41,13 @@ What stone already infers:
 - **Types.** The checker infers the type of every variable and expression from the values
   assigned to it and the signatures of the functions it calls, so the only types written are
   the parameter and return types of functions.
+- **Specialized generic functions.** A generic function writes its type parameters in brackets,
+  as in `fn first[T](xs: list[T]) -> T:`, and every call infers its own types for them, so no
+  type is ever written at a call. The compiler makes a copy of the function for each set of
+  types it is called with, the way Rust compiles generics, so a generic function is as fast as
+  one written for a single type. Structs and enums can be generic the same way, as in
+  `struct Pair[A, B]:`. Even `option[T]` is one, written in stone in the prelude that every
+  program is linked with, so it follows the same rules as the programmer's own enums.
 - **Memory management.** Compiled programs count references, with no garbage collector. The
   compiler places every retain and release, decides which parameters are only borrowed, and
   skips counting where it can prove a count would not matter.
@@ -49,11 +56,6 @@ What stone already infers:
 
 What it should infer next:
 
-- **Specialized generic functions.** A function is currently monomorphic:
-  `fn first(xs: list[int]) -> int: ret xs[0]` cannot be called on a `list[str]`. Generic
-  functions will write their type parameters in the signature like every other type, and the
-  compiler should specialize them for each use, the way Rust compiles generics. Their syntax is
-  not designed yet.
 - **Where values live and when they are copied.** Values that never escape a function should
   live on its stack, and an update to a value nothing else refers to should happen in place.
   See [value semantics](#value-semantics).
@@ -177,6 +179,9 @@ like a Rust `Vec<(i64, String)>`, which is a first step toward choosing where ev
 Structs are compiled the same way, so a `list[Point]` is a flat array of coordinates, though each
 change to a field of one still checks the list's bounds and that it is not shared, which keeps
 the `nbody` benchmark about 5 times slower than C.
+A generic function, or a method of a generic struct, is compiled once for each set of types it is
+used with, so its copies are as fast as functions written for each type, and a generic struct is
+flattened like any other.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.

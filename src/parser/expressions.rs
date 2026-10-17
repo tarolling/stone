@@ -560,10 +560,11 @@ impl Parser {
             .expect(TokenType::Keyword("none".to_string()))
             .is_some()
         {
+            // the prelude's variant, which linking turns into `option.none`
             return Ok(Box::new(Expr::new(
-                ExprKind::Constant {
-                    value: Box::new(Constant::None),
-                    kind: None,
+                ExprKind::Name {
+                    id: "none".to_string(),
+                    ctx: ExprContext::Load,
                 },
                 self.span_from(mark),
             )));

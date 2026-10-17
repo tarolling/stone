@@ -5,7 +5,7 @@
 //! label back every time, and later emit one stub behind it that prints the message.
 
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
-use crate::checker::{Analysis, Structs, Type, TypeChecker};
+use crate::checker::{Analysis, Structs, Type, TypeChecker, variants};
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::{Callee, Inst, Program};
@@ -442,7 +442,7 @@ impl Context {
                 format!("stone.print_{}", mangle(ty))
             }
             // lowering prints a tuple or struct, and a list holding one, a value at a time
-            Type::Tuple(_) | Type::Struct(_) => {
+            Type::Tuple(_) | Type::Struct { .. } => {
                 return Err("a tuple or struct is printed a value at a time".to_string());
             }
             // lowering prints an enum, and a list holding one, through a function of its own
@@ -451,6 +451,8 @@ impl Context {
             Type::Map(..) => return Err("a map is printed an entry at a time".to_string()),
             Type::Unit => return Err("no value cannot be printed".to_string()),
             Type::Function { .. } => return Err("functions cannot be printed".to_string()),
+            // lowering fills in a generic function's type parameters before printing
+            Type::Param(name) => return Err(format!("type parameter '{name}' was not filled in")),
         })
     }
 
@@ -475,29 +477,30 @@ impl Context {
         Ok(printers)
     }
 
+    /// Returns every type the program's values have: each expression's, and each type a generic
+    /// function is called with, which its copy's values have.
+    fn types(&self) -> impl Iterator<Item = &Type> {
+        let instances = self.analysis.instances.values().flat_map(|i| &i.args);
+        self.analysis.types.values().chain(instances)
+    }
+
     /// Returns whether the program needs the string runtime.
     pub fn needs_strings(&self) -> bool {
-        self.analysis
-            .types
-            .values()
+        self.types()
             .any(|ty| contains_str(ty, &self.analysis, &mut HashSet::new()))
             || self.uses(STRING_ROUTINES)
     }
 
     /// Returns whether the program needs the list runtime.
     pub fn needs_lists(&self) -> bool {
-        self.analysis
-            .types
-            .values()
+        self.types()
             .any(|ty| contains_list(ty, &self.analysis, &mut HashSet::new()))
             || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
     }
 
     /// Returns whether the program has enum values, which need `stone.free_enum`.
     pub fn needs_enums(&self) -> bool {
-        self.analysis
-            .types
-            .values()
+        self.types()
             .any(|ty| contains_enum(ty, &self.analysis.structs, &mut HashSet::new()))
     }
 
@@ -625,16 +628,17 @@ pub fn function_label(name: &str) -> String {
 /// Returns whether the fields of the struct `name`, from `structs`, include one for which `has`
 /// returns true, unless `seen` shows the struct was already looked through.
 fn struct_has(
-    name: &str,
+    ty: &Type,
     structs: &Structs,
     seen: &mut HashSet<String>,
     has: fn(&Type, &Structs, &mut HashSet<String>) -> bool,
 ) -> bool {
-    if !seen.insert(name.to_string()) {
+    if !seen.insert(ty.to_string()) {
         return false;
     }
-    let fields = structs.get(name).map(Vec::as_slice).unwrap_or_default();
-    fields.iter().any(|(_, ty)| has(ty, structs, seen))
+    ty.struct_fields(structs)
+        .iter()
+        .any(|(_, ty)| has(ty, structs, seen))
 }
 
 /// Returns whether a value of type `ty` involves a list, which means the list runtime is needed,
@@ -647,23 +651,20 @@ fn contains_list(ty: &Type, analysis: &Analysis, seen: &mut HashSet<String>) -> 
     match ty {
         Type::List(_) | Type::Map(..) => true,
         Type::Tuple(fields) => fields.iter().any(|f| contains_list(f, analysis, seen)),
-        Type::Struct(name) => {
-            seen.insert(name.clone())
-                && analysis.structs.get(name).is_some_and(|fields| {
-                    fields
-                        .iter()
-                        .any(|(_, ty)| contains_list(ty, analysis, seen))
-                })
+        Type::Struct { .. } => {
+            seen.insert(ty.to_string())
+                && ty
+                    .struct_fields(&analysis.structs)
+                    .iter()
+                    .any(|(_, ty)| contains_list(ty, analysis, seen))
         }
-        Type::Enum { name, args } => {
+        Type::Enum { args, .. } => {
             args.iter().any(|arg| contains_list(arg, analysis, seen))
-                || (seen.insert(name.clone())
-                    && analysis.enums.get(name).is_some_and(|variants| {
-                        variants
-                            .iter()
-                            .flat_map(|(_, values)| values)
-                            .any(|ty| contains_list(ty, analysis, seen))
-                    }))
+                || (seen.insert(ty.to_string())
+                    && variants(&analysis.enums, ty)
+                        .iter()
+                        .flat_map(|(_, values)| values)
+                        .any(|ty| contains_list(ty, analysis, seen)))
         }
         Type::Function { params, ret } => {
             params.iter().any(|p| contains_list(p, analysis, seen))
@@ -681,7 +682,7 @@ fn contains_enum(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bo
         Type::List(elem) => contains_enum(elem, structs, seen),
         Type::Map(_, value) => contains_enum(value, structs, seen),
         Type::Tuple(fields) => fields.iter().any(|f| contains_enum(f, structs, seen)),
-        Type::Struct(name) => struct_has(name, structs, seen, contains_enum),
+        Type::Struct { .. } => struct_has(ty, structs, seen, contains_enum),
         Type::Function { params, ret } => {
             params.iter().any(|p| contains_enum(p, structs, seen))
                 || contains_enum(ret, structs, seen)
@@ -700,23 +701,20 @@ fn contains_str(ty: &Type, analysis: &Analysis, seen: &mut HashSet<String>) -> b
     match ty {
         Type::Str => true,
         Type::Tuple(fields) => fields.iter().any(|f| contains_str(f, analysis, seen)),
-        Type::Struct(name) => {
-            seen.insert(name.clone())
-                && analysis.structs.get(name).is_some_and(|fields| {
-                    fields
-                        .iter()
-                        .any(|(_, ty)| contains_str(ty, analysis, seen))
-                })
+        Type::Struct { .. } => {
+            seen.insert(ty.to_string())
+                && ty
+                    .struct_fields(&analysis.structs)
+                    .iter()
+                    .any(|(_, ty)| contains_str(ty, analysis, seen))
         }
-        Type::Enum { name, args } => {
+        Type::Enum { args, .. } => {
             args.iter().any(|arg| contains_str(arg, analysis, seen))
-                || (seen.insert(name.clone())
-                    && analysis.enums.get(name).is_some_and(|variants| {
-                        variants
-                            .iter()
-                            .flat_map(|(_, values)| values)
-                            .any(|ty| contains_str(ty, analysis, seen))
-                    }))
+                || (seen.insert(ty.to_string())
+                    && variants(&analysis.enums, ty)
+                        .iter()
+                        .flat_map(|(_, values)| values)
+                        .any(|ty| contains_str(ty, analysis, seen)))
         }
         _ => false,
     }

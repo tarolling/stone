@@ -1,0 +1,10 @@
+// The prelude, which every program is linked with, so its names need no `use`. Its variants are
+// written alone, as `some(x)` and `none`, and print that way too.
+//
+// Builtins such as `find`, `pop`, `get`, and `os.env` make options by tag, so `none` stays the
+// first variant and `some` the second.
+
+// A value that may be missing: `some(x)` holds one, and `none` holds nothing.
+pub enum option[T]:
+    none
+    some(T)

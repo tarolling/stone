@@ -570,11 +570,11 @@ fn pop_frame(r#gen: &mut dyn AssemblyGenerator, saved: &[&str]) {
 mod tests {
     use super::*;
     use crate::codegen::context::function_label;
-    use crate::driver::parse;
+    use crate::driver::parse_program;
 
     /// Parses and assembles `source` without invoking gcc.
     fn assemble(source: &str) -> Result<String, String> {
-        let module = parse(source).map_err(|e| e.to_string())?;
+        let module = parse_program(source).map_err(|e| e.to_string())?;
         Arm64Generator::new().assemble(&module)
     }
 

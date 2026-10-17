@@ -10,8 +10,21 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
 ### Added
 
+- Generic functions: type parameters in brackets after a function's name, as in
+  `fn first[T](xs: list[T]) -> T:`. Each call infers its own types for them, and the body is
+  checked once, with `T` standing for any type, so a value of type `T` can be moved, stored in
+  lists, tuples, options, and map values, and printed, but not used in arithmetic, compared, or
+  given methods. `stone build` compiles a copy of the function for each set of types it is
+  called with. A library's `pub fn` can be generic too.
+- Generic structs and enums: `struct Pair[A, B]:` and `enum Tree[T]:` take type parameters, which
+  their fields and variants use and a value fills in from what it holds, so
+  `Pair(first=1, second="a")` is a `Pair[int, str]`. Their types are written with their types
+  filled in, as in `Tree[str]`. An `impl` block of a generic struct uses its type parameters
+  without brackets, and `stone build` compiles its methods once for each set of types.
 - `m.get(k)` reads a map's value for `k` as an option: `some` of the value, or `none` if the map
   has no entry for `k`, where `m[k]` stops the program.
 - Benchmarks of strings (`strings`), maps (`wordcount`), structs and methods (`nbody`), and enums
@@ -20,6 +33,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Changed
 
+- `option[T]` is an ordinary generic enum, `pub enum option[T]:` with the variants `none` and
+  `some(T)`, defined in stone by a prelude that every program is linked with, rather than a type
+  the compiler special-cases. Programs are unchanged: `some(x)` and `none` are still written
+  without `option.`, which is now an error to write (`option.some(1)`), and `some` is a variant
+  rather than a builtin function.
 - `%` by a constant power of two compiles to shifts instead of `idiv`, as `/` already did, which
   makes the `lcg` benchmark about 3.7 times as fast.
 - An index into a list of structs or tuples is checked without dividing the list's length by the
@@ -37,6 +55,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Fixed
 
+- `some` of a value with more than 32 values, such as a tuple of 34 ints, is a checker error, as
+  it is for any enum's variant. `stone run` used to accept it and `stone build` to crash.
 - `stone build` no longer fails to assemble a program that prints an option holding a map, such
   as `print(some({"a": 1}))`.
 - `stone build` no longer fails with `undefined label 'stone.print_list_int'` for a program that

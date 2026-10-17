@@ -594,7 +594,7 @@ fn os_links_to_builtin_names() {
     );
     assert_eq!(linked.diagnostics, []);
     let Mod::Module { body } = &linked.module;
-    let StmtKind::Expr { value } = &body[0].kind else {
+    let StmtKind::Expr { value } = &body.last().unwrap().kind else {
         panic!("expected a call");
     };
     let ExprKind::Call { args, .. } = &value.kind else {
@@ -981,5 +981,181 @@ fn a_method_cannot_share_its_linked_name_with_a_module_function() {
          module 'shapes'",
         1,
         8,
+    );
+}
+
+#[test]
+fn a_library_may_define_generic_functions() {
+    assert_eq!(
+        output(&[
+            (
+                "main.stn",
+                "use util.first\nuse util\nprint(first([1, 2]))\nprint(util.first([\"a\"]))\n"
+            ),
+            (
+                "util.stn",
+                "pub fn first[T](xs: list[T]) -> T:\n    ret only(xs[0])\n\nfn only[T](x: T) -> T:\n    ret x\n"
+            ),
+        ]),
+        "1\na\n"
+    );
+}
+
+#[test]
+fn a_type_parameter_cannot_reuse_a_type_name() {
+    assert_error(
+        &[
+            (
+                "main.stn",
+                "use geo.Point\nfn f[Point](p: Point):\n    print(p)\n",
+            ),
+            ("geo.stn", "pub struct Point:\n    x: int\n"),
+        ],
+        "main.stn",
+        "'Point' is already a type",
+        2,
+        6,
+    );
+    assert_error(
+        &[
+            ("main.stn", "use geo\nprint(1)\n"),
+            (
+                "geo.stn",
+                "enum Shape:\n    Dot\n\nfn f[Shape](s: Shape):\n    print(s)\n",
+            ),
+        ],
+        "geo.stn",
+        "'Shape' is already a type",
+        4,
+        6,
+    );
+}
+
+#[test]
+fn every_program_links_the_preludes_option_enum() {
+    let linked = link(Path::new("main.stn"), "x = 1\n", &MapSources::default());
+    assert!(linked.diagnostics.is_empty(), "{:?}", linked.diagnostics);
+    let Mod::Module { body } = &linked.module;
+    let StmtKind::EnumDef {
+        name,
+        type_params,
+        variants,
+        ..
+    } = &body[0].kind
+    else {
+        panic!("the prelude's enum should come first: {:?}", body[0]);
+    };
+    assert_eq!(name, "option");
+    assert_eq!(type_params.len(), 1);
+    let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+    assert_eq!(names, ["none", "some"]);
+    assert_eq!(body[0].span.file, FileId::PRELUDE);
+    assert_eq!(linked.sources.file(FileId::PRELUDE).source, PRELUDE);
+    // the prelude is not one of the program's own files
+    assert!(linked.sources.files().all(|(id, _)| id != FileId::PRELUDE));
+}
+
+#[test]
+fn bare_some_and_none_name_the_preludes_variants() {
+    let linked = link(
+        Path::new("main.stn"),
+        "x = some(1)\ny = none\nmatch x:\n    case some(v):\n        print(v)\n    case none:\n        print(y)\n",
+        &MapSources::default(),
+    );
+    assert!(linked.diagnostics.is_empty(), "{:?}", linked.diagnostics);
+    let Mod::Module { body } = &linked.module;
+    let variant = |expr: &Expr| match &expr.kind {
+        ExprKind::Attribute { value, attr, .. } => match &value.kind {
+            ExprKind::Name { id, .. } => (id.clone(), attr.clone(), value.span),
+            _ => panic!("{expr:?}"),
+        },
+        _ => panic!("{expr:?}"),
+    };
+    let StmtKind::Assign { value, .. } = &body[1].kind else {
+        panic!("{:?}", body[1]);
+    };
+    let ExprKind::Call { func, .. } = &value.kind else {
+        panic!("{value:?}");
+    };
+    let (enum_name, attr, span) = variant(func);
+    assert_eq!((enum_name.as_str(), attr.as_str()), ("option", "some"));
+    // the enum's name was never written, so it covers no text
+    assert_eq!(span.start, span.end);
+    let StmtKind::Assign { value, .. } = &body[2].kind else {
+        panic!("{:?}", body[2]);
+    };
+    let (enum_name, attr, _) = variant(value);
+    assert_eq!((enum_name.as_str(), attr.as_str()), ("option", "none"));
+    let StmtKind::Match { cases, .. } = &body[3].kind else {
+        panic!("{:?}", body[3]);
+    };
+    let paths: Vec<Vec<&str>> = cases
+        .iter()
+        .map(|case| match &case.pattern.kind {
+            PatternKind::Variant { path, .. } => path.iter().map(|(n, _)| n.as_str()).collect(),
+            other => panic!("{other:?}"),
+        })
+        .collect();
+    assert_eq!(paths, [["option", "some"], ["option", "none"]]);
+}
+
+#[test]
+fn a_library_module_uses_options_like_the_entry_file() {
+    assert_eq!(
+        output(&[
+            (
+                "main.stn",
+                "use util\nprint(util.first([3, 4]), util.first([]))\n"
+            ),
+            (
+                "util.stn",
+                "pub fn first(xs: list[int]) -> option[int]:\n    if xs.len() == 0:\n        ret none\n    ret some(xs[0])\n",
+            ),
+        ]),
+        "some(3) none\n"
+    );
+}
+
+#[test]
+fn option_variants_are_written_without_the_enums_name() {
+    let message = "write 'some(x)' or 'none' without 'option.'";
+    assert_error(
+        &[("main.stn", "x = option.some(1)\n")],
+        "main.stn",
+        message,
+        1,
+        5,
+    );
+    assert_error(
+        &[(
+            "main.stn",
+            "x = some(1)\nmatch x:\n    case option.some(v):\n        print(v)\n    case _:\n        print(0)\n",
+        )],
+        "main.stn",
+        message,
+        3,
+        10,
+    );
+}
+
+#[test]
+fn an_import_cannot_take_a_prelude_variants_name() {
+    assert_error(
+        &[("main.stn", "use util.twice as some\n"), UTIL],
+        "main.stn",
+        "'some' is a builtin, so rename it with 'as'",
+        1,
+        19,
+    );
+}
+
+#[test]
+fn only_the_prelude_names_a_variant_none() {
+    assert_error(
+        &[("main.stn", "enum E:\n    none\n")],
+        "main.stn",
+        "expected a variant name, found 'none'",
+        2,
+        5,
     );
 }

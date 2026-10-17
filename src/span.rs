@@ -25,6 +25,12 @@ impl Pos {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 pub struct FileId(pub u32);
 
+impl FileId {
+    /// The prelude, [`crate::stdlib::PRELUDE`], which every program is linked with. It is not
+    /// one of the program's files, so it has an id no program reaches.
+    pub const PRELUDE: FileId = FileId(u32::MAX);
+}
+
 /// A half-open range of source text from `start` up to but not including `end`, in `file`.
 ///
 /// For example, `Span::new(Pos::new(1, 5), Pos::new(1, 7))` covers the two characters of `42` in
@@ -67,6 +73,13 @@ impl Span {
     /// For example, the span of `add` at cols 1 to 4 contains cols 1 through 4.
     pub fn contains(&self, pos: Pos) -> bool {
         self.start <= pos && pos <= self.end
+    }
+
+    /// Returns whether `other` lies wholly inside the span, in the same file.
+    ///
+    /// For example, a function's span encloses the span of every expression in its body.
+    pub fn encloses(&self, other: Span) -> bool {
+        self.file == other.file && self.start <= other.start && other.end <= self.end
     }
 
     /// Returns the span from the start of `self` to the end of `other`.

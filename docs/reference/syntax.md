@@ -111,9 +111,9 @@ themselves, as in `"café"`.
 | assignment | `x = 1`, `a = b = 0`, `items[i] = x`, `grid[r][c] = 0`, `p.x = 1.0`, `ps[i].y = 0.0` |
 | unpacking | `q, r = divide(7, 2)`, `a, b = (b, a)`, `(x, (y, z)) = t` |
 | augmented assignment | `x += 1`, `total -= cost`, `items[i] *= 2`, `grid[r][c] **= 2`, `p.x += 0.5` |
-| function definition | `fn f(a: int, b: int) -> int:` plus a block |
-| enum definition | `enum Shape:` plus a block of variants, such as `Circle(float)` and `Empty` |
-| struct definition | `struct Point:` plus a block of fields, such as `x: float` and `y: float` |
+| function definition | `fn f(a: int, b: int) -> int:` or `fn first[T](xs: list[T]) -> T:` plus a block |
+| enum definition | `enum Shape:` or `enum Tree[T]:` plus a block of variants, such as `Circle(float)` and `Empty` |
+| struct definition | `struct Point:` or `struct Pair[A, B]:` plus a block of fields, such as `x: float` and `y: float` |
 | `impl` block | `impl Point:` plus a block of `fn`s, such as `fn norm(self) -> float:` plus a block |
 | `match` | `match s:` plus a block of cases, such as `case Shape.Circle(r):` plus a block |
 | `ret` | `ret`, `ret x`, `ret (a, b)` |
@@ -175,7 +175,9 @@ A type is `int`, `float`, `bool`, `str`, `list[T]` for any type `T`, such as
 `list[list[int]]`, `map[K, V]` with keys of type `K` and values of type `V`, such as
 `map[str, list[int]]`, `tuple[T1, T2, ...]` with a type for each of two or more values, such as
 `tuple[str, list[int]]`, `option[T]`, or a struct's or enum's name, such as `Shape`, or
-`shapes.Shape` for one of a module. A function without `->` returns no value, so a call to it can only be a
+`shapes.Shape` for one of a module, followed by its types in brackets if it is generic, such as
+`Pair[int, str]`. Inside a generic function, struct, or enum, its type parameters, such as `T`,
+are types too. A function without `->` returns no value, so a call to it can only be a
 statement of its own, and its `ret` takes no value. Types are written only in signatures:
 variables, including a function's locals, never have them. See [Types](types.md).
 

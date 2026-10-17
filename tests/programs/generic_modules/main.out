@@ -1,0 +1,8 @@
+3
+x
+(Tagged.Named('floats'), [1.5])
+(Tagged.Named('one'), 's')
+Pair(left=1, right='one') Pair(left='one', right=1) one=1
+Pair(left=none, right=[1])
+Choice.Two(4, 5) Choice.One('a') Choice.Nothing
+y x

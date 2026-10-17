@@ -10,8 +10,21 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-17
+
+### Added
+
+- Generic functions in `stone-lsp`: hover shows `fn first[T](xs: list[T]) -> T`, a type parameter
+  hovers as `(type parameter) T`, renames everywhere in its function, and is outlined under it.
+- Generic structs and enums in `stone-lsp`: hover shows `struct Pair[A, B]` and `enum Tree[T]`
+  with their fields and variants, and a value's type with its types filled in, as
+  `Pair[int, str]`.
+
 ### Changed
 
+- `some`, `none`, and `option` lead to the prelude that defines them, which `stone-lsp` writes as
+  `prelude.stn` beside its builtins reference. Hover shows `some(T)` and `enum option[T]` with its
+  variants, and they cannot be renamed.
 - Typing `.` after a value opens completion right away, without Ctrl+Space, and a list, string,
   map, or option offers only the builtin methods of its type.
 - Blocks open with `:`, as stone now writes them: a line ending in `:` indents the next line and

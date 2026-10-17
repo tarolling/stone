@@ -41,7 +41,7 @@ use crate::ast::{
     Stmt, StmtKind, UnaryOp, constant_int,
 };
 use crate::checker::{
-    Analysis, Enums, Method, Methods, Step, Structs, SymbolKind, Type, collect_assigned,
+    Analysis, Enums, Instance, Method, Methods, Step, Structs, SymbolKind, Type, collect_assigned,
     collect_changed, place, place_root, place_spans, range_args, struct_display, variant_display,
     variants,
 };
@@ -73,6 +73,8 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         enums,
         structs,
         methods,
+        instances,
+        type_params,
         ..
     } = analysis;
 
@@ -90,6 +92,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
                     | SymbolKind::Struct
                     | SymbolKind::Field
                     | SymbolKind::Method
+                    | SymbolKind::TypeParam
             )
         })
         .map(|symbol| {
@@ -131,13 +134,26 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         enums,
         structs,
         methods,
+        instances,
         helpers: RefCell::new(Vec::new()),
+        requested: RefCell::new(Vec::new()),
     };
 
     let mut functions = Vec::new();
     let mut top_level = Vec::new();
+    // a generic function is lowered once for each set of types it is called with
+    let mut generic = HashMap::new();
     for stmt in body {
         match &stmt.kind {
+            StmtKind::FunctionDef {
+                name,
+                type_params: params,
+                args,
+                body,
+                ..
+            } if !params.is_empty() => {
+                generic.insert(name.clone(), (&args.args, body));
+            }
             StmtKind::FunctionDef {
                 name, args, body, ..
             } => {
@@ -153,7 +169,13 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
                         ..
                     } = &method.kind
                     {
-                        let lowerer = Lowerer::new(&context, Some(format!("{name}.{method}")));
+                        let function = format!("{name}.{method}");
+                        // a generic struct's methods are generic over its type parameters
+                        if type_params.contains_key(name) {
+                            generic.insert(function, (&args.args, body));
+                            continue;
+                        }
+                        let lowerer = Lowerer::new(&context, Some(function));
                         functions.push(lowerer.function(&args.args, body)?);
                     }
                 }
@@ -162,10 +184,23 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         }
     }
     functions.push(Lowerer::new(&context, None).function(&[], &top_level)?);
-    // a helper can ask for the helpers of the enums and structs its values hold, so this runs
-    // until none is left
-    let mut made = 0;
+    // an instance can call other instances, and both instances and helpers can ask for the
+    // helpers of the enums and structs their values hold, so this runs until none is left
+    let (mut made, mut instanced) = (0, 0);
     loop {
+        let next = context.requested.borrow().get(instanced).cloned();
+        if let Some(instance) = next {
+            instanced += 1;
+            let Some(&(args, body)) = generic.get(&instance.function) else {
+                return Err(format!("'{}' is not a generic function", instance.function));
+            };
+            let names = type_params
+                .get(&instance.function)
+                .ok_or_else(|| format!("'{}' has no type parameters", instance.function))?;
+            let lowerer = Lowerer::new_instance(&context, &instance, names);
+            functions.push(lowerer.function(args, body)?);
+            continue;
+        }
         let next = context.helpers.borrow().get(made).cloned();
         let Some(helper) = next else {
             break;
@@ -173,7 +208,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         made += 1;
         let lowerer = Lowerer::new(&context, Some(helper.label()));
         functions.push(match helper {
-            Helper::Print(ty @ Type::Struct(_)) => lowerer.struct_printer(&ty)?,
+            Helper::Print(ty @ Type::Struct { .. }) => lowerer.struct_printer(&ty)?,
             Helper::Print(ty) => lowerer.enum_printer(&ty)?,
             Helper::Equal(ty) => lowerer.enum_comparer(&ty)?,
         });
@@ -200,11 +235,24 @@ impl Helper {
     /// `stone.eq_enum.option.int`.
     fn label(&self) -> String {
         match self {
-            Helper::Print(Type::Struct(name)) => format!("stone.print_struct.{name}"),
+            Helper::Print(ty @ Type::Struct { .. }) => {
+                format!("stone.print_struct.{}", mangle(ty))
+            }
             Helper::Print(ty) => format!("stone.print_enum.{}", mangle(ty)),
             Helper::Equal(ty) => format!("stone.eq_enum.{}", mangle(ty)),
         }
     }
+}
+
+/// Returns the label of the copy of the generic function `function` whose type parameters are
+/// `args`: its name, then each type as [`mangle`] names it, each after two dots, which no linked
+/// name or mangled type holds.
+///
+/// For example, `first` called with `list[int]` is `first..list_int`, and `zoo.pair` with `str`
+/// and `int` is `zoo.pair..str..int`.
+fn instance_label(function: &str, args: &[Type]) -> String {
+    let args: Vec<String> = args.iter().map(mangle).collect();
+    format!("{function}..{}", args.join(".."))
 }
 
 /// Names the type `ty` in a label.
@@ -219,8 +267,8 @@ fn mangle(ty: &Type) -> String {
             let fields: Vec<String> = fields.iter().map(mangle).collect();
             format!("tuple{}_{}", fields.len(), fields.join("_"))
         }
-        Type::Enum { name, args } if args.is_empty() => name.clone(),
-        Type::Enum { name, args } => {
+        Type::Enum { name, args } | Type::Struct { name, args } if args.is_empty() => name.clone(),
+        Type::Enum { name, args } | Type::Struct { name, args } => {
             let args: Vec<String> = args.iter().map(mangle).collect();
             format!("{name}.{}", args.join("_"))
         }
@@ -249,6 +297,10 @@ struct Context<'a> {
     structs: &'a Structs,
     /// How every call of a function of an `impl` block was resolved, by the call's span.
     methods: &'a Methods,
+    /// The type arguments of every call of a generic function, by the call's span.
+    instances: &'a HashMap<Span, Instance>,
+    /// Each copy of a generic function some code calls, in the order it was first called.
+    requested: RefCell<Vec<Instance>>,
     /// Each helper some code calls, in the order it was first called: one that prints values of
     /// each enum and struct type the program prints, and one that compares values of each enum
     /// type it compares.
@@ -288,7 +340,16 @@ struct PendingBlock {
 /// Lowers one function body.
 struct Lowerer<'a> {
     context: &'a Context<'a>,
+    /// The function's label, or `None` for `main`.
     name: Option<String>,
+    /// The function's stone name, which is its label except in a copy of a generic function,
+    /// whose label also names its types.
+    base: Option<String>,
+    /// The type each type parameter stands for in a copy of a generic function, by name.
+    substitution: HashMap<String, Type>,
+    /// The type of each variable of a copy of a generic function, with its type parameters
+    /// filled in, including one for each value of a tuple or struct.
+    instance_variables: HashMap<String, Type>,
     /// Each local's vreg. Empty in `main`, where assigned names are globals.
     locals: HashMap<String, VReg>,
     /// The locals that own a reference, which are released when the function returns.
@@ -339,7 +400,10 @@ impl<'a> Lowerer<'a> {
     fn new(context: &'a Context<'a>, name: Option<String>) -> Self {
         Lowerer {
             context,
+            base: name.clone(),
             name,
+            substitution: HashMap::new(),
+            instance_variables: HashMap::new(),
             locals: HashMap::new(),
             counted_locals: Vec::new(),
             owned: HashMap::new(),
@@ -360,6 +424,64 @@ impl<'a> Lowerer<'a> {
             compare_depth: Operand::Imm(0),
             returns_self: false,
         }
+    }
+
+    /// Returns a lowerer for the copy `instance` of a generic function, whose type parameters,
+    /// named `names`, stand for the instance's types.
+    fn new_instance(context: &'a Context<'a>, instance: &Instance, names: &[String]) -> Self {
+        let function = &instance.function;
+        let substitution: HashMap<String, Type> =
+            names.iter().cloned().zip(instance.args.clone()).collect();
+        let mut lowerer = Lowerer::new(context, Some(instance_label(function, &instance.args)));
+        lowerer.base = Some(function.clone());
+        let scope = Some(function.clone());
+        for ((owner, name), ty) in context.variables {
+            if *owner != scope {
+                continue;
+            }
+            let ty = ty.substitute(&substitution);
+            if ty.is_flat() {
+                for (i, leaf) in ty.leaves(context.structs).into_iter().enumerate() {
+                    lowerer.instance_variables.insert(leaf_name(name, i), leaf);
+                }
+            }
+            lowerer.instance_variables.insert(name.clone(), ty);
+        }
+        lowerer.substitution = substitution;
+        lowerer
+    }
+
+    /// Returns `ty` with the type parameters of this copy of a generic function filled in.
+    fn fill(&self, ty: &Type) -> Type {
+        match self.substitution.is_empty() {
+            true => ty.clone(),
+            false => ty.substitute(&self.substitution),
+        }
+    }
+
+    /// Returns the type the checker gave the expression at `span`, with the type parameters of
+    /// this copy of a generic function filled in.
+    fn span_type(&self, span: Span) -> Option<Type> {
+        self.context.types.get(&span).map(|ty| self.fill(ty))
+    }
+
+    /// Returns the label to call for the stone function `name` at the call `call`: its own, or
+    /// for a generic function the label of its copy for the call's types, which this asks
+    /// lowering to make.
+    fn callee_label(&self, name: &str, call: Span) -> String {
+        let Some(instance) = self.context.instances.get(&call) else {
+            return name.to_string();
+        };
+        let instance = Instance {
+            function: instance.function.clone(),
+            args: instance.args.iter().map(|a| self.fill(a)).collect(),
+        };
+        let label = instance_label(&instance.function, &instance.args);
+        let mut requested = self.context.requested.borrow_mut();
+        if !requested.contains(&instance) {
+            requested.push(instance);
+        }
+        label
     }
 
     fn function(mut self, args: &[Arg], body: &[Stmt]) -> Result<Function, String> {
@@ -386,7 +508,7 @@ impl<'a> Lowerer<'a> {
         self.live_after = live_after(body, &self.context.global_reads, &kept_at_exit(args));
         // a method owns `self` exactly when it changes it
         self.returns_self = args.first().is_some_and(|arg| arg.arg == "self")
-            && self.name.as_ref().is_some_and(|name| {
+            && self.base.as_ref().is_some_and(|name| {
                 self.context
                     .owned_params
                     .get(name)
@@ -491,7 +613,7 @@ impl<'a> Lowerer<'a> {
     /// such as `Point(x=1.0, y=2.0)`, given the struct's values and how many enum and struct
     /// values it is inside. Printing one nested too deeply stops the program, as for enums.
     fn struct_printer(mut self, ty: &Type) -> Result<Function, String> {
-        let Type::Struct(name) = ty else {
+        let Type::Struct { name, .. } = ty else {
             return Err("only a struct has fields to print".to_string());
         };
         let values: Vec<VReg> = self.leaves(ty).iter().map(|_| self.fresh()).collect();
@@ -501,7 +623,7 @@ impl<'a> Lowerer<'a> {
         self.print_depth = self.enter_level(Operand::Reg(depth), PRINT_DEPTH);
         self.print_text(&format!("{}(", struct_display(name)));
         let mut start = 0;
-        for (k, (field, field_ty)) in self.context.structs[name].iter().enumerate() {
+        for (k, (field, field_ty)) in ty.struct_fields(self.context.structs).iter().enumerate() {
             if k > 0 {
                 self.print_char(',');
                 self.print_char(' ');
@@ -760,9 +882,12 @@ impl<'a> Lowerer<'a> {
     /// Returns the type of the stone variable `name` where this code reads it: a local of this
     /// function, or else a global.
     fn variable_type(&self, name: &str) -> Option<&Type> {
+        if let Some(ty) = self.instance_variables.get(name) {
+            return Some(ty);
+        }
         self.context
             .variables
-            .get(&(self.name.clone(), name.to_string()))
+            .get(&(self.base.clone(), name.to_string()))
             .or_else(|| self.context.variables.get(&(None, name.to_string())))
     }
 
@@ -793,9 +918,12 @@ impl<'a> Lowerer<'a> {
 
     /// Returns how variable `name` of this function, or global `name` in `main`, is counted.
     fn variable_kind(&self, name: &str) -> Option<RcKind> {
+        if let Some(ty) = self.instance_variables.get(name) {
+            return RcKind::of(ty);
+        }
         self.context
             .variables
-            .get(&(self.name.clone(), name.to_string()))
+            .get(&(self.base.clone(), name.to_string()))
             .and_then(RcKind::of)
     }
 
@@ -809,7 +937,7 @@ impl<'a> Lowerer<'a> {
 
     /// Returns how the value of `expr` is counted.
     fn counted(&self, expr: &Expr) -> Option<RcKind> {
-        self.context.types.get(&expr.span).and_then(RcKind::of)
+        self.span_type(expr.span).as_ref().and_then(RcKind::of)
     }
 
     /// Returns how many values each element of the list `expr` holds, one for each value of a
@@ -826,11 +954,11 @@ impl<'a> Lowerer<'a> {
     /// Returns how each value of an element of the list `expr` is counted: one for each value of
     /// a tuple, or one.
     fn element_kinds(&self, expr: &Expr) -> Vec<Option<RcKind>> {
-        match self.context.types.get(&expr.span) {
-            Some(Type::List(elem)) => self.leaves(elem).iter().map(RcKind::of).collect(),
+        match self.span_type(expr.span) {
+            Some(Type::List(elem)) => self.leaves(&elem).iter().map(RcKind::of).collect(),
             // an entry of a map is its key, then its value
-            Some(Type::Map(key, value)) => std::iter::once(RcKind::of(key))
-                .chain(self.leaves(value).iter().map(RcKind::of))
+            Some(Type::Map(key, value)) => std::iter::once(RcKind::of(&key))
+                .chain(self.leaves(&value).iter().map(RcKind::of))
                 .collect(),
             _ => vec![None],
         }
@@ -839,21 +967,21 @@ impl<'a> Lowerer<'a> {
     /// Returns whether each element of the list `expr` is several values lowering keeps apart:
     /// a tuple or a struct.
     fn holds_flat(&self, expr: &Expr) -> bool {
-        matches!(self.context.types.get(&expr.span), Some(Type::List(elem)) if elem.is_flat())
+        matches!(self.span_type(expr.span), Some(Type::List(elem)) if elem.is_flat())
     }
 
     /// Returns the type of the keys of `expr` if it is a map.
     fn map_key(&self, expr: &Expr) -> Option<Type> {
-        match self.context.types.get(&expr.span) {
-            Some(Type::Map(key, _)) => Some((**key).clone()),
+        match self.span_type(expr.span) {
+            Some(Type::Map(key, _)) => Some(*key),
             _ => None,
         }
     }
 
     /// Returns how the elements of the list `expr` are counted.
     fn element_kind(&self, expr: &Expr) -> Option<RcKind> {
-        match self.context.types.get(&expr.span) {
-            Some(Type::List(elem)) => RcKind::of(elem),
+        match self.span_type(expr.span) {
+            Some(Type::List(elem)) => RcKind::of(&elem),
             _ => None,
         }
     }
@@ -951,10 +1079,7 @@ impl<'a> Lowerer<'a> {
     }
 
     fn type_of(&self, expr: &Expr) -> Result<Type, String> {
-        self.context
-            .types
-            .get(&expr.span)
-            .cloned()
+        self.span_type(expr.span)
             .ok_or_else(|| format!("expression at {:?} has no type", expr.span.start))
     }
 
@@ -1591,7 +1716,7 @@ impl<'a> Lowerer<'a> {
         self.context
             .enums
             .get(enum_name)
-            .and_then(|all| all.iter().position(|(name, _)| name == variant))
+            .and_then(|all| all.variants.iter().position(|(name, _)| name == variant))
             .ok_or_else(|| format!("'{enum_name}' has no variant '{variant}'"))
     }
 
@@ -2610,12 +2735,6 @@ impl<'a> Lowerer<'a> {
                     Constant::Int(n) => Operand::Imm(*n),
                     Constant::Float(x) => Operand::Imm(x.to_bits() as i64),
                     Constant::Bool(b) => Operand::Imm(*b as i64),
-                    Constant::None => {
-                        // like a string literal, it lives as long as the program
-                        let dst = self.fresh();
-                        self.push(Inst::VariantStatic { dst, tag: 0 });
-                        Operand::Reg(dst)
-                    }
                     Constant::Str(s) => {
                         // literals are never freed, so they are borrowed
                         let dst = self.fresh();
@@ -2739,7 +2858,7 @@ impl<'a> Lowerer<'a> {
                 let ExprKind::Name { id, .. } = &func.kind else {
                     return Err("only functions can be called, by name".to_string());
                 };
-                self.call(id, args, into, kind)
+                self.call(id, expr.span, args, into, kind)
             }
 
             ExprKind::Attribute { value, attr, .. } => match &value.kind {
@@ -3943,18 +4062,12 @@ impl<'a> Lowerer<'a> {
     fn call(
         &mut self,
         name: &str,
+        call: Span,
         args: &[Expr],
         into: Option<VReg>,
         kind: Option<RcKind>,
     ) -> Result<Operand, String> {
         match name {
-            "some" => {
-                let ty = Type::Enum {
-                    name: crate::checker::OPTION.to_string(),
-                    args: vec![self.type_of(&args[0])?],
-                };
-                self.variant(&ty, 1, args, into)
-            }
             "print" => {
                 // every argument is evaluated before anything prints, like the interpreter
                 let mut values = Vec::new();
@@ -4152,7 +4265,7 @@ impl<'a> Lowerer<'a> {
                 self.own(result, kind);
                 Ok(result)
             }
-            _ => Ok(self.user_call(name, args, into, &[kind])?[0]),
+            _ => Ok(self.user_call(name, call, args, into, &[kind])?[0]),
         }
     }
 
@@ -4171,15 +4284,15 @@ impl<'a> Lowerer<'a> {
         let kinds = self.leaf_kinds(call)?;
         let function = method.function.as_str();
         if !method.receiver {
-            return self.user_call(function, args, into, &kinds);
+            return self.user_call(function, call.span, args, into, &kinds);
         }
         if !method.changes {
             let mut all = Vec::with_capacity(args.len() + 1);
             all.push(receiver.clone());
             all.extend(args.iter().cloned());
-            return self.user_call(function, &all, into, &kinds);
+            return self.user_call(function, call.span, &all, into, &kinds);
         }
-        self.changing_call(function, receiver, args, into, &kinds)
+        self.changing_call((function, call.span), receiver, args, into, &kinds)
     }
 
     /// Calls `function`, a method that changes `self`, on `receiver`, a variable or a place in
@@ -4192,7 +4305,7 @@ impl<'a> Lowerer<'a> {
     /// instead, and the old ones released once the new ones are stored.
     fn changing_call(
         &mut self,
-        function: &str,
+        (function, call): (&str, Span),
         receiver: &Expr,
         args: &[Expr],
         into: Option<VReg>,
@@ -4228,7 +4341,7 @@ impl<'a> Lowerer<'a> {
         call_args.extend(values.iter().flatten());
         self.push(Inst::Call {
             dsts: dsts.clone(),
-            callee: Callee::User(function.to_string()),
+            callee: Callee::User(self.callee_label(function, call)),
             args: call_args,
         });
         for (value, given) in values
@@ -4261,6 +4374,7 @@ impl<'a> Lowerer<'a> {
     fn user_call(
         &mut self,
         name: &str,
+        call: Span,
         args: &[Expr],
         into: Option<VReg>,
         kinds: &[Option<RcKind>],
@@ -4276,7 +4390,7 @@ impl<'a> Lowerer<'a> {
         dsts.extend((1..kinds.len()).map(|_| self.fresh()));
         self.push(Inst::Call {
             dsts: dsts.clone(),
-            callee: Callee::User(name.to_string()),
+            callee: Callee::User(self.callee_label(name, call)),
             args: values.concat(),
         });
         for (value, given) in values
@@ -4455,6 +4569,7 @@ impl<'a> Lowerer<'a> {
             ExprKind::Call { func, keywords, .. } => match &func.kind {
                 ExprKind::Name { id, .. } if self.context.structs.contains_key(id) => {
                     self.context.structs[id]
+                        .fields
                         .iter()
                         .flat_map(|(field, _)| {
                             keywords
@@ -4473,10 +4588,7 @@ impl<'a> Lowerer<'a> {
 
     /// Returns whether `expr` is a tuple or a struct, which lowers to several values.
     fn is_flat(&self, expr: &Expr) -> bool {
-        self.context
-            .types
-            .get(&expr.span)
-            .is_some_and(Type::is_flat)
+        self.span_type(expr.span).is_some_and(|ty| ty.is_flat())
     }
 
     /// Lowers `expr` to its values: one for each value of a tuple, nested tuples flattened, or
@@ -4545,7 +4657,7 @@ impl<'a> Lowerer<'a> {
                 ExprKind::Name { id, .. } if id == "random.choice" => self.choose_element(&args[0]),
                 ExprKind::Name { id, .. } => {
                     let kinds = self.leaf_kinds(expr)?;
-                    self.user_call(id, args, None, &kinds)
+                    self.user_call(id, expr.span, args, None, &kinds)
                 }
                 ExprKind::Attribute { value, .. }
                     if self.context.methods.contains_key(&expr.span) =>
@@ -4589,7 +4701,7 @@ impl<'a> Lowerer<'a> {
             slice: position,
             ..
         } = &value.kind
-            && matches!(self.context.types.get(&list.span), Some(Type::List(_)))
+            && matches!(self.span_type(list.span), Some(Type::List(_)))
         {
             let outer = std::mem::replace(&mut self.span, value.span);
             let picked = self.element_values(list, position, leaves);
@@ -4613,18 +4725,19 @@ impl<'a> Lowerer<'a> {
     ///
     /// For example, `Point(y=f(), x=1.0)` calls `f` and gives `1.0`, then the call's result.
     fn construct(&mut self, name: &str, keywords: &[Keyword]) -> Result<Vec<Operand>, String> {
-        let fields = &self.context.structs[name];
+        let fields = &self.context.structs[name].fields;
         let mut given: Vec<Option<Vec<Operand>>> = vec![None; fields.len()];
         for keyword in keywords {
             let values = self.expr_flat(&keyword.value)?;
             let position = self.context.structs[name]
+                .fields
                 .iter()
                 .position(|(field, _)| *field == keyword.arg)
                 .ok_or_else(|| format!("'{name}' has no field '{}'", keyword.arg))?;
             given[position] = Some(values);
         }
         let mut values = Vec::new();
-        for (field, (name, _)) in given.into_iter().zip(&self.context.structs[name]) {
+        for (field, (name, _)) in given.into_iter().zip(&self.context.structs[name].fields) {
             values.extend(field.ok_or_else(|| format!("field '{name}' has no value"))?);
         }
         Ok(values)
@@ -5228,7 +5341,7 @@ impl<'a> Lowerer<'a> {
                 self.print_elements(elem, values[0])
             }
             Type::Map(key, value) => self.print_entries(Some(key), value, values[0]),
-            Type::Struct(_) | Type::Enum { .. } => {
+            Type::Struct { .. } | Type::Enum { .. } => {
                 let label = self.helper(Helper::Print(ty.clone()));
                 let mut args = values.to_vec();
                 args.push(self.print_depth);
@@ -5354,7 +5467,7 @@ impl<'a> Lowerer<'a> {
                     op: UnaryOp::UnaryAdd | UnaryOp::UnarySub,
                     ..
                 }
-        ) && matches!(self.context.types.get(&expr.span), Some(Type::List(_)))
+        ) && matches!(self.span_type(expr.span), Some(Type::List(_)))
     }
 
     /// Returns whether `expr` is a call to a stone function, rather than a builtin or a builtin
@@ -5398,7 +5511,7 @@ impl<'a> Lowerer<'a> {
 /// For example, `tuple[int, str]` and `list[list[Point]]` do, and `list[int]` does not.
 fn holds_flat(ty: &Type) -> bool {
     match ty {
-        Type::Tuple(_) | Type::Struct(_) | Type::Map(..) => true,
+        Type::Tuple(_) | Type::Struct { .. } | Type::Map(..) => true,
         Type::List(elem) => holds_flat(elem),
         _ => false,
     }
@@ -5437,7 +5550,7 @@ enum Location {
 /// Returns whether `==` compares values of type `ty` value by value: a tuple, a struct, or an
 /// enum value, rather than one number, bool, or string.
 fn is_compound(ty: &Type) -> bool {
-    matches!(ty, Type::Tuple(_) | Type::Struct(_) | Type::Enum { .. })
+    matches!(ty, Type::Tuple(_) | Type::Struct { .. } | Type::Enum { .. })
 }
 
 /// Returns whether a value of type `ty` is or holds an enum value, in a list or tuple, which

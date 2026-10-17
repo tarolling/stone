@@ -1,0 +1,22 @@
+// generic functions imported from a library, whose own type names stay its own
+use util.lists
+use util.lists.first
+use util.lists.Pair
+
+print(first([3, 2, 1]))
+print(lists.first(["x"]))
+print(lists.tag([1.5], "floats"))
+print(first([lists.tag("s", "one")]))
+
+fn describe(p: lists.Pair[int, str]) -> str:
+    ret p.right + "=" + str(p.left)
+
+p = Pair.of(1, "one")
+print(p, p.flip(), describe(p))
+print(lists.Pair(left=[1], right=none).flip())
+print(lists.choose([4, 5, 6]), lists.choose(["a"]), lists.choose([(1, 2)][1:]))
+match lists.choose(["x", "y"]):
+    case lists.Choice.Two(a, b):
+        print(b, a)
+    case _:
+        print("other")

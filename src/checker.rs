@@ -23,12 +23,12 @@ use std::fmt::Display;
 
 use crate::ast::{
     Arguments, CompOp, Constant, Expr, ExprKind, Field, Keyword, MatchCase, Mod, Operator, Pattern,
-    PatternKind, Stmt, StmtKind, TypeExpr, TypeExprKind, UnaryOp, Variant, constant_int,
+    PatternKind, Stmt, StmtKind, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Variant, constant_int,
     target_names,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
-use crate::stdlib::{BUILTINS, MAX_ELEMENT_VALUES, METHODS, changes_receiver, is_builtin};
+use crate::stdlib::{MAX_ELEMENT_VALUES, METHODS, changes_receiver, is_builtin, is_reserved};
 
 #[cfg(test)]
 mod tests;
@@ -47,15 +47,21 @@ pub enum Type {
     Map(Box<Type>, Box<Type>),
     /// A tuple of two or more fields, such as `tuple[int, str]`.
     Tuple(Vec<Type>),
-    /// An enum by its linked name, with its type arguments: `Shape`, or `option[int]`, the enum
-    /// [`OPTION`] built into the language.
+    /// An enum by its linked name, with its type arguments: `Shape`, or `option[int]`, the
+    /// prelude's enum [`OPTION`].
     Enum {
         name: String,
         args: Vec<Type>,
     },
-    /// A struct by its linked name, such as `Point` or `geometry.Point`, whose fields are in
-    /// [`Analysis::structs`].
-    Struct(String),
+    /// A struct by its linked name, with its type arguments: `Point`, `geometry.Point`, or
+    /// `Pair[int, str]`, whose fields are in [`Analysis::structs`].
+    Struct {
+        name: String,
+        args: Vec<Type>,
+    },
+    /// A type parameter of the generic function the type appears in, such as `T` in
+    /// `fn first[T](xs: list[T]) -> T:`, which each call fills in with a type of its own.
+    Param(String),
     Function {
         params: Vec<Type>,
         ret: Box<Type>,
@@ -72,10 +78,11 @@ impl Type {
     pub fn leaves(&self, structs: &Structs) -> Vec<Type> {
         match self {
             Type::Tuple(fields) => fields.iter().flat_map(|f| f.leaves(structs)).collect(),
-            Type::Struct(name) => structs
-                .get(name)
-                .map(|fields| fields.iter().flat_map(|(_, f)| f.leaves(structs)).collect())
-                .unwrap_or_default(),
+            Type::Struct { .. } => self
+                .struct_fields(structs)
+                .iter()
+                .flat_map(|(_, f)| f.leaves(structs))
+                .collect(),
             other => vec![other.clone()],
         }
     }
@@ -83,7 +90,61 @@ impl Type {
     /// Returns whether a value of this type is flattened into [`Type::leaves`] of its own: a
     /// tuple or a struct.
     pub fn is_flat(&self) -> bool {
-        matches!(self, Type::Tuple(_) | Type::Struct(_))
+        matches!(self, Type::Tuple(_) | Type::Struct { .. })
+    }
+
+    /// Returns the fields of this struct type, in order, each with its type once the struct's
+    /// type arguments are filled in, or nothing if it is not a struct.
+    ///
+    /// For example, `Pair[int, str]`, with fields `a: A` and `b: B`, has `a: int` and `b: str`.
+    pub fn struct_fields(&self, structs: &Structs) -> Vec<(String, Type)> {
+        let Type::Struct { name, args } = self else {
+            return vec![];
+        };
+        let Some(info) = structs.get(name) else {
+            return vec![];
+        };
+        let substitution = substitution(&info.params, args);
+        info.fields
+            .iter()
+            .map(|(field, ty)| (field.clone(), ty.substitute(&substitution)))
+            .collect()
+    }
+
+    /// Returns this type with each type parameter that `substitution` names replaced by its
+    /// type.
+    ///
+    /// For example, substituting `str` for `T` in `option[list[T]]` gives `option[list[str]]`.
+    pub fn substitute(&self, substitution: &HashMap<String, Type>) -> Type {
+        if substitution.is_empty() {
+            return self.clone();
+        }
+        let each = |types: &[Type]| types.iter().map(|t| t.substitute(substitution)).collect();
+        match self {
+            Type::Param(name) => substitution
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| self.clone()),
+            Type::List(elem) => Type::List(Box::new(elem.substitute(substitution))),
+            Type::Map(key, value) => Type::Map(
+                Box::new(key.substitute(substitution)),
+                Box::new(value.substitute(substitution)),
+            ),
+            Type::Tuple(fields) => Type::Tuple(each(fields)),
+            Type::Enum { name, args } => Type::Enum {
+                name: name.clone(),
+                args: each(args),
+            },
+            Type::Struct { name, args } => Type::Struct {
+                name: name.clone(),
+                args: each(args),
+            },
+            Type::Function { params, ret } => Type::Function {
+                params: each(params),
+                ret: Box::new(ret.substitute(substitution)),
+            },
+            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Unit => self.clone(),
+        }
     }
 
     /// Returns the positions among [`Type::leaves`] of field `k` of this tuple type.
@@ -107,14 +168,11 @@ impl Type {
         name: &str,
         structs: &Structs,
     ) -> Option<(std::ops::Range<usize>, Type)> {
-        let Type::Struct(struct_name) = self else {
-            return None;
-        };
         let mut start = 0;
-        for (field, ty) in structs.get(struct_name)? {
+        for (field, ty) in self.struct_fields(structs) {
             let width = ty.leaves(structs).len();
             if field == name {
-                return Some((start..start + width, ty.clone()));
+                return Some((start..start + width, ty));
             }
             start += width;
         }
@@ -141,7 +199,12 @@ impl Display for Type {
                 let args: Vec<String> = args.iter().map(Type::to_string).collect();
                 write!(f, "{name}[{}]", args.join(", "))
             }
-            Type::Struct(name) => write!(f, "{name}"),
+            Type::Struct { name, args } if args.is_empty() => write!(f, "{name}"),
+            Type::Struct { name, args } => {
+                let args: Vec<String> = args.iter().map(Type::to_string).collect();
+                write!(f, "{name}[{}]", args.join(", "))
+            }
+            Type::Param(name) => write!(f, "{name}"),
             Type::Function { params, ret } => {
                 let params: Vec<String> = params.iter().map(Type::to_string).collect();
                 match **ret {
@@ -153,37 +216,69 @@ impl Display for Type {
     }
 }
 
-/// The name of the enum built into the language, whose values are `none` and `some(x)`.
+/// The name of the prelude's enum, whose values are `none` and `some(x)`, and which builtins such
+/// as `find` and `os.env` return.
 pub const OPTION: &str = "option";
 
-/// The variants of every enum a program defines, keyed by linked name, each with the types of its
-/// values in order, as in `Circle` holding `float`. [`variants`] also gives `option`'s.
-pub type Enums = HashMap<String, Vec<(String, Vec<Type>)>>;
+/// Returns whether the variants of the enum `name` are written and printed alone, as the
+/// prelude's are: `some(1)`, not `option.some(1)`.
+///
+/// For example, `prints_bare("option")` is true and `prints_bare("Shape")` is false.
+pub fn prints_bare(name: &str) -> bool {
+    name == OPTION
+}
 
-/// Returns the variants of the enum type `ty`, each with the types of its values, in the order
-/// their tags number them, or nothing if `ty` is not an enum.
+/// Maps each of `params`, a generic type's or function's type parameters, to the type at the
+/// same position of `args`.
+pub fn substitution(params: &[String], args: &[Type]) -> HashMap<String, Type> {
+    params.iter().cloned().zip(args.iter().cloned()).collect()
+}
+
+/// An enum a program defines: its type parameters, such as `T` in `enum Tree[T]:`, and its
+/// variants, each with the types of its values in order, as in `Circle` holding `float`.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EnumDef {
+    pub params: Vec<String>,
+    pub variants: Vec<(String, Vec<Type>)>,
+}
+
+/// Every enum a program defines, keyed by linked name, including the prelude's `option`.
+pub type Enums = HashMap<String, EnumDef>;
+
+/// Returns the variants of the enum type `ty`, each with the types of its values once its type
+/// arguments are filled in, in the order their tags number them, or nothing if `ty` is not an
+/// enum.
 ///
 /// For example, `option[int]` gives `none` with no values, then `some` with an `int`.
 pub fn variants(enums: &Enums, ty: &Type) -> Vec<(String, Vec<Type>)> {
     match ty {
-        Type::Enum { name, args } if name == OPTION => vec![
-            ("none".to_string(), vec![]),
-            ("some".to_string(), args.clone()),
-        ],
-        Type::Enum { name, .. } => enums.get(name).cloned().unwrap_or_default(),
+        Type::Enum { name, args } => {
+            let Some(info) = enums.get(name) else {
+                return vec![];
+            };
+            let substitution = substitution(&info.params, args);
+            info.variants
+                .iter()
+                .map(|(variant, fields)| {
+                    let fields = fields.iter().map(|f| f.substitute(&substitution)).collect();
+                    (variant.clone(), fields)
+                })
+                .collect()
+        }
         _ => vec![],
     }
 }
 
 /// Returns how a value of the enum type `ty`'s variant `name` prints before its values: the
-/// enum's own name and the variant's, or the variant's alone for `option`.
+/// enum's own name and the variant's, or the variant's alone for the prelude's `option`
+/// ([`prints_bare`]).
 ///
 /// For example, `Circle` of `geometry.Shape` prints as `Shape.Circle`, and `some` as `some`.
 pub fn variant_display(ty: &Type, name: &str) -> String {
     match ty {
         Type::Enum {
             name: enum_name, ..
-        } if enum_name != OPTION => {
+        } if !prints_bare(enum_name) => {
             let short = enum_name.rsplit('.').next().unwrap_or(enum_name);
             format!("{short}.{name}")
         }
@@ -191,9 +286,17 @@ pub fn variant_display(ty: &Type, name: &str) -> String {
     }
 }
 
-/// The fields of every struct a program defines, keyed by linked name, each with its type, in
-/// the order they are written, as in `Point` holding `x: float` and `y: float`.
-pub type Structs = HashMap<String, Vec<(String, Type)>>;
+/// A struct a program defines: its type parameters, such as `A` and `B` in `struct Pair[A, B]:`,
+/// and its fields, each with its type, in the order they are written, as in `Point` holding
+/// `x: float` and `y: float`. [`Type::struct_fields`] fills in a struct type's arguments.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct StructDef {
+    pub params: Vec<String>,
+    pub fields: Vec<(String, Type)>,
+}
+
+/// Every struct a program defines, keyed by linked name.
+pub type Structs = HashMap<String, StructDef>;
 
 /// Returns how the struct `name` prints before its fields: its own name, without the module
 /// it is in.
@@ -223,6 +326,19 @@ pub struct Method {
 /// Every call of a function of an `impl` block, keyed by the call's span.
 pub type Methods = HashMap<Span, Method>;
 
+/// The type arguments a call of a generic function fills its type parameters with, which
+/// [`Analysis::instances`] holds by the call's span.
+///
+/// For example, `first(["a"])` calls `first` with `str` for `T`. Inside another generic
+/// function, an argument may be that function's own type parameter, as `T` in `first(xs)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Instance {
+    /// The function's linked name, such as `util.first`.
+    pub function: String,
+    /// A type for each of its type parameters, in order.
+    pub args: Vec<Type>,
+}
+
 /// What a [`Symbol`] names.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
@@ -239,6 +355,9 @@ pub enum SymbolKind {
     /// A function of an `impl` block, such as `norm` in `fn norm(self) -> float:`, whose
     /// [`Symbol::scope`] is the struct's name.
     Method,
+    /// A type parameter of a generic function, such as `T` in `fn first[T](xs: list[T]) -> T:`,
+    /// whose [`Symbol::scope`] is the function's name.
+    TypeParam,
     Parameter,
     /// A variable assigned inside a function.
     Local,
@@ -287,6 +406,10 @@ pub struct Analysis {
     pub structs: Structs,
     /// How every call of a function of an `impl` block was resolved.
     pub methods: Methods,
+    /// The type arguments of every call of a generic function, by the call's span.
+    pub instances: HashMap<Span, Instance>,
+    /// The names of each generic function's type parameters, in order, by its linked name.
+    pub type_params: HashMap<String, Vec<String>>,
 }
 
 impl Analysis {
@@ -318,7 +441,10 @@ impl Analysis {
         self.symbols.iter().filter(move |s| match &s.scope {
             _ if matches!(
                 s.kind,
-                SymbolKind::Variant | SymbolKind::Field | SymbolKind::Method
+                SymbolKind::Variant
+                    | SymbolKind::Field
+                    | SymbolKind::Method
+                    | SymbolKind::TypeParam
             ) =>
             {
                 false
@@ -370,9 +496,14 @@ enum Ty {
     Map(Box<Ty>, Box<Ty>),
     Tuple(Vec<Ty>),
     Enum(String, Vec<Ty>),
-    Struct(String),
+    /// A struct by its linked name, with its type arguments.
+    Struct(String, Vec<Ty>),
     /// An unknown type, identified by its index in [`Inference::vars`].
     Var(usize),
+    /// A type parameter of a generic function, identified by its index in
+    /// [`Inference::type_params`]. Inside the function it is an opaque type that unifies only with
+    /// itself, and each call replaces it with a fresh variable.
+    Param(usize),
 }
 
 /// A requirement that a type turn out to be one of a few kinds, checked once inference is done
@@ -505,6 +636,8 @@ enum Kind {
     Tuple,
     Enum,
     Struct,
+    /// A type parameter, which no constraint admits, since it may be any type.
+    Param,
 }
 
 impl Kind {
@@ -519,7 +652,8 @@ impl Kind {
             Ty::Map(..) => Some(Kind::Map),
             Ty::Tuple(_) => Some(Kind::Tuple),
             Ty::Enum(..) => Some(Kind::Enum),
-            Ty::Struct(_) => Some(Kind::Struct),
+            Ty::Struct(..) => Some(Kind::Struct),
+            Ty::Param(_) => Some(Kind::Param),
             Ty::Var(_) => None,
         }
     }
@@ -550,10 +684,11 @@ struct Uncomparable {
     field: Option<(String, String)>,
 }
 
-/// An enum a program defines: its symbol and its variants, each with its symbol and the types of
-/// its values.
+/// An enum a program defines: its symbol, its type parameters, and its variants, each with its
+/// symbol and the types of its values, which may hold the type parameters.
 struct EnumInfo {
     symbol: usize,
+    type_params: Vec<usize>,
     variants: Vec<VariantInfo>,
 }
 
@@ -563,9 +698,11 @@ struct VariantInfo {
     fields: Vec<Ty>,
 }
 
-/// A struct a program defines: its symbol and its fields, each with its symbol and type.
+/// A struct a program defines: its symbol, its type parameters, and its fields, each with its
+/// symbol and type, which may hold the type parameters.
 struct StructInfo {
     symbol: usize,
+    type_params: Vec<usize>,
     fields: Vec<FieldInfo>,
 }
 
@@ -596,10 +733,40 @@ struct PendingMatch {
 /// A function's inferred signature.
 struct FunctionInfo {
     symbol: usize,
+    /// The type parameters of a generic function, as indexes into [`Inference::type_params`],
+    /// which `params` and `ret` hold as [`Ty::Param`].
+    type_params: Vec<usize>,
     params: Vec<Ty>,
     ret: Ty,
     /// Whether the definition writes its return type, rather than returning no value by default.
     ret_written: bool,
+}
+
+/// How a value is held inside another, for counting the values it takes up.
+#[derive(Clone, Copy, PartialEq)]
+enum Held {
+    /// An element of a list.
+    Element,
+    /// The value of a map's entry, stored after its key.
+    Entry,
+    /// A value of a generic enum, whose widest variant counts.
+    Variants,
+}
+
+/// A call of a generic function and the type arguments it fills the type parameters with.
+struct PendingInstance {
+    span: Span,
+    /// The function the call is in, or `None` at the top level.
+    caller: Option<String>,
+    /// The generic function called.
+    function: String,
+    args: Vec<Ty>,
+}
+
+/// A type parameter of a generic function, such as `T` in `fn first[T](xs: list[T]) -> T:`.
+struct TypeParamInfo {
+    name: String,
+    symbol: usize,
 }
 
 /// The function whose body is being checked.
@@ -616,6 +783,14 @@ struct FunctionScope {
 struct Inference {
     /// The solution for each type variable, if known.
     vars: Vec<Option<Ty>>,
+    /// Every type parameter of every generic function, which [`Ty::Param`] indexes.
+    type_params: Vec<TypeParamInfo>,
+    /// The type parameters of the generic function whose signature or body is being checked, by
+    /// name.
+    scope_params: HashMap<String, usize>,
+    /// Every call of a generic function, which `finish` checks and gives lowering as
+    /// [`Analysis::instances`].
+    instances: Vec<PendingInstance>,
     diagnostics: Vec<Diagnostic>,
     constraints: Vec<Constraint>,
     /// The type each `==` and `!=` compares, with the comparison's span, checked once inference
@@ -764,7 +939,10 @@ impl Inference {
                 None
             }
             // set by the caller
-            SymbolKind::Variant | SymbolKind::Field | SymbolKind::Method => None,
+            SymbolKind::Variant
+            | SymbolKind::Field
+            | SymbolKind::Method
+            | SymbolKind::TypeParam => None,
         };
         self.symbols.push(Symbol {
             name: name.to_string(),
@@ -783,6 +961,10 @@ impl Inference {
     }
 
     fn add_reference(&mut self, span: Span, symbol: usize) {
+        // a name linking wrote, such as `option` in `some(1)`, has no text to find
+        if span.start == span.end {
+            return;
+        }
         // the name in `x += 1` is read and assigned, but is one reference
         if self
             .references
@@ -819,6 +1001,9 @@ impl Inference {
             }
             Ty::Tuple(fields) => Ty::Tuple(fields.iter().map(|f| self.resolve(f)).collect()),
             Ty::Enum(name, args) => Ty::Enum(name, args.iter().map(|a| self.resolve(a)).collect()),
+            Ty::Struct(name, args) => {
+                Ty::Struct(name, args.iter().map(|a| self.resolve(a)).collect())
+            }
             other => other,
         }
     }
@@ -828,7 +1013,9 @@ impl Inference {
             Ty::Var(v) => v == var,
             Ty::List(elem) => self.occurs(var, &elem),
             Ty::Map(key, value) => self.occurs(var, &key) || self.occurs(var, &value),
-            Ty::Tuple(fields) | Ty::Enum(_, fields) => fields.iter().any(|f| self.occurs(var, f)),
+            Ty::Tuple(fields) | Ty::Enum(_, fields) | Ty::Struct(_, fields) => {
+                fields.iter().any(|f| self.occurs(var, f))
+            }
             _ => false,
         }
     }
@@ -865,7 +1052,7 @@ impl Inference {
                         .zip(&ys)
                         .fold(true, |same, (x, y)| self.unify(x, y) && same)
             }
-            (Ty::Enum(a, xs), Ty::Enum(b, ys)) => {
+            (Ty::Enum(a, xs), Ty::Enum(b, ys)) | (Ty::Struct(a, xs), Ty::Struct(b, ys)) => {
                 a == b
                     && xs.len() == ys.len()
                     && xs
@@ -963,7 +1150,12 @@ impl Inference {
                 let args: Vec<String> = args.iter().map(|a| self.show(a)).collect();
                 format!("{name}[{}]", args.join(", "))
             }
-            Ty::Struct(name) => name,
+            Ty::Struct(name, args) if args.is_empty() => name,
+            Ty::Struct(name, args) => {
+                let args: Vec<String> = args.iter().map(|a| self.show(a)).collect();
+                format!("{name}[{}]", args.join(", "))
+            }
+            Ty::Param(p) => self.type_params[p].name.clone(),
             Ty::Var(x) => match self.bounds.get(&x) {
                 Some(bound) => self.show(&bound.default()),
                 None => "unknown".to_string(),
@@ -1022,11 +1214,32 @@ impl Inference {
         if op.op == ArithmeticOp::Binary(Operator::Power) {
             return self.solve_power(op, left, right, force);
         }
+        // a type parameter may be any type, so it is no operand, whatever the other one is
+        if let Some(param) = [&left, &right]
+            .into_iter()
+            .find(|t| matches!(t, Ty::Param(_)))
+        {
+            let message = match symbol {
+                "+" => "'+' needs int, float, or str operands, found {}",
+                "-" => "'-' needs int or float operands, found {}",
+                "*" => "'*' needs int or float operands, found {}",
+                "/" => "'/' needs int or float operands, found {}",
+                _ => "'%' needs int or float operands, found {}",
+            };
+            self.require(param.clone(), NUMBERS, op.span, message);
+            return true;
+        }
         // a string, bool, or none is never a list, so an unknown other operand has its type
         let scalar = |ty: &Ty| {
             matches!(
                 ty,
-                Ty::Str | Ty::Bool | Ty::Unit | Ty::Tuple(_) | Ty::Enum(..) | Ty::Struct(_)
+                Ty::Str
+                    | Ty::Bool
+                    | Ty::Unit
+                    | Ty::Tuple(_)
+                    | Ty::Enum(..)
+                    | Ty::Struct(..)
+                    | Ty::Param(_)
             )
         };
         match (&left, &right) {
@@ -1115,7 +1328,7 @@ impl Inference {
                 // a tuple, enum, or struct is never an operand, whatever the other one is
                 if let Some(tuple) = [&left, &right]
                     .into_iter()
-                    .find(|ty| matches!(ty, Ty::Tuple(_) | Ty::Enum(..) | Ty::Struct(_)))
+                    .find(|ty| matches!(ty, Ty::Tuple(_) | Ty::Enum(..) | Ty::Struct(..)))
                 {
                     self.require(tuple.clone(), allowed, op.span, message);
                     self.unify(&op.result, &left);
@@ -1251,12 +1464,13 @@ impl Inference {
             if let StmtKind::FunctionDef {
                 name,
                 name_span,
+                type_params,
                 args,
                 returns,
                 ..
             } = &stmt.kind
             {
-                self.declare_function(name, *name_span, args, returns.as_ref());
+                self.declare_function(name, *name_span, type_params, args, returns.as_ref());
                 self.function_spans.entry(name.clone()).or_insert(stmt.span);
             }
         }
@@ -1267,7 +1481,7 @@ impl Inference {
                 && !self.functions.contains_key(&name)
                 && !self.enums.contains_key(&name)
                 && !self.structs.contains_key(&name)
-                && !BUILTINS.contains(&name.as_str())
+                && !is_reserved(&name)
             {
                 let ty = self.fresh();
                 let symbol = self.add_symbol(&name, SymbolKind::Global, span, ty);
@@ -1308,6 +1522,7 @@ impl Inference {
         &mut self,
         name: &str,
         name_span: Span,
+        type_params: &[TypeParam],
         args: &Arguments,
         returns: Option<&TypeExpr>,
     ) {
@@ -1315,7 +1530,7 @@ impl Inference {
             self.error(name_span, format!("function '{name}' is already defined"));
             return;
         }
-        if BUILTINS.contains(&name) {
+        if is_reserved(name) {
             self.error(name_span, format!("cannot redefine builtin '{name}'"));
             return;
         }
@@ -1330,18 +1545,117 @@ impl Inference {
             );
             return;
         }
+        self.scope_params.clear();
+        let type_params = self.declare_type_params(name, type_params);
         let (params, ret) = self.signature(args, returns, None);
+        self.scope_params.clear();
         // the symbol's type is rebuilt from `params` and `ret` in `finish`
         let symbol = self.add_symbol(name, SymbolKind::Function, name_span, Ty::Unit);
         self.functions.insert(
             name.to_string(),
             FunctionInfo {
                 symbol,
+                type_params,
                 params,
                 ret,
                 ret_written: returns.is_some(),
             },
         );
+    }
+
+    /// Declares the type parameters of `owner`, a generic function, struct, or enum, adding them
+    /// to [`Inference::scope_params`] for the types it writes, and returns their indexes into
+    /// [`Inference::type_params`]. A name that is already a type, or already a type parameter in
+    /// scope, is reported and left out.
+    ///
+    /// For example, `[T]` in `fn first[T](xs: list[T]) -> T:` declares one parameter `T`.
+    fn declare_type_params(&mut self, owner: &str, params: &[TypeParam]) -> Vec<usize> {
+        let mut declared = vec![];
+        for param in params {
+            let name = &param.name;
+            // the prelude's parameters cannot clash with a program's types, which it never sees
+            if param.span.file != FileId::PRELUDE
+                && (BUILTIN_TYPES.contains(&name.as_str())
+                    || name == "map"
+                    || self.enums.contains_key(name)
+                    || self.structs.contains_key(name))
+            {
+                self.error(param.span, format!("'{name}' is already a type"));
+                continue;
+            }
+            if self.scope_params.contains_key(name) {
+                self.error(
+                    param.span,
+                    format!("'{owner}' already has a type parameter '{name}'"),
+                );
+                continue;
+            }
+            let symbol = self.add_symbol(name, SymbolKind::TypeParam, param.span, Ty::Unit);
+            self.symbols[symbol].scope = Some(owner.to_string());
+            self.type_params.push(TypeParamInfo {
+                name: name.clone(),
+                symbol,
+            });
+            let index = self.type_params.len() - 1;
+            self.symbol_types[symbol] = Ty::Param(index);
+            self.scope_params.insert(name.clone(), index);
+            declared.push(index);
+        }
+        declared
+    }
+
+    /// Returns `ty` with each of the type parameters `params` replaced by the type at the same
+    /// position of `args`.
+    ///
+    /// For example, substituting `int` for `T` in `list[T]` gives `list[int]`.
+    fn substitute(ty: &Ty, params: &[usize], args: &[Ty]) -> Ty {
+        let each = |tys: &[Ty]| {
+            tys.iter()
+                .map(|t| Self::substitute(t, params, args))
+                .collect()
+        };
+        match ty {
+            Ty::Param(p) => match params.iter().position(|q| q == p) {
+                Some(i) => args.get(i).cloned().unwrap_or_else(|| ty.clone()),
+                None => ty.clone(),
+            },
+            Ty::List(elem) => Ty::List(Box::new(Self::substitute(elem, params, args))),
+            Ty::Map(key, value) => Ty::Map(
+                Box::new(Self::substitute(key, params, args)),
+                Box::new(Self::substitute(value, params, args)),
+            ),
+            Ty::Tuple(fields) => Ty::Tuple(each(fields)),
+            Ty::Enum(name, fields) => Ty::Enum(name.clone(), each(fields)),
+            Ty::Struct(name, fields) => Ty::Struct(name.clone(), each(fields)),
+            other => other.clone(),
+        }
+    }
+
+    /// Returns the parameter types and result type of the function `function` for the call at
+    /// `call`, with its type parameters, if it is generic or a method of a generic struct,
+    /// filled in by `type_args`, which the call records for lowering.
+    ///
+    /// For example, `first` of `fn first[T](xs: list[T]) -> T:` with `str` for `T` takes a
+    /// `list[str]` and gives a `str`.
+    fn instantiate(&mut self, call: Span, function: &str, type_args: Vec<Ty>) -> (Vec<Ty>, Ty) {
+        let info = &self.functions[function];
+        let (params, ret) = (info.params.clone(), info.ret.clone());
+        let type_params = info.type_params.clone();
+        if type_params.is_empty() {
+            return (params, ret);
+        }
+        let params = params
+            .iter()
+            .map(|p| Self::substitute(p, &type_params, &type_args))
+            .collect();
+        let ret = Self::substitute(&ret, &type_params, &type_args);
+        self.instances.push(PendingInstance {
+            span: call,
+            caller: self.function.as_ref().map(|f| f.name.clone()),
+            function: function.to_string(),
+            args: type_args,
+        });
+        (params, ret)
     }
 
     /// Returns the parameter types and return type a signature writes. In a function of the
@@ -1361,7 +1675,7 @@ impl Inference {
                 (annotation, Some(this)) if arg.arg == "self" && i == 0 => {
                     if annotation.is_some() {
                         let name = match this {
-                            Ty::Struct(name) => struct_display(name).to_string(),
+                            Ty::Struct(name, _) => struct_display(name).to_string(),
                             _ => String::new(),
                         };
                         self.error(
@@ -1427,6 +1741,7 @@ impl Inference {
                 let StmtKind::FunctionDef {
                     name,
                     name_span,
+                    type_params,
                     args,
                     returns,
                     ..
@@ -1434,6 +1749,17 @@ impl Inference {
                 else {
                     continue;
                 };
+                // a generic struct's type parameters are its methods' too
+                let struct_params = self.structs[owner].type_params.clone();
+                self.scope_params = struct_params
+                    .iter()
+                    .map(|&p| (self.type_params[p].name.clone(), p))
+                    .collect();
+                if let Some(param) = type_params.first() {
+                    self.error(param.span, "a method cannot have type parameters for now");
+                    // declared anyway, so its signature has no further errors
+                    self.declare_type_params(&format!("{owner}.{name}"), type_params);
+                }
                 let short = struct_display(owner);
                 if self
                     .struct_methods
@@ -1455,8 +1781,12 @@ impl Inference {
                     );
                     continue;
                 }
-                let this = Ty::Struct(owner.clone());
+                let this = Ty::Struct(
+                    owner.clone(),
+                    struct_params.iter().map(|&p| Ty::Param(p)).collect(),
+                );
                 let (params, ret) = self.signature(args, returns.as_ref(), Some(&this));
+                self.scope_params.clear();
                 let has_self = args.args.first().is_some_and(|arg| arg.arg == "self");
                 // the symbol's type is rebuilt from `params` and `ret` in `finish`
                 let symbol = self.add_symbol(name, SymbolKind::Method, *name_span, Ty::Unit);
@@ -1466,6 +1796,7 @@ impl Inference {
                     function.clone(),
                     FunctionInfo {
                         symbol,
+                        type_params: struct_params,
                         params,
                         ret,
                         ret_written: returns.is_some(),
@@ -1597,16 +1928,18 @@ impl Inference {
             return false;
         };
         // the place's type, from the fields' written types
-        let mut ty = Some(Ty::Struct(owner.to_string()));
+        let mut ty = Some(self.own_type(owner));
         for step in steps {
             ty = match (step, ty) {
-                (Step::Field(field), Some(Ty::Struct(name))) => self.struct_field_ty(&name, field),
+                (Step::Field(field), Some(Ty::Struct(name, args))) => {
+                    self.field_type(&name, &args, field)
+                }
                 (Step::Index(_), Some(Ty::List(elem))) => Some(*elem),
                 _ => None,
             };
         }
         match ty {
-            Some(Ty::Struct(name)) => self
+            Some(Ty::Struct(name, _)) => self
                 .struct_methods
                 .get(&name)
                 .and_then(|methods| methods.get(attr.as_str()))
@@ -1624,18 +1957,204 @@ impl Inference {
     fn declare_types(&mut self, body: &[Stmt]) {
         let enums = self.declare_enum_names(body);
         let structs = self.declare_struct_names(body);
+        // after every name, so a type parameter named like a type is reported
+        for (name, params, _) in &enums {
+            let declared = self.declare_type_params(name, params);
+            self.scope_params.clear();
+            let ty = Ty::Enum(
+                name.to_string(),
+                declared.iter().map(|&p| Ty::Param(p)).collect(),
+            );
+            if let Some(info) = self.enums.get_mut(*name) {
+                self.symbol_types[info.symbol] = ty;
+                info.type_params = declared;
+            }
+        }
+        for (name, params, _) in &structs {
+            let declared = self.declare_type_params(name, params);
+            self.scope_params.clear();
+            let ty = Ty::Struct(
+                name.to_string(),
+                declared.iter().map(|&p| Ty::Param(p)).collect(),
+            );
+            if let Some(info) = self.structs.get_mut(*name) {
+                self.symbol_types[info.symbol] = ty;
+                info.type_params = declared;
+            }
+        }
         self.declare_variants(enums);
         self.declare_fields(structs);
+        self.check_growing_types();
+    }
+
+    /// Reports a generic struct or enum that holds itself, directly or through other types,
+    /// with type arguments that nest its own type parameter, as `X(Bad[list[T]])` does in
+    /// `enum Bad[T]:`, since a value of `Bad[int]` could then hold a `Bad[list[int]]`, which
+    /// could hold a `Bad[list[list[int]]]`, and so on, so its types would never end.
+    fn check_growing_types(&mut self) {
+        // each type parameter is given to the ones its fields and variants fill in
+        let mut edges: Vec<(usize, usize, bool, Span)> = vec![];
+        let mut defs: Vec<(Vec<(Ty, Span)>, String)> = vec![];
+        for (name, info) in &self.structs {
+            let fields = info
+                .fields
+                .iter()
+                .map(|f| (f.ty.clone(), self.symbols[f.symbol].span))
+                .collect();
+            defs.push((fields, name.clone()));
+        }
+        for (name, info) in &self.enums {
+            let fields = info
+                .variants
+                .iter()
+                .flat_map(|v| {
+                    let span = self.symbols[v.symbol].span;
+                    v.fields.iter().map(move |f| (f.clone(), span))
+                })
+                .collect();
+            defs.push((fields, name.clone()));
+        }
+        for (fields, _) in &defs {
+            for (ty, span) in fields {
+                let mut stack = vec![ty.clone()];
+                while let Some(ty) = stack.pop() {
+                    match ty {
+                        Ty::Struct(name, args) | Ty::Enum(name, args) => {
+                            let params = self
+                                .structs
+                                .get(&name)
+                                .map(|info| info.type_params.clone())
+                                .or_else(|| self.enums.get(&name).map(|i| i.type_params.clone()))
+                                .unwrap_or_default();
+                            for (&q, arg) in params.iter().zip(&args) {
+                                let mut found = vec![];
+                                self.params_in(arg, &mut found);
+                                for p in found {
+                                    edges.push((p, q, *arg != Ty::Param(p), *span));
+                                }
+                            }
+                            stack.extend(args);
+                        }
+                        Ty::List(elem) => stack.push(*elem),
+                        Ty::Map(key, value) => {
+                            stack.push(*key);
+                            stack.push(*value);
+                        }
+                        Ty::Tuple(fields) => stack.extend(fields),
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let reaches = |from: usize, to: usize| {
+            let mut seen = HashSet::from([from]);
+            let mut stack = vec![from];
+            while let Some(p) = stack.pop() {
+                if p == to {
+                    return true;
+                }
+                for &(a, b, _, _) in &edges {
+                    if a == p && seen.insert(b) {
+                        stack.push(b);
+                    }
+                }
+            }
+            false
+        };
+        let mut reported = vec![];
+        for &(p, q, grows, span) in &edges {
+            if grows && reaches(q, p) && !reported.contains(&span) {
+                reported.push(span);
+                let owner = self.symbols[self.type_params[q].symbol]
+                    .scope
+                    .clone()
+                    .unwrap_or_default();
+                let param = self.type_params[q].name.clone();
+                self.error(
+                    span,
+                    format!(
+                        "this gives '{owner}' a type that nests '{}' for '{param}', so its values \
+                         could hold ever larger types",
+                        self.type_params[p].name
+                    ),
+                );
+            }
+        }
+    }
+
+    /// Puts the type parameters of the generic struct or enum `name` in
+    /// [`Inference::scope_params`], for the types its fields or variants write.
+    fn enter_type_params(&mut self, params: &[usize]) {
+        self.scope_params = params
+            .iter()
+            .map(|&p| (self.type_params[p].name.clone(), p))
+            .collect();
+    }
+
+    /// Returns the type the struct or enum `name` has inside its own definition and `impl`
+    /// blocks: itself with its type parameters as its type arguments, such as `Pair[A, B]`.
+    fn own_type(&self, name: &str) -> Ty {
+        if let Some(info) = self.structs.get(name) {
+            return Ty::Struct(
+                name.to_string(),
+                info.type_params.iter().map(|&p| Ty::Param(p)).collect(),
+            );
+        }
+        let params = self
+            .enums
+            .get(name)
+            .map(|info| info.type_params.iter().map(|&p| Ty::Param(p)).collect())
+            .unwrap_or_default();
+        Ty::Enum(name.to_string(), params)
+    }
+
+    /// Returns the type of field `field` of the struct type `name[args]`, with its type
+    /// arguments filled in, if it has the field.
+    ///
+    /// For example, field `a` of `Pair[int, str]`, written `a: A`, is an `int`.
+    fn field_type(&self, name: &str, args: &[Ty], field: &str) -> Option<Ty> {
+        let info = self.structs.get(name)?;
+        let ty = &info.fields.iter().find(|f| f.name == field)?.ty;
+        Some(Self::substitute(ty, &info.type_params, args))
+    }
+
+    /// Returns the types of every field of the struct type `name[args]`, in order, with its
+    /// type arguments filled in.
+    fn field_types(&self, name: &str, args: &[Ty]) -> Vec<Ty> {
+        self.structs.get(name).map_or_else(Vec::new, |info| {
+            info.fields
+                .iter()
+                .map(|f| Self::substitute(&f.ty, &info.type_params, args))
+                .collect()
+        })
+    }
+
+    /// Returns a fresh type variable for each type parameter of the struct or enum `name`, which
+    /// a value of it whose type arguments are not known yet has.
+    fn fresh_args(&mut self, name: &str) -> Vec<Ty> {
+        let count = match self.structs.get(name) {
+            Some(info) => info.type_params.len(),
+            None => self
+                .enums
+                .get(name)
+                .map_or(0, |info| info.type_params.len()),
+        };
+        (0..count).map(|_| self.fresh()).collect()
     }
 
     /// Declares the name of every enum defined at the top level of `body`, returning each with
-    /// its variants.
-    fn declare_enum_names<'a>(&mut self, body: &'a [Stmt]) -> Vec<(&'a String, &'a Vec<Variant>)> {
+    /// its type parameters and variants.
+    #[allow(clippy::type_complexity)]
+    fn declare_enum_names<'a>(
+        &mut self,
+        body: &'a [Stmt],
+    ) -> Vec<(&'a String, &'a Vec<TypeParam>, &'a Vec<Variant>)> {
         let mut declared = vec![];
         for stmt in body {
             let StmtKind::EnumDef {
                 name,
                 name_span,
+                type_params,
                 variants,
                 ..
             } = &stmt.kind
@@ -1643,12 +2162,14 @@ impl Inference {
                 continue;
             };
             self.enum_spans.insert(stmt.span);
-            if self.enums.contains_key(name) {
-                self.error(*name_span, format!("enum '{name}' is already defined"));
+            if name_span.file != FileId::PRELUDE
+                && (is_reserved(name) || BUILTIN_TYPES.contains(&name.as_str()))
+            {
+                self.error(*name_span, format!("cannot redefine builtin '{name}'"));
                 continue;
             }
-            if BUILTINS.contains(&name.as_str()) || BUILTIN_TYPES.contains(&name.as_str()) {
-                self.error(*name_span, format!("cannot redefine builtin '{name}'"));
+            if self.enums.contains_key(name) {
+                self.error(*name_span, format!("enum '{name}' is already defined"));
                 continue;
             }
             let ty = Ty::Enum(name.clone(), vec![]);
@@ -1657,17 +2178,21 @@ impl Inference {
                 name.clone(),
                 EnumInfo {
                     symbol,
+                    type_params: vec![],
                     variants: vec![],
                 },
             );
-            declared.push((name, variants));
+            declared.push((name, type_params, variants));
         }
         declared
     }
 
     /// Declares the variants of each enum in `declared`, from [`Inference::declare_enum_names`].
-    fn declare_variants(&mut self, declared: Vec<(&String, &Vec<Variant>)>) {
-        for (name, variants) in declared {
+    fn declare_variants(&mut self, declared: Vec<(&String, &Vec<TypeParam>, &Vec<Variant>)>) {
+        for (name, _, variants) in declared {
+            let params = self.enums[name].type_params.clone();
+            self.enter_type_params(&params);
+            let own = self.own_type(name);
             let mut infos: Vec<VariantInfo> = vec![];
             for variant in variants {
                 if infos.iter().any(|info| info.name == variant.name) {
@@ -1686,7 +2211,7 @@ impl Inference {
                     &variant.name,
                     SymbolKind::Variant,
                     variant.span,
-                    Ty::Enum(name.clone(), vec![]),
+                    own.clone(),
                 );
                 self.symbols[symbol].scope = Some(name.clone());
                 infos.push(VariantInfo {
@@ -1698,17 +2223,23 @@ impl Inference {
             if let Some(info) = self.enums.get_mut(name) {
                 info.variants = infos;
             }
+            self.scope_params.clear();
         }
     }
 
     /// Declares the name of every struct defined at the top level of `body`, returning each with
-    /// its fields.
-    fn declare_struct_names<'a>(&mut self, body: &'a [Stmt]) -> Vec<(&'a String, &'a Vec<Field>)> {
+    /// its type parameters and fields.
+    #[allow(clippy::type_complexity)]
+    fn declare_struct_names<'a>(
+        &mut self,
+        body: &'a [Stmt],
+    ) -> Vec<(&'a String, &'a Vec<TypeParam>, &'a Vec<Field>)> {
         let mut declared = vec![];
         for stmt in body {
             let StmtKind::StructDef {
                 name,
                 name_span,
+                type_params,
                 fields,
                 ..
             } = &stmt.kind
@@ -1727,20 +2258,21 @@ impl Inference {
                 );
                 continue;
             }
-            if BUILTINS.contains(&name.as_str()) || BUILTIN_TYPES.contains(&name.as_str()) {
+            if is_reserved(name) || BUILTIN_TYPES.contains(&name.as_str()) {
                 self.error(*name_span, format!("cannot redefine builtin '{name}'"));
                 continue;
             }
-            let ty = Ty::Struct(name.clone());
+            let ty = Ty::Struct(name.clone(), vec![]);
             let symbol = self.add_symbol(name, SymbolKind::Struct, *name_span, ty);
             self.structs.insert(
                 name.clone(),
                 StructInfo {
                     symbol,
+                    type_params: vec![],
                     fields: vec![],
                 },
             );
-            declared.push((name, fields));
+            declared.push((name, type_params, fields));
         }
         declared
     }
@@ -1748,8 +2280,10 @@ impl Inference {
     /// Declares the fields of each struct in `declared`, from
     /// [`Inference::declare_struct_names`], then reports any struct that holds itself without a
     /// list, option, or enum in between, since such a value would never end.
-    fn declare_fields(&mut self, declared: Vec<(&String, &Vec<Field>)>) {
-        for (name, fields) in &declared {
+    fn declare_fields(&mut self, declared: Vec<(&String, &Vec<TypeParam>, &Vec<Field>)>) {
+        for (name, _, fields) in &declared {
+            let params = self.structs[*name].type_params.clone();
+            self.enter_type_params(&params);
             let mut infos: Vec<FieldInfo> = vec![];
             for field in fields.iter() {
                 if infos.iter().any(|info| info.name == field.name) {
@@ -1773,13 +2307,14 @@ impl Inference {
             if let Some(info) = self.structs.get_mut(*name) {
                 info.fields = infos;
             }
+            self.scope_params.clear();
         }
-        for (name, fields) in declared {
+        for (name, _, fields) in declared {
             for field in fields {
                 let Some(ty) = self.struct_field_ty(name, &field.name) else {
                     continue;
                 };
-                if !self.reaches(&ty, name, &mut HashSet::new()) {
+                if !self.reaches(&ty, name, &mut HashSet::new(), 0) {
                     continue;
                 }
                 self.error(
@@ -1810,22 +2345,26 @@ impl Inference {
 
     /// Returns whether a value of type `ty` holds a value of the struct `target` directly, as a
     /// field of its own or of the tuples and structs it holds, rather than in a list or an enum.
-    /// `seen` holds the structs already looked through.
-    fn reaches(&self, ty: &Ty, target: &str, seen: &mut HashSet<String>) -> bool {
+    /// `seen` holds the struct types already looked through, and `depth` how many, so a type
+    /// that grows with every step, which `check_growing_types` reports, ends too.
+    ///
+    /// For example, with `struct Wrap[T]:` holding `x: T`, a `Wrap[S]` reaches `S`.
+    fn reaches(&self, ty: &Ty, target: &str, seen: &mut HashSet<String>, depth: usize) -> bool {
         match self.shallow(ty) {
-            Ty::Struct(name) if name == target => true,
-            Ty::Struct(name) => {
-                if !seen.insert(name.clone()) {
+            Ty::Struct(name, _) if name == target => true,
+            Ty::Struct(name, args) => {
+                let shown = self.show(&Ty::Struct(name.clone(), args.clone()));
+                if depth > MAX_ELEMENT_VALUES || !seen.insert(shown) {
                     return false;
                 }
-                let fields: Vec<Ty> = self
-                    .structs
-                    .get(&name)
-                    .map(|info| info.fields.iter().map(|f| f.ty.clone()).collect())
-                    .unwrap_or_default();
-                fields.iter().any(|f| self.reaches(f, target, seen))
+                let fields = self.field_types(&name, &args);
+                fields
+                    .iter()
+                    .any(|f| self.reaches(f, target, seen, depth + 1))
             }
-            Ty::Tuple(fields) => fields.iter().any(|f| self.reaches(f, target, seen)),
+            Ty::Tuple(fields) => fields
+                .iter()
+                .any(|f| self.reaches(f, target, seen, depth + 1)),
             _ => false,
         }
     }
@@ -1851,9 +2390,11 @@ impl Inference {
     fn values(&self, ty: &Ty) -> usize {
         match self.shallow(ty) {
             Ty::Tuple(fields) => fields.iter().map(|f| self.values(f)).sum(),
-            Ty::Struct(name) => self.structs.get(&name).map_or(1, |info| {
-                info.fields.iter().map(|f| self.values(&f.ty)).sum()
-            }),
+            Ty::Struct(name, args) if self.structs.contains_key(&name) => self
+                .field_types(&name, &args)
+                .iter()
+                .map(|f| self.values(f))
+                .sum(),
             _ => 1,
         }
     }
@@ -1946,32 +2487,45 @@ impl Inference {
             ),
             TypeExprKind::Named { name, args } => {
                 let args: Vec<Ty> = args.iter().map(|a| self.written_type(a, errors)).collect();
-                let takes = if name == OPTION {
-                    1
-                } else if let Some(info) = self.enums.get(name) {
-                    // a type that takes no types is only its name
-                    self.add_reference(annotation.span, info.symbol);
-                    0
-                } else if let Some(info) = self.structs.get(name) {
-                    self.add_reference(annotation.span, info.symbol);
+                if let Some(&param) = self.scope_params.get(name) {
+                    self.add_reference(annotation.span, self.type_params[param].symbol);
                     if !args.is_empty() {
                         errors.push((annotation.span, format!("'{name}' takes no types")));
                         return self.fresh();
                     }
-                    return Ty::Struct(name.clone());
+                    return Ty::Param(param);
+                }
+                let found = if let Some(info) = self.enums.get(name) {
+                    Some((Some(info.symbol), info.type_params.len(), false))
                 } else {
+                    self.structs
+                        .get(name)
+                        .map(|info| (Some(info.symbol), info.type_params.len(), true))
+                };
+                let Some((symbol, takes, is_struct)) = found else {
                     errors.push((annotation.span, format!("there is no type '{name}'")));
                     return self.fresh();
                 };
+                if let Some(symbol) = symbol {
+                    self.add_reference(annotation.span, symbol);
+                }
                 if args.len() != takes {
+                    // a type that takes no types is only its name
                     let message = match takes {
+                        0 => format!("'{name}' takes no types"),
                         1 => format!("'{name}' takes one type, as in '{name}[int]'"),
-                        _ => format!("'{name}' takes no types"),
+                        n => {
+                            let example = vec!["int"; n].join(", ");
+                            format!("'{name}' takes {n} types, as in '{name}[{example}]'")
+                        }
                     };
                     errors.push((annotation.span, message));
                     return self.fresh();
                 }
-                Ty::Enum(name.clone(), args)
+                match is_struct {
+                    true => Ty::Struct(name.clone(), args),
+                    false => Ty::Enum(name.clone(), args),
+                }
             }
         }
     }
@@ -2570,7 +3124,8 @@ impl Inference {
         if self.structs.contains_key(name) {
             return Resolved::Struct(name.to_string());
         }
-        if is_builtin(name) {
+        // a prelude variant is only ever read as `option.some`, but no variable may take its name
+        if is_builtin(name) || is_reserved(name) {
             return Resolved::Builtin;
         }
         Resolved::Undefined
@@ -2679,6 +3234,10 @@ impl Inference {
         for arg in args {
             self.infer(arg);
         }
+        // each value fills in the struct's type parameters with types of its own
+        let type_args = self.fresh_args(name);
+        let struct_ty = Ty::Struct(name.to_string(), type_args.clone());
+        let type_params = self.structs[name].type_params.clone();
         let mut given: Vec<&str> = vec![];
         for keyword in keywords {
             let found = self.infer(&keyword.value);
@@ -2686,7 +3245,7 @@ impl Inference {
                 .fields
                 .iter()
                 .find(|f| f.name == keyword.arg)
-                .map(|f| (f.symbol, f.ty.clone()));
+                .map(|f| (f.symbol, Self::substitute(&f.ty, &type_params, &type_args)));
             let Some((field_symbol, ty)) = field else {
                 self.error(
                     keyword.arg_span,
@@ -2711,7 +3270,7 @@ impl Inference {
                 call.span,
                 format!("a struct's values are named, as in '{example}'"),
             );
-            return Ty::Struct(name.to_string());
+            return struct_ty;
         }
         let missing: Vec<String> = self.structs[name]
             .fields
@@ -2727,7 +3286,7 @@ impl Inference {
             };
             self.error(call.span, format!("missing {noun} {names} for '{name}'"));
         }
-        Ty::Struct(name.to_string())
+        struct_ty
     }
 
     /// Infers `base.attr`, the field `attr` of a struct, written as `expr`, and returns the
@@ -2738,7 +3297,7 @@ impl Inference {
         let base_ty = self.infer(base);
         let attr_span = Self::attr_span(expr, attr);
         match self.shallow(&base_ty) {
-            Ty::Struct(name) => self.struct_field(&name, attr, attr_span),
+            Ty::Struct(name, args) => self.struct_field(&name, &args, attr, attr_span),
             Ty::Var(_) if self.is_global_in_function(base) => {
                 // a function checked before the global's assignment, which makes it a struct
                 let result = self.fresh();
@@ -2774,14 +3333,14 @@ impl Inference {
         }
     }
 
-    /// Returns the type of field `attr` of the struct `name`, recording the reference to it at
-    /// `attr_span`, or reports that there is no such field.
-    fn struct_field(&mut self, name: &str, attr: &str, attr_span: Span) -> Ty {
+    /// Returns the type of field `attr` of the struct type `name[args]`, recording the reference
+    /// to it at `attr_span`, or reports that there is no such field.
+    fn struct_field(&mut self, name: &str, args: &[Ty], attr: &str, attr_span: Span) -> Ty {
         let field = self.structs.get(name).and_then(|info| {
             info.fields
                 .iter()
                 .find(|f| f.name == attr)
-                .map(|f| (f.symbol, f.ty.clone()))
+                .map(|f| (f.symbol, Self::substitute(&f.ty, &info.type_params, args)))
         });
         match field {
             Some((symbol, ty)) => {
@@ -2807,8 +3366,8 @@ impl Inference {
     /// Settles a field read from a global that was not known when it was found.
     fn settle_field(&mut self, deferred: DeferredField) {
         match self.shallow(&deferred.value_ty) {
-            Ty::Struct(name) => {
-                let field = self.struct_field(&name, &deferred.attr, deferred.attr_span);
+            Ty::Struct(name, args) => {
+                let field = self.struct_field(&name, &args, &deferred.attr, deferred.attr_span);
                 self.expect(&field, &deferred.result, deferred.attr_span);
             }
             other => {
@@ -2837,17 +3396,23 @@ impl Inference {
             .iter()
             .map(|arg| self.infer(arg))
             .collect();
-        let enum_ty = Ty::Enum(enum_name.to_string(), vec![]);
+        // each value fills in the enum's type parameters with types of its own
+        let type_args = self.fresh_args(enum_name);
+        let enum_ty = Ty::Enum(enum_name.to_string(), type_args.clone());
         let ExprKind::Attribute { value, .. } = &func.kind else {
             return enum_ty;
         };
         let info = &self.enums[enum_name];
         let enum_symbol = info.symbol;
-        let found = info
-            .variants
-            .iter()
-            .find(|v| v.name == variant)
-            .map(|v| (v.symbol, v.fields.clone()));
+        let type_params = info.type_params.clone();
+        let found = info.variants.iter().find(|v| v.name == variant).map(|v| {
+            let fields = v
+                .fields
+                .iter()
+                .map(|f| Self::substitute(f, &type_params, &type_args))
+                .collect::<Vec<Ty>>();
+            (v.symbol, fields)
+        });
         self.add_reference(value.span, enum_symbol);
         let attr_span = Self::attr_span(func, variant);
         let Some((symbol, fields)) = found else {
@@ -2858,7 +3423,11 @@ impl Inference {
             return enum_ty;
         };
         self.add_reference(attr_span, symbol);
-        let written = format!("{enum_name}.{variant}");
+        let written = if prints_bare(enum_name) {
+            variant.to_string()
+        } else {
+            format!("{enum_name}.{variant}")
+        };
         match args {
             None if !fields.is_empty() => {
                 let count = values_phrase(fields.len());
@@ -2963,8 +3532,8 @@ impl Inference {
         };
         self.add_reference(name_span, symbol);
         let function = format!("{owner}.{name}");
-        let info = &self.functions[&function];
-        let (params, ret) = (info.params.clone(), info.ret.clone());
+        let type_args = self.fresh_args(owner);
+        let (params, ret) = self.instantiate(call.span, &function, type_args);
         self.methods.insert(
             call.span,
             Method {
@@ -2994,7 +3563,7 @@ impl Inference {
         call: &Expr,
         func: &Expr,
         receiver: &Expr,
-        owner: &str,
+        (owner, type_args): (&str, &[Ty]),
         name: &str,
         args: &[Expr],
     ) -> Ty {
@@ -3031,8 +3600,8 @@ impl Inference {
         };
         self.add_reference(name_span, symbol);
         let function = format!("{owner}.{name}");
-        let info = &self.functions[&function];
-        let (params, ret) = (info.params[1..].to_vec(), info.ret.clone());
+        let (mut params, ret) = self.instantiate(call.span, &function, type_args.to_vec());
+        params.remove(0);
         self.methods.insert(
             call.span,
             Method {
@@ -3077,8 +3646,8 @@ impl Inference {
     /// Settles a method called on a value whose type was not known when it was found.
     fn settle_method(&mut self, deferred: DeferredMethod) {
         let name = &deferred.name;
-        let owner = match self.shallow(&deferred.value_ty) {
-            Ty::Struct(owner) => owner,
+        let (owner, type_args) = match self.shallow(&deferred.value_ty) {
+            Ty::Struct(owner, args) => (owner, args),
             Ty::Var(_) => {
                 self.error(
                     deferred.receiver.span,
@@ -3106,8 +3675,8 @@ impl Inference {
         };
         self.add_reference(deferred.name_span, symbol);
         let function = format!("{owner}.{name}");
-        let info = &self.functions[&function];
-        let (params, ret) = (info.params[1..].to_vec(), info.ret.clone());
+        let (mut params, ret) = self.instantiate(deferred.call, &function, type_args);
+        params.remove(0);
         if changes {
             if ret == Ty::Unit && !deferred.statement {
                 self.error(
@@ -3163,7 +3732,6 @@ impl Inference {
             ExprKind::Constant { value, .. } => match **value {
                 Constant::Bool(_) => Ty::Bool,
                 Constant::Str(_) | Constant::Char(_) => Ty::Str,
-                Constant::None => Ty::Enum(OPTION.to_string(), vec![self.fresh()]),
                 Constant::Float(_) | Constant::F32(_) | Constant::F64(_) | Constant::Decimal(_) => {
                     Ty::Float
                 }
@@ -3514,8 +4082,13 @@ impl Inference {
 
         match self.resolve_name(id) {
             Resolved::Function(name) => {
-                let info = &self.functions[&name];
-                let (symbol, params, ret) = (info.symbol, info.params.clone(), info.ret.clone());
+                let (symbol, count) = {
+                    let info = &self.functions[&name];
+                    (info.symbol, info.type_params.len())
+                };
+                // each call fills in the type parameters with types of its own
+                let type_args = (0..count).map(|_| self.fresh()).collect();
+                let (params, ret) = self.instantiate(call.span, &name, type_args);
                 self.add_reference(func.span, symbol);
                 self.expr_types.push((func.span, Ty::Unit));
                 if params.len() != args.len() {
@@ -3657,19 +4230,6 @@ impl Inference {
     /// `["some"]` gives `option[T]`, `some`, and `[T]` for a new unknown `T`.
     fn variant_of_pattern(&mut self, path: &[(String, Span)]) -> Option<(Ty, String, Vec<Ty>)> {
         match path {
-            [(name, _)] if name == "none" => {
-                let elem = self.fresh();
-                Some((
-                    Ty::Enum(OPTION.to_string(), vec![elem]),
-                    name.clone(),
-                    vec![],
-                ))
-            }
-            [(name, _)] if name == "some" => {
-                let elem = self.fresh();
-                let option = Ty::Enum(OPTION.to_string(), vec![elem.clone()]);
-                Some((option, name.clone(), vec![elem]))
-            }
             [(name, span)] => {
                 self.error(
                     *span,
@@ -3685,13 +4245,19 @@ impl Inference {
                     self.error(*enum_span, format!("'{enum_name}' is not an enum"));
                     return None;
                 };
+                // the subject fills in the type arguments, as `some(x)` fills in `option`'s
+                let type_args = self.fresh_args(&name);
                 let info = &self.enums[&name];
                 let enum_symbol = info.symbol;
-                let found = info
-                    .variants
-                    .iter()
-                    .find(|v| v.name == *variant)
-                    .map(|v| (v.symbol, v.fields.clone()));
+                let type_params = info.type_params.clone();
+                let found = info.variants.iter().find(|v| v.name == *variant).map(|v| {
+                    let fields = v
+                        .fields
+                        .iter()
+                        .map(|f| Self::substitute(f, &type_params, &type_args))
+                        .collect::<Vec<Ty>>();
+                    (v.symbol, fields)
+                });
                 self.add_reference(*enum_span, enum_symbol);
                 let Some((symbol, fields)) = found else {
                     self.error(
@@ -3702,7 +4268,7 @@ impl Inference {
                 };
                 self.add_reference(*variant_span, symbol);
                 let written = format!("{enum_name}.{variant}");
-                Some((Ty::Enum(name, vec![]), written, fields))
+                Some((Ty::Enum(name, type_args), written, fields))
             }
             _ => {
                 let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
@@ -3739,8 +4305,28 @@ impl Inference {
     ) -> Ty {
         let receiver_ty = self.infer(receiver);
         match self.shallow(&receiver_ty) {
-            Ty::Struct(owner) => {
-                return self.infer_struct_method(call, func, receiver, &owner, name, args);
+            Ty::Struct(owner, type_args) => {
+                return self.infer_struct_method(
+                    call,
+                    func,
+                    receiver,
+                    (&owner, &type_args),
+                    name,
+                    args,
+                );
+            }
+            param @ Ty::Param(_) => {
+                for arg in args {
+                    self.infer(arg);
+                }
+                let param = self.show(&param);
+                self.error(
+                    Self::attr_span(func, name),
+                    format!(
+                        "values of type '{param}' have no methods, since '{param}' may be any type"
+                    ),
+                );
+                return self.fresh();
             }
             Ty::Var(_) if !METHODS.contains(&name) => {
                 // as a global a function checked before the global's assignment reads, which
@@ -3950,13 +4536,6 @@ impl Inference {
     fn infer_builtin(&mut self, call: &Expr, name: &str, args: &[Expr], arg_types: &[Ty]) -> Ty {
         match name {
             "print" => Ty::Unit,
-            "some" => match arg_types {
-                [value] => Ty::Enum(OPTION.to_string(), vec![value.clone()]),
-                _ => {
-                    self.arity_error(call.span, name, "1", args.len());
-                    Ty::Enum(OPTION.to_string(), vec![self.fresh()])
-                }
-            },
             "int" | "float" | "str" => {
                 if args.len() != 1 {
                     self.arity_error(call.span, name, "1", args.len());
@@ -4169,6 +4748,12 @@ impl Inference {
                 let message = format!("'==' and '!=' cannot compare {}", self.show(&ty));
                 self.error(span, message);
             }
+            Ty::Param(_) => {
+                let name = self.show(&ty);
+                let message =
+                    format!("'==' and '!=' cannot compare {name}, since '{name}' may be any type");
+                self.error(span, message);
+            }
             _ => {
                 let Some(found) = self.uncomparable(&ty, &mut HashSet::new()) else {
                     return;
@@ -4191,30 +4776,34 @@ impl Inference {
     /// of every variant of enums, each enum and struct once, by its name in `seen`.
     fn uncomparable(&self, ty: &Ty, seen: &mut HashSet<String>) -> Option<Uncomparable> {
         match self.shallow(ty) {
-            ty @ (Ty::List(_) | Ty::Map(..)) => Some(Uncomparable { ty, field: None }),
+            // a type parameter may be a list or a map
+            ty @ (Ty::List(_) | Ty::Map(..) | Ty::Param(_)) => {
+                Some(Uncomparable { ty, field: None })
+            }
             Ty::Tuple(fields) => fields
                 .iter()
                 .find_map(|field| self.uncomparable(field, seen)),
-            Ty::Enum(name, args) if name == OPTION => {
-                args.iter().find_map(|arg| self.uncomparable(arg, seen))
-            }
-            Ty::Enum(name, _) => {
+            Ty::Enum(name, args) => {
                 let info = self.enums.get(&name)?;
-                if !seen.insert(name) {
+                if !seen.insert(self.show(&Ty::Enum(name.clone(), args.clone()))) {
                     return None;
                 }
                 info.variants
                     .iter()
                     .flat_map(|variant| &variant.fields)
-                    .find_map(|field| self.uncomparable(field, seen))
+                    .find_map(|field| {
+                        let field = Self::substitute(field, &info.type_params, &args);
+                        self.uncomparable(&field, seen)
+                    })
             }
-            Ty::Struct(name) => {
+            Ty::Struct(name, args) => {
                 let info = self.structs.get(&name)?;
-                if !seen.insert(name.clone()) {
+                if !seen.insert(self.show(&Ty::Struct(name.clone(), args.clone()))) {
                     return None;
                 }
                 info.fields.iter().find_map(|field| {
-                    let mut found = self.uncomparable(&field.ty, seen)?;
+                    let ty = Self::substitute(&field.ty, &info.type_params, &args);
+                    let mut found = self.uncomparable(&ty, seen)?;
                     found
                         .field
                         .get_or_insert_with(|| (name.clone(), field.name.clone()));
@@ -4222,6 +4811,304 @@ impl Inference {
                 })
             }
             _ => None,
+        }
+    }
+
+    /// Returns the type parameters that appear in `ty`, in order, each once.
+    ///
+    /// For example, `tuple[A, list[B], A]` holds `A` and `B`.
+    fn params_in(&self, ty: &Ty, found: &mut Vec<usize>) {
+        match self.shallow(ty) {
+            Ty::Param(p) if !found.contains(&p) => found.push(p),
+            Ty::List(elem) => self.params_in(&elem, found),
+            Ty::Map(key, value) => {
+                self.params_in(&key, found);
+                self.params_in(&value, found);
+            }
+            Ty::Tuple(fields) | Ty::Enum(_, fields) => {
+                fields.iter().for_each(|f| self.params_in(f, found))
+            }
+            _ => {}
+        }
+    }
+
+    /// Checks every call of a generic function: that no call leads back to itself with ever
+    /// larger types, which would need infinitely many copies of the function, as `f([x])` does
+    /// inside `fn f[T](x: T):`, and that no list element or map entry holds too many values
+    /// once the type parameters are filled in, which only the types a call gives can tell.
+    fn check_instances(&mut self) {
+        let instances: Vec<(Span, Option<String>, String, Vec<Ty>)> = self
+            .instances
+            .iter()
+            .map(|i| {
+                let args = i.args.iter().map(|a| self.resolve(a)).collect();
+                (i.span, i.caller.clone(), i.function.clone(), args)
+            })
+            .collect();
+        if instances.is_empty() {
+            return;
+        }
+
+        // each type parameter is given to the ones its calls fill in, growing if nested
+        let mut edges: Vec<(usize, usize, bool, usize)> = vec![];
+        for (i, (_, _, function, args)) in instances.iter().enumerate() {
+            let params = self.functions[function].type_params.clone();
+            for (&q, arg) in params.iter().zip(args) {
+                let mut found = vec![];
+                self.params_in(arg, &mut found);
+                for p in found {
+                    edges.push((p, q, *arg != Ty::Param(p), i));
+                }
+            }
+        }
+        let reaches = |from: usize, to: usize| {
+            let mut seen = HashSet::from([from]);
+            let mut stack = vec![from];
+            while let Some(p) = stack.pop() {
+                if p == to {
+                    return true;
+                }
+                for &(a, b, _, _) in &edges {
+                    if a == p && seen.insert(b) {
+                        stack.push(b);
+                    }
+                }
+            }
+            false
+        };
+        let mut growing = vec![];
+        for &(p, q, grows, i) in &edges {
+            if grows && reaches(q, p) && !growing.contains(&i) {
+                growing.push(i);
+            }
+        }
+        for &i in &growing {
+            let (span, _, function, args) = &instances[i];
+            let params = self.functions[function].type_params.clone();
+            let (param, arg) = params
+                .iter()
+                .zip(args)
+                .find(|(_, arg)| !matches!(arg, Ty::Param(_)))
+                .map(|(&q, arg)| (self.type_params[q].name.clone(), self.show(arg)))
+                .unwrap_or_default();
+            let short = function.rsplit('.').next().unwrap_or(function);
+            self.error(
+                *span,
+                format!(
+                    "this call gives '{short}' {arg} for '{param}' and leads back to itself, so \
+                     '{short}' would need a copy for ever larger types"
+                ),
+            );
+        }
+        if !growing.is_empty() {
+            return;
+        }
+
+        // the list elements, map values, and enum values each generic function's code makes
+        let mut held: HashMap<String, Vec<(Ty, Held)>> = HashMap::new();
+        let spans: Vec<(String, Span)> = self
+            .functions
+            .iter()
+            .filter(|(_, info)| !info.type_params.is_empty())
+            .filter_map(|(name, _)| Some((name.clone(), *self.function_spans.get(name)?)))
+            .collect();
+        for (span, ty) in &self.expr_types {
+            let Some((function, _)) = spans.iter().find(|(_, f)| f.encloses(*span)) else {
+                continue;
+            };
+            let mut found = vec![];
+            self.stored(&self.resolve(ty), &mut found, &mut HashSet::new());
+            found.retain(|(ty, _)| {
+                let mut params = vec![];
+                self.params_in(ty, &mut params);
+                !params.is_empty()
+            });
+            held.entry(function.clone()).or_default().extend(found);
+        }
+
+        // fill them in from each call outside a generic function's own type parameters
+        let mut seen = HashSet::new();
+        let mut reported = HashSet::new();
+        let mut pending: Vec<(String, Vec<Ty>, Span)> = instances
+            .iter()
+            .filter(|(_, _, _, args)| {
+                let mut found = vec![];
+                args.iter().for_each(|a| self.params_in(a, &mut found));
+                found.is_empty()
+            })
+            .map(|(span, _, function, args)| (function.clone(), args.clone(), *span))
+            .collect();
+        while let Some((function, args, outer)) = pending.pop() {
+            if !seen.insert((function.clone(), self.show(&Ty::Tuple(args.clone())))) {
+                continue;
+            }
+            let params = self.functions[&function].type_params.clone();
+            for (ty, kind) in held.get(&function).cloned().unwrap_or_default() {
+                let ty = Self::substitute(&ty, &params, &args);
+                let (what, count) = self.held_width(&ty, kind);
+                if count > MAX_ELEMENT_VALUES && reported.insert(outer) {
+                    let short = function.rsplit('.').next().unwrap_or(&function);
+                    self.error(
+                        outer,
+                        format!(
+                            "this call makes '{short}' store {what}, which holds {count} \
+                             values, but at most {MAX_ELEMENT_VALUES} fit"
+                        ),
+                    );
+                }
+            }
+            for (_, caller, callee, inner) in &instances {
+                if caller.as_deref() == Some(function.as_str()) {
+                    let inner = inner
+                        .iter()
+                        .map(|a| Self::substitute(a, &params, &args))
+                        .collect();
+                    pending.push((callee.clone(), inner, outer));
+                }
+            }
+        }
+    }
+
+    /// Lists the list elements, map values, and values of generic enums that a value of type
+    /// `ty` holds, looking into tuples, structs, and enums, each struct and enum type once.
+    ///
+    /// For example, a `tuple[list[int], Box[str]]` holds list elements of `int` and the values
+    /// of `Box[str]`.
+    fn stored(&self, ty: &Ty, out: &mut Vec<(Ty, Held)>, seen: &mut HashSet<String>) {
+        match self.shallow(ty) {
+            Ty::List(elem) => {
+                out.push(((*elem).clone(), Held::Element));
+                self.stored(&elem, out, seen);
+            }
+            Ty::Map(key, value) => {
+                out.push(((*value).clone(), Held::Entry));
+                self.stored(&key, out, seen);
+                self.stored(&value, out, seen);
+            }
+            Ty::Tuple(fields) => fields.iter().for_each(|f| self.stored(f, out, seen)),
+            ty @ Ty::Enum(..) => {
+                if !seen.insert(self.show(&ty)) {
+                    return;
+                }
+                out.push((ty.clone(), Held::Variants));
+                for (_, fields) in self.ty_variants(&ty).unwrap_or_default() {
+                    fields.iter().for_each(|f| self.stored(f, out, seen));
+                }
+            }
+            Ty::Struct(name, args) => {
+                if !seen.insert(self.show(&Ty::Struct(name.clone(), args.clone()))) {
+                    return;
+                }
+                for field in self.field_types(&name, &args) {
+                    self.stored(&field, out, seen);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    /// Describes what a value of type `ty`, held as `kind`, stores and how many values that is,
+    /// counting each value of tuples and structs: one element of a list, a map's key and value,
+    /// or the widest variant of an enum.
+    fn held_width(&self, ty: &Ty, kind: Held) -> (String, usize) {
+        match kind {
+            Held::Element => (
+                format!("a list element of {}", self.show(ty)),
+                self.values(ty),
+            ),
+            Held::Entry => (
+                format!("a map entry of a key and {}", self.show(ty)),
+                1 + self.values(ty),
+            ),
+            Held::Variants => {
+                let widest = self
+                    .ty_variants(ty)
+                    .unwrap_or_default()
+                    .into_iter()
+                    .map(|(variant, fields)| {
+                        let count: usize = fields.iter().map(|f| self.values(f)).sum();
+                        (variant, count)
+                    })
+                    .max_by_key(|(_, count)| *count);
+                let Some((variant, count)) = widest else {
+                    return (String::new(), 0);
+                };
+                (
+                    format!("a value of {} variant '{variant}'", self.show(ty)),
+                    count,
+                )
+            }
+        }
+    }
+
+    /// Reports a value of a generic enum, made outside generic functions, whose variant holds
+    /// more values than an enum value can once its type arguments are filled in.
+    ///
+    /// For example, with `enum Box[T]:` holding `Full(T)`, `Box.Full(t)` for a tuple `t` of 40
+    /// values is too wide, though `Full(T)` alone is not.
+    fn check_variant_widths(&mut self) {
+        let generic: Vec<Span> = self
+            .functions
+            .iter()
+            .filter(|(_, info)| !info.type_params.is_empty())
+            .filter_map(|(name, _)| self.function_spans.get(name).copied())
+            .collect();
+        let mut seen = HashSet::new();
+        let mut errors = vec![];
+        for (span, ty) in &self.expr_types {
+            if generic.iter().any(|f| f.encloses(*span)) {
+                continue;
+            }
+            let mut found = vec![];
+            self.stored(&self.resolve(ty), &mut found, &mut HashSet::new());
+            for (ty, kind) in found {
+                if kind != Held::Variants || !seen.insert(self.show(&ty)) {
+                    continue;
+                }
+                let (what, count) = self.held_width(&ty, kind);
+                if count > MAX_ELEMENT_VALUES {
+                    errors.push((
+                        *span,
+                        format!(
+                            "this makes {what}, which holds {count} values, but at most \
+                             {MAX_ELEMENT_VALUES} fit"
+                        ),
+                    ));
+                }
+            }
+        }
+        errors.sort_by_key(|(span, _)| (span.file, span.start));
+        for (span, message) in errors {
+            self.error(span, message);
+        }
+    }
+
+    /// Reports a global whose type holds a type parameter, which a generic function gave it by
+    /// reading it, since outside that function the type parameter means nothing.
+    ///
+    /// For example, after `g = []`, `fn f[T]() -> T: ret g[0]` makes `g` a `list[T]`.
+    fn check_captured_params(&mut self) {
+        let mut globals: Vec<(&String, &usize)> = self.globals.iter().collect();
+        globals.sort_by_key(|(_, symbol)| **symbol);
+        let mut errors = vec![];
+        for (name, &symbol) in globals {
+            let mut found = vec![];
+            self.params_in(&self.symbol_types[symbol], &mut found);
+            if let Some(&p) = found.first() {
+                let param = &self.type_params[p];
+                let function = self.symbols[param.symbol].scope.clone().unwrap_or_default();
+                errors.push((
+                    self.symbols[symbol].span,
+                    format!(
+                        "'{name}' holds a value of type {}, the type parameter of '{function}', \
+                         which means nothing outside '{function}'",
+                        param.name
+                    ),
+                ));
+            }
+        }
+        for (span, message) in errors {
+            self.error(span, message);
         }
     }
 
@@ -4270,7 +5157,7 @@ impl Inference {
                     Kind::List => Ty::List(Box::new(self.fresh())),
                     // no constraint allows a map, tuple, enum, or struct first, and nothing tells
                     // which
-                    Kind::Map | Kind::Tuple | Kind::Enum | Kind::Struct => continue,
+                    Kind::Map | Kind::Tuple | Kind::Enum | Kind::Struct | Kind::Param => continue,
                 };
                 self.unify(&ty, &default);
                 continue;
@@ -4283,6 +5170,9 @@ impl Inference {
         for (ty, span) in std::mem::take(&mut self.equalities) {
             self.check_equality(&ty, span);
         }
+        self.check_instances();
+        self.check_variant_widths();
+        self.check_captured_params();
         for pending in std::mem::take(&mut self.matches) {
             self.check_cases(pending);
         }
@@ -4334,10 +5224,7 @@ impl Inference {
                         .unwrap_or_default();
                     Type::Function {
                         params: fields,
-                        ret: Box::new(Type::Enum {
-                            name: enum_name,
-                            args: vec![],
-                        }),
+                        ret: Box::new(self.finalize(&self.own_type(&enum_name))),
                     }
                 }
                 SymbolKind::Field => {
@@ -4355,6 +5242,12 @@ impl Inference {
                 ..symbol.clone()
             });
         }
+        let names = |params: &[usize]| -> Vec<String> {
+            params
+                .iter()
+                .map(|&p| self.type_params[p].name.clone())
+                .collect()
+        };
         for (name, info) in &self.enums {
             let variants = info
                 .variants
@@ -4364,7 +5257,13 @@ impl Inference {
                     (v.name.clone(), fields)
                 })
                 .collect();
-            analysis.enums.insert(name.clone(), variants);
+            let params = names(&info.type_params);
+            if !params.is_empty() {
+                analysis.type_params.insert(name.clone(), params.clone());
+            }
+            analysis
+                .enums
+                .insert(name.clone(), EnumDef { params, variants });
         }
         for (name, info) in &self.structs {
             let fields = info
@@ -4372,7 +5271,33 @@ impl Inference {
                 .iter()
                 .map(|f| (f.name.clone(), self.finalize(&f.ty)))
                 .collect();
-            analysis.structs.insert(name.clone(), fields);
+            let params = names(&info.type_params);
+            if !params.is_empty() {
+                analysis.type_params.insert(name.clone(), params.clone());
+            }
+            analysis
+                .structs
+                .insert(name.clone(), StructDef { params, fields });
+        }
+        for instance in std::mem::take(&mut self.instances) {
+            let args = instance.args.iter().map(|a| self.finalize(a)).collect();
+            analysis.instances.insert(
+                instance.span,
+                Instance {
+                    function: instance.function,
+                    args,
+                },
+            );
+        }
+        for (name, info) in &self.functions {
+            if !info.type_params.is_empty() {
+                let names = info
+                    .type_params
+                    .iter()
+                    .map(|&p| self.type_params[p].name.clone())
+                    .collect();
+                analysis.type_params.insert(name.clone(), names);
+            }
         }
         analysis.references = self.references;
         analysis
@@ -4408,7 +5333,11 @@ impl Inference {
                 name,
                 args: args.iter().map(|a| self.finalize(a)).collect(),
             },
-            Ty::Struct(name) => Type::Struct(name),
+            Ty::Struct(name, args) => Type::Struct {
+                name,
+                args: args.iter().map(|a| self.finalize(a)).collect(),
+            },
+            Ty::Param(p) => Type::Param(self.type_params[p].name.clone()),
         }
     }
 
@@ -4463,14 +5392,17 @@ impl Inference {
     /// `ty` is not an enum.
     fn ty_variants(&self, ty: &Ty) -> Option<Vec<(String, Vec<Ty>)>> {
         match self.resolve(ty) {
-            Ty::Enum(name, args) if name == OPTION => Some(vec![
-                ("none".to_string(), vec![]),
-                ("some".to_string(), args),
-            ]),
-            Ty::Enum(name, _) => self.enums.get(&name).map(|info| {
+            Ty::Enum(name, args) => self.enums.get(&name).map(|info| {
                 info.variants
                     .iter()
-                    .map(|v| (v.name.clone(), v.fields.clone()))
+                    .map(|v| {
+                        let fields = v
+                            .fields
+                            .iter()
+                            .map(|f| Self::substitute(f, &info.type_params, &args))
+                            .collect();
+                        (v.name.clone(), fields)
+                    })
                     .collect()
             }),
             _ => None,
@@ -4584,7 +5516,7 @@ impl Inference {
     /// written, such as `Shape.Rect(_, _)` or `none`.
     fn written_variant(&self, ty: &Ty, name: &str, fields: &[String]) -> String {
         let prefix = match self.resolve(ty) {
-            Ty::Enum(enum_name, _) if enum_name != OPTION => format!("{enum_name}.{name}"),
+            Ty::Enum(enum_name, _) if !prints_bare(&enum_name) => format!("{enum_name}.{name}"),
             _ => name.to_string(),
         };
         if fields.is_empty() {

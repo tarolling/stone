@@ -1,0 +1,35 @@
+pub enum Tagged:
+    Plain
+    Named(str)
+
+pub fn first[T](xs: list[T]) -> T:
+    ret only(xs[0])
+
+pub fn tag[T](x: T, name: str) -> tuple[Tagged, T]:
+    ret (Tagged.Named(name), only(x))
+
+fn only[T](x: T) -> T:
+    ret x
+
+pub struct Pair[A, B]:
+    left: A
+    right: B
+
+impl Pair:
+    fn flip(self) -> Pair[B, A]:
+        ret Pair(left=self.right, right=self.left)
+
+    fn of(a: A, b: B) -> Pair[A, B]:
+        ret Pair(left=a, right=b)
+
+pub enum Choice[T]:
+    Nothing
+    One(T)
+    Two(T, T)
+
+pub fn choose[T](xs: list[T]) -> Choice[T]:
+    if xs.len() == 0:
+        ret Choice.Nothing
+    if xs.len() == 1:
+        ret Choice.One(xs[0])
+    ret Choice.Two(xs[0], xs[1])

@@ -80,21 +80,30 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
     Ok(())
 }
 
-/// Writes the builtins reference to a directory for this version of the server, returning its
-/// URI, so that going to the definition of a builtin like `print` has a file to open.
+/// Writes the builtins reference and, beside it, the prelude to a directory for this version of
+/// the server, returning the reference's URI, so that going to the definition of a builtin like
+/// `print`, or of `some` or `option`, has a file to open.
 ///
-/// For example, on Linux this writes `/tmp/stone-lsp-0.1.0/builtins.stn`.
+/// For example, on Linux this writes `/tmp/stone-lsp-0.1.0/builtins.stn` and
+/// `/tmp/stone-lsp-0.1.0/prelude.stn`.
 fn write_builtins_reference() -> Option<Uri> {
     let dir = std::env::temp_dir().join(format!("stone-lsp-{}", env!("CARGO_PKG_VERSION")));
     std::fs::create_dir_all(&dir).ok()?;
+    replace_file(&dir.join("prelude.stn"), stone::stdlib::PRELUDE)?;
     let path = dir.join("builtins.stn");
-    // several servers can start at once, so replace the file whole rather than rewriting it
+    replace_file(&path, &stone::stdlib::builtins_reference())?;
+    file_uri(&path)
+}
+
+/// Writes `text` to `path` whole, through a temporary file, since several servers can start at
+/// once.
+fn replace_file(path: &Path, text: &str) -> Option<()> {
     static NEXT: AtomicUsize = AtomicUsize::new(0);
     let unique = NEXT.fetch_add(1, Ordering::Relaxed);
-    let temporary = dir.join(format!("builtins.stn.{}.{unique}.tmp", std::process::id()));
-    std::fs::write(&temporary, stone::stdlib::builtins_reference()).ok()?;
-    std::fs::rename(&temporary, &path).ok()?;
-    file_uri(&path)
+    let name = path.file_name()?.to_string_lossy();
+    let temporary = path.with_file_name(format!("{name}.{}.{unique}.tmp", std::process::id()));
+    std::fs::write(&temporary, text).ok()?;
+    std::fs::rename(&temporary, path).ok()
 }
 
 /// Picks UTF-8 positions if the client supports them, and UTF-16 otherwise.

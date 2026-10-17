@@ -78,9 +78,16 @@ pub const MAX_ELEMENT_VALUES: usize = 32;
 /// Names of the builtin functions.
 ///
 /// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3):`.
-pub static BUILTINS: [&str; 9] = [
-    "print", "range", "int", "float", "str", "input", "eof", "args", "some",
+pub static BUILTINS: [&str; 8] = [
+    "print", "range", "int", "float", "str", "input", "eof", "args",
 ];
+
+/// The prelude, a stone file linked into every program, which defines `option[T]`.
+pub const PRELUDE: &str = include_str!("prelude.stn");
+
+/// The variants of the prelude's enums, which every file writes by name alone, as in `some(x)`
+/// and `none`, in the order the prelude defines them.
+pub static PRELUDE_VARIANTS: [&str; 2] = ["none", "some"];
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
 pub static METHODS: [&str; 17] = [
@@ -122,7 +129,7 @@ pub struct BuiltinDoc {
     pub description: &'static str,
 }
 
-pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
+pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     BuiltinDoc {
         name: "print",
         signature: "print(values...)",
@@ -172,13 +179,6 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
         signature: "args() -> list[str]",
         description: "Returns the arguments given after the program, so `stone run f.stn a b` \
                       and a built `./f a b` both see `[\"a\", \"b\"]`.",
-    },
-    BuiltinDoc {
-        name: "some",
-        signature: "some(value: T) -> option[T]",
-        description: "Returns an option that holds `value`. The other option is `none`, which \
-                      holds nothing, so a function that may have no answer returns \
-                      `option[T]` and a `match` with `case some(x):` and `case none:` reads it.",
     },
 ];
 
@@ -301,6 +301,15 @@ pub static METHOD_DOCS: [BuiltinDoc; 17] = [
 /// is false.
 pub fn is_builtin(name: &str) -> bool {
     BUILTINS.contains(&name) || module_function(name).is_some()
+}
+
+/// Returns whether `name` is taken by the language, so no function, variable, or import may use
+/// it: a builtin function or a variant of the prelude.
+///
+/// For example, `is_reserved("print")` and `is_reserved("some")` are true, but
+/// `is_reserved("len")` is false, since methods do not reserve their names.
+pub fn is_reserved(name: &str) -> bool {
+    BUILTINS.contains(&name) || PRELUDE_VARIANTS.contains(&name)
 }
 
 /// Returns the documentation for the builtin function named `name`, which may be a function of
@@ -847,6 +856,49 @@ mod tests {
             slice_indices(3, None, None, Some(0)),
             Err("slice step cannot be zero")
         );
+    }
+
+    #[test]
+    fn the_prelude_defines_option_with_none_then_some() {
+        use crate::ast::{Mod, StmtKind};
+        use crate::lexer::Lexer;
+        use crate::parser::Parser;
+        use crate::span::FileId;
+
+        let tokens = Lexer::with_file(PRELUDE, FileId::PRELUDE).lex().unwrap();
+        let Mod::Module { body } = Parser::new(&tokens).parse().unwrap();
+        let [stmt] = body.as_slice() else {
+            panic!("the prelude should hold one statement: {body:?}");
+        };
+        let StmtKind::EnumDef {
+            name,
+            public,
+            type_params,
+            variants,
+            ..
+        } = &stmt.kind
+        else {
+            panic!("{stmt:?}");
+        };
+        assert_eq!(name, "option");
+        assert!(public);
+        assert_eq!(type_params.len(), 1);
+        // the runtime builds options by tag, so `none` is 0 and `some` is 1
+        let shape: Vec<(&str, usize)> = variants
+            .iter()
+            .map(|v| (v.name.as_str(), v.fields.len()))
+            .collect();
+        assert_eq!(shape, [("none", 0), ("some", 1)]);
+        let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
+        assert_eq!(names, PRELUDE_VARIANTS);
+    }
+
+    #[test]
+    fn prelude_variants_are_reserved() {
+        assert!(is_reserved("some"));
+        assert!(is_reserved("print"));
+        assert!(!is_reserved("len"));
+        assert!(!BUILTINS.contains(&"some"));
     }
 
     #[test]

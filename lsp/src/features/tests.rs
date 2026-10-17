@@ -1145,3 +1145,190 @@ fn completion_after_a_struct_value_offers_its_methods_and_after_the_struct_its_f
         [("origin".to_string(), Some(CompletionItemKind::FUNCTION))]
     );
 }
+
+const GENERIC: &str = "\
+fn first[T](xs: list[T]) -> T:
+    ret xs[0]
+x = first([\"a\"])
+";
+
+#[test]
+fn hover_shows_a_generic_functions_type_parameters() {
+    let doc = doc(GENERIC);
+    assert_eq!(
+        hover_text(&doc, at(3, 6)).unwrap(),
+        "```stone\nfn first[T](xs: list[T]) -> T\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(1, 10)).unwrap(),
+        "```stone\n(type parameter) T\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(1, 15)).unwrap(),
+        "```stone\n(parameter) xs: list[T]\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(3, 1)).unwrap(),
+        "```stone\n(global) x: str\n```"
+    );
+}
+
+#[test]
+fn a_type_parameter_renames_everywhere_in_its_function() {
+    let doc = doc(GENERIC);
+    let edit = rename(&doc, &uri(), at(1, 29), "Item").unwrap();
+    let edits = &edit.changes.unwrap()[&uri()];
+    let mut ranges: Vec<(u32, u32)> = edits
+        .iter()
+        .map(|e| (e.range.start.line, e.range.start.character))
+        .collect();
+    ranges.sort();
+    assert_eq!(ranges, [(0, 9), (0, 21), (0, 28)]);
+}
+
+#[test]
+fn an_outline_lists_a_functions_type_parameters() {
+    let doc = doc(GENERIC);
+    let outline = document_symbols(&doc);
+    let children = outline[0].children.as_ref().unwrap();
+    assert_eq!(children[0].name, "T");
+    assert_eq!(children[0].kind, SymbolKind::TYPE_PARAMETER);
+}
+
+const GENERIC_TYPES: &str = "\
+struct Pair[A, B]:
+    first: A
+    second: B
+enum Tree[T]:
+    Leaf
+    Node(Tree[T], T)
+p = Pair(first=1, second=\"s\")
+";
+
+#[test]
+fn hover_shows_a_generic_types_parameters() {
+    let doc = doc(GENERIC_TYPES);
+    assert_eq!(
+        hover_text(&doc, at(1, 8)).unwrap(),
+        "```stone\nstruct Pair[A, B]\n    first: A\n    second: B\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(4, 6)).unwrap(),
+        "```stone\nenum Tree[T]\n    Leaf\n    Node(Tree[T], T)\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(7, 1)).unwrap(),
+        "```stone\n(global) p: Pair[int, str]\n```"
+    );
+}
+
+#[test]
+fn completion_offers_a_generic_structs_fields() {
+    let source = format!("{GENERIC_TYPES}x = p.\n");
+    let doc = doc(&source);
+    let items = completion(&doc, at(8, 7), &MapSources::default());
+    let labels: Vec<(&str, Option<&str>)> = items
+        .iter()
+        .map(|i| (i.label.as_str(), i.detail.as_deref()))
+        .collect();
+    assert_eq!(
+        labels,
+        [
+            ("first", Some("Pair.first: A")),
+            ("second", Some("Pair.second: B"))
+        ]
+    );
+}
+
+const OPTIONS: &str =
+    "fn f(o: option[int]) -> int:\n    ret o.unwrap_or(0)\nx = some(1)\ny = none\n";
+
+/// Returns the range of `name` on the first line of the prelude that holds it.
+fn in_prelude(name: &str) -> Range {
+    let (line, text) = stone::stdlib::PRELUDE
+        .lines()
+        .enumerate()
+        .find(|(_, l)| l.contains(name) && !l.starts_with("//"))
+        .unwrap();
+    let col = text.find(name).unwrap() as u32;
+    let line = line as u32;
+    Range::new(
+        Position::new(line, col),
+        Position::new(line, col + name.len() as u32),
+    )
+}
+
+#[test]
+fn the_preludes_names_lead_to_the_prelude_file() {
+    let reference: Uri = "file:///cache/builtins.stn".parse().unwrap();
+    let builtins = Builtins::new(reference);
+    let prelude: Uri = "file:///cache/prelude.stn".parse().unwrap();
+    let doc = doc(OPTIONS);
+    let target = |position: Position| definition(&doc, &uri(), position, Some(&builtins));
+
+    let some = target(at(3, 6)).unwrap();
+    assert_eq!(
+        (some.uri.clone(), some.range),
+        (prelude.clone(), in_prelude("some"))
+    );
+    let none = target(at(4, 6)).unwrap();
+    assert_eq!(
+        (none.uri.clone(), none.range),
+        (prelude.clone(), in_prelude("none"))
+    );
+    let option = target(at(1, 10)).unwrap();
+    assert_eq!((option.uri, option.range), (prelude, in_prelude("option")));
+    // without the files written out, the prelude has nowhere to go
+    assert_eq!(definition(&doc, &uri(), at(3, 6), None), None);
+    // and its uses are only found in the program's own files
+    let uses = references(&doc, &uri(), at(3, 6), true);
+    assert_eq!(uses.len(), 1);
+    assert!(uses.iter().all(|l| l.uri == uri()));
+}
+
+#[test]
+fn the_preludes_names_cannot_be_renamed() {
+    let doc = doc(OPTIONS);
+    assert_eq!(prepare_rename(&doc, at(3, 6)), None);
+    assert_eq!(prepare_rename(&doc, at(1, 10)), None);
+    assert_eq!(
+        rename(&doc, &uri(), at(3, 6), "maybe").unwrap_err(),
+        "'some' is a builtin"
+    );
+    assert_eq!(
+        rename(&doc, &uri(), at(3, 1), "some").unwrap_err(),
+        "'some' is a builtin"
+    );
+}
+
+#[test]
+fn hover_shows_the_preludes_variants_as_they_are_written() {
+    let doc = doc(OPTIONS);
+    assert_eq!(
+        hover_text(&doc, at(3, 6)).unwrap(),
+        "```stone\nsome(T)\n```"
+    );
+    assert!(
+        hover_text(&doc, at(1, 10))
+            .unwrap()
+            .starts_with("```stone\nenum option[T]\n    none\n    some(T)\n```"),
+        "{:?}",
+        hover_text(&doc, at(1, 10))
+    );
+}
+
+#[test]
+fn completion_offers_the_preludes_variants() {
+    let doc = doc("x = \n");
+    let labels: Vec<String> = completion(&doc, at(1, 5), &MapSources::default())
+        .into_iter()
+        .map(|i| i.label)
+        .collect();
+    for name in stone::stdlib::PRELUDE_VARIANTS {
+        assert_eq!(
+            labels.iter().filter(|l| *l == name).count(),
+            1,
+            "{name}: {labels:?}"
+        );
+    }
+}

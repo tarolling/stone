@@ -1,0 +1,6 @@
+Tree.Leaf
+Stack(items=['a', 'b']) some('b')
+[Stack(items=[9]), Stack(items=[2, 3, 4])] some(4)
+Node(value=(1, 'x'), next=some(Node(value=(2, 'y'), next=none))) 2
+{'a': Stack(items=[[1.5]]), 'b': Stack(items=[])}
+none

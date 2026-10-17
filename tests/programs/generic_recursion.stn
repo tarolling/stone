@@ -1,0 +1,40 @@
+// generic functions that call themselves and each other with the same or smaller types
+fn repeat[T](x: T, n: int) -> list[T]:
+    if n == 0:
+        ret []
+    rest = repeat(x, n - 1)
+    rest.append(x)
+    ret rest
+
+fn flatten[T](rows: list[list[T]]) -> list[T]:
+    out = []
+    for row in rows:
+        for x in row:
+            out.append(x)
+    ret out
+
+fn reverse[T](xs: list[T]) -> list[T]:
+    if xs.len() < 2:
+        ret xs
+    out = reverse(xs[1:])
+    out.append(xs[0])
+    ret out
+
+fn pick[T](xs: list[T], n: int) -> T:
+    ret xs[n % xs.len()]
+
+fn pick_twice[T](rows: list[list[T]]) -> T:
+    ret pick(pick(rows, 1), 2)
+
+fn count[T](xs: list[T]) -> int:
+    ret xs.len()
+
+print(repeat("ab", 3))
+print(repeat((1, "x"), 2))
+print(flatten(repeat([1, 2], 3)))
+print(flatten([["a"], [], ["b", "c"]]))
+print(reverse([1, 2, 3, 4]))
+print(reverse(["x", "y"]))
+print(pick_twice([[1, 2], [3, 4, 5]]))
+print(pick_twice([["a"], ["b", "c"]]))
+print(count(repeat(repeat(none, 2), 3)))

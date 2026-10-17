@@ -1,6 +1,6 @@
 use super::*;
 use crate::checker::TypeChecker;
-use crate::driver::parse;
+use crate::driver::parse_program;
 use crate::span::Pos;
 
 /// Parses, checks, and lowers `source`, returning the IR dump of every function and `main`.
@@ -14,7 +14,7 @@ fn dump(source: &str) -> String {
 }
 
 fn lower_source(source: &str) -> Program {
-    let module = parse(source).unwrap();
+    let module = parse_program(source).unwrap();
     let analysis = TypeChecker::new().analyze(&module);
     assert!(
         analysis.diagnostics.is_empty(),
@@ -1173,4 +1173,72 @@ fn an_index_into_a_list_of_wide_elements_divides_only_when_negative_or_failing()
         let function = &program.functions[0];
         assert!(divides_only_off_the_in_range_path(function), "{function}");
     }
+}
+
+#[test]
+fn a_generic_function_is_lowered_once_for_each_set_of_types() {
+    let source = "fn id[T](x: T) -> T:\n    ret x\nfn pair[A, B](a: A, b: B) -> tuple[A, B]:\n    \
+                  ret (id(a), b)\nprint(id(1), id(\"s\"), id(2))\nprint(pair(\"s\", (1, 2.5)))\n";
+    let program = lower_source(source);
+    let mut names: Vec<String> = program
+        .functions
+        .iter()
+        .filter_map(|f| f.name.clone())
+        .collect();
+    names.sort();
+    // never lowered as itself, only as the copies the program calls
+    assert_eq!(
+        names,
+        ["id..int", "id..str", "pair..str..tuple2_int_float",]
+    );
+    let ir = dump(source);
+    // a string is counted, so the copy for it takes and gives references, unlike the int copy
+    assert!(ir.contains("fn id..int(v0):\nb0:\n  ret v0\n"), "{ir}");
+    assert!(ir.contains("call id..str("), "{ir}");
+    // a tuple is passed as its values
+    assert!(
+        ir.contains("fn pair..str..tuple2_int_float(v0, v1, v2):"),
+        "{ir}"
+    );
+}
+
+#[test]
+fn a_copy_of_a_generic_function_moves_its_owned_list() {
+    let main = |source: &str| {
+        let ir = dump(source);
+        let main = ir.split("fn main").nth(1).unwrap();
+        main.split("fn push").next().unwrap().to_string()
+    };
+    let generic = main(
+        "fn push[T](xs: list[T], x: T) -> list[T]:\n    xs.append(x)\n    ret xs\n\
+         ys = [\"a\"]\nys = push(ys, \"b\")\nprint(ys)\n",
+    );
+    let plain = main(
+        "fn push(xs: list[str], x: str) -> list[str]:\n    xs.append(x)\n    ret xs\n\
+         ys = [\"a\"]\nys = push(ys, \"b\")\nprint(ys)\n",
+    );
+    // ys moves into the copy as it would into a function written for strings
+    assert_eq!(generic.replace("push..str", "push"), plain);
+}
+
+#[test]
+fn a_generic_structs_methods_are_lowered_for_each_set_of_types() {
+    let source = "struct Box[T]:\n    x: T\nimpl Box:\n    fn get(self) -> T:\n        ret self.x\n    \
+                  fn put(self, x: T):\n        self.x = x\nb = Box(x=1)\nb.put(2)\nc = Box(x=(\"s\", 1.5))\n\
+                  print(b.get(), c.get())\n";
+    let program = lower_source(source);
+    let mut names: Vec<String> = program
+        .functions
+        .iter()
+        .filter_map(|f| f.name.clone())
+        .filter(|name| !name.starts_with("stone."))
+        .collect();
+    names.sort();
+    assert_eq!(
+        names,
+        ["Box.get..int", "Box.get..tuple2_str_float", "Box.put..int"]
+    );
+    let ir = dump(source);
+    // a struct of a tuple is passed as its values
+    assert!(ir.contains("fn Box.get..tuple2_str_float(v0, v1):"), "{ir}");
 }

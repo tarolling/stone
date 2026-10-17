@@ -135,24 +135,6 @@ for a in args():
 print(total)
 ```
 
-## `some`
-
-```text
-some(value: T) -> option[T]
-```
-
-Returns an option that holds `value`. The other option is `none`, which holds nothing, so a
-function that may have no answer returns `option[T]`, and `match` reads one with the patterns
-`some(x)` and `none`. See [Types](types.md#options).
-
-```stone
-fn first(xs: list[int]) -> option[int]:
-    if xs.len() > 0:
-        ret some(xs[0])
-    ret none
-print(first([7, 8]), first([]))   // some(7) none
-```
-
 ## Methods
 
 A method is called on a value with a `.`, as in `items.append(4)`. The value before the `.` is

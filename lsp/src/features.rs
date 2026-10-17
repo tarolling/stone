@@ -12,15 +12,17 @@ use lsp_types::{
     HoverContents, Location, MarkupContent, MarkupKind, Position, PrepareRenameResponse, Range,
     SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
-use stone::checker::{Analysis, Symbol, SymbolKind as StoneSymbolKind, Type, struct_display};
+use stone::checker::{
+    Analysis, Symbol, SymbolKind as StoneSymbolKind, Type, prints_bare, struct_display,
+};
 use stone::diagnostic::Severity;
 use stone::project::{
     DEFAULT_ENTRY, Import, Linked, MapSources, SourceMap, Sources, Target, link, link_in,
 };
 use stone::span::{FileId, Pos, Span};
 use stone::stdlib::{
-    BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, MODULES, builtin_doc,
-    builtins_reference, method_doc,
+    BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, MODULES, PRELUDE, PRELUDE_VARIANTS,
+    builtin_doc, builtins_reference, is_reserved, method_doc,
 };
 use stone::token::RESERVED_KEYWORDS;
 
@@ -103,7 +105,12 @@ impl Document {
     }
 
     /// Returns where `span` is, given that this document is at `uri`.
+    /// The prelude is not in any program's files, so a span in it has no location here; see
+    /// [`Builtins::prelude_location`].
     fn location(&self, span: Span, uri: &Uri) -> Option<Location> {
+        if span.file == FileId::PRELUDE {
+            return None;
+        }
         if span.file == self.file {
             return Some(Location::new(uri.clone(), self.index.range(span)));
         }
@@ -228,21 +235,25 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 })
                 .map(|variant| format!("\n    {}", variant_signature(variant)))
                 .collect();
-            format!("enum {}{}", symbol.name, variants.concat())
+            let params = type_params_of(analysis, &symbol.name);
+            format!("enum {}{params}{}", symbol.name, variants.concat())
         }
-        (StoneSymbolKind::Variant, Type::Function { ret, .. }) => {
-            format!("{ret}.{}", variant_signature(symbol))
-        }
+        (StoneSymbolKind::Variant, Type::Function { ret, .. }) => match &**ret {
+            Type::Enum { name, .. } if prints_bare(name) => variant_signature(symbol),
+            _ => format!("{ret}.{}", variant_signature(symbol)),
+        },
         (StoneSymbolKind::Struct, _) => {
             let fields: Vec<String> = struct_fields(analysis, &symbol.name)
                 .map(|field| format!("\n    {}: {}", field.name, field.ty))
                 .collect();
-            format!("struct {}{}", symbol.name, fields.concat())
+            let params = type_params_of(analysis, &symbol.name);
+            format!("struct {}{params}{}", symbol.name, fields.concat())
         }
         (StoneSymbolKind::Field, ty) => {
             let owner = symbol.scope.as_deref().unwrap_or_default();
             format!("{owner}.{}: {ty}", symbol.name)
         }
+        (StoneSymbolKind::TypeParam, _) => format!("(type parameter) {}", symbol.name),
         (kind, ty) => {
             let kind = match kind {
                 StoneSymbolKind::Parameter => "parameter",
@@ -253,7 +264,8 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 | StoneSymbolKind::Variant
                 | StoneSymbolKind::Struct
                 | StoneSymbolKind::Field
-                | StoneSymbolKind::Method => "global",
+                | StoneSymbolKind::Method
+                | StoneSymbolKind::TypeParam => "global",
             };
             format!("({kind}) {}: {ty}", symbol.name)
         }
@@ -261,8 +273,8 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
 }
 
 /// Describes the function `function` as its definition declares it, named `shown`, such as
-/// `fn add(a: int) -> int`, with a method's `self` without its type, as in
-/// `fn Point.norm(self) -> float`.
+/// `fn add(a: int) -> int` or `fn first[T](xs: list[T]) -> T`, with a method's `self` without
+/// its type, as in `fn Point.norm(self) -> float`.
 fn function_signature(
     analysis: &Analysis,
     function: &str,
@@ -286,7 +298,23 @@ fn function_signature(
         Type::Unit => String::new(),
         ret => format!(" -> {ret}"),
     };
-    format!("fn {shown}({}){returns}", params.join(", "))
+    let type_params = type_params_of(analysis, function);
+    format!("fn {shown}{type_params}({}){returns}", params.join(", "))
+}
+
+/// Writes the type parameters of the generic function, struct, or enum `owner` as its definition
+/// does, such as `[A, B]`, or nothing if it is not generic.
+fn type_params_of(analysis: &Analysis, owner: &str) -> String {
+    let names: Vec<&str> = analysis
+        .symbols
+        .iter()
+        .filter(|s| s.kind == StoneSymbolKind::TypeParam && s.scope.as_deref() == Some(owner))
+        .map(|s| s.name.as_str())
+        .collect();
+    match names.is_empty() {
+        true => String::new(),
+        false => format!("[{}]", names.join(", ")),
+    }
 }
 
 /// Writes a variant as its enum declares it, such as `Rect(float, float)` or `Empty`.
@@ -564,6 +592,8 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
 /// server so editors can open it.
 pub struct Builtins {
     uri: Uri,
+    /// Where the prelude is written, beside the reference as `prelude.stn`.
+    prelude: Option<Uri>,
     /// The line and column of each builtin function's name in its signature, counted from 0.
     functions: HashMap<&'static str, (u32, u32)>,
     /// The same for each builtin method, such as `len` in `// (str | list[T]).len() -> int`.
@@ -600,12 +630,23 @@ impl Builtins {
                 Some((module.name, (line as u32, "// The ".len() as u32)))
             })
             .collect();
+        let prelude = uri
+            .as_str()
+            .rsplit_once('/')
+            .and_then(|(dir, _)| format!("{dir}/prelude.stn").parse().ok());
         Builtins {
             uri,
+            prelude,
             functions,
             methods,
             modules,
         }
+    }
+
+    /// Returns where `span`, a span in the prelude, is in the prelude's file.
+    fn prelude_location(&self, span: Span, encoding: Encoding) -> Option<Location> {
+        let index = LineIndex::new(PRELUDE, encoding);
+        Some(Location::new(self.prelude.clone()?, index.range(span)))
     }
 
     /// Returns the location of the builtin module `name` in the heading of its functions.
@@ -640,7 +681,11 @@ pub fn definition(
     builtins: Option<&Builtins>,
 ) -> Option<Location> {
     if let Some((symbol, _)) = doc.symbol_at(position) {
-        return doc.location(doc.analysis.symbols[symbol].span, uri);
+        let span = doc.analysis.symbols[symbol].span;
+        if span.file == FileId::PRELUDE {
+            return builtins?.prelude_location(span, doc.encoding);
+        }
+        return doc.location(span, uri);
     }
     if let Some(import) = doc.import_at(position) {
         match &import.target {
@@ -685,7 +730,11 @@ pub fn references(
 
 /// Returns the range of the name at `position` if it can be renamed.
 pub fn prepare_rename(doc: &Document, position: Position) -> Option<PrepareRenameResponse> {
-    let (_, span) = doc.symbol_at(position)?;
+    let (symbol, span) = doc.symbol_at(position)?;
+    // the prelude's names, such as `some`, belong to the language
+    if doc.analysis.symbols[symbol].span.file == FileId::PRELUDE {
+        return None;
+    }
     Some(PrepareRenameResponse::Range(doc.index.range(span)))
 }
 
@@ -711,13 +760,16 @@ pub fn rename(
     if RESERVED_KEYWORDS.contains(&new_name) {
         return Err(format!("'{new_name}' is a keyword"));
     }
-    if BUILTINS.contains(&new_name) {
+    let symbol = &doc.analysis.symbols[index];
+    if symbol.span.file == FileId::PRELUDE {
+        return Err(format!("'{}' is a builtin", symbol.name));
+    }
+    if is_reserved(new_name) {
         return Err(format!("'{new_name}' is a builtin"));
     }
     if !is_name(new_name) {
         return Err(format!("'{new_name}' is not a valid name"));
     }
-    let symbol = &doc.analysis.symbols[index];
     let name = doc.local_name(symbol);
     // an alias from `use ... as` keeps its own name
     let mut uses: Vec<Span> = doc
@@ -771,6 +823,7 @@ fn document_symbol(doc: &Document, symbol: &Symbol, range: Span) -> DocumentSymb
             StoneSymbolKind::Field => SymbolKind::FIELD,
             StoneSymbolKind::Method if has_self(&doc.analysis, symbol) => SymbolKind::METHOD,
             StoneSymbolKind::Method => SymbolKind::FUNCTION,
+            StoneSymbolKind::TypeParam => SymbolKind::TYPE_PARAMETER,
             _ => SymbolKind::VARIABLE,
         },
         tags: None,
@@ -962,7 +1015,7 @@ pub fn completion(
         let mut visible: Vec<&Symbol> = doc.analysis.visible_at(doc.file, pos).collect();
         visible.sort_by_key(|s| s.scope.is_none());
         let held = visible.iter().find(|s| s.name == receiver).map(|s| &s.ty);
-        if let Some(Type::Struct(name)) = held {
+        if let Some(Type::Struct { name, .. }) = held {
             let fields = struct_fields(&doc.analysis, name).map(|field| CompletionItem {
                 label: field.name.clone(),
                 kind: Some(CompletionItemKind::FIELD),
@@ -1045,6 +1098,17 @@ pub fn completion(
             detail: builtin_doc(builtin).map(|doc| doc.signature.to_string()),
             ..CompletionItem::default()
         });
+    }
+    // `none` is also a keyword, which is offered below
+    for variant in PRELUDE_VARIANTS {
+        if !RESERVED_KEYWORDS.contains(&variant) {
+            items.push(CompletionItem {
+                label: variant.to_string(),
+                kind: Some(CompletionItemKind::ENUM_MEMBER),
+                detail: Some("option[T]".to_string()),
+                ..CompletionItem::default()
+            });
+        }
     }
     for keyword in RESERVED_KEYWORDS {
         items.push(CompletionItem {

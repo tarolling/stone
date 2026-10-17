@@ -5,10 +5,12 @@ module stone
 {
     mod = Module(stmt* body)
 
-    stmt = FunctionDef(identifier name, bool public, arguments args,
-                       stmt* body, type? returns)
-          | EnumDef(identifier name, bool public, variant* variants)
-          | StructDef(identifier name, bool public, field* fields)
+    stmt = FunctionDef(identifier name, bool public, type_param* type_params,
+                       arguments args, stmt* body, type? returns)
+          | EnumDef(identifier name, bool public, type_param* type_params,
+                    variant* variants)
+          | StructDef(identifier name, bool public, type_param* type_params,
+                      field* fields)
           -- each method is a FunctionDef
           | ImplDef(identifier name, stmt* methods)
 
@@ -59,6 +61,9 @@ module stone
 
     arg = (identifier arg, type? annotation)
 
+    -- a type parameter of a generic function, struct, or enum, such as T in enum Tree[T]:
+    type_param = (identifier name)
+
     variant = (identifier name, type* fields)
 
     field = (identifier name, type annotation)
@@ -75,6 +80,6 @@ module stone
 
     type = Int | Float | Bool | Str | List(type elem) | Map(type key, type value)
          | Tuple(type* elts)
-         -- a struct, such as Point, an enum, such as Shape, or option[T]
+         -- a struct, such as Point, an enum, such as Shape, option[T], or a type parameter, such as T
          | Named(identifier name, type* args)
 }

@@ -1,0 +1,55 @@
+// [T] after a function's name makes it generic: T stands for any type
+fn first[T](xs: list[T]) -> T:
+    ret xs[0]
+
+print(first([3, 1, 2]))
+print(first(["a", "b"]))
+
+// a generic function can have several type parameters
+fn swap[A, B](pair: tuple[A, B]) -> tuple[B, A]:
+    a, b = pair
+    ret (b, a)
+
+print(swap((1, "one")))
+
+// T can be held in lists, tuples, and options, and moved around
+fn repeat[T](x: T, n: int) -> list[T]:
+    out = []
+    for i in range(n):
+        out.append(x)
+    ret out
+
+fn or_else[T](x: option[T], fallback: T) -> T:
+    match x:
+        case some(value):
+            ret value
+        case none:
+            ret fallback
+
+print(repeat("ab", 3))
+print(or_else(some(1.5), 0.0), or_else(none, "nothing"))
+
+// structs and enums can be generic too, and a value fills in their types
+struct Pair[A, B]:
+    first: A
+    second: B
+
+impl Pair:
+    fn swap(self) -> Pair[B, A]:
+        ret Pair(first=self.second, second=self.first)
+
+enum Tree[T]:
+    Leaf
+    Node(Tree[T], T, Tree[T])
+
+fn count[T](t: Tree[T]) -> int:
+    match t:
+        case Tree.Leaf:
+            ret 0
+        case Tree.Node(left, _, right):
+            ret count(left) + 1 + count(right)
+
+p = Pair(first=1, second="one")
+print(p, p.swap(), p.first + 1)
+t = Tree.Node(Tree.Leaf, "a", Tree.Node(Tree.Leaf, "b", Tree.Leaf))
+print(count(t), count(Tree.Node(Tree.Leaf, 2.5, Tree.Leaf)))

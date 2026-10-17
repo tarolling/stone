@@ -45,10 +45,15 @@ null: a value that may be missing is an option, `option[T]`, which is either `so
 `T`, or `none`. `find` above returns an `option[int]`, and `match` reads it with the patterns
 `some(i)` and `none`, so the program cannot use a position that is not there.
 
+`option` is not a special type: it is an enum like `Shape`, which every program gets from a
+small stone file called the prelude, and whose variants are written alone, as `some(x)` rather
+than `option.some(x)`. It holds any type `T`, which {doc}`generics` shows how to write for your
+own enums.
+
 An option also has methods: `unwrap_or(-1)` gives the value or `-1` when there is none,
 `is_some()` and `is_none()` say which it is, and `unwrap()` gives the value, stopping the
 program with `cannot unwrap none` when there is none. Options compare with `==` and `!=`, so
 `x == some(3)` and `x != none` work too, as do values of your own enums. See
 [Types](../reference/types.md#enums) for the details.
 
-Next, {doc}`input`.
+Next, {doc}`generics`.

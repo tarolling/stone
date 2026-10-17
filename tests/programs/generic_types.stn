@@ -1,0 +1,80 @@
+// generic structs and enums, their methods, printing, and == at several types
+struct Pair[A, B]:
+    first: A
+    second: B
+
+impl Pair:
+    fn swap(self) -> Pair[B, A]:
+        ret Pair(first=self.second, second=self.first)
+
+    fn set_first(self, x: A):
+        self.first = x
+
+    fn make(a: A, b: B) -> Pair[A, B]:
+        ret Pair(first=a, second=b)
+
+enum Tree[T]:
+    Leaf
+    Node(Tree[T], T, Tree[T])
+
+fn insert(t: Tree[int], x: int) -> Tree[int]:
+    match t:
+        case Tree.Leaf:
+            ret Tree.Node(Tree.Leaf, x, Tree.Leaf)
+        case Tree.Node(l, v, r):
+            if x < v:
+                ret Tree.Node(insert(l, x), v, r)
+            ret Tree.Node(l, v, insert(r, x))
+
+fn items[T](t: Tree[T]) -> list[T]:
+    match t:
+        case Tree.Leaf:
+            ret []
+        case Tree.Node(l, v, r):
+            out = items(l)
+            out.append(v)
+            for x in items(r):
+                out.append(x)
+            ret out
+
+fn size[T](t: Tree[T]) -> int:
+    match t:
+        case Tree.Leaf:
+            ret 0
+        case Tree.Node(l, _, r):
+            ret size(l) + 1 + size(r)
+
+enum Result[T, E]:
+    Ok(T)
+    Err(E)
+
+fn parse(s: str) -> Result[int, str]:
+    if s == "":
+        ret Result.Err("empty")
+    ret Result.Ok(int(s))
+
+p = Pair(first=1, second="one")
+print(p, p.swap())
+q = Pair.make([1.5], some(2))
+q.set_first([2.5, 3.5])
+print(q, q.first, q.second)
+print(p == Pair(first=1, second="one"), p.swap() == Pair(first="one", second=2))
+
+t = Tree.Leaf
+for x in [5, 2, 8, 1]:
+    t = insert(t, x)
+print(items(t), size(t))
+words = Tree.Node(Tree.Leaf, "b", Tree.Node(Tree.Leaf, "c", Tree.Leaf))
+print(words)
+print(items(words), size(words))
+print(words == Tree.Node(Tree.Leaf, "b", Tree.Node(Tree.Leaf, "c", Tree.Leaf)))
+
+print(parse("42"), parse(""))
+match parse("7"):
+    case Result.Ok(n):
+        print("ok", n + 1)
+    case Result.Err(e):
+        print("error", e)
+pairs = [Pair(first="x", second=(1, 2)), Pair(first="y", second=(3, 4))]
+pairs[1].second = (5, 6)
+print(pairs)

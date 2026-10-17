@@ -1,0 +1,10 @@
+Pair(first=1, second='one') Pair(first='one', second=1)
+Pair(first=[2.5, 3.5], second=some(2)) [2.5, 3.5] some(2)
+true false
+[1, 2, 5, 8] 4
+Tree.Node(Tree.Leaf, 'b', Tree.Node(Tree.Leaf, 'c', Tree.Leaf))
+['b', 'c'] 2
+true
+Result.Ok(42) Result.Err('empty')
+ok 8
+[Pair(first='x', second=(1, 2)), Pair(first='y', second=(5, 6))]

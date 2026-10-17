@@ -1,0 +1,33 @@
+// a generic function that owns and changes its list, moved in at its last use
+fn push[T](xs: list[T], x: T) -> list[T]:
+    xs.append(x)
+    ret xs
+
+fn set_first[T](xs: list[T], x: T) -> list[T]:
+    xs[0] = x
+    ret xs
+
+fn take_last[T](xs: list[T]) -> tuple[list[T], T]:
+    x = xs.pop()
+    ret (xs, x.unwrap())
+
+names = ["a"]
+for i in range(3):
+    names = push(names, str(i))
+print(names)
+
+// a copy, since names is read again
+more = push(names, "z")
+print(names, more)
+
+rows = [[1], [2]]
+rows = push(rows, [3, 4])
+rows = set_first(rows, [0])
+print(rows)
+
+pairs = push([(1, "one")], (2, "two"))
+rest, last = take_last(pairs)
+print(rest, last)
+
+options = set_first([some("x"), none], none)
+print(options)

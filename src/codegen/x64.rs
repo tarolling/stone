@@ -497,12 +497,12 @@ impl X64Generator {
 mod tests {
     use super::*;
     use crate::codegen::context::function_label;
-    use crate::driver::parse;
+    use crate::driver::parse_program;
     use crate::stdlib::MAX_CALL_DEPTH;
 
     /// Parses and assembles `source` without invoking gcc.
     fn assemble(source: &str) -> Result<String, String> {
-        let module = parse(source).map_err(|e| e.to_string())?;
+        let module = parse_program(source).map_err(|e| e.to_string())?;
         X64Generator::new().assemble(&module)
     }
 

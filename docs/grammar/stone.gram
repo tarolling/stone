@@ -134,7 +134,12 @@ block:
 # --------------------
 
 function_def:
-    | ['pub'] 'fn' NAME '(' [parameters] ')' ['->' type] ':' block 
+    | ['pub'] 'fn' NAME [type_params] '(' [parameters] ')' ['->' type] ':' block 
+
+# the type parameters of a generic function, struct, or enum, such as [T] in
+# fn first[T](xs: list[T]) -> T: or [A, B] in struct Pair[A, B]:
+type_params:
+    | '[' ','.NAME+ [','] ']' 
 
 # Function parameters
 # -------------------
@@ -149,8 +154,8 @@ param:
 # Types
 # -----
 
-# a name is int, float, bool, or str, or else a struct or an enum, which the checker looks up,
-# or 'option' '[' type ']'; 'none' is not a type
+# a name is int, float, bool, or str, or else a type parameter in scope, a struct, or an enum,
+# which the checker looks up, or 'option' '[' type ']'; 'none' is not a type
 type:
     | 'list' '[' type ']'
     | 'map' '[' type ',' type [','] ']'
@@ -161,7 +166,7 @@ type:
 # ----------------
 
 enum_def:
-    | ['pub'] 'enum' NAME ':' NEWLINE INDENT variant+ DEDENT
+    | ['pub'] 'enum' NAME [type_params] ':' NEWLINE INDENT variant+ DEDENT
 
 variant:
     | NAME ['(' ','.type+ [','] ')'] NEWLINE
@@ -170,7 +175,7 @@ variant:
 # ------------------
 
 struct_def:
-    | ['pub'] 'struct' NAME ':' NEWLINE INDENT field+ DEDENT
+    | ['pub'] 'struct' NAME [type_params] ':' NEWLINE INDENT field+ DEDENT
 
 field:
     | NAME ':' type NEWLINE

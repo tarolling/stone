@@ -1,0 +1,6 @@
+// a runtime error inside a copy of a generic function points into the function
+fn second[T](xs: list[T]) -> T:
+    ret xs[1]
+
+print(second(["a", "b"]))
+print(second([1]))

@@ -1,10 +1,10 @@
 use super::*;
-use crate::driver::parse;
+use crate::driver::parse_program;
 use crate::span::{FileId, Pos, Span};
 
 /// Parses and checks `source`, returning its analysis.
 fn analyze_source(source: &str) -> Analysis {
-    let module = parse(source).expect("test source should parse");
+    let module = parse_program(source).expect("test source should parse");
     TypeChecker::new().analyze(&module)
 }
 
@@ -1502,6 +1502,7 @@ fn an_augmented_name_is_one_reference() {
     let spans: Vec<Pos> = analysis
         .references
         .iter()
+        .filter(|reference| reference.span.file == FileId(0))
         .map(|reference| reference.span.start)
         .collect();
     assert_eq!(spans, [Pos::new(1, 1), Pos::new(2, 1), Pos::new(3, 7)]);
@@ -2636,7 +2637,7 @@ fn a_change_to_a_fields_parameter_is_lost_unless_it_is_read() {
         []
     );
     let mut changed = HashSet::new();
-    let module = parse("p.x = 1.0\nq.items.append(1)\nr[0].y += 1\n").unwrap();
+    let module = parse_program("p.x = 1.0\nq.items.append(1)\nr[0].y += 1\n").unwrap();
     let Mod::Module { body } = &module;
     collect_changed(body, &mut changed, &Methods::new());
     let mut changed: Vec<String> = changed.into_iter().collect();
@@ -3167,9 +3168,532 @@ fn a_change_through_a_method_is_lost_on_a_parameter_but_not_on_self() {
 
     let source = format!("{STACK}s = Stack.new()\ns.push(1)\nn = s.size()\n");
     let analysis = analyze_source(&source);
-    let module = parse(&source).unwrap();
+    let module = parse_program(&source).unwrap();
     let Mod::Module { body } = &module;
     let mut changed = HashSet::new();
     collect_changed(&body[3..], &mut changed, &analysis.methods);
     assert_eq!(changed, HashSet::from(["s".to_string()]));
+}
+
+/// A generic function every test below may call.
+const FIRST: &str = "fn first[T](xs: list[T]) -> T:\n    ret xs[0]\n";
+
+#[test]
+fn a_generic_function_is_called_at_any_type() {
+    let source = format!("{FIRST}a = first([1])\nb = first([\"s\"])\nc = first([[1.5]])\n");
+    assert_eq!(type_of_symbol(&source, "a"), "int");
+    assert_eq!(type_of_symbol(&source, "b"), "str");
+    assert_eq!(type_of_symbol(&source, "c"), "list[float]");
+    assert_eq!(type_of_symbol(&source, "first"), "fn(list[T]) -> T");
+    assert_eq!(type_of_symbol(&source, "xs"), "list[T]");
+}
+
+#[test]
+fn a_call_records_its_type_arguments() {
+    let source = format!("{FIRST}a = first([1])\nb = first([(1, \"s\")])\n");
+    let analysis = analyze_source(&source);
+    assert_eq!(analysis.diagnostics, []);
+    let mut instances: Vec<(usize, String, Vec<String>)> = analysis
+        .instances
+        .iter()
+        .map(|(span, instance)| {
+            let args = instance.args.iter().map(Type::to_string).collect();
+            (span.start.line, instance.function.clone(), args)
+        })
+        .collect();
+    instances.sort();
+    assert_eq!(
+        instances,
+        [
+            (3, "first".to_string(), vec!["int".to_string()]),
+            (4, "first".to_string(), vec!["tuple[int, str]".to_string()]),
+        ]
+    );
+}
+
+#[test]
+fn arguments_agree_on_a_type_parameter() {
+    assert_error(
+        "fn pair[T](a: T, b: T) -> list[T]:\n    ret [a, b]\nxs = pair(1, \"s\")\n",
+        "expected int, found str",
+        3,
+        14,
+    );
+    // a type parameter only in the result is filled in by its use
+    let source = "fn empty[T]() -> list[T]:\n    ret []\nxs = empty()\nxs.append(\"a\")\n";
+    assert_eq!(type_of_symbol(source, "xs"), "list[str]");
+}
+
+#[test]
+fn a_type_parameter_is_any_type_inside_its_function() {
+    let message = |op: &str| format!("'{op}' needs an int or float operand, found T");
+    assert_error("fn f[T](x: T) -> T:\n    ret -x\n", &message("-"), 2, 10);
+    assert_error(
+        "fn f[T](x: T, y: T) -> T:\n    ret x + y\n",
+        "'+' needs int, float, or str operands, found T",
+        2,
+        9,
+    );
+    assert_error(
+        "fn f[T](x: T, y: T) -> bool:\n    ret x < y\n",
+        "'<' needs int, float, or str operands, found T",
+        2,
+        9,
+    );
+    assert_error(
+        "fn f[T](x: T, y: T) -> bool:\n    ret x == y\n",
+        "'==' and '!=' cannot compare T, since 'T' may be any type",
+        2,
+        9,
+    );
+    assert_error(
+        "fn f[T](x: T) -> str:\n    ret str(x)\n",
+        "'str' needs an int, float, bool, or str, found T",
+        2,
+        13,
+    );
+    assert_error(
+        "fn f[T](x: T):\n    if x:\n        ret\n",
+        "a condition must be bool, found T",
+        2,
+        8,
+    );
+    assert_error(
+        "fn f[T](x: T) -> int:\n    ret x.len()\n",
+        "values of type 'T' have no methods, since 'T' may be any type",
+        2,
+        11,
+    );
+    assert_error(
+        "fn f[T](x: T) -> int:\n    ret x[0]\n",
+        "expected list[unknown], found T",
+        2,
+        9,
+    );
+    assert_error(
+        "fn f[T](x: T):\n    for y in x:\n        print(y)\n",
+        "expected list[unknown], found T",
+        2,
+        14,
+    );
+    assert_error(
+        "fn f[T](x: T) -> int:\n    ret x\n",
+        "'f' returns int, but this is T",
+        2,
+        9,
+    );
+}
+
+#[test]
+fn a_type_parameter_moves_through_values_that_hold_it() {
+    let source = "fn wrap[T](x: T) -> option[T]:\n    xs = [x]\n    xs.append(x)\n    \
+                  t = (x, xs.len())\n    a, n = t\n    print(a, n)\n    last = xs.pop()\n    ret last\n\
+                  y = wrap(\"s\").unwrap()\n";
+    assert_eq!(type_of_symbol(source, "y"), "str");
+}
+
+#[test]
+fn two_type_parameters_differ() {
+    assert_error(
+        "fn f[A, B](a: A, b: B) -> A:\n    ret b\n",
+        "'f' returns A, but this is B",
+        2,
+        9,
+    );
+    // so do the type parameters of different functions
+    assert_error(
+        "fn f[T](a: T) -> T:\n    ret a\nfn g[T](a: T, b: list[T]) -> T:\n    ret f(b)\n",
+        "'g' returns T, but this is list[T]",
+        4,
+        9,
+    );
+}
+
+#[test]
+fn a_map_key_cannot_be_a_type_parameter() {
+    assert_error(
+        "fn f[K](m: map[K, int]):\n    print(m)\n",
+        "a map key must be int, str, or bool, found K",
+        1,
+        16,
+    );
+}
+
+#[test]
+fn type_parameters_are_declared_once_and_never_shadow_types() {
+    assert_error(
+        "struct Point:\n    x: int\nfn f[Point](p: Point):\n    print(p)\n",
+        "'Point' is already a type",
+        3,
+        6,
+    );
+    assert_error(
+        "fn f[int](p: int):\n    print(p)\n",
+        "'int' is already a type",
+        1,
+        6,
+    );
+    assert_error(
+        "fn f[T, T](p: T):\n    print(p)\n",
+        "'f' already has a type parameter 'T'",
+        1,
+        9,
+    );
+    assert_error(
+        "fn f[T](p: T[int]):\n    print(p)\n",
+        "'T' takes no types",
+        1,
+        12,
+    );
+    // a type parameter belongs to its own function only
+    assert_error(
+        "fn f[T](p: T):\n    print(p)\nfn g(p: T):\n    print(p)\n",
+        "there is no type 'T'",
+        3,
+        9,
+    );
+}
+
+#[test]
+fn a_method_has_no_type_parameters_for_now() {
+    assert_error(
+        "struct P:\n    x: int\nimpl P:\n    fn f[T](self, t: T):\n        print(t)\n",
+        "a method cannot have type parameters for now",
+        4,
+        10,
+    );
+}
+
+#[test]
+fn a_generic_function_cannot_call_itself_with_ever_larger_types() {
+    assert_error(
+        "fn f[T](x: T, n: int):\n    if n > 0:\n        f([x], n - 1)\nf(1, 3)\n",
+        "this call gives 'f' list[T] for 'T' and leads back to itself, so 'f' would need a copy \
+         for ever larger types",
+        3,
+        9,
+    );
+    // through another function too
+    assert_error(
+        "fn f[T](x: T):\n    g((x, 1))\nfn g[U](y: U):\n    f(y)\n",
+        "this call gives 'g' tuple[T, int] for 'U' and leads back to itself, so 'g' would need a \
+         copy for ever larger types",
+        2,
+        5,
+    );
+    // the same types, or smaller ones, are fine
+    assert_eq!(
+        errors(
+            "fn f[T](x: T, n: int):\n    if n > 0:\n        f(x, n - 1)\n\
+             fn g[T](xs: list[T]) -> T:\n    ret h(xs[0])\nfn h[T](x: T) -> T:\n    ret x\n\
+             f(g([1]), 2)\n"
+        ),
+        []
+    );
+}
+
+#[test]
+fn a_type_parameter_counts_its_values_once_filled_in() {
+    let wide = format!("tuple[{}]", ["int"; 20].join(", "));
+    let source = format!(
+        "fn pairs[T](x: T) -> int:\n    xs = [(x, x)]\n    ret xs.len()\n\
+         fn outer[T](x: T) -> int:\n    ret pairs(x)\n\
+         fn make(t: {wide}) -> int:\n    ret outer(t)\nprint(outer(1))\n"
+    );
+    assert_eq!(
+        errors(&source),
+        [(
+            format!(
+                "this call makes 'pairs' store a list element of tuple[{wide}, {wide}], which \
+                 holds 40 values, but at most 32 fit"
+            ),
+            7,
+            9
+        )]
+    );
+}
+
+#[test]
+fn a_global_cannot_take_a_type_parameter() {
+    assert_error(
+        "fn f[T]() -> T:\n    ret g[0]\ng = []\n",
+        "'g' holds a value of type T, the type parameter of 'f', which means nothing outside 'f'",
+        3,
+        1,
+    );
+}
+
+/// A generic struct, enum, and methods every test below may use.
+const TYPES: &str = "struct Pair[A, B]:\n    first: A\n    second: B\nimpl Pair:\n    \
+                     fn swap(self) -> Pair[B, A]:\n        ret Pair(first=self.second, \
+                     second=self.first)\n    fn make(a: A, b: B) -> Pair[A, B]:\n        \
+                     ret Pair(first=a, second=b)\nenum Tree[T]:\n    Leaf\n    \
+                     Node(Tree[T], T, Tree[T])\n";
+
+#[test]
+fn generic_types_take_their_arguments_from_their_values() {
+    let source = format!(
+        "{TYPES}p = Pair(first=1, second=\"s\")\nq = p.swap()\nr = Pair.make([1.5], none)\n\
+         x = q.first\nt = Tree.Node(Tree.Leaf, \"a\", Tree.Leaf)\nmatch t:\n    \
+         case Tree.Node(_, v, _):\n        print(v)\n    case Tree.Leaf:\n        print(0)\n\
+         r.second = some(2)\n"
+    );
+    assert_eq!(type_of_symbol(&source, "p"), "Pair[int, str]");
+    assert_eq!(type_of_symbol(&source, "q"), "Pair[str, int]");
+    assert_eq!(
+        type_of_symbol(&source, "r"),
+        "Pair[list[float], option[int]]"
+    );
+    assert_eq!(type_of_symbol(&source, "x"), "str");
+    assert_eq!(type_of_symbol(&source, "t"), "Tree[str]");
+    assert_eq!(type_of_symbol(&source, "v"), "str");
+    assert_eq!(type_of_symbol(&source, "first"), "A");
+    assert_eq!(
+        type_of_symbol(&source, "swap"),
+        "fn(Pair[A, B]) -> Pair[B, A]"
+    );
+}
+
+#[test]
+fn a_generic_type_is_written_with_its_arguments() {
+    assert_error(
+        &format!("{TYPES}fn f(t: Tree) -> int:\n    ret 0\n"),
+        "'Tree' takes one type, as in 'Tree[int]'",
+        12,
+        9,
+    );
+    assert_error(
+        &format!("{TYPES}fn f(p: Pair[int]) -> int:\n    ret 0\n"),
+        "'Pair' takes 2 types, as in 'Pair[int, int]'",
+        12,
+        9,
+    );
+    assert_error(
+        &format!("{TYPES}fn f(p: Pair[int, str]) -> str:\n    ret p.first\n"),
+        "'f' returns str, but this is int",
+        13,
+        9,
+    );
+}
+
+#[test]
+fn values_of_a_generic_type_agree_on_its_arguments() {
+    assert_error(
+        "struct Same[T]:\n    a: T\n    b: T\nx = Same(a=1, b=\"s\")\n",
+        "expected int, found str",
+        4,
+        17,
+    );
+    assert_error(
+        &format!("{TYPES}t = Tree.Node(Tree.Leaf, 1, Tree.Node(Tree.Leaf, \"s\", Tree.Leaf))\n"),
+        "expected Tree[int], found Tree[str]",
+        12,
+        29,
+    );
+}
+
+#[test]
+fn a_generic_types_parameters_are_opaque_in_its_methods() {
+    assert_error(
+        "struct Box[T]:\n    x: T\nimpl Box:\n    fn bump(self) -> T:\n        ret self.x + 1\n",
+        "'+' needs int, float, or str operands, found T",
+        5,
+        13,
+    );
+    assert_error(
+        "struct Box[T]:\n    x: T\nimpl Box:\n    fn same(self, other: Box[T]) -> bool:\n        \
+         ret self == other\n",
+        "'==' and '!=' cannot compare Box[T], since field 'Box.x' holds T",
+        5,
+        13,
+    );
+}
+
+#[test]
+fn equality_looks_through_type_arguments() {
+    assert_eq!(
+        errors(&format!(
+            "{TYPES}print(Pair(first=1, second=\"a\") == Pair(first=2, second=\"b\"))\n"
+        )),
+        []
+    );
+    assert_error(
+        &format!("{TYPES}print(Pair(first=[1], second=2) == Pair(first=[1], second=2))\n"),
+        "'==' and '!=' cannot compare Pair[list[int], int], since field 'Pair.first' holds \
+         list[int]",
+        12,
+        7,
+    );
+}
+
+#[test]
+fn a_generic_type_cannot_hold_itself_with_larger_types() {
+    assert_error(
+        "enum Bad[T]:\n    Stop\n    More(Bad[list[T]])\n",
+        "this gives 'Bad' a type that nests 'T' for 'T', so its values could hold ever larger \
+         types",
+        3,
+        5,
+    );
+    // nor hold itself through a type argument without a list or an option in between
+    assert_error(
+        "struct Wrap[T]:\n    x: T\nstruct S:\n    w: Wrap[S]\n",
+        "'S' holds itself through 'w', so a value of it would never end; hold it in a list or \
+         an option, as in 'w: option[S]'",
+        4,
+        5,
+    );
+    // the same types, or a list of itself, are fine
+    assert_eq!(
+        errors(
+            "enum List[T]:\n    Empty\n    Cons(T, List[T])\nstruct Node[T]:\n    kids: list[Node[T]]\n"
+        ),
+        []
+    );
+}
+
+#[test]
+fn a_generic_enum_counts_its_values_once_filled_in() {
+    let wide = format!("tuple[{}]", ["int"; 20].join(", "));
+    let source = format!(
+        "enum Box[T]:\n    Full(T, T)\nfn make(t: {wide}) -> int:\n    b = Box.Full(t, t)\n    ret 0\n"
+    );
+    assert_eq!(
+        errors(&source),
+        [(
+            format!(
+                "this makes a value of Box[{wide}] variant 'Full', which holds 40 values, but at \
+                 most 32 fit"
+            ),
+            4,
+            9
+        )]
+    );
+}
+
+#[test]
+fn a_types_parameters_cannot_reuse_type_names() {
+    assert_error(
+        "struct Point:\n    x: int\nstruct Box[Point]:\n    x: Point\n",
+        "'Point' is already a type",
+        3,
+        12,
+    );
+    assert_error(
+        "enum E[T, T]:\n    X(T)\n",
+        "'E' already has a type parameter 'T'",
+        1,
+        11,
+    );
+    // a struct's type parameters belong to it and its methods only
+    assert_error(
+        "struct Box[T]:\n    x: T\nfn f(x: T):\n    print(x)\n",
+        "there is no type 'T'",
+        3,
+        9,
+    );
+}
+
+#[test]
+fn an_option_holds_at_most_32_values() {
+    let values: Vec<String> = (0..34).map(|i| i.to_string()).collect();
+    let source = format!("t = ({})\no = some(t)\n", values.join(", "));
+    let ints = vec!["int"; 34].join(", ");
+    assert_error(
+        &source,
+        &format!(
+            "this makes a value of option[tuple[{ints}]] variant 'some', which holds 34 values, \
+             but at most 32 fit"
+        ),
+        2,
+        5,
+    );
+}
+
+#[test]
+fn the_preludes_names_are_reserved() {
+    assert_error(
+        "fn some() -> int:\n    ret 1\n",
+        "cannot redefine builtin 'some'",
+        1,
+        4,
+    );
+    assert_error("some = 1\n", "cannot assign to builtin 'some'", 1, 1);
+    assert_error(
+        "enum option:\n    X\n",
+        "cannot redefine builtin 'option'",
+        1,
+        6,
+    );
+    assert_error(
+        "struct some:\n    x: int\n",
+        "cannot redefine builtin 'some'",
+        1,
+        8,
+    );
+    // the prelude's type parameter is its own, so a program may name a type `T`
+    assert_eq!(
+        errors("struct T:\n    a: int\nx = some(T(a=1))\nprint(x)\n"),
+        []
+    );
+}
+
+#[test]
+fn some_and_none_are_checked_like_any_variant() {
+    assert_error(
+        "x = some()\n",
+        "'some' holds 1 value, but 0 were given",
+        1,
+        5,
+    );
+    assert_error(
+        "x = some\n",
+        "'some' holds 1 value, so make one with a call, as in 'some(...)'",
+        1,
+        5,
+    );
+    assert_error(
+        "x = none(1)\n",
+        "'none' holds no values, so it is written without parentheses, as 'none'",
+        1,
+        5,
+    );
+    assert_eq!(type_of_symbol("x = some(1.5)\n", "x"), "option[float]");
+}
+
+#[test]
+fn some_refers_to_the_preludes_variant() {
+    let analysis = analyze_source("x = some(1)\n");
+    let reference = analysis
+        .reference_at(FileId(0), Pos::new(1, 5))
+        .expect("a reference at 'some'");
+    let symbol = &analysis.symbols[reference.symbol];
+    assert_eq!(symbol.name, "some");
+    assert_eq!(symbol.kind, SymbolKind::Variant);
+    assert_eq!(symbol.span.file, FileId::PRELUDE);
+    // the enum's name was never written, so nothing refers to it there
+    let option = analysis
+        .symbols
+        .iter()
+        .position(|s| s.name == "option" && s.kind == SymbolKind::Enum)
+        .unwrap();
+    assert!(
+        analysis
+            .references_to(option)
+            .all(|r| r.span.file == FileId::PRELUDE)
+    );
+}
+
+#[test]
+fn a_written_option_type_refers_to_the_preludes_enum() {
+    let analysis = analyze_source("fn f(o: option[int]) -> int:\n    ret o.unwrap_or(0)\n");
+    assert_eq!(analysis.diagnostics, []);
+    let reference = analysis
+        .reference_at(FileId(0), Pos::new(1, 9))
+        .expect("a reference at 'option'");
+    let symbol = &analysis.symbols[reference.symbol];
+    assert_eq!(
+        (symbol.name.as_str(), symbol.kind),
+        ("option", SymbolKind::Enum)
+    );
 }

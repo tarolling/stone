@@ -1,0 +1,17 @@
+1 3
+a b
+[1.5]
+(1, 'one')
+Point(x=1.0, y=2.0)
+Shape.Square(2.0)
+some(3)
+('a', 1)
+([1, 2], 'a')
+['ab', 'ab'] [Point(x=0.25, y=0.5), Point(x=0.25, y=0.5)]
+[[1, 1], [1, 1]]
+x y 7
+int 1
+str s
+list [[1], [2]]
+map {'a': 1}
+tuple (1, (2.5, 'x'))

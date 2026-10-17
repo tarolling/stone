@@ -30,6 +30,20 @@ pub fn parse(source: &str) -> Result<Mod, Diagnostic> {
     parser.parse()
 }
 
+/// Parses source code and links it, with no other files, into a module that holds the prelude,
+/// so `option`, `some`, and `none` work in it as in any program. Returns the syntax and import
+/// errors, if any.
+///
+/// For example, `parse_program("x = some(1)\n")` returns a module whose second statement assigns
+/// `option.some(1)`, after the prelude's `option` enum.
+pub fn parse_program(source: &str) -> Result<Mod, Diagnostics> {
+    let linked = project::link(Path::new(DEFAULT_ENTRY), source, &MapSources::default());
+    if has_errors(&linked.diagnostics) {
+        return Err(Diagnostics(linked.diagnostics));
+    }
+    Ok(linked.module)
+}
+
 /// Parses, links, and checks the program with this entry source, given as a single string with
 /// no other files, returning the module only if no errors were found.
 ///
@@ -419,6 +433,8 @@ pub fn repl(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::checker::Type;
+    use crate::span::FileId;
 
     #[test]
     fn simple_program() {
@@ -553,7 +569,12 @@ ret y
             .map(|d| d.message.as_str())
             .collect();
         assert_eq!(messages, ["expected an expression, found end of line"]);
-        let names: Vec<&str> = analysis.symbols.iter().map(|s| s.name.as_str()).collect();
+        let names: Vec<&str> = analysis
+            .symbols
+            .iter()
+            .filter(|s| s.span.file == FileId(0))
+            .map(|s| s.name.as_str())
+            .collect();
         assert_eq!(names, ["x", "z"]);
     }
 
@@ -573,7 +594,9 @@ ret y
     fn analyze_returns_types_and_symbols() {
         let analysis = analyze("x = 1\n");
         assert_eq!(analysis.diagnostics, []);
-        assert_eq!(analysis.symbols[0].name, "x");
+        let x = analysis.symbols.iter().find(|s| s.span.file == FileId(0));
+        assert_eq!(x.map(|s| s.name.as_str()), Some("x"));
+        assert_eq!(x.map(|s| &s.ty), Some(&Type::Int));
     }
 
     #[test]

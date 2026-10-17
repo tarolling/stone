@@ -1,0 +1,48 @@
+// generic structs whose methods change self in place, through lists and maps, and nest
+struct Stack[T]:
+    items: list[T]
+
+impl Stack:
+    fn push(self, x: T):
+        self.items.append(x)
+
+    fn top(self) -> option[T]:
+        if self.items.len() == 0:
+            ret none
+        ret some(self.items[-1])
+
+    fn empty() -> Stack[T]:
+        ret Stack(items=[])
+
+struct Node[T]:
+    value: T
+    next: option[Node[T]]
+
+enum Tree[T]:
+    Leaf
+    Node(Tree[T], T, Tree[T])
+
+fn length[T](n: Node[T]) -> int:
+    match n.next:
+        case some(rest):
+            ret 1 + length(rest)
+        case none:
+            ret 1
+
+t = Tree.Leaf
+print(t)
+s = Stack.empty()
+s.push("a")
+s.push("b")
+print(s, s.top())
+stacks = [Stack(items=[1]), Stack(items=[2, 3])]
+stacks[1].push(4)
+stacks[0].items[0] = 9
+print(stacks, stacks[1].top())
+n = Node(value=(1, "x"), next=some(Node(value=(2, "y"), next=none)))
+print(n, length(n))
+m = {"a": Stack(items=[[1.5]])}
+m["b"] = Stack.empty()
+print(m)
+e = Stack.empty()
+print(e.top())

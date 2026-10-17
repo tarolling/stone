@@ -55,8 +55,8 @@ x = "one"   # error: cannot assign str to 'x', which is int
 An empty list `[]` starts with an unknown element type, which is filled in by what is appended
 to it, assigned into it, or what it is passed to.
 
-Functions are monomorphic: a function has exactly the types its signature writes, so one that
-takes `xs: list[int]` cannot also be called with a `list[str]`.
+A function has exactly the types its signature writes, so one that takes `xs: list[int]`
+cannot also be called with a `list[str]`, unless it is generic (see below).
 
 Arithmetic works on numbers and, element by element, on lists of them, so an operand whose type
 is not known yet can be either. For example, after `xs = []`, nothing is known about `xs[0]`,
@@ -64,6 +64,74 @@ and `xs[0] * 2` makes it an `int` or a `list[int]`. The operand still has to be 
 list of numbers that fits the other operand, so a later `xs.append("a")` is an error at `"a"`.
 If nothing ever settles it, it is the same type as the other operand.
 
+## Generics
+
+A generic function names its type parameters in brackets after its name, and uses them in its
+signature like any other type:
+
+```stone
+fn first[T](xs: list[T]) -> T:
+    ret xs[0]
+```
+
+Each call fills in the type parameters with types of its own, inferred from its arguments and
+from how its result is used, so `first([1])` is an `int` and `first(["a"])` a `str`. Type
+arguments are never written at a call. A type parameter cannot reuse the name of a type, such
+as `int` or a struct, and cannot take types of its own (`T[int]`).
+
+The body is checked once, with each type parameter as a type of its own that stands for any
+type, so every error is reported inside the generic function or at an argument, never because
+of a distant call. A value of type `T` can be assigned, passed, returned, printed, and stored
+in lists, tuples, options, and map values, but not used in arithmetic, compared, converted with
+`str`, used as a condition, indexed, iterated, matched, or used as a map key, and it has no
+methods. Two different type parameters are different types.
+
+The compiler makes one copy of a generic function for each set of types the program calls it
+with. Two rules keep that finite and safe:
+
+- A generic function cannot reach a call of itself with a larger type, as `f([x])` inside
+  `fn f[T](x: T):` would, since that would need a copy for `list[T]`, then `list[list[T]]`,
+  and so on.
+- A list element or map entry a generic function stores must fit, once its type parameters are
+  filled in, in the same 32 values as any other, which the call that fills them in reports.
+
+A global cannot take a type parameter's type, as `g` would after `g = []` if a generic function
+returned `g[0]` as its `T`.
+
+### Generic structs and enums
+
+A struct or enum can have type parameters too, written the same way after its name, and used in
+its fields or variants:
+
+```stone
+struct Pair[A, B]:
+    first: A
+    second: B
+
+enum Tree[T]:
+    Leaf
+    Node(Tree[T], T, Tree[T])
+```
+
+Its type is written with a type for each parameter, such as `Pair[int, str]` or `Tree[float]`,
+and writing `Tree` alone is an error. A value fills them in from its own values, as a call does:
+`Pair(first=1, second="a")` is a `Pair[int, str]`, `Tree.Node(Tree.Leaf, 2.5, Tree.Leaf)` a
+`Tree[float]`, and `Tree.Leaf` alone a `Tree` of whatever its use needs. Reading a field or
+matching a variant gives the type filled in, so `p.first` is an `int`.
+
+An `impl` block of a generic struct takes no brackets: the struct's type parameters are in scope
+in all of its functions, and `self` is the struct with them, such as `Pair[A, B]`. Like a generic
+function's body, each function is checked once, with the type parameters as opaque types, and
+compiled once for each set of types it is used with. Methods cannot have type parameters of their
+own yet.
+
+A generic type can hold itself, in a list or an enum as any type can, but only with the same type
+parameters: `enum Bad[T]:` with a variant `More(Bad[list[T]])` is an error, since a value could
+then hold ever larger types. An enum value holds at most 32 values in each variant once its type
+parameters are filled in, which the code making the value reports.
+
+`==` compares two values of a generic type if the types filled in can be compared, so a
+`Pair[int, str]` can be compared and a `Pair[list[int], int]` cannot.
 ## Strings
 
 A string is a sequence of bytes holding UTF-8 text, so a character outside ASCII, such as `é`,
@@ -311,8 +379,19 @@ before it, with `value is nested too deeply to print (more than 10000 levels)`.
 
 ## Options
 
-`option[T]` is the enum built into the language for a value that may be missing: `some(x)` holds
-a `T`, and `none` holds nothing. A function that may have no answer returns one:
+`option[T]` is the type of a value that may be missing: `some(x)` holds a `T`, and `none` holds
+nothing. It is an ordinary [generic enum](#generic-structs-and-enums), defined in stone by the
+prelude, a file every program is linked with:
+
+```stone
+pub enum option[T]:
+    none
+    some(T)
+```
+
+Its variants are written alone, as `some(x)` and `none` rather than `option.some(x)`, in every
+file and without a `use`, and the names `option` and `some` cannot be defined again. A function
+that may have no answer returns one:
 
 ```{literalinclude} ../examples/enums.stn
 :language: stone
@@ -322,7 +401,9 @@ a `T`, and `none` holds nothing. A function that may have no answer returns one:
 `match` reads an option with the patterns `some(x)` and `none`, and its methods read it too:
 `x.is_some()` and `x.is_none()` say which it is, `x.unwrap()` returns the value it holds and stops
 the program with `cannot unwrap none` if there is none, and `x.unwrap_or(default)` returns
-`default` instead. An option prints as `some(1)` or `none`.
+`default` instead. An option prints as `some(1)` or `none`. Since it is an enum, it follows the
+rules of every enum: two options compare with `==` when what they hold can, and `some` of a value
+must fit an enum value's 32 values.
 
 `none` on its own has an unknown type until its use settles it, as an empty list does, so after
 `best = none`, `best = some("a")` makes `best` an `option[str]`.

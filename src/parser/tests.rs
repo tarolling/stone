@@ -50,6 +50,7 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
         StmtKind::FunctionDef {
             name,
             public,
+            type_params,
             args,
             returns,
             body,
@@ -58,6 +59,13 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
             name,
             name_span: Span::default(),
             public,
+            type_params: type_params
+                .into_iter()
+                .map(|p| TypeParam {
+                    name: p.name,
+                    span: Span::default(),
+                })
+                .collect(),
             args: Arguments {
                 args: args
                     .args
@@ -111,12 +119,20 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
         StmtKind::EnumDef {
             name,
             public,
+            type_params,
             variants,
             ..
         } => StmtKind::EnumDef {
             name,
             name_span: Span::default(),
             public,
+            type_params: type_params
+                .into_iter()
+                .map(|p| TypeParam {
+                    name: p.name,
+                    span: Span::default(),
+                })
+                .collect(),
             variants: variants
                 .into_iter()
                 .map(|v| Variant {
@@ -129,12 +145,20 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
         StmtKind::StructDef {
             name,
             public,
+            type_params,
             fields,
             ..
         } => StmtKind::StructDef {
             name,
             name_span: Span::default(),
             public,
+            type_params: type_params
+                .into_iter()
+                .map(|p| TypeParam {
+                    name: p.name,
+                    span: Span::default(),
+                })
+                .collect(),
             fields: fields
                 .into_iter()
                 .map(|f| Field {
@@ -414,6 +438,7 @@ fn simple_function_no_args() {
                     name: "testing".to_string(),
                     name_span: Span::default(),
                     public: false,
+                    type_params: vec![],
                     args: Arguments { args: vec![] },
                     returns: None,
                     body: vec![
@@ -494,6 +519,7 @@ fn simple_function_one_arg() {
                     name: "testing".to_string(),
                     name_span: Span::default(),
                     public: false,
+                    type_params: vec![],
                     args: Arguments {
                         args: vec![Arg {
                             arg: "a".to_string(),
@@ -605,6 +631,7 @@ fn simple_function_multiple_args() {
                     name: "testing".to_string(),
                     name_span: Span::default(),
                     public: false,
+                    type_params: vec![],
                     args: Arguments {
                         args: vec![
                             Arg {
@@ -2156,6 +2183,7 @@ fn an_enum_lists_its_variants() {
                 name: "Shape".to_string(),
                 name_span: Span::default(),
                 public: true,
+                type_params: vec![],
                 variants: vec![
                     variant("Circle", &["float"]),
                     variant("Rect", &["float", "float"]),
@@ -2395,6 +2423,7 @@ fn a_struct_definition_holds_its_fields() {
                     name: "Point".to_string(),
                     name_span: Span::default(),
                     public: true,
+                    type_params: vec![],
                     fields: vec![field("x", TypeExprKind::Float), field("ys", list_of_int)],
                 }
                 .into()
@@ -2426,6 +2455,7 @@ fn an_impl_block_holds_its_methods() {
             name: name.to_string(),
             name_span: Span::default(),
             public: false,
+            type_params: vec![],
             args: Arguments {
                 args: args
                     .into_iter()
@@ -2547,6 +2577,120 @@ fn named_values_follow_the_others_in_a_call() {
             "a value without a name cannot follow a named one, as in 'x=1'".to_string(),
             1,
             8
+        )
+    );
+}
+
+/// Parses `source`, which must start with a function definition, and returns its type
+/// parameters' names and spans.
+///
+/// For example, `type_params_of("fn f[T](x: T): ret\n")` returns `[("T", 1:6-1:7)]`.
+fn type_params_of(source: &str) -> Vec<(String, Span)> {
+    let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
+    let StmtKind::FunctionDef { type_params, .. } = &body[0].kind else {
+        panic!("expected function definition");
+    };
+    type_params
+        .iter()
+        .map(|p| (p.name.clone(), p.span))
+        .collect()
+}
+
+#[test]
+fn functions_may_have_type_parameters() {
+    assert_eq!(
+        type_params_of("fn first[T](xs: list[T]) -> T: ret xs[0]\n"),
+        vec![("T".to_string(), span(1, 10, 1, 11))]
+    );
+    assert_eq!(
+        signature_of("fn first[T](xs: list[T]) -> T: ret xs[0]\n"),
+        (vec![Some("list[T]".to_string())], Some("T".to_string()))
+    );
+    assert_eq!(
+        type_params_of("fn swap[A, Bee,](p: tuple[A, Bee]): ret\n"),
+        vec![
+            ("A".to_string(), span(1, 9, 1, 10)),
+            ("Bee".to_string(), span(1, 12, 1, 15))
+        ]
+    );
+    assert!(type_params_of("fn f(): ret\n").is_empty());
+}
+
+#[test]
+fn type_parameters_are_names() {
+    assert_eq!(
+        error_of("fn f[](x: int): ret\n"),
+        (
+            "a function's type parameters need at least one name, as in 'fn first[T](xs: list[T]) -> T'"
+                .to_string(),
+            1,
+            5
+        )
+    );
+    assert_eq!(
+        error_of("fn f[list[int]](x: int): ret\n"),
+        ("expected ']', found '['".to_string(), 1, 10)
+    );
+    assert_eq!(
+        error_of("fn f[1](x: int): ret\n"),
+        (
+            "expected a type parameter name, found '1'".to_string(),
+            1,
+            6
+        )
+    );
+}
+
+#[test]
+fn structs_and_enums_may_have_type_parameters() {
+    let Mod::Module { body } = parse_within(
+        "struct Pair[A, B]:\n    a: A\n    b: B\nenum Tree[T]:\n    Leaf\n    Node(Tree[T], T)\n"
+            .to_string(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let StmtKind::StructDef {
+        type_params,
+        fields,
+        ..
+    } = &body[0].kind
+    else {
+        panic!("expected a struct");
+    };
+    let names: Vec<(&str, Span)> = type_params
+        .iter()
+        .map(|p| (p.name.as_str(), p.span))
+        .collect();
+    assert_eq!(
+        names,
+        [("A", span(1, 13, 1, 14)), ("B", span(1, 16, 1, 17))]
+    );
+    assert_eq!(fields[1].annotation.to_string(), "B");
+    let StmtKind::EnumDef {
+        type_params,
+        variants,
+        ..
+    } = &body[1].kind
+    else {
+        panic!("expected an enum");
+    };
+    assert_eq!(type_params[0].name, "T");
+    assert_eq!(variants[1].fields[0].to_string(), "Tree[T]");
+    assert_eq!(
+        error_of("struct P[]:\n    x: int\n"),
+        (
+            "a struct's type parameters need at least one name, as in 'struct Pair[A, B]:'"
+                .to_string(),
+            1,
+            9
+        )
+    );
+    assert_eq!(
+        error_of("enum E[]:\n    X\n"),
+        (
+            "an enum's type parameters need at least one name, as in 'enum Tree[T]:'".to_string(),
+            1,
+            7
         )
     );
 }

@@ -5,6 +5,7 @@
 //! `fn f0(p0: int) -> int:\n    ret p0 + 1\nprint(f0(2))\n`, and [`differential`] runs it through both backends.
 
 use arbitrary::{Result, Unstructured};
+use compound::{Signature, Ty, TypeDef, Var};
 use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -12,6 +13,8 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 use stone::codegen::{Architecture, Target};
 use stone::interpreter::Limits;
+
+mod compound;
 
 /// Limits for fuzzing the interpreter, small enough that every input finishes quickly.
 ///
@@ -41,14 +44,18 @@ const MAX_PARAMS: usize = 8;
 /// ints that always have at least two elements, so indexes from -2 to 1 are always in range, and
 /// strings. Strings outside ASCII are only compared, searched, split, joined, and looped over,
 /// while words, ASCII strings of at least two bytes, are also indexed from -2 to 1 and sliced,
-/// so no string operation fails. Booleans appear in `print` and in conditions. Functions never read globals, which may not be
-/// assigned yet when they run, and every loop is bounded: `while` loops by a counter, `for` loops
-/// by a small `range` or by a list that nothing appends to while it is iterated.
+/// so no string operation fails. Booleans appear in `print` and in conditions. Programs may also
+/// declare structs with `impl` blocks and enums, and hold them, options, maps, and lists of them
+/// in variables, fields, parameters, and results, which they change in place, `match`, and compare
+/// with `==` (see the `compound` module for the rules that keep those valid). Functions never read
+/// globals, which may not be assigned yet when they run, and every loop is bounded: `while` loops
+/// by a counter, `for` loops by a small `range` or by a list that nothing appends to while it is
+/// iterated.
 ///
 /// For example, some input bytes produce:
 ///
 /// ```text
-/// fn f0(p0: int, p1: int) -> int;
+/// fn f0(p0: int, p1: int) -> int:
 ///     l0 = p0 * p1
 ///     ret l0 - 3
 /// g0 = f0(4, 2)
@@ -57,6 +64,14 @@ const MAX_PARAMS: usize = 8;
 pub fn generate(u: &mut Unstructured) -> Result<String> {
     let mut generator = Generator::default();
 
+    if u.arbitrary()? {
+        generator.declarations(u)?;
+    }
+    // before the int functions, whose nested calls can use up the input
+    generator.impls(u)?;
+    for index in 0..u.int_in_range(0..=2)? {
+        generator.typed_function(u, index)?;
+    }
     for index in 0..u.int_in_range(0..=3)? {
         generator.function(u, index)?;
     }
@@ -73,10 +88,14 @@ pub fn generate(u: &mut Unstructured) -> Result<String> {
     let value = generator.expression(u, &scope, 0)?;
     generator.line(0, &format!("print({value})"));
 
+    let mut header = String::new();
     if generator.uses_math {
-        return Ok(format!("use math\n{}", generator.source));
+        header.push_str("use math\n");
     }
-    Ok(generator.source)
+    if generator.uses_os {
+        header.push_str("use os\n");
+    }
+    Ok(header + &generator.source)
 }
 
 /// Names visible at one point in a generated program.
@@ -99,6 +118,10 @@ struct Scope {
     in_function: bool,
     /// Whether this point is inside a `while` loop, so `break` and `cont` are allowed.
     in_loop: bool,
+    /// Variables holding compound values or bools, such as a struct or a map.
+    values: Vec<Var>,
+    /// The type a function's `ret` gives, or `None` in a function that returns no value.
+    returns: Option<Ty>,
 }
 
 impl Scope {
@@ -120,6 +143,17 @@ struct Generator {
     next_name: usize,
     /// Whether the program calls the `math` module, so it needs `use math` first.
     uses_math: bool,
+    /// Whether the program calls the `os` module, so it needs `use os` first.
+    uses_os: bool,
+    /// Structs and enums declared so far, as `S<n>` or `E<n>` for the `n`th.
+    types: Vec<TypeDef>,
+    /// Functions with typed parameters defined so far, as `t<n>` for the `n`th.
+    typed_functions: Vec<Signature>,
+    /// Variables the function being generated has changed in place, so it can read any changed
+    /// parameter before returning.
+    changed: Vec<String>,
+    /// Whether the type being declared may only hold comparable types, so `==` accepts it.
+    plain: bool,
 }
 
 impl Generator {
@@ -151,6 +185,7 @@ impl Generator {
         let mut scope = Scope {
             variables: params,
             in_function: true,
+            returns: Some(Ty::Int),
             ..Scope::default()
         };
         for _ in 0..u.int_in_range(0..=MAX_BLOCK_LEN)? {
@@ -172,7 +207,7 @@ impl Generator {
         nesting: usize,
     ) -> Result<()> {
         let nested = nesting < MAX_NESTING;
-        match u.int_in_range(0..=15)? {
+        match u.int_in_range(0..=21)? {
             0 | 1 => {
                 let value = self.expression(u, scope, 0)?;
                 if !scope.variables.is_empty() && u.arbitrary()? {
@@ -210,16 +245,24 @@ impl Generator {
                 let keyword = if u.arbitrary()? { "break" } else { "cont" };
                 self.line(indent, keyword);
             }
-            8 if scope.in_function => {
-                let value = self.expression(u, scope, 0)?;
-                self.line(indent, &format!("ret {value}"));
-            }
+            8 if scope.in_function => match scope.returns.clone() {
+                Some(Ty::Int) => {
+                    let value = self.expression(u, scope, 0)?;
+                    self.line(indent, &format!("ret {value}"));
+                }
+                Some(ty) => {
+                    let value = self.value(u, scope, &ty, 0, true)?;
+                    self.line(indent, &format!("ret {value}"));
+                }
+                None => self.line(indent, "ret"),
+            },
             9 if !self.functions.is_empty() => {
                 let call = self.call(u, scope, 0)?;
                 self.line(indent, &call);
             }
             10..=13 if !scope.in_function => self.list_statement(u, scope, indent)?,
             14 | 15 => self.string_statement(u, scope, indent, nesting)?,
+            16..=21 => self.compound_statement(u, scope, indent, nesting)?,
             _ => {
                 let value = self.expression(u, scope, 0)?;
                 self.line(indent, &format!("print({value})"));
@@ -471,15 +514,19 @@ impl Generator {
                 let value = self.expression(u, scope, nesting + 1)?;
                 Ok(format!("str({value})"))
             }
-            _ => Ok(u
-                .choose(&[
+            _ => {
+                if let Some(text) = self.read_values(u, scope, &Ty::Str, nesting)? {
+                    return Ok(text);
+                }
+                Ok(u.choose(&[
                     "\"\"",
                     "\"caf\u{e9}\"",
                     "\"na\u{ef}ve \u{20ac}5\"",
                     "\"a\"",
                     "\"\u{e9}\"",
                 ])?
-                .to_string()),
+                .to_string())
+            }
         }
     }
 
@@ -606,7 +653,14 @@ impl Generator {
     /// Generates an `if` or `elif` test: comparisons, sometimes joined by `and` or `or`, or a
     /// negation of them, such as `not (a < b or c == 1)`.
     fn condition(&mut self, u: &mut Unstructured, scope: &Scope) -> Result<String> {
-        let mut test = self.comparison(u, scope)?;
+        let mut test = match !scope.values.is_empty() && u.int_in_range(0..=3)? == 3 {
+            true => {
+                let (a, b) = self.equality(u, scope, 1)?;
+                let op = *u.choose(&["==", "!="])?;
+                format!("{a} {op} {b}")
+            }
+            false => self.comparison(u, scope)?,
+        };
         if u.int_in_range(0..=3)? == 3 {
             let op = if u.arbitrary()? { "and" } else { "or" };
             for _ in 0..u.int_in_range(1..=2)? {
@@ -715,7 +769,12 @@ impl Generator {
                 let inner = self.float_expression(u, scope, nesting + 1)?;
                 Ok(format!("int({inner})"))
             }
-            _ => Ok(u.int_in_range(0..=12)?.to_string()),
+            _ => {
+                if let Some(text) = self.read_values(u, scope, &Ty::Int, nesting)? {
+                    return Ok(text);
+                }
+                Ok(u.int_in_range(0..=12)?.to_string())
+            }
         }
     }
 
@@ -794,11 +853,16 @@ impl Generator {
                     "0.1", "1e16", "1e300", "1e-300", "5e-324", "1e-05", "0.3", "2.5e-7",
                 ])?
                 .to_string()),
-            _ => Ok(format!(
-                "{}.{}",
-                u.int_in_range(0..=99)?,
-                u.int_in_range(0..=99)?
-            )),
+            _ => {
+                if let Some(text) = self.read_values(u, scope, &Ty::Float, nesting)? {
+                    return Ok(text);
+                }
+                Ok(format!(
+                    "{}.{}",
+                    u.int_in_range(0..=99)?,
+                    u.int_in_range(0..=99)?
+                ))
+            }
         }
     }
 
@@ -850,6 +914,21 @@ impl Generator {
                 Ok(format!("{name}({inner}, {other})"))
             }
         }
+    }
+
+    /// Sometimes reads a leaf value out of the scope's compound variables, such as `v1.x0`,
+    /// `v2.unwrap_or(3)`, or `v0.len()`, using no input when there are none.
+    fn read_values(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &Scope,
+        ty: &Ty,
+        nesting: usize,
+    ) -> Result<Option<String>> {
+        if nesting >= MAX_NESTING || scope.values.is_empty() || !u.arbitrary()? {
+            return Ok(None);
+        }
+        self.derived(u, scope, ty, nesting + 1)
     }
 
     /// Generates a call to a function defined earlier, with the right number of arguments.
@@ -1160,6 +1239,97 @@ mod tests {
         };
         let count = sources.iter().filter(indexed).count();
         assert!(count >= 5, "only {count} of 500 programs index a string");
+    }
+
+    /// Programs from longer inputs, which declare types and reach compound values more often.
+    fn compound_sources(count: u64) -> Vec<String> {
+        (0..count)
+            .map(|seed| generate(&mut Unstructured::new(&bytes(seed, 4096))).unwrap())
+            .collect()
+    }
+
+    /// Enums, structs and their methods, maps, options, and `==` on them all appear.
+    #[test]
+    fn generated_programs_use_compound_types() {
+        let sources = compound_sources(500);
+        for feature in [
+            "enum ",
+            "struct ",
+            "impl ",
+            "fn make(",
+            "(self",
+            "self.",
+            "match ",
+            "case _",
+            "case some(",
+            "case none",
+            "{",
+            "[\"",
+            ".get(",
+            ".contains(",
+            "some(",
+            "none",
+            ".unwrap_or(",
+            "=S",
+            "print(\"eq",
+            " == E",
+            " == S",
+            " == some(",
+            "fn t",
+        ] {
+            let count = sources.iter().filter(|s| s.contains(feature)).count();
+            assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
+        }
+        // a method is called on a value, such as `v3.m1(2)`
+        let called = |source: &&String| {
+            source.split(".m").skip(1).any(|rest| {
+                let rest = rest.trim_start_matches(|c: char| c.is_ascii_digit());
+                rest.starts_with('(')
+            })
+        };
+        let count = sources.iter().filter(called).count();
+        assert!(count >= 5, "only {count} of 500 programs call a method");
+    }
+
+    #[test]
+    fn compound_programs_type_check() {
+        for source in compound_sources(1_000) {
+            let diagnostics = stone::driver::check(&source);
+            if let Some(first) = diagnostics.first() {
+                panic!("generated program failed to check ({first}):\n{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn compound_programs_assemble_for_every_target() {
+        for source in compound_sources(500) {
+            if let Err(e) = build_every_target(&source) {
+                panic!("a generated program {e}:\n{source}");
+            }
+        }
+    }
+
+    #[test]
+    fn compound_programs_agree_across_backends() {
+        // builds and runs each program, so keep the count small enough for every test run
+        for source in compound_sources(60) {
+            differential(&source);
+        }
+    }
+
+    /// Longer inputs divide by zero and nest calls past the interpreter's limit more often, so
+    /// fewer pass: before compound values, 128 of these 300 did.
+    #[test]
+    fn compound_programs_are_often_comparable() {
+        let comparable = compound_sources(300)
+            .iter()
+            .filter(|source| interpret(source).is_some())
+            .count();
+        assert!(
+            comparable > 120,
+            "only {comparable} of 300 generated programs can be compared"
+        );
     }
 
     #[test]

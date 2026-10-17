@@ -209,10 +209,12 @@ impl Helper {
 
 /// Names the type `ty` in a label.
 ///
-/// For example, `option[tuple[int, str]]` is `option.tuple2_int_str`.
+/// For example, `option[tuple[int, str]]` is `option.tuple2_int_str`, and
+/// `option[map[str, float]]` is `option.map_str_float`.
 fn mangle(ty: &Type) -> String {
     match ty {
         Type::List(elem) => format!("list_{}", mangle(elem)),
+        Type::Map(key, value) => format!("map_{}_{}", mangle(key), mangle(value)),
         Type::Tuple(fields) => {
             let fields: Vec<String> = fields.iter().map(mangle).collect();
             format!("tuple{}_{}", fields.len(), fields.join("_"))

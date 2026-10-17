@@ -1,0 +1,3 @@
+some({'a': 1.5, 'b': -2.0})
+none [some({1: 'one'}), none]
+some(some({true: [1, 2]}))

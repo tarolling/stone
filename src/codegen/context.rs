@@ -480,7 +480,7 @@ impl Context {
         self.analysis
             .types
             .values()
-            .any(|ty| contains_str(ty, &self.analysis.structs, &mut HashSet::new()))
+            .any(|ty| contains_str(ty, &self.analysis, &mut HashSet::new()))
             || self.uses(STRING_ROUTINES)
     }
 
@@ -489,7 +489,7 @@ impl Context {
         self.analysis
             .types
             .values()
-            .any(|ty| contains_list(ty, &self.analysis.structs, &mut HashSet::new()))
+            .any(|ty| contains_list(ty, &self.analysis, &mut HashSet::new()))
             || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
     }
 
@@ -637,16 +637,37 @@ fn struct_has(
     fields.iter().any(|(_, ty)| has(ty, structs, seen))
 }
 
-/// Returns whether a value of type `ty` involves a list, which means the list runtime is needed.
-/// `seen` holds the structs already looked through.
-fn contains_list(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bool {
+/// Returns whether a value of type `ty` involves a list, which means the list runtime is needed,
+/// looking through tuples, struct fields, and what an enum's variants or an option may hold.
+/// `seen` holds the structs and enums already looked through.
+///
+/// For example, an enum with a variant `Path(list[int])` involves a list even in a program that
+/// never makes one, since printing the enum's values needs `stone.print_list_int`.
+fn contains_list(ty: &Type, analysis: &Analysis, seen: &mut HashSet<String>) -> bool {
     match ty {
         Type::List(_) | Type::Map(..) => true,
-        Type::Tuple(fields) => fields.iter().any(|f| contains_list(f, structs, seen)),
-        Type::Struct(name) => struct_has(name, structs, seen, contains_list),
+        Type::Tuple(fields) => fields.iter().any(|f| contains_list(f, analysis, seen)),
+        Type::Struct(name) => {
+            seen.insert(name.clone())
+                && analysis.structs.get(name).is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .any(|(_, ty)| contains_list(ty, analysis, seen))
+                })
+        }
+        Type::Enum { name, args } => {
+            args.iter().any(|arg| contains_list(arg, analysis, seen))
+                || (seen.insert(name.clone())
+                    && analysis.enums.get(name).is_some_and(|variants| {
+                        variants
+                            .iter()
+                            .flat_map(|(_, values)| values)
+                            .any(|ty| contains_list(ty, analysis, seen))
+                    }))
+        }
         Type::Function { params, ret } => {
-            params.iter().any(|p| contains_list(p, structs, seen))
-                || contains_list(ret, structs, seen)
+            params.iter().any(|p| contains_list(p, analysis, seen))
+                || contains_list(ret, analysis, seen)
         }
         _ => false,
     }
@@ -669,15 +690,34 @@ fn contains_enum(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bo
     }
 }
 
-/// Returns whether a value of type `ty` is or holds a string, outside of lists. `seen` holds the
-/// structs already looked through.
+/// Returns whether a value of type `ty` is or holds a string, outside of lists, looking through
+/// tuples, struct fields, and what an enum's variants or an option may hold. `seen` holds the
+/// structs and enums already looked through.
 ///
-/// For example, `str` and `tuple[int, str]` do, and `list[str]` does not.
-fn contains_str(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bool {
+/// For example, `str`, `tuple[int, str]`, and `option[str]` do, and `list[str]` does not. An
+/// `option[str]` alone needs the string runtime, since `==` on two of them calls `stone.str_eq`.
+fn contains_str(ty: &Type, analysis: &Analysis, seen: &mut HashSet<String>) -> bool {
     match ty {
         Type::Str => true,
-        Type::Tuple(fields) => fields.iter().any(|f| contains_str(f, structs, seen)),
-        Type::Struct(name) => struct_has(name, structs, seen, contains_str),
+        Type::Tuple(fields) => fields.iter().any(|f| contains_str(f, analysis, seen)),
+        Type::Struct(name) => {
+            seen.insert(name.clone())
+                && analysis.structs.get(name).is_some_and(|fields| {
+                    fields
+                        .iter()
+                        .any(|(_, ty)| contains_str(ty, analysis, seen))
+                })
+        }
+        Type::Enum { name, args } => {
+            args.iter().any(|arg| contains_str(arg, analysis, seen))
+                || (seen.insert(name.clone())
+                    && analysis.enums.get(name).is_some_and(|variants| {
+                        variants
+                            .iter()
+                            .flat_map(|(_, values)| values)
+                            .any(|ty| contains_str(ty, analysis, seen))
+                    }))
+        }
         _ => false,
     }
 }

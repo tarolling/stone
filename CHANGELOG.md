@@ -35,6 +35,18 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   returns the element and still stops the program on an empty list or an index out of range);
   and `os.env(name)` is `option[str]`, `none` rather than `""` when the variable is not set.
 
+### Fixed
+
+- `stone build` no longer fails to assemble a program that prints an option holding a map, such
+  as `print(some({"a": 1}))`.
+- `stone build` no longer fails with `undefined label 'stone.print_list_int'` for a program that
+  prints an enum or option that may hold a list but never makes a list itself.
+- `stone build` no longer fails with `undefined label 'stone.str_eq'` for a program that
+  compares options or enums that may hold a string, such as two `option[str]` parameters, but
+  never makes a string itself.
+- The differential fuzzer generates structs with `impl` methods, enums, `match`, options, maps,
+  and `==` on them, which found the three bugs above.
+
 ## [0.2.7] - 2026-10-15
 
 ### Added

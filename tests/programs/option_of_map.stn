@@ -1,0 +1,7 @@
+// printing an option that holds a map goes through a helper named after the map's type
+m = {"a": 1.5, "b": -2.0}
+o = some(m)
+print(o)
+o = none
+print(o, [some({1: "one"}), none])
+print(some(some({true: [1, 2]})))

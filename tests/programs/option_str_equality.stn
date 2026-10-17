@@ -1,0 +1,10 @@
+// comparing options or enums that may hold a string needs the string runtime, even in a program
+// that never makes a string itself
+enum Tag:
+    Empty
+    Named(str)
+
+fn same(a: option[str], b: option[str]) -> bool:
+    ret a == b
+
+print(same(none, none), Tag.Empty == Tag.Empty)

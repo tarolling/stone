@@ -1,0 +1,11 @@
+// printing an enum or option that may hold a list needs the list's printer, even in a program
+// that never makes a list itself
+enum Shape:
+    Dot(int)
+    Path(list[int])
+
+fn show(o: option[list[float]]):
+    print(o)
+
+print(Shape.Dot(1))
+show(none)

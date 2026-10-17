@@ -49,11 +49,11 @@ grid[0] **= 2
 print(row, grid[0])
 
 // the index is evaluated once, before the value
-fn pick(i: int) -> int;
+fn pick(i: int) -> int:
     print("pick", i)
     ret i
 
-fn amount() -> int;
+fn amount() -> int:
     print("amount")
     ret 5
 
@@ -64,29 +64,29 @@ print(counts)
 
 // a counter in a loop
 total = 0
-for i in range(1, 11);
+for i in range(1, 11):
     total += i
 print(total)
 words = ["a", "bb", "ccc"]
 line = ""
-for w in words;
+for w in words:
     line += w
     line += " "
 print(line.strip())
 
 // a function's locals and parameters
-fn scale(xs: list[float], k: float) -> list[float];
+fn scale(xs: list[float], k: float) -> list[float]:
     xs *= k
     ret xs
 
-fn square_all(rows: list[list[int]]) -> list[list[int]];
-    for i in range(rows.len());
+fn square_all(rows: list[list[int]]) -> list[list[int]]:
+    for i in range(rows.len()):
         rows[i] **= 2
     ret rows
 
-fn sum_to(m: int) -> int;
+fn sum_to(m: int) -> int:
     acc = 0
-    while m > 0;
+    while m > 0:
         acc += m
         m -= 1
     ret acc

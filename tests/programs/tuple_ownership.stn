@@ -1,7 +1,7 @@
 // strings and lists inside tuples are counted, and each is freed exactly once
 
 // a tuple moves at its last use
-fn grow(t: tuple[list[int], str]) -> tuple[list[int], str];
+fn grow(t: tuple[list[int], str]) -> tuple[list[int], str]:
     xs, s = t
     xs.append(xs.len())
     ret (xs, s + "!")
@@ -21,10 +21,10 @@ changed = grow(keep)
 print(keep, changed)
 
 // the same variable more than once in a returned tuple
-fn twice(s: str) -> tuple[str, str];
+fn twice(s: str) -> tuple[str, str]:
     ret (s, s)
 
-fn twice_list(xs: list[int]) -> tuple[list[int], list[int]];
+fn twice_list(xs: list[int]) -> tuple[list[int], list[int]]:
     ret (xs, xs)
 
 word = "w" + "x"
@@ -46,14 +46,14 @@ p = "p"
 q = "q"
 xs = [1]
 ys = [2]
-for i in range(5);
+for i in range(5):
     p, q = (q, p + "")
     xs, ys = (ys, xs)
 print(p, q, xs, ys)
 
 // a global tuple of strings, assigned again and again
 names = ("ann", "bo")
-for i in range(3);
+for i in range(3):
     first, second = names
     names = (second + "!", first)
 print(names)
@@ -61,7 +61,7 @@ print(names)
 // a tuple read by a function after the top level reassigns it
 config = ("mode", [1, 2])
 
-fn show() -> str;
+fn show() -> str:
     key, values = config
     ret key + "=" + str(values.len())
 
@@ -70,7 +70,7 @@ config = ("other", [3])
 print(show())
 
 // discarded tuples and fields
-fn make(n: int) -> tuple[str, list[str], int];
+fn make(n: int) -> tuple[str, list[str], int]:
     ret (str(n), [str(n), "x"], n)
 
 make(1)

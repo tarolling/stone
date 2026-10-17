@@ -1,6 +1,6 @@
-fn classify(x: int) -> int;
-    if x != 0;
-        if x != 1;
+fn classify(x: int) -> int:
+    if x != 0:
+        if x != 1:
             ret 2
         ret 1
     ret 0
@@ -8,6 +8,6 @@ fn classify(x: int) -> int;
 print(classify(0))
 print(classify(1))
 print(classify(5))
-if true;
-    if true;
+if true:
+    if true:
         print("nested")

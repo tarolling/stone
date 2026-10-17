@@ -17,6 +17,6 @@ totals = prices * counts
 print(totals, totals * 1.08, -counts)
 
 // and inside functions
-fn scale(values: list[float], factor: float) -> list[float];
+fn scale(values: list[float], factor: float) -> list[float]:
     ret values * factor + 1.0
 print(scale(prices, 2.0))

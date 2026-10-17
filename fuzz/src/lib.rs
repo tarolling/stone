@@ -2,7 +2,7 @@
 //! generator, and the differential check that compares `stone run` with `stone build`.
 //!
 //! For example, [`generate`] turns fuzzer bytes into a program such as
-//! `fn f0(p0: int) -> int;\n    ret p0 + 1\nprint(f0(2))\n`, and [`differential`] runs it through both backends.
+//! `fn f0(p0: int) -> int:\n    ret p0 + 1\nprint(f0(2))\n`, and [`differential`] runs it through both backends.
 
 use arbitrary::{Result, Unstructured};
 use std::fs::File;
@@ -15,7 +15,7 @@ use stone::interpreter::Limits;
 
 /// Limits for fuzzing the interpreter, small enough that every input finishes quickly.
 ///
-/// For example, `while true;` runs out of fuel after 10,000 iterations instead of hanging.
+/// For example, `while true:` runs out of fuel after 10,000 iterations instead of hanging.
 pub const LIMITS: Limits = Limits {
     fuel: 10_000,
     max_depth: 200,
@@ -143,7 +143,7 @@ impl Generator {
             .collect();
         // parameters hold ints, and the final `ret` is an int expression
         let typed: Vec<String> = params.iter().map(|p| format!("{p}: int")).collect();
-        self.line(0, &format!("fn {name}({}) -> int;", typed.join(", ")));
+        self.line(0, &format!("fn {name}({}) -> int:", typed.join(", ")));
 
         // registering before the body allows recursion, which fuel keeps bounded
         self.functions.push((name, params.len()));
@@ -321,7 +321,7 @@ impl Generator {
     }
 
     /// Emits a statement that makes, prints, or loops over a string, such as `word2 = "ab" + word1`,
-    /// `print(word1[-1], s3.find("a"))`, or `for ch4 in s3;` and a block.
+    /// `print(word1[-1], s3.find("a"))`, or `for ch4 in s3:` and a block.
     fn string_statement(
         &mut self,
         u: &mut Unstructured,
@@ -333,7 +333,7 @@ impl Generator {
             1 if nesting < MAX_NESTING => {
                 let text = self.text(u, scope, 0)?;
                 let variable = self.fresh("ch");
-                self.line(indent, &format!("for {variable} in {text};"));
+                self.line(indent, &format!("for {variable} in {text}:"));
                 let mut inner = scope.clone();
                 inner.strings.push(variable);
                 inner.in_loop = true;
@@ -539,24 +539,24 @@ impl Generator {
         nesting: usize,
     ) -> Result<()> {
         let test = self.condition(u, scope)?;
-        self.line(indent, &format!("if {test};"));
+        self.line(indent, &format!("if {test}:"));
         self.block(u, scope, indent + 1, nesting + 1)?;
 
         for _ in 0..u.int_in_range(0..=2)? {
             let test = self.condition(u, scope)?;
-            self.line(indent, &format!("elif {test};"));
+            self.line(indent, &format!("elif {test}:"));
             self.block(u, scope, indent + 1, nesting + 1)?;
         }
 
         if u.arbitrary()? {
-            self.line(indent, "else;");
+            self.line(indent, "else:");
             self.block(u, scope, indent + 1, nesting + 1)?;
         }
         Ok(())
     }
 
     /// Emits a loop that runs a fixed number of times, such as
-    /// `c0 = 0` then `while c0 < 3;` with `c0 = c0 + 1` as the first statement of its body.
+    /// `c0 = 0` then `while c0 < 3:` with `c0 = c0 + 1` as the first statement of its body.
     fn while_statement(
         &mut self,
         u: &mut Unstructured,
@@ -567,7 +567,7 @@ impl Generator {
         let counter = self.fresh("c");
         let bound = u.int_in_range(0..=5)?;
         self.line(indent, &format!("{counter} = 0"));
-        self.line(indent, &format!("while {counter} < {bound};"));
+        self.line(indent, &format!("while {counter} < {bound}:"));
         // incrementing first means `cont` cannot skip it
         self.line(indent + 1, &format!("{counter} = {counter} + 1"));
 
@@ -590,12 +590,12 @@ impl Generator {
         let mut inner = scope.clone();
         if !scope.lists.is_empty() && u.arbitrary()? {
             let list = u.choose(&scope.lists)?.clone();
-            self.line(indent, &format!("for {variable} in {list};"));
+            self.line(indent, &format!("for {variable} in {list}:"));
             inner.lists.retain(|l| *l != list);
         } else {
             let start = u.int_in_range(-2..=2)?;
             let end = u.int_in_range(0..=5)?;
-            self.line(indent, &format!("for {variable} in range({start}, {end});"));
+            self.line(indent, &format!("for {variable} in range({start}, {end}):"));
         }
         // the variable is read-only in the body, like a `while` counter
         inner.counters.push(variable);

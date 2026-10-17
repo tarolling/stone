@@ -21,11 +21,10 @@ pub enum TokenType {
     RBracket,
     LBrace,
     RBrace,
-    Semi,
     Comma,
     Colon,
     Dot,
-    /// The `->` before a function's return type, as in `fn f() -> int;`.
+    /// The `->` before a function's return type, as in `fn f() -> int:`.
     Arrow,
 }
 

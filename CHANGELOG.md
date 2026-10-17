@@ -17,6 +17,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Changed
 
+- Blocks open with `:`, as in Python, instead of `;`: `if x:`, `fn add(a: int, b: int) -> int:`,
+  `enum Shape:`, `struct Point:`, `impl Point:`, `match s:`, and `case Shape.Circle(r):`. `;` is
+  no longer valid anywhere and reports `unexpected character ';'`. Since `;` only ever opened a
+  block, `sed -i 's/;\( *\/\/.*\)\?$/:\1/' *.stn` converts most programs; a block
+  written on the same line, as in `if done; break`, needs its `;` changed by hand.
 - Builtins that could find nothing return an option instead of a value that means "missing":
   `s.find(t)` is `option[int]`, `none` rather than `-1` when `t` never appears; `xs.pop()` is
   `option[T]`, `none` rather than stopping the program when the list is empty (`xs.pop(i)` still

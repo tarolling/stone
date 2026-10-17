@@ -1,3 +1,3 @@
 // a program with only definitions prints nothing
-fn unused(a: int) -> int;
+fn unused(a: int) -> int:
     ret a + 1

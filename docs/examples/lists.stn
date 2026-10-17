@@ -13,7 +13,7 @@ print(primes)
 
 // for walks a list in order
 total = 0
-for p in primes;
+for p in primes:
     total += p
 print(total)
 

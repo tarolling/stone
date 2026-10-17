@@ -1,16 +1,16 @@
 // a module whose enum and signatures name another module's enum
 use zoo.Animal
 
-pub enum Shape;
+pub enum Shape:
     Square(int)
     Line
 
-pub fn area(s: Shape) -> int;
-    match s;
-        case Shape.Square(n);
+pub fn area(s: Shape) -> int:
+    match s:
+        case Shape.Square(n):
             ret n * n
-        case Shape.Line;
+        case Shape.Line:
             ret 0
 
-pub fn mascot() -> option[Animal];
+pub fn mascot() -> option[Animal]:
     ret some(Animal.Fish)

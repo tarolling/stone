@@ -45,15 +45,15 @@ stone check hello.stn        # only look for errors
 
 ## Blocks and indentation
 
-Like Python, stone groups statements by indentation. A line that opens a block ends in `;`
-where Python would use `:`, and the indented lines after it are the block:
+Like Python, stone groups statements by indentation. A line that opens a block ends in `:`, as
+in Python, and the indented lines after it are the block:
 
 ```stone
-if 2 > 1;
+if 2 > 1:
     print("math still works")
 ```
 
-A block with a single statement can also follow the `;` on the same line, as in
-`if done; break`. Comments start with `//` and run to the end of the line.
+A block with a single statement can also follow the `:` on the same line, as in
+`if done: break`. Comments start with `//` and run to the end of the line.
 
 Next, {doc}`values`.

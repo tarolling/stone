@@ -1,18 +1,18 @@
 // maps in structs, nested maps, word counts, and a global map read by a function defined first
-struct Inventory;
+struct Inventory:
     name: str
     stock: map[str, int]
 
-fn count_words(words: list[str]) -> map[str, int];
+fn count_words(words: list[str]) -> map[str, int]:
     counts = {}
-    for w in words;
-        if counts.contains(w);
+    for w in words:
+        if counts.contains(w):
             counts[w] = counts[w] + 1
-        else;
+        else:
             counts[w] = 1
     ret counts
 
-fn lookup(k: str) -> int;
+fn lookup(k: str) -> int:
     ret table[k]
 
 table = {"x": 10, "y": 20}

@@ -7,7 +7,7 @@ print(random.random(), random.random(), random.random())
 
 random.seed(42)
 rolls = []
-for i in range(10);
+for i in range(10):
     rolls.append(random.randint(1, 6))
 print(rolls)
 
@@ -31,7 +31,7 @@ random.seed(2026)
 print(a == random.randint(0, 1000000))
 
 // arguments are evaluated left to right, then the number is drawn
-fn noisy(x: int) -> int;
+fn noisy(x: int) -> int:
     print("arg", x)
     ret x
 

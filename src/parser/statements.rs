@@ -10,21 +10,21 @@ use crate::span::Span;
 use crate::token::TokenType;
 
 impl Parser {
-    /// Parses a `for` loop, such as `for i in range(3); print(i)`.
+    /// Parses a `for` loop, such as `for i in range(3): print(i)`.
     ///
     /// ```text
     /// for_stmt:
-    ///     | 'for' star_targets 'in' ~ expressions ';' block
+    ///     | 'for' star_targets 'in' ~ expressions ':' block
     /// ```
     pub(super) fn parse_for_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // 'for' star_targets 'in' ~ expressions ';' block
+        // 'for' star_targets 'in' ~ expressions ':' block
         if self.expect(TokenType::Keyword("for".to_string())).is_some()
             && let Ok(target) = self.parse_star_targets()
             && self.expect(TokenType::Keyword("in".to_string())).is_some()
             && let Ok(iter) = self.parse_expressions()
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && let Ok(body) = self.nested(Self::parse_block)
         {
             return Ok(Box::new(Stmt::new(
@@ -45,21 +45,21 @@ impl Parser {
     // while statement
     ////////////////////////////////////////////////////////////////
 
-    /// Parses a `while` loop, such as `while x; x = x - 1`.
+    /// Parses a `while` loop, such as `while x: x = x - 1`.
     ///
     /// ```text
     /// while_stmt:
-    ///     | 'while' expression ';' block
+    ///     | 'while' expression ':' block
     /// ```
     pub(super) fn parse_while_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // 'while' expression ';' block
+        // 'while' expression ':' block
         if self
             .expect(TokenType::Keyword("while".to_string()))
             .is_some()
             && let Ok(test) = self.parse_expression()
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && let Ok(body) = self.parse_block()
         {
             return Ok(Box::new(Stmt::new(
@@ -78,20 +78,20 @@ impl Parser {
     // if statement
     ////////////////////////////////////////////////////////////////
 
-    /// Parses the `else` branch of an `if` statement, such as `else; print(x)`.
+    /// Parses the `else` branch of an `if` statement, such as `else: print(x)`.
     ///
     /// ```text
     /// else_block:
-    ///     | 'else' ';' block
+    ///     | 'else' ':' block
     /// ```
     pub(super) fn parse_else_block(&mut self) -> Result<Vec<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // 'else' ';' block
+        // 'else' ':' block
         if self
             .expect(TokenType::Keyword("else".to_string()))
             .is_some()
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && let Ok(block) = self.parse_block()
         {
             return Ok(block);
@@ -105,12 +105,12 @@ impl Parser {
         })
     }
 
-    /// Parses an `elif` branch and any branches after it, such as `elif x; print(x)`.
+    /// Parses an `elif` branch and any branches after it, such as `elif x: print(x)`.
     ///
     /// ```text
     /// elif_stmt:
-    ///     | 'elif' expression ';' block elif_stmt
-    ///     | 'elif' expression ';' block [else_block]
+    ///     | 'elif' expression ':' block elif_stmt
+    ///     | 'elif' expression ':' block [else_block]
     /// ```
     pub(super) fn parse_elif_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
@@ -120,7 +120,7 @@ impl Parser {
             .expect(TokenType::Keyword("elif".to_string()))
             .is_some()
             && let Ok(test) = self.parse_expression()
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && let Ok(body) = self.parse_block()
         {
             let after_body = self.pos;
@@ -157,12 +157,12 @@ impl Parser {
         })
     }
 
-    /// Parses an `if` statement with its `elif` and `else` branches, such as `if x; print(x)`.
+    /// Parses an `if` statement with its `elif` and `else` branches, such as `if x: print(x)`.
     ///
     /// ```text
     /// if_stmt:
-    ///     | 'if' expression ';' block elif_stmt
-    ///     | 'if' expression ';' block [else_block]
+    ///     | 'if' expression ':' block elif_stmt
+    ///     | 'if' expression ':' block [else_block]
     /// ```
     pub(super) fn parse_if_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
@@ -170,7 +170,7 @@ impl Parser {
         // both alternatives share this prefix, so parse it once instead of backtracking
         if self.expect(TokenType::Keyword("if".to_string())).is_some()
             && let Ok(test) = self.parse_expression()
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && let Ok(body) = self.parse_block()
         {
             let after_body = self.pos;
@@ -207,7 +207,7 @@ impl Parser {
         })
     }
 
-    /// Parses one function parameter, such as `a: int` in `fn f(a: int, b: int);`.
+    /// Parses one function parameter, such as `a: int` in `fn f(a: int, b: int):`.
     ///
     /// ```text
     /// param:
@@ -386,23 +386,23 @@ impl Parser {
         Some(types)
     }
 
-    /// Parses an enum definition, such as `enum Shape;` followed by an indented line for each
+    /// Parses an enum definition, such as `enum Shape:` followed by an indented line for each
     /// variant, like `Circle(float)` or `Empty`.
     ///
     /// ```text
     /// enum_def:
-    ///     | ['pub'] 'enum' NAME ';' NEWLINE INDENT variant+ DEDENT
+    ///     | ['pub'] 'enum' NAME ':' NEWLINE INDENT variant+ DEDENT
     /// ```
     pub(super) fn parse_enum_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // ['pub'] 'enum' NAME ';' NEWLINE INDENT variant+ DEDENT
+        // ['pub'] 'enum' NAME ':' NEWLINE INDENT variant+ DEDENT
         let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
         if self
             .expect(TokenType::Keyword("enum".to_string()))
             .is_some()
             && let Some((name, name_span)) = self.expect_name("an enum name", false)
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && self.expect(TokenType::Newline).is_some()
             && self.expect(TokenType::Indent).is_some()
             && let Ok(variants) = self.nested(Self::parse_variants)
@@ -427,23 +427,23 @@ impl Parser {
         })
     }
 
-    /// Parses a struct definition, such as `struct Point;` followed by an indented line for each
+    /// Parses a struct definition, such as `struct Point:` followed by an indented line for each
     /// field, like `x: float`.
     ///
     /// ```text
     /// struct_def:
-    ///     | ['pub'] 'struct' NAME ';' NEWLINE INDENT field+ DEDENT
+    ///     | ['pub'] 'struct' NAME ':' NEWLINE INDENT field+ DEDENT
     /// ```
     pub(super) fn parse_struct_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // ['pub'] 'struct' NAME ';' NEWLINE INDENT field+ DEDENT
+        // ['pub'] 'struct' NAME ':' NEWLINE INDENT field+ DEDENT
         let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
         if self
             .expect(TokenType::Keyword("struct".to_string()))
             .is_some()
             && let Some((name, name_span)) = self.expect_name("a struct name", false)
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && self.expect(TokenType::Newline).is_some()
             && self.expect(TokenType::Indent).is_some()
             && let Ok(fields) = self.nested(Self::parse_fields)
@@ -468,22 +468,22 @@ impl Parser {
         })
     }
 
-    /// Parses an `impl` block, such as `impl Point;` followed by an indented function for each
-    /// method, like `fn norm(self) -> float; ret self.x`.
+    /// Parses an `impl` block, such as `impl Point:` followed by an indented function for each
+    /// method, like `fn norm(self) -> float: ret self.x`.
     ///
     /// ```text
     /// impl_def:
-    ///     | 'impl' NAME ';' NEWLINE INDENT function_def+ DEDENT
+    ///     | 'impl' NAME ':' NEWLINE INDENT function_def+ DEDENT
     /// ```
     pub(super) fn parse_impl_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // 'impl' NAME ';' NEWLINE INDENT function_def+ DEDENT
+        // 'impl' NAME ':' NEWLINE INDENT function_def+ DEDENT
         if self
             .expect(TokenType::Keyword("impl".to_string()))
             .is_some()
             && let Some((name, name_span)) = self.expect_name("a struct name", false)
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && self.expect(TokenType::Newline).is_some()
             && self.expect(TokenType::Indent).is_some()
             && let Ok(methods) = self.nested(Self::parse_methods)
@@ -632,24 +632,24 @@ impl Parser {
         })
     }
 
-    /// Parses a `match` statement, such as `match s;` followed by an indented `case` for each
-    /// pattern, like `case Shape.Circle(r); print(r)`.
+    /// Parses a `match` statement, such as `match s:` followed by an indented `case` for each
+    /// pattern, like `case Shape.Circle(r): print(r)`.
     ///
     /// ```text
     /// match_stmt:
-    ///     | 'match' expression ';' NEWLINE INDENT case_block+ DEDENT
+    ///     | 'match' expression ':' NEWLINE INDENT case_block+ DEDENT
     /// case_block:
-    ///     | 'case' pattern ';' block
+    ///     | 'case' pattern ':' block
     /// ```
     pub(super) fn parse_match_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // 'match' expression ';' NEWLINE INDENT case_block+ DEDENT
+        // 'match' expression ':' NEWLINE INDENT case_block+ DEDENT
         if self
             .expect(TokenType::Keyword("match".to_string()))
             .is_some()
             && let Ok(subject) = self.parse_expression()
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && self.expect(TokenType::Newline).is_some()
             && self.expect(TokenType::Indent).is_some()
             && let Ok(cases) = self.nested(Self::parse_cases)
@@ -678,7 +678,7 @@ impl Parser {
                 .expect(TokenType::Keyword("case".to_string()))
                 .is_some()
                 && let Ok(pattern) = self.parse_pattern()
-                && self.expect(TokenType::Semi).is_some()
+                && self.expect_block_start().is_some()
                 && let Ok(body) = self.nested(Self::parse_block)
             {
                 cases.push(MatchCase { pattern, body });
@@ -795,7 +795,7 @@ impl Parser {
     }
 
     /// Parses a comma-separated parameter list, such as `a: int, b: int` in
-    /// `fn f(a: int, b: int);`.
+    /// `fn f(a: int, b: int):`.
     ///
     /// ```text
     /// parameters:
@@ -821,7 +821,7 @@ impl Parser {
         Ok(Arguments { args })
     }
 
-    /// Parses function parameters if there are any, returning an empty list for `fn f();`.
+    /// Parses function parameters if there are any, returning an empty list for `fn f():`.
     ///
     /// ```text
     /// [parameters]
@@ -835,7 +835,7 @@ impl Parser {
     }
 
     /// Parses a function's return type if it has one, such as `-> int` in
-    /// `fn f(a: int) -> int;`, returning `None` for `fn f();`.
+    /// `fn f(a: int) -> int:`, returning `None` for `fn f():`.
     ///
     /// ```text
     /// ['->' type]
@@ -847,17 +847,17 @@ impl Parser {
         self.parse_type().map(|ty| Some(*ty))
     }
 
-    /// Parses a function definition, such as `fn add(a: int, b: int) -> int; ret a + b` or
-    /// `pub fn f() -> int; ret 1`.
+    /// Parses a function definition, such as `fn add(a: int, b: int) -> int: ret a + b` or
+    /// `pub fn f() -> int: ret 1`.
     ///
     /// ```text
     /// function_def:
-    ///     | ['pub'] 'fn' NAME '(' [params] ')' ['->' type] ';' block
+    ///     | ['pub'] 'fn' NAME '(' [params] ')' ['->' type] ':' block
     /// ```
     pub(super) fn parse_function_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // ['pub'] 'fn' NAME '(' [params] ')' ['->' type] ';' block
+        // ['pub'] 'fn' NAME '(' [params] ')' ['->' type] ':' block
         let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
         if self.expect(TokenType::Keyword("fn".to_string())).is_some()
             && let Some((name, name_span)) = self.expect_name("a function name", false)
@@ -865,7 +865,7 @@ impl Parser {
             && let args = self.parse_function_def_optional()
             && self.expect(TokenType::RParen).is_some()
             && let Ok(returns) = self.parse_return_type()
-            && self.expect(TokenType::Semi).is_some()
+            && self.expect_block_start().is_some()
             && let Ok(body) = self.parse_block()
         {
             return Ok(Box::new(Stmt::new(
@@ -1287,7 +1287,7 @@ impl Parser {
         })
     }
 
-    /// Parses one statement of either kind, such as `x = 1` or `if x; print(x)`.
+    /// Parses one statement of either kind, such as `x = 1` or `if x: print(x)`.
     ///
     /// ```text
     /// statement: compound_stmt | simple_stmts

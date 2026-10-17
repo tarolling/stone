@@ -1,13 +1,13 @@
 // a function returns several values as a tuple
-fn divide(a: int, b: int) -> tuple[int, int];
+fn divide(a: int, b: int) -> tuple[int, int]:
     ret (a / b, a % b)
 
 q, r = divide(17, 5)
 print(q, r, divide(-7, 2))
 
 // recursion that returns a pair
-fn fib_pair(n: int) -> tuple[int, int];
-    if n == 0;
+fn fib_pair(n: int) -> tuple[int, int]:
+    if n == 0:
         ret (0, 1)
     a, b = fib_pair(n - 1)
     ret (b, a + b)
@@ -15,7 +15,7 @@ fn fib_pair(n: int) -> tuple[int, int];
 print(fib_pair(10), fib_pair(90)[0])
 
 // three values come back in registers on every target
-fn describe(n: int) -> tuple[int, str, float];
+fn describe(n: int) -> tuple[int, str, float]:
     ret (n * n, str(n), float(n) / 2.0)
 
 print(describe(7))
@@ -24,7 +24,7 @@ print(square, text, half)
 
 // a tuple argument is passed as each of its values, so these take eleven, more than fit in
 // registers, and return nine, more than come back in them
-fn spread(a: tuple[int, int, int], b: tuple[str, str, str], c: tuple[float, float, float], d: int, e: str) -> tuple[int, int, int, str, str, str, float, float, float];
+fn spread(a: tuple[int, int, int], b: tuple[str, str, str], c: tuple[float, float, float], d: int, e: str) -> tuple[int, int, int, str, str, str, float, float, float]:
     a0, a1, a2 = a
     b0, b1, b2 = b
     c0, c1, c2 = c
@@ -37,36 +37,36 @@ print(n0, n1, n2, s0, s1, s2, f0, f1, f2)
 print(big[4], spread((0, 0, 0), ("a", "b", "c"), (0.0, 0.0, 0.0), 1, "-")[8])
 
 // a nested result, and a function that assigns its tuple parameter
-fn step(state: tuple[int, tuple[str, list[int]]]) -> tuple[int, tuple[str, list[int]]];
+fn step(state: tuple[int, tuple[str, list[int]]]) -> tuple[int, tuple[str, list[int]]]:
     n, (name, seen) = state
     seen.append(n)
     state = (n + 1, (name + "+", seen))
     ret state
 
 state = (0, ("s", []))
-for i in range(3);
+for i in range(3):
     state = step(state)
 print(state)
 
 // a tuple passed to a function that only reads it
-fn total(scores: tuple[int, int, int]) -> int;
+fn total(scores: tuple[int, int, int]) -> int:
     ret scores[0] + scores[1] + scores[2]
 
 scores = (90, 85, 77)
 print(total(scores), total((1, 2, 3)), scores)
 
 // a tuple from a function used without naming it
-fn pair_of(s: str) -> tuple[str, str];
+fn pair_of(s: str) -> tuple[str, str]:
     ret (s, s + s)
 
 print(pair_of("ab")[1], pair_of("c"))
 pair_of("unused")
 
 // a function returning a tuple from inside a loop, with strings in it
-fn find(words: list[str], target: str) -> tuple[bool, int, str];
+fn find(words: list[str], target: str) -> tuple[bool, int, str]:
     i = 0
-    for word in words;
-        if word == target;
+    for word in words:
+        if word == target:
             ret (true, i, word)
         i += 1
     ret (false, -1, "")

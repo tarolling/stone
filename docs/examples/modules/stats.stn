@@ -1,18 +1,18 @@
 // summary statistics for lists of ints
 
-pub fn mean(xs: list[int]) -> int;
+pub fn mean(xs: list[int]) -> int:
     ret total(xs) / xs.len()
 
-pub fn best(xs: list[int]) -> int;
+pub fn best(xs: list[int]) -> int:
     top = xs[0]
-    for x in xs;
-        if x > top;
+    for x in xs:
+        if x > top:
             top = x
     ret top
 
 // only stats.stn can call this, since it is not pub
-fn total(xs: list[int]) -> int;
+fn total(xs: list[int]) -> int:
     sum = 0
-    for x in xs;
+    for x in xs:
         sum = sum + x
     ret sum

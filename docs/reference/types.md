@@ -25,7 +25,7 @@ runs, reporting every place they conflict.
 Types appear only in function signatures, after each parameter's name and after `->`:
 
 ```stone
-fn scale(xs: list[float], k: float) -> list[float];
+fn scale(xs: list[float], k: float) -> list[float]:
     ret xs * k
 ```
 
@@ -84,7 +84,7 @@ A `for` loop over a string takes one character at a time, each a string of the o
 bytes that make it up, so it never cuts one, and `for c in "naïve"` runs five times:
 
 ```stone
-for c in "aé€";
+for c in "aé€":
     print(c, c.len())   // a 1, then é 2, then € 3
 ```
 
@@ -101,7 +101,7 @@ A tuple holds two or more values, each of its own type, written in parentheses. 
 function returns several values:
 
 ```stone
-fn divide(a: int, b: int) -> tuple[int, int];
+fn divide(a: int, b: int) -> tuple[int, int]:
     ret (a / b, a % b)
 
 q, r = divide(17, 5)
@@ -114,7 +114,7 @@ assigned, so `a, b = (b, a)` swaps. A list of tuples unpacks one element at a ti
 
 ```stone
 scores = [("ann", 3), ("bo", 5)]
-for name, score in scores;
+for name, score in scores:
     print(name, score)
 ```
 
@@ -251,7 +251,7 @@ An enum is a type whose values are one of the variants it lists, each holding th
 parentheses give the types of, or none, like an enum in Rust:
 
 ```stone
-enum Shape;
+enum Shape:
     Circle(float)
     Rect(float, float)
     Empty
@@ -276,7 +276,7 @@ pattern is one of:
 - a name, which fits any value and assigns it to that variable, like `=`
 - `_`, which fits any value and assigns nothing
 
-So `case Empty;`, without `Shape.`, would assign any value to a variable named `Empty`, which is
+So `case Empty:`, without `Shape.`, would assign any value to a variable named `Empty`, which is
 an error that suggests `Shape.Empty`. The names a case assigns are ordinary variables, so a name
 every case assigns can be read after the `match`.
 
@@ -284,7 +284,7 @@ A variant can hold any type, including lists, tuples, and the enum itself, so en
 and linked lists:
 
 ```stone
-enum Tree;
+enum Tree:
     Leaf(int)
     Node(Tree, Tree)
 ```
@@ -337,7 +337,7 @@ These keep the two backends identical and catch common mistakes:
   never mix with numbers either: `int("3")` and `float("2.5")` read numbers from strings, and
   `str(3)` writes them.
 - **Conditions are `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject ints,
-  floats, strings, lists, and `none`, so `if 1 or 0;` is an error; write `n != 0` instead of `n`.
+  floats, strings, lists, and `none`, so `if 1 or 0:` is an error; write `n != 0` instead of `n`.
 - **Lists and maps are not comparable.** `==` and `!=` compare numbers, bools, strings, and
   tuples, structs, options, and enum values of them, part by part, but not lists or maps, even
   inside another value, and `<`, `<=`, `>`, and `>=` compare only numbers and strings.

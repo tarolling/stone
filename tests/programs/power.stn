@@ -7,10 +7,10 @@ print(2 ** 62, 2 ** 63, 2 ** 64, 3 ** 50, (0 - 3) ** 41)
 print(1 ** 9223372036854775807, (0 - 1) ** 9223372036854775807, 0 ** 9223372036854775807)
 
 // exponents from variables and calls
-fn power(base: int, exp: int) -> int;
+fn power(base: int, exp: int) -> int:
     ret base ** exp
 total = 0
-for n in range(8);
+for n in range(8):
     total = total + power(3, n)
 print(total, power(7, 3), power(0 - 7, 3))
 
@@ -23,12 +23,12 @@ inf = 1e308 * 10.0
 nan = inf - inf
 print(1.0 ** min, 2.0 ** min, 1.0 ** (0 - 1), nan ** 0, nan ** 1, inf ** -1)
 
-fn float_power(base: float, exp: int) -> float;
+fn float_power(base: float, exp: int) -> float:
     ret base ** exp
 print(float_power(1.1, 100), float_power(2.0, 0 - 3), float_power(0.0, 0 - 1))
 
 // powers between values that stay live across them
-fn mixed(a: int, b: int, c: int, x: float, y: float);
+fn mixed(a: int, b: int, c: int, x: float, y: float):
     p = a ** b + c ** 2
     q = x ** b - y ** -2
     print([a, b, c, p, a ** c % 1000, b], [x, y, q])

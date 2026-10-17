@@ -16,17 +16,17 @@ big = [9223372036854775807, -7, 7]
 print(big + 1, big / 2, big % -2, [-7, 7] / [2, -2])
 
 // a list operand can be any expression, evaluated once, left to right
-fn noisy(label: str, xs: list[int]) -> list[int];
+fn noisy(label: str, xs: list[int]) -> list[int]:
     print(label)
     ret xs
 print(noisy("left", a) * 2 + noisy("right", b))
 
 // functions can take and return lists or numbers
-fn scale(xs: list[int], k: int) -> list[int];
+fn scale(xs: list[int], k: int) -> list[int]:
     ret xs * k
-fn double(n: int) -> int;
+fn double(n: int) -> int:
     ret n * 2
-fn axpy(alpha: float, xs: list[float], ys: list[float]) -> list[float];
+fn axpy(alpha: float, xs: list[float], ys: list[float]) -> list[float]:
     ret alpha * xs + ys
 print(scale(a, 3), double(4), axpy(2.0, x, y))
 
@@ -45,7 +45,7 @@ print(d, e)
 
 // every length, from empty to past several pairs, gives the same answers
 f = []
-for n in range(10);
+for n in range(10):
     g = f * 3 + f
     h = 0.5 * [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0][:n]
     k = f + f - 1
@@ -55,6 +55,6 @@ for n in range(10);
 
 // results work anywhere a list does
 total = 0
-for v in a * a;
+for v in a * a:
     total = total + v
 print(total, (a * 3)[1], (a + b).len(), (b - a)[::-1])

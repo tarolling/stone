@@ -1,11 +1,11 @@
 // comparing enum values nested more than 10000 levels deep stops the program
-enum IntList;
+enum IntList:
     Nil
     Cons(int, IntList)
 
-fn numbers(n: int) -> IntList;
+fn numbers(n: int) -> IntList:
     l = IntList.Nil
-    for i in range(n);
+    for i in range(n):
         l = IntList.Cons(i, l)
     ret l
 

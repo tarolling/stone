@@ -70,7 +70,7 @@ impl LastUses {
 
 /// A user-defined function.
 ///
-/// For example, `fn add(a: int, b: int) -> int; ret a + b` has the parameters `["a", "b"]`.
+/// For example, `fn add(a: int, b: int) -> int: ret a + b` has the parameters `["a", "b"]`.
 struct Function {
     params: Vec<String>,
     body: Vec<Stmt>,
@@ -763,7 +763,7 @@ pub struct Limits {
     /// Deepest nesting of statement and expression evaluation allowed, counting across calls.
     ///
     /// This bounds the interpreter's own recursion, and so its stack use. A recursive stone
-    /// function uses several levels per call, so `fn f(n: int) -> int; ret f(n - 1)` uses about
+    /// function uses several levels per call, so `fn f(n: int) -> int: ret f(n - 1)` uses about
     /// three.
     pub max_depth: usize,
     /// Most function calls active at once, which is part of the language, so compiled code
@@ -945,7 +945,7 @@ impl<'out> Interpreter<'out> {
 
     /// Runs statements in order until one of them breaks, continues, or returns.
     ///
-    /// For example, the body of `if x; ret 1` yields `ControlFlow::Return(Int(1))` when `x` is
+    /// For example, the body of `if x: ret 1` yields `ControlFlow::Return(Int(1))` when `x` is
     /// true, which the enclosing function then returns.
     fn eval_block(&mut self, body: &[Stmt]) -> Result<ControlFlow, Box<dyn std::error::Error>> {
         for stmt in body {
@@ -2319,10 +2319,10 @@ mod tests {
     }
 
     /// A stack whose methods change it in place.
-    const STACK: &str = "struct Stack;\n    items: list[int]\nimpl Stack;\n    fn new() -> Stack;\n        \
-                         ret Stack(items=[])\n    fn push(self, x: int);\n        self.items.append(x)\n    \
-                         fn size(self) -> int;\n        ret self.items.len()\n    \
-                         fn pop_top(self) -> int;\n        x = self.items.pop(-1)\n        ret x\n";
+    const STACK: &str = "struct Stack:\n    items: list[int]\nimpl Stack:\n    fn new() -> Stack:\n        \
+                         ret Stack(items=[])\n    fn push(self, x: int):\n        self.items.append(x)\n    \
+                         fn size(self) -> int:\n        ret self.items.len()\n    \
+                         fn pop_top(self) -> int:\n        x = self.items.pop(-1)\n        ret x\n";
 
     #[test]
     fn methods_are_called_on_values_and_associated_functions_on_structs() {
@@ -2331,7 +2331,7 @@ mod tests {
         );
         assert_eq!(run(&source).0, "1 2 Stack(items=[1])\n");
         // a method named like a builtin one is the struct's
-        let source = "struct Bag;\n    n: int\nimpl Bag;\n    fn append(self, x: int) -> int;\n        \
+        let source = "struct Bag:\n    n: int\nimpl Bag:\n    fn append(self, x: int) -> int:\n        \
                       ret self.n + x\nb = Bag(n=1)\nb.append(5)\nprint(b.append(2), b)\n";
         assert_eq!(run(source).0, "3 Bag(n=1)\n");
     }
@@ -2339,7 +2339,7 @@ mod tests {
     #[test]
     fn a_method_changes_its_receiver_in_place_unless_another_value_shares_it() {
         let source = format!(
-            "{STACK}s = Stack.new()\nfor i in range(100);\n    s.push(i)\nprint(s.size())\n"
+            "{STACK}s = Stack.new()\nfor i in range(100):\n    s.push(i)\nprint(s.size())\n"
         );
         assert_eq!(run(&source), ("100\n".to_string(), 0));
         let source = format!(
@@ -2356,22 +2356,22 @@ mod tests {
             ("Stack(items=[1]) Stack(items=[])\n".to_string(), 1)
         );
         // a receiver that is also an argument is read before the change
-        let source = "struct P;\n    xs: list[int]\nimpl P;\n    fn absorb(self, ys: list[int]);\n        \
-                      for y in ys;\n            self.xs.append(y)\np = P(xs=[1, 2])\np.absorb(p.xs)\nprint(p)\n";
+        let source = "struct P:\n    xs: list[int]\nimpl P:\n    fn absorb(self, ys: list[int]):\n        \
+                      for y in ys:\n            self.xs.append(y)\np = P(xs=[1, 2])\np.absorb(p.xs)\nprint(p)\n";
         assert_eq!(run(source).0, "P(xs=[1, 2, 1, 2])\n");
     }
 
     #[test]
     fn a_method_that_reads_the_global_it_changes_sees_it_unchanged() {
         let source = format!(
-            "{STACK}impl Box;\n    fn grow(self);\n        self.s.push(g.s.size())\n\
-             struct Box;\n    s: Stack\ng = Box(s=Stack.new())\ng.grow()\ng.grow()\nprint(g)\n"
+            "{STACK}impl Box:\n    fn grow(self):\n        self.s.push(g.s.size())\n\
+             struct Box:\n    s: Stack\ng = Box(s=Stack.new())\ng.grow()\ng.grow()\nprint(g)\n"
         );
         assert_eq!(run(&source).0, "Box(s=Stack(items=[0, 1]))\n");
     }
 
     /// A function that appends to its parameter and returns it.
-    const ADD: &str = "fn add(xs: list[int], x: int) -> list[int];\n    xs.append(x)\n    ret xs\n";
+    const ADD: &str = "fn add(xs: list[int], x: int) -> list[int]:\n    xs.append(x)\n    ret xs\n";
 
     #[test]
     fn an_augmented_element_copies_only_a_shared_list() {
@@ -2390,16 +2390,16 @@ mod tests {
     #[test]
     fn a_list_assigned_the_result_of_a_call_is_changed_in_place() {
         let source =
-            format!("{ADD}xs = []\nfor i in range(100);\n    xs = add(xs, i)\nprint(xs)\n");
+            format!("{ADD}xs = []\nfor i in range(100):\n    xs = add(xs, i)\nprint(xs)\n");
         assert_eq!(copies(&source), 0);
         let source = format!(
-            "{ADD}fn fill(xs, n);\n    if n == 0;\n        ret xs\n    xs.append(n)\n    \
+            "{ADD}fn fill(xs, n):\n    if n == 0:\n        ret xs\n    xs.append(n)\n    \
              ret fill(xs, n - 1)\nprint(fill([], 50))\n"
         );
         assert_eq!(copies(&source), 0);
         // a call among the arguments runs statements of its own first
         let source = format!(
-            "{ADD}fn one();\n    n = 1\n    ret n\nxs = []\nfor i in range(10);\n    \
+            "{ADD}fn one():\n    n = 1\n    ret n\nxs = []\nfor i in range(10):\n    \
              xs = add(xs, one())\nprint(xs)\n"
         );
         assert_eq!(copies(&source), 0);
@@ -2407,7 +2407,7 @@ mod tests {
 
     #[test]
     fn a_field_changes_in_place_unless_another_value_shares_it() {
-        let bag = "struct Bag;\n    items: list[int]\n    n: int\n";
+        let bag = "struct Bag:\n    items: list[int]\n    n: int\n";
         let make = "b = Bag(items=[1], n=0)\n";
         assert_eq!(
             copies(&format!("{bag}{make}b.items.append(2)\nprint(b)\n")),
@@ -2427,12 +2427,12 @@ mod tests {
         );
         // a field assigned the result of a call moves into it
         let source = format!(
-            "{ADD}{bag}{make}for i in range(100);\n    b.items = add(b.items, i)\nprint(b.n)\n"
+            "{ADD}{bag}{make}for i in range(100):\n    b.items = add(b.items, i)\nprint(b.n)\n"
         );
         assert_eq!(copies(&source), 0);
         let source = format!(
-            "{ADD}{bag}fn grow(b: Bag) -> Bag;\n    b.items = add(b.items, 1)\n    ret b\n\
-             {make}for i in range(10);\n    b = grow(b)\nprint(b)\n"
+            "{ADD}{bag}fn grow(b: Bag) -> Bag:\n    b.items = add(b.items, 1)\n    ret b\n\
+             {make}for i in range(10):\n    b = grow(b)\nprint(b)\n"
         );
         assert_eq!(copies(&source), 0);
     }
@@ -2448,7 +2448,7 @@ mod tests {
             copies("rows = []\nrow = [1]\nrows.append(row)\nrows[0].append(2)\nprint(rows)\n"),
             0
         );
-        let source = "fn f(n: int) -> list[int];\n    xs = [n]\n    ys = xs\n    ys.append(1)\n    ret ys\n\
+        let source = "fn f(n: int) -> list[int]:\n    xs = [n]\n    ys = xs\n    ys.append(1)\n    ret ys\n\
                       print(f(0))\n";
         assert_eq!(copies(source), 0);
     }
@@ -2464,7 +2464,7 @@ mod tests {
             1
         );
         // the function reads the global it is given, so it must not see the change
-        let source = "fn peek(ys: list[int]) -> list[int];\n    ys.append(xs[0])\n    ret ys\nxs = [1]\nxs = peek(xs)\n\
+        let source = "fn peek(ys: list[int]) -> list[int]:\n    ys.append(xs[0])\n    ret ys\nxs = [1]\nxs = peek(xs)\n\
                       print(xs)\n";
         assert_eq!(copies(source), 1);
     }
@@ -2502,7 +2502,7 @@ mod tests {
             "[2] x 1\n"
         );
         assert_eq!(
-            output("for k, (v, w) in [(1, (2, 3)), (4, (5, 6))];\n    print(k + v + w)\n"),
+            output("for k, (v, w) in [(1, (2, 3)), (4, (5, 6))]:\n    print(k + v + w)\n"),
             "6\n15\n"
         );
     }

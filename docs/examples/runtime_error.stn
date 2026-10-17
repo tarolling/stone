@@ -1,6 +1,6 @@
-fn average(values: list[int]) -> int;
+fn average(values: list[int]) -> int:
     total = 0
-    for v in values;
+    for v in values:
         total = total + v
     ret total / values.len()
 

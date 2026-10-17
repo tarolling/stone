@@ -30,16 +30,16 @@ xs = [3, 5]
 xs.append(math.max(xs) * 2)
 print(xs)
 
-fn norm(x: float, y: float) -> float;
+fn norm(x: float, y: float) -> float:
     ret math.sqrt(x * x + y * y)
 
-fn clamp(x: int, low: int, high: int) -> int;
+fn clamp(x: int, low: int, high: int) -> int:
     ret math.min(math.max(x, low), high)
 
 print(norm(3.0, 4.0), clamp(12, 0, 10), clamp(-4, 0, 10), clamp(5, 0, 10))
 
 // arguments are evaluated left to right before comparing
-fn noisy(x: int) -> int;
+fn noisy(x: int) -> int:
     print("arg", x)
     ret x
 

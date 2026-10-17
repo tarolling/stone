@@ -2,7 +2,7 @@
 
 Language support for stone `.stn` files, backed by the `stone-lsp` language server:
 
-- syntax highlighting, comment toggling, bracket matching, and indentation after a line ending in `;`
+- syntax highlighting, comment toggling, bracket matching, and indentation after a line ending in `:`
 - errors as you type, from the same checker `stone check` uses
 - hover to see signatures and inferred types, such as `fn add(a: int, b: int) -> int`
 - go to definition, find references, and rename. Going to the definition of a builtin like `print`

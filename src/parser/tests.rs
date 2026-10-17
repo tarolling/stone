@@ -390,7 +390,7 @@ fn simple_function_no_args() {
         tok(TokenType::Name("testing".to_string()), 1, 5),
         tok(TokenType::LParen, 1, 12),
         tok(TokenType::RParen, 1, 13),
-        tok(TokenType::Semi, 1, 14),
+        tok(TokenType::Colon, 1, 14),
         tok(TokenType::Newline, 1, 15),
         tok(TokenType::Indent, 2, 1),
         tok(TokenType::Keyword("ret".to_string()), 2, 5),
@@ -467,7 +467,7 @@ fn simple_function_one_arg() {
         tok(TokenType::LParen, 1, 12),
         tok(TokenType::Name("a".to_string()), 1, 13),
         tok(TokenType::RParen, 1, 14),
-        tok(TokenType::Semi, 1, 15),
+        tok(TokenType::Colon, 1, 15),
         tok(TokenType::Newline, 1, 16),
         tok(TokenType::Indent, 2, 1),
         tok(TokenType::Keyword("ret".to_string()), 2, 5),
@@ -576,7 +576,7 @@ fn simple_function_multiple_args() {
         tok(TokenType::Comma, 1, 17),
         tok(TokenType::Name("c".to_string()), 1, 19),
         tok(TokenType::RParen, 1, 20),
-        tok(TokenType::Semi, 1, 21),
+        tok(TokenType::Colon, 1, 21),
         tok(TokenType::Newline, 1, 22),
         tok(TokenType::Indent, 2, 1),
         tok(TokenType::Keyword("ret".to_string()), 2, 5),
@@ -705,13 +705,13 @@ fn nested_calls_parse_in_linear_time() {
     assert!(parse_within(source, Duration::from_secs(5)).is_ok());
 }
 
-/// Builds `depth` nested `if 1;` statements around a single assignment.
+/// Builds `depth` nested `if 1:` statements around a single assignment.
 ///
-/// For example, `nested_ifs(2)` returns `"if 1;\n    if 1;\n        x = 1\n"`.
+/// For example, `nested_ifs(2)` returns `"if 1:\n    if 1:\n        x = 1\n"`.
 fn nested_ifs(depth: usize) -> String {
     let mut source = String::new();
     for level in 0..depth {
-        source += &format!("{}if 1;\n", "    ".repeat(level));
+        source += &format!("{}if 1:\n", "    ".repeat(level));
     }
     source + &format!("{}x = 1\n", "    ".repeat(depth))
 }
@@ -723,7 +723,7 @@ fn nested_ifs_parse_in_linear_time() {
 
 #[test]
 fn if_elif_else_chain() {
-    let source = "if 1;\n    x = 1\nelif 2;\n    x = 2\nelif 3;\n    x = 3\nelse;\n    x = 4\n";
+    let source = "if 1:\n    x = 1\nelif 2:\n    x = 2\nelif 3:\n    x = 3\nelse:\n    x = 4\n";
     let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
     let StmtKind::If { orelse, .. } = &body[0].kind else {
         panic!("expected if statement");
@@ -811,7 +811,7 @@ fn calls_and_unary_operators_span_their_source_text() {
 
 #[test]
 fn function_definitions_span_their_name_and_parameters() {
-    let source = "fn f(a, bc);\n    ret a\n";
+    let source = "fn f(a, bc):\n    ret a\n";
     let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
     // the block ends at its last token, not at the dedent after it
     assert_eq!(body[0].span, span(1, 1, 2, 10));
@@ -828,7 +828,7 @@ fn function_definitions_span_their_name_and_parameters() {
 /// Parses `source`, which must start with a function definition, and returns each parameter's
 /// written type and the written return type, as source text.
 ///
-/// For example, `signature_of("fn f(a: int) -> str; ret \"\"\n")` returns
+/// For example, `signature_of("fn f(a: int) -> str: ret \"\"\n")` returns
 /// `(vec![Some("int")], Some("str"))`.
 fn signature_of(source: &str) -> (Vec<Option<String>>, Option<String>) {
     let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
@@ -846,7 +846,7 @@ fn signature_of(source: &str) -> (Vec<Option<String>>, Option<String>) {
 #[test]
 fn parameters_and_the_return_value_have_types() {
     assert_eq!(
-        signature_of("fn f(a: int, b: float, c: bool, d: str) -> int; ret a\n"),
+        signature_of("fn f(a: int, b: float, c: bool, d: str) -> int: ret a\n"),
         (
             ["int", "float", "bool", "str"]
                 .map(|t| Some(t.to_string()))
@@ -859,7 +859,7 @@ fn parameters_and_the_return_value_have_types() {
 #[test]
 fn list_types_nest() {
     assert_eq!(
-        signature_of("fn f(grid: list[list[float]]) -> list[str]; ret []\n"),
+        signature_of("fn f(grid: list[list[float]]) -> list[str]: ret []\n"),
         (
             vec![Some("list[list[float]]".to_string())],
             Some("list[str]".to_string())
@@ -870,14 +870,14 @@ fn list_types_nest() {
 #[test]
 fn types_may_be_left_out_for_the_checker_to_report() {
     assert_eq!(
-        signature_of("fn f(a, b: int); ret\n"),
+        signature_of("fn f(a, b: int): ret\n"),
         (vec![None, Some("int".to_string())], None)
     );
 }
 
 #[test]
 fn types_span_their_text() {
-    let source = "fn f(xs: list[int]) -> bool; ret\n";
+    let source = "fn f(xs: list[int]) -> bool: ret\n";
     let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
     let StmtKind::FunctionDef { args, returns, .. } = &body[0].kind else {
         panic!("expected function definition");
@@ -894,7 +894,7 @@ fn types_span_their_text() {
 #[test]
 fn an_unknown_type_is_an_error() {
     assert_eq!(
-        error_of("fn f(a: int) -> 3; ret\n"),
+        error_of("fn f(a: int) -> 3: ret\n"),
         ("expected a type, found '3'".to_string(), 1, 17)
     );
 }
@@ -902,11 +902,11 @@ fn an_unknown_type_is_an_error() {
 #[test]
 fn a_list_type_needs_its_element_type() {
     assert_eq!(
-        error_of("fn f(xs: list); ret\n"),
+        error_of("fn f(xs: list): ret\n"),
         ("expected '[', found ')'".to_string(), 1, 14)
     );
     assert_eq!(
-        error_of("fn f(xs: list[int); ret\n"),
+        error_of("fn f(xs: list[int): ret\n"),
         ("expected ']', found ')'".to_string(), 1, 18)
     );
 }
@@ -914,7 +914,7 @@ fn a_list_type_needs_its_element_type() {
 #[test]
 fn a_colon_needs_a_type_after_it() {
     assert_eq!(
-        error_of("fn f(a: , b: int); ret\n"),
+        error_of("fn f(a: , b: int): ret\n"),
         ("expected a type, found ','".to_string(), 1, 9)
     );
 }
@@ -931,7 +931,7 @@ fn error_of(source: &str) -> (String, usize, usize) {
 fn missing_semicolon_after_condition() {
     assert_eq!(
         error_of("if x\n    y = 1\n"),
-        ("expected ';', found end of line".to_string(), 1, 5)
+        ("expected ':', found end of line".to_string(), 1, 5)
     );
 }
 
@@ -958,9 +958,9 @@ fn missing_expression() {
 #[test]
 fn bad_parameter() {
     assert_eq!(
-        error_of("fn f(;\n    ret 1\n"),
+        error_of("fn f(:\n    ret 1\n"),
         (
-            "expected a parameter name or ')', found ';'".to_string(),
+            "expected a parameter name or ')', found ':'".to_string(),
             1,
             6
         )
@@ -1021,7 +1021,7 @@ fn failed_call_arguments_are_an_error_not_an_empty_call() {
 #[test]
 fn failed_parameters_are_an_error_not_an_empty_list() {
     assert_eq!(
-        error_of("fn f(a, );\n    ret a\n"),
+        error_of("fn f(a, ):\n    ret a\n"),
         ("expected a parameter name, found ')'".to_string(), 1, 9)
     );
 }
@@ -1197,7 +1197,7 @@ fn unclosed_group_is_an_error() {
 fn for_loops_parse() {
     let Mod::Module { body } = without_spans(
         parse_within(
-            "for i in range(3);\n    print(i)\n".to_string(),
+            "for i in range(3):\n    print(i)\n".to_string(),
             Duration::from_secs(5),
         )
         .unwrap(),
@@ -1228,7 +1228,7 @@ fn for_loops_parse() {
 #[test]
 fn for_loop_without_in_is_an_error() {
     assert_eq!(
-        error_of("for i range(3);\n    print(i)\n"),
+        error_of("for i range(3):\n    print(i)\n"),
         ("expected 'in', found 'range'".to_string(), 1, 7)
     );
 }
@@ -1394,7 +1394,7 @@ fn unclosed_dict_is_an_error() {
 #[test]
 fn map_types_parse() {
     assert_eq!(
-        signature_of("fn f(m: map[str, list[int]]) -> map[int, str]; ret\n"),
+        signature_of("fn f(m: map[str, list[int]]) -> map[int, str]: ret\n"),
         (
             vec![Some("map[str, list[int]]".to_string())],
             Some("map[int, str]".to_string())
@@ -1405,7 +1405,7 @@ fn map_types_parse() {
 #[test]
 fn a_map_type_needs_two_types() {
     assert_eq!(
-        error_of("fn f(m: map[int]); ret\n").0,
+        error_of("fn f(m: map[int]): ret\n").0,
         "a map type needs a key type and a value type, as in 'map[str, int]'"
     );
 }
@@ -1470,7 +1470,7 @@ fn body_kinds(stmt: &Stmt) -> Vec<&'static str> {
 
 #[test]
 fn recovery_keeps_a_block_with_a_bad_statement() {
-    let (body, errors) = recover("fn f();\n    x = \n    ret 1\ng = 2\n");
+    let (body, errors) = recover("fn f():\n    x = \n    ret 1\ng = 2\n");
     assert_eq!(
         errors,
         [(
@@ -1485,7 +1485,7 @@ fn recovery_keeps_a_block_with_a_bad_statement() {
 
 #[test]
 fn recovery_reports_every_bad_statement_in_a_block() {
-    let (body, errors) = recover("fn f();\n    x = \n    y = 1\n    z = (\n    ret y\n");
+    let (body, errors) = recover("fn f():\n    x = \n    y = 1\n    z = (\n    ret y\n");
     let lines: Vec<usize> = errors.iter().map(|(_, line, _)| *line).collect();
     assert_eq!(lines, [2, 4]);
     assert_eq!(body_kinds(&body[0]), ["Assign", "Return"]);
@@ -1493,18 +1493,18 @@ fn recovery_reports_every_bad_statement_in_a_block() {
 
 #[test]
 fn recovery_skips_a_bad_header_with_its_block() {
-    let source = "fn f(c);\n    if c\n        print(1)\n        print(2)\n    ret 2\n";
+    let source = "fn f(c):\n    if c\n        print(1)\n        print(2)\n    ret 2\n";
     let (body, errors) = recover(source);
     assert_eq!(
         errors,
-        [("expected ';', found end of line".to_string(), 2, 9)]
+        [("expected ':', found end of line".to_string(), 2, 9)]
     );
     assert_eq!(body_kinds(&body[0]), ["Return"]);
 }
 
 #[test]
 fn recovery_works_in_nested_blocks() {
-    let source = "fn f(c);\n    if c;\n        x = \n        ret 1\n    ret 2\n";
+    let source = "fn f(c):\n    if c:\n        x = \n        ret 1\n    ret 2\n";
     let (body, errors) = recover(source);
     assert_eq!(errors.len(), 1);
     assert_eq!(body_kinds(&body[0]), ["If", "Return"]);
@@ -1512,7 +1512,7 @@ fn recovery_works_in_nested_blocks() {
 
 #[test]
 fn a_block_of_only_bad_statements_is_empty() {
-    let (body, errors) = recover("fn f();\n    x = \ny = 1\n");
+    let (body, errors) = recover("fn f():\n    x = \ny = 1\n");
     assert_eq!(errors.len(), 1);
     assert_eq!(body.len(), 2);
     assert_eq!(body_kinds(&body[0]), Vec::<&str>::new());
@@ -1527,7 +1527,7 @@ fn recovery_skips_an_unexpected_indent() {
 
 #[test]
 fn recovery_of_a_valid_program_has_no_errors() {
-    let (body, errors) = recover("fn f();\n    ret 1\nprint(f())\n");
+    let (body, errors) = recover("fn f():\n    ret 1\nprint(f())\n");
     assert_eq!(errors, []);
     assert_eq!(body.len(), 2);
 }
@@ -1902,7 +1902,7 @@ fn use_needs_a_name_after_as() {
 
 #[test]
 fn pub_marks_a_function_public() {
-    let body = stmts_of("pub fn f(); ret 1\nfn g(); ret 2\n");
+    let body = stmts_of("pub fn f(): ret 1\nfn g(): ret 2\n");
     let StmtKind::FunctionDef { public, .. } = &body[0].kind else {
         panic!("expected function definition");
     };
@@ -1916,7 +1916,7 @@ fn pub_marks_a_function_public() {
 #[test]
 fn pub_spans_from_the_keyword() {
     let Mod::Module { body } =
-        parse_within("pub fn f(); ret 1\n".to_string(), Duration::from_secs(5)).unwrap();
+        parse_within("pub fn f(): ret 1\n".to_string(), Duration::from_secs(5)).unwrap();
     assert_eq!(body[0].span, span(1, 1, 1, 18));
 }
 
@@ -2003,7 +2003,7 @@ fn unpacking_targets_parse() {
 fn for_loops_unpack_into_names() {
     let Mod::Module { body } = without_spans(
         parse_within(
-            "for name, score in pairs;\n    print(name)\n".to_string(),
+            "for name, score in pairs:\n    print(name)\n".to_string(),
             Duration::from_secs(5),
         )
         .unwrap(),
@@ -2020,7 +2020,7 @@ fn for_loops_unpack_into_names() {
 #[test]
 fn tuple_types_nest() {
     assert_eq!(
-        signature_of("fn f(t: tuple[int, list[tuple[str, float]]]) -> tuple[int, str,]; ret t\n"),
+        signature_of("fn f(t: tuple[int, list[tuple[str, float]]]) -> tuple[int, str,]: ret t\n"),
         (
             vec![Some("tuple[int, list[tuple[str, float]]]".to_string())],
             Some("tuple[int, str]".to_string())
@@ -2036,13 +2036,13 @@ fn values_separated_by_commas_need_parentheses() {
     assert_eq!(error_of("x = a, b,\n"), (message.clone(), 1, 5));
     assert_eq!(error_of("a, b\n"), (message.clone(), 1, 1));
     assert_eq!(error_of("q, r = a, b\n"), (message.clone(), 1, 8));
-    assert_eq!(error_of("for x in a, b;\n    print(x)\n"), (message, 1, 10));
+    assert_eq!(error_of("for x in a, b:\n    print(x)\n"), (message, 1, 10));
 }
 
 #[test]
 fn returning_several_values_needs_a_tuple() {
     assert_eq!(
-        error_of("fn f() -> tuple[int, int];\n    ret 1, 2\n"),
+        error_of("fn f() -> tuple[int, int]:\n    ret 1, 2\n"),
         (
             "to return several values, return a tuple, as in 'ret (a, b)'".to_string(),
             2,
@@ -2080,7 +2080,7 @@ fn a_tuple_needs_two_values() {
         )
     );
     assert_eq!(
-        error_of("fn f(t: tuple[int]);\n    print(t)\n"),
+        error_of("fn f(t: tuple[int]):\n    print(t)\n"),
         (
             "a tuple type needs at least two types, as in 'tuple[int, str]'".to_string(),
             1,
@@ -2142,7 +2142,7 @@ fn variant(name: &str, fields: &[&str]) -> Variant {
 #[test]
 fn an_enum_lists_its_variants() {
     let module = Parser::new(
-        &Lexer::new("pub enum Shape;\n    Circle(float)\n    Rect(float, float,)\n    Empty\n    Group(list[Shape])\n")
+        &Lexer::new("pub enum Shape:\n    Circle(float)\n    Rect(float, float,)\n    Empty\n    Group(list[Shape])\n")
             .lex()
             .unwrap(),
     )
@@ -2178,15 +2178,15 @@ fn an_enum_lists_its_variants() {
 #[test]
 fn an_enum_needs_a_block_of_variants() {
     assert_eq!(
-        error_of("enum Shape;\nx = 1\n"),
+        error_of("enum Shape:\nx = 1\n"),
         ("expected an indented block, found 'x'".to_string(), 2, 1)
     );
     assert_eq!(
-        error_of("enum Shape;\n    Circle(\n"),
+        error_of("enum Shape:\n    Circle(\n"),
         ("expected a type, found end of line".to_string(), 2, 12)
     );
     assert_eq!(
-        error_of("enum Shape;\n    Circle()\n"),
+        error_of("enum Shape:\n    Circle()\n"),
         (
             "a variant without values is written without parentheses, as in 'Circle'".to_string(),
             2,
@@ -2199,7 +2199,7 @@ fn an_enum_needs_a_block_of_variants() {
 fn named_types_take_type_arguments() {
     assert_eq!(
         signature_of(
-            "fn f(a: option[int], b: Shape, c: shapes.Shape) -> option[list[Shape]]; ret none\n"
+            "fn f(a: option[int], b: Shape, c: shapes.Shape) -> option[list[Shape]]: ret none\n"
         ),
         (
             ["option[int]", "Shape", "shapes.Shape"]
@@ -2213,7 +2213,7 @@ fn named_types_take_type_arguments() {
 #[test]
 fn none_is_not_a_type() {
     assert_eq!(
-        error_of("fn f(a: none); ret\n"),
+        error_of("fn f(a: none): ret\n"),
         (
             "'none' is not a type: a function without '->' returns no value, and 'option[T]' holds a value or none"
                 .to_string(),
@@ -2242,7 +2242,7 @@ fn variant_pattern(path: &[&str], fields: Vec<Pattern>) -> Pattern {
 
 #[test]
 fn match_runs_the_first_case_that_fits() {
-    let source = "match s;\n    case Shape.Rect(w, _);\n        print(w)\n    case some(Tree.Leaf(n));\n        print(n)\n    case none; print(0)\n    case other;\n        break\n";
+    let source = "match s:\n    case Shape.Rect(w, _):\n        print(w)\n    case some(Tree.Leaf(n)):\n        print(n)\n    case none: print(0)\n    case other:\n        break\n";
     let module = Parser::new(&Lexer::new(source).lex().unwrap())
         .parse()
         .unwrap();
@@ -2320,7 +2320,7 @@ fn match_runs_the_first_case_that_fits() {
 
 #[test]
 fn patterns_span_their_text() {
-    let source = "match s;\n    case Shape.Rect(w, _);\n        print(w)\n";
+    let source = "match s:\n    case Shape.Rect(w, _):\n        print(w)\n";
     let Mod::Module { body } = parse_within(source.to_string(), Duration::from_secs(5)).unwrap();
     let StmtKind::Match { cases, .. } = &body[0].kind else {
         panic!("expected match");
@@ -2338,11 +2338,11 @@ fn patterns_span_their_text() {
 #[test]
 fn match_needs_cases() {
     assert_eq!(
-        error_of("match s;\n    print(s)\n"),
+        error_of("match s:\n    print(s)\n"),
         ("expected 'case', found 'print'".to_string(), 2, 5)
     );
     assert_eq!(
-        error_of("match s;\n    case 1;\n        print(s)\n"),
+        error_of("match s:\n    case 1:\n        print(s)\n"),
         (
             "a pattern is a variant such as 'Shape.Circle(r)', 'some(x)', or 'none', a name, or '_'"
                 .to_string(),
@@ -2351,14 +2351,14 @@ fn match_needs_cases() {
         )
     );
     assert_eq!(
-        error_of("match s;\n    case some();\n        print(s)\n"),
+        error_of("match s:\n    case some():\n        print(s)\n"),
         ("expected a pattern, found ')'".to_string(), 2, 15)
     );
 }
 
 #[test]
 fn a_bad_case_is_skipped_with_its_match() {
-    let tokens = Lexer::new("match s;\n    case 1;\n        print(s)\nx = 1\n")
+    let tokens = Lexer::new("match s:\n    case 1:\n        print(s)\nx = 1\n")
         .lex()
         .unwrap();
     let (module, diagnostics) = Parser::new(&tokens).parse_recovering();
@@ -2388,7 +2388,7 @@ fn a_struct_definition_holds_its_fields() {
         span: Span::default(),
     }));
     assert_eq!(
-        parse_ok("pub struct Point;\n    x: float\n    ys: list[int]\n"),
+        parse_ok("pub struct Point:\n    x: float\n    ys: list[int]\n"),
         Mod::Module {
             body: vec![
                 StmtKind::StructDef {
@@ -2406,15 +2406,15 @@ fn a_struct_definition_holds_its_fields() {
 #[test]
 fn a_struct_needs_typed_fields() {
     assert_eq!(
-        error_of("struct Point;\n    x\n"),
+        error_of("struct Point:\n    x\n"),
         ("expected ':', found end of line".to_string(), 2, 6)
     );
     assert_eq!(
-        error_of("struct Point;\n    x = 1\n"),
+        error_of("struct Point:\n    x = 1\n"),
         ("expected ':', found '='".to_string(), 2, 7)
     );
     assert_eq!(
-        error_of("struct Point;\nx = 1\n"),
+        error_of("struct Point:\nx = 1\n"),
         ("expected an indented block, found 'x'".to_string(), 2, 1)
     );
 }
@@ -2443,7 +2443,7 @@ fn an_impl_block_holds_its_methods() {
     };
     let pass = |value: Box<Expr>| -> Stmt { StmtKind::Expr { value }.into() };
     assert_eq!(
-        parse_ok("impl Point;\n    fn origin();\n        f()\n    fn show(self); print(self)\n"),
+        parse_ok("impl Point:\n    fn origin():\n        f()\n    fn show(self): print(self)\n"),
         Mod::Module {
             body: vec![
                 StmtKind::ImplDef {
@@ -2485,11 +2485,11 @@ fn an_impl_block_holds_its_methods() {
 #[test]
 fn an_impl_block_holds_only_functions() {
     assert_eq!(
-        error_of("impl Point;\n    x = 1\n"),
+        error_of("impl Point:\n    x = 1\n"),
         ("expected 'fn', found 'x'".to_string(), 2, 5)
     );
     assert_eq!(
-        error_of("impl Point;\n    pub fn f(self);\n        print(1)\n"),
+        error_of("impl Point:\n    pub fn f(self):\n        print(1)\n"),
         (
             "a method needs no 'pub', since it is visible wherever its struct is".to_string(),
             2,
@@ -2497,7 +2497,7 @@ fn an_impl_block_holds_only_functions() {
         )
     );
     assert_eq!(
-        error_of("impl Point;\nx = 1\n"),
+        error_of("impl Point:\nx = 1\n"),
         ("expected an indented block, found 'x'".to_string(), 2, 1)
     );
 }

@@ -1,36 +1,36 @@
 // structs: named fields, made from named values in any order
-struct Point;
+struct Point:
     x: float
     y: float
 
-struct Line;
+struct Line:
     start: Point
     end: Point
     label: str
 
-struct Bag;
+struct Bag:
     name: str
     items: list[int]
     pair: tuple[int, str]
 
-enum Shape;
+enum Shape:
     Dot(Point)
     Segment(Line)
     Nothing
 
-fn length(line: Line) -> float;
+fn length(line: Line) -> float:
     dx = line.end.x - line.start.x
     dy = line.end.y - line.start.y
     ret dx * dx + dy * dy
 
-fn moved(p: Point, dx: float) -> Point;
+fn moved(p: Point, dx: float) -> Point:
     p.x += dx
     ret p
 
-fn origin() -> Point;
+fn origin() -> Point:
     ret Point(y=0.0, x=0.0)
 
-fn first_item(b: Bag) -> int;
+fn first_item(b: Bag) -> int:
     ret b.items[0]
 
 // printing, with strings quoted inside
@@ -69,7 +69,7 @@ ps[1].y *= 3.0
 ps[-1].x -= 1.0
 print(ps, ps[1].y, ps.len())
 total = 0.0
-for point in ps;
+for point in ps:
     total += point.x
     point.x = 0.0
 print(total, ps[0].x)
@@ -86,14 +86,14 @@ print(bags[0].items, b.items.len(), bags[0].pair)
 t = (p, 1)
 print(t, t[0].y)
 shapes = [Shape.Dot(p), Shape.Segment(line), Shape.Nothing]
-for s in shapes;
-    match s;
-        case Shape.Dot(d);
+for s in shapes:
+    match s:
+        case Shape.Dot(d):
             d.x = 100.0
             print("dot", d)
-        case Shape.Segment(l);
+        case Shape.Segment(l):
             print("segment", l.label)
-        case Shape.Nothing;
+        case Shape.Nothing:
             print("nothing")
 print(shapes[0])
 maybe = some(p)
@@ -103,7 +103,7 @@ none_point = some(origin())
 print(none_point)
 
 // a global read by a function defined before it is assigned
-fn far() -> float;
+fn far() -> float:
     ret corner.x + corner.y
 corner = Point(x=5.0, y=6.0)
 print(far())

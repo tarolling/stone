@@ -1,11 +1,11 @@
 // arithmetic writes over a list nothing else holds, and copies one that something else does
-fn step(xs: list[int], k: int) -> list[int];
+fn step(xs: list[int], k: int) -> list[int]:
     xs = xs * k + 1
     ret xs
 
-fn steps(n: int) -> list[int];
+fn steps(n: int) -> list[int]:
     xs = [0, 1, 2]
-    for i in range(n);
+    for i in range(n):
         xs = step(xs, 2)
     ret xs
 
@@ -25,14 +25,14 @@ grid[1] = grid[1] * grid[1]
 print(row, grid)
 
 // a variable's last use can give its list to the result without being assigned
-fn combine(x: list[int]) -> list[int];
+fn combine(x: list[int]) -> list[int]:
     y = x * 3
     z = y + x
     ret z
 print(combine([1, 2, 3]))
 
 // returning arithmetic on locals reuses them
-fn scaled(x: list[float]) -> list[float];
+fn scaled(x: list[float]) -> list[float]:
     y = x * 1.5
     ret -y
 print(scaled([2.0, 4.0]))

@@ -65,7 +65,7 @@ fn assert_error(files: &[(&str, &str)], path: &str, message: &str, line: usize, 
 
 const UTIL: (&str, &str) = (
     "util.stn",
-    "pub fn twice(x: int) -> int;\n    ret helper(x) * 2\n\nfn helper(x: int) -> int;\n    ret x\n",
+    "pub fn twice(x: int) -> int:\n    ret helper(x) * 2\n\nfn helper(x: int) -> int:\n    ret x\n",
 );
 
 #[test]
@@ -105,11 +105,11 @@ fn modules_nest_in_directories() {
             ("main.stn", "use geometry.shapes\nprint(shapes.area(2))\n"),
             (
                 "geometry/shapes.stn",
-                "use geometry.vec.dot\n\npub fn area(r: int) -> int;\n    ret 3 * dot([r], [r])\n"
+                "use geometry.vec.dot\n\npub fn area(r: int) -> int:\n    ret 3 * dot([r], [r])\n"
             ),
             (
                 "geometry/vec.stn",
-                "pub fn dot(a: list[int], b: list[int]) -> int;\n    ret a[0] * b[0]\n"
+                "pub fn dot(a: list[int], b: list[int]) -> int:\n    ret a[0] * b[0]\n"
             ),
         ]),
         "12\n"
@@ -124,8 +124,8 @@ fn a_module_may_sit_next_to_a_directory_of_the_same_name() {
                 "main.stn",
                 "use geometry\nuse geometry.vec\nprint(geometry.unit(), vec.zero())\n"
             ),
-            ("geometry.stn", "pub fn unit() -> int;\n    ret 1\n"),
-            ("geometry/vec.stn", "pub fn zero() -> int;\n    ret 0\n"),
+            ("geometry.stn", "pub fn unit() -> int:\n    ret 1\n"),
+            ("geometry/vec.stn", "pub fn zero() -> int:\n    ret 0\n"),
         ]),
         "1 0\n"
     );
@@ -136,8 +136,8 @@ fn a_module_file_wins_over_a_function_of_the_same_path() {
     assert_eq!(
         output(&[
             ("main.stn", "use geometry.vec\nprint(vec.zero())\n"),
-            ("geometry.stn", "pub fn vec() -> int;\n    ret 1\n"),
-            ("geometry/vec.stn", "pub fn zero() -> int;\n    ret 0\n"),
+            ("geometry.stn", "pub fn vec() -> int:\n    ret 1\n"),
+            ("geometry/vec.stn", "pub fn zero() -> int:\n    ret 0\n"),
         ]),
         "0\n"
     );
@@ -147,11 +147,11 @@ fn a_module_file_wins_over_a_function_of_the_same_path() {
 fn private_functions_of_different_modules_do_not_collide() {
     let a = (
         "a.stn",
-        "fn helper() -> int;\n    ret 1\npub fn get() -> int;\n    ret helper()\n",
+        "fn helper() -> int:\n    ret 1\npub fn get() -> int:\n    ret helper()\n",
     );
     let b = (
         "b.stn",
-        "fn helper() -> int;\n    ret 2\npub fn get() -> int;\n    ret helper()\n",
+        "fn helper() -> int:\n    ret 2\npub fn get() -> int:\n    ret helper()\n",
     );
     assert_eq!(
         output(&[
@@ -167,11 +167,11 @@ fn private_functions_of_different_modules_do_not_collide() {
 fn modules_may_import_each_other() {
     let even = (
         "even.stn",
-        "use odd\n\npub fn even(n: int) -> bool;\n    if n == 0;\n        ret true\n    ret odd.odd(n - 1)\n",
+        "use odd\n\npub fn even(n: int) -> bool:\n    if n == 0:\n        ret true\n    ret odd.odd(n - 1)\n",
     );
     let odd = (
         "odd.stn",
-        "use even\n\npub fn odd(n: int) -> bool;\n    if n == 0;\n        ret false\n    ret even.even(n - 1)\n",
+        "use even\n\npub fn odd(n: int) -> bool:\n    if n == 0:\n        ret false\n    ret even.even(n - 1)\n",
     );
     assert_eq!(
         output(&[("main.stn", "use even\nprint(even.even(10))\n"), even, odd]),
@@ -185,7 +185,7 @@ fn a_local_may_shadow_an_import() {
         output(&[
             (
                 "main.stn",
-                "use util.twice\n\nfn f(twice: int) -> int;\n    ret twice + 1\n\nprint(f(1), twice(1))\n"
+                "use util.twice\n\nfn f(twice: int) -> int:\n    ret twice + 1\n\nprint(f(1), twice(1))\n"
             ),
             UTIL
         ]),
@@ -196,7 +196,7 @@ fn a_local_may_shadow_an_import() {
 #[test]
 fn pub_is_ignored_in_the_entry_file() {
     assert_eq!(
-        output(&[("main.stn", "pub fn f() -> int;\n    ret 1\nprint(f())\n")]),
+        output(&[("main.stn", "pub fn f() -> int:\n    ret 1\nprint(f())\n")]),
         "1\n"
     );
 }
@@ -208,7 +208,7 @@ fn library_functions_take_their_written_types() {
             ("main.stn", "use util.first\nprint(first([\"a\", \"b\"]))\n"),
             (
                 "util.stn",
-                "pub fn first(xs: list[str]) -> str;\n    ret xs[0]\n"
+                "pub fn first(xs: list[str]) -> str:\n    ret xs[0]\n"
             ),
         ]),
         "a\n"
@@ -238,7 +238,7 @@ fn a_directory_cannot_be_imported() {
     assert_error(
         &[
             ("main.stn", "use geometry\n"),
-            ("geometry/vec.stn", "pub fn zero() -> int;\n    ret 0\n"),
+            ("geometry/vec.stn", "pub fn zero() -> int:\n    ret 0\n"),
         ],
         "main.stn",
         "'geometry' is a directory, so use a module inside it",
@@ -300,7 +300,7 @@ fn an_imported_name_must_be_unique_in_its_file() {
         &[
             ("main.stn", "use util.twice\nuse other.twice\n"),
             UTIL,
-            ("other.stn", "pub fn twice() -> int;\n    ret 2\n"),
+            ("other.stn", "pub fn twice() -> int:\n    ret 2\n"),
         ],
         "main.stn",
         "'twice' is already imported",
@@ -311,7 +311,7 @@ fn an_imported_name_must_be_unique_in_its_file() {
         &[
             (
                 "main.stn",
-                "use util.twice\n\nfn twice() -> int;\n    ret 1\n",
+                "use util.twice\n\nfn twice() -> int:\n    ret 1\n",
             ),
             UTIL,
         ],
@@ -334,7 +334,7 @@ fn an_import_cannot_shadow_a_builtin() {
     assert_error(
         &[
             ("main.stn", "use str\n"),
-            ("str.stn", "pub fn f() -> int;\n    ret 1\n"),
+            ("str.stn", "pub fn f() -> int:\n    ret 1\n"),
         ],
         "main.stn",
         "'str' is a builtin, so rename it with 'as'",
@@ -360,7 +360,7 @@ fn the_entry_file_cannot_be_imported() {
     assert_error(&[("main.stn", "use main\n")], "main.stn", message, 1, 5);
     assert_error(
         &[
-            ("main.stn", "use util\n\nfn f() -> int;\n    ret 1\n"),
+            ("main.stn", "use util\n\nfn f() -> int:\n    ret 1\n"),
             ("util.stn", "use main.f\n"),
         ],
         "util.stn",
@@ -375,7 +375,7 @@ fn a_module_only_holds_use_and_def() {
     assert_error(
         &[
             ("main.stn", "use util\n"),
-            ("util.stn", "print(1)\n\npub fn f() -> int;\n    ret 1\n"),
+            ("util.stn", "print(1)\n\npub fn f() -> int:\n    ret 1\n"),
         ],
         "util.stn",
         "only use, fn, enum, struct, and impl are allowed at the top level of a module",
@@ -389,7 +389,7 @@ fn a_module_cannot_see_the_entry_files_names() {
     assert_error(
         &[
             ("main.stn", "use util\ncount = 1\nprint(util.get())\n"),
-            ("util.stn", "pub fn get() -> int;\n    ret count\n"),
+            ("util.stn", "pub fn get() -> int:\n    ret count\n"),
         ],
         "util.stn",
         "undefined name 'count'",
@@ -400,9 +400,9 @@ fn a_module_cannot_see_the_entry_files_names() {
         &[
             (
                 "main.stn",
-                "use util\n\nfn helper() -> int;\n    ret 1\n\nprint(util.get())\n",
+                "use util\n\nfn helper() -> int:\n    ret 1\n\nprint(util.get())\n",
             ),
-            ("util.stn", "pub fn get() -> int;\n    ret helper()\n"),
+            ("util.stn", "pub fn get() -> int:\n    ret helper()\n"),
         ],
         "util.stn",
         "undefined function 'helper'",
@@ -413,7 +413,7 @@ fn a_module_cannot_see_the_entry_files_names() {
 
 #[test]
 fn errors_point_into_the_file_they_are_in() {
-    let errors = errors(&[("main.stn", "use util\n"), ("util.stn", "pub fn f(;\n")]);
+    let errors = errors(&[("main.stn", "use util\n"), ("util.stn", "pub fn f(:\n")]);
     assert_eq!(errors.len(), 1);
     assert_eq!(errors[0].0, "util.stn");
 }
@@ -445,7 +445,7 @@ fn library_functions_are_named_by_their_module() {
     let linked = link(
         Path::new("main.stn"),
         "use geometry.vec\nprint(vec.zero())\n",
-        &sources_of(&[("geometry/vec.stn", "pub fn zero() -> int;\n    ret 0\n")]),
+        &sources_of(&[("geometry/vec.stn", "pub fn zero() -> int:\n    ret 0\n")]),
     );
     let analysis = driver::analyze_linked(&linked);
     assert!(
@@ -460,7 +460,7 @@ fn library_functions_are_named_by_their_module() {
 fn lookups_by_position_stay_in_their_file() {
     let linked = link(
         Path::new("main.stn"),
-        "use util\n\nfn main_only(n: int) -> int;\n    ret util.twice(n)\n",
+        "use util\n\nfn main_only(n: int) -> int:\n    ret util.twice(n)\n",
         &sources_of(&[UTIL]),
     );
     let analysis = driver::analyze_linked(&linked);
@@ -487,13 +487,13 @@ fn lookups_by_position_stay_in_their_file() {
 #[test]
 fn a_module_can_be_linked_as_the_entry_from_the_project_root() {
     let sources = sources_of(&[
-        ("p/geometry/vec.stn", "pub fn zero() -> int;\n    ret 0\n"),
+        ("p/geometry/vec.stn", "pub fn zero() -> int:\n    ret 0\n"),
         ("p/main.stn", "print(1)\n"),
     ]);
     let linked = link_in(
         Path::new("p"),
         Path::new("p/geometry/shapes.stn"),
-        "use geometry.vec\nuse geometry.shapes\n\npub fn area() -> int;\n    ret vec.zero()\n",
+        "use geometry.vec\nuse geometry.shapes\n\npub fn area() -> int:\n    ret vec.zero()\n",
         &sources,
     );
     let messages: Vec<&str> = linked
@@ -578,7 +578,7 @@ fn a_library_module_can_use_os() {
             ("main.stn", "use util\nprint(util.ok())\n"),
             (
                 "util.stn",
-                "use os\n\npub fn ok() -> bool;\n    ret os.pid() > 0\n"
+                "use os\n\npub fn ok() -> bool:\n    ret os.pid() > 0\n"
             ),
         ]),
         "true\n"
@@ -680,7 +680,7 @@ fn a_file_cannot_take_the_builtin_os_modules_name() {
     assert_error(
         &[
             ("main.stn", "use os\nprint(os.pid() > 0)\n"),
-            ("os.stn", "pub fn pid() -> int;\n    ret 0\n"),
+            ("os.stn", "pub fn pid() -> int:\n    ret 0\n"),
         ],
         "main.stn",
         "'os' is a builtin module, so rename os.stn",
@@ -704,7 +704,7 @@ fn every_builtin_module_can_be_used_like_os() {
             ("main.stn", "use util\nprint(util.biggest([3, 9, 4]))\n"),
             (
                 "util.stn",
-                "use math\n\npub fn biggest(xs: list[int]) -> int;\n    ret math.max(xs)\n"
+                "use math\n\npub fn biggest(xs: list[int]) -> int:\n    ret math.max(xs)\n"
             ),
         ]),
         "9\n"
@@ -727,7 +727,7 @@ fn a_file_cannot_take_a_builtin_modules_name() {
         assert_error(
             &[
                 (DEFAULT_ENTRY, &entry),
-                (&file, "pub fn f() -> int;\n    ret 0\n"),
+                (&file, "pub fn f() -> int:\n    ret 0\n"),
             ],
             DEFAULT_ENTRY,
             &format!("'{name}' is a builtin module, so rename {name}.stn"),
@@ -750,17 +750,17 @@ fn a_builtin_modules_functions_do_not_reserve_their_names() {
 
 const ZOO: (&str, &str) = (
     "zoo.stn",
-    "pub enum Animal;\n    Dog(str)\n    Fish\nenum Secret;\n    Hidden\n\
-     pub fn name(a: Animal) -> str;\n    match a;\n        case Animal.Dog(n);\n            ret n\n\
-     \x20       case Animal.Fish;\n            ret \"fish\"\n",
+    "pub enum Animal:\n    Dog(str)\n    Fish\nenum Secret:\n    Hidden\n\
+     pub fn name(a: Animal) -> str:\n    match a:\n        case Animal.Dog(n):\n            ret n\n\
+     \x20       case Animal.Fish:\n            ret \"fish\"\n",
 );
 
 #[test]
 fn a_public_enum_is_used_by_name_or_through_its_module() {
-    let main = "use zoo\nuse zoo.Animal\nfn twice(a: zoo.Animal) -> list[Animal];\n    ret [a, a]\n\
+    let main = "use zoo\nuse zoo.Animal\nfn twice(a: zoo.Animal) -> list[Animal]:\n    ret [a, a]\n\
                 print(twice(Animal.Dog(\"rex\")), zoo.name(zoo.Animal.Fish))\n\
-                match twice(Animal.Fish)[0];\n    case zoo.Animal.Fish;\n        print(\"fish\")\n\
-                \x20   case Animal.Dog(_);\n        print(\"dog\")\n";
+                match twice(Animal.Fish)[0]:\n    case zoo.Animal.Fish:\n        print(\"fish\")\n\
+                \x20   case Animal.Dog(_):\n        print(\"dog\")\n";
     assert_eq!(
         output(&[("main.stn", main), ZOO]),
         "[Animal.Dog('rex'), Animal.Dog('rex')] fish\nfish\n"
@@ -784,7 +784,7 @@ fn a_private_enum_cannot_be_used_from_another_file() {
         5,
     );
     assert_error(
-        &[("main.stn", "use zoo\nfn f(x: zoo.Bird);\n    ret\n"), ZOO],
+        &[("main.stn", "use zoo\nfn f(x: zoo.Bird):\n    ret\n"), ZOO],
         "main.stn",
         "module 'zoo' has no type 'Bird'",
         2,
@@ -795,7 +795,7 @@ fn a_private_enum_cannot_be_used_from_another_file() {
 #[test]
 fn an_imported_enum_cannot_share_a_name_with_one_the_file_defines() {
     assert_error(
-        &[("main.stn", "use zoo.Animal\nenum Animal;\n    Cat\n"), ZOO],
+        &[("main.stn", "use zoo.Animal\nenum Animal:\n    Cat\n"), ZOO],
         "main.stn",
         "'Animal' is already defined in this file",
         1,
@@ -805,14 +805,14 @@ fn an_imported_enum_cannot_share_a_name_with_one_the_file_defines() {
 
 const GEO: (&str, &str) = (
     "geo.stn",
-    "pub struct Point;\n    x: int\n    y: int\nstruct Secret;\n    code: int\n\
-     pub fn shift(p: Point, dx: int) -> Point;\n    p.x += dx\n    ret p\n\
-     pub fn origin() -> Point;\n    ret Point(x=0, y=0)\n",
+    "pub struct Point:\n    x: int\n    y: int\nstruct Secret:\n    code: int\n\
+     pub fn shift(p: Point, dx: int) -> Point:\n    p.x += dx\n    ret p\n\
+     pub fn origin() -> Point:\n    ret Point(x=0, y=0)\n",
 );
 
 #[test]
 fn a_public_struct_is_used_by_name_or_through_its_module() {
-    let main = "use geo\nuse geo.Point\nfn pair(a: geo.Point) -> list[Point];\n    ret [a, a]\n\
+    let main = "use geo\nuse geo.Point\nfn pair(a: geo.Point) -> list[Point]:\n    ret [a, a]\n\
                 p = geo.Point(x=1, y=2)\nq = Point(y=4, x=3)\nq.y = 5\n\
                 print(pair(p), geo.shift(q, 10), geo.origin().y)\n";
     assert_eq!(
@@ -852,7 +852,7 @@ fn a_private_struct_cannot_be_used_from_another_file() {
         9,
     );
     assert_error(
-        &[("main.stn", "use geo\nfn f(p: geo.Spot);\n    ret\n"), GEO],
+        &[("main.stn", "use geo\nfn f(p: geo.Spot):\n    ret\n"), GEO],
         "main.stn",
         "module 'geo' has no type 'Spot'",
         2,
@@ -864,7 +864,7 @@ fn a_private_struct_cannot_be_used_from_another_file() {
 fn an_imported_struct_cannot_share_a_name_with_one_the_file_defines() {
     assert_error(
         &[
-            ("main.stn", "use geo.Point\nstruct Point;\n    z: int\n"),
+            ("main.stn", "use geo.Point\nstruct Point:\n    z: int\n"),
             GEO,
         ],
         "main.stn",
@@ -876,9 +876,9 @@ fn an_imported_struct_cannot_share_a_name_with_one_the_file_defines() {
 
 const SHAPES: (&str, &str) = (
     "shapes.stn",
-    "pub struct Square;\n    side: int\nimpl Square;\n    fn unit() -> Square;\n        \
-     ret Square(side=one())\n    fn area(self) -> int;\n        ret self.side * self.side\n\
-     fn one() -> int;\n    ret 1\n",
+    "pub struct Square:\n    side: int\nimpl Square:\n    fn unit() -> Square:\n        \
+     ret Square(side=one())\n    fn area(self) -> int:\n        ret self.side * self.side\n\
+     fn one() -> int:\n    ret 1\n",
 );
 
 #[test]
@@ -937,7 +937,7 @@ fn an_impl_in_a_library_names_its_struct_and_functions_by_their_linked_names() {
 #[test]
 fn an_impl_is_for_a_struct_of_its_own_file() {
     assert_error(
-        &[("main.stn", "impl Point;\n    fn f(self);\n        ret\n")],
+        &[("main.stn", "impl Point:\n    fn f(self):\n        ret\n")],
         "main.stn",
         "no struct named 'Point' is defined in this file",
         1,
@@ -946,7 +946,7 @@ fn an_impl_is_for_a_struct_of_its_own_file() {
     assert_error(
         &[(
             "main.stn",
-            "enum Shape;\n    Dot\nimpl Shape;\n    fn f(self);\n        ret\n",
+            "enum Shape:\n    Dot\nimpl Shape:\n    fn f(self):\n        ret\n",
         )],
         "main.stn",
         "'Shape' is an enum, and only a struct has an impl block for now",
@@ -957,7 +957,7 @@ fn an_impl_is_for_a_struct_of_its_own_file() {
         &[
             (
                 "main.stn",
-                "use geo.Point\nimpl Point;\n    fn f(self);\n        ret\n",
+                "use geo.Point\nimpl Point:\n    fn f(self):\n        ret\n",
             ),
             GEO,
         ],
@@ -974,7 +974,7 @@ fn a_method_cannot_share_its_linked_name_with_a_module_function() {
         &[
             ("main.stn", "use shapes\nuse shapes.Square.unit\n"),
             SHAPES,
-            ("shapes/Square.stn", "pub fn unit() -> int;\n    ret 1\n"),
+            ("shapes/Square.stn", "pub fn unit() -> int:\n    ret 1\n"),
         ],
         "shapes/Square.stn",
         "'shapes.Square.unit' is both a function of this module and a method of 'Square' in \

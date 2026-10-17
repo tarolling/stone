@@ -134,7 +134,7 @@
       "patterns": [
         {
           "name": "punctuation.section.block.begin.stone",
-          "match": ";"
+          "match": ":(?=\\s*(//.*)?$)"
         },
         {
           "name": "punctuation.separator.comma.stone",

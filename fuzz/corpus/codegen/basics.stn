@@ -4,14 +4,14 @@ z = x + y
 print(z)
 print(x)
 
-if false;
+if false:
     print("i love you")
-elif false;
+elif false:
     print("yo")
-else;
+else:
     print("WHATTTT")
 
-fn test(y: int, z: int, a: int) -> int;
+fn test(y: int, z: int, a: int) -> int:
     print("testing")
     print("testing".len())
     ret a

@@ -31,7 +31,7 @@ x = grid[1].pop(0)
 print(x, grid)
 
 // a function pops from its own copy and returns it
-fn drop_last(items: list[int]) -> list[int];
+fn drop_last(items: list[int]) -> list[int]:
     items.pop()
     ret items
 zs = [5, 6, 7]
@@ -40,16 +40,16 @@ print(zs, drop_last([8, 9]))
 
 // a stack, popped until it gives none
 stack = []
-for i in range(5);
+for i in range(5):
     stack.append(i * i)
 total = 0
 done = false
-while not done;
+while not done:
     top = stack.pop()
-    match top;
-        case some(n);
+    match top:
+        case some(n):
             total = total + n
-        case none;
+        case none:
             done = true
 rest = stack.pop()
 print(total, stack, rest)

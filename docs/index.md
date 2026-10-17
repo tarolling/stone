@@ -5,12 +5,12 @@ a program and compiles it to a native x86-64 or arm64 executable, and the two al
 what a program prints.
 
 ```stone
-fn fib(n: int) -> int;
-    if n < 2;
+fn fib(n: int) -> int:
+    if n < 2:
         ret n
     ret fib(n - 1) + fib(n - 2)
 
-for i in range(10);
+for i in range(10):
     print(fib(i))
 ```
 

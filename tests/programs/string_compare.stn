@@ -8,19 +8,19 @@ print("a" < "b" < "c", "a" < "c" < "b", "c" > "b" >= "b")
 print("é" > "z", "é" < "ê", "naïve" < "nb")
 
 // comparisons decide branches
-fn smallest(words: list[str]) -> str;
+fn smallest(words: list[str]) -> str:
     best = words[0]
-    for w in words;
-        if w < best;
+    for w in words:
+        if w < best:
             best = w
     ret best
 print(smallest(["pear", "apple", "fig", "applesauce"]))
 
 // a simple insertion sort
 names = ["mia", "ann", "zoe", "bo", "ann", "al"]
-for i in range(1, names.len());
+for i in range(1, names.len()):
     j = i
-    while j > 0 and names[j - 1] > names[j];
+    while j > 0 and names[j - 1] > names[j]:
         t = names[j - 1]
         names[j - 1] = names[j]
         names[j] = t

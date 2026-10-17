@@ -12,7 +12,7 @@ prints
 
 ## Defining a struct
 
-A struct groups a few values under one name, each in a field of its own. `struct Point;` opens
+A struct groups a few values under one name, each in a field of its own. `struct Point:` opens
 one, and each indented line after it names a field and its type, so a `Point` has a float `x`
 and a float `y`. Structs are like Rust's: plain data with typed fields, and no classes or
 inheritance.

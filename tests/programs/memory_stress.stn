@@ -1,13 +1,13 @@
 // allocates small and large lists and strings, growing, copying, and freeing them many times
-fn build(n: int) -> list[int];
+fn build(n: int) -> list[int]:
     xs = []
-    for i in range(n);
+    for i in range(n):
         xs.append(i * i % 1000)
     ret xs
 
-fn total(xs: list[int]) -> int;
+fn total(xs: list[int]) -> int:
     sum = 0
-    for x in xs;
+    for x in xs:
         sum = sum + x
     ret sum
 
@@ -23,9 +23,9 @@ print(big[0], copy[0], total(copy) - total(big))
 // strings of every size, freed and allocated again
 text = ""
 lengths = []
-for round in range(3);
+for round in range(3):
     text = ""
-    for i in range(20000);
+    for i in range(20000):
         text = text + "ab"
     lengths.append(text.len())
     words = (text + " " + text).split()
@@ -34,9 +34,9 @@ print(lengths)
 
 // many small lists that come and go
 rows = []
-for i in range(2000);
+for i in range(2000):
     row = build(i % 50)
     rows.append(row)
-    if rows.len() > 100;
+    if rows.len() > 100:
         rows = []
 print(rows.len(), total(rows[rows.len() - 1]))

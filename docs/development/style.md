@@ -30,9 +30,9 @@ These apply to stone programs, such as the examples, tests, and benchmarks.
   // how many times `n` can be halved before it reaches 1
   //
   // `n` must be positive.
-  fn halvings(n: int) -> int;
+  fn halvings(n: int) -> int:
       count = 0
-      while n > 1;
+      while n > 1:
           n /= 2
           count += 1
       ret count

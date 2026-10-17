@@ -2,7 +2,7 @@
 é = 3
 bׇ = 4
 
-fn größe(n: int) -> int;
+fn größe(n: int) -> int:
     ret n * 2
 
 print(é + bׇ, größe(é))

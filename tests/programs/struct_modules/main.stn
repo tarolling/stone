@@ -2,7 +2,7 @@ use geo
 use geo.Point
 use geo.shapes as sh
 
-fn pair(a: geo.Point) -> list[Point];
+fn pair(a: geo.Point) -> list[Point]:
     ret [a, a]
 
 p = geo.Point(x=1, y=2)

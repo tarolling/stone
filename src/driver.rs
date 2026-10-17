@@ -155,7 +155,7 @@ pub fn interpret(source: &str, args: &[String]) -> Result<(), Box<dyn Error>> {
 /// with an error once it exceeds `limits`.
 ///
 /// For example, `interpret_with("print(1)\n", &mut buffer, limits)` appends `1\n` to `buffer`,
-/// while `interpret_with("while true;\n    x = 1\n", ...)` returns an error once fuel runs out.
+/// while `interpret_with("while true:\n    x = 1\n", ...)` returns an error once fuel runs out.
 pub fn interpret_with(
     source: &str,
     out: &mut (impl Write + Send),
@@ -452,17 +452,17 @@ ret y
 
     #[test]
     fn infinite_loop_runs_out_of_fuel() {
-        assert!(run_limited("while true;\n    x = 1\n").is_err());
+        assert!(run_limited("while true:\n    x = 1\n").is_err());
     }
 
     #[test]
     fn unbounded_recursion_hits_the_depth_limit() {
-        assert!(run_limited("fn f(n: int) -> int;\n    ret f(n)\nf(1)\n").is_err());
+        assert!(run_limited("fn f(n: int) -> int:\n    ret f(n)\nf(1)\n").is_err());
     }
 
     #[test]
     fn deep_expressions_inside_recursion_hit_the_depth_limit() {
-        let source = format!("fn f(n);\n    ret {}f(n)\nf(1)\n", "-".repeat(40));
+        let source = format!("fn f(n):\n    ret {}f(n)\nf(1)\n", "-".repeat(40));
         assert!(run_limited(&source).is_err());
     }
 
@@ -488,13 +488,13 @@ ret y
     #[test]
     fn ret_inside_if_returns_from_the_function() {
         let source =
-            "fn f(x: int) -> int;\n    if x != 0;\n        ret 1\n    ret 0\nprint(f(5))\n";
+            "fn f(x: int) -> int:\n    if x != 0:\n        ret 1\n    ret 0\nprint(f(5))\n";
         assert_eq!(run_limited(source), Ok("1\n".to_string()));
     }
 
     #[test]
     fn while_reevaluates_its_test() {
-        let source = "i = 0\nwhile i != 2;\n    i = i + 1\nprint(i)\n";
+        let source = "i = 0\nwhile i != 2:\n    i = i + 1\nprint(i)\n";
         assert_eq!(run_limited(source), Ok("2\n".to_string()));
     }
 
@@ -512,7 +512,7 @@ ret y
             .collect();
         assert_eq!(
             rendered,
-            ["main.stn:2:5: error: expected ';', found end of line\n  |\n2 | if x\n  |     ^\n"]
+            ["main.stn:2:5: error: expected ':', found end of line\n  |\n2 | if x\n  |     ^\n"]
         );
     }
 
@@ -560,7 +560,7 @@ ret y
     #[test]
     fn analyze_hides_type_errors_while_there_are_syntax_errors() {
         // `f` failed to parse, so calling it would otherwise be an undefined function
-        let analysis = analyze("fn f(;\n    ret 1\nprint(f())\n");
+        let analysis = analyze("fn f(:\n    ret 1\nprint(f())\n");
         assert_eq!(analysis.diagnostics.len(), 1);
     }
 
@@ -578,7 +578,7 @@ ret y
 
     #[test]
     fn parameters_do_not_overwrite_caller_variables() {
-        let source = "fn f(a: int) -> int;\n    ret a\na = 7\nprint(f(1))\nprint(a)\n";
+        let source = "fn f(a: int) -> int:\n    ret a\na = 7\nprint(f(1))\nprint(a)\n";
         assert_eq!(run_limited(source), Ok("1\n7\n".to_string()));
     }
 
@@ -621,7 +621,7 @@ ret y
 
     #[test]
     fn exit_with_status_zero_ends_the_program_successfully() {
-        let source = "use os\n\nfn stop(xs: list[str]);\n    os.exit(0)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
+        let source = "use os\n\nfn stop(xs: list[str]):\n    os.exit(0)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
         assert_eq!(run_io(source, "", &[]), Ok("1\n".to_string()));
         // only the low 8 bits are the status
         let source = "use os\nprint(1)\nos.exit(256)\nprint(2)\n";
@@ -646,7 +646,7 @@ ret y
     #[test]
     fn input_reads_lines_until_eof() {
         let source =
-            "while not eof();\n    print(\"[\" + input() + \"]\")\nprint(input() == \"\")\n";
+            "while not eof():\n    print(\"[\" + input() + \"]\")\nprint(input() == \"\")\n";
         assert_eq!(
             run_io(source, "a\n\nb c\r\nlast", &[]),
             Ok("[a]\n[]\n[b c\r]\n[last]\ntrue\n".to_string())

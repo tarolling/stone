@@ -1,5 +1,5 @@
 // a value moves at its last use, and every copy that is still read stays as it was
-fn add(xs: list[int], x: int) -> list[int];
+fn add(xs: list[int], x: int) -> list[int]:
     xs.append(x)
     ret xs
 
@@ -15,16 +15,16 @@ print(rows)
 // a read on one branch keeps the value
 d = [4]
 e = add(d, 5)
-if e.len() > 5;
+if e.len() > 5:
     print(d)
-else;
+else:
     print(e)
 
 // a later iteration keeps the value
 grow = [0]
 snapshot = []
 i = 0
-while i < 3;
+while i < 3:
     grow = add(grow, i)
     snapshot = grow
     grow = add(grow, 10)
@@ -33,7 +33,7 @@ print(grow, snapshot)
 
 // a function called later reads the global, so the global keeps its copy
 seen = [7]
-fn first_seen() -> int;
+fn first_seen() -> int:
     ret seen[0]
 copied = add(seen, 8)
 print(copied, first_seen())
@@ -41,11 +41,11 @@ print(copied, first_seen())
 // break and cont
 items = [1, 2, 3, 4]
 kept = []
-for item in items;
+for item in items:
     row = [item]
-    if item == 2;
+    if item == 2:
         cont
-    if item == 4;
+    if item == 4:
         break
     kept.append(row)
 print(kept, items)
@@ -57,9 +57,9 @@ other = other + "c"
 print(other)
 
 // in a function, locals move into calls, lists, and the result
-fn build(n: int) -> list[list[int]];
+fn build(n: int) -> list[list[int]]:
     out = []
-    for i in range(n);
+    for i in range(n):
         row = add([i], i)
         out.append(row)
     copy = out

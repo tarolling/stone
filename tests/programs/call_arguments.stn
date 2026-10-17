@@ -1,5 +1,5 @@
 // every argument keeps its value while later arguments are evaluated, even ones that divide
-fn digits(a: int, b: int, c: int, d: int) -> int;
+fn digits(a: int, b: int, c: int, d: int) -> int:
     ret a * 1000 + b * 100 + c * 10 + d
 print(digits(1, 2, 3, 8 / 2))
 print(digits(1, 2, 3 / 1, 4))

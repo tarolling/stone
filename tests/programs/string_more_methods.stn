@@ -15,16 +15,16 @@ print("".startswith(""), "".startswith("a"))
 
 // together
 line = "key=value"
-for text in [line, "no equals"];
-    match text.find("=");
-        case some(at);
+for text in [line, "no equals"]:
+    match text.find("="):
+        case some(at):
             print(text[:at], text[at + 1:])
-        case none;
+        case none:
             print("no '=' in", text)
-for entry in ["# comment", "name=stone", "  # indented"];
-    if entry.strip().startswith("#");
+for entry in ["# comment", "name=stone", "  # indented"]:
+    if entry.strip().startswith("#"):
         print("skip")
-    else;
+    else:
         print(entry.split("=")[1])
 
 // endswith

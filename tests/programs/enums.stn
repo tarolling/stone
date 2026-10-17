@@ -1,120 +1,120 @@
 // enums whose variants hold values, matched by their patterns
-enum Shape;
+enum Shape:
     Circle(float)
     Rect(float, float)
     Empty
 
-fn area(s: Shape) -> float;
-    match s;
-        case Shape.Circle(r);
+fn area(s: Shape) -> float:
+    match s:
+        case Shape.Circle(r):
             ret 3.0 * r * r
-        case Shape.Rect(w, h);
+        case Shape.Rect(w, h):
             ret w * h
-        case Shape.Empty;
+        case Shape.Empty:
             ret 0.0
 
-fn describe(s: Shape) -> str;
-    match s;
-        case Shape.Rect(w, _);
+fn describe(s: Shape) -> str:
+    match s:
+        case Shape.Rect(w, _):
             ret "rect " + str(w)
-        case other;
+        case other:
             ret "not a rect"
 
 shapes = [Shape.Circle(1.0), Shape.Rect(2.0, 3.0), Shape.Empty]
 total = 0.0
-for s in shapes;
+for s in shapes:
     print(s, area(s), describe(s))
     total += area(s)
 print(total)
 print(shapes, shapes[1])
 
 // variants can hold strings, lists, tuples, and other enums, all counted
-enum Item;
+enum Item:
     Named(str, list[int])
     Pair(tuple[int, str], Shape)
     Nothing
 
 items = [Item.Named("ab", [1, 2]), Item.Pair((7, "seven"), Shape.Circle(0.5)), Item.Nothing]
-for item in items;
-    match item;
-        case Item.Named(name, xs);
+for item in items:
+    match item:
+        case Item.Named(name, xs):
             xs.append(3)
             print(name, xs)
-        case Item.Pair(t, Shape.Circle(r));
+        case Item.Pair(t, Shape.Circle(r)):
             n, word = t
             print(n, word, r)
-        case Item.Pair(t, _);
+        case Item.Pair(t, _):
             print("another pair", t)
-        case Item.Nothing;
+        case Item.Nothing:
             print("nothing")
 // binding a list copies it, so the item still holds the old one
 print(items)
 
 // a value made in a function, returned, and passed on
-fn make(n: int) -> Item;
+fn make(n: int) -> Item:
     name = "n" + str(n)
     ret Item.Named(name, [n, n * n])
 
-fn names(xs: list[Item]) -> list[str];
+fn names(xs: list[Item]) -> list[str]:
     out = []
-    for x in xs;
-        match x;
-            case Item.Named(name, _);
+    for x in xs:
+        match x:
+            case Item.Named(name, _):
                 out.append(name)
-            case _;
+            case _:
                 out.append("?")
     ret out
 
 made = []
-for i in range(3);
+for i in range(3):
     made.append(make(i))
 made.append(Item.Nothing)
 print(names(made))
 
 // a name bound in every case is assigned after the match
-fn width(s: Shape) -> float;
-    match s;
-        case Shape.Rect(w, _);
+fn width(s: Shape) -> float:
+    match s:
+        case Shape.Rect(w, _):
             result = w
-        case Shape.Circle(r);
+        case Shape.Circle(r):
             result = 2.0 * r
-        case Shape.Empty;
+        case Shape.Empty:
             result = 0.0
     ret result
 print(width(Shape.Rect(4.0, 1.0)), width(Shape.Circle(1.5)), width(Shape.Empty))
 
 // matching a variable the case assigns, and a value a call makes
 s = Shape.Rect(5.0, 6.0)
-match s;
-    case Shape.Rect(w, h);
+match s:
+    case Shape.Rect(w, h):
         s = Shape.Circle(w + h)
-    case _;
+    case _:
         print("unreachable")
 print(s)
-match make(9);
-    case Item.Named(name, xs);
+match make(9):
+    case Item.Named(name, xs):
         print(name, xs)
-    case _;
+    case _:
         print("unreachable")
 
 // leaving a match early, inside loops, releases what it holds
-fn first_named(xs: list[Item]) -> str;
-    for x in xs;
-        match x;
-            case Item.Named(name, _);
+fn first_named(xs: list[Item]) -> str:
+    for x in xs:
+        match x:
+            case Item.Named(name, _):
                 ret name
-            case _;
+            case _:
                 cont
     ret "none named"
 print(first_named([Item.Nothing, make(4), make(5)]))
 count = 0
-while true;
-    match make(count);
-        case Item.Named(_, xs);
-            if xs[1] > 10;
+while true:
+    match make(count):
+        case Item.Named(_, xs):
+            if xs[1] > 10:
                 break
             count += 1
-        case _;
+        case _:
             break
 print("stopped at", count)
 

@@ -27,8 +27,8 @@ const HISTORY: &str = "<session>";
 /// Returns whether `buffer` is the start of an entry that needs more lines, which is when it
 /// opens a block and has not yet ended with a blank line, as in Python.
 ///
-/// For example, `needs_more("if x;\n")` is true, while `needs_more("x = 1\n")` and
-/// `needs_more("if x;\n    y = 1\n\n")` are false.
+/// For example, `needs_more("if x:\n")` is true, while `needs_more("x = 1\n")` and
+/// `needs_more("if x:\n    y = 1\n\n")` are false.
 pub fn needs_more(buffer: &str) -> bool {
     if buffer
         .lines()
@@ -43,7 +43,7 @@ pub fn needs_more(buffer: &str) -> bool {
     };
     tokens
         .windows(2)
-        .any(|pair| pair[0].r#type == TokenType::Semi && pair[1].r#type == TokenType::Newline)
+        .any(|pair| pair[0].r#type == TokenType::Colon && pair[1].r#type == TokenType::Newline)
 }
 
 /// One top-level statement of an entry the session kept, as source text ending in a newline.
@@ -137,7 +137,7 @@ fn redefined(old: &Chunk, chunks: &[Chunk]) -> bool {
 /// Splits an entry into one chunk per top-level statement, each running from the line the
 /// statement starts on to the line before the next one.
 ///
-/// For example, `x = 1\nfn f() -> int; ret x\n` gives `x = 1\n` and `fn f() -> int; ret x\n`, the
+/// For example, `x = 1\nfn f() -> int: ret x\n` gives `x = 1\n` and `fn f() -> int: ret x\n`, the
 /// second defining `f`. An entry that does not parse gives no chunks, since it is never kept.
 fn split(entry: &str) -> Vec<Chunk> {
     let Ok(tokens) = Lexer::new(entry).lex() else {
@@ -310,36 +310,37 @@ mod tests {
 
     #[test]
     fn a_block_needs_more_until_a_blank_line() {
-        assert!(needs_more("if x;\n"));
-        assert!(needs_more("fn f();\n"));
-        assert!(needs_more("if x;\n    y = 1\n"));
-        assert!(!needs_more("if x;\n    y = 1\n\n"));
-        assert!(!needs_more("if x;\n    y = 1\n   \n"));
+        assert!(needs_more("if x:\n"));
+        assert!(!needs_more("if x;\n"));
+        assert!(needs_more("fn f():\n"));
+        assert!(needs_more("if x:\n    y = 1\n"));
+        assert!(!needs_more("if x:\n    y = 1\n\n"));
+        assert!(!needs_more("if x:\n    y = 1\n   \n"));
     }
 
     #[test]
     fn a_one_line_block_needs_nothing_more() {
-        assert!(!needs_more("fn f() -> int; ret 1\n"));
+        assert!(!needs_more("fn f() -> int: ret 1\n"));
     }
 
     #[test]
     fn a_semicolon_in_a_string_or_comment_opens_no_block() {
         assert!(!needs_more("print(\"a;\")\n"));
-        assert!(!needs_more("x = 1 # see;\n"));
+        assert!(!needs_more("x = 1 # see:\n"));
     }
 
     #[test]
     fn a_lex_error_needs_nothing_more() {
-        assert!(!needs_more("print(\"a;\n"));
+        assert!(!needs_more("print(\"a:\n"));
     }
 
-    /// Runs a session over `input` with `util.stn` holding `pub fn one() -> int; ret 1`, returning
+    /// Runs a session over `input` with `util.stn` holding `pub fn one() -> int: ret 1`, returning
     /// what it printed to stdout and to stderr.
     ///
     /// For example, `session("x = 1\nx + 1\n")` returns `("2\n", "")`.
     fn session(input: &str) -> (String, String) {
         let mut sources = MapSources::default();
-        sources.insert("util.stn", "pub fn one() -> int; ret 1\n");
+        sources.insert("util.stn", "pub fn one() -> int: ret 1\n");
         let (mut out, mut err) = (Vec::new(), Vec::new());
         driver::repl(&mut input.as_bytes(), &mut out, &mut err, false, &sources).unwrap();
         (
@@ -368,22 +369,22 @@ mod tests {
     #[test]
     fn options_and_enum_values_echo() {
         assert_eq!(session("none\nsome(\"a\")\n").0, "none\nsome('a')\n");
-        let input = "enum Coin;\n    Heads\n    Tails\n\nc = Coin.Tails\nc\n";
+        let input = "enum Coin:\n    Heads\n    Tails\n\nc = Coin.Tails\nc\n";
         assert_eq!(session(input), ("Coin.Tails\n".into(), "".into()));
     }
 
     #[test]
     fn methods_carry_over_and_change_their_receivers() {
-        let input = "struct S;\n    n: int\n\nimpl S;\n    fn bump(self);\n        self.n += 1\n\n\
+        let input = "struct S:\n    n: int\n\nimpl S:\n    fn bump(self):\n        self.n += 1\n\n\
                      s = S(n=0)\ns.bump()\ns.bump()\ns\n";
         assert_eq!(session(input), ("S(n=2)\n".into(), "".into()));
     }
 
     #[test]
     fn an_impl_block_defined_again_replaces_the_one_with_its_methods() {
-        let s = "struct S;\n    n: int\n\n";
-        let get = |n: i32| format!("impl S;\n    fn get(self) -> int;\n        ret {n}\n\n");
-        let other = "impl S;\n    fn other(self) -> int;\n        ret 3\n\n";
+        let s = "struct S:\n    n: int\n\n";
+        let get = |n: i32| format!("impl S:\n    fn get(self) -> int:\n        ret {n}\n\n");
+        let other = "impl S:\n    fn other(self) -> int:\n        ret 3\n\n";
         let input = format!(
             "{s}{}{other}{}S(n=0).get() + S(n=0).other()\n",
             get(1),
@@ -395,27 +396,27 @@ mod tests {
     #[test]
     fn a_function_keeps_its_methods_when_earlier_entries_move() {
         // redefining `f` drops its first definition, so the lines of the entries after it move
-        let input = "fn f() -> int;\n    ret 1\n\nstruct S;\n    n: int\n\nimpl S;\n    \
-                     fn bump(self);\n        self.n += 10\n\nfn g(s: S) -> S;\n    s.bump()\n    \
-                     ret s\n\nfn f() -> int;\n    ret 2\n\ng(S(n=f()))\n";
+        let input = "fn f() -> int:\n    ret 1\n\nstruct S:\n    n: int\n\nimpl S:\n    \
+                     fn bump(self):\n        self.n += 10\n\nfn g(s: S) -> S:\n    s.bump()\n    \
+                     ret s\n\nfn f() -> int:\n    ret 2\n\ng(S(n=f()))\n";
         assert_eq!(session(input), ("S(n=12)\n".into(), "".into()));
     }
 
     #[test]
     fn an_enum_defined_again_replaces_the_old_one() {
-        let input = "enum Coin;\n    Heads\n\nenum Coin;\n    Edge\n\nCoin.Edge\n";
+        let input = "enum Coin:\n    Heads\n\nenum Coin:\n    Edge\n\nCoin.Edge\n";
         assert_eq!(session(input), ("Coin.Edge\n".into(), "".into()));
     }
 
     #[test]
     fn struct_values_echo_and_change() {
-        let input = "struct P;\n    x: int\n    s: str\n\np = P(s=\"a\", x=1)\np.x += 2\np\np.s\n";
+        let input = "struct P:\n    x: int\n    s: str\n\np = P(s=\"a\", x=1)\np.x += 2\np\np.s\n";
         assert_eq!(session(input), ("P(x=3, s='a')\n'a'\n".into(), "".into()));
     }
 
     #[test]
     fn a_struct_defined_again_replaces_the_old_one() {
-        let input = "struct P;\n    x: int\n\nstruct P;\n    y: str\n\nP(y=\"b\")\n";
+        let input = "struct P:\n    x: int\n\nstruct P:\n    y: str\n\nP(y=\"b\")\n";
         assert_eq!(session(input), ("P(y='b')\n".into(), "".into()));
     }
 
@@ -426,24 +427,24 @@ mod tests {
 
     #[test]
     fn a_multi_line_function_ends_at_a_blank_line() {
-        let input = "fn double(n: int) -> int;\n    m = n * 2\n    ret m\n\ndouble(4)\n";
+        let input = "fn double(n: int) -> int:\n    m = n * 2\n    ret m\n\ndouble(4)\n";
         assert_eq!(session(input), ("8\n".into(), "".into()));
     }
 
     #[test]
     fn a_loop_runs_once_its_block_ends() {
-        let input = "for i in range(3);\n    print(i)\n\nprint(\"done\")\n";
+        let input = "for i in range(3):\n    print(i)\n\nprint(\"done\")\n";
         assert_eq!(session(input).0, "0\n1\n2\ndone\n");
     }
 
     #[test]
     fn a_block_at_the_end_of_the_input_still_runs() {
-        assert_eq!(session("if true;\n    print(5)\n").0, "5\n");
+        assert_eq!(session("if true:\n    print(5)\n").0, "5\n");
     }
 
     #[test]
     fn functions_can_be_called_from_a_later_entry() {
-        assert_eq!(session("fn one() -> int; ret 1\none() + 1\n").0, "2\n");
+        assert_eq!(session("fn one() -> int: ret 1\none() + 1\n").0, "2\n");
     }
 
     #[test]
@@ -476,14 +477,14 @@ mod tests {
 
     #[test]
     fn a_function_can_be_redefined() {
-        let (out, err) = session("fn f() -> int; ret 1\nf()\nfn f() -> int; ret 2\nf()\n");
+        let (out, err) = session("fn f() -> int: ret 1\nf()\nfn f() -> int: ret 2\nf()\n");
         assert_eq!((out.as_str(), err.as_str()), ("1\n2\n", ""));
     }
 
     #[test]
     fn a_redefinition_that_breaks_earlier_entries_is_rejected() {
         let (out, err) =
-            session("fn f() -> int; ret 1\nx = f() + 1\nfn f() -> str; ret \"a\"\nf()\n");
+            session("fn f() -> int: ret 1\nx = f() + 1\nfn f() -> str: ret \"a\"\nf()\n");
         assert_eq!(out, "1\n");
         assert!(
             err.starts_with("<session>:1:11: error: expected str, found int"),
@@ -510,15 +511,15 @@ mod tests {
 
     #[test]
     fn entries_split_into_statements() {
-        let chunks = split("x = 1\nfn f() -> int;\n    ret x\n\nprint(1)\n");
+        let chunks = split("x = 1\nfn f() -> int:\n    ret x\n\nprint(1)\n");
         let texts: Vec<&str> = chunks.iter().map(|c| c.text.as_str()).collect();
         assert_eq!(
             texts,
-            ["x = 1\n", "fn f() -> int;\n    ret x\n\n", "print(1)\n"]
+            ["x = 1\n", "fn f() -> int:\n    ret x\n\n", "print(1)\n"]
         );
         assert_eq!(chunks[1].defines, ["f"]);
         assert!(chunks[0].defines.is_empty());
-        let chunks = split("impl S;\n    fn a(self);\n        ret\n    fn b(self);\n        ret\n");
+        let chunks = split("impl S:\n    fn a(self):\n        ret\n    fn b(self):\n        ret\n");
         assert_eq!(chunks[0].defines, ["S.a", "S.b"]);
     }
 
@@ -534,7 +535,7 @@ mod tests {
 
     #[test]
     fn runtime_errors_in_earlier_entries_name_the_session() {
-        let (_, err) = session("fn f(n: int) -> int;\n    ret 1 / n\n\nf(0)\n");
+        let (_, err) = session("fn f(n: int) -> int:\n    ret 1 / n\n\nf(0)\n");
         assert!(
             err.starts_with("<session>:2:9: error: division by zero\n"),
             "{err}"
@@ -569,7 +570,7 @@ mod tests {
             ("1\n".into(), "".into())
         );
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let input = "use os\nprint(1)\nif true;\n    os.exit(4)\n\nprint(2)\n";
+        let input = "use os\nprint(1)\nif true:\n    os.exit(4)\n\nprint(2)\n";
         let error = driver::repl(
             &mut input.as_bytes(),
             &mut out,
@@ -585,7 +586,7 @@ mod tests {
     #[test]
     fn prompts_go_to_err() {
         let (mut out, mut err) = (Vec::new(), Vec::new());
-        let input = "if true;\n    print(1)\n\n";
+        let input = "if true:\n    print(1)\n\n";
         driver::repl(
             &mut input.as_bytes(),
             &mut out,

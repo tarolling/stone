@@ -13,7 +13,7 @@ print(nums)
 
 // append grows a list well past its first allocation
 squares = []
-for i in range(20);
+for i in range(20):
     squares.append(i * i)
 print(squares.len(), squares[19])
 print(squares)
@@ -26,12 +26,12 @@ print(nums, alias)
 // iterating, including over a list that grows while it is being iterated, which walks the
 // list as it was when the loop started
 total = 0
-for n in nums;
+for n in nums:
     total = total + n
 print(total)
 grow = [1]
-for g in grow;
-    if g < 4;
+for g in grow:
+    if g < 4:
         grow.append(g + 1)
 print(grow)
 
@@ -41,14 +41,14 @@ grid[1][0] = 5
 print(grid, grid[1])
 
 // a function changes its own copy of a list, and gives it back
-fn fill(items: list[int], n: int) -> list[int];
-    for i in range(n);
+fn fill(items: list[int], n: int) -> list[int]:
+    for i in range(n):
         items.append(i)
     ret items
 built = fill([], 3)
 print(built, fill(built, 2))
 
-fn words() -> list[str];
+fn words() -> list[str]:
     ret ["x", "y"]
-for w in words();
+for w in words():
     print(w)

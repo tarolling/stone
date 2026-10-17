@@ -63,7 +63,7 @@ struct Hint {
     message: String,
 }
 
-/// Something a rule expected to find, such as `';'` or `an expression`.
+/// Something a rule expected to find, such as `':'` or `an expression`.
 ///
 /// Quiet expectations, like an operator that could continue an expression, are only shown when
 /// nothing else was expected at the same token. So `print(1` reports `expected ')'` rather than
@@ -117,6 +117,18 @@ impl Parser {
         Some(tok)
     }
 
+    /// Expects the `:` that opens a block, as after `if x` or `fn f()`.
+    ///
+    /// A `:` elsewhere, such as before an optional parameter type, is a quiet expectation, but the
+    /// one that opens a block is always required, so `if x` reports `expected ':'`.
+    fn expect_block_start(&mut self) -> Option<Token> {
+        if self.peek().r#type == TokenType::Colon {
+            return Some(self.advance());
+        }
+        self.record_expected(describe_expected(&TokenType::Colon), false);
+        None
+    }
+
     /// Returns the span of the last token consumed, skipping layout tokens so that a statement
     /// ends at its last visible character rather than at the `Newline` or `Dedent` after it.
     ///
@@ -145,7 +157,7 @@ impl Parser {
 
     /// Consumes a name token and returns it with its span, or notes that `what` was expected here.
     ///
-    /// For example, `self.expect_name("a parameter name", false)` reads `a` in `fn f(a: int);`.
+    /// For example, `self.expect_name("a parameter name", false)` reads `a` in `fn f(a: int):`.
     fn expect_name(&mut self, what: &str, quiet: bool) -> Option<(String, Span)> {
         let tok = self.peek().clone();
         if let TokenType::Name(name) = tok.r#type {
@@ -341,7 +353,7 @@ impl Parser {
                 }
                 TokenType::Newline if depth == 0 => {
                     self.pos += 1;
-                    // a block may follow, as after `fn f();`
+                    // a block may follow, as after `fn f():`
                     if self.peek().r#type != TokenType::Indent {
                         return;
                     }
@@ -354,7 +366,7 @@ impl Parser {
     }
 }
 
-/// Describes a token a rule expected, such as `';'` or `end of line`.
+/// Describes a token a rule expected, such as `':'` or `end of line`.
 fn describe_expected(r#type: &TokenType) -> String {
     match r#type {
         TokenType::Name(_) => "a name".to_string(),
@@ -383,7 +395,6 @@ fn describe_found(r#type: &TokenType) -> String {
         TokenType::RBracket => "']'".to_string(),
         TokenType::LBrace => "'{'".to_string(),
         TokenType::RBrace => "'}'".to_string(),
-        TokenType::Semi => "';'".to_string(),
         TokenType::Comma => "','".to_string(),
         TokenType::Colon => "':'".to_string(),
         TokenType::Dot => "'.'".to_string(),

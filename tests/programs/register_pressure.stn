@@ -1,8 +1,8 @@
 // more values live at once than there are registers, across calls of every kind
-fn id(x: int) -> int;
+fn id(x: int) -> int:
     ret x
 
-fn many(n: int) -> int;
+fn many(n: int) -> int:
     a = n + 1
     b = n + 2
     c = n + 3
@@ -17,7 +17,7 @@ fn many(n: int) -> int;
     l = n + 12
     m = n + 13
     total = 0
-    for step in range(3);
+    for step in range(3):
         total = total + id(a) + b * c - d + e * f - g + h * i - j + k * l - m + step
         print(a, b, c, d, e, f, g, h, i, j, k, l, m)
     ret total + a + b + c + d + e + f + g + h + i + j + k + l + m
@@ -25,8 +25,8 @@ fn many(n: int) -> int;
 print(many(5))
 
 // each frame keeps values in registers across the recursive call
-fn depth(n: int, acc: int) -> int;
-    if n == 0;
+fn depth(n: int, acc: int) -> int:
+    if n == 0:
         ret acc
     x = n * 3
     y = x + acc
@@ -36,12 +36,12 @@ fn depth(n: int, acc: int) -> int;
 print(depth(50, 1))
 
 // values live across append, string concatenation, len, and print
-fn mixed(n: int) -> int;
+fn mixed(n: int) -> int:
     xs = []
     s = "a"
     t = 0
     u = 1.5
-    for i in range(n);
+    for i in range(n):
         xs.append(i * i)
         s = s + "b"
         t = t + xs.len() + s.len()
@@ -52,7 +52,7 @@ fn mixed(n: int) -> int;
 print(mixed(4))
 
 // an assignment whose right side reads the variable being assigned
-fn reads_target(x: int, y: int) -> int;
+fn reads_target(x: int, y: int) -> int:
     x = y - x
     y = x * y + x
     x = [x, y][1] - x

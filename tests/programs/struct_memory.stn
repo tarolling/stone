@@ -1,31 +1,31 @@
 // every string, list, and enum value a struct holds is freed exactly once
 
-struct Inner;
+struct Inner:
     tags: list[str]
     note: str
 
-struct Item;
+struct Item:
     name: str
     inner: Inner
     count: int
     maybe: option[str]
 
-fn make(name: str) -> Item;
+fn make(name: str) -> Item:
     ret Item(name=name, inner=Inner(tags=[name + "-a"], note="n"), count=1, maybe=some(name))
 
-fn add_tag(tags: list[str], tag: str) -> list[str];
+fn add_tag(tags: list[str], tag: str) -> list[str]:
     tags.append(tag)
     ret tags
 
-fn renamed(item: Item, name: str) -> Item;
+fn renamed(item: Item, name: str) -> Item:
     item.name = name
     item.inner.tags.append(name)
     ret item
 
-fn name_of(item: Item) -> str;
+fn name_of(item: Item) -> str:
     ret item.name
 
-fn tags_of(item: Item) -> list[str];
+fn tags_of(item: Item) -> list[str]:
     ret item.inner.tags
 
 // replacing counted fields of a local
@@ -68,35 +68,35 @@ print(items)
 print(popped.name, middle, copied[0].inner.note, items[0].inner.note)
 
 // matching an enum that holds a struct
-enum Box;
+enum Box:
     Full(Item)
     Empty
 
 boxes = [Box.Full(make("m")), Box.Empty]
-for box in boxes;
-    match box;
-        case Box.Full(item);
+for box in boxes:
+    match box:
+        case Box.Full(item):
             item.inner.tags.append("seen")
             print(item.inner.tags)
-        case Box.Empty;
+        case Box.Empty:
             print("empty")
 
 // leaving loops early releases what they hold
-fn find(items: list[Item], name: str) -> option[Item];
-    for item in items;
-        if item.name == name;
+fn find(items: list[Item], name: str) -> option[Item]:
+    for item in items:
+        if item.name == name:
             ret some(item)
     ret none
 
 print(find(items, "y2").is_some(), find(items, "nope").is_none())
-for item in items;
-    if item.count == 1;
+for item in items:
+    if item.count == 1:
         cont
     break
 
 // a global struct changes only at the top level, and functions read it
 g = make("g")
-fn global_name() -> str;
+fn global_name() -> str:
     ret g.name + "/" + g.inner.note
 g.inner.tags.append("g-b")
 g.inner.note = "changed"

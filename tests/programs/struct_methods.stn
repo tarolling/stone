@@ -1,83 +1,83 @@
-struct Stack;
+struct Stack:
     items: list[int]
 
-impl Stack;
-    fn new() -> Stack;
+impl Stack:
+    fn new() -> Stack:
         ret Stack(items=[])
 
-    fn size(self) -> int;
+    fn size(self) -> int:
         ret self.items.len()
 
-    fn push(self, x: int);
+    fn push(self, x: int):
         self.items.append(x)
 
-    fn pop_top(self) -> int;
+    fn pop_top(self) -> int:
         x = self.items.pop(-1)
         ret x
 
-    fn push_all(self, xs: list[int]);
-        for x in xs;
+    fn push_all(self, xs: list[int]):
+        for x in xs:
             self.push(x)
 
-    fn count_down(self, n: int);
-        if n == 0;
+    fn count_down(self, n: int):
+        if n == 0:
             ret
         self.push(n)
         self.count_down(n - 1)
 
-    fn top(self) -> option[int];
-        if self.items.len() == 0;
+    fn top(self) -> option[int]:
+        if self.items.len() == 0:
             ret none
         ret some(self.items[-1])
 
-struct Point;
+struct Point:
     x: float
     y: float
 
-impl Point;
-    fn origin() -> Point;
+impl Point:
+    fn origin() -> Point:
         ret Point(x=0.0, y=0.0)
 
-    fn shift(self, dx: float, dy: float);
+    fn shift(self, dx: float, dy: float):
         self.x += dx
         self.y += dy
 
-    fn scaled(self, k: float) -> Point;
+    fn scaled(self, k: float) -> Point:
         ret Point(x=self.x * k, y=self.y * k)
 
-    fn len(self) -> float;
+    fn len(self) -> float:
         ret self.x * self.x + self.y * self.y
 
-    fn reset(self);
+    fn reset(self):
         self = Point.origin()
 
-struct Line;
+struct Line:
     start: Point
     end: Point
     tags: list[str]
 
-impl Line;
-    fn shift(self, dx: float);
+impl Line:
+    fn shift(self, dx: float):
         self.start.shift(dx, 0.0)
         self.end.shift(dx, 0.0)
 
-    fn tag(self, t: str);
+    fn tag(self, t: str):
         self.tags.append(t)
 
-    fn length2(self) -> float;
+    fn length2(self) -> float:
         dx = self.end.x - self.start.x
         dy = self.end.y - self.start.y
         ret dx * dx + dy * dy
 
-fn fill(n: int) -> Stack;
+fn fill(n: int) -> Stack:
     s = Stack.new()
-    for i in range(n);
+    for i in range(n):
         s.push(i * i)
     ret s
 
-fn drain(s: Stack) -> int;
+fn drain(s: Stack) -> int:
     total = 0
-    while s.size() > 0;
+    while s.size() > 0:
         x = s.pop_top()
         total += x
     ret total

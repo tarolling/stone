@@ -5,7 +5,7 @@ print("" + "", "".len(), "a" + "")
 
 // building a string in a loop
 stars = ""
-for i in range(5);
+for i in range(5):
     stars = stars + "*"
 print(stars, stars.len())
 
@@ -17,10 +17,10 @@ same = joined
 print(same == joined)
 
 // strings from functions and lists
-fn shout(word: str) -> str;
+fn shout(word: str) -> str:
     ret word + "!"
 names = ["ann", "bo"]
-for name in names;
+for name in names:
     print(shout(name))
 print(shout(names[1]) == "bo!")
 

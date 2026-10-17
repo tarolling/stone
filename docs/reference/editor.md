@@ -18,7 +18,7 @@ arguments, speaking LSP over stdin and stdout, for files ending in `.stn`.
 - **Completion** of names visible at the cursor, builtins, and keywords.
 
 The VS Code extension also provides syntax highlighting, comment toggling, bracket matching, and
-indentation after a line ending in `;`.
+indentation after a line ending in `:`.
 
 ## Installing
 

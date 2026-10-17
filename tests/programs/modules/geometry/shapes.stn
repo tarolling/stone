@@ -1,11 +1,11 @@
 use geometry.vec
 
-pub fn area(r: int) -> int;
+pub fn area(r: int) -> int:
     ret 3 * square(r)
 
-pub fn perimeter(r: int) -> int;
+pub fn perimeter(r: int) -> int:
     ret 2 * 3 * r
 
 // private, so it does not clash with vec's helper of the same name
-fn square(x: int) -> int;
+fn square(x: int) -> int:
     ret vec.dot([x], [x])

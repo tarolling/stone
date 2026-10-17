@@ -1,19 +1,19 @@
 // a global list passed to a function, which gives back the changed list
 names = []
-fn add(names: list[str], name: str) -> list[str];
+fn add(names: list[str], name: str) -> list[str]:
     names.append(name + "")
     ret names
 
-fn reset();
+fn reset():
     names = ["fresh"]
 
-for i in range(5);
+for i in range(5):
     names = add(names, str(i))
 print(names)
 
 // assigning in a function makes a local that shadows the global
 current = "old" + ""
-fn change(text: str) -> str;
+fn change(text: str) -> str:
     current = "new" + text
     ret current
 print(change(current), current)
@@ -22,7 +22,7 @@ print(current)
 
 // a function changes its own copy of a global list while the caller holds an element
 shared = ["first" + ""]
-fn clobber() -> list[str];
+fn clobber() -> list[str]:
     mine = shared
     mine[0] = "second" + ""
     ret mine
@@ -30,6 +30,6 @@ print(shared[0], clobber(), shared[0])
 
 // ret at the top level still frees everything
 leftover = ["a" + "b"]
-for x in [leftover];
+for x in [leftover]:
     ret
 print("unreachable")

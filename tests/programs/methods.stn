@@ -1,17 +1,17 @@
 // len and append are methods, called on a value
-fn push(xs: list[int], x: int) -> list[int];
+fn push(xs: list[int], x: int) -> list[int]:
     xs.append(x)
     ret xs
 
-fn index(n: int) -> int;
+fn index(n: int) -> int:
     print("index")
     ret n
 
-fn value(n: int) -> int;
+fn value(n: int) -> int:
     print("argument")
     ret n
 
-fn words() -> list[str];
+fn words() -> list[str]:
     ret ["a", "bb"]
 
 xs = []
@@ -34,6 +34,6 @@ print(floats, floats.len())
 
 // len and append are ordinary names now
 len = 3
-fn append(a: int, b: int) -> int;
+fn append(a: int, b: int) -> int:
     ret a + b
 print(len, append(len, 4))

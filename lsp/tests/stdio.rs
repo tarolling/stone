@@ -58,7 +58,7 @@ fn serves_diagnostics_over_stdio_and_exits_cleanly() {
     };
     assert_eq!(
         published.params["diagnostics"][0]["message"],
-        "expected ';', found end of line"
+        "expected ':', found end of line"
     );
 
     send(Request::new(RequestId::from(2), "shutdown".to_string(), json!(null)).into());

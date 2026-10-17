@@ -1344,7 +1344,7 @@ impl<'a> Lowerer<'a> {
     /// and runs. A subject that is not a variable is held until the `match` ends, so the values
     /// bound from it are retained before anything can release it.
     ///
-    /// For example, `case some(x);` checks `enum_tag v0` against 1, then binds `x` to
+    /// For example, `case some(x):` checks `enum_tag v0` against 1, then binds `x` to
     /// `field_get v0, 0`.
     fn match_stmt(&mut self, subject: &Expr, cases: &[MatchCase]) -> Result<(), String> {
         let ty = self.type_of(subject)?;
@@ -2259,7 +2259,7 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Lowers `for target in iter;`, counting with hidden vregs that the body cannot assign, so
+    /// Lowers `for target in iter:`, counting with hidden vregs that the body cannot assign, so
     /// assigning the loop variable never changes the iteration.
     ///
     /// A range's bounds are evaluated once, left to right. A list's length is reread every
@@ -2436,7 +2436,7 @@ impl<'a> Lowerer<'a> {
     /// current block.
     ///
     /// Comparisons branch on the flags directly, and `and`, `or`, and `not` become branches, so
-    /// `if a < b and c;` never materializes a bool.
+    /// `if a < b and c:` never materializes a bool.
     fn cond(&mut self, test: &Expr, then: BlockId, otherwise: BlockId) -> Result<(), String> {
         match &test.kind {
             // a single == or != of tuples, structs, or enum values branches as it compares, then
@@ -5345,7 +5345,7 @@ fn holds_enum(ty: &Type) -> bool {
 /// Returns, for each function in `body`, whether it owns each of its parameters, which it does if
 /// it assigns or changes the parameter.
 ///
-/// For example, `fn add(xs: list[int], x: int) -> list[int]; xs.append(x); ret xs` owns `xs`
+/// For example, `fn add(xs: list[int], x: int) -> list[int]: xs.append(x): ret xs` owns `xs`
 /// but not `x`.
 fn owned_params(body: &[Stmt], methods: &Methods) -> HashMap<String, Vec<bool>> {
     let mut owned = HashMap::new();

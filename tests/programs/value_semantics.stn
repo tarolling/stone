@@ -24,7 +24,7 @@ items.append(9)
 print(items, nested)
 
 // a function gets a copy of its argument, and gives back what it changed
-fn with_zero(xs: list[int]) -> list[int];
+fn with_zero(xs: list[int]) -> list[int]:
     xs.append(0)
     ret xs
 original = [5]
@@ -33,16 +33,16 @@ print(original, changed)
 original = with_zero(original)
 print(original)
 
-fn bumped(grid: list[list[int]]) -> list[list[int]];
+fn bumped(grid: list[list[int]]) -> list[list[int]]:
     grid[0][0] = grid[0][0] + 1
     ret grid
 small = [[1], [2]]
 print(bumped(small), small)
 
 // a loop variable is a copy of the element
-fn rows_with(grid: list[list[int]], x: int) -> list[list[int]];
+fn rows_with(grid: list[list[int]], x: int) -> list[list[int]]:
     out = []
-    for row in grid;
+    for row in grid:
         row.append(x)
         out.append(row)
     ret out
@@ -50,7 +50,7 @@ print(rows_with(small, 9), small)
 
 // a loop walks the list as it was when the loop started
 grow = [1, 2]
-for g in grow;
+for g in grow:
     grow.append(g * 10)
 print(grow)
 
@@ -63,9 +63,9 @@ print(words, more)
 
 // a function reads globals, and changes lists of its own
 total = [100]
-fn summed(xs: list[int]) -> int;
+fn summed(xs: list[int]) -> int:
     out = [0]
-    for x in xs;
+    for x in xs:
         out[0] = out[0] + x
     ret out[0] + total[0]
 print(summed([1, 2, 3]), total)

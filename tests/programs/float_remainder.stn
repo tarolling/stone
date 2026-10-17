@@ -8,34 +8,34 @@ print(9007199254740993.0 % 2.0, 1.7976931348623157e308 % 0.7, 123456789.0 % 0.00
 
 // random pairs across the whole range, each checked against the definition
 seed = 2024
-fn next(seed: int) -> int;
+fn next(seed: int) -> int:
     seed = seed * 6364136223846793005 % 9223372036854775807 + 1442695040888963407
-    if seed < 0;
+    if seed < 0:
         seed = -(seed + 1)
     ret seed
 
-fn scaled(m: int, e: int) -> float;
+fn scaled(m: int, e: int) -> float:
     x = float(m)
-    while e > 0;
+    while e > 0:
         step = e
-        if step > 900;
+        if step > 900:
             step = 900
         x = x * 2.0 ** step
         e = e - step
-    while e < 0;
+    while e < 0:
         step = -e
-        if step > 900;
+        if step > 900:
             step = 900
         x = x * 0.5 ** step
         e = e + step
     ret x
 
-for i in range(600);
+for i in range(600):
     seed = next(seed)
     a = scaled(seed % 9007199254740992, seed % 2000 - 1100)
     seed = next(seed)
     b = scaled(seed % 9007199254740992 + 1, seed % 2000 - 1100)
-    if seed % 2 == 0;
+    if seed % 2 == 0:
         a = -a
-    if i % 3 == 0;
+    if i % 3 == 0:
         print(a % b)

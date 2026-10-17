@@ -248,7 +248,7 @@ mod tests {
         // b0 starts at 0: copy 2/3, jmp 4/5; b1 at 6: br 8/9; b2 at 10: add 12/13, jmp 14/15;
         // b3 at 16: ret 18/19
         let liveness = liveness(
-            "fn f(n: int) -> int;\n    i = 0\n    while i < n;\n        i = i + 1\n    ret i\n",
+            "fn f(n: int) -> int:\n    i = 0\n    while i < n:\n        i = i + 1\n    ret i\n",
         );
         assert_eq!(span(&liveness, 0), (0, 15));
         assert_eq!(span(&liveness, 1), (3, 18));
@@ -259,7 +259,7 @@ mod tests {
     #[test]
     fn a_temporary_ends_where_its_last_reader_reads() {
         // mul 2/3, add 4/5, ret 6/7
-        let liveness = liveness("fn f(a: int, b: int) -> int;\n    ret a * b + 1\n");
+        let liveness = liveness("fn f(a: int, b: int) -> int:\n    ret a * b + 1\n");
         assert_eq!(span(&liveness, 0), (0, 2));
         assert_eq!(span(&liveness, 2), (3, 4));
         assert_eq!(span(&liveness, 3), (5, 6));
@@ -268,7 +268,7 @@ mod tests {
     #[test]
     fn only_values_needed_after_a_call_cross_it() {
         let liveness = liveness(
-            "fn f(a: int, b: int) -> int;\n    ret g(a) + b\nfn g(x: int) -> int;\n    ret x\n",
+            "fn f(a: int, b: int) -> int:\n    ret g(a) + b\nfn g(x: int) -> int:\n    ret x\n",
         );
         assert!(
             !crosses(&liveness, 0),
@@ -282,8 +282,8 @@ mod tests {
     fn every_result_of_a_call_starts_where_the_call_writes() {
         // b0 starts at 0, and `v3, v4 = call pair(v0)` reads at 2 and writes both results at 3
         let liveness = liveness(
-            "fn f(a: int) -> int;\n    x, y = pair(a)\n    ret x + y\n\
-             fn pair(n: int) -> tuple[int, int];\n    ret (n, n)\n",
+            "fn f(a: int) -> int:\n    x, y = pair(a)\n    ret x + y\n\
+             fn pair(n: int) -> tuple[int, int]:\n    ret (n, n)\n",
         );
         assert_eq!(span(&liveness, 0), (0, 2));
         assert_eq!(span(&liveness, 3).0, 3);
@@ -293,7 +293,7 @@ mod tests {
 
     #[test]
     fn a_value_live_into_a_loop_crosses_a_call_at_the_top_of_the_loop() {
-        let source = "fn f(n: int) -> int;\n    t = 0\n    while true;\n        print(t)\n        t = t + n\n";
+        let source = "fn f(n: int) -> int:\n    t = 0\n    while true:\n        print(t)\n        t = t + n\n";
         let liveness = liveness(source);
         assert!(crosses(&liveness, 0));
         assert!(crosses(&liveness, 1));
@@ -302,7 +302,7 @@ mod tests {
     #[test]
     fn deeper_loops_weigh_more() {
         let liveness = liveness(
-            "fn f(n: int) -> int;\n    a = 0\n    b = 0\n    for i in range(n);\n        b = b + 1\n    ret a + b\n",
+            "fn f(n: int) -> int:\n    a = 0\n    b = 0\n    for i in range(n):\n        b = b + 1\n    ret a + b\n",
         );
         let weight = |reg: u32| {
             liveness

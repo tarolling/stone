@@ -1,11 +1,11 @@
-struct Counter;
+struct Counter:
     n: int
 
-impl Counter;
-    fn bump(self, k: int);
+impl Counter:
+    fn bump(self, k: int):
         self.n += k
 
-fn noisy() -> int;
+fn noisy() -> int:
     print("argument")
     ret 1
 

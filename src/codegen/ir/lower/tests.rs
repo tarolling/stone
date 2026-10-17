@@ -27,7 +27,7 @@ fn lower_source(source: &str) -> Program {
 #[test]
 fn assigning_an_expression_to_a_local_writes_it_directly() {
     assert_eq!(
-        dump("fn f(x: int) -> int;\n    x = x + 1\n    ret x\n"),
+        dump("fn f(x: int) -> int:\n    x = x + 1\n    ret x\n"),
         "fn f(v0):\nb0:\n  v0 = add v0, 1\n  ret v0\nfn main():\nb0:\n  ret 0\n"
     );
 }
@@ -35,15 +35,15 @@ fn assigning_an_expression_to_a_local_writes_it_directly() {
 #[test]
 fn an_augmented_local_writes_it_directly() {
     assert_eq!(
-        dump("fn f(x: int) -> int;\n    x += 1\n    ret x\n"),
-        dump("fn f(x: int) -> int;\n    x = x + 1\n    ret x\n")
+        dump("fn f(x: int) -> int:\n    x += 1\n    ret x\n"),
+        dump("fn f(x: int) -> int:\n    x = x + 1\n    ret x\n")
     );
 }
 
 #[test]
 fn an_augmented_element_reads_it_then_changes_it() {
     let source =
-        "fn f(xs: list[int], i: int) -> list[int];\n    xs[i] *= 3\n    ret xs\nprint(f([1], 0))\n";
+        "fn f(xs: list[int], i: int) -> list[int]:\n    xs[i] *= 3\n    ret xs\nprint(f([1], 0))\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
@@ -54,7 +54,7 @@ fn an_augmented_element_reads_it_then_changes_it() {
 
 #[test]
 fn an_augmented_element_evaluates_its_index_once() {
-    let source = "fn pick() -> int;\n    ret 0\nfn f(xs: list[int]) -> list[int];\n    xs[pick()] += 1\n    ret xs\nprint(f([1]))\n";
+    let source = "fn pick() -> int:\n    ret 0\nfn f(xs: list[int]) -> list[int]:\n    xs[pick()] += 1\n    ret xs\nprint(f([1]))\n";
     let ir = dump(source);
     let f = ir
         .split("fn f(")
@@ -69,7 +69,7 @@ fn an_augmented_element_evaluates_its_index_once() {
 #[test]
 fn an_augmented_list_is_changed_in_place() {
     let ir = first_function(
-        "fn f(a: list[int], b: list[int]) -> list[int];\n    a += b\n    ret a\nf([1], [2])\n",
+        "fn f(a: list[int], b: list[int]) -> list[int]:\n    a += b\n    ret a\nf([1], [2])\n",
     );
     assert!(ir.contains("call stone.list_reuse"), "{ir}");
     assert!(!ir.contains("stone.list_new"), "{ir}");
@@ -78,7 +78,7 @@ fn an_augmented_list_is_changed_in_place() {
 #[test]
 fn an_augmented_row_is_replaced_by_a_new_one() {
     let ir = first_function(
-        "fn f(rows: list[list[int]]) -> list[list[int]];\n    rows[0] += 1\n    ret rows\nf([[1]])\n",
+        "fn f(rows: list[list[int]]) -> list[list[int]]:\n    rows[0] += 1\n    ret rows\nf([[1]])\n",
     );
     // one loop over the row, stored over the old row, which is released
     assert_eq!(ir.matches("list_set").count(), 1, "{ir}");
@@ -90,7 +90,7 @@ fn an_augmented_row_is_replaced_by_a_new_one() {
 #[test]
 fn a_while_test_becomes_a_compare_and_branch() {
     let source =
-        "fn f(n: int) -> int;\n    i = 0\n    while i < n;\n        i = i + 1\n    ret i\n";
+        "fn f(n: int) -> int:\n    i = 0\n    while i < n:\n        i = i + 1\n    ret i\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0):\n\
@@ -110,7 +110,7 @@ fn a_while_test_becomes_a_compare_and_branch() {
 
 #[test]
 fn chained_compares_and_boolean_operators_in_conditions_branch_directly() {
-    let source = "fn f(a: int, b: int, c: int) -> int;\n    if a < b < c and not a == c;\n        ret 1\n    ret 0\n";
+    let source = "fn f(a: int, b: int, c: int) -> int:\n    if a < b < c and not a == c:\n        ret 1\n    ret 0\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1, v2):\n\
@@ -124,7 +124,7 @@ fn chained_compares_and_boolean_operators_in_conditions_branch_directly() {
 
 #[test]
 fn a_range_loop_counts_with_hidden_vregs_and_copies_a_variable_bound() {
-    let source = "fn f(n: int) -> int;\n    t = 0\n    for i in range(1, n);\n        t = t + i\n    ret t\n";
+    let source = "fn f(n: int) -> int:\n    t = 0\n    for i in range(1, n):\n        t = t + i\n    ret t\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0):\n\
@@ -137,13 +137,13 @@ fn a_range_loop_counts_with_hidden_vregs_and_copies_a_variable_bound() {
 
 #[test]
 fn a_constant_range_bound_stays_an_immediate() {
-    let dump = dump("fn f();\n    for i in range(10);\n        print(i)\n");
+    let dump = dump("fn f():\n    for i in range(10):\n        print(i)\n");
     assert!(dump.contains("br_lt v1, 10 -> "), "{dump}");
 }
 
 #[test]
 fn top_level_list_loops_hold_their_list_and_main_releases_globals() {
-    let source = "xs = [1, 2]\nfor x in xs;\n    if x > 1;\n        break\n    print(x)\nret 5\n";
+    let source = "xs = [1, 2]\nfor x in xs:\n    if x > 1:\n        break\n    print(x)\nret 5\n";
     assert_eq!(
         dump(source),
         "fn main():\n\
@@ -162,7 +162,7 @@ fn top_level_list_loops_hold_their_list_and_main_releases_globals() {
 #[test]
 fn and_as_a_value_short_circuits_through_a_result_vreg() {
     assert_eq!(
-        dump("fn f(a: bool, b: bool) -> bool;\n    ret a and b\nprint(f(true, false))\n")
+        dump("fn f(a: bool, b: bool) -> bool:\n    ret a and b\nprint(f(true, false))\n")
             .split("fn main")
             .next()
             .unwrap(),
@@ -176,7 +176,7 @@ fn and_as_a_value_short_circuits_through_a_result_vreg() {
 #[test]
 fn a_list_literal_is_built_before_its_variable_lets_go_of_the_old_list() {
     assert_eq!(
-        dump("fn f(x: list[int]) -> list[int];\n    x = [x[0]]\n    ret x\nprint(f([1]))\n")
+        dump("fn f(x: list[int]) -> list[int]:\n    x = [x[0]]\n    ret x\nprint(f([1]))\n")
             .split("fn main")
             .next()
             .unwrap(),
@@ -189,7 +189,7 @@ fn a_list_literal_is_built_before_its_variable_lets_go_of_the_old_list() {
 #[test]
 fn assigning_a_string_releases_the_old_value_after_computing_the_new_one() {
     assert_eq!(
-        dump("fn f(s: str) -> str;\n    s = s + \"x\"\n    ret s\nprint(f(\"a\"))\n"),
+        dump("fn f(s: str) -> str:\n    s = s + \"x\"\n    ret s\nprint(f(\"a\"))\n"),
         "fn f(v0):\n\
          b0:\n  v1 = str \"x\"\n  v2 = call stone.str_concat(v0, v1)\n  \
          release_str v0\n  v0 = copy v2\n  ret v0\n\
@@ -201,8 +201,8 @@ fn assigning_a_string_releases_the_old_value_after_computing_the_new_one() {
 
 #[test]
 fn parameters_are_borrowed_unless_changed_and_temporaries_are_released_once_used() {
-    let source = "fn f(xs: list[str], i: int);\n    xs[i] = xs[0]\n    g(xs[1] + \"!\")\n\
-                  fn g(s: str) -> str;\n    ret s\nf([\"a\"], 0)\n";
+    let source = "fn f(xs: list[str], i: int):\n    xs[i] = xs[0]\n    g(xs[1] + \"!\")\n\
+                  fn g(s: str) -> str:\n    ret s\nf([\"a\"], 0)\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
@@ -218,7 +218,7 @@ fn parameters_are_borrowed_unless_changed_and_temporaries_are_released_once_used
 #[test]
 fn a_chain_of_string_compares_releases_its_operand_when_it_stops_early() {
     assert_eq!(
-        dump("fn f(a: str, b: str, c: str) -> bool;\n    ret a == b + \"\" == c\nprint(f(\"a\", \"b\", \"c\"))\n")
+        dump("fn f(a: str, b: str, c: str) -> bool:\n    ret a == b + \"\" == c\nprint(f(\"a\", \"b\", \"c\"))\n")
             .split("fn main")
             .next()
             .unwrap(),
@@ -233,7 +233,7 @@ fn a_chain_of_string_compares_releases_its_operand_when_it_stops_early() {
 
 #[test]
 fn returning_from_a_list_loop_releases_the_list_and_gives_up_the_local() {
-    let source = "fn f(xs: list[str]) -> str;\n    for x in xs;\n        if x == \"a\";\n            ret x\n    \
+    let source = "fn f(xs: list[str]) -> str:\n    for x in xs:\n        if x == \"a\":\n            ret x\n    \
                   ret \"\"\nprint(f([\"a\"]))\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
@@ -250,23 +250,23 @@ fn returning_from_a_list_loop_releases_the_list_and_gives_up_the_local() {
 
 #[test]
 fn functions_read_globals_with_a_check_and_main_without() {
-    let dump = dump("g = 1\nfn f() -> int;\n    ret g\nprint(g + f())\n");
+    let dump = dump("g = 1\nfn f() -> int:\n    ret g\nprint(g + f())\n");
     assert!(dump.contains("v0 = load_global_checked g"), "{dump}");
     assert!(dump.contains("= load_global g"), "{dump}");
 }
 
 #[test]
 fn negative_literals_fold_to_immediates() {
-    let ints = dump("fn f(x: int) -> int;\n    ret x / -4\nprint(f(8))\n");
+    let ints = dump("fn f(x: int) -> int:\n    ret x / -4\nprint(f(8))\n");
     assert!(ints.contains("div v0, -4"), "{ints}");
-    let floats = dump("fn f(x: float) -> float;\n    ret x * -1.5\nprint(f(2.0))\n");
+    let floats = dump("fn f(x: float) -> float:\n    ret x * -1.5\nprint(f(2.0))\n");
     let bits = (-1.5f64).to_bits() as i64;
     assert!(floats.contains(&format!("fmul v0, {bits}")), "{floats}");
 }
 
 #[test]
 fn methods_lower_to_list_and_string_operations() {
-    let source = "fn f(xs: list[int], s: str) -> int;\n    xs.append(s.len())\n    ret xs.len()\nf([], \"a\")\n";
+    let source = "fn f(xs: list[int], s: str) -> int:\n    xs.append(s.len())\n    ret xs.len()\nf([], \"a\")\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
@@ -277,7 +277,7 @@ fn methods_lower_to_list_and_string_operations() {
 
 #[test]
 fn a_changed_parameter_is_owned_and_made_unique_before_each_change() {
-    let source = "fn f(xs: list[int], i: int) -> list[int];\n    xs[i] = 0\n    xs.append(i)\n    ret xs\nprint(f([1], 0))\n";
+    let source = "fn f(xs: list[int], i: int) -> list[int]:\n    xs[i] = 0\n    xs.append(i)\n    ret xs\nprint(f([1], 0))\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
@@ -296,13 +296,13 @@ fn a_nested_change_makes_every_list_on_the_way_unique() {
 }
 
 /// A function that appends to its parameter and returns it, for the tests of moves below.
-const ADD: &str = "fn add(xs: list[int], x: int) -> list[int];\n    xs.append(x)\n    ret xs\n";
+const ADD: &str = "fn add(xs: list[int], x: int) -> list[int]:\n    xs.append(x)\n    ret xs\n";
 
 #[test]
 fn the_caller_gives_an_owned_parameter_its_reference() {
     // a borrowed variable is retained for the call, and a temporary is given up
     let source = format!(
-        "{ADD}fn f(ys: list[int]) -> list[list[int]];\n    ret [add(ys, 1), add([2], 3)]\nprint(f([0]))\n"
+        "{ADD}fn f(ys: list[int]) -> list[list[int]]:\n    ret [add(ys, 1), add([2], 3)]\nprint(f([0]))\n"
     );
     let dump = dump(&source);
     assert!(
@@ -317,7 +317,7 @@ fn the_caller_gives_an_owned_parameter_its_reference() {
 #[test]
 fn a_local_assigned_the_result_of_a_call_is_moved_into_it() {
     let source = format!(
-        "{ADD}fn f(xs: list[int]) -> list[int];\n    xs = add(xs, 1)\n    ret xs\nprint(f([0]))\n"
+        "{ADD}fn f(xs: list[int]) -> list[int]:\n    xs = add(xs, 1)\n    ret xs\nprint(f([0]))\n"
     );
     let dump = dump(&source);
     assert!(
@@ -328,8 +328,8 @@ fn a_local_assigned_the_result_of_a_call_is_moved_into_it() {
 
 #[test]
 fn only_one_of_two_copies_of_an_argument_moves() {
-    let source = "fn two(xs: list[int], ys: list[int]) -> list[int];\n    ys.append(2)\n    xs.append(ys.len())\n    ret xs\n\
-                  fn f(xs: list[int]) -> list[int];\n    xs = two(xs, xs)\n    ret xs\nprint(f([0]))\n";
+    let source = "fn two(xs: list[int], ys: list[int]) -> list[int]:\n    ys.append(2)\n    xs.append(ys.len())\n    ret xs\n\
+                  fn f(xs: list[int]) -> list[int]:\n    xs = two(xs, xs)\n    ret xs\nprint(f([0]))\n";
     let dump = dump(source);
     assert!(
         dump.contains("fn f(v0):\nb0:\n  retain v0\n  v1 = call two(v0, v0)\n  v0 = copy v1\n"),
@@ -345,8 +345,8 @@ fn a_global_moves_only_into_a_function_that_never_reads_it() {
         "{moved}"
     );
     // `peek` reads xs, so the call needs a copy
-    let source = "fn peek(ys: list[int]) -> list[int];\n    ys.append(xs[0])\n    ret ys\n\
-                  fn add(ys: list[int]) -> list[int];\n    ys.append(1)\n    ret peek(ys)\nxs = [0]\nxs = add(xs)\n";
+    let source = "fn peek(ys: list[int]) -> list[int]:\n    ys.append(xs[0])\n    ret ys\n\
+                  fn add(ys: list[int]) -> list[int]:\n    ys.append(1)\n    ret peek(ys)\nxs = [0]\nxs = add(xs)\n";
     let kept = dump(source);
     assert!(
         kept.contains("v2 = load_global xs\n  retain v2\n  v3 = call add(v2)\n"),
@@ -357,7 +357,7 @@ fn a_global_moves_only_into_a_function_that_never_reads_it() {
 #[test]
 fn a_variable_moves_into_a_call_at_its_last_use_and_is_left_null() {
     let source = format!(
-        "{ADD}fn f(n: int) -> list[int];\n    xs = [n]\n    ys = add(xs, 1)\n    ret ys\nprint(f(0))\n"
+        "{ADD}fn f(n: int) -> list[int]:\n    xs = [n]\n    ys = add(xs, 1)\n    ret ys\nprint(f(0))\n"
     );
     let dump = dump(&source);
     assert!(
@@ -366,7 +366,7 @@ fn a_variable_moves_into_a_call_at_its_last_use_and_is_left_null() {
     );
     // a later read keeps the variable's own copy
     let source = format!(
-        "{ADD}fn f(n: int) -> list[int];\n    xs = [n]\n    ys = add(xs, 1)\n    print(xs)\n    ret ys\n\
+        "{ADD}fn f(n: int) -> list[int]:\n    xs = [n]\n    ys = add(xs, 1)\n    print(xs)\n    ret ys\n\
          print(f(0))\n"
     );
     let dump = super::tests::dump(&source);
@@ -379,14 +379,14 @@ fn a_variable_moves_into_a_call_at_its_last_use_and_is_left_null() {
 #[test]
 fn a_variable_moves_into_another_variable_or_a_list_at_its_last_use() {
     let dump =
-        dump("fn f(n: int) -> list[int];\n    xs = [n]\n    ys = xs\n    ret ys\nprint(f(0))\n");
+        dump("fn f(n: int) -> list[int]:\n    xs = [n]\n    ys = xs\n    ret ys\nprint(f(0))\n");
     assert!(
         dump.contains(
             "release_list v2\n  v2 = copy v1\n  v1 = copy 0\n  release_list v1\n  ret v2\n"
         ),
         "{dump}"
     );
-    let source = "fn f(n: int) -> list[list[int]];\n    rows = []\n    row = [n]\n    rows.append(row)\n    \
+    let source = "fn f(n: int) -> list[list[int]]:\n    rows = []\n    row = [n]\n    rows.append(row)\n    \
                   ret rows\nprint(f(0))\n";
     let dump = super::tests::dump(source);
     assert!(
@@ -407,7 +407,7 @@ fn a_global_moves_at_its_last_use_in_main() {
 
 #[test]
 fn returning_a_call_moves_the_locals_it_is_given() {
-    let source = "fn fill(xs: list[int], n: int) -> list[int];\n    if n == 0;\n        ret xs\n    xs.append(n)\n    \
+    let source = "fn fill(xs: list[int], n: int) -> list[int]:\n    if n == 0:\n        ret xs\n    xs.append(n)\n    \
                   ret fill(xs, n - 1)\nprint(fill([], 3))\n";
     let dump = dump(source);
     assert!(
@@ -419,7 +419,7 @@ fn returning_a_call_moves_the_locals_it_is_given() {
 #[test]
 fn modulo_and_power_lower_to_arithmetic() {
     assert_eq!(
-        dump("fn f(x: int, n: int) -> int;\n    ret x % n ** 2\nprint(f(7, 2))\n")
+        dump("fn f(x: int, n: int) -> int:\n    ret x % n ** 2\nprint(f(7, 2))\n")
             .split("fn main")
             .next()
             .unwrap(),
@@ -427,7 +427,7 @@ fn modulo_and_power_lower_to_arithmetic() {
     );
     // a float power's exponent stays an int, not float bits
     let floats = dump(
-        "fn f(x: float, n: int) -> float;\n    ret x % 1.5 ** n + x ** -2\nprint(f(2.0, 3))\n",
+        "fn f(x: float, n: int) -> float:\n    ret x % 1.5 ** n + x ** -2\nprint(f(2.0, 3))\n",
     );
     let bits = 1.5f64.to_bits() as i64;
     assert!(floats.contains(&format!("fpow {bits}, v1")), "{floats}");
@@ -437,9 +437,9 @@ fn modulo_and_power_lower_to_arithmetic() {
 
 #[test]
 fn io_and_string_builtins_call_the_runtime() {
-    let source = "fn f(s: str, n: int, x: float, b: bool) -> list[str];\n    \
+    let source = "fn f(s: str, n: int, x: float, b: bool) -> list[str]:\n    \
                   ret [input(), input(s), str(n), str(x), str(b), str(s), s.strip()]\n\
-                  fn g(s: str) -> int;\n    \
+                  fn g(s: str) -> int:\n    \
                   ret int(s) + int(float(s)) + args().len() + s.split().len() + s.split(s).len()\n\
                   f(\"a\", 1, 1.5, true)\ng(\"1\")\nprint(eof())\n";
     let text = dump(source);
@@ -463,7 +463,7 @@ fn io_and_string_builtins_call_the_runtime() {
 
 #[test]
 fn string_indexes_check_the_length_then_call_the_runtime() {
-    let source = "fn f(s: str, i: int) -> str;\n    ret s[i]\nprint(f(\"a\", 0))\n";
+    let source = "fn f(s: str, i: int) -> str:\n    ret s[i]\nprint(f(\"a\", 0))\n";
     let text = dump(source);
     let f = text.split("fn main").next().unwrap();
     for line in [
@@ -480,7 +480,7 @@ fn string_indexes_check_the_length_then_call_the_runtime() {
 
 #[test]
 fn string_slices_and_methods_call_the_runtime() {
-    let source = "fn f(s: str, xs: list[str]) -> list[str];\n    \
+    let source = "fn f(s: str, xs: list[str]) -> list[str]:\n    \
                   ret [s[1:], s[::-1], s.join(xs), str(s.find(s).unwrap_or(-1)), str(s.startswith(s))]\n\
                   print(f(\"a\", []))\n";
     let text = dump(source);
@@ -498,7 +498,7 @@ fn string_slices_and_methods_call_the_runtime() {
 
 #[test]
 fn a_for_loop_over_a_string_steps_by_each_character() {
-    let source = "fn f(s: str) -> int;\n    n = 0\n    for c in s;\n        n = n + 1\n    ret n\n\
+    let source = "fn f(s: str) -> int:\n    n = 0\n    for c in s:\n        n = n + 1\n    ret n\n\
                   print(f(\"a\"))\n";
     let text = dump(source);
     let f = text.split("fn main").next().unwrap();
@@ -511,14 +511,14 @@ fn a_for_loop_over_a_string_steps_by_each_character() {
 
 #[test]
 fn endswith_calls_the_runtime() {
-    let text = dump("fn f(s: str) -> bool;\n    ret s.endswith(s)\nprint(f(\"a\"))\n");
+    let text = dump("fn f(s: str) -> bool:\n    ret s.endswith(s)\nprint(f(\"a\"))\n");
     assert!(text.contains("call stone.str_ends(v0, v0)"), "{text}");
 }
 
 #[test]
 fn string_order_compares_the_runtime_result_with_zero() {
-    let source = "fn f(a: str, b: str) -> bool;\n    ret a <= b\n\
-                  fn g(a: str, b: str) -> int;\n    if a > b;\n        ret 1\n    ret 0\n\
+    let source = "fn f(a: str, b: str) -> bool:\n    ret a <= b\n\
+                  fn g(a: str, b: str) -> int:\n    if a > b:\n        ret 1\n    ret 0\n\
                   print(f(\"a\", \"b\"), g(\"a\", \"b\"))\n";
     let text = dump(source);
     assert!(
@@ -533,7 +533,7 @@ fn string_order_compares_the_runtime_result_with_zero() {
 
 #[test]
 fn a_row_read_for_indexing_is_borrowed_unless_a_call_could_replace_it() {
-    let source = "fn f(a: list[list[int]], i: int, k: int) -> int;\n    ret a[i][k] + a[i][g(k)]\nfn g(k: int) -> int;\n    ret k\n\
+    let source = "fn f(a: list[list[int]], i: int, k: int) -> int:\n    ret a[i][k] + a[i][g(k)]\nfn g(k: int) -> int:\n    ret k\n\
                   print(f([[1]], 0, 0))\n";
     assert_eq!(
         dump(source).split("fn g").next().unwrap(),
@@ -599,7 +599,7 @@ fn first_function(source: &str) -> String {
 
 #[test]
 fn math_abs_branches_instead_of_calling() {
-    let ints = "use math\nfn f(x: int) -> int;\n    ret math.abs(x)\nprint(f(1))\n";
+    let ints = "use math\nfn f(x: int) -> int:\n    ret math.abs(x)\nprint(f(1))\n";
     assert_eq!(
         first_function(ints),
         "fn f(v0):\n\
@@ -610,7 +610,7 @@ fn math_abs_branches_instead_of_calling() {
          b4:\n  v1 = copy v0\n  jmp b5\n\
          b5:\n  ret v1\n"
     );
-    let floats = "use math\nfn f(x: float) -> float;\n    ret math.abs(x)\nprint(f(1.5))\n";
+    let floats = "use math\nfn f(x: float) -> float:\n    ret math.abs(x)\nprint(f(1.5))\n";
     // 0.0 - x rather than a sign flip, so -0.0 becomes 0.0
     assert_eq!(
         first_function(floats),
@@ -624,7 +624,7 @@ fn math_abs_branches_instead_of_calling() {
 
 #[test]
 fn math_min_and_max_fold_from_the_left() {
-    let several = "use math\nfn f(a: int, b: int, c: int) -> int;\n    ret math.max(a, b, c)\nprint(f(1, 2, 3))\n";
+    let several = "use math\nfn f(a: int, b: int, c: int) -> int:\n    ret math.max(a, b, c)\nprint(f(1, 2, 3))\n";
     assert_eq!(
         first_function(several),
         "fn f(v0, v1, v2):\n\
@@ -634,7 +634,7 @@ fn math_min_and_max_fold_from_the_left() {
          b3:\n  v3 = copy v2\n  jmp b4\n\
          b4:\n  ret v3\n"
     );
-    let list = "use math\nfn f(xs: list[float]) -> float;\n    ret math.min(xs)\nprint(f([1.5]))\n";
+    let list = "use math\nfn f(xs: list[float]) -> float:\n    ret math.min(xs)\nprint(f([1.5]))\n";
     assert_eq!(
         first_function(list),
         "fn f(v0):\n\
@@ -651,7 +651,7 @@ fn math_min_and_max_fold_from_the_left() {
 
 #[test]
 fn math_sqrt_and_floor_check_their_argument_first() {
-    let sqrt = "use math\nfn f(x: int) -> float;\n    ret math.sqrt(x)\nprint(f(2))\n";
+    let sqrt = "use math\nfn f(x: int) -> float:\n    ret math.sqrt(x)\nprint(f(2))\n";
     assert_eq!(
         first_function(sqrt),
         "fn f(v0):\n\
@@ -659,7 +659,7 @@ fn math_sqrt_and_floor_check_their_argument_first() {
          b1:\n  fail \"math domain error\"\n\
          b2:\n  v2 = fsqrt v1\n  ret v2\n"
     );
-    let floor = "use math\nfn f(x: float) -> int;\n    ret math.floor(x)\nprint(f(2.5))\n";
+    let floor = "use math\nfn f(x: float) -> int:\n    ret math.floor(x)\nprint(f(2.5))\n";
     assert_eq!(
         first_function(floor),
         "fn f(v0):\n\
@@ -691,7 +691,7 @@ fn time_functions_call_the_runtime() {
 fn randint_checks_its_range_then_draws_below_the_span() {
     assert_eq!(
         first_function(
-            "use random\nfn f(a: int, b: int) -> int;\n    ret random.randint(a, b)\nprint(f(1, 6))\n"
+            "use random\nfn f(a: int, b: int) -> int:\n    ret random.randint(a, b)\nprint(f(1, 6))\n"
         ),
         "fn f(v0, v1):\n\
          b0:\n  br_gt v0, v1 -> b1, b2\n\
@@ -704,7 +704,7 @@ fn randint_checks_its_range_then_draws_below_the_span() {
 #[test]
 fn choice_retains_a_counted_element() {
     let text = first_function(
-        "use random\nfn f(xs: list[str]) -> str;\n    ret random.choice(xs)\nprint(f([\"a\"]))\n",
+        "use random\nfn f(xs: list[str]) -> str:\n    ret random.choice(xs)\nprint(f([\"a\"]))\n",
     );
     assert_eq!(
         text,
@@ -719,7 +719,7 @@ fn choice_retains_a_counted_element() {
 #[test]
 fn elementwise_arithmetic_is_one_loop_with_no_temporary_lists() {
     let ir = first_function(
-        "fn f(a: list[int], b: list[int]) -> list[int];\n    ret a * 2 + b * b\nf([1], [2])\n",
+        "fn f(a: list[int], b: list[int]) -> list[int]:\n    ret a * 2 + b * b\nf([1], [2])\n",
     );
     // the lengths are checked once, then each element is read, computed, and stored
     assert_eq!(ir.matches("= len ").count(), 2, "{ir}");
@@ -738,7 +738,7 @@ fn elementwise_arithmetic_is_one_loop_with_no_temporary_lists() {
 #[test]
 fn elementwise_float_arithmetic_uses_float_instructions() {
     let ir = first_function(
-        "fn f(a: list[float], k: float) -> list[float];\n    ret -(a * k) + 1.5\nf([1.0], 2.0)\n",
+        "fn f(a: list[float], k: float) -> list[float]:\n    ret -(a * k) + 1.5\nf([1.0], 2.0)\n",
     );
     assert!(ir.contains("fmul"), "{ir}");
     assert!(ir.contains("fneg"), "{ir}");
@@ -749,18 +749,18 @@ fn elementwise_float_arithmetic_uses_float_instructions() {
 fn elementwise_arithmetic_reuses_a_list_at_its_last_use() {
     // `a` is assigned, so its old list can hold the result
     let ir = first_function(
-        "fn f(a: list[int], b: list[int]) -> list[int];\n    a = a * 2 + b\n    ret a\nf([1], [2])\n",
+        "fn f(a: list[int], b: list[int]) -> list[int]:\n    a = a * 2 + b\n    ret a\nf([1], [2])\n",
     );
     assert!(ir.contains("call stone.list_reuse"), "{ir}");
     assert!(!ir.contains("stone.list_new"), "{ir}");
     // `b` is not read afterward, so it can too, though `a`, read afterward, cannot
     let ir = first_function(
-        "fn f(x: list[int]) -> list[list[int]];\n    a = x * 1\n    b = a * 2\n    c = b + a\n    ret [a, c]\nf([1])\n",
+        "fn f(x: list[int]) -> list[list[int]]:\n    a = x * 1\n    b = a * 2\n    c = b + a\n    ret [a, c]\nf([1])\n",
     );
     assert_eq!(ir.matches("call stone.list_reuse").count(), 1, "{ir}");
     assert_eq!(ir.matches("call stone.list_new(v").count(), 2, "{ir}");
     // and a borrowed parameter belongs to the caller
-    let ir = first_function("fn f(a: list[int]) -> list[int];\n    c = a + 1\n    ret c\nf([1])\n");
+    let ir = first_function("fn f(a: list[int]) -> list[int]:\n    c = a + 1\n    ret c\nf([1])\n");
     assert!(!ir.contains("stone.list_reuse"), "{ir}");
     assert!(ir.contains("call stone.list_new"), "{ir}");
 }
@@ -768,7 +768,7 @@ fn elementwise_arithmetic_reuses_a_list_at_its_last_use() {
 #[test]
 fn elementwise_arithmetic_packs_pairs_when_it_can() {
     let ir = first_function(
-        "fn f(a: list[float], b: list[float]) -> list[float];\n    ret -(a * 2.5) / b\nf([1.0], [2.0])\n",
+        "fn f(a: list[float], b: list[float]) -> list[float]:\n    ret -(a * 2.5) / b\nf([1.0], [2.0])\n",
     );
     assert!(
         ir.contains("= packed v") && ir.contains("fdiv(fneg(fmul([v"),
@@ -785,12 +785,12 @@ fn elementwise_arithmetic_packs_pairs_when_it_can() {
         .unwrap();
     assert!(ir.contains(&format!("= copy {}", done.trim())), "{ir}");
     // ints add and subtract in pairs
-    let ir = first_function("fn f(a: list[int]) -> list[int];\n    ret a - 1 + a\nf([1])\n");
+    let ir = first_function("fn f(a: list[int]) -> list[int]:\n    ret a - 1 + a\nf([1])\n");
     assert!(ir.contains("add(sub([v"), "{ir}");
     // but nothing else on ints packs, so the single loop does all of it
-    let ir = first_function("fn f(a: list[int]) -> list[int];\n    ret a * 3\nf([1])\n");
+    let ir = first_function("fn f(a: list[int]) -> list[int]:\n    ret a * 3\nf([1])\n");
     assert!(!ir.contains("packed"), "{ir}");
-    let ir = first_function("fn f(a: list[float]) -> list[float];\n    ret a ** 2\nf([1.5])\n");
+    let ir = first_function("fn f(a: list[float]) -> list[float]:\n    ret a ** 2\nf([1.5])\n");
     assert!(!ir.contains("packed"), "{ir}");
 }
 
@@ -809,7 +809,7 @@ fn spans_of(source: &str, pick: impl Fn(&Inst) -> bool) -> Vec<Span> {
 
 #[test]
 fn each_instruction_records_the_innermost_expression_it_came_from() {
-    let source = "fn f(a: int, b: int) -> int;\n    ret 1 + a / b\n";
+    let source = "fn f(a: int, b: int) -> int:\n    ret 1 + a / b\n";
     let division = spans_of(source, |inst| {
         matches!(inst, Inst::Binary { op: BinOp::Div, .. })
     });
@@ -823,7 +823,7 @@ fn each_instruction_records_the_innermost_expression_it_came_from() {
 #[test]
 fn a_change_records_the_subscript_whose_index_it_checks() {
     let source =
-        "fn f(grid: list[list[int]]) -> list[list[int]];\n    grid[1][2] = 3\n    ret grid\n";
+        "fn f(grid: list[list[int]]) -> list[list[int]]:\n    grid[1][2] = 3\n    ret grid\n";
     // the row comes from grid[1], and the store goes to grid[1][2]
     let load = spans_of(source, |inst| matches!(inst, Inst::ListLoad { .. }));
     assert_eq!(load, [Span::new(Pos::new(2, 5), Pos::new(2, 12))]);
@@ -841,8 +841,8 @@ fn a_change_records_the_subscript_whose_index_it_checks() {
 
 #[test]
 fn a_tuple_is_returned_and_received_as_its_values() {
-    let source = "fn swap(a: int, b: int) -> tuple[int, int];\n    a, b = (b, a)\n    ret (a, b)\n\
-                  fn f() -> int;\n    x, y = swap(1, 2)\n    ret x - y\nprint(f())\n";
+    let source = "fn swap(a: int, b: int) -> tuple[int, int]:\n    a, b = (b, a)\n    ret (a, b)\n\
+                  fn f() -> int:\n    x, y = swap(1, 2)\n    ret x - y\nprint(f())\n";
     let ir = dump(source);
     // the swap copies both values before assigning either
     assert_eq!(
@@ -856,7 +856,7 @@ fn a_tuple_is_returned_and_received_as_its_values() {
 
 #[test]
 fn a_tuple_parameter_is_passed_as_its_values() {
-    let source = "fn first(t: tuple[int, tuple[str, float]]) -> str;\n    ret t[1][0]\n\
+    let source = "fn first(t: tuple[int, tuple[str, float]]) -> str:\n    ret t[1][0]\n\
                   print(first((1, (\"a\", 2.5))))\n";
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
@@ -866,7 +866,7 @@ fn a_tuple_parameter_is_passed_as_its_values() {
 
 #[test]
 fn a_local_returned_twice_gives_one_reference_and_retains_the_other() {
-    let source = "fn twice(s: str) -> tuple[str, str];\n    t = s + \"!\"\n    ret (t, t)\n\
+    let source = "fn twice(s: str) -> tuple[str, str]:\n    t = s + \"!\"\n    ret (t, t)\n\
                   print(twice(\"a\"))\n";
     let ir = dump(source);
     let twice = ir.split("fn main").next().unwrap();
@@ -876,7 +876,7 @@ fn a_local_returned_twice_gives_one_reference_and_retains_the_other() {
 
 #[test]
 fn a_field_of_a_list_element_reads_only_its_slot() {
-    let source = "fn first(pairs: list[tuple[str, int]], i: int) -> int;\n    ret pairs[i][1]\n\
+    let source = "fn first(pairs: list[tuple[str, int]], i: int) -> int:\n    ret pairs[i][1]\n\
                   print(first([(\"a\", 1)], 0))\n";
     let ir = dump(source);
     let first = ir.split("fn main").next().unwrap();
@@ -895,9 +895,9 @@ fn a_list_of_tuples_records_its_width_and_kinds() {
 
 #[test]
 fn a_variant_with_values_is_a_new_value_and_one_without_is_static() {
-    let source = "enum Shape;\n    Circle(float)\n    Named(str, int)\n    Empty\n\
-                  fn f(s: str) -> Shape;\n    ret Shape.Named(s, 2)\n\
-                  fn g() -> Shape;\n    ret Shape.Empty\n";
+    let source = "enum Shape:\n    Circle(float)\n    Named(str, int)\n    Empty\n\
+                  fn f(s: str) -> Shape:\n    ret Shape.Named(s, 2)\n\
+                  fn g() -> Shape:\n    ret Shape.Empty\n";
     let ir = dump(source);
     let f = ir.split("fn g").next().unwrap();
     // the string is counted, as the kinds 0b00_01 say, so the value keeps its own reference
@@ -918,8 +918,8 @@ fn a_variant_with_values_is_a_new_value_and_one_without_is_static() {
 
 #[test]
 fn a_match_checks_tags_then_binds_retained_values() {
-    let source = "fn f(x: option[str]) -> str;\n    match x;\n        case some(s);\n            \
-                  ret s\n        case none;\n            ret \"\"\n";
+    let source = "fn f(x: option[str]) -> str:\n    match x:\n        case some(s):\n            \
+                  ret s\n        case none:\n            ret \"\"\n";
     let ir = dump(source);
     let f = ir.split("fn main").next().unwrap();
     // the subject is read through a copy, since a case may assign the variable it came from
@@ -936,7 +936,7 @@ fn a_match_checks_tags_then_binds_retained_values() {
 #[test]
 fn pop_without_an_index_is_some_of_the_last_element_or_none() {
     let ir = first_function(
-        "fn f(xs: list[str]) -> option[str];\n    o = xs.pop()\n    ret o\nprint(f([]))\n",
+        "fn f(xs: list[str]) -> option[str]:\n    o = xs.pop()\n    ret o\nprint(f([]))\n",
     );
     // the list's reference to the element moves into the option, and the static none is
     // retained, so the option is owned either way
@@ -953,7 +953,7 @@ fn pop_without_an_index_is_some_of_the_last_element_or_none() {
 #[test]
 fn find_get_and_os_env_are_some_of_a_value_or_none() {
     let ir = first_function(
-        "fn f(s: str, m: map[int, str]) -> tuple[option[int], option[str]];\n    \
+        "fn f(s: str, m: map[int, str]) -> tuple[option[int], option[str]]:\n    \
          ret (s.find(\"a\"), m.get(1))\nprint(f(\"a\", {}))\n",
     );
     assert_eq!(
@@ -979,7 +979,7 @@ fn find_get_and_os_env_are_some_of_a_value_or_none() {
 #[test]
 fn unwrap_of_none_stops_the_program() {
     let ir =
-        first_function("fn f(x: option[int]) -> int;\n    ret x.unwrap()\nprint(f(some(1)))\n");
+        first_function("fn f(x: option[int]) -> int:\n    ret x.unwrap()\nprint(f(some(1)))\n");
     assert!(ir.contains("fail \"cannot unwrap none\""), "{ir}");
 }
 
@@ -1000,13 +1000,13 @@ fn printing_an_enum_calls_a_function_made_for_its_type() {
     );
 }
 
-const POINT: &str = "struct Point;\n    x: int\n    y: int\n";
+const POINT: &str = "struct Point:\n    x: int\n    y: int\n";
 
 #[test]
 fn a_struct_field_is_a_variable_of_its_own() {
     assert_eq!(
         dump(&format!(
-            "{POINT}fn f(p: Point) -> Point;\n    p.y = 7\n    p.x += p.y\n    ret p\n"
+            "{POINT}fn f(p: Point) -> Point:\n    p.y = 7\n    p.x += p.y\n    ret p\n"
         ))
         .split("fn main")
         .next()
@@ -1019,7 +1019,7 @@ fn a_struct_field_is_a_variable_of_its_own() {
 fn a_field_of_a_list_element_is_one_slot_of_it() {
     assert_eq!(
         dump(&format!(
-            "{POINT}fn f(ps: list[Point], i: int) -> list[Point];\n    ps[i].y = 7\n    ret ps\n"
+            "{POINT}fn f(ps: list[Point], i: int) -> list[Point]:\n    ps[i].y = 7\n    ret ps\n"
         ))
         .split("fn main")
         .next()
@@ -1038,10 +1038,10 @@ fn a_field_of_a_list_element_is_one_slot_of_it() {
 
 #[test]
 fn a_field_assigned_the_result_of_a_call_moves_into_it() {
-    let bag = "struct Bag;\n    items: list[int]\n    n: int\n";
-    let add = "fn add(xs: list[int], x: int) -> list[int];\n    xs.append(x)\n    ret xs\n";
+    let bag = "struct Bag:\n    items: list[int]\n    n: int\n";
+    let add = "fn add(xs: list[int], x: int) -> list[int]:\n    xs.append(x)\n    ret xs\n";
     let source =
-        format!("{bag}{add}fn f(b: Bag) -> Bag;\n    b.items = add(b.items, 1)\n    ret b\n");
+        format!("{bag}{add}fn f(b: Bag) -> Bag:\n    b.items = add(b.items, 1)\n    ret b\n");
     let dumped = dump(&source);
     let f = dumped
         .split("fn f")
@@ -1058,11 +1058,11 @@ fn a_field_assigned_the_result_of_a_call_moves_into_it() {
 
 #[test]
 fn a_method_that_changes_self_returns_it_for_its_caller_to_store() {
-    let source = "struct Bag;\n    items: list[int]\n    n: int\nimpl Bag;\n    \
-                  fn size(self) -> int;\n        ret self.items.len()\n    \
-                  fn add(self, x: int);\n        self.items.append(x)\n    \
-                  fn items_of(self) -> list[int];\n        self.n += 1\n        ret self.items\n\
-                  fn f(b: Bag) -> int;\n    b.add(1)\n    ret b.size()\n";
+    let source = "struct Bag:\n    items: list[int]\n    n: int\nimpl Bag:\n    \
+                  fn size(self) -> int:\n        ret self.items.len()\n    \
+                  fn add(self, x: int):\n        self.items.append(x)\n    \
+                  fn items_of(self) -> list[int]:\n        self.n += 1\n        ret self.items\n\
+                  fn f(b: Bag) -> int:\n    b.add(1)\n    ret b.size()\n";
     let dumped = dump(source);
     let function = |name: &str| {
         dumped
@@ -1100,7 +1100,7 @@ fn a_method_that_changes_self_returns_it_for_its_caller_to_store() {
 #[test]
 fn comparing_structs_in_a_condition_branches_on_each_value() {
     let ir = dump(&format!(
-        "{POINT}fn f(a: Point, b: Point) -> int;\n    if a == b;\n        ret 1\n    ret 0\n"
+        "{POINT}fn f(a: Point, b: Point) -> int:\n    if a == b:\n        ret 1\n    ret 0\n"
     ));
     let f = ir.split("fn main").next().unwrap();
     assert!(f.contains("br_eq v0, v2 -> b"), "{f}");
@@ -1111,7 +1111,7 @@ fn comparing_structs_in_a_condition_branches_on_each_value() {
 #[test]
 fn comparing_tuples_as_a_value_writes_one_or_zero() {
     let ir = dump(
-        "fn f(a: tuple[str, float], b: tuple[str, float]) -> bool;\n    ret a != b\n\
+        "fn f(a: tuple[str, float], b: tuple[str, float]) -> bool:\n    ret a != b\n\
          print(f((\"a\", 1.0), (\"a\", 1.0)))\n",
     );
     let f = ir.split("fn main").next().unwrap();
@@ -1122,7 +1122,7 @@ fn comparing_tuples_as_a_value_writes_one_or_zero() {
 #[test]
 fn comparing_enums_calls_a_function_made_for_their_type() {
     let ir = dump(
-        "fn f(a: option[int], b: option[int]) -> bool;\n    ret a == b\nprint(f(none, none))\n",
+        "fn f(a: option[int], b: option[int]) -> bool:\n    ret a == b\nprint(f(none, none))\n",
     );
     assert!(
         ir.contains("call stone.eq_enum.option.int(v0, v1, 0)"),

@@ -1,21 +1,21 @@
 // enums can hold themselves, so they make trees and linked lists
-enum Tree;
+enum Tree:
     Leaf(int)
     Node(Tree, Tree)
 
-fn build(depth: int, start: int) -> Tree;
-    if depth == 0;
+fn build(depth: int, start: int) -> Tree:
+    if depth == 0:
         ret Tree.Leaf(start)
     half = 1
-    for i in range(depth - 1);
+    for i in range(depth - 1):
         half = half * 2
     ret Tree.Node(build(depth - 1, start), build(depth - 1, start + half))
 
-fn total(t: Tree) -> int;
-    match t;
-        case Tree.Leaf(n);
+fn total(t: Tree) -> int:
+    match t:
+        case Tree.Leaf(n):
             ret n
-        case Tree.Node(left, right);
+        case Tree.Node(left, right):
             ret total(left) + total(right)
 
 small = build(2, 1)
@@ -24,40 +24,40 @@ print(total(build(10, 1)))
 
 // a list of 300,000 nodes is freed without running out of stack, which freeing each node's
 // next node inside its own would
-enum Chain;
+enum Chain:
     Link(int, Chain)
     End
 
 chain = Chain.End
-for i in range(300000);
+for i in range(300000):
     chain = Chain.Link(i, chain)
 sum = 0
 steps = 0
 done = false
-while not done;
-    match chain;
-        case Chain.Link(n, rest);
+while not done:
+    match chain:
+        case Chain.Link(n, rest):
             sum += n
             steps += 1
             chain = rest
-        case Chain.End;
+        case Chain.End:
             done = true
 print(steps, sum)
 long = Chain.End
-for i in range(300000);
+for i in range(300000):
     long = Chain.Link(i, long)
 long = Chain.End
 print(long)
 
 // a variant can hold a list of its own enum
-enum Rose;
+enum Rose:
     Node(str, list[Rose])
 
-fn count(r: Rose) -> int;
-    match r;
-        case Rose.Node(_, children);
+fn count(r: Rose) -> int:
+    match r:
+        case Rose.Node(_, children):
             n = 1
-            for child in children;
+            for child in children:
                 n += count(child)
             ret n
 

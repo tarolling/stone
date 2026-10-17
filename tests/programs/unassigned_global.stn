@@ -1,5 +1,5 @@
 // a function can read a global that is assigned later, but not before it is assigned
-fn read_total() -> int;
+fn read_total() -> int:
     ret total
 print("start")
 print(read_total())

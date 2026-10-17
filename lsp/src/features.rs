@@ -303,10 +303,10 @@ fn variant_signature(variant: &Symbol) -> String {
 /// Returns the `//` comment lines directly above a function's or variable's definition, without
 /// their `//` and the space after it, as Markdown for hover.
 ///
-/// For example, for `f` in `"// adds one\n// to n\nfn f(n);\n    ret n + 1\n"` this returns
+/// For example, for `f` in `"// adds one\n// to n\nfn f(n):\n    ret n + 1\n"` this returns
 /// `"adds one\nto n"`. A line that is only `//` becomes a paragraph break. A blank line between
 /// the comment and the definition detaches it, parameters are never documented, and neither is a
-/// definition that does not start its line, such as `i` in `for i in range(3);`.
+/// definition that does not start its line, such as `i` in `for i in range(3):`.
 fn doc_comment(text: &str, symbol: &Symbol) -> Option<String> {
     if symbol.kind == StoneSymbolKind::Parameter {
         return None;
@@ -337,7 +337,7 @@ fn doc_comment(text: &str, symbol: &Symbol) -> Option<String> {
 /// Returns the `//` comment lines at the very top of a module's file, without their `//` and the
 /// space after it, as Markdown for hover.
 ///
-/// For example, for `"// summary statistics\n\npub fn mean(xs);\n..."` this returns
+/// For example, for `"// summary statistics\n\npub fn mean(xs):\n..."` this returns
 /// `"summary statistics"`. A comment directly above a definition documents that definition
 /// instead (see [`doc_comment`]), so only one followed by a blank line or the end of the file
 /// counts.

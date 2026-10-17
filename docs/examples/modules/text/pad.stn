@@ -1,5 +1,5 @@
 // pads s with spaces on the left until it is width characters long
-pub fn left(s: str, width: int) -> str;
-    while s.len() < width;
+pub fn left(s: str, width: int) -> str:
+    while s.len() < width:
         s = " " + s
     ret s

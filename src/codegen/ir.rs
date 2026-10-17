@@ -6,7 +6,7 @@
 //! function, and temporaries get fresh vregs. Blocks are stored in layout order, which is also the
 //! order liveness numbers instructions in and the order a backend emits them in.
 //!
-//! For example, `fn inc(x: int) -> int; ret x + 1` lowers to:
+//! For example, `fn inc(x: int) -> int: ret x + 1` lowers to:
 //!
 //! ```text
 //! fn inc(v0):

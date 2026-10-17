@@ -1,19 +1,19 @@
-struct P;
+struct P:
     xs: list[int]
 
-impl P;
-    fn absorb(self, ys: list[int]);
-        for y in ys;
+impl P:
+    fn absorb(self, ys: list[int]):
+        for y in ys:
             self.xs.append(y)
 
-    fn count(self) -> int;
+    fn count(self) -> int:
         ret self.xs.len()
 
-fn peek() -> int;
+fn peek() -> int:
     ret g.count()
 
-fn opt(n: int) -> option[P];
-    if n == 0;
+fn opt(n: int) -> option[P]:
+    if n == 0:
         ret none
     ret some(P(xs=[n]))
 
@@ -21,15 +21,15 @@ p = P(xs=[1, 2])
 p.absorb(p.xs)
 print(p)
 ps = [P(xs=[]), P(xs=[5])]
-for q in ps;
+for q in ps:
     q.absorb([9])
     print(q)
 print(ps)
-match opt(3);
-    case some(r);
+match opt(3):
+    case some(r):
         r.absorb([4])
         print(r, r.count())
-    case none;
+    case none:
         print("none")
 g = P(xs=[7, 8, 9])
 print(peek())

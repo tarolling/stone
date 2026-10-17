@@ -1,7 +1,7 @@
 // compiled code divides by constants without idiv or runtime checks where it can,
 // so these must still round toward zero like the interpreter
 
-fn show(x: int);
+fn show(x: int):
     print(x, x / 1, x / 2, x / -2, x / 8, x / -8, x / 3, x / -7)
 
 show(0)

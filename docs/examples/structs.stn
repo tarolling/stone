@@ -1,16 +1,16 @@
 use math
 
-struct Point;
+struct Point:
     x: float
     y: float
 
-struct Path;
+struct Path:
     name: str
     points: list[Point]
 
-fn length(path: Path) -> float;
+fn length(path: Path) -> float:
     total = 0.0
-    for i in range(1, path.points.len());
+    for i in range(1, path.points.len()):
         a = path.points[i - 1]
         b = path.points[i]
         total += math.sqrt((b.x - a.x) ** 2 + (b.y - a.y) ** 2)

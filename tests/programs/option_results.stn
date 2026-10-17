@@ -4,11 +4,11 @@ use os
 // find
 s = "banana"
 print(s.find("na"), s.find("x"), "".find(""))
-fn key_of(line: str) -> str;
-    match line.find("=");
-        case some(at);
+fn key_of(line: str) -> str:
+    match line.find("="):
+        case some(at):
             ret line[:at]
-        case none;
+        case none:
             ret line
 print(key_of("name=stone"), key_of("plain"))
 
@@ -27,18 +27,18 @@ print(l, lists, l.unwrap_or([]).len())
 pairs = [("a", [1]), ("b", [2, 3])]
 p = pairs.pop()
 print(p, pairs)
-match p;
-    case some(pair);
+match p:
+    case some(pair):
         name, values = pair
         print(name, values)
-    case none;
+    case none:
         print("empty")
 empty = [("z", [0])]
 empty.pop()
 q = empty.pop()
 print(q, empty)
 
-struct Bag;
+struct Bag:
     items: list[str]
 bags = [Bag(items=["one"]), Bag(items=["two", "three"])]
 top = bags.pop()
@@ -52,7 +52,7 @@ y = grid[1].pop()
 print(x, y, grid)
 
 // a function pops from its own copy and returns it
-fn drop_last(xs: list[int]) -> list[int];
+fn drop_last(xs: list[int]) -> list[int]:
     last = xs.pop()
     print("dropped", last)
     ret xs
@@ -65,7 +65,7 @@ flags = {true: [1, 2], false: []}
 print(flags.get(true), flags.get(false))
 named = {1: ("one", [1.5])}
 print(named.get(1), named.get(2), {"k": "v"}.get("k"))
-fn age(name: str) -> int;
+fn age(name: str) -> int:
     ret ages.get(name).unwrap_or(-1)
 print(age("bo"), age("dee"))
 

@@ -356,7 +356,7 @@ pub trait AssemblyGenerator {
     fn assemble(&mut self, module: &Mod) -> Result<String, String>;
     /// Runs the first compilation pass, which lowers the module to [`ir`] functions.
     ///
-    /// For example, scanning `fn f(a: int); b = a + 1` lowers `f` to `v1 = add v0, 1`.
+    /// For example, scanning `fn f(a: int): b = a + 1` lowers `f` to `v1 = add v0, 1`.
     fn scan(&mut self, module: &Mod) -> Result<(), String>;
     /// Runs the second compilation pass, which allocates registers for the functions lowered by
     /// [`Self::scan`] and emits their assembly.

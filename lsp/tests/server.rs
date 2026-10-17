@@ -161,7 +161,7 @@ fn publishes_diagnostics_as_the_document_changes() {
 #[test]
 fn answers_requests_about_an_open_document() {
     let (mut session, _) = Session::start(None);
-    session.open("fn twice(n: int) -> int;\n    ret n * 2\nprint(twice(4))\n");
+    session.open("fn twice(n: int) -> int:\n    ret n * 2\nprint(twice(4))\n");
     session.diagnostics();
 
     let hover = session.request("textDocument/hover", position(2, 7));
@@ -286,7 +286,7 @@ fn a_change_to_one_file_republishes_the_others_in_its_program() {
             .collect()
     };
 
-    open(util, "pub fn twice(x: int) -> int;\n    ret x * 2\n");
+    open(util, "pub fn twice(x: int) -> int:\n    ret x * 2\n");
     assert_eq!(published(1), [(util.to_string(), 0)]);
     open(main, "use util\nprint(util.twice(1))\n");
     assert_eq!(published(2), [(main.to_string(), 0), (util.to_string(), 0)]);
@@ -296,7 +296,7 @@ fn a_change_to_one_file_republishes_the_others_in_its_program() {
         "textDocument/didChange",
         json!({
             "textDocument": { "uri": util, "version": 2 },
-            "contentChanges": [{ "text": "fn twice(x: int) -> int;\n    ret x * 2\n" }]
+            "contentChanges": [{ "text": "fn twice(x: int) -> int:\n    ret x * 2\n" }]
         }),
     );
     assert_eq!(published(2), [(util.to_string(), 0), (main.to_string(), 1)]);

@@ -14,7 +14,7 @@ prints
 
 `if`, `elif`, and `while` take a condition that is a `bool`: `true`, `false`, a comparison, or
 `and`, `or`, and `not` of those. No other value is true or false, so write `n != 0`,
-`s.len() > 0`, or `x != 0.0` instead of `n`, `s`, or `x`, and `while true;` for a loop that
+`s.len() > 0`, or `x != 0.0` instead of `n`, `s`, or `x`, and `while true:` for a loop that
 ends only with `break` or `ret`.
 
 Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`. They chain the way they do in Python:

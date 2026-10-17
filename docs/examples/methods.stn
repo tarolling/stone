@@ -1,35 +1,35 @@
 use math
 
-struct Point;
+struct Point:
     x: float
     y: float
 
-impl Point;
-    fn origin() -> Point;
+impl Point:
+    fn origin() -> Point:
         ret Point(x=0.0, y=0.0)
 
-    fn dist(self, other: Point) -> float;
+    fn dist(self, other: Point) -> float:
         ret math.sqrt((other.x - self.x) ** 2 + (other.y - self.y) ** 2)
 
-    fn shift(self, dx: float, dy: float);
+    fn shift(self, dx: float, dy: float):
         self.x += dx
         self.y += dy
 
-struct Path;
+struct Path:
     points: list[Point]
 
-impl Path;
-    fn new() -> Path;
+impl Path:
+    fn new() -> Path:
         ret Path(points=[Point.origin()])
 
-    fn go(self, dx: float, dy: float);
+    fn go(self, dx: float, dy: float):
         last = self.points[-1]
         last.shift(dx, dy)
         self.points.append(last)
 
-    fn length(self) -> float;
+    fn length(self) -> float:
         total = 0.0
-        for i in range(1, self.points.len());
+        for i in range(1, self.points.len()):
             total += self.points[i - 1].dist(self.points[i])
         ret total
 

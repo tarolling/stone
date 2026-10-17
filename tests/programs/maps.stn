@@ -1,23 +1,23 @@
 // maps: literals, reads, inserts, overwrites, len, contains, and printing in insertion order
-struct Point;
+struct Point:
     x: int
     y: int
 
-enum Shape;
+enum Shape:
     Circle(float)
     Square(int)
 
-fn with_entry(m: map[str, int], key: str, value: int) -> map[str, int];
+fn with_entry(m: map[str, int], key: str, value: int) -> map[str, int]:
     m[key] = value
     ret m
 
-fn changed_copy(m: map[str, int]);
+fn changed_copy(m: map[str, int]):
     m["changed"] = 1
     print(m.len())
 
-fn total(m: map[int, int], n: int) -> int;
+fn total(m: map[int, int], n: int) -> int:
     sum = 0
-    for i in range(n);
+    for i in range(n):
         sum += m[i]
     ret sum
 
@@ -68,10 +68,10 @@ print(counts, copy)
 
 // many entries, so the index grows
 squares = {}
-for i in range(10000);
+for i in range(10000):
     squares[i] = i * i
 print(squares.len(), squares[9999], total(squares, 10000))
 words = {}
-for i in range(1000);
+for i in range(1000):
     words[str(i)] = i
 print(words.len(), words["500"], words.contains("1000"), words.contains("999"))

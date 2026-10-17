@@ -65,39 +65,39 @@ fn literals_and_operators_have_types() {
 
 #[test]
 fn function_types_come_from_their_calls_and_returns() {
-    let source = "fn add(a: int, b: int) -> int;\n    ret a + b\nx = add(1, 2)\n";
+    let source = "fn add(a: int, b: int) -> int:\n    ret a + b\nx = add(1, 2)\n";
     assert_eq!(type_of_symbol(source, "add"), "fn(int, int) -> int");
     assert_eq!(type_of_symbol(source, "x"), "int");
 }
 
 #[test]
 fn a_function_without_ret_returns_no_value() {
-    let source = "fn greet(name: str);\n    print(\"hi\", name)\ngreet(\"bo\")\n";
+    let source = "fn greet(name: str):\n    print(\"hi\", name)\ngreet(\"bo\")\n";
     assert_eq!(type_of_symbol(source, "greet"), "fn(str)");
 }
 
 #[test]
 fn recursive_functions_are_typed() {
     let source =
-        "fn fact(n: int) -> int;\n    if n != 0;\n        ret n * fact(n - 1)\n    ret 1\n";
+        "fn fact(n: int) -> int:\n    if n != 0:\n        ret n * fact(n - 1)\n    ret 1\n";
     assert_eq!(type_of_symbol(source, "fact"), "fn(int) -> int");
 }
 
 #[test]
 fn functions_can_be_called_before_they_are_defined() {
-    let source = "print(twice(2))\nfn twice(n: int) -> int;\n    ret n * 2\n";
+    let source = "print(twice(2))\nfn twice(n: int) -> int:\n    ret n * 2\n";
     assert_eq!(errors(source), []);
 }
 
 #[test]
 fn unconstrained_types_default_to_int() {
-    let source = "fn ignore(a: int) -> int;\n    ret 0\n";
+    let source = "fn ignore(a: int) -> int:\n    ret 0\n";
     assert_eq!(type_of_symbol(source, "ignore"), "fn(int) -> int");
 }
 
 #[test]
 fn parameters_and_returns_take_their_written_types() {
-    let source = "fn scale(xs: list[float], k: float) -> list[float];\n    ret xs * k\n";
+    let source = "fn scale(xs: list[float], k: float) -> list[float]:\n    ret xs * k\n";
     assert_eq!(
         type_of_symbol(source, "scale"),
         "fn(list[float], float) -> list[float]"
@@ -106,14 +106,14 @@ fn parameters_and_returns_take_their_written_types() {
 
 #[test]
 fn a_function_without_a_return_type_returns_no_value() {
-    let source = "fn greet(name: str);\n    print(\"hi\", name)\n";
+    let source = "fn greet(name: str):\n    print(\"hi\", name)\n";
     assert_eq!(type_of_symbol(source, "greet"), "fn(str)");
 }
 
 #[test]
 fn a_call_that_returns_no_value_is_only_a_statement() {
     let message = "'greet' returns no value, so it can only be called as a statement of its own";
-    let greet = "fn greet(name: str);\n    print(\"hi\", name)\n";
+    let greet = "fn greet(name: str):\n    print(\"hi\", name)\n";
     assert_error(&format!("{greet}x = greet(\"bo\")\n"), message, 3, 5);
     assert_error(&format!("{greet}print(greet(\"bo\"))\n"), message, 3, 7);
     assert_error(&format!("{greet}xs = [greet(\"bo\")]\n"), message, 3, 7);
@@ -129,7 +129,7 @@ fn a_call_that_returns_no_value_is_only_a_statement() {
 #[test]
 fn ret_without_a_value_needs_a_function_without_a_return_type() {
     assert_error(
-        "fn f() -> int;\n    ret\n",
+        "fn f() -> int:\n    ret\n",
         "'f' returns int, so 'ret' needs a value",
         2,
         5,
@@ -139,7 +139,7 @@ fn ret_without_a_value_needs_a_function_without_a_return_type() {
 #[test]
 fn a_parameter_needs_a_type() {
     assert_error(
-        "fn twice(n) -> int;\n    ret n * 2\n",
+        "fn twice(n) -> int:\n    ret n * 2\n",
         "parameter 'n' needs a type, such as 'n: int'",
         1,
         10,
@@ -149,7 +149,7 @@ fn a_parameter_needs_a_type() {
 #[test]
 fn a_missing_type_is_suggested_from_the_calls() {
     assert_error(
-        "fn greet(name);\n    print(name)\ngreet(\"bo\")\n",
+        "fn greet(name):\n    print(name)\ngreet(\"bo\")\n",
         "parameter 'name' needs a type, such as 'name: str'",
         1,
         10,
@@ -159,7 +159,7 @@ fn a_missing_type_is_suggested_from_the_calls() {
 #[test]
 fn returning_a_value_needs_a_return_type() {
     assert_error(
-        "fn one();\n    ret 1\n",
+        "fn one():\n    ret 1\n",
         "'one' has no return type, so it cannot return int; add '-> int' after its parameters",
         2,
         9,
@@ -170,7 +170,7 @@ fn returning_a_value_needs_a_return_type() {
 fn a_missing_return_type_is_suggested_once_it_is_known() {
     // `ys` is a list of unknown elements at the first `ret`, and only the append settles them
     let source =
-        "fn f(x: float);\n    ys = []\n    if x > 0.0;\n        ret ys\n    ys.append(x)\n";
+        "fn f(x: float):\n    ys = []\n    if x > 0.0:\n        ret ys\n    ys.append(x)\n";
     let message = "'f' has no return type, so it cannot return list[float]; add '-> list[float]' \
                    after its parameters";
     assert_error(source, message, 4, 13);
@@ -179,7 +179,7 @@ fn a_missing_return_type_is_suggested_once_it_is_known() {
 #[test]
 fn arguments_must_match_the_written_types() {
     assert_error(
-        "fn half(x: float) -> float;\n    ret x / 2.0\nhalf(3)\n",
+        "fn half(x: float) -> float:\n    ret x / 2.0\nhalf(3)\n",
         "expected float, found int",
         3,
         6,
@@ -189,13 +189,13 @@ fn arguments_must_match_the_written_types() {
 #[test]
 fn the_body_must_match_the_written_types() {
     assert_error(
-        "fn f(s: str) -> int;\n    ret s\n",
+        "fn f(s: str) -> int:\n    ret s\n",
         "'f' returns int, but this is str",
         2,
         9,
     );
     assert_error(
-        "fn f() -> option[int];\n    ret 1\n",
+        "fn f() -> option[int]:\n    ret 1\n",
         "'f' returns option[int], but this is int",
         2,
         9,
@@ -205,7 +205,7 @@ fn the_body_must_match_the_written_types() {
 #[test]
 fn a_written_list_type_settles_arithmetic_before_any_call() {
     // without the types, `xs * 2` could be on numbers or on a list until a call settles it
-    let analysis = analyze_source("fn f(xs: list[int]) -> list[int];\n    ret xs * 2\n");
+    let analysis = analyze_source("fn f(xs: list[int]) -> list[int]:\n    ret xs * 2\n");
     assert_eq!(analysis.diagnostics, []);
     let product = Span::new(Pos::new(2, 9), Pos::new(2, 15));
     assert_eq!(
@@ -272,33 +272,33 @@ fn arithmetic_on_lists_works_element_by_element() {
 
 #[test]
 fn elementwise_operands_are_inferred_from_calls() {
-    let source = "fn scale(xs: list[float], k: float) -> list[float];\n    ret xs * k\ny = scale([1.5], 2.0)\n";
+    let source = "fn scale(xs: list[float], k: float) -> list[float]:\n    ret xs * k\ny = scale([1.5], 2.0)\n";
     assert_eq!(
         type_of_symbol(source, "scale"),
         "fn(list[float], float) -> list[float]"
     );
     let source =
-        "fn scale(k: int, xs: list[int]) -> list[int];\n    ret k * xs\ny = scale(2, [1])\n";
+        "fn scale(k: int, xs: list[int]) -> list[int]:\n    ret k * xs\ny = scale(2, [1])\n";
     assert_eq!(type_of_symbol(source, "y"), "list[int]");
-    let source = "fn double(x: int) -> int;\n    ret x * 2\na = double(3)\n";
+    let source = "fn double(x: int) -> int:\n    ret x * 2\na = double(3)\n";
     assert_eq!(type_of_symbol(source, "double"), "fn(int) -> int");
-    let source = "fn shift(xs: list[float]) -> list[float];\n    ret xs + 1.0\nb = shift([1.5])\n";
+    let source = "fn shift(xs: list[float]) -> list[float]:\n    ret xs + 1.0\nb = shift([1.5])\n";
     assert_eq!(type_of_symbol(source, "b"), "list[float]");
     // a result used as a list makes its unknown operand a list
     let source =
-        "fn twice(xs: list[int]) -> list[int];\n    ys = xs * 2\n    ys.append(1)\n    ret ys\n";
+        "fn twice(xs: list[int]) -> list[int]:\n    ys = xs * 2\n    ys.append(1)\n    ret ys\n";
     assert_eq!(
         type_of_symbol(source, "twice"),
         "fn(list[int]) -> list[int]"
     );
     // with nothing else to go on, both operands have the same type, as for numbers
-    let source = "fn add(a: int, b: int) -> int;\n    ret a + b\n";
+    let source = "fn add(a: int, b: int) -> int:\n    ret a + b\n";
     assert_eq!(type_of_symbol(source, "add"), "fn(int, int) -> int");
 }
 
 #[test]
 fn a_wrong_argument_to_arithmetic_is_reported_where_it_is_passed() {
-    let twice = "fn twice(n: int) -> int;\n    ret n * 2\n";
+    let twice = "fn twice(n: int) -> int:\n    ret n * 2\n";
     assert_eq!(errors(&format!("{twice}a = twice(3)\n")), []);
     assert_error(
         &format!("{twice}x = twice(\"a\")\n"),
@@ -320,15 +320,15 @@ fn a_wrong_argument_to_arithmetic_is_reported_where_it_is_passed() {
 fn arithmetic_on_unknown_lists_and_operands_settles() {
     assert_error("[]--d\n", "undefined name 'd'", 1, 5);
     assert_eq!(
-        type_of_symbol("fn f(a: int) -> list[int];\n    ret [] - a\n", "f"),
+        type_of_symbol("fn f(a: int) -> list[int]:\n    ret [] - a\n", "f"),
         "fn(int) -> list[int]"
     );
     assert_eq!(
-        type_of_symbol("fn f(a: int) -> list[int];\n    ret -a * []\n", "f"),
+        type_of_symbol("fn f(a: int) -> list[int]:\n    ret -a * []\n", "f"),
         "fn(int) -> list[int]"
     );
     // an int times 2 is an int, so it cannot be used as a list of floats
-    let source = "fn f(n: int) -> list[float];\n    ys = n * 2\n    ys.append(1.5)\n    ret ys\n";
+    let source = "fn f(n: int) -> list[float]:\n    ys = n * 2\n    ys.append(1.5)\n    ret ys\n";
     assert_eq!(
         errors(source),
         [
@@ -463,10 +463,10 @@ fn power_takes_a_number_base_and_an_int_exponent() {
 
 #[test]
 fn a_power_exponent_is_inferred_as_int() {
-    let source = "fn f(n: int) -> float;\n    ret 1.5 ** n\nx = f(2)\n";
+    let source = "fn f(n: int) -> float:\n    ret 1.5 ** n\nx = f(2)\n";
     assert_eq!(type_of_symbol(source, "x"), "float");
     assert_error(
-        "fn f(n: int) -> float;\n    ret 1.5 ** n\nx = f(2.0)\n",
+        "fn f(n: int) -> float:\n    ret 1.5 ** n\nx = f(2.0)\n",
         "expected int, found float",
         3,
         7,
@@ -485,9 +485,9 @@ fn float_arithmetic_gives_floats() {
 
 #[test]
 fn functions_take_their_operand_types_from_calls() {
-    let source = "fn scale(a: float, b: float) -> float;\n    ret -a * b\nx = scale(1.5, 2.0)\n";
+    let source = "fn scale(a: float, b: float) -> float:\n    ret -a * b\nx = scale(1.5, 2.0)\n";
     assert_eq!(type_of_symbol(source, "scale"), "fn(float, float) -> float");
-    let source = "fn less(a: float, b: float) -> bool;\n    ret a < b\nx = less(1.5, 2.0)\n";
+    let source = "fn less(a: float, b: float) -> bool:\n    ret a < b\nx = less(1.5, 2.0)\n";
     assert_eq!(type_of_symbol(source, "less"), "fn(float, float) -> bool");
 }
 
@@ -522,7 +522,7 @@ fn int_and_float_convert_numbers() {
 #[test]
 fn floats_are_not_conditions() {
     assert_error(
-        "if 1.5;\n    print(1)\n",
+        "if 1.5:\n    print(1)\n",
         "a condition must be bool, found float",
         1,
         4,
@@ -547,7 +547,7 @@ fn strings_are_ordered() {
     let source = "a = \"a\" < \"b\"\nb = \"b\" <= \"c\" > \"a\" >= \"\"\n";
     assert_eq!(type_of_symbol(source, "a"), "bool");
     assert_eq!(type_of_symbol(source, "b"), "bool");
-    assert_eq!(errors("fn f(s: str, t: str) -> bool;\n    ret s < t\n"), []);
+    assert_eq!(errors("fn f(s: str, t: str) -> bool:\n    ret s < t\n"), []);
 }
 
 #[test]
@@ -556,7 +556,7 @@ fn strings_index_and_slice_to_strings() {
     assert_eq!(type_of_symbol(source, "a"), "str");
     assert_eq!(type_of_symbol(source, "b"), "str");
     assert_eq!(type_of_symbol(source, "c"), "str");
-    let source = "fn first(s: str) -> str;\n    ret s[0]\nwords = [\"ab\"]\nw = words[0][1:]\n";
+    let source = "fn first(s: str) -> str:\n    ret s[0]\nwords = [\"ab\"]\nw = words[0][1:]\n";
     assert_eq!(type_of_symbol(source, "w"), "str");
     assert_error("x = \"ab\"[\"a\"]\n", "expected int, found str", 1, 10);
     assert_error("x = \"ab\"[1.5:]\n", "expected int, found float", 1, 10);
@@ -573,11 +573,11 @@ fn strings_cannot_be_changed() {
 
 #[test]
 fn for_loops_walk_the_characters_of_strings() {
-    let source = "for c in \"abc\";\n    print(c)\nfn count(s: str) -> int;\n    n = 0\n    for ch in s;\n        n = n + ch.len()\n    ret n\n";
+    let source = "for c in \"abc\":\n    print(c)\nfn count(s: str) -> int:\n    n = 0\n    for ch in s:\n        n = n + ch.len()\n    ret n\n";
     assert_eq!(type_of_symbol(source, "c"), "str");
     assert_eq!(type_of_symbol(source, "ch"), "str");
     assert_error(
-        "for x in 5;\n    print(x)\n",
+        "for x in 5:\n    print(x)\n",
         "expected list[unknown], found int",
         1,
         10,
@@ -654,7 +654,7 @@ fn endswith_takes_a_str() {
 #[test]
 fn conditions_must_be_bool() {
     assert_error(
-        "if \"yes\";\n    print(1)\n",
+        "if \"yes\":\n    print(1)\n",
         "a condition must be bool, found str",
         1,
         4,
@@ -666,7 +666,7 @@ fn conditions_must_be_bool() {
         9,
     );
     assert_eq!(
-        errors("if 1 or 0;\n    print(1)\n"),
+        errors("if 1 or 0:\n    print(1)\n"),
         [
             ("a condition must be bool, found int".to_string(), 1, 4),
             ("a condition must be bool, found int".to_string(), 1, 9),
@@ -679,7 +679,7 @@ fn conditions_must_be_bool() {
         13,
     );
     assert_error(
-        "n = 3\nwhile n;\n    n -= 1\n",
+        "n = 3\nwhile n:\n    n -= 1\n",
         "a condition must be bool, found int",
         2,
         7,
@@ -696,7 +696,7 @@ fn undefined_names_are_errors() {
 #[test]
 fn calls_need_the_right_number_of_arguments() {
     assert_error(
-        "fn f(a: int, b: int) -> int;\n    ret a\nf(1)\n",
+        "fn f(a: int, b: int) -> int:\n    ret a\nf(1)\n",
         "'f' takes 2 arguments, but 1 was given",
         3,
         1,
@@ -712,7 +712,7 @@ fn calls_need_the_right_number_of_arguments() {
 #[test]
 fn calls_must_agree_on_argument_types() {
     assert_error(
-        "fn f(a: int) -> int;\n    ret a\nf(1)\nf(\"s\")\n",
+        "fn f(a: int) -> int:\n    ret a\nf(1)\nf(\"s\")\n",
         "expected int, found str",
         4,
         3,
@@ -722,7 +722,7 @@ fn calls_must_agree_on_argument_types() {
 #[test]
 fn returns_must_agree() {
     assert_error(
-        "fn f(x: int) -> int;\n    if x > 0;\n        ret 1\n    ret \"a\"\n",
+        "fn f(x: int) -> int:\n    if x > 0:\n        ret 1\n    ret \"a\"\n",
         "'f' returns int, but this is str",
         4,
         9,
@@ -732,7 +732,7 @@ fn returns_must_agree() {
 #[test]
 fn a_value_returning_function_must_return_on_every_path() {
     assert_error(
-        "fn f(x: int) -> int;\n    if x > 0;\n        ret 1\n",
+        "fn f(x: int) -> int:\n    if x > 0:\n        ret 1\n",
         "'f' does not return a value on every path",
         1,
         4,
@@ -741,14 +741,14 @@ fn a_value_returning_function_must_return_on_every_path() {
 
 #[test]
 fn an_endless_loop_counts_as_returning() {
-    let source = "fn f(k: int) -> int;\n    m = 1\n    while true;\n        if m * k == 12;\n            ret m\n        m = m + 1\nprint(f(4))\n";
+    let source = "fn f(k: int) -> int:\n    m = 1\n    while true:\n        if m * k == 12:\n            ret m\n        m = m + 1\nprint(f(4))\n";
     assert_eq!(errors(source), []);
 }
 
 #[test]
 fn a_loop_that_can_break_does_not_count_as_returning() {
     assert_error(
-        "fn f() -> int;\n    while true;\n        break\n        ret 1\n",
+        "fn f() -> int:\n    while true:\n        break\n        ret 1\n",
         "'f' does not return a value on every path",
         1,
         4,
@@ -758,13 +758,13 @@ fn a_loop_that_can_break_does_not_count_as_returning() {
 #[test]
 fn break_and_cont_need_a_loop() {
     assert_error("break\n", "'break' outside a loop", 1, 1);
-    assert_error("fn f();\n    cont\n", "'cont' outside a loop", 2, 5);
+    assert_error("fn f():\n    cont\n", "'cont' outside a loop", 2, 5);
 }
 
 #[test]
 fn functions_must_be_top_level() {
     assert_error(
-        "fn outer() -> int;\n    fn inner();\n        ret 1\n    ret 2\n",
+        "fn outer() -> int:\n    fn inner():\n        ret 1\n    ret 2\n",
         "functions can only be defined at the top level",
         2,
         8,
@@ -774,7 +774,7 @@ fn functions_must_be_top_level() {
 #[test]
 fn functions_are_not_values() {
     assert_error(
-        "fn f() -> int;\n    ret 1\nx = f\n",
+        "fn f() -> int:\n    ret 1\nx = f\n",
         "'f' is a function, so it can only be called",
         3,
         5,
@@ -790,7 +790,7 @@ fn functions_are_not_values() {
 #[test]
 fn functions_and_builtins_cannot_be_assigned() {
     assert_error(
-        "fn f() -> int;\n    ret 1\nf = 2\n",
+        "fn f() -> int:\n    ret 1\nf = 2\n",
         "cannot assign to function 'f'",
         3,
         1,
@@ -806,7 +806,7 @@ fn only_functions_can_be_called() {
 #[test]
 fn functions_cannot_be_redefined() {
     assert_error(
-        "fn f() -> int;\n    ret 1\nfn f();\n    ret 2\n",
+        "fn f() -> int:\n    ret 1\nfn f():\n    ret 2\n",
         "function 'f' is already defined",
         3,
         4,
@@ -816,7 +816,7 @@ fn functions_cannot_be_redefined() {
 #[test]
 fn parameters_must_be_unique() {
     assert_error(
-        "fn f(a: int, a: int) -> int;\n    ret a\n",
+        "fn f(a: int, a: int) -> int:\n    ret a\n",
         "duplicate parameter 'a'",
         1,
         14,
@@ -835,14 +835,14 @@ fn len_needs_a_str() {
 
 #[test]
 fn locals_shadow_globals_and_keep_their_own_type() {
-    let source = "x = 1\nfn f() -> str;\n    x = \"local\"\n    ret x\ny = f()\n";
+    let source = "x = 1\nfn f() -> str:\n    x = \"local\"\n    ret x\ny = f()\n";
     assert_eq!(errors(source), []);
     assert_eq!(type_of_symbol(source, "y"), "str");
 }
 
 #[test]
 fn functions_read_globals() {
-    let source = "fn f() -> int;\n    ret n + 1\nn = 3\n";
+    let source = "fn f() -> int:\n    ret n + 1\nn = 3\n";
     assert_eq!(errors(source), []);
 }
 
@@ -850,7 +850,7 @@ fn functions_read_globals() {
 fn a_local_assigned_anywhere_in_the_function_is_local_everywhere() {
     // like Python, `x` is local to `f` because `f` assigns it, so the global is never read, and
     // reading the local before assigning it is an error rather than a read of the global
-    let source = "x = \"global\"\nfn f() -> int;\n    y = x\n    x = 1\n    ret y\nprint(f())\n";
+    let source = "x = \"global\"\nfn f() -> int:\n    y = x\n    x = 1\n    ret y\nprint(f())\n";
     assert_error(source, "'x' might be used before it is assigned", 3, 9);
     let analysis = analyze_source(source);
     let y = analysis.symbols.iter().find(|s| s.name == "y").unwrap();
@@ -859,7 +859,7 @@ fn a_local_assigned_anywhere_in_the_function_is_local_everywhere() {
 
 #[test]
 fn every_use_of_a_symbol_is_a_reference() {
-    let analysis = analyze_source("fn f(a: int) -> int;\n    b = a\n    ret a + b\nf(1)\n");
+    let analysis = analyze_source("fn f(a: int) -> int:\n    b = a\n    ret a + b\nf(1)\n");
     let param = analysis.symbols.iter().position(|s| s.name == "a").unwrap();
     let uses: Vec<Pos> = analysis
         .references
@@ -883,7 +883,7 @@ fn diagnostics_are_sorted_by_position() {
 
 #[test]
 fn for_loops_over_ranges_give_ints() {
-    let source = "for i in range(3);\n    x = i\nfor j in range(1, 4);\n    y = j\n";
+    let source = "for i in range(3):\n    x = i\nfor j in range(1, 4):\n    y = j\n";
     assert_eq!(type_of_symbol(source, "x"), "int");
     assert_eq!(type_of_symbol(source, "y"), "int");
 }
@@ -901,13 +901,13 @@ fn range_is_only_for_loops() {
 #[test]
 fn range_takes_one_or_two_ints() {
     assert_error(
-        "for i in range();\n    print(i)\n",
+        "for i in range():\n    print(i)\n",
         "'range' takes 1 or 2 arguments, but 0 were given",
         1,
         10,
     );
     assert_error(
-        "for i in range(\"a\");\n    print(i)\n",
+        "for i in range(\"a\"):\n    print(i)\n",
         "expected int, found str",
         1,
         16,
@@ -916,7 +916,7 @@ fn range_takes_one_or_two_ints() {
 
 #[test]
 fn for_loop_variables_must_be_names() {
-    let messages: Vec<String> = errors("a = 0\nfor a[0] in range(3);\n    print(1)\n")
+    let messages: Vec<String> = errors("a = 0\nfor a[0] in range(3):\n    print(1)\n")
         .into_iter()
         .map(|(message, _, _)| message)
         .collect();
@@ -933,14 +933,14 @@ fn for_loop_variables_must_be_names() {
 #[test]
 fn break_and_cont_work_in_for_loops() {
     let source =
-        "for i in range(9);\n    if i == 2;\n        cont\n    if i == 5;\n        break\n";
+        "for i in range(9):\n    if i == 2:\n        cont\n    if i == 5:\n        break\n";
     assert_eq!(errors(source), []);
 }
 
 #[test]
 fn a_for_loop_does_not_count_as_returning() {
     assert_error(
-        "fn f() -> int;\n    for i in range(3);\n        ret i\n",
+        "fn f() -> int:\n    for i in range(3):\n        ret i\n",
         "'f' does not return a value on every path",
         1,
         4,
@@ -1021,10 +1021,10 @@ fn len_takes_lists() {
 
 #[test]
 fn for_loops_iterate_over_lists() {
-    let source = "for word in [\"a\", \"b\"];\n    w = word\n";
+    let source = "for word in [\"a\", \"b\"]:\n    w = word\n";
     assert_eq!(type_of_symbol(source, "w"), "str");
     assert_error(
-        "for x in 5;\n    print(x)\n",
+        "for x in 5:\n    print(x)\n",
         "expected list[unknown], found int",
         1,
         10,
@@ -1062,14 +1062,14 @@ const UNASSIGNED: &str = "'x' might be used before it is assigned";
 #[test]
 fn reading_before_assigning_is_an_error() {
     assert_error("print(x)\nx = 1\n", UNASSIGNED, 1, 7);
-    assert_error("fn f();\n    print(x)\n    x = 1\n", UNASSIGNED, 2, 11);
+    assert_error("fn f():\n    print(x)\n    x = 1\n", UNASSIGNED, 2, 11);
 }
 
 #[test]
 fn assignments_in_one_branch_are_not_enough() {
-    assert_error("c = true\nif c;\n    x = 1\nprint(x)\n", UNASSIGNED, 4, 7);
+    assert_error("c = true\nif c:\n    x = 1\nprint(x)\n", UNASSIGNED, 4, 7);
     assert_error(
-        "fn f(c: bool) -> int;\n    if c;\n        x = 1\n    ret x\n",
+        "fn f(c: bool) -> int:\n    if c:\n        x = 1\n    ret x\n",
         UNASSIGNED,
         4,
         9,
@@ -1079,30 +1079,30 @@ fn assignments_in_one_branch_are_not_enough() {
 #[test]
 fn assignments_in_every_branch_are_enough() {
     let source =
-        "c = 1\nif c == 1;\n    x = 1\nelif c == 2;\n    x = 2\nelse;\n    x = 3\nprint(x)\n";
+        "c = 1\nif c == 1:\n    x = 1\nelif c == 2:\n    x = 2\nelse:\n    x = 3\nprint(x)\n";
     assert_eq!(errors(source), []);
 }
 
 #[test]
 fn branches_that_leave_do_not_count() {
     let source =
-        "fn f(c: bool) -> int;\n    if c;\n        x = 1\n    else;\n        ret 0\n    ret x\n";
+        "fn f(c: bool) -> int:\n    if c:\n        x = 1\n    else:\n        ret 0\n    ret x\n";
     assert_eq!(errors(source), []);
     let source =
-        "for i in range(3);\n    if i > 0;\n        x = i\n    else;\n        cont\n    print(x)\n";
+        "for i in range(3):\n    if i > 0:\n        x = i\n    else:\n        cont\n    print(x)\n";
     assert_eq!(errors(source), []);
 }
 
 #[test]
 fn loop_bodies_might_not_run() {
     assert_error(
-        "c = 0\nwhile c < 1;\n    x = 1\n    c = c + 1\nprint(x)\n",
+        "c = 0\nwhile c < 1:\n    x = 1\n    c = c + 1\nprint(x)\n",
         UNASSIGNED,
         5,
         7,
     );
     assert_error(
-        "for x in range(3);\n    y = x\nprint(x)\n",
+        "for x in range(3):\n    y = x\nprint(x)\n",
         UNASSIGNED,
         3,
         7,
@@ -1112,7 +1112,7 @@ fn loop_bodies_might_not_run() {
 #[test]
 fn a_loop_body_cannot_read_what_it_assigns_later() {
     assert_error(
-        "c = 0\nwhile c < 2;\n    print(x)\n    x = c\n    c = c + 1\n",
+        "c = 0\nwhile c < 2:\n    print(x)\n    x = c\n    c = c + 1\n",
         UNASSIGNED,
         3,
         11,
@@ -1122,7 +1122,7 @@ fn a_loop_body_cannot_read_what_it_assigns_later() {
 #[test]
 fn functions_read_globals_whenever_they_are_called() {
     // whether `total` is assigned depends on when `f` runs, which the interpreter checks
-    let source = "fn f() -> int;\n    ret total\ntotal = 1\nprint(f())\n";
+    let source = "fn f() -> int:\n    ret total\ntotal = 1\nprint(f())\n";
     assert_eq!(errors(source), []);
 }
 
@@ -1133,7 +1133,7 @@ fn each_unassigned_variable_is_reported_once() {
 
 #[test]
 fn references_are_found_by_position() {
-    let analysis = analyze_source("fn add(a: int, b: int) -> int;\n    ret a + b\nx = add(1, 2)\n");
+    let analysis = analyze_source("fn add(a: int, b: int) -> int:\n    ret a + b\nx = add(1, 2)\n");
     // inside the `add` of the call
     let reference = analysis.reference_at(FileId(0), Pos::new(3, 6)).unwrap();
     let symbol = &analysis.symbols[reference.symbol];
@@ -1159,7 +1159,7 @@ fn references_are_found_by_position() {
 
 #[test]
 fn function_spans_cover_their_bodies() {
-    let analysis = analyze_source("fn f(a: int) -> int;\n    b = a\n    ret b\nx = 1\n");
+    let analysis = analyze_source("fn f(a: int) -> int:\n    b = a\n    ret b\nx = 1\n");
     assert_eq!(
         analysis.functions.get("f"),
         Some(&Span::new(Pos::new(1, 1), Pos::new(3, 10)))
@@ -1168,7 +1168,7 @@ fn function_spans_cover_their_bodies() {
 
 #[test]
 fn visible_symbols_depend_on_position() {
-    let source = "g = 1\nfn f(a: int) -> int;\n    b = a\n    ret b\nfn h() -> int;\n    ret 2\n";
+    let source = "g = 1\nfn f(a: int) -> int:\n    b = a\n    ret b\nfn h() -> int:\n    ret 2\n";
     let analysis = analyze_source(source);
     let names_at = |pos: Pos| -> Vec<String> {
         let mut names: Vec<String> = analysis
@@ -1191,13 +1191,13 @@ fn len_takes_strings() {
 #[test]
 fn methods_chain_after_subscripts_and_calls() {
     let source =
-        "fn f() -> list[str];\n    ret [\"a\"]\ngrid = [[1]]\ngrid[0].append(2)\nn = f().len()\n";
+        "fn f() -> list[str]:\n    ret [\"a\"]\ngrid = [[1]]\ngrid[0].append(2)\nn = f().len()\n";
     assert_eq!(type_of_symbol(source, "n"), "int");
 }
 
 #[test]
 fn append_infers_a_parameter_is_a_list() {
-    let source = "fn push(xs: list[int], x: int) -> list[int];\n    xs.append(x + 1)\n    ret xs\npush([], 2)\n";
+    let source = "fn push(xs: list[int], x: int) -> list[int]:\n    xs.append(x + 1)\n    ret xs\npush([], 2)\n";
     assert_eq!(
         type_of_symbol(source, "push"),
         "fn(list[int], int) -> list[int]"
@@ -1239,7 +1239,7 @@ fn len_and_append_are_no_longer_functions() {
 fn len_and_append_are_ordinary_names() {
     assert_eq!(type_of_symbol("len = 3\n", "len"), "int");
     assert_eq!(
-        type_of_symbol("fn append(a: int) -> int;\n    ret a\n", "append"),
+        type_of_symbol("fn append(a: int) -> int:\n    ret a\n", "append"),
         "fn(int) -> int"
     );
 }
@@ -1321,7 +1321,7 @@ fn pop_is_a_statement_or_an_assigned_value() {
     assert_error("xs = [1]\nprint(xs.pop())\n", message, 2, 7);
     assert_error("xs = [1]\ny = xs.pop(0) + 1\n", message, 2, 5);
     assert_error(
-        "fn f(xs: list[int]) -> int;\n    ret xs.pop(-1)\nf([1])\n",
+        "fn f(xs: list[int]) -> int:\n    ret xs.pop(-1)\nf([1])\n",
         message,
         2,
         9,
@@ -1339,13 +1339,13 @@ fn pop_is_a_statement_or_an_assigned_value() {
 fn popping_counts_as_a_change() {
     // a function cannot pop from a global, and popping a parameter it never reads again is lost
     assert_error(
-        "xs = [1]\nfn f() -> int;\n    x = xs.pop(0)\n    ret x\nf()\n",
+        "xs = [1]\nfn f() -> int:\n    x = xs.pop(0)\n    ret x\nf()\n",
         "a function cannot change the global 'xs'; pass it as an argument and return the \
          changed value",
         3,
         9,
     );
-    let source = "fn f(xs: list[int]) -> int;\n    x = xs.pop(0)\n    ret x\nf([1])\n";
+    let source = "fn f(xs: list[int]) -> int:\n    x = xs.pop(0)\n    ret x\nf([1])\n";
     assert_eq!(
         errors(source),
         [(
@@ -1357,7 +1357,7 @@ fn popping_counts_as_a_change() {
         )]
     );
     assert_eq!(
-        errors("fn f(xs: list[int]) -> list[int];\n    x = xs.pop()\n    ret xs\nf([1])\n"),
+        errors("fn f(xs: list[int]) -> list[int]:\n    x = xs.pop()\n    ret xs\nf([1])\n"),
         []
     );
 }
@@ -1376,13 +1376,13 @@ fn append_can_only_be_a_statement() {
 fn only_a_list_in_a_variable_can_be_changed() {
     let message = "this list is not stored in a variable, so changing it has no effect";
     assert_error(
-        "fn f() -> list[int];\n    ret [1]\nf().append(2)\n",
+        "fn f() -> list[int]:\n    ret [1]\nf().append(2)\n",
         message,
         3,
         1,
     );
     assert_error(
-        "fn f() -> list[list[int]];\n    ret [[1]]\nf()[0][0] = 2\n",
+        "fn f() -> list[list[int]]:\n    ret [[1]]\nf()[0][0] = 2\n",
         message,
         3,
         1,
@@ -1396,7 +1396,7 @@ fn only_a_list_in_a_variable_can_be_changed() {
 
 #[test]
 fn functions_cannot_change_globals() {
-    let source = "names = []\nfn add(name: str);\n    names.append(name)\nadd(\"a\")\n";
+    let source = "names = []\nfn add(name: str):\n    names.append(name)\nadd(\"a\")\n";
     assert_error(
         source,
         "a function cannot change the global 'names'; pass it as an argument and return the \
@@ -1404,7 +1404,7 @@ fn functions_cannot_change_globals() {
         3,
         5,
     );
-    let source = "grid = [[0]]\nfn clear(i: int);\n    grid[i][0] = 0\nclear(0)\n";
+    let source = "grid = [[0]]\nfn clear(i: int):\n    grid[i][0] = 0\nclear(0)\n";
     assert_error(
         source,
         "a function cannot change the global 'grid'; pass it as an argument and return the \
@@ -1413,8 +1413,8 @@ fn functions_cannot_change_globals() {
         5,
     );
     // reading a global is fine, and so is changing a local that shadows one
-    let source = "names = [1]\nfn f() -> list[int];\n    names = [2]\n    names.append(3)\n    ret names\n\
-                  fn g() -> int;\n    ret names[0]\nprint(f(), g())\n";
+    let source = "names = [1]\nfn f() -> list[int]:\n    names = [2]\n    names.append(3)\n    ret names\n\
+                  fn g() -> int:\n    ret names[0]\nprint(f(), g())\n";
     assert_eq!(errors(source), []);
 }
 
@@ -1462,13 +1462,13 @@ fn augmented_assignments_report_what_the_long_form_does() {
     assert_error("x += 1\n", "'x' might be used before it is assigned", 1, 1);
     // a function's augmented name is its own local, as in Python
     assert_error(
-        "x = 1\nfn f();\n    x += 1\nf()\n",
+        "x = 1\nfn f():\n    x += 1\nf()\n",
         "'x' might be used before it is assigned",
         3,
         5,
     );
     assert_error(
-        "fn g();\n    ret\ng += 1\n",
+        "fn g():\n    ret\ng += 1\n",
         "cannot assign to function 'g'",
         3,
         1,
@@ -1487,7 +1487,7 @@ fn augmented_assignments_report_what_the_long_form_does() {
         1,
     );
     assert_error(
-        "xs = [1]\nfn f();\n    xs[0] += 1\nf()\n",
+        "xs = [1]\nfn f():\n    xs[0] += 1\nf()\n",
         "a function cannot change the global 'xs'; pass it as an argument and return the changed \
          value",
         3,
@@ -1510,7 +1510,7 @@ fn an_augmented_name_is_one_reference() {
 #[test]
 fn changing_a_parameter_by_augmented_assignment_can_be_lost() {
     let diagnostics =
-        analyze_source("fn bump(xs: list[int]);\n    xs[0] += 1\nbump([1])\n").diagnostics;
+        analyze_source("fn bump(xs: list[int]):\n    xs[0] += 1\nbump([1])\n").diagnostics;
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(
         diagnostics[0].severity,
@@ -1520,7 +1520,7 @@ fn changing_a_parameter_by_augmented_assignment_can_be_lost() {
     // rebinding a parameter is no change to the caller's list
     assert_eq!(
         errors(
-            "fn twice(xs: list[int]) -> list[int];\n    xs *= 2\n    ret xs\nprint(twice([1]))\n"
+            "fn twice(xs: list[int]) -> list[int]:\n    xs *= 2\n    ret xs\nprint(twice([1]))\n"
         ),
         []
     );
@@ -1528,7 +1528,7 @@ fn changing_a_parameter_by_augmented_assignment_can_be_lost() {
 
 #[test]
 fn changing_a_parameter_that_is_never_used_again_is_a_warning() {
-    let source = "fn push(xs: list[int], x: int);\n    xs.append(x)\nys = [1]\npush(ys, 2)\n";
+    let source = "fn push(xs: list[int], x: int):\n    xs.append(x)\nys = [1]\npush(ys, 2)\n";
     let diagnostics = analyze_source(source).diagnostics;
     assert_eq!(diagnostics.len(), 1, "{diagnostics:?}");
     assert_eq!(
@@ -1541,7 +1541,7 @@ fn changing_a_parameter_that_is_never_used_again_is_a_warning() {
          and assign the result where 'push' is called"
     );
     assert_eq!(diagnostics[0].span.start, Pos::new(2, 5));
-    let source = "fn clear(grid: list[list[int]], i: int);\n    if i > 0;\n        grid[i][0] = 0\nclear([[1]], 0)\n";
+    let source = "fn clear(grid: list[list[int]], i: int):\n    if i > 0:\n        grid[i][0] = 0\nclear([[1]], 0)\n";
     assert_eq!(
         errors(source),
         [(
@@ -1558,10 +1558,10 @@ fn changing_a_parameter_that_is_never_used_again_is_a_warning() {
         ("", "    xs[0] = x\n    print(xs)\n"),
         (
             " -> int",
-            "    for i in range(3);\n        xs.append(x)\n    ret xs.len()\n",
+            "    for i in range(3):\n        xs.append(x)\n    ret xs.len()\n",
         ),
     ] {
-        let source = format!("fn push(xs: list[int], x: int){returns};\n{body}push([1], 2)\n");
+        let source = format!("fn push(xs: list[int], x: int){returns}:\n{body}push([1], 2)\n");
         assert_eq!(errors(&source), [], "{source}");
     }
 }
@@ -1632,7 +1632,7 @@ fn eof_and_args_take_nothing() {
 
 #[test]
 fn eof_is_a_condition() {
-    assert_eq!(errors("while not eof();\n    print(input())\n"), []);
+    assert_eq!(errors("while not eof():\n    print(input())\n"), []);
 }
 
 #[test]
@@ -1671,7 +1671,7 @@ fn new_builtins_cannot_be_assigned() {
 #[test]
 fn use_inside_a_block_is_an_error() {
     assert_error(
-        "fn f() -> int;\n    use util\n    ret 1\n",
+        "fn f() -> int:\n    use util\n    ret 1\n",
         "use is only allowed at the top level of a file",
         2,
         5,
@@ -1783,10 +1783,10 @@ fn math_functions_have_types() {
 #[test]
 fn math_functions_infer_their_parameters() {
     let source =
-        "use math\n\nfn f(a: int, b: int) -> int;\n    ret math.max(a, b) + 1\n\nx = f(1, 2)\n";
+        "use math\n\nfn f(a: int, b: int) -> int:\n    ret math.max(a, b) + 1\n\nx = f(1, 2)\n";
     assert_eq!(linked_type(source, "f"), "fn(int, int) -> int");
     let source =
-        "use math\n\nfn g(xs: list[float]) -> float;\n    ret math.min(xs) * 2.0\n\nx = g([1.0])\n";
+        "use math\n\nfn g(xs: list[float]) -> float:\n    ret math.min(xs) * 2.0\n\nx = g([1.0])\n";
     assert_eq!(linked_type(source, "g"), "fn(list[float]) -> float");
 }
 
@@ -1884,7 +1884,7 @@ fn random_functions_have_types() {
             "{call}"
         );
     }
-    let source = "use random\n\nfn pick(xs: list[int]) -> int;\n    ret random.choice(xs) + 1\n\nx = pick([1])\n";
+    let source = "use random\n\nfn pick(xs: list[int]) -> int:\n    ret random.choice(xs) + 1\n\nx = pick([1])\n";
     assert_eq!(linked_type(source, "pick"), "fn(list[int]) -> int");
 }
 
@@ -1930,10 +1930,10 @@ fn tuples_have_a_type_per_field() {
 #[test]
 fn tuple_types_are_written_in_signatures() {
     let source =
-        "fn divide(a: int, b: int) -> tuple[int, int];\n    ret (a / b, a % b)\nq = divide(7, 2)\n";
+        "fn divide(a: int, b: int) -> tuple[int, int]:\n    ret (a / b, a % b)\nq = divide(7, 2)\n";
     assert_eq!(type_of_symbol(source, "q"), "tuple[int, int]");
     assert_error(
-        "fn f() -> tuple[int, str];\n    ret (1, 2)\n",
+        "fn f() -> tuple[int, str]:\n    ret (1, 2)\n",
         "'f' returns tuple[int, str], but this is tuple[int, int]",
         2,
         9,
@@ -1949,7 +1949,7 @@ fn unpacking_gives_each_name_its_field() {
     // a value not known yet becomes a tuple
     let source = "xs = []\nxs.append((1, \"a\"))\nn, s = xs.pop(-1)\n";
     assert_eq!(type_of_symbol(source, "s"), "str");
-    let source = "fn f(pairs: list[tuple[str, int]]);\n    for name, score in pairs;\n        print(name, score + 1)\n";
+    let source = "fn f(pairs: list[tuple[str, int]]):\n    for name, score in pairs:\n        print(name, score + 1)\n";
     assert_eq!(errors(source), []);
 }
 
@@ -1980,7 +1980,7 @@ fn unpacking_needs_a_tuple_of_as_many_values() {
         8,
     );
     assert_error(
-        "for a, b in [1, 2];\n    print(a)\n",
+        "for a, b in [1, 2]:\n    print(a)\n",
         "cannot unpack int; only a tuple can be unpacked, as in 'a, b = (1, 2)'",
         1,
         5,
@@ -2047,13 +2047,13 @@ fn tuples_are_not_numbers_strings_or_lists() {
         11,
     );
     assert_error(
-        "t = (1, 2)\nfor x in t;\n    print(x)\n",
+        "t = (1, 2)\nfor x in t:\n    print(x)\n",
         "a tuple cannot be iterated; unpack it, or use a list",
         2,
         10,
     );
     assert_error(
-        "t = (1, 2)\nif t;\n    print(1)\n",
+        "t = (1, 2)\nif t:\n    print(1)\n",
         "a condition must be bool, found tuple[int, int]",
         2,
         4,
@@ -2075,7 +2075,7 @@ fn a_list_element_holds_at_most_32_values() {
     );
     assert!(message.ends_with("holds 33"), "{message}");
     let fields = vec!["int"; 33].join(", ");
-    let source = format!("fn f(xs: list[tuple[{fields}]]);\n    print(xs)\n");
+    let source = format!("fn f(xs: list[tuple[{fields}]]):\n    print(xs)\n");
     assert_eq!(errors(&source).len(), 1);
     // a tuple outside a list has no limit
     let fields = vec!["1"; 40].join(", ");
@@ -2084,25 +2084,25 @@ fn a_list_element_holds_at_most_32_values() {
 
 #[test]
 fn a_function_indexes_a_tuple_global_assigned_after_it() {
-    let source = "fn first() -> int;\n    ret pair[0]\nfn name() -> str;\n    ret pair[-1]\npair = (1, \"one\")\n";
+    let source = "fn first() -> int:\n    ret pair[0]\nfn name() -> str:\n    ret pair[-1]\npair = (1, \"one\")\n";
     assert_eq!(errors(source), []);
     assert_error(
-        "fn third() -> int;\n    ret pair[2]\npair = (1, 2)\n",
+        "fn third() -> int:\n    ret pair[2]\npair = (1, 2)\n",
         "index 2 is out of range for tuple[int, int], which has 2 values",
         2,
         14,
     );
     assert_error(
-        "fn first() -> str;\n    ret pair[0]\npair = (1, 2)\n",
+        "fn first() -> str:\n    ret pair[0]\npair = (1, 2)\n",
         "expected int, found str",
         2,
         14,
     );
     // a list global still indexes as before
-    assert_eq!(errors("fn first() -> int;\n    ret xs[0]\nxs = [1]\n"), []);
+    assert_eq!(errors("fn first() -> int:\n    ret xs[0]\nxs = [1]\n"), []);
 }
 
-const SHAPE: &str = "enum Shape;\n    Circle(float)\n    Rect(float, float)\n    Empty\n";
+const SHAPE: &str = "enum Shape:\n    Circle(float)\n    Rect(float, float)\n    Empty\n";
 
 #[test]
 fn variants_make_values_of_their_enum() {
@@ -2115,9 +2115,9 @@ fn variants_make_values_of_their_enum() {
 
 #[test]
 fn enums_can_be_used_before_their_definition_and_hold_themselves() {
-    let source = "fn leaf(n: int) -> Tree;\n    ret Tree.Leaf(n)\n\
+    let source = "fn leaf(n: int) -> Tree:\n    ret Tree.Leaf(n)\n\
                   t = Tree.Node(leaf(1), leaf(2))\n\
-                  enum Tree;\n    Leaf(int)\n    Node(Tree, Tree)\n";
+                  enum Tree:\n    Leaf(int)\n    Node(Tree, Tree)\n";
     assert_eq!(type_of_symbol(source, "t"), "Tree");
     assert_eq!(type_of_symbol(source, "leaf"), "fn(int) -> Tree");
 }
@@ -2165,51 +2165,51 @@ fn variants_check_their_values() {
 #[test]
 fn enum_definitions_are_checked() {
     assert_error(
-        "enum A;\n    X\nenum A;\n    Y\n",
+        "enum A:\n    X\nenum A:\n    Y\n",
         "enum 'A' is already defined",
         3,
         6,
     );
     assert_error(
-        "enum A;\n    X\n    X(int)\n",
+        "enum A:\n    X\n    X(int)\n",
         "'A' already has a variant 'X'",
         3,
         5,
     );
     assert_error(
-        "enum option;\n    X\n",
+        "enum option:\n    X\n",
         "cannot redefine builtin 'option'",
         1,
         6,
     );
     assert_error(
-        "enum list;\n    X\n",
+        "enum list:\n    X\n",
         "cannot redefine builtin 'list'",
         1,
         6,
     );
     assert_error(
-        "enum A;\n    X(Missing)\n",
+        "enum A:\n    X(Missing)\n",
         "there is no type 'Missing'",
         2,
         7,
     );
     assert_error(
-        "if true;\n    enum A;\n        X\n",
+        "if true:\n    enum A:\n        X\n",
         "enums can only be defined at the top level",
         2,
         10,
     );
     assert_error(
-        "enum A;\n    X\nfn A();\n    ret\n",
+        "enum A:\n    X\nfn A():\n    ret\n",
         "'A' is already defined as an enum",
         3,
         4,
     );
-    assert_error("enum A;\n    X\nA = 1\n", "cannot assign to enum 'A'", 3, 1);
+    assert_error("enum A:\n    X\nA = 1\n", "cannot assign to enum 'A'", 3, 1);
     let wide = vec!["int"; 33].join(", ");
     assert_error(
-        &format!("enum A;\n    X({wide})\n"),
+        &format!("enum A:\n    X({wide})\n"),
         "a variant can hold at most 32 values, but 'A.X' holds 33",
         2,
         5,
@@ -2219,19 +2219,19 @@ fn enum_definitions_are_checked() {
 #[test]
 fn written_types_name_enums_and_options() {
     let source =
-        format!("{SHAPE}fn first(xs: list[Shape]) -> option[Shape];\n    ret some(xs[0])\n");
+        format!("{SHAPE}fn first(xs: list[Shape]) -> option[Shape]:\n    ret some(xs[0])\n");
     assert_eq!(
         type_of_symbol(&source, "first"),
         "fn(list[Shape]) -> option[Shape]"
     );
     assert_error(
-        "fn f(x: option) -> int;\n    ret 1\n",
+        "fn f(x: option) -> int:\n    ret 1\n",
         "'option' takes one type, as in 'option[int]'",
         1,
         9,
     );
     assert_error(
-        &format!("{SHAPE}fn f(x: Shape[int]) -> int;\n    ret 1\n"),
+        &format!("{SHAPE}fn f(x: Shape[int]) -> int:\n    ret 1\n"),
         "'Shape' takes no types",
         5,
         9,
@@ -2271,7 +2271,7 @@ fn options_hold_a_value_or_none() {
 #[test]
 fn enums_and_options_are_not_conditions() {
     assert_error(
-        "x = some(1)\nif x;\n    print(1)\n",
+        "x = some(1)\nif x:\n    print(1)\n",
         "a condition must be bool, found option[int]",
         2,
         4,
@@ -2281,9 +2281,9 @@ fn enums_and_options_are_not_conditions() {
 #[test]
 fn a_match_binds_the_values_of_each_case() {
     let source = format!(
-        "{SHAPE}fn area(s: Shape) -> float;\n    match s;\n        case Shape.Circle(r);\n            \
-         ret 3.0 * r * r\n        case Shape.Rect(w, _);\n            ret w\n        case \
-         Shape.Empty;\n            ret 0.0\n"
+        "{SHAPE}fn area(s: Shape) -> float:\n    match s:\n        case Shape.Circle(r):\n            \
+         ret 3.0 * r * r\n        case Shape.Rect(w, _):\n            ret w\n        case \
+         Shape.Empty:\n            ret 0.0\n"
     );
     let analysis = analyze_source(&source);
     assert_eq!(analysis.diagnostics, []);
@@ -2295,8 +2295,8 @@ fn a_match_binds_the_values_of_each_case() {
 #[test]
 fn nested_patterns_match_options_of_enums() {
     let source = format!(
-        "{SHAPE}x = some(Shape.Circle(1.0))\nmatch x;\n    case some(Shape.Circle(r));\n        \
-         print(r)\n    case some(_);\n        print(0)\n    case none;\n        print(1)\n"
+        "{SHAPE}x = some(Shape.Circle(1.0))\nmatch x:\n    case some(Shape.Circle(r)):\n        \
+         print(r)\n    case some(_):\n        print(0)\n    case none:\n        print(1)\n"
     );
     assert_eq!(errors(&source), []);
 }
@@ -2304,21 +2304,21 @@ fn nested_patterns_match_options_of_enums() {
 #[test]
 fn a_match_must_cover_every_value() {
     assert_error(
-        &format!("{SHAPE}s = Shape.Empty\nmatch s;\n    case Shape.Circle(_);\n        print(1)\n"),
-        "'match' does not cover Shape.Rect(_, _); add 'case Shape.Rect(_, _);' or 'case _;'",
+        &format!("{SHAPE}s = Shape.Empty\nmatch s:\n    case Shape.Circle(_):\n        print(1)\n"),
+        "'match' does not cover Shape.Rect(_, _); add 'case Shape.Rect(_, _):' or 'case _:'",
         6,
         7,
     );
     assert_error(
-        "x = some(some(1))\nmatch x;\n    case some(some(n));\n        print(n)\n    case none;\n        \
+        "x = some(some(1))\nmatch x:\n    case some(some(n)):\n        print(n)\n    case none:\n        \
          print(0)\n",
-        "'match' does not cover some(none); add 'case some(none);' or 'case _;'",
+        "'match' does not cover some(none); add 'case some(none):' or 'case _:'",
         2,
         7,
     );
     assert_eq!(
         errors(&format!(
-            "{SHAPE}s = Shape.Empty\nmatch s;\n    case Shape.Empty;\n        print(1)\n    case other;\n        print(2)\n"
+            "{SHAPE}s = Shape.Empty\nmatch s:\n    case Shape.Empty:\n        print(1)\n    case other:\n        print(2)\n"
         )),
         []
     );
@@ -2327,7 +2327,7 @@ fn a_match_must_cover_every_value() {
 #[test]
 fn a_case_after_one_that_matches_everything_never_runs() {
     let source =
-        "x = some(1)\nmatch x;\n    case _;\n        print(1)\n    case none;\n        print(0)\n";
+        "x = some(1)\nmatch x:\n    case _:\n        print(1)\n    case none:\n        print(0)\n";
     let analysis = analyze_source(source);
     assert_eq!(analysis.diagnostics.len(), 1);
     let warning = &analysis.diagnostics[0];
@@ -2342,7 +2342,7 @@ fn a_case_after_one_that_matches_everything_never_runs() {
 #[test]
 fn patterns_are_checked_against_the_value() {
     assert_error(
-        &format!("{SHAPE}s = Shape.Empty\nmatch s;\n    case Empty;\n        print(1)\n"),
+        &format!("{SHAPE}s = Shape.Empty\nmatch s:\n    case Empty:\n        print(1)\n"),
         "'Empty' here is a new variable that matches any value; to match the variant, write \
          'Shape.Empty'",
         7,
@@ -2350,7 +2350,7 @@ fn patterns_are_checked_against_the_value() {
     );
     assert_error(
         &format!(
-            "{SHAPE}s = Shape.Empty\nmatch s;\n    case some(x);\n        print(x)\n    case _;\n        print(0)\n"
+            "{SHAPE}s = Shape.Empty\nmatch s:\n    case some(x):\n        print(x)\n    case _:\n        print(0)\n"
         ),
         "this pattern matches option[unknown], but the value is Shape",
         7,
@@ -2358,7 +2358,7 @@ fn patterns_are_checked_against_the_value() {
     );
     assert_error(
         &format!(
-            "{SHAPE}s = Shape.Empty\nmatch s;\n    case Shape.Rect(w);\n        print(w)\n    case _;\n        print(0)\n"
+            "{SHAPE}s = Shape.Empty\nmatch s:\n    case Shape.Rect(w):\n        print(w)\n    case _:\n        print(0)\n"
         ),
         "'Shape.Rect' holds 2 values, but this pattern has 1",
         7,
@@ -2366,20 +2366,20 @@ fn patterns_are_checked_against_the_value() {
     );
     assert_error(
         &format!(
-            "{SHAPE}s = Shape.Empty\nmatch s;\n    case Shape.Rect(w, w);\n        print(w)\n    case _;\n        print(0)\n"
+            "{SHAPE}s = Shape.Empty\nmatch s:\n    case Shape.Rect(w, w):\n        print(w)\n    case _:\n        print(0)\n"
         ),
         "'w' is bound more than once in this pattern",
         7,
         24,
     );
     assert_error(
-        "match 3;\n    case n;\n        print(n)\n",
+        "match 3:\n    case n:\n        print(n)\n",
         "'match' needs an enum or option value, found int",
         1,
         7,
     );
     assert_error(
-        "x = some(1)\nmatch x;\n    case other(y);\n        print(y)\n    case _;\n        print(0)\n",
+        "x = some(1)\nmatch x:\n    case other(y):\n        print(y)\n    case _:\n        print(0)\n",
         "'other' is not a variant; write a variant with its enum, as in 'Shape.Circle(r)', or 'some(x)'",
         3,
         10,
@@ -2388,26 +2388,26 @@ fn patterns_are_checked_against_the_value() {
 
 #[test]
 fn a_name_bound_in_every_case_is_assigned_after_the_match() {
-    let both = "x = some(1)\nmatch x;\n    case some(n);\n        y = n\n    case none;\n        y = 0\nprint(y)\n";
+    let both = "x = some(1)\nmatch x:\n    case some(n):\n        y = n\n    case none:\n        y = 0\nprint(y)\n";
     assert_eq!(errors(both), []);
-    let one = "x = some(1)\nmatch x;\n    case some(n);\n        y = n\n    case none;\n        print(0)\nprint(y)\n";
+    let one = "x = some(1)\nmatch x:\n    case some(n):\n        y = n\n    case none:\n        print(0)\nprint(y)\n";
     assert_error(one, "'y' might be used before it is assigned", 7, 7);
 }
 
 #[test]
 fn a_match_whose_cases_all_return_returns() {
-    let source = "fn f(x: option[int]) -> int;\n    match x;\n        case some(n);\n            ret n\n        case none;\n            ret 0\n";
+    let source = "fn f(x: option[int]) -> int:\n    match x:\n        case some(n):\n            ret n\n        case none:\n            ret 0\n";
     assert_eq!(errors(source), []);
 }
 
-const POINT: &str = "struct Point;\n    x: float\n    y: float\n";
+const POINT: &str = "struct Point:\n    x: float\n    y: float\n";
 
 #[test]
 fn structs_are_made_from_named_values_in_any_order() {
     let source = format!("{POINT}p = Point(y=2.0, x=1.0)\na = p.x\n");
     assert_eq!(type_of_symbol(&source, "p"), "Point");
     assert_eq!(type_of_symbol(&source, "a"), "float");
-    let source = format!("{POINT}fn f(p: Point) -> list[Point];\n    ret [p]\n");
+    let source = format!("{POINT}fn f(p: Point) -> list[Point]:\n    ret [p]\n");
     assert_eq!(type_of_symbol(&source, "f"), "fn(Point) -> list[Point]");
 }
 
@@ -2438,7 +2438,7 @@ fn struct_values_are_checked() {
         5,
     );
     assert_error(
-        "struct T;\n    a: int\n    b: int\n    c: int\nt = T(b=1)\n",
+        "struct T:\n    a: int\n    b: int\n    c: int\nt = T(b=1)\n",
         "missing fields 'a' and 'c' for 'T'",
         5,
         5,
@@ -2450,7 +2450,7 @@ fn struct_values_are_checked() {
         13,
     );
     assert_error(
-        "fn f(a: int) -> int;\n    ret a\nprint(f(a=1))\n",
+        "fn f(a: int) -> int:\n    ret a\nprint(f(a=1))\n",
         "only a struct is made with named values; pass this value without its name",
         3,
         9,
@@ -2472,49 +2472,49 @@ fn struct_values_are_checked() {
 #[test]
 fn struct_definitions_are_checked() {
     assert_error(
-        "struct A;\n    x: int\nstruct A;\n    y: int\n",
+        "struct A:\n    x: int\nstruct A:\n    y: int\n",
         "struct 'A' is already defined",
         3,
         8,
     );
     assert_error(
-        "struct A;\n    x: int\n    x: str\n",
+        "struct A:\n    x: int\n    x: str\n",
         "'A' already has a field 'x'",
         3,
         5,
     );
     assert_error(
-        "struct list;\n    x: int\n",
+        "struct list:\n    x: int\n",
         "cannot redefine builtin 'list'",
         1,
         8,
     );
     assert_error(
-        "struct A;\n    x: Missing\n",
+        "struct A:\n    x: Missing\n",
         "there is no type 'Missing'",
         2,
         8,
     );
     assert_error(
-        "if true;\n    struct A;\n        x: int\n",
+        "if true:\n    struct A:\n        x: int\n",
         "structs can only be defined at the top level",
         2,
         12,
     );
     assert_error(
-        "struct A;\n    x: int\nfn A();\n    ret\n",
+        "struct A:\n    x: int\nfn A():\n    ret\n",
         "'A' is already defined as a struct",
         3,
         4,
     );
     assert_error(
-        "enum A;\n    X\nstruct A;\n    x: int\n",
+        "enum A:\n    X\nstruct A:\n    x: int\n",
         "'A' is already defined as an enum",
         3,
         8,
     );
     assert_error(
-        "struct A;\n    x: int\nA = 1\n",
+        "struct A:\n    x: int\nA = 1\n",
         "cannot assign to struct 'A'",
         3,
         1,
@@ -2524,7 +2524,7 @@ fn struct_definitions_are_checked() {
 #[test]
 fn a_struct_holds_itself_only_through_a_list_or_an_enum() {
     assert_error(
-        "struct Node;\n    value: int\n    next: Node\n",
+        "struct Node:\n    value: int\n    next: Node\n",
         "'Node' holds itself through 'next', so a value of it would never end; hold it in a \
          list or an option, as in 'next: option[Node]'",
         3,
@@ -2532,7 +2532,7 @@ fn a_struct_holds_itself_only_through_a_list_or_an_enum() {
     );
     // through a tuple and another struct, reported once
     assert_error(
-        "struct A;\n    b: tuple[int, B]\nstruct B;\n    a: A\n",
+        "struct A:\n    b: tuple[int, B]\nstruct B:\n    a: A\n",
         "'A' holds itself through 'b', so a value of it would never end; hold it in a list or \
          an option, as in 'b: option[A]'",
         2,
@@ -2540,7 +2540,7 @@ fn a_struct_holds_itself_only_through_a_list_or_an_enum() {
     );
     assert_eq!(
         errors(
-            "struct Node;\n    kids: list[Node]\n    next: option[Node]\n\
+            "struct Node:\n    kids: list[Node]\n    next: option[Node]\n\
              n = Node(kids=[], next=none)\nm = Node(kids=[n], next=some(n))\nprint(m)\n"
         ),
         []
@@ -2575,7 +2575,7 @@ fn fields_are_read_and_changed() {
 
 #[test]
 fn a_change_reaches_a_field_of_a_variable() {
-    let bag = "struct Bag;\n    items: list[int]\n    name: str\n";
+    let bag = "struct Bag:\n    items: list[int]\n    name: str\n";
     assert_eq!(
         errors(&format!(
             "{bag}b = Bag(items=[], name=\"b\")\nb.items.append(1)\nb.items[0] = 2\n\
@@ -2584,13 +2584,13 @@ fn a_change_reaches_a_field_of_a_variable() {
         []
     );
     assert_error(
-        &format!("{POINT}fn f() -> Point;\n    ret Point(x=1.0, y=2.0)\nf().x = 1.0\n"),
+        &format!("{POINT}fn f() -> Point:\n    ret Point(x=1.0, y=2.0)\nf().x = 1.0\n"),
         "this value is not stored in a variable, so changing it has no effect",
         6,
         1,
     );
     assert_error(
-        &format!("{POINT}p = Point(x=1.0, y=2.0)\nfn f();\n    p.x = 1.0\n"),
+        &format!("{POINT}p = Point(x=1.0, y=2.0)\nfn f():\n    p.x = 1.0\n"),
         "a function cannot change the global 'p'; pass it as an argument and return the changed \
          value",
         6,
@@ -2612,7 +2612,7 @@ fn a_change_reaches_a_field_of_a_variable() {
 
 #[test]
 fn a_change_to_a_fields_parameter_is_lost_unless_it_is_read() {
-    let source = format!("{POINT}fn f(p: Point);\n    p.x = 1.0\n");
+    let source = format!("{POINT}fn f(p: Point):\n    p.x = 1.0\n");
     let analysis = analyze_source(&source);
     let warnings: Vec<(String, usize, usize)> = analysis
         .diagnostics
@@ -2631,7 +2631,7 @@ fn a_change_to_a_fields_parameter_is_lost_unless_it_is_read() {
     );
     assert_eq!(
         errors(&format!(
-            "{POINT}fn f(p: Point) -> Point;\n    p.x = 1.0\n    ret p\n"
+            "{POINT}fn f(p: Point) -> Point:\n    p.x = 1.0\n    ret p\n"
         )),
         []
     );
@@ -2660,7 +2660,7 @@ fn structs_are_not_numbers_or_strings() {
         11,
     );
     assert_error(
-        &format!("{p}if p;\n    print(1)\n"),
+        &format!("{p}if p:\n    print(1)\n"),
         "a condition must be bool, found Point",
         5,
         4,
@@ -2671,7 +2671,7 @@ fn structs_are_not_numbers_or_strings() {
 fn a_list_element_of_a_struct_holds_at_most_32_values() {
     let wide = vec!["int"; 33].join(", ");
     assert_error(
-        &format!("struct W;\n    t: tuple[{wide}]\nfn f(ws: list[W]);\n    print(ws)\n"),
+        &format!("struct W:\n    t: tuple[{wide}]\nfn f(ws: list[W]):\n    print(ws)\n"),
         "a list element can hold at most 32 values, but W holds 33",
         3,
         10,
@@ -2680,16 +2680,16 @@ fn a_list_element_of_a_struct_holds_at_most_32_values() {
 
 #[test]
 fn a_function_reads_a_field_of_a_global_assigned_after_it() {
-    let source = format!("{POINT}fn f() -> float;\n    ret p.x\np = Point(x=1.0, y=2.0)\n");
+    let source = format!("{POINT}fn f() -> float:\n    ret p.x\np = Point(x=1.0, y=2.0)\n");
     assert_eq!(errors(&source), []);
     assert_error(
-        &format!("{POINT}fn f() -> str;\n    ret p.x\np = Point(x=1.0, y=2.0)\n"),
+        &format!("{POINT}fn f() -> str:\n    ret p.x\np = Point(x=1.0, y=2.0)\n"),
         "expected float, found str",
         5,
         11,
     );
     assert_error(
-        &format!("{POINT}fn f() -> float;\n    ret p.x\np = 1\n"),
+        &format!("{POINT}fn f() -> float:\n    ret p.x\np = 1\n"),
         "int has no field 'x'",
         5,
         11,
@@ -2725,7 +2725,7 @@ fn map_keys_are_int_str_or_bool() {
         6,
     );
     assert_error(
-        "fn f(m: map[list[int], int]); ret\n",
+        "fn f(m: map[list[int], int]): ret\n",
         "a map key must be int, str, or bool, found list[int]",
         1,
         13,
@@ -2813,11 +2813,11 @@ fn tuples_structs_options_and_enums_compare_by_value() {
         "t = (1, (\"a\", 2.0))\nprint(t == t, t != (1, (\"b\", 2.0)))\n".to_string(),
         format!("{POINT}p = Point(x=1.0, y=2.0)\nprint(p == p, p != Point(x=0.0, y=2.0))\n"),
         "x = some(1)\nprint(x == none, x != some(2), none == none)\n".to_string(),
-        "enum List;\n    Nil\n    Cons(int, List)\nl = List.Cons(1, List.Nil)\n\
+        "enum List:\n    Nil\n    Cons(int, List)\nl = List.Cons(1, List.Nil)\n\
          print(l == List.Nil, l == l == l)\n"
             .to_string(),
-        "struct Named;\n    name: str\n    shape: option[tuple[int, float]]\n\
-         n = Named(name=\"a\", shape=none)\nif n != n;\n    print(n)\n"
+        "struct Named:\n    name: str\n    shape: option[tuple[int, float]]\n\
+         n = Named(name=\"a\", shape=none)\nif n != n:\n    print(n)\n"
             .to_string(),
     ];
     for source in &sources {
@@ -2844,13 +2844,13 @@ fn compared_values_must_have_one_type() {
 #[test]
 fn values_holding_lists_or_maps_cannot_be_compared() {
     assert_error(
-        "struct Bag;\n    items: list[int]\nb = Bag(items=[])\nprint(b == b)\n",
+        "struct Bag:\n    items: list[int]\nb = Bag(items=[])\nprint(b == b)\n",
         "'==' and '!=' cannot compare Bag, since field 'Bag.items' holds list[int]",
         4,
         7,
     );
     assert_error(
-        "struct Bag;\n    items: list[int]\nstruct Box;\n    bag: tuple[int, Bag]\n\
+        "struct Bag:\n    items: list[int]\nstruct Box:\n    bag: tuple[int, Bag]\n\
          b = Box(bag=(1, Bag(items=[])))\nprint(b != b)\n",
         "'==' and '!=' cannot compare Box, since field 'Bag.items' holds list[int]",
         6,
@@ -2869,7 +2869,7 @@ fn values_holding_lists_or_maps_cannot_be_compared() {
         7,
     );
     assert_error(
-        "enum Tree;\n    Leaf\n    Node(int, list[Tree])\nt = Tree.Leaf\nprint(t == t)\n",
+        "enum Tree:\n    Leaf\n    Node(int, list[Tree])\nt = Tree.Leaf\nprint(t == t)\n",
         "'==' and '!=' cannot compare Tree, since it holds list[Tree]",
         5,
         7,
@@ -2885,7 +2885,7 @@ fn maps_cannot_be_compared_or_iterated() {
         5,
     );
     assert_error(
-        "for k in {1: 1};\n    print(k)\n",
+        "for k in {1: 1}:\n    print(k)\n",
         "a map cannot be iterated, for now",
         1,
         10,
@@ -2896,7 +2896,7 @@ fn maps_cannot_be_compared_or_iterated() {
 fn a_function_changing_a_map_owns_it() {
     assert!(
         errors(
-            "fn f(m: map[str, int]) -> map[str, int];\n    m[\"a\"] = 1\n    ret m\nprint(f({}))\n"
+            "fn f(m: map[str, int]) -> map[str, int]:\n    m[\"a\"] = 1\n    ret m\nprint(f({}))\n"
         )
         .is_empty()
     );
@@ -2905,21 +2905,21 @@ fn a_function_changing_a_map_owns_it() {
 #[test]
 fn a_function_can_index_a_global_map_assigned_after_it() {
     assert!(
-        errors("fn f(k: str) -> int;\n    ret table[k]\ntable = {\"a\": 1}\nprint(f(\"a\"))\n")
+        errors("fn f(k: str) -> int:\n    ret table[k]\ntable = {\"a\": 1}\nprint(f(\"a\"))\n")
             .is_empty()
     );
     assert_error(
-        "fn f(k: str) -> int;\n    ret table[k]\ntable = [1]\nprint(f(\"a\"))\n",
+        "fn f(k: str) -> int:\n    ret table[k]\ntable = [1]\nprint(f(\"a\"))\n",
         "expected int, found str",
         2,
         15,
     );
 }
 
-const STACK: &str = "struct Stack;\n    items: list[int]\nimpl Stack;\n    fn new() -> Stack;\n        \
-                     ret Stack(items=[])\n    fn size(self) -> int;\n        ret self.items.len()\n    \
-                     fn push(self, x: int);\n        self.items.append(x)\n    \
-                     fn pop_top(self) -> int;\n        x = self.items.pop(-1)\n        ret x\n";
+const STACK: &str = "struct Stack:\n    items: list[int]\nimpl Stack:\n    fn new() -> Stack:\n        \
+                     ret Stack(items=[])\n    fn size(self) -> int:\n        ret self.items.len()\n    \
+                     fn push(self, x: int):\n        self.items.append(x)\n    \
+                     fn pop_top(self) -> int:\n        x = self.items.pop(-1)\n        ret x\n";
 
 /// Returns each method call of `source` as the function it calls, whether it has a receiver,
 /// and whether it changes it, sorted.
@@ -2968,11 +2968,11 @@ fn methods_and_associated_functions_are_typed() {
 #[test]
 fn a_method_changes_self_through_its_fields_and_other_methods() {
     let source = format!(
-        "{STACK}struct Pair;\n    a: Stack\n    rest: list[Stack]\nimpl Pair;\n    \
-         fn both(self);\n        self.a.push(1)\n        self.rest[0].push(2)\n    \
-         fn twice(self);\n        self.both()\n        self.both()\n    \
-         fn total(self) -> int;\n        ret self.a.size() + self.rest[0].size()\n    \
-         fn reset(self);\n        self = Pair(a=Stack.new(), rest=[])\n\
+        "{STACK}struct Pair:\n    a: Stack\n    rest: list[Stack]\nimpl Pair:\n    \
+         fn both(self):\n        self.a.push(1)\n        self.rest[0].push(2)\n    \
+         fn twice(self):\n        self.both()\n        self.both()\n    \
+         fn total(self) -> int:\n        ret self.a.size() + self.rest[0].size()\n    \
+         fn reset(self):\n        self = Pair(a=Stack.new(), rest=[])\n\
          p = Pair(a=Stack.new(), rest=[])\np.twice()\np.reset()\nprint(p.total())\n"
     );
     let calls = method_calls(&source);
@@ -2992,8 +2992,8 @@ fn a_method_changes_self_through_its_fields_and_other_methods() {
 
 #[test]
 fn a_struct_method_is_not_the_builtin_of_the_same_name() {
-    let source = "struct Bag;\n    n: int\nimpl Bag;\n    fn append(self, x: int) -> int;\n        \
-                  ret self.n + x\n    fn len(self) -> int;\n        ret self.n\n\
+    let source = "struct Bag:\n    n: int\nimpl Bag:\n    fn append(self, x: int) -> int:\n        \
+                  ret self.n + x\n    fn len(self) -> int:\n        ret self.n\n\
                   b = Bag(n=1)\nb.append(2)\nprint(b.append(3), b.len())\n";
     assert_eq!(
         method_calls(source),
@@ -3028,7 +3028,7 @@ fn a_method_that_changes_its_receiver_is_a_statement_or_an_assigned_value() {
         1,
     );
     assert_error(
-        &format!("{s}fn f();\n    s.push(1)\n"),
+        &format!("{s}fn f():\n    s.push(1)\n"),
         "a function cannot change the global 's'; pass it as an argument and return the changed \
          value",
         15,
@@ -3096,7 +3096,7 @@ fn method_calls_are_checked() {
     );
     assert_eq!(
         errors(&format!(
-            "{STACK}fn f() -> int;\n    ret g.size()\ng = Stack.new()\nprint(f())\n"
+            "{STACK}fn f() -> int:\n    ret g.size()\ng = Stack.new()\nprint(f())\n"
         )),
         []
     );
@@ -3104,41 +3104,41 @@ fn method_calls_are_checked() {
 
 #[test]
 fn impl_blocks_are_checked() {
-    let s = "struct S;\n    n: int\n";
+    let s = "struct S:\n    n: int\n";
     assert_error(
         &format!(
-            "{s}impl S;\n    fn f(self);\n        ret\nimpl S;\n    fn f(self);\n        ret\n"
+            "{s}impl S:\n    fn f(self):\n        ret\nimpl S:\n    fn f(self):\n        ret\n"
         ),
         "'S' already has a method 'f'",
         7,
         8,
     );
     assert_error(
-        &format!("{s}impl S;\n    fn n(self) -> int;\n        ret 1\n"),
+        &format!("{s}impl S:\n    fn n(self) -> int:\n        ret 1\n"),
         "'n' is a field of 'S', so a method cannot have its name",
         4,
         8,
     );
     assert_error(
-        &format!("{s}impl S;\n    fn f(self: S);\n        ret\n"),
+        &format!("{s}impl S:\n    fn f(self: S):\n        ret\n"),
         "'self' needs no type, since it is the 'S' the method is called on",
         4,
         10,
     );
     assert_error(
-        &format!("{s}impl S;\n    fn f(x: int, self);\n        ret\n"),
+        &format!("{s}impl S:\n    fn f(x: int, self):\n        ret\n"),
         "'self' can only be the first parameter of a method",
         4,
         18,
     );
     assert_error(
-        "fn f(self);\n    ret\n",
+        "fn f(self):\n    ret\n",
         "'self' can only be the first parameter of a method",
         1,
         6,
     );
     assert_error(
-        &format!("{s}fn f();\n    impl S;\n        fn g(self);\n            ret\n"),
+        &format!("{s}fn f():\n    impl S:\n        fn g(self):\n            ret\n"),
         "impl blocks can only be at the top level",
         4,
         10,
@@ -3147,7 +3147,7 @@ fn impl_blocks_are_checked() {
 
 #[test]
 fn a_change_through_a_method_is_lost_on_a_parameter_but_not_on_self() {
-    let source = format!("{STACK}fn f(s: Stack);\n    s.push(1)\n");
+    let source = format!("{STACK}fn f(s: Stack):\n    s.push(1)\n");
     let analysis = analyze_source(&source);
     let warnings: Vec<(String, usize, usize)> = analysis
         .diagnostics

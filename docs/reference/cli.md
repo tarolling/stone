@@ -137,7 +137,7 @@ stone 0.2.0. Press Ctrl+D to exit.
 'hi Ada'
 ```
 
-A line that opens a block, such as `fn f(n: int);` or `if x;`, continues the entry with a `...`
+A line that opens a block, such as `fn f(n: int):` or `if x:`, continues the entry with a `...`
 prompt, and a blank line ends it. Every entry is checked together with the earlier ones as if
 they were one file, so `x = "a"` after `x = 6` is an error. An entry with an error is reported as
 `<stdin>:line:col` and discarded, and one that fails at runtime prints `error: message`; the

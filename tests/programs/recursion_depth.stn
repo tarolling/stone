@@ -1,6 +1,6 @@
 // up to 1000 calls can be active at once
-fn depth(n: int) -> int;
-    if n == 0;
+fn depth(n: int) -> int:
+    if n == 0:
         ret 0
     ret 1 + depth(n - 1)
 print(depth(999))

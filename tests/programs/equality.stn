@@ -1,38 +1,38 @@
 // == and != compare tuples, structs, options, and enums part by part
 
-struct Point;
+struct Point:
     x: float
     y: float
 
-enum Shape;
+enum Shape:
     Circle(Point, float)
     Rect(Point, Point)
     Named(str, option[Shape])
     Empty
 
-struct Label;
+struct Label:
     text: str
     at: Point
     shape: option[Shape]
     pair: tuple[int, str]
 
-enum IntList;
+enum IntList:
     Nil
     Cons(int, IntList)
 
-fn word(n: int) -> str;
+fn word(n: int) -> str:
     ret "w" + str(n)
 
-fn pair(n: int) -> tuple[int, str];
+fn pair(n: int) -> tuple[int, str]:
     ret (n, word(n))
 
-fn numbers(n: int) -> IntList;
+fn numbers(n: int) -> IntList:
     l = IntList.Nil
-    for i in range(n);
+    for i in range(n):
         l = IntList.Cons(i, l)
     ret l
 
-fn label(text: str) -> Label;
+fn label(text: str) -> Label:
     ret Label(text=text, at=Point(x=1.0, y=2.0), shape=some(Shape.Empty), pair=(1, "a"))
 
 // tuples, nested, with strings built at runtime
@@ -82,25 +82,25 @@ m = numbers(50)
 print(l == m)
 
 // in conditions, chained, and in loops
-if p == Point(x=1.0, y=2.0) and x != none;
+if p == Point(x=1.0, y=2.0) and x != none:
     print("equal")
-if not (c == Shape.Empty);
+if not (c == Shape.Empty):
     print("not empty")
 print(p == p == Point(x=1.0, y=2.0), t == t == (1, ("w1", 3.0)))
 print(word(1) == word(1) == "w1", pair(1) == pair(1) == pair(2))
 count = 0
 k = numbers(0)
-while k != numbers(5);
+while k != numbers(5):
     count += 1
-    match k;
-        case IntList.Nil;
+    match k:
+        case IntList.Nil:
             k = IntList.Cons(0, k)
-        case IntList.Cons(head, _);
+        case IntList.Cons(head, _):
             k = IntList.Cons(head + 1, k)
 print(count)
 labels = [label("a"), label("b"), label("a")]
 found = 0
-for item in labels;
-    if item == label("a");
+for item in labels:
+    if item == label("a"):
         found += 1
 print(found)

@@ -107,7 +107,7 @@ reading one is `undefined name` or `undefined function`, as for any unknown name
 ## Types
 
 The checker checks the whole program at once, the same way it does within one file. A module's
-functions have the types their signatures write, so `pub fn first(xs: list[str]) -> str; ret xs[0]`
+functions have the types their signatures write, so `pub fn first(xs: list[str]) -> str: ret xs[0]`
 can be called from any file with a `list[str]`, and a call with anything else is an error in the
 calling file. Errors point at the file they are in, as in
 `app/geometry/shapes.stn:4:12: error: ...`.

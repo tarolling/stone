@@ -12,7 +12,7 @@ prints
 
 ## Defining and calling
 
-`fn name(param: type, ...) -> type;` opens a function, and `ret value` returns from it. Each
+`fn name(param: type, ...) -> type:` opens a function, and `ret value` returns from it. Each
 parameter is written with its type, and the type after `->` is the type of the value the
 function returns. A function without `->` returns no value: `ret` on its own, or reaching the
 end of the body, leaves it, and a call to it can only be a statement of its own, as

@@ -1,31 +1,31 @@
 // an enum a module makes public, with functions that make and read its values
-pub enum Animal;
+pub enum Animal:
     Dog(str)
     Cat(int)
     Fish
 
 // a private enum, which only this module can use
-enum Mood;
+enum Mood:
     Happy
     Grumpy
 
-fn mood(a: Animal) -> Mood;
-    match a;
-        case Animal.Cat(_);
+fn mood(a: Animal) -> Mood:
+    match a:
+        case Animal.Cat(_):
             ret Mood.Grumpy
-        case _;
+        case _:
             ret Mood.Happy
 
-pub fn name(a: Animal) -> str;
-    match mood(a);
-        case Mood.Grumpy;
+pub fn name(a: Animal) -> str:
+    match mood(a):
+        case Mood.Grumpy:
             ret "grumpy cat"
-        case Mood.Happy;
-            match a;
-                case Animal.Dog(n);
+        case Mood.Happy:
+            match a:
+                case Animal.Dog(n):
                     ret n
-                case _;
+                case _:
                     ret "fish"
 
-pub fn adopt(lives: int) -> Animal;
+pub fn adopt(lives: int) -> Animal:
     ret Animal.Cat(lives)

@@ -26,7 +26,7 @@ from it.
   `items.insert(i, value)` puts `value` at `i`, and `items.extend(more)` adds every element of
   `more` to the end.
 - `items[start:stop]` is a new list of part of `items`, as in Python.
-- `for item in items;` walks the list in order, as it was when the loop started. If the body
+- `for item in items:` walks the list in order, as it was when the loop started. If the body
   appends to the list, the loop does not visit the new elements.
 
 An index past either end stops the program with `list index out of range`.
@@ -72,9 +72,9 @@ A function that changes a list it was given changes its own copy, so it returns 
 the caller assigns the result:
 
 ```stone
-fn with_total(xs: list[int]) -> list[int];
+fn with_total(xs: list[int]) -> list[int]:
     total = 0
-    for x in xs;
+    for x in xs:
         total += x
     xs.append(total)
     ret xs

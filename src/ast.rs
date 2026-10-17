@@ -88,7 +88,7 @@ impl Constant {
 ////////////////////////////////////////////////////////////////
 
 /// A function parameter, the span of its name, and its type, such as `a: int` in
-/// `fn f(a: int);`.
+/// `fn f(a: int):`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arg {
     pub arg: Identifier,
@@ -305,7 +305,7 @@ impl Stmt {
 /// The kind of a [`Stmt`], such as an assignment or a loop.
 #[derive(Debug, Clone, PartialEq)]
 pub enum StmtKind {
-    /// A function definition, such as `fn add(a: int, b: int) -> int; ret a + b`.
+    /// A function definition, such as `fn add(a: int, b: int) -> int: ret a + b`.
     FunctionDef {
         name: Identifier,
         /// The span of the function's name, which editor features point at.
@@ -333,13 +333,13 @@ pub enum StmtKind {
         op: Operator,
         value: Box<Expr>,
     },
-    /// A `for` loop, such as `for i in 10; print(i)`.
+    /// A `for` loop, such as `for i in 10: print(i)`.
     For {
         target: Box<Expr>,
         iter: Box<Expr>,
         body: Vec<Stmt>,
     },
-    /// A `while` loop, such as `while x; x = x - 1`.
+    /// A `while` loop, such as `while x: x = x - 1`.
     While { test: Box<Expr>, body: Vec<Stmt> },
     /// An `if` statement, where `elif` and `else` branches are nested in `orelse`.
     If {
@@ -355,7 +355,7 @@ pub enum StmtKind {
         path: Vec<(Identifier, Span)>,
         alias: Option<(Identifier, Span)>,
     },
-    /// An enum definition, such as `enum Shape;` followed by an indented line for each variant,
+    /// An enum definition, such as `enum Shape:` followed by an indented line for each variant,
     /// like `Circle(float)` or `Empty`.
     EnumDef {
         name: Identifier,
@@ -365,7 +365,7 @@ pub enum StmtKind {
         public: bool,
         variants: Vec<Variant>,
     },
-    /// A struct definition, such as `struct Point;` followed by an indented line for each
+    /// A struct definition, such as `struct Point:` followed by an indented line for each
     /// field, like `x: float`.
     StructDef {
         name: Identifier,
@@ -375,8 +375,8 @@ pub enum StmtKind {
         public: bool,
         fields: Vec<Field>,
     },
-    /// An `impl` block, such as `impl Point;` followed by indented functions: methods, whose
-    /// first parameter is `self` (`fn norm(self) -> float;`), called on a value as `p.norm()`,
+    /// An `impl` block, such as `impl Point:` followed by indented functions: methods, whose
+    /// first parameter is `self` (`fn norm(self) -> float:`), called on a value as `p.norm()`,
     /// and associated functions without `self`, called on the struct as `Point.origin()`.
     ImplDef {
         name: Identifier,
@@ -386,7 +386,7 @@ pub enum StmtKind {
         methods: Vec<Stmt>,
     },
     /// A `match` statement, which runs the first case whose pattern matches `subject`, such as
-    /// `match s;` followed by `case Shape.Circle(r); print(r)`.
+    /// `match s:` followed by `case Shape.Circle(r): print(r)`.
     Match {
         subject: Box<Expr>,
         cases: Vec<MatchCase>,
@@ -415,7 +415,7 @@ pub struct Field {
     pub annotation: TypeExpr,
 }
 
-/// One case of a `match` statement, such as `case some(x); print(x)`.
+/// One case of a `match` statement, such as `case some(x): print(x)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct MatchCase {
     pub pattern: Pattern,
@@ -521,7 +521,7 @@ impl Error for ParserError {}
 // type annotations
 ////////////////////////////////////////////////////////////////
 
-/// A type written in a function's signature, such as `list[int]` in `fn f(xs: list[int]);`.
+/// A type written in a function's signature, such as `list[int]` in `fn f(xs: list[int]):`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TypeExpr {
     pub kind: TypeExprKind,

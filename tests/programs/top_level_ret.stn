@@ -1,5 +1,5 @@
 // ret at the top level ends the program normally
 print(1)
-if true;
+if true:
     ret 5
 print(2)

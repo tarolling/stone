@@ -213,7 +213,7 @@ pub const DEFAULT_ENTRY: &str = "main.stn";
 /// uses from `sources`, and links them into one module.
 ///
 /// For example, linking `main.stn` holding `use util` and `print(util.one())` with a `util.stn`
-/// holding `pub fn one() -> int; ret 1` gives a module that defines `util.one` and calls it.
+/// holding `pub fn one() -> int: ret 1` gives a module that defines `util.one` and calls it.
 pub fn link(entry: &Path, source: &str, sources: &dyn Sources) -> Linked {
     let root = entry.parent().unwrap_or(Path::new(""));
     link_in(root, entry, source, sources)

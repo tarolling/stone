@@ -1,18 +1,18 @@
 // arithmetic on lists: y = a * x + y over a million floats, repeated
-fn fill(n: int, k: int) -> list[float];
+fn fill(n: int, k: int) -> list[float]:
     xs = []
-    for i in range(n);
+    for i in range(n):
         xs.append(float(i % k))
     ret xs
 
-fn saxpy(a: float, x: list[float], y: list[float], reps: int) -> list[float];
-    for r in range(reps);
+fn saxpy(a: float, x: list[float], y: list[float], reps: int) -> list[float]:
+    for r in range(reps):
         y = a * x + y
     ret y
 
-fn total(xs: list[float]) -> float;
+fn total(xs: list[float]) -> float:
     sum = 0.0
-    for v in xs;
+    for v in xs:
         sum = sum + v
     ret sum
 

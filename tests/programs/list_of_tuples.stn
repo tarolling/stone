@@ -3,18 +3,18 @@ use random
 
 scores = [("ann", 3), ("bo", 5)]
 print(scores, scores.len(), scores[0], scores[-1][0], scores[1][1])
-for name, score in scores;
+for name, score in scores:
     print(name, score * 2)
-for pair in scores;
+for pair in scores:
     print(pair)
 
 // growing past the capacity, one element at a time
 squares = []
-for i in range(100);
+for i in range(100):
     squares.append((i, i * i, str(i)))
 print(squares.len(), squares[0], squares[57], squares[-1])
 total = 0
-for n, square, text in squares;
+for n, square, text in squares:
     total += square + text.len()
 print(total)
 
@@ -75,14 +75,14 @@ picked = random.choice(scores)
 print(picked, random.choice(squares)[2])
 
 // functions take and return lists of tuples
-fn best(entries: list[tuple[str, int]]) -> tuple[str, int];
+fn best(entries: list[tuple[str, int]]) -> tuple[str, int]:
     top = entries[0]
-    for entry in entries;
-        if entry[1] > top[1];
+    for entry in entries:
+        if entry[1] > top[1]:
             top = entry
     ret top
 
-fn add(entries: list[tuple[str, int]], name: str, score: int) -> list[tuple[str, int]];
+fn add(entries: list[tuple[str, int]], name: str, score: int) -> list[tuple[str, int]]:
     entries.append((name, score))
     ret entries
 

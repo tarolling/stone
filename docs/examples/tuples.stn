@@ -4,13 +4,13 @@ person = ("ann", 31, ["chess", "go"])
 print(point, person, person[0], person[-1][1])
 
 // a function returns several values as a tuple
-fn min_max(xs: list[int]) -> tuple[int, int];
+fn min_max(xs: list[int]) -> tuple[int, int]:
     low = xs[0]
     high = xs[0]
-    for x in xs;
-        if x < low;
+    for x in xs:
+        if x < low:
             low = x
-        if x > high;
+        if x > high:
             high = x
     ret (low, high)
 
@@ -26,6 +26,6 @@ print(a, b)
 // a list of tuples unpacks one element at a time
 scores = [("ann", 3), ("bo", 5)]
 scores.append(("cy", 4))
-for name, score in scores;
+for name, score in scores:
     print(name, score)
 print(scores, scores[1][0])

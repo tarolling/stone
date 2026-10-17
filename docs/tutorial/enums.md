@@ -12,7 +12,7 @@ prints
 
 ## Enums
 
-An enum is a type whose values are one of a few kinds, called its variants. `enum Shape;` opens
+An enum is a type whose values are one of a few kinds, called its variants. `enum Shape:` opens
 one, and each indented line after it names a variant and, in parentheses, the types of the
 values it holds, so a `Shape` is a circle with a radius, a rectangle with a width and a height,
 or empty. Enums are like Rust's: a variant can hold any values, including lists and other enum
@@ -24,16 +24,16 @@ it is written.
 
 ## Match
 
-`match` looks at a value and runs the first `case` whose pattern fits it. `case Shape.Rect(w, h);`
+`match` looks at a value and runs the first `case` whose pattern fits it. `case Shape.Rect(w, h):`
 fits a rectangle and names its two values `w` and `h` for the block under it, and `_` in place
-of a name fits any value without naming it, as in `case Shape.Rect(w, _);`. A name on its own,
-as in `case other;`, fits every value.
+of a name fits any value without naming it, as in `case Shape.Rect(w, _):`. A name on its own,
+as in `case other:`, fits every value.
 
-The cases must cover every value. Leave out `case Shape.Empty;` from `area`, and the checker
+The cases must cover every value. Leave out `case Shape.Empty:` from `area`, and the checker
 stops before the program runs:
 
 ```text
-error: 'match' does not cover Shape.Empty; add 'case Shape.Empty;' or 'case _;'
+error: 'match' does not cover Shape.Empty; add 'case Shape.Empty:' or 'case _:'
 ```
 
 So adding a variant to an enum points at every `match` that needs a case for it.

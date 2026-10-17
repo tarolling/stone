@@ -1,5 +1,5 @@
 // the element is read before the value, so a bad index stops the program first
-fn amount() -> int;
+fn amount() -> int:
     print("amount")
     ret 1
 

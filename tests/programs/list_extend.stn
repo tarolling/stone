@@ -29,6 +29,6 @@ print(words)
 
 // extending over and over grows the list
 big = []
-for i in range(100);
+for i in range(100):
     big.extend([i, i])
 print(big.len(), big[199])

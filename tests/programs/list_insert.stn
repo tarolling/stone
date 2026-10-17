@@ -23,7 +23,7 @@ print(grid, row)
 
 // inserting at the front over and over grows the list
 ys = []
-for i in range(20);
+for i in range(20):
     ys.insert(0, i)
 print(ys)
 

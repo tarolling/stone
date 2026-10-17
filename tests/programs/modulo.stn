@@ -5,7 +5,7 @@ b = 3
 print(a % b, a % (0 - b), (a / b) * b + a % b == a)
 
 // constant divisors, including powers of two
-fn by_constants(x: int) -> list[int];
+fn by_constants(x: int) -> list[int]:
     ret [x % 1, x % 2, x % 8, x % -8, x % 10, x % -10, x % 4096]
 print(by_constants(12345), by_constants(0 - 12345))
 
@@ -26,9 +26,9 @@ nan = inf - inf
 print(2.5 % inf, -2.5 % inf, inf % 2.0, nan % 2.0, 2.0 % nan)
 
 // a remainder in a loop, with live values on both sides
-fn digit_sum(n: int) -> int;
+fn digit_sum(n: int) -> int:
     total = 0
-    while n > 0;
+    while n > 0:
         total = total + n % 10
         n = n / 10
     ret total

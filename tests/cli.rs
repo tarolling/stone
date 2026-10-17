@@ -35,7 +35,7 @@ fn check_reports_a_syntax_error_and_fails() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{}:1:5: error: expected ';', found end of line\n  |\n1 | if 1\n  |     ^\n",
+            "{}:1:5: error: expected ':', found end of line\n  |\n1 | if 1\n  |     ^\n",
             file.display()
         )
     );
@@ -83,7 +83,7 @@ fn run_reports_a_runtime_error_and_fails() {
 
 #[test]
 fn built_programs_report_runtime_errors_as_run_does() {
-    let source = "fn mean(xs: list[int]) -> int;\n    ret xs[0] / xs.len()\n\nprint(mean([4]))\nprint(mean([]))\n";
+    let source = "fn mean(xs: list[int]) -> int:\n    ret xs[0] / xs.len()\n\nprint(mean([4]))\nprint(mean([]))\n";
     let (run, file) = stone(&["run"], "mean_empty", source);
     let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("mean_empty");
     let build = Command::new(env!("CARGO_BIN_EXE_stone"))
@@ -113,7 +113,7 @@ fn built_programs_report_runtime_errors_as_run_does() {
 
 #[test]
 fn built_programs_render_runtime_errors_byte_for_byte_as_run_does() {
-    let source = "fn ratio(a: int, b: int) -> int;\n    ret a / b\n\nprint(ratio(6, 3))\nprint(ratio(1, 0))\n";
+    let source = "fn ratio(a: int, b: int) -> int:\n    ret a / b\n\nprint(ratio(6, 3))\nprint(ratio(1, 0))\n";
     let (run, file) = stone(&["run"], "ratio_zero", source);
     let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("ratio_zero");
     let build = Command::new(env!("CARGO_BIN_EXE_stone"))
@@ -271,7 +271,7 @@ fn errors_in_an_imported_file_name_that_file() {
         "project_errors",
         &[
             ("main.stn", "use geometry.vec\nprint(vec.zero())\n"),
-            ("geometry/vec.stn", "pub fn zero();\n    ret 0 +\n"),
+            ("geometry/vec.stn", "pub fn zero():\n    ret 0 +\n"),
         ],
     );
     let expected = format!(
@@ -299,7 +299,7 @@ fn run_and_build_load_imported_files() {
         "project_runs",
         &[
             ("main.stn", "use util.twice\nprint(twice(21))\n"),
-            ("util.stn", "pub fn twice(x: int) -> int;\n    ret x * 2\n"),
+            ("util.stn", "pub fn twice(x: int) -> int:\n    ret x * 2\n"),
         ],
     );
     let main = dir.join("main.stn");
@@ -334,7 +334,7 @@ fn no_arguments_runs_a_quiet_session_over_piped_input() {
         .stderr(Stdio::piped())
         .spawn()
         .expect("stone should run");
-    let entries = "x = 2\nx * 3\n1 / 0\nfn f(n: int) -> int;\n    ret n + x\n\nf(1)\n";
+    let entries = "x = 2\nx * 3\n1 / 0\nfn f(n: int) -> int:\n    ret n + x\n\nf(1)\n";
     child
         .stdin
         .take()
@@ -420,7 +420,7 @@ fn run_and_build_in(name: &str, source: &str) -> (PathBuf, [Output; 2]) {
 #[test]
 fn run_and_build_print_warnings_and_still_succeed() {
     let source =
-        "fn push(xs: list[int], x: int);\n    xs.append(x)\n\nys = [1]\npush(ys, 2)\nprint(ys)\n";
+        "fn push(xs: list[int], x: int):\n    xs.append(x)\n\nys = [1]\npush(ys, 2)\nprint(ys)\n";
     let warning = "main.stn:2:5: warning: changes to 'xs' are lost when 'push' returns";
     for command in ["run", "build"] {
         let dir = project(&format!("warns_{command}"), &[("main.stn", source)]);
@@ -438,7 +438,7 @@ fn run_and_build_print_warnings_and_still_succeed() {
 #[test]
 fn exit_ends_the_program_with_its_status() {
     let source =
-        "use os\n\nfn stop(xs: list[str]);\n    os.exit(3)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
+        "use os\n\nfn stop(xs: list[str]):\n    os.exit(3)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
     let (_, outputs) = run_and_build_in("os_exit_status", source);
     for output in outputs {
         assert_eq!(output.status.code(), Some(3), "{output:?}");
@@ -501,11 +501,11 @@ count = 0
 longest = 0
 total = 0
 last = \"\"
-while not eof();
+while not eof():
     last = input()
     count = count + 1
     total = total + last.len()
-    if last.len() > longest;
+    if last.len() > longest:
         longest = last.len()
 print(count, longest, total, last)
 ";
@@ -827,7 +827,7 @@ fn clean_refuses_a_build_directory_stone_did_not_make() {
 #[test]
 fn printing_stops_at_an_enum_value_nested_too_deeply_in_both_backends() {
     // `N.Z` inside 9,999 `N.S`s is 10,000 levels, which prints, and one more does not
-    let source = "enum N;\n    S(N)\n    Z\n\nn = N.Z\nfor i in range(9999);\n    n = N.S(n)\n\
+    let source = "enum N:\n    S(N)\n    Z\n\nn = N.Z\nfor i in range(9999):\n    n = N.S(n)\n\
                   print(n)\nn = N.S(n)\nprint(\"start\", n)\n";
     let (_, [run, built]) = run_and_build_in("print_too_deep", source);
     let expected = format!(
@@ -850,7 +850,7 @@ fn printing_stops_at_an_enum_value_nested_too_deeply_in_both_backends() {
 #[test]
 fn printing_counts_struct_values_toward_the_depth_limit_in_both_backends() {
     // a leaf inside 9,999 trees is 10,000 levels, which prints, and one more does not
-    let source = "struct T;\n    kids: list[T]\n\nt = T(kids=[])\nfor i in range(9999);\n    \
+    let source = "struct T:\n    kids: list[T]\n\nt = T(kids=[])\nfor i in range(9999):\n    \
                   t = T(kids=[t])\nprint(t)\nt = T(kids=[t])\nprint(\"start\", t)\n";
     let (_, [run, built]) = run_and_build_in("print_struct_too_deep", source);
     let expected = format!(

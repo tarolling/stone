@@ -1,5 +1,5 @@
 // a change evaluates the value and every index before it walks to the list it changes
-fn say(n: int) -> int;
+fn say(n: int) -> int:
     print(n)
     ret n
 

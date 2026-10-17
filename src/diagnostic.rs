@@ -1,7 +1,7 @@
 //! Diagnostics: errors and warnings about a program, each pointing at a span of its source.
 //!
 //! Every stage reports problems as a [`Diagnostic`], so the CLI and the language server show them
-//! the same way. For example, parsing `if x` reports `expected ';', found end of line` at the end
+//! the same way. For example, parsing `if x` reports `expected ':', found end of line` at the end
 //! of the line.
 
 use std::error::Error;
@@ -56,10 +56,10 @@ impl Diagnostic {
     /// Formats the diagnostic for a terminal as `file:line:col: severity: message`, followed by the
     /// offending source line and a caret under the start of the span.
     ///
-    /// For example, rendering `expected ';'` for `if x` in `main.stn` gives:
+    /// For example, rendering `expected ':'` for `if x` in `main.stn` gives:
     ///
     /// ```text
-    /// main.stn:1:5: error: expected ';', found end of line
+    /// main.stn:1:5: error: expected ':', found end of line
     ///   |
     /// 1 | if x
     ///   |     ^

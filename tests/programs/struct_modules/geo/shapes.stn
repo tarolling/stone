@@ -1,12 +1,12 @@
 use geo
 use geo.Point
 
-pub struct Rect;
+pub struct Rect:
     corner: Point
     size: geo.Point
 
-pub fn area(r: Rect) -> int;
+pub fn area(r: Rect) -> int:
     ret r.size.x * r.size.y
 
-pub fn far(r: Rect) -> Point;
+pub fn far(r: Rect) -> Point:
     ret Point(x=r.corner.x + r.size.x, y=r.corner.y + r.size.y)

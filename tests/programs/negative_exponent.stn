@@ -1,4 +1,4 @@
-fn power(base: int, exp: int) -> int;
+fn power(base: int, exp: int) -> int:
     ret base ** exp
 print(power(2, 3))
 print(power(2, 0 - 1))

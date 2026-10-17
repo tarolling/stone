@@ -29,7 +29,7 @@ safe, the better fix is to change the semantics so that the compiler can always 
 fast, safe option on its own and the programmer never sees the difference.
 
 The one exception to this rule is a function's signature: the type of each parameter and of the
-value it returns, as in `fn mean(xs: list[float]) -> float;`. Signatures are written for the
+value it returns, as in `fn mean(xs: list[float]) -> float:`. Signatures are written for the
 reader and for error messages, not for the compiler. A signature is the function's contract,
 readable without its body, and it lets the checker report a mistake where it is made: a wrong
 argument at the call, and a wrong value inside the function, rather than wherever two
@@ -50,7 +50,7 @@ What stone already infers:
 What it should infer next:
 
 - **Specialized generic functions.** A function is currently monomorphic:
-  `fn first(xs: list[int]) -> int; ret xs[0]` cannot be called on a `list[str]`. Generic
+  `fn first(xs: list[int]) -> int: ret xs[0]` cannot be called on a `list[str]`. Generic
   functions will write their type parameters in the signature like every other type, and the
   compiler should specialize them for each use, the way Rust compiles generics. Their syntax is
   not designed yet.
@@ -73,8 +73,8 @@ A feature belongs in stone only if a newcomer can understand it without knowing 
 compiler does with it. If a feature makes sense only to someone who knows how it is compiled,
 the compiler should handle it instead.
 
-stone's syntax differs from Python's in a few small ways (blocks open with `;`, functions
-return with `ret`, and loops skip ahead with `cont`), listed in [syntax](reference/syntax.md).
+stone's syntax differs from Python's in a few small ways (functions return with `ret`, and loops
+skip ahead with `cont`), listed in [syntax](reference/syntax.md).
 
 ## Memory safety and value semantics
 

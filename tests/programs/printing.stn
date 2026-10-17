@@ -14,17 +14,17 @@ print("with spaces", "", "and after an empty string")
 print()
 
 // a function without ret returns no value, so its call is a statement
-fn nothing();
+fn nothing():
     x = 1
 nothing()
 
 // arguments are all evaluated before anything on the line is printed
-fn loud(n: int) -> int;
+fn loud(n: int) -> int:
     print("loud", n)
     ret n
 print("line", loud(1), loud(2))
 
 // printing inside a call's arguments keeps the outer arguments intact
-fn pair(a: int, b: int) -> int;
+fn pair(a: int, b: int) -> int:
     ret a * 10 + b
 print(pair(4, loud(3)))

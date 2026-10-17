@@ -134,7 +134,7 @@ block:
 # --------------------
 
 function_def:
-    | ['pub'] 'fn' NAME '(' [parameters] ')' ['->' type] ';' block 
+    | ['pub'] 'fn' NAME '(' [parameters] ')' ['->' type] ':' block 
 
 # Function parameters
 # -------------------
@@ -161,7 +161,7 @@ type:
 # ----------------
 
 enum_def:
-    | ['pub'] 'enum' NAME ';' NEWLINE INDENT variant+ DEDENT
+    | ['pub'] 'enum' NAME ':' NEWLINE INDENT variant+ DEDENT
 
 variant:
     | NAME ['(' ','.type+ [','] ')'] NEWLINE
@@ -170,7 +170,7 @@ variant:
 # ------------------
 
 struct_def:
-    | ['pub'] 'struct' NAME ';' NEWLINE INDENT field+ DEDENT
+    | ['pub'] 'struct' NAME ':' NEWLINE INDENT field+ DEDENT
 
 field:
     | NAME ':' type NEWLINE
@@ -181,16 +181,16 @@ field:
 # methods take 'self', without a type, as their first parameter; the others are associated
 # functions, called on the struct
 impl_def:
-    | 'impl' NAME ';' NEWLINE INDENT function_def+ DEDENT
+    | 'impl' NAME ':' NEWLINE INDENT function_def+ DEDENT
 
 # Match statement
 # ---------------
 
 match_stmt:
-    | 'match' expression ';' NEWLINE INDENT case_block+ DEDENT
+    | 'match' expression ':' NEWLINE INDENT case_block+ DEDENT
 
 case_block:
-    | 'case' pattern ';' block
+    | 'case' pattern ':' block
 
 # a single NAME without parentheses binds, and '_' matches anything; any other is a variant,
 # as in Shape.Circle(r), some(x), or Shape.Empty
@@ -202,26 +202,26 @@ pattern:
 # ------------
 
 if_stmt:
-    | 'if' expression ';' block elif_stmt 
-    | 'if' expression ';' block [else_block] 
+    | 'if' expression ':' block elif_stmt 
+    | 'if' expression ':' block [else_block] 
 elif_stmt:
-    | 'elif' expression ';' block elif_stmt 
-    | 'elif' expression ';' block [else_block] 
+    | 'elif' expression ':' block elif_stmt 
+    | 'elif' expression ':' block [else_block] 
 else_block:
-    | 'else' ';' block 
+    | 'else' ':' block 
 
 # While statement
 # ---------------
 
 while_stmt:
-    | 'while' expression ';' block
+    | 'while' expression ':' block
 
 # For statement
 # -------------
 
 # the iterable is a list, or range(n) or range(a, b), which counts without building one
 for_stmt:
-    | 'for' star_targets 'in' ~ expressions ';' block
+    | 'for' star_targets 'in' ~ expressions ':' block
 
 # EXPRESSIONS
 # -----------

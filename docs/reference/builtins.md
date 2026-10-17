@@ -33,7 +33,7 @@ Counts from `start`, or 0, up to but not including `end`. It can only be the ite
 `for` loop, and its bounds are evaluated once, before the loop starts.
 
 ```stone
-for i in range(2, 5);
+for i in range(2, 5):
     print(i)   // 2, then 3, then 4
 ```
 
@@ -113,7 +113,7 @@ Returns whether standard input has nothing left to read. If no input has arrived
 someone is typing, it waits for some. The usual way to read every line is:
 
 ```stone
-while not eof();
+while not eof():
     line = input()
     print(line.len())
 ```
@@ -130,7 +130,7 @@ list.
 
 ```stone
 total = 0
-for a in args();
+for a in args():
     total += int(a)
 print(total)
 ```
@@ -146,8 +146,8 @@ function that may have no answer returns `option[T]`, and `match` reads one with
 `some(x)` and `none`. See [Types](types.md#options).
 
 ```stone
-fn first(xs: list[int]) -> option[int];
-    if xs.len() > 0;
+fn first(xs: list[int]) -> option[int]:
+    if xs.len() > 0:
         ret some(xs[0])
     ret none
 print(first([7, 8]), first([]))   // some(7) none
@@ -300,10 +300,10 @@ does. Like `len` and indexes, it counts bytes. An empty `text` is found at `0`.
 
 ```stone
 line = "key=value"
-match line.find("=");
-    case some(at);
+match line.find("="):
+    case some(at):
         print(at, line[:at], line[at + 1:])   // 3 key value
-    case none;
+    case none:
         print("no =")
 print(line.find("?"))                       // none
 ```
@@ -445,7 +445,7 @@ Returns whether the environment variable `name` is set, even to `""`, as
 ```stone
 use os
 
-if os.has_env("DEBUG");
+if os.has_env("DEBUG"):
     print("debugging")
 ```
 
@@ -515,7 +515,7 @@ nothing. The system keeps only the low 8 bits of the status, so `os.exit(256)` e
 ```stone
 use os
 
-if args().len() == 0;
+if args().len() == 0:
     print("usage: greet NAME")
     os.exit(2)
 print("hello", args()[0])
@@ -579,7 +579,7 @@ with the same rules as `math.min`. The greatest of an empty list stops the progr
 ```stone
 use math
 
-fn clamp(x: int, low: int, high: int) -> int;
+fn clamp(x: int, low: int, high: int) -> int:
     ret math.min(math.max(x, low), high)
 
 print(clamp(12, 0, 10), math.max([4, 8, 7]))   // 10 8
@@ -599,7 +599,7 @@ of nan is nan.
 ```stone
 use math
 
-fn distance(x: float, y: float) -> float;
+fn distance(x: float, y: float) -> float:
     ret math.sqrt(x * x + y * y)
 
 print(distance(3.0, 4.0))   // 5.0
@@ -727,7 +727,7 @@ use time
 
 start = time.clock()
 total = 0
-for i in range(1000000);
+for i in range(1000000):
     total += i
 print("took", time.clock() - start, "seconds")
 ```
@@ -746,7 +746,7 @@ negative length or nan stops the program with `sleep length must be non-negative
 ```stone
 use time
 
-for i in range(3);
+for i in range(3):
     print(3 - i)
     time.sleep(1)
 print("go")

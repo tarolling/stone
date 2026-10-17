@@ -1,6 +1,6 @@
 // unwrap stops the program when the option is none, pointing at the call
-fn lookup(xs: list[int], i: int) -> option[int];
-    if i < xs.len();
+fn lookup(xs: list[int], i: int) -> option[int]:
+    if i < xs.len():
         ret some(xs[i])
     ret none
 

@@ -1,7 +1,7 @@
 // os.exit stops at once, even with strings and lists still allocated
 use os
 
-fn finish(words: list[str], code: int);
+fn finish(words: list[str], code: int):
     print("finishing with", words.len(), "words")
     os.exit(code)
     print("never printed")

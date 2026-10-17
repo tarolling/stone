@@ -1,11 +1,11 @@
 // named values run in the order they are written, whatever the order of the fields
 
-struct Trio;
+struct Trio:
     a: int
     b: int
     c: int
 
-fn note(n: int) -> int;
+fn note(n: int) -> int:
     print("value", n)
     ret n
 

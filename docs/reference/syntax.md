@@ -8,16 +8,16 @@ grammar is
 
 | Python | stone |
 | --- | --- |
-| `if x:` / `while x:` / `for i in xs:` | `if x;` / `while x;` / `for i in xs;` |
-| `def f(a, b):`, annotations optional | `fn f(a: int, b: int) -> int;`, parameter types required |
-| `else:` / `elif x:` | `else;` / `elif x;` |
+| `if x:` / `while x:` / `for i in xs:` | `if x:` / `while x:` / `for i in xs:` |
+| `def f(a, b):`, annotations optional | `fn f(a: int, b: int) -> int:`, parameter types required |
+| `else:` / `elif x:` | `else:` / `elif x:` |
 | `return x` | `ret x` |
 | `continue` | `cont` |
 | `True`, `False` | `true`, `false` |
 | `None`, `Optional[int]` | `none` and `some(x)`, of type `option[int]` |
-| `class Shape(Enum):` | `enum Shape;`, whose variants can hold values, as in Rust |
-| `@dataclass class Point:` | `struct Point;` with a typed field per line, made as `Point(x=1.0, y=2.0)` |
-| `match x:` / `case P:` | `match x;` / `case P;`, which must cover every value |
+| `class Shape(Enum):` | `enum Shape:`, whose variants can hold values, as in Rust |
+| `@dataclass class Point:` | `struct Point:` with a typed field per line, made as `Point(x=1.0, y=2.0)` |
+| `match x:` / `case P:` | `match x:` / `case P:`, which must cover every value |
 | `'single'` or `"double"` quotes | `"double"` quotes only |
 | `-7 // 2 == -4` | `-7 / 2 == -3` (truncates) |
 | `-7 % 2 == 1` | `-7 % 2 == -1` (takes the dividend's sign, like `/`) |
@@ -38,7 +38,7 @@ These names are reserved and cannot be used for variables or functions:
 | `enum` | defines an enum |
 | `struct` | defines a struct |
 | `impl` | defines the methods and associated functions of a struct |
-| `pub` | lets other files use the function, enum, or struct after it, as in `pub fn f() -> int;` |
+| `pub` | lets other files use the function, enum, or struct after it, as in `pub fn f() -> int:` |
 | `use`, `as` | uses a module or one of its functions, optionally under another name |
 | `ret` | returns from a function, or ends the program at the top level |
 | `if`, `elif`, `else` | conditional blocks |
@@ -54,15 +54,15 @@ These names are reserved and cannot be used for variables or functions:
 ## Lines and blocks
 
 A statement ends at the end of its line. A statement that opens a block (`fn`, `if`, `elif`,
-`else`, `while`, `for`, `case`) ends in `;`, followed either by an indented block on the next
+`else`, `while`, `for`, `case`) ends in `:`, followed either by an indented block on the next
 lines or by a single simple statement on the same line. `enum`, `struct`, `impl`, and `match`
-end in `;` too, and are always followed by an indented block: of variants or fields, one per
+end in `:` too, and are always followed by an indented block: of variants or fields, one per
 line, of `fn`s, or of `case`s:
 
 ```stone
-for i in range(3);
+for i in range(3):
     print(i)
-while true; break
+while true: break
 ```
 
 Indent with spaces or tabs, as long as each block is consistent. Comments start with `//` outside
@@ -111,15 +111,15 @@ themselves, as in `"café"`.
 | assignment | `x = 1`, `a = b = 0`, `items[i] = x`, `grid[r][c] = 0`, `p.x = 1.0`, `ps[i].y = 0.0` |
 | unpacking | `q, r = divide(7, 2)`, `a, b = (b, a)`, `(x, (y, z)) = t` |
 | augmented assignment | `x += 1`, `total -= cost`, `items[i] *= 2`, `grid[r][c] **= 2`, `p.x += 0.5` |
-| function definition | `fn f(a: int, b: int) -> int;` plus a block |
-| enum definition | `enum Shape;` plus a block of variants, such as `Circle(float)` and `Empty` |
-| struct definition | `struct Point;` plus a block of fields, such as `x: float` and `y: float` |
-| `impl` block | `impl Point;` plus a block of `fn`s, such as `fn norm(self) -> float;` plus a block |
-| `match` | `match s;` plus a block of cases, such as `case Shape.Circle(r);` plus a block |
+| function definition | `fn f(a: int, b: int) -> int:` plus a block |
+| enum definition | `enum Shape:` plus a block of variants, such as `Circle(float)` and `Empty` |
+| struct definition | `struct Point:` plus a block of fields, such as `x: float` and `y: float` |
+| `impl` block | `impl Point:` plus a block of `fn`s, such as `fn norm(self) -> float:` plus a block |
+| `match` | `match s:` plus a block of cases, such as `case Shape.Circle(r):` plus a block |
 | `ret` | `ret`, `ret x`, `ret (a, b)` |
-| `if` / `elif` / `else` | `if x < 0;` ... `elif x == 0;` ... `else;` ... |
-| `while` | `while i < 10;` plus a block |
-| `for` | `for x in items;`, `for c in text;`, `for i in range(n);`, `for name, score in pairs;` |
+| `if` / `elif` / `else` | `if x < 0:` ... `elif x == 0:` ... `else:` ... |
+| `while` | `while i < 10:` plus a block |
+| `for` | `for x in items:`, `for c in text:`, `for i in range(n):`, `for name, score in pairs:` |
 | `break`, `cont` | inside a loop only |
 | `use` | `use util`, `use geometry.shapes.area as area` |
 
@@ -136,7 +136,7 @@ at the top level.
 
 ```stone
 total = 0
-for price in [3, 4, 5];
+for price in [3, 4, 5]:
     total += price
 total *= 2
 print(total)   // 24
@@ -161,13 +161,13 @@ Every parameter is written with its type after a colon, and a function that retu
 writes its type after `->`:
 
 ```stone
-fn mean(xs: list[float]) -> float;
+fn mean(xs: list[float]) -> float:
     total = 0.0
-    for x in xs;
+    for x in xs:
         total += x
     ret total / float(xs.len())
 
-fn report(name: str, score: float);
+fn report(name: str, score: float):
     print(name, score)
 ```
 
@@ -214,7 +214,7 @@ An enum lists its variants, one per line, each with the types of the values it h
 parentheses, or none:
 
 ```stone
-enum Shape;
+enum Shape:
     Circle(float)
     Rect(float, float)
     Empty
@@ -224,12 +224,12 @@ enum Shape;
 fits a value:
 
 ```stone
-match s;
-    case Shape.Circle(r);
+match s:
+    case Shape.Circle(r):
         print("a circle of radius", r)
-    case Shape.Rect(w, _);
+    case Shape.Rect(w, _):
         print("a rectangle", w, "wide")
-    case _;
+    case _:
         print("empty")
 ```
 
@@ -243,7 +243,7 @@ every value. See [Types](types.md#enums).
 A struct lists its fields, one per line, each with its type:
 
 ```stone
-struct Point;
+struct Point:
     x: float
     y: float
 ```
@@ -255,11 +255,11 @@ the struct is stored in a variable. See [Types](types.md#structs).
 An `impl` block, in the same file as the struct, holds its functions:
 
 ```stone
-impl Point;
-    fn origin() -> Point;
+impl Point:
+    fn origin() -> Point:
         ret Point(x=0.0, y=0.0)
 
-    fn shift(self, dx: float);
+    fn shift(self, dx: float):
         self.x += dx
 ```
 

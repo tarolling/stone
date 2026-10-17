@@ -103,7 +103,7 @@ pub(crate) type LiveAfter = HashMap<Span, HashSet<String>>;
 /// Returns, for each function in `body`, every global in `globals` that it or a function it calls,
 /// directly or not, may read.
 ///
-/// For example, after `fn f() -> int; ret g()` and `fn g() -> int; ret xs[0]`, both `f` and `g`
+/// For example, after `fn f() -> int: ret g()` and `fn g() -> int: ret xs[0]`, both `f` and `g`
 /// read `xs`.
 pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalReads {
     let mut reads = GlobalReads::default();
@@ -592,7 +592,7 @@ mod tests {
             [names(&["t"]), names(&["a", "b", "c"]), names(&[])]
         );
         assert_eq!(
-            live("ps = [(1, 2)]\nfor a, b in ps;\n    print(a)\nprint(ps)\n"),
+            live("ps = [(1, 2)]\nfor a, b in ps:\n    print(a)\nprint(ps)\n"),
             [names(&["ps"]), names(&["ps"]), names(&["ps"]), names(&[])]
         );
     }
@@ -611,7 +611,7 @@ mod tests {
 
     #[test]
     fn a_read_on_either_branch_keeps_a_variable_live() {
-        let source = "x = [1]\nc = 1\nif c;\n    print(x)\nelse;\n    x = [2]\nprint(c)\n";
+        let source = "x = [1]\nc = 1\nif c:\n    print(x)\nelse:\n    x = [2]\nprint(c)\n";
         assert_eq!(
             live(source),
             [
@@ -627,7 +627,7 @@ mod tests {
 
     #[test]
     fn a_read_in_a_later_iteration_keeps_a_variable_live() {
-        let source = "x = [1]\ni = 0\nwhile i < 3;\n    y = x\n    x = [i]\n    i = i + 1\n";
+        let source = "x = [1]\ni = 0\nwhile i < 3:\n    y = x\n    x = [i]\n    i = i + 1\n";
         assert_eq!(
             live(source),
             [
@@ -643,8 +643,8 @@ mod tests {
 
     #[test]
     fn a_for_loop_assigns_its_variable_each_iteration() {
-        let source = "xs = [1]\nfor x in xs;\n    y = x\n    if y;\n        break\n    \
-                      if y;\n        cont\n    print(y)\nprint(xs)\n";
+        let source = "xs = [1]\nfor x in xs:\n    y = x\n    if y:\n        break\n    \
+                      if y:\n        cont\n    print(y)\nprint(xs)\n";
         assert_eq!(
             live(source),
             [
@@ -664,7 +664,7 @@ mod tests {
     #[test]
     fn nothing_is_live_after_a_return() {
         let source =
-            "fn f(xs: int, n: int) -> int;\n    ys = xs\n    if n;\n        ret ys\n    ret xs\n";
+            "fn f(xs: int, n: int) -> int:\n    ys = xs\n    if n:\n        ret ys\n    ret xs\n";
         assert_eq!(
             live(source),
             [
@@ -678,7 +678,7 @@ mod tests {
 
     #[test]
     fn a_call_reads_the_globals_its_function_reads() {
-        let source = "fn f() -> int;\n    ret g()\nfn g() -> int;\n    ret xs[0]\nxs = [1]\nys = xs\nprint(f())\n";
+        let source = "fn f() -> int:\n    ret g()\nfn g() -> int:\n    ret xs[0]\nxs = [1]\nys = xs\nprint(f())\n";
         assert_eq!(
             live(source),
             [
@@ -706,8 +706,8 @@ mod tests {
 
     #[test]
     fn a_method_call_reads_the_globals_every_method_of_its_name_reads() {
-        let source = "struct S;\n    n: int\nimpl S;\n    fn get(self) -> int;\n        ret xs[0]\n\
-                      fn f(s: S) -> int;\n    ret s.get()\nfn g() -> S;\n    ret S.make()\n\
+        let source = "struct S:\n    n: int\nimpl S:\n    fn get(self) -> int:\n        ret xs[0]\n\
+                      fn f(s: S) -> int:\n    ret s.get()\nfn g() -> S:\n    ret S.make()\n\
                       xs = [1]\n";
         let module = parse(source).unwrap();
         let crate::ast::Mod::Module { body } = &module;
@@ -719,7 +719,7 @@ mod tests {
 
     #[test]
     fn what_a_function_returns_besides_its_value_is_live_at_every_exit() {
-        let source = "if c;\n    ret 1\nx = self.n\nret x\n";
+        let source = "if c:\n    ret 1\nx = self.n\nret x\n";
         let module = parse(source).unwrap();
         let crate::ast::Mod::Module { body } = &module;
         let exit = HashSet::from(["self".to_string()]);

@@ -8,6 +8,6 @@ print(float("123456789012345678901234567890"), float("4.9e-324"))
 // numbers still convert as before
 print(int(2.9), float(3))
 total = 0
-for word in "10 20 30".split();
+for word in "10 20 30".split():
     total = total + int(word)
 print(total)

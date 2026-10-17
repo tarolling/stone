@@ -1,11 +1,11 @@
 // a call whose result is assigned back to its argument changes the list in place, while every
 // other copy stays as it was
-fn add(xs: list[int], x: int) -> list[int];
+fn add(xs: list[int], x: int) -> list[int]:
     xs.append(x)
     ret xs
 
 xs = []
-for i in range(5);
+for i in range(5):
     xs = add(xs, i)
 print(xs)
 
@@ -14,14 +14,14 @@ xs = add(xs, 5)
 print(kept, xs)
 
 // a function that reads the global sees it unchanged during the call
-fn add_first(ys: list[int]) -> list[int];
+fn add_first(ys: list[int]) -> list[int]:
     ys.append(xs[0] + 100)
     ret ys
 xs = add_first(xs)
 print(xs)
 
 // the same list passed twice is two copies
-fn joined(a: list[int], b: list[int]) -> list[int];
+fn joined(a: list[int], b: list[int]) -> list[int]:
     a.append(b.len())
     b.append(-1)
     ret a
@@ -30,8 +30,8 @@ row = joined(row, row)
 print(row)
 
 // returning a call passes the list on, and the caller's copy stays as it was
-fn fill(xs: list[int], n: int) -> list[int];
-    if n == 0;
+fn fill(xs: list[int], n: int) -> list[int]:
+    if n == 0:
         ret xs
     xs.append(n)
     ret fill(xs, n - 1)
@@ -39,7 +39,7 @@ start = [0]
 print(fill(start, 3), start)
 
 // a function that replaces the list it was given
-fn replaced(xs: list[str]) -> list[str];
+fn replaced(xs: list[str]) -> list[str]:
     xs = ["new" + ""]
     ret xs
 words = ["old" + ""]
@@ -47,7 +47,7 @@ words = replaced(words)
 print(words)
 
 // strings are passed the same way
-fn shout(s: str) -> str;
+fn shout(s: str) -> str:
     s = s + "!"
     ret s
 greeting = "hi" + ""
@@ -57,15 +57,15 @@ greeting = shout(greeting)
 print(greeting, copy_of)
 
 // a local is moved too
-fn build(n: int) -> list[int];
+fn build(n: int) -> list[int]:
     out = []
-    for i in range(n);
+    for i in range(n):
         out = add(out, i * i)
     ret out
 print(build(4))
 
 // a loop keeps the list it walks
 items = [1, 2]
-for item in items;
+for item in items:
     items = add(items, item * 10)
 print(items)

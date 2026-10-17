@@ -227,16 +227,16 @@ pub type Methods = HashMap<Span, Method>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SymbolKind {
     Function,
-    /// An enum, such as `Shape` in `enum Shape;`.
+    /// An enum, such as `Shape` in `enum Shape:`.
     Enum,
     /// A variant of an enum, such as `Circle`, whose [`Symbol::scope`] is the enum's name.
     Variant,
-    /// A struct, such as `Point` in `struct Point;`.
+    /// A struct, such as `Point` in `struct Point:`.
     Struct,
     /// A field of a struct, such as `x` in `x: float`, whose [`Symbol::scope`] is the struct's
     /// name.
     Field,
-    /// A function of an `impl` block, such as `norm` in `fn norm(self) -> float;`, whose
+    /// A function of an `impl` block, such as `norm` in `fn norm(self) -> float:`, whose
     /// [`Symbol::scope`] is the struct's name.
     Method,
     Parameter,
@@ -1227,7 +1227,7 @@ impl Inference {
     }
 
     /// Requires `ty` to be `bool`, as conditions and the operands of `not`, `and`, and `or` must
-    /// be, so `if 1 or 0;` is an error while `if n != 0;` is fine.
+    /// be, so `if 1 or 0:` is an error while `if n != 0:` is fine.
     fn require_condition(&mut self, ty: Ty, span: Span) {
         self.require(
             ty,
@@ -1301,7 +1301,7 @@ impl Inference {
     /// Declares a function with the types its signature writes, so calls anywhere in the program
     /// are checked against them.
     ///
-    /// For example, `fn half(x: float) -> float;` declares `half` as `fn(float) -> float`. A
+    /// For example, `fn half(x: float) -> float:` declares `half` as `fn(float) -> float`. A
     /// parameter without a type gets an unknown one, so checking goes on, and is reported in
     /// `finish`; a function without `->` returns no value.
     fn declare_function(
@@ -1406,7 +1406,7 @@ impl Inference {
     /// struct's name, a dot, and its own name, so calls anywhere in the program are checked
     /// against them.
     ///
-    /// For example, `impl Point;` holding `fn norm(self) -> float;` declares `Point.norm` as
+    /// For example, `impl Point:` holding `fn norm(self) -> float:` declares `Point.norm` as
     /// `fn(Point) -> float`, called as `p.norm()`.
     fn declare_methods(&mut self, body: &[Stmt]) {
         for stmt in body {
@@ -1493,8 +1493,8 @@ impl Inference {
     /// each other in any order. The type of a place in `self` comes from the fields' written
     /// types alone, so this needs nothing inferred.
     ///
-    /// For example, in `fn push(self, x: int); self.items.append(x)`, `push` changes `self`, and
-    /// so does `fn twice(self); self.push(1); self.push(2)`.
+    /// For example, in `fn push(self, x: int): self.items.append(x)`, `push` changes `self`, and
+    /// so does `fn twice(self): self.push(1): self.push(2)`.
     fn find_changing_methods(&mut self, body: &[Stmt]) {
         let mut methods = vec![];
         for stmt in body {
@@ -1619,7 +1619,7 @@ impl Inference {
     /// variants and fields can hold any of them, including their own, then their variants and
     /// fields.
     ///
-    /// For example, `enum Tree;` with variants `Leaf(int)` and `Node(Tree, Tree)` declares `Tree`
+    /// For example, `enum Tree:` with variants `Leaf(int)` and `Node(Tree, Tree)` declares `Tree`
     /// with a variant `Node` that holds two `Tree`s.
     fn declare_types(&mut self, body: &[Stmt]) {
         let enums = self.declare_enum_names(body);
@@ -2925,8 +2925,8 @@ impl Inference {
     /// Infers a call of the associated function `name` of the struct `owner`, written as `func`
     /// (whose value names the struct), and returns its result's type.
     ///
-    /// For example, `Point.origin()` is a `Point` if `impl Point;` holds
-    /// `fn origin() -> Point;`.
+    /// For example, `Point.origin()` is a `Point` if `impl Point:` holds
+    /// `fn origin() -> Point:`.
     fn infer_associated(
         &mut self,
         call: &Expr,
@@ -2988,7 +2988,7 @@ impl Inference {
     /// must be a statement of its own or the value of an assignment, and the receiver a variable
     /// or a place in one, as for `append`.
     ///
-    /// For example, `p.norm()` is a `float` if `impl Point;` holds `fn norm(self) -> float;`.
+    /// For example, `p.norm()` is a `float` if `impl Point:` holds `fn norm(self) -> float:`.
     fn infer_struct_method(
         &mut self,
         call: &Expr,
@@ -4454,7 +4454,7 @@ impl Inference {
             let missed = &witness[0];
             self.error(
                 pending.subject_span,
-                format!("'match' does not cover {missed}; add 'case {missed};' or 'case _;'"),
+                format!("'match' does not cover {missed}; add 'case {missed}:' or 'case _:'"),
             );
         }
     }
@@ -4659,8 +4659,8 @@ type Assigned = Option<HashSet<String>>;
 /// Checks that variables are assigned on every path before they are read, since the interpreter
 /// stops with an error on such a read while compiled code would read a leftover value.
 ///
-/// For example, after `if c; x = 1`, reading `x` is an error, but after `if c; x = 1` followed by
-/// `else; x = 2` it is fine.
+/// For example, after `if c: x = 1`, reading `x` is an error, but after `if c: x = 1` followed by
+/// `else: x = 2` it is fine.
 struct AssignmentCheck<'a> {
     /// The variables this check covers: the globals for top-level code, or a function's locals.
     tracked: HashSet<String>,
@@ -4856,7 +4856,7 @@ impl<'a> AssignmentCheck<'a> {
     }
 }
 
-/// Returns the arguments of `iter` if it is a call to `range`, as in `for i in range(3);`.
+/// Returns the arguments of `iter` if it is a call to `range`, as in `for i in range(3):`.
 ///
 /// Both backends count through a `range` directly rather than building a list, so it only has
 /// meaning as a `for` loop's iterable.
@@ -4873,7 +4873,7 @@ pub fn range_args(iter: &Expr) -> Option<&[Expr]> {
 /// Collects every name assigned in `body`, with the span of its first assignment, without
 /// looking inside function definitions.
 ///
-/// For example, for `x = 1` followed by `if x; y = x`, this collects `x` and then `y`.
+/// For example, for `x = 1` followed by `if x: y = x`, this collects `x` and then `y`.
 pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
     let add = |target: &Expr, out: &mut Vec<(String, Span)>| {
         let mut names = Vec::new();
@@ -5045,7 +5045,7 @@ pub(crate) fn changed_receiver<'a>(expr: &'a Expr, methods: &Methods) -> Option<
 /// `p.x = v`, `xs.append(v)`, or a method that changes `self`, as `methods` resolved it, without
 /// looking inside function definitions.
 ///
-/// For example, for `grid[0][1] = 2` followed by `if x; ys.append(1)`, this collects `grid` and
+/// For example, for `grid[0][1] = 2` followed by `if x: ys.append(1)`, this collects `grid` and
 /// `ys`.
 pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>, methods: &Methods) {
     let add = |list: &Expr, out: &mut HashSet<String>| {
@@ -5104,7 +5104,7 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>, methods:
 /// Returns where `body` first changes the parameter `name` if it never reads it anywhere else,
 /// since the caller cannot see the change and nothing else uses it.
 ///
-/// For example, the change in `fn push(xs: list[int], x: int); xs.append(x)` is lost, but a
+/// For example, the change in `fn push(xs: list[int], x: int): xs.append(x)` is lost, but a
 /// later `ret xs` or `print(xs)` uses it.
 fn lost_change(body: &[Stmt], name: &str, methods: &Methods) -> Option<Span> {
     let mut usage = ParameterUse {
@@ -5277,8 +5277,8 @@ impl ParameterUse<'_> {
 /// Returns whether running `body` can never reach its end, because every path returns or loops
 /// forever.
 ///
-/// For example, `if x; ret 1` followed by `else; ret 2` always exits, and so does `while 1;` with no
-/// `break`, but `if x; ret 1` alone does not.
+/// For example, `if x: ret 1` followed by `else: ret 2` always exits, and so does `while 1:` with no
+/// `break`, but `if x: ret 1` alone does not.
 fn always_exits(body: &[Stmt]) -> bool {
     body.iter().any(|stmt| match &stmt.kind {
         StmtKind::Return { .. } => true,

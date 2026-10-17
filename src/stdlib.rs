@@ -77,7 +77,7 @@ pub const MAX_ELEMENT_VALUES: usize = 32;
 
 /// Names of the builtin functions.
 ///
-/// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3);`.
+/// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3):`.
 pub static BUILTINS: [&str; 9] = [
     "print", "range", "int", "float", "str", "input", "eof", "args", "some",
 ];
@@ -178,7 +178,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
         signature: "some(value: T) -> option[T]",
         description: "Returns an option that holds `value`. The other option is `none`, which \
                       holds nothing, so a function that may have no answer returns \
-                      `option[T]` and a `match` with `case some(x);` and `case none;` reads it.",
+                      `option[T]` and a `match` with `case some(x):` and `case none:` reads it.",
     },
 ];
 

@@ -1,8 +1,8 @@
-struct Point;
+struct Point:
     x: float
     y: float
 
-fn value() -> float;
+fn value() -> float:
     print("value runs")
     ret 1.0
 

@@ -13,7 +13,6 @@ LSQB '['    # 0x5B
 RSQB ']'    # 0x5D
 COLON ':'   # 0x3A
 COMMA ','   # 0x2C
-SEMI ';'    # 0x3B
 PLUS '+'    # 0x2B
 MINUS '-'   # 0x2D
 STAR '*'    # 0x2A

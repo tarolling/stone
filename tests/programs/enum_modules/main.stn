@@ -6,26 +6,26 @@ use zoo.shapes as sh
 pet = Animal.Dog("rex")
 print(pet, zoo.name(pet))
 animals = [zoo.Animal.Cat(3), Animal.Fish, pet]
-for a in animals;
+for a in animals:
     print(zoo.name(a))
 
-match zoo.adopt(9);
-    case zoo.Animal.Cat(lives);
+match zoo.adopt(9):
+    case zoo.Animal.Cat(lives):
         print("a cat with", lives, "lives")
-    case Animal.Dog(n);
+    case Animal.Dog(n):
         print("a dog named", n)
-    case _;
+    case _:
         print("something else")
 
-fn shout(a: Animal) -> str;
+fn shout(a: Animal) -> str:
     ret zoo.name(a) + "!"
 print(shout(pet))
 
 s = sh.Shape.Square(4)
 print(s, sh.area(s), sh.area(sh.Shape.Line))
 print(sh.mascot())
-match sh.mascot();
-    case some(Animal.Fish);
+match sh.mascot():
+    case some(Animal.Fish):
         print("the mascot is a fish")
-    case _;
+    case _:
         print("the mascot is not a fish")

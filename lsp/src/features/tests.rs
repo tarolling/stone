@@ -5,10 +5,10 @@ use stone::project::MapSources;
 
 const SOURCE: &str = "\
 total = 0
-fn add(a: int, b: int) -> int;
+fn add(a: int, b: int) -> int:
     sum = a + b
     ret sum
-for i in range(3);
+for i in range(3):
     total = add(total, i)
 print(total, \"é\".len())
 ";
@@ -89,10 +89,10 @@ limit = 3
 // before it reaches 1
 //
 // `n` must be positive.
-fn halvings(n: int) -> int;
+fn halvings(n: int) -> int:
     // the count so far
     count = 0
-    while n > 1;
+    while n > 1:
         n = n / 2
         count = count + 1
     ret count
@@ -156,7 +156,7 @@ fn a_trailing_comment_is_not_documentation() {
 
 #[test]
 fn only_a_definition_that_starts_its_line_is_documented() {
-    let doc = doc("// about the loop\nfor i in range(3);\n    print(i)\n");
+    let doc = doc("// about the loop\nfor i in range(3):\n    print(i)\n");
     assert_eq!(
         hover_text(&doc, at(2, 5)).unwrap(),
         "```stone\n(global) i: int\n```"
@@ -165,7 +165,7 @@ fn only_a_definition_that_starts_its_line_is_documented() {
 
 #[test]
 fn parameters_have_no_documentation() {
-    let doc = doc("// about f\nfn f(n: int) -> int;\n    ret n\nprint(f(1))\n");
+    let doc = doc("// about f\nfn f(n: int) -> int:\n    ret n\nprint(f(1))\n");
     assert_eq!(
         hover_text(&doc, at(2, 7)).unwrap(),
         "```stone\n(parameter) n: int\n```"
@@ -438,7 +438,7 @@ fn completion_details_show_types() {
 
 #[test]
 fn a_function_returning_none_shows_no_return_type() {
-    let doc = doc("fn greet(name: str);\n    print(name)\ngreet(\"bo\")\n");
+    let doc = doc("fn greet(name: str):\n    print(name)\ngreet(\"bo\")\n");
     assert_eq!(
         hover_text(&doc, at(3, 2)).unwrap(),
         "```stone\nfn greet(name: str)\n```"
@@ -447,7 +447,7 @@ fn a_function_returning_none_shows_no_return_type() {
 
 #[test]
 fn features_still_work_around_a_syntax_error() {
-    let doc = doc("fn f(a: int) -> int;\n    ret a\nx = \nprint(f(1))\n");
+    let doc = doc("fn f(a: int) -> int:\n    ret a\nx = \nprint(f(1))\n");
     assert_eq!(diagnostics(&doc).len(), 1);
     assert_eq!(
         hover_text(&doc, at(4, 7)).unwrap(),
@@ -457,7 +457,7 @@ fn features_still_work_around_a_syntax_error() {
 
 #[test]
 fn features_work_inside_a_function_with_a_syntax_error() {
-    let doc = doc("fn f(a: int) -> int;\n    x = \n    ret a\nprint(f(1))\n");
+    let doc = doc("fn f(a: int) -> int:\n    x = \n    ret a\nprint(f(1))\n");
     assert_eq!(diagnostics(&doc).len(), 1);
     assert_eq!(
         hover_text(&doc, at(3, 9)).unwrap(),
@@ -476,10 +476,10 @@ print(util.twice(1), double(2))
 
 const UTIL: &str = "\
 // doubles x
-pub fn twice(x: int) -> int;
+pub fn twice(x: int) -> int:
     ret helper(x) * 2
 
-fn helper(x: int) -> int;
+fn helper(x: int) -> int:
     ret x
 ";
 
@@ -507,7 +507,7 @@ fn uri_of(path: &str) -> Uri {
 fn diagnostics_only_cover_their_own_file() {
     let files = [
         ("main.stn", MAIN),
-        ("util.stn", "pub fn twice(x);\n    ret x +\n"),
+        ("util.stn", "pub fn twice(x):\n    ret x +\n"),
     ];
     assert_eq!(diagnostics(&project_doc("main.stn", &files)), []);
     let in_util = diagnostics(&project_doc("util.stn", &files));
@@ -530,10 +530,10 @@ fn a_module_is_checked_as_part_of_the_program_that_uses_it() {
 fn a_module_the_program_does_not_use_yet_is_checked_from_the_root() {
     let files = [
         ("main.stn", "print(1)\n"),
-        ("geometry/vec.stn", "pub fn zero() -> int;\n    ret 0\n"),
+        ("geometry/vec.stn", "pub fn zero() -> int:\n    ret 0\n"),
         (
             "geometry/shapes.stn",
-            "use geometry.vec\n\npub fn area() -> int;\n    ret vec.zero()\n",
+            "use geometry.vec\n\npub fn area() -> int:\n    ret vec.zero()\n",
         ),
     ];
     assert_eq!(diagnostics(&project_doc("geometry/shapes.stn", &files)), []);
@@ -657,7 +657,7 @@ fn completion_in_a_use_offers_modules_and_directories() {
     let files = [
         ("main.stn", "use \nuse geometry.\n"),
         ("util.stn", UTIL),
-        ("geometry/vec.stn", "pub fn zero() -> int;\n    ret 0\n"),
+        ("geometry/vec.stn", "pub fn zero() -> int:\n    ret 0\n"),
     ];
     let doc = project_doc("main.stn", &files);
     let sources = project(&files);
@@ -689,7 +689,7 @@ const STATS: &str = "\
 // summary statistics
 // for lists of ints
 
-pub fn mean(xs: list[int]) -> int;
+pub fn mean(xs: list[int]) -> int:
     ret xs[0]
 ";
 
@@ -841,14 +841,14 @@ fn every_builtin_module_has_hover_completion_and_a_definition() {
 }
 
 const ENUMS: &str = "\
-enum Shape;
+enum Shape:
     Circle(float)
     Empty
 s = Shape.Circle(1.0)
-match s;
-    case Shape.Circle(r);
+match s:
+    case Shape.Circle(r):
         print(r)
-    case Shape.Empty;
+    case Shape.Empty:
         print(0)
 ";
 
@@ -927,7 +927,7 @@ fn completion_after_an_enum_offers_its_variants() {
 }
 
 const STRUCTS: &str = "\
-struct Point;
+struct Point:
     x: float
     y: float
 p = Point(x=1.0, y=2.0)
@@ -1012,12 +1012,12 @@ fn completion_after_a_struct_value_offers_its_fields() {
 }
 
 const METHODS_SOURCE: &str = "\
-struct Point;
+struct Point:
     x: float
-impl Point;
-    fn origin() -> Point;
+impl Point:
+    fn origin() -> Point:
         ret Point(x=0.0)
-    fn shift(self, dx: float);
+    fn shift(self, dx: float):
         self.x += dx
 p = Point.origin()
 p.shift(1.0)

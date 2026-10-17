@@ -24,7 +24,7 @@ prices.stn:3:15: error: expected float, found int
 ```
 
 and exits with status 1. The fix is `price * float(count)`. Syntax errors look the same:
-forgetting the `;` after `if x > 1` reports `expected ';', found end of line`.
+forgetting the `:` after `if x > 1` reports `expected ':', found end of line`.
 
 Among the things the checker reports:
 

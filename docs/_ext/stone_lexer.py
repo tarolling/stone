@@ -43,7 +43,7 @@ METHODS = (
 
 
 class StoneLexer(RegexLexer):
-    """Highlights stone source, such as `fn f(a: int) -> int; ret a + 1`."""
+    """Highlights stone source, such as `fn f(a: int) -> int: ret a + 1`."""
 
     name = "stone"
     aliases = ["stone", "stn"]
@@ -78,7 +78,7 @@ class StoneLexer(RegexLexer):
             (r"\d+\.\d*([eE][+-]?\d+)?|\d+[eE][+-]?\d+", Number.Float),
             (r"\d+", Number.Integer),
             (r"\*\*=|[-+*/%]=|==|!=|<=|>=|\*\*|[-+*/%<>=]", Operator),
-            (r"[()\[\],;:.]", Punctuation),
+            (r"[()\[\],:.]", Punctuation),
             (r"[A-Za-z_]\w*", Name),
             (r".", Text),
         ],

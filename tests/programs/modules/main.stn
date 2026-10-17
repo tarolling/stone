@@ -10,12 +10,12 @@ print(geometry.origin())
 print(shapes.area(2), shapes.perimeter(3))
 print(dot([1, 2, 3], [4, 5, 6]))
 
-while not eof();
+while not eof():
     line = input()
     print(pad.left(str(count_words(line)), 3) + " | " + line.strip())
 
 // a local may shadow an imported name
-fn describe(pad: int) -> str;
+fn describe(pad: int) -> str:
     ret "pad is " + str(pad)
 
 print(describe(7))

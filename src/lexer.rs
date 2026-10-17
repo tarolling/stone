@@ -1,6 +1,6 @@
 //! Lexer that turns stone source code into tokens.
 //!
-//! Indentation is tracked Python-style, so `fn f();` followed by an indented line produces
+//! Indentation is tracked Python-style, so `fn f():` followed by an indented line produces
 //! `Newline`, `Indent`, and later `Dedent` tokens around the function body.
 
 use crate::diagnostic::Diagnostic;
@@ -428,10 +428,6 @@ impl Lexer {
                 let end = Pos::new(start.line, start.col + 1);
                 return Ok(Token::new(TokenType::Newline, Span::new(start, end)));
             }
-            Some(';') => {
-                self.advance();
-                TokenType::Semi
-            }
             Some(',') => {
                 self.advance();
                 TokenType::Comma
@@ -646,7 +642,7 @@ ret y
 
     #[test]
     fn simple_functions() {
-        let source = r#"fn testing();
+        let source = r#"fn testing():
     ret 52
 testing()
 "#;
@@ -664,7 +660,7 @@ testing()
         );
         assert_eq!(start_of(&tokens[2]), tok(TokenType::LParen, 1, 11));
         assert_eq!(start_of(&tokens[3]), tok(TokenType::RParen, 1, 12));
-        assert_eq!(start_of(&tokens[4]), tok(TokenType::Semi, 1, 13));
+        assert_eq!(start_of(&tokens[4]), tok(TokenType::Colon, 1, 13));
         assert_eq!(start_of(&tokens[5]), tok(TokenType::Newline, 1, 14));
         assert_eq!(start_of(&tokens[6]), tok(TokenType::Indent, 2, 1));
         assert_eq!(
@@ -693,7 +689,7 @@ testing()
     /// ```
     #[test]
     fn simple_function_multiple_args() {
-        let source = r#"fn testing(a, b, c);
+        let source = r#"fn testing(a, b, c):
     ret b
 testing(1, 2, 3)"#;
 
@@ -711,7 +707,7 @@ testing(1, 2, 3)"#;
                 tok(TokenType::Comma, 1, 16),
                 tok(TokenType::Name("c".to_string()), 1, 18),
                 tok(TokenType::RParen, 1, 19),
-                tok(TokenType::Semi, 1, 20),
+                tok(TokenType::Colon, 1, 20),
                 tok(TokenType::Newline, 1, 21),
                 tok(TokenType::Indent, 2, 1),
                 tok(TokenType::Keyword("ret".to_string()), 2, 5),
@@ -851,13 +847,13 @@ testing(1, 2, 3)"#;
 
     #[test]
     fn comment_only_lines_do_not_change_indentation() {
-        let source = "if 1;\n    x = 1\n// at column one\n        // deeper\n    y = 2\n";
+        let source = "if 1:\n    x = 1\n// at column one\n        // deeper\n    y = 2\n";
         assert_eq!(
             types_of(source),
             [
                 TokenType::Keyword("if".to_string()),
                 TokenType::Number(1),
-                TokenType::Semi,
+                TokenType::Colon,
                 TokenType::Newline,
                 TokenType::Indent,
                 name("x"),
@@ -953,8 +949,8 @@ testing(1, 2, 3)"#;
     #[test]
     fn an_arrow_is_one_token() {
         assert_eq!(
-            types_of("fn f(a: int) -> int;\n")[7..10],
-            [TokenType::Arrow, name("int"), TokenType::Semi]
+            types_of("fn f(a: int) -> int:\n")[7..10],
+            [TokenType::Arrow, name("int"), TokenType::Colon]
         );
         // a minus before a separate `>` is still subtraction
         assert_eq!(
@@ -1014,7 +1010,7 @@ testing(1, 2, 3)"#;
     #[test]
     fn for_and_in_are_keywords() {
         assert_eq!(
-            types_of("for i in x;\n")[..4],
+            types_of("for i in x:\n")[..4],
             [
                 TokenType::Keyword("for".to_string()),
                 name("i"),
@@ -1028,6 +1024,13 @@ testing(1, 2, 3)"#;
     fn a_lone_bang_is_an_error() {
         let err = Lexer::new("x = !y\n").lex().unwrap_err();
         assert_eq!(err.message, "unexpected character '!'");
+    }
+
+    #[test]
+    fn a_semicolon_is_an_error() {
+        let err = Lexer::new("if x;\n").lex().unwrap_err();
+        assert_eq!(err.message, "unexpected character ';'");
+        assert_eq!(err.span, Span::new(Pos::new(1, 5), Pos::new(1, 6)));
     }
 
     #[test]
@@ -1099,7 +1102,7 @@ testing(1, 2, 3)"#;
 
     #[test]
     fn indented_block_at_end_of_file() {
-        let tokens = Lexer::new("if 1;\n    x = 1\n").lex().unwrap();
+        let tokens = Lexer::new("if 1:\n    x = 1\n").lex().unwrap();
         let types: Vec<TokenType> = tokens.into_iter().map(|t| t.r#type).collect();
         assert_eq!(
             types[types.len() - 3..],
@@ -1109,7 +1112,7 @@ testing(1, 2, 3)"#;
 
     #[test]
     fn dropping_two_levels_emits_two_dedents() {
-        let tokens = Lexer::new("if 1;\n    if 1;\n        x = 1\ny = 2\n")
+        let tokens = Lexer::new("if 1:\n    if 1:\n        x = 1\ny = 2\n")
             .lex()
             .unwrap();
         let types: Vec<TokenType> = tokens.into_iter().map(|t| t.r#type).collect();
@@ -1138,7 +1141,7 @@ testing(1, 2, 3)"#;
 
     #[test]
     fn while_and_not_are_keywords() {
-        let tokens = Lexer::new("while not x;\n").lex().unwrap();
+        let tokens = Lexer::new("while not x:\n").lex().unwrap();
         assert_eq!(tokens[0].r#type, TokenType::Keyword("while".to_string()));
         assert_eq!(tokens[1].r#type, TokenType::Keyword("not".to_string()));
     }

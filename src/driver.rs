@@ -605,7 +605,7 @@ ret y
         let platform = crate::stdlib::os::platform();
         assert_eq!(
             run_io(
-                "use os\nprint(os.platform(), os.has_env(\"PATH\"), os.env(\"STONE_UNSET\") == \"\")\n",
+                "use os\nprint(os.platform(), os.has_env(\"PATH\"), os.env(\"STONE_UNSET\").is_none())\n",
                 "",
                 &[]
             ),

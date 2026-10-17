@@ -481,7 +481,7 @@ fn string_indexes_check_the_length_then_call_the_runtime() {
 #[test]
 fn string_slices_and_methods_call_the_runtime() {
     let source = "fn f(s: str, xs: list[str]) -> list[str];\n    \
-                  ret [s[1:], s[::-1], s.join(xs), str(s.find(s)), str(s.startswith(s))]\n\
+                  ret [s[1:], s[::-1], s.join(xs), str(s.find(s).unwrap_or(-1)), str(s.startswith(s))]\n\
                   print(f(\"a\", []))\n";
     let text = dump(source);
     for call in [
@@ -559,7 +559,7 @@ fn dump_linked(source: &str) -> String {
 
 #[test]
 fn os_functions_call_the_runtime() {
-    let source = "use os\nx = os.env(\"A\")\n\
+    let source = "use os\nx = os.env(\"A\").unwrap_or(\"\")\n\
                   print(os.has_env(x), os.platform(), os.arch(), os.hostname(), os.cpu_count())\n\
                   print(os.pid(), os.cwd())\nos.exit(1)\n";
     let text = dump_linked(source);
@@ -930,6 +930,49 @@ fn a_match_checks_tags_then_binds_retained_values() {
     assert!(
         f.contains("b1:\n  v4 = field_get v2, 0\n  retain v4\n  release_str v1\n  v1 = copy v4"),
         "{f}"
+    );
+}
+
+#[test]
+fn pop_without_an_index_is_some_of_the_last_element_or_none() {
+    let ir = first_function(
+        "fn f(xs: list[str]) -> option[str];\n    o = xs.pop()\n    ret o\nprint(f([]))\n",
+    );
+    // the list's reference to the element moves into the option, and the static none is
+    // retained, so the option is owned either way
+    assert_eq!(
+        ir,
+        "fn f(v0):\nb0:\n  v1 = copy 0\n  v0 = list_unique v0\n  v2 = len v0\n  \
+         br_ne v2, 0 -> b1, b2\nb1:\n  v4 = sub v2, 1\n  v5 = call stone.list_pop(v0, v4)\n  \
+         v3 = call stone.enum_new(1, 1, 1)\n  field_init v3[0], v5\n  jmp b3\nb2:\n  \
+         v3 = variant 0\n  retain v3\n  jmp b3\nb3:\n  release_enum v1\n  v1 = copy v3\n  \
+         release_list v0\n  ret v1\n"
+    );
+}
+
+#[test]
+fn find_get_and_os_env_are_some_of_a_value_or_none() {
+    let ir = first_function(
+        "fn f(s: str, m: map[int, str]) -> tuple[option[int], option[str]];\n    \
+         ret (s.find(\"a\"), m.get(1))\nprint(f(\"a\", {}))\n",
+    );
+    assert_eq!(
+        ir,
+        "fn f(v0, v1):\nb0:\n  v2 = str \"a\"\n  v3 = call stone.str_position(v0, v2)\n  \
+         br_ge v3, 0 -> b1, b2\nb1:\n  v4 = call stone.enum_new(1, 0, 1)\n  \
+         field_init v4[0], v3\n  jmp b3\nb2:\n  v4 = variant 0\n  retain v4\n  jmp b3\nb3:\n  \
+         v5 = call stone.map_find(v1, 1, 0)\n  br_ge v5, 0 -> b4, b5\nb4:\n  v7 = add v5, 1\n  \
+         v8 = list_get v1, v7\n  retain v8\n  v6 = call stone.enum_new(1, 1, 1)\n  \
+         field_init v6[0], v8\n  jmp b6\nb5:\n  v6 = variant 0\n  retain v6\n  jmp b6\nb6:\n  \
+         ret v4, v6\n"
+    );
+    let ir = dump_linked("use os\nprint(os.env(\"A\"))\n");
+    assert!(
+        ir.contains(
+            "call stone.os_env(v0)\n  br_ne v1, 0 -> b1, b2\nb1:\n  \
+                     v2 = call stone.enum_new(1, 1, 1)\n  field_init v2[0], v1"
+        ),
+        "{ir}"
     );
 }
 

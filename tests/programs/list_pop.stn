@@ -1,4 +1,4 @@
-// pop removes an element and returns it
+// pop removes an element and returns it, and without an index gives an option
 xs = [1, 2, 3, 4]
 last = xs.pop()
 first = xs.pop(0)
@@ -16,13 +16,13 @@ words = ["a", "b", "c"]
 w = words.pop(1)
 print(w, words)
 grid = [[1], [2, 3]]
-row = grid.pop()
+row = grid.pop(-1)
 row.append(4)
 print(row, grid)
 
 // the value is popped before the element it goes into is found
 grid = [[1], [2]]
-grid[0] = grid.pop()
+grid[0] = grid.pop(-1)
 print(grid)
 
 // a nested list can be popped from
@@ -38,12 +38,25 @@ zs = [5, 6, 7]
 zs = drop_last(zs)
 print(zs, drop_last([8, 9]))
 
-// a stack
+// a stack, popped until it gives none
 stack = []
 for i in range(5);
     stack.append(i * i)
 total = 0
-while stack.len() > 0;
+done = false
+while not done;
     top = stack.pop()
-    total = total + top
-print(total, stack)
+    match top;
+        case some(n);
+            total = total + n
+        case none;
+            done = true
+rest = stack.pop()
+print(total, stack, rest)
+
+// strings and lists move into the option
+words = ["a", "b"]
+word = words.pop()
+grid = [[1], [2, 3]]
+last_row = grid.pop()
+print(word, words, last_row, grid, word.unwrap(), last_row.unwrap_or([]))

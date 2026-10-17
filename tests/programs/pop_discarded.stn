@@ -1,0 +1,5 @@
+// a discarded pop is the only option, so the enum runtime is still needed
+xs = [1]
+xs.pop()
+xs.pop()
+print(xs)

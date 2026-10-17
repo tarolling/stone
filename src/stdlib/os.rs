@@ -20,15 +20,15 @@ pub const MODULE_DOC: &str = "The builtin module that tells a program about the 
 pub static DOCS: [BuiltinDoc; 9] = [
     BuiltinDoc {
         name: "os.env",
-        signature: "os.env(name: str) -> str",
-        description: "Returns the value of the environment variable `name`, or `\"\"` if it is \
-                      not set. A name that is empty or holds `=` is never set.",
+        signature: "os.env(name: str) -> option[str]",
+        description: "Returns `some` of the value of the environment variable `name`, or \
+                      `none` if it is not set. A name that is empty or holds `=` is never set.",
     },
     BuiltinDoc {
         name: "os.has_env",
         signature: "os.has_env(name: str) -> bool",
-        description: "Returns whether the environment variable `name` is set, which tells an \
-                      empty value apart from a missing one.",
+        description: "Returns whether the environment variable `name` is set, even to `\"\"`, \
+                      as `os.env(name).is_some()` does.",
     },
     BuiltinDoc {
         name: "os.platform",
@@ -81,11 +81,12 @@ fn lookup(name: &str) -> Option<String> {
     std::env::var_os(name).map(|value| value.to_string_lossy().into_owned())
 }
 
-/// Returns the environment variable `name`, or `""` if it is not set.
+/// Returns the environment variable `name`, or `None` if it is not set.
 ///
-/// For example, `env("HOME")` might return `"/home/ada"`, and `env("A=B")` always returns `""`.
-pub fn env(name: &str) -> String {
-    lookup(name).unwrap_or_default()
+/// For example, `env("HOME")` might return `Some("/home/ada")`, and `env("A=B")` always returns
+/// `None`.
+pub fn env(name: &str) -> Option<String> {
+    lookup(name)
 }
 
 /// Returns whether the environment variable `name` is set, even to `""`.
@@ -159,9 +160,9 @@ mod tests {
     fn env_reads_the_environment() {
         // PATH is set wherever cargo runs tests
         assert!(has_env("PATH"));
-        assert_eq!(env("PATH"), std::env::var("PATH").unwrap());
+        assert_eq!(env("PATH"), std::env::var("PATH").ok());
         assert!(!has_env("STONE_SURELY_UNSET_VARIABLE"));
-        assert_eq!(env("STONE_SURELY_UNSET_VARIABLE"), "");
+        assert_eq!(env("STONE_SURELY_UNSET_VARIABLE"), None);
     }
 
     #[test]

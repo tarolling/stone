@@ -664,7 +664,7 @@ fn built_programs_need_only_the_system_and_start_on_their_own() {
         .env_clear()
         .output()
         .expect("the binary should run");
-    assert_eq!(String::from_utf8_lossy(&empty.stdout), "[]  false\n");
+    assert_eq!(String::from_utf8_lossy(&empty.stdout), "[] none false\n");
     let full = Command::new(dir.join("out"))
         .args(["a", "b c"])
         .env("STONE_TEST", "x=y")
@@ -673,7 +673,7 @@ fn built_programs_need_only_the_system_and_start_on_their_own() {
     let has_home = std::env::var_os("HOME").is_some();
     assert_eq!(
         String::from_utf8_lossy(&full.stdout),
-        format!("['a', 'b c'] x=y {has_home}\n")
+        format!("['a', 'b c'] some('x=y') {has_home}\n")
     );
 }
 

@@ -26,7 +26,7 @@ for c in "ab" + "cd";
 
 fn first_vowel(text: str) -> str;
     for c in text;
-        if "aeiou".find(c) >= 0;
+        if "aeiou".find(c).is_some();
             ret c
     ret ""
 print(first_vowel("rhythm and blues"), "[" + first_vowel("xyz") + "]")

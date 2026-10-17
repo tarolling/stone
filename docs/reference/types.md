@@ -230,8 +230,8 @@ Keys are `int`, `str`, or `bool`, all of one type, and values can be any type, a
 too. `{}` is an empty map, whose types come from how it is used. A map keeps its entries in the
 order their keys were first added, which is the order it prints in, and a literal that names a
 key twice keeps the later value, as in Python. `m[k]` stops the program with
-`key not found: 'dee'` if `m` has no entry for `k`, so check with `m.contains(k)` first where it
-might not.
+`key not found: 'dee'` if `m` has no entry for `k`, so where it might not, check with
+`m.contains(k)` first or read it with `m.get(k)`, which gives `some` of the value or `none`.
 
 Like lists, maps are values: `b = a` and passing `a` to a function copy it, so a function
 changes its caller's map only by returning it, as in `counts = add(counts, word)`, which changes

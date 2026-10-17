@@ -60,7 +60,7 @@ items[1].inner.tags[0] = "y-0"
 items[0].name += "!"
 items.append(a)
 items.insert(1, b)
-popped = items.pop()
+popped = items.pop(-1)
 middle = items[1:2]
 copied = items
 copied[0].inner.note = "copied"

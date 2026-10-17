@@ -10,6 +10,19 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `m.get(k)` reads a map's value for `k` as an option: `some` of the value, or `none` if the map
+  has no entry for `k`, where `m[k]` stops the program.
+
+### Changed
+
+- Builtins that could find nothing return an option instead of a value that means "missing":
+  `s.find(t)` is `option[int]`, `none` rather than `-1` when `t` never appears; `xs.pop()` is
+  `option[T]`, `none` rather than stopping the program when the list is empty (`xs.pop(i)` still
+  returns the element and still stops the program on an empty list or an index out of range);
+  and `os.env(name)` is `option[str]`, `none` rather than `""` when the variable is not set.
+
 ## [0.2.7] - 2026-10-15
 
 ### Added

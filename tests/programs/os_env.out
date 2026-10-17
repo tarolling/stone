@@ -1,6 +1,7 @@
-hello there
+some('hello there')
 11 true
 true true
 false true
+not set
 false false
-['hello there', '', '']
+[some('hello there'), some(''), none]

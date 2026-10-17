@@ -23,7 +23,7 @@ average.stn:5:9: error: division by zero
 
 Both backends stop at the same point with the same message, since operands are evaluated left
 to right in both. The error points at the innermost expression that failed: the division in
-`1 + a / b`, the subscript in `xs[i]`, the call in `int(s)`, `xs.pop()`, `x.unwrap()`, `print(x)`, or
+`1 + a / b`, the subscript in `xs[i]`, the call in `int(s)`, `xs.pop(i)`, `x.unwrap()`, `print(x)`, or
 `math.sqrt(x)`, and
 for `recursion is too deep`, the call that went one level too deep. A change such as
 `grid[i][j] = v` or `ps[i].x = v` points at the subscript whose index is out of range. An executable names the
@@ -36,7 +36,7 @@ file by the path it was built from.
 | `negative exponent` | `**` with an int base and a negative exponent, which has no int result |
 | `list index out of range (index 5, length 2)` | an index at or past the length, or a negative index before the start, including `insert` at an index below `-len` or above `len`. It gives the index as written and the list's length |
 | `key not found: 'pear'` | `m[k]` for a key `m` has no entry for. It gives the key, quoted if it is a string |
-| `pop from empty list` | `pop()` or `pop(i)` on an empty list |
+| `pop from empty list` | `pop(i)` on an empty list (`pop()` gives `none` instead) |
 | `pop index out of range` | `pop(i)` with `i` at or past the length, or before the start |
 | `string index out of range (index -4, length 3)` | a string index at or past the length, or a negative index before the start. It gives the index as written and the string's length in bytes |
 | `cannot cut a string inside a character` | `s[i]` of a byte that is part of a character outside ASCII, or a slice that would hold only part of one (see [strings](types.md#strings)) |

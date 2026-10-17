@@ -4,16 +4,21 @@ use os.env
 use os as system
 
 print(os.env("STONE_GREETING"))
-print(env("STONE_GREETING").len(), system.has_env("STONE_GREETING"))
+print(env("STONE_GREETING").unwrap().len(), system.has_env("STONE_GREETING"))
 
 // an empty value is set, unlike a missing one
-print(os.has_env("STONE_EMPTY"), os.env("STONE_EMPTY") == "")
-print(os.has_env("STONE_SURELY_MISSING"), os.env("STONE_SURELY_MISSING") == "")
+print(os.has_env("STONE_EMPTY"), os.env("STONE_EMPTY") == some(""))
+print(os.has_env("STONE_SURELY_MISSING"), os.env("STONE_SURELY_MISSING").is_none())
+match os.env("STONE_SURELY_MISSING");
+    case some(value);
+        print("set to", value)
+    case none;
+        print("not set")
 
 // names libc cannot look up are never set
 print(os.has_env(""), os.has_env("STONE_GREETING=hello there"))
 
-// values are new strings, so they can be kept and joined
+// values are new strings, so they can be kept
 names = ["STONE_GREETING", "STONE_EMPTY", "STONE_SURELY_MISSING"]
 values = []
 for name in names;

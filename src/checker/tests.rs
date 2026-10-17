@@ -589,7 +589,7 @@ fn join_find_and_startswith_take_strs() {
     let source =
         "s = \", \".join([\"a\", \"b\"])\nn = \"abc\".find(\"c\")\nb = \"abc\".startswith(\"a\")\n";
     assert_eq!(type_of_symbol(source, "s"), "str");
-    assert_eq!(type_of_symbol(source, "n"), "int");
+    assert_eq!(type_of_symbol(source, "n"), "option[int]");
     assert_eq!(type_of_symbol(source, "b"), "bool");
     // the element type of an empty list comes from join
     assert_eq!(
@@ -1256,14 +1256,15 @@ fn method_receivers_must_be_assigned_first() {
 
 #[test]
 fn pop_insert_and_extend_have_types() {
-    let source = "xs = [1.5]\nx = xs.pop()\ny = xs.pop(0)\nxs.insert(0, 2.5)\nxs.extend([x, y])\n\
+    // without an index, pop gives none for an empty list
+    let source = "xs = [1.5]\nx = xs.pop()\ny = xs.pop(0)\nxs.insert(0, 2.5)\nxs.extend([y])\n\
                   xs.pop()\n";
-    assert_eq!(type_of_symbol(source, "x"), "float");
+    assert_eq!(type_of_symbol(source, "x"), "option[float]");
     assert_eq!(type_of_symbol(source, "y"), "float");
     assert_eq!(type_of_symbol(source, "xs"), "list[float]");
     // the list's type can come from what is put in it
     let source = "xs = []\nxs.insert(0, \"a\")\nys = []\nys.extend(xs)\nz = ys.pop()\n";
-    assert_eq!(type_of_symbol(source, "z"), "str");
+    assert_eq!(type_of_symbol(source, "z"), "option[str]");
 }
 
 #[test]
@@ -1318,9 +1319,9 @@ fn pop_is_a_statement_or_an_assigned_value() {
     let message = "'pop' changes a list, so it can only be a statement of its own or the value of \
                    an assignment, as in 'x = xs.pop()'";
     assert_error("xs = [1]\nprint(xs.pop())\n", message, 2, 7);
-    assert_error("xs = [1]\ny = xs.pop() + 1\n", message, 2, 5);
+    assert_error("xs = [1]\ny = xs.pop(0) + 1\n", message, 2, 5);
     assert_error(
-        "fn f(xs: list[int]) -> int;\n    ret xs.pop()\nf([1])\n",
+        "fn f(xs: list[int]) -> int;\n    ret xs.pop(-1)\nf([1])\n",
         message,
         2,
         9,
@@ -1338,13 +1339,13 @@ fn pop_is_a_statement_or_an_assigned_value() {
 fn popping_counts_as_a_change() {
     // a function cannot pop from a global, and popping a parameter it never reads again is lost
     assert_error(
-        "xs = [1]\nfn f() -> int;\n    x = xs.pop()\n    ret x\nf()\n",
+        "xs = [1]\nfn f() -> int;\n    x = xs.pop(0)\n    ret x\nf()\n",
         "a function cannot change the global 'xs'; pass it as an argument and return the \
          changed value",
         3,
         9,
     );
-    let source = "fn f(xs: list[int]) -> int;\n    x = xs.pop()\n    ret x\nf([1])\n";
+    let source = "fn f(xs: list[int]) -> int;\n    x = xs.pop(0)\n    ret x\nf([1])\n";
     assert_eq!(
         errors(source),
         [(
@@ -1698,7 +1699,7 @@ fn linked_type(source: &str, name: &str) -> String {
 #[test]
 fn os_functions_have_types() {
     let cases = [
-        ("os.env(\"HOME\")", "str"),
+        ("os.env(\"HOME\")", "option[str]"),
         ("os.has_env(\"HOME\")", "bool"),
         ("os.platform()", "str"),
         ("os.arch()", "str"),
@@ -1946,7 +1947,7 @@ fn unpacking_gives_each_name_its_field() {
     assert_eq!(type_of_symbol(source, "b"), "str");
     assert_eq!(type_of_symbol(source, "c"), "list[float]");
     // a value not known yet becomes a tuple
-    let source = "xs = []\nxs.append((1, \"a\"))\nn, s = xs.pop()\n";
+    let source = "xs = []\nxs.append((1, \"a\"))\nn, s = xs.pop(-1)\n";
     assert_eq!(type_of_symbol(source, "s"), "str");
     let source = "fn f(pairs: list[tuple[str, int]]);\n    for name, score in pairs;\n        print(name, score + 1)\n";
     assert_eq!(errors(source), []);
@@ -2765,7 +2766,7 @@ fn a_map_entry_changes_only_by_assignment_for_now() {
 }
 
 #[test]
-fn maps_have_len_and_contains() {
+fn maps_have_len_contains_and_get() {
     assert_eq!(type_of_symbol("m = {1: 1}\nn = m.len()\n", "n"), "int");
     assert_eq!(
         type_of_symbol("m = {1: 1}\nb = m.contains(2)\n", "b"),
@@ -2776,6 +2777,33 @@ fn maps_have_len_and_contains() {
         "expected int, found str",
         2,
         16,
+    );
+    assert_eq!(
+        type_of_symbol("m = {\"a\": (1, [2.5])}\nv = m.get(\"b\")\n", "v"),
+        "option[tuple[int, list[float]]]"
+    );
+    // the map's type can come from get
+    assert_eq!(
+        type_of_symbol("m = {}\nv = m.get(true)\nm[false] = \"x\"\n", "m"),
+        "map[bool, str]"
+    );
+    assert_error(
+        "m = {1: 1}\nv = m.get(\"a\")\n",
+        "expected int, found str",
+        2,
+        11,
+    );
+    assert_error(
+        "m = {1: 1}\nv = m.get()\n",
+        "'get' takes 1 argument, but 0 were given",
+        2,
+        5,
+    );
+    assert_error(
+        "xs = [1]\nv = xs.get(0)\n",
+        "expected map[unknown, unknown], found list[int]",
+        2,
+        5,
     );
 }
 
@@ -2891,7 +2919,7 @@ fn a_function_can_index_a_global_map_assigned_after_it() {
 const STACK: &str = "struct Stack;\n    items: list[int]\nimpl Stack;\n    fn new() -> Stack;\n        \
                      ret Stack(items=[])\n    fn size(self) -> int;\n        ret self.items.len()\n    \
                      fn push(self, x: int);\n        self.items.append(x)\n    \
-                     fn pop_top(self) -> int;\n        x = self.items.pop()\n        ret x\n";
+                     fn pop_top(self) -> int;\n        x = self.items.pop(-1)\n        ret x\n";
 
 /// Returns each method call of `source` as the function it calls, whether it has a receiver,
 /// and whether it changes it, sorted.

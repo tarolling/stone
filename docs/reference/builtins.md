@@ -191,20 +191,24 @@ print(names)   // ['ada']
 ### `pop`
 
 ```text
-list[T].pop() | list[T].pop(index: int) -> T
+list[T].pop() -> option[T] | list[T].pop(index: int) -> T
 ```
 
-Removes the last element, or the one at `index`, and returns it. A negative `index` counts from
-the end, as in indexing. Like `append`, it changes only the variable it is called on, so it is
-either a statement of its own or the whole value of an assignment, as in `x = xs.pop()`. It stops
-the program with `pop from empty list` if the list is empty, and with `pop index out of range` if
-`index` is past either end.
+Without `index`, removes the last element and returns it as `some(x)`, or returns `none` if the
+list is empty. With `index`, removes the element there and returns it; a negative `index` counts
+from the end, as in indexing, and the program stops with `pop from empty list` if the list is
+empty and with `pop index out of range` if `index` is past either end. Like `append`, it changes
+only the variable it is called on, so it is either a statement of its own or the whole value of
+an assignment, as in `x = xs.pop()`.
 
 ```stone
 stack = [1, 2, 3]
 top = stack.pop()
 first = stack.pop(0)
-print(top, first, stack)   // 3 1 [2]
+print(top, first, stack)   // some(3) 1 [2]
+stack = []
+nothing = stack.pop()
+print(nothing)             // none
 ```
 
 ### `insert`
@@ -288,16 +292,20 @@ print("-".join("1 2 3".split()))        // 1-2-3
 ### `find`
 
 ```text
-str.find(text: str) -> int
+str.find(text: str) -> option[int]
 ```
 
-Returns the index where `text` first appears in the string, or `-1` if it never does. Like
-`len` and indexes, it counts bytes. An empty `text` is found at `0`.
+Returns `some` of the index where `text` first appears in the string, or `none` if it never
+does. Like `len` and indexes, it counts bytes. An empty `text` is found at `0`.
 
 ```stone
 line = "key=value"
-at = line.find("=")
-print(at, line[:at], line[at + 1:], line.find("?"))   // 3 key value -1
+match line.find("=");
+    case some(at);
+        print(at, line[:at], line[at + 1:])   // 3 key value
+    case none;
+        print("no =")
+print(line.find("?"))                       // none
 ```
 
 ### `startswith`
@@ -382,6 +390,21 @@ ages = {"ann": 31}
 print(ages.contains("ann"), ages.contains("bob"))   // true false
 ```
 
+### `get`
+
+```text
+map[K, V].get(key: K) -> option[V]
+```
+
+Returns `some` of the value of `key`'s entry, or `none` if the map has no entry for it. Unlike
+`m[key]`, which stops the program with `key not found`, it never fails.
+
+```stone
+ages = {"ann": 31}
+print(ages.get("ann"), ages.get("bob"))   // some(31) none
+print(ages.get("bob").unwrap_or(0))      // 0
+```
+
 ## The `os` module
 
 `os` is a builtin module: it has no file, and a program imports it like any other module, with
@@ -396,16 +419,18 @@ every machine. The examples show values from one machine.
 ### `os.env`
 
 ```text
-os.env(name: str) -> str
+os.env(name: str) -> option[str]
 ```
 
-Returns the value of the environment variable `name`, or `""` if it is not set. Use `os.has_env`
-to tell an empty value from a missing one. A name that is empty or holds `=` is never set.
+Returns `some` of the value of the environment variable `name`, or `none` if it is not set, so
+an empty value, `some("")`, differs from a missing one. A name that is empty or holds `=` is never
+set.
 
 ```stone
 use os
 
-print(os.env("HOME"))   // /home/ada
+print(os.env("HOME"))                         // some('/home/ada')
+print(os.env("NO_SUCH_VARIABLE").unwrap_or(""))   // prints an empty line
 ```
 
 ### `os.has_env`
@@ -414,7 +439,8 @@ print(os.env("HOME"))   // /home/ada
 os.has_env(name: str) -> bool
 ```
 
-Returns whether the environment variable `name` is set, even to `""`.
+Returns whether the environment variable `name` is set, even to `""`, as
+`os.env(name).is_some()` does.
 
 ```stone
 use os

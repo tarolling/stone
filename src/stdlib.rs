@@ -53,7 +53,7 @@ pub fn module(name: &str) -> Option<&'static BuiltinModule> {
 
 /// Returns the documentation for the function of a builtin module with the linked name `name`.
 ///
-/// For example, `module_function("os.env")` has the signature `os.env(name: str) -> str`, and
+/// For example, `module_function("os.env")` has the signature `os.env(name: str) -> option[str]`, and
 /// `module_function("env")` is `None`.
 pub fn module_function(name: &str) -> Option<&'static BuiltinDoc> {
     let (prefix, _) = name.split_once('.')?;
@@ -83,7 +83,7 @@ pub static BUILTINS: [&str; 9] = [
 ];
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 16] = [
+pub static METHODS: [&str; 17] = [
     "len",
     "append",
     "pop",
@@ -100,6 +100,7 @@ pub static METHODS: [&str; 16] = [
     "unwrap",
     "unwrap_or",
     "contains",
+    "get",
 ];
 
 /// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
@@ -181,7 +182,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 16] = [
+pub static METHOD_DOCS: [BuiltinDoc; 17] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T] | map[K, V]).len() -> int",
@@ -196,12 +197,13 @@ pub static METHOD_DOCS: [BuiltinDoc; 16] = [
     },
     BuiltinDoc {
         name: "pop",
-        signature: "list[T].pop() | list[T].pop(index: int) -> T",
-        description: "Removes the last element, or the one at `index`, and returns it, so \
-                      `x = xs.pop()` takes the last element off `xs`. A negative `index` counts \
-                      from the end. It stops the program if the list is empty or `index` is out \
-                      of range, and it is a statement of its own or the whole value of an \
-                      assignment.",
+        signature: "list[T].pop() -> option[T] | list[T].pop(index: int) -> T",
+        description: "Without `index`, removes the last element and returns `some` of it, or \
+                      `none` if the list is empty, so `x = xs.pop()` takes the last element off \
+                      `xs`. With `index`, removes the element there and returns it, stopping \
+                      the program if the list is empty or `index` is out of range; a negative \
+                      `index` counts from the end. It is a statement of its own or the whole \
+                      value of an assignment.",
     },
     BuiltinDoc {
         name: "insert",
@@ -238,10 +240,10 @@ pub static METHOD_DOCS: [BuiltinDoc; 16] = [
     },
     BuiltinDoc {
         name: "find",
-        signature: "str.find(text: str) -> int",
-        description: "Returns the byte index where `text` first appears in the string, or -1 if \
-                      it never does, so `\"banana\".find(\"na\")` is 2. An empty `text` is found \
-                      at 0.",
+        signature: "str.find(text: str) -> option[int]",
+        description: "Returns `some` of the byte index where `text` first appears in the \
+                      string, or `none` if it never does, so `\"banana\".find(\"na\")` is \
+                      `some(2)`. An empty `text` is found at 0.",
     },
     BuiltinDoc {
         name: "startswith",
@@ -282,6 +284,13 @@ pub static METHOD_DOCS: [BuiltinDoc; 16] = [
         name: "contains",
         signature: "map[K, V].contains(key: K) -> bool",
         description: "Returns whether the map has an entry for `key`.",
+    },
+    BuiltinDoc {
+        name: "get",
+        signature: "map[K, V].get(key: K) -> option[V]",
+        description: "Returns `some` of the value for `key`, or `none` if the map has no entry \
+                      for it, so `{\"a\": 1}.get(\"b\")` is `none`. Unlike `m[key]`, it never \
+                      stops the program.",
     },
 ];
 

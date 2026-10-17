@@ -1511,12 +1511,29 @@ impl<'a> Lowerer<'a> {
             self.take(value, kind);
         }
         let dst = self.fresh();
+        self.new_variant(dst, tag, values, &kinds);
+        self.own(Operand::Reg(dst), Some(RcKind::Enum));
+        Ok(self.finish(Operand::Reg(dst), into))
+    }
+
+    /// Makes a new value of the variant `tag` in `dst` holding `values`, counted as `kinds`
+    /// say, which already carry the references it keeps.
+    ///
+    /// For example, `some("a")` is `dst = call stone.enum_new(1, 1, 1)` and
+    /// `field_init dst[0], v0`.
+    fn new_variant(
+        &mut self,
+        dst: VReg,
+        tag: usize,
+        values: Vec<Operand>,
+        kinds: &[Option<RcKind>],
+    ) {
         self.push(Inst::Call {
             dsts: vec![dst],
             callee: Callee::Runtime("stone.enum_new"),
             args: vec![
                 Operand::Imm(tag as i64),
-                Operand::Imm(RcKind::codes(&kinds)),
+                Operand::Imm(RcKind::codes(kinds)),
                 Operand::Imm(kinds.len() as i64),
             ],
         });
@@ -1527,8 +1544,44 @@ impl<'a> Lowerer<'a> {
                 src,
             });
         }
+    }
+
+    /// Lowers an option that is `some` of what `values` gives when `lhs cond rhs` holds, and
+    /// `none` otherwise, owned either way, into `into` if given. `values` runs only when the
+    /// condition holds and gives each value with how it is counted, already carrying the
+    /// reference the option keeps.
+    ///
+    /// For example, `s.find(t)` is `some(position)` when the position is at least 0.
+    fn option_if(
+        &mut self,
+        (cond, lhs, rhs): (Cond, Operand, Operand),
+        into: Option<VReg>,
+        values: impl FnOnce(&mut Self) -> Vec<(Operand, Option<RcKind>)>,
+    ) -> Operand {
+        let dst = self.dst(into);
+        let (holds, empty, end) = (self.new_block(), self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond,
+            float: false,
+            lhs,
+            rhs,
+            then: holds,
+            otherwise: empty,
+        });
+        self.start(holds);
+        let (values, kinds): (Vec<Operand>, Vec<Option<RcKind>>) = values(self).into_iter().unzip();
+        self.new_variant(dst, 1, values, &kinds);
+        self.jump(end);
+        self.start(empty);
+        // the static none, retained so both ways give an owned value
+        self.push(Inst::VariantStatic { dst, tag: 0 });
+        self.push(Inst::Retain {
+            src: Operand::Reg(dst),
+        });
+        self.jump(end);
+        self.start(end);
         self.own(Operand::Reg(dst), Some(RcKind::Enum));
-        Ok(self.finish(Operand::Reg(dst), into))
+        Operand::Reg(dst)
     }
 
     /// Returns the tag of the variant `variant` of the enum the program calls `enum_name`.
@@ -3427,6 +3480,21 @@ impl<'a> Lowerer<'a> {
                 });
                 Ok(Operand::Reg(dst))
             }
+            "get" => {
+                let key_ty = self.map_key(receiver).ok_or("only a map has 'get'")?;
+                let kinds = self.element_kinds(receiver);
+                let map = self.list_operand(receiver, &args.iter().collect::<Vec<_>>())?;
+                let key = self.expr(&args[0])?;
+                let first = self.map_find(map, key, &key_ty, None);
+                self.release_temp(key);
+                let option = self.option_if((Cond::Ge, first, Operand::Imm(0)), into, |this| {
+                    // the key is slot 0 of an entry, and reading a value retains it
+                    let values = this.load_slots(map, first, 1, 1..kinds.len(), &kinds);
+                    values.into_iter().zip(kinds[1..].iter().copied()).collect()
+                });
+                self.release_temp(map);
+                Ok(option)
+            }
             "len" if self.holds_flat(receiver) || self.map_key(receiver).is_some() => {
                 let width = self.element_layout(receiver).0;
                 let list = self.list_operand(receiver, &[])?;
@@ -3479,30 +3547,16 @@ impl<'a> Lowerer<'a> {
                 // append returns none
                 Ok(self.finish(Operand::Imm(0), into))
             }
+            "pop" if args.is_empty() => self.pop_last(receiver, into),
             "pop" => {
                 // the receiver's indexes, then the index, then the change
                 let indexes = self.place_indexes(receiver)?;
-                let index = match args.first() {
-                    Some(arg) => Some(self.expr(arg)?),
-                    None => None,
-                };
+                let index = self.expr(&args[0])?;
                 let list = self.unique_place(receiver, &indexes)?;
                 let len = self.fresh();
                 self.push(Inst::ListLen { dst: len, list });
                 self.fail_unless(Cond::Ne, Operand::Reg(len), Operand::Imm(0), POP_EMPTY);
-                let position = match index {
-                    Some(index) => self.list_position(index, Operand::Reg(len), false, POP_RANGE),
-                    None => {
-                        let last = self.fresh();
-                        self.push(Inst::Binary {
-                            op: BinOp::Sub,
-                            dst: last,
-                            lhs: Operand::Reg(len),
-                            rhs: Operand::Imm(1),
-                        });
-                        Operand::Reg(last)
-                    }
-                };
+                let position = self.list_position(index, Operand::Reg(len), false, POP_RANGE);
                 // the list's reference to the element moves to the result
                 let result = self.runtime_call("stone.list_pop", vec![list, position], into);
                 self.own(result, kind);
@@ -3564,14 +3618,26 @@ impl<'a> Lowerer<'a> {
                 self.own(result, kind);
                 Ok(result)
             }
-            "join" | "find" | "startswith" | "endswith" => {
+            "find" => {
+                let text = self.expr(receiver)?;
+                let part = self.expr(&args[0])?;
+                let position = self.runtime_call("stone.str_position", vec![text, part], None);
+                self.release_temp(text);
+                self.release_temp(part);
+                // the routine gives -1 when the text never appears
+                Ok(
+                    self.option_if((Cond::Ge, position, Operand::Imm(0)), into, |_| {
+                        vec![(position, None)]
+                    }),
+                )
+            }
+            "join" | "startswith" | "endswith" => {
                 let mut values = vec![self.expr(receiver)?];
                 for arg in args {
                     values.push(self.expr(arg)?);
                 }
                 let label = match name {
                     "join" => "stone.str_join",
-                    "find" => "stone.str_position",
                     "startswith" => "stone.str_starts",
                     _ => "stone.str_ends",
                 };
@@ -4062,6 +4128,17 @@ impl<'a> Lowerer<'a> {
                 });
                 // sleep returns none
                 Ok(self.finish(Operand::Imm(0), into))
+            }
+            "os.env" => {
+                let name = self.expr(&args[0])?;
+                let value = self.runtime_call("stone.os_env", vec![name], None);
+                self.release_temp(name);
+                // the routine gives a new string, or 0 when the variable is not set
+                Ok(
+                    self.option_if((Cond::Ne, value, Operand::Imm(0)), into, |_| {
+                        vec![(value, Some(RcKind::Str))]
+                    }),
+                )
             }
             _ if let Some(label) = module_routine(name) => {
                 let mut values = Vec::new();
@@ -4754,34 +4831,59 @@ impl<'a> Lowerer<'a> {
         let kinds = self.element_kinds(receiver);
         // the receiver's indexes, then the index, then the change
         let indexes = self.place_indexes(receiver)?;
-        let index = match args.first() {
-            Some(arg) => Some(self.expr(arg)?),
-            None => None,
+        let [index] = args else {
+            return Err("only pop(index) gives the values of an element".to_string());
         };
+        let index = self.expr(index)?;
         let list = self.unique_place(receiver, &indexes)?;
         let count = self.element_count(list, width);
         self.fail_unless(Cond::Ne, count, Operand::Imm(0), POP_EMPTY);
-        let position = match index {
-            Some(index) => self.list_position(index, count, false, POP_RANGE),
-            None => {
-                let last = self.fresh();
-                self.push(Inst::Binary {
+        let position = self.list_position(index, count, false, POP_RANGE);
+        let values = self.remove_element(list, position, width, &kinds);
+        for (&value, &kind) in values.iter().zip(&kinds) {
+            self.own(value, kind);
+        }
+        Ok(values)
+    }
+
+    /// Lowers `receiver.pop()`, which is `some` of the last element, holding the list's
+    /// references to its values, or `none` if the list is empty, into `into` if given.
+    fn pop_last(&mut self, receiver: &Expr, into: Option<VReg>) -> Result<Operand, String> {
+        let width = self.element_layout(receiver).0;
+        let kinds = self.element_kinds(receiver);
+        let indexes = self.place_indexes(receiver)?;
+        let list = self.unique_place(receiver, &indexes)?;
+        let count = self.element_count(list, width);
+        Ok(
+            self.option_if((Cond::Ne, count, Operand::Imm(0)), into, |this| {
+                let last = this.fresh();
+                this.push(Inst::Binary {
                     op: BinOp::Sub,
                     dst: last,
                     lhs: count,
                     rhs: Operand::Imm(1),
                 });
-                Operand::Reg(last)
-            }
-        };
+                let values = this.remove_element(list, Operand::Reg(last), width, &kinds);
+                values.into_iter().zip(kinds.iter().copied()).collect()
+            }),
+        )
+    }
+
+    /// Removes element `position` of `list`, whose elements are `width` slots each, returning
+    /// its values, each with the list's reference to it.
+    fn remove_element(
+        &mut self,
+        list: Operand,
+        position: Operand,
+        width: usize,
+        kinds: &[Option<RcKind>],
+    ) -> Vec<Operand> {
         let first = self.first_slot(position, width);
-        let mut values = Vec::new();
-        for kind in kinds {
-            let value = self.runtime_call("stone.list_pop", vec![list, first], None);
-            self.own(value, kind);
-            values.push(value);
-        }
-        Ok(values)
+        // each value removed moves the next one down to the same slot
+        kinds
+            .iter()
+            .map(|_| self.runtime_call("stone.list_pop", vec![list, first], None))
+            .collect()
     }
 
     /// Stores the values of a tuple, which already carry the references the list takes, in the

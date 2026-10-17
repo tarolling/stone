@@ -2688,9 +2688,8 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("\tbl\tstone.os_getenv");
         r#gen.emit("\tcbz\tx0, .Los_env_unset");
         r#gen.emit("\tbl\tstone.os_copy");
-        pop_frame(r#gen, &[]);
+        // x0 is 0 for a variable that is not set
         r#gen.emit(".Los_env_unset:");
-        address(r#gen, "x0", ".Lstone_os_empty");
         pop_frame(r#gen, &[]);
     }
     if uses("stone.os_has_env") {

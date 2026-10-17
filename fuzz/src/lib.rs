@@ -266,11 +266,15 @@ impl Generator {
                 let value = self.expression(u, scope, 0)?;
                 self.line(indent, &format!("{list}.append({value})"));
                 let target = self.fresh("g");
-                let index = match u.arbitrary()? {
-                    true => u.int_in_range(-2..=1)?.to_string(),
-                    false => String::new(),
-                };
-                self.line(indent, &format!("{target} = {list}.pop({index})"));
+                if u.arbitrary()? {
+                    let index = u.int_in_range(-2..=1)?;
+                    self.line(indent, &format!("{target} = {list}.pop({index})"));
+                } else {
+                    // without an index pop gives an option, which holds a value here
+                    let option = self.fresh("g");
+                    self.line(indent, &format!("{option} = {list}.pop()"));
+                    self.line(indent, &format!("{target} = {option}.unwrap()"));
+                }
                 scope.variables.push(target);
             }
             8 => {

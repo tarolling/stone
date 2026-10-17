@@ -2,11 +2,12 @@ a, b, c one []
 stone line 1
 line 2
 true the_quick_brown_fox
-2 1 -1 0 0 -1
-0 -1 6
+some(2) some(1) none some(0) some(0) none
+some(0) none some(6)
 true true false false
 true false
 key value
+no '=' in no equals
 skip
 stone
 skip

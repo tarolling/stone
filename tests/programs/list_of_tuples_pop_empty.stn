@@ -1,5 +1,5 @@
 // popping from an empty list of tuples
 pairs = [("a", 1)]
-name, n = pairs.pop()
+name, n = pairs.pop(-1)
 print(name, n)
-name, n = pairs.pop()
+name, n = pairs.pop(-1)

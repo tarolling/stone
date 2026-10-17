@@ -2691,7 +2691,7 @@ fn str_join(r#gen: &mut dyn AssemblyGenerator) {
 ///
 /// - `stone.os_getenv` returns `stone.getenv` of the string in `rdi`, or null if it is empty or
 ///   holds `=`, which `stone.getenv` could otherwise match. `stone.os_env` and `stone.os_has_env` use it
-/// - `stone.os_env` returns a copy of the variable named by `rdi`, or an empty string
+/// - `stone.os_env` returns a copy of the variable named by `rdi`, or 0 if it is not set
 /// - `stone.os_has_env` returns 1 if the variable named by `rdi` is set, else 0
 /// - `stone.os_platform` and `stone.os_arch` return immortal strings
 /// - `stone.os_hostname` returns a copy of the host name in `uname`'s answer, as `gethostname`
@@ -2733,7 +2733,7 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("\tcall\tstone.os_getenv");
         r#gen.emit("\ttest\trax, rax");
         r#gen.emit("\tjnz\tstone.os_copy");
-        r#gen.emit("\tlea\trax, [rip + .Lstone_os_empty]");
+        // rax is 0
         r#gen.emit("\tret");
     }
     if uses("stone.os_has_env") {

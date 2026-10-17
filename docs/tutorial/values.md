@@ -51,11 +51,12 @@ See [augmented assignment](../reference/syntax.md#augmented-assignment).
 
 Strings index and slice like lists, compare in dictionary order with `<` and `>`, can be
 walked one character at a time with `for`, and have methods such as `split`, `join`, `find`,
-`startswith`, and `endswith`:
+`startswith`, and `endswith`. `find` gives an option, `none` if the text never appears, which
+`unwrap` opens when it must be there:
 
 ```stone
 line = "name=stone"
-at = line.find("=")
+at = line.find("=").unwrap()
 print(line[:at], line[at + 1:], line[0], line[-1])   // name stone n e
 print("apple" < "banana", line.startswith("name"))   // true true
 print("-".join(line.split("=")))                     // name-stone

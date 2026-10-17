@@ -4,7 +4,7 @@ print("".join(["s", "t", "o", "n", "e"]), "\n".join(["line 1", "line 2"]))
 words = "the quick brown fox".split()
 print(" ".join(words) == "the quick brown fox", "_".join(words))
 
-// find gives the byte index of the first match, or -1
+// find gives the byte index of the first match, or none
 s = "banana"
 print(s.find("na"), s.find("a"), s.find("x"), s.find(""), s.find("banana"), s.find("bananas"))
 print("".find(""), "".find("a"), "café au lait".find("au"))
@@ -15,8 +15,12 @@ print("".startswith(""), "".startswith("a"))
 
 // together
 line = "key=value"
-at = line.find("=")
-print(line[:at], line[at + 1:])
+for text in [line, "no equals"];
+    match text.find("=");
+        case some(at);
+            print(text[:at], text[at + 1:])
+        case none;
+            print("no '=' in", text)
 for entry in ["# comment", "name=stone", "  # indented"];
     if entry.strip().startswith("#");
         print("skip")

@@ -21,7 +21,8 @@ from it.
 - `items[i] = value` replaces an element.
 - `items.append(value)` adds to the end, and `items.len()` counts the elements. `append`
   returns nothing, so it is always a statement of its own.
-- `items.pop()` removes the last element and returns it, and `items.pop(i)` the one at `i`.
+- `items.pop()` removes the last element and returns it as an option, which is `none` if the
+  list is empty, and `items.pop(i)` removes and returns the one at `i`.
   `items.insert(i, value)` puts `value` at `i`, and `items.extend(more)` adds every element of
   `more` to the end.
 - `items[start:stop]` is a new list of part of `items`, as in Python.

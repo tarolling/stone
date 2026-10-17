@@ -414,6 +414,7 @@ fn completion_after_a_dot_offers_methods() {
         "unwrap",
         "unwrap_or",
         "contains",
+        "get",
     ]
     .iter()
     .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
@@ -725,7 +726,7 @@ fn hover_documents_the_os_module() {
     );
     let text = hover_text(&doc, at(3, 18)).unwrap();
     assert!(
-        text.starts_with("```stone\nos.env(name: str) -> str\n```\n"),
+        text.starts_with("```stone\nos.env(name: str) -> option[str]\n```\n"),
         "{text}"
     );
     // the module, in its `use` and before a `.`
@@ -777,7 +778,10 @@ fn completion_after_os_offers_its_functions() {
         .collect();
     assert_eq!(labels, expected);
     assert_eq!(items[0].kind, Some(CompletionItemKind::FUNCTION));
-    assert_eq!(items[0].detail.as_deref(), Some("os.env(name: str) -> str"));
+    assert_eq!(
+        items[0].detail.as_deref(),
+        Some("os.env(name: str) -> option[str]")
+    );
 }
 
 #[test]
@@ -790,7 +794,7 @@ fn completion_offers_os_imports() {
     assert_eq!(item("getenv").kind, Some(CompletionItemKind::FUNCTION));
     assert_eq!(
         item("getenv").detail.as_deref(),
-        Some("os.env(name: str) -> str")
+        Some("os.env(name: str) -> option[str]")
     );
 }
 

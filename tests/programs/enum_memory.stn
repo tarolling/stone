@@ -28,7 +28,7 @@ fn show(t: Token) -> str;
 tokens = [Token.Word("a"), Token.Number(1), Token.End]
 tokens[1] = Token.Group([Token.Word("b"), Token.Word("c")])
 tokens.append(Token.Wide(1, "x", 2.5, [1, 2], "y", 3, true, "z"))
-last = tokens.pop()
+last = tokens.pop(-1)
 print(show(last))
 tokens.insert(0, Token.Number(7))
 middle = tokens[1:3]

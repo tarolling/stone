@@ -73,7 +73,7 @@ for point in ps;
     total += point.x
     point.x = 0.0
 print(total, ps[0].x)
-last = ps.pop()
+last = ps.pop(-1)
 ps.insert(0, last)
 print(ps[0], ps[1:])
 

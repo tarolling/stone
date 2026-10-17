@@ -1,0 +1,20 @@
+some(2) none some(0)
+name plain
+some(2) some(1) none []
+some('y') ['x'] y!
+some([2, 3]) [[1]] 2
+some(('b', [2, 3])) [('a', [1])]
+b [2, 3]
+none []
+some(Bag(items=['two', 'three'])) [Bag(items=['one'])]
+none [Bag(items=[])]
+some(2) none [[1], []]
+dropped some(5)
+dropped none
+[4] []
+some(31) none {'ann': 31, 'bo': 22}
+some([1, 2]) some([])
+some(('one', [1.5])) none some('v')
+22 -1
+some('here') none
+here nowhere

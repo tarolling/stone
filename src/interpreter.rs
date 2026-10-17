@@ -689,14 +689,15 @@ fn unary(op: UnaryOp, value: Value) -> EvalResult<Value> {
 /// Calls the method `name`, which changes its receiver, on `items` with `args`.
 ///
 /// For example, `append` with `[Value::Int(1)]` pushes 1 and returns `Value::Unit`, and `pop`
-/// with no arguments removes and returns the last element.
+/// with no arguments removes the last element and returns `some` of it, or `none` if there is
+/// none.
 fn change_list(items: &mut Vec<Value>, name: &str, args: Vec<Value>) -> EvalResult<Value> {
     match (name, &args[..]) {
         ("append", [item]) => {
             items.push(item.clone());
             Ok(Value::Unit)
         }
-        ("pop", []) => items.pop().ok_or_else(|| stdlib::POP_EMPTY.into()),
+        ("pop", []) => Ok(items.pop().map_or_else(none, some)),
         ("pop", [index]) => {
             if items.is_empty() {
                 return Err(stdlib::POP_EMPTY.into());
@@ -1787,6 +1788,11 @@ impl<'out> Interpreter<'out> {
                 Ok(Value::Bool(map.positions.contains_key(&MapKey::of(key)?)))
             }
             ("contains", _, _) => Err("contains() is called on a map, with one key".into()),
+            ("get", Value::Map(map), [key]) => Ok(match map.positions.get(&MapKey::of(key)?) {
+                Some(&at) => some(map.entries[at].1.clone()),
+                None => none(),
+            }),
+            ("get", _, _) => Err("get() is called on a map, with one key".into()),
             ("strip", Value::Str(s), []) => Ok(Value::Str(stdlib::strip(s).into())),
             ("strip", _, _) => Err("strip() is called on a str, with no arguments".into()),
             ("split", Value::Str(s), []) => Ok(str_list(stdlib::split_whitespace(s))),
@@ -1806,9 +1812,9 @@ impl<'out> Interpreter<'out> {
             }
             ("join", _, _) => Err("join() is called on a str, with a list of strs".into()),
             // a byte index, like len
-            ("find", Value::Str(s), [Value::Str(text)]) => {
-                Ok(Value::Int(s.find(&**text).map_or(-1, |at| at as i64)))
-            }
+            ("find", Value::Str(s), [Value::Str(text)]) => Ok(s
+                .find(&**text)
+                .map_or_else(none, |at| some(Value::Int(at as i64)))),
             ("find", _, _) => Err("find() is called on a str, with a str".into()),
             ("startswith", Value::Str(s), [Value::Str(prefix)]) => {
                 Ok(Value::Bool(s.starts_with(&**prefix)))
@@ -1980,7 +1986,9 @@ impl<'out> Interpreter<'out> {
                 let args = self.args.iter().map(|a| a.as_str()).collect();
                 return Ok(str_list(args));
             }
-            ("os.env", [Value::Str(name)]) => return Ok(Value::Str(os::env(name).into())),
+            ("os.env", [Value::Str(name)]) => {
+                return Ok(os::env(name).map_or_else(none, |value| some(Value::Str(value.into()))));
+            }
             ("os.has_env", [Value::Str(name)]) => return Ok(Value::Bool(os::has_env(name))),
             ("os.platform", []) => return Ok(Value::Str(os::platform().into())),
             ("os.arch", []) => return Ok(Value::Str(os::arch().into())),
@@ -2314,7 +2322,7 @@ mod tests {
     const STACK: &str = "struct Stack;\n    items: list[int]\nimpl Stack;\n    fn new() -> Stack;\n        \
                          ret Stack(items=[])\n    fn push(self, x: int);\n        self.items.append(x)\n    \
                          fn size(self) -> int;\n        ret self.items.len()\n    \
-                         fn pop_top(self) -> int;\n        x = self.items.pop()\n        ret x\n";
+                         fn pop_top(self) -> int;\n        x = self.items.pop(-1)\n        ret x\n";
 
     #[test]
     fn methods_are_called_on_values_and_associated_functions_on_structs() {

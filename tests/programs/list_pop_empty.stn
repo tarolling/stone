@@ -1,5 +1,9 @@
+// without an index, pop gives none for an empty list
 xs = [1]
 xs.pop()
-print("before")
 x = xs.pop()
+print(x)
+print("before")
+// with one, it stops the program
+y = xs.pop(0)
 print("after")

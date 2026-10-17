@@ -12,7 +12,7 @@ impl Stack;
         self.items.append(x)
 
     fn pop_top(self) -> int;
-        x = self.items.pop()
+        x = self.items.pop(-1)
         ret x
 
     fn push_all(self, xs: list[int]);

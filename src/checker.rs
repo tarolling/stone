@@ -3812,6 +3812,18 @@ impl Inference {
                 self.expect(&key, &arg_types[0], args[0].span);
                 Ty::Bool
             }
+            "get" => {
+                let key = self.fresh();
+                let value = self.fresh();
+                let map = Ty::Map(Box::new(key.clone()), Box::new(value.clone()));
+                self.expect(&map, &receiver_ty, receiver.span);
+                if args.len() == 1 {
+                    self.expect(&key, &arg_types[0], args[0].span);
+                } else {
+                    self.arity_error(call.span, name, "1", args.len());
+                }
+                Ty::Enum(OPTION.to_string(), vec![value])
+            }
             "append" => {
                 if args.len() != 1 {
                     self.arity_error(call.span, name, "1", args.len());
@@ -3832,7 +3844,11 @@ impl Inference {
                     &receiver_ty,
                     receiver.span,
                 );
-                elem
+                // without an index, an empty list gives none
+                match args {
+                    [] => Ty::Enum(OPTION.to_string(), vec![elem]),
+                    _ => elem,
+                }
             }
             "insert" => {
                 if args.len() != 2 {
@@ -3904,7 +3920,11 @@ impl Inference {
                         Ty::List(Box::new(Ty::Str)),
                         Ty::Str,
                     ),
-                    "find" => ("'find' needs a str, found {}", Ty::Str, Ty::Int),
+                    "find" => (
+                        "'find' needs a str, found {}",
+                        Ty::Str,
+                        Ty::Enum(OPTION.to_string(), vec![Ty::Int]),
+                    ),
                     "startswith" => ("'startswith' needs a str, found {}", Ty::Str, Ty::Bool),
                     _ => ("'endswith' needs a str, found {}", Ty::Str, Ty::Bool),
                 };
@@ -3989,7 +4009,7 @@ impl Inference {
                     _ => self.arity_error(call.span, name, "1", args.len()),
                 }
                 match name {
-                    "os.env" => Ty::Str,
+                    "os.env" => Ty::Enum(OPTION.to_string(), vec![Ty::Str]),
                     "os.has_env" => Ty::Bool,
                     _ => Ty::Unit,
                 }

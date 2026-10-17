@@ -173,14 +173,27 @@ fn installed_copy(dir: &str) -> PathBuf {
 }
 
 /// Runs `<exe> uninstall <args>` with no stdin and `CARGO_HOME` set to `cargo_home`.
+///
+/// A freshly copied binary can fail to start with `ETXTBSY` while another test's child, forked
+/// before it execs, still holds the copy's write descriptor (rust-lang/rust#114554), so this
+/// retries until that child has exec'd.
 fn uninstall(exe: &PathBuf, args: &[&str], cargo_home: &PathBuf) -> Output {
-    Command::new(exe)
-        .arg("uninstall")
-        .args(args)
-        .env("CARGO_HOME", cargo_home)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .expect("stone should run")
+    let mut attempts = 0;
+    loop {
+        let result = Command::new(exe)
+            .arg("uninstall")
+            .args(args)
+            .env("CARGO_HOME", cargo_home)
+            .stdin(std::process::Stdio::null())
+            .output();
+        match result {
+            Err(e) if e.kind() == std::io::ErrorKind::ExecutableFileBusy && attempts < 100 => {
+                attempts += 1;
+                std::thread::sleep(std::time::Duration::from_millis(10));
+            }
+            result => return result.expect("stone should run"),
+        }
+    }
 }
 
 #[test]

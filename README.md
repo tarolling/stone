@@ -36,6 +36,10 @@ cargo run --release -- build examples/basics.stn  # compile
 
 `stone <file>` is shorthand for `stone run <file>`. `build` writes the executable to a `build` directory next to the file, named after it (a `main.stn` is named after its directory), with the assembly beside it (`examples/build/basics.s`). other targets go in `build/<target>/`, `-o` picks a path instead, and `stone clean` removes the directory.
 
+## coming from python
+
+if you use a coding agent, give it [`docs/agents/python-to-stone.md`](https://raw.githubusercontent.com/tarolling/stone/main/docs/agents/python-to-stone.md) to convert your python code to stone. it covers the process, how each python idiom translates, and the differences that would change your program's output without an error. to have an agent write new stone code instead, give it [`docs/agents/stone.md`](https://raw.githubusercontent.com/tarolling/stone/main/docs/agents/stone.md), which teaches the language.
+
 ## layout
 
 | path | contents |

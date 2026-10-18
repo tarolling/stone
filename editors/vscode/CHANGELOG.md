@@ -10,6 +10,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-17
+
 ### Added
 
 - Traits in `stone-lsp`: hover shows `trait Shape` with its methods, a trait's method as

@@ -10,8 +10,14 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.3.1] - 2026-10-17
+
 ### Added
 
+- Prompts for coding agents in `docs/agents/`: `stone.md` teaches an agent to write stone, and
+  `python-to-stone.md` guides one through converting Python, with a translation of each idiom,
+  the differences that change output without an error, and a worked example. The README links
+  them for people coming from Python, and a test checks and runs every program in them.
 - `xs.sort()` puts a list of `int`, `float`, or `str` in ascending order, in place. Strings
   compare byte by byte, and floats in a total order, `-inf`, the negative numbers, `-0.0`, `0.0`,
   the positive numbers, `inf`, then every `nan`, so the result is the same in `stone run` and

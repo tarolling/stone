@@ -31,6 +31,7 @@ source_suffix = {".md": "markdown"}
 # a virtualenv made in docs/ for building would otherwise be read as pages
 exclude_patterns = [
     "_build",
+    "agents",
     "grammar",
     "examples",
     "ARCHITECTURE.md",

@@ -18,6 +18,9 @@
 //! - A method marked as changing `self` starts by changing it and is only called as a statement
 //!   or the whole value of an assignment, and any other method sees `self` as read-only.
 //! - A function that changes a parameter prints it before returning, so the change is never lost.
+//! - Traits only appear in the fixed [`GENERIC_TYPES`]: `G` implements `K` and `ord`, so a `G`'s
+//!   length is also read as `g.key()`, `g.twice()`, or `keyed(g)`, and two `G`s are ordered with
+//!   `<`, picked from the path rather than drawn, so programs without them are unchanged.
 
 use crate::{Generator, MAX_BLOCK_LEN, MAX_NESTING, Scope};
 use arbitrary::{Result, Unstructured};
@@ -54,8 +57,9 @@ pub(crate) enum Ty {
     H(Box<Ty>),
 }
 
-/// A generic struct and enum, with methods that read, change, and make a `G`, which a program
-/// declares first when it uses them.
+/// A generic struct and enum, with methods that read, change, and make a `G`, a trait `K` that `G`
+/// implements, with a default method and a bounded function calling both, and an order on `G`s
+/// by their lengths, which a program declares first when it uses them.
 pub(crate) const GENERIC_TYPES: &str = "\
 struct G[T]:
     v: T
@@ -75,6 +79,22 @@ enum H[T]:
     Nothing
     Just(T)
     Both(T, T)
+
+trait K:
+    fn key(self) -> int
+    fn twice(self) -> int:
+        ret self.key() * 2
+
+impl K for G:
+    fn key(self) -> int:
+        ret self.vs.len()
+
+impl ord for G:
+    fn cmp(self, other: Self) -> ordering:
+        ret self.vs.len().cmp(other.vs.len())
+
+fn keyed[T: K](x: T) -> int:
+    ret x.twice() + x.key()
 ";
 
 impl Ty {
@@ -234,6 +254,8 @@ enum Source {
     Generic(usize, Option<Ty>),
     /// `path.get()` of a `G` path.
     Value(usize),
+    /// Two `G` paths of the same type compared by their order, as in `a < b`.
+    Ordered(usize),
 }
 
 /// Returns the variants of `H[t]`, each as its pattern's head and the types of its values.
@@ -864,7 +886,14 @@ impl Generator {
                     }
                 }
                 Ty::List(_) if *ty == Ty::Int => out.push(Source::Len(i)),
-                Ty::G(t) if **t == *ty => out.push(Source::Value(i)),
+                Ty::G(t) => {
+                    if **t == *ty {
+                        out.push(Source::Value(i));
+                    }
+                    if *ty == Ty::Bool {
+                        out.push(Source::Ordered(i));
+                    }
+                }
                 Ty::Struct(s) => {
                     for (m, method) in self.methods(*s).iter().enumerate() {
                         if method.has_self && !method.changes && method.ret.as_ref() == Some(ty) {
@@ -935,6 +964,25 @@ impl Generator {
             }
             Source::Get(i, key) => format!("{}.get({})", fill(u, &paths[i].text)?, key.literal(u)?),
             Source::Value(i) => format!("{}.get()", fill(u, &paths[i].text)?),
+            // `G`s are ordered by `cmp`, through the prelude's trait `ord`
+            Source::Ordered(i) => {
+                let path = fill(u, &paths[i].text)?;
+                let op = ["<", "<=", ">", ">="][i % 4];
+                format!("({path} {op} {path})")
+            }
+            // the length of a `G`'s list is its `key` through the trait `K`, which a call may
+            // read instead, or a multiple of it, picked by the path rather than drawn, since
+            // coverage elsewhere depends on how many draws a program makes
+            Source::Len(i) if paths[i].text.ends_with(".vs") => {
+                let path = fill(u, &paths[i].text)?;
+                let g = path.strip_suffix(".vs").unwrap_or(&path);
+                match i % 4 {
+                    0 => format!("{path}.len()"),
+                    1 => format!("{g}.key()"),
+                    2 => format!("{g}.twice()"),
+                    _ => format!("keyed({g})"),
+                }
+            }
             Source::Len(i) => format!("{}.len()", fill(u, &paths[i].text)?),
             Source::Contains(i, key) => {
                 format!("{}.contains({})", fill(u, &paths[i].text)?, key.literal(u)?)
@@ -1668,7 +1716,8 @@ impl Generator {
     }
 
     /// Emits an `append` to a writable list and then a `pop` from it, so it keeps at least two
-    /// elements, such as `v1.x0.append(3)` then `v4 = v1.x0.pop()`.
+    /// elements, such as `v1.x0.append(3)` then `v4 = v1.x0.pop()`. After a `pop` at an index
+    /// from a list of ints, floats, or strings, it sorts the list and prints it.
     fn pop_statement(
         &mut self,
         u: &mut Unstructured,
@@ -1698,6 +1747,11 @@ impl Generator {
         } else {
             let index = u.int_in_range(-2..=1)?;
             self.line(indent, &format!("{name} = {list}.pop({index})"));
+            // sorting here draws nothing more, so the programs it appears in stay as they were
+            if matches!(element, Ty::Int | Ty::Float | Ty::Str) {
+                self.line(indent, &format!("{list}.sort()"));
+                self.line(indent, &format!("print({list})"));
+            }
             self.bind(scope, &name, element, true);
         }
         let root = scope.values[path.root].name.clone();

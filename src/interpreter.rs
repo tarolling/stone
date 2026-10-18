@@ -174,6 +174,8 @@ impl MapValue {
 pub struct StructDef {
     /// The struct's name without its module, such as `Point`.
     pub name: Rc<str>,
+    /// The struct's linked name, such as `geo.Point`, which calls through a bound look up.
+    pub linked: Rc<str>,
     pub fields: Vec<String>,
 }
 
@@ -256,6 +258,33 @@ fn drop_values(mut pending: Vec<Value>) {
                 _ => {}
             }
         }
+    }
+}
+
+/// Makes the ordering `less`, `equal`, or `greater`, the prelude's variants in that order, for
+/// `cmp`.
+fn ordering(order: Ordering) -> Value {
+    let (name, tag) = match order {
+        Ordering::Less => ("less", 0),
+        Ordering::Equal => ("equal", 1),
+        Ordering::Greater => ("greater", 2),
+    };
+    Value::Enum(Rc::new(EnumValue {
+        name: name.into(),
+        tag,
+        fields: vec![],
+    }))
+}
+
+/// Reads an ordering a `cmp` returned.
+fn ordering_of(value: &Value) -> EvalResult<Ordering> {
+    match value {
+        Value::Enum(order) => Ok(match order.tag {
+            0 => Ordering::Less,
+            1 => Ordering::Equal,
+            _ => Ordering::Greater,
+        }),
+        other => Err(format!("expected an ordering, found {}", other.display(true)).into()),
     }
 }
 
@@ -722,6 +751,18 @@ fn change_list(items: &mut Vec<Value>, name: &str, args: Vec<Value>) -> EvalResu
         }
         ("extend", [other]) => {
             items.extend(other.as_list()?.iter().cloned());
+            Ok(Value::Unit)
+        }
+        ("sort", []) => {
+            // the order is total on what a program can see, so any sort gives the same list
+            items.sort_unstable_by(|a, b| match (a, b) {
+                (Value::Int(a), Value::Int(b)) => a.cmp(b),
+                (Value::Float(a), Value::Float(b)) => {
+                    stdlib::float_key(*a).cmp(&stdlib::float_key(*b))
+                }
+                (Value::Str(a), Value::Str(b)) => a.as_bytes().cmp(b.as_bytes()),
+                _ => std::cmp::Ordering::Equal,
+            });
             Ok(Value::Unit)
         }
         _ => Err(format!("{name}() is called on a list with the wrong arguments").into()),
@@ -1196,7 +1237,9 @@ impl<'out> Interpreter<'out> {
                 self.define(name.clone(), &args.args, body);
                 Ok(ControlFlow::None)
             }
-            StmtKind::ImplDef { name, methods, .. } => {
+            // a trait's default methods are functions like any others, named by the trait, and
+            // its methods without a body are only the types'
+            StmtKind::ImplDef { name, methods, .. } | StmtKind::TraitDef { name, methods, .. } => {
                 for method in methods {
                     if let StmtKind::FunctionDef {
                         name: method,
@@ -1204,6 +1247,7 @@ impl<'out> Interpreter<'out> {
                         body,
                         ..
                     } = &method.kind
+                        && !body.is_empty()
                     {
                         self.define(format!("{name}.{method}"), &args.args, body);
                     }
@@ -1381,6 +1425,7 @@ impl<'out> Interpreter<'out> {
             StmtKind::StructDef { name, fields, .. } => {
                 let def = StructDef {
                     name: struct_display(name).into(),
+                    linked: name.as_str().into(),
                     fields: fields.iter().map(|f| f.name.clone()).collect(),
                 };
                 self.structs.insert(name.clone(), Rc::new(def));
@@ -1616,15 +1661,19 @@ impl<'out> Interpreter<'out> {
                 for (op, comparator) in ops.iter().zip(comparators) {
                     let next = self.eval_expr(comparator)?;
                     let holds = match op {
-                        CompOp::Equal => current.equals(&next, 0)?,
-                        CompOp::NotEqual => !current.equals(&next, 0)?,
-                        CompOp::LessThan => current.compare(&next)?.is_some_and(Ordering::is_lt),
-                        CompOp::LessThanEqual => {
-                            current.compare(&next)?.is_some_and(Ordering::is_le)
+                        CompOp::Equal => self.values_equal(&current, &next, 0)?,
+                        CompOp::NotEqual => !self.values_equal(&current, &next, 0)?,
+                        CompOp::LessThan => {
+                            self.order(&current, &next)?.is_some_and(Ordering::is_lt)
                         }
-                        CompOp::GreaterThan => current.compare(&next)?.is_some_and(Ordering::is_gt),
+                        CompOp::LessThanEqual => {
+                            self.order(&current, &next)?.is_some_and(Ordering::is_le)
+                        }
+                        CompOp::GreaterThan => {
+                            self.order(&current, &next)?.is_some_and(Ordering::is_gt)
+                        }
                         CompOp::GreaterThanEqual => {
-                            current.compare(&next)?.is_some_and(Ordering::is_ge)
+                            self.order(&current, &next)?.is_some_and(Ordering::is_ge)
                         }
                     };
                     if !holds {
@@ -1679,7 +1728,18 @@ impl<'out> Interpreter<'out> {
                     for arg in args {
                         values.push(self.eval_expr(arg)?);
                     }
-                    let items = self.place_list(root, &steps, &place_spans(value))?;
+                    let spans = place_spans(value);
+                    let items = self.place_list(root, &steps, &spans)?;
+                    // values of other types sort by their `cmp`, in the prelude's sort
+                    if attr == "sort"
+                        && items.first().is_some_and(|v| matches!(v, Value::Struct(_)))
+                    {
+                        let list = Value::List(Rc::new(items.clone()));
+                        let (sorted, _) = self.invoke(stdlib::PRELUDE_SORT, vec![list], false)?;
+                        let sorted = sorted.as_list()?.to_vec();
+                        *self.place_list(root, &steps, &spans)? = sorted;
+                        return Ok(Value::Unit);
+                    }
                     return change_list(items, attr, values);
                 }
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind {
@@ -1781,8 +1841,61 @@ impl<'out> Interpreter<'out> {
     /// Calls the builtin method `name` on an already evaluated receiver and arguments.
     ///
     /// For example, `call_method("len", Value::Str("abc".into()), vec![])` returns `Value::Int(3)`.
+    /// Returns whether two values are equal, as `==` compares them: part by part, except a
+    /// struct that implements `eq`, whose `eq` says, and an enum value more than
+    /// [`stdlib::MAX_PRINT_DEPTH`] deep, which fails as compiled code does.
+    fn values_equal(&mut self, a: &Value, b: &Value, depth: usize) -> EvalResult<bool> {
+        let all_equal = |this: &mut Self, a: &[Value], b: &[Value], depth: usize| {
+            for (a, b) in a.iter().zip(b) {
+                if !this.values_equal(a, b, depth)? {
+                    return Ok(false);
+                }
+            }
+            Ok::<bool, Box<dyn std::error::Error>>(a.len() == b.len())
+        };
+        match (a, b) {
+            (Value::Tuple(x), Value::Tuple(y)) => all_equal(self, x, y, depth),
+            (Value::Struct(x), Value::Struct(y)) => {
+                let function = format!("{}.eq", x.def.linked);
+                if self.functions.contains_key(&function) {
+                    let (result, _) = self.invoke(&function, vec![a.clone(), b.clone()], false)?;
+                    return Ok(matches!(result, Value::Bool(true)));
+                }
+                all_equal(self, &x.fields, &y.fields, depth)
+            }
+            (Value::Enum(x), Value::Enum(y)) => {
+                if depth >= stdlib::MAX_PRINT_DEPTH {
+                    return Err(stdlib::COMPARE_DEPTH.into());
+                }
+                Ok(x.tag == y.tag && all_equal(self, &x.fields, &y.fields, depth + 1)?)
+            }
+            _ => a.equals(b, depth),
+        }
+    }
+
+    /// Orders two values as `<` does: numbers and strings by value, or `None` if either is nan,
+    /// and a struct by its `cmp`.
+    fn order(&mut self, a: &Value, b: &Value) -> EvalResult<Option<Ordering>> {
+        let Value::Struct(x) = a else {
+            return a.compare(b);
+        };
+        let function = format!("{}.cmp", x.def.linked);
+        let (result, _) = self.invoke(&function, vec![a.clone(), b.clone()], false)?;
+        Ok(Some(ordering_of(&result)?))
+    }
+
     fn call_method(&mut self, name: &str, receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
         match (name, &receiver, &args[..]) {
+            ("eq", _, [other]) => Ok(Value::Bool(self.values_equal(&receiver, other, 0)?)),
+            ("cmp", Value::Int(a), [Value::Int(b)]) => Ok(ordering(a.cmp(b))),
+            // the order `sort` uses, in which every float has its place
+            ("cmp", Value::Float(a), [Value::Float(b)]) => {
+                Ok(ordering(stdlib::float_key(*a).cmp(&stdlib::float_key(*b))))
+            }
+            ("cmp", Value::Str(a), [Value::Str(b)]) => Ok(ordering(a.as_bytes().cmp(b.as_bytes()))),
+            ("cmp", _, [other]) => Ok(ordering(
+                self.order(&receiver, other)?.unwrap_or(Ordering::Equal),
+            )),
             // len counts bytes, like the compiled strlen
             ("len", Value::Str(s), []) => Ok(Value::Int(s.len() as i64)),
             ("len", Value::List(items), []) => Ok(Value::Int(items.len() as i64)),
@@ -1893,6 +2006,9 @@ impl<'out> Interpreter<'out> {
         let function = method.function.as_str();
         // claimed first, since a call among the arguments runs statements of its own
         let movable = self.top_call.take_if(|(call, _)| *call == span);
+        if method.implementations.is_some() {
+            return self.call_through_bound(method, receiver, args, movable);
+        }
         if !method.receiver {
             let mut values = Vec::with_capacity(args.len());
             for arg in args {
@@ -1941,6 +2057,112 @@ impl<'out> Interpreter<'out> {
             *self.place_value(root, &steps, &spans)? = changed;
         }
         Ok(result)
+    }
+
+    /// Calls a method through a bound, as `x.area()` with `x` of type `T` in
+    /// `fn f[T: Shape](x: T):`, as the method of the receiver's own type, which only the value
+    /// tells.
+    fn call_through_bound(
+        &mut self,
+        method: &Method,
+        receiver: &Expr,
+        args: &[Expr],
+        movable: Option<(Span, Vec<String>)>,
+    ) -> EvalResult<Value> {
+        // a type that compares part by part, or a number or a string, has the builtin method
+        if matches!(method.function.as_str(), "eq.eq" | "ord.cmp") {
+            let receiver_value = self.eval_expr(receiver)?;
+            if self.implementation(method, &receiver_value).is_err() {
+                let mut values = Vec::with_capacity(args.len());
+                for arg in args {
+                    values.push(self.eval_expr(arg)?);
+                }
+                let name = method.function.rsplit('.').next().unwrap_or_default();
+                return self.call_method(name, receiver_value, values);
+            }
+            let function = self.implementation(method, &receiver_value)?;
+            let mut values = vec![receiver_value];
+            for arg in args {
+                values.push(self.eval_expr(arg)?);
+            }
+            if let Some((_, names)) = movable {
+                self.move_arguments(args, &names, &function, None);
+            }
+            return Ok(self.invoke(&function, values, false)?.0);
+        }
+        if !method.changes {
+            let receiver = self.eval_expr(receiver)?;
+            let function = self.implementation(method, &receiver)?;
+            let mut values = Vec::with_capacity(args.len() + 1);
+            values.push(receiver);
+            for arg in args {
+                values.push(self.eval_expr(arg)?);
+            }
+            if let Some((_, names)) = movable {
+                self.move_arguments(args, &names, &function, None);
+            }
+            return Ok(self.invoke(&function, values, false)?.0);
+        }
+        let (root, steps) = self.eval_place(receiver)?;
+        let mut values = Vec::with_capacity(args.len() + 1);
+        values.push(Value::Unit);
+        for arg in args {
+            values.push(self.eval_expr(arg)?);
+        }
+        let spans = place_spans(receiver);
+        let value = self.place_value(root, &steps, &spans)?.clone();
+        let function = self.implementation(method, &value)?;
+        if let Some((_, names)) = movable {
+            self.move_arguments(args, &names, &function, Some(root));
+        }
+        let keep = self.scopes.is_empty()
+            && (!self.moves_globals
+                || self
+                    .global_reads
+                    .get(&function)
+                    .is_some_and(|reads| reads.contains(root)));
+        let place = self.place_value(root, &steps, &spans)?;
+        values[0] = match keep {
+            true => place.clone(),
+            false => std::mem::replace(place, Value::Unit),
+        };
+        let (result, changed) = self.invoke(&function, values, true)?;
+        if let Some(changed) = changed {
+            *self.place_value(root, &steps, &spans)? = changed;
+        }
+        Ok(result)
+    }
+
+    /// Returns the function a call through a bound calls for the receiver `value`: the method
+    /// of its type.
+    fn implementation(&self, method: &Method, value: &Value) -> EvalResult<String> {
+        let key = match value {
+            Value::Struct(value) => value.def.linked.to_string(),
+            Value::Int(_) => "int".to_string(),
+            Value::Float(_) => "float".to_string(),
+            Value::Bool(_) => "bool".to_string(),
+            Value::Str(_) => "str".to_string(),
+            _ => String::new(),
+        };
+        if let Some(function) = method
+            .implementations
+            .as_ref()
+            .and_then(|implementations| implementations.get(&key))
+        {
+            return Ok(function.clone());
+        }
+        // a default method checked in an earlier REPL entry knows only the types that
+        // implemented its trait then, but a type's methods have names of their own, so its
+        // method is its own function if it has one, and the default otherwise
+        let name = method.function.rsplit('.').next().unwrap_or_default();
+        let own = format!("{key}.{name}");
+        if self.functions.contains_key(&own) {
+            return Ok(own);
+        }
+        match self.functions.contains_key(&method.function) {
+            true => Ok(method.function.clone()),
+            false => Err(format!("'{key}' does not implement '{}'", method.function).into()),
+        }
     }
 
     fn call(&mut self, name: &str, args: Vec<Value>) -> EvalResult<Value> {
@@ -2282,6 +2504,7 @@ fn is_definition(stmt: &Stmt) -> bool {
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. }
     )
 }
 

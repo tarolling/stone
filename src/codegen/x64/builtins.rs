@@ -5,6 +5,7 @@ use crate::codegen::context::{
     SMALLEST_CLASS, STDIN_BUFFER,
 };
 pub use crate::codegen::context::{IMMORTAL, immortal_string};
+use crate::codegen::x64::sort::sort_runtime;
 
 /// Emits `_start`, where the kernel starts the program, with the argument count at `[rsp]`, the
 /// arguments after it, then a null, then the environment. It calls `main` with the count in
@@ -1298,9 +1299,12 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
 ///   returns it in `rax` if nothing else refers to it, for arithmetic to write its result over.
 ///   Otherwise it drops the reference and returns a new list of length `rsi` from
 ///   `stone.list_new`.
+/// - `stone.list_sort_int`, `stone.list_sort_float`, and `stone.list_sort_str` sort list `rdi`
+///   (see [`sort_runtime`]).
 ///
 /// [`LIST_ROUTINES`]: crate::codegen::context::LIST_ROUTINES
 pub fn list_methods(r#gen: &mut dyn AssemblyGenerator, labels: &[&str]) {
+    sort_runtime(r#gen, labels);
     if labels.contains(&"stone.list_slice") {
         list_slice(r#gen);
     }

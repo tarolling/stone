@@ -91,6 +91,7 @@ compound_stmt:
     | enum_def
     | struct_def
     | impl_def
+    | trait_def
     | match_stmt
     | if_stmt
     | for_stmt
@@ -139,7 +140,14 @@ function_def:
 # the type parameters of a generic function, struct, or enum, such as [T] in
 # fn first[T](xs: list[T]) -> T: or [A, B] in struct Pair[A, B]:
 type_params:
-    | '[' ','.NAME+ [','] ']' 
+    | '[' ','.type_param+ [','] ']' 
+
+# a parameter's bounds name the traits its types implement, as in [T: Shape + Named]
+type_param:
+    | NAME [':' '+'.trait_name+]
+
+trait_name:
+    | '.'.NAME+
 
 # Function parameters
 # -------------------
@@ -184,9 +192,21 @@ field:
 # -----------
 
 # methods take 'self', without a type, as their first parameter; the others are associated
-# functions, called on the struct
+# functions, called on the struct; with a trait name and 'for', the block implements that trait
+# for the type after 'for'
 impl_def:
-    | 'impl' NAME ':' NEWLINE INDENT function_def+ DEDENT
+    | 'impl' [trait_name 'for'] NAME ':' NEWLINE INDENT function_def+ DEDENT
+
+# Trait definitions
+# -----------------
+
+# a method without a body is one every implementing type defines; one with a body is a default
+trait_def:
+    | ['pub'] 'trait' NAME ':' NEWLINE INDENT trait_method+ DEDENT
+
+trait_method:
+    | function_def
+    | 'fn' NAME [type_params] '(' [parameters] ')' ['->' type] NEWLINE
 
 # Match statement
 # ---------------

@@ -40,6 +40,9 @@ use geometry.shapes.area as shape_area
 - If that module defines a struct by the last name, `use` binds the struct, as in
   `use geometry.shapes.Point`, and its values are written `Point(x=1.0, y=2.0)`. Through the
   module, they are `shapes.Point(x=1.0, y=2.0)`, and its type is `shapes.Point`.
+- If that module defines a trait by the last name, `use` binds the trait, as in
+  `use geometry.shapes.Shape`, for bounds (`[T: Shape]`) and `impl Shape for Circle:` blocks.
+  Through the module, it is `shapes.Shape`.
 - `as` binds the name after it instead.
 
 So when both `geometry/shapes.stn` and a function `shapes` in `geometry.stn` exist,
@@ -69,8 +72,9 @@ functions.
 `os`, `math`, `random`, and `time` are builtin modules with no file, so `use math`,
 `use math.sqrt`, and `use math as m` work in any file without a `math.stn`. A program cannot have
 a module of its own with one of those names: using it is the error
-`'math' is a builtin module, so rename math.stn`. See [the builtins](builtins.md) for their
-functions:
+`'math' is a builtin module, so rename math.stn`. `prelude` is taken too, since the functions of
+stone's prelude are linked as if in a module of that name. See [the builtins](builtins.md) for
+their functions:
 
 | module | for |
 | --- | --- |
@@ -84,21 +88,24 @@ own variables and functions `min`, `max`, `sleep`, or `env`.
 
 ## pub
 
-`pub fn` makes a function usable from other files, `pub enum` an enum, and `pub struct` a struct.
-Every other function, enum, and struct is private to the file it is in. `pub` makes no difference in the entry file, so a
+`pub fn` makes a function usable from other files, `pub enum` an enum, `pub struct` a struct, and
+`pub trait` a trait. Every other function, enum, struct, and trait is private to the file it is
+in. `pub` makes no difference in the entry file, so a
 module can also be run on its own.
 
 A struct's `impl` blocks are in the file that defines the struct, and its methods and associated
 functions need no `pub`: they can be used wherever the struct can, as `p.area()` and
 `shapes.Square.unit()` or, after `use shapes.Square`, `Square.unit()`. An `impl` block for a
-struct of another file is an error.
+struct of another file is an error, except one that implements a trait for it in the trait's
+file: `impl Shape for Square:` goes in the file of `Shape` or of `Square`, and one implementing a
+trait for `int`, `float`, `bool`, or `str` in the trait's.
 
 ## Module bodies
 
-A module other than the entry file holds only `use` statements, `fn`s, `enum`s, `struct`s, and
-`impl` blocks.
-Any other top-level statement is an error: `only use, fn, enum, struct, and impl are allowed at the top
-level of a module`. So using a module never runs code, and modules may use each other in a cycle.
+A module other than the entry file holds only `use` statements, `fn`s, `enum`s, `struct`s,
+`impl` blocks, and `trait`s.
+Any other top-level statement is an error: `only use, fn, enum, struct, impl, and trait are
+allowed at the top level of a module`. So using a module never runs code, and modules may use each other in a cycle.
 
 A module's functions see their parameters and locals, their own file's functions, builtins, and
 the names their file binds with `use`. They never see the entry file's variables or functions:

@@ -287,6 +287,18 @@ fn a_changed_parameter_is_owned_and_made_unique_before_each_change() {
 }
 
 #[test]
+fn sort_makes_the_list_unique_then_calls_the_routine_for_its_elements() {
+    let source = "fn f(xs: list[int], ys: list[float], zs: list[str]):\n    \
+                  xs.sort()\n    ys.sort()\n    zs.sort()\n    print(xs, ys, zs)\n\
+                  f([1], [1.0], [\"a\"])\n";
+    let dump = dump(source);
+    let sorts = "b0:\n  v0 = list_unique v0\n  call stone.list_sort_int(v0)\n  \
+                 v1 = list_unique v1\n  call stone.list_sort_float(v1)\n  \
+                 v2 = list_unique v2\n  call stone.list_sort_str(v2)\n";
+    assert!(dump.contains(sorts), "{dump}");
+}
+
+#[test]
 fn a_nested_change_makes_every_list_on_the_way_unique() {
     let dump = dump("grid = [[1]]\ngrid[0][0] = 2\n");
     let change = "v3 = load_global grid\n  v4 = list_unique v3\n  store_global grid, v4\n  \
@@ -1241,4 +1253,36 @@ fn a_generic_structs_methods_are_lowered_for_each_set_of_types() {
     let ir = dump(source);
     // a struct of a tuple is passed as its values
     assert!(ir.contains("fn Box.get..tuple2_str_float(v0, v1):"), "{ir}");
+}
+
+#[test]
+fn a_call_through_a_bound_calls_each_types_own_method() {
+    let source = "trait Sized:\n    fn size(self) -> int\n    fn twice(self) -> int:\n        \
+                  ret self.size() * 2\nstruct Bag:\n    n: int\nimpl Sized for Bag:\n    \
+                  fn size(self) -> int:\n        ret self.n\nimpl Sized for str:\n    \
+                  fn size(self) -> int:\n        ret self.len()\nfn total[T: Sized](x: T) -> int:\n    \
+                  ret x.twice()\nprint(total(Bag(n=1)), total(\"ab\"))\n";
+    let program = lower_source(source);
+    let mut names: Vec<String> = program
+        .functions
+        .iter()
+        .filter_map(|f| f.name.clone())
+        .collect();
+    names.sort();
+    // the default method is a copy per type, and the trait's own method is never lowered
+    assert_eq!(
+        names,
+        [
+            "Bag.size",
+            "Sized.twice..Bag",
+            "Sized.twice..str",
+            "str.size",
+            "total..Bag",
+            "total..str",
+        ]
+    );
+    let ir = dump(source);
+    assert!(ir.contains("call Sized.twice..Bag("), "{ir}");
+    assert!(ir.contains("call Bag.size("), "{ir}");
+    assert!(ir.contains("call str.size("), "{ir}");
 }

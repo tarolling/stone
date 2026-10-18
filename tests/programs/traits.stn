@@ -1,0 +1,67 @@
+// traits: methods a type implements, called directly and through bounds
+
+trait Shape:
+    fn area(self) -> float
+    fn name(self) -> str
+    // a default method, which a type keeps unless it defines its own
+    fn describe(self) -> str:
+        ret self.name() + " of area " + str(self.area())
+
+struct Circle:
+    r: float
+
+struct Rect:
+    w: float
+    h: float
+
+impl Shape for Circle:
+    fn area(self) -> float:
+        ret 3.0 * self.r * self.r
+    fn name(self) -> str:
+        ret "circle"
+
+impl Shape for Rect:
+    fn area(self) -> float:
+        ret self.w * self.h
+    fn name(self) -> str:
+        ret "rect"
+    fn describe(self) -> str:
+        ret "a " + str(self.w) + " by " + str(self.h) + " rect"
+
+impl Rect:
+    fn square(side: float) -> Self:
+        ret Rect(w=side, h=side)
+
+fn total[T: Shape](xs: list[T]) -> float:
+    t = 0.0
+    for x in xs:
+        t += x.area()
+    ret t
+
+fn largest[T: Shape](xs: list[T]) -> T:
+    best = xs[0]
+    for x in xs:
+        if x.area() > best.area():
+            best = x
+    ret best
+
+fn describe_all[T: Shape](xs: list[T]):
+    for x in xs:
+        print(x.describe())
+
+// a bounded function calling another passes its own bound on
+fn report[T: Shape](xs: list[T]):
+    print(total(xs))
+    print(largest(xs).name())
+    describe_all(xs)
+
+c = Circle(r=1.0)
+print(c.area())
+print(c.describe())
+r = Rect(w=2.0, h=3.0)
+print(r.describe())
+circles = [Circle(r=1.0), Circle(r=2.0), Circle(r=0.5)]
+rects = [r, Rect.square(4.0), Rect(w=1.0, h=1.0)]
+report(circles)
+report(rects)
+print(largest(circles))

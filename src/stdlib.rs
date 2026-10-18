@@ -82,20 +82,41 @@ pub static BUILTINS: [&str; 8] = [
     "print", "range", "int", "float", "str", "input", "eof", "args",
 ];
 
-/// The prelude, a stone file linked into every program, which defines `option[T]`.
+/// The prelude, a stone file linked into every program, which defines `option[T]`, `ordering`,
+/// the traits `eq` and `ord`, and the sort `xs.sort()` uses for values of other types.
 pub const PRELUDE: &str = include_str!("prelude.stn");
 
+/// The linked name of the prelude's sort, which `sort` uses for values that are not numbers or
+/// strings.
+pub const PRELUDE_SORT: &str = "prelude.sort";
+
 /// The variants of the prelude's enums, which every file writes by name alone, as in `some(x)`
-/// and `none`, in the order the prelude defines them.
-pub static PRELUDE_VARIANTS: [&str; 2] = ["none", "some"];
+/// and `none`, each with its enum, in the order the prelude defines them.
+pub static PRELUDE_VARIANTS: [(&str, &str); 5] = [
+    ("none", "option"),
+    ("some", "option"),
+    ("less", "ordering"),
+    ("equal", "ordering"),
+    ("greater", "ordering"),
+];
+
+/// Returns the prelude enum whose variant is written alone as `name`, such as `option` for
+/// `some`, if there is one.
+pub fn prelude_variant(name: &str) -> Option<&'static str> {
+    PRELUDE_VARIANTS
+        .iter()
+        .find(|(variant, _)| *variant == name)
+        .map(|(_, enum_name)| *enum_name)
+}
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 17] = [
+pub static METHODS: [&str; 20] = [
     "len",
     "append",
     "pop",
     "insert",
     "extend",
+    "sort",
     "strip",
     "split",
     "join",
@@ -108,6 +129,8 @@ pub static METHODS: [&str; 17] = [
     "unwrap_or",
     "contains",
     "get",
+    "eq",
+    "cmp",
 ];
 
 /// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
@@ -118,7 +141,7 @@ pub static METHODS: [&str; 17] = [
 /// `grid[0].append(1)`. `pop`, which also returns a value, may instead be the whole value of an
 /// assignment, as in `x = xs.pop()`.
 pub fn changes_receiver(name: &str) -> bool {
-    matches!(name, "append" | "pop" | "insert" | "extend")
+    matches!(name, "append" | "pop" | "insert" | "extend" | "sort")
 }
 
 /// Documentation for a builtin function or method, for editor tooling.
@@ -182,7 +205,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 17] = [
+pub static METHOD_DOCS: [BuiltinDoc; 20] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T] | map[K, V]).len() -> int",
@@ -218,6 +241,15 @@ pub static METHOD_DOCS: [BuiltinDoc; 17] = [
         signature: "list[T].extend(items: list[T])",
         description: "Adds every element of `items` to the end of the list, in order. It is a \
                       statement of its own.",
+    },
+    BuiltinDoc {
+        name: "sort",
+        signature: "list[T].sort()",
+        description: "Puts the elements of a list of `int`, `float`, `str`, or a type that \
+                      implements `ord` in ascending order. Strings compare byte by byte, and \
+                      floats in the order `-inf`, the negative numbers, `-0.0`, `0.0`, the \
+                      positive numbers, `inf`, then `nan`. Other values compare by their `cmp`, \
+                      and equal ones keep their order. It is a statement of its own.",
     },
     BuiltinDoc {
         name: "strip",
@@ -292,6 +324,22 @@ pub static METHOD_DOCS: [BuiltinDoc; 17] = [
                       for it, so `{\"a\": 1}.get(\"b\")` is `none`. Unlike `m[key]`, it never \
                       stops the program.",
     },
+    BuiltinDoc {
+        name: "eq",
+        signature: "T.eq(other: T) -> bool",
+        description: "Returns whether two values are equal, as `==` does, for any type that \
+                      implements `eq`: every type `==` compares, and a struct whose `impl eq` \
+                      block says what equal means for it.",
+    },
+    BuiltinDoc {
+        name: "cmp",
+        signature: "T.cmp(other: T) -> ordering",
+        description: "Returns `less`, `equal`, or `greater` as the value comes before, with, or \
+                      after `other`, for any type that implements `ord`: `int`, `float`, `str`, \
+                      and a struct with an `impl ord` block. Floats are in the order `sort` \
+                      uses, so `-0.0` is less than `0.0` and `nan` is greater than every other \
+                      float.",
+    },
 ];
 
 /// Returns whether `name` is a builtin function: one of [`BUILTINS`] or the linked name of a
@@ -309,7 +357,7 @@ pub fn is_builtin(name: &str) -> bool {
 /// For example, `is_reserved("print")` and `is_reserved("some")` are true, but
 /// `is_reserved("len")` is false, since methods do not reserve their names.
 pub fn is_reserved(name: &str) -> bool {
-    BUILTINS.contains(&name) || PRELUDE_VARIANTS.contains(&name)
+    BUILTINS.contains(&name) || prelude_variant(name).is_some()
 }
 
 /// Returns the documentation for the builtin function named `name`, which may be a function of
@@ -631,6 +679,25 @@ pub fn slice_indices(
     Ok((start, step, count as usize))
 }
 
+/// Returns the key `sort` orders a float by, an unsigned integer whose order is the total order
+/// `-inf < ... < -0.0 < 0.0 < ... < inf < nan`.
+///
+/// Every NaN gets the same key, the largest, since a program cannot tell NaNs apart, so a sorted
+/// list is the same whatever algorithm sorted it. For example, `float_key(-0.0) < float_key(0.0)`
+/// and `float_key(f64::INFINITY) < float_key(f64::NAN)`. Compiled code computes the same key as
+/// `bits ^ ((bits >> 63 arithmetic) | 1 << 63)`.
+pub fn float_key(value: f64) -> u64 {
+    if value.is_nan() {
+        return FLOAT_KEY_NAN;
+    }
+    let bits = value.to_bits();
+    bits ^ (((bits as i64 >> 63) as u64) | 1 << 63)
+}
+
+/// The key [`float_key`] gives every NaN, which is the key of the quiet NaN `0x7ff8...`, so
+/// compiled code writes that NaN back.
+pub const FLOAT_KEY_NAN: u64 = 0xfff8_0000_0000_0000;
+
 /// The characters `strip`, `split()`, `int`, and `float` treat as whitespace, which are the ones
 /// C's `isspace` accepts: space, tab, newline, vertical tab, form feed, and carriage return.
 pub fn is_space(c: char) -> bool {
@@ -736,6 +803,31 @@ fn is_decimal(text: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn float_keys_order_floats_totally() {
+        let floats = [
+            f64::NEG_INFINITY,
+            -1.5,
+            -f64::MIN_POSITIVE,
+            -0.0,
+            0.0,
+            f64::MIN_POSITIVE,
+            1.5,
+            f64::MAX,
+            f64::INFINITY,
+        ];
+        for pair in floats.windows(2) {
+            assert!(float_key(pair[0]) < float_key(pair[1]), "{pair:?}");
+        }
+        // every nan is one value, the largest, whatever its sign
+        assert_eq!(float_key(f64::NAN), FLOAT_KEY_NAN);
+        assert_eq!(float_key(-f64::NAN), FLOAT_KEY_NAN);
+        assert_eq!(float_key(f64::INFINITY - f64::INFINITY), FLOAT_KEY_NAN);
+        assert!(float_key(f64::INFINITY) < FLOAT_KEY_NAN);
+        // the quiet nan's own key, so compiled code can write it back
+        assert_eq!(FLOAT_KEY_NAN, f64::NAN.to_bits() ^ (1 << 63));
+    }
 
     #[test]
     fn fill_writes_each_value_into_its_hole() {
@@ -859,7 +951,7 @@ mod tests {
     }
 
     #[test]
-    fn the_prelude_defines_option_with_none_then_some() {
+    fn the_prelude_defines_option_ordering_eq_ord_and_sort() {
         use crate::ast::{Mod, StmtKind};
         use crate::lexer::Lexer;
         use crate::parser::Parser;
@@ -867,35 +959,70 @@ mod tests {
 
         let tokens = Lexer::with_file(PRELUDE, FileId::PRELUDE).lex().unwrap();
         let Mod::Module { body } = Parser::new(&tokens).parse().unwrap();
-        let [stmt] = body.as_slice() else {
-            panic!("the prelude should hold one statement: {body:?}");
-        };
-        let StmtKind::EnumDef {
-            name,
-            public,
-            type_params,
-            variants,
-            ..
-        } = &stmt.kind
-        else {
-            panic!("{stmt:?}");
-        };
-        assert_eq!(name, "option");
-        assert!(public);
-        assert_eq!(type_params.len(), 1);
-        // the runtime builds options by tag, so `none` is 0 and `some` is 1
-        let shape: Vec<(&str, usize)> = variants
+        let mut enums = vec![];
+        let mut traits = vec![];
+        let mut functions = vec![];
+        for stmt in &body {
+            match &stmt.kind {
+                StmtKind::EnumDef {
+                    name,
+                    public,
+                    type_params,
+                    variants,
+                    ..
+                } => {
+                    assert!(public, "{name}");
+                    // the runtime builds options and orderings by tag
+                    let shape: Vec<(&str, usize)> = variants
+                        .iter()
+                        .map(|v| (v.name.as_str(), v.fields.len()))
+                        .collect();
+                    enums.push((name.as_str(), type_params.len(), shape));
+                }
+                StmtKind::TraitDef { name, methods, .. } => {
+                    let names: Vec<String> = methods
+                        .iter()
+                        .filter_map(|m| match &m.kind {
+                            StmtKind::FunctionDef { name, .. } => Some(name.clone()),
+                            _ => None,
+                        })
+                        .collect();
+                    traits.push((name.clone(), names));
+                }
+                StmtKind::FunctionDef { name, .. } => functions.push(name.clone()),
+                other => panic!("the prelude should hold no {other:?}"),
+            }
+        }
+        assert_eq!(
+            enums,
+            [
+                ("option", 1, vec![("none", 0), ("some", 1)]),
+                (
+                    "ordering",
+                    0,
+                    vec![("less", 0), ("equal", 0), ("greater", 0)]
+                ),
+            ]
+        );
+        assert_eq!(
+            traits,
+            [
+                ("eq".to_string(), vec!["eq".to_string()]),
+                ("ord".to_string(), vec!["cmp".to_string()]),
+            ]
+        );
+        assert_eq!(functions, ["sort"]);
+        let variants: Vec<(&str, &str)> = enums
             .iter()
-            .map(|v| (v.name.as_str(), v.fields.len()))
+            .flat_map(|(name, _, shape)| shape.iter().map(move |(v, _)| (*v, *name)))
             .collect();
-        assert_eq!(shape, [("none", 0), ("some", 1)]);
-        let names: Vec<&str> = variants.iter().map(|v| v.name.as_str()).collect();
-        assert_eq!(names, PRELUDE_VARIANTS);
+        assert_eq!(variants, PRELUDE_VARIANTS);
     }
 
     #[test]
     fn prelude_variants_are_reserved() {
         assert!(is_reserved("some"));
+        assert!(is_reserved("less"));
         assert!(is_reserved("print"));
         assert!(!is_reserved("len"));
         assert!(!BUILTINS.contains(&"some"));

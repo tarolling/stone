@@ -59,13 +59,7 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
             name,
             name_span: Span::default(),
             public,
-            type_params: type_params
-                .into_iter()
-                .map(|p| TypeParam {
-                    name: p.name,
-                    span: Span::default(),
-                })
-                .collect(),
+            type_params: type_params.into_iter().map(strip_type_param).collect(),
             args: Arguments {
                 args: args
                     .args
@@ -126,13 +120,7 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
             name,
             name_span: Span::default(),
             public,
-            type_params: type_params
-                .into_iter()
-                .map(|p| TypeParam {
-                    name: p.name,
-                    span: Span::default(),
-                })
-                .collect(),
+            type_params: type_params.into_iter().map(strip_type_param).collect(),
             variants: variants
                 .into_iter()
                 .map(|v| Variant {
@@ -152,13 +140,7 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
             name,
             name_span: Span::default(),
             public,
-            type_params: type_params
-                .into_iter()
-                .map(|p| TypeParam {
-                    name: p.name,
-                    span: Span::default(),
-                })
-                .collect(),
+            type_params: type_params.into_iter().map(strip_type_param).collect(),
             fields: fields
                 .into_iter()
                 .map(|f| Field {
@@ -168,9 +150,26 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
                 })
                 .collect(),
         },
-        StmtKind::ImplDef { name, methods, .. } => StmtKind::ImplDef {
+        StmtKind::ImplDef {
+            name,
+            trait_name,
+            methods,
+            ..
+        } => StmtKind::ImplDef {
             name,
             name_span: Span::default(),
+            trait_name: trait_name.map(strip_trait_name),
+            methods: strip_all(methods),
+        },
+        StmtKind::TraitDef {
+            name,
+            public,
+            methods,
+            ..
+        } => StmtKind::TraitDef {
+            name,
+            name_span: Span::default(),
+            public,
             methods: strip_all(methods),
         },
         StmtKind::Match { subject, cases } => StmtKind::Match {
@@ -186,6 +185,21 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
         kind @ (StmtKind::Break | StmtKind::Continue) => kind,
     };
     kind.into()
+}
+
+fn strip_type_param(param: TypeParam) -> TypeParam {
+    TypeParam {
+        name: param.name,
+        span: Span::default(),
+        bounds: param.bounds.into_iter().map(strip_trait_name).collect(),
+    }
+}
+
+fn strip_trait_name(name: TraitName) -> TraitName {
+    TraitName {
+        name: name.name,
+        span: Span::default(),
+    }
 }
 
 fn strip_pattern(pattern: Pattern) -> Pattern {
@@ -1952,7 +1966,7 @@ fn pub_must_come_before_def() {
     assert_eq!(
         error_of("pub x = 1\n"),
         (
-            "expected 'fn', 'enum' or 'struct', found 'x'".to_string(),
+            "expected 'fn', 'enum', 'struct' or 'trait', found 'x'".to_string(),
             1,
             5
         )
@@ -2479,6 +2493,7 @@ fn an_impl_block_holds_its_methods() {
                 StmtKind::ImplDef {
                     name: "Point".to_string(),
                     name_span: Span::default(),
+                    trait_name: None,
                     methods: vec![
                         method(
                             "origin",
@@ -2692,5 +2707,161 @@ fn structs_and_enums_may_have_type_parameters() {
             1,
             7
         )
+    );
+}
+
+/// Builds a function definition with untyped parameters named `args` and no spans, as the
+/// tests of `impl` blocks and traits compare them.
+fn method_def(name: &str, args: &[&str], returns: Option<TypeExpr>, body: Vec<Stmt>) -> Stmt {
+    StmtKind::FunctionDef {
+        name: name.to_string(),
+        name_span: Span::default(),
+        public: false,
+        type_params: vec![],
+        args: Arguments {
+            args: args
+                .iter()
+                .map(|arg| Arg {
+                    arg: arg.to_string(),
+                    span: Span::default(),
+                    annotation: None,
+                })
+                .collect(),
+        },
+        returns,
+        body,
+    }
+    .into()
+}
+
+fn trait_name(name: &str) -> TraitName {
+    TraitName {
+        name: name.to_string(),
+        span: Span::default(),
+    }
+}
+
+#[test]
+fn a_trait_holds_signatures_and_default_methods() {
+    let float = TypeExpr {
+        kind: TypeExprKind::Float,
+        span: Span::default(),
+    };
+    let ret = |value: Box<Expr>| -> Stmt { StmtKind::Return { value: Some(value) }.into() };
+    assert_eq!(
+        parse_ok(
+            "pub trait Shape:\n    fn area(self) -> float\n    fn half(self) -> float:\n        \
+             ret 1\n"
+        ),
+        Mod::Module {
+            body: vec![
+                StmtKind::TraitDef {
+                    name: "Shape".to_string(),
+                    name_span: Span::default(),
+                    public: true,
+                    methods: vec![
+                        method_def("area", &["self"], Some(float.clone()), vec![]),
+                        method_def("half", &["self"], Some(float), vec![ret(int(1))]),
+                    ],
+                }
+                .into()
+            ]
+        }
+    );
+}
+
+#[test]
+fn a_trait_holds_only_functions() {
+    assert_eq!(
+        error_of("trait Shape:\n    x = 1\n"),
+        ("expected 'fn', found 'x'".to_string(), 2, 5)
+    );
+    assert_eq!(
+        error_of("trait Shape:\n    pub fn area(self) -> float\n"),
+        (
+            "a trait's method needs no 'pub', since it is visible wherever the trait is"
+                .to_string(),
+            2,
+            5
+        )
+    );
+    // only a trait's functions may go without a body
+    assert_eq!(
+        error_of("fn area(self) -> float\n"),
+        ("expected ':', found end of line".to_string(), 1, 23)
+    );
+    assert_eq!(
+        error_of("impl Point:\n    fn area(self) -> float\n"),
+        ("expected ':', found end of line".to_string(), 2, 27)
+    );
+}
+
+#[test]
+fn an_impl_block_may_implement_a_trait() {
+    let impl_of = |source: &str| -> (String, Option<TraitName>) {
+        let Mod::Module { body } = parse_ok(source);
+        let StmtKind::ImplDef {
+            name, trait_name, ..
+        } = &body[0].kind
+        else {
+            panic!("expected an impl block");
+        };
+        (name.clone(), trait_name.clone())
+    };
+    assert_eq!(
+        impl_of("impl Shape for Circle:\n    fn area(self) -> float: ret 1.0\n"),
+        ("Circle".to_string(), Some(trait_name("Shape")))
+    );
+    assert_eq!(
+        impl_of("impl geo.Shape for int:\n    fn area(self) -> float: ret 1.0\n"),
+        ("int".to_string(), Some(trait_name("geo.Shape")))
+    );
+    assert_eq!(
+        impl_of("impl Circle:\n    fn area(self) -> float: ret 1.0\n").1,
+        None
+    );
+    assert_eq!(
+        error_of("impl geo.Shape:\n    fn area(self) -> float: ret 1.0\n"),
+        ("expected 'for', found ':'".to_string(), 1, 15)
+    );
+    assert_eq!(
+        error_of("impl Shape for:\n    fn area(self) -> float: ret 1.0\n"),
+        ("expected a type name, found ':'".to_string(), 1, 15)
+    );
+}
+
+#[test]
+fn type_parameters_may_have_bounds() {
+    let Mod::Module { body } = parse_ok("fn f[T: Shape + geo.Named, U](x: T): ret\n");
+    let StmtKind::FunctionDef { type_params, .. } = &body[0].kind else {
+        panic!("expected function definition");
+    };
+    let params: Vec<TypeParam> = type_params.iter().cloned().map(strip_type_param).collect();
+    assert_eq!(
+        params,
+        vec![
+            TypeParam {
+                name: "T".to_string(),
+                span: Span::default(),
+                bounds: vec![trait_name("Shape"), trait_name("geo.Named")],
+            },
+            TypeParam {
+                name: "U".to_string(),
+                span: Span::default(),
+                bounds: vec![],
+            },
+        ]
+    );
+    assert_eq!(
+        type_params_of("fn f[T: Shape](x: T): ret\n"),
+        vec![("T".to_string(), span(1, 6, 1, 7))]
+    );
+    assert_eq!(
+        error_of("fn f[T:](x: T): ret\n"),
+        ("expected a trait name, found ']'".to_string(), 1, 8)
+    );
+    assert_eq!(
+        error_of("fn f[T: Shape +](x: T): ret\n"),
+        ("expected a trait name, found ']'".to_string(), 1, 16)
     );
 }

@@ -31,7 +31,8 @@ assigned, passed, returned, printed, and stored in lists, tuples, options, and m
 cannot be used in arithmetic, compared with `==` or `<`, converted with `str`, used as a
 condition, indexed, looped over, or matched, and it has no methods, since `T` might be a type
 that allows none of these. A list of `T` is still a list, so `xs.len()`, `xs.append(x)`, and
-`xs[0]` all work on a `list[T]`.
+`xs[0]` all work on a `list[T]`. To give `T` methods, or let it be compared, bound it by a trait,
+as {doc}`traits` shows.
 
 ## Generic structs and enums
 
@@ -47,4 +48,4 @@ The compiler makes a copy of a generic function, or of a generic struct's method
 of types the program uses it with, the way Rust does, so it runs as fast as one written for a
 single type.
 
-Next, {doc}`input`.
+Next, {doc}`traits`.

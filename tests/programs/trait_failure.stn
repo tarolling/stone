@@ -1,0 +1,21 @@
+// a runtime error inside a default method points into the trait
+
+trait Indexed:
+    fn items(self) -> list[int]
+    fn at(self, i: int) -> int:
+        ret self.items()[i]
+
+struct Row:
+    xs: list[int]
+
+impl Indexed for Row:
+    fn items(self) -> list[int]:
+        ret self.xs
+
+fn last_of[T: Indexed](x: T, n: int) -> int:
+    ret x.at(n - 1)
+
+r = Row(xs=[1, 2])
+print(r.at(1))
+print(last_of(r, 2))
+print(last_of(r, 3))

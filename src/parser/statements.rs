@@ -3,7 +3,7 @@
 use super::Parser;
 use crate::ast::{
     Arg, Arguments, Expr, Field, MatchCase, Operator, ParserError, Pattern, PatternKind, Stmt,
-    StmtKind, TypeExpr, TypeExprKind, TypeParam, Variant,
+    StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam, Variant,
 };
 use crate::debug;
 use crate::span::{FileId, Span};
@@ -473,30 +473,33 @@ impl Parser {
     }
 
     /// Parses an `impl` block, such as `impl Point:` followed by an indented function for each
-    /// method, like `fn norm(self) -> float: ret self.x`.
+    /// method, like `fn norm(self) -> float: ret self.x`, or `impl Shape for Circle:`, which
+    /// implements the trait `Shape` for `Circle`.
     ///
     /// ```text
     /// impl_def:
-    ///     | 'impl' NAME ':' NEWLINE INDENT function_def+ DEDENT
+    ///     | 'impl' [trait_name 'for'] NAME ':' NEWLINE INDENT function_def+ DEDENT
     /// ```
     pub(super) fn parse_impl_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // 'impl' NAME ':' NEWLINE INDENT function_def+ DEDENT
+        // 'impl' [trait_name 'for'] NAME ':' NEWLINE INDENT function_def+ DEDENT
         if self
             .expect(TokenType::Keyword("impl".to_string()))
             .is_some()
-            && let Some((name, name_span)) = self.expect_name("a struct name", false)
+            && let Some(first) = self.parse_trait_name("a struct name")
+            && let Some((trait_name, (name, name_span))) = self.parse_impl_target(first)
             && self.expect_block_start().is_some()
             && self.expect(TokenType::Newline).is_some()
             && self.expect(TokenType::Indent).is_some()
-            && let Ok(methods) = self.nested(Self::parse_methods)
+            && let Ok(methods) = self.nested(|parser| parser.parse_methods(false))
             && self.expect(TokenType::Dedent).is_some()
         {
             return Ok(Box::new(Stmt::new(
                 StmtKind::ImplDef {
                     name,
                     name_span,
+                    trait_name,
                     methods,
                 },
                 self.span_from(mark),
@@ -511,28 +514,118 @@ impl Parser {
         })
     }
 
-    /// Parses the functions of an `impl` block up to the `Dedent` that ends them.
+    /// Parses what follows the first name of an `impl` block: nothing for `impl Point:`, whose
+    /// name is the struct's, or `for` and the type for `impl Shape for Circle:`, whose first name
+    /// is the trait's. A dotted first name is a trait's, so it must be followed by `for`.
+    #[allow(clippy::type_complexity)]
+    fn parse_impl_target(
+        &mut self,
+        first: TraitName,
+    ) -> Option<(Option<TraitName>, (String, Span))> {
+        if self.expect(TokenType::Keyword("for".to_string())).is_some() {
+            let target = self.expect_name("a type name", false)?;
+            return Some((Some(first), target));
+        }
+        if first.name.contains('.') {
+            self.record_expected("'for'".to_string(), false);
+            return None;
+        }
+        // `for` is optional here, so it is only expected if nothing else is
+        self.record_expected("'for'".to_string(), true);
+        Some((None, (first.name, first.span)))
+    }
+
+    /// Parses a trait's name, maybe through its module, such as `Shape` or `geo.Shape`, calling
+    /// it `what` if the first name is missing.
+    ///
+    /// ```text
+    /// trait_name:
+    ///     | '.'.NAME+
+    /// ```
+    fn parse_trait_name(&mut self, what: &str) -> Option<TraitName> {
+        let (mut name, mut span) = self.expect_name(what, false)?;
+        while self.peek().r#type == TokenType::Dot {
+            let mark = self.pos;
+            self.advance();
+            let Some((next, next_span)) = self.expect_name("a name", false) else {
+                self.pos = mark;
+                break;
+            };
+            name = format!("{name}.{next}");
+            span = span.to(next_span);
+        }
+        Some(TraitName { name, span })
+    }
+
+    /// Parses a trait definition, such as `trait Shape:` followed by an indented function for
+    /// each method, written without a body, as `fn area(self) -> float`, or with a default one.
+    ///
+    /// ```text
+    /// trait_def:
+    ///     | ['pub'] 'trait' NAME ':' NEWLINE INDENT trait_method+ DEDENT
+    /// ```
+    pub(super) fn parse_trait_def(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+
+        // ['pub'] 'trait' NAME ':' NEWLINE INDENT trait_method+ DEDENT
+        let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
+        if self
+            .expect(TokenType::Keyword("trait".to_string()))
+            .is_some()
+            && let Some((name, name_span)) = self.expect_name("a trait name", false)
+            && self.expect_block_start().is_some()
+            && self.expect(TokenType::Newline).is_some()
+            && self.expect(TokenType::Indent).is_some()
+            && let Ok(methods) = self.nested(|parser| parser.parse_methods(true))
+            && self.expect(TokenType::Dedent).is_some()
+        {
+            return Ok(Box::new(Stmt::new(
+                StmtKind::TraitDef {
+                    name,
+                    name_span,
+                    public,
+                    methods,
+                },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+
+        Err(ParserError {
+            method: "parse_trait_def".to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        })
+    }
+
+    /// Parses the functions of an `impl` block, or of a trait if `in_trait`, where a function
+    /// may have no body, up to the `Dedent` that ends them.
     ///
     /// ```text
     /// methods:
     ///     | function_def+
+    /// trait_method:
+    ///     | function_def
+    ///     | 'fn' NAME [type_params] '(' [params] ')' ['->' type] NEWLINE
     /// ```
-    fn parse_methods(&mut self) -> Result<Vec<Stmt>, ParserError> {
+    fn parse_methods(&mut self, in_trait: bool) -> Result<Vec<Stmt>, ParserError> {
         let mut methods = vec![];
         loop {
             let token = self.peek().clone();
             if token.r#type == TokenType::Keyword("pub".to_string()) {
-                self.hint(
-                    token.span,
-                    "a method needs no 'pub', since it is visible wherever its struct is",
-                );
+                let message = if in_trait {
+                    "a trait's method needs no 'pub', since it is visible wherever the trait is"
+                } else {
+                    "a method needs no 'pub', since it is visible wherever its struct is"
+                };
+                self.hint(token.span, message);
                 break;
             }
             if token.r#type != TokenType::Keyword("fn".to_string()) {
                 self.record_expected("'fn'".to_string(), false);
                 break;
             }
-            let Ok(method) = self.parse_function_def() else {
+            let Ok(method) = self.parse_function_def_in(in_trait) else {
                 break;
             };
             methods.push(*method);
@@ -864,9 +957,13 @@ impl Parser {
     /// `fn f():`. `owner` names what has them in the hint for empty brackets, such as
     /// `"a function's"`, and `example` shows them, such as `"fn first[T](xs: list[T]) -> T"`.
     ///
+    /// A parameter may name traits its types must implement, as in `[T: Shape + Named]`.
+    ///
     /// ```text
     /// type_params:
-    ///     | '[' ','.NAME+ [','] ']'
+    ///     | '[' ','.type_param+ [','] ']'
+    /// type_param:
+    ///     | NAME [':' '+'.trait_name+]
     /// ```
     pub(super) fn parse_type_params(
         &mut self,
@@ -883,13 +980,16 @@ impl Parser {
                 span,
                 &format!("{owner} type parameters need at least one name, as in '{example}'"),
             );
-        } else if let Some((name, span)) = self.expect_name("a type parameter name", false) {
-            let mut params = vec![TypeParam { name, span }];
+        } else if let Some(param) = self.parse_type_param() {
+            let mut params = vec![param];
             while self.expect(TokenType::Comma).is_some() {
-                match self.expect_name("a type parameter name", false) {
-                    Some((name, span)) => params.push(TypeParam { name, span }),
+                if self.peek().r#type == TokenType::RBracket {
                     // a trailing comma is allowed
-                    None => break,
+                    break;
+                }
+                match self.parse_type_param() {
+                    Some(param) => params.push(param),
+                    None => return Err(self.error_here("parse_type_params")),
                 }
             }
             if self.expect(TokenType::RBracket).is_some() {
@@ -903,6 +1003,19 @@ impl Parser {
         })
     }
 
+    /// Parses one type parameter and its bounds, such as `T` or `T: Shape + geo.Named`.
+    fn parse_type_param(&mut self) -> Option<TypeParam> {
+        let (name, span) = self.expect_name("a type parameter name", false)?;
+        let mut bounds = vec![];
+        if self.expect(TokenType::Colon).is_some() {
+            bounds.push(self.parse_trait_name("a trait name")?);
+            while self.expect(TokenType::Operator("+".to_string())).is_some() {
+                bounds.push(self.parse_trait_name("a trait name")?);
+            }
+        }
+        Some(TypeParam { name, span, bounds })
+    }
+
     /// Parses a function definition, such as `fn add(a: int, b: int) -> int: ret a + b`,
     /// `pub fn f() -> int: ret 1`, or `fn first[T](xs: list[T]) -> T: ret xs[0]`.
     ///
@@ -911,6 +1024,12 @@ impl Parser {
     ///     | ['pub'] 'fn' NAME [type_params] '(' [params] ')' ['->' type] ':' block
     /// ```
     pub(super) fn parse_function_def(&mut self) -> Result<Box<Stmt>, ParserError> {
+        self.parse_function_def_in(false)
+    }
+
+    /// Parses a function definition, which in a trait (`in_trait`) may end its signature with a
+    /// newline instead of a body, as `fn area(self) -> float` does, leaving `body` empty.
+    fn parse_function_def_in(&mut self, in_trait: bool) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
         // ['pub'] 'fn' NAME [type_params] '(' [params] ')' ['->' type] ':' block
@@ -923,8 +1042,7 @@ impl Parser {
             && let args = self.parse_function_def_optional()
             && self.expect(TokenType::RParen).is_some()
             && let Ok(returns) = self.parse_return_type()
-            && self.expect_block_start().is_some()
-            && let Ok(body) = self.parse_block()
+            && let Ok(body) = self.parse_function_body(in_trait)
         {
             return Ok(Box::new(Stmt::new(
                 StmtKind::FunctionDef {
@@ -946,6 +1064,28 @@ impl Parser {
             token: self.peek().r#type.clone(),
             span: self.peek().span,
         })
+    }
+
+    /// Parses a function's `':' block`, or in a trait (`in_trait`) the newline of a signature
+    /// without a body, giving an empty body.
+    fn parse_function_body(&mut self, in_trait: bool) -> Result<Vec<Stmt>, ParserError> {
+        if in_trait && self.peek().r#type == TokenType::Newline {
+            self.advance();
+            return Ok(vec![]);
+        }
+        if self.expect_block_start().is_none() {
+            return Err(self.error_here("parse_function_def"));
+        }
+        self.parse_block()
+    }
+
+    /// Returns the error of the rule `method` failing at the current token.
+    fn error_here(&self, method: &str) -> ParserError {
+        ParserError {
+            method: method.to_string(),
+            token: self.peek().r#type.clone(),
+            span: self.peek().span,
+        }
     }
 
     /// Parses the body of a compound statement, either as an indented block or on the same line.
@@ -1202,6 +1342,12 @@ impl Parser {
 
         // impl_def
         if let Ok(stmt) = self.parse_impl_def() {
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
+        // trait_def
+        if let Ok(stmt) = self.parse_trait_def() {
             return Ok(stmt);
         }
         self.pos = mark;

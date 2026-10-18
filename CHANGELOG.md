@@ -10,6 +10,41 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `xs.sort()` puts a list of `int`, `float`, or `str` in ascending order, in place. Strings
+  compare byte by byte, and floats in a total order, `-inf`, the negative numbers, `-0.0`, `0.0`,
+  the positive numbers, `inf`, then every `nan`, so the result is the same in `stone run` and
+  `stone build` on every target. Like `append`, it is a statement of its own. Compiled programs
+  sort a list already in order, or in reverse order, in one pass, and sort long lists of ints
+  and floats by radix, one pass per byte in which the values differ after subtracting the
+  smallest, splitting large lists by their highest byte first so each part is sorted in cache;
+  other lists use a quicksort that falls back to heapsort, so it never takes more than
+  `n log n` time. The new `sort` benchmark, which sorts 2 million ints and 2 million floats,
+  runs 2.3 to 3.4 times faster than the same program in C with `qsort`.
+- Traits: `trait Shape:` lists methods, written without a body (`fn area(self) -> float`), or
+  with one as a default, and `impl Shape for Circle:` implements them for a struct, or for
+  `int`, `float`, `bool`, or `str`. Bounds give a generic function's type parameters the methods
+  of traits, as in `fn total[T: Shape](xs: list[T]) -> float:`, and each call checks that its
+  types implement them. `stone build` compiles a copy per type, so a call through a bound calls
+  the type's method directly. Inside a trait and any `impl` block, `Self` names the type. A
+  trait's method changes `self` only if its default body does, and a type's method then changes
+  its receiver in place too. A library's `pub trait` is imported like a struct.
+- The prelude's traits `eq` and `ord`, and its enum `ordering`, whose variants `less`, `equal`,
+  and `greater` are written and printed alone. Every type `==` compares part by part implements
+  `eq`, and a struct can implement it itself with `fn eq(self, other: Self) -> bool`, which then
+  decides `==` and `!=` for it wherever it is compared, and lets a struct holding a list be
+  compared. `int`, `float`, and `str` implement `ord`, and a struct can with
+  `fn cmp(self, other: Self) -> ordering`, which `<`, `<=`, `>`, `>=`, and `sort` then use;
+  sorting a list of a struct keeps equal values in their order. `[T: eq]` and `[T: ord]` let a
+  generic function compare and order its values. The methods `x.eq(y)` and `x.cmp(y)` work on
+  every type that implements them, with floats in the order `sort` uses.
+
+### Changed
+
+- `trait` is a keyword, and `less`, `equal`, and `greater` are reserved, like `some`. A module
+  cannot be named `prelude`.
+
 ## [0.3.0] - 2026-10-17
 
 ### Added

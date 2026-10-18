@@ -24,6 +24,7 @@ grammar is
 | `2 ** -1 == 0.5`, `2 ** 0.5` | `2.0 ** -1 == 0.5`; the exponent is always an `int` |
 | `[1, 2] + [3]` joins, `[0] * 3` repeats | `+ - * / % **` on lists work element by element, as in numpy; join with `xs.extend(ys)` |
 | `xs.insert(9, x)` clamps the index | an index past either end is an error |
+| `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `xs.sort()` only, on a list of `int`, `float`, or `str`; `-0.0` sorts before `0.0`, and `nan` last |
 | `t = 1, 2`, `return a, b` | `t = (1, 2)`, `ret (a, b)`; a tuple's values always need parentheses |
 | `()`, `(x,)` | no empty or one-value tuples; a tuple has two or more values |
 | `t[i]`, `t[1:]` | `t[1]`, `t[-1]`: a constant index only, and no slices |
@@ -37,13 +38,14 @@ These names are reserved and cannot be used for variables or functions:
 | `fn` | defines a function |
 | `enum` | defines an enum |
 | `struct` | defines a struct |
-| `impl` | defines the methods and associated functions of a struct |
-| `pub` | lets other files use the function, enum, or struct after it, as in `pub fn f() -> int:` |
+| `trait` | defines a trait: methods that types implement, as in `trait Shape:` |
+| `impl` | defines the methods and associated functions of a struct, or implements a trait for a type, as in `impl Shape for Circle:` |
+| `pub` | lets other files use the function, enum, struct, or trait after it, as in `pub fn f() -> int:` |
 | `use`, `as` | uses a module or one of its functions, optionally under another name |
 | `ret` | returns from a function, or ends the program at the top level |
 | `if`, `elif`, `else` | conditional blocks |
 | `while` | loops while a condition holds |
-| `for`, `in` | loops over a list or a `range` |
+| `for`, `in` | loops over a list or a `range`; `for` also names the type in `impl Shape for Circle:` |
 | `match`, `case` | runs the first case whose pattern fits a value |
 | `break` | leaves the innermost loop |
 | `cont` | skips to the next iteration of the innermost loop |

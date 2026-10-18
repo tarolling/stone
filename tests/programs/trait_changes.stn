@@ -1,0 +1,60 @@
+// a trait's method changes `self` when its default body does, and an impl's override then
+// changes its receiver in place too, wherever it is called
+
+trait Ticker:
+    fn next(self) -> Self
+    fn advance(self):
+        self = self.next()
+    fn advance_by(self, n: int):
+        for i in range(n):
+            self.advance()
+
+struct Counter:
+    n: int
+    log: list[int]
+
+impl Ticker for Counter:
+    fn next(self) -> Self:
+        log = self.log
+        log.append(self.n)
+        ret Counter(n=self.n + 1, log=log)
+
+struct Clock:
+    hours: int
+
+impl Ticker for Clock:
+    fn next(self) -> Self:
+        ret Clock(hours=(self.hours + 1) % 12)
+    // an override changes `self` as the trait's method does
+    fn advance(self):
+        self.hours = (self.hours + 5) % 12
+
+struct Shelf:
+    clocks: list[Clock]
+    counter: Counter
+
+fn run[T: Ticker](t: T, n: int) -> T:
+    t.advance_by(n)
+    t.advance()
+    ret t
+
+c = Counter(n=0, log=[])
+c.advance()
+c.advance_by(2)
+print(c)
+print(run(c, 2))
+print(c)
+
+k = Clock(hours=11)
+k.advance()
+print(k)
+print(run(k, 3))
+
+shelf = Shelf(clocks=[Clock(hours=1), Clock(hours=2)], counter=c)
+shelf.clocks[1].advance()
+shelf.counter.advance_by(3)
+print(shelf)
+clocks = [Clock(hours=0)]
+for i in range(3):
+    clocks[0].advance_by(i)
+print(clocks)

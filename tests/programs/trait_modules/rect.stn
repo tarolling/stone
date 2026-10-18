@@ -1,0 +1,16 @@
+// a trait's file implementing it for a struct of another module
+
+use shapes.square.Square
+
+pub trait Named:
+    fn name(self) -> str
+
+impl Named for Square:
+    fn name(self) -> str:
+        ret "square " + str(self.side)
+
+pub fn names[T: Named](xs: list[T]) -> str:
+    out = ""
+    for x in xs:
+        out = out + x.name() + ";"
+    ret out

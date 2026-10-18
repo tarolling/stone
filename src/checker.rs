@@ -23,8 +23,8 @@ use std::fmt::Display;
 
 use crate::ast::{
     Arguments, CompOp, Constant, Expr, ExprKind, Field, Keyword, MatchCase, Mod, Operator, Pattern,
-    PatternKind, Stmt, StmtKind, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Variant, constant_int,
-    target_names,
+    PatternKind, Stmt, StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Variant,
+    constant_int, target_names,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
@@ -220,12 +220,24 @@ impl Display for Type {
 /// as `find` and `os.env` return.
 pub const OPTION: &str = "option";
 
+/// The name of the prelude's enum whose values are `less`, `equal`, and `greater`, which `cmp`
+/// returns.
+pub const ORDERING: &str = "ordering";
+
+/// The name of the prelude's trait of values `==` compares, which every type it compares part by
+/// part implements, and a struct may implement itself.
+pub const EQ: &str = "eq";
+
+/// The name of the prelude's trait of ordered values, which `int`, `float`, and `str` implement,
+/// and a struct may too.
+pub const ORD: &str = "ord";
+
 /// Returns whether the variants of the enum `name` are written and printed alone, as the
 /// prelude's are: `some(1)`, not `option.some(1)`.
 ///
 /// For example, `prints_bare("option")` is true and `prints_bare("Shape")` is false.
 pub fn prints_bare(name: &str) -> bool {
-    name == OPTION
+    name == OPTION || name == ORDERING
 }
 
 /// Maps each of `params`, a generic type's or function's type parameters, to the type at the
@@ -321,6 +333,52 @@ pub struct Method {
     pub receiver: bool,
     /// Whether the method changes `self`, and so the receiver, in place.
     pub changes: bool,
+    /// For a call through a bound, as `x.area()` with `x` of type `T` in
+    /// `fn f[T: Shape](x: T):`, the function each type that implements the trait calls, by the
+    /// type's linked name (`int` for a builtin type), and `function` is the trait's method, such
+    /// as `Shape.area`. A function named by its trait is the trait's default method, called
+    /// with the type as `Self`. `None` for a call whose function is known.
+    pub implementations: Option<HashMap<String, String>>,
+}
+
+impl Method {
+    /// Returns the function a call through a bound calls for a receiver of `ty`, and the type
+    /// arguments of its copy: the struct's own for a method of its `impl` block, or `ty` for
+    /// `Self` of the trait's default method. Returns `function` and no types for a call whose
+    /// function is already known.
+    ///
+    /// For example, `x.area()` calls `Circle.area` for a `Circle`, and `Shape.half` with
+    /// `Circle` for `Self` if `Circle` keeps the default of `half`.
+    pub fn resolve(&self, ty: &Type) -> Option<(String, Vec<Type>)> {
+        let Some(implementations) = &self.implementations else {
+            return Some((self.function.clone(), vec![]));
+        };
+        let (key, args) = match ty {
+            Type::Struct { name, args } => (name.as_str(), args.clone()),
+            other => (type_key(other)?, vec![]),
+        };
+        let function = implementations.get(key)?;
+        let (owner, _) = self.function.rsplit_once('.')?;
+        if function
+            .rsplit_once('.')
+            .is_some_and(|(trait_, _)| trait_ == owner)
+        {
+            return Some((function.clone(), vec![ty.clone()]));
+        }
+        Some((function.clone(), args))
+    }
+}
+
+/// Returns the name a builtin type is known by among the types that implement traits, such as
+/// `int`, or `None` for a type that cannot implement one.
+pub fn type_key(ty: &Type) -> Option<&'static str> {
+    match ty {
+        Type::Int => Some("int"),
+        Type::Float => Some("float"),
+        Type::Bool => Some("bool"),
+        Type::Str => Some("str"),
+        _ => None,
+    }
 }
 
 /// Every call of a function of an `impl` block, keyed by the call's span.
@@ -353,8 +411,10 @@ pub enum SymbolKind {
     /// name.
     Field,
     /// A function of an `impl` block, such as `norm` in `fn norm(self) -> float:`, whose
-    /// [`Symbol::scope`] is the struct's name.
+    /// [`Symbol::scope`] is the struct's name, or of a trait, whose scope is the trait's name.
     Method,
+    /// A trait, such as `Shape` in `trait Shape:`.
+    Trait,
     /// A type parameter of a generic function, such as `T` in `fn first[T](xs: list[T]) -> T:`,
     /// whose [`Symbol::scope`] is the function's name.
     TypeParam,
@@ -410,6 +470,12 @@ pub struct Analysis {
     pub instances: HashMap<Span, Instance>,
     /// The names of each generic function's type parameters, in order, by its linked name.
     pub type_params: HashMap<String, Vec<String>>,
+    /// The traits that bound each type parameter that has bounds, by the index of its symbol
+    /// in [`Analysis::symbols`], such as `Shape` for `T` in `fn total[T: Shape]`.
+    pub bounds: HashMap<usize, Vec<String>>,
+    /// The traits each type implements, by the type's linked name (`int` for a builtin type),
+    /// sorted.
+    pub implemented: HashMap<String, Vec<String>>,
 }
 
 impl Analysis {
@@ -506,6 +572,30 @@ enum Ty {
     Param(usize),
 }
 
+/// Returns the builtin type a trait's `impl` block names by `key`, such as `int`, if it is one.
+fn builtin_key_type(key: &str) -> Option<Ty> {
+    match key {
+        "int" => Some(Ty::Int),
+        "float" => Some(Ty::Float),
+        "bool" => Some(Ty::Bool),
+        "str" => Some(Ty::Str),
+        _ => None,
+    }
+}
+
+/// Returns the name a type is known by among the types that implement traits: a struct's linked
+/// name, or a builtin type's, such as `int`.
+fn ty_key(ty: &Ty) -> Option<String> {
+    match ty {
+        Ty::Struct(name, _) => Some(name.clone()),
+        Ty::Int => Some("int".to_string()),
+        Ty::Float => Some("float".to_string()),
+        Ty::Bool => Some("bool".to_string()),
+        Ty::Str => Some("str".to_string()),
+        _ => None,
+    }
+}
+
 /// A requirement that a type turn out to be one of a few kinds, checked once inference is done
 /// because the type may still be unknown when the requirement is found.
 ///
@@ -517,6 +607,8 @@ struct Constraint {
     span: Span,
     /// The message, with `{}` standing for the type that was found.
     message: &'static str,
+    /// Whether a type that implements `ord` is allowed too, as for `<`.
+    ord: bool,
 }
 
 /// An arithmetic operation whose operands may be lists, checked once its operands are known to be
@@ -670,7 +762,9 @@ const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
 /// What `str` converts from.
 const PRINTABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
 /// The names of the types built into the language, which no enum or struct may take.
-const BUILTIN_TYPES: &[&str] = &["int", "float", "bool", "str", "list", "tuple", OPTION];
+const BUILTIN_TYPES: &[&str] = &[
+    "int", "float", "bool", "str", "list", "tuple", OPTION, "Self",
+];
 /// The message for a map key of another kind.
 const MAP_KEY: &str = "a map key must be int, str, or bool, found {}";
 
@@ -714,11 +808,36 @@ struct FieldInfo {
 
 /// A function of an `impl` block, whose signature is in [`Inference::functions`] under its
 /// struct's name, a dot, and its own name.
+///
+/// A trait's default method the type keeps is one too, whose function is the trait's.
 struct MethodInfo {
     symbol: usize,
     /// Whether its first parameter is `self`, so it is called on a value rather than the struct.
     has_self: bool,
     /// Whether it changes `self`, found by [`Inference::find_changing_methods`].
+    changes: bool,
+    /// The function it calls, such as `Point.norm`, or `Shape.half` for a default method.
+    function: String,
+    /// Whether it is a trait's default method, called with the type as `Self`.
+    default: bool,
+}
+
+/// A trait a program defines: its symbol, its type parameter `Self`, the type that implements
+/// it, and its methods, whose signatures are in [`Inference::functions`] under the trait's name,
+/// a dot, and their own names.
+struct TraitInfo {
+    symbol: usize,
+    self_param: usize,
+    methods: Vec<TraitMethodInfo>,
+}
+
+struct TraitMethodInfo {
+    name: String,
+    symbol: usize,
+    /// Whether it has a default body, which a type gets unless it defines the method itself.
+    has_body: bool,
+    /// Whether it changes `self`: a default that does, found by
+    /// [`Inference::find_changing_methods`]. A method without a body never does.
     changes: bool,
 }
 
@@ -767,6 +886,8 @@ struct PendingInstance {
 struct TypeParamInfo {
     name: String,
     symbol: usize,
+    /// The traits its types implement, by linked name, such as `Shape` in `[T: Shape]`.
+    bounds: Vec<String>,
 }
 
 /// The function whose body is being checked.
@@ -848,8 +969,19 @@ struct Inference {
     struct_spans: HashSet<Span>,
     /// The span of every `impl` block at the top level, so a nested one is reported.
     impl_spans: HashSet<Span>,
-    /// The functions of every struct's `impl` blocks, by struct and function name.
+    /// The functions of every struct's `impl` blocks, and the methods of the traits it
+    /// implements, by the type's linked name (`int` for a builtin type) and function name.
     struct_methods: HashMap<String, HashMap<String, MethodInfo>>,
+    /// Every trait the program defines, by name.
+    traits: HashMap<String, TraitInfo>,
+    /// The span of every trait definition declared at the top level, so a nested one is
+    /// reported.
+    trait_spans: HashSet<Span>,
+    /// The methods of every implementation of a trait, by the trait's and the type's linked
+    /// names, each mapped to the function it calls.
+    impls: HashMap<(String, String), HashMap<String, String>>,
+    /// The type `Self` names in the `impl` block whose signatures are being read.
+    self_type: Option<Ty>,
     /// How each call of a function of an `impl` block was resolved, by the call's span.
     methods: Methods,
     /// Methods called on a global a function reads before the code assigning it is checked,
@@ -935,9 +1067,11 @@ impl Inference {
             SymbolKind::Parameter | SymbolKind::Local => {
                 self.function.as_ref().map(|f| f.name.clone())
             }
-            SymbolKind::Function | SymbolKind::Enum | SymbolKind::Struct | SymbolKind::Global => {
-                None
-            }
+            SymbolKind::Function
+            | SymbolKind::Enum
+            | SymbolKind::Struct
+            | SymbolKind::Trait
+            | SymbolKind::Global => None,
             // set by the caller
             SymbolKind::Variant
             | SymbolKind::Field
@@ -1436,6 +1570,19 @@ impl Inference {
             allowed,
             span,
             message,
+            ord: false,
+        });
+    }
+
+    /// Requires `ty` to be ordered, as `<` and `sort` need: `int`, `float`, `str`, or a type
+    /// that implements `ord`.
+    fn require_ordered(&mut self, ty: Ty, span: Span, message: &'static str) {
+        self.constraints.push(Constraint {
+            ty,
+            allowed: ORDERED,
+            span,
+            message,
+            ord: true,
         });
     }
 
@@ -1458,6 +1605,7 @@ impl Inference {
         // structs, enums, functions, and globals are visible everywhere, so declare them all
         // first, types before the signatures that name them
         self.declare_types(body);
+        self.declare_traits(body);
         self.declare_methods(body);
         self.find_changing_methods(body);
         for stmt in body {
@@ -1545,8 +1693,12 @@ impl Inference {
             );
             return;
         }
+        if self.traits.contains_key(name) {
+            self.error(name_span, format!("'{name}' is already defined as a trait"));
+            return;
+        }
         self.scope_params.clear();
-        let type_params = self.declare_type_params(name, type_params);
+        let type_params = self.declare_type_params(name, type_params, true);
         let (params, ret) = self.signature(args, returns, None);
         self.scope_params.clear();
         // the symbol's type is rebuilt from `params` and `ret` in `finish`
@@ -1568,8 +1720,14 @@ impl Inference {
     /// [`Inference::type_params`]. A name that is already a type, or already a type parameter in
     /// scope, is reported and left out.
     ///
-    /// For example, `[T]` in `fn first[T](xs: list[T]) -> T:` declares one parameter `T`.
-    fn declare_type_params(&mut self, owner: &str, params: &[TypeParam]) -> Vec<usize> {
+    /// For example, `[T]` in `fn first[T](xs: list[T]) -> T:` declares one parameter `T`. Only
+    /// a function's parameters may have bounds (`bounded`), each of which must be a trait.
+    fn declare_type_params(
+        &mut self,
+        owner: &str,
+        params: &[TypeParam],
+        bounded: bool,
+    ) -> Vec<usize> {
         let mut declared = vec![];
         for param in params {
             let name = &param.name;
@@ -1592,9 +1750,11 @@ impl Inference {
             }
             let symbol = self.add_symbol(name, SymbolKind::TypeParam, param.span, Ty::Unit);
             self.symbols[symbol].scope = Some(owner.to_string());
+            let bounds = self.bounds(&param.bounds, bounded);
             self.type_params.push(TypeParamInfo {
                 name: name.clone(),
                 symbol,
+                bounds,
             });
             let index = self.type_params.len() - 1;
             self.symbol_types[symbol] = Ty::Param(index);
@@ -1602,6 +1762,39 @@ impl Inference {
             declared.push(index);
         }
         declared
+    }
+
+    /// Returns the traits `bounds` name, reporting any that is no trait, and every one unless
+    /// they bound a function's type parameter (`bounded`).
+    fn bounds(&mut self, bounds: &[TraitName], bounded: bool) -> Vec<String> {
+        let mut traits = vec![];
+        for bound in bounds {
+            let name = &bound.name;
+            let short = struct_display(name);
+            if !bounded {
+                self.error(
+                    bound.span,
+                    "only a function's type parameters can have bounds for now",
+                );
+                continue;
+            }
+            match self.traits.get(name) {
+                Some(info) => {
+                    self.add_reference(bound.span, info.symbol);
+                    if !traits.contains(name) {
+                        traits.push(name.clone());
+                    }
+                }
+                None if self.structs.contains_key(name) => {
+                    self.error(bound.span, format!("'{short}' is a struct, not a trait"));
+                }
+                None if self.enums.contains_key(name) => {
+                    self.error(bound.span, format!("'{short}' is an enum, not a trait"));
+                }
+                None => self.error(bound.span, format!("there is no trait '{short}'")),
+            }
+        }
+        traits
     }
 
     /// Returns `ty` with each of the type parameters `params` replaced by the type at the same
@@ -1721,88 +1914,72 @@ impl Inference {
     /// against them.
     ///
     /// For example, `impl Point:` holding `fn norm(self) -> float:` declares `Point.norm` as
-    /// `fn(Point) -> float`, called as `p.norm()`.
+    /// `fn(Point) -> float`, called as `p.norm()`. An `impl` block of a trait declares its
+    /// functions the same way, checks them against the trait's, and gives the type the trait's
+    /// default methods it does not define.
     fn declare_methods(&mut self, body: &[Stmt]) {
+        // every block's own functions first, so a default never takes the name of one
+        let mut implemented = vec![];
         for stmt in body {
             let StmtKind::ImplDef {
                 name: owner,
+                name_span,
+                trait_name,
                 methods,
-                ..
             } = &stmt.kind
             else {
                 continue;
             };
             self.impl_spans.insert(stmt.span);
-            // the linker reports an impl block for anything but a struct of its file
-            if !self.structs.contains_key(owner) {
+            // the linker reports an impl block for anything but a struct of its file, or a
+            // builtin type in a trait's
+            let Some(this) = self.impl_type(owner, trait_name.is_some()) else {
                 continue;
-            }
+            };
+            let trait_ = match trait_name {
+                Some(trait_name) => match self.impl_trait(owner, *name_span, trait_name) {
+                    Some(trait_) => Some(trait_),
+                    None => continue,
+                },
+                None => None,
+            };
+            let mut declared = HashMap::new();
             for method in methods {
-                let StmtKind::FunctionDef {
-                    name,
-                    name_span,
-                    type_params,
-                    args,
-                    returns,
-                    ..
-                } = &method.kind
-                else {
-                    continue;
-                };
-                // a generic struct's type parameters are its methods' too
-                let struct_params = self.structs[owner].type_params.clone();
-                self.scope_params = struct_params
-                    .iter()
-                    .map(|&p| (self.type_params[p].name.clone(), p))
-                    .collect();
-                if let Some(param) = type_params.first() {
-                    self.error(param.span, "a method cannot have type parameters for now");
-                    // declared anyway, so its signature has no further errors
-                    self.declare_type_params(&format!("{owner}.{name}"), type_params);
+                if let Some(name) = self.declare_method(owner, &this, method, trait_.as_deref()) {
+                    declared.insert(name.clone(), format!("{owner}.{name}"));
                 }
-                let short = struct_display(owner);
+            }
+            if let Some(trait_) = trait_ {
+                self.report_missing_methods(owner, *name_span, &trait_, &declared);
+                implemented.push((trait_, owner.clone(), *name_span, declared));
+            }
+        }
+        for (trait_, owner, span, mut declared) in implemented {
+            let defaults: Vec<(String, usize)> = self.traits[&trait_]
+                .methods
+                .iter()
+                .filter(|m| m.has_body && !declared.contains_key(&m.name))
+                .map(|m| (m.name.clone(), m.symbol))
+                .collect();
+            for (name, symbol) in defaults {
                 if self
                     .struct_methods
-                    .get(owner)
-                    .is_some_and(|methods| methods.contains_key(name))
+                    .get(&owner)
+                    .is_some_and(|methods| methods.contains_key(&name))
+                    || self.struct_field_ty(&owner, &name).is_some()
                 {
                     self.error(
-                        *name_span,
-                        format!("'{short}' already has a method '{name}'"),
-                    );
-                    continue;
-                }
-                if self.struct_field_ty(owner, name).is_some() {
-                    self.error(
-                        *name_span,
+                        span,
                         format!(
-                            "'{name}' is a field of '{short}', so a method cannot have its name"
+                            "'{}' already has a method or field '{name}', so it cannot get the \
+                             default of '{}'",
+                            struct_display(&owner),
+                            struct_display(&trait_)
                         ),
                     );
                     continue;
                 }
-                let this = Ty::Struct(
-                    owner.clone(),
-                    struct_params.iter().map(|&p| Ty::Param(p)).collect(),
-                );
-                let (params, ret) = self.signature(args, returns.as_ref(), Some(&this));
-                self.scope_params.clear();
-                let has_self = args.args.first().is_some_and(|arg| arg.arg == "self");
-                // the symbol's type is rebuilt from `params` and `ret` in `finish`
-                let symbol = self.add_symbol(name, SymbolKind::Method, *name_span, Ty::Unit);
-                self.symbols[symbol].scope = Some(owner.clone());
-                let function = format!("{owner}.{name}");
-                self.functions.insert(
-                    function.clone(),
-                    FunctionInfo {
-                        symbol,
-                        type_params: struct_params,
-                        params,
-                        ret,
-                        ret_written: returns.is_some(),
-                    },
-                );
-                self.function_spans.insert(function, method.span);
+                let function = format!("{trait_}.{name}");
                 self.struct_methods
                     .entry(owner.clone())
                     .or_default()
@@ -1810,11 +1987,414 @@ impl Inference {
                         name.clone(),
                         MethodInfo {
                             symbol,
-                            has_self,
+                            has_self: true,
                             changes: false,
+                            function: function.clone(),
+                            default: true,
                         },
                     );
+                declared.insert(name, function);
             }
+            self.impls.insert((trait_, owner), declared);
+        }
+    }
+
+    /// Returns the type `Self` is in an `impl` block for `owner`: the struct with its type
+    /// parameters as its type arguments, or a builtin type, which only a trait's block may be
+    /// for. Returns `None` for anything else, which the linker reported.
+    fn impl_type(&self, owner: &str, of_trait: bool) -> Option<Ty> {
+        if self.structs.contains_key(owner) {
+            return Some(self.own_type(owner));
+        }
+        if !of_trait {
+            return None;
+        }
+        builtin_key_type(owner)
+    }
+
+    /// Finds the trait an `impl` block for `owner` names, reporting a name that is no trait and
+    /// a second block implementing the same trait for the same type.
+    fn impl_trait(
+        &mut self,
+        owner: &str,
+        owner_span: Span,
+        trait_name: &TraitName,
+    ) -> Option<String> {
+        let name = &trait_name.name;
+        let Some(info) = self.traits.get(name) else {
+            let short = struct_display(name);
+            let message = if self.structs.contains_key(name) {
+                format!("'{short}' is a struct, not a trait")
+            } else if self.enums.contains_key(name) {
+                format!("'{short}' is an enum, not a trait")
+            } else {
+                format!("there is no trait '{short}'")
+            };
+            self.error(trait_name.span, message);
+            return None;
+        };
+        self.add_reference(trait_name.span, info.symbol);
+        if (name == EQ || name == ORD) && !self.structs.contains_key(owner) {
+            self.error(owner_span, format!("{owner} already implements '{name}'"));
+            return None;
+        }
+        let key = (name.clone(), owner.to_string());
+        if self.impls.contains_key(&key) {
+            self.error(
+                owner_span,
+                format!(
+                    "'{}' already implements '{}'",
+                    struct_display(owner),
+                    struct_display(name)
+                ),
+            );
+            return None;
+        }
+        // filled in once every block's functions are declared
+        self.impls.insert(key, HashMap::new());
+        Some(name.clone())
+    }
+
+    /// Declares `method`, a function of an `impl` block for `owner`, whose `self` is `this`,
+    /// returning its name, or reports why it cannot be declared. In a block implementing
+    /// `trait_`, it must be one of the trait's methods, with the same signature.
+    fn declare_method(
+        &mut self,
+        owner: &str,
+        this: &Ty,
+        method: &Stmt,
+        trait_: Option<&str>,
+    ) -> Option<String> {
+        let StmtKind::FunctionDef {
+            name,
+            name_span,
+            type_params,
+            args,
+            returns,
+            ..
+        } = &method.kind
+        else {
+            return None;
+        };
+        // a generic struct's type parameters are its methods' too
+        let struct_params = self
+            .structs
+            .get(owner)
+            .map(|info| info.type_params.clone())
+            .unwrap_or_default();
+        self.scope_params = struct_params
+            .iter()
+            .map(|&p| (self.type_params[p].name.clone(), p))
+            .collect();
+        if let Some(param) = type_params.first() {
+            self.error(param.span, "a method cannot have type parameters for now");
+            // declared anyway, so its signature has no further errors
+            self.declare_type_params(&format!("{owner}.{name}"), type_params, false);
+        }
+        let short = struct_display(owner);
+        let trait_method =
+            trait_.map(|trait_| self.traits[trait_].methods.iter().any(|m| &m.name == name));
+        let builtin_trait = match name.as_str() {
+            "eq" => Some(EQ),
+            "cmp" => Some(ORD),
+            _ => None,
+        };
+        let error = if let Some(builtin) = builtin_trait
+            && trait_.is_none()
+        {
+            Some(format!(
+                "'{name}' is the method of the trait '{builtin}', so it goes in an \
+                 'impl {builtin} for {short}:' block"
+            ))
+        } else if trait_method == Some(false) {
+            let trait_ = struct_display(trait_.unwrap_or_default());
+            Some(match self.structs.contains_key(owner) {
+                true => format!(
+                    "'{name}' is not a method of '{trait_}', so it goes in an 'impl {short}:' block"
+                ),
+                false => format!("'{name}' is not a method of '{trait_}'"),
+            })
+        } else if self
+            .struct_methods
+            .get(owner)
+            .is_some_and(|methods| methods.contains_key(name))
+        {
+            Some(format!("'{short}' already has a method '{name}'"))
+        } else if self.struct_field_ty(owner, name).is_some() {
+            Some(format!(
+                "'{name}' is a field of '{short}', so a method cannot have its name"
+            ))
+        } else if !self.structs.contains_key(owner) && METHODS.contains(&name.as_str()) {
+            Some(format!(
+                "'{name}' is a builtin method, so a method cannot have its name"
+            ))
+        } else {
+            None
+        };
+        if let Some(message) = error {
+            self.error(*name_span, message);
+            self.scope_params.clear();
+            return None;
+        }
+        self.self_type = Some(this.clone());
+        let (params, ret) = self.signature(args, returns.as_ref(), Some(this));
+        self.self_type = None;
+        self.scope_params.clear();
+        if let Some(trait_) = trait_ {
+            self.check_implemented_signature(trait_, name, *name_span, this, (&params, &ret));
+        }
+        let has_self = args.args.first().is_some_and(|arg| arg.arg == "self");
+        // the symbol's type is rebuilt from `params` and `ret` in `finish`
+        let symbol = self.add_symbol(name, SymbolKind::Method, *name_span, Ty::Unit);
+        self.symbols[symbol].scope = Some(owner.to_string());
+        let function = format!("{owner}.{name}");
+        self.functions.insert(
+            function.clone(),
+            FunctionInfo {
+                symbol,
+                type_params: struct_params,
+                params,
+                ret,
+                ret_written: returns.is_some(),
+            },
+        );
+        self.function_spans.insert(function.clone(), method.span);
+        self.struct_methods
+            .entry(owner.to_string())
+            .or_default()
+            .insert(
+                name.clone(),
+                MethodInfo {
+                    symbol,
+                    has_self,
+                    changes: false,
+                    function,
+                    default: false,
+                },
+            );
+        Some(name.clone())
+    }
+
+    /// Reports a function of an `impl` block of `trait_` whose signature differs from the
+    /// trait's method of the same name, with `this` for `Self`.
+    fn check_implemented_signature(
+        &mut self,
+        trait_: &str,
+        name: &str,
+        name_span: Span,
+        this: &Ty,
+        (params, ret): (&[Ty], &Ty),
+    ) {
+        let info = &self.functions[&format!("{trait_}.{name}")];
+        let (expected, expected_ret) = (info.params.clone(), info.ret.clone());
+        let self_param = self.traits[trait_].self_param;
+        let fill = |ty: &Ty| Self::substitute(ty, &[self_param], std::slice::from_ref(this));
+        let same = |a: &Ty, b: &Ty| a == b || matches!(b, Ty::Var(_));
+        let matches = expected.len() == params.len()
+            && expected.iter().zip(params).all(|(e, p)| same(&fill(e), p))
+            && same(&fill(&expected_ret), ret);
+        if matches {
+            return;
+        }
+        let rendered: Vec<String> = expected
+            .iter()
+            .enumerate()
+            .map(|(i, ty)| match i {
+                0 => "self".to_string(),
+                _ => self.show(ty),
+            })
+            .collect();
+        let returns = match expected_ret {
+            Ty::Unit => String::new(),
+            ty => format!(" -> {}", self.show(&ty)),
+        };
+        self.error(
+            name_span,
+            format!(
+                "'{name}' must take and return what '{}' says, as in 'fn {name}({}){returns}'",
+                struct_display(trait_),
+                rendered.join(", ")
+            ),
+        );
+    }
+
+    /// Reports each method of `trait_` without a default that the `impl` block for `owner`
+    /// does not define.
+    fn report_missing_methods(
+        &mut self,
+        owner: &str,
+        span: Span,
+        trait_: &str,
+        declared: &HashMap<String, String>,
+    ) {
+        let missing: Vec<String> = self.traits[trait_]
+            .methods
+            .iter()
+            .filter(|m| !m.has_body && !declared.contains_key(&m.name))
+            .map(|m| format!("'{}'", m.name))
+            .collect();
+        let list = match missing.as_slice() {
+            [] => return,
+            [one] => one.clone(),
+            [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
+        };
+        self.error(
+            span,
+            format!(
+                "'{}' does not implement {list} of '{}'",
+                struct_display(owner),
+                struct_display(trait_)
+            ),
+        );
+    }
+
+    /// Declares the methods of every trait defined at the top level of `body`, each under the
+    /// trait's name, a dot, and its own name, as a function generic over the trait's `Self`.
+    ///
+    /// For example, `trait Shape:` holding `fn area(self) -> float` declares `Shape.area` as
+    /// `fn[Self](Self) -> float`.
+    fn declare_traits(&mut self, body: &[Stmt]) {
+        for stmt in body {
+            let StmtKind::TraitDef {
+                name: owner,
+                name_span,
+                methods,
+                ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            let Some(info) = self.traits.get(owner) else {
+                continue;
+            };
+            // a trait defined twice was reported, and only its first definition counts
+            if self.symbols[info.symbol].span != *name_span {
+                continue;
+            }
+            let self_param = info.self_param;
+            let mut infos: Vec<TraitMethodInfo> = vec![];
+            for method in methods {
+                let StmtKind::FunctionDef {
+                    name,
+                    name_span,
+                    type_params,
+                    args,
+                    returns,
+                    body,
+                    ..
+                } = &method.kind
+                else {
+                    continue;
+                };
+                if infos.iter().any(|m| &m.name == name) {
+                    self.error(
+                        *name_span,
+                        format!("'{}' already has a method '{name}'", struct_display(owner)),
+                    );
+                    continue;
+                }
+                if let Some(param) = type_params.first() {
+                    self.error(
+                        param.span,
+                        "a trait's method cannot have type parameters for now",
+                    );
+                    continue;
+                }
+                if args.args.first().is_none_or(|arg| arg.arg != "self") {
+                    self.error(
+                        *name_span,
+                        format!(
+                            "a trait's method takes 'self' first, as in 'fn {name}(self)', since \
+                             it is called on a value"
+                        ),
+                    );
+                    continue;
+                }
+                self.scope_params = HashMap::from([("Self".to_string(), self_param)]);
+                let (params, ret) =
+                    self.signature(args, returns.as_ref(), Some(&Ty::Param(self_param)));
+                self.scope_params.clear();
+                let symbol = self.add_symbol(name, SymbolKind::Method, *name_span, Ty::Unit);
+                self.symbols[symbol].scope = Some(owner.clone());
+                let function = format!("{owner}.{name}");
+                // a default's parameters are declared with its body, and the others' here, for
+                // editors to name
+                if body.is_empty() {
+                    for (arg, ty) in args.args.iter().zip(&params) {
+                        let param =
+                            self.add_symbol(&arg.arg, SymbolKind::Parameter, arg.span, ty.clone());
+                        self.symbols[param].scope = Some(function.clone());
+                    }
+                }
+                self.functions.insert(
+                    function.clone(),
+                    FunctionInfo {
+                        symbol,
+                        type_params: vec![self_param],
+                        params,
+                        ret,
+                        ret_written: returns.is_some(),
+                    },
+                );
+                if !body.is_empty() {
+                    self.function_spans.insert(function, method.span);
+                }
+                infos.push(TraitMethodInfo {
+                    name: name.clone(),
+                    symbol,
+                    has_body: !body.is_empty(),
+                    changes: false,
+                });
+            }
+            if let Some(info) = self.traits.get_mut(owner) {
+                info.methods = infos;
+            }
+        }
+    }
+
+    /// Declares the name of every trait defined at the top level of `body`, with its type
+    /// parameter `Self`, which is bounded by the trait itself.
+    fn declare_trait_names(&mut self, body: &[Stmt]) {
+        for stmt in body {
+            let StmtKind::TraitDef {
+                name, name_span, ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            self.trait_spans.insert(stmt.span);
+            let error = if self.traits.contains_key(name) {
+                Some(format!("trait '{name}' is already defined"))
+            } else if self.enums.contains_key(name) {
+                Some(format!("'{name}' is already defined as an enum"))
+            } else if self.structs.contains_key(name) {
+                Some(format!("'{name}' is already defined as a struct"))
+            } else if name_span.file != FileId::PRELUDE
+                && (is_reserved(name) || BUILTIN_TYPES.contains(&name.as_str()))
+            {
+                Some(format!("cannot redefine builtin '{name}'"))
+            } else {
+                None
+            };
+            if let Some(message) = error {
+                self.error(*name_span, message);
+                continue;
+            }
+            let symbol = self.add_symbol(name, SymbolKind::Trait, *name_span, Ty::Unit);
+            // `Self` refers to the trait wherever it is written
+            self.type_params.push(TypeParamInfo {
+                name: "Self".to_string(),
+                symbol,
+                bounds: vec![name.clone()],
+            });
+            self.traits.insert(
+                name.clone(),
+                TraitInfo {
+                    symbol,
+                    self_param: self.type_params.len() - 1,
+                    methods: vec![],
+                },
+            );
         }
     }
 
@@ -1828,29 +2408,55 @@ impl Inference {
     /// so does `fn twice(self): self.push(1): self.push(2)`.
     fn find_changing_methods(&mut self, body: &[Stmt]) {
         let mut methods = vec![];
+        let mut defaults = vec![];
         for stmt in body {
-            let StmtKind::ImplDef {
-                name: owner,
-                methods: defs,
-                ..
-            } = &stmt.kind
-            else {
-                continue;
-            };
-            for def in defs {
-                // a method defined twice was reported, and only its first definition counts
-                if let StmtKind::FunctionDef {
-                    name,
-                    name_span,
-                    body,
+            match &stmt.kind {
+                StmtKind::ImplDef {
+                    name: owner,
+                    methods: defs,
                     ..
-                } = &def.kind
-                    && let Some(info) = self.struct_methods.get(owner).and_then(|m| m.get(name))
-                    && self.symbols[info.symbol].span == *name_span
-                    && info.has_self
-                {
-                    methods.push((owner, name, body));
+                } => {
+                    for def in defs {
+                        // a method defined twice was reported, and only its first definition
+                        // counts
+                        if let StmtKind::FunctionDef {
+                            name,
+                            name_span,
+                            body,
+                            ..
+                        } = &def.kind
+                            && let Some(info) =
+                                self.struct_methods.get(owner).and_then(|m| m.get(name))
+                            && self.symbols[info.symbol].span == *name_span
+                            && info.has_self
+                        {
+                            methods.push((owner, name, body));
+                        }
+                    }
                 }
+                StmtKind::TraitDef {
+                    name: owner,
+                    methods: defs,
+                    ..
+                } => {
+                    for def in defs {
+                        if let StmtKind::FunctionDef {
+                            name,
+                            name_span,
+                            body,
+                            ..
+                        } = &def.kind
+                            && let Some(info) = self.traits.get(owner)
+                            && let Some(i) = info.methods.iter().position(|m| {
+                                m.name == *name && self.symbols[m.symbol].span == *name_span
+                            })
+                            && info.methods[i].has_body
+                        {
+                            defaults.push((owner, i, body));
+                        }
+                    }
+                }
+                _ => {}
             }
         }
         loop {
@@ -1867,9 +2473,69 @@ impl Inference {
                     found = true;
                 }
             }
+            for &(owner, i, body) in &defaults {
+                if !self.traits[owner].methods[i].changes && self.changes_self(owner, body) {
+                    if let Some(info) = self.traits.get_mut(owner) {
+                        info.methods[i].changes = true;
+                    }
+                    found = true;
+                }
+            }
+            // a type's method changes `self` wherever its trait's does, so calls through a
+            // bound and on the type itself agree
+            let forced: Vec<(String, String)> = self
+                .impls
+                .iter()
+                .flat_map(|((trait_, owner), implemented)| {
+                    let info = &self.traits[trait_];
+                    implemented.keys().filter_map(move |name| {
+                        let changes = info.methods.iter().any(|m| &m.name == name && m.changes);
+                        changes.then(|| (owner.clone(), name.clone()))
+                    })
+                })
+                .collect();
+            for (owner, name) in forced {
+                if let Some(info) = self
+                    .struct_methods
+                    .get_mut(&owner)
+                    .and_then(|methods| methods.get_mut(&name))
+                    && !info.changes
+                {
+                    info.changes = true;
+                    found = true;
+                }
+            }
             if !found {
                 break;
             }
+        }
+        // a method that changes `self` where the trait's does not would change a receiver
+        // that code calling it through a bound only borrows
+        let mut reported = vec![];
+        for ((trait_, owner), implemented) in &self.impls {
+            for name in implemented.keys() {
+                let changes = self.traits[trait_]
+                    .methods
+                    .iter()
+                    .any(|m| &m.name == name && m.changes);
+                if let Some(info) = self.struct_methods.get(owner).and_then(|m| m.get(name))
+                    && info.changes
+                    && !info.default
+                    && !changes
+                {
+                    reported.push((
+                        self.symbols[info.symbol].span,
+                        format!(
+                            "'{name}' cannot change 'self', since '{name}' of '{}' does not",
+                            struct_display(trait_)
+                        ),
+                    ));
+                }
+            }
+        }
+        reported.sort_by_key(|(span, _)| (span.file, span.start));
+        for (span, message) in reported {
+            self.error(span, message);
         }
     }
 
@@ -1928,7 +2594,10 @@ impl Inference {
             return false;
         };
         // the place's type, from the fields' written types
-        let mut ty = Some(self.own_type(owner));
+        let mut ty = Some(match self.traits.get(owner) {
+            Some(info) => Ty::Param(info.self_param),
+            None => builtin_key_type(owner).unwrap_or_else(|| self.own_type(owner)),
+        });
         for step in steps {
             ty = match (step, ty) {
                 (Step::Field(field), Some(Ty::Struct(name, args))) => {
@@ -1939,11 +2608,22 @@ impl Inference {
             };
         }
         match ty {
-            Some(Ty::Struct(name, _)) => self
-                .struct_methods
-                .get(&name)
-                .and_then(|methods| methods.get(attr.as_str()))
-                .is_some_and(|method| method.changes),
+            Some(Ty::Param(param)) => self.type_params[param].bounds.iter().any(|trait_| {
+                self.traits[trait_]
+                    .methods
+                    .iter()
+                    .any(|m| m.name == *attr && m.changes)
+            }),
+            Some(ty)
+                if let Some(method) = ty_key(&ty).and_then(|key| {
+                    self.struct_methods
+                        .get(&key)
+                        .and_then(|methods| methods.get(attr.as_str()))
+                }) =>
+            {
+                method.changes
+            }
+            Some(Ty::Struct(..)) => false,
             _ => changes_receiver(attr),
         }
     }
@@ -1957,9 +2637,10 @@ impl Inference {
     fn declare_types(&mut self, body: &[Stmt]) {
         let enums = self.declare_enum_names(body);
         let structs = self.declare_struct_names(body);
+        self.declare_trait_names(body);
         // after every name, so a type parameter named like a type is reported
         for (name, params, _) in &enums {
-            let declared = self.declare_type_params(name, params);
+            let declared = self.declare_type_params(name, params, false);
             self.scope_params.clear();
             let ty = Ty::Enum(
                 name.to_string(),
@@ -1971,7 +2652,7 @@ impl Inference {
             }
         }
         for (name, params, _) in &structs {
-            let declared = self.declare_type_params(name, params);
+            let declared = self.declare_type_params(name, params, false);
             self.scope_params.clear();
             let ty = Ty::Struct(
                 name.to_string(),
@@ -2495,6 +3176,35 @@ impl Inference {
                     }
                     return Ty::Param(param);
                 }
+                if name == "Self" {
+                    return match self.self_type.clone() {
+                        Some(ty) if args.is_empty() => ty,
+                        Some(_) => {
+                            errors.push((annotation.span, "'Self' takes no types".to_string()));
+                            self.fresh()
+                        }
+                        None => {
+                            errors.push((
+                                annotation.span,
+                                "'Self' is only a type in a trait or an impl block".to_string(),
+                            ));
+                            self.fresh()
+                        }
+                    };
+                }
+                if let Some(info) = self.traits.get(name) {
+                    let symbol = info.symbol;
+                    self.add_reference(annotation.span, symbol);
+                    let short = struct_display(name);
+                    errors.push((
+                        annotation.span,
+                        format!(
+                            "'{short}' is a trait, not a type; to take any type that implements \
+                             it, write a type parameter, as in 'fn f[T: {short}](x: T)'"
+                        ),
+                    ));
+                    return self.fresh();
+                }
                 let found = if let Some(info) = self.enums.get(name) {
                     Some((Some(info.symbol), info.type_params.len(), false))
                 } else {
@@ -2726,6 +3436,7 @@ impl Inference {
                 name,
                 name_span,
                 methods,
+                ..
             } => {
                 if !self.impl_spans.contains(&stmt.span) {
                     self.error(*name_span, "impl blocks can only be at the top level");
@@ -2739,6 +3450,30 @@ impl Inference {
                         body,
                         ..
                     } = &method.kind
+                    {
+                        self.check_function(&format!("{name}.{method}"), *name_span, args, body);
+                    }
+                }
+            }
+            StmtKind::TraitDef {
+                name,
+                name_span,
+                methods,
+                ..
+            } => {
+                if !self.trait_spans.contains(&stmt.span) {
+                    self.error(*name_span, "traits can only be defined at the top level");
+                    return;
+                }
+                for method in methods {
+                    if let StmtKind::FunctionDef {
+                        name: method,
+                        name_span,
+                        args,
+                        body,
+                        ..
+                    } = &method.kind
+                        && !body.is_empty()
                     {
                         self.check_function(&format!("{name}.{method}"), *name_span, args, body);
                     }
@@ -3516,6 +4251,7 @@ impl Inference {
             .and_then(|methods| methods.get(name))
             .map(|method| (method.symbol, method.has_self));
         let short = struct_display(owner);
+        // a trait's default method always has `self`, so this is a function of the struct's
         let symbol = match method {
             None => {
                 self.error(name_span, format!("'{short}' has no function '{name}'"));
@@ -3540,6 +4276,7 @@ impl Inference {
                 function,
                 receiver: false,
                 changes: false,
+                implementations: None,
             },
         );
         if params.len() != args.len() {
@@ -3577,7 +4314,10 @@ impl Inference {
             .map(|method| (method.symbol, method.has_self, method.changes));
         let (symbol, changes) = match method {
             None => {
-                let mut message = format!("'{short}' has no method '{name}'");
+                let mut message = match builtin_key_type(owner) {
+                    Some(_) => format!("{owner} has no method '{name}'"),
+                    None => format!("'{short}' has no method '{name}'"),
+                };
                 if self.struct_field_ty(owner, name).is_some() {
                     message.push_str(&format!(
                         "; '{name}' is a field of '{short}', so read it without parentheses"
@@ -3599,8 +4339,8 @@ impl Inference {
             Some((symbol, true, changes)) => (symbol, changes),
         };
         self.add_reference(name_span, symbol);
-        let function = format!("{owner}.{name}");
-        let (mut params, ret) = self.instantiate(call.span, &function, type_args.to_vec());
+        let (function, type_args) = self.method_function(owner, type_args, name);
+        let (mut params, ret) = self.instantiate(call.span, &function, type_args);
         params.remove(0);
         self.methods.insert(
             call.span,
@@ -3608,36 +4348,166 @@ impl Inference {
                 function,
                 receiver: true,
                 changes,
+                implementations: None,
             },
         );
+        self.check_method_args(call, name, &params, &arg_types, args);
+        if changes {
+            self.check_changing_call(call.span, name, &ret);
+            self.check_change_of(receiver, true);
+        }
+        ret
+    }
+
+    /// Checks the arguments of a call of the method `name`, whose parameters after `self` are
+    /// `params`.
+    fn check_method_args(
+        &mut self,
+        call: &Expr,
+        name: &str,
+        params: &[Ty],
+        arg_types: &[Ty],
+        args: &[Expr],
+    ) {
         if params.len() != args.len() {
             self.arity_error(call.span, name, &params.len().to_string(), args.len());
         } else {
-            for ((param, arg_ty), arg) in params.iter().zip(&arg_types).zip(args) {
+            for ((param, arg_ty), arg) in params.iter().zip(arg_types).zip(args) {
                 self.expect(param, arg_ty, arg.span);
             }
         }
-        if changes {
-            // inside an expression, a borrowed copy of the receiver could see the change
-            if ret == Ty::Unit {
-                if self.statement_call != Some(call.span) {
-                    self.error(
-                        call.span,
-                        format!(
-                            "'{name}' changes its receiver and returns no value, so it can only \
-                             be a statement of its own"
-                        ),
-                    );
-                }
-            } else if ![self.statement_call, self.assigned_call].contains(&Some(call.span)) {
+    }
+
+    /// Reports the call at `call` of `name`, a method that changes its receiver and returns
+    /// `ret`, unless it is a statement of its own or, if it returns a value, the whole value of
+    /// an assignment, since inside an expression a borrowed copy of the receiver could see the
+    /// change.
+    fn check_changing_call(&mut self, call: Span, name: &str, ret: &Ty) {
+        if *ret == Ty::Unit {
+            if self.statement_call != Some(call) {
                 self.error(
-                    call.span,
+                    call,
                     format!(
-                        "'{name}' changes its receiver, so it can only be a statement of its own \
-                         or the value of an assignment"
+                        "'{name}' changes its receiver and returns no value, so it can only be a \
+                         statement of its own"
                     ),
                 );
             }
+        } else if ![self.statement_call, self.assigned_call].contains(&Some(call)) {
+            self.error(
+                call,
+                format!(
+                    "'{name}' changes its receiver, so it can only be a statement of its own or \
+                     the value of an assignment"
+                ),
+            );
+        }
+    }
+
+    /// Returns the function a call of the method `name` on a value of `owner[type_args]`
+    /// calls, and the type arguments of its copy: the struct's for one of its own methods, or
+    /// the value's type, as `Self`, for a trait's default method.
+    fn method_function(&self, owner: &str, type_args: &[Ty], name: &str) -> (String, Vec<Ty>) {
+        let info = &self.struct_methods[owner][name];
+        if !info.default {
+            return (info.function.clone(), type_args.to_vec());
+        }
+        let this = builtin_key_type(owner)
+            .unwrap_or_else(|| Ty::Struct(owner.to_string(), type_args.to_vec()));
+        (info.function.clone(), vec![this])
+    }
+
+    /// Infers a call of the method `name` on `receiver`, whose type is the type parameter
+    /// `param`, through the one trait among its bounds that has the method, and returns its
+    /// result's type. Each copy of the function calls the method of its own type.
+    ///
+    /// For example, in `fn f[T: Shape](x: T) -> float: ret x.area()`, `x.area()` calls
+    /// `Shape.area` with `T` as `Self`.
+    #[allow(clippy::too_many_arguments)]
+    fn infer_trait_call(
+        &mut self,
+        call: &Expr,
+        func: &Expr,
+        receiver: &Expr,
+        param: usize,
+        name: &str,
+        args: &[Expr],
+        arg_types: &[Ty],
+    ) -> Ty {
+        let name_span = Self::attr_span(func, name);
+        let shown = self.type_params[param].name.clone();
+        let traits: Vec<String> = self.type_params[param]
+            .bounds
+            .iter()
+            .filter(|t| self.traits[*t].methods.iter().any(|m| m.name == name))
+            .cloned()
+            .collect();
+        let trait_ = match traits.as_slice() {
+            [trait_] => trait_.clone(),
+            [] => {
+                let mut message = format!(
+                    "values of type '{shown}' have no method '{name}', since '{shown}' may be any \
+                     type"
+                );
+                let mut having: Vec<&String> = self
+                    .traits
+                    .iter()
+                    .filter(|(_, info)| info.methods.iter().any(|m| m.name == name))
+                    .map(|(trait_, _)| trait_)
+                    .collect();
+                having.sort();
+                if let Some(trait_) = having.first() {
+                    let short = struct_display(trait_);
+                    message.push_str(&format!(
+                        " that implements a trait with it, as in '[{shown}: {short}]'"
+                    ));
+                }
+                self.error(name_span, message);
+                return self.fresh();
+            }
+            [first, second, ..] => {
+                self.error(
+                    name_span,
+                    format!(
+                        "'{name}' is a method of both '{}' and '{}', which bound '{shown}', so \
+                         this call could mean either",
+                        struct_display(first),
+                        struct_display(second)
+                    ),
+                );
+                return self.fresh();
+            }
+        };
+        let info = self.traits[&trait_]
+            .methods
+            .iter()
+            .find(|m| m.name == name)
+            .map(|m| (m.symbol, m.changes));
+        let Some((symbol, changes)) = info else {
+            return self.fresh();
+        };
+        self.add_reference(name_span, symbol);
+        let function = format!("{trait_}.{name}");
+        let (mut params, ret) = self.instantiate(call.span, &function, vec![Ty::Param(param)]);
+        params.remove(0);
+        let implementations = self
+            .impls
+            .iter()
+            .filter(|((t, _), _)| *t == trait_)
+            .filter_map(|((_, ty), methods)| Some((ty.clone(), methods.get(name)?.clone())))
+            .collect();
+        self.methods.insert(
+            call.span,
+            Method {
+                function,
+                receiver: true,
+                changes,
+                implementations: Some(implementations),
+            },
+        );
+        self.check_method_args(call, name, &params, arg_types, args);
+        if changes {
+            self.check_changing_call(call.span, name, &ret);
             self.check_change_of(receiver, true);
         }
         ret
@@ -3648,6 +4518,9 @@ impl Inference {
         let name = &deferred.name;
         let (owner, type_args) = match self.shallow(&deferred.value_ty) {
             Ty::Struct(owner, args) => (owner, args),
+            ty if ty_key(&ty).is_some_and(|key| self.struct_methods.contains_key(&key)) => {
+                (ty_key(&ty).unwrap_or_default(), vec![])
+            }
             Ty::Var(_) => {
                 self.error(
                     deferred.receiver.span,
@@ -3674,7 +4547,7 @@ impl Inference {
             return;
         };
         self.add_reference(deferred.name_span, symbol);
-        let function = format!("{owner}.{name}");
+        let (function, type_args) = self.method_function(&owner, &type_args, name);
         let (mut params, ret) = self.instantiate(deferred.call, &function, type_args);
         params.remove(0);
         if changes {
@@ -3710,6 +4583,7 @@ impl Inference {
                 function,
                 receiver: true,
                 changes,
+                implementations: None,
             },
         );
         if params.len() != deferred.args.len() {
@@ -3830,26 +4704,26 @@ impl Inference {
                 for (op, comparator) in ops.iter().zip(comparators) {
                     let ty = self.infer(comparator);
                     self.expect(&prev, &ty, comparator.span);
-                    let (allowed, message): (&'static [Kind], _) = match op {
+                    let message = match op {
                         CompOp::Equal | CompOp::NotEqual => {
                             self.equalities.push((ty.clone(), expr.span));
                             prev = ty;
                             continue;
                         }
                         CompOp::LessThan => {
-                            (ORDERED, "'<' needs int, float, or str operands, found {}")
+                            "'<' needs int, float, str, or a type that implements 'ord', found {}"
                         }
                         CompOp::LessThanEqual => {
-                            (ORDERED, "'<=' needs int, float, or str operands, found {}")
+                            "'<=' needs int, float, str, or a type that implements 'ord', found {}"
                         }
                         CompOp::GreaterThan => {
-                            (ORDERED, "'>' needs int, float, or str operands, found {}")
+                            "'>' needs int, float, str, or a type that implements 'ord', found {}"
                         }
                         CompOp::GreaterThanEqual => {
-                            (ORDERED, "'>=' needs int, float, or str operands, found {}")
+                            "'>=' needs int, float, str, or a type that implements 'ord', found {}"
                         }
                     };
-                    self.require(ty.clone(), allowed, expr.span, message);
+                    self.require_ordered(ty.clone(), expr.span, message);
                     prev = ty;
                 }
                 Ty::Bool
@@ -4305,6 +5179,13 @@ impl Inference {
     ) -> Ty {
         let receiver_ty = self.infer(receiver);
         match self.shallow(&receiver_ty) {
+            // a struct that does not implement `eq` itself compares part by part
+            Ty::Struct(owner, _)
+                if name == "eq"
+                    && !self
+                        .struct_methods
+                        .get(&owner)
+                        .is_some_and(|methods| methods.contains_key(name)) => {}
             Ty::Struct(owner, type_args) => {
                 return self.infer_struct_method(
                     call,
@@ -4315,18 +5196,18 @@ impl Inference {
                     args,
                 );
             }
-            param @ Ty::Param(_) => {
-                for arg in args {
-                    self.infer(arg);
-                }
-                let param = self.show(&param);
-                self.error(
-                    Self::attr_span(func, name),
-                    format!(
-                        "values of type '{param}' have no methods, since '{param}' may be any type"
-                    ),
-                );
-                return self.fresh();
+            Ty::Param(param) => {
+                let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+                return self.infer_trait_call(call, func, receiver, param, name, args, &arg_types);
+            }
+            ty if ty_key(&ty).is_some_and(|key| {
+                self.struct_methods
+                    .get(&key)
+                    .is_some_and(|methods| methods.contains_key(name))
+            }) =>
+            {
+                let key = ty_key(&ty).unwrap_or_default();
+                return self.infer_struct_method(call, func, receiver, (&key, &[]), name, args);
             }
             Ty::Var(_) if !METHODS.contains(&name) => {
                 // as a global a function checked before the global's assignment reads, which
@@ -4458,6 +5339,46 @@ impl Inference {
                     self.unify(&list, &arg_types[0]);
                     self.expect(&list, &receiver_ty, receiver.span);
                 }
+                Ty::Unit
+            }
+            "cmp" => {
+                if args.len() != 1 {
+                    self.arity_error(call.span, name, "1", args.len());
+                } else {
+                    self.expect(&receiver_ty, &arg_types[0], args[0].span);
+                }
+                self.require_ordered(
+                    receiver_ty.clone(),
+                    receiver.span,
+                    "'cmp' needs int, float, str, or a type that implements 'ord', found {}",
+                );
+                Ty::Enum(ORDERING.to_string(), vec![])
+            }
+            "eq" => {
+                if args.len() != 1 {
+                    self.arity_error(call.span, name, "1", args.len());
+                } else {
+                    self.expect(&receiver_ty, &arg_types[0], args[0].span);
+                }
+                self.equalities.push((receiver_ty.clone(), call.span));
+                Ty::Bool
+            }
+            "sort" => {
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                let elem = self.fresh();
+                self.expect(
+                    &Ty::List(Box::new(elem.clone())),
+                    &receiver_ty,
+                    receiver.span,
+                );
+                self.require_ordered(
+                    elem,
+                    receiver.span,
+                    "'sort' needs a list of int, float, str, or a type that implements 'ord', \
+                     found a list of {}",
+                );
                 Ty::Unit
             }
             "is_some" | "is_none" | "unwrap" | "unwrap_or" => {
@@ -4748,10 +5669,13 @@ impl Inference {
                 let message = format!("'==' and '!=' cannot compare {}", self.show(&ty));
                 self.error(span, message);
             }
+            Ty::Param(p) if self.type_params[p].bounds.iter().any(|b| b == EQ) => {}
             Ty::Param(_) => {
                 let name = self.show(&ty);
-                let message =
-                    format!("'==' and '!=' cannot compare {name}, since '{name}' may be any type");
+                let message = format!(
+                    "'==' and '!=' cannot compare {name}, since '{name}' may be any type; to \
+                     compare its values, bound it by 'eq', as in '[{name}: eq]'"
+                );
                 self.error(span, message);
             }
             _ => {
@@ -4776,6 +5700,9 @@ impl Inference {
     /// of every variant of enums, each enum and struct once, by its name in `seen`.
     fn uncomparable(&self, ty: &Ty, seen: &mut HashSet<String>) -> Option<Uncomparable> {
         match self.shallow(ty) {
+            Ty::Param(p) if self.type_params[p].bounds.iter().any(|b| b == EQ) => None,
+            // a struct that implements `eq` compares however it says
+            Ty::Struct(name, _) if self.impls.contains_key(&(EQ.to_string(), name.clone())) => None,
             // a type parameter may be a list or a map
             ty @ (Ty::List(_) | Ty::Map(..) | Ty::Param(_)) => {
                 Some(Uncomparable { ty, field: None })
@@ -4848,6 +5775,7 @@ impl Inference {
         if instances.is_empty() {
             return;
         }
+        self.check_bounds(&instances);
 
         // each type parameter is given to the ones its calls fill in, growing if nested
         let mut edges: Vec<(usize, usize, bool, usize)> = vec![];
@@ -4939,6 +5867,10 @@ impl Inference {
             .map(|(span, _, function, args)| (function.clone(), args.clone(), *span))
             .collect();
         while let Some((function, args, outer)) = pending.pop() {
+            // a trait's method is the type's own for a known type
+            let (function, args) = self
+                .implementation_of(&function, &args)
+                .unwrap_or((function, args));
             if !seen.insert((function.clone(), self.show(&Ty::Tuple(args.clone())))) {
                 continue;
             }
@@ -4967,6 +5899,74 @@ impl Inference {
                 }
             }
         }
+    }
+
+    /// Reports each call of a generic function whose type arguments do not implement the
+    /// traits that bound its type parameters, as `total([1])` does for `fn total[T: Shape]`
+    /// unless `int` implements `Shape`. Inside another generic function, a type argument that
+    /// is its own type parameter must have the bound itself.
+    fn check_bounds(&mut self, instances: &[(Span, Option<String>, String, Vec<Ty>)]) {
+        for (span, _, function, args) in instances {
+            let params = self.functions[function].type_params.clone();
+            for (&q, arg) in params.iter().zip(args) {
+                for bound in self.type_params[q].bounds.clone() {
+                    if self.satisfies(arg, &bound) {
+                        continue;
+                    }
+                    let short = function.rsplit('.').next().unwrap_or(function);
+                    let message = format!(
+                        "'{}' does not implement '{}', which '{short}' needs for '{}'",
+                        self.show(arg),
+                        struct_display(&bound),
+                        self.type_params[q].name
+                    );
+                    self.error(*span, message);
+                }
+            }
+        }
+    }
+
+    /// Returns whether values of type `ty` have the methods of `trait_`: a type parameter if
+    /// it is bounded by the trait, and any other type if it implements it.
+    fn satisfies(&self, ty: &Ty, trait_: &str) -> bool {
+        match self.shallow(ty) {
+            Ty::Param(p) => self.type_params[p].bounds.iter().any(|b| b == trait_),
+            // every type `==` compares part by part
+            ty if trait_ == EQ => {
+                !matches!(ty, Ty::List(_) | Ty::Map(..) | Ty::Unit)
+                    && self.uncomparable(&ty, &mut HashSet::new()).is_none()
+            }
+            Ty::Int | Ty::Float | Ty::Str if trait_ == ORD => true,
+            ty => {
+                ty_key(&ty).is_some_and(|key| self.impls.contains_key(&(trait_.to_string(), key)))
+            }
+        }
+    }
+
+    /// Returns the function that the trait method `function` is for a known type `args[0]`,
+    /// as `Circle.area` is for `Shape.area`, with the type arguments of its copy, or `None` if
+    /// `function` is not a trait's method or the type is not known.
+    fn implementation_of(&self, function: &str, args: &[Ty]) -> Option<(String, Vec<Ty>)> {
+        let (trait_, name) = function.rsplit_once('.')?;
+        if !self.traits.contains_key(trait_) {
+            return None;
+        }
+        let [this] = args else {
+            return None;
+        };
+        let key = ty_key(this)?;
+        let implemented = self.impls.get(&(trait_.to_string(), key))?.get(name)?;
+        if implemented
+            .rsplit_once('.')
+            .is_some_and(|(owner, _)| owner == trait_)
+        {
+            return Some((implemented.clone(), args.to_vec()));
+        }
+        let type_args = match this {
+            Ty::Struct(_, type_args) => type_args.clone(),
+            _ => vec![],
+        };
+        Some((implemented.clone(), type_args))
     }
 
     /// Lists the list elements, map values, and values of generic enums that a value of type
@@ -5162,7 +6162,8 @@ impl Inference {
                 self.unify(&ty, &default);
                 continue;
             };
-            if !constraint.allowed.contains(&kind) {
+            if !constraint.allowed.contains(&kind) && !(constraint.ord && self.satisfies(&ty, ORD))
+            {
                 let message = constraint.message.replace("{}", &self.show(&ty));
                 self.error(constraint.span, message);
             }
@@ -5288,6 +6289,22 @@ impl Inference {
                     args,
                 },
             );
+        }
+        for (trait_, owner) in self.impls.keys() {
+            analysis
+                .implemented
+                .entry(owner.clone())
+                .or_default()
+                .push(trait_.clone());
+        }
+        analysis
+            .implemented
+            .values_mut()
+            .for_each(|traits| traits.sort());
+        for info in &self.type_params {
+            if !info.bounds.is_empty() && self.symbols[info.symbol].kind == SymbolKind::TypeParam {
+                analysis.bounds.insert(info.symbol, info.bounds.clone());
+            }
         }
         for (name, info) in &self.functions {
             if !info.type_params.is_empty() {
@@ -5710,7 +6727,8 @@ impl<'a> AssignmentCheck<'a> {
             | StmtKind::Use { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
-            | StmtKind::ImplDef { .. } => Some(assigned),
+            | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. } => Some(assigned),
         }
     }
 
@@ -5851,6 +6869,7 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Return { .. }
             | StmtKind::Expr { .. }
@@ -6025,6 +7044,7 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>, methods:
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Return { .. }
             | StmtKind::Break
@@ -6123,6 +7143,7 @@ impl ParameterUse<'_> {
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}

@@ -23,8 +23,8 @@ from it.
   returns nothing, so it is always a statement of its own.
 - `items.pop()` removes the last element and returns it as an option, which is `none` if the
   list is empty, and `items.pop(i)` removes and returns the one at `i`.
-  `items.insert(i, value)` puts `value` at `i`, and `items.extend(more)` adds every element of
-  `more` to the end.
+  `items.insert(i, value)` puts `value` at `i`, `items.extend(more)` adds every element of
+  `more` to the end, and `items.sort()` puts a list of numbers or strings in ascending order.
 - `items[start:stop]` is a new list of part of `items`, as in Python.
 - `for item in items:` walks the list in order, as it was when the loop started. If the body
   appends to the list, the loop does not visit the new elements.

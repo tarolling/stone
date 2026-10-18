@@ -6,7 +6,7 @@
 //! it in place. [`live_after`] says which variables are still read after each statement, and
 //! [`last_uses`] which variables a statement uses for the last time.
 
-use crate::ast::{Expr, ExprKind, Stmt, StmtKind, target_names};
+use crate::ast::{CompOp, Expr, ExprKind, Stmt, StmtKind, target_names};
 use crate::checker::collect_assigned;
 use crate::span::Span;
 use crate::stdlib::is_builtin;
@@ -69,7 +69,8 @@ pub(crate) struct Names<'a> {
 }
 
 /// Returns every function `body` defines, with its parameters and body: each top-level `fn`,
-/// and each function of an `impl` block, named by its struct's name, a dot, and its own name.
+/// and each function of an `impl` block or a trait, named by its struct's or trait's name, a
+/// dot, and its own name.
 fn functions(body: &[Stmt]) -> Vec<(String, &crate::ast::Arguments, &[Stmt])> {
     let mut functions = vec![];
     for stmt in body {
@@ -78,6 +79,11 @@ fn functions(body: &[Stmt]) -> Vec<(String, &crate::ast::Arguments, &[Stmt])> {
                 name, args, body, ..
             } => functions.push((name.clone(), args, body.as_slice())),
             StmtKind::ImplDef {
+                name: owner,
+                methods,
+                ..
+            }
+            | StmtKind::TraitDef {
                 name: owner,
                 methods,
                 ..
@@ -168,10 +174,15 @@ pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalRe
     reads
 }
 
-/// Returns whether `name` is the name of a function of an `impl` block in `body`.
+/// Returns whether `name` is the name of a function of an `impl` block or a trait in `body`.
 fn is_method(body: &[Stmt], name: &str) -> bool {
     body.iter().any(|stmt| match &stmt.kind {
         StmtKind::ImplDef {
+            name: owner,
+            methods,
+            ..
+        }
+        | StmtKind::TraitDef {
             name: owner,
             methods,
             ..
@@ -230,6 +241,7 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Names<'a>) {
         | StmtKind::EnumDef { .. }
         | StmtKind::StructDef { .. }
         | StmtKind::ImplDef { .. }
+        | StmtKind::TraitDef { .. }
         | StmtKind::Use { .. }
         | StmtKind::Break
         | StmtKind::Continue => {}
@@ -270,8 +282,17 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
             }
         }
         ExprKind::Compare {
-            left, comparators, ..
+            left,
+            ops,
+            comparators,
         } => {
+            // a struct may compare with its own `eq` and order with its `cmp`
+            for op in ops {
+                out.methods.push(match op {
+                    CompOp::Equal | CompOp::NotEqual => "eq",
+                    _ => "cmp",
+                });
+            }
             expr_names(left, out);
             comparators.iter().for_each(|value| expr_names(value, out));
         }
@@ -282,6 +303,10 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
         } => {
             if let ExprKind::Attribute { attr, .. } = &func.kind {
                 out.methods.push(attr);
+                // a list of a struct sorts by its `cmp`
+                if attr == "sort" {
+                    out.methods.push("cmp");
+                }
             }
             expr_names(func, out);
             args.iter().for_each(|arg| expr_names(arg, out));
@@ -477,6 +502,7 @@ impl Liveness<'_> {
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. }
             | StmtKind::Use { .. } => out,
         }
     }
@@ -715,6 +741,23 @@ mod tests {
         assert_eq!(reads["S.get"], HashSet::from(["xs".to_string()]));
         assert_eq!(reads["f"], HashSet::from(["xs".to_string()]));
         assert!(reads["g"].is_empty());
+    }
+
+    #[test]
+    fn comparing_and_sorting_read_the_globals_eq_and_cmp_read() {
+        let source = "struct V:\n    n: int\nimpl ord for V:\n    fn cmp(self, other: Self) -> \
+                      ordering:\n        ret ws[0].cmp(other.n)\nimpl eq for V:\n    \
+                      fn eq(self, other: Self) -> bool:\n        ret ys[0] == 1\n\
+                      fn lt(a: V, b: V) -> bool:\n    ret a < b\nfn same(a: V, b: V) -> bool:\n    \
+                      ret a == b\nfn sorted(vs: list[V]) -> list[V]:\n    vs.sort()\n    ret vs\n\
+                      ws = [1]\nys = [1]\n";
+        let module = parse(source).unwrap();
+        let crate::ast::Mod::Module { body } = &module;
+        let globals = HashSet::from(["ws".to_string(), "ys".to_string()]);
+        let reads = global_reads(body, &globals);
+        assert_eq!(reads["lt"], HashSet::from(["ws".to_string()]));
+        assert_eq!(reads["same"], HashSet::from(["ys".to_string()]));
+        assert_eq!(reads["sorted"], HashSet::from(["ws".to_string()]));
     }
 
     #[test]

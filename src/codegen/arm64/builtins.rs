@@ -7,6 +7,7 @@
 //! The float text routines and `stone.fmod` are in `floats.rs`.
 
 use super::emit::CALLER_SAVED;
+use super::sort::sort_runtime;
 use super::{address, pop_frame, push_frame};
 use crate::codegen::context::{CPU_ONLINE, PATH_BUFFER, UTSNAME_FIELD, UTSNAME_SIZE};
 use crate::codegen::context::{
@@ -1415,9 +1416,12 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
 /// - `stone.list_reuse` takes a reference to list `x0`, whose elements are not counted, and
 ///   returns it if nothing else refers to it, for arithmetic to write its result over. Otherwise
 ///   it drops the reference and returns a new list of length `x1` from `stone.list_new`.
+/// - `stone.list_sort_int`, `stone.list_sort_float`, and `stone.list_sort_str` sort list `x0`
+///   (see [`sort_runtime`]).
 ///
 /// [`LIST_ROUTINES`]: crate::codegen::context::LIST_ROUTINES
 pub fn list_methods(r#gen: &mut dyn AssemblyGenerator, labels: &[&str]) {
+    sort_runtime(r#gen, labels);
     if labels.contains(&"stone.list_slice") {
         list_slice(r#gen);
     }

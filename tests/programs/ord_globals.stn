@@ -1,0 +1,34 @@
+// a cmp that reads a global keeps it from moving into a call that sorts, compares, or orders
+
+rank = [30, 10, 20]
+
+struct P:
+    k: int
+
+impl ord for P:
+    fn cmp(self, other: Self) -> ordering:
+        ret rank[self.k].cmp(rank[other.k])
+
+impl eq for P:
+    fn eq(self, other: Self) -> bool:
+        ret rank[self.k] == rank[other.k]
+
+fn sorted_with(xs: list[int]) -> list[int]:
+    ps = [P(k=0), P(k=1), P(k=2)]
+    ps.sort()
+    for p in ps:
+        xs.append(p.k)
+    ret xs
+
+fn least_with(xs: list[int]) -> list[int]:
+    if P(k=1) < P(k=2):
+        xs.append(1)
+    if P(k=0) == P(k=0):
+        xs.append(0)
+    ret xs
+
+// each call reads rank through cmp or eq while it changes the list it was given
+rank = sorted_with(rank)
+print(rank)
+rank = least_with(rank)
+print(rank)

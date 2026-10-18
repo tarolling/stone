@@ -1,0 +1,17 @@
+// a library trait, with a bounded function, and an impl for a builtin type in the trait's file
+
+pub trait Shape:
+    fn area(self) -> int
+    fn label(self) -> str:
+        ret "shape of area " + str(self.area())
+
+pub fn total[T: Shape](xs: list[T]) -> int:
+    t = 0
+    for x in xs:
+        t += x.area()
+    ret t
+
+// an int is a square of that side
+impl Shape for int:
+    fn area(self) -> int:
+        ret self * self

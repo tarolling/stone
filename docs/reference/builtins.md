@@ -228,6 +228,33 @@ xs.extend(xs)
 print(xs)   // [1, 2, 3, 4, 1, 2, 3, 4]
 ```
 
+### `sort`
+
+```text
+list[T].sort()
+```
+
+Puts the elements of a list of `int`, `float`, `str`, or a type that implements `ord` in
+ascending order, in place. Strings compare byte by byte, so `"Z"` comes before `"a"` and a prefix
+before the longer string. Floats go in the order `-inf`, the negative numbers, `-0.0`, `0.0`, the
+positive numbers, `inf`, then every `nan`, so no two values a program can tell apart tie and the
+result never depends on how the list was sorted. Values of a struct that implements `ord` go in
+the order its `cmp` gives, and values it finds equal keep the order they were in. It is a
+statement of its own; to keep the list as it was, sort a copy (`ys = xs`, then `ys.sort()`).
+
+```stone
+xs = [3.5, -1.0, 0.0, -0.0]
+xs.sort()
+print(xs)   // [-1.0, -0.0, 0.0, 3.5]
+```
+
+Compiled programs sort a list that is already in order, or in reverse order, in one pass. Long
+lists of ints or floats are sorted by radix, a pass per byte in which the values differ, after
+subtracting the smallest, so ints from a small range take one or two passes; this borrows memory
+as large as the list until it is done. Other lists of numbers and strings use a quicksort that
+never takes more than `n log n` time. A list of a struct is sorted by a merge sort written in
+stone in the prelude, which calls `cmp` about `n log n` times.
+
 ### `strip`
 
 ```text
@@ -385,6 +412,35 @@ Returns `some` of the value of `key`'s entry, or `none` if the map has no entry 
 ages = {"ann": 31}
 print(ages.get("ann"), ages.get("bob"))   // some(31) none
 print(ages.get("bob").unwrap_or(0))      // 0
+```
+
+### `eq`
+
+```text
+T.eq(other: T) -> bool
+```
+
+Returns whether two values are equal, as `==` does, for any type that implements the trait
+`eq`: every type `==` compares part by part, and a struct whose `impl eq` block says what equal
+means for it.
+
+```stone
+print(3.eq(3), (1, "a").eq((1, "b")))   // true false
+```
+
+### `cmp`
+
+```text
+T.cmp(other: T) -> ordering
+```
+
+Returns `less`, `equal`, or `greater` as the value comes before, with, or after `other`, for any
+type that implements the trait `ord`: `int`, `float`, `str`, and a struct with an `impl ord`
+block. Floats are in the order `sort` uses, so unlike `<`, `cmp` puts `-0.0` before `0.0` and
+`nan` after every other float, with all `nan`s equal.
+
+```stone
+print(1.cmp(2), "b".cmp("a"), (-0.0).cmp(0.0))   // less greater less
 ```
 
 ## The `os` module

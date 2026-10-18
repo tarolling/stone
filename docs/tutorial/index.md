@@ -17,6 +17,7 @@ lists
 structs
 enums
 generics
+traits
 input
 modules
 errors

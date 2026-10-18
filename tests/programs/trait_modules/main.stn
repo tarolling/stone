@@ -1,0 +1,23 @@
+use shapes.core
+use shapes.core.Shape
+use shapes.square.Square
+use rect
+
+struct Tri:
+    b: int
+    h: int
+
+impl Shape for Tri:
+    fn area(self) -> int:
+        ret self.b * self.h / 2
+
+fn both[T: core.Shape + rect.Named](x: T) -> str:
+    ret x.name() + " " + x.label()
+
+squares = [Square(side=2), Square(side=3)]
+print(core.total(squares))
+print(core.total([Tri(b=4, h=3)]))
+print(core.total([1, 2, 3]))
+print(squares[0].label(), Tri(b=1, h=2).label(), 5.label())
+print(rect.names(squares))
+print(both(squares[1]))

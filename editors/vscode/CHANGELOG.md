@@ -10,6 +10,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Traits in `stone-lsp`: hover shows `trait Shape` with its methods, a trait's method as
+  `fn Shape.area(self) -> float`, and a bounded type parameter as `(type parameter) T: Shape`; a
+  generic function's signature shows its bounds, as in `fn total[T: Shape](xs: list[T])`. A trait
+  is outlined with its methods, a call through a bound leads to the trait's method, and
+  completion after a value of a bounded type parameter offers its traits' methods, and after a
+  struct value the default methods of the traits it implements.
+- Highlighting of `trait`, `Self`, and the prelude's `less`, `equal`, and `greater`.
+
 ## [0.3.0] - 2026-10-17
 
 ### Added

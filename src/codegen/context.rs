@@ -11,7 +11,7 @@ use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::{Callee, Inst, Program};
 use crate::diagnostic::Severity;
 use crate::project::SourceMap;
-use crate::span::Span;
+use crate::span::{FileId, Span};
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 /// Runtime routines for list methods and slices, which `builtins::list_methods` emits in each
@@ -22,6 +22,9 @@ pub const LIST_ROUTINES: &[&str] = &[
     "stone.list_insert",
     "stone.list_extend",
     "stone.list_reuse",
+    "stone.list_sort_int",
+    "stone.list_sort_float",
+    "stone.list_sort_str",
 ];
 
 /// The runtime routines behind maps, which each backend's `builtins::map_runtime` emits when the
@@ -172,6 +175,25 @@ pub const LARGEST_CLASS: i64 = 16;
 
 /// The size of each region the allocator maps to cut small blocks from.
 pub const HEAP_REGION: i64 = 1 << 20;
+
+/// `sort` puts lists of up to this many elements in order by insertion, which beats
+/// partitioning them further.
+pub const SORT_INSERTION_MAX: i64 = 24;
+
+/// `sort` puts a list of ints or floats in order by radix, a pass per byte its keys differ in,
+/// instead of by quicksort, once it has at least `SORT_RADIX_FACTOR * bytes * bytes` elements,
+/// and so borrows a buffer as long as the list. Each byte costs a pass over the list as well as
+/// a fixed amount, so a short list pays only for few bytes: 200 ints between -1000 and 1000 (2
+/// bytes) go to radix, but 200 random ints (8 bytes) to quicksort.
+pub const SORT_RADIX_FACTOR: i64 = 12;
+
+/// `sort` splits a list of at least this many ints or floats by its highest byte before sorting
+/// each part by its other bytes, so each part fits in a cache while it is sorted.
+pub const SORT_SPLIT_MIN: i64 = 1 << 16;
+
+/// When `sort` has split a list, it sorts the parts shorter than this by insertion and quicksort
+/// rather than by radix.
+pub const SORT_PART_MIN: i64 = 128;
 
 /// The size of the buffer compiled programs read stdin into, one `read` syscall at a time.
 pub const STDIN_BUFFER: i64 = 1 << 16;
@@ -481,7 +503,13 @@ impl Context {
     /// function is called with, which its copy's values have.
     fn types(&self) -> impl Iterator<Item = &Type> {
         let instances = self.analysis.instances.values().flat_map(|i| &i.args);
-        self.analysis.types.values().chain(instances)
+        // the prelude's code runs only for values the program's own code has
+        self.analysis
+            .types
+            .iter()
+            .filter(|(span, _)| span.file != FileId::PRELUDE)
+            .map(|(_, ty)| ty)
+            .chain(instances)
     }
 
     /// Returns whether the program needs the string runtime.
@@ -773,7 +801,7 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
                 collect_calls_from_stmt(s, calls);
             }
         }
-        StmtKind::ImplDef { methods, .. } => {
+        StmtKind::ImplDef { methods, .. } | StmtKind::TraitDef { methods, .. } => {
             for s in methods {
                 collect_calls_from_stmt(s, calls);
             }

@@ -41,16 +41,16 @@ use crate::ast::{
     Stmt, StmtKind, UnaryOp, constant_int,
 };
 use crate::checker::{
-    Analysis, Enums, Instance, Method, Methods, Step, Structs, SymbolKind, Type, collect_assigned,
-    collect_changed, place, place_root, place_spans, range_args, struct_display, variant_display,
-    variants,
+    Analysis, EQ, Enums, Instance, Method, Methods, ORD, Step, Structs, SymbolKind, Type,
+    collect_assigned, collect_changed, place, place_root, place_spans, range_args, struct_display,
+    variant_display, variants,
 };
 use crate::codegen::context::module_routine;
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::Span;
 use crate::stdlib::{
-    COMPARE_DEPTH, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRINT_DEPTH,
-    SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_NONE, math, random,
+    COMPARE_DEPTH, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE,
+    PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_NONE, math, random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -75,6 +75,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         methods,
         instances,
         type_params,
+        implemented,
         ..
     } = analysis;
 
@@ -92,6 +93,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
                     | SymbolKind::Struct
                     | SymbolKind::Field
                     | SymbolKind::Method
+                    | SymbolKind::Trait
                     | SymbolKind::TypeParam
             )
         })
@@ -135,6 +137,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         structs,
         methods,
         instances,
+        implemented,
         helpers: RefCell::new(Vec::new()),
         requested: RefCell::new(Vec::new()),
     };
@@ -177,6 +180,21 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
                         }
                         let lowerer = Lowerer::new(&context, Some(function));
                         functions.push(lowerer.function(&args.args, body)?);
+                    }
+                }
+            }
+            // a trait's default methods are generic over `Self`, and the others have no body
+            StmtKind::TraitDef { name, methods, .. } => {
+                for method in methods {
+                    if let StmtKind::FunctionDef {
+                        name: method,
+                        args,
+                        body,
+                        ..
+                    } = &method.kind
+                        && !body.is_empty()
+                    {
+                        generic.insert(format!("{name}.{method}"), (&args.args, body));
                     }
                 }
             }
@@ -299,6 +317,9 @@ struct Context<'a> {
     methods: &'a Methods,
     /// The type arguments of every call of a generic function, by the call's span.
     instances: &'a HashMap<Span, Instance>,
+    /// The traits each type implements, by the type's linked name, which say whether a struct
+    /// compares and orders by methods of its own.
+    implemented: &'a HashMap<String, Vec<String>>,
     /// Each copy of a generic function some code calls, in the order it was first called.
     requested: RefCell<Vec<Instance>>,
     /// Each helper some code calls, in the order it was first called: one that prints values of
@@ -350,6 +371,9 @@ struct Lowerer<'a> {
     /// The type of each variable of a copy of a generic function, with its type parameters
     /// filled in, including one for each value of a tuple or struct.
     instance_variables: HashMap<String, Type>,
+    /// The label a call through a bound resolved to in this copy, by the call's span, which
+    /// [`Lowerer::callee_label`] gives instead of the trait's method.
+    dispatched: Option<(Span, String)>,
     /// Each local's vreg. Empty in `main`, where assigned names are globals.
     locals: HashMap<String, VReg>,
     /// The locals that own a reference, which are released when the function returns.
@@ -404,6 +428,7 @@ impl<'a> Lowerer<'a> {
             name,
             substitution: HashMap::new(),
             instance_variables: HashMap::new(),
+            dispatched: None,
             locals: HashMap::new(),
             counted_locals: Vec::new(),
             owned: HashMap::new(),
@@ -469,6 +494,11 @@ impl<'a> Lowerer<'a> {
     /// for a generic function the label of its copy for the call's types, which this asks
     /// lowering to make.
     fn callee_label(&self, name: &str, call: Span) -> String {
+        if let Some((span, label)) = &self.dispatched
+            && *span == call
+        {
+            return label.clone();
+        }
         let Some(instance) = self.context.instances.get(&call) else {
             return name.to_string();
         };
@@ -476,6 +506,12 @@ impl<'a> Lowerer<'a> {
             function: instance.function.clone(),
             args: instance.args.iter().map(|a| self.fill(a)).collect(),
         };
+        self.request(instance)
+    }
+
+    /// Returns the label of the copy `instance` of a generic function, asking lowering to make
+    /// it.
+    fn request(&self, instance: Instance) -> String {
         let label = instance_label(&instance.function, &instance.args);
         let mut requested = self.context.requested.borrow_mut();
         if !requested.contains(&instance) {
@@ -712,6 +748,7 @@ impl<'a> Lowerer<'a> {
             if leaves.is_empty() {
                 continue;
             }
+            let compared: Vec<Compared> = fields.iter().flat_map(|f| self.compared(f)).collect();
             let (this, next) = (self.new_block(), self.new_block());
             self.terminate(Terminator::CmpBranch {
                 cond: Cond::Eq,
@@ -725,7 +762,7 @@ impl<'a> Lowerer<'a> {
             // comparing changes nothing, so the values are borrowed
             let lhs = self.field_values(Operand::Reg(a), 0, leaves.len());
             let rhs = self.field_values(Operand::Reg(b), 0, leaves.len());
-            self.equal_leaves(&leaves, &lhs, &rhs, equal, differ);
+            self.equal_leaves(&compared, &lhs, &rhs, equal, differ);
             self.start(next);
         }
         self.jump(equal);
@@ -762,31 +799,120 @@ impl<'a> Lowerer<'a> {
         then: BlockId,
         otherwise: BlockId,
     ) {
-        let leaves = self.leaves(ty);
-        self.equal_leaves(&leaves, lhs, rhs, then, otherwise);
+        let compared = self.compared(ty);
+        self.equal_leaves(&compared, lhs, rhs, then, otherwise);
+    }
+
+    /// Returns whether the struct type `ty` implements the trait `name`, as `eq` or `ord`.
+    fn implements(&self, ty: &Type, name: &str) -> bool {
+        let Type::Struct { name: owner, .. } = ty else {
+            return false;
+        };
+        self.context
+            .implemented
+            .get(owner)
+            .is_some_and(|traits| traits.iter().any(|t| t == name))
+    }
+
+    /// Returns what `==` compares in turn for values of type `ty`, in the order of their values:
+    /// each value on its own, except the values of a struct that implements `eq`, which its
+    /// `eq` compares together.
+    fn compared(&self, ty: &Type) -> Vec<Compared> {
+        if self.implements(ty, EQ) {
+            return vec![Compared::Custom(ty.clone(), self.leaves(ty).len())];
+        }
+        match ty {
+            Type::Tuple(fields) => fields.iter().flat_map(|f| self.compared(f)).collect(),
+            Type::Struct { .. } => ty
+                .struct_fields(self.context.structs)
+                .iter()
+                .flat_map(|(_, f)| self.compared(f))
+                .collect(),
+            _ => vec![Compared::Value(ty.clone())],
+        }
+    }
+
+    /// Calls the method `name` of the struct type `ty`, which takes its values `lhs` as `self`
+    /// and `rhs` as its other value, borrowing both unless it owns them, as `eq` and `cmp` do,
+    /// and returns its result.
+    fn compare_call(&mut self, ty: &Type, name: &str, lhs: &[Operand], rhs: &[Operand]) -> VReg {
+        let Type::Struct { name: owner, args } = ty else {
+            unreachable!("only a struct has its own '{name}'")
+        };
+        let function = format!("{owner}.{name}");
+        let label = match args.is_empty() {
+            true => function.clone(),
+            false => self.request(Instance {
+                function: function.clone(),
+                args: args.clone(),
+            }),
+        };
+        // a parameter it assigns is its own, so it gets a reference
+        let owned = self
+            .context
+            .owned_params
+            .get(&function)
+            .cloned()
+            .unwrap_or_default();
+        let kinds: Vec<Option<RcKind>> = self.leaves(ty).iter().map(RcKind::of).collect();
+        for (i, values) in [lhs, rhs].into_iter().enumerate() {
+            if owned.get(i) == Some(&true) {
+                for (&value, kind) in values.iter().zip(&kinds) {
+                    if kind.is_some() {
+                        self.push(Inst::Retain { src: value });
+                    }
+                }
+            }
+        }
+        let result = self.fresh();
+        self.push(Inst::Call {
+            dsts: vec![result],
+            callee: Callee::User(label),
+            args: lhs.iter().chain(rhs).copied().collect(),
+        });
+        result
     }
 
     /// Jumps to `then` if each of `lhs` equals the one of `rhs` in the same place, where each
-    /// pair is of the type in `leaves`, and to `otherwise` at the first pair that differs:
-    /// numbers and bools compare directly, strings by their contents, and enum values through a
-    /// comparer made for their type.
+    /// pair is what `compared` says, and to `otherwise` at the first pair that differs:
+    /// numbers and bools compare directly, strings by their contents, enum values through a
+    /// comparer made for their type, and the values of a struct that implements `eq` by its
+    /// `eq`.
     fn equal_leaves(
         &mut self,
-        leaves: &[Type],
+        compared: &[Compared],
         lhs: &[Operand],
         rhs: &[Operand],
         then: BlockId,
         otherwise: BlockId,
     ) {
-        if leaves.is_empty() {
+        if compared.is_empty() {
             self.jump(then);
             return;
         }
-        for (k, leaf) in leaves.iter().enumerate() {
-            let next = if k + 1 < leaves.len() {
+        let mut k = 0;
+        for (i, part) in compared.iter().enumerate() {
+            let next = if i + 1 < compared.len() {
                 self.new_block()
             } else {
                 then
+            };
+            let leaf = match part {
+                Compared::Custom(ty, count) => {
+                    let range = k..k + count;
+                    let equal = self.compare_call(ty, "eq", &lhs[range.clone()], &rhs[range]);
+                    self.terminate(Terminator::Branch {
+                        cond: Operand::Reg(equal),
+                        then: next,
+                        otherwise,
+                    });
+                    k += count;
+                    if next != then {
+                        self.start(next);
+                    }
+                    continue;
+                }
+                Compared::Value(leaf) => leaf,
             };
             match leaf {
                 Type::Str => {
@@ -820,6 +946,7 @@ impl<'a> Lowerer<'a> {
                     otherwise,
                 }),
             }
+            k += 1;
             if next != then {
                 self.start(next);
             }
@@ -1454,7 +1581,7 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            StmtKind::FunctionDef { .. } | StmtKind::ImplDef { .. } => {
+            StmtKind::FunctionDef { .. } | StmtKind::ImplDef { .. } | StmtKind::TraitDef { .. } => {
                 return Err("functions must be defined at the top level".to_string());
             }
             StmtKind::EnumDef { .. } | StmtKind::StructDef { .. } => {}
@@ -2571,6 +2698,10 @@ impl<'a> Lowerer<'a> {
                 ops,
                 comparators,
             } if ops.len() == 1
+                && matches!(
+                    ops[0],
+                    crate::ast::CompOp::Equal | crate::ast::CompOp::NotEqual
+                )
                 && self
                     .type_of(&comparators[0])
                     .is_ok_and(|ty| is_compound(&ty)) =>
@@ -3450,6 +3581,33 @@ impl<'a> Lowerer<'a> {
             let (lhs, rhs) = (lhs_values[0], rhs_values[0]);
             let cond = Cond::from(op);
             match self.type_of(comparator)? {
+                // ordered by its `cmp`, whose ordering's tag says which comes first
+                ty if !matches!(cond, Cond::Eq | Cond::Ne) && self.implements(&ty, ORD) => {
+                    let order = self.compare_call(&ty, "cmp", &lhs_values, &rhs_values);
+                    let tag = self.fresh();
+                    self.push(Inst::EnumTag {
+                        dst: tag,
+                        value: Operand::Reg(order),
+                    });
+                    // `less` is 0, `equal` 1, and `greater` 2
+                    let (cond, against) = match cond {
+                        Cond::Lt => (Cond::Eq, 0),
+                        Cond::Le => (Cond::Ne, 2),
+                        Cond::Gt => (Cond::Eq, 2),
+                        _ => (Cond::Ne, 0),
+                    };
+                    self.push(Inst::Compare {
+                        cond,
+                        float: false,
+                        dst: result,
+                        lhs: Operand::Reg(tag),
+                        rhs: Operand::Imm(against),
+                    });
+                    self.push(Inst::Release {
+                        src: Operand::Reg(order),
+                        kind: RcKind::Enum,
+                    });
+                }
                 // compared value by value, which only == and != do
                 ty if is_compound(&ty) => {
                     let (yes, no, join) = (self.new_block(), self.new_block(), self.new_block());
@@ -3546,6 +3704,112 @@ impl<'a> Lowerer<'a> {
         Ok(self.finish(Operand::Reg(result), into))
     }
 
+    /// Makes the ordering `lhs.cmp(rhs)` gives for two ints, floats, or strings, of type `ty`:
+    /// `less`, `equal`, or `greater`, the static variants with tags 0, 1, and 2. Floats are in
+    /// the order `sort` uses: nan after every other float, all nans equal, and `-0.0` before
+    /// `0.0`, which compare equal, so their sign bits decide.
+    fn ordering(
+        &mut self,
+        ty: &Type,
+        lhs: Operand,
+        rhs: Operand,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let dst = self.dst(into);
+        let blocks = [self.new_block(), self.new_block(), self.new_block()];
+        let end = self.new_block();
+        let [less, equal, greater] = blocks;
+        let branch = |this: &mut Self, cond, float, lhs, rhs, then, otherwise| {
+            this.terminate(Terminator::CmpBranch {
+                cond,
+                float,
+                lhs,
+                rhs,
+                then,
+                otherwise,
+            });
+        };
+        match ty {
+            Type::Int => {
+                let not_less = self.new_block();
+                branch(self, Cond::Lt, false, lhs, rhs, less, not_less);
+                self.start(not_less);
+                branch(self, Cond::Gt, false, lhs, rhs, greater, equal);
+            }
+            Type::Str => {
+                let order = self.runtime_call("stone.str_cmp", vec![lhs, rhs], None);
+                let not_less = self.new_block();
+                branch(
+                    self,
+                    Cond::Lt,
+                    false,
+                    order,
+                    Operand::Imm(0),
+                    less,
+                    not_less,
+                );
+                self.start(not_less);
+                branch(
+                    self,
+                    Cond::Gt,
+                    false,
+                    order,
+                    Operand::Imm(0),
+                    greater,
+                    equal,
+                );
+            }
+            Type::Float => {
+                let names = [(); 6].map(|_| self.new_block());
+                let [
+                    lhs_nan,
+                    lhs_number,
+                    not_less,
+                    same,
+                    lhs_negative,
+                    lhs_positive,
+                ] = names;
+                // nan is the only float unequal to itself
+                branch(self, Cond::Ne, true, lhs, lhs, lhs_nan, lhs_number);
+                self.start(lhs_nan);
+                branch(self, Cond::Ne, true, rhs, rhs, equal, greater);
+                self.start(lhs_number);
+                let rhs_number = self.new_block();
+                branch(self, Cond::Ne, true, rhs, rhs, less, rhs_number);
+                self.start(rhs_number);
+                branch(self, Cond::Lt, true, lhs, rhs, less, not_less);
+                self.start(not_less);
+                branch(self, Cond::Gt, true, lhs, rhs, greater, same);
+                // equal numbers, which only zeros' sign bits tell apart, read as ints
+                self.start(same);
+                branch(
+                    self,
+                    Cond::Lt,
+                    false,
+                    lhs,
+                    Operand::Imm(0),
+                    lhs_negative,
+                    lhs_positive,
+                );
+                self.start(lhs_negative);
+                branch(self, Cond::Lt, false, rhs, Operand::Imm(0), equal, less);
+                self.start(lhs_positive);
+                branch(self, Cond::Lt, false, rhs, Operand::Imm(0), greater, equal);
+            }
+            other => return Err(format!("cannot order {other}")),
+        }
+        for (tag, block) in blocks.into_iter().enumerate() {
+            self.start(block);
+            self.push(Inst::VariantStatic { dst, tag });
+            self.push(Inst::Retain {
+                src: Operand::Reg(dst),
+            });
+            self.jump(end);
+        }
+        self.start(end);
+        Ok(Operand::Reg(dst))
+    }
+
     /// Lowers the method call `receiver.name(args)`, evaluating the receiver before the arguments
     /// like the interpreter. Its result is counted as `kind`.
     ///
@@ -3560,6 +3824,41 @@ impl<'a> Lowerer<'a> {
         kind: Option<RcKind>,
     ) -> Result<Operand, String> {
         match name {
+            "cmp" => {
+                let ty = self.type_of(receiver)?;
+                let lhs = self.expr(receiver)?;
+                let rhs = self.expr(&args[0])?;
+                let order = self.ordering(&ty, lhs, rhs, into)?;
+                self.release_temp(lhs);
+                self.release_temp(rhs);
+                self.own(order, Some(RcKind::Enum));
+                Ok(order)
+            }
+            // a type that compares part by part compares as `==` does
+            "eq" => {
+                let ty = self.type_of(receiver)?;
+                let lhs = self.expr_flat(receiver)?;
+                let rhs = self.expr_flat(&args[0])?;
+                let (yes, no, join) = (self.new_block(), self.new_block(), self.new_block());
+                let result = self.dst(into);
+                self.equal_branch(&ty, &lhs, &rhs, yes, no);
+                self.start(yes);
+                self.push(Inst::Copy {
+                    dst: result,
+                    src: Operand::Imm(1),
+                });
+                self.jump(join);
+                self.start(no);
+                self.push(Inst::Copy {
+                    dst: result,
+                    src: Operand::Imm(0),
+                });
+                self.start(join);
+                for value in lhs.into_iter().chain(rhs) {
+                    self.release_temp(value);
+                }
+                Ok(self.finish(Operand::Reg(result), into))
+            }
             "is_some" | "is_none" => {
                 let option = self.expr(receiver)?;
                 let tag = self.fresh();
@@ -3718,6 +4017,42 @@ impl<'a> Lowerer<'a> {
                     args: vec![list, other],
                 });
                 self.release_temp(other);
+                Ok(self.finish(Operand::Imm(0), into))
+            }
+            "sort" => {
+                // sorting only moves the elements, so their counts stay as they are
+                let label = match self.span_type(receiver.span) {
+                    Some(Type::List(elem)) => match *elem {
+                        Type::Int => "stone.list_sort_int",
+                        Type::Float => "stone.list_sort_float",
+                        Type::Str => "stone.list_sort_str",
+                        // others sort by their `cmp`, in the prelude's sort, which moves the
+                        // list in and gives it back sorted, as a method changing `self` does
+                        other => {
+                            let label = self.request(Instance {
+                                function: PRELUDE_SORT.to_string(),
+                                args: vec![other],
+                            });
+                            self.dispatched = Some((receiver.span, label));
+                            self.changing_call(
+                                (PRELUDE_SORT, receiver.span),
+                                receiver,
+                                &[],
+                                None,
+                                &[],
+                            )?;
+                            return Ok(self.finish(Operand::Imm(0), into));
+                        }
+                    },
+                    _ => return Err("sort() is called on a list".to_string()),
+                };
+                let indexes = self.place_indexes(receiver)?;
+                let list = self.unique_place(receiver, &indexes)?;
+                self.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Runtime(label),
+                    args: vec![list],
+                });
                 Ok(self.finish(Operand::Imm(0), into))
             }
             "strip" | "split" => {
@@ -4282,7 +4617,39 @@ impl<'a> Lowerer<'a> {
         into: Option<VReg>,
     ) -> Result<Vec<Operand>, String> {
         let kinds = self.leaf_kinds(call)?;
-        let function = method.function.as_str();
+        let function = match &method.implementations {
+            // through a bound, the receiver's type in this copy picks the method
+            Some(_) => {
+                let ty = self
+                    .span_type(receiver.span)
+                    .ok_or("receiver has no type")?;
+                // a number, a string, or a type compared part by part has the builtin method
+                if matches!(method.function.as_str(), "eq.eq" | "ord.cmp")
+                    && method.resolve(&ty).is_none()
+                {
+                    let name = method.function.rsplit('.').next().unwrap_or_default();
+                    let value = self.method(receiver, name, args, into, kinds[0])?;
+                    return Ok(vec![value]);
+                }
+                let (function, args) = method.resolve(&ty).ok_or_else(|| {
+                    format!(
+                        "'{ty}' does not implement the trait of '{}'",
+                        method.function
+                    )
+                })?;
+                let label = match args.is_empty() {
+                    true => function.clone(),
+                    false => self.request(Instance {
+                        function: function.clone(),
+                        args,
+                    }),
+                };
+                self.dispatched = Some((call.span, label));
+                function
+            }
+            None => method.function.clone(),
+        };
+        let function = function.as_str();
         if !method.receiver {
             return self.user_call(function, call.span, args, into, &kinds);
         }
@@ -5597,6 +5964,11 @@ fn owned_params(body: &[Stmt], methods: &Methods) -> HashMap<String, Vec<bool>> 
                 name: owner,
                 methods: defs,
                 ..
+            }
+            | StmtKind::TraitDef {
+                name: owner,
+                methods: defs,
+                ..
             } => {
                 for def in defs {
                     if let StmtKind::FunctionDef {
@@ -5611,6 +5983,13 @@ fn owned_params(body: &[Stmt], methods: &Methods) -> HashMap<String, Vec<bool>> 
         }
     }
     owned
+}
+
+/// What `==` compares in turn, from [`Lowerer::compared`]: one value, or the values of a struct
+/// that implements `eq`, which its `eq` compares, with how many there are.
+enum Compared {
+    Value(Type),
+    Custom(Type, usize),
 }
 
 /// Arithmetic on lists with its operands evaluated, from [`Lowerer::fused`].

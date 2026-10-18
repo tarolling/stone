@@ -48,7 +48,7 @@
       }
     },
     "struct-definition": {
-      "match": "\\b(struct|impl)\\s+([A-Za-z_][A-Za-z0-9_]*)",
+      "match": "\\b(struct|impl|trait)\\s+([A-Za-z_][A-Za-z0-9_]*)",
       "captures": {
         "1": { "name": "storage.type.struct.stone" },
         "2": { "name": "entity.name.type.struct.stone" }
@@ -65,7 +65,7 @@
       "patterns": [
         {
           "name": "variable.language.self.stone",
-          "match": "\\bself\\b"
+          "match": "\\b(self|Self)\\b"
         },
         {
           "match": "\\b(use)\\s+([A-Za-z_][A-Za-z0-9_.]*)",
@@ -94,7 +94,7 @@
     },
     "constant": {
       "name": "constant.language.stone",
-      "match": "\\b(true|false|none)\\b"
+      "match": "\\b(true|false|none|less|equal|greater)\\b"
     },
     "number": {
       "name": "constant.numeric.integer.stone",

@@ -157,16 +157,29 @@ fn split(entry: &str) -> Vec<Chunk> {
             let defines = match &stmt.kind {
                 StmtKind::FunctionDef { name, .. }
                 | StmtKind::EnumDef { name, .. }
-                | StmtKind::StructDef { name, .. } => vec![name.clone()],
-                StmtKind::ImplDef { name, methods, .. } => methods
-                    .iter()
-                    .filter_map(|method| match &method.kind {
-                        StmtKind::FunctionDef { name: method, .. } => {
-                            Some(format!("{name}.{method}"))
-                        }
-                        _ => None,
-                    })
-                    .collect(),
+                | StmtKind::StructDef { name, .. }
+                | StmtKind::TraitDef { name, .. } => vec![name.clone()],
+                StmtKind::ImplDef {
+                    name,
+                    trait_name,
+                    methods,
+                    ..
+                } => {
+                    let mut defines: Vec<String> = methods
+                        .iter()
+                        .filter_map(|method| match &method.kind {
+                            StmtKind::FunctionDef { name: method, .. } => {
+                                Some(format!("{name}.{method}"))
+                            }
+                            _ => None,
+                        })
+                        .collect();
+                    // a type implements a trait once, so a new block replaces the old one
+                    if let Some(trait_name) = trait_name {
+                        defines.push(format!("{} for {name}", trait_name.name));
+                    }
+                    defines
+                }
                 _ => vec![],
             };
             Chunk { text, defines }
@@ -391,6 +404,20 @@ mod tests {
             get(2)
         );
         assert_eq!(session(&input), ("5\n".into(), "".into()));
+    }
+
+    #[test]
+    fn traits_and_their_impl_blocks_carry_over_and_are_replaced() {
+        let shape = "trait Shape:\n    fn area(self) -> int\n    fn twice(self) -> int:\n        \
+                     ret self.area() * 2\n\nstruct Sq:\n    s: int\n\n";
+        let area =
+            |n: &str| format!("impl Shape for Sq:\n    fn area(self) -> int:\n        ret {n}\n\n");
+        let input = format!(
+            "{shape}{}fn f[T: Shape](x: T) -> int:\n    ret x.twice()\n\nf(Sq(s=3))\n{}f(Sq(s=3))\n",
+            area("self.s"),
+            area("self.s * self.s")
+        );
+        assert_eq!(session(&input), ("6\n18\n".into(), "".into()));
     }
 
     #[test]

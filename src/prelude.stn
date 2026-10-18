@@ -1,10 +1,65 @@
 // The prelude, which every program is linked with, so its names need no `use`. Its variants are
-// written alone, as `some(x)` and `none`, and print that way too.
+// written alone, as `some(x)`, `none`, and `less`, and print that way too. Its functions are
+// linked as `prelude.<name>`, so a program's names never clash with them.
 //
 // Builtins such as `find`, `pop`, `get`, and `os.env` make options by tag, so `none` stays the
-// first variant and `some` the second.
+// first variant and `some` the second, and `cmp` on builtin types makes orderings by tag, so
+// `less`, `equal`, and `greater` stay in that order.
 
 // A value that may be missing: `some(x)` holds one, and `none` holds nothing.
 pub enum option[T]:
     none
     some(T)
+
+// How one value compares with another, which `cmp` gives.
+pub enum ordering:
+    less
+    equal
+    greater
+
+// Values that `==` and `!=` compare. Every type `==` compares part by part implements it, and a
+// struct may define what `==` means for it instead, as in `impl eq for Point:`.
+pub trait eq:
+    fn eq(self, other: Self) -> bool
+
+// Values in an order, which `<`, `<=`, `>`, `>=`, and `sort` use. `int`, `float`, and `str`
+// implement it, and a struct may too, as in `impl ord for Version:`.
+pub trait ord:
+    fn cmp(self, other: Self) -> ordering
+
+// Sorts a list of values of a type that implements `ord`, for `xs.sort()` on a list of anything
+// but `int`, `float`, and `str`. It merges ever longer runs, taking from the right run only when
+// its value is less than the left's, so equal values keep their order, and every program gets
+// the same list from the same `cmp`.
+fn sort[T: ord](xs: list[T]) -> list[T]:
+    n = xs.len()
+    width = 1
+    while width < n:
+        out = []
+        start = 0
+        while start < n:
+            mid = start + width
+            if mid > n:
+                mid = n
+            end = mid + width
+            if end > n:
+                end = n
+            i = start
+            j = mid
+            while i < mid and j < end:
+                if xs[j] < xs[i]:
+                    out.append(xs[j])
+                    j += 1
+                else:
+                    out.append(xs[i])
+                    i += 1
+            while i < mid:
+                out.append(xs[i])
+                i += 1
+            while j < end:
+                out.append(xs[j])
+                j += 1
+            start = end
+        xs = out
+        width *= 2
+    ret xs

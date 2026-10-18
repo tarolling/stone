@@ -1,0 +1,30 @@
+// sorting a long list of ints, then one of floats
+fn draw(x: int) -> int:
+    ret (x * 1103515245 + 12345) % 2147483648
+
+fn main(n: int):
+    x = 1
+    ints = []
+    for i in range(n):
+        x = draw(x)
+        high = x
+        x = draw(x)
+        ints.append(high * 2147483648 + x)
+    ints.sort()
+    total = 0
+    for v in ints:
+        total = (total * 31 + v % 1000000007) % 1000000007
+    print(total, ints[0], ints[n - 1])
+
+    floats = []
+    for i in range(n):
+        x = draw(x)
+        floats.append(float(x) / 2147483648.0 - 0.5)
+    floats.sort()
+    sum = 0.0
+    for i in range(n):
+        sum = sum * 0.5 + floats[i]
+    // floats print scaled to ints, so C need not print them as stone does
+    print(int(sum * 1000000000.0), int(floats[0] * 1000000000.0), int(floats[n - 1] * 1000000000.0))
+
+main(int(args()[0]))

@@ -32,7 +32,12 @@ fn assert_error(source: &str, message: &str, line: usize, col: usize) {
 fn type_of_symbol(source: &str, name: &str) -> String {
     let analysis = analyze_source(source);
     assert_eq!(analysis.diagnostics, [], "{source}");
-    let matching: Vec<&Symbol> = analysis.symbols.iter().filter(|s| s.name == name).collect();
+    // the prelude's own names are never a test's
+    let matching: Vec<&Symbol> = analysis
+        .symbols
+        .iter()
+        .filter(|s| s.name == name && s.span.file != FileId::PRELUDE)
+        .collect();
     assert_eq!(matching.len(), 1, "expected one symbol named {name}");
     matching[0].ty.to_string()
 }
@@ -381,7 +386,7 @@ fn elementwise_operands_must_agree() {
     // lists still cannot be compared
     assert_error(
         "x = [1] < [2]\n",
-        "'<' needs int, float, or str operands, found list[int]",
+        "'<' needs int, float, str, or a type that implements 'ord', found list[int]",
         1,
         5,
     );
@@ -487,8 +492,8 @@ fn float_arithmetic_gives_floats() {
 fn functions_take_their_operand_types_from_calls() {
     let source = "fn scale(a: float, b: float) -> float:\n    ret -a * b\nx = scale(1.5, 2.0)\n";
     assert_eq!(type_of_symbol(source, "scale"), "fn(float, float) -> float");
-    let source = "fn less(a: float, b: float) -> bool:\n    ret a < b\nx = less(1.5, 2.0)\n";
-    assert_eq!(type_of_symbol(source, "less"), "fn(float, float) -> bool");
+    let source = "fn below(a: float, b: float) -> bool:\n    ret a < b\nx = below(1.5, 2.0)\n";
+    assert_eq!(type_of_symbol(source, "below"), "fn(float, float) -> bool");
 }
 
 #[test]
@@ -535,7 +540,7 @@ fn comparisons_need_matching_operands() {
     assert_error("x = 1 < 2.5\n", "expected int, found float", 1, 9);
     assert_error(
         "x = true < false\n",
-        "'<' needs int, float, or str operands, found bool",
+        "'<' needs int, float, str, or a type that implements 'ord', found bool",
         1,
         5,
     );
@@ -1311,6 +1316,57 @@ fn pop_insert_and_extend_check_their_arguments() {
         "expected list[unknown], found int",
         2,
         1,
+    );
+}
+
+#[test]
+fn sort_orders_lists_of_numbers_and_strings() {
+    let source = "xs = [3, 1]\nxs.sort()\nys = []\nys.append(1.5)\nys.sort()\nzs = [\"b\"]\n\
+                  zs.sort()\ngrid = [[2, 1]]\ngrid[0].sort()\n";
+    assert_eq!(errors(source), []);
+    assert_eq!(type_of_symbol(source, "ys"), "list[float]");
+    let message = "'sort' needs a list of int, float, str, or a type that implements 'ord', found a list of {}";
+    assert_error(
+        "xs = [true]\nxs.sort()\n",
+        &message.replace("{}", "bool"),
+        2,
+        1,
+    );
+    assert_error(
+        "xs = [(1, 2)]\nxs.sort()\n",
+        &message.replace("{}", "tuple[int, int]"),
+        2,
+        1,
+    );
+    assert_error(
+        "fn f[T](xs: list[T]) -> list[T]:\n    xs.sort()\n    ret xs\n",
+        &message.replace("{}", "T"),
+        2,
+        5,
+    );
+    assert_error(
+        "xs = [1]\nxs.sort(1)\n",
+        "'sort' takes 0 arguments, but 1 was given",
+        2,
+        1,
+    );
+    assert_error(
+        "x = 1\nx.sort()\n",
+        "expected list[unknown], found int",
+        2,
+        1,
+    );
+    let message =
+        "'sort' changes a list and returns none, so it can only be a statement of its own";
+    assert_error("xs = [1]\ny = xs.sort()\n", message, 2, 5);
+    assert_error("xs = [1]\nprint(xs.sort())\n", message, 2, 7);
+    // a function cannot sort a global
+    assert_error(
+        "xs = [1]\nfn f():\n    xs.sort()\nf()\n",
+        "a function cannot change the global 'xs'; pass it as an argument and return the changed \
+         value",
+        3,
+        5,
     );
 }
 
@@ -3236,13 +3292,14 @@ fn a_type_parameter_is_any_type_inside_its_function() {
     );
     assert_error(
         "fn f[T](x: T, y: T) -> bool:\n    ret x < y\n",
-        "'<' needs int, float, or str operands, found T",
+        "'<' needs int, float, str, or a type that implements 'ord', found T",
         2,
         9,
     );
     assert_error(
         "fn f[T](x: T, y: T) -> bool:\n    ret x == y\n",
-        "'==' and '!=' cannot compare T, since 'T' may be any type",
+        "'==' and '!=' cannot compare T, since 'T' may be any type; to compare its values, bound \
+         it by 'eq', as in '[T: eq]'",
         2,
         9,
     );
@@ -3260,7 +3317,7 @@ fn a_type_parameter_is_any_type_inside_its_function() {
     );
     assert_error(
         "fn f[T](x: T) -> int:\n    ret x.len()\n",
-        "values of type 'T' have no methods, since 'T' may be any type",
+        "values of type 'T' have no method 'len', since 'T' may be any type",
         2,
         11,
     );
@@ -3695,5 +3752,406 @@ fn a_written_option_type_refers_to_the_preludes_enum() {
     assert_eq!(
         (symbol.name.as_str(), symbol.kind),
         ("option", SymbolKind::Enum)
+    );
+}
+
+const SHAPES: &str = "trait Shape:\n    fn area(self) -> float\n    fn twice(self) -> float:\n        \
+ret self.area() * 2.0\nstruct Circle:\n    r: float\nstruct Square:\n    s: float\n\
+impl Shape for Circle:\n    fn area(self) -> float:\n        ret 3.0 * self.r * self.r\n\
+impl Shape for Square:\n    fn area(self) -> float:\n        ret self.s * self.s\n    \
+fn twice(self) -> float:\n        ret 4.0\n\
+fn total[T: Shape](xs: list[T]) -> float:\n    t = 0.0\n    for x in xs:\n        t += x.area()\n    \
+ret t\n";
+
+/// Returns every call through a bound in `source`, which must check cleanly, as the trait's
+/// method and the function each implementing type calls.
+fn trait_calls(source: &str) -> Vec<(String, Vec<(String, String)>)> {
+    let analysis = analyze_source(source);
+    assert_eq!(analysis.diagnostics, [], "{source}");
+    let mut calls: Vec<(String, Vec<(String, String)>)> = analysis
+        .methods
+        .values()
+        .filter_map(|m| {
+            let mut implementations: Vec<(String, String)> =
+                m.implementations.clone()?.into_iter().collect();
+            implementations.sort();
+            Some((m.function.clone(), implementations))
+        })
+        .collect();
+    calls.sort();
+    calls.dedup();
+    calls
+}
+
+#[test]
+fn trait_methods_are_called_on_types_that_implement_them() {
+    let source = format!(
+        "{SHAPES}c = Circle(r=1.0)\na = c.area()\nb = c.twice()\nd = Square(s=2.0).twice()\n\
+         all = total([c])\n"
+    );
+    for name in ["a", "b", "d", "all"] {
+        assert_eq!(type_of_symbol(&source, name), "float");
+    }
+    assert_eq!(
+        method_calls(&source),
+        [
+            ("Circle.area".to_string(), true, false),
+            ("Shape.area".to_string(), true, false),
+            ("Shape.twice".to_string(), true, false),
+            ("Square.twice".to_string(), true, false),
+        ]
+    );
+    let both = vec![
+        ("Circle".to_string(), "Circle.area".to_string()),
+        ("Square".to_string(), "Square.area".to_string()),
+    ];
+    assert_eq!(trait_calls(&source), [("Shape.area".to_string(), both)]);
+}
+
+#[test]
+fn a_type_parameter_has_the_methods_of_its_bounds() {
+    assert_error(
+        "fn f[T](x: T) -> int:\n    ret x.size()\n",
+        "values of type 'T' have no method 'size', since 'T' may be any type",
+        2,
+        11,
+    );
+    assert_error(
+        &format!("{SHAPES}fn f[T](x: T) -> float:\n    ret x.area()\n"),
+        "values of type 'T' have no method 'area', since 'T' may be any type that implements \
+         a trait with it, as in '[T: Shape]'",
+        23,
+        11,
+    );
+    assert_error(
+        &format!(
+            "{SHAPES}trait Round:\n    fn area(self) -> float\n\
+             fn f[T: Shape + Round](x: T) -> float:\n    ret x.area()\n"
+        ),
+        "'area' is a method of both 'Shape' and 'Round', which bound 'T', so this call could \
+         mean either",
+        25,
+        11,
+    );
+    assert_error(
+        &format!("{SHAPES}fn f[T: Shape](x: T) -> float:\n    ret x.area(1)\n"),
+        "'area' takes 0 arguments, but 1 was given",
+        23,
+        9,
+    );
+}
+
+#[test]
+fn a_call_of_a_bounded_function_needs_types_that_implement_the_bounds() {
+    assert_error(
+        &format!("{SHAPES}struct P:\n    x: int\nt = total([P(x=1)])\n"),
+        "'P' does not implement 'Shape', which 'total' needs for 'T'",
+        24,
+        5,
+    );
+    assert_error(
+        &format!("{SHAPES}fn g[T](xs: list[T]) -> float:\n    ret total(xs)\n"),
+        "'T' does not implement 'Shape', which 'total' needs for 'T'",
+        23,
+        9,
+    );
+    assert_eq!(
+        errors(&format!(
+            "{SHAPES}fn g[U: Shape](xs: list[U]) -> float:\n    ret total(xs)\n"
+        )),
+        []
+    );
+}
+
+#[test]
+fn an_impl_block_of_a_trait_defines_its_methods() {
+    let base = "trait Shape:\n    fn area(self) -> float\n    fn name(self) -> str\n\
+                struct Sq:\n    s: float\n";
+    assert_error(
+        &format!("{base}impl Shape for Sq:\n    fn area(self) -> float:\n        ret 1.0\n"),
+        "'Sq' does not implement 'name' of 'Shape'",
+        6,
+        16,
+    );
+    assert_eq!(
+        errors(&format!(
+            "{base}impl Shape for Sq:\n    fn nothing(self):\n        ret\n"
+        )),
+        [
+            (
+                "'Sq' does not implement 'area' and 'name' of 'Shape'".to_string(),
+                6,
+                16
+            ),
+            (
+                "'nothing' is not a method of 'Shape', so it goes in an 'impl Sq:' block"
+                    .to_string(),
+                7,
+                8
+            ),
+        ]
+    );
+    let full = "    fn area(self) -> float:\n        ret 1.0\n    fn name(self) -> str:\n        \
+                ret \"s\"\n";
+    assert_error(
+        &format!("{base}impl Shape for Sq:\n{full}    fn side(self) -> float:\n        ret 1.0\n"),
+        "'side' is not a method of 'Shape', so it goes in an 'impl Sq:' block",
+        11,
+        8,
+    );
+    assert_error(
+        &format!(
+            "{base}impl Shape for Sq:\n    fn area(self, k: int) -> float:\n        ret 1.0\n    \
+             fn name(self) -> str:\n        ret \"s\"\n"
+        ),
+        "'area' must take and return what 'Shape' says, as in 'fn area(self) -> float'",
+        7,
+        8,
+    );
+    assert_error(
+        &format!("{base}impl Shape for Sq:\n{full}impl Shape for Sq:\n{full}"),
+        "'Sq' already implements 'Shape'",
+        11,
+        16,
+    );
+    assert_error(
+        &format!(
+            "{base}impl Shape for Sq:\n{full}impl Sq:\n    fn area(self) -> float:\n        ret 2.0\n"
+        ),
+        "'Sq' already has a method 'area'",
+        12,
+        8,
+    );
+    assert_error(
+        "struct Sq:\n    s: float\nimpl Shape for Sq:\n    fn area(self) -> float:\n        \
+         ret 1.0\n",
+        "there is no trait 'Shape'",
+        3,
+        6,
+    );
+    assert_error(
+        "struct Sq:\n    s: float\nimpl Sq for Sq:\n    fn area(self) -> float:\n        \
+         ret 1.0\n",
+        "'Sq' is a struct, not a trait",
+        3,
+        6,
+    );
+}
+
+#[test]
+fn traits_are_named_only_as_bounds() {
+    assert_error(
+        &format!("{SHAPES}fn f(x: Shape) -> float:\n    ret 1.0\n"),
+        "'Shape' is a trait, not a type; to take any type that implements it, write a type \
+         parameter, as in 'fn f[T: Shape](x: T)'",
+        22,
+        9,
+    );
+    assert_error(
+        &format!("{SHAPES}fn f[T: Circle](x: T):\n    ret\n"),
+        "'Circle' is a struct, not a trait",
+        22,
+        9,
+    );
+    assert_error(
+        "fn f[T: Shape](x: T):\n    ret\n",
+        "there is no trait 'Shape'",
+        1,
+        9,
+    );
+    assert_error(
+        &format!("{SHAPES}struct Box[T: Shape]:\n    x: T\n"),
+        "only a function's type parameters can have bounds for now",
+        22,
+        15,
+    );
+}
+
+#[test]
+fn self_names_the_type_of_a_trait_or_impl_block() {
+    let source = "trait Ordered:\n    fn before(self, other: Self) -> bool\n\
+                  struct V:\n    n: int\nimpl Ordered for V:\n    fn before(self, other: Self) -> \
+                  bool:\n        ret self.n < other.n\nimpl V:\n    fn zero() -> Self:\n        \
+                  ret V(n=0)\nb = V(n=1).before(V.zero())\n";
+    assert_eq!(type_of_symbol(source, "b"), "bool");
+    assert_error(
+        "fn f(x: Self):\n    ret\n",
+        "'Self' is only a type in a trait or an impl block",
+        1,
+        9,
+    );
+    assert_error(
+        "struct Self:\n    x: int\n",
+        "cannot redefine builtin 'Self'",
+        1,
+        8,
+    );
+}
+
+#[test]
+fn a_default_method_sees_only_the_traits_methods() {
+    assert_error(
+        "trait N:\n    fn n(self) -> int\n    fn m(self) -> int:\n        ret self.x\n",
+        "Self has no field 'x'",
+        4,
+        18,
+    );
+    assert_error(
+        "trait N:\n    fn n() -> int\n",
+        "a trait's method takes 'self' first, as in 'fn n(self)', since it is called on a value",
+        2,
+        8,
+    );
+}
+
+const TICKER: &str = "trait Ticker:\n    fn next(self) -> Self\n    fn advance(self):\n        \
+self = self.next()\nstruct C:\n    n: int\nimpl Ticker for C:\n    fn next(self) -> Self:\n        \
+ret C(n=self.n + 1)\n";
+
+#[test]
+fn a_trait_decides_which_methods_change_self() {
+    let source = format!("{TICKER}c = C(n=0)\nc.advance()\nd = c.next()\n");
+    assert_eq!(
+        method_calls(&source),
+        [
+            ("C.next".to_string(), true, false),
+            ("Ticker.advance".to_string(), true, true),
+            ("Ticker.next".to_string(), true, false),
+        ]
+    );
+    assert_error(
+        &format!("{TICKER}c = C(n=0)\nx = c.advance()\n"),
+        "'advance' changes its receiver and returns no value, so it can only be a statement of \
+         its own",
+        11,
+        5,
+    );
+    // an override changes `self` as the trait's method does
+    let overriding = format!(
+        "{TICKER}    fn advance(self):\n        self.n += 1\nfn f[T: Ticker](t: T) -> T:\n    \
+         t.advance()\n    ret t\nc = f(C(n=0))\nc.advance()\n"
+    );
+    assert!(method_calls(&overriding).contains(&("C.advance".to_string(), true, true)));
+    assert_error(
+        &format!(
+            "{TICKER}trait Bump:\n    fn bump(self)\nimpl Bump for C:\n    fn bump(self):\n        \
+             self.n += 1\n"
+        ),
+        "'bump' cannot change 'self', since 'bump' of 'Bump' does not",
+        13,
+        8,
+    );
+}
+
+const BAG_EQ: &str = "struct Bag:\n    items: list[int]\nimpl eq for Bag:\n    \
+fn eq(self, other: Self) -> bool:\n        ret self.items.len() == other.items.len()\n";
+
+#[test]
+fn a_struct_that_implements_eq_compares_however_it_says() {
+    let source = format!(
+        "{BAG_EQ}a = Bag(items=[1])\nb = a == Bag(items=[2])\nc = (a, 1) != (a, 2)\n\
+         d = some(a) == none\ne = a.eq(a)\n"
+    );
+    for name in ["b", "c", "d", "e"] {
+        assert_eq!(type_of_symbol(&source, name), "bool");
+    }
+    assert_eq!(method_calls(&source), [("Bag.eq".to_string(), true, false)]);
+    // without the impl block, the list keeps it from comparing
+    assert_error(
+        "struct Bag:\n    items: list[int]\nb = Bag(items=[]) == Bag(items=[])\n",
+        "'==' and '!=' cannot compare Bag, since field 'Bag.items' holds list[int]",
+        3,
+        5,
+    );
+    // a struct without its own `eq` has the one that compares part by part
+    assert_eq!(
+        type_of_symbol("struct P:\n    x: int\nb = P(x=1).eq(P(x=2))\n", "b"),
+        "bool"
+    );
+    assert_error(
+        "b = [1].eq([2])\n",
+        "'==' and '!=' cannot compare list[int]",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn bounds_by_eq_and_ord_allow_comparisons() {
+    assert_eq!(
+        errors(
+            "fn same[T: eq](a: T, b: T) -> bool:\n    ret a == b and a.eq(b)\n\
+             fn least[T: ord](xs: list[T]) -> T:\n    xs.sort()\n    if xs[0] < xs[1]:\n        \
+             ret xs[0]\n    ret xs[1]\nx = same((1, \"a\"), (1, \"b\"))\ny = least([2.5, 1.5])\n"
+        ),
+        []
+    );
+    assert_error(
+        "fn same[T: ord](a: T, b: T) -> bool:\n    ret a == b\n",
+        "'==' and '!=' cannot compare T, since 'T' may be any type; to compare its values, bound \
+         it by 'eq', as in '[T: eq]'",
+        2,
+        9,
+    );
+    assert_error(
+        "fn same[T: eq](a: T, b: T) -> bool:\n    ret a == b\nx = same([1], [2])\n",
+        "'list[int]' does not implement 'eq', which 'same' needs for 'T'",
+        3,
+        5,
+    );
+}
+
+const VERSION: &str = "struct Version:\n    major: int\n    minor: int\nimpl ord for Version:\n    \
+fn cmp(self, other: Self) -> ordering:\n        if self.major != other.major:\n            \
+ret self.major.cmp(other.major)\n        ret self.minor.cmp(other.minor)\n";
+
+#[test]
+fn a_struct_that_implements_ord_is_ordered() {
+    let source = format!(
+        "{VERSION}a = Version(major=1, minor=2)\nb = a < Version(major=1, minor=3)\n\
+         vs = [a]\nvs.sort()\no = a.cmp(a)\nn = 1.5.cmp(2.5)\n"
+    );
+    assert_eq!(type_of_symbol(&source, "b"), "bool");
+    assert_eq!(type_of_symbol(&source, "o"), "ordering");
+    assert_eq!(type_of_symbol(&source, "n"), "ordering");
+    assert_error(
+        "struct P:\n    x: int\nb = P(x=1) < P(x=2)\n",
+        "'<' needs int, float, str, or a type that implements 'ord', found P",
+        3,
+        5,
+    );
+    assert_error(
+        "b = true.cmp(false)\n",
+        "'cmp' needs int, float, str, or a type that implements 'ord', found bool",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn eq_and_cmp_are_only_the_traits_methods() {
+    assert_error(
+        "struct P:\n    x: int\nimpl P:\n    fn eq(self, other: P) -> bool:\n        ret true\n",
+        "'eq' is the method of the trait 'eq', so it goes in an 'impl eq for P:' block",
+        4,
+        8,
+    );
+    assert_error(
+        "impl ord for int:\n    fn cmp(self, other: int) -> ordering:\n        ret less\n",
+        "int already implements 'ord'",
+        1,
+        14,
+    );
+    assert_error(
+        &format!("{VERSION}impl Version:\n    fn cmp(self) -> int:\n        ret 1\n"),
+        "'cmp' is the method of the trait 'ord', so it goes in an 'impl ord for Version:' block",
+        10,
+        8,
+    );
+    assert_error(
+        "fn less() -> int:\n    ret 1\n",
+        "cannot redefine builtin 'less'",
+        1,
+        4,
     );
 }

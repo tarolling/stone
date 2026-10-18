@@ -1,0 +1,42 @@
+// a generic struct implements a trait for every type it holds
+
+trait Sized:
+    fn size(self) -> int
+    fn is_empty(self) -> bool:
+        ret self.size() == 0
+
+struct Stack[T]:
+    items: list[T]
+
+impl Stack:
+    fn push(self, x: T):
+        self.items.append(x)
+
+impl Sized for Stack:
+    fn size(self) -> int:
+        ret self.items.len()
+
+struct Pair[A, B]:
+    first: A
+    second: B
+
+impl Sized for Pair:
+    fn size(self) -> int:
+        ret 2
+
+fn sizes[T: Sized](xs: list[T]) -> list[int]:
+    out = []
+    for x in xs:
+        out.append(x.size())
+    ret out
+
+s = Stack(items=[1, 2])
+s.push(3)
+words = Stack(items=["a"])
+print(sizes([s, Stack(items=[])]))
+print(sizes([words]))
+print(words.is_empty(), Stack(items=[0.5]).size())
+print(sizes([Pair(first=1, second="x"), Pair(first=2, second="y")]))
+e = Stack(items=[[1], [2, 3]])
+e.items = []
+print(e.is_empty())

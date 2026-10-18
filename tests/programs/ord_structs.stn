@@ -1,0 +1,51 @@
+// a struct that implements ord is ordered by its cmp: <, <=, >, >=, sort, and bounded functions
+
+struct Version:
+    major: int
+    minor: int
+    // not part of the order, so sorting shows that equal versions keep their order
+    note: str
+
+impl ord for Version:
+    fn cmp(self, other: Self) -> ordering:
+        if self.major != other.major:
+            ret self.major.cmp(other.major)
+        ret self.minor.cmp(other.minor)
+
+fn v(major: int, minor: int, note: str) -> Version:
+    ret Version(major=major, minor=minor, note=note)
+
+a = v(1, 2, "a")
+b = v(1, 10, "b")
+print(a < b, a <= b, a > b, a >= b, a < a, a <= a)
+print(a.cmp(b), b.cmp(a), a.cmp(v(1, 2, "other")))
+
+fn largest[T: ord](xs: list[T]) -> T:
+    best = xs[0]
+    for x in xs:
+        if x > best:
+            best = x
+    ret best
+
+fn sorted[T: ord](xs: list[T]) -> list[T]:
+    xs.sort()
+    ret xs
+
+vs = [v(2, 0, "c"), a, v(1, 2, "d"), b, v(0, 9, "e"), v(1, 2, "f")]
+print(largest(vs).note, largest([3, 9, 4]), largest(["b", "a"]))
+vs.sort()
+notes = ""
+for x in vs:
+    notes = notes + x.note
+print(notes)
+print(sorted([3, 1, 2]), sorted(["b", "c", "a"]), sorted([v(5, 5, "z"), v(4, 4, "y")])[0].note)
+
+struct Shelf:
+    versions: list[Version]
+
+shelf = Shelf(versions=[b, a, v(0, 1, "g")])
+shelf.versions.sort()
+rows = [[b, a], []]
+rows[0].sort()
+rows[1].sort()
+print(shelf.versions[0].note, rows[0][0].note, rows[1].len())

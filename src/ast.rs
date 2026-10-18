@@ -101,6 +101,18 @@ pub struct Arg {
 pub struct TypeParam {
     pub name: Identifier,
     pub span: Span,
+    /// The traits after a colon that the parameter's types must implement, such as `Shape` in
+    /// `fn total[T: Shape](xs: list[T]) -> float:`, empty for a parameter without bounds.
+    pub bounds: Vec<TraitName>,
+}
+
+/// A trait named in a bound or an `impl` block, maybe through its module, and its span, such as
+/// `Shape` in `fn f[T: Shape](x: T):` or `geo.Shape` in `impl geo.Shape for Circle:`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitName {
+    /// The name as written, with dots between a module's names and the trait's.
+    pub name: Identifier,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -392,11 +404,29 @@ pub enum StmtKind {
     /// An `impl` block, such as `impl Point:` followed by indented functions: methods, whose
     /// first parameter is `self` (`fn norm(self) -> float:`), called on a value as `p.norm()`,
     /// and associated functions without `self`, called on the struct as `Point.origin()`.
+    ///
+    /// `impl Shape for Circle:` implements the trait `Shape` for `Circle` instead, holding the
+    /// trait's methods.
     ImplDef {
         name: Identifier,
-        /// The span of the struct's name after `impl`, which editor features point at.
+        /// The span of the type's name, which editor features point at.
         name_span: Span,
+        /// The trait before `for`, if the block implements one.
+        trait_name: Option<TraitName>,
         /// The functions of the block, each a [`StmtKind::FunctionDef`].
+        methods: Vec<Stmt>,
+    },
+    /// A trait definition, such as `trait Shape:` followed by indented functions: methods a type
+    /// implements, written without a body (`fn area(self) -> float`), and default methods with
+    /// one, which a type gets unless its `impl` block defines them again.
+    TraitDef {
+        name: Identifier,
+        /// The span of the trait's name, which editor features point at.
+        name_span: Span,
+        /// Whether the definition starts with `pub`, so other modules may use it.
+        public: bool,
+        /// The functions of the trait, each a [`StmtKind::FunctionDef`] whose `body` is empty
+        /// when it is written without one.
         methods: Vec<Stmt>,
     },
     /// A `match` statement, which runs the first case whose pattern matches `subject`, such as

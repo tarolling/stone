@@ -11,8 +11,10 @@ module stone
                     variant* variants)
           | StructDef(identifier name, bool public, type_param* type_params,
                       field* fields)
-          -- each method is a FunctionDef
-          | ImplDef(identifier name, stmt* methods)
+          -- each method is a FunctionDef; trait_name is the trait before 'for', if any
+          | ImplDef(identifier name, trait_name? trait_name, stmt* methods)
+          -- each method is a FunctionDef, whose body is empty if it is written without one
+          | TraitDef(identifier name, bool public, stmt* methods)
 
           | Return(expr? value)
 
@@ -62,7 +64,10 @@ module stone
     arg = (identifier arg, type? annotation)
 
     -- a type parameter of a generic function, struct, or enum, such as T in enum Tree[T]:
-    type_param = (identifier name)
+    type_param = (identifier name, trait_name* bounds)
+
+    -- a trait, maybe through its module, such as geo.Shape
+    trait_name = (identifier name)
 
     variant = (identifier name, type* fields)
 

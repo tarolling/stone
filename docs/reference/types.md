@@ -18,6 +18,7 @@ runs, reporting every place they conflict.
 | `option[T]` | `some(x)`, which holds a `T`, or `none`, which holds nothing |
 | structs | the named, typed fields a `struct` lists, such as `Point(x=1.0, y=2.0)`, which are values |
 | enums | the variants an `enum` lists, such as `Shape.Circle(1.0)`, which never change |
+| `ordering` | `less`, `equal`, or `greater`, which `cmp` returns |
 | functions | each function has one signature, such as `fn(int, list[str]) -> bool` |
 
 ## Writing types
@@ -83,8 +84,9 @@ The body is checked once, with each type parameter as a type of its own that sta
 type, so every error is reported inside the generic function or at an argument, never because
 of a distant call. A value of type `T` can be assigned, passed, returned, printed, and stored
 in lists, tuples, options, and map values, but not used in arithmetic, compared, converted with
-`str`, used as a condition, indexed, iterated, matched, or used as a map key, and it has no
-methods. Two different type parameters are different types.
+`str`, used as a condition, indexed, iterated, matched, or used as a map key, and it has only the
+methods of the traits that bound it (see [Traits](#traits)). Two different type parameters are
+different types.
 
 The compiler makes one copy of a generic function for each set of types the program calls it
 with. Two rules keep that finite and safe:
@@ -132,6 +134,106 @@ parameters are filled in, which the code making the value reports.
 
 `==` compares two values of a generic type if the types filled in can be compared, so a
 `Pair[int, str]` can be compared and a `Pair[list[int], int]` cannot.
+## Traits
+
+A trait names methods that types implement, with a signature for each and maybe a default
+body:
+
+```stone
+trait Shape:
+    fn area(self) -> float
+    fn half(self) -> float:
+        ret self.area() / 2.0
+```
+
+An `impl` block for a type implements a trait by defining each of its methods without a
+default, with the parameters and result the trait gives them, and maybe its defaults too, which
+replace them for that type:
+
+```stone
+impl Shape for Circle:
+    fn area(self) -> float:
+        ret 3.0 * self.r * self.r
+```
+
+A block that leaves out a method without a default, defines a function the trait does not have,
+or changes a method's signature is an error. Every method of a trait takes `self` first, and
+cannot have type parameters of its own for now. Inside a trait, `Self` is the type that
+implements it, and inside any `impl` block, the block's type, as in `fn same(self, other: Self)`.
+A trait is not a type: a value always has the type of the struct or builtin type it is, and a
+function that takes any type implementing a trait has a type parameter with a bound.
+
+A type implements a trait at most once, and its methods, whether its own or from traits, all
+have different names, so `c.area()` always means one function. The implementation goes in the
+file that defines the trait or the one that defines the struct; `int`, `float`, `bool`, and `str`
+can implement a trait in the trait's file. A trait is imported like a struct, with
+`use shapes.Shape`, and a library marks it `pub` to share it. Its methods need no `use`: they
+are called wherever the type is.
+
+### Bounds
+
+A generic function names the traits each type parameter implements after a colon, joined by
+`+`:
+
+```stone
+fn total[T: Shape](xs: list[T]) -> float:
+    t = 0.0
+    for x in xs:
+        t += x.area()
+    ret t
+```
+
+In the body, a value of type `T` has the methods of those traits, and still nothing else, so it
+is checked once for every type `T` could be. Two bounds with a method of the same name make a
+call of it an error. Each call checks its types against the bounds, so `total([1])` is an error
+unless `int` implements `Shape`, and a generic function passing its own `T` on must have the
+bound itself. Only a function's type parameters have bounds for now, not a struct's or an
+enum's.
+
+The compiler makes a copy of the function for each set of types, and of each default method for
+each type that keeps it, so a call through a bound calls the type's method directly.
+
+### Methods that change self
+
+Whether a trait's method changes `self` is part of its signature, since a generic function is
+checked before the types that implement the trait are known. A default changes `self` if its
+body does, as `fn advance(self): self = self.next()` does, and a method without a body never
+does. A type's method changes `self` exactly when the trait's does: a definition that changes
+`self` where the trait's does not is an error, and one that does not still follows the rules of a
+method that does, being a statement of its own, called on a variable, an element, or a field.
+
+### eq and ord
+
+The prelude defines two traits that the operators use:
+
+```stone
+pub trait eq:
+    fn eq(self, other: Self) -> bool
+
+pub trait ord:
+    fn cmp(self, other: Self) -> ordering
+```
+
+`==` and `!=` use `eq`. Every type `==` compares part by part implements it, and a struct can
+implement it itself, in which case its `eq` decides wherever its values are compared, inside
+tuples, structs, options, and enums too, and a struct holding a list or map can be compared that
+way. `<`, `<=`, `>`, `>=`, and `sort` use `ord`, which `int`, `float`, and `str` implement and a
+struct can. `a < b` on a struct is `a.cmp(b) == less`, `a <= b` is `a.cmp(b) != greater`, and so
+on, and a list of a struct sorts by `cmp`, keeping equal values in their order. `[T: eq]` lets a
+generic function use `==` on a `T`, and `[T: ord]` lets it use `<` and `sort`; `ord` does not
+imply `eq`. `x.eq(y)` and `x.cmp(y)` work on every type that implements the trait. A struct's
+method named `eq` or `cmp` belongs in its `impl eq` or `impl ord` block, and an enum cannot have
+an `impl` block yet, so it always compares part by part.
+
+`ordering` is a prelude enum like `option`, whose variants are written and printed alone:
+
+```stone
+pub enum ordering:
+    less
+    equal
+    greater
+```
+
 ## Strings
 
 A string is a sequence of bytes holding UTF-8 text, so a character outside ASCII, such as `é`,
@@ -390,7 +492,8 @@ pub enum option[T]:
 ```
 
 Its variants are written alone, as `some(x)` and `none` rather than `option.some(x)`, in every
-file and without a `use`, and the names `option` and `some` cannot be defined again. A function
+file and without a `use`, and the names `option` and `some` cannot be defined again, nor can
+`ordering`'s `less`, `equal`, and `greater`. A function
 that may have no answer returns one:
 
 ```{literalinclude} ../examples/enums.stn
@@ -421,7 +524,8 @@ These keep the two backends identical and catch common mistakes:
   floats, strings, lists, and `none`, so `if 1 or 0:` is an error; write `n != 0` instead of `n`.
 - **Lists and maps are not comparable.** `==` and `!=` compare numbers, bools, strings, and
   tuples, structs, options, and enum values of them, part by part, but not lists or maps, even
-  inside another value, and `<`, `<=`, `>`, and `>=` compare only numbers and strings.
+  inside another value, unless a struct holding one implements `eq`. `<`, `<=`, `>`, and `>=`
+  compare only numbers, strings, and structs that implement `ord`.
 - **A call without a value is a statement.** A function without `->`, and builtins such as
   `print`, return no value, so their calls can only be statements of their own.
 - **Matches cover every value.** The cases of a `match` must fit every value of its subject,

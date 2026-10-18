@@ -15,6 +15,7 @@
 pub mod builtins;
 mod emit;
 pub mod floats;
+pub mod sort;
 
 use crate::ast::Mod;
 use crate::codegen::context::{

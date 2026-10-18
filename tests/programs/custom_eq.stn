@@ -1,0 +1,38 @@
+// a struct that implements eq decides what == means for it, wherever it is compared
+
+struct Tag:
+    name: str
+    // never compared, so a tag can hold a list and still be compared
+    seen: list[int]
+
+impl eq for Tag:
+    fn eq(self, other: Self) -> bool:
+        ret self.name == other.name
+
+struct Labeled:
+    tag: Tag
+    n: int
+
+enum Item:
+    Tagged(Tag)
+    Plain(int)
+
+a = Tag(name="x", seen=[1])
+b = Tag(name="x", seen=[2, 3])
+c = Tag(name="y", seen=[1])
+print(a == b, a != b, a == c, a.eq(c))
+// inside tuples, structs, options, and enums, its own eq still decides
+print((a, 1) == (b, 1), (a, 1) == (c, 1))
+print(Labeled(tag=a, n=1) == Labeled(tag=b, n=1), Labeled(tag=a, n=1) == Labeled(tag=b, n=2))
+print(some(a) == some(b), some(a) == none, some(a) != some(c))
+print(Item.Tagged(a) == Item.Tagged(b), Item.Tagged(a) == Item.Plain(1))
+
+fn count[T: eq](xs: list[T], x: T) -> int:
+    n = 0
+    for y in xs:
+        if y == x:
+            n += 1
+    ret n
+
+tags = [a, b, c, Tag(name="x", seen=[])]
+print(count(tags, a), count(tags, c), count([1, 2, 1], 1), count([some(a)], some(b)))

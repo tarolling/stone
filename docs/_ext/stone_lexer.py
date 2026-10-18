@@ -19,16 +19,20 @@ from pygments.token import (
 
 KEYWORDS = (
     "and", "as", "break", "case", "cont", "elif", "else", "enum", "fn", "for", "if", "impl", "in",
-    "match", "not", "or", "pub", "ret", "struct", "use", "while",
+    "match", "not", "or", "pub", "ret", "struct", "trait", "use", "while",
 )
 CONSTANTS = ("true", "false", "none")
-BUILTINS = ("print", "range", "int", "float", "str", "input", "eof", "args", "some")
+BUILTINS = (
+    "print", "range", "int", "float", "str", "input", "eof", "args", "some", "less", "equal",
+    "greater",
+)
 METHODS = (
     "len",
     "append",
     "pop",
     "insert",
     "extend",
+    "sort",
     "strip",
     "split",
     "join",
@@ -39,6 +43,10 @@ METHODS = (
     "is_none",
     "unwrap",
     "unwrap_or",
+    "contains",
+    "get",
+    "eq",
+    "cmp",
 )
 
 
@@ -62,7 +70,7 @@ class StoneLexer(RegexLexer):
             (r"//.*$", Comment.Single),
             (r'"', String.Double, "string"),
             (r"(fn)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
-            (r"(enum|struct|impl)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Class)),
+            (r"(enum|struct|impl|trait)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Class)),
             (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
             (
                 # a type name, maybe inside list[, map[, tuple[, or option[, then closing brackets or more
@@ -70,7 +78,7 @@ class StoneLexer(RegexLexer):
                 r"(->|:)(\s*)((?:(?:list|map|tuple|option)\[)*(?:int|float|bool|str)(?:\]|,\s*(?:(?:list|map|tuple|option)\[)*(?:int|float|bool|str))*)(?![\w(])",
                 bygroups(Punctuation, Whitespace, Keyword.Type),
             ),
-            (r"\bself\b", Name.Builtin.Pseudo),
+            (r"\b(self|Self)\b", Name.Builtin.Pseudo),
             (words(KEYWORDS, suffix=r"\b"), Keyword),
             (words(CONSTANTS, suffix=r"\b"), Keyword.Constant),
             (words(BUILTINS, suffix=r"\b"), Name.Builtin),

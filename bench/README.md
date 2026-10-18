@@ -36,6 +36,7 @@ A benchmark of arithmetic on lists can also have a numpy version, `name.np.py`, 
 | `wordcount` | a `map[str, int]`: `get`, `contains`, reads, and sets | counting 2 million words drawn from 50,000 |
 | `nbody` | a `list` of structs, changes to their fields, and `impl` methods | a million steps of the Sun and the four gas giants orbiting |
 | `binary_trees` | an enum that holds itself, `match`, and freeing | building and walking binary trees of depth 4 to 15, as in the Benchmarks Game |
+| `sort` | `sort` on lists of ints and floats, against C's `qsort` and Python's `list.sort` | sorting 2 million 62-bit ints, then 2 million floats |
 
 Each workload size is in the benchmark's `.args` file, so every version reads it at runtime and gcc cannot specialize on a constant size. Sizes are chosen so `gcc -O2` takes at least about 40 ms and the whole suite finishes in a few minutes. The runner warns when any time is under 10 ms, which usually means gcc optimized the work away.
 
@@ -65,6 +66,7 @@ Median of 9 runs on 2026-10-16, on an Intel Core i7-10750H under WSL2, pinned to
 
 Compiled stone is about 2.1x slower than `gcc -O2` and about 14x faster than CPython, as a geometric mean. It is faster than `gcc -O0` on `binary_trees`, `collatz`, `globals`, `sieve`, and `vector`, and on `vector` it is about 2.7x faster than numpy. The Python ratio is lower than in earlier baselines mostly because `strings` and `wordcount` spend their time in work CPython does in C: splitting and joining strings, and hashing in `dict`.
 
+- `sort` was added on 2026-10-17, after this baseline. That day, pinned the same way, it took 227 ms in stone, 772 ms with `gcc -O2`, and 5288 ms in Python. Stone wins because C's version calls a comparison function through `qsort` for every comparison, while stone sorts ints and floats by radix, a pass per byte in which they differ.
 - `sieve` is close to C because allocating and touching 40 MB of memory dominates all three native versions.
 - `globals` looks close to C only because C's version is also slow: once the modulus is a variable instead of a constant, gcc has to use `idiv` too. Compare stone's `globals` with its own `lcg` to see what reading globals costs.
 - `binary_trees` is close to C because both spend their time allocating and freeing nodes, and stone's allocator, which keeps a free list per block size, keeps up with glibc's `malloc` there. Every `Tree.Leaf` is one shared static value, so stone allocates exactly the nodes C does.

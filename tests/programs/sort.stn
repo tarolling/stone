@@ -1,0 +1,237 @@
+// sort puts a list of ints, floats, or strings in ascending order
+
+fn ordered(xs: list[int]) -> bool:
+    for i in range(1, xs.len()):
+        if xs[i] < xs[i - 1]:
+            ret false
+    ret true
+
+fn ordered_floats(xs: list[float]) -> bool:
+    for i in range(1, xs.len()):
+        if xs[i] < xs[i - 1]:
+            ret false
+    ret true
+
+fn ordered_strs(xs: list[str]) -> bool:
+    for i in range(1, xs.len()):
+        if xs[i] < xs[i - 1]:
+            ret false
+    ret true
+
+// a sum that depends on where each value ends up
+fn checksum(xs: list[int]) -> int:
+    total = 0
+    for i in range(xs.len()):
+        total = total * 31 + xs[i]
+    ret total
+
+fn float_checksum(xs: list[float]) -> float:
+    total = 0.0
+    for i in range(xs.len()):
+        total = total * 0.5 + xs[i]
+    ret total
+
+fn str_checksum(xs: list[str]) -> int:
+    total = 0
+    for s in xs:
+        total = total * 31 + s.len()
+        for c in s:
+            total = total * 7 + c.len()
+    ret total
+
+// a list it changes is its own, so the caller's stays as it was
+fn sorted_copy(xs: list[int]) -> list[int]:
+    xs.sort()
+    ret xs
+
+struct Bag:
+    items: list[int]
+
+impl Bag:
+    fn tidy(self):
+        self.items.sort()
+
+// small lists
+empty = []
+empty.append(0)
+empty.pop()
+empty.sort()
+print(empty)
+one = [5]
+one.sort()
+print(one)
+xs = [3, 1, 2]
+xs.sort()
+print(xs)
+xs = [1, 2, 3, 4]
+xs.sort()
+print(xs)
+xs = [4, 3, 2, 1]
+xs.sort()
+print(xs)
+xs = [2, 1, 2, 1, 2, 1]
+xs.sort()
+print(xs)
+low = -9223372036854775807 - 1
+xs = [0, 9223372036854775807, -1, low, 1, low, -9223372036854775807]
+xs.sort()
+print(xs)
+
+// floats in their total order, with every nan last
+nan = float("nan")
+inf = float("inf")
+fs = [1.5, nan, -0.0, inf, 0.0, -inf, -2.5, nan, 0.0, -0.0, 1e-300, -1e-300]
+fs.sort()
+print(fs)
+fs = [inf - inf, 1.0, -(inf - inf)]
+fs.sort()
+print(fs)
+
+// strings byte by byte, so a prefix comes first
+words = ["pear", "", "apple", "app", "Zebra", "apple pie", "été", "applesauce!", "a"]
+words.sort()
+print(words)
+long = ["abcdefghijklmnopq", "abcdefghijklmnop", "abcdefghijklmnoz", "abcdefgh", "abcdefg"]
+long.sort()
+print(long)
+accents = ["é", "e", "z", "è", "ea"]
+accents.sort()
+print(accents)
+
+// copies stay as they were
+xs = [3, 1, 2]
+ys = xs
+ys.sort()
+print(xs, ys)
+print(sorted_copy(xs), xs)
+
+// elements and fields sort in place
+grid = [[3, 2, 1], [6, 5, 4]]
+grid[1].sort()
+print(grid)
+bag = Bag(items=[9, 7, 8])
+bag.items.sort()
+print(bag)
+bag = Bag(items=[2, 3, 1])
+bag.tidy()
+print(bag)
+
+// long lists of every shape
+seed = 12345
+big = []
+for i in range(5000):
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    big.append(seed)
+copy = big
+big.sort()
+print(ordered(big), checksum(big), big[0], big[4999])
+copy.sort()
+print(checksum(copy) == checksum(big))
+big.sort()
+print(ordered(big), checksum(big))
+
+// a small range leaves most bytes alike
+small = []
+for i in range(3000):
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    small.append(seed % 1000 - 500)
+small.sort()
+print(ordered(small), checksum(small), small[0], small[2999])
+
+same = []
+for i in range(2000):
+    same.append(-7)
+same.sort()
+print(same.len(), same[0], same[1999])
+
+down = []
+for i in range(4000):
+    down.append(4000 - i)
+down.sort()
+print(ordered(down), down[0], down[3999])
+
+// every length up to a few hundred, around each threshold
+for k in range(100):
+    part = []
+    for i in range(k * 7):
+        seed = seed * 6364136223846793005 + 1442695040888963407
+        part.append(seed % 50)
+    part.sort()
+    if not ordered(part):
+        print("not sorted", k * 7)
+print("lengths done")
+
+floats = []
+for i in range(3000):
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    floats.append(float(seed % 2000001 - 1000000) / 1000.0)
+floats.append(-0.0)
+floats.append(0.0)
+floats.sort()
+print(ordered_floats(floats), float_checksum(floats), floats[0], floats[3001])
+
+texts = []
+for i in range(2000):
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    text = "k"
+    for j in range(seed % 13 + 13):
+        text = text + str(seed % (j + 3))
+    texts.append(text)
+texts.sort()
+print(ordered_strs(texts), str_checksum(texts), texts[0], texts[1999])
+
+// a long list splits by its highest byte first, into parts of every size
+mixed = []
+for i in range(70000):
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    if i % 700 == 0:
+        mixed.append(seed)
+    else:
+        mixed.append(seed % 1000)
+mixed.sort()
+print(ordered(mixed), checksum(mixed), mixed[0], mixed[69999])
+
+wide = []
+for i in range(70000):
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    wide.append(seed % 50000000)
+wide.sort()
+print(ordered(wide), checksum(wide), wide[0], wide[69999])
+
+wide = []
+for i in range(70000):
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    wide.append(seed)
+wide.sort()
+print(ordered(wide), checksum(wide), wide[0], wide[69999])
+
+floats = []
+for i in range(70000):
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    floats.append(float(seed) / 3.0)
+floats.sort()
+print(ordered_floats(floats), float_checksum(floats), floats[0], floats[69999])
+
+// lists too short for radix by all eight bytes go to the quicksort
+for k in range(110):
+    part = []
+    for i in range(k * 7):
+        seed = seed * 6364136223846793005 + 1442695040888963407
+        part.append(seed)
+    copy = part
+    part.sort()
+    if not ordered(part):
+        print("not sorted", k * 7)
+    copy.sort()
+    if checksum(copy) != checksum(part):
+        print("sorted differently", k * 7)
+print("quicksort lengths done")
+
+// a few far apart values, many times each
+picks = [9223372036854775807, -9223372036854775807, 0, 4611686018427387904, -3]
+dups = []
+for i in range(700):
+    seed = seed * 6364136223846793005 + 1442695040888963407
+    dups.append(picks[(seed / 65536) % 5])
+dups.sort()
+print(ordered(dups), checksum(dups), dups[0], dups[350], dups[699])

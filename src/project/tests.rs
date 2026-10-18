@@ -378,7 +378,7 @@ fn a_module_only_holds_use_and_def() {
             ("util.stn", "print(1)\n\npub fn f() -> int:\n    ret 1\n"),
         ],
         "util.stn",
-        "only use, fn, enum, struct, and impl are allowed at the top level of a module",
+        "only use, fn, enum, struct, impl, and trait are allowed at the top level of a module",
         1,
         1,
     );
@@ -1064,6 +1064,12 @@ fn bare_some_and_none_name_the_preludes_variants() {
     );
     assert!(linked.diagnostics.is_empty(), "{:?}", linked.diagnostics);
     let Mod::Module { body } = &linked.module;
+    // the prelude's own statements come first, then the entry file's, kept as if from index 1
+    let skipped = body
+        .iter()
+        .take_while(|stmt| stmt.span.file == FileId::PRELUDE)
+        .count();
+    let body = &body[skipped - 1..];
     let variant = |expr: &Expr| match &expr.kind {
         ExprKind::Attribute { value, attr, .. } => match &value.kind {
             ExprKind::Name { id, .. } => (id.clone(), attr.clone(), value.span),
@@ -1156,6 +1162,241 @@ fn only_the_prelude_names_a_variant_none() {
         "main.stn",
         "expected a variant name, found 'none'",
         2,
+        5,
+    );
+}
+
+const ROUND: (&str, &str) = (
+    "round.stn",
+    "pub trait Shape:\n    fn area(self) -> int\n    fn twice(self) -> int:\n        \
+     ret self.area() * 2\ntrait Secret:\n    fn code(self) -> int\n\
+     pub fn total[T: Shape](xs: list[T]) -> int:\n    t = 0\n    for x in xs:\n        \
+     t += x.area()\n    ret t\n",
+);
+
+/// Returns the linked module's statements of `files`, which must link without errors.
+fn linked_body(files: &[(&str, &str)]) -> Vec<Stmt> {
+    let (entry, source) = files[0];
+    let linked = link(Path::new(entry), source, &sources_of(&files[1..]));
+    assert_eq!(linked.diagnostics, []);
+    let Mod::Module { body } = linked.module;
+    body
+}
+
+/// Returns the bounds of the first type parameter of the linked function `name`.
+fn bounds_of(body: &[Stmt], name: &str) -> Vec<String> {
+    body.iter()
+        .find_map(|stmt| match &stmt.kind {
+            StmtKind::FunctionDef {
+                name: n,
+                type_params,
+                ..
+            } if n == name => Some(
+                type_params[0]
+                    .bounds
+                    .iter()
+                    .map(|b| b.name.clone())
+                    .collect(),
+            ),
+            _ => None,
+        })
+        .expect("expected the function")
+}
+
+#[test]
+fn a_library_trait_is_named_by_its_linked_name() {
+    let body = linked_body(&[
+        (
+            "main.stn",
+            "use round\nuse round.Shape\nstruct Sq:\n    s: int\nimpl Shape for Sq:\n    \
+             fn area(self) -> int:\n        ret self.s\nfn f[T: Shape](x: T) -> int:\n    \
+             ret x.area()\nfn g[T: round.Shape](x: T) -> int:\n    ret x.area()\n",
+        ),
+        ROUND,
+    ]);
+    assert!(body.iter().any(
+        |stmt| matches!(&stmt.kind, StmtKind::TraitDef { name, .. } if name == "round.Shape")
+    ));
+    assert_eq!(bounds_of(&body, "round.total"), ["round.Shape"]);
+    assert_eq!(bounds_of(&body, "f"), ["round.Shape"]);
+    assert_eq!(bounds_of(&body, "g"), ["round.Shape"]);
+    let Some(StmtKind::ImplDef {
+        name, trait_name, ..
+    }) = body
+        .iter()
+        .map(|stmt| &stmt.kind)
+        .find(|kind| matches!(kind, StmtKind::ImplDef { .. }))
+    else {
+        panic!("expected an impl block");
+    };
+    assert_eq!(name, "Sq");
+    assert_eq!(trait_name.as_ref().unwrap().name, "round.Shape");
+}
+
+#[test]
+fn a_trait_import_binds_the_trait() {
+    let linked = link(
+        Path::new("main.stn"),
+        "use round.Shape\n",
+        &sources_of(&[ROUND]),
+    );
+    assert_eq!(
+        linked.imports[0].target,
+        Target::Trait("round.Shape".to_string())
+    );
+}
+
+#[test]
+fn a_private_trait_cannot_be_used_from_another_file() {
+    assert_error(
+        &[("main.stn", "use round.Secret\n"), ROUND],
+        "main.stn",
+        "'Secret' is private to module 'round'",
+        1,
+        11,
+    );
+    assert_error(
+        &[
+            (
+                "main.stn",
+                "use round\nfn f[T: round.Secret](x: T):\n    ret\n",
+            ),
+            ROUND,
+        ],
+        "main.stn",
+        "'Secret' is private to module 'round'",
+        2,
+        9,
+    );
+    assert_error(
+        &[
+            (
+                "main.stn",
+                "use round\nfn f[T: round.Round](x: T):\n    ret\n",
+            ),
+            ROUND,
+        ],
+        "main.stn",
+        "module 'round' has no trait 'Round'",
+        2,
+        9,
+    );
+}
+
+#[test]
+fn an_impl_of_a_trait_is_in_the_file_of_the_trait_or_the_type() {
+    // the trait's file may implement it for another file's struct
+    let body = linked_body(&[
+        ("main.stn", "use named\n"),
+        GEO,
+        (
+            "named.stn",
+            "use geo.Point\npub trait Named:\n    fn name(self) -> str\nimpl Named for Point:\n    \
+             fn name(self) -> str:\n        ret \"p\"\n",
+        ),
+    ]);
+    let impls: Vec<(String, String)> = body
+        .iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::ImplDef {
+                name,
+                trait_name: Some(trait_name),
+                ..
+            } => Some((trait_name.name.clone(), name.clone())),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        impls,
+        [("named.Named".to_string(), "geo.Point".to_string())]
+    );
+
+    assert_error(
+        &[
+            (
+                "main.stn",
+                "use geo.Point\nuse round.Shape\nimpl Shape for Point:\n    \
+                 fn area(self) -> int:\n        ret 1\n",
+            ),
+            GEO,
+            ROUND,
+        ],
+        "main.stn",
+        "'Shape' and 'Point' are both defined in other files, so their impl block goes in the \
+         file of either",
+        3,
+        16,
+    );
+    assert_error(
+        &[(
+            "main.stn",
+            "trait Shape:\n    fn area(self) -> int\nimpl Shape for Point:\n    \
+             fn area(self) -> int:\n        ret 1\n",
+        )],
+        "main.stn",
+        "no struct named 'Point'",
+        3,
+        16,
+    );
+    assert_error(
+        &[(
+            "main.stn",
+            "enum E:\n    A\ntrait Shape:\n    fn area(self) -> int\nimpl Shape for E:\n    \
+             fn area(self) -> int:\n        ret 1\n",
+        )],
+        "main.stn",
+        "'E' is an enum, and only a struct has an impl block for now",
+        5,
+        16,
+    );
+}
+
+#[test]
+fn a_default_method_cannot_share_its_linked_name_with_a_module_function() {
+    assert_error(
+        &[
+            ("main.stn", "use round\nuse round.Shape.twice\n"),
+            ROUND,
+            ("round/Shape.stn", "pub fn twice() -> int:\n    ret 1\n"),
+        ],
+        "round/Shape.stn",
+        "'round.Shape.twice' is both a function of this module and a method of 'Shape' in \
+         module 'round'",
+        1,
+        8,
+    );
+}
+
+#[test]
+fn no_module_can_be_named_like_the_prelude() {
+    assert_error(
+        &[
+            ("main.stn", "use prelude\n"),
+            ("prelude.stn", "pub fn sort() -> int:\n    ret 1\n"),
+        ],
+        "main.stn",
+        "'prelude' is the name of stone's prelude, which every program has, so rename \
+         prelude.stn",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn the_preludes_variants_are_written_alone() {
+    assert_eq!(
+        output(&[(
+            "main.stn",
+            "o = less\nmatch o:\n    case greater:\n        print(1)\n    case _:\n        \
+             print(o, equal)\n",
+        )]),
+        "less equal\n"
+    );
+    assert_error(
+        &[("main.stn", "o = ordering.less\n")],
+        "main.stn",
+        "write 'less', 'equal', or 'greater' without 'ordering.'",
+        1,
         5,
     );
 }

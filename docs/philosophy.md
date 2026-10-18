@@ -48,6 +48,12 @@ What stone already infers:
   one written for a single type. Structs and enums can be generic the same way, as in
   `struct Pair[A, B]:`. Even `option[T]` is one, written in stone in the prelude that every
   program is linked with, so it follows the same rules as the programmer's own enums.
+- **Which method a bound calls.** A trait lists methods that types implement, and a bound such
+  as `fn total[T: Shape](xs: list[T])` lets a generic function call them. Each copy of the
+  function calls the method of its own type directly, so there is no `dyn` to write and no
+  lookup while the program runs. Whether a trait's method changes `self` is decided by the
+  trait, from its default body, so no `mut` marks it either. Even `==` and `<` are the prelude's
+  traits `eq` and `ord`, which a struct can implement to compare its own way.
 - **Memory management.** Compiled programs count references, with no garbage collector. The
   compiler places every retain and release, decides which parameters are only borrowed, and
   skips counting where it can prove a count would not matter.
@@ -181,7 +187,10 @@ change to a field of one still checks the list's bounds and that it is not share
 the `nbody` benchmark about 5 times slower than C.
 A generic function, or a method of a generic struct, is compiled once for each set of types it is
 used with, so its copies are as fast as functions written for each type, and a generic struct is
-flattened like any other.
+flattened like any other. A call through a trait's bound is a direct call in each copy, and a
+trait's default method is compiled once for each type that keeps it. A trait is not yet a type of
+values, as `dyn Shape` is in Rust, so a list holds values of one type; a list of shapes of
+several types would need its values boxed with a table of their methods.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.

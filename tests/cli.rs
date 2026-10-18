@@ -887,3 +887,24 @@ fn check_reports_a_mistake_inside_a_generic_function() {
         )
     );
 }
+
+#[test]
+fn check_reports_a_method_a_trait_needs() {
+    let (output, file) = stone(
+        &["check"],
+        "trait_missing",
+        "trait Shape:\n    fn area(self) -> float\nstruct Sq:\n    s: float\n\
+         impl Shape for Sq:\n    fn side(self) -> float:\n        ret self.s\n",
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let file = file.display();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "{file}:5:16: error: 'Sq' does not implement 'area' of 'Shape'\n  |\n5 | impl Shape \
+             for Sq:\n  |                ^^\n{file}:6:8: error: 'side' is not a method of \
+             'Shape', so it goes in an 'impl Sq:' block\n  |\n6 |     fn side(self) -> float:\n  \
+             |        ^^^^\n"
+        )
+    );
+}

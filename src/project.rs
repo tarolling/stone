@@ -23,16 +23,17 @@ use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
 use crate::ast::{
-    Expr, ExprContext, ExprKind, Mod, Pattern, PatternKind, Stmt, StmtKind, TypeExpr, TypeExprKind,
-    TypeParam,
+    Expr, ExprContext, ExprKind, Mod, Pattern, PatternKind, Stmt, StmtKind, TraitName, TypeExpr,
+    TypeExprKind, TypeParam,
 };
-use crate::checker::{OPTION, collect_assigned};
+use crate::checker::{EQ, OPTION, ORD, collect_assigned};
 use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::{
     BuiltinModule, PRELUDE, PRELUDE_VARIANTS, is_builtin, is_reserved, module_function,
+    prelude_variant,
 };
 
 #[cfg(test)]
@@ -198,6 +199,8 @@ pub enum Target {
     Enum(String),
     /// A library struct, by its linked name, such as `geometry.Point`.
     Struct(String),
+    /// A library trait, by its linked name, such as `geometry.Shape`.
+    Trait(String),
 }
 
 /// A name a `use` binds, for editor tooling.
@@ -273,7 +276,21 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
 }
 
 /// The error for a variant of the prelude written with its enum's name, as in `option.some(1)`.
-const PRELUDE_QUALIFIED: &str = "write 'some(x)' or 'none' without 'option.'";
+/// Returns the error for a variant of the prelude's enum `name` written with the enum's name,
+/// which is written alone.
+fn prelude_qualified(name: &str) -> &'static str {
+    match name {
+        OPTION => "write 'some(x)' or 'none' without 'option.'",
+        _ => "write 'less', 'equal', or 'greater' without 'ordering.'",
+    }
+}
+
+/// Returns whether `name` is an enum of the prelude, whose variants are written alone.
+fn is_prelude_enum(name: &str) -> bool {
+    PRELUDE_VARIANTS
+        .iter()
+        .any(|(_, enum_name)| *enum_name == name)
+}
 
 /// What a name a file binds with `use` refers to while linking.
 enum Binding {
@@ -281,7 +298,7 @@ enum Binding {
     /// A builtin module, such as `os`.
     BuiltinModule(&'static BuiltinModule),
     Function(String),
-    /// A library enum or struct, by its linked name.
+    /// A library enum, struct, or trait, by its linked name.
     Type(String),
     /// A `use` that failed to resolve, which was already reported, so its uses are left alone.
     Unresolved,
@@ -394,6 +411,16 @@ impl Loader<'_> {
     fn resolve(&mut self, file: FileId, path: &[(String, Span)]) -> Result<Target, Diagnostic> {
         let names: Vec<String> = path.iter().map(|(name, _)| name.clone()).collect();
         let span = path[0].1.to(path[path.len() - 1].1);
+        // the prelude's functions are linked as if in this module
+        if names == [PRELUDE_MODULE] {
+            return Err(Diagnostic::error(
+                span,
+                format!(
+                    "'{PRELUDE_MODULE}' is the name of stone's prelude, which every program has, \
+                     so rename {PRELUDE_MODULE}.stn"
+                ),
+            ));
+        }
         if let Some(module) = crate::stdlib::module(&names[0]) {
             return self.resolve_builtin_module(module, path, span);
         }
@@ -430,6 +457,8 @@ impl Loader<'_> {
                         ))
                     } else if is_struct(parsed, function) {
                         Ok(Target::Struct(linked))
+                    } else if is_trait(parsed, function) {
+                        Ok(Target::Trait(linked))
                     } else {
                         Ok(Target::Enum(linked))
                     };
@@ -516,6 +545,10 @@ impl Loader<'_> {
         let functions: Vec<HashMap<String, bool>> =
             self.modules.iter().map(public_functions).collect();
         let types: Vec<HashMap<String, bool>> = self.modules.iter().map(public_types).collect();
+        // each file's structs with their type parameters, and its traits, for `impl` blocks
+        let structs: Vec<HashMap<String, Vec<TypeParam>>> =
+            self.modules.iter().map(struct_params).collect();
+        let traits: Vec<HashSet<String>> = self.modules.iter().map(trait_names).collect();
         let module_names: Vec<String> = self.files.iter().map(|f| f.module.clone()).collect();
         let mut imports = vec![];
         let mut library_body = vec![];
@@ -561,7 +594,7 @@ impl Loader<'_> {
                         match target {
                             Target::Module(id) => Binding::Module(*id),
                             Target::Function(name) => Binding::Function(name.clone()),
-                            Target::Enum(name) | Target::Struct(name) => {
+                            Target::Enum(name) | Target::Struct(name) | Target::Trait(name) => {
                                 Binding::Type(name.clone())
                             }
                             Target::BuiltinModule(name) => Binding::BuiltinModule(
@@ -575,15 +608,7 @@ impl Loader<'_> {
             }
 
             // each struct with its type parameters, which its impl blocks' functions can name
-            let own_structs: HashMap<String, Vec<TypeParam>> = body
-                .iter()
-                .filter_map(|stmt| match &stmt.kind {
-                    StmtKind::StructDef {
-                        name, type_params, ..
-                    } => Some((name.clone(), type_params.clone())),
-                    _ => None,
-                })
-                .collect();
+            let own_structs = &structs[i];
             let mut rewriter = Rewriter {
                 file,
                 library,
@@ -607,13 +632,67 @@ impl Loader<'_> {
                         }
                         rewriter.function(&mut stmt, &[]);
                     }
+                    StmtKind::TraitDef { name, methods, .. } => {
+                        if library {
+                            *name = format!("{}.{name}", module_names[i]);
+                        }
+                        methods.iter_mut().for_each(|m| rewriter.function(m, &[]));
+                    }
+                    StmtKind::ImplDef {
+                        name,
+                        name_span,
+                        trait_name: Some(trait_name),
+                        methods,
+                    } => {
+                        let own_trait = traits[i].contains(&trait_name.name);
+                        rewriter.trait_name(trait_name);
+                        let found = rewriter.impl_type(name, &structs, &traits, &module_names);
+                        let error = match &found {
+                            Err(message) => Some(message.clone()),
+                            // the checker says a builtin type already implements the prelude's
+                            Ok((linked, _, _))
+                                if [EQ, ORD].contains(&trait_name.name.as_str())
+                                    && matches!(
+                                        linked.as_str(),
+                                        "int" | "float" | "bool" | "str"
+                                    ) =>
+                            {
+                                None
+                            }
+                            Ok((_, _, own_type)) if !own_type && !own_trait => Some(format!(
+                                "'{}' and '{name}' are both defined in other files, so their \
+                                 impl block goes in the file of either",
+                                trait_name.name.rsplit('.').next().unwrap_or_default()
+                            )),
+                            Ok(_) => None,
+                        };
+                        if let Some(message) = error {
+                            rewriter
+                                .diagnostics
+                                .push(Diagnostic::error(*name_span, message));
+                            continue;
+                        }
+                        let Ok((linked, outer, _)) = found else {
+                            continue;
+                        };
+                        *name = linked;
+                        methods
+                            .iter_mut()
+                            .for_each(|m| rewriter.function(m, &outer));
+                    }
                     StmtKind::ImplDef {
                         name,
                         name_span,
                         methods,
+                        ..
                     } => {
                         let error = if own_structs.contains_key(name.as_str()) {
                             None
+                        } else if traits[i].contains(name.as_str()) {
+                            Some(format!(
+                                "'{name}' is a trait, so name the type it is for, as in \
+                                 'impl {name} for Point:'"
+                            ))
                         } else if types[i].contains_key(name.as_str()) {
                             Some(format!(
                                 "'{name}' is an enum, and only a struct has an impl block for now"
@@ -649,6 +728,7 @@ impl Loader<'_> {
                     } => {
                         rewriter.locals.clear();
                         rewriter.set_type_params(&[], type_params);
+                        rewriter.bounds(type_params);
                         for variant in variants.iter_mut() {
                             variant
                                 .fields
@@ -667,6 +747,7 @@ impl Loader<'_> {
                     } => {
                         rewriter.locals.clear();
                         rewriter.set_type_params(&[], type_params);
+                        rewriter.bounds(type_params);
                         fields
                             .iter_mut()
                             .for_each(|f| rewriter.type_expr(&mut f.annotation));
@@ -718,8 +799,12 @@ impl Loader<'_> {
     }
 }
 
+/// The module name the prelude's functions are linked under, as `prelude.sort`, which no file
+/// may have.
+pub const PRELUDE_MODULE: &str = "prelude";
+
 /// Parses the prelude, whose definitions every program is linked with and which keep their own
-/// names, such as `option`. It always parses, so an error in it is a bug in the compiler, but one
+/// names, such as `option`, except its functions, which are named as if in a module `prelude`. It always parses, so an error in it is a bug in the compiler, but one
 /// is still reported rather than lost.
 fn prelude(diagnostics: &mut Vec<Diagnostic>) -> Vec<Stmt> {
     let parsed = Lexer::with_file(PRELUDE, FileId::PRELUDE)
@@ -727,7 +812,15 @@ fn prelude(diagnostics: &mut Vec<Diagnostic>) -> Vec<Stmt> {
         .map_err(Diagnostic::from)
         .and_then(|tokens| Parser::new(&tokens).parse());
     match parsed {
-        Ok(Mod::Module { body }) => body,
+        Ok(Mod::Module { mut body }) => {
+            // a function calls no other of the prelude's, so only its name changes
+            for stmt in &mut body {
+                if let StmtKind::FunctionDef { name, .. } = &mut stmt.kind {
+                    *name = format!("{PRELUDE_MODULE}.{name}");
+                }
+            }
+            body
+        }
         Err(error) => {
             diagnostics.push(error);
             vec![]
@@ -742,6 +835,9 @@ fn report_method_collisions(library: &[Stmt], entry: &[Stmt], diagnostics: &mut 
     let mut methods = HashMap::new();
     for stmt in library.iter().chain(entry) {
         if let StmtKind::ImplDef {
+            name, methods: m, ..
+        }
+        | StmtKind::TraitDef {
             name, methods: m, ..
         } = &stmt.kind
         {
@@ -778,18 +874,47 @@ fn module_path(names: &[String]) -> PathBuf {
     path
 }
 
-/// Returns each enum and struct a module defines at the top level, mapped to whether it is
-/// `pub`.
+/// Returns each enum, struct, and trait a module defines at the top level, mapped to whether it
+/// is `pub`.
 fn public_types(module: &Mod) -> HashMap<String, bool> {
     let Mod::Module { body } = module;
     body.iter()
         .filter_map(|stmt| match &stmt.kind {
-            StmtKind::EnumDef { name, public, .. } | StmtKind::StructDef { name, public, .. } => {
-                Some((name.clone(), *public))
-            }
+            StmtKind::EnumDef { name, public, .. }
+            | StmtKind::StructDef { name, public, .. }
+            | StmtKind::TraitDef { name, public, .. } => Some((name.clone(), *public)),
             _ => None,
         })
         .collect()
+}
+
+/// Returns each struct a module defines at the top level, mapped to its type parameters.
+fn struct_params(module: &Mod) -> HashMap<String, Vec<TypeParam>> {
+    let Mod::Module { body } = module;
+    body.iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::StructDef {
+                name, type_params, ..
+            } => Some((name.clone(), type_params.clone())),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Returns the name of each trait a module defines at the top level.
+fn trait_names(module: &Mod) -> HashSet<String> {
+    let Mod::Module { body } = module;
+    body.iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::TraitDef { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Returns whether a module defines a trait called `name` at the top level.
+fn is_trait(module: &Mod, name: &str) -> bool {
+    trait_names(module).contains(name)
 }
 
 /// Returns whether a module defines a struct called `name` at the top level.
@@ -811,7 +936,7 @@ fn public_functions(module: &Mod) -> HashMap<String, bool> {
 }
 
 /// Reports a `use` after other statements, and in a library, any top-level statement that is not
-/// a `use`, `fn`, `enum`, `struct`, or `impl`.
+/// a `use`, `fn`, `enum`, `struct`, `impl`, or `trait`.
 fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnostic>) {
     let mut after_use = false;
     for stmt in body {
@@ -824,14 +949,15 @@ fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnosti
             StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
-            | StmtKind::ImplDef { .. } => after_use = true,
+            | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. } => after_use = true,
             _ => {
                 after_use = true;
                 if library {
                     diagnostics.push(Diagnostic::error(
                         stmt.span,
-                        "only use, fn, enum, struct, and impl are allowed at the top level of a \
-                         module",
+                        "only use, fn, enum, struct, impl, and trait are allowed at the top level \
+                         of a module",
                     ));
                 }
             }
@@ -880,6 +1006,7 @@ impl Rewriter<'_> {
             return;
         };
         self.set_type_params(outer, type_params);
+        self.bounds(type_params);
         let mut locals = vec![];
         collect_assigned(body, &mut locals);
         self.locals = locals.into_iter().map(|(name, _)| name).collect();
@@ -910,6 +1037,68 @@ impl Rewriter<'_> {
         }
         self.type_params
             .extend(outer.iter().chain(own).map(|p| p.name.clone()));
+    }
+
+    /// Rewrites the traits each of `params` is bounded by to their linked names.
+    fn bounds(&mut self, params: &mut [TypeParam]) {
+        for bound in params.iter_mut().flat_map(|p| &mut p.bounds) {
+            self.trait_name(bound);
+        }
+    }
+
+    /// Rewrites a trait named in a bound or an `impl` block to its linked name, as `type_expr`
+    /// does a type. A name that is no trait this file can see is left for the checker.
+    fn trait_name(&mut self, name: &mut TraitName) {
+        let linked = match name.name.rsplit_once('.') {
+            Some((module, short)) => self.module_type(module, short, name.span, "trait"),
+            None => self.enum_name(&name.name),
+        };
+        if let Some(linked) = linked {
+            name.name = linked;
+        }
+    }
+
+    /// Finds the type `name` that an `impl` block of a trait is for, in this file or imported:
+    /// its linked name, its type parameters, and whether this file defines it. A builtin type,
+    /// such as `int`, is defined in no file. The error says why it cannot have the block.
+    fn impl_type(
+        &self,
+        name: &str,
+        structs: &[HashMap<String, Vec<TypeParam>>],
+        traits: &[HashSet<String>],
+        module_names: &[String],
+    ) -> Result<(String, Vec<TypeParam>, bool), String> {
+        let own = &structs[self.file.0 as usize];
+        if let Some(params) = own.get(name) {
+            let linked = match self.library {
+                true => format!("{}.{name}", self.module),
+                false => name.to_string(),
+            };
+            return Ok((linked, params.clone(), true));
+        }
+        if matches!(name, "int" | "float" | "bool" | "str") {
+            return Ok((name.to_string(), vec![], false));
+        }
+        let enum_error =
+            format!("'{name}' is an enum, and only a struct has an impl block for now");
+        if traits[self.file.0 as usize].contains(name) {
+            return Err(format!(
+                "'{name}' is a trait, so it cannot have an impl block"
+            ));
+        }
+        if self.own_types.contains_key(name) {
+            return Err(enum_error);
+        }
+        if let Some(Binding::Type(linked)) = self.bindings.get(name)
+            && let Some((module, short)) = linked.rsplit_once('.')
+            && let Some(file) = module_names.iter().position(|m| m == module)
+        {
+            return match structs[file].get(short) {
+                Some(params) => Ok((linked.clone(), params.clone(), false)),
+                None => Err(enum_error),
+            };
+        }
+        Err(format!("no struct named '{name}'"))
     }
 
     fn block(&mut self, body: &mut [Stmt]) {
@@ -959,6 +1148,7 @@ impl Rewriter<'_> {
             StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
@@ -986,7 +1176,8 @@ impl Rewriter<'_> {
                             *name = linked;
                         }
                     }
-                    None if self.type_params.contains(name) => {}
+                    // `Self` names the type of a trait or impl block, never a module's type
+                    None if self.type_params.contains(name) || name == "Self" => {}
                     None => {
                         if let Some(linked) = self.enum_name(name) {
                             *name = linked;
@@ -1079,18 +1270,31 @@ impl Rewriter<'_> {
 
     /// Rewrites the enum each variant in `pattern` names to its linked name.
     fn pattern(&mut self, pattern: &mut Pattern) {
+        // a prelude variant without values, such as `less`, is written as a name, which can only
+        // be the variant, since its name is reserved
+        if let PatternKind::Name(name) = &pattern.kind
+            && let Some(enum_name) = prelude_variant(name)
+        {
+            let span = pattern.span;
+            let unwritten = Span::new(span.start, span.start).in_file(span.file);
+            pattern.kind = PatternKind::Variant {
+                path: vec![(enum_name.to_string(), unwritten), (name.clone(), span)],
+                fields: vec![],
+            };
+            return;
+        }
         let PatternKind::Variant { path, fields } = &mut pattern.kind else {
             return;
         };
         fields.iter_mut().for_each(|f| self.pattern(f));
         match path.as_mut_slice() {
-            [(name, span), ..] if name == OPTION => {
+            [(name, span), ..] if is_prelude_enum(name) => {
                 self.diagnostics
-                    .push(Diagnostic::error(*span, PRELUDE_QUALIFIED));
+                    .push(Diagnostic::error(*span, prelude_qualified(name)));
             }
-            [(name, span)] if PRELUDE_VARIANTS.contains(&name.as_str()) => {
+            [(name, span)] if let Some(enum_name) = prelude_variant(name) => {
                 let unwritten = Span::new(span.start, span.start).in_file(span.file);
-                path.insert(0, (OPTION.to_string(), unwritten));
+                path.insert(0, (enum_name.to_string(), unwritten));
             }
             [(name, _), _] => {
                 if let Some(linked) = self.enum_name(name) {
@@ -1112,10 +1316,12 @@ impl Rewriter<'_> {
             return;
         }
         if let ExprKind::Attribute { value, .. } = &expr.kind
-            && matches!(&value.kind, ExprKind::Name { id, .. } if id == OPTION)
+            && let ExprKind::Name { id, .. } = &value.kind
+            && is_prelude_enum(id)
+            && !self.locals.contains(id)
         {
             self.diagnostics
-                .push(Diagnostic::error(expr.span, PRELUDE_QUALIFIED));
+                .push(Diagnostic::error(expr.span, prelude_qualified(id)));
             return;
         }
         match &mut expr.kind {
@@ -1183,14 +1389,17 @@ impl Rewriter<'_> {
             return false;
         };
         // a parameter may shadow it, as one may shadow a builtin
-        if !PRELUDE_VARIANTS.contains(&id.as_str()) || self.locals.contains(id) {
+        let Some(enum_name) = prelude_variant(id) else {
+            return false;
+        };
+        if self.locals.contains(id) {
             return false;
         }
         let span = expr.span;
         let unwritten = Span::new(span.start, span.start).in_file(span.file);
         let enum_name = Expr::new(
             ExprKind::Name {
-                id: OPTION.to_string(),
+                id: enum_name.to_string(),
                 ctx: ExprContext::Load,
             },
             unwritten,

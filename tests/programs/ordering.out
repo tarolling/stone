@@ -1,0 +1,11 @@
+less equal greater
+less greater equal
+less greater equal
+greater less equal greater
+false false
+1 before
+5 same
+9 after
+true true [less, equal, greater] some(equal)
+7 pear nan
+true false true

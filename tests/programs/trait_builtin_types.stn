@@ -1,0 +1,74 @@
+// traits implemented by builtin types, called directly and through bounds
+
+trait Describe:
+    fn describe(self) -> str
+    fn loud(self) -> str:
+        ret self.describe() + "!"
+
+impl Describe for int:
+    fn describe(self) -> str:
+        if self < 0:
+            ret "negative " + str(-self)
+        ret "int " + str(self)
+
+impl Describe for str:
+    fn describe(self) -> str:
+        ret "text '" + self + "' of length " + str(self.len())
+    fn loud(self) -> str:
+        ret self + "?!"
+
+impl Describe for bool:
+    fn describe(self) -> str:
+        if self:
+            ret "yes"
+        ret "no"
+
+impl Describe for float:
+    fn describe(self) -> str:
+        ret "about " + str(int(self))
+
+struct Point:
+    x: int
+
+impl Describe for Point:
+    fn describe(self) -> str:
+        ret "point at " + self.x.describe()
+
+trait Step:
+    fn step(self) -> Self
+    fn bump(self):
+        self = self.step()
+
+impl Step for int:
+    fn step(self) -> int:
+        ret self + 10
+
+impl Step for str:
+    fn step(self) -> str:
+        ret self + "+"
+
+fn all[T: Describe](xs: list[T]) -> list[str]:
+    out = []
+    for x in xs:
+        out.append(x.loud())
+    ret out
+
+fn bumped[T: Step](x: T, n: int) -> T:
+    for i in range(n):
+        x.bump()
+    ret x
+
+print(5.describe(), (-2).loud())
+print("hi".describe())
+print(all([1, -3]))
+print(all(["a", "bc"]))
+print(all([true, false]))
+print(all([2.5]), all([Point(x=4)]))
+n = 1
+n.bump()
+s = "go"
+s.bump()
+print(n, s, bumped(3, 2), bumped("x", 3))
+ns = [1, 2]
+ns[1].bump()
+print(ns)

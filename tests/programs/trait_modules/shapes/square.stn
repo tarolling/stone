@@ -1,0 +1,10 @@
+// a library struct that implements another module's trait in its own file
+
+use shapes.core.Shape
+
+pub struct Square:
+    side: int
+
+impl Shape for Square:
+    fn area(self) -> int:
+        ret self.side * self.side

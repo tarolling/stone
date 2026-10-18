@@ -360,7 +360,13 @@ impl Generator {
                 let op = *u.choose(&["", "+", "-", "*", "%"])?;
                 self.line(indent, &format!("{list}[{index}] {op}= {value}"));
             }
-            2 => self.line(indent, &format!("print({list}, {list}.len())")),
+            2 => {
+                // half the lists, by name, sort first, which draws nothing more
+                if list.ends_with(['0', '2', '4', '6', '8']) {
+                    self.line(indent, &format!("{list}.sort()"));
+                }
+                self.line(indent, &format!("print({list}, {list}.len())"));
+            }
             _ => {
                 let value = self.expression(u, scope, 0)?;
                 let test = self.comparison(u, scope)?;
@@ -1208,7 +1214,7 @@ mod tests {
             .map(|seed| generate(&mut Unstructured::new(&bytes(seed, 4096))).unwrap())
             .collect();
         // a colon only appears in a slice
-        for feature in [".pop(", ".insert(", ".extend(", ":", "= (list"] {
+        for feature in [".pop(", ".insert(", ".extend(", ".sort()", ":", "= (list"] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
         }
@@ -1283,6 +1289,7 @@ mod tests {
             " == S",
             " == some(",
             "fn t",
+            ".sort()",
         ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
@@ -1361,6 +1368,27 @@ mod tests {
             "G.wrap(", "G(v=", ".add(", ".get()", "H.Just(", "H.Both(", "case H.", ": G[", "H[",
             " == H.",
         ] {
+            let count = uses(feature);
+            assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
+        }
+    }
+
+    #[test]
+    fn generated_programs_use_traits() {
+        let sources = compound_sources(500);
+        // past the declarations, which end with the bounded function
+        let end = "    ret x.twice() + x.key()\n";
+        let uses = |feature: &str| {
+            sources
+                .iter()
+                .filter(|s| {
+                    s.split(end)
+                        .nth(1)
+                        .is_some_and(|rest| rest.contains(feature))
+                })
+                .count()
+        };
+        for feature in [".key()", ".twice()", "keyed(", " < ", " >= "] {
             let count = uses(feature);
             assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
         }

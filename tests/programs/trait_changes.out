@@ -1,0 +1,7 @@
+Counter(n=3, log=[0, 1, 2])
+Counter(n=6, log=[0, 1, 2, 3, 4, 5])
+Counter(n=3, log=[0, 1, 2])
+Clock(hours=4)
+Clock(hours=0)
+Shelf(clocks=[Clock(hours=1), Clock(hours=7)], counter=Counter(n=6, log=[0, 1, 2, 3, 4, 5]))
+[Clock(hours=3)]

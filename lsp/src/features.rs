@@ -253,7 +253,32 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
             let owner = symbol.scope.as_deref().unwrap_or_default();
             format!("{owner}.{}: {ty}", symbol.name)
         }
-        (StoneSymbolKind::TypeParam, _) => format!("(type parameter) {}", symbol.name),
+        (StoneSymbolKind::Trait, _) => {
+            let methods: Vec<String> = trait_methods(analysis, &symbol.name)
+                .filter_map(|method| match &method.ty {
+                    Type::Function { params, ret } => {
+                        let function = format!("{}.{}", symbol.name, method.name);
+                        let shown =
+                            function_signature(analysis, &function, &method.name, params, ret);
+                        Some(format!("\n    {shown}"))
+                    }
+                    _ => None,
+                })
+                .collect();
+            format!("trait {}{}", symbol.name, methods.concat())
+        }
+        (StoneSymbolKind::TypeParam, _) => {
+            let index = analysis
+                .symbols
+                .iter()
+                .position(|s| std::ptr::eq(s, symbol))
+                .unwrap_or(usize::MAX);
+            format!(
+                "(type parameter) {}{}",
+                symbol.name,
+                bounds_of(analysis, index)
+            )
+        }
         (kind, ty) => {
             let kind = match kind {
                 StoneSymbolKind::Parameter => "parameter",
@@ -265,6 +290,7 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 | StoneSymbolKind::Struct
                 | StoneSymbolKind::Field
                 | StoneSymbolKind::Method
+                | StoneSymbolKind::Trait
                 | StoneSymbolKind::TypeParam => "global",
             };
             format!("({kind}) {}: {ty}", symbol.name)
@@ -305,16 +331,87 @@ fn function_signature(
 /// Writes the type parameters of the generic function, struct, or enum `owner` as its definition
 /// does, such as `[A, B]`, or nothing if it is not generic.
 fn type_params_of(analysis: &Analysis, owner: &str) -> String {
-    let names: Vec<&str> = analysis
+    let names: Vec<String> = analysis
         .symbols
         .iter()
-        .filter(|s| s.kind == StoneSymbolKind::TypeParam && s.scope.as_deref() == Some(owner))
-        .map(|s| s.name.as_str())
+        .enumerate()
+        .filter(|(_, s)| s.kind == StoneSymbolKind::TypeParam && s.scope.as_deref() == Some(owner))
+        .map(|(i, s)| format!("{}{}", s.name, bounds_of(analysis, i)))
         .collect();
     match names.is_empty() {
         true => String::new(),
         false => format!("[{}]", names.join(", ")),
     }
+}
+
+/// Writes the bounds of the type parameter whose symbol is at index `symbol` as its definition
+/// does, such as `: Shape + Named`, or nothing if it has none.
+fn bounds_of(analysis: &Analysis, symbol: usize) -> String {
+    match analysis.bounds.get(&symbol) {
+        Some(bounds) => {
+            let shown: Vec<&str> = bounds.iter().map(|b| struct_display(b)).collect();
+            format!(": {}", shown.join(" + "))
+        }
+        None => String::new(),
+    }
+}
+
+/// Returns the methods of the trait with the linked name `name`, in order.
+fn trait_methods<'a>(analysis: &'a Analysis, name: &'a str) -> impl Iterator<Item = &'a Symbol> {
+    analysis
+        .symbols
+        .iter()
+        .filter(move |s| s.kind == StoneSymbolKind::Method && s.scope.as_deref() == Some(name))
+}
+
+/// Returns the methods a value of the type parameter `param` has at `pos`: those of the traits
+/// that bound it in the function `pos` is inside, or of the trait whose default method that is,
+/// for `Self`.
+fn bound_methods<'a>(
+    doc: &'a Document,
+    pos: stone::span::Pos,
+    param: &str,
+) -> impl Iterator<Item = &'a Symbol> {
+    let analysis = &doc.analysis;
+    let function = analysis
+        .functions
+        .iter()
+        .find(|(_, span)| span.file == doc.file && span.contains(pos))
+        .map(|(name, _)| name.as_str());
+    let mut traits: Vec<&str> = vec![];
+    if let Some(function) = function {
+        if param == "Self"
+            && let Some((owner, _)) = function.rsplit_once('.')
+            && is_trait(analysis, owner)
+        {
+            traits.push(owner);
+        }
+        if let Some((i, _)) = analysis.symbols.iter().enumerate().find(|(_, s)| {
+            s.kind == StoneSymbolKind::TypeParam
+                && s.name == param
+                && s.scope.as_deref() == Some(function)
+        }) {
+            traits.extend(
+                analysis
+                    .bounds
+                    .get(&i)
+                    .into_iter()
+                    .flatten()
+                    .map(String::as_str),
+            );
+        }
+    }
+    traits
+        .into_iter()
+        .flat_map(move |trait_| trait_methods(analysis, trait_))
+}
+
+/// Returns whether the program defines a trait with the linked name `name`.
+fn is_trait(analysis: &Analysis, name: &str) -> bool {
+    analysis
+        .symbols
+        .iter()
+        .any(|s| s.kind == StoneSymbolKind::Trait && s.name == name)
 }
 
 /// Writes a variant as its enum declares it, such as `Rect(float, float)` or `Empty`.
@@ -393,7 +490,8 @@ fn module_at(doc: &Document, position: Position) -> Option<(FileId, Span)> {
             Target::Function(_)
             | Target::BuiltinModule(_)
             | Target::Enum(_)
-            | Target::Struct(_) => None,
+            | Target::Struct(_)
+            | Target::Trait(_) => None,
         };
     }
     let (word, span) = word_at(doc, doc.index.pos(position))?;
@@ -822,6 +920,7 @@ fn document_symbol(doc: &Document, symbol: &Symbol, range: Span) -> DocumentSymb
             StoneSymbolKind::Struct => SymbolKind::STRUCT,
             StoneSymbolKind::Field => SymbolKind::FIELD,
             StoneSymbolKind::Method if has_self(&doc.analysis, symbol) => SymbolKind::METHOD,
+            StoneSymbolKind::Trait => SymbolKind::INTERFACE,
             StoneSymbolKind::Method => SymbolKind::FUNCTION,
             StoneSymbolKind::TypeParam => SymbolKind::TYPE_PARAMETER,
             _ => SymbolKind::VARIABLE,
@@ -848,6 +947,15 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
                 outline.children = Some(
                     enum_variants(analysis, &symbol.name)
                         .map(|s| document_symbol(doc, s, s.span))
+                        .collect(),
+                );
+                return outline;
+            }
+            if symbol.kind == StoneSymbolKind::Trait {
+                let mut outline = document_symbol(doc, symbol, symbol.span);
+                outline.children = Some(
+                    trait_methods(analysis, &symbol.name)
+                        .map(|s| function_outline(doc, s, &format!("{}.{}", symbol.name, s.name)))
                         .collect(),
                 );
                 return outline;
@@ -1015,6 +1123,16 @@ pub fn completion(
         let mut visible: Vec<&Symbol> = doc.analysis.visible_at(doc.file, pos).collect();
         visible.sort_by_key(|s| s.scope.is_none());
         let held = visible.iter().find(|s| s.name == receiver).map(|s| &s.ty);
+        if let Some(Type::Param(param)) = held {
+            return bound_methods(doc, pos, param)
+                .map(|method| CompletionItem {
+                    label: method.name.clone(),
+                    kind: Some(CompletionItemKind::METHOD),
+                    detail: Some(signature(&doc.analysis, method)),
+                    ..CompletionItem::default()
+                })
+                .collect();
+        }
         if let Some(Type::Struct { name, .. }) = held {
             let fields = struct_fields(&doc.analysis, name).map(|field| CompletionItem {
                 label: field.name.clone(),
@@ -1022,8 +1140,20 @@ pub fn completion(
                 detail: Some(signature(&doc.analysis, field)),
                 ..CompletionItem::default()
             });
-            let methods = struct_methods(&doc.analysis, name)
+            let own: Vec<&Symbol> = struct_methods(&doc.analysis, name)
                 .filter(|method| has_self(&doc.analysis, method))
+                .collect();
+            // and the defaults of the traits it implements that it does not define again
+            let traits = doc.analysis.implemented.get(name.as_str());
+            let defaults: Vec<&Symbol> = traits
+                .into_iter()
+                .flatten()
+                .flat_map(|trait_| trait_methods(&doc.analysis, trait_))
+                .filter(|method| !own.iter().any(|m| m.name == method.name))
+                .collect();
+            let methods = own
+                .into_iter()
+                .chain(defaults)
                 .map(|method| CompletionItem {
                     label: method.name.clone(),
                     kind: Some(CompletionItemKind::METHOD),
@@ -1083,6 +1213,7 @@ pub fn completion(
             }
             Target::Enum(name) => (CompletionItemKind::ENUM, Some(format!("enum {name}"))),
             Target::Struct(name) => (CompletionItemKind::STRUCT, Some(format!("struct {name}"))),
+            Target::Trait(name) => (CompletionItemKind::INTERFACE, Some(format!("trait {name}"))),
         };
         items.push(CompletionItem {
             label: import.name.clone(),
@@ -1100,12 +1231,16 @@ pub fn completion(
         });
     }
     // `none` is also a keyword, which is offered below
-    for variant in PRELUDE_VARIANTS {
+    for (variant, enum_name) in PRELUDE_VARIANTS {
         if !RESERVED_KEYWORDS.contains(&variant) {
+            let detail = match enum_name {
+                stone::checker::OPTION => "option[T]",
+                other => other,
+            };
             items.push(CompletionItem {
                 label: variant.to_string(),
                 kind: Some(CompletionItemKind::ENUM_MEMBER),
-                detail: Some("option[T]".to_string()),
+                detail: Some(detail.to_string()),
                 ..CompletionItem::default()
             });
         }
@@ -1127,12 +1262,21 @@ pub fn completion(
 /// and a map, and `append` (`list[T].append(item: T)`) only to a list.
 fn method_applies(method: &str, ty: &Type) -> bool {
     let kind = match ty {
+        Type::Int => "int",
+        Type::Float => "float",
+        Type::Bool => "bool",
         Type::Str => "str",
         Type::List(_) => "list",
         Type::Map(..) => "map",
         Type::Enum { name, .. } if name == stone::checker::OPTION => "option",
         _ => return false,
     };
+    // the methods of the prelude's traits are on every type that implements them
+    match method {
+        "eq" => return kind != "list" && kind != "map",
+        "cmp" => return matches!(kind, "int" | "float" | "str"),
+        _ => {}
+    }
     let Some(doc) = method_doc(method) else {
         return false;
     };

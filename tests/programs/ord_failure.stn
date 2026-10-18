@@ -1,0 +1,16 @@
+// a runtime error inside cmp while sorting points into cmp
+
+struct Ratio:
+    n: int
+    d: int
+
+impl ord for Ratio:
+    fn cmp(self, other: Self) -> ordering:
+        ret (self.n / self.d).cmp(other.n / other.d)
+
+rs = [Ratio(n=4, d=2), Ratio(n=1, d=1)]
+rs.sort()
+print(rs)
+rs.append(Ratio(n=1, d=0))
+rs.sort()
+print(rs)

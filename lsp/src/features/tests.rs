@@ -404,6 +404,7 @@ fn completion_after_a_dot_offers_methods() {
         "pop",
         "insert",
         "extend",
+        "sort",
         "strip",
         "split",
         "join",
@@ -416,12 +417,14 @@ fn completion_after_a_dot_offers_methods() {
         "unwrap_or",
         "contains",
         "get",
+        "eq",
+        "cmp",
     ]
     .iter()
     .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
     .collect();
     // a list offers the list methods, even once a name is started
-    let list_methods = &methods[..5];
+    let list_methods = &methods[..6];
     assert_eq!(labels(at(2, 4)), list_methods);
     assert_eq!(labels(at(3, 6)), list_methods);
     // and a receiver of unknown type offers every method
@@ -446,7 +449,7 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
     };
     assert_eq!(
         labels(at(2, 4)),
-        ["len", "append", "pop", "insert", "extend"]
+        ["len", "append", "pop", "insert", "extend", "sort"]
     );
     assert_eq!(
         labels(at(4, 3)),
@@ -457,15 +460,18 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "join",
             "find",
             "startswith",
-            "endswith"
+            "endswith",
+            "eq",
+            "cmp"
         ]
     );
     assert_eq!(labels(at(6, 3)), ["len", "contains", "get"]);
     assert_eq!(
         labels(at(8, 3)),
-        ["is_some", "is_none", "unwrap", "unwrap_or"]
+        ["is_some", "is_none", "unwrap", "unwrap_or", "eq"]
     );
-    assert!(labels(at(10, 3)).is_empty());
+    // a number has the methods of the prelude's traits
+    assert_eq!(labels(at(10, 3)), ["eq", "cmp"]);
 }
 
 #[test]
@@ -1324,11 +1330,110 @@ fn completion_offers_the_preludes_variants() {
         .into_iter()
         .map(|i| i.label)
         .collect();
-    for name in stone::stdlib::PRELUDE_VARIANTS {
+    for (name, _) in stone::stdlib::PRELUDE_VARIANTS {
         assert_eq!(
             labels.iter().filter(|l| *l == name).count(),
             1,
             "{name}: {labels:?}"
         );
     }
+}
+
+const TRAITS: &str = "\
+trait Shape:
+    fn area(self) -> float
+    fn half(self) -> float:
+        ret self.area() / 2.0
+struct Sq:
+    s: float
+impl Shape for Sq:
+    fn area(self) -> float:
+        ret self.s * self.s
+fn total[T: Shape](xs: list[T]) -> float:
+    t = 0.0
+    for x in xs:
+        t += x.area()
+    ret t
+q = Sq(s=1.0)
+";
+
+#[test]
+fn hover_shows_a_trait_its_methods_and_bounds() {
+    let doc = doc(TRAITS);
+    assert_eq!(diagnostics(&doc), []);
+    assert_eq!(
+        hover_text(&doc, at(1, 7)).unwrap(),
+        "```stone\ntrait Shape\n    fn area(self) -> float\n    fn half(self) -> float\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(13, 16)).unwrap(),
+        "```stone\nfn Shape.area(self) -> float\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(10, 4)).unwrap(),
+        "```stone\nfn total[T: Shape](xs: list[T]) -> float\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(10, 10)).unwrap(),
+        "```stone\n(type parameter) T: Shape\n```"
+    );
+    // the trait named in a bound and an impl block
+    assert!(
+        hover_text(&doc, at(10, 13))
+            .unwrap()
+            .starts_with("```stone\ntrait Shape")
+    );
+    assert!(
+        hover_text(&doc, at(7, 7))
+            .unwrap()
+            .starts_with("```stone\ntrait Shape")
+    );
+}
+
+#[test]
+fn a_call_through_a_bound_leads_to_the_traits_method() {
+    let doc = doc(TRAITS);
+    let location = definition(&doc, &uri(), at(13, 16), None).unwrap();
+    assert_eq!(location.range.start, Position::new(1, 7));
+    let location = definition(&doc, &uri(), at(10, 13), None).unwrap();
+    assert_eq!(location.range.start, Position::new(0, 6));
+}
+
+#[test]
+fn a_trait_is_outlined_with_its_methods() {
+    let symbols = document_symbols(&doc(TRAITS));
+    let shape = symbols.iter().find(|s| s.name == "Shape").unwrap();
+    assert_eq!(shape.kind, SymbolKind::INTERFACE);
+    let children: Vec<(&str, SymbolKind)> = shape
+        .children
+        .as_ref()
+        .unwrap()
+        .iter()
+        .map(|c| (c.name.as_str(), c.kind))
+        .collect();
+    assert_eq!(
+        children,
+        [("area", SymbolKind::METHOD), ("half", SymbolKind::METHOD)]
+    );
+}
+
+#[test]
+fn completion_offers_the_methods_of_a_bound_and_a_traits_defaults() {
+    let labels = |source: String, position: Position| -> Vec<String> {
+        completion(&doc(&source), position, &MapSources::default())
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    };
+    assert_eq!(
+        labels(format!("{TRAITS}r = q.\n"), at(16, 7)),
+        ["s", "area", "half"]
+    );
+    assert_eq!(
+        labels(
+            format!("{TRAITS}fn f[T: Shape](x: T) -> float:\n    y = x.\n    ret 1.0\n"),
+            at(17, 11)
+        ),
+        ["area", "half"]
+    );
 }

@@ -156,6 +156,27 @@ impl MapValue {
         }
     }
 
+    /// Returns the value of `key`'s entry for changing, or the error [`MapValue::get`] gives.
+    fn get_mut(&mut self, key: &MapKey) -> EvalResult<&mut Value> {
+        match self.positions.get(key) {
+            Some(&position) => Ok(&mut self.entries[position].1),
+            None => Err(format!("key not found: {}", key.value().display(true)).into()),
+        }
+    }
+
+    /// Removes `key`'s entry and returns its value, if it has one, keeping the other entries in
+    /// order.
+    fn remove(&mut self, key: &MapKey) -> Option<Value> {
+        let position = self.positions.remove(key)?;
+        let (_, value) = self.entries.remove(position);
+        for (key, _) in &self.entries[position..] {
+            if let Some(later) = self.positions.get_mut(key) {
+                *later -= 1;
+            }
+        }
+        Some(value)
+    }
+
     /// Sets `key`'s entry to `value`, adding it at the end if there is none.
     fn insert(&mut self, key: MapKey, value: Value) {
         match self.positions.get(&key) {
@@ -712,6 +733,17 @@ fn unary(op: UnaryOp, value: Value) -> EvalResult<Value> {
             Value::Float(x) => Ok(Value::Float(-x)),
             other => Ok(Value::Int(other.as_int()?.wrapping_neg())),
         },
+    }
+}
+
+/// Calls the method `name`, which changes its receiver, on `map` with `args`.
+///
+/// For example, `pop` with the key `"a"` removes the entry for `"a"` and returns `some` of its
+/// value, or `none` if the map has none.
+fn change_map(map: &mut MapValue, name: &str, args: &[Value]) -> EvalResult<Value> {
+    match (name, args) {
+        ("pop", [key]) => Ok(map.remove(&MapKey::of(key)?).map_or_else(none, some)),
+        _ => Err(format!("a map has no method '{name}' that changes it").into()),
     }
 }
 
@@ -1281,19 +1313,8 @@ impl<'out> Interpreter<'out> {
                         ExprKind::Subscript { value, slice, .. } => {
                             let (root, indexes) = self.eval_place(value)?;
                             let index = self.eval_expr(slice)?;
-                            // the checker allows a change to a map's entry only through its name
-                            if indexes.is_empty()
-                                && let Value::Map(map) = self.place_value(root, &[], &[])?
-                            {
-                                let key = MapKey::of(&index)?;
-                                Rc::make_mut(map).insert(key, rhs.clone());
-                                continue;
-                            }
-                            let index = index.as_int()?;
-                            let items = self.place_list(root, &indexes, &place_spans(value))?;
-                            let position = list_position(index, items.len())
-                                .map_err(|e| located(e, target.span))?;
-                            items[position] = rhs.clone();
+                            let spans = place_spans(value);
+                            self.store_at(root, &indexes, &spans, index, target.span, &rhs)?;
                         }
                         ExprKind::Attribute { .. } => {
                             let (root, steps) = self.eval_place(target)?;
@@ -1317,17 +1338,14 @@ impl<'out> Interpreter<'out> {
                     } => {
                         // the indexes once, then the old element, then the value
                         let (root, indexes) = self.eval_place(list)?;
-                        let index = self.eval_expr(slice)?.as_int()?;
+                        let index = self.eval_expr(slice)?;
                         let spans = place_spans(list);
                         let mut steps = indexes.clone();
-                        steps.push(PlaceStep::Index(index));
+                        steps.push(PlaceStep::Index(index.clone()));
                         let old = self.read_place(root, &steps, &place_spans(target))?;
                         let new = self.augmented(*op, old, value, stmt.span)?;
-                        // the value cannot change the list, which only this statement can
-                        let items = self.place_list(root, &indexes, &spans)?;
-                        let position = list_position(index, items.len())
-                            .map_err(|e| located(e, target.span))?;
-                        items[position] = new;
+                        // the value cannot change the list or map, which only this statement can
+                        self.store_at(root, &indexes, &spans, index, target.span, &new)?;
                     }
                     ExprKind::Attribute { .. } => {
                         // the indexes once, then the old field, then the value
@@ -1367,6 +1385,17 @@ impl<'out> Interpreter<'out> {
                 if let Value::Str(text) = &list {
                     for ch in text.chars() {
                         self.assign_target(target, &Value::Str(ch.to_string().into()))?;
+                        if let Some(flow) = self.run_iteration(body)? {
+                            return Ok(flow);
+                        }
+                    }
+                    return Ok(ControlFlow::None);
+                }
+                // a map gives its keys, as they were, so changing the map copies it first
+                if let Value::Map(map) = &list {
+                    let map = map.clone();
+                    for (key, _) in &map.entries {
+                        self.assign_target(target, &key.value())?;
                         if let Some(flow) = self.run_iteration(body)? {
                             return Ok(flow);
                         }
@@ -1593,11 +1622,18 @@ impl<'out> Interpreter<'out> {
         let mut current = self.get_var(root)?;
         for (step, &span) in steps.iter().zip(spans) {
             let next = match step {
-                PlaceStep::Index(i) => {
-                    let items = current.as_list()?;
-                    let position = list_position(*i, items.len()).map_err(|e| located(e, span))?;
-                    items[position].clone()
-                }
+                PlaceStep::Index(index) => match &current {
+                    Value::Map(map) => map
+                        .get(&MapKey::of(index)?)
+                        .map_err(|e| located(e, span))?
+                        .clone(),
+                    _ => {
+                        let items = current.as_list()?;
+                        let position = list_position(index.as_int()?, items.len())
+                            .map_err(|e| located(e, span))?;
+                        items[position].clone()
+                    }
+                },
                 PlaceStep::Field(name) => {
                     let value = current.as_struct()?;
                     value.fields[value.field(name)?].clone()
@@ -1729,6 +1765,12 @@ impl<'out> Interpreter<'out> {
                         values.push(self.eval_expr(arg)?);
                     }
                     let spans = place_spans(value);
+                    if let Value::Map(map) = self.place_value(root, &steps, &spans)? {
+                        let shared = Rc::strong_count(map) > 1;
+                        let result = change_map(Rc::make_mut(map), attr, &values);
+                        self.copies += shared as u64;
+                        return result;
+                    }
                     let items = self.place_list(root, &steps, &spans)?;
                     // values of other types sort by their `cmp`, in the prelude's sort
                     if attr == "sort"
@@ -1912,6 +1954,22 @@ impl<'out> Interpreter<'out> {
                 None => none(),
             }),
             ("get", _, _) => Err("get() is called on a map, with one key".into()),
+            ("keys", Value::Map(map), []) => {
+                let keys = map.entries.iter().map(|(key, _)| key.value()).collect();
+                Ok(Value::List(Rc::new(keys)))
+            }
+            ("values", Value::Map(map), []) => {
+                let values = map.entries.iter().map(|(_, value)| value.clone()).collect();
+                Ok(Value::List(Rc::new(values)))
+            }
+            ("items", Value::Map(map), []) => {
+                let items = map
+                    .entries
+                    .iter()
+                    .map(|(key, value)| Value::Tuple(Rc::from([key.value(), value.clone()])))
+                    .collect();
+                Ok(Value::List(Rc::new(items)))
+            }
             ("strip", Value::Str(s), []) => Ok(Value::Str(stdlib::strip(s).into())),
             ("strip", _, _) => Err("strip() is called on a str, with no arguments".into()),
             ("split", Value::Str(s), []) => Ok(str_list(stdlib::split_whitespace(s))),
@@ -2394,7 +2452,7 @@ impl<'out> Interpreter<'out> {
         let mut steps = Vec::with_capacity(exprs.len());
         for step in exprs {
             steps.push(match step {
-                Step::Index(index) => PlaceStep::Index(self.eval_expr(index)?.as_int()?),
+                Step::Index(index) => PlaceStep::Index(self.eval_expr(index)?),
                 Step::Field(name) => PlaceStep::Field(name),
             });
         }
@@ -2437,6 +2495,30 @@ impl<'out> Interpreter<'out> {
         self.copies += value.is_shared() as u64;
         value.as_list_mut()
     }
+
+    /// Stores `value` at `index` of the list or map that `root` leads to through `steps`: a list's
+    /// element, failing at `span` if `index` is out of range, or a map's entry for the key
+    /// `index`, which is added at the end if the map has none.
+    fn store_at(
+        &mut self,
+        root: &str,
+        steps: &[PlaceStep],
+        spans: &[Span],
+        index: Value,
+        span: Span,
+        value: &Value,
+    ) -> EvalResult<()> {
+        if let Value::Map(map) = self.place_value(root, steps, spans)? {
+            let shared = Rc::strong_count(map) > 1;
+            Rc::make_mut(map).insert(MapKey::of(&index)?, value.clone());
+            self.copies += shared as u64;
+            return Ok(());
+        }
+        let items = self.place_list(root, steps, spans)?;
+        let position = list_position(index.as_int()?, items.len()).map_err(|e| located(e, span))?;
+        items[position] = value.clone();
+        Ok(())
+    }
 }
 
 /// Walks from `value` through `steps` for [`Interpreter::place_value`], counting in `copies`
@@ -2451,8 +2533,16 @@ fn walk_place<'v>(
         match step {
             PlaceStep::Index(index) => {
                 *copies += value.is_shared() as u64;
+                if let Value::Map(map) = value {
+                    let key = MapKey::of(index)?;
+                    value = Rc::make_mut(map)
+                        .get_mut(&key)
+                        .map_err(|e| located(e, span))?;
+                    continue;
+                }
                 let items = value.as_list_mut()?;
-                let position = list_position(*index, items.len()).map_err(|e| located(e, span))?;
+                let position =
+                    list_position(index.as_int()?, items.len()).map_err(|e| located(e, span))?;
                 value = &mut items[position];
             }
             PlaceStep::Field(name) => {
@@ -2470,10 +2560,11 @@ fn walk_place<'v>(
 }
 
 /// One step of an evaluated place, from [`Interpreter::eval_place`]: the index of a list's
-/// element, or the name of a struct's field.
-#[derive(Debug, Clone, Copy)]
+/// element or the key of a map's entry, which the value it steps into tells apart, or the name of
+/// a struct's field.
+#[derive(Debug, Clone)]
 enum PlaceStep<'a> {
-    Index(i64),
+    Index(Value),
     Field(&'a str),
 }
 
@@ -2745,5 +2836,23 @@ mod tests {
             copies("t = ([1], 2)\nxs, n = t\nxs.append(n)\nprint(xs, t)\n"),
             1
         );
+    }
+
+    #[test]
+    fn a_change_through_a_map_copies_only_a_shared_map() {
+        let bag = "struct Bag:\n    m: map[str, list[int]]\nb = Bag(m={\"a\": [1]})\n";
+        assert_eq!(copies(&format!("{bag}b.m[\"a\"].append(2)\nprint(b)\n")), 0);
+        assert_eq!(copies(&format!("{bag}b.m[\"a\"][0] += 2\nprint(b)\n")), 0);
+        // the map and its list are shared with `c`, so each is copied once
+        assert_eq!(
+            copies(&format!("{bag}c = b\nb.m[\"a\"].append(2)\nprint(b, c)\n")),
+            2
+        );
+        assert_eq!(copies("m = {1: 1}\nx = m.pop(1)\nprint(m, x)\n"), 0);
+        assert_eq!(
+            copies("m = {1: 1}\nn = m\nx = m.pop(1)\nprint(m, n, x)\n"),
+            1
+        );
+        assert_eq!(copies("m = {1: 1}\nn = m\nm[2] = 2\nprint(m, n)\n"), 1);
     }
 }

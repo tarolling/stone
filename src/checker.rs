@@ -3353,11 +3353,6 @@ impl Inference {
                     literal_right: false,
                 });
                 match &target.kind {
-                    ExprKind::Subscript { value: list, .. }
-                        if self.indexed_maps.contains(&list.span) =>
-                    {
-                        self.error(target.span, MAP_CHANGE);
-                    }
                     ExprKind::Subscript { value: list, .. } => {
                         self.expect(&old, &result, value.span);
                         self.check_change(list);
@@ -3383,9 +3378,20 @@ impl Inference {
                                 "a tuple cannot be iterated; unpack it, or use a list",
                             );
                             self.fresh()
-                        } else if let Ty::Map(..) = self.shallow(&iter_ty) {
-                            self.error(iter.span, "a map cannot be iterated, for now");
-                            self.fresh()
+                        } else if let Ty::Map(key, _) = self.shallow(&iter_ty) {
+                            if matches!(target.kind, ExprKind::Tuple { .. }) {
+                                self.error(target.span, MAP_PAIRS);
+                                // still declare each name, so the error does not lead to others
+                                let mut names = Vec::new();
+                                target_names(target, &mut names);
+                                for name in names {
+                                    let unknown = self.fresh();
+                                    self.check_target(name, &unknown, target.span);
+                                }
+                                self.check_loop_body(body);
+                                return;
+                            }
+                            *key
                         } else {
                             let elem = self.fresh();
                             self.expect(&Ty::List(Box::new(elem.clone())), &iter_ty, iter.span);
@@ -3658,10 +3664,6 @@ impl Inference {
                     self.error(target.span, SLICE_CHANGE);
                     return;
                 }
-                if matches!(indexed, Indexed::Map) && !matches!(value.kind, ExprKind::Name { .. }) {
-                    self.error(target.span, MAP_CHANGE);
-                    return;
-                }
                 self.expect(&elem, found, value_span);
                 self.check_change(value);
             }
@@ -3807,10 +3809,6 @@ impl Inference {
                 ExprKind::Subscript { value, .. } => {
                     if self.indexed_tuples.contains(&value.span) {
                         self.error(node.span, TUPLE_CHANGE);
-                        return;
-                    }
-                    if self.indexed_maps.contains(&value.span) {
-                        self.error(node.span, MAP_CHANGE);
                         return;
                     }
                     node = value;
@@ -5240,8 +5238,8 @@ impl Inference {
                 if ![self.statement_call, self.assigned_call].contains(&Some(call.span)) {
                     self.error(
                         call.span,
-                        "'pop' changes a list, so it can only be a statement of its own or the \
-                         value of an assignment, as in 'x = xs.pop()'",
+                        "'pop' changes its receiver, so it can only be a statement of its own or \
+                         the value of an assignment, as in 'x = xs.pop()'",
                     );
                 }
             } else if self.statement_call != Some(call.span) {
@@ -5298,6 +5296,31 @@ impl Inference {
                 }
                 self.add_element(receiver, &receiver_ty, &args[0], &arg_types[0]);
                 Ty::Unit
+            }
+            "pop" if matches!(self.shallow(&receiver_ty), Ty::Map(..)) => {
+                let Ty::Map(key, value) = self.shallow(&receiver_ty) else {
+                    unreachable!("the receiver is a map")
+                };
+                match (args, &arg_types[..]) {
+                    ([arg], [ty]) => self.expect(&key, ty, arg.span),
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                Ty::Enum(OPTION.to_string(), vec![*value])
+            }
+            "keys" | "values" | "items" => {
+                let key = self.fresh();
+                let value = self.fresh();
+                let map = Ty::Map(Box::new(key.clone()), Box::new(value.clone()));
+                self.expect(&map, &receiver_ty, receiver.span);
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                let elem = match name {
+                    "keys" => key,
+                    "values" => value,
+                    _ => Ty::Tuple(vec![key, value]),
+                };
+                Ty::List(Box::new(elem))
             }
             "pop" => {
                 match (args, &arg_types[..]) {
@@ -6885,9 +6908,8 @@ const STRING_CHANGE: &str =
     "a string cannot be changed; build a new one, as in 's = s[:i] + c + s[i + 1:]'";
 
 const TUPLE_CHANGE: &str = "a tuple cannot be changed; build a new one, as in 't = (v, t[1])'";
-/// The error for changing a map entry other than by assigning it, as in `m[k] += 1`, or a map
-/// that is not a variable, as in `p.m[k] = 1`.
-const MAP_CHANGE: &str = "a map entry can only be assigned, as in 'm[key] = value', for now";
+/// The error for a `for` loop that unpacks a map's elements, which are its keys.
+const MAP_PAIRS: &str = "a map gives its keys; iterate 'm.items()' for its keys and values";
 /// The kinds a map's keys may be, which hash and compare exactly.
 const MAP_KEYS: &[Kind] = &[Kind::Int, Kind::Str, Kind::Bool];
 

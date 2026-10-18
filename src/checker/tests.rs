@@ -1372,7 +1372,7 @@ fn sort_orders_lists_of_numbers_and_strings() {
 
 #[test]
 fn pop_is_a_statement_or_an_assigned_value() {
-    let message = "'pop' changes a list, so it can only be a statement of its own or the value of \
+    let message = "'pop' changes its receiver, so it can only be a statement of its own or the value of \
                    an assignment, as in 'x = xs.pop()'";
     assert_error("xs = [1]\nprint(xs.pop())\n", message, 2, 7);
     assert_error("xs = [1]\ny = xs.pop(0) + 1\n", message, 2, 5);
@@ -2807,18 +2807,120 @@ fn maps_are_indexed_by_their_key_type() {
 }
 
 #[test]
-fn a_map_entry_changes_only_by_assignment_for_now() {
+fn map_entries_change_through_any_place() {
+    let sources = [
+        "m = {1: 1}\nm[1] += 1\n".to_string(),
+        "m = {1: [1]}\nm[1].append(2)\nm[1][0] = 3\nm[1] *= 2\n".to_string(),
+        "m = {\"a\": {\"b\": 1}}\nm[\"a\"][\"c\"] = 2\nm[\"a\"][\"b\"] -= 1\n".to_string(),
+        format!("{POINT}m = {{1: Point(x=1.0, y=2.0)}}\nm[1].x = 3.0\nm[1].y += 1.0\n"),
+        "struct Bag:\n    m: map[str, int]\nb = Bag(m={})\nb.m[\"a\"] = 1\nb.m[\"a\"] += 1\n\
+         x = b.m.pop(\"a\")\nbs = [b]\nbs[0].m[\"b\"] = 2\nbs[0].m[\"b\"] += 2\n"
+            .to_string(),
+        "fn f(m: map[str, list[int]]) -> map[str, list[int]]:\n    m[\"a\"].append(1)\n    ret m\n\
+         print(f({\"a\": []}))\n"
+            .to_string(),
+    ];
+    for source in &sources {
+        assert_eq!(errors(source), [], "{source}");
+    }
     assert_error(
-        "m = {1: 1}\nm[1] += 1\n",
-        "a map entry can only be assigned, as in 'm[key] = value', for now",
+        "m = {1: (1, 2)}\nm[1][0] = 3\n",
+        "a tuple cannot be changed; build a new one, as in 't = (v, t[1])'",
         2,
         1,
     );
     assert_error(
-        "m = {1: [1]}\nm[1].append(2)\n",
-        "a map entry can only be assigned, as in 'm[key] = value', for now",
+        "m = {1: 1}\nm[1] += 1.5\n",
+        "expected int, found float",
         2,
+        9,
+    );
+}
+
+#[test]
+fn a_method_changing_a_map_field_changes_self() {
+    let source = concat!(
+        "struct Counter:\n",
+        "    counts: map[str, int]\n",
+        "impl Counter:\n",
+        "    fn add(self, k: str):\n",
+        "        if self.counts.contains(k):\n",
+        "            self.counts[k] += 1\n",
+        "        else:\n",
+        "            self.counts[k] = 1\n",
+        "    fn drop(self, k: str):\n",
+        "        x = self.counts.pop(k)\n",
+        "c = Counter(counts={})\n",
+        "c.add(\"a\")\n",
+        "c.drop(\"a\")\n",
+        "print(c)\n",
+    );
+    assert_eq!(errors(source), [], "{source}");
+}
+
+#[test]
+fn maps_pop_by_key_into_an_option() {
+    assert_eq!(
+        type_of_symbol("m = {\"a\": (1, 2.5)}\nv = m.pop(\"a\")\n", "v"),
+        "option[tuple[int, float]]"
+    );
+    assert!(errors("m = {1: 1}\nm.pop(1)\n").is_empty());
+    assert_error(
+        "m = {1: 1}\nv = m.pop(\"a\")\n",
+        "expected int, found str",
+        2,
+        11,
+    );
+    assert_error(
+        "m = {1: 1}\nprint(m.pop(1))\n",
+        "'pop' changes its receiver, so it can only be a statement of its own or the value of \
+         an assignment, as in 'x = xs.pop()'",
+        2,
+        7,
+    );
+    assert_error(
+        "g = {1: \"a\"}\nfn f():\n    v = g.pop(1)\n    print(v)\n",
+        "a function cannot change the global 'g'; pass it as an argument and return the \
+         changed value",
+        3,
+        9,
+    );
+}
+
+#[test]
+fn maps_have_keys_values_and_items() {
+    let source = "m = {\"a\": (1, 2.5)}\nks = m.keys()\nvs = m.values()\nits = m.items()\n";
+    assert_eq!(type_of_symbol(source, "ks"), "list[str]");
+    assert_eq!(type_of_symbol(source, "vs"), "list[tuple[int, float]]");
+    assert_eq!(
+        type_of_symbol(source, "its"),
+        "list[tuple[str, tuple[int, float]]]"
+    );
+    assert_error(
+        "xs = [1]\nks = xs.keys()\n",
+        "expected map[unknown, unknown], found list[int]",
+        2,
+        6,
+    );
+    assert_error(
+        "m = {1: 1}\nks = m.keys(1)\n",
+        "'keys' takes 0 arguments, but 1 was given",
+        2,
+        6,
+    );
+}
+
+#[test]
+fn maps_iterate_their_keys() {
+    assert_eq!(
+        type_of_symbol("for k in {\"a\": 1}:\n    print(k)\n", "k"),
+        "str"
+    );
+    assert_error(
+        "for k, v in {1: 1}:\n    print(k)\n",
+        "a map gives its keys; iterate 'm.items()' for its keys and values",
         1,
+        5,
     );
 }
 
@@ -2934,18 +3036,12 @@ fn values_holding_lists_or_maps_cannot_be_compared() {
 }
 
 #[test]
-fn maps_cannot_be_compared_or_iterated() {
+fn maps_cannot_be_compared() {
     assert_error(
         "x = {1: 1} == {1: 1}\n",
         "'==' and '!=' cannot compare map[int, int]",
         1,
         5,
-    );
-    assert_error(
-        "for k in {1: 1}:\n    print(k)\n",
-        "a map cannot be iterated, for now",
-        1,
-        10,
     );
 }
 

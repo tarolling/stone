@@ -1222,6 +1222,8 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
 ///   is none, with `x2` 1 for a string key
 /// - `stone.map_add` adds an entry for key `x1`, which the map does not have, at the end of map
 ///   `x0`, retaining a string key, and returns its first slot. The caller fills in its values.
+/// - `stone.map_unindex` frees the index of map `x0`, whose entries moved, so the next lookup
+///   builds a new one
 pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     // x19 holds the map, x20 the key, and x21 whether it is a string
     let saved = ["x19", "x20", "x21", "x22", "x23"];
@@ -1291,6 +1293,16 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tstr\tx9, [x0]");
     r#gen.emit("\tmov\tx0, x22");
     pop_frame(r#gen, &saved);
+
+    r#gen.emit("stone.map_unindex:");
+    r#gen.emit("\tldr\tx9, [x0, #40]");
+    r#gen.emit("\tcbz\tx9, .Lmap_unindex_done");
+    r#gen.emit("\tstr\txzr, [x0, #40]");
+    push_frame(r#gen, &[]);
+    r#gen.emit("\tbl\tstone.mem_free");
+    pop_frame(r#gen, &[]);
+    r#gen.emit(".Lmap_unindex_done:");
+    r#gen.emit("\tret");
 
     // replaces map x19's index with one for its entries and one more, keeping x20 and x21 for its
     // caller: x22 is the first slot of each entry in turn, and x23 the capacity

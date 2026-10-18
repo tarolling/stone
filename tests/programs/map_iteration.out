@@ -1,0 +1,23 @@
+ann 31
+bob 27
+cy 45
+103
+['ann', 'bob', 'cy'] [31, 27, 45] [('ann', 31), ('bob', 27), ('cy', 45)]
+ann 31
+bob 27
+cy 45
+{'ann': 31, 'bob': 27, 'cy': 45, 'ann!': 32, 'bob!': 28, 'cy!': 46}
+1 Point(x=1, y=2)
+2 Point(x=3, y=4)
+[1, 2] [Point(x=1, y=2), Point(x=3, y=4)]
+4
+9
+[('x', [1, 2]), ('y', [3])] [('a', ('x', [1, 2])), ('b', ('y', [3]))]
+a x 2
+b y 1
+[true, false] ['yes', 'no']
+a [1]
+b []
+7 6
+[(9, Point(x=0, y=0)), (2, Point(x=3, y=4))] {1: Point(x=1, y=2), 2: Point(x=3, y=4)}
+[] [] [] some('a')

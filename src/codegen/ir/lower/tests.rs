@@ -1286,3 +1286,21 @@ fn a_call_through_a_bound_calls_each_types_own_method() {
     assert!(ir.contains("call Bag.size("), "{ir}");
     assert!(ir.contains("call str.size("), "{ir}");
 }
+
+#[test]
+fn an_augmented_map_entry_finds_its_key_once() {
+    let ir = dump(
+        "fn f(m: map[str, int], k: str) -> map[str, int]:\n    m[k] += 1\n    ret m\nprint(f({}, \"a\"))\n",
+    );
+    let f = ir.split("fn main").next().unwrap();
+    assert_eq!(f.matches("stone.map_find").count(), 1, "{f}");
+    assert!(!f.contains("stone.map_add"), "{f}");
+}
+
+#[test]
+fn a_maps_items_share_its_entries() {
+    let ir = dump("fn f(m: map[int, float]) -> list[tuple[int, float]]:\n    ret m.items()\n");
+    let f = ir.split("fn main").next().unwrap();
+    assert!(f.contains("retain v0"), "{f}");
+    assert!(!f.contains("call"), "{f}");
+}

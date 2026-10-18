@@ -101,8 +101,14 @@ print(xs, xs[1:3], xs.len())
 
 ages = {"ann": 31, "bob": 27}
 ages["cy"] = 45
-ages["ann"] = ages["ann"] + 1
+ages["ann"] += 1
 print(ages, ages.contains("dee"), ages.get("bob").unwrap_or(0))
+for name in ages:
+    print(name, ages[name])
+for name, age in ages.items():
+    print(name, age)
+gone = ages.pop("bob")
+print(gone, ages.keys(), ages.values())
 
 q, r = divide(17, 5)
 pairs = [("a", 1), ("b", 2)]
@@ -110,10 +116,13 @@ for name, n in pairs:
     print(name, n, q, r)
 ```
 
-A map cannot be iterated yet, so keep a list of its keys if you need to walk it. `m[k]` stops the
-program if `k` is missing; use `m.contains(k)` or `m.get(k)` when it might be. A map entry can
-only be assigned: write `m[k] = m[k] + 1`, not `m[k] += 1`. A tuple is indexed only by a literal
-(`t[0]`, `t[-1]`) and never changes.
+`for k in m` goes through a map's keys in insertion order; `m.keys()`, `m.values()`, and
+`m.items()` return new lists. `m[k]` stops the program if `k` is missing; use `m.contains(k)` or
+`m.get(k)` when it might be. `m.pop(k)` returns an option and, like a list's `pop`, is a statement
+or the whole value of an assignment. Entries change in place like list elements, through any
+place: `m[k] += 1`, `m[k].append(x)`, `p.counts[k] = 0`. Only `m[k] = v` adds a missing key; `+=`
+and changes inside an entry need the key to exist. A tuple is indexed only by a literal (`t[0]`,
+`t[-1]`) and never changes.
 
 ### Options
 
@@ -314,7 +323,9 @@ assign the result where 'add' is called
 | `a if cond else b` | an `if`/`else` assigning a variable |
 | `x in xs` | a loop, or a helper `fn contains(xs: list[int], x: int) -> bool` |
 | `k in d` | `d.contains(k)` |
-| `for k in d:`, `d.items()` | keep a `list` of keys beside the map |
+| `for k, v in d.items():` | the same; `d.items()` is a list of tuples |
+| `d.pop(k)`, `d.pop(k, default)` | `d.pop(k)` returns an option: `.unwrap_or(default)` |
+| `del d[k]` | `d.pop(k)` as a statement |
 | `set()` | `map[K, bool]` |
 | `def f(x, n=1)`, `f(n=2)` | every argument, positionally (only structs take names) |
 | `lambda`, passing a function | a trait and a generic function with a bound |
@@ -339,7 +350,8 @@ Functions: `print(values...)` (space-separated, newline), `range(end)` and `rang
 Methods: `len` (str, list, map); lists: `append`, `pop()` (option) and `pop(i)`, `insert`,
 `extend`, `sort`; strings: `strip`, `split()` and `split(sep)`, `sep.join(xs)`, `find`
 (option), `startswith`, `endswith`; options: `is_some`, `is_none`, `unwrap`, `unwrap_or`; maps:
-`contains`, `get` (option); any comparable value: `eq`, `cmp`.
+`contains`, `get` (option), `pop(key)` (option), `keys`, `values`, `items`; any comparable
+value: `eq`, `cmp`.
 
 Builtin modules, imported with `use math` (or `use math.sqrt`):
 

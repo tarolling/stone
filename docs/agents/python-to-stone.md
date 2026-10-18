@@ -12,7 +12,7 @@ since stone copies values.
 1. **Inventory before writing.** Read the whole Python program and list what it uses that stone
    lacks (see "Not in stone" in the stone guide): classes with inheritance, exceptions, lambdas
    and functions passed as values, comprehensions, f-strings, default and keyword arguments,
-   iteration over dicts, sets, file I/O, and values whose type varies (a variable that is
+   sets, file I/O, and values whose type varies (a variable that is
    sometimes `None`, a name reused for an int and then a float, or a list that mixes types). Find
    arithmetic that could pass 64 bits, such as products in hashes and random number generators,
    and check that every intermediate value stays below 2^63, or the result will wrap. Decide how each will be translated
@@ -50,30 +50,29 @@ since stone copies values.
 | `xs.remove(x)`, `xs.index(x)` | a loop that finds the index, then `pop(i)` |
 | `d.get(k, default)` | `d.get(k).unwrap_or(default)` |
 | `k in d` | `d.contains(k)` |
-| `for k, v in d.items():` | keep a list of keys in insertion order beside the map |
-| `defaultdict(int)` | check `d.contains(k)` before reading |
+| `for k in d:`, `for k, v in d.items():` | the same, in insertion order |
+| `d.keys()`, `d.values()`, `list(d.items())` | `d.keys()`, `d.values()`, `d.items()`: new lists |
+| `d.pop(k)`, `del d[k]` | `d.pop(k)`, which returns an option, `none` if `k` is missing |
+| `d.pop(k, default)` | `x = d.pop(k)` then `x.unwrap_or(default)` |
+| `d[k] += 1`, `d[k].append(x)` | the same, but the key must exist |
+| `defaultdict(int)` | check `d.contains(k)` before reading or changing |
 | `set()`, `s.add(x)`, `x in s` | `map[T, bool]`: `s[x] = true`, `s.contains(x)` |
 | `collections.Counter` | a map of counts, or a list of structs as in the worked example |
 
-A dict whose values change in place, such as `d[k].append(x)` or `d[k] += 1`, cannot be written
-directly: a map entry can only be assigned. Either write `d[k] = d[k] + 1`, or keep the values
-in a list and map each key to its index, then change the list's element:
+An entry changes in place as a list's element does, through any place, but stone has no
+default for a missing key: `d[k] += 1` and `d[k].append(x)` stop the program unless `d` has `k`,
+so add it first, as `defaultdict` would:
 
 ```stone
 // groups words by their first letter, keeping letters in the order they first appear
 words = ["apple", "bean", "avocado", "beet", "cherry"]
-index = {}
-letters = []
-groups = []
+groups = {}
 for w in words:
-    first = w[0]
-    if not index.contains(first):
-        index[first] = groups.len()
-        letters.append(first)
-        groups.append([])
-    groups[index[first]].append(w)
-for i in range(letters.len()):
-    print(letters[i], groups[i])
+    if not groups.contains(w[0]):
+        groups[w[0]] = []
+    groups[w[0]].append(w)
+for letter, group in groups.items():
+    print(letter, group)
 
 // a set of ints
 seen = {}
@@ -305,15 +304,13 @@ fn total_value(items: list[Item]) -> float:
     ret total
 
 // counts each word, keeping the words in the order they first appear
-fn word_counts(text: str) -> list[WordCount]:
-    index = {}
-    counts = []
+fn word_counts(text: str) -> map[str, int]:
+    counts = {}
     for word in text.split():
-        if not index.contains(word):
-            index[word] = counts.len()
-            counts.append(WordCount(word=word, n=1))
+        if counts.contains(word):
+            counts[word] += 1
         else:
-            counts[index[word]].n += 1
+            counts[word] = 1
     ret counts
 
 items = [Item(name="apple", qty=3, price=0.5), Item(name="pear", qty=0, price=0.75), Item(name="plum", qty=12, price=0.25)]
@@ -332,9 +329,11 @@ for item in items:
     if item.price < cheapest.price:
         cheapest = item
 print("cheapest:", cheapest)
-counts = word_counts("the cat and the hat and the bat")
-counts.sort()
-for c in counts:
+ranked = []
+for word, n in word_counts("the cat and the hat and the bat").items():
+    ranked.append(WordCount(word=word, n=n))
+ranked.sort()
+for c in ranked:
     print(c.word, c.n)
 ```
 
@@ -347,12 +346,10 @@ The decisions:
 - `qty * price` mixed an int and a float; stone needs `float(item.qty)`.
 - The generator expression, the comprehension, and `min(key=...)` became loops, and the f-strings
   became `+` with `str`.
-- The dict of counts could not be iterated or sorted, so `word_counts` returns a list of structs,
-  with a map from each word to its index. `WordCount`'s `cmp` orders by count, highest first,
-  and stone's sort of structs is stable like Python's, so ties keep their first-seen order.
-- In `word_counts`, the `append` comes before `counts[...].n += 1` in the code. The checker reads
-  top to bottom, and reading a field of an element of `[]` before anything has given the list a
-  type is an error (`the type of this value must be known before its field 'n' is read`).
+- `counts.get(word, 0) + 1` became a `contains` check, since `counts[word] += 1` needs the key.
+- `sorted(..., key=...)` became a list of structs built from `items()`. `WordCount`'s `cmp`
+  orders by count, highest first, and stone's sort of structs is stable like Python's, so ties
+  keep their first-seen order.
 - `print("cheapest:", cheapest)` needed no change: a struct prints as a dataclass does.
 
 ## Report template

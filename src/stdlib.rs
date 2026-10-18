@@ -110,7 +110,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 20] = [
+pub static METHODS: [&str; 23] = [
     "len",
     "append",
     "pop",
@@ -129,6 +129,9 @@ pub static METHODS: [&str; 20] = [
     "unwrap_or",
     "contains",
     "get",
+    "keys",
+    "values",
+    "items",
     "eq",
     "cmp",
 ];
@@ -205,7 +208,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 20] = [
+pub static METHOD_DOCS: [BuiltinDoc; 23] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T] | map[K, V]).len() -> int",
@@ -220,13 +223,16 @@ pub static METHOD_DOCS: [BuiltinDoc; 20] = [
     },
     BuiltinDoc {
         name: "pop",
-        signature: "list[T].pop() -> option[T] | list[T].pop(index: int) -> T",
+        signature: "list[T].pop() -> option[T] | list[T].pop(index: int) -> T | \
+                    map[K, V].pop(key: K) -> option[V]",
         description: "Without `index`, removes the last element and returns `some` of it, or \
                       `none` if the list is empty, so `x = xs.pop()` takes the last element off \
                       `xs`. With `index`, removes the element there and returns it, stopping \
                       the program if the list is empty or `index` is out of range; a negative \
-                      `index` counts from the end. It is a statement of its own or the whole \
-                      value of an assignment.",
+                      `index` counts from the end. On a map, removes the entry for `key` and \
+                      returns `some` of its value, or `none` if there is none, keeping the \
+                      other entries in order. It is a statement of its own or the whole value \
+                      of an assignment.",
     },
     BuiltinDoc {
         name: "insert",
@@ -323,6 +329,26 @@ pub static METHOD_DOCS: [BuiltinDoc; 20] = [
         description: "Returns `some` of the value for `key`, or `none` if the map has no entry \
                       for it, so `{\"a\": 1}.get(\"b\")` is `none`. Unlike `m[key]`, it never \
                       stops the program.",
+    },
+    BuiltinDoc {
+        name: "keys",
+        signature: "map[K, V].keys() -> list[K]",
+        description: "Returns a new list of the map's keys, in the order they were added, so \
+                      `{\"b\": 1, \"a\": 2}.keys()` is `[\"b\", \"a\"]`. `for k in m` goes \
+                      through them too.",
+    },
+    BuiltinDoc {
+        name: "values",
+        signature: "map[K, V].values() -> list[V]",
+        description: "Returns a new list of the map's values, in the order their keys were \
+                      added.",
+    },
+    BuiltinDoc {
+        name: "items",
+        signature: "map[K, V].items() -> list[tuple[K, V]]",
+        description: "Returns a new list of the map's entries as `(key, value)` tuples, in the \
+                      order their keys were added, so `for k, v in m.items()` goes through \
+                      both.",
     },
     BuiltinDoc {
         name: "eq",

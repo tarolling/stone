@@ -10,6 +10,19 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- More of maps: `for k in m` goes through a map's keys in insertion order, over the map as it
+  was when the loop started; `m.keys()`, `m.values()`, and `m.items()` return new lists, the
+  last of `(key, value)` tuples, which compiled code makes without copying anything until one of
+  them changes; and `m.pop(k)` removes an entry, returning `some` of its value or `none`, and
+  keeps the other entries in order.
+- A map entry changes in place like a list element, through any place that starts at a
+  variable: `m[k] += 1`, `m[k].append(x)`, `m[k][i] = v`, `m[k].x = v`, `m[a][b] = v`, a
+  struct's field such as `p.counts[k] += 1` or `p.counts.pop(k)`, and a method that changes
+  `self.counts`. A plain `m[k] = v` adds a missing key; anywhere else the key must exist, or the
+  program stops with `key not found` at its subscript, in both backends.
+
 ## [0.3.1] - 2026-10-17
 
 ### Added

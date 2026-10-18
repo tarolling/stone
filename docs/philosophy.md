@@ -137,7 +137,8 @@ do instead:
   the loop does not make the loop run longer.
 
 Status: lists, and maps, which compiled code stores as lists of entries with a hash table
-beside them, have value semantics in both backends. Compiled code checks a list's reference
+beside them, have value semantics in both backends, and a change reaches into either through
+any place, such as `p.counts[k] += 1`. Compiled code checks a list's reference
 count before changing it and copies the list only when something else refers to it
 (`list_unique` in the IR), so changing a list that only one variable holds is still done in
 place. A function owns each parameter it assigns or changes, and the caller hands it a reference

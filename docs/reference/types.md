@@ -403,17 +403,34 @@ key twice keeps the later value, as in Python. `m[k]` stops the program with
 `key not found: 'dee'` if `m` has no entry for `k`, so where it might not, check with
 `m.contains(k)` first or read it with `m.get(k)`, which gives `some` of the value or `none`.
 
+A `for` loop over a map goes through its keys in that order, and `m.keys()`, `m.values()`, and
+`m.items()` give them as new lists, the last as `(key, value)` tuples. `m.pop(k)` removes `k`'s
+entry and gives `some` of its value, or `none` if there is none:
+
+```stone
+counts = {"a": 1, "b": 2}
+for k in counts:
+    counts[k] += 10              // the loop goes through the keys as they were
+for k, n in counts.items():
+    print(k, n)                  // a 11, then b 12
+gone = counts.pop("a")
+print(gone, counts.keys())       // some(11) ['b']
+```
+
 Like lists, maps are values: `b = a` and passing `a` to a function copy it, so a function
 changes its caller's map only by returning it, as in `counts = add(counts, word)`, which changes
-it in place. A change must be to a map in a variable, and for now it can only be an assignment,
-`m[k] = v`: `m[k] += 1` and `m[k].append(x)` are errors, so write `m[k] = m[k] + 1`. A map
-cannot be compared with `==`, converted with `str`, iterated, or used in arithmetic or as a
-condition.
+it in place. An entry changes like a list's element, through any place that starts at a
+variable: `m[k] += 1`, `m[k].append(x)`, `m[k].x = 1.0`, `grid[r][c] = v` for a map of maps,
+`p.counts[k] += 1` for a struct's field, and `p.counts.pop(k)`. A plain assignment `m[k] = v`
+adds the entry if it is missing, but a key on the way to what changes, or the target of `+=`,
+must have one, or the program stops with `key not found`. A map cannot be compared with `==`,
+converted with `str`, or used in arithmetic or as a condition.
 
 An entry is stored as a key and its value's values side by side, as a list stores tuples, in
 insertion order, with a hash table to find each key, so reading and setting an entry takes
-about the same time however large the map is. An entry can hold at most 32 values, counting its
-key and each field of its value's tuples and structs.
+about the same time however large the map is. Removing an entry moves the ones after it down,
+so `pop` takes time in proportion to the map's size. An entry can hold at most 32 values,
+counting its key and each field of its value's tuples and structs.
 
 ## Enums
 

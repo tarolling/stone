@@ -1290,6 +1290,10 @@ mod tests {
             " == some(",
             "fn t",
             ".sort()",
+            ".items()",
+            "for k",
+            "print(\"p",
+            "] += ",
         ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
@@ -1352,7 +1356,8 @@ mod tests {
     /// compared, at several types.
     #[test]
     fn generated_programs_use_generic_types() {
-        let sources = compound_sources(500);
+        // enough programs that the rarest uses, such as `==` on an `H`, come up several times
+        let sources = compound_sources(1000);
         // past the declarations, which every such program starts with
         let uses = |feature: &str| {
             sources
@@ -1369,7 +1374,7 @@ mod tests {
             " == H.",
         ] {
             let count = uses(feature);
-            assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
+            assert!(count >= 5, "only {count} of 1000 programs use {feature:?}");
         }
     }
 

@@ -1,0 +1,78 @@
+// a map changes through any place: struct fields, list elements, and other maps' entries
+struct Point:
+    x: float
+    y: float
+
+struct Bag:
+    name: str
+    counts: map[str, int]
+
+impl Bag:
+    fn add(self, k: str):
+        if self.counts.contains(k):
+            self.counts[k] += 1
+        else:
+            self.counts[k] = 1
+
+    fn take(self, k: str) -> option[int]:
+        taken = self.counts.pop(k)
+        ret taken
+
+b = Bag(name="b", counts={})
+b.counts["x"] = 1
+b.counts["x"] += 2
+b.add("y")
+b.add("y")
+b.add("x")
+print(b)
+t1 = b.take("y")
+t2 = b.take("zz")
+print(t1, t2, b)
+x = b.counts.pop("x")
+print(x, b)
+
+// list elements holding maps, and maps holding lists, structs, and maps
+bags = [Bag(name="p", counts={"a": 1}), Bag(name="q", counts={})]
+bags[1].counts["b"] = 5
+bags[0].counts["a"] += 10
+bags[1].add("b")
+y = bags[0].counts.pop("a")
+print(bags, y)
+lists = {"a": [1, 2], "b": []}
+lists["a"].append(3)
+lists["b"].extend([4, 5])
+lists["a"][0] = 10
+lists["a"][1] += 20
+z = lists["a"].pop()
+lists["b"].sort()
+print(lists, z)
+points = {"o": Point(x=0.0, y=0.0)}
+points["o"].x = 1.5
+points["o"].y += 2.5
+print(points)
+grid = {1: {"a": 1}}
+grid[1]["b"] = 2
+grid[1]["a"] += 5
+w = grid[1].pop("b")
+print(grid, w)
+deep = {"k": [Bag(name="d", counts={})]}
+deep["k"][0].counts["z"] = 26
+deep["k"][0].add("z")
+print(deep)
+
+// maps are values: changing one through a place leaves its copies alone
+copy = b
+copy.counts["new"] = 1
+print(b, copy)
+before = lists
+lists["a"].append(99)
+print(before, lists)
+
+fn bumped(b: Bag, k: str) -> Bag:
+    b.counts[k] += 1
+    ret b
+
+c = Bag(name="c", counts={"k": 1})
+print(bumped(c, "k"), c)
+c = bumped(c, "k")
+print(c)

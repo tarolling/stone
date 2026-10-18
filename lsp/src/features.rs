@@ -1280,14 +1280,41 @@ fn method_applies(method: &str, ty: &Type) -> bool {
     let Some(doc) = method_doc(method) else {
         return false;
     };
-    let Some((receivers, _)) = doc.signature.split_once(&format!(".{method}(")) else {
-        return false;
-    };
-    receivers
-        .trim_start_matches('(')
-        .trim_end_matches(')')
-        .split('|')
-        .any(|receiver| receiver.trim().split('[').next() == Some(kind))
+    // each form of the signature names its receivers, as `list[T].pop()` and
+    // `map[K, V].pop(key: K)` do, and a form like `(str | list[T]).len()` names several
+    signature_forms(doc.signature).into_iter().any(|form| {
+        form.split_once(&format!(".{method}("))
+            .is_some_and(|(receivers, _)| {
+                receivers
+                    .trim_start_matches('(')
+                    .trim_end_matches(')')
+                    .split('|')
+                    .any(|receiver| receiver.trim().split('[').next() == Some(kind))
+            })
+    })
+}
+
+/// Splits a builtin's signature into its forms, which ` | ` separates outside parentheses and
+/// brackets.
+///
+/// For example, `list[T].pop() -> option[T] | map[K, V].pop(key: K) -> option[V]` has two
+/// forms, and `(str | list[T]).len() -> int` one.
+fn signature_forms(signature: &str) -> Vec<&str> {
+    let mut forms = Vec::new();
+    let (mut depth, mut start) = (0, 0);
+    for (i, c) in signature.char_indices() {
+        match c {
+            '(' | '[' => depth += 1,
+            ')' | ']' => depth -= 1,
+            '|' if depth == 0 => {
+                forms.push(signature[start..i].trim());
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    forms.push(signature[start..].trim());
+    forms
 }
 
 /// Returns the public functions of the module in `file`, by their own names.

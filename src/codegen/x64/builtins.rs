@@ -1099,6 +1099,8 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
 ///   there is none
 /// - `stone.map_add` adds an entry for key `rsi`, which the map does not have, at the end of map
 ///   `rdi`, retaining a string key, and returns its first slot. The caller fills in its values.
+/// - `stone.map_unindex` frees the index of map `rdi`, whose entries moved, as when one is
+///   removed, so the next lookup builds a new one
 pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     // rbx holds the map, r12 the key, and r13 whether it is a string
     let saved = ["rbx", "r12", "r13", "r14", "r15"];
@@ -1170,6 +1172,15 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tmov\tQWORD PTR [rax], rcx");
     r#gen.emit("\tmov\trax, r14");
     leave(r#gen);
+
+    r#gen.emit("stone.map_unindex:");
+    r#gen.emit("\tmov\trax, QWORD PTR [rdi + 40]");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lmap_unindex_done");
+    r#gen.emit("\tmov\tQWORD PTR [rdi + 40], 0");
+    r#gen.emit("\tcall\tstone.mem_free");
+    r#gen.emit(".Lmap_unindex_done:");
+    r#gen.emit("\tret");
 
     // replaces map rbx's index with one for its entries and one more, keeping r12 and r13 for its
     // caller: r14 is the first slot of each entry in turn, and r15 the capacity

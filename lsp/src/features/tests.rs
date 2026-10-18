@@ -417,6 +417,9 @@ fn completion_after_a_dot_offers_methods() {
         "unwrap_or",
         "contains",
         "get",
+        "keys",
+        "values",
+        "items",
         "eq",
         "cmp",
     ]
@@ -465,7 +468,10 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "cmp"
         ]
     );
-    assert_eq!(labels(at(6, 3)), ["len", "contains", "get"]);
+    assert_eq!(
+        labels(at(6, 3)),
+        ["len", "pop", "contains", "get", "keys", "values", "items"]
+    );
     assert_eq!(
         labels(at(8, 3)),
         ["is_some", "is_none", "unwrap", "unwrap_or", "eq"]

@@ -1,0 +1,38 @@
+// an entry changes in place with an augmented assignment
+counts = {}
+for word in "the cat saw the other cat and the dog".split():
+    if counts.contains(word):
+        counts[word] += 1
+    else:
+        counts[word] = 1
+print(counts)
+scores = {1: 1.5, 2: 2.0}
+scores[1] *= 2.0
+scores[2] -= 0.5
+scores[2] /= 3.0
+print(scores)
+bits = {true: 6, false: 7}
+bits[true] %= 4
+bits[false] **= 2
+print(bits)
+vectors = {"a": [1, 2, 3]}
+vectors["a"] *= 2
+vectors["a"] += [10, 20, 30]
+print(vectors)
+
+// the key is evaluated once, before the value
+fn key(k: str) -> str:
+    print("key", k)
+    ret k
+
+fn value(v: int) -> int:
+    print("value", v)
+    ret v
+
+counts[key("cat")] += value(10)
+print(counts["cat"])
+
+// the change is to this map only
+copy = counts
+copy["the"] += 100
+print(counts["the"], copy["the"])

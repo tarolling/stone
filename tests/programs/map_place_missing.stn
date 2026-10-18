@@ -1,0 +1,9 @@
+// as for a list, the receiver's keys and indexes, then the arguments, then the change
+fn item() -> int:
+    print("item")
+    ret 1
+
+m = {"a": [1]}
+m["a"].append(2)
+print(m)
+m["b"].append(item())

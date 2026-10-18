@@ -1,0 +1,12 @@
+Bag(name='b', counts={'x': 4, 'y': 2})
+some(2) none Bag(name='b', counts={'x': 4})
+some(4) Bag(name='b', counts={})
+[Bag(name='p', counts={}), Bag(name='q', counts={'b': 6})] some(11)
+{'a': [10, 22], 'b': [4, 5]} some(3)
+{'o': Point(x=1.5, y=2.5)}
+{1: {'a': 6}} some(2)
+{'k': [Bag(name='d', counts={'z': 27})]}
+Bag(name='b', counts={}) Bag(name='b', counts={'new': 1})
+{'a': [10, 22], 'b': [4, 5]} {'a': [10, 22, 99], 'b': [4, 5]}
+Bag(name='c', counts={'k': 2}) Bag(name='c', counts={'k': 1})
+Bag(name='c', counts={'k': 2})

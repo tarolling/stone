@@ -1,0 +1,62 @@
+// pop removes an entry and gives some of its value, or none, keeping the others in order
+m = {"a": 1, "b": 2, "c": 3, "d": 4}
+x = m.pop("b")
+print(x, m)
+again = m.pop("b")
+missing = m.pop("zz")
+print(again, missing)
+m.pop("a")
+print(m, m.len(), m.contains("a"), m.contains("c"))
+// lookups after a removal find every key in its new place
+print(m["c"], m["d"], m.get("a"))
+m["a"] = 5
+print(m)
+m.pop("d")
+m.pop("c")
+m.pop("a")
+print(m, m.len())
+
+// many entries, removed and looked up in turn
+squares = {}
+for i in range(2000):
+    squares[i] = i * i
+for i in range(2000):
+    if i % 3 == 0:
+        squares.pop(i)
+sum = 0
+for k in squares:
+    sum += squares[k]
+print(squares.len(), sum, squares.contains(3), squares.contains(4), squares[1999])
+
+// counted keys and values are freed
+words = {"one": [1], "two": [2, 2], "three": [3, 3, 3]}
+taken = words.pop("two")
+print(taken, words)
+one = words.pop("one")
+match one:
+    case some(xs):
+        print(xs.len())
+    case none:
+        print("missing")
+pairs = {1: ("a", 1.5), 2: ("b", 2.5)}
+two = pairs.pop(2)
+match two:
+    case some(pair):
+        print(pair[0], pair[1])
+    case none:
+        print("missing")
+print(pairs)
+
+// maps are values: popping a copy leaves the original
+copy = words
+copy.pop("three")
+print(words, copy)
+
+fn without(m: map[int, str], k: int) -> map[int, str]:
+    m.pop(k)
+    ret m
+
+names = {1: "a", 2: "b"}
+print(without(names, 1), names)
+names = without(names, 2)
+print(names)

@@ -173,7 +173,7 @@ print(names)   // ['ada']
 ### `pop`
 
 ```text
-list[T].pop() -> option[T] | list[T].pop(index: int) -> T
+list[T].pop() -> option[T] | list[T].pop(index: int) -> T | map[K, V].pop(key: K) -> option[V]
 ```
 
 Without `index`, removes the last element and returns it as `some(x)`, or returns `none` if the
@@ -183,6 +183,10 @@ empty and with `pop index out of range` if `index` is past either end. Like `app
 only the variable it is called on, so it is either a statement of its own or the whole value of
 an assignment, as in `x = xs.pop()`.
 
+On a map, `pop` removes the entry for `key` and returns `some` of its value, or `none` if the map
+has no entry for it. The other entries keep their order, and adding `key` again puts it last.
+Removing an entry moves the ones after it, so it takes time in proportion to the map's size.
+
 ```stone
 stack = [1, 2, 3]
 top = stack.pop()
@@ -191,6 +195,10 @@ print(top, first, stack)   // some(3) 1 [2]
 stack = []
 nothing = stack.pop()
 print(nothing)             // none
+ages = {"ann": 31, "bob": 27}
+gone = ages.pop("ann")
+missing = ages.pop("cy")
+print(gone, missing, ages)   // some(31) none {'bob': 27}
 ```
 
 ### `insert`
@@ -412,6 +420,52 @@ Returns `some` of the value of `key`'s entry, or `none` if the map has no entry 
 ages = {"ann": 31}
 print(ages.get("ann"), ages.get("bob"))   // some(31) none
 print(ages.get("bob").unwrap_or(0))      // 0
+```
+
+### `keys`
+
+```text
+map[K, V].keys() -> list[K]
+```
+
+Returns a new list of the map's keys, in the order they were first added. A `for` loop over a
+map goes through the same keys without making a list.
+
+```stone
+ages = {"bob": 27, "ann": 31}
+print(ages.keys())   // ['bob', 'ann']
+for name in ages:
+    print(name)      // bob, then ann
+```
+
+### `values`
+
+```text
+map[K, V].values() -> list[V]
+```
+
+Returns a new list of the map's values, in the order their keys were first added.
+
+```stone
+ages = {"bob": 27, "ann": 31}
+print(ages.values())   // [27, 31]
+```
+
+### `items`
+
+```text
+map[K, V].items() -> list[tuple[K, V]]
+```
+
+Returns a new list of the map's entries as `(key, value)` tuples, in the order their keys were
+first added, so `for k, v in m.items()` goes through both. It shares the map's storage until one
+of them changes, so it copies nothing.
+
+```stone
+ages = {"bob": 27, "ann": 31}
+print(ages.items())   // [('bob', 27), ('ann', 31)]
+for name, age in ages.items():
+    print(name, age)
 ```
 
 ### `eq`

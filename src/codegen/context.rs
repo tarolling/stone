@@ -29,7 +29,7 @@ pub const LIST_ROUTINES: &[&str] = &[
 
 /// The runtime routines behind maps, which each backend's `builtins::map_runtime` emits when the
 /// program calls them.
-pub const MAP_ROUTINES: &[&str] = &["stone.map_find", "stone.map_add"];
+pub const MAP_ROUTINES: &[&str] = &["stone.map_find", "stone.map_add", "stone.map_unindex"];
 
 /// The runtime routines behind string methods, indexes, slices, and ordering, which each
 /// backend's `builtins::string_methods` emits when the program calls them.

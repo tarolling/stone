@@ -1,0 +1,56 @@
+// maps iterate their keys in insertion order, and keys, values, and items copy them into lists
+struct Point:
+    x: int
+    y: int
+
+fn total(m: map[str, int]) -> int:
+    sum = 0
+    for k in m:
+        sum += m[k]
+    ret sum
+
+ages = {"ann": 31, "bob": 27, "cy": 45}
+for name in ages:
+    print(name, ages[name])
+print(total(ages))
+print(ages.keys(), ages.values(), ages.items())
+for name, age in ages.items():
+    print(name, age)
+
+// the loop goes through the map as it was, so changing it in the body copies it first
+for name in ages:
+    ages[name + "!"] = ages[name] + 1
+print(ages)
+
+// a key or value of several values, and counted ones
+points = {1: Point(x=1, y=2), 2: Point(x=3, y=4)}
+for n in points:
+    print(n, points[n])
+print(points.keys(), points.values())
+for n, p in points.items():
+    print(n + p.x + p.y)
+pairs = {"a": ("x", [1, 2]), "b": ("y", [3])}
+print(pairs.values(), pairs.items())
+for k, (s, xs) in pairs.items():
+    print(k, s, xs.len())
+names = {true: "yes", false: "no"}
+print(names.keys(), names.values())
+nested = {"a": {1: "one"}, "b": {}}
+for k in nested:
+    print(k, nested[k].keys())
+
+// items moves the map into the list at its last use, and the list changes on its own
+items = ages.items()
+items.append(("dee", 50))
+print(items.len(), ages.len())
+copy = points.items()
+copy[0] = (9, Point(x=0, y=0))
+print(copy, points)
+
+// an empty map
+empty = {}
+empty[1] = "a"
+x = empty.pop(1)
+for n in empty:
+    print("never", n)
+print(empty.keys(), empty.values(), empty.items(), x)

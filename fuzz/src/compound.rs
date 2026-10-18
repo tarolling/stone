@@ -12,7 +12,9 @@
 //! - Every list has at least two elements and nothing shrinks one, so indexes from -2 to 1 are
 //!   always in range, and a `pop` always follows an `append` to the same list.
 //! - A map variable is never assigned again, only given entries, so the keys it is known to hold
-//!   only grow, and only those are read with `m[k]`.
+//!   only grow, and only those are read with `m[k]` or changed with `m[k] += v`. An entry it
+//!   pops is assigned again right after, and a map reached through a field or element is only
+//!   given entries, since nothing tracks its keys.
 //! - Bare `none` only appears where the type around it says what it holds, such as a field or an
 //!   argument, so every new variable's type can be inferred.
 //! - A method marked as changing `self` starts by changing it and is only called as a statement
@@ -1338,13 +1340,14 @@ impl Generator {
             }
             // a map variable only gains entries, so the keys it holds are known
             Ty::Map(key, value) if target == root_name => {
+                let (key, value) = (*key, (**value).clone());
+                self.map_change(u, scope, indent, path.root, key, &value)?;
+            }
+            // a map inside a variable gains an entry, through its place
+            Ty::Map(key, value) => {
                 let key_text = key.literal(u)?;
                 let value = self.value(u, scope, value, 0, true)?;
                 self.line(indent, &format!("{target}[{key_text}] = {value}"));
-                let keys = &mut scope.values[path.root].keys;
-                if !keys.contains(&key_text) {
-                    keys.push(key_text);
-                }
             }
             Ty::G(t) => {
                 let value = self.value(u, scope, t, 0, true)?;
@@ -1372,8 +1375,99 @@ impl Generator {
         Ok(true)
     }
 
-    /// Emits `print` of a map's length, membership, and lookups, such as
-    /// `print(v1, v1.len(), v1.contains("a"), v1.get("a"), v1["b"])`.
+    /// Emits a change to the map variable `scope.values[root]`, whose keys are of type `key` and
+    /// values of type `value`: a new or replaced entry, `m[k] op= v` for a key it holds, or a
+    /// `pop` whose entry is assigned again right after, so the keys it holds only grow.
+    fn map_change(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &mut Scope,
+        indent: usize,
+        root: usize,
+        key: Key,
+        value: &Ty,
+    ) -> Result<()> {
+        match u.int_in_range(0..=3)? {
+            1 if self.map_augment(u, scope, indent, root, value)? => Ok(()),
+            2 => self.map_pop(u, scope, indent, root, key, value),
+            _ => {
+                let key_text = key.literal(u)?;
+                self.map_set(u, scope, indent, root, key_text, value)
+            }
+        }
+    }
+
+    /// Emits `m[key] = value` for the map variable `scope.values[root]` and notes that it holds
+    /// `key`.
+    fn map_set(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &mut Scope,
+        indent: usize,
+        root: usize,
+        key_text: String,
+        value: &Ty,
+    ) -> Result<()> {
+        let target = scope.values[root].name.clone();
+        let value = self.value(u, scope, value, 0, true)?;
+        self.line(indent, &format!("{target}[{key_text}] = {value}"));
+        let keys = &mut scope.values[root].keys;
+        if !keys.contains(&key_text) {
+            keys.push(key_text);
+        }
+        Ok(())
+    }
+
+    /// Emits `m[k] op= v` for a key `k` that the map variable `scope.values[root]` holds, if
+    /// its values are numbers and it holds any, and returns whether it did.
+    fn map_augment(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &mut Scope,
+        indent: usize,
+        root: usize,
+        value: &Ty,
+    ) -> Result<bool> {
+        let known = scope.values[root].keys.clone();
+        if known.is_empty() {
+            return Ok(false);
+        }
+        let target = scope.values[root].name.clone();
+        let (op, amount) = match value {
+            Ty::Int => (*u.choose(&["+", "-", "*"])?, self.expression(u, scope, 0)?),
+            Ty::Float => (
+                *u.choose(&["+", "-", "*", "/"])?,
+                self.float_expression(u, scope, 0)?,
+            ),
+            _ => return Ok(false),
+        };
+        let key_text = u.choose(&known)?;
+        self.line(indent, &format!("{target}[{key_text}] {op}= {amount}"));
+        Ok(true)
+    }
+
+    /// Emits `p = m.pop(k)` for the map variable `scope.values[root]` and prints `p`, then
+    /// assigns `m[k]` again, so the entry comes back at the end and the keys it holds only grow.
+    fn map_pop(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &mut Scope,
+        indent: usize,
+        root: usize,
+        key: Key,
+        value: &Ty,
+    ) -> Result<()> {
+        let target = scope.values[root].name.clone();
+        let key_text = key.literal(u)?;
+        let popped = self.fresh("p");
+        self.line(indent, &format!("{popped} = {target}.pop({key_text})"));
+        self.line(indent, &format!("print(\"{popped}\", {popped})"));
+        self.map_set(u, scope, indent, root, key_text, value)
+    }
+
+    /// Emits `print` of a map's length, membership, lookups, and lists of its keys, values, and
+    /// entries, such as `print(v1, v1.len(), v1.contains("a"), v1.get("a"), v1.keys(),
+    /// v1.values(), v1.items(), v1["b"])`, then a loop over its keys that prints each entry.
     fn map_statement(
         &mut self,
         u: &mut Unstructured,
@@ -1399,12 +1493,33 @@ impl Generator {
             format!("{map}.len()"),
             format!("{map}.contains({a})"),
             format!("{map}.get({b})"),
+            format!("{map}.keys()"),
+            format!("{map}.values()"),
+            format!("{map}.items()"),
         ];
         let keys = &scope.values[path.root].keys;
         if map == scope.values[path.root].name && !keys.is_empty() {
             parts.push(format!("{map}[{}]", u.choose(keys)?));
         }
         self.line(indent, &format!("print({})", parts.join(", ")));
+        // the loop's key is always one the map holds
+        let key = self.fresh("k");
+        self.line(indent, &format!("for {key} in {map}:"));
+        self.line(
+            indent + 1,
+            &format!("print(\"{key}\", {key}, {map}[{key}])"),
+        );
+        // and a map variable that may change does
+        let root = path.root;
+        if map == scope.values[root].name && path.place {
+            let Ty::Map(key, value) = path.ty.clone() else {
+                unreachable!()
+            };
+            self.map_pop(u, scope, indent, root, key, &value)?;
+            self.map_augment(u, scope, indent, root, &value)?;
+            let name = scope.values[root].name.clone();
+            self.note_change(&name);
+        }
         Ok(true)
     }
 

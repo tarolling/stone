@@ -418,6 +418,9 @@ struct Lowerer<'a> {
     /// Whether this is a method that changes `self`, which returns the values of `self` after
     /// its own, for the caller to store back into the receiver.
     returns_self: bool,
+    /// The keys that [`Lowerer::place_indexes`] evaluated to owned strings for the statement
+    /// being lowered, which it releases once the change is made.
+    place_keys: Vec<Operand>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -443,6 +446,7 @@ impl<'a> Lowerer<'a> {
             moved_globals: HashSet::new(),
             live_after: LiveAfter::new(),
             statement_last_uses: Vec::new(),
+            place_keys: Vec::new(),
             span: Span::default(),
             held: Vec::new(),
             print_depth: Operand::Imm(0),
@@ -1105,6 +1109,19 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Returns whether the place `expr` steps into a map's entry on its way from its variable,
+    /// as `m[k]`, `m[k].x`, and `grid[i][k]` for a list of maps do, which
+    /// [`Lowerer::locate`] walks.
+    fn through_map(&self, expr: &Expr) -> bool {
+        match &expr.kind {
+            ExprKind::Subscript { value, .. } => {
+                self.map_key(value).is_some() || self.through_map(value)
+            }
+            ExprKind::Attribute { value, .. } => self.through_map(value),
+            _ => false,
+        }
+    }
+
     /// Returns how the elements of the list `expr` are counted.
     fn element_kind(&self, expr: &Expr) -> Option<RcKind> {
         match self.span_type(expr.span) {
@@ -1408,6 +1425,12 @@ impl<'a> Lowerer<'a> {
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         let outer = std::mem::replace(&mut self.span, stmt.span);
         let result = self.stmt_unspanned(stmt);
+        // a change through a map's entry may have evaluated a key to a new string
+        for key in std::mem::take(&mut self.place_keys) {
+            if self.current.is_some() {
+                self.release_temp(key);
+            }
+        }
         self.span = outer;
         result
     }
@@ -2073,7 +2096,7 @@ impl<'a> Lowerer<'a> {
         op: Operator,
         value: &Expr,
     ) -> Result<(), String> {
-        if has_field(target) {
+        if has_field(target) || self.through_map(target) {
             return self.aug_assign_place(target, op, value);
         }
         let ExprKind::Subscript {
@@ -2136,9 +2159,10 @@ impl<'a> Lowerer<'a> {
         self.store_element(target, &indexes, index, new, kind)
     }
 
-    /// Lowers `target op= value` for a target reached through a struct's field, such as
-    /// `p.x += 1.0` or `ps[i].x *= 2.0`: the indexes once, then the old value, which an index out
-    /// of range fails at, then the value, then the new value is stored.
+    /// Lowers `target op= value` for a target reached through a struct's field or a map's entry,
+    /// such as `p.x += 1.0`, `ps[i].x *= 2.0`, or `m[k] += 1`: the indexes and keys once, then
+    /// the old value, which an index out of range or a missing key fails at, then the value, then
+    /// the new value is stored.
     fn aug_assign_place(
         &mut self,
         target: &Expr,
@@ -2223,6 +2247,25 @@ impl<'a> Lowerer<'a> {
                         },
                     };
                     ty = field;
+                }
+                Step::Index(_) if matches!(ty, Type::Map(..)) => {
+                    let key = indexes.next().ok_or("a key was not evaluated")?;
+                    let Type::Map(key_ty, value) = ty else {
+                        unreachable!("the step is into a map")
+                    };
+                    let map = self.unique_location(location)?;
+                    // a missing key points at its own subscript
+                    self.span = span;
+                    let first = self.map_find(map, key, &key_ty, None);
+                    self.fail_missing_key(first, key, &key_ty);
+                    self.span = outer;
+                    // the key is slot 0 of an entry
+                    location = Location::Slots {
+                        list: map,
+                        first: self.slot(first, 1),
+                        count: self.leaves(&value).len(),
+                    };
+                    ty = *value;
                 }
                 Step::Index(_) => {
                     let index = indexes.next().ok_or("an index was not evaluated")?;
@@ -2414,7 +2457,11 @@ impl<'a> Lowerer<'a> {
         let mut indexes = Vec::new();
         for step in steps {
             if let Step::Index(index) = step {
-                indexes.push(self.expr(index)?);
+                let index = self.expr(index)?;
+                if matches!(index, Operand::Reg(reg) if self.owned.contains_key(&reg)) {
+                    self.place_keys.push(index);
+                }
+                indexes.push(index);
             }
         }
         Ok(indexes)
@@ -2429,7 +2476,7 @@ impl<'a> Lowerer<'a> {
     /// `v0 = list_unique v0`, `v1 = list_load v0, 0`, `v1 = list_unique v1`, and
     /// `list_store v0, 0, v1` before the append. Only `main` changes globals.
     fn unique_place(&mut self, list: &Expr, indexes: &[Operand]) -> Result<Operand, String> {
-        if has_field(list) {
+        if has_field(list) || self.through_map(list) {
             let location = self.locate(list, indexes)?;
             return self.unique_location(location);
         }
@@ -2568,9 +2615,11 @@ impl<'a> Lowerer<'a> {
             Iterable::Range(_) => (None, None),
         };
 
-        // each element of a list of tuples or structs is several values
+        // each element of a list of tuples or structs is several values, and a map's entries
+        // are its key and then its value's, of which the loop takes the key
         let width = self.element_layout(iter).0;
-        let flat = self.holds_flat(iter);
+        let keyed = self.map_key(iter).is_some();
+        let flat = self.holds_flat(iter) || keyed;
         self.loop_depth += 1;
         self.start(header);
         let end = match iterable {
@@ -2598,8 +2647,9 @@ impl<'a> Lowerer<'a> {
         {
             // each value is retained for the variable that takes it
             let kinds = self.element_kinds(iter);
-            let values = self.load_slots(list, Operand::Reg(next), width, 0..width, &kinds);
-            self.assign_flat(target, &values, &kinds)?;
+            let leaves = if keyed { 0..1 } else { 0..width };
+            let values = self.load_slots(list, Operand::Reg(next), width, leaves.clone(), &kinds);
+            self.assign_flat(target, &values, &kinds[leaves])?;
             self.push(Inst::Binary {
                 op: BinOp::Add,
                 dst: next,
@@ -3966,6 +4016,25 @@ impl<'a> Lowerer<'a> {
                 Ok(self.finish(Operand::Imm(0), into))
             }
             "pop" if args.is_empty() => self.pop_last(receiver, into),
+            "pop" if self.map_key(receiver).is_some() => self.map_pop(receiver, &args[0], into),
+            "keys" => self.map_column(receiver, 0..1, into),
+            "values" => {
+                let width = self.element_layout(receiver).0;
+                self.map_column(receiver, 1..width, into)
+            }
+            "items" => {
+                // a map's entries are laid out as a list of (key, value) tuples, with an index the
+                // list never reads
+                let map = self.expr(receiver)?;
+                self.take(map, Some(RcKind::List));
+                let list = self.fresh();
+                self.push(Inst::Copy {
+                    dst: list,
+                    src: map,
+                });
+                self.own(Operand::Reg(list), Some(RcKind::List));
+                Ok(self.finish(Operand::Reg(list), into))
+            }
             "pop" => {
                 // the receiver's indexes, then the index, then the change
                 let indexes = self.place_indexes(receiver)?;
@@ -5559,6 +5628,23 @@ impl<'a> Lowerer<'a> {
         let key = self.expr(slice)?;
         let outer = std::mem::replace(&mut self.span, subscript.span);
         let first = self.map_find(map, key, &key_ty, None);
+        self.fail_missing_key(first, key, &key_ty);
+        self.span = outer;
+        self.release_temp(key);
+        // the key is slot 0 of an entry
+        let fields = leaves.start + 1..leaves.end + 1;
+        let values = self.load_slots(map, first, 1, fields.clone(), &kinds);
+        for (&value, field) in values.iter().zip(fields) {
+            self.own(value, kinds[field]);
+        }
+        self.release_temp(map);
+        Ok(values)
+    }
+
+    /// Stops the program unless `first`, from [`Lowerer::map_find`], is an entry's first slot,
+    /// failing as the interpreter does for the missing `key` of type `key_ty`, such as with
+    /// `key not found: 'pear'`, then goes on in a new block.
+    fn fail_missing_key(&mut self, first: Operand, key: Operand, key_ty: &Type) {
         let (found, missing) = (self.new_block(), self.new_block());
         self.terminate(Terminator::CmpBranch {
             cond: Cond::Ge,
@@ -5597,16 +5683,123 @@ impl<'a> Lowerer<'a> {
             _ => self.terminate(Terminator::Fail("key not found: {}".to_string(), vec![key])),
         }
         self.start(found);
-        self.span = outer;
+    }
+
+    /// Lowers `receiver.pop(key)` for a map, which is `some` of the value of `key`'s entry,
+    /// holding the map's references to its values, or `none` if it has none, into `into` if
+    /// given. The receiver's indexes and keys are evaluated, then the key, then the entry is
+    /// removed, which moves the later ones down, so the map's index is rebuilt on its next lookup.
+    fn map_pop(
+        &mut self,
+        receiver: &Expr,
+        key_expr: &Expr,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let key_ty = self.map_key(receiver).ok_or("only a map has entries")?;
+        let kinds = self.element_kinds(receiver);
+        let indexes = self.place_indexes(receiver)?;
+        let key = self.expr(key_expr)?;
+        let map = self.unique_place(receiver, &indexes)?;
+        let first = self.map_find(map, key, &key_ty, None);
         self.release_temp(key);
-        // the key is slot 0 of an entry
-        let fields = leaves.start + 1..leaves.end + 1;
-        let values = self.load_slots(map, first, 1, fields.clone(), &kinds);
-        for (&value, field) in values.iter().zip(fields) {
-            self.own(value, kinds[field]);
+        Ok(
+            self.option_if((Cond::Ge, first, Operand::Imm(0)), into, |this| {
+                // each value removed moves the next one down to the same slot
+                let removed: Vec<Operand> = kinds
+                    .iter()
+                    .map(|_| this.runtime_call("stone.list_pop", vec![map, first], None))
+                    .collect();
+                // the entry's key goes with it
+                if let Some(kind) = kinds[0] {
+                    this.push(Inst::Release {
+                        src: removed[0],
+                        kind,
+                    });
+                }
+                this.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Runtime("stone.map_unindex"),
+                    args: vec![map],
+                });
+                removed[1..]
+                    .iter()
+                    .copied()
+                    .zip(kinds[1..].iter().copied())
+                    .collect()
+            }),
+        )
+    }
+
+    /// Lowers `receiver.keys()` or `receiver.values()` for a map to a new list holding, for each
+    /// entry in order, the values in `leaves` of it, retained, into `into` if given: `0..1` is
+    /// the key, and the rest are the value's.
+    fn map_column(
+        &mut self,
+        receiver: &Expr,
+        leaves: std::ops::Range<usize>,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let kinds = self.element_kinds(receiver);
+        let width = kinds.len();
+        let taken = &kinds[leaves.clone()];
+        let map = self.list_operand(receiver, &[])?;
+        let count = self.element_count(map, width);
+        let slots = self.first_slot(count, taken.len());
+        let list = self.fresh();
+        let codes = Operand::Imm(RcKind::codes(taken));
+        let (label, args) = match taken.len() {
+            1 => ("stone.list_new", vec![slots, codes]),
+            n => (
+                "stone.list_new_wide",
+                vec![slots, codes, Operand::Imm(n as i64)],
+            ),
+        };
+        self.push(Inst::Call {
+            dsts: vec![list],
+            callee: Callee::Runtime(label),
+            args,
+        });
+        let next = self.fresh();
+        self.push(Inst::Copy {
+            dst: next,
+            src: Operand::Imm(0),
+        });
+        let (header, body, exit) = (self.new_block(), self.new_block(), self.new_block());
+        self.loop_depth += 1;
+        self.jump(header);
+        self.start(header);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(next),
+            rhs: count,
+            then: body,
+            otherwise: exit,
+        });
+        self.start(body);
+        // the new list takes a reference to each counted value
+        let values = self.load_slots(map, Operand::Reg(next), width, leaves, &kinds);
+        let first = self.first_slot(Operand::Reg(next), taken.len());
+        for (field, value) in values.into_iter().enumerate() {
+            let index = self.slot(first, field);
+            self.push(Inst::ListSet {
+                list: Operand::Reg(list),
+                index,
+                value,
+            });
         }
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: next,
+            lhs: Operand::Reg(next),
+            rhs: Operand::Imm(1),
+        });
+        self.jump(header);
+        self.loop_depth -= 1;
+        self.start(exit);
         self.release_temp(map);
-        Ok(values)
+        self.own(Operand::Reg(list), Some(RcKind::List));
+        Ok(self.finish(Operand::Reg(list), into))
     }
 
     /// Stores `values`, which already carry the references the map takes, as the value of the
@@ -5623,8 +5816,10 @@ impl<'a> Lowerer<'a> {
         };
         let key_ty = self.map_key(map_expr).ok_or("only a map has entries")?;
         let kinds = self.element_kinds(map_expr);
+        // the value was evaluated first, then the indexes and keys on the way, then the key
+        let indexes = self.place_indexes(map_expr)?;
         let key = self.expr(slice)?;
-        let map = self.unique_place(map_expr, &[])?;
+        let map = self.unique_place(map_expr, &indexes)?;
         self.map_put(map, key, &key_ty, values, &kinds);
         self.release_temp(key);
         Ok(())

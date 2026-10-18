@@ -199,6 +199,55 @@ impl Expr {
     pub fn new(kind: ExprKind, span: Span) -> Self {
         Expr { kind, span }
     }
+
+    /// Calls `f` on this expression and then on each expression inside it, outermost first and
+    /// left to right.
+    ///
+    /// For example, `f(a + 1)` visits `f(a + 1)`, `f`, `a + 1`, `a`, and `1`.
+    pub fn visit<'a>(&'a self, f: &mut impl FnMut(&'a Expr)) {
+        f(self);
+        for child in self.children() {
+            child.visit(f);
+        }
+    }
+
+    /// Returns the expressions directly inside this one, left to right.
+    ///
+    /// For example, `f(a + 1, b)` gives `f`, `a + 1`, and `b`.
+    pub fn children(&self) -> Vec<&Expr> {
+        match &self.kind {
+            ExprKind::Name { .. } | ExprKind::Constant { .. } => vec![],
+            ExprKind::BoolOp { values, .. }
+            | ExprKind::List { elts: values, .. }
+            | ExprKind::Tuple { elts: values, .. } => values.iter().collect(),
+            ExprKind::BinOp { left, right, .. } => vec![left, right],
+            ExprKind::UnaryOp { operand, .. } => vec![operand],
+            ExprKind::Compare {
+                left, comparators, ..
+            } => [&**left].into_iter().chain(comparators).collect(),
+            ExprKind::Call {
+                func,
+                args,
+                keywords,
+            } => [&**func]
+                .into_iter()
+                .chain(args)
+                .chain(keywords.iter().map(|keyword| &keyword.value))
+                .collect(),
+            ExprKind::Subscript { value, slice, .. } => vec![value, slice],
+            ExprKind::Attribute { value, .. } => vec![value],
+            ExprKind::Dict { keys, values } => keys
+                .iter()
+                .zip(values)
+                .flat_map(|(key, value)| [key, value])
+                .collect(),
+            ExprKind::Slice { lower, upper, step } => [lower, upper, step]
+                .into_iter()
+                .flatten()
+                .map(|b| &**b)
+                .collect(),
+        }
+    }
 }
 
 /// The kind of an [`Expr`], such as a call or a binary operation.
@@ -316,6 +365,31 @@ pub struct Stmt {
 impl Stmt {
     pub fn new(kind: StmtKind, span: Span) -> Self {
         Stmt { kind, span }
+    }
+
+    /// Returns the expressions of this statement itself, in source order, leaving out those in
+    /// the blocks it holds.
+    ///
+    /// For example, `xs[i] = f(x)` gives `xs[i]` and `f(x)`, and `while n > 0: n -= 1` gives
+    /// only `n > 0`.
+    pub fn exprs(&self) -> Vec<&Expr> {
+        match &self.kind {
+            StmtKind::Return { value } => value.iter().map(|value| &**value).collect(),
+            StmtKind::Assign { targets, value } => targets.iter().chain([&**value]).collect(),
+            StmtKind::AugAssign { target, value, .. } => vec![target, value],
+            StmtKind::For { target, iter, .. } => vec![target, iter],
+            StmtKind::While { test, .. } | StmtKind::If { test, .. } => vec![test],
+            StmtKind::Expr { value } => vec![value],
+            StmtKind::Match { subject, .. } => vec![subject],
+            StmtKind::FunctionDef { .. }
+            | StmtKind::Use { .. }
+            | StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. }
+            | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. }
+            | StmtKind::Break
+            | StmtKind::Continue => vec![],
+        }
     }
 }
 
@@ -628,5 +702,39 @@ impl Display for TypeExpr {
                 Ok(())
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::driver::parse_program;
+    use crate::span::FileId;
+
+    /// Returns the statements of `source`, which must parse, without the prelude's.
+    fn body(source: &str) -> Vec<Stmt> {
+        let Mod::Module { body } = parse_program(source).expect("test source should parse");
+        body.into_iter()
+            .filter(|stmt| stmt.span.file != FileId::PRELUDE)
+            .collect()
+    }
+
+    #[test]
+    fn visit_goes_outermost_first_and_left_to_right() {
+        let body = body("f(a + 1, xs[1:n])\n");
+        let mut seen = vec![];
+        body[0].exprs()[0].visit(&mut |expr| seen.push(expr.span.start.col));
+        // f(...), f, a + 1, a, 1, xs[1:n], xs, 1:n, 1, n
+        assert_eq!(seen, [1, 1, 3, 3, 7, 10, 10, 13, 13, 15]);
+    }
+
+    #[test]
+    fn a_statement_s_own_expressions_leave_out_its_blocks() {
+        let body = body("xs[i] = f(x)\nwhile n > 0:\n    n -= 1\nbreak\n");
+        let cols =
+            |stmt: &Stmt| -> Vec<usize> { stmt.exprs().iter().map(|e| e.span.start.col).collect() };
+        assert_eq!(cols(&body[0]), [1, 9]);
+        assert_eq!(cols(&body[1]), [7]);
+        assert_eq!(cols(&body[2]), Vec::<usize>::new());
     }
 }

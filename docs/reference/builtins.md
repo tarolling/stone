@@ -180,8 +180,11 @@ Without `index`, removes the last element and returns it as `some(x)`, or return
 list is empty. With `index`, removes the element there and returns it; a negative `index` counts
 from the end, as in indexing, and the program stops with `pop from empty list` if the list is
 empty and with `pop index out of range` if `index` is past either end. Like `append`, it changes
-only the variable it is called on, so it is either a statement of its own or the whole value of
-an assignment, as in `x = xs.pop()`.
+only the variable it is called on. Unlike `append`, it may be inside any expression, as in
+`print(xs.pop().unwrap())` or `while xs.pop().is_some():`, as long as nothing else in that
+statement uses the list it changes: `print(xs, xs.pop())` is an error, since `xs` would be read
+around the change, so write `x = xs.pop()` first. The whole value of an assignment, such as
+`xs[0] = xs.pop(1)`, may use it anywhere, since the value is evaluated before the target.
 
 On a map, `pop` removes the entry for `key` and returns `some` of its value, or `none` if the map
 has no entry for it. The other entries keep their order, and adding `key` again puts it last.

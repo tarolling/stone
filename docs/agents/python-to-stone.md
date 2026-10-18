@@ -53,7 +53,7 @@ since stone copies values.
 | `for k in d:`, `for k, v in d.items():` | the same, in insertion order |
 | `d.keys()`, `d.values()`, `list(d.items())` | `d.keys()`, `d.values()`, `d.items()`: new lists |
 | `d.pop(k)`, `del d[k]` | `d.pop(k)`, which returns an option, `none` if `k` is missing |
-| `d.pop(k, default)` | `x = d.pop(k)` then `x.unwrap_or(default)` |
+| `d.pop(k, default)` | `d.pop(k).unwrap_or(default)` |
 | `d[k] += 1`, `d[k].append(x)` | the same, but the key must exist |
 | `defaultdict(int)` | check `d.contains(k)` before reading or changing |
 | `set()`, `s.add(x)`, `x in s` | `map[T, bool]`: `s[x] = true`, `s.contains(x)` |

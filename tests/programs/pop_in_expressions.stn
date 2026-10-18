@@ -1,0 +1,74 @@
+// a call that changes its receiver and returns a value may be inside an expression, as long as
+// nothing else in its statement uses what it changes
+
+struct Queue:
+    items: list[str]
+    offset: int
+
+impl Queue:
+    fn take(self) -> int:
+        ret self.items.pop().unwrap_or("").len() + self.offset
+
+    fn last(self) -> option[str]:
+        ret self.items.pop()
+
+fn total(xs: list[int]) -> int:
+    n = 0
+    while xs.pop().is_some():
+        n += 1
+    ret n + xs.len()
+
+fn rest(xs: list[int]) -> list[int]:
+    if xs.pop(0) > 7:
+        ret []
+    ret xs
+
+fn twice(n: int) -> int:
+    ret n * 2
+
+xs = [1, 2, 3, 4, 5, 6]
+print(xs.pop().unwrap())
+print(twice(xs.pop().unwrap_or(0)))
+a = xs.pop().unwrap() + xs.pop().unwrap()
+print(a)
+if xs.pop(0) == 1:
+    print("first was 1")
+xs.append(xs.pop().unwrap() * 10)
+print(xs)
+
+// the caller's list is a copy
+ys = [7, 8, 9]
+print(total(ys), rest(ys), ys)
+
+words = ["a", "bb", "ccc"]
+print(words.pop().unwrap() + words.pop().unwrap())
+while words.pop().is_some():
+    print("popped")
+print(words.pop().is_none())
+print(words)
+
+grid = [[1, 2], [3]]
+print(grid[0].pop().unwrap() + grid[1].pop().unwrap())
+for v in grid.pop().unwrap():
+    print("row", v)
+print(grid)
+
+pairs = [(1, "one"), (2, "two")]
+match pairs.pop():
+    case some(p):
+        print(p[1])
+    case none:
+        print("empty")
+n, s = pairs.pop().unwrap()
+print(n, s, pairs)
+
+m = {"a": 1, "b": 2}
+print(m.pop("a").unwrap_or(0) + m.pop("z").unwrap_or(10))
+print(m)
+
+q = Queue(items=["x", "yy"], offset=100)
+print(q.take())
+print(q.last(), q.last())
+print(q.items)
+qs = [q]
+print(qs[0].take())

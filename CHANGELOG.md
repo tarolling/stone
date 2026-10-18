@@ -23,6 +23,15 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `self.counts`. A plain `m[k] = v` adds a missing key; anywhere else the key must exist, or the
   program stops with `key not found` at its subscript, in both backends.
 
+### Changed
+
+- `pop`, and a method that changes `self` and returns a value, may be inside any expression,
+  not only a statement of its own or the whole value of an assignment: `xs.pop().unwrap()`,
+  `while xs.pop().is_some():`, `ret self.items.pop().unwrap_or(0)`, and `m.pop(k).unwrap_or(0)`
+  all work. Nothing else in the same statement may use what the call changes, so
+  `print(xs, xs.pop())` is an error pointing at the other `xs`, while `self.offset` beside
+  `self.items.pop()` is fine.
+
 ## [0.3.1] - 2026-10-17
 
 ### Added

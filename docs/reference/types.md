@@ -373,7 +373,9 @@ A method that changes `self`, by assigning `self`, one of its fields, or anythin
 by calling something that changes one of those, such as `self.points.append(p)` or another such
 method, changes the value it is called on, as `append` changes a list. stone finds these methods
 itself, with no keyword. A call of one is a statement of its own or, if the method returns a
-value, the whole value of an assignment, as in `x = s.pop_top()`, and the value it is called on
+value, may be inside any expression, as in `print(s.pop_top())`, as long as nothing else in that
+statement uses what it changes (`s`, or `self.items` for `self.items.pop()`, while `self.offset`
+is another field and may be used), and the value it is called on
 is a variable, an element, or a field, which a function may change only if it is the function's
 own: `p.shift(1.0)`, `ps[i].shift(1.0)`, and `path.start.shift(1.0)` all change what they name,
 while `Point.origin().shift(1.0)` is an error, since the change would be lost. The receiver's
@@ -556,9 +558,10 @@ These keep the two backends identical and catch common mistakes:
   statement of its own, so `ys = xs.append(1)` is an error, and the list or struct must be in a
   variable or an element or field of one, so `f().append(1)` and `xs[1:].append(1)` are errors
   too, since the change would be lost. `pop`,
-  which also returns what it removes, may instead be the whole value of an assignment, as in
-  `x = xs.pop()`. A method that changes `self` follows the same rules, as in `s.push(1)` and
-  `x = s.pop_top()`.
+  which also returns what it removes, may instead be inside any expression, as in
+  `print(xs.pop().unwrap())`, as long as nothing else in that statement uses the list it
+  changes, so `print(xs, xs.pop())` is an error. A method that changes `self` follows the same
+  rules, as in `s.push(1)` and `print(s.pop_top())`.
 - **Functions change only their own variables.** A function can read a global but cannot
   change it, with `append`, an index, or a field, just as it cannot assign it. It takes the list as an
   argument and returns the changed one instead. A function that changes a parameter and then

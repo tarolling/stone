@@ -1371,24 +1371,101 @@ fn sort_orders_lists_of_numbers_and_strings() {
 }
 
 #[test]
-fn pop_is_a_statement_or_an_assigned_value() {
-    let message = "'pop' changes its receiver, so it can only be a statement of its own or the value of \
-                   an assignment, as in 'x = xs.pop()'";
-    assert_error("xs = [1]\nprint(xs.pop())\n", message, 2, 7);
-    assert_error("xs = [1]\ny = xs.pop(0) + 1\n", message, 2, 5);
-    assert_error(
-        "fn f(xs: list[int]) -> int:\n    ret xs.pop(-1)\nf([1])\n",
-        message,
-        2,
-        9,
+fn pop_may_be_inside_an_expression() {
+    assert_eq!(
+        errors(
+            "xs = [1, 2, 3]\nprint(xs.pop().unwrap())\ny = xs.pop(0) + 1\n\
+             a = xs.pop().unwrap_or(0) + xs.pop().unwrap_or(0)\nwhile xs.pop().is_some():\n    \
+             print(1)\nxs.append(xs.pop().unwrap_or(4))\nmatch xs.pop():\n    case some(x):\n        \
+             print(x)\n    case none:\n        print(0)\ngrid = [[1]]\n\
+             for v in grid.pop().unwrap():\n    print(v)\n"
+        ),
+        []
     );
     assert_eq!(
-        errors("xs = [1, 2]\ny = xs.pop()\nxs.pop()\ngrid = [[1]]\nrow = grid.pop()\n"),
+        errors("fn f(xs: list[int]) -> list[int]:\n    print(xs.pop(-1))\n    ret xs\nf([1])\n"),
         []
     );
     let message =
         "'insert' changes a list and returns none, so it can only be a statement of its own";
     assert_error("xs = [1]\ny = xs.insert(0, 1)\n", message, 2, 5);
+}
+
+#[test]
+fn pop_inside_an_expression_is_the_only_use_of_its_list_there() {
+    let message = "'pop' changes 'xs' in this statement, so 'xs' cannot also be used in it; assign \
+                   the result of 'pop' to a variable first";
+    assert_error("xs = [1]\nprint(xs, xs.pop())\n", message, 2, 7);
+    assert_error(
+        "xs = [1]\ny = xs.pop().unwrap() + xs.len()\n",
+        message,
+        2,
+        25,
+    );
+    assert_error("xs = [1, 2]\nxs[0] = xs.pop().unwrap()\n", message, 2, 1);
+    assert_error("xs = [1, 2]\nxs[0] += xs.pop().unwrap()\n", message, 2, 1);
+    // the whole value of an assignment is evaluated before its target, as before
+    assert_eq!(errors("xs = [1, 2]\nxs[0] = xs.pop(0)\n"), []);
+    let message = "'pop' changes 'grid' in this statement, so 'grid' cannot also be used in it; \
+                   assign the result of 'pop' to a variable first";
+    assert_error(
+        "grid = [[1], [2]]\nprint(grid[0].pop(), grid[1])\n",
+        message,
+        2,
+        22,
+    );
+}
+
+#[test]
+fn a_pop_inside_an_expression_is_a_change() {
+    let mut changed = HashSet::new();
+    let module =
+        parse_program("print(xs.pop().unwrap())\nif ys[0].pop().is_some():\n    ret zs.pop(0)\n")
+            .unwrap();
+    let Mod::Module { body } = &module;
+    collect_changed(body, &mut changed, &Methods::new());
+    let mut changed: Vec<String> = changed.into_iter().collect();
+    changed.sort();
+    assert_eq!(changed, ["xs", "ys", "zs"]);
+    // the caller cannot see the change, as with `x = xs.pop(0)`
+    assert_eq!(
+        errors("fn f(xs: list[int]) -> int:\n    ret xs.pop().unwrap()\nf([1])\n"),
+        [(
+            "changes to 'xs' are lost when 'f' returns, since parameters are copies; return it \
+             and assign the result where 'f' is called"
+                .into(),
+            2,
+            9
+        )]
+    );
+}
+
+#[test]
+fn a_method_that_pops_inside_an_expression_changes_self() {
+    let source = "struct Queue:\n    items: list[int]\n    offset: int\nimpl Queue:\n    \
+                  fn take(self) -> int:\n        ret self.items.pop().unwrap_or(0) + self.offset\n\
+                  q = Queue(items=[1], offset=2)\nn = q.take()\n";
+    assert_eq!(
+        method_calls(source),
+        [("Queue.take".to_string(), true, true)]
+    );
+    assert_error(
+        &source.replace("+ self.offset", "+ self.items.len()"),
+        "'pop' changes 'self.items' in this statement, so 'self.items' cannot also be used in \
+         it; assign the result of 'pop' to a variable first",
+        6,
+        45,
+    );
+    assert_error(
+        &source.replace(
+            "ret self.items.pop().unwrap_or(0) + self.offset",
+            "print(self, self.items.pop())\n        ret 0",
+        ),
+        "'pop' changes 'self.items' in this statement, so 'self' cannot also be used in it; \
+         assign the result of 'pop' to a variable first",
+        6,
+        15,
+    );
 }
 
 #[test]
@@ -2871,12 +2948,13 @@ fn maps_pop_by_key_into_an_option() {
         2,
         11,
     );
+    assert!(errors("m = {1: 1}\nprint(m.pop(1).unwrap_or(0))\n").is_empty());
     assert_error(
-        "m = {1: 1}\nprint(m.pop(1))\n",
-        "'pop' changes its receiver, so it can only be a statement of its own or the value of \
-         an assignment, as in 'x = xs.pop()'",
+        "m = {1: 1}\nprint(m.pop(1), m)\n",
+        "'pop' changes 'm' in this statement, so 'm' cannot also be used in it; assign the \
+         result of 'pop' to a variable first",
         2,
-        7,
+        17,
     );
     assert_error(
         "g = {1: \"a\"}\nfn f():\n    v = g.pop(1)\n    print(v)\n",
@@ -3158,7 +3236,7 @@ fn a_struct_method_is_not_the_builtin_of_the_same_name() {
 }
 
 #[test]
-fn a_method_that_changes_its_receiver_is_a_statement_or_an_assigned_value() {
+fn a_method_that_changes_its_receiver_is_placed_like_pop() {
     let s = format!("{STACK}s = Stack.new()\n");
     assert_error(
         &format!("{s}print(s.push(1))\n"),
@@ -3167,12 +3245,18 @@ fn a_method_that_changes_its_receiver_is_a_statement_or_an_assigned_value() {
         14,
         7,
     );
+    assert!(
+        errors(&format!(
+            "{s}print(s.pop_top())\nif s.pop_top() > 0:\n    print(1)\n"
+        ))
+        .is_empty()
+    );
     assert_error(
-        &format!("{s}print(s.pop_top())\n"),
-        "'pop_top' changes its receiver, so it can only be a statement of its own or the value of \
-         an assignment",
+        &format!("{s}print(s.pop_top() + s.size())\n"),
+        "'pop_top' changes 's' in this statement, so 's' cannot also be used in it; assign the \
+         result of 'pop_top' to a variable first",
         14,
-        7,
+        21,
     );
     assert_error(
         &format!("{s}Stack.new().push(1)\n"),

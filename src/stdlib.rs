@@ -141,8 +141,8 @@ pub static METHODS: [&str; 23] = [
 ///
 /// Such a call changes the variable that holds the value, like an assignment, so it must be a
 /// statement of its own whose receiver is a variable or an element of one, such as
-/// `grid[0].append(1)`. `pop`, which also returns a value, may instead be the whole value of an
-/// assignment, as in `x = xs.pop()`.
+/// `grid[0].append(1)`. `pop`, which also returns a value, may instead be inside any expression
+/// that nothing else in its statement uses the list in, as in `print(xs.pop().unwrap())`.
 pub fn changes_receiver(name: &str) -> bool {
     matches!(name, "append" | "pop" | "insert" | "extend" | "sort")
 }
@@ -231,8 +231,9 @@ pub static METHOD_DOCS: [BuiltinDoc; 23] = [
                       the program if the list is empty or `index` is out of range; a negative \
                       `index` counts from the end. On a map, removes the entry for `key` and \
                       returns `some` of its value, or `none` if there is none, keeping the \
-                      other entries in order. It is a statement of its own or the whole value \
-                      of an assignment.",
+                      other entries in order. It may be inside any expression, as in \
+                      `xs.pop().unwrap()`, if nothing else in the statement uses what it \
+                      changes.",
     },
     BuiltinDoc {
         name: "insert",

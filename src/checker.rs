@@ -940,9 +940,12 @@ struct Inference {
     /// The span of the call an expression statement makes, if it is one, which is the only place
     /// a method that changes its receiver may be called.
     statement_call: Option<Span>,
-    /// The span of the call that is the whole value of an assignment, if it is one, where `pop`,
-    /// which changes its receiver and returns a value, may also be called.
+    /// The span of the call that is the whole value of an assignment, if it is one, where a call
+    /// that changes its receiver may be whatever else the statement uses its receiver for.
     assigned_call: Option<Span>,
+    /// The calls in the statement being checked that change their receiver, which
+    /// [`Inference::check_stmt`] checks once it has seen them all.
+    changing_calls: Vec<ChangingCall>,
     /// The span of every tuple that is indexed, such as `t` in `t[0]`, so that a change through
     /// one, such as `t[0].append(1)`, can be reported.
     indexed_tuples: HashSet<Span>,
@@ -1031,6 +1034,37 @@ struct DeferredMethod {
     /// The type and span of each argument.
     args: Vec<(Ty, Span)>,
     result: Ty,
+    /// Whether its statement has been checked, filling in `conflict`.
+    checked: bool,
+    /// Where else its statement uses the receiver, which is an error if the method turns out to
+    /// change it and the call is inside an expression.
+    conflict: Option<Conflict>,
+}
+
+/// A call that changes its receiver, in the statement being checked.
+struct ChangingCall {
+    /// The name of the method, for errors.
+    name: String,
+    /// The span of the variable the receiver starts from, which another call that changes its
+    /// receiver may share.
+    root: Span,
+    /// The variable the receiver starts from, then the fields after it up to the first index,
+    /// such as `self` and `items` for `self.items[0]`, which is what the call may change.
+    path: Vec<String>,
+    /// Whether the call is inside an expression, rather than a statement of its own or the whole
+    /// value of an assignment, so nothing else in the statement may use what it changes.
+    inner: bool,
+}
+
+/// A use of what a call changes elsewhere in the same statement, such as `xs` in
+/// `print(xs, xs.pop())`.
+#[derive(Clone)]
+struct Conflict {
+    /// What the call changes, such as `xs` or `self.items`.
+    changed: String,
+    /// What the statement also uses, which overlaps it.
+    used: String,
+    span: Span,
 }
 
 /// What [`Inference::subscript_of`] indexed.
@@ -2552,32 +2586,38 @@ impl Inference {
 
     fn block_changes_self(&self, owner: &str, body: &[Stmt]) -> bool {
         let in_self = |place_expr: &Expr| place(place_expr).is_some_and(|(root, _)| root == "self");
-        body.iter().any(|stmt| match &stmt.kind {
-            StmtKind::Assign { targets, value } => {
-                targets.iter().any(|target| {
-                    matches!(
-                        target.kind,
-                        ExprKind::Subscript { .. } | ExprKind::Attribute { .. }
-                    ) && in_self(target)
-                }) || self.call_changes_self(owner, value)
+        body.iter().any(|stmt| {
+            // a call that changes its receiver may be anywhere in the statement's own expressions
+            let mut calls = false;
+            for expr in stmt.exprs() {
+                expr.visit(&mut |expr| calls |= self.call_changes_self(owner, expr));
             }
-            StmtKind::AugAssign { target, .. } => {
-                matches!(
-                    target.kind,
-                    ExprKind::Subscript { .. } | ExprKind::Attribute { .. }
-                ) && in_self(target)
-            }
-            StmtKind::Expr { value } => self.call_changes_self(owner, value),
-            StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
-                self.block_changes_self(owner, body)
-            }
-            StmtKind::If { body, orelse, .. } => {
-                self.block_changes_self(owner, body) || self.block_changes_self(owner, orelse)
-            }
-            StmtKind::Match { cases, .. } => cases
-                .iter()
-                .any(|case| self.block_changes_self(owner, &case.body)),
-            _ => false,
+            calls
+                || match &stmt.kind {
+                    StmtKind::Assign { targets, .. } => targets.iter().any(|target| {
+                        matches!(
+                            target.kind,
+                            ExprKind::Subscript { .. } | ExprKind::Attribute { .. }
+                        ) && in_self(target)
+                    }),
+                    StmtKind::AugAssign { target, .. } => {
+                        matches!(
+                            target.kind,
+                            ExprKind::Subscript { .. } | ExprKind::Attribute { .. }
+                        ) && in_self(target)
+                    }
+                    StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
+                        self.block_changes_self(owner, body)
+                    }
+                    StmtKind::If { body, orelse, .. } => {
+                        self.block_changes_self(owner, body)
+                            || self.block_changes_self(owner, orelse)
+                    }
+                    StmtKind::Match { cases, .. } => cases
+                        .iter()
+                        .any(|case| self.block_changes_self(owner, &case.body)),
+                    _ => false,
+                }
         })
     }
 
@@ -3246,7 +3286,42 @@ impl Inference {
         }
     }
 
+    /// Checks `stmt`, then that a call inside one of its expressions that changes its receiver,
+    /// such as `xs.pop()` in `print(xs.pop())`, is the statement's only use of what it changes,
+    /// since a borrowed copy of it elsewhere in the statement could see the change.
     fn check_stmt(&mut self, stmt: &Stmt) {
+        let outer = std::mem::take(&mut self.changing_calls);
+        let deferred = self.deferred_methods.len();
+        self.check_stmt_kind(stmt);
+        // the statements of a nested block checked their own calls
+        let calls = std::mem::replace(&mut self.changing_calls, outer);
+        let mut mentions = vec![];
+        for expr in stmt.exprs() {
+            place_mentions(expr, &mut mentions);
+        }
+        let exempt: HashSet<Span> = calls.iter().map(|call| call.root).collect();
+        let mut reported = HashSet::new();
+        for call in calls.iter().filter(|call| call.inner) {
+            if let Some(conflict) = first_conflict(&mentions, &call.path, &exempt)
+                && reported.insert(conflict.span)
+            {
+                self.error(conflict.span, conflict_message(&call.name, &conflict));
+            }
+        }
+        for method in &mut self.deferred_methods[deferred..] {
+            if method.checked {
+                continue;
+            }
+            method.checked = true;
+            if let Some((root, path)) = changed_path(&method.receiver) {
+                let mut exempt = exempt.clone();
+                exempt.insert(root);
+                method.conflict = first_conflict(&mentions, &path, &exempt);
+            }
+        }
+    }
+
+    fn check_stmt_kind(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::FunctionDef {
                 name,
@@ -4351,7 +4426,7 @@ impl Inference {
         );
         self.check_method_args(call, name, &params, &arg_types, args);
         if changes {
-            self.check_changing_call(call.span, name, &ret);
+            self.check_changing_call(call.span, receiver, name, &ret);
             self.check_change_of(receiver, true);
         }
         ret
@@ -4376,29 +4451,36 @@ impl Inference {
         }
     }
 
-    /// Reports the call at `call` of `name`, a method that changes its receiver and returns
-    /// `ret`, unless it is a statement of its own or, if it returns a value, the whole value of
-    /// an assignment, since inside an expression a borrowed copy of the receiver could see the
-    /// change.
-    fn check_changing_call(&mut self, call: Span, name: &str, ret: &Ty) {
-        if *ret == Ty::Unit {
-            if self.statement_call != Some(call) {
-                self.error(
-                    call,
-                    format!(
-                        "'{name}' changes its receiver and returns no value, so it can only be a \
-                         statement of its own"
-                    ),
-                );
-            }
-        } else if ![self.statement_call, self.assigned_call].contains(&Some(call)) {
+    /// Reports the call at `call` of `name`, a method that changes `receiver` and returns `ret`,
+    /// unless it is a statement of its own or returns a value, and notes it for
+    /// [`Inference::check_stmt`], which checks that a call inside an expression is its
+    /// statement's only use of what it changes.
+    fn check_changing_call(&mut self, call: Span, receiver: &Expr, name: &str, ret: &Ty) {
+        if *ret == Ty::Unit && self.statement_call != Some(call) {
             self.error(
                 call,
                 format!(
-                    "'{name}' changes its receiver, so it can only be a statement of its own or \
-                     the value of an assignment"
+                    "'{name}' changes its receiver and returns no value, so it can only be a \
+                     statement of its own"
                 ),
             );
+        }
+        self.note_changing_call(call, receiver, name, *ret != Ty::Unit);
+    }
+
+    /// Notes the call at `call` of `name`, which changes `receiver`, for
+    /// [`Inference::check_stmt`]: whether it `returns` a value and is inside an expression,
+    /// rather than a statement of its own or the whole value of an assignment.
+    fn note_changing_call(&mut self, call: Span, receiver: &Expr, name: &str, returns: bool) {
+        // a receiver that is not a variable was reported
+        if let Some((root, path)) = changed_path(receiver) {
+            let whole = [self.statement_call, self.assigned_call].contains(&Some(call));
+            self.changing_calls.push(ChangingCall {
+                name: name.to_string(),
+                root,
+                path,
+                inner: returns && !whole,
+            });
         }
     }
 
@@ -4505,7 +4587,7 @@ impl Inference {
         );
         self.check_method_args(call, name, &params, arg_types, args);
         if changes {
-            self.check_changing_call(call.span, name, &ret);
+            self.check_changing_call(call.span, receiver, name, &ret);
             self.check_change_of(receiver, true);
         }
         ret
@@ -4557,14 +4639,11 @@ impl Inference {
                          statement of its own"
                     ),
                 );
-            } else if !deferred.statement && !deferred.assigned {
-                self.error(
-                    deferred.call,
-                    format!(
-                        "'{name}' changes its receiver, so it can only be a statement of its own \
-                         or the value of an assignment"
-                    ),
-                );
+            } else if !deferred.statement
+                && !deferred.assigned
+                && let Some(conflict) = &deferred.conflict
+            {
+                self.error(conflict.span, conflict_message(name, conflict));
             }
             self.check_change_with(&deferred.receiver, true, deferred.global);
         } else if ret == Ty::Unit && !deferred.statement {
@@ -5226,6 +5305,8 @@ impl Inference {
                         .zip(args.iter().map(|a| a.span))
                         .collect(),
                     result: result.clone(),
+                    checked: false,
+                    conflict: None,
                 });
                 return result;
             }
@@ -5233,16 +5314,9 @@ impl Inference {
         }
         let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
         if changes_receiver(name) {
-            // inside an expression, a borrowed copy of the receiver could see the change
-            if name == "pop" {
-                if ![self.statement_call, self.assigned_call].contains(&Some(call.span)) {
-                    self.error(
-                        call.span,
-                        "'pop' changes its receiver, so it can only be a statement of its own or \
-                         the value of an assignment, as in 'x = xs.pop()'",
-                    );
-                }
-            } else if self.statement_call != Some(call.span) {
+            // `pop` returns what it takes out, and the others return nothing
+            self.note_changing_call(call.span, receiver, name, name == "pop");
+            if name != "pop" && self.statement_call != Some(call.span) {
                 self.error(
                     call.span,
                     format!(
@@ -6938,6 +7012,101 @@ fn has_slice(expr: &Expr) -> bool {
     }
 }
 
+/// Returns the span of the variable that `receiver`, a place a call changes, starts from, and
+/// that variable followed by the fields after it up to the first index, which is what the call
+/// may change.
+///
+/// For example, `self.items[0]` gives `self`'s span and `["self", "items"]`, and `f().x` gives
+/// `None`.
+fn changed_path(receiver: &Expr) -> Option<(Span, Vec<String>)> {
+    let (root, steps) = place(receiver)?;
+    Some((place_root(receiver).span, field_path(root, &steps)))
+}
+
+/// Returns `root` followed by the fields at the start of `steps`, up to the first index.
+fn field_path(root: &str, steps: &[Step]) -> Vec<String> {
+    let fields = steps.iter().map_while(|step| match step {
+        Step::Field(field) => Some(field.to_string()),
+        Step::Index(_) => None,
+    });
+    [root.to_string()].into_iter().chain(fields).collect()
+}
+
+/// Pushes each variable `expr` uses, in order, as the span of the variable and the path
+/// [`field_path`] gives for the place it is read through, leaving out a method's name and a
+/// called function's.
+///
+/// For example, `f(p.x, xs[i].len())` gives `p` with `["p", "x"]`, `xs` with `["xs"]`, and `i`
+/// with `["i"]`.
+fn place_mentions(expr: &Expr, out: &mut Vec<(Span, Vec<String>)>) {
+    match &expr.kind {
+        ExprKind::Name { .. } | ExprKind::Subscript { .. } | ExprKind::Attribute { .. }
+            if let Some((root, steps)) = place(expr) =>
+        {
+            out.push((place_root(expr).span, field_path(root, &steps)));
+            for step in steps {
+                if let Step::Index(index) = step {
+                    place_mentions(index, out);
+                }
+            }
+        }
+        ExprKind::Call {
+            func,
+            args,
+            keywords,
+        } => {
+            match &func.kind {
+                ExprKind::Name { .. } => {}
+                ExprKind::Attribute { value, .. } => place_mentions(value, out),
+                _ => place_mentions(func, out),
+            }
+            for arg in args
+                .iter()
+                .chain(keywords.iter().map(|keyword| &keyword.value))
+            {
+                place_mentions(arg, out);
+            }
+        }
+        _ => {
+            for child in expr.children() {
+                place_mentions(child, out);
+            }
+        }
+    }
+}
+
+/// Returns the first of `mentions`, from [`place_mentions`], that overlaps `changed`, a path
+/// that [`changed_path`] gave, because one path starts with the other, leaving out the variables
+/// at `exempt`, those other calls change.
+///
+/// For example, a change to `self.items` overlaps `self` and `self.items.len()`, but not
+/// `self.offset`.
+fn first_conflict(
+    mentions: &[(Span, Vec<String>)],
+    changed: &[String],
+    exempt: &HashSet<Span>,
+) -> Option<Conflict> {
+    let (span, used) = mentions.iter().find(|(span, used)| {
+        used[0] == changed[0]
+            && !exempt.contains(span)
+            && used.iter().zip(changed).all(|(a, b)| a == b)
+    })?;
+    Some(Conflict {
+        changed: changed.join("."),
+        used: used.join("."),
+        span: *span,
+    })
+}
+
+/// Returns the error for `conflict`, another use of what a call of the method `name` changes.
+fn conflict_message(name: &str, conflict: &Conflict) -> String {
+    format!(
+        "'{name}' changes '{}' in this statement, so '{}' cannot also be used in it; assign the \
+         result of '{name}' to a variable first",
+        conflict.changed, conflict.used
+    )
+}
+
 /// Returns the expression the place `expr` starts from, following its subscripts and fields.
 ///
 /// For example, the root of `grid[i][j]` and of `ps[i].x` is `grid` or `ps`, and the root of
@@ -7015,8 +7184,8 @@ pub(crate) fn changed_receiver<'a>(expr: &'a Expr, methods: &Methods) -> Option<
 }
 
 /// Collects the name of every variable that `body` changes in place, through `xs[i] = v`,
-/// `p.x = v`, `xs.append(v)`, or a method that changes `self`, as `methods` resolved it, without
-/// looking inside function definitions.
+/// `p.x = v`, `xs.append(v)`, or a method that changes `self`, as `methods` resolved it, wherever
+/// the call is in a statement (`print(zs.pop())`), without looking inside function definitions.
 ///
 /// For example, for `grid[0][1] = 2` followed by `if x: ys.append(1)`, this collects `grid` and
 /// `ys`.
@@ -7028,7 +7197,7 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>, methods:
     };
     for stmt in body {
         match &stmt.kind {
-            StmtKind::Assign { targets, value } => {
+            StmtKind::Assign { targets, .. } => {
                 for target in targets {
                     match &target.kind {
                         ExprKind::Subscript { value, .. } => add(value, out),
@@ -7036,20 +7205,23 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>, methods:
                         _ => {}
                     }
                 }
-                if let Some(receiver) = changed_receiver(value, methods) {
-                    add(receiver, out);
-                }
             }
             StmtKind::AugAssign { target, .. } => match &target.kind {
                 ExprKind::Subscript { value, .. } => add(value, out),
                 ExprKind::Attribute { .. } => add(target, out),
                 _ => {}
             },
-            StmtKind::Expr { value } => {
-                if let Some(receiver) = changed_receiver(value, methods) {
+            _ => {}
+        }
+        // a call that changes its receiver may be anywhere in the statement's own expressions
+        for expr in stmt.exprs() {
+            expr.visit(&mut |expr| {
+                if let Some(receiver) = changed_receiver(expr, methods) {
                     add(receiver, out);
                 }
-            }
+            });
+        }
+        match &stmt.kind {
             StmtKind::For { body, .. } | StmtKind::While { body, .. } => {
                 collect_changed(body, out, methods)
             }
@@ -7062,15 +7234,7 @@ pub(crate) fn collect_changed(body: &[Stmt], out: &mut HashSet<String>, methods:
                     collect_changed(&case.body, out, methods);
                 }
             }
-            StmtKind::FunctionDef { .. }
-            | StmtKind::EnumDef { .. }
-            | StmtKind::StructDef { .. }
-            | StmtKind::ImplDef { .. }
-            | StmtKind::TraitDef { .. }
-            | StmtKind::Use { .. }
-            | StmtKind::Return { .. }
-            | StmtKind::Break
-            | StmtKind::Continue => {}
+            _ => {}
         }
     }
 }
@@ -7111,7 +7275,7 @@ impl ParameterUse<'_> {
     fn stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::Assign { targets, value } => {
-                self.change_or_expr(value);
+                self.expr(value);
                 for target in targets {
                     match &target.kind {
                         ExprKind::Name { .. } | ExprKind::Tuple { .. } => {}
@@ -7136,7 +7300,7 @@ impl ParameterUse<'_> {
                 }
                 self.expr(value);
             }
-            StmtKind::Expr { value } => self.change_or_expr(value),
+            StmtKind::Expr { value } => self.expr(value),
             StmtKind::Return { value } => {
                 if let Some(value) = value {
                     self.expr(value);
@@ -7172,20 +7336,6 @@ impl ParameterUse<'_> {
         }
     }
 
-    /// Notes the change `value` makes if it calls a method that changes its receiver, as in
-    /// `xs.append(x)` or `x = xs.pop()`, and otherwise what it reads.
-    fn change_or_expr(&mut self, value: &Expr) {
-        match (changed_receiver(value, self.methods), &value.kind) {
-            (Some(receiver), ExprKind::Call { args, .. }) => {
-                self.change(receiver);
-                for arg in args {
-                    self.expr(arg);
-                }
-            }
-            _ => self.expr(value),
-        }
-    }
-
     /// Notes a change to `list`, which changes the parameter if `list` starts from it.
     fn change(&mut self, list: &Expr) {
         match place(list) {
@@ -7201,8 +7351,16 @@ impl ParameterUse<'_> {
         }
     }
 
-    /// Notes whether `expr` reads the parameter.
+    /// Notes whether `expr` reads the parameter, and any change a call in it makes, as in
+    /// `xs.append(x)` or `print(xs.pop())`.
     fn expr(&mut self, expr: &Expr) {
+        if let (Some(receiver), ExprKind::Call { args, .. }) =
+            (changed_receiver(expr, self.methods), &expr.kind)
+        {
+            self.change(receiver);
+            args.iter().for_each(|arg| self.expr(arg));
+            return;
+        }
         match &expr.kind {
             ExprKind::Name { id, .. } => self.read |= id == self.name,
             ExprKind::BoolOp { values, .. } => values.iter().for_each(|value| self.expr(value)),

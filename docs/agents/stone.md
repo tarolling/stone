@@ -118,8 +118,8 @@ for name, n in pairs:
 
 `for k in m` goes through a map's keys in insertion order; `m.keys()`, `m.values()`, and
 `m.items()` return new lists. `m[k]` stops the program if `k` is missing; use `m.contains(k)` or
-`m.get(k)` when it might be. `m.pop(k)` returns an option and, like a list's `pop`, is a statement
-or the whole value of an assignment. Entries change in place like list elements, through any
+`m.get(k)` when it might be. `m.pop(k)` returns an option and, like a list's `pop`, may be used
+inside any expression, as in `m.pop(k).unwrap_or(0)`. Entries change in place like list elements, through any
 place: `m[k] += 1`, `m[k].append(x)`, `p.counts[k] = 0`. Only `m[k] = v` adds a missing key; `+=`
 and changes inside an entry need the key to exist. A tuple is indexed only by a literal (`t[0]`,
 `t[-1]`) and never changes.
@@ -144,8 +144,9 @@ print(find_index(names, "zed").is_none(), find_index(names, "ann").unwrap())
 
 `find`, `pop()`, `get`, and `os.env` return options too: `"abc".find("c")` is `some(2)`, not an
 index or -1, so write `s.find(t).unwrap_or(-1)` where Python code compares with -1. `pop()` gives
-an option as well, and since it changes the list it must be the whole value of an assignment
-(see below): `last = xs.pop()`, then `last.unwrap()`.
+an option as well, so `xs.pop().unwrap()` takes the last element and `while xs.pop().is_some():`
+empties a list; since it changes the list, nothing else in the same statement may use it (see
+below).
 
 ### Structs and methods
 
@@ -261,8 +262,9 @@ Lists, maps, and structs are values. Assigning one or passing it to a function b
 - **A change is a statement of its own**, made to a variable or an element or field of one:
   `xs.append(1)`, `xs[i] = v`, `p.x = 1.0`, `grid[r][c] += 1`, `ps[i].deposit(5)`. So
   `ys = xs.append(1)` and `f().append(1)` are errors. The exception is `pop` and other methods
-  that change their receiver and return a value: those may be the whole right side of an
-  assignment, `x = xs.pop()`, and nothing more.
+  that change their receiver and return a value: those may be inside any expression,
+  `print(xs.pop().unwrap())`, as long as nothing else in that statement uses what they change,
+  so `print(xs, xs.pop())` is an error; write `x = xs.pop()` first.
 - **Methods are the exception that changes in place**: a method that changes `self` changes the
   variable it was called on, as `a.deposit(50)` did above.
 

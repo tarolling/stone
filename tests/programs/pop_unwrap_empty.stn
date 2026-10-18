@@ -1,0 +1,3 @@
+xs = ["a"]
+print(xs.pop().unwrap())
+print(xs.pop().unwrap() + "b")

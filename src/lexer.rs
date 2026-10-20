@@ -500,6 +500,10 @@ impl Lexer {
                     TokenType::Operator(first.to_string())
                 }
             }
+            Some('?') => {
+                self.advance();
+                TokenType::Operator("?".to_string())
+            }
             Some('"') => TokenType::String(self.lex_string()?),
             Some(ch) if ch.is_ascii_digit() => self.lex_number()?,
             Some(ch) if ch.is_alphabetic() || ch == '_' => {
@@ -1017,6 +1021,17 @@ testing(1, 2, 3)"#;
                 TokenType::Keyword("in".to_string()),
                 name("x"),
             ]
+        );
+    }
+
+    #[test]
+    fn a_question_mark_is_an_operator() {
+        assert_eq!(
+            types_of("x = f()?\n")
+                .into_iter()
+                .filter(|t| matches!(t, TokenType::Operator(_)))
+                .collect::<Vec<_>>(),
+            ["=", "?"].map(op)
         );
     }
 

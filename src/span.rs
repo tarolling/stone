@@ -67,6 +67,14 @@ impl Span {
         Span::new(pos, pos)
     }
 
+    /// Returns whether the span covers no text, as only the names linking writes do, such as the
+    /// unwritten `option` before a bare `some`.
+    ///
+    /// For example, `Span::empty(Pos::new(2, 1)).is_empty()` is true.
+    pub fn is_empty(&self) -> bool {
+        self.start == self.end
+    }
+
     /// Returns whether `pos` is inside the span, counting the position just past its end, which is
     /// where an editor's cursor sits after typing it.
     ///

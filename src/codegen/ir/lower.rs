@@ -41,16 +41,17 @@ use crate::ast::{
     Stmt, StmtKind, UnaryOp, constant_int,
 };
 use crate::checker::{
-    Analysis, EQ, Enums, Instance, Method, Methods, ORD, Step, Structs, SymbolKind, Type,
-    collect_assigned, collect_changed, place, place_root, place_spans, range_args, struct_display,
-    variant_display, variants,
+    Analysis, EQ, Enums, Instance, Method, Methods, OPTION, ORD, RESULT, Step, Structs, SymbolKind,
+    Type, collect_assigned, collect_changed, may_name_enum, place, place_root, place_spans,
+    range_args, struct_display, variant_display, variants,
 };
 use crate::codegen::context::module_routine;
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::Span;
 use crate::stdlib::{
     COMPARE_DEPTH, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE,
-    PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_NONE, math, random,
+    PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE,
+    UNWRAP_OK, math, random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -380,6 +381,9 @@ struct Lowerer<'a> {
     counted_locals: Vec<(VReg, RcKind)>,
     /// Temporaries that own a reference, which whatever uses them must give away or release.
     owned: HashMap<VReg, RcKind>,
+    /// References an assignment took for its target but has not stored yet, while it evaluates
+    /// the target's indexes, which a `?` there releases before returning.
+    pending: Vec<(Operand, RcKind)>,
     vreg_count: u32,
     blocks: Vec<PendingBlock>,
     /// Block ids in the order they were started, which becomes the layout order.
@@ -435,6 +439,7 @@ impl<'a> Lowerer<'a> {
             locals: HashMap::new(),
             counted_locals: Vec::new(),
             owned: HashMap::new(),
+            pending: Vec::new(),
             vreg_count: 0,
             blocks: Vec::new(),
             order: Vec::new(),
@@ -1475,7 +1480,14 @@ impl<'a> Lowerer<'a> {
                         } else {
                             self.take_from(value, result, kind, &last_uses);
                         }
+                        // a `?` in the target's indexes drops the reference it would store
+                        if let Some(kind) = kind {
+                            self.pending.push((result, kind));
+                        }
                         self.assign(target, result, kind)?;
+                        if kind.is_some() {
+                            self.pending.pop();
+                        }
                     }
                 }
                 self.clear_moved();
@@ -1870,19 +1882,40 @@ impl<'a> Lowerer<'a> {
             .ok_or_else(|| format!("'{enum_name}' has no variant '{variant}'"))
     }
 
-    /// Lowers `receiver.unwrap()`, or `receiver.unwrap_or(default)` with a `default`, to the
-    /// values the option holds, owned, one for each value of a tuple: the receiver is evaluated,
-    /// then the default, and `unwrap` of `none` stops the program.
+    /// Returns, for the method `method` (`unwrap`, `unwrap_or`, or `unwrap_err`) of an option
+    /// or a result of type `ty`, the tag of the variant whose value it gives, the position of
+    /// that value's type among the enum's type arguments, and the error it stops the program
+    /// with on the other variant.
+    ///
+    /// For example, `unwrap` of a `result[int, str]` gives `ok`'s value, the first argument, and
+    /// stops with `cannot unwrap err`.
+    fn unwrapped(&self, ty: &Type, method: &str) -> Result<(usize, usize, &'static str), String> {
+        let Type::Enum { name, .. } = ty else {
+            return Err("only an option or a result holds a value".to_string());
+        };
+        Ok(match (name.as_str(), method) {
+            (RESULT, "unwrap_err") => (self.tag_of(RESULT, "err")?, 1, UNWRAP_OK),
+            (RESULT, _) => (self.tag_of(RESULT, "ok")?, 0, UNWRAP_ERR),
+            _ => (self.tag_of(OPTION, "some")?, 0, UNWRAP_NONE),
+        })
+    }
+
+    /// Lowers `receiver.unwrap()`, `receiver.unwrap_err()`, or `receiver.unwrap_or(default)` with
+    /// a `default`, to the values the option or result holds, owned, one for each value of a
+    /// tuple: the receiver is evaluated, then the default, and `unwrap` of `none` or of an `err`,
+    /// or `unwrap_err` of an `ok`, stops the program.
     fn option_value(
         &mut self,
         receiver: &Expr,
+        method: &str,
         default: Option<&Expr>,
     ) -> Result<Vec<Operand>, String> {
         let ty = self.type_of(receiver)?;
+        let (holding, position, failure) = self.unwrapped(&ty, method)?;
         let Type::Enum { args, .. } = &ty else {
-            return Err("only an option holds a value".to_string());
+            return Err("only an option or a result holds a value".to_string());
         };
-        let held = args.first().cloned().unwrap_or(Type::Int);
+        let held = args.get(position).cloned().unwrap_or(Type::Int);
         let kinds: Vec<Option<RcKind>> = self.leaves(&held).iter().map(RcKind::of).collect();
         let option = self.expr(receiver)?;
         let defaults = match default {
@@ -1907,7 +1940,7 @@ impl<'a> Lowerer<'a> {
             cond: Cond::Eq,
             float: false,
             lhs: Operand::Reg(tag),
-            rhs: Operand::Imm(1),
+            rhs: Operand::Imm(holding as i64),
             then: holds,
             otherwise: empty,
         });
@@ -1943,11 +1976,102 @@ impl<'a> Lowerer<'a> {
                 }
                 self.jump(end);
             }
-            None => self.terminate(Terminator::Fail(UNWRAP_NONE.to_string(), vec![])),
+            None => self.terminate(Terminator::Fail(failure.to_string(), vec![])),
         }
         self.start(end);
         self.release_temp(option);
         let results: Vec<Operand> = results.into_iter().map(Operand::Reg).collect();
+        for (&result, &kind) in results.iter().zip(&kinds) {
+            self.own(result, kind);
+        }
+        Ok(results)
+    }
+
+    /// Lowers `value?` to the values an `ok` or a `some` holds, owned, one for each value of a
+    /// tuple, after returning an `err` or `none` from the function. That way out releases what
+    /// the statement owns so far, as `ret` releases the locals: the temporaries in `owned`,
+    /// which the way on still owns, and the references in `pending`.
+    ///
+    /// An `err` returns the very value `?` found, since a variant's layout depends only on its
+    /// own values, so an `err` of a `result[int, str]` is one of a `result[float, str]` too, and
+    /// the static `none` is every option's.
+    fn try_values(&mut self, value: &Expr) -> Result<Vec<Operand>, String> {
+        let ty = self.type_of(value)?;
+        let Type::Enum { name, args } = &ty else {
+            return Err("'?' needs a result or an option".to_string());
+        };
+        let leaving = match name.as_str() {
+            RESULT => self.tag_of(RESULT, "err")?,
+            _ => self.tag_of(OPTION, "none")?,
+        };
+        let held = args.first().cloned().unwrap_or(Type::Int);
+        let kinds: Vec<Option<RcKind>> = self.leaves(&held).iter().map(RcKind::of).collect();
+        let found = self.expr(value)?;
+        let tag = self.fresh();
+        self.push(Inst::EnumTag {
+            dst: tag,
+            value: found,
+        });
+        let (leave, holds) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Eq,
+            float: false,
+            lhs: Operand::Reg(tag),
+            rhs: Operand::Imm(leaving as i64),
+            then: leave,
+            otherwise: holds,
+        });
+
+        self.start(leave);
+        let Operand::Reg(found_reg) = found else {
+            return Err("an enum value is in a register".to_string());
+        };
+        let mut releases: Vec<(VReg, RcKind)> = self
+            .owned
+            .iter()
+            .filter(|(reg, _)| **reg != found_reg)
+            .map(|(&reg, &kind)| (reg, kind))
+            .collect();
+        releases.sort_by_key(|(reg, _)| reg.0);
+        for (reg, kind) in releases {
+            self.push(Inst::Release {
+                src: Operand::Reg(reg),
+                kind,
+            });
+        }
+        for (src, kind) in self.pending.clone() {
+            self.push(Inst::Release { src, kind });
+        }
+        // the caller gets a reference: a temporary's or a counted local's own, else a new one
+        let local = self.counted_locals.iter().any(|(reg, _)| *reg == found_reg);
+        if !local && !self.owned.contains_key(&found_reg) {
+            self.push(Inst::Retain { src: found });
+        }
+        // the way on still has the statement's moves to make
+        let moved = self.moved_locals.clone();
+        self.leave(&[found]);
+        self.moved_locals = moved;
+
+        self.start(holds);
+        let values = self.field_values(found, 0, kinds.len());
+        let results: Vec<Operand> = values
+            .into_iter()
+            .zip(&kinds)
+            .map(|(value, &kind)| {
+                let result = self.fresh();
+                self.push(Inst::Copy {
+                    dst: result,
+                    src: value,
+                });
+                if kind.is_some() {
+                    self.push(Inst::Retain {
+                        src: Operand::Reg(result),
+                    });
+                }
+                Operand::Reg(result)
+            })
+            .collect();
+        self.release_temp(found);
         for (&result, &kind) in results.iter().zip(&kinds) {
             self.own(result, kind);
         }
@@ -2884,6 +3008,10 @@ impl<'a> Lowerer<'a> {
             return Ok(self.finish(value, into));
         }
         match &expr.kind {
+            ExprKind::Try { value } => {
+                let values = self.try_values(value)?;
+                Ok(self.finish(values[0], into))
+            }
             ExprKind::Dict { keys, values } => {
                 let (width, codes) = self.element_layout(expr);
                 let kinds = self.element_kinds(expr);
@@ -2898,6 +3026,8 @@ impl<'a> Lowerer<'a> {
                         Operand::Imm(width as i64),
                     ],
                 });
+                // owned from the start, so a `?` in a later entry frees it and what it holds
+                self.own(Operand::Reg(map), kind);
                 // each key, then its value, left to right, and a later key wins
                 for (key_expr, value) in keys.iter().zip(values) {
                     let key = self.expr(key_expr)?;
@@ -2908,7 +3038,6 @@ impl<'a> Lowerer<'a> {
                     self.map_put(Operand::Reg(map), key, &key_ty, &values, &kinds);
                     self.release_temp(key);
                 }
-                self.own(Operand::Reg(map), kind);
                 Ok(Operand::Reg(map))
             }
             ExprKind::Constant { value, .. } => {
@@ -3029,6 +3158,7 @@ impl<'a> Lowerer<'a> {
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind {
                     if let ExprKind::Name { id, .. } = &value.kind
                         && self.context.enums.contains_key(id)
+                        && may_name_enum(value)
                     {
                         let ty = self.type_of(expr)?;
                         let tag = self.tag_of(id, attr)?;
@@ -3043,7 +3173,9 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::Attribute { value, attr, .. } => match &value.kind {
-                ExprKind::Name { id, .. } if self.context.enums.contains_key(id) => {
+                ExprKind::Name { id, .. }
+                    if self.context.enums.contains_key(id) && may_name_enum(value) =>
+                {
                     let ty = self.type_of(expr)?;
                     let tag = self.tag_of(id, attr)?;
                     self.variant(&ty, tag, &[], into)
@@ -3909,7 +4041,13 @@ impl<'a> Lowerer<'a> {
                 }
                 Ok(self.finish(Operand::Reg(result), into))
             }
-            "is_some" | "is_none" => {
+            "is_some" | "is_none" | "is_ok" | "is_err" => {
+                let tag_of = match name {
+                    "is_some" => self.tag_of(OPTION, "some")?,
+                    "is_none" => self.tag_of(OPTION, "none")?,
+                    "is_ok" => self.tag_of(RESULT, "ok")?,
+                    _ => self.tag_of(RESULT, "err")?,
+                };
                 let option = self.expr(receiver)?;
                 let tag = self.fresh();
                 self.push(Inst::EnumTag {
@@ -3922,14 +4060,61 @@ impl<'a> Lowerer<'a> {
                     float: false,
                     dst,
                     lhs: Operand::Reg(tag),
-                    rhs: Operand::Imm(i64::from(name == "is_some")),
+                    rhs: Operand::Imm(tag_of as i64),
                 });
                 self.release_temp(option);
                 Ok(Operand::Reg(dst))
             }
-            "unwrap" | "unwrap_or" => {
-                let values = self.option_value(receiver, args.first())?;
+            "unwrap" | "unwrap_or" | "unwrap_err" => {
+                let values = self.option_value(receiver, name, args.first())?;
                 Ok(self.finish(values[0], into))
+            }
+            "ok" | "err" => {
+                let ty = self.type_of(receiver)?;
+                let Type::Enum {
+                    args: type_args, ..
+                } = &ty
+                else {
+                    return Err("only a result has 'ok' and 'err'".to_string());
+                };
+                let position = usize::from(name == "err");
+                let held = type_args.get(position).cloned().unwrap_or(Type::Int);
+                let kinds: Vec<Option<RcKind>> =
+                    self.leaves(&held).iter().map(RcKind::of).collect();
+                let tag_of = self.tag_of(RESULT, name)?;
+                let result = self.expr(receiver)?;
+                let tag = self.fresh();
+                self.push(Inst::EnumTag {
+                    dst: tag,
+                    value: result,
+                });
+                let option = self.option_if(
+                    (Cond::Eq, Operand::Reg(tag), Operand::Imm(tag_of as i64)),
+                    into,
+                    |lowerer| {
+                        let values = lowerer.field_values(result, 0, kinds.len());
+                        // the option keeps a reference of its own
+                        for (&value, kind) in values.iter().zip(&kinds) {
+                            if kind.is_some() {
+                                lowerer.push(Inst::Retain { src: value });
+                            }
+                        }
+                        values.into_iter().zip(kinds).collect()
+                    },
+                );
+                self.release_temp(result);
+                Ok(option)
+            }
+            "parse_int" | "parse_float" => {
+                let text = self.expr(receiver)?;
+                let label = match name {
+                    "parse_int" => "stone.parse_int_result",
+                    _ => "stone.parse_float_result",
+                };
+                let result = self.runtime_call(label, vec![text], into);
+                self.release_temp(text);
+                self.own(result, Some(RcKind::Enum));
+                Ok(result)
             }
             "contains" => {
                 let key_ty = self.map_key(receiver).ok_or("only a map has 'contains'")?;
@@ -5045,6 +5230,7 @@ impl<'a> Lowerer<'a> {
 
     fn tuple_values(&mut self, expr: &Expr) -> Result<Vec<Operand>, String> {
         match &expr.kind {
+            ExprKind::Try { value } => self.try_values(value),
             ExprKind::Tuple { elts, .. } => {
                 let mut values = Vec::new();
                 for elt in elts {
@@ -5105,9 +5291,9 @@ impl<'a> Lowerer<'a> {
                     self.pop_element(value, args)
                 }
                 ExprKind::Attribute { value, attr, .. }
-                    if attr == "unwrap" || attr == "unwrap_or" =>
+                    if matches!(attr.as_str(), "unwrap" | "unwrap_or" | "unwrap_err") =>
                 {
-                    self.option_value(value, args.first())
+                    self.option_value(value, attr, args.first())
                 }
                 _ => Err("this method does not return a tuple".to_string()),
             },
@@ -6033,8 +6219,9 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Returns whether `expr` is a call to a stone function, rather than a builtin or a builtin
-    /// method: a function, or a function of an `impl` block.
+    /// method: a function, or a function of an `impl` block, possibly followed by `?`s.
     fn is_stone_call(&self, expr: &Expr) -> bool {
+        let expr = expr.without_try();
         let ExprKind::Call { func, .. } = &expr.kind else {
             return false;
         };
@@ -6306,7 +6493,7 @@ fn has_call(expr: &Expr) -> bool {
         ExprKind::Call { .. } => true,
         ExprKind::Constant { .. } | ExprKind::Name { .. } => false,
         ExprKind::BinOp { left, right, .. } => has_call(left) || has_call(right),
-        ExprKind::UnaryOp { operand, .. } => has_call(operand),
+        ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => has_call(operand),
         ExprKind::BoolOp { values, .. }
         | ExprKind::List { elts: values, .. }
         | ExprKind::Tuple { elts: values, .. } => values.iter().any(has_call),

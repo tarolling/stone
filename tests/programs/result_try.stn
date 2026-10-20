@@ -1,0 +1,114 @@
+// ? gives the value of an ok, and returns an err from the function it is in, in every place an
+// expression can be, freeing everything the statement made before it returned
+fn number(s: str) -> result[int, str]:
+    ret s.parse_int()
+
+fn word(n: int) -> result[str, str]:
+    if n < 0:
+        ret err("negative " + str(n))
+    ret ok("w" + str(n))
+
+fn join(a: str, b: str) -> str:
+    ret a + b
+
+// an assignment's value, and a later call argument after an owned temporary
+fn assigned(s: str) -> result[str, str]:
+    n = number(s)?
+    text = join("n" + str(n), word(n)?)
+    ret ok(text)
+
+// list and map literals, and struct construction
+struct Pair:
+    name: str
+    items: list[str]
+
+fn built(a: int, b: int) -> result[Pair, str]:
+    xs = ["first" + str(a), word(a)?, word(b)?]
+    m = {"k" + str(a): word(a)?, word(b)?: "v"}
+    p = Pair(name="p" + str(m.len()), items=[word(b)?, "end"])
+    xs.extend(p.items)
+    ret ok(Pair(name=p.name, items=xs))
+
+// a subscript's index, a map's key, and a chained assignment
+fn stored(i: str) -> result[list[str], str]:
+    xs = ["a", "b"]
+    m = {"x": [1]}
+    xs[number(i)?] = "s" + str(xs.len())
+    m[word(number(i)?)?] = [2, 3]
+    a = b = "both" + str(number(i)?)
+    xs.extend([a, b, str(m.len())])
+    ret ok(xs)
+
+// a while condition, a for loop's list and a value inside its body, and a match's subject
+fn looped(texts: list[str]) -> result[int, str]:
+    total = 0
+    i = 0
+    while number(texts[i])? > 0:
+        total += 1
+        i += 1
+    for w in [word(total)?, word(-total)?]:
+        print(w)
+    for t in texts:
+        held = [t + "!"]
+        total += number(t)? + held.len()
+    match word(total - 100):
+        case ok(w):
+            print(w)
+        case err(e):
+            total += word(-1)?.len()
+    ret ok(total)
+
+// a method that changes self returns self when ? returns early
+struct Acc:
+    names: list[str]
+    count: int
+
+impl Acc:
+    fn add(self, s: str) -> result[int, str]:
+        self.names.append(word(number(s)?)?)
+        self.count += 1
+        ret ok(self.count)
+
+// tuples and structs come out of ?, and ? nests
+fn pair(s: str) -> result[tuple[int, str], str]:
+    n = number(s)?
+    ret ok((n, word(n)?))
+
+fn unpacked(s: str) -> result[str, str]:
+    n, w = pair(s)?
+    ret ok(w + "/" + str(n) + "/" + pair(word(number(s)?)?)?[1])
+
+fn names(a: int) -> result[str, str]:
+    ret ok(built(a, a)?.name + built(a, -1)?.name)
+
+// x = f(x)? moves x in
+fn grow(xs: list[str], n: int) -> result[list[str], str]:
+    xs.append(word(n)?)
+    ret ok(xs)
+
+fn grown(n: int) -> result[list[str], str]:
+    xs = ["start" + str(n)]
+    xs = grow(xs, n)?
+    xs = grow(xs, n - 5)?
+    ret ok(xs)
+
+// a generic function
+fn all_ok[T, E](rs: list[result[T, E]]) -> result[list[T], E]:
+    out = []
+    for r in rs:
+        out.append(r?)
+    ret ok(out)
+
+for s in ["4", "-2", "x"]:
+    print(assigned(s))
+print(built(1, 2), built(1, -2), built(-1, 2))
+print(stored("1"), stored("-1"), stored("q"))
+print(looped(["3", "0", "5"]), looped(["2", "x"]), looped(["0", "1"]), looped(["0", "z"]))
+acc = Acc(names=["start"], count=0)
+for s in ["1", "-5", "2", "y"]:
+    added = acc.add(s)
+    print(added, acc)
+print(pair("3"), pair("-3"), unpacked("2"), unpacked("-2"))
+print(names(1), names(-1))
+print(grown(7), grown(3), grown(-1))
+print(all_ok([ok(1), ok(2)]), all_ok([ok("a"), err(3), err(4)]))

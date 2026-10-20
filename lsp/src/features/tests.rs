@@ -415,6 +415,13 @@ fn completion_after_a_dot_offers_methods() {
         "is_none",
         "unwrap",
         "unwrap_or",
+        "is_ok",
+        "is_err",
+        "unwrap_err",
+        "ok",
+        "err",
+        "parse_int",
+        "parse_float",
         "contains",
         "get",
         "keys",
@@ -443,7 +450,10 @@ fn completion_after_a_dot_offers_methods() {
 
 #[test]
 fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
-    let doc = doc("xs = [1]\nxs.\ns = \"a\"\ns.\nm = {\"a\": 1}\nm.\no = some(1)\no.\nn = 1\nn.\n");
+    let doc = doc(
+        "xs = [1]\nxs.\ns = \"a\"\ns.\nm = {\"a\": 1}\nm.\no = some(1)\no.\nn = 1\nn.\n\
+         r = \"1\".parse_int()\nr.\n",
+    );
     let labels = |pos: Position| -> Vec<String> {
         completion(&doc, pos, &MapSources::default())
             .into_iter()
@@ -464,6 +474,8 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "find",
             "startswith",
             "endswith",
+            "parse_int",
+            "parse_float",
             "eq",
             "cmp"
         ]
@@ -478,6 +490,19 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
     );
     // a number has the methods of the prelude's traits
     assert_eq!(labels(at(10, 3)), ["eq", "cmp"]);
+    assert_eq!(
+        labels(at(12, 3)),
+        [
+            "unwrap",
+            "unwrap_or",
+            "is_ok",
+            "is_err",
+            "unwrap_err",
+            "ok",
+            "err",
+            "eq"
+        ]
+    );
 }
 
 #[test]

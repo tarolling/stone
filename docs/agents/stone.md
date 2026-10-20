@@ -82,6 +82,7 @@ a loop variable you do not need, and `main` is an ordinary function name.
 | `map[K, V]` | `{"a": 1}`, `{}` | keys `int`, `str`, or `bool`; insertion order |
 | `tuple[A, B]` | `(1, "a")` | two or more values, always in parentheses |
 | `option[T]` | `some(1)`, `none` | stone's replacement for `None` |
+| `result[T, E]` | `ok(1)`, `err("bad")` | stone's replacement for exceptions |
 | struct | `Point(x=1.0, y=2.0)` | named, typed fields |
 | enum | `Shape.Circle(1.0)` | variants that hold values, as in Rust |
 
@@ -148,6 +149,32 @@ an option as well, so `xs.pop().unwrap()` takes the last element and `while xs.p
 empties a list; since it changes the list, nothing else in the same statement may use it (see
 below).
 
+### Results and ?
+
+```stone
+fn parse_pair(line: str) -> result[tuple[int, int], str]:
+    parts = line.split(",")
+    if parts.len() != 2:
+        ret err("expected two numbers in '" + line + "'")
+    ret ok((parts[0].parse_int()?, parts[1].parse_int()?))
+
+for line in ["3,4", "3", "3,x"]:
+    match parse_pair(line):
+        case ok(pair):
+            print("pair", pair)
+        case err(message):
+            print("error:", message)
+print(parse_pair("1,2").unwrap(), parse_pair("1").is_err())
+```
+
+A function that can fail returns `result[T, E]`: `ok(x)` or `err(e)`. `?` after a result gives
+the `ok` value, or returns the `err` from the enclosing function at once; it is only allowed in a
+function that returns a `result` with the same error type (`?` on an option needs a function
+returning an option, and `r.ok()?` turns a result into one). `s.parse_int()` and
+`s.parse_float()` return `result[int, str]` and `result[float, str]` instead of stopping the
+program as `int(s)` and `float(s)` do. Results have `is_ok`, `is_err`, `unwrap`, `unwrap_or`,
+`unwrap_err`, `ok()`, and `err()`.
+
 ### Structs and methods
 
 ```stone
@@ -203,8 +230,8 @@ for s in shapes:
 ```
 
 A `match` must cover every variant (or end with `case _:`); a missing one is an error naming it.
-Variants are always written with their enum, `Shape.Empty`, except `some`/`none` and the
-`ordering` variants `less`/`equal`/`greater`. An enum can hold itself, which is how you build
+Variants are always written with their enum, `Shape.Empty`, except `some`/`none`, `ok`/`err`,
+and the `ordering` variants `less`/`equal`/`greater`, which are reserved names. An enum can hold itself, which is how you build
 trees and linked lists.
 
 ### Generics and traits
@@ -331,7 +358,7 @@ assign the result where 'add' is called
 | `set()` | `map[K, bool]` |
 | `def f(x, n=1)`, `f(n=2)` | every argument, positionally (only structs take names) |
 | `lambda`, passing a function | a trait and a generic function with a bound |
-| `try`/`except`, `raise` | check first, or return an `option` |
+| `try`/`except`, `raise` | return a `result` and pass errors on with `?`; `s.parse_int()` instead of `int(s)` |
 | `class` with inheritance | a `struct` plus `impl`, an `enum` for alternatives, a `trait` for shared behavior |
 | `None`, `Optional[T]` | `none`, `option[T]` |
 | `pass` | restructure so every block has a real statement |

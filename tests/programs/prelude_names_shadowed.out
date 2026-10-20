@@ -1,0 +1,3 @@
+[ok(1), err('x'), err('negative')] 3 some(3)
+3 Score(x=3) less
+30

@@ -310,10 +310,11 @@ power:
 # Primary elements
 # ----------------
 
-# Primary elements are things like "obj.something.something", "obj[something]", "obj(something)", "obj" ...
+# Primary elements are things like "obj.something.something", "obj[something]", "obj(something)",
+# "obj?", "obj" ...
 
 primary:
-    | atom ( '(' [arguments] ')' | '[' slices ']' | '.' NAME )* 
+    | atom ( '(' [arguments] ')' | '[' slices ']' | '.' NAME | '?' )* 
 
 slices:
     | slice !',' 

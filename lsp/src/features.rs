@@ -1235,6 +1235,7 @@ pub fn completion(
         if !RESERVED_KEYWORDS.contains(&variant) {
             let detail = match enum_name {
                 stone::checker::OPTION => "option[T]",
+                stone::checker::RESULT => "result[T, E]",
                 other => other,
             };
             items.push(CompletionItem {
@@ -1269,6 +1270,7 @@ fn method_applies(method: &str, ty: &Type) -> bool {
         Type::List(_) => "list",
         Type::Map(..) => "map",
         Type::Enum { name, .. } if name == stone::checker::OPTION => "option",
+        Type::Enum { name, .. } if name == stone::checker::RESULT => "result",
         _ => return false,
     };
     // the methods of the prelude's traits are on every type that implements them

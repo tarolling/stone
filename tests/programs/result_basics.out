@@ -1,0 +1,9 @@
+10 / 2 is 5
+10 / 0 failed: division by zero
+ok(3) err('division by zero')
+true false true true
+[Job(name='one', outcome=ok(['a', 'b'])), Job(name='two', outcome=err(404))]
+one made 2 lines
+two failed with 404
+[err('x'), ok(some(1.5)), ok(none)] some(some(1.5))
+[ok(1), err('bad'), ok(2)] 3 true

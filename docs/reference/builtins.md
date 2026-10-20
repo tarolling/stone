@@ -352,6 +352,34 @@ Returns whether the string ends with `suffix`. Every string ends with `""`.
 print("main.stn".endswith(".stn"), "main.stn".endswith("main"))   // true false
 ```
 
+### `parse_int`
+
+```text
+str.parse_int() -> result[int, str]
+```
+
+Reads the string as `int` does, but returns a result instead of stopping the program: `ok` of the
+int, or `err` of the message `int` would stop with. Use it for text that may not be a number,
+such as input, and `?` to pass the error on.
+
+```stone
+print("42".parse_int(), " -7\n".parse_int())   // ok(42) ok(-7)
+print("4.5".parse_int())   // err("invalid literal for int() with base 10: '4.5'")
+```
+
+### `parse_float`
+
+```text
+str.parse_float() -> result[float, str]
+```
+
+Reads the string as `float` does, returning `ok` of the float, or `err` of the message `float`
+would stop with.
+
+```stone
+print("2.5".parse_float(), "x".parse_float())   // ok(2.5) err("could not convert string to float: 'x'")
+```
+
 ### `is_some`
 
 ```text
@@ -375,26 +403,83 @@ print(some(1).is_some(), some(1).is_none(), none.is_none())   // true false true
 ### `unwrap`
 
 ```text
-option[T].unwrap() -> T
+(option[T] | result[T, E]).unwrap() -> T
 ```
 
-Returns the value the option holds. It stops the program with `cannot unwrap none` if the option
-is `none`, so use it where the option cannot be `none`, and `match` or `unwrap_or` elsewhere.
+Returns the value the option or the `ok` holds. It stops the program with `cannot unwrap none` if
+the option is `none`, or `cannot unwrap err` if the result is an `err`, so use it where that
+cannot happen, and `match`, `unwrap_or`, or `?` elsewhere.
 
 ```stone
-print(some("a").unwrap())   // a
+print(some("a").unwrap(), ok(2).unwrap())   // a 2
 ```
 
 ### `unwrap_or`
 
 ```text
-option[T].unwrap_or(default: T) -> T
+(option[T] | result[T, E]).unwrap_or(default: T) -> T
 ```
 
-Returns the value the option holds, or `default` if it is `none`.
+Returns the value the option or the `ok` holds, or `default` if it is `none` or an `err`.
 
 ```stone
-print(some(3).unwrap_or(0), none.unwrap_or(0))   // 3 0
+print(some(3).unwrap_or(0), none.unwrap_or(0), "x".parse_int().unwrap_or(-1))   // 3 0 -1
+```
+
+### `is_ok`
+
+```text
+result[T, E].is_ok() -> bool
+```
+
+Returns whether the result is an `ok`.
+
+### `is_err`
+
+```text
+result[T, E].is_err() -> bool
+```
+
+Returns whether the result is an `err`.
+
+```stone
+r = "12".parse_int()
+print(r.is_ok(), r.is_err())   // true false
+```
+
+### `unwrap_err`
+
+```text
+result[T, E].unwrap_err() -> E
+```
+
+Returns the error the `err` holds. It stops the program with `cannot unwrap_err ok` if the result
+is an `ok`.
+
+```stone
+print("x".parse_float().unwrap_err())   // could not convert string to float: 'x'
+```
+
+### `ok`
+
+```text
+result[T, E].ok() -> option[T]
+```
+
+Returns `some` of the value an `ok` holds, or `none` for an `err`, which turns a result into an
+option, as a function that returns an option needs before `?`.
+
+### `err`
+
+```text
+result[T, E].err() -> option[E]
+```
+
+Returns `some` of the error an `err` holds, or `none` for an `ok`.
+
+```stone
+r = "7".parse_int()
+print(r.ok(), r.err())   // some(7) none
 ```
 
 ### `contains`

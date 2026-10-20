@@ -7,8 +7,8 @@ use crate::ast::{
     StmtKind, UnaryOp, target_names,
 };
 use crate::checker::{
-    Method, Methods, Step, collect_assigned, place, place_spans, prints_bare, range_args,
-    struct_display,
+    Method, Methods, Step, collect_assigned, may_name_enum, place, place_spans, prints_bare,
+    range_args, struct_display,
 };
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
@@ -23,12 +23,13 @@ use std::rc::Rc;
 type EvalResult<T> = Result<T, Box<dyn std::error::Error>>;
 
 /// Gives a runtime error the position of `span`, the expression that failed, unless it already
-/// has one from an expression inside it or is an [`Exit`], so the innermost expression wins.
+/// has one from an expression inside it or is an [`Exit`] or a [`Propagate`], so the innermost
+/// expression wins.
 ///
 /// For example, `division by zero` raised while evaluating `a / b` at 3:7 becomes a
 /// [`Diagnostic`] at 3:7, which stays there as it passes through `print(a / b)`.
 fn located(error: Box<dyn std::error::Error>, span: Span) -> Box<dyn std::error::Error> {
-    if error.is::<Diagnostic>() || error.is::<Exit>() {
+    if error.is::<Diagnostic>() || error.is::<Exit>() || error.is::<Propagate>() {
         return error;
     }
     Box::new(Diagnostic::error(span, error.to_string()))
@@ -325,6 +326,26 @@ fn some(value: Value) -> Value {
         tag: 1,
         fields: vec![value],
     }))
+}
+
+/// Makes the result `ok(value)` from `Ok(value)` or `err(message)` from `Err(message)`, as
+/// `parse_int` and `parse_float` return.
+fn result(outcome: Result<Value, String>) -> Value {
+    let (name, tag, value) = match outcome {
+        Ok(value) => ("ok", 0, value),
+        Err(message) => ("err", 1, Value::Str(message.into())),
+    };
+    Value::Enum(Rc::new(EnumValue {
+        name: name.into(),
+        tag,
+        fields: vec![value],
+    }))
+}
+
+/// Returns whether `value` is a result, `ok` or `err`, rather than an option, which share the
+/// methods `unwrap` and `unwrap_or`. Only the prelude's variants print as `ok` and `err`.
+fn is_result(value: &EnumValue) -> bool {
+    matches!(&*value.name, "ok" | "err")
 }
 
 /// Printing stopped because an enum value is nested more than [`stdlib::MAX_PRINT_DEPTH`] deep.
@@ -817,6 +838,22 @@ impl std::fmt::Display for Exit {
 
 impl std::error::Error for Exit {}
 
+/// A `?` found an `err` or a `none`, which the function it is in returns. It travels as an
+/// error from the expression to the statement holding it, which returns it.
+///
+/// For example, in `n = s.parse_int()?`, an `err("...")` stops evaluating the statement, which
+/// returns that `err` from the function.
+#[derive(Debug)]
+struct Propagate(Value);
+
+impl std::fmt::Display for Propagate {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "'?' returned {}", self.0.display(true))
+    }
+}
+
+impl std::error::Error for Propagate {}
+
 pub enum ControlFlow {
     None,
     Return(Value),
@@ -1120,7 +1157,16 @@ impl<'out> Interpreter<'out> {
     /// ```
     fn eval_stmt(&mut self, stmt: &Stmt) -> Result<ControlFlow, Box<dyn std::error::Error>> {
         self.nested(|this| {
-            let flow = this.eval_stmt_unguarded(stmt)?;
+            let flow = match this.eval_stmt_unguarded(stmt) {
+                Ok(flow) => flow,
+                // a `?` in the statement returns what it found
+                Err(error) => {
+                    return match error.downcast::<Propagate>() {
+                        Ok(propagate) => Ok(ControlFlow::Return(propagate.0)),
+                        Err(error) => Err(error),
+                    };
+                }
+            };
             // returning drops the whole scope anyway
             if !matches!(stmt.kind, StmtKind::Return { .. }) {
                 this.drop_last_uses(stmt.span);
@@ -1146,7 +1192,7 @@ impl<'out> Interpreter<'out> {
     ///
     /// For example, `xs = add(xs, 1)` may take `xs`, since the assignment replaces it.
     fn note_top_call(&mut self, span: Span, value: &Expr, targets: &[Expr]) {
-        let ExprKind::Call { func, .. } = &value.kind else {
+        let ExprKind::Call { func, .. } = &value.without_try().kind else {
             return;
         };
         let stone = match &func.kind {
@@ -1653,6 +1699,17 @@ impl<'out> Interpreter<'out> {
 
     fn eval_expr_unguarded(&mut self, expr: &Expr) -> EvalResult<Value> {
         match &expr.kind {
+            ExprKind::Try { value } => {
+                let value = self.eval_expr(value)?;
+                let Value::Enum(variant) = &value else {
+                    return Err("'?' needs a result or an option".into());
+                };
+                // `ok` and `some` hold the value, and `err` and `none` are returned
+                match (&*variant.name, variant.fields.first()) {
+                    ("ok" | "some", Some(inner)) => Ok(inner.clone()),
+                    _ => Err(Box::new(Propagate(value))),
+                }
+            }
             ExprKind::Dict { keys, values } => {
                 let mut map = MapValue::default();
                 for (key, value) in keys.iter().zip(values) {
@@ -1743,6 +1800,7 @@ impl<'out> Interpreter<'out> {
                 if let ExprKind::Attribute { value, attr, .. } = &func.kind
                     && let ExprKind::Name { id, .. } = &value.kind
                     && self.enums.contains_key(id)
+                    && may_name_enum(value)
                 {
                     let mut values = Vec::with_capacity(args.len());
                     for arg in args {
@@ -1809,7 +1867,9 @@ impl<'out> Interpreter<'out> {
                 self.call(id, values)
             }
             ExprKind::Attribute { value, attr, .. } => match &value.kind {
-                ExprKind::Name { id, .. } if self.enums.contains_key(id) => {
+                ExprKind::Name { id, .. }
+                    if self.enums.contains_key(id) && may_name_enum(value) =>
+                {
                     self.variant(id, attr, vec![])
                 }
                 _ => {
@@ -2001,6 +2061,34 @@ impl<'out> Interpreter<'out> {
                 Ok(Value::Bool(s.ends_with(&**suffix)))
             }
             ("endswith", _, _) => Err("endswith() is called on a str, with a str".into()),
+            ("parse_int", Value::Str(s), []) => Ok(result(stdlib::parse_int(s).map(Value::Int))),
+            ("parse_float", Value::Str(s), []) => {
+                Ok(result(stdlib::parse_float(s).map(Value::Float)))
+            }
+            ("is_ok", Value::Enum(result), []) => Ok(Value::Bool(result.tag == 0)),
+            ("is_err", Value::Enum(result), []) => Ok(Value::Bool(result.tag == 1)),
+            ("unwrap", Value::Enum(result), []) if is_result(result) => match result.tag {
+                0 => Ok(result.fields[0].clone()),
+                _ => Err(stdlib::UNWRAP_ERR.into()),
+            },
+            ("unwrap_or", Value::Enum(result), [default]) if is_result(result) => {
+                Ok(match result.tag {
+                    0 => result.fields[0].clone(),
+                    _ => default.clone(),
+                })
+            }
+            ("unwrap_err", Value::Enum(result), []) => match result.tag {
+                1 => Ok(result.fields[0].clone()),
+                _ => Err(stdlib::UNWRAP_OK.into()),
+            },
+            ("ok", Value::Enum(result), []) => Ok(match result.tag {
+                0 => some(result.fields[0].clone()),
+                _ => none(),
+            }),
+            ("err", Value::Enum(result), []) => Ok(match result.tag {
+                1 => some(result.fields[0].clone()),
+                _ => none(),
+            }),
             ("is_some", Value::Enum(option), []) => Ok(Value::Bool(option.tag == 1)),
             ("is_none", Value::Enum(option), []) => Ok(Value::Bool(option.tag == 0)),
             ("unwrap", Value::Enum(option), []) => match option.fields.first() {

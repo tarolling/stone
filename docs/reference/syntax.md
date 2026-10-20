@@ -15,6 +15,7 @@ grammar is
 | `continue` | `cont` |
 | `True`, `False` | `true`, `false` |
 | `None`, `Optional[int]` | `none` and `some(x)`, of type `option[int]` |
+| `raise`, `try:` / `except:` | return a `result[T, E]`, `ok(x)` or `err(e)`, and pass an error on with `?` |
 | `class Shape(Enum):` | `enum Shape:`, whose variants can hold values, as in Rust |
 | `@dataclass class Point:` | `struct Point:` with a typed field per line, made as `Point(x=1.0, y=2.0)` |
 | `match x:` / `case P:` | `match x:` / `case P:`, which must cover every value |
@@ -83,6 +84,7 @@ module's name in a `use` or before a `.`.
 | string | `"hello"`, `""` |
 | bool | `true`, `false` |
 | option | `none`, `some(1)` |
+| result | `ok(1)`, `err("bad")` |
 | list | `[]`, `[1, 2, 3]`, `[[1.0], []]` |
 | map | `{}`, `{"a": 1, "b": 2}`, `{1: [2.5], 3: [],}` |
 | tuple | `(1, "a")`, `(x, y, z,)`, `(1, ("a", [2.5]))` |
@@ -197,7 +199,11 @@ From lowest to highest precedence:
 | `*` `/` `%` | two ints or two floats, or lists of them |
 | unary `+` `-` | an int or a float, or a list of them |
 | `**` | an int or float base and an `int` exponent, or lists of them |
-| calls `f(x)`, method calls `xs.len()`, fields `p.x`, indexing `xs[i]`, slicing `xs[i:j:k]` | |
+| calls `f(x)`, method calls `xs.len()`, fields `p.x`, indexing `xs[i]`, slicing `xs[i:j:k]`, `?` | `?`: a result or an option, in a function that returns one |
+
+`x?` gives the value an `ok` or a `some` holds, and on an `err` or `none` returns it from the
+function, so `n = s.parse_int()?` passes a parse error to the caller (see
+[Types](types.md#passing-errors-on)).
 
 Comparisons chain, so `a < b <= c` means `a < b and b <= c` with `b` evaluated once.
 `**` groups right to left and binds tighter than a unary sign on its left, as in Python, so
@@ -239,7 +245,8 @@ match s:
 
 A pattern is a variant with a pattern for each of its values, such as `Shape.Rect(w, _)` or
 `some(Shape.Circle(r))`, a name, which matches any value and binds it, or `_`, which matches any
-value and binds nothing. `some(p)` and `none` are the patterns of an option. The cases must cover
+value and binds nothing. `some(p)` and `none` are the patterns of an option, and `ok(p)` and
+`err(p)` those of a result. The cases must cover
 every value. See [Types](types.md#enums).
 
 ## Structs

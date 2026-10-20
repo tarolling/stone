@@ -224,6 +224,10 @@ pub const OPTION: &str = "option";
 /// returns.
 pub const ORDERING: &str = "ordering";
 
+/// The name of the prelude's enum whose values are `ok(x)` and `err(e)`, which `parse_int` and
+/// `parse_float` return, and which `?` unwraps.
+pub const RESULT: &str = "result";
+
 /// The name of the prelude's trait of values `==` compares, which every type it compares part by
 /// part implements, and a struct may implement itself.
 pub const EQ: &str = "eq";
@@ -237,7 +241,21 @@ pub const ORD: &str = "ord";
 ///
 /// For example, `prints_bare("option")` is true and `prints_bare("Shape")` is false.
 pub fn prints_bare(name: &str) -> bool {
-    name == OPTION || name == ORDERING
+    name == OPTION || name == ORDERING || name == RESULT
+}
+
+/// Returns whether `value`, the expression before a dot, may name an enum rather than a value:
+/// any name but a written one of a prelude enum, which is always a variable, since the prelude's
+/// variants are written alone and linking writes the enum's name before them
+/// ([`Expr::is_unwritten`]).
+///
+/// For example, `Shape` in `Shape.Circle` may, and so may the unwritten `result` in
+/// `result.ok(1)`, but a written `result` in `result.append(x)` is a variable.
+pub fn may_name_enum(value: &Expr) -> bool {
+    match &value.kind {
+        ExprKind::Name { id, .. } => !prints_bare(id) || value.is_unwritten(),
+        _ => false,
+    }
 }
 
 /// Maps each of `params`, a generic type's or function's type parameters, to the type at the
@@ -763,7 +781,7 @@ const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
 const PRINTABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
 /// The names of the types built into the language, which no enum or struct may take.
 const BUILTIN_TYPES: &[&str] = &[
-    "int", "float", "bool", "str", "list", "tuple", OPTION, "Self",
+    "int", "float", "bool", "str", "list", "tuple", OPTION, RESULT, "Self",
 ];
 /// The message for a map key of another kind.
 const MAP_KEY: &str = "a map key must be int, str, or bool, found {}";
@@ -1661,7 +1679,7 @@ impl Inference {
         for (name, span) in assigned {
             if !self.globals.contains_key(&name)
                 && !self.functions.contains_key(&name)
-                && !self.enums.contains_key(&name)
+                && !self.value_enum(&name)
                 && !self.structs.contains_key(&name)
                 && !is_reserved(&name)
             {
@@ -1716,7 +1734,7 @@ impl Inference {
             self.error(name_span, format!("cannot redefine builtin '{name}'"));
             return;
         }
-        if self.enums.contains_key(name) {
+        if self.value_enum(name) {
             self.error(name_span, format!("'{name}' is already defined as an enum"));
             return;
         }
@@ -3366,7 +3384,7 @@ impl Inference {
                 }
             }
             StmtKind::Assign { targets, value } => {
-                self.assigned_call = Some(value.span);
+                self.assigned_call = Some(value.without_try().span);
                 let found = self.infer(value);
                 self.assigned_call = None;
                 for target in targets {
@@ -3497,7 +3515,7 @@ impl Inference {
                 self.check_block(orelse);
             }
             StmtKind::Expr { value } => {
-                self.statement_call = Some(value.span);
+                self.statement_call = Some(value.without_try().span);
                 // the one place a call that returns no value can be
                 let ty = self.infer_kind(value);
                 self.expr_types.push((value.span, ty));
@@ -3643,7 +3661,7 @@ impl Inference {
         for (local, span) in assigned {
             // assigning an enum's or struct's name is reported where it happens
             if self.local(&local).is_none()
-                && !self.enums.contains_key(&local)
+                && !self.value_enum(&local)
                 && !self.structs.contains_key(&local)
             {
                 let ty = self.fresh();
@@ -4276,11 +4294,20 @@ impl Inference {
         enum_ty
     }
 
+    /// Returns whether `name` is an enum whose name no variable may take: any but the prelude's,
+    /// whose variants are written alone, so that a value may be named `result`.
+    fn value_enum(&self, name: &str) -> bool {
+        self.enums.contains_key(name) && !prints_bare(name)
+    }
+
     /// Returns the name of the enum `value` names, if it is one, as in `Shape` in `Shape.Circle`.
     fn enum_named(&self, value: &Expr) -> Option<String> {
         let ExprKind::Name { id, .. } = &value.kind else {
             return None;
         };
+        if value.is_unwritten() && self.enums.contains_key(id) {
+            return Some(id.clone());
+        }
         match self.resolve_name(id) {
             Resolved::Enum(name) => Some(name),
             _ => None,
@@ -4678,8 +4705,77 @@ impl Inference {
         self.expect(&ret, &deferred.result, deferred.call);
     }
 
+    /// Infers `value?`, the value an `ok` or a `some` holds, checking that `value` is a result
+    /// whose error the function it is in returns, or an option in a function that returns one.
+    fn infer_try(&mut self, expr: &Expr, value: &Expr) -> Ty {
+        let found = self.infer(value);
+        let inner = self.fresh();
+        let Some(function) = &self.function else {
+            let message = "'?' can only return from a function that returns a result or an option";
+            self.error(expr.span, message.to_string());
+            return inner;
+        };
+        let (name, ret) = (function.name.clone(), self.shallow(&function.ret));
+        let found_enum = match self.shallow(&found) {
+            Ty::Enum(enum_name, _) => Some(enum_name),
+            _ => None,
+        };
+        match &ret {
+            Ty::Enum(enum_name, args) if enum_name == RESULT => {
+                let error = self.fresh();
+                let result = Ty::Enum(RESULT.to_string(), vec![inner.clone(), error.clone()]);
+                if !self.unify(&result, &found) {
+                    let message = match found_enum.as_deref() {
+                        Some(OPTION) => format!(
+                            "'?' on an option needs '{name}' to return an option, but it returns {}",
+                            self.show(&ret)
+                        ),
+                        _ => format!("'?' needs a result, found {}", self.show(&found)),
+                    };
+                    self.error(expr.span, message);
+                } else if let Some(returned) = args.get(1)
+                    && !self.unify(returned, &error)
+                {
+                    let message = format!(
+                        "'{name}' returns {}, so '?' needs an error of type {}, found {}",
+                        self.show(&ret),
+                        self.show(returned),
+                        self.show(&error)
+                    );
+                    self.error(expr.span, message);
+                }
+            }
+            Ty::Enum(enum_name, _) if enum_name == OPTION => {
+                let option = Ty::Enum(OPTION.to_string(), vec![inner.clone()]);
+                if !self.unify(&option, &found) {
+                    let message = match found_enum.as_deref() {
+                        Some(RESULT) => format!(
+                            "'?' on a result needs '{name}' to return a result, but it returns {}; \
+                             add '.ok()' before '?' to drop the error",
+                            self.show(&ret)
+                        ),
+                        _ => format!("'?' needs an option, found {}", self.show(&found)),
+                    };
+                    self.error(expr.span, message);
+                }
+            }
+            _ => {
+                let returns = match ret {
+                    Ty::Unit => "no value".to_string(),
+                    _ => self.show(&ret),
+                };
+                let message = format!(
+                    "'?' returns from '{name}', which returns {returns}, not a result or an option"
+                );
+                self.error(expr.span, message);
+            }
+        }
+        inner
+    }
+
     fn infer_kind(&mut self, expr: &Expr) -> Ty {
         match &expr.kind {
+            ExprKind::Try { value } => self.infer_try(expr, value),
             ExprKind::Constant { value, .. } => match **value {
                 Constant::Bool(_) => Ty::Bool,
                 Constant::Str(_) | Constant::Char(_) => Ty::Str,
@@ -5478,14 +5574,62 @@ impl Inference {
                 );
                 Ty::Unit
             }
+            "unwrap" | "unwrap_or" | "is_ok" | "is_err" | "unwrap_err" | "ok" | "err"
+                if matches!(self.shallow(&receiver_ty), Ty::Enum(ref enum_name, _) if enum_name == RESULT)
+                    || !matches!(name, "unwrap" | "unwrap_or") =>
+            {
+                let value = self.fresh();
+                let error = self.fresh();
+                let result = Ty::Enum(RESULT.to_string(), vec![value.clone(), error.clone()]);
+                if !self.unify(&result, &receiver_ty) {
+                    let message =
+                        format!("'{name}' needs a result, found {}", self.show(&receiver_ty));
+                    self.error(receiver.span, message);
+                }
+                match (name, args) {
+                    ("unwrap_or", [default]) => self.expect(&value, &arg_types[0], default.span),
+                    ("unwrap_or", _) => self.arity_error(call.span, name, "1", args.len()),
+                    (_, []) => {}
+                    _ => self.arity_error(call.span, name, "0", args.len()),
+                }
+                match name {
+                    "is_ok" | "is_err" => Ty::Bool,
+                    "unwrap_err" => error,
+                    "ok" => Ty::Enum(OPTION.to_string(), vec![value]),
+                    "err" => Ty::Enum(OPTION.to_string(), vec![error]),
+                    _ => value,
+                }
+            }
+            "parse_int" | "parse_float" => {
+                let message = match name {
+                    "parse_int" => "'parse_int' needs a str, found {}",
+                    _ => "'parse_float' needs a str, found {}",
+                };
+                self.require(receiver_ty, &[Kind::Str], receiver.span, message);
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                let value = if name == "parse_int" {
+                    Ty::Int
+                } else {
+                    Ty::Float
+                };
+                Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
+            }
             "is_some" | "is_none" | "unwrap" | "unwrap_or" => {
                 let elem = self.fresh();
                 let option = Ty::Enum(OPTION.to_string(), vec![elem.clone()]);
                 if !self.unify(&option, &receiver_ty) {
-                    let message = format!(
-                        "'{name}' needs an option, found {}",
-                        self.show(&receiver_ty)
-                    );
+                    let message = match name {
+                        "unwrap" | "unwrap_or" => format!(
+                            "'{name}' needs an option or a result, found {}",
+                            self.show(&receiver_ty)
+                        ),
+                        _ => format!(
+                            "'{name}' needs an option, found {}",
+                            self.show(&receiver_ty)
+                        ),
+                    };
                     self.error(receiver.span, message);
                 }
                 match (name, args) {
@@ -6832,6 +6976,7 @@ impl<'a> AssignmentCheck<'a> {
     /// Reports every tracked variable `expr` reads that is not assigned yet.
     fn reads(&mut self, expr: &Expr, assigned: &HashSet<String>) {
         match &expr.kind {
+            ExprKind::Name { .. } if expr.is_unwritten() => {}
             ExprKind::Name { id, .. } => {
                 if self.tracked.contains(id)
                     && !assigned.contains(id)
@@ -6852,7 +6997,9 @@ impl<'a> AssignmentCheck<'a> {
                 self.reads(left, assigned);
                 self.reads(right, assigned);
             }
-            ExprKind::UnaryOp { operand, .. } => self.reads(operand, assigned),
+            ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
+                self.reads(operand, assigned)
+            }
             ExprKind::Compare {
                 left, comparators, ..
             } => {
@@ -7362,13 +7509,15 @@ impl ParameterUse<'_> {
             return;
         }
         match &expr.kind {
-            ExprKind::Name { id, .. } => self.read |= id == self.name,
+            ExprKind::Name { id, .. } => self.read |= id == self.name && !expr.is_unwritten(),
             ExprKind::BoolOp { values, .. } => values.iter().for_each(|value| self.expr(value)),
             ExprKind::BinOp { left, right, .. } => {
                 self.expr(left);
                 self.expr(right);
             }
-            ExprKind::UnaryOp { operand, .. } => self.expr(operand),
+            ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
+                self.expr(operand)
+            }
             ExprKind::Compare {
                 left, comparators, ..
             } => {

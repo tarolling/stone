@@ -1,0 +1,3 @@
+some('b') none
+some(4) none none
+some([1, 2]) none

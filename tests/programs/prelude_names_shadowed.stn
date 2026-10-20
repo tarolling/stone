@@ -1,0 +1,25 @@
+// a value may take the name of a prelude enum, whose variants are written alone
+struct Score:
+    x: int
+
+fn check(n: int) -> result[int, str]:
+    result = ok(n)
+    if n < 0:
+        result = err("negative")
+    ret result
+
+fn wrap(option: int) -> option[int]:
+    ret some(option)
+
+result = [ok(1)]
+result.append(err("x"))
+result.append(check(-1))
+print(result, result.len(), wrap(3))
+ordering = Score(x=2)
+ordering.x += 1
+print(ordering.x, ordering, less)
+
+fn reads_global() -> int:
+    ret ordering.x * 10
+
+print(reads_global())

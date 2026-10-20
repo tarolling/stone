@@ -1304,3 +1304,34 @@ fn a_maps_items_share_its_entries() {
     assert!(f.contains("retain v0"), "{f}");
     assert!(!f.contains("call"), "{f}");
 }
+
+#[test]
+fn a_question_mark_returns_the_err_it_found_and_moves_like_a_call() {
+    let source = "fn grow(xs: list[int]) -> result[list[int], str]:\n    xs.append(1)\n    ret ok(xs)\n\
+                  fn f(xs: list[int], s: str) -> result[list[int], str]:\n    xs = grow(xs)?\n    \
+                  ret ok(xs)\nprint(f([0], \"a\"))\n";
+    let first = dump(source);
+    let f = first
+        .split("fn f")
+        .nth(1)
+        .unwrap()
+        .split("fn main")
+        .next()
+        .unwrap();
+    // xs moves into grow, so the err goes back as it is, with nothing left to release
+    assert!(
+        f.starts_with(
+            "(v0, v1):\nb0:\n  v2 = call grow(v0)\n  v3 = enum_tag v2\n  br_eq v3, 1 -> b1, b2\n\
+             b1:\n  ret v2\nb2:\n  v4 = field_get v2, 0\n  v5 = copy v4\n  retain v5\n  \
+             release_enum v2\n  v0 = copy v5\n"
+        ),
+        "{f}"
+    );
+    // a temporary the statement made before the ? is released on the way out
+    let source = "fn word(n: int) -> result[str, str]:\n    ret ok(str(n))\n\
+                  fn f(s: str) -> result[str, str]:\n    ret ok((s + \"!\") + word(1)?)\n\
+                  print(f(\"a\"))\n";
+    let second = dump(source);
+    let f = second.split("fn f").nth(1).unwrap();
+    assert!(f.contains("b1:\n  release_str v2\n  ret v3\n"), "{f}");
+}

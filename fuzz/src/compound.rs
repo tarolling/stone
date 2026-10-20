@@ -22,7 +22,8 @@
 //! - A function that changes a parameter prints it before returning, so the change is never lost.
 //! - Traits only appear in the fixed [`GENERIC_TYPES`]: `G` implements `K` and `ord`, so a `G`'s
 //!   length is also read as `g.key()`, `g.twice()`, or `keyed(g)`, and two `G`s are ordered with
-//!   `<`, picked from the path rather than drawn, so programs without them are unchanged.
+//!   `<`, picked from the path rather than drawn, so programs without them are unchanged. Results,
+//!   options, and `?` appear there too, in `measured` and `looked_up`, read the same way.
 
 use crate::{Generator, MAX_BLOCK_LEN, MAX_NESTING, Scope};
 use arbitrary::{Result, Unstructured};
@@ -97,6 +98,19 @@ impl ord for G:
 
 fn keyed[T: K](x: T) -> int:
     ret x.twice() + x.key()
+
+fn bounded[T](g: G[T], n: int) -> result[int, str]:
+    if n >= g.vs.len():
+        ret err(\"past \" + str(n))
+    ret ok(n)
+
+fn measured[T](g: G[T], n: int) -> result[int, str]:
+    k = (\"n\" + str(n)).len() + bounded(g, n)?
+    ret ok(k + g.key())
+
+fn looked_up[T](g: G[T], n: int) -> option[int]:
+    m = {0: g.key()}
+    ret some(m.get(n)? + 1)
 ";
 
 impl Ty {
@@ -978,11 +992,14 @@ impl Generator {
             Source::Len(i) if paths[i].text.ends_with(".vs") => {
                 let path = fill(u, &paths[i].text)?;
                 let g = path.strip_suffix(".vs").unwrap_or(&path);
-                match i % 4 {
+                match i % 6 {
                     0 => format!("{path}.len()"),
                     1 => format!("{g}.key()"),
                     2 => format!("{g}.twice()"),
-                    _ => format!("keyed({g})"),
+                    3 => format!("keyed({g})"),
+                    // an err for an n past the list's two elements, and none for n = 1
+                    4 => format!("measured({g}, {}).unwrap_or({g}.key())", i % 3),
+                    _ => format!("looked_up({g}, {}).unwrap_or(0)", (i / 6) % 2),
                 }
             }
             Source::Len(i) => format!("{}.len()", fill(u, &paths[i].text)?),

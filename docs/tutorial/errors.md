@@ -57,5 +57,32 @@ A runtime error prints like a checker error, pointing at the expression that fai
 with status 1. `stone run` and a compiled executable print the same thing. See {doc}`../reference/runtime-errors` for
 every one.
 
+## Errors you expect
+
+Some failures are part of a program's job, such as a line of a file that is not a number. stone
+has no exceptions: a function that may fail returns a `result[T, E]`, which is either `ok(x)`,
+holding the `T` it made, or `err(e)`, holding an error `E`, often a `str` saying what went wrong.
+Like `option`, it is an enum from the prelude whose variants are written alone.
+
+```{literalinclude} ../examples/results.stn
+:language: stone
+```
+
+prints
+
+```{literalinclude} ../examples/results.out
+:language: text
+```
+
+`s.parse_int()` reads an int as `int(s)` does, but returns `err` of the message `int(s)` would
+stop with instead of stopping. `?` after a result passes an error on: `line[i + 1:].parse_int()?`
+gives the int an `ok` holds, and if the result is an `err`, the function returns that `err`
+right there. A function can only use `?` on a result if it returns a result with the same error
+type, so every error is either handled with `match` or passed on, in plain sight. `?` works on
+options the same way, in a function that returns an option.
+
+A result also has methods: `is_ok()`, `is_err()`, `unwrap()`, `unwrap_or(default)`,
+`unwrap_err()`, and `ok()` and `err()`, which turn it into an option.
+
 That is the whole tutorial. The {doc}`../reference/syntax` and {doc}`../reference/builtins`
 pages cover the details.

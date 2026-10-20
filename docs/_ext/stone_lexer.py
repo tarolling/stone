@@ -24,7 +24,7 @@ KEYWORDS = (
 CONSTANTS = ("true", "false", "none")
 BUILTINS = (
     "print", "range", "int", "float", "str", "input", "eof", "args", "some", "less", "equal",
-    "greater",
+    "greater", "ok", "err",
 )
 METHODS = (
     "len",
@@ -43,8 +43,16 @@ METHODS = (
     "is_none",
     "unwrap",
     "unwrap_or",
+    "is_ok",
+    "is_err",
+    "unwrap_err",
+    "parse_int",
+    "parse_float",
     "contains",
     "get",
+    "keys",
+    "values",
+    "items",
     "eq",
     "cmp",
 )
@@ -73,9 +81,9 @@ class StoneLexer(RegexLexer):
             (r"(enum|struct|impl|trait)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Class)),
             (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
             (
-                # a type name, maybe inside list[, map[, tuple[, or option[, then closing brackets or more
-                # types
-                r"(->|:)(\s*)((?:(?:list|map|tuple|option)\[)*(?:int|float|bool|str)(?:\]|,\s*(?:(?:list|map|tuple|option)\[)*(?:int|float|bool|str))*)(?![\w(])",
+                # a type name, maybe inside list[, map[, tuple[, option[, or result[, then closing
+                # brackets or more types
+                r"(->|:)(\s*)((?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str)(?:\]|,\s*(?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str))*)(?![\w(])",
                 bygroups(Punctuation, Whitespace, Keyword.Type),
             ),
             (r"\b(self|Self)\b", Name.Builtin.Pseudo),
@@ -85,7 +93,7 @@ class StoneLexer(RegexLexer):
             (words(METHODS, prefix=r"(?<=\.)", suffix=r"\b"), Name.Builtin),
             (r"\d+\.\d*([eE][+-]?\d+)?|\d+[eE][+-]?\d+", Number.Float),
             (r"\d+", Number.Integer),
-            (r"\*\*=|[-+*/%]=|==|!=|<=|>=|\*\*|[-+*/%<>=]", Operator),
+            (r"\*\*=|[-+*/%]=|==|!=|<=|>=|\*\*|[-+*/%<>=?]", Operator),
             (r"[()\[\],:.]", Punctuation),
             (r"[A-Za-z_]\w*", Name),
             (r".", Text),

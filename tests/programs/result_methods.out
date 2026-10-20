@@ -1,0 +1,21 @@
+true false false true
+8 8 0 negative: -1
+some(8) none none some('negative: -1')
+['w0', 'w1', 'x'] ok(['w0', 'w1']) ['-'] none at all!
+some(['w0', 'w1']) some('none at all') true
+ok(42)
+ok(-7)
+err("invalid literal for int() with base 10: '1.5'")
+err("invalid literal for int() with base 10: ''")
+err("int() argument out of range: '99999999999999999999'")
+ok(0)
+ok(2.5)
+ok(-1000.0)
+ok(inf)
+ok(nan)
+err("could not convert string to float: 'x'")
+err("could not convert string to float: '.'")
+ok(inf)
+invalid literal for int() with base 10: 'x'
+invalid literal for int() with base 10: '5.0'
+5

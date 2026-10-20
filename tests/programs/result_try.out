@@ -1,0 +1,18 @@
+ok('n4w4')
+err('negative -2')
+err("invalid literal for int() with base 10: 'x'")
+ok(Pair(name='p2', items=['first1', 'w1', 'w2', 'w2', 'end'])) err('negative -2') err('negative -1')
+ok(['a', 's2', 'both1', 'both1', '2']) err('negative -1') err("invalid literal for int() with base 10: 'q'")
+w0
+w0
+w0
+w0
+err('negative -1') err("invalid literal for int() with base 10: 'x'") err('negative -1') err("invalid literal for int() with base 10: 'z'")
+ok(1) Acc(names=['start', 'w1'], count=1)
+err('negative -5') Acc(names=['start', 'w1'], count=1)
+ok(2) Acc(names=['start', 'w1', 'w2'], count=2)
+err("invalid literal for int() with base 10: 'y'") Acc(names=['start', 'w1', 'w2'], count=2)
+ok((3, 'w3')) err('negative -3') err("invalid literal for int() with base 10: 'w2'") err('negative -2')
+err('negative -1') err('negative -1')
+ok(['start7', 'w7', 'w2']) err('negative -2') err('negative -1')
+ok([1, 2]) err(3)

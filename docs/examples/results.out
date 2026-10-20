@@ -1,0 +1,5 @@
+ok(Setting(name='width', value=80))
+ok(104)
+err("no '=' in 'height'")
+err("invalid literal for int() with base 10: ' wide'")
+total 3

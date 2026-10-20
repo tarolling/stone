@@ -46,8 +46,8 @@ What stone already infers:
   type is ever written at a call. The compiler makes a copy of the function for each set of
   types it is called with, the way Rust compiles generics, so a generic function is as fast as
   one written for a single type. Structs and enums can be generic the same way, as in
-  `struct Pair[A, B]:`. Even `option[T]` is one, written in stone in the prelude that every
-  program is linked with, so it follows the same rules as the programmer's own enums.
+  `struct Pair[A, B]:`. Even `option[T]` and `result[T, E]` are, written in stone in the prelude
+  that every program is linked with, so they follow the same rules as the programmer's own enums.
 - **Which method a bound calls.** A trait lists methods that types implement, and a bound such
   as `fn total[T: Shape](xs: list[T])` lets a generic function call them. Each copy of the
   function calls the method of its own type directly, so there is no `dyn` to write and no
@@ -93,7 +93,9 @@ it runs and stops the program with a clear error, never undefined behavior.
 
 stone already guarantees this. Every list index is checked, there is no null (a value that may
 be missing is an `option[T]`, which `match` or `unwrap` must open, and `none` is one of its
-values), reading an unassigned variable is a checker error or a runtime error, and reference
+values), an error a program expects is a `result[T, E]` that the caller must open or pass on
+with `?`, never an exception that unwinds through code that did not ask for it, reading an
+unassigned variable is a checker error or a runtime error, and reference
 counting frees every string, list, and enum value exactly once. The checker rules out cyclic
 values, and enum values never change, so reference counting never leaks.
 

@@ -3,8 +3,9 @@
 // linked as `prelude.<name>`, so a program's names never clash with them.
 //
 // Builtins such as `find`, `pop`, `get`, and `os.env` make options by tag, so `none` stays the
-// first variant and `some` the second, and `cmp` on builtin types makes orderings by tag, so
-// `less`, `equal`, and `greater` stay in that order.
+// first variant and `some` the second, `cmp` on builtin types makes orderings by tag, so `less`,
+// `equal`, and `greater` stay in that order, and `parse_int` and `parse_float` make results by
+// tag, so `ok` stays before `err`.
 
 // A value that may be missing: `some(x)` holds one, and `none` holds nothing.
 pub enum option[T]:
@@ -16,6 +17,12 @@ pub enum ordering:
     less
     equal
     greater
+
+// The outcome of something that may fail: `ok(x)` holds its value, and `err(e)` the error. `?`
+// after a result gives the value of an `ok`, and returns an `err` from the function it is in.
+pub enum result[T, E]:
+    ok(T)
+    err(E)
 
 // Values that `==` and `!=` compare. Every type `==` compares part by part implements it, and a
 // struct may define what `==` means for it instead, as in `impl eq for Point:`.

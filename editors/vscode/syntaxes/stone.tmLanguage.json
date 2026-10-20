@@ -55,7 +55,7 @@
       }
     },
     "type-annotation": {
-      "match": "(->|:)\\s*((?:(?:list|tuple|option)\\[)*(?:int|float|bool|str)(?:\\]|,\\s*(?:(?:list|tuple|option)\\[)*(?:int|float|bool|str))*)(?![A-Za-z0-9_(])",
+      "match": "(->|:)\\s*((?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str)(?:\\]|,\\s*(?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str))*)(?![A-Za-z0-9_(])",
       "captures": {
         "1": { "name": "punctuation.separator.annotation.stone" },
         "2": { "name": "support.type.stone" }
@@ -102,7 +102,7 @@
     },
     "builtin": {
       "name": "support.function.builtin.stone",
-      "match": "\\b(print|len|range|append|some)\\b(?=\\s*\\()"
+      "match": "\\b(print|len|range|append|some|ok|err)\\b(?=\\s*\\()"
     },
     "function-call": {
       "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",
@@ -126,7 +126,7 @@
         },
         {
           "name": "keyword.operator.arithmetic.stone",
-          "match": "\\*\\*|\\+|-|\\*|/|%"
+          "match": "\\*\\*|\\+|-|\\*|/|%|\\?"
         }
       ]
     },

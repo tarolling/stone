@@ -83,7 +83,8 @@ pub static BUILTINS: [&str; 8] = [
 ];
 
 /// The prelude, a stone file linked into every program, which defines `option[T]`, `ordering`,
-/// the traits `eq` and `ord`, and the sort `xs.sort()` uses for values of other types.
+/// `result[T, E]`, the traits `eq` and `ord`, and the sort `xs.sort()` uses for values of other
+/// types.
 pub const PRELUDE: &str = include_str!("prelude.stn");
 
 /// The linked name of the prelude's sort, which `sort` uses for values that are not numbers or
@@ -92,12 +93,14 @@ pub const PRELUDE_SORT: &str = "prelude.sort";
 
 /// The variants of the prelude's enums, which every file writes by name alone, as in `some(x)`
 /// and `none`, each with its enum, in the order the prelude defines them.
-pub static PRELUDE_VARIANTS: [(&str, &str); 5] = [
+pub static PRELUDE_VARIANTS: [(&str, &str); 7] = [
     ("none", "option"),
     ("some", "option"),
     ("less", "ordering"),
     ("equal", "ordering"),
     ("greater", "ordering"),
+    ("ok", "result"),
+    ("err", "result"),
 ];
 
 /// Returns the prelude enum whose variant is written alone as `name`, such as `option` for
@@ -110,7 +113,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 23] = [
+pub static METHODS: [&str; 30] = [
     "len",
     "append",
     "pop",
@@ -127,6 +130,13 @@ pub static METHODS: [&str; 23] = [
     "is_none",
     "unwrap",
     "unwrap_or",
+    "is_ok",
+    "is_err",
+    "unwrap_err",
+    "ok",
+    "err",
+    "parse_int",
+    "parse_float",
     "contains",
     "get",
     "keys",
@@ -208,7 +218,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 23] = [
+pub static METHOD_DOCS: [BuiltinDoc; 30] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T] | map[K, V]).len() -> int",
@@ -309,15 +319,58 @@ pub static METHOD_DOCS: [BuiltinDoc; 23] = [
     },
     BuiltinDoc {
         name: "unwrap",
-        signature: "option[T].unwrap() -> T",
-        description: "Returns the value the option holds, so `some(3).unwrap()` is 3. It stops \
-                      the program if the option is `none`.",
+        signature: "(option[T] | result[T, E]).unwrap() -> T",
+        description: "Returns the value an option or an `ok` holds, so `some(3).unwrap()` and \
+                      `ok(3).unwrap()` are 3. It stops the program if the option is `none` or \
+                      the result is an `err`.",
     },
     BuiltinDoc {
         name: "unwrap_or",
-        signature: "option[T].unwrap_or(default: T) -> T",
-        description: "Returns the value the option holds, or `default` if it is `none`, so \
-                      `none.unwrap_or(0)` is 0.",
+        signature: "(option[T] | result[T, E]).unwrap_or(default: T) -> T",
+        description: "Returns the value an option or an `ok` holds, or `default` if it is \
+                      `none` or an `err`, so `none.unwrap_or(0)` is 0.",
+    },
+    BuiltinDoc {
+        name: "is_ok",
+        signature: "result[T, E].is_ok() -> bool",
+        description: "Returns whether the result is an `ok`, so `ok(1).is_ok()` is `true`.",
+    },
+    BuiltinDoc {
+        name: "is_err",
+        signature: "result[T, E].is_err() -> bool",
+        description: "Returns whether the result is an `err`.",
+    },
+    BuiltinDoc {
+        name: "unwrap_err",
+        signature: "result[T, E].unwrap_err() -> E",
+        description: "Returns the error an `err` holds, so `err(\"bad\").unwrap_err()` is \
+                      `\"bad\"`. It stops the program if the result is an `ok`.",
+    },
+    BuiltinDoc {
+        name: "ok",
+        signature: "result[T, E].ok() -> option[T]",
+        description: "Returns `some` of the value an `ok` holds, or `none` for an `err`, so \
+                      `ok(1).ok()` is `some(1)`.",
+    },
+    BuiltinDoc {
+        name: "err",
+        signature: "result[T, E].err() -> option[E]",
+        description: "Returns `some` of the error an `err` holds, or `none` for an `ok`.",
+    },
+    BuiltinDoc {
+        name: "parse_int",
+        signature: "str.parse_int() -> result[int, str]",
+        description: "Reads the string as `int` does, returning `ok` of the int, or `err` of \
+                      the message `int` would stop the program with, so `\"42\".parse_int()` \
+                      is `ok(42)` and `\"x\".parse_int()` is \
+                      `err(\"invalid literal for int() with base 10: 'x'\")`.",
+    },
+    BuiltinDoc {
+        name: "parse_float",
+        signature: "str.parse_float() -> result[float, str]",
+        description: "Reads the string as `float` does, returning `ok` of the float, or `err` \
+                      of the message `float` would stop the program with, so \
+                      `\"2.5\".parse_float()` is `ok(2.5)`.",
     },
     BuiltinDoc {
         name: "contains",
@@ -524,6 +577,12 @@ pub fn float_pow(base: f64, exp: i64) -> f64 {
 /// The runtime error for a slice whose step is 0, such as `xs[::0]`.
 /// What `unwrap` stops the program with when the option is `none`.
 pub const UNWRAP_NONE: &str = "cannot unwrap none";
+
+/// The error `unwrap` stops the program with on an `err`.
+pub const UNWRAP_ERR: &str = "cannot unwrap err";
+
+/// The error `unwrap_err` stops the program with on an `ok`.
+pub const UNWRAP_OK: &str = "cannot unwrap_err ok";
 
 /// The most enum values nested inside one another that `print` writes, in both backends, since
 /// printing one inside another takes stack.
@@ -978,7 +1037,7 @@ mod tests {
     }
 
     #[test]
-    fn the_prelude_defines_option_ordering_eq_ord_and_sort() {
+    fn the_prelude_defines_option_ordering_result_eq_ord_and_sort() {
         use crate::ast::{Mod, StmtKind};
         use crate::lexer::Lexer;
         use crate::parser::Parser;
@@ -1029,6 +1088,7 @@ mod tests {
                     0,
                     vec![("less", 0), ("equal", 0), ("greater", 0)]
                 ),
+                ("result", 2, vec![("ok", 1), ("err", 1)]),
             ]
         );
         assert_eq!(
@@ -1050,6 +1110,8 @@ mod tests {
     fn prelude_variants_are_reserved() {
         assert!(is_reserved("some"));
         assert!(is_reserved("less"));
+        assert!(is_reserved("ok"));
+        assert!(is_reserved("err"));
         assert!(is_reserved("print"));
         assert!(!is_reserved("len"));
         assert!(!BUILTINS.contains(&"some"));

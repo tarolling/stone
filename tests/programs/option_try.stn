@@ -1,0 +1,23 @@
+// ? on an option gives the value of a some, and returns none from a function returning an option
+fn second_word(line: str) -> option[str]:
+    words = line.split()
+    words.pop(0)
+    ret some(words.pop()?.strip())
+
+fn value_of(m: map[str, list[int]], key: str) -> option[int]:
+    total = 0
+    for n in m.get(key)?:
+        total += n
+    ret some(total + m.get(key + "!")?.len())
+
+// a result becomes an option with ok()
+fn parsed(texts: list[str]) -> option[list[int]]:
+    out = []
+    for t in texts:
+        out.append(t.parse_int().ok()?)
+    ret some(out)
+
+print(second_word("a b"), second_word("a"))
+m = {"x": [1, 2], "x!": [3], "y": [4]}
+print(value_of(m, "x"), value_of(m, "y"), value_of(m, "z"))
+print(parsed(["1", " 2"]), parsed(["1", "two"]))

@@ -1,0 +1,27 @@
+struct Setting:
+    name: str
+    value: int
+
+fn parse_setting(line: str) -> result[Setting, str]:
+    match line.find("="):
+        case some(i):
+            value = line[i + 1:].parse_int()?
+            ret ok(Setting(name=line[:i].strip(), value=value))
+        case none:
+            ret err("no '=' in '" + line + "'")
+
+fn total(lines: list[str]) -> result[int, str]:
+    sum = 0
+    for line in lines:
+        sum += parse_setting(line)?.value
+    ret ok(sum)
+
+print(parse_setting("width = 80"))
+print(total(["width = 80", "height = 24"]))
+print(total(["width = 80", "height"]))
+print(total(["width = wide"]))
+match total(["depth = 3"]):
+    case ok(n):
+        print("total", n)
+    case err(message):
+        print("error:", message)

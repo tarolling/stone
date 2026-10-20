@@ -211,7 +211,24 @@ impl Expr {
         }
     }
 
-    /// Returns the expressions directly inside this one, left to right.
+    /// Returns the expression inside any `?`s this one is, such as `f(x)` for `f(x)?`, which is
+    /// what a statement or an assignment calls when its value is `f(x)?`.
+    pub fn without_try(&self) -> &Expr {
+        match &self.kind {
+            ExprKind::Try { value } => value.without_try(),
+            _ => self,
+        }
+    }
+
+    /// Returns whether this is the name of a prelude enum that linking wrote before a bare
+    /// variant, as `option` in `option.some(1)` for `some(1)`, which names the enum even where a
+    /// variable takes the same name. The parser never makes a name that covers no text.
+    pub fn is_unwritten(&self) -> bool {
+        matches!(self.kind, ExprKind::Name { .. }) && self.span.is_empty()
+    }
+
+    /// Returns the expressions directly inside this one, left to right, leaving out an unwritten
+    /// enum name ([`Expr::is_unwritten`]), which reads no variable.
     ///
     /// For example, `f(a + 1, b)` gives `f`, `a + 1`, and `b`.
     pub fn children(&self) -> Vec<&Expr> {
@@ -221,7 +238,7 @@ impl Expr {
             | ExprKind::List { elts: values, .. }
             | ExprKind::Tuple { elts: values, .. } => values.iter().collect(),
             ExprKind::BinOp { left, right, .. } => vec![left, right],
-            ExprKind::UnaryOp { operand, .. } => vec![operand],
+            ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => vec![operand],
             ExprKind::Compare {
                 left, comparators, ..
             } => [&**left].into_iter().chain(comparators).collect(),
@@ -235,6 +252,7 @@ impl Expr {
                 .chain(keywords.iter().map(|keyword| &keyword.value))
                 .collect(),
             ExprKind::Subscript { value, slice, .. } => vec![value, slice],
+            ExprKind::Attribute { value, .. } if value.is_unwritten() => vec![],
             ExprKind::Attribute { value, .. } => vec![value],
             ExprKind::Dict { keys, values } => keys
                 .iter()
@@ -294,6 +312,9 @@ pub enum ExprKind {
         attr: Identifier,
         ctx: ExprContext,
     },
+    /// A `?` after a result or an option, such as `f()?`, which gives the value an `ok` or a
+    /// `some` holds, and otherwise returns the `err` or `none` from the function it is in.
+    Try { value: Box<Expr> },
     /// A variable reference, such as `x`.
     Name { id: Identifier, ctx: ExprContext },
     /// A list literal, such as `[1, 2, 3]`.
@@ -614,6 +635,8 @@ pub enum PrimaryOp {
     Subscript(Box<Expr>, Span),
     Call(Vec<Expr>, Vec<Keyword>, Span),
     Attribute(Identifier, Span),
+    /// A `?`, ending at its span.
+    Try(Span),
 }
 
 #[derive(Debug, PartialEq)]

@@ -57,6 +57,8 @@ file by the path it was built from.
 | `sleep length is too large` | `time.sleep()` of 2^63 seconds or more |
 | `recursion is too deep (more than 1000 nested calls)` | more than 1,000 calls active at once |
 | `cannot unwrap none` | `unwrap()` of an option that is `none` |
+| `cannot unwrap err` | `unwrap()` of a result that is an `err` |
+| `cannot unwrap_err ok` | `unwrap_err()` of a result that is an `ok` |
 | `value is nested too deeply to print (more than 10000 levels)` | `print` of an enum or struct value inside more than 9,999 others, as in a long linked list. What comes before it on the line stays printed |
 | `'name' is used before it is assigned` | a function read a global that had not been assigned yet when it ran |
 

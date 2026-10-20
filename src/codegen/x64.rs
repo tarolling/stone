@@ -78,7 +78,9 @@ impl AssemblyGenerator for X64Generator {
         self.emit_failures();
         self.emit_list_runtime()?;
         let formats_floats = self.ctx.prints_floats || self.ctx.uses(&["stone.str_float"]);
-        let parses_floats = self.ctx.uses(&["stone.parse_float"]);
+        let parses_floats = self
+            .ctx
+            .uses(&["stone.parse_float", "stone.parse_float_result"]);
         if formats_floats {
             floats::float_runtime(self);
         }
@@ -370,6 +372,8 @@ impl X64Generator {
         let parsing: Vec<&str> = [
             "stone.parse_int",
             "stone.parse_float",
+            "stone.parse_int_result",
+            "stone.parse_float_result",
             "stone.map_missing_str",
         ]
         .into_iter()

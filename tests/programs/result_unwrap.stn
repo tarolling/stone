@@ -1,0 +1,9 @@
+// unwrap stops the program when the result is an err, pointing at the call
+fn half(n: int) -> result[int, str]:
+    if n % 2 == 1:
+        ret err("odd")
+    ret ok(n / 2)
+
+print(half(4).unwrap())
+print(half(3).unwrap())
+print("never printed")

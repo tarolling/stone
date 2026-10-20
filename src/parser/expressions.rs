@@ -140,6 +140,9 @@ impl Parser {
                         },
                         start.to(end),
                     )),
+                    PrimaryOp::Try(end) => {
+                        Box::new(Expr::new(ExprKind::Try { value: result }, start.to(end)))
+                    }
                 };
             }
 
@@ -862,11 +865,11 @@ impl Parser {
         })
     }
 
-    /// Parses the calls, subscripts, and attributes that follow an atom, such as `(1)[0]` in
-    /// `f(1)[0]` or `.len()` in `xs.len()`.
+    /// Parses the calls, subscripts, attributes, and `?`s that follow an atom, such as `(1)[0]` in
+    /// `f(1)[0]`, `.len()` in `xs.len()`, or `?` in `f()?`.
     ///
     /// ```text
-    /// ( '(' [arguments] ')' | '[' slices ']' | '.' NAME )*
+    /// ( '(' [arguments] ')' | '[' slices ']' | '.' NAME | '?' )*
     /// ```
     pub(super) fn parse_primary_loop0(&mut self) -> Vec<PrimaryOp> {
         let mut results: Vec<PrimaryOp> = vec![];
@@ -902,22 +905,29 @@ impl Parser {
                 continue;
             }
             self.pos = mark;
+
+            // '?'
+            if self.expect(TokenType::Operator("?".to_string())).is_some() {
+                results.push(PrimaryOp::Try(self.last_span()));
+                continue;
+            }
+            self.pos = mark;
             break;
         }
         results
     }
 
-    /// Parses an atom followed by any calls, subscripts, or attributes, such as `f(1)`, `a[0]`, or
-    /// `xs.len()`.
+    /// Parses an atom followed by any calls, subscripts, attributes, or `?`s, such as `f(1)`,
+    /// `a[0]`, `xs.len()`, or `f()?`.
     ///
     /// ```text
     /// primary:
-    ///     | atom ( '(' [arguments] ')' | '[' slices ']' | '.' NAME )*
+    ///     | atom ( '(' [arguments] ')' | '[' slices ']' | '.' NAME | '?' )*
     /// ```
     pub(super) fn parse_primary(&mut self) -> ParseExprResult {
         let mark = self.pos;
 
-        // atom ( '(' [arguments] ')' | '[' slices ']' | '.' NAME )*
+        // atom ( '(' [arguments] ')' | '[' slices ']' | '.' NAME | '?' )*
         if let Ok(mut result) = self.parse_atom()
             && let ops = self.parse_primary_loop0()
         {
@@ -952,6 +962,9 @@ impl Parser {
                         },
                         start.to(end),
                     )),
+                    PrimaryOp::Try(end) => {
+                        Box::new(Expr::new(ExprKind::Try { value: result }, start.to(end)))
+                    }
                 };
             }
 

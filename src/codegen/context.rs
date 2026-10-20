@@ -52,6 +52,8 @@ pub const STRING_METHOD_ROUTINES: &[&str] = &[
 const STRING_ROUTINES: &[&str] = &[
     "stone.parse_int",
     "stone.parse_float",
+    "stone.parse_int_result",
+    "stone.parse_float_result",
     "stone.str_strip",
     "stone.str_split_ws",
     "stone.str_split",
@@ -847,7 +849,9 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
             collect_calls_from_expr(left, calls);
             collect_calls_from_expr(right, calls);
         }
-        ExprKind::UnaryOp { operand, .. } => collect_calls_from_expr(operand, calls),
+        ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
+            collect_calls_from_expr(operand, calls)
+        }
         ExprKind::BoolOp { values, .. } => {
             for val in values {
                 collect_calls_from_expr(val, calls);

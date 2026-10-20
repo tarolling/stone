@@ -26,7 +26,7 @@ use crate::ast::{
     Expr, ExprContext, ExprKind, Mod, Pattern, PatternKind, Stmt, StmtKind, TraitName, TypeExpr,
     TypeExprKind, TypeParam,
 };
-use crate::checker::{EQ, OPTION, ORD, collect_assigned};
+use crate::checker::{EQ, OPTION, ORD, RESULT, collect_assigned};
 use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -281,6 +281,7 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
 fn prelude_qualified(name: &str) -> &'static str {
     match name {
         OPTION => "write 'some(x)' or 'none' without 'option.'",
+        RESULT => "write 'ok(x)' or 'err(e)' without 'result.'",
         _ => "write 'less', 'equal', or 'greater' without 'ordering.'",
     }
 }
@@ -609,6 +610,10 @@ impl Loader<'_> {
 
             // each struct with its type parameters, which its impl blocks' functions can name
             let own_structs = &structs[i];
+            let mut globals = vec![];
+            if !library {
+                collect_assigned(&body, &mut globals);
+            }
             let mut rewriter = Rewriter {
                 file,
                 library,
@@ -620,6 +625,7 @@ impl Loader<'_> {
                 types: &types,
                 module_names: &module_names,
                 locals: HashSet::new(),
+                globals: globals.into_iter().map(|(name, _)| name).collect(),
                 type_params: HashSet::new(),
                 diagnostics: &mut self.diagnostics,
             };
@@ -985,6 +991,9 @@ struct Rewriter<'a> {
     module_names: &'a [String],
     /// The parameters and locals of the function being rewritten, which shadow everything else.
     locals: HashSet<String>,
+    /// The names the entry file's top-level code assigns, which, like locals, may take the name
+    /// of a prelude enum, as in `result = []`.
+    globals: HashSet<String>,
     /// The type parameters of the function being rewritten, such as `T` in
     /// `fn first[T](xs: list[T]) -> T:`, which its types never rename.
     type_params: HashSet<String>,
@@ -1319,6 +1328,7 @@ impl Rewriter<'_> {
             && let ExprKind::Name { id, .. } = &value.kind
             && is_prelude_enum(id)
             && !self.locals.contains(id)
+            && !self.globals.contains(id)
         {
             self.diagnostics
                 .push(Diagnostic::error(expr.span, prelude_qualified(id)));
@@ -1345,7 +1355,9 @@ impl Rewriter<'_> {
                 self.expr(left);
                 self.expr(right);
             }
-            ExprKind::UnaryOp { operand, .. } => self.expr(operand),
+            ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
+                self.expr(operand)
+            }
             ExprKind::Compare {
                 left, comparators, ..
             } => {

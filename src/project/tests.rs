@@ -1400,3 +1400,22 @@ fn the_preludes_variants_are_written_alone() {
         5,
     );
 }
+
+#[test]
+fn result_variants_are_written_alone() {
+    assert_eq!(
+        output(&[(
+            "main.stn",
+            "r = ok(1)\nmatch r:\n    case ok(v):\n        print(v, err(\"no\"))\n    case err(e):\n        \
+             print(e)\n",
+        )]),
+        "1 err('no')\n"
+    );
+    assert_error(
+        &[("main.stn", "r = result.ok(1)\n")],
+        "main.stn",
+        "write 'ok(x)' or 'err(e)' without 'result.'",
+        1,
+        5,
+    );
+}

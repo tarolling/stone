@@ -16,6 +16,7 @@ runs, reporting every place they conflict.
 | `map[K, V]` | maps from keys of type `K`, which are `int`, `str`, or `bool`, to values of type `V`, which are values like lists |
 | `tuple[T1, T2, ...]` | two or more values of fixed types, such as `(1, "a")`, which never change |
 | `option[T]` | `some(x)`, which holds a `T`, or `none`, which holds nothing |
+| `result[T, E]` | `ok(x)`, which holds a `T`, or `err(e)`, which holds an error `E` |
 | structs | the named, typed fields a `struct` lists, such as `Point(x=1.0, y=2.0)`, which are values |
 | enums | the variants an `enum` lists, such as `Shape.Circle(1.0)`, which never change |
 | `ordering` | `less`, `equal`, or `greater`, which `cmp` returns |
@@ -511,9 +512,11 @@ pub enum option[T]:
 ```
 
 Its variants are written alone, as `some(x)` and `none` rather than `option.some(x)`, in every
-file and without a `use`, and the names `option` and `some` cannot be defined again, nor can
-`ordering`'s `less`, `equal`, and `greater`. A function
-that may have no answer returns one:
+file and without a `use`, and no function, variable, or type may take the name `some`, nor
+`ordering`'s `less`, `equal`, and `greater`, nor `result`'s `ok` and `err`. No enum or struct may
+be named `option`, `ordering`, or `result` either, but since their variants never follow their
+names, a variable, parameter, or function may be, as in `result = []`. A function that may have no
+answer returns an option:
 
 ```{literalinclude} ../examples/enums.stn
 :language: stone
@@ -529,6 +532,54 @@ must fit an enum value's 32 values.
 
 `none` on its own has an unknown type until its use settles it, as an empty list does, so after
 `best = none`, `best = some("a")` makes `best` an `option[str]`.
+
+## Results
+
+`result[T, E]` is the type of something that may fail: `ok(x)` holds the `T` it made, and `err(e)`
+an error `E`, such as a `str` saying what went wrong. Like `option`, it is a prelude enum whose
+variants are written alone:
+
+```stone
+pub enum result[T, E]:
+    ok(T)
+    err(E)
+```
+
+`match` reads a result with the patterns `ok(x)` and `err(e)`, and its methods read it too:
+`r.is_ok()` and `r.is_err()` say which it is, `r.unwrap()` returns the value an `ok` holds and
+stops the program with `cannot unwrap err` on an `err`, `r.unwrap_or(default)` returns `default`
+instead, `r.unwrap_err()` returns the error and stops with `cannot unwrap_err ok` on an `ok`, and
+`r.ok()` and `r.err()` give `some` of the value or the error, or `none`. `s.parse_int()` and
+`s.parse_float()` return results, whose error is the message `int(s)` or `float(s)` would stop
+the program with. A result prints as `ok(1)` or `err('bad')`, and compares with `==` when what it
+holds can.
+
+### Passing errors on
+
+`?` after a result gives the value an `ok` holds, and on an `err` returns that `err` from the
+function it is in, right there:
+
+```stone
+fn sum(texts: list[str]) -> result[int, str]:
+    total = 0
+    for t in texts:
+        total += t.parse_int()?
+    ret ok(total)
+
+print(sum(["1", "2"]), sum(["1", "x"]))   // ok(3) err("invalid literal for int() with base 10: 'x'")
+```
+
+It follows a value as a call or an index does, so `f()?.name`, `m.get(k)?[0]`, and `-f()?` mean
+what they look like, and it may appear anywhere in an expression; whatever the statement made
+before it is freed when it returns. The checker requires:
+
+- a function: `?` at the top level, or in a function that returns no value, is an error
+- on a result, a function that returns a result with the same error type, as in
+  `result[float, str]` for a `?` on a `result[int, str]`; nothing converts one error into another
+- on an option, a function that returns an option, where `?` returns `none`
+
+A result becomes an option with `.ok()`, so `t.parse_int().ok()?` works in a function that
+returns an option.
 
 ## Rules the checker enforces
 

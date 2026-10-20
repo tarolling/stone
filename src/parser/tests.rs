@@ -257,6 +257,9 @@ fn strip_expr(expr: Expr) -> Expr {
             op,
             operand: strip_box(operand),
         },
+        ExprKind::Try { value } => ExprKind::Try {
+            value: strip_box(value),
+        },
         ExprKind::Compare {
             left,
             ops,
@@ -2863,5 +2866,68 @@ fn type_parameters_may_have_bounds() {
     assert_eq!(
         error_of("fn f[T: Shape +](x: T): ret\n"),
         ("expected a trait name, found ']'".to_string(), 1, 16)
+    );
+}
+
+/// Builds `value?`.
+fn try_of(value: Box<Expr>) -> Box<Expr> {
+    Box::new(ExprKind::Try { value }.into())
+}
+
+#[test]
+fn a_question_mark_follows_a_primary() {
+    let f_call: Box<Expr> = Box::new(
+        ExprKind::Call {
+            func: name("f"),
+            args: vec![],
+            keywords: vec![],
+        }
+        .into(),
+    );
+    assert_eq!(expr_of("f()?\n"), *try_of(f_call.clone()));
+    // it chains with calls, subscripts, and attributes
+    assert_eq!(
+        expr_of("f()?.len()\n"),
+        method_call(try_of(f_call.clone()), "len", vec![])
+    );
+    assert_eq!(
+        expr_of("m.get(1)??\n"),
+        *try_of(try_of(Box::new(method_call(
+            name("m"),
+            "get",
+            vec![*int(1)]
+        ))))
+    );
+    assert_eq!(
+        expr_of("f()?[0]\n"),
+        *subscript(try_of(f_call.clone()), int(0), ExprContext::Load)
+    );
+    // and binds tighter than a unary minus
+    assert_eq!(
+        expr_of("-f()?\n"),
+        ExprKind::UnaryOp {
+            op: UnaryOp::UnarySub,
+            operand: try_of(f_call),
+        }
+        .into()
+    );
+}
+
+#[test]
+fn a_question_mark_spans_its_value() {
+    let Mod::Module { body } =
+        parse_within("x = f(1)?\n".to_string(), Duration::from_secs(5)).unwrap();
+    let StmtKind::Assign { value, .. } = &body[0].kind else {
+        panic!("expected an assignment");
+    };
+    assert_eq!(value.span, span(1, 5, 1, 10));
+    assert!(matches!(value.kind, ExprKind::Try { .. }));
+}
+
+#[test]
+fn a_question_mark_cannot_end_a_target() {
+    assert_eq!(
+        error_of("f()? = 1\n").0,
+        "expected end of line, found '='".to_string()
     );
 }

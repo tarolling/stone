@@ -1988,6 +1988,9 @@ pub fn args_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.parse_int` returns the int in the string in `x0`
 /// - `stone.parse_float` returns the bits of the float in the string in `x0`, checking the
 ///   grammar before `stone.decimal_to_float` reads it
+/// - `stone.parse_int_result` and `stone.parse_float_result` read the same way, but return a new
+///   result instead of failing: `ok` of the number (tag 0), or `err` (tag 1) of the message the
+///   others fail with
 /// - `stone.fail_quoted` stops the program with the message `x0` followed by the string `x1`
 ///   and a closing quote
 pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
@@ -2031,11 +2034,74 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tb\tstone.fail_quoted");
     }
 
-    if used.contains(&"stone.parse_int") {
+    // each core returns the number in x0 and 0 in x2, or the start of the message in x2 and the
+    // text in x1, for the entry points to fail with or to make an err of
+    let ints = used.contains(&"stone.parse_int") || used.contains(&"stone.parse_int_result");
+    let floats = used.contains(&"stone.parse_float") || used.contains(&"stone.parse_float_result");
+    let result_saved = ["x19", "x20"];
+    for (label, core) in [
+        ("stone.parse_int", ".Lparse_int_core"),
+        ("stone.parse_float", ".Lparse_float_core"),
+    ] {
+        if used.contains(&label) {
+            r#gen.emit(&format!("{label}:"));
+            push_frame(r#gen, &[]);
+            r#gen.emit(&format!("\tbl\t{core}"));
+            r#gen.emit(&format!("\tcbnz\tx2, {core}_fail"));
+            pop_frame(r#gen, &[]);
+            r#gen.emit(&format!("{core}_fail:"));
+            r#gen.emit("\tmov\tx0, x2");
+            r#gen.emit("\tb\tstone.fail_quoted");
+        }
+        let result = format!("{label}_result");
+        if used.contains(&result.as_str()) {
+            r#gen.emit(&format!("{result}:"));
+            push_frame(r#gen, &result_saved);
+            r#gen.emit(&format!("\tbl\t{core}"));
+            r#gen.emit("\tb\t.Lparse_result");
+        }
+    }
+    if used.contains(&"stone.parse_int_result") || used.contains(&"stone.parse_float_result") {
+        // the frame of the entry point that branched here, with x19 holding the number, then the
+        // first piece of the message, and x20 the message
+        r#gen.emit(".Lparse_result:");
+        r#gen.emit("\tcbnz\tx2, .Lparse_result_err");
+        r#gen.emit("\tmov\tx19, x0");
+        r#gen.emit("\tmov\tx0, #0"); // ok
+        r#gen.emit("\tmov\tx1, #0"); // an uncounted slot
+        r#gen.emit("\tmov\tx2, #1");
+        r#gen.emit("\tbl\tstone.enum_new");
+        r#gen.emit("\tstr\tx19, [x0, #16]");
+        r#gen.emit("\tb\t.Lparse_result_done");
+        r#gen.emit(".Lparse_result_err:");
+        r#gen.emit("\tmov\tx0, x2");
+        r#gen.emit("\tbl\tstone.str_concat");
+        r#gen.emit("\tmov\tx19, x0");
+        address(r#gen, "x1", ".Lstone_quote");
+        r#gen.emit("\tbl\tstone.str_concat");
+        r#gen.emit("\tmov\tx20, x0");
+        // the first piece was only for joining
+        r#gen.emit("\tldur\tx16, [x19, #-8]");
+        r#gen.emit("\tsubs\tx16, x16, #1");
+        r#gen.emit("\tstur\tx16, [x19, #-8]");
+        r#gen.emit("\tb.ne\t.Lparse_result_joined");
+        r#gen.emit("\tmov\tx9, x19");
+        r#gen.emit("\tbl\tstone.free_str");
+        r#gen.emit(".Lparse_result_joined:");
+        r#gen.emit("\tmov\tx0, #1"); // err
+        r#gen.emit("\tmov\tx1, #1"); // a string slot
+        r#gen.emit("\tmov\tx2, #1");
+        r#gen.emit("\tbl\tstone.enum_new");
+        r#gen.emit("\tstr\tx20, [x0, #16]");
+        r#gen.emit(".Lparse_result_done:");
+        pop_frame(r#gen, &result_saved);
+    }
+
+    if ints {
         // x0 keeps the text, x9 is the cursor, x12 where the digits start, x13 the value so far,
         // negated so that the most negative int fits, x11 whether a minus sign came first, and x14
         // whether the value overflowed
-        r#gen.emit("stone.parse_int:");
+        r#gen.emit(".Lparse_int_core:");
         r#gen.emit("\tmov\tx9, x0");
         r#gen.emit(".Lparse_int_lead:");
         r#gen.emit("\tldrb\tw10, [x9], #1");
@@ -2081,8 +2147,8 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         jump_if_space(r#gen, "w10", ".Lparse_int_trailing");
         r#gen.emit(".Lparse_int_invalid:");
         r#gen.emit("\tmov\tx1, x0");
-        address(r#gen, "x0", ".Lstone_int_invalid");
-        r#gen.emit("\tb\tstone.fail_quoted");
+        address(r#gen, "x2", ".Lstone_int_invalid");
+        r#gen.emit("\tret");
         r#gen.emit(".Lparse_int_end:");
         r#gen.emit("\tcbnz\tx14, .Lparse_int_range");
         r#gen.emit("\tcbnz\tx11, .Lparse_int_done");
@@ -2090,17 +2156,18 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tb.vs\t.Lparse_int_range"); // 9223372036854775808 has no positive int
         r#gen.emit(".Lparse_int_done:");
         r#gen.emit("\tmov\tx0, x13");
+        r#gen.emit("\tmov\tx2, #0");
         r#gen.emit("\tret");
         r#gen.emit(".Lparse_int_range:");
         r#gen.emit("\tmov\tx1, x0");
-        address(r#gen, "x0", ".Lstone_int_range");
-        r#gen.emit("\tb\tstone.fail_quoted");
+        address(r#gen, "x2", ".Lstone_int_range");
+        r#gen.emit("\tret");
     }
 
-    if used.contains(&"stone.parse_float") {
+    if floats {
         // x19 holds the text, x20 the cursor, and x21 a count of digits
         let saved = ["x19", "x20", "x21"];
-        r#gen.emit("stone.parse_float:");
+        r#gen.emit(".Lparse_float_core:");
         push_frame(r#gen, &saved);
         r#gen.emit("\tmov\tx19, x0");
         r#gen.emit("\tmov\tx20, x0");
@@ -2180,12 +2247,14 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tcbz\tw10, .Lparse_float_valid");
         jump_if_space(r#gen, "w10", ".Lparse_float_trailing");
         r#gen.emit(".Lparse_float_invalid:");
-        address(r#gen, "x0", ".Lstone_float_invalid");
+        address(r#gen, "x2", ".Lstone_float_invalid");
         r#gen.emit("\tmov\tx1, x19");
-        r#gen.emit("\tb\tstone.fail_quoted");
+        r#gen.emit("\tb\t.Lparse_float_return");
         r#gen.emit(".Lparse_float_valid:");
         r#gen.emit("\tmov\tx0, x19");
         r#gen.emit("\tbl\tstone.decimal_to_float");
+        r#gen.emit("\tmov\tx2, #0");
+        r#gen.emit(".Lparse_float_return:");
         pop_frame(r#gen, &saved);
     }
 }

@@ -1942,6 +1942,9 @@ pub fn args_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.parse_int` returns the int in the string in `rdi`
 /// - `stone.parse_float` returns the bits of the float in the string in `rdi`, checking the
 ///   grammar before `stone.decimal_to_float` reads it
+/// - `stone.parse_int_result` and `stone.parse_float_result` read the same way, but return a new
+///   result instead of failing: `ok` of the number (tag 0), or `err` (tag 1) of the message the
+///   others fail with
 /// - `stone.fail_quoted` stops the program with the message `rdi` followed by the string `rsi`
 ///   and a closing quote
 /// - `stone.map_missing_str` stops the program because a map has no entry for the string key
@@ -1991,11 +1994,80 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tjmp\tstone.fail_quoted");
     }
 
-    if used.contains(&"stone.parse_int") {
+    // each core returns the number in rax and 0 in rdx, or the start of the message in rdx and
+    // the text in rsi, for the entry points to fail with or to make an err of
+    let ints = used.contains(&"stone.parse_int") || used.contains(&"stone.parse_int_result");
+    let floats = used.contains(&"stone.parse_float") || used.contains(&"stone.parse_float_result");
+    for (label, core) in [
+        ("stone.parse_int", ".Lparse_int_core"),
+        ("stone.parse_float", ".Lparse_float_core"),
+    ] {
+        if used.contains(&label) {
+            r#gen.emit(&format!("{label}:"));
+            r#gen.emit(&format!("\tcall\t{core}"));
+            r#gen.emit("\ttest\trdx, rdx");
+            r#gen.emit(&format!("\tjnz\t{core}_fail"));
+            r#gen.emit("\tret");
+            r#gen.emit(&format!("{core}_fail:"));
+            r#gen.emit("\tmov\trdi, rdx");
+            r#gen.emit("\tjmp\tstone.fail_quoted");
+        }
+        let result = format!("{label}_result");
+        if used.contains(&result.as_str()) {
+            r#gen.emit(&format!("{result}:"));
+            r#gen.emit(&format!("\tcall\t{core}"));
+            r#gen.emit("\tjmp\t.Lparse_result");
+        }
+    }
+    if used.contains(&"stone.parse_int_result") || used.contains(&"stone.parse_float_result") {
+        // rbx holds the number, then the first piece of the message, and r12 the message
+        r#gen.emit(".Lparse_result:");
+        r#gen.emit("\tpush\trbp");
+        r#gen.emit("\tmov\trbp, rsp");
+        r#gen.emit("\tpush\trbx");
+        r#gen.emit("\tpush\tr12");
+        r#gen.emit("\tand\trsp, -16");
+        r#gen.emit("\ttest\trdx, rdx");
+        r#gen.emit("\tjnz\t.Lparse_result_err");
+        r#gen.emit("\tmov\trbx, rax");
+        r#gen.emit("\txor\tedi, edi"); // ok
+        r#gen.emit("\txor\tesi, esi"); // an uncounted slot
+        r#gen.emit("\tmov\tedx, 1");
+        r#gen.emit("\tcall\tstone.enum_new");
+        r#gen.emit("\tmov\tQWORD PTR [rax + 16], rbx");
+        r#gen.emit("\tjmp\t.Lparse_result_done");
+        r#gen.emit(".Lparse_result_err:");
+        r#gen.emit("\tmov\trdi, rdx");
+        r#gen.emit("\tcall\tstone.str_concat");
+        r#gen.emit("\tmov\trbx, rax");
+        r#gen.emit("\tmov\trdi, rax");
+        r#gen.emit("\tlea\trsi, [rip + .Lstone_quote]");
+        r#gen.emit("\tcall\tstone.str_concat");
+        r#gen.emit("\tmov\tr12, rax");
+        // the first piece was only for joining
+        r#gen.emit("\tdec\tQWORD PTR [rbx - 8]");
+        r#gen.emit("\tjnz\t.Lparse_result_joined");
+        r#gen.emit("\tmov\trax, rbx");
+        r#gen.emit("\tcall\tstone.free_str");
+        r#gen.emit(".Lparse_result_joined:");
+        r#gen.emit("\tmov\tedi, 1"); // err
+        r#gen.emit("\tmov\tesi, 1"); // a string slot
+        r#gen.emit("\tmov\tedx, 1");
+        r#gen.emit("\tcall\tstone.enum_new");
+        r#gen.emit("\tmov\tQWORD PTR [rax + 16], r12");
+        r#gen.emit(".Lparse_result_done:");
+        r#gen.emit("\tlea\trsp, [rbp - 16]");
+        r#gen.emit("\tpop\tr12");
+        r#gen.emit("\tpop\trbx");
+        r#gen.emit("\tpop\trbp");
+        r#gen.emit("\tret");
+    }
+
+    if ints {
         // rdi keeps the text, rsi is the cursor, rdx where the digits start, r10 the value so far,
         // negated so that the most negative int fits, r8 whether a minus sign came first, and r9
         // whether the value overflowed
-        r#gen.emit("stone.parse_int:");
+        r#gen.emit(".Lparse_int_core:");
         r#gen.emit("\tmov\trsi, rdi");
         r#gen.emit(".Lparse_int_lead:");
         r#gen.emit("\tmovzx\tecx, byte ptr [rsi]");
@@ -2040,8 +2112,8 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         jump_if_space(r#gen, "ecx", ".Lparse_int_trailing");
         r#gen.emit(".Lparse_int_invalid:");
         r#gen.emit("\tmov\trsi, rdi");
-        r#gen.emit("\tlea\trdi, [rip + .Lstone_int_invalid]");
-        r#gen.emit("\tjmp\tstone.fail_quoted");
+        r#gen.emit("\tlea\trdx, [rip + .Lstone_int_invalid]");
+        r#gen.emit("\tret");
         r#gen.emit(".Lparse_int_end:");
         r#gen.emit("\ttest\tr9d, r9d");
         r#gen.emit("\tjnz\t.Lparse_int_range");
@@ -2051,16 +2123,17 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tneg\trax");
         r#gen.emit("\tjo\t.Lparse_int_range"); // 9223372036854775808 has no positive int
         r#gen.emit(".Lparse_int_done:");
+        r#gen.emit("\txor\tedx, edx");
         r#gen.emit("\tret");
         r#gen.emit(".Lparse_int_range:");
         r#gen.emit("\tmov\trsi, rdi");
-        r#gen.emit("\tlea\trdi, [rip + .Lstone_int_range]");
-        r#gen.emit("\tjmp\tstone.fail_quoted");
+        r#gen.emit("\tlea\trdx, [rip + .Lstone_int_range]");
+        r#gen.emit("\tret");
     }
 
-    if used.contains(&"stone.parse_float") {
+    if floats {
         // rbx holds the text, r12 the cursor, and r13 a count of digits
-        r#gen.emit("stone.parse_float:");
+        r#gen.emit(".Lparse_float_core:");
         r#gen.emit("\tpush\trbp");
         r#gen.emit("\tmov\trbp, rsp");
         r#gen.emit("\tpush\trbx");
@@ -2148,12 +2221,14 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tinc\tr12");
         jump_if_space(r#gen, "ecx", ".Lparse_float_trailing");
         r#gen.emit(".Lparse_float_invalid:");
-        r#gen.emit("\tlea\trdi, [rip + .Lstone_float_invalid]");
+        r#gen.emit("\tlea\trdx, [rip + .Lstone_float_invalid]");
         r#gen.emit("\tmov\trsi, rbx");
-        r#gen.emit("\tjmp\tstone.fail_quoted");
+        r#gen.emit("\tjmp\t.Lparse_float_return");
         r#gen.emit(".Lparse_float_valid:");
         r#gen.emit("\tmov\trdi, rbx");
         r#gen.emit("\tcall\tstone.decimal_to_float");
+        r#gen.emit("\txor\tedx, edx");
+        r#gen.emit(".Lparse_float_return:");
         r#gen.emit("\tlea\trsp, [rbp - 24]");
         r#gen.emit("\tpop\tr13");
         r#gen.emit("\tpop\tr12");

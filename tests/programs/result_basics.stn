@@ -1,0 +1,47 @@
+// a result holds a value or an error, written ok(x) and err(e)
+fn divide(a: int, b: int) -> result[int, str]:
+    if b == 0:
+        ret err("division by zero")
+    ret ok(a / b)
+
+for d in [2, 0]:
+    match divide(10, d):
+        case ok(q):
+            print("10 /", d, "is", q)
+        case err(message):
+            print("10 /", d, "failed:", message)
+
+a = divide(9, 3)
+b = divide(9, 0)
+print(a, b)
+print(a == ok(3), b == ok(3), b == err("division by zero"), a != b)
+
+// results of counted values, in lists and structs
+struct Job:
+    name: str
+    outcome: result[list[str], int]
+
+jobs = [Job(name="one", outcome=ok(["a", "b"])), Job(name="two", outcome=err(404))]
+print(jobs)
+for job in jobs:
+    match job.outcome:
+        case ok(lines):
+            print(job.name, "made", lines.len(), "lines")
+        case err(code):
+            print(job.name, "failed with", code)
+
+// nested results and options, in generic functions
+fn first_ok[T, E](xs: list[result[T, E]]) -> option[T]:
+    for x in xs:
+        match x:
+            case ok(v):
+                ret some(v)
+            case err(_):
+                cont
+    ret none
+
+rs = [err("x"), ok(some(1.5)), ok(none)]
+print(rs, first_ok(rs))
+codes = [ok(1), err("bad")]
+codes.append(ok(2))
+print(codes, codes.len(), first_ok([err(1), err(2)]) == none)

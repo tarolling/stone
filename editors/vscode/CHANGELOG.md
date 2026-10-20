@@ -10,6 +10,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Results in `stone-lsp`: completion offers `ok` and `err` as `result[T, E]`, and a result
+  value's methods after a `.`; completion after a `str` offers `parse_int` and `parse_float`.
+- Highlighting of `ok`, `err`, `result[...]` types, and the `?` operator.
+
 ## [0.3.1] - 2026-10-17
 
 ### Added

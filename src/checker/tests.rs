@@ -2390,7 +2390,7 @@ fn options_hold_a_value_or_none() {
     );
     assert_error(
         "x = [1].unwrap()\n",
-        "'unwrap' needs an option, found list[int]",
+        "'unwrap' needs an option or a result, found list[int]",
         1,
         5,
     );
@@ -4333,5 +4333,199 @@ fn eq_and_cmp_are_only_the_traits_methods() {
         "cannot redefine builtin 'less'",
         1,
         4,
+    );
+}
+
+#[test]
+fn result_is_the_preludes_enum() {
+    assert_eq!(
+        type_of_symbol("fn f() -> result[int, str]:\n    ret ok(1)\nx = f()\n", "x"),
+        "result[int, str]"
+    );
+    assert_error(
+        "fn f() -> result[int, str]:\n    ret 1\n",
+        "'f' returns result[int, str], but this is int",
+        2,
+        9,
+    );
+    assert_error(
+        "enum result:\n    X\n",
+        "cannot redefine builtin 'result'",
+        1,
+        6,
+    );
+    assert_error("ok = 1\n", "cannot assign to builtin 'ok'", 1, 1);
+    assert_error(
+        "fn err() -> int:\n    ret 1\n",
+        "cannot redefine builtin 'err'",
+        1,
+        4,
+    );
+    assert_error(
+        "fn f(r: result[int, str]) -> int:\n    match r:\n        case ok(v):\n            ret v\n",
+        "'match' does not cover err(_); add 'case err(_):' or 'case _:'",
+        2,
+        11,
+    );
+}
+
+#[test]
+fn result_methods() {
+    let source = "fn f() -> result[int, str]:\n    ret err(\"bad\")\nr = f()\n";
+    for (expr, ty) in [
+        ("r.is_ok()", "bool"),
+        ("r.is_err()", "bool"),
+        ("r.unwrap()", "int"),
+        ("r.unwrap_or(2)", "int"),
+        ("r.unwrap_err()", "str"),
+        ("r.ok()", "option[int]"),
+        ("r.err()", "option[str]"),
+        ("\"1\".parse_int()", "result[int, str]"),
+        ("\"1.5\".parse_float()", "result[float, str]"),
+    ] {
+        assert_eq!(
+            type_of_symbol(&format!("{source}x = {expr}\n"), "x"),
+            ty,
+            "{expr}"
+        );
+    }
+    assert_error(
+        &format!("{source}x = r.unwrap_or(\"no\")\n"),
+        "expected int, found str",
+        4,
+        17,
+    );
+    assert_error(
+        "x = some(1).unwrap_err()\n",
+        "'unwrap_err' needs a result, found option[int]",
+        1,
+        5,
+    );
+    assert_error(
+        "x = 1.unwrap()\n",
+        "'unwrap' needs an option or a result, found int",
+        1,
+        5,
+    );
+    assert_error(
+        "x = 1.parse_int()\n",
+        "'parse_int' needs a str, found int",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn values_may_take_the_names_of_the_preludes_enums() {
+    assert_eq!(errors("result = 0\nprint(result + 1)\n"), []);
+    assert_eq!(
+        errors(
+            "fn f(n: int) -> result[int, str]:\n    result = ok(n)\n    if n < 0:\n        \
+             result = err(\"negative\")\n    ret result\nprint(f(1))\n"
+        ),
+        []
+    );
+    assert_eq!(
+        errors("fn f(option: int) -> option[int]:\n    ret some(option)\nprint(f(1))\n"),
+        []
+    );
+    assert_eq!(
+        errors("fn ordering() -> ordering:\n    ret less\nprint(ordering())\n"),
+        []
+    );
+    assert_eq!(
+        errors("result = [ok(1)]\nresult.append(err(\"x\"))\nprint(result.len())\n"),
+        []
+    );
+    assert_error(
+        "x = result\n",
+        "'result' is an enum, so a value of it is one of its variants, as in 'result.ok'",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn a_question_mark_unwraps_a_result_or_returns_its_error() {
+    let parse =
+        "fn twice(s: str) -> result[int, str]:\n    n = s.parse_int()?\n    ret ok(n * 2)\n";
+    assert_eq!(errors(&format!("{parse}print(twice(\"2\"))\n")), []);
+    assert_eq!(type_of_symbol(parse, "n"), "int");
+    // options work the same way, in a function that returns an option
+    let option = "fn at(s: str) -> option[int]:\n    n = s.find(\"a\")? + 1\n    ret some(n)\n";
+    assert_eq!(errors(&format!("{option}print(at(\"ba\"))\n")), []);
+    // generic functions too
+    assert_eq!(
+        errors(
+            "fn both[T, E](a: result[T, E], b: result[T, E]) -> result[tuple[T, T], E]:\n    \
+             ret ok((a?, b?))\nprint(both(ok(1), err(\"x\")))\n"
+        ),
+        []
+    );
+    // and methods
+    assert_eq!(
+        errors(
+            "struct Acc:\n    total: int\nimpl Acc:\n    fn add(self, s: str) -> result[int, str]:\n        \
+             self.total += s.parse_int()?\n        ret ok(self.total)\n\
+             a = Acc(total=0)\nprint(a.add(\"3\"))\n"
+        ),
+        []
+    );
+}
+
+#[test]
+fn a_question_mark_needs_a_function_that_returns_a_result_or_an_option() {
+    assert_error(
+        "x = \"1\".parse_int()?\n",
+        "'?' can only return from a function that returns a result or an option",
+        1,
+        5,
+    );
+    assert_error(
+        "fn f(s: str) -> int:\n    ret s.parse_int()?\n",
+        "'?' returns from 'f', which returns int, not a result or an option",
+        2,
+        9,
+    );
+    assert_error(
+        "fn f(s: str):\n    print(s.parse_int()?)\n",
+        "'?' returns from 'f', which returns no value, not a result or an option",
+        2,
+        11,
+    );
+}
+
+#[test]
+fn a_question_mark_checks_what_it_unwraps() {
+    assert_error(
+        "fn f(n: int) -> result[int, str]:\n    ret ok(n?)\n",
+        "'?' needs a result, found int",
+        2,
+        12,
+    );
+    assert_error(
+        "fn f(r: result[int, int]) -> result[int, str]:\n    ret ok(r?)\n",
+        "'f' returns result[int, str], so '?' needs an error of type str, found int",
+        2,
+        12,
+    );
+    assert_error(
+        "fn f(o: option[int]) -> result[int, str]:\n    ret ok(o?)\n",
+        "'?' on an option needs 'f' to return an option, but it returns result[int, str]",
+        2,
+        12,
+    );
+    assert_error(
+        "fn f(r: result[int, str]) -> option[int]:\n    ret some(r?)\n",
+        "'?' on a result needs 'f' to return a result, but it returns option[int]; add '.ok()' \
+         before '?' to drop the error",
+        2,
+        14,
+    );
+    assert_error(
+        "fn f(n: int) -> option[int]:\n    ret some(n?)\n",
+        "'?' needs an option, found int",
+        2,
+        14,
     );
 }

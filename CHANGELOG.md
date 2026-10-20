@@ -22,9 +22,22 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   struct's field such as `p.counts[k] += 1` or `p.counts.pop(k)`, and a method that changes
   `self.counts`. A plain `m[k] = v` adds a missing key; anywhere else the key must exist, or the
   program stops with `key not found` at its subscript, in both backends.
+- `result[T, E]`, a prelude enum like `option[T]` whose variants `ok(x)` and `err(e)` are written
+  alone, with the methods `is_ok`, `is_err`, `unwrap`, `unwrap_or`, `unwrap_err`, `ok()`, and
+  `err()`, the last two turning it into an option.
+- `?` after a result gives the value an `ok` holds, and on an `err` returns it from the function
+  at once, anywhere in an expression, freeing what the statement made so far. It needs a function
+  that returns a result with the same error type; on an option, it returns `none` from a function
+  that returns an option. `x = f(x)?` moves `x` into the call, as `x = f(x)` does.
+- `s.parse_int()` and `s.parse_float()` return a `result[int, str]` and a `result[float, str]`,
+  whose error is the message `int(s)` and `float(s)` stop the program with.
 
 ### Changed
 
+- `ok` and `err` are reserved, like `some` and `none`, so a program that used them as names must
+  rename them. A variable, parameter, or function may now be named `result`, `option`, or
+  `ordering`, since their variants never follow their names; types in signatures still mean the
+  enums.
 - `pop`, and a method that changes `self` and returns a value, may be inside any expression,
   not only a statement of its own or the whole value of an assignment: `xs.pop().unwrap()`,
   `while xs.pop().is_some():`, `ret self.items.pop().unwrap_or(0)`, and `m.pop(k).unwrap_or(0)`

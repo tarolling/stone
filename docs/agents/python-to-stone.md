@@ -128,8 +128,9 @@ print(total)
 | `lambda`, a function argument | a trait with one method, and a generic function bounded by it |
 | `return a, b` | `ret (a, b)`, with `-> tuple[A, B]` |
 | returning `None` on failure | `-> option[T]`, returning `none` or `some(x)` |
-| `raise` | return an `option` (or an `enum` of results and errors) and let the caller decide; `os.exit(1)` after printing a message for a fatal error |
-| `try: int(s) except ValueError:` | validate first: `int(s)` on bad text stops the program, and nothing catches it |
+| `raise` | return a `result[T, str]` with `err("message")` and let the caller decide; `os.exit(1)` after printing a message for a fatal error |
+| `try: int(s) except ValueError:` | `match s.parse_int():` with `case ok(n):` and `case err(message):`; `int(s)` on bad text stops the program, and nothing catches it |
+| an exception passing through a function | `?`: `n = s.parse_int()?` returns the `err` from a function that returns a `result` with the same error type |
 | a function that mutates a list argument | return the list: `xs = f(xs)`, which is still in place |
 | a function that mutates a global | take it as a parameter and return it |
 | recursion deeper than 1000 | a loop with an explicit stack (a `list`) |
@@ -137,28 +138,23 @@ print(total)
 | `x * (i + 1)` with a float `x` | `x * float(i + 1)`: convert every int that meets a float |
 
 ```stone
-// int(s) stops the program on bad text, so check it first
-fn parse_int(s: str) -> option[int]:
-    t = s.strip()
-    digits = t
-    if t.startswith("-") or t.startswith("+"):
-        digits = t[1:]
-    if digits == "":
-        ret none
-    for c in digits:
-        if c < "0" or c > "9":
-            ret none
-    ret some(int(t))
+// int(s) stops the program on bad text, but s.parse_int() returns a result, which ? passes on
+fn total(texts: list[str]) -> result[int, str]:
+    sum = 0
+    for s in texts:
+        sum += s.parse_int()?
+    ret ok(sum)
 
-for s in ["42", " -7 ", "x1", "", "+"]:
-    match parse_int(s):
-        case some(n):
-            print("number", n)
-        case none:
-            print("not a number:", "'" + s + "'")
+for texts in [["42", " -7 "], ["1", "x1"], ["99999999999999999999"]]:
+    match total(texts):
+        case ok(n):
+            print("total", n)
+        case err(message):
+            print("error:", message)
 ```
 
-This still stops on a number too large for 64 bits; check its length too if that can happen.
+The error is the message `int(s)` would stop with, such as
+`invalid literal for int() with base 10: 'x1'`.
 
 ### Strings and I/O
 

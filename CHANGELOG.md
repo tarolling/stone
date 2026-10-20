@@ -10,6 +10,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-19
+
 ### Added
 
 - More of maps: `for k in m` goes through a map's keys in insertion order, over the map as it

@@ -10,6 +10,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.3.2] - 2026-10-19
+
 ### Added
 
 - Results in `stone-lsp`: completion offers `ok` and `err` as `result[T, E]`, and a result

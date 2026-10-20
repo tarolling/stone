@@ -1,0 +1,40 @@
+use fs
+
+print(fs.exists("notes.txt"))
+print(fs.write("notes.txt", "one\n"))
+print(fs.append("notes.txt", "two\r\nthree"))
+print(fs.exists("notes.txt"))
+text = fs.read("notes.txt").unwrap()
+print(text.len(), text.split("\n").len())
+print(fs.read_lines("notes.txt"))
+
+// write replaces, append adds, and both create
+print(fs.write("notes.txt", "x"))
+print(fs.read("notes.txt"))
+print(fs.append("fresh.txt", "made\n"))
+print(fs.read_lines("fresh.txt"))
+
+// lines: no final empty line, but empty lines in between, and an empty file has none
+fs.write("blank.txt", "\n\na\n\n").unwrap()
+print(fs.read_lines("blank.txt"))
+fs.write("empty.txt", "").unwrap()
+print(fs.read("empty.txt"), fs.read_lines("empty.txt"))
+
+// text outside ASCII round trips
+fs.write("cafe.txt", "café ☕").unwrap()
+print(fs.read("cafe.txt"))
+
+// a bigger file, written a line at a time
+for i in range(2000):
+    fs.append("big.txt", str(i) + "\n").unwrap()
+lines = fs.read_lines("big.txt").unwrap()
+print(lines.len(), lines[0], lines[1999])
+total = 0
+for line in lines:
+    total += line.parse_int().unwrap()
+print(total)
+
+print(fs.remove("notes.txt"))
+print(fs.exists("notes.txt"))
+print(fs.read("notes.txt"))
+print(fs.remove("notes.txt"))

@@ -31,6 +31,13 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   that returns an option. `x = f(x)?` moves `x` into the call, as `x = f(x)` does.
 - `s.parse_int()` and `s.parse_float()` return a `result[int, str]` and a `result[float, str]`,
   whose error is the message `int(s)` and `float(s)` stop the program with.
+- The builtin module `fs` reads and writes files: `fs.read(path)`, `fs.read_lines(path)`,
+  `fs.write(path, text)`, `fs.append(path, text)`, `fs.list_dir(path)` (sorted names),
+  `fs.exists(path)`, `fs.remove(path)`, and `fs.make_dir(path)`. Each but `exists` returns a
+  result whose error is a message naming the path, such as
+  `no such file or directory: 'notes.txt'`, worded the same under `stone run` and a built
+  program, so errors pass on with `?`. A file that is not UTF-8 text, or holds a null byte, is
+  an error too.
 
 ### Changed
 

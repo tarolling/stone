@@ -6,9 +6,9 @@
 
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
 use crate::checker::{Analysis, Structs, Type, TypeChecker, variants};
-use crate::codegen::AssemblyGenerator;
 use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::{Callee, Inst, Program};
+use crate::codegen::{Architecture, AssemblyGenerator, Os, Target};
 use crate::diagnostic::Severity;
 use crate::project::SourceMap;
 use crate::span::{FileId, Span};
@@ -72,6 +72,14 @@ const STRING_ROUTINES: &[&str] = &[
     "stone.os_arch",
     "stone.os_hostname",
     "stone.os_cwd",
+    "stone.fs_read",
+    "stone.fs_read_lines",
+    "stone.fs_write",
+    "stone.fs_append",
+    "stone.fs_list_dir",
+    "stone.fs_exists",
+    "stone.fs_remove",
+    "stone.fs_make_dir",
 ];
 
 /// The runtime routine behind each function of a builtin module that calls the runtime, by its
@@ -79,7 +87,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 14] = [
+pub const MODULE_ROUTINES: [(&str, &str); 22] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -94,6 +102,26 @@ pub const MODULE_ROUTINES: [(&str, &str); 14] = [
     ("time.now", "stone.time_now"),
     ("time.clock", "stone.time_clock"),
     ("time.sleep", "stone.time_sleep"),
+    ("fs.read", "stone.fs_read"),
+    ("fs.read_lines", "stone.fs_read_lines"),
+    ("fs.write", "stone.fs_write"),
+    ("fs.append", "stone.fs_append"),
+    ("fs.list_dir", "stone.fs_list_dir"),
+    ("fs.exists", "stone.fs_exists"),
+    ("fs.remove", "stone.fs_remove"),
+    ("fs.make_dir", "stone.fs_make_dir"),
+];
+
+/// The routines of the `fs` module that can return an error, which needs the routines that
+/// write one.
+const FS_FAILING: &[&str] = &[
+    "stone.fs_read",
+    "stone.fs_read_lines",
+    "stone.fs_write",
+    "stone.fs_append",
+    "stone.fs_list_dir",
+    "stone.fs_remove",
+    "stone.fs_make_dir",
 ];
 
 /// Returns the runtime routine behind the function of a builtin module with the linked name
@@ -207,6 +235,54 @@ pub const CPU_ONLINE: &str = "/sys/devices/system/cpu/online";
 /// The size of the buffer `os.cwd` asks the kernel to write the path into, which is the most
 /// the `getcwd` syscall can return.
 pub const PATH_BUFFER: i64 = 4096;
+
+/// How many bytes `fs.read` first reads a file into, a buffer that doubles until the file fits.
+pub const FILE_BUFFER: i64 = 1 << 14;
+
+/// How many bytes of directory entries `fs.list_dir` asks the `getdents64` syscall for at once.
+pub const DIR_BUFFER: i64 = 1 << 15;
+
+/// The code the `fs` routines pass for an error that is not the system's, a file or name that is
+/// not UTF-8 text (`stdlib::fs::INVALID_TEXT`), where the system's error numbers are positive.
+pub const INVALID_TEXT_CODE: i64 = -1;
+
+/// The code for a path holding a null character (`stdlib::fs::NULL_IN_PATH`).
+pub const NULL_IN_PATH_CODE: i64 = -2;
+
+/// The `open` flags the `fs` routines use, which differ by system.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct OpenFlags {
+    /// Reading a file: `O_RDONLY | O_CLOEXEC`.
+    pub read: i64,
+    /// Writing a file over what it held: `O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC`.
+    pub write: i64,
+    /// Writing at a file's end: `O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC`.
+    pub append: i64,
+    /// Reading a directory's entries: `O_RDONLY | O_DIRECTORY | O_CLOEXEC`, which only Linux
+    /// uses, since macOS reads directories with `opendir`.
+    pub directory: i64,
+}
+
+impl OpenFlags {
+    /// Returns the flags of `target`'s system, whose values differ between Linux and macOS,
+    /// and for `O_DIRECTORY` even between Linux's architectures.
+    pub fn of(target: Target) -> OpenFlags {
+        let (wronly, creat, trunc, append, cloexec) = match target.os {
+            Os::Linux => (1, 0o100, 0o1000, 0o2000, 0o2000000),
+            Os::MacOs => (1, 0x200, 0x400, 0x8, 0x1000000),
+        };
+        let directory = match target.arch {
+            Architecture::X64 => 0o200000,
+            Architecture::Arm64 => 0o40000,
+        };
+        OpenFlags {
+            read: cloexec,
+            write: wronly | creat | trunc | cloexec,
+            append: wronly | creat | append | cloexec,
+            directory: directory | cloexec,
+        }
+    }
+}
 
 /// The size of the `utsname` structure the `uname` syscall fills: six fields of 65 bytes, rounded
 /// up to keep the stack aligned.
@@ -329,6 +405,14 @@ impl Context {
                 }
                 _ => {}
             }
+        }
+        // routines the fs routines call: an error number with no reason in the tables is
+        // written with stone.str_int, and a directory's names are sorted
+        if self.runtime.iter().any(|label| FS_FAILING.contains(label)) {
+            self.runtime.insert("stone.str_int");
+        }
+        if self.runtime.contains("stone.fs_list_dir") {
+            self.runtime.insert("stone.list_sort_str");
         }
         self.counts_references = self.needs_strings() || self.needs_lists() || self.needs_enums();
         Ok(())
@@ -525,7 +609,13 @@ impl Context {
     pub fn needs_lists(&self) -> bool {
         self.types()
             .any(|ty| contains_list(ty, &self.analysis, &mut HashSet::new()))
-            || self.uses(&["stone.args", "stone.str_split_ws", "stone.str_split"])
+            || self.uses(&[
+                "stone.args",
+                "stone.str_split_ws",
+                "stone.str_split",
+                "stone.fs_read_lines",
+                "stone.fs_list_dir",
+            ])
     }
 
     /// Returns whether the program has enum values, which need `stone.free_enum`.

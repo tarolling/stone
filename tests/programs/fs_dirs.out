@@ -1,0 +1,17 @@
+ok('out')
+err("file exists: 'out'")
+ok([])
+ok(['B.txt', 'a.txt', 'b.txt', 'c', 'sub'])
+ok(['deep.txt'])
+true true false
+err("no such file or directory: 'missing.txt'")
+err("no such file or directory: 'missing'")
+err("is a directory: 'out'")
+err("is a directory: 'out'")
+err("not a directory: 'out/a.txt'")
+err("not a directory: 'out/a.txt/inner'")
+err("no such file or directory: 'missing/inner'")
+err("no such file or directory: 'missing/inner.txt'")
+err("no such file or directory: ''")
+['out']
+ok([])

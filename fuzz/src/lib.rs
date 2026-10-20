@@ -25,6 +25,21 @@ pub const LIMITS: Limits = Limits {
     max_calls: stone::stdlib::MAX_CALL_DEPTH,
 };
 
+/// Moves the fuzzing process, once, into a new empty directory under the system's temporary
+/// directory, so a program the `interpret` target runs, such as `use fs` then
+/// `fs.write("a", "b")`, writes its files there rather than beside the fuzzer.
+///
+/// For example, the first call in process 42 moves into `<temp>/stone-fuzz-42`, and later calls
+/// do nothing.
+pub fn sandbox() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        let dir = std::env::temp_dir().join(format!("stone-fuzz-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).expect("the temporary directory should be writable");
+        std::env::set_current_dir(&dir).expect("the new directory should exist");
+    });
+}
+
 /// How long a compiled program may run before the differential check reports a hang.
 const RUN_TIMEOUT: Duration = Duration::from_secs(5);
 

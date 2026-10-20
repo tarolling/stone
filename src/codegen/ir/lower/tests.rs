@@ -591,6 +591,32 @@ fn os_functions_call_the_runtime() {
 }
 
 #[test]
+fn fs_functions_call_the_runtime_and_own_their_results() {
+    let source = "use fs\nprint(fs.read(\"a\"), fs.read_lines(\"a\"), fs.list_dir(\"a\"))\n\
+                  print(fs.write(\"a\", \"b\"), fs.append(\"a\", \"b\"), fs.exists(\"a\"))\n\
+                  print(fs.remove(\"a\"), fs.make_dir(\"a\"))\n";
+    let text = dump_linked(source);
+    for call in [
+        "call stone.fs_read(",
+        "call stone.fs_read_lines(",
+        "call stone.fs_list_dir(",
+        "call stone.fs_write(",
+        "call stone.fs_append(",
+        "call stone.fs_exists(",
+        "call stone.fs_remove(",
+        "call stone.fs_make_dir(",
+    ] {
+        assert!(text.contains(call), "{call} in\n{text}");
+    }
+    // a printed result is a temporary, released after the print
+    let text = dump_linked("use fs\nprint(fs.read(\"a\"))\n");
+    assert!(
+        text.contains("v1 = call stone.fs_read(v0)") && text.contains("release_enum v1"),
+        "{text}"
+    );
+}
+
+#[test]
 fn os_strings_are_owned_by_whoever_uses_them() {
     // a printed result is a temporary, released after the print
     let text = dump_linked("use os\nprint(os.cwd())\n");

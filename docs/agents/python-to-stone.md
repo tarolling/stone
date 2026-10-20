@@ -12,12 +12,12 @@ since stone copies values.
 1. **Inventory before writing.** Read the whole Python program and list what it uses that stone
    lacks (see "Not in stone" in the stone guide): classes with inheritance, exceptions, lambdas
    and functions passed as values, comprehensions, f-strings, default and keyword arguments,
-   sets, file I/O, and values whose type varies (a variable that is
+   sets, and values whose type varies (a variable that is
    sometimes `None`, a name reused for an int and then a float, or a list that mixes types). Find
    arithmetic that could pass 64 bits, such as products in hashes and random number generators,
    and check that every intermediate value stays below 2^63, or the result will wrap. Decide how each will be translated
-   before converting anything. If something cannot be translated (file I/O, networking,
-   threads, third-party libraries), say so up front and ask whether to continue.
+   before converting anything. If something cannot be translated (networking, threads,
+   third-party libraries), say so up front and ask whether to continue.
 2. **Choose the types.** Write down a stone signature for every function: each parameter's type
    and the return type. A value that may be missing becomes `option[T]`; a value that is one of
    several shapes becomes an `enum`; a class becomes a `struct`; a function that mutates an
@@ -165,7 +165,13 @@ The error is the message `int(s)` would stop with, such as
 | `s.lower()`, `s.replace()`, `s.isdigit()` | loops over characters, comparing with `<` and `>` |
 | `s * 3` | a loop of `+=` |
 | `ord(c)`, `chr(n)` | not available; compare characters as strings (`c >= "a" and c <= "z"`) |
-| `open(path).read()`, `sys.stdin` | `while not eof(): line = input()` and redirect the file to standard input |
+| `sys.stdin`, `for line in sys.stdin` | `while not eof(): line = input()` |
+| `open(path).read()` | `fs.read(path)`, a `result[str, str]`, after `use fs` |
+| `open(path).read().splitlines()`, `f.readlines()` | `fs.read_lines(path)` (lines without endings) |
+| `open(path, "w").write(s)`, mode `"a"` | `fs.write(path, s)`, `fs.append(path, s)` |
+| `os.listdir(p)`, `os.path.exists(p)` | `fs.list_dir(p)` (sorted), `fs.exists(p)` |
+| `os.remove(p)`, `os.mkdir(p)` | `fs.remove(p)`, `fs.make_dir(p)` |
+| `except FileNotFoundError:` | `match` the result: `err(message)` holds a message such as `no such file or directory: 'x'` |
 | `sys.argv[1:]` | `args()` (without the program's name) |
 | `sys.exit(n)` | `os.exit(n)` |
 | `os.environ.get("X", "d")` | `os.env("X").unwrap_or("d")`, after `use os` |

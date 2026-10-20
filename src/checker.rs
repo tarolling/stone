@@ -5755,6 +5755,27 @@ impl Inference {
                     _ => Ty::Unit,
                 }
             }
+            "fs.read" | "fs.read_lines" | "fs.list_dir" | "fs.exists" | "fs.remove"
+            | "fs.make_dir" | "fs.write" | "fs.append" => {
+                let params = match name {
+                    "fs.write" | "fs.append" => 2,
+                    _ => 1,
+                };
+                if args.len() == params {
+                    for (arg, ty) in args.iter().zip(arg_types) {
+                        self.expect(&Ty::Str, ty, arg.span);
+                    }
+                } else {
+                    self.arity_error(call.span, name, &params.to_string(), args.len());
+                }
+                let value = match name {
+                    "fs.exists" => return Ty::Bool,
+                    "fs.read_lines" | "fs.list_dir" => Ty::List(Box::new(Ty::Str)),
+                    "fs.write" | "fs.append" => Ty::Int,
+                    _ => Ty::Str,
+                };
+                Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
+            }
             "os.platform" | "os.arch" | "os.hostname" | "os.cpu_count" | "os.pid" | "os.cwd"
             | "time.now" | "time.clock" => {
                 if !args.is_empty() {

@@ -41,11 +41,22 @@ pub enum Sys {
     /// Fills a buffer with entropy: `getrandom` on Linux and `getentropy` on macOS, which ignores
     /// the flags in `x2`.
     Getrandom,
+    Getdents64,
+    /// Deletes the file named by `x1`, relative to the directory `x0`: `unlinkat` on Linux, and
+    /// `unlink` on macOS, whose shim drops `x0`, as it does for the next two.
+    Unlinkat,
+    Mkdirat,
+    Faccessat,
+    Opendir,
+    /// Reads the next entry of a `DIR` from `opendir`, returning null at the end, which only
+    /// macOS calls.
+    Readdir,
+    Closedir,
 }
 
 impl Sys {
     /// Every call, in the order their shims are emitted.
-    pub const ALL: [Sys; 15] = [
+    pub const ALL: [Sys; 22] = [
         Sys::Read,
         Sys::Write,
         Sys::Openat,
@@ -61,6 +72,13 @@ impl Sys {
         Sys::Sysctl,
         Sys::Nanosleep,
         Sys::Getrandom,
+        Sys::Getdents64,
+        Sys::Unlinkat,
+        Sys::Mkdirat,
+        Sys::Faccessat,
+        Sys::Opendir,
+        Sys::Readdir,
+        Sys::Closedir,
     ];
 
     /// Returns the call's Linux system call number, such as 64 for `write`, or `None` if the
@@ -81,7 +99,11 @@ impl Sys {
             Sys::ClockGettime => 113,
             Sys::Nanosleep => 101,
             Sys::Getrandom => 278,
-            Sys::Sysctl => return None,
+            Sys::Getdents64 => 61,
+            Sys::Unlinkat => 35,
+            Sys::Mkdirat => 34,
+            Sys::Faccessat => 48,
+            Sys::Sysctl | Sys::Opendir | Sys::Readdir | Sys::Closedir => return None,
         })
     }
 
@@ -100,7 +122,15 @@ impl Sys {
             Sys::Sysctl => "sysctl",
             Sys::Nanosleep => "nanosleep",
             Sys::Getrandom => "getentropy",
-            Sys::Openat | Sys::Close | Sys::Mremap | Sys::Uname => return None,
+            Sys::Openat => "open",
+            Sys::Close => "close",
+            Sys::Unlinkat => "unlink",
+            Sys::Mkdirat => "mkdir",
+            Sys::Faccessat => "access",
+            Sys::Opendir => "opendir",
+            Sys::Readdir => "readdir",
+            Sys::Closedir => "closedir",
+            Sys::Mremap | Sys::Uname | Sys::Getdents64 => return None,
         })
     }
 
@@ -144,24 +174,71 @@ const SHIM_SAVED: [&str; 17] = [
 
 /// Emits the macOS shim of every call that `assembly`, the program's text so far, makes through
 /// [`system_call`]. Each shim calls the `libSystem` function, which the linker binds, and keeps
-/// the contract of a Linux system call: only `x0` changes. `libSystem` reports a failure as -1,
-/// which the checks written for Linux's -4095 through -1 catch too, except that `getcwd` returns
-/// a pointer, so its shim turns a null into -1.
+/// the contract of a Linux system call: only `x0` changes, and a failure comes back as the
+/// negative error number. `libSystem` reports a failure as -1, or a null pointer from `getcwd`
+/// and `opendir`, with the number in `errno`, which `__error` points to.
+///
+/// The calls named for Linux's `*at` system calls take a directory in `x0`, which the shim drops,
+/// since every path the runtime passes is relative to the working directory. `open` is variadic,
+/// and Apple's arm64 calling convention passes variadic arguments on the stack, so its shim
+/// stores the mode there. `readdir` returns null both at the end and on an error, so its shim
+/// clears `errno` first and returns 0 at the end.
 pub fn system_shims(r#gen: &mut dyn AssemblyGenerator, assembly: &str) {
     for call in Sys::ALL {
         if call.macos().is_none() || !assembly.contains(&format!("\tbl\t{}\n", call.shim())) {
             continue;
         }
+        let name = call.macos().unwrap().trim_start_matches('_');
+        let done = format!(".Lsys_{name}_done");
         r#gen.emit(&format!("{}:", call.shim()));
         push_frame(r#gen, &SHIM_SAVED);
-        r#gen.emit(&format!("\tbl\t{}", call.macos().unwrap()));
-        if call == Sys::Getcwd {
-            r#gen.emit("\tcbnz\tx0, .Lsys_getcwd_done");
-            r#gen.emit("\tmov\tx0, #-1");
-            r#gen.emit(".Lsys_getcwd_done:");
+        if matches!(
+            call,
+            Sys::Openat | Sys::Unlinkat | Sys::Mkdirat | Sys::Faccessat
+        ) {
+            r#gen.emit("\tmov\tx0, x1");
+            r#gen.emit("\tmov\tx1, x2");
+            r#gen.emit("\tmov\tx2, x3");
         }
+        match call {
+            Sys::Openat => {
+                r#gen.emit("\tstr\tx2, [sp, #-16]!");
+                r#gen.emit("\tbl\topen");
+                r#gen.emit("\tadd\tsp, sp, #16");
+            }
+            Sys::Readdir => {
+                r#gen.emit("\tstr\tx0, [sp, #-16]!");
+                r#gen.emit(&format!("\tbl\t{ERRNO_FUNCTION}"));
+                r#gen.emit("\tstr\twzr, [x0]");
+                r#gen.emit("\tldr\tx0, [sp], #16");
+                r#gen.emit("\tbl\treaddir");
+                r#gen.emit(&format!("\tcbnz\tx0, {done}"));
+                errno(r#gen);
+            }
+            _ => r#gen.emit(&format!("\tbl\t{}", call.macos().unwrap())),
+        }
+        if matches!(call, Sys::Getcwd | Sys::Opendir) {
+            r#gen.emit(&format!("\tcbnz\tx0, {done}"));
+            errno(r#gen);
+        } else if !matches!(call, Sys::Readdir | Sys::Exit | Sys::Getpid) {
+            r#gen.emit("\tcmn\tx0, #1");
+            r#gen.emit(&format!("\tb.ne\t{done}"));
+            errno(r#gen);
+        }
+        r#gen.emit(&format!("{done}:"));
         pop_frame(r#gen, &SHIM_SAVED);
     }
+}
+
+/// The `libSystem` function that returns where the calling thread's `errno` is, which the shims
+/// call after a failure.
+pub const ERRNO_FUNCTION: &str = "__error";
+
+/// Emits code that puts the negative of `errno` in `x0`, for a shim whose call failed.
+fn errno(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit(&format!("\tbl\t{ERRNO_FUNCTION}"));
+    r#gen.emit("\tldr\tw0, [x0]");
+    r#gen.emit("\tneg\tx0, x0");
 }
 
 /// Emits a loop that copies `count` bytes from `src` to `dst`, advancing both and counting
@@ -3001,10 +3078,8 @@ pub fn time_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], failures: 
         r#gen.emit("\tmov\tx0, sp");
         r#gen.emit("\tadd\tx1, sp, #16");
         system_call(r#gen, Sys::Nanosleep);
-        // a signal interrupted it, so sleep for what is left: Linux returns -EINTR, and
-        // libSystem returns -1, which can only mean EINTR for a valid request
-        let interrupted = if macos { 1 } else { 4 };
-        r#gen.emit(&format!("\tcmn\tx0, #{interrupted}"));
+        // a signal interrupted it, so sleep for what is left: both systems return -EINTR
+        r#gen.emit("\tcmn\tx0, #4");
         r#gen.emit("\tb.ne\t.Ltime_sleep_done");
         r#gen.emit("\tldp\tx9, x10, [sp, #16]");
         r#gen.emit("\tstp\tx9, x10, [sp]");

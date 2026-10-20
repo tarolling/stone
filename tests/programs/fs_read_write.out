@@ -1,0 +1,19 @@
+false
+ok(4)
+ok(10)
+true
+14 3
+ok(['one', 'two', 'three'])
+ok(1)
+ok('x')
+ok(5)
+ok(['made'])
+ok(['', '', 'a', ''])
+ok('') ok([])
+ok('café ☕')
+2000 0 1999
+1999000
+ok('notes.txt')
+false
+err("no such file or directory: 'notes.txt'")
+err("no such file or directory: 'notes.txt'")

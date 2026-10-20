@@ -1,0 +1,13 @@
+use fs
+
+print(fs.list_dir("."))
+print(fs.list_dir("data"))
+lines = fs.read_lines("data/poem.txt").unwrap()
+print(lines.len())
+for line in lines:
+    print(line)
+print(fs.read("data/crlf.txt"))
+print(fs.read_lines("data/crlf.txt"))
+print(fs.read("data/latin1.txt"))
+print(fs.read_lines("data/latin1.txt"))
+print(fs.read("data/null.txt"))

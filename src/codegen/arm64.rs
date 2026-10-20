@@ -15,6 +15,7 @@
 pub mod builtins;
 mod emit;
 pub mod floats;
+pub mod fs;
 pub mod sort;
 
 use crate::ast::Mod;
@@ -375,6 +376,10 @@ impl Arm64Generator {
                 .ctx
                 .failure_of("stone.os_cwd", crate::stdlib::os::CWD_FAILURE);
             builtins::os_runtime(self, &os, &cwd_failure);
+        }
+        let fs = self.ctx.module_routines("stone.fs_");
+        if !fs.is_empty() {
+            fs::fs_runtime(self, &fs);
         }
         let random: Vec<&str> = [
             "stone.random_seed",
@@ -779,6 +784,34 @@ mod tests {
         Arm64Generator::new()
             .assemble(&module.unwrap().module)
             .unwrap()
+    }
+
+    #[test]
+    fn fs_routines_are_only_emitted_when_used() {
+        let plain = assemble_linked("use fs\nprint(1)\n");
+        assert!(!plain.contains("stone.fs_"), "{plain}");
+
+        // exists cannot fail, so it needs none of the error tables
+        let exists = assemble_linked("use fs\nprint(fs.exists(\"a\"))\n");
+        assert!(exists.contains("stone.fs_exists:"), "{exists}");
+        assert!(!exists.contains(".Lfs_err:"), "{exists}");
+        assert!(!exists.contains("stone.fs_read:"), "{exists}");
+
+        let read = assemble_linked("use fs\nprint(fs.read(\"a\"))\n");
+        for label in [
+            "stone.fs_read:",
+            ".Lfs_err:",
+            ".Lfs_utf8:",
+            "stone.str_int:",
+        ] {
+            assert!(read.contains(label), "{label} in {read}");
+        }
+        assert!(!read.contains("stone.fs_list_dir:"), "{read}");
+
+        let list = assemble_linked("use fs\nprint(fs.list_dir(\".\"))\n");
+        for label in ["stone.fs_list_dir:", "stone.list_sort_str:"] {
+            assert!(list.contains(label), "{label} in {list}");
+        }
     }
 
     #[test]

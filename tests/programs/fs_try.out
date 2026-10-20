@@ -1,0 +1,8 @@
+ok(4)
+ok(46)
+err("no such file or directory: 'missing.txt'")
+err("invalid literal for int() with base 10: 'five'")
+read 14 bytes
+failed: no such file or directory: 'nowhere/numbers.txt'
+true true
+default

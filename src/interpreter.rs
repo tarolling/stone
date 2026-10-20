@@ -14,7 +14,7 @@ use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
 use crate::span::Span;
 use crate::stdlib::random::Rng;
-use crate::stdlib::{self, MAX_CALL_DEPTH, math, os, time};
+use crate::stdlib::{self, MAX_CALL_DEPTH, fs, math, os, time};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
@@ -2369,6 +2369,33 @@ impl<'out> Interpreter<'out> {
             ("os.cpu_count", []) => return Ok(Value::Int(os::cpu_count())),
             ("os.pid", []) => return Ok(Value::Int(os::pid())),
             ("os.cwd", []) => return Ok(Value::Str(os::cwd()?.into())),
+            ("fs.read", [Value::Str(path)]) => {
+                return Ok(result(fs::read(path).map(|text| Value::Str(text.into()))));
+            }
+            ("fs.read_lines" | "fs.list_dir", [Value::Str(path)]) => {
+                let names = match name {
+                    "fs.read_lines" => fs::read_lines(path),
+                    _ => fs::list_dir(path),
+                };
+                return Ok(result(names.map(|names| {
+                    str_list(names.iter().map(String::as_str).collect())
+                })));
+            }
+            ("fs.write" | "fs.append", [Value::Str(path), Value::Str(text)]) => {
+                let written = match name {
+                    "fs.write" => fs::write(path, text),
+                    _ => fs::append(path, text),
+                };
+                return Ok(result(written.map(Value::Int)));
+            }
+            ("fs.exists", [Value::Str(path)]) => return Ok(Value::Bool(fs::exists(path))),
+            ("fs.remove" | "fs.make_dir", [Value::Str(path)]) => {
+                let done = match name {
+                    "fs.remove" => fs::remove(path),
+                    _ => fs::make_dir(path),
+                };
+                return Ok(result(done.map(|path| Value::Str(path.into()))));
+            }
             ("os.exit", [Value::Int(code)]) => {
                 self.out.flush()?;
                 return Err(Box::new(Exit(*code as u8)));

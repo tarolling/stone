@@ -525,6 +525,7 @@ mod tests {
 use os
 use math
 use time
+use fs
 xs = [1.5, float(\" 2.5 \")]
 xs.append(xs[0] % 0.5)
 words = input(\"> \").strip().split()
@@ -534,6 +535,8 @@ print(xs, words, parts, eof(), args(), words.len())
 print(os.env(\"HOME\"), os.has_env(\"HOME\"), os.platform(), os.arch(), os.hostname())
 print(os.cpu_count(), os.pid(), os.cwd(), time.now(), time.clock())
 print(math.abs(-1), math.abs(-1.5), math.min(1, 2), math.max([1.5]), math.sqrt(2), math.floor(1.5))
+print(fs.read(\"a\"), fs.read_lines(\"a\"), fs.write(\"a\", \"b\"), fs.append(\"a\", \"b\"))
+print(fs.list_dir(\".\"), fs.exists(\"a\"), fs.remove(\"a\"), fs.make_dir(\"d\"))
 time.sleep(0)
 os.exit(0)
 ";
@@ -620,6 +623,7 @@ os.exit(0)
         let system: Vec<&str> = arm64::builtins::Sys::ALL
             .iter()
             .filter_map(|call| call.macos())
+            .chain([arm64::builtins::ERRNO_FUNCTION])
             .collect();
         let mut needs = Vec::new();
         for target in Target::ALL {

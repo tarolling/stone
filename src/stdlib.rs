@@ -1,5 +1,6 @@
 //! The builtin functions shared by the interpreter and the compiler, and the limits both enforce.
 
+pub mod fs;
 pub mod math;
 pub mod os;
 pub mod random;
@@ -21,7 +22,7 @@ pub struct BuiltinModule {
 }
 
 /// Every builtin module.
-pub static MODULES: [BuiltinModule; 4] = [
+pub static MODULES: [BuiltinModule; 5] = [
     BuiltinModule {
         name: os::MODULE,
         doc: os::MODULE_DOC,
@@ -41,6 +42,11 @@ pub static MODULES: [BuiltinModule; 4] = [
         name: time::MODULE,
         doc: time::MODULE_DOC,
         functions: &time::DOCS,
+    },
+    BuiltinModule {
+        name: fs::MODULE,
+        doc: fs::MODULE_DOC,
+        functions: &fs::DOCS,
     },
 ];
 

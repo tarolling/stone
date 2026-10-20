@@ -6,5 +6,7 @@
 use libfuzzer_sys::fuzz_target;
 
 fuzz_target!(|source: &str| {
+    // a program may use the fs module
+    stone_fuzz::sandbox();
     let _ = stone::driver::interpret_with(source, &mut std::io::sink(), stone_fuzz::LIMITS);
 });

@@ -26,13 +26,16 @@ const PROGRAM_DIRS: [&str; 4] = [
 ];
 
 /// Returns every `.stn` file directly in [`PROGRAM_DIRS`] and the `main.stn` of each of their
-/// subdirectories.
+/// subdirectories, except a program's `.files` directory of fixtures.
 fn programs() -> Vec<PathBuf> {
     let root = Path::new(env!("CARGO_MANIFEST_DIR"));
     let mut programs = Vec::new();
     for dir in PROGRAM_DIRS {
         for entry in std::fs::read_dir(root.join(dir)).unwrap() {
             let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "files") {
+                continue;
+            }
             if path.is_dir() {
                 programs.push(path.join("main.stn"));
             } else if path.extension().is_some_and(|ext| ext == "stn") {

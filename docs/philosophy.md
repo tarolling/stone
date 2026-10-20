@@ -247,9 +247,11 @@ Status: on Linux, compiled programs need no C library. They start at their own `
 system calls directly, allocate memory with their own allocator on top of `mmap`, read input
 through their own buffer, and format and parse floats themselves, digit for digit like the
 interpreter, so each one is a static executable. On arm64 macOS, the same runtime calls only
-`libSystem`'s system call wrappers (`read`, `write`, `mmap`, `sysctl`, and a few more), each
-through a shim that keeps the contract of a Linux system call, so the rest of the runtime is
-shared. `stone build` writes either executable itself, with its own assembler and linkers,
+`libSystem`'s system call wrappers (`read`, `write`, `open`, `mmap`, `sysctl`, and a few more),
+each through a shim that keeps the contract of a Linux system call, error numbers included, so
+the rest of the runtime is shared. The one exception is reading a directory, for `fs.list_dir`:
+Linux's `getdents64` has no public counterpart on macOS, so there the runtime calls
+`opendir` and `readdir`, the interface Apple supports. `stone build` writes either executable itself, with its own assembler and linkers,
 including the Mach-O file's imports and its code signature, so it needs no assembler, linker,
 or C compiler installed, and builds for every target from any machine. Windows is not supported
 yet.

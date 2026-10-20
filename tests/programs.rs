@@ -18,6 +18,11 @@
 //! `main.stn`, whose `.out`, `.err`, `.in`, `.args`, and `.env` files sit next to `main.stn`. For example,
 //! `tests/programs/modules/main.stn` uses modules such as `tests/programs/modules/text.stn`.
 //!
+//! Every backend runs a program in a new empty working directory of its own, so programs that
+//! write files never meet. A program that reads files can have a sibling `.files` directory (such
+//! as `tests/programs/fs_fixture.files/` beside `fs_fixture.stn`, or `main.files/` beside a
+//! `main.stn`), which is copied into the working directory first.
+//!
 //! The compiler is also tested for the other architecture, such as aarch64 on an x86-64 machine,
 //! by cross-compiling each program with `stone build --target` and running it under qemu-user.
 //! `stone build` needs no other tools for any target, but running the program needs qemu (such
@@ -88,6 +93,10 @@ fn programs() -> Vec<PathBuf> {
     for dir in PROGRAM_DIRS {
         for entry in std::fs::read_dir(root.join(dir)).expect("program directory should exist") {
             let path = entry.unwrap().path();
+            if path.extension().is_some_and(|ext| ext == "files") {
+                // a program's fixtures, not a program
+                continue;
+            }
             if path.is_dir() {
                 let main = path.join("main.stn");
                 assert!(main.is_file(), "{} has no main.stn", path.display());
@@ -157,6 +166,39 @@ fn outcome_of(command: &mut Command, input: &[u8]) -> Result<Outcome, String> {
     })
 }
 
+/// Copies the directory `from`, and everything in it, to `to`.
+fn copy_dir(from: &Path, to: &Path) {
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_dir(&path, &target);
+        } else {
+            std::fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+/// Returns a new working directory for running the program with the backend, holding a copy of
+/// the program's `.files` directory if it has one.
+///
+/// For example, `tests/programs/fs_fixture.stn` runs under `stone run` in
+/// `<target tmpdir>/run/fs_fixture.cwd/`, which starts as a copy of `fs_fixture.files/`.
+fn working_dir(program: &Path, backend: Backend) -> PathBuf {
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+        .join(backend.name())
+        .join(format!("{}.cwd", name_of(program)));
+    let _ = std::fs::remove_dir_all(&dir);
+    let fixtures = program.with_extension("files");
+    if fixtures.is_dir() {
+        copy_dir(&fixtures, &dir);
+    } else {
+        std::fs::create_dir_all(&dir).unwrap();
+    }
+    dir
+}
+
 /// Executes the program with the given backend and returns how it ended.
 fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
     let stone = env!("CARGO_BIN_EXE_stone");
@@ -172,13 +214,15 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 .collect()
         })
         .unwrap_or_default();
+    let cwd = working_dir(program, backend);
     match backend {
         Backend::Run => outcome_of(
             Command::new(stone)
                 .arg("run")
                 .arg(program)
                 .args(&args)
-                .envs(env),
+                .envs(env)
+                .current_dir(&cwd),
             &input,
         ),
         Backend::Build | Backend::Cross(_) => {
@@ -204,7 +248,11 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
             };
             // the binary reports any string or list still allocated when it ends
             outcome_of(
-                command.args(&args).envs(env).env("STONE_LEAK_CHECK", "1"),
+                command
+                    .args(&args)
+                    .envs(env)
+                    .env("STONE_LEAK_CHECK", "1")
+                    .current_dir(&cwd),
                 &input,
             )
         }

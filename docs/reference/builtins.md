@@ -3,8 +3,9 @@
 These functions are part of the language and available everywhere. Their names cannot be
 assigned to. The builtin [methods](#methods) are called on a value instead, as in `xs.len()`.
 The builtin modules, [`os`](#the-os-module), [`math`](#the-math-module),
-[`random`](#the-random-module), and [`time`](#the-time-module), are imported like module files,
-as in `use math`. The same descriptions appear on hover in the editor.
+[`random`](#the-random-module), [`time`](#the-time-module), and [`fs`](#the-fs-module), are
+imported like module files, as in `use math`. The same descriptions appear on hover in the
+editor.
 
 ## `print`
 
@@ -930,4 +931,155 @@ for i in range(3):
     print(3 - i)
     time.sleep(1)
 print("go")
+```
+
+## The `fs` module
+
+`fs` is a builtin module like [`os`](#the-os-module): `use fs` to call `fs.read("notes.txt")`,
+or `use fs.read` to call `read("notes.txt")`. A file named `fs.stn` next to the entry file
+cannot be imported.
+
+Every function but `fs.exists` returns a `result` whose error is a message naming the path,
+such as `no such file or directory: 'notes.txt'`, so a program decides what a missing file
+means, or passes the error on with `?` from a function that returns `result[..., str]`:
+
+```stone
+use fs
+
+fn total(path: str) -> result[int, str]:
+    sum = 0
+    for line in fs.read_lines(path)?:
+        sum += line.parse_int()?
+    ret ok(sum)
+
+print(total("numbers.txt"))   // ok(46), or err("no such file or directory: 'numbers.txt'")
+```
+
+A path is relative to the working directory unless it starts with `/`. The messages are the
+same under `stone run` and a built program: the reason the system gives, in lowercase (such as
+`permission denied`, `is a directory`, `not a directory`, or `file exists`), or
+`os error N` for an error number with no reason in stone's table. A file, or a name in a
+directory, that is not UTF-8 text is the error `not valid UTF-8 text`, and so is a file holding
+a null byte, since a string cannot hold one.
+
+### `fs.read`
+
+```text
+fs.read(path: str) -> result[str, str]
+```
+
+Returns `ok` of the whole text of the file at `path`, or `err` of a message.
+
+```stone
+use fs
+
+match fs.read("notes.txt"):
+    case ok(text):
+        print(text.len(), "bytes")
+    case err(message):
+        print("cannot read:", message)
+```
+
+### `fs.read_lines`
+
+```text
+fs.read_lines(path: str) -> result[list[str], str]
+```
+
+Returns `ok` of the lines of the file at `path`, without their line endings, or `err` of a
+message. A line ends at `\n` or `\r\n`, and a file that ends with a line ending has no empty
+last line, so `"a\nb\n"` and `"a\r\nb"` both read as `["a", "b"]`.
+
+```stone
+use fs
+
+for line in fs.read_lines("notes.txt").unwrap_or([]):
+    print(line)
+```
+
+### `fs.write`
+
+```text
+fs.write(path: str, text: str) -> result[int, str]
+```
+
+Writes `text` to the file at `path`, creating it or replacing what it held, and returns `ok` of
+the number of bytes written, or `err` of a message. A new file can be read and written by
+everyone the system's umask allows.
+
+```stone
+use fs
+
+fs.write("greeting.txt", "hello\n").unwrap()
+print(fs.read("greeting.txt"))   // ok('hello\n')
+```
+
+### `fs.append`
+
+```text
+fs.append(path: str, text: str) -> result[int, str]
+```
+
+Writes `text` to the end of the file at `path`, creating it if there is none, and returns `ok`
+of the number of bytes written, or `err` of a message.
+
+```stone
+use fs
+
+for i in range(3):
+    fs.append("log.txt", "line " + str(i) + "\n").unwrap()
+print(fs.read_lines("log.txt"))   // ok(['line 0', 'line 1', 'line 2'])
+```
+
+### `fs.list_dir`
+
+```text
+fs.list_dir(path: str) -> result[list[str], str]
+```
+
+Returns `ok` of the names in the directory at `path`, without `.` and `..`, sorted by their
+bytes (so `"B"` comes before `"a"`), or `err` of a message. The names are not paths: join one to
+`path` to use it.
+
+```stone
+use fs
+
+for name in fs.list_dir(".").unwrap():
+    if name.endswith(".txt"):
+        print(name)
+```
+
+### `fs.exists`
+
+```text
+fs.exists(path: str) -> bool
+```
+
+Returns whether there is a file or directory at `path`, following symbolic links, so a link to
+nothing does not exist.
+
+### `fs.remove`
+
+```text
+fs.remove(path: str) -> result[str, str]
+```
+
+Deletes the file at `path` and returns `ok` of `path`, or `err` of a message. It does not
+delete directories.
+
+### `fs.make_dir`
+
+```text
+fs.make_dir(path: str) -> result[str, str]
+```
+
+Creates the directory `path`, whose parent must exist, and returns `ok` of `path`, or `err` of
+a message, such as `file exists: 'out'` if something is already there.
+
+```stone
+use fs
+
+if not fs.exists("out"):
+    fs.make_dir("out").unwrap()
+fs.write("out/report.txt", "done\n").unwrap()
 ```

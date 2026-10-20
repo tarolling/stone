@@ -1,0 +1,32 @@
+use fs
+
+print(fs.make_dir("out"))
+print(fs.make_dir("out"))
+print(fs.list_dir("out"))
+for name in ["b.txt", "a.txt", "B.txt", "c"]:
+    fs.write("out/" + name, name).unwrap()
+fs.make_dir("out/sub").unwrap()
+fs.write("out/sub/deep.txt", "deep").unwrap()
+print(fs.list_dir("out"))
+print(fs.list_dir("out/sub"))
+print(fs.exists("out"), fs.exists("out/sub/deep.txt"), fs.exists("out/nothing"))
+
+// each kind of failure is a message naming the path
+print(fs.read("missing.txt"))
+print(fs.list_dir("missing"))
+print(fs.read("out"))
+print(fs.write("out", "x"))
+print(fs.list_dir("out/a.txt"))
+print(fs.read("out/a.txt/inner"))
+print(fs.make_dir("missing/inner"))
+print(fs.write("missing/inner.txt", "x"))
+print(fs.read(""))
+
+// the current directory lists too
+names = fs.list_dir(".").unwrap()
+print(names)
+
+// cleaning up
+for name in fs.list_dir("out/sub").unwrap():
+    fs.remove("out/sub/" + name).unwrap()
+print(fs.list_dir("out/sub"))

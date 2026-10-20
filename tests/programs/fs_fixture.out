@@ -1,0 +1,13 @@
+ok(['data', 'top.txt'])
+ok(['crlf.txt', 'latin1.txt', 'null.txt', 'poem.txt'])
+5
+Roses are red,
+violets are blue,
+
+stone reads files,
+and so can you.
+ok('first\r\nsecond\r\n')
+ok(['first', 'second'])
+err("not valid UTF-8 text: 'data/latin1.txt'")
+err("not valid UTF-8 text: 'data/latin1.txt'")
+err("not valid UTF-8 text: 'data/null.txt'")

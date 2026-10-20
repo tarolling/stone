@@ -1,0 +1,34 @@
+use fs
+
+fn total(path: str) -> result[int, str]:
+    sum = 0
+    for line in fs.read_lines(path)?:
+        sum += line.strip().parse_int()?
+    ret ok(sum)
+
+fn save(path: str, values: list[int]) -> result[int, str]:
+    fs.write(path, "")?
+    for v in values:
+        fs.append(path, str(v) + "\n")?
+    ret ok(values.len())
+
+print(save("numbers.txt", [1, 2, 3, 40]))
+print(total("numbers.txt"))
+print(total("missing.txt"))
+fs.append("numbers.txt", "five\n").unwrap()
+print(total("numbers.txt"))
+
+match fs.read("numbers.txt"):
+    case ok(text):
+        print("read", text.len(), "bytes")
+    case err(message):
+        print("failed:", message)
+
+match fs.read("nowhere/numbers.txt"):
+    case ok(text):
+        print("read", text.len(), "bytes")
+    case err(message):
+        print("failed:", message)
+
+print(fs.read("numbers.txt").is_ok(), fs.read("x").is_err())
+print(fs.read("x").unwrap_or("default"))

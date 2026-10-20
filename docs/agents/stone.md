@@ -367,7 +367,8 @@ assign the result where 'add' is called
 | `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `ys = xs` then `ys.sort()`; `impl ord` for custom orders, reverse with `ys[::-1]` |
 | `"ab" * 3`, `s.upper()`, `s.replace(...)` | loops over characters; only the string methods below exist |
 | `print(x, end="")` | build the line as a string, then `print` it once |
-| `open(path)` | read standard input with `input()` and `eof()`; there is no file I/O |
+| `open(path).read()`, `.readlines()`, `f.write(s)` | `fs.read(path)`, `fs.read_lines(path)`, `fs.write(path, s)`, each a `result` |
+| `os.listdir`, `os.path.exists`, `os.remove`, `os.mkdir` | `fs.list_dir` (sorted), `fs.exists`, `fs.remove`, `fs.make_dir` |
 | `sys.argv[1:]`, `sys.exit(n)` | `args()`, `os.exit(n)` |
 
 ## Builtins
@@ -389,6 +390,10 @@ Builtin modules, imported with `use math` (or `use math.sqrt`):
 - `time`: `now`, `clock`, `sleep(seconds)`
 - `os`: `env(name)` (option), `has_env`, `platform`, `arch`, `hostname`, `cpu_count`, `pid`,
   `cwd`, `exit(code)`
+- `fs`: `read(path)`, `read_lines(path)`, `write(path, text)`, `append(path, text)`,
+  `list_dir(path)` (sorted names), `exists(path)` (bool), `remove(path)`, `make_dir(path)`;
+  all but `exists` return a `result` whose error is a message such as
+  `no such file or directory: 'data.txt'`
 
 Reading all of standard input:
 
@@ -400,6 +405,29 @@ while not eof():
         cont
     total += int(line)
 print(total)
+```
+
+Files, with errors passed on by `?`:
+
+```stone
+use fs
+
+fn save(path: str, values: list[int]) -> result[int, str]:
+    fs.write(path, "")?
+    for v in values:
+        fs.append(path, str(v) + "\n")?
+    ret ok(values.len())
+
+fn total(path: str) -> result[int, str]:
+    sum = 0
+    for line in fs.read_lines(path)?:
+        sum += line.parse_int()?
+    ret ok(sum)
+
+print(save("numbers.txt", [1, 2, 3]))   // ok(3)
+print(total("numbers.txt"))             // ok(6)
+print(total("missing.txt"))             // err("no such file or directory: 'missing.txt'")
+fs.remove("numbers.txt").unwrap()
 ```
 
 ## Modules

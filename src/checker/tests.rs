@@ -1880,6 +1880,57 @@ fn os_functions_check_their_arguments() {
 }
 
 #[test]
+fn fs_functions_have_types() {
+    let cases = [
+        ("fs.read(\"a\")", "result[str, str]"),
+        ("fs.read_lines(\"a\")", "result[list[str], str]"),
+        ("fs.write(\"a\", \"b\")", "result[int, str]"),
+        ("fs.append(\"a\", \"b\")", "result[int, str]"),
+        ("fs.list_dir(\"a\")", "result[list[str], str]"),
+        ("fs.exists(\"a\")", "bool"),
+        ("fs.remove(\"a\")", "result[str, str]"),
+        ("fs.make_dir(\"a\")", "result[str, str]"),
+    ];
+    for (call, ty) in cases {
+        assert_eq!(
+            linked_type(&format!("use fs\nx = {call}\n"), "x"),
+            ty,
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn fs_functions_check_their_arguments() {
+    assert_eq!(
+        linked_errors("use fs\nfs.write(\"a\")\n"),
+        [(
+            "'fs.write' takes 2 arguments, but 1 was given".to_string(),
+            2,
+            1
+        )]
+    );
+    assert_eq!(
+        linked_errors("use fs\nfs.read(1)\n"),
+        [("expected str, found int".to_string(), 2, 9)]
+    );
+    assert_eq!(
+        linked_errors("use fs\nfs.append(\"a\", 1)\n"),
+        [("expected str, found int".to_string(), 2, 16)]
+    );
+}
+
+#[test]
+fn fs_errors_pass_on_with_try() {
+    let source = "use fs\nfn size(path: str) -> result[int, str]:\n    \
+                  ret ok(fs.read(path)?.len())\nprint(size(\"a\"))\n";
+    assert_eq!(linked_errors(source), []);
+    let wrong = "use fs\nfn size(path: str) -> result[int, int]:\n    \
+                 ret ok(fs.read(path)?.len())\nprint(size(\"a\"))\n";
+    assert_eq!(linked_errors(wrong).len(), 1);
+}
+
+#[test]
 fn an_os_function_is_not_a_value() {
     assert_eq!(
         linked_errors("use os.pid\nx = pid\n"),

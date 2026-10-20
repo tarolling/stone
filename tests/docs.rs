@@ -91,6 +91,8 @@ fn agent_prompts_have_valid_programs() {
                 let output = std::process::Command::new(env!("CARGO_BIN_EXE_stone"))
                     .arg(command)
                     .arg(&file)
+                    // a block that writes files writes them here, not in the repository
+                    .current_dir(&scratch)
                     .stdin(std::process::Stdio::null())
                     .output()
                     .expect("stone should run");

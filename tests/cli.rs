@@ -396,7 +396,18 @@ fn build_for_the_host_target_by_name_runs() {
 /// from that directory both with `stone run` and as a binary from `stone build`, returning each
 /// run's output.
 fn run_and_build_in(name: &str, source: &str) -> (PathBuf, [Output; 2]) {
+    run_and_build_with(name, source, |_| {})
+}
+
+/// Does what [`run_and_build_in`] does, calling `setup` with the directory first, such as to
+/// write files for the program to read.
+fn run_and_build_with(
+    name: &str,
+    source: &str,
+    setup: impl FnOnce(&Path),
+) -> (PathBuf, [Output; 2]) {
     let dir = project(name, &[("main.stn", source)]);
+    setup(&dir);
     let run = Command::new(env!("CARGO_BIN_EXE_stone"))
         .arg("run")
         .arg("main.stn")
@@ -907,4 +918,175 @@ fn check_reports_a_method_a_trait_needs() {
              |        ^^^^\n"
         )
     );
+}
+
+/// Asserts that both runs succeeded and printed the same lines, naming the first that differs.
+fn assert_same_output([run, built]: &[Output; 2]) {
+    assert!(run.status.success(), "{run:?}");
+    assert!(built.status.success(), "{built:?}");
+    let expected = String::from_utf8_lossy(&run.stdout);
+    let actual = String::from_utf8_lossy(&built.stdout);
+    for (line, (want, got)) in expected.lines().zip(actual.lines()).enumerate() {
+        assert_eq!(got, want, "line {}", line + 1);
+    }
+    assert_eq!(actual.lines().count(), expected.lines().count());
+}
+
+#[test]
+fn compiled_files_are_text_exactly_when_the_interpreter_says() {
+    // the edge cases of UTF-8, then random bytes that are mostly the start of a character or the
+    // rest of one
+    let mut files: Vec<Vec<u8>> = [
+        &b""[..],
+        b"plain",
+        b"\0",
+        b"a\0b",
+        b"\xc0\x80",
+        b"\xc1\xbf",
+        b"\xc2\x80",
+        b"\xdf\xbf",
+        b"\xe0\x80\x80",
+        b"\xe0\x9f\xbf",
+        b"\xe0\xa0\x80",
+        b"\xed\x9f\xbf",
+        b"\xed\xa0\x80",
+        b"\xef\xbf\xbf",
+        b"\xf0\x80\x80\x80",
+        b"\xf0\x8f\xbf\xbf",
+        b"\xf0\x90\x80\x80",
+        b"\xf4\x8f\xbf\xbf",
+        b"\xf4\x90\x80\x80",
+        b"\xf5\x80\x80\x80",
+        b"\xff",
+        b"\x80",
+        b"\xe2\x82",
+        b"\xe2\x82\xac",
+        b"\xf0\x9f\x98",
+        b"\xf0\x9f\x98\x80",
+    ]
+    .iter()
+    .map(|bytes| bytes.to_vec())
+    .collect();
+    let mut state = 0x9e37_79b9_7f4a_7c15;
+    let pieces: [&[u8]; 8] = [
+        b"a",
+        b"\n",
+        b"\r\n",
+        b"\xc3",
+        b"\xa9",
+        b"\xe2\x82",
+        b"\xf0\x9f",
+        b"\x80",
+    ];
+    for _ in 0..400 {
+        let mut bytes = Vec::new();
+        for _ in 0..xorshift(&mut state) % 8 {
+            let random = xorshift(&mut state);
+            match random % 3 {
+                0 => bytes.push((random >> 8) as u8),
+                _ => bytes.extend_from_slice(pieces[(random >> 8) as usize % pieces.len()]),
+            }
+        }
+        files.push(bytes);
+    }
+    let source = "use fs\nfor name in fs.list_dir(\"data\").unwrap():\n    \
+                  path = \"data/\" + name\n    text = fs.read(path)\n    \
+                  lines = fs.read_lines(path)\n    \
+                  print(name, text.is_ok(), text.unwrap_or(\"\").len(), \
+                  lines.unwrap_or([]).len())\n";
+    let (_, outputs) = run_and_build_with("fs_text_differential", source, |dir| {
+        std::fs::create_dir(dir.join("data")).unwrap();
+        for (i, bytes) in files.iter().enumerate() {
+            std::fs::write(dir.join(format!("data/{i:03}")), bytes).unwrap();
+        }
+    });
+    assert_same_output(&outputs);
+    let text = String::from_utf8_lossy(&outputs[0].stdout).into_owned();
+    // both kinds happen, so the check is not passing by refusing everything
+    assert!(
+        text.contains(" true ") && text.contains(" false "),
+        "{text}"
+    );
+}
+
+#[test]
+fn large_files_and_directories_read_the_same_in_both_backends() {
+    let source = "use fs\nlines = fs.read_lines(\"big.txt\").unwrap()\n\
+                  print(lines.len(), lines[0], lines[lines.len() - 1])\n\
+                  text = fs.read(\"big.txt\").unwrap()\nprint(text.len())\n\
+                  print(fs.write(\"copy.txt\", text), fs.read(\"copy.txt\").unwrap() == text)\n\
+                  names = fs.list_dir(\"many\").unwrap()\n\
+                  print(names.len(), names[0], names[names.len() - 1])\n\
+                  total = 0\nfor name in names:\n    total += name.len()\nprint(total)\n";
+    let (_, outputs) = run_and_build_with("fs_large", source, |dir| {
+        // more than 3 MiB, so the buffer doubles past the allocator's largest class
+        let mut text = String::new();
+        for i in 0..400_000 {
+            text.push_str(&format!("line {i}\n"));
+        }
+        std::fs::write(dir.join("big.txt"), text).unwrap();
+        // more entries than one getdents64 call returns, with names of many lengths
+        std::fs::create_dir(dir.join("many")).unwrap();
+        for i in 0..2000 {
+            let name = format!("{i}-{}", "x".repeat(i % 37));
+            std::fs::write(dir.join("many").join(name), "").unwrap();
+        }
+    });
+    assert_same_output(&outputs);
+    let text = String::from_utf8_lossy(&outputs[0].stdout).into_owned();
+    assert!(text.starts_with("400000 line 0 line 399999\n"), "{text}");
+}
+
+#[test]
+fn file_errors_are_worded_the_same_in_both_backends() {
+    use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::PermissionsExt;
+    let source = "use fs\nprint(fs.read(\"secret.txt\"))\nprint(fs.write(\"secret.txt\", \"x\"))\n\
+                  print(fs.list_dir(\"locked\"))\nprint(fs.write(\"locked/new.txt\", \"x\"))\n\
+                  print(fs.exists(\"locked/inside.txt\"))\nprint(fs.list_dir(\"odd\"))\n\
+                  print(fs.read(\"loop\"))\nprint(fs.exists(\"dangling\"))\n";
+    let (dir, outputs) = run_and_build_with("fs_errors", source, |dir| {
+        std::fs::write(dir.join("secret.txt"), "hidden").unwrap();
+        std::fs::create_dir(dir.join("locked")).unwrap();
+        std::fs::write(dir.join("locked/inside.txt"), "").unwrap();
+        for path in ["secret.txt", "locked"] {
+            let permissions = std::fs::Permissions::from_mode(0o000);
+            std::fs::set_permissions(dir.join(path), permissions).unwrap();
+        }
+        // a name that is not UTF-8, a link to itself, and a link to nothing
+        std::fs::create_dir(dir.join("odd")).unwrap();
+        // which macOS's file system refuses to create
+        let name = std::ffi::OsStr::from_bytes(b"caf\xe9");
+        let _ = std::fs::write(dir.join("odd").join(name), "");
+        std::os::unix::fs::symlink("loop", dir.join("loop")).unwrap();
+        std::os::unix::fs::symlink("nowhere", dir.join("dangling")).unwrap();
+    });
+    // root reads anything, so the permissions mean nothing there
+    let root = std::fs::read(dir.join("secret.txt")).is_ok();
+    for path in ["secret.txt", "locked"] {
+        let permissions = std::fs::Permissions::from_mode(0o755);
+        std::fs::set_permissions(dir.join(path), permissions).unwrap();
+    }
+    assert_same_output(&outputs);
+    let text = String::from_utf8_lossy(&outputs[0].stdout).into_owned();
+    let odd = match std::fs::read_dir(dir.join("odd")).unwrap().count() {
+        0 => "ok([])",
+        _ => "err(\"not valid UTF-8 text: 'odd'\")",
+    };
+    let mut expected = vec![
+        "err(\"permission denied: 'secret.txt'\")".to_string(),
+        "err(\"permission denied: 'secret.txt'\")".to_string(),
+        "err(\"permission denied: 'locked'\")".to_string(),
+        "err(\"permission denied: 'locked/new.txt'\")".to_string(),
+        "false".to_string(),
+        odd.to_string(),
+        "err(\"too many levels of symbolic links: 'loop'\")".to_string(),
+        "false".to_string(),
+    ];
+    if root {
+        expected.drain(..5);
+        assert!(text.ends_with(&(expected.join("\n") + "\n")), "{text}");
+    } else {
+        assert_eq!(text, expected.join("\n") + "\n");
+    }
 }

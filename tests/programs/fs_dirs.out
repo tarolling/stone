@@ -1,7 +1,7 @@
 ok('out')
 err("file exists: 'out'")
 ok([])
-ok(['B.txt', 'a.txt', 'b.txt', 'c', 'sub'])
+ok(['C.txt', 'a.txt', 'b.txt', 'c', 'sub'])
 ok(['deep.txt'])
 true true false
 err("no such file or directory: 'missing.txt'")

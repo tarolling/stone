@@ -352,10 +352,10 @@ mod tests {
         let sub = format!("{root}/sub");
         assert_eq!(make_dir(&sub), Ok(sub.clone()));
         assert_eq!(make_dir(&sub), Err(message("file exists", &sub)));
-        for name in ["b", "a", "B"] {
+        for name in ["b", "a", "C"] {
             write(&format!("{root}/{name}"), "").unwrap();
         }
-        assert_eq!(list_dir(root).unwrap(), ["B", "a", "b", "sub"]);
+        assert_eq!(list_dir(root).unwrap(), ["C", "a", "b", "sub"]);
         assert_eq!(read(&sub), Err(message("is a directory", &sub)));
         let file = format!("{root}/a");
         assert_eq!(list_dir(&file), Err(message("not a directory", &file)));

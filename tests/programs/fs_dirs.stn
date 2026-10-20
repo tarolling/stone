@@ -3,7 +3,7 @@ use fs
 print(fs.make_dir("out"))
 print(fs.make_dir("out"))
 print(fs.list_dir("out"))
-for name in ["b.txt", "a.txt", "B.txt", "c"]:
+for name in ["b.txt", "a.txt", "C.txt", "c"]:
     fs.write("out/" + name, name).unwrap()
 fs.make_dir("out/sub").unwrap()
 fs.write("out/sub/deep.txt", "deep").unwrap()

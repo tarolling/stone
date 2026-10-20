@@ -5,3 +5,4 @@
 *.out -text
 *.err -text
 *.args -text
+**/*.files/** -text

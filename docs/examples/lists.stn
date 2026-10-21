@@ -11,6 +11,9 @@ print(primes)
 primes.append(7)
 print(primes)
 
+// in looks for an element
+print(5 in primes, 4 in primes, 4 not in primes)
+
 // for walks a list in order
 total = 0
 for p in primes:

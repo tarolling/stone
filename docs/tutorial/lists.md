@@ -26,6 +26,8 @@ from it.
   `items.insert(i, value)` puts `value` at `i`, `items.extend(more)` adds every element of
   `more` to the end, and `items.sort()` puts a list of numbers or strings in ascending order.
 - `items[start:stop]` is a new list of part of `items`, as in Python.
+- `value in items` tests whether some element equals `value`, and `value not in items` whether
+  none does. `in` works on maps (their keys) and strings (their text) too.
 - `for item in items:` walks the list in order, as it was when the loop started. If the body
   appends to the list, the loop does not visit the new elements.
 

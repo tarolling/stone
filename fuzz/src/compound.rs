@@ -256,7 +256,7 @@ enum Source {
     Get(usize, Key),
     /// `path.len()` of a list or map path.
     Len(usize),
-    /// `path.contains(key)` of a map path.
+    /// `path.contains(key)` of a map path, or `key in path` or `not (key not in path)`.
     Contains(usize, Key),
     /// `m[key]` for a key that the map variable `m` is known to hold.
     Known(String, String),
@@ -1004,7 +1004,13 @@ impl Generator {
             }
             Source::Len(i) => format!("{}.len()", fill(u, &paths[i].text)?),
             Source::Contains(i, key) => {
-                format!("{}.contains({})", fill(u, &paths[i].text)?, key.literal(u)?)
+                let (map, key) = (fill(u, &paths[i].text)?, key.literal(u)?);
+                // the method, or either operator, which binds looser than whatever holds it
+                match u.int_in_range(0..=2)? {
+                    0 => format!("{map}.contains({key})"),
+                    1 => format!("({key} in {map})"),
+                    _ => format!("(not ({key} not in {map}))"),
+                }
             }
             Source::Known(name, key) => format!("{name}[{key}]"),
             Source::Method(i, s, m) => {

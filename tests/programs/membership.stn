@@ -1,0 +1,116 @@
+// in and not in test a map for a key, a list for an element equal to a value, and a string for
+// a piece of text, as contains does
+
+ages = {"ann": 31, "bob": 27}
+print("ann" in ages, "dee" in ages, "dee" not in ages, ages.contains("bob"))
+squares = {1: 1, 2: 4, 3: 9}
+print(2 in squares, 4 in squares, 4 not in squares)
+flags = {true: "yes"}
+print(true in flags, false in flags, false not in flags)
+print("x" in {}, 1 in {2: 3}.keys())
+
+xs = [3, 1, 4, 1, 5]
+print(4 in xs, 9 in xs, 9 not in xs, xs.contains(5), [].contains(1) or 1 in [1])
+print(2.5 in [1.0, 2.5], -0.0 in [0.0], 0.0 / 1.0 in [1.0])
+words = ["apple", "pear"]
+print("pear" in words, "pea" in words, "pea" not in words, words.contains("apple"))
+print(true in [false], false in [false, true])
+
+text = "hello, world"
+print("world" in text, "World" in text, "" in text, "" in "", "x" not in text)
+print(text.contains("lo, w"), "hello, world!".contains(text), "a" in "")
+
+// a list of tuples compares every value of an element
+pairs = [(1, "one"), (2, "two")]
+print((2, "two") in pairs, (2, "one") in pairs, (1, "one") not in pairs)
+
+// options and enums compare as == does
+enum Shape:
+    Circle(float)
+    Square(float)
+    Empty
+
+shapes = [Shape.Circle(1.0), Shape.Empty]
+print(Shape.Empty in shapes, Shape.Circle(1.0) in shapes, Shape.Square(1.0) in shapes)
+maybes = [some(1), none]
+print(none in maybes, some(1) in maybes, some(2) in maybes, some(2) not in [some(3)])
+
+// a struct compares field by field, unless it has its own eq, which in calls as x.eq(element),
+// in order, stopping at the first that matches
+struct Point:
+    x: int
+    y: int
+
+points = [Point(x=1, y=2), Point(x=3, y=4)]
+print(Point(x=3, y=4) in points, Point(x=4, y=3) in points)
+
+struct Tag:
+    name: str
+    seen: list[int]
+
+impl eq for Tag:
+    fn eq(self, other: Self) -> bool:
+        print("  ", self.name, "==", other.name)
+        ret self.name == other.name
+
+tags = [Tag(name="a", seen=[1]), Tag(name="b", seen=[]), Tag(name="c", seen=[2])]
+print(Tag(name="b", seen=[9]) in tags)
+print(Tag(name="z", seen=[]) not in tags)
+print(tags.contains(Tag(name="a", seen=[])))
+
+// a generic function tests any type that implements eq
+fn has[T: eq](items: list[T], item: T) -> bool:
+    ret item in items
+
+print(has([1, 2], 2), has(["a"], "b"), has(points, Point(x=1, y=2)))
+
+// tests in conditions
+fn vowels(word: str) -> int:
+    n = 0
+    for c in word:
+        if c in "aeiou" and c not in "y":
+            n += 1
+    ret n
+
+print(vowels("membership"), vowels("rhythm"))
+seen = {}
+for w in ["a", "b", "a", "c", "b", "a"]:
+    if not w in seen:
+        seen[w] = 0
+    seen[w] += 1
+print(seen)
+i = 0
+while i not in [3, 7]:
+    i += 1
+print(i)
+
+// the value is evaluated before the container, and a receiver before its argument
+fn value(n: int) -> int:
+    print("value", n)
+    ret n
+
+fn numbers() -> list[int]:
+    print("numbers")
+    ret [1, 2, 3]
+
+print(value(2) in numbers())
+print(numbers().contains(value(4)))
+
+// temporaries on both sides are freed
+fn name(n: int) -> str:
+    ret "item" + str(n)
+
+fn names() -> list[str]:
+    ret [name(1), name(2)]
+
+print(name(2) in names(), name(3) not in names(), name(1) in name(1) + "!")
+print(names()[0] in {name(1): 1}, (name(1), 1) in [(name(1), 1)])
+
+// a function can test a global assigned after it
+fn known(k: str) -> bool:
+    ret k in table and k in table_keys and k in table_text
+
+table = {"a": 1}
+table_keys = ["a", "b"]
+table_text = "abc"
+print(known("a"), known("b"))

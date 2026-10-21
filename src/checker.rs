@@ -932,9 +932,10 @@ struct Inference {
     instances: Vec<PendingInstance>,
     diagnostics: Vec<Diagnostic>,
     constraints: Vec<Constraint>,
-    /// The type each `==` and `!=` compares, with the comparison's span, checked once inference
-    /// is done for a list or map anywhere inside it.
-    equalities: Vec<(Ty, Span)>,
+    /// The type each `==` and `!=` compares (or `in` or `contains` compares a list's elements
+    /// by), with the comparison's span and its operators as an error names them, such as
+    /// `'==' and '!='`, checked once inference is done for a list or map anywhere inside it.
+    equalities: Vec<(Ty, Span, &'static str)>,
     /// Arithmetic whose operands were not yet known to be lists or numbers when it was found.
     arithmetic: Vec<Arithmetic>,
     /// What each type variable that is an operand of such arithmetic can still be.
@@ -979,6 +980,9 @@ struct Inference {
     /// Constant indexes into a global a function reads before the code assigning it is checked,
     /// which `finish` settles once the global is known to be a tuple or a list.
     deferred_indexes: Vec<DeferredIndex>,
+    /// Tests of whether a container holds a value whose container was not yet known, which
+    /// `finish` settles.
+    deferred_memberships: Vec<Membership>,
     /// Every enum the program defines, by name.
     enums: HashMap<String, EnumInfo>,
     /// The span of every enum definition declared at the top level, so a nested one is reported.
@@ -1024,6 +1028,21 @@ struct DeferredIndex {
     /// The type of the index, an int unless the global turns out to be a map.
     index_ty: Ty,
     result: Ty,
+}
+
+/// A test of whether a container holds a value, `needle in container` or
+/// `container.contains(needle)`, whose container was not yet known to be a map, a list, or a
+/// string when it was found, as a global a function reads before the code assigning it is
+/// checked may not be.
+struct Membership {
+    /// The span of the whole test, where an error comparing a list's elements points.
+    span: Span,
+    container: Span,
+    container_ty: Ty,
+    needle: Span,
+    needle_ty: Ty,
+    /// The test as written: `in`, `not in`, or `contains`.
+    name: &'static str,
 }
 
 /// `value.attr`, where `value` is a global not yet known to be a struct, whose field is
@@ -4872,6 +4891,38 @@ impl Inference {
                 left,
                 ops,
                 comparators,
+            } if ops.iter().any(CompOp::is_membership) => {
+                let needle_ty = self.infer(left);
+                let container_ty = self.infer(&comparators[0]);
+                let name = match ops.iter().find(|op| op.is_membership()) {
+                    Some(CompOp::NotIn) => "not in",
+                    _ => "in",
+                };
+                if ops.len() > 1 {
+                    for comparator in &comparators[1..] {
+                        self.infer(comparator);
+                    }
+                    let message = format!(
+                        "'{name}' cannot be chained with other comparisons; add parentheses, as \
+                         in '(x {name} xs) == b'"
+                    );
+                    self.error(expr.span, message);
+                    return Ty::Bool;
+                }
+                self.membership(Membership {
+                    span: expr.span,
+                    container: comparators[0].span,
+                    container_ty,
+                    needle: left.span,
+                    needle_ty,
+                    name,
+                });
+                Ty::Bool
+            }
+            ExprKind::Compare {
+                left,
+                ops,
+                comparators,
             } => {
                 let mut prev = self.infer(left);
                 for (op, comparator) in ops.iter().zip(comparators) {
@@ -4879,10 +4930,13 @@ impl Inference {
                     self.expect(&prev, &ty, comparator.span);
                     let message = match op {
                         CompOp::Equal | CompOp::NotEqual => {
-                            self.equalities.push((ty.clone(), expr.span));
+                            self.equalities
+                                .push((ty.clone(), expr.span, "'==' and '!='"));
                             prev = ty;
                             continue;
                         }
+                        // tests of membership are the arm above's
+                        CompOp::In | CompOp::NotIn => continue,
                         CompOp::LessThan => {
                             "'<' needs int, float, str, or a type that implements 'ord', found {}"
                         }
@@ -5020,6 +5074,55 @@ impl Inference {
         let index = self.infer(slice);
         self.expect(&Ty::Int, &index, slice.span);
         (elem, indexed)
+    }
+
+    /// Checks a test of whether a container holds a value: a map's key, a list's element, which
+    /// `==` compares with the value, or a string's text. A container not yet known waits for
+    /// `finish`, which [`Inference::settle_membership`] settles.
+    ///
+    /// For example, `2 in xs` needs `xs` to be a `list[int]` once `xs` is known to be a list, and
+    /// `"a" in m` a `map[str, V]`.
+    fn membership(&mut self, test: Membership) {
+        if let Ty::Var(_) = self.shallow(&test.container_ty) {
+            self.deferred_memberships.push(test);
+            return;
+        }
+        self.settle_membership(test);
+    }
+
+    /// Settles a test of whether a container holds a value, taking a container that is still
+    /// not known to be a list, as a subscript does.
+    fn settle_membership(&mut self, test: Membership) {
+        match self.shallow(&test.container_ty) {
+            Ty::Map(key, _) => self.expect(&key, &test.needle_ty, test.needle),
+            Ty::Str => self.expect(&Ty::Str, &test.needle_ty, test.needle),
+            Ty::List(elem) => self.compare_elements(*elem, &test),
+            Ty::Var(_) => {
+                let elem = self.fresh();
+                let list = Ty::List(Box::new(elem.clone()));
+                self.expect(&list, &test.container_ty, test.container);
+                self.compare_elements(elem, &test);
+            }
+            other => {
+                let message = format!(
+                    "'{}' needs a str, list, or map, found {}",
+                    test.name,
+                    self.show(&other)
+                );
+                self.error(test.container, message);
+            }
+        }
+    }
+
+    /// Checks that a list of `elem` can hold the value `test` looks for, and that `==` can
+    /// compare the two.
+    fn compare_elements(&mut self, elem: Ty, test: &Membership) {
+        self.expect(&elem, &test.needle_ty, test.needle);
+        let what = match test.name {
+            "contains" => "'contains'",
+            _ => "'in' and 'not in'",
+        };
+        self.equalities.push((elem, test.span, what));
     }
 
     /// Returns whether `value` names a global from inside a function.
@@ -5437,14 +5540,18 @@ impl Inference {
                 Ty::Int
             }
             "contains" => {
-                let key = self.fresh();
-                let map = Ty::Map(Box::new(key.clone()), Box::new(self.fresh()));
-                self.expect(&map, &receiver_ty, receiver.span);
                 if args.len() != 1 {
                     self.arity_error(call.span, name, "1", args.len());
                     return Ty::Bool;
                 }
-                self.expect(&key, &arg_types[0], args[0].span);
+                self.membership(Membership {
+                    span: call.span,
+                    container: receiver.span,
+                    container_ty: receiver_ty.clone(),
+                    needle: args[0].span,
+                    needle_ty: arg_types[0].clone(),
+                    name: "contains",
+                });
                 Ty::Bool
             }
             "get" => {
@@ -5553,7 +5660,8 @@ impl Inference {
                 } else {
                     self.expect(&receiver_ty, &arg_types[0], args[0].span);
                 }
-                self.equalities.push((receiver_ty.clone(), call.span));
+                self.equalities
+                    .push((receiver_ty.clone(), call.span, "'==' and '!='"));
                 Ty::Bool
             }
             "sort" => {
@@ -5920,7 +6028,7 @@ impl Inference {
     /// compiled code would compare them by address.
     ///
     /// For example, `(1, "a") == t` is fine, while `(1, [2]) == t` is an error naming `list[int]`.
-    fn check_equality(&mut self, ty: &Ty, span: Span) {
+    fn check_equality(&mut self, ty: &Ty, span: Span, what: &str) {
         let ty = self.shallow(ty);
         match ty {
             // never pinned down, so take the default
@@ -5928,15 +6036,15 @@ impl Inference {
                 self.unify(&ty, &Ty::Int);
             }
             Ty::List(_) | Ty::Map(..) | Ty::Unit => {
-                let message = format!("'==' and '!=' cannot compare {}", self.show(&ty));
+                let message = format!("{what} cannot compare {}", self.show(&ty));
                 self.error(span, message);
             }
             Ty::Param(p) if self.type_params[p].bounds.iter().any(|b| b == EQ) => {}
             Ty::Param(_) => {
                 let name = self.show(&ty);
                 let message = format!(
-                    "'==' and '!=' cannot compare {name}, since '{name}' may be any type; to \
-                     compare its values, bound it by 'eq', as in '[{name}: eq]'"
+                    "{what} cannot compare {name}, since '{name}' may be any type; to compare \
+                     its values, bound it by 'eq', as in '[{name}: eq]'"
                 );
                 self.error(span, message);
             }
@@ -5949,7 +6057,7 @@ impl Inference {
                     None => "it".to_string(),
                 };
                 let message = format!(
-                    "'==' and '!=' cannot compare {}, since {holder} holds {}",
+                    "{what} cannot compare {}, since {holder} holds {}",
                     self.show(&ty),
                     self.show(&found.ty)
                 );
@@ -6385,6 +6493,10 @@ impl Inference {
         for deferred in std::mem::take(&mut self.deferred_methods) {
             self.settle_method(deferred);
         }
+        // and so may a container, as in `k in g.inner`
+        for deferred in std::mem::take(&mut self.deferred_memberships) {
+            self.settle_membership(deferred);
+        }
         // solving one operation can pin down another's operands, so force one only when none can
         // be solved otherwise
         let mut pending = std::mem::take(&mut self.arithmetic);
@@ -6430,8 +6542,8 @@ impl Inference {
                 self.error(constraint.span, message);
             }
         }
-        for (ty, span) in std::mem::take(&mut self.equalities) {
-            self.check_equality(&ty, span);
+        for (ty, span, what) in std::mem::take(&mut self.equalities) {
+            self.check_equality(&ty, span, what);
         }
         self.check_instances();
         self.check_variant_widths();

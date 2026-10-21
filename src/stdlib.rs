@@ -380,8 +380,12 @@ pub static METHOD_DOCS: [BuiltinDoc; 30] = [
     },
     BuiltinDoc {
         name: "contains",
-        signature: "map[K, V].contains(key: K) -> bool",
-        description: "Returns whether the map has an entry for `key`.",
+        signature: "str.contains(text: str) -> bool | list[T].contains(value: T) -> bool | \
+                    map[K, V].contains(key: K) -> bool",
+        description: "Returns whether the string has `text` in it, the list an element equal to \
+                      `value`, as `==` compares them, or the map an entry for `key`, so \
+                      `\"hello\".contains(\"ell\")` and `[1, 2].contains(2)` are `true`. \
+                      `value in c` makes the same test, and `value not in c` the opposite.",
     },
     BuiltinDoc {
         name: "get",

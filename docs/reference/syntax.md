@@ -46,7 +46,7 @@ These names are reserved and cannot be used for variables or functions:
 | `ret` | returns from a function, or ends the program at the top level |
 | `if`, `elif`, `else` | conditional blocks |
 | `while` | loops while a condition holds |
-| `for`, `in` | loops over a list or a `range`; `for` also names the type in `impl Shape for Circle:` |
+| `for`, `in` | loops over a list or a `range`; `for` also names the type in `impl Shape for Circle:`, and `in` and `not in` test membership, as in `x in xs` |
 | `match`, `case` | runs the first case whose pattern fits a value |
 | `break` | leaves the innermost loop |
 | `cont` | skips to the next iteration of the innermost loop |
@@ -194,7 +194,7 @@ From lowest to highest precedence:
 | `or` | `bool` conditions |
 | `and` | `bool` conditions |
 | `not` | a `bool` condition |
-| `==` `!=` `<` `<=` `>` `>=` | numbers and strings; `==` and `!=` also bools, tuples, structs, options, and enums |
+| `==` `!=` `<` `<=` `>` `>=` `in` `not in` | numbers and strings; `==` and `!=` also bools, tuples, structs, options, and enums; `in` and `not in` a value and a map, list, or string |
 | `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings |
 | `*` `/` `%` | two ints or two floats, or lists of them |
 | unary `+` `-` | an int or a float, or a list of them |
@@ -206,6 +206,10 @@ function, so `n = s.parse_int()?` passes a parse error to the caller (see
 [Types](types.md#passing-errors-on)).
 
 Comparisons chain, so `a < b <= c` means `a < b and b <= c` with `b` evaluated once.
+`x in c` tests whether the map `c` has the key `x`, the list `c` an element equal to `x`, as `==`
+compares them, or the string `c` the text `x`, and `x not in c` is its opposite, as
+`c.contains(x)` and `not c.contains(x)` are. Unlike in Python, `in` and `not in` never chain:
+`x in xs == b` is an error, written `(x in xs) == b` instead.
 `**` groups right to left and binds tighter than a unary sign on its left, as in Python, so
 `2 ** 3 ** 2 == 512` and `-2 ** 2 == -4`, while `2 ** -1` raises to `-1`.
 Parentheses group as usual. Operands are evaluated left to right.

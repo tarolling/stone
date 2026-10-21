@@ -58,7 +58,7 @@ module stone
 
     unaryop = Invert | Not | UAdd | USub
 
-    cmpop = Eq | NotEq | Lt | LtE | Gt | GtE
+    cmpop = Eq | NotEq | Lt | LtE | Gt | GtE | In | NotIn
 
     arguments = (arg* args)
 

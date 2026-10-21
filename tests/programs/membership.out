@@ -1,0 +1,36 @@
+true false true true
+true false true
+true false true
+false false
+true false true true true
+true true false
+true false true true
+false true
+true false true true true
+true true false
+true false false
+true true false
+true true false true
+true false
+   b == a
+   b == b
+true
+   z == a
+   z == b
+   z == c
+true
+   a == a
+true
+true false true
+3 0
+{'a': 3, 'b': 2, 'c': 1}
+3
+value 2
+numbers
+true
+numbers
+value 4
+false
+true true true
+true true
+true false

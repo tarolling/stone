@@ -486,14 +486,20 @@ print(r.ok(), r.err())   // some(7) none
 ### `contains`
 
 ```text
-map[K, V].contains(key: K) -> bool
+str.contains(text: str) -> bool | list[T].contains(value: T) -> bool | map[K, V].contains(key: K) -> bool
 ```
 
-Returns whether the map has an entry for `key`.
+Returns whether the string has `text` in it (the empty string is in every string), the list an
+element equal to `value`, or the map an entry for `key`. A list compares its elements with `value`
+in order, as `value == element` does, and stops at the first that is equal, so its elements must
+be values `==` can compare, and a struct with its own `eq` compares by it. The operators `in` and
+`not in` make the same test: `value in c` is `c.contains(value)`, except that it evaluates
+`value` first.
 
 ```stone
 ages = {"ann": 31}
 print(ages.contains("ann"), ages.contains("bob"))   // true false
+print([3, 1, 4].contains(4), "hello".contains("ell"))   // true true
 ```
 
 ### `get`

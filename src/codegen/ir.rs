@@ -61,7 +61,7 @@ pub enum BinOp {
 
 /// A comparison, as in [`Inst::Compare`] and [`Terminator::CmpBranch`].
 ///
-/// For example, `Cond::from(&CompOp::LessThan)` is `Cond::Lt`, and its negation is `Cond::Ge`.
+/// For example, `Cond::of(&CompOp::LessThan)` is `Some(Cond::Lt)`, and its negation is `Cond::Ge`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Cond {
     Eq,
@@ -73,6 +73,22 @@ pub enum Cond {
 }
 
 impl Cond {
+    /// Returns the comparison a comparison operator makes of two values, or `None` for `in` and
+    /// `not in`, which look inside their right operand instead.
+    ///
+    /// For example, `Cond::of(&CompOp::GreaterThan)` is `Some(Cond::Gt)`.
+    pub fn of(op: &CompOp) -> Option<Cond> {
+        Some(match op {
+            CompOp::Equal => Cond::Eq,
+            CompOp::NotEqual => Cond::Ne,
+            CompOp::LessThan => Cond::Lt,
+            CompOp::LessThanEqual => Cond::Le,
+            CompOp::GreaterThan => Cond::Gt,
+            CompOp::GreaterThanEqual => Cond::Ge,
+            CompOp::In | CompOp::NotIn => return None,
+        })
+    }
+
     /// Returns the condition that holds exactly when `self` does not, for ints.
     ///
     /// For example, `Cond::Lt.negate()` is `Cond::Ge`. Floats need care, since every ordered
@@ -110,19 +126,6 @@ impl Cond {
             Cond::Le => "le",
             Cond::Gt => "gt",
             Cond::Ge => "ge",
-        }
-    }
-}
-
-impl From<&CompOp> for Cond {
-    fn from(op: &CompOp) -> Cond {
-        match op {
-            CompOp::Equal => Cond::Eq,
-            CompOp::NotEqual => Cond::Ne,
-            CompOp::LessThan => Cond::Lt,
-            CompOp::LessThanEqual => Cond::Le,
-            CompOp::GreaterThan => Cond::Gt,
-            CompOp::GreaterThanEqual => Cond::Ge,
         }
     }
 }

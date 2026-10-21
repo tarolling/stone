@@ -4580,3 +4580,140 @@ fn a_question_mark_checks_what_it_unwraps() {
         14,
     );
 }
+
+#[test]
+fn in_tests_a_map_for_a_key_a_list_for_an_element_and_a_string_for_text() {
+    assert_eq!(type_of_symbol("m = {1: \"a\"}\nb = 2 in m\n", "b"), "bool");
+    assert_eq!(
+        type_of_symbol("xs = [1.5]\nb = 2.5 not in xs\n", "b"),
+        "bool"
+    );
+    assert_eq!(type_of_symbol("b = \"el\" in \"hello\"\n", "b"), "bool");
+    // the container's type can come from what it is asked for
+    assert_eq!(
+        type_of_symbol("xs = []\nb = \"a\" in xs\n", "xs"),
+        "list[str]"
+    );
+    assert_eq!(
+        type_of_symbol("m = {}\nb = true in m\nm[false] = 1\n", "m"),
+        "map[bool, int]"
+    );
+    assert!(errors("ps = [(1, \"a\")]\nif (1, \"a\") in ps:\n    print(1)\n").is_empty());
+}
+
+#[test]
+fn contains_tests_lists_and_strings_too() {
+    assert_eq!(type_of_symbol("b = [1, 2].contains(2)\n", "b"), "bool");
+    assert_eq!(
+        type_of_symbol("b = \"abc\".contains(\"bc\")\n", "b"),
+        "bool"
+    );
+    assert_error(
+        "b = [1, 2].contains(\"a\")\n",
+        "expected int, found str",
+        1,
+        21,
+    );
+    assert_error(
+        "b = \"abc\".contains(1)\n",
+        "expected str, found int",
+        1,
+        20,
+    );
+    assert_error(
+        "b = [1].contains()\n",
+        "'contains' takes 1 argument, but 0 were given",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn in_needs_a_value_of_the_containers_kind() {
+    assert_error("b = 1 in \"abc\"\n", "expected str, found int", 1, 5);
+    assert_error("b = \"a\" in [1, 2]\n", "expected int, found str", 1, 5);
+    assert_error("b = \"a\" in {1: 2}\n", "expected int, found str", 1, 5);
+    assert_error(
+        "b = 1 in 5\n",
+        "'in' needs a str, list, or map, found int",
+        1,
+        10,
+    );
+    assert_error(
+        "struct P:\n    x: int\nb = 1 in P(x=1)\n",
+        "'in' needs a str, list, or map, found P",
+        3,
+        10,
+    );
+}
+
+#[test]
+fn in_compares_elements_as_equality_does() {
+    assert_error(
+        "b = [1] in [[1]]\n",
+        "'in' and 'not in' cannot compare list[int]",
+        1,
+        5,
+    );
+    assert_error(
+        "b = [[1]].contains([1])\n",
+        "'contains' cannot compare list[int]",
+        1,
+        5,
+    );
+    assert_error(
+        "fn has[T](xs: list[T], x: T) -> bool:\n    ret x in xs\n",
+        "'in' and 'not in' cannot compare T, since 'T' may be any type; to compare its values, \
+         bound it by 'eq', as in '[T: eq]'",
+        2,
+        9,
+    );
+    assert!(errors("fn has[T: eq](xs: list[T], x: T) -> bool:\n    ret x in xs\n").is_empty());
+    // a type parameter is no container
+    assert_error(
+        "fn has[T](c: T) -> bool:\n    ret 1 in c\n",
+        "'in' needs a str, list, or map, found T",
+        2,
+        14,
+    );
+}
+
+#[test]
+fn in_never_chains_with_other_comparisons() {
+    assert_error(
+        "xs = [1]\nb = 1 in xs == true\n",
+        "'in' cannot be chained with other comparisons; add parentheses, as in '(x in xs) == b'",
+        2,
+        5,
+    );
+    assert_error(
+        "xs = [1]\nb = 0 < 1 not in xs\n",
+        "'not in' cannot be chained with other comparisons; add parentheses, as in \
+         '(x not in xs) == b'",
+        2,
+        5,
+    );
+    assert!(errors("xs = [true]\nb = (1 in [1]) in xs\n").is_empty());
+}
+
+#[test]
+fn a_function_can_test_a_global_assigned_after_it() {
+    for global in ["{\"a\": 1}", "[\"a\"]", "\"abc\""] {
+        let source = format!(
+            "fn f(k: str) -> bool:\n    ret k in table\ntable = {global}\nprint(f(\"a\"))\n"
+        );
+        assert!(errors(&source).is_empty(), "{source}");
+    }
+    assert_error(
+        "fn f(k: str) -> bool:\n    ret k in table\ntable = [1]\nprint(f(\"a\"))\n",
+        "expected int, found str",
+        2,
+        9,
+    );
+    assert_error(
+        "fn f(k: str) -> bool:\n    ret k in table\ntable = 3\nprint(f(\"a\"))\n",
+        "'in' needs a str, list, or map, found int",
+        2,
+        14,
+    );
+}

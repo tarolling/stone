@@ -103,7 +103,7 @@ print(xs, xs[1:3], xs.len())
 ages = {"ann": 31, "bob": 27}
 ages["cy"] = 45
 ages["ann"] += 1
-print(ages, ages.contains("dee"), ages.get("bob").unwrap_or(0))
+print(ages, "dee" in ages, 3 in xs, "el" in "hello", ages.get("bob").unwrap_or(0))
 for name in ages:
     print(name, ages[name])
 for name, age in ages.items():
@@ -118,8 +118,9 @@ for name, n in pairs:
 ```
 
 `for k in m` goes through a map's keys in insertion order; `m.keys()`, `m.values()`, and
-`m.items()` return new lists. `m[k]` stops the program if `k` is missing; use `m.contains(k)` or
-`m.get(k)` when it might be. `m.pop(k)` returns an option and, like a list's `pop`, may be used
+`m.items()` return new lists. `m[k]` stops the program if `k` is missing; test `k in m` or use
+`m.get(k)` when it might be. `x in c` and `x not in c` test a map's keys, a list's elements (by
+`==`), or a string's text, as `c.contains(x)` does, and never chain: write `(x in xs) == b`. `m.pop(k)` returns an option and, like a list's `pop`, may be used
 inside any expression, as in `m.pop(k).unwrap_or(0)`. Entries change in place like list elements, through any
 place: `m[k] += 1`, `m[k].append(x)`, `p.counts[k] = 0`. Only `m[k] = v` adds a missing key; `+=`
 and changes inside an entry need the key to exist. A tuple is indexed only by a literal (`t[0]`,
@@ -350,8 +351,6 @@ assign the result where 'add' is called
 | `[f(x) for x in xs if p(x)]` | a `for` loop with `if` and `append` |
 | `f"{a} and {b}"`, `"%d" % n`, `.format` | `str(a) + " and " + str(b)` |
 | `a if cond else b` | an `if`/`else` assigning a variable |
-| `x in xs` | a loop, or a helper `fn contains(xs: list[int], x: int) -> bool` |
-| `k in d` | `d.contains(k)` |
 | `for k, v in d.items():` | the same; `d.items()` is a list of tuples |
 | `d.pop(k)`, `d.pop(k, default)` | `d.pop(k)` returns an option: `.unwrap_or(default)` |
 | `del d[k]` | `d.pop(k)` as a statement |

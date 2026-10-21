@@ -679,13 +679,20 @@ impl Generator {
     }
 
     /// Generates an `if` or `elif` test: comparisons, sometimes joined by `and` or `or`, or a
-    /// negation of them, such as `not (a < b or c == 1)`.
+    /// negation of them, such as `not (a < b or c == 1)`, or a test of a list, such as
+    /// `a + 1 not in list0`.
     fn condition(&mut self, u: &mut Unstructured, scope: &Scope) -> Result<String> {
         let mut test = match !scope.values.is_empty() && u.int_in_range(0..=3)? == 3 {
             true => {
                 let (a, b) = self.equality(u, scope, 1)?;
                 let op = *u.choose(&["==", "!="])?;
                 format!("{a} {op} {b}")
+            }
+            false if !scope.lists.is_empty() && u.int_in_range(0..=5)? == 5 => {
+                let value = self.sum(u, scope, 0)?;
+                let op = *u.choose(&["in", "not in"])?;
+                let list = u.choose(&scope.lists)?;
+                format!("{value} {op} {list}")
             }
             false => self.comparison(u, scope)?,
         };

@@ -434,7 +434,8 @@ fn completion_after_a_dot_offers_methods() {
     .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
     .collect();
     // a list offers the list methods, even once a name is started
-    let list_methods = &methods[..6];
+    let mut list_methods = methods[..6].to_vec();
+    list_methods.push(("contains".to_string(), Some(CompletionItemKind::METHOD)));
     assert_eq!(labels(at(2, 4)), list_methods);
     assert_eq!(labels(at(3, 6)), list_methods);
     // and a receiver of unknown type offers every method
@@ -462,7 +463,9 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
     };
     assert_eq!(
         labels(at(2, 4)),
-        ["len", "append", "pop", "insert", "extend", "sort"]
+        [
+            "len", "append", "pop", "insert", "extend", "sort", "contains"
+        ]
     );
     assert_eq!(
         labels(at(4, 3)),
@@ -476,6 +479,7 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "endswith",
             "parse_int",
             "parse_float",
+            "contains",
             "eq",
             "cmp"
         ]

@@ -1216,9 +1216,20 @@ impl Parser {
     ///
     /// ```text
     /// compare_op:
-    ///     | '==' | '!=' | '<' | '<=' | '>' | '>='
+    ///     | '==' | '!=' | '<' | '<=' | '>' | '>=' | 'in' | 'not' 'in'
     /// ```
     pub(super) fn parse_compare_op(&mut self) -> Option<CompOp> {
+        let keyword = |word: &str| TokenType::Keyword(word.to_string());
+        if self.expect_quietly(keyword("in")).is_some() {
+            return Some(CompOp::In);
+        }
+        let mark = self.pos;
+        if self.expect_quietly(keyword("not")).is_some() {
+            if self.expect_quietly(keyword("in")).is_some() {
+                return Some(CompOp::NotIn);
+            }
+            self.pos = mark;
+        }
         let ops = [
             ("==", CompOp::Equal),
             ("!=", CompOp::NotEqual),

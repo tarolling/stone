@@ -277,7 +277,8 @@ inversion:
 # Comparison operators
 # --------------------
 
-# chains such as a < b <= c mean a < b and b <= c, evaluating b once
+# chains such as a < b <= c mean a < b and b <= c, evaluating b once; the checker rejects a
+# chain with 'in' or 'not in' in it
 comparison:
     | sum (compare_op sum)*
 
@@ -288,6 +289,8 @@ compare_op:
     | '<='
     | '>'
     | '>='
+    | 'in'
+    | 'not' 'in'
 
 # Arithmetic operators
 # --------------------

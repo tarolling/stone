@@ -124,6 +124,7 @@ pub struct Arguments {
 ///
 /// ```text
 /// cmpop = Equal | NotEqual | LessThan | LessThanEqual | GreaterThan | GreaterThanEqual
+///       | In | NotIn
 /// ```
 #[derive(Debug, Clone, PartialEq)]
 pub enum CompOp {
@@ -133,6 +134,19 @@ pub enum CompOp {
     LessThanEqual,
     GreaterThan,
     GreaterThanEqual,
+    /// `in`, which tests whether a map has a key, a list an element equal to a value, or a
+    /// string a piece of text: `2 in [1, 2]` and `"el" in "hello"` are `true`.
+    In,
+    /// `not in`, the opposite of `in`: `3 not in [1, 2]` is `true`.
+    NotIn,
+}
+
+impl CompOp {
+    /// Returns whether this is `in` or `not in`, which test membership rather than compare two
+    /// values of one type, and never chain with other comparisons.
+    pub fn is_membership(&self) -> bool {
+        matches!(self, CompOp::In | CompOp::NotIn)
+    }
 }
 
 /// A unary operator, such as `-` in `-x`.

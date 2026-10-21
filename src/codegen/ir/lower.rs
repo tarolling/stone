@@ -2915,10 +2915,11 @@ impl<'a> Lowerer<'a> {
                 left,
                 ops,
                 comparators,
-            } if comparators.iter().all(|c| {
-                self.type_of(c)
-                    .is_ok_and(|ty| ty != Type::Str && !is_compound(&ty))
-            }) =>
+            } if !ops.iter().any(crate::ast::CompOp::is_membership)
+                && comparators.iter().all(|c| {
+                    self.type_of(c)
+                        .is_ok_and(|ty| ty != Type::Str && !is_compound(&ty))
+                }) =>
             {
                 // a < b < c means a < b and b < c, with b evaluated once and c skipped once false
                 let mut lhs = self.expr(left)?;
@@ -2930,8 +2931,9 @@ impl<'a> Lowerer<'a> {
                     } else {
                         then
                     };
+                    let cond = Cond::of(op).ok_or("'in' is not a comparison of two values")?;
                     self.terminate(Terminator::CmpBranch {
-                        cond: Cond::from(op),
+                        cond,
                         float,
                         lhs,
                         rhs,
@@ -3740,6 +3742,139 @@ impl<'a> Lowerer<'a> {
         Ok(Operand::Reg(dst))
     }
 
+    /// Lowers `container`, a map, list, or string of type `ty` that a test of membership reads
+    /// once `before` are evaluated, borrowing a list's element as [`Lowerer::list_operand`] does.
+    fn container(
+        &mut self,
+        container: &Expr,
+        ty: &Type,
+        before: &[&Expr],
+    ) -> Result<Operand, String> {
+        match ty {
+            Type::List(_) | Type::Map(..) => self.list_operand(container, before),
+            _ => self.expr(container),
+        }
+    }
+
+    /// Lowers a test of whether `container`, a value of type `ty`, holds the value whose values
+    /// are `needle`, as `needle in container` and `container.contains(needle)` make, to 1 or 0:
+    /// a map's key through `stone.map_find`, a string's text through `stone.str_position`, and
+    /// a list's element by a loop that compares each element with `needle` as `==` does, from
+    /// the first, stopping at the first that is equal. The elements stay borrowed from the list.
+    ///
+    /// For example, `x in xs` of a `list[int]`, with `xs` in `v0` and `x` in `v1`, loops over
+    /// `v5 = list_get v0, v4` and `br_eq v1, v5`.
+    fn contains_values(
+        &mut self,
+        container: Operand,
+        ty: &Type,
+        needle: &[Operand],
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let elem = match ty {
+            Type::Map(key, _) => {
+                let first = self.map_find(container, needle[0], key, None);
+                return Ok(self.at_least_zero(first, into));
+            }
+            Type::Str => {
+                // the routine gives -1 when the text never appears
+                let position =
+                    self.runtime_call("stone.str_position", vec![container, needle[0]], None);
+                return Ok(self.at_least_zero(position, into));
+            }
+            Type::List(elem) => (**elem).clone(),
+            _ => return Err("'in' needs a str, list, or map".to_string()),
+        };
+        let width = self.leaves(&elem).len();
+        let count = self.element_count(container, width);
+        // a fresh vreg, since the loop still reads `needle` after it writes the result
+        let result = self.fresh();
+        let index = self.fresh();
+        self.push(Inst::Copy {
+            dst: index,
+            src: Operand::Imm(0),
+        });
+        let (header, body, next) = (self.new_block(), self.new_block(), self.new_block());
+        let (found, missing, done) = (self.new_block(), self.new_block(), self.new_block());
+        self.loop_depth += 1;
+        self.start(header);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(index),
+            rhs: count,
+            then: body,
+            otherwise: missing,
+        });
+        self.start(body);
+        let uncounted = vec![None; width];
+        let element = self.load_slots(container, Operand::Reg(index), width, 0..width, &uncounted);
+        self.equal_branch(&elem, needle, &element, found, next);
+        self.start(next);
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: index,
+            lhs: Operand::Reg(index),
+            rhs: Operand::Imm(1),
+        });
+        self.jump(header);
+        self.loop_depth -= 1;
+        self.start(found);
+        self.push(Inst::Copy {
+            dst: result,
+            src: Operand::Imm(1),
+        });
+        self.jump(done);
+        self.start(missing);
+        self.push(Inst::Copy {
+            dst: result,
+            src: Operand::Imm(0),
+        });
+        self.start(done);
+        Ok(self.finish(Operand::Reg(result), into))
+    }
+
+    /// Writes 1 if `value` is at least 0 and 0 if not, as for a position that is -1 when
+    /// something is missing.
+    fn at_least_zero(&mut self, value: Operand, into: Option<VReg>) -> Operand {
+        let dst = self.dst(into);
+        self.push(Inst::Compare {
+            cond: Cond::Ge,
+            float: false,
+            dst,
+            lhs: value,
+            rhs: Operand::Imm(0),
+        });
+        Operand::Reg(dst)
+    }
+
+    /// Lowers `needle in container` or `needle not in container`, evaluating the value it looks
+    /// for before the container, to 1 or 0.
+    fn membership(
+        &mut self,
+        needle: &Expr,
+        op: &crate::ast::CompOp,
+        container: &Expr,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let values = self.expr_flat(needle)?;
+        let ty = self.type_of(container)?;
+        let held = self.container(container, &ty, &[])?;
+        let negated = *op == crate::ast::CompOp::NotIn;
+        let found =
+            self.contains_values(held, &ty, &values, (!negated).then_some(into).flatten())?;
+        for value in values {
+            self.release_temp(value);
+        }
+        self.release_temp(held);
+        if !negated {
+            return Ok(found);
+        }
+        let dst = self.dst(into);
+        self.push(Inst::Not { dst, src: found });
+        Ok(Operand::Reg(dst))
+    }
+
     /// Lowers a comparison used as a value, which is 1 or 0. Each counted operand is released
     /// once the links that read it are done, including when a chain stops early.
     fn compare(
@@ -3749,6 +3884,11 @@ impl<'a> Lowerer<'a> {
         comparators: &[Expr],
         into: Option<VReg>,
     ) -> Result<Operand, String> {
+        if let ([op], [container]) = (ops, comparators)
+            && op.is_membership()
+        {
+            return self.membership(left, op, container, into);
+        }
         // a single link can write its destination directly, but a chain writes it more than once
         let result = if ops.len() == 1 {
             self.dst(into)
@@ -3761,7 +3901,7 @@ impl<'a> Lowerer<'a> {
         for (i, (op, comparator)) in ops.iter().zip(comparators).enumerate() {
             let rhs_values = self.expr_flat(comparator)?;
             let (lhs, rhs) = (lhs_values[0], rhs_values[0]);
-            let cond = Cond::from(op);
+            let cond = Cond::of(op).ok_or("'in' is not a comparison of two values")?;
             match self.type_of(comparator)? {
                 // ordered by its `cmp`, whose ordering's tag says which comes first
                 ty if !matches!(cond, Cond::Eq | Cond::Ne) && self.implements(&ty, ORD) => {
@@ -4117,21 +4257,19 @@ impl<'a> Lowerer<'a> {
                 Ok(result)
             }
             "contains" => {
-                let key_ty = self.map_key(receiver).ok_or("only a map has 'contains'")?;
-                let map = self.list_operand(receiver, &args.iter().collect::<Vec<_>>())?;
-                let key = self.expr(&args[0])?;
-                let first = self.map_find(map, key, &key_ty, None);
-                self.release_temp(key);
-                self.release_temp(map);
-                let dst = self.dst(into);
-                self.push(Inst::Compare {
-                    cond: Cond::Ge,
-                    float: false,
-                    dst,
-                    lhs: first,
-                    rhs: Operand::Imm(0),
-                });
-                Ok(Operand::Reg(dst))
+                let [needle] = args else {
+                    return Err("contains() takes one value".to_string());
+                };
+                // the receiver, then the value it looks for
+                let ty = self.type_of(receiver)?;
+                let container = self.container(receiver, &ty, &[needle])?;
+                let needle = self.expr_flat(needle)?;
+                let found = self.contains_values(container, &ty, &needle, into)?;
+                for value in needle {
+                    self.release_temp(value);
+                }
+                self.release_temp(container);
+                Ok(found)
             }
             "get" => {
                 let key_ty = self.map_key(receiver).ok_or("only a map has 'get'")?;

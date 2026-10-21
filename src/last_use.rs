@@ -289,10 +289,11 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
             ops,
             comparators,
         } => {
-            // a struct may compare with its own `eq` and order with its `cmp`
+            // a struct may compare with its own `eq` and order with its `cmp`, and `in` compares
+            // a list's elements with `eq`
             for op in ops {
                 out.methods.push(match op {
-                    CompOp::Equal | CompOp::NotEqual => "eq",
+                    CompOp::Equal | CompOp::NotEqual | CompOp::In | CompOp::NotIn => "eq",
                     _ => "cmp",
                 });
             }
@@ -306,9 +307,11 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
         } => {
             if let ExprKind::Attribute { attr, .. } = &func.kind {
                 out.methods.push(attr);
-                // a list of a struct sorts by its `cmp`
-                if attr == "sort" {
-                    out.methods.push("cmp");
+                // a list of a struct sorts by its `cmp`, and finds an element by its `eq`
+                match attr.as_str() {
+                    "sort" => out.methods.push("cmp"),
+                    "contains" => out.methods.push("eq"),
+                    _ => {}
                 }
             }
             expr_names(func, out);

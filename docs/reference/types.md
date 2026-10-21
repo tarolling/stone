@@ -259,7 +259,13 @@ for c in "aé€":
     print(c, c.len())   // a 1, then é 2, then € 3
 ```
 
-A string knows its length, so `s.len()` takes the same time for any string.
+A string knows its length, so `s.len()` takes the same time for any string. `t in s` (or
+`s.contains(t)`) tests whether the text `t` appears anywhere in `s`, byte for byte, and
+`s.find(t)` gives where it first does:
+
+```stone
+print("ell" in "hello", "" in "hello", "x" not in "hello")   // true true true
+```
 
 `<`, `<=`, `>`, and `>=` order strings byte by byte, so a string orders before any longer string
 it starts, and the order of characters is the order of their Unicode code points, as in Python.
@@ -395,7 +401,7 @@ A map holds a value for each of its keys, like a `dict` in Python or a `HashMap`
 ages = {"ann": 31, "bob": 27}
 ages["cy"] = 45      // adds an entry
 ages["ann"] = 32     // changes one, which keeps its place
-print(ages["bob"], ages.len(), ages.contains("dee"))   // 27 3 false
+print(ages["bob"], ages.len(), "dee" in ages)   // 27 3 false
 print(ages)          // {'ann': 32, 'bob': 27, 'cy': 45}
 ```
 
@@ -404,7 +410,8 @@ too. `{}` is an empty map, whose types come from how it is used. A map keeps its
 order their keys were first added, which is the order it prints in, and a literal that names a
 key twice keeps the later value, as in Python. `m[k]` stops the program with
 `key not found: 'dee'` if `m` has no entry for `k`, so where it might not, check with
-`m.contains(k)` first or read it with `m.get(k)`, which gives `some` of the value or `none`.
+`k in m` (or `m.contains(k)`) first or read it with `m.get(k)`, which gives `some` of the value
+or `none`.
 
 A `for` loop over a map goes through its keys in that order, and `m.keys()`, `m.values()`, and
 `m.items()` give them as new lists, the last as `(key, value)` tuples. `m.pop(k)` removes `k`'s

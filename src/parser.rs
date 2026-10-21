@@ -117,6 +117,19 @@ impl Parser {
         Some(tok)
     }
 
+    /// Expects `target` as [`Parser::expect`] does, but quietly whatever the token, as for the
+    /// `in` of `x in xs`, which is one of many ways an expression may go on, unlike the `in` a
+    /// `for` loop requires.
+    fn expect_quietly(&mut self, target: TokenType) -> Option<Token> {
+        let tok = self.peek().clone();
+        if target != tok.r#type {
+            self.record_expected(describe_expected(&target), true);
+            return None;
+        }
+        self.pos += 1;
+        Some(tok)
+    }
+
     /// Expects the `:` that opens a block, as after `if x` or `fn f()`.
     ///
     /// A `:` elsewhere, such as before an optional parameter type, is a quiet expectation, but the

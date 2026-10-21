@@ -1749,6 +1749,20 @@ impl<'out> Interpreter<'out> {
                 left,
                 ops,
                 comparators,
+            } if ops.iter().any(CompOp::is_membership) => {
+                let [op] = &ops[..] else {
+                    return Err("'in' cannot be chained with other comparisons".into());
+                };
+                // the value looked for, then where
+                let needle = self.eval_expr(left)?;
+                let container = self.eval_expr(&comparators[0])?;
+                let found = self.contains(&container, &needle)?;
+                Ok(Value::Bool(found == (*op == CompOp::In)))
+            }
+            ExprKind::Compare {
+                left,
+                ops,
+                comparators,
             } => {
                 let mut current = self.eval_expr(left)?;
                 for (op, comparator) in ops.iter().zip(comparators) {
@@ -1767,6 +1781,9 @@ impl<'out> Interpreter<'out> {
                         }
                         CompOp::GreaterThanEqual => {
                             self.order(&current, &next)?.is_some_and(Ordering::is_ge)
+                        }
+                        CompOp::In | CompOp::NotIn => {
+                            return Err("'in' cannot be chained with other comparisons".into());
                         }
                     };
                     if !holds {
@@ -1975,6 +1992,28 @@ impl<'out> Interpreter<'out> {
         }
     }
 
+    /// Returns whether `container` holds `needle`, as `needle in container` and
+    /// `container.contains(needle)` test: a map an entry for the key `needle`, a list an element
+    /// that `needle == element`, looking from the first and stopping at a match, and a string
+    /// the text `needle`.
+    ///
+    /// For example, `2 in [1, 2, 3]` compares 2 with 1 and then 2, and `"" in "abc"` is true.
+    fn contains(&mut self, container: &Value, needle: &Value) -> EvalResult<bool> {
+        match (container, needle) {
+            (Value::Map(map), key) => Ok(map.positions.contains_key(&MapKey::of(key)?)),
+            (Value::Str(text), Value::Str(part)) => Ok(text.contains(&**part)),
+            (Value::List(items), _) => {
+                for item in items.iter() {
+                    if self.values_equal(needle, item, 0)? {
+                        return Ok(true);
+                    }
+                }
+                Ok(false)
+            }
+            _ => Err("'in' needs a str, list, or map".into()),
+        }
+    }
+
     /// Orders two values as `<` does: numbers and strings by value, or `None` if either is nan,
     /// and a struct by its `cmp`.
     fn order(&mut self, a: &Value, b: &Value) -> EvalResult<Option<Ordering>> {
@@ -2005,10 +2044,8 @@ impl<'out> Interpreter<'out> {
             ("len", _, _) => {
                 Err("len() is called on a str, list, or map, with no arguments".into())
             }
-            ("contains", Value::Map(map), [key]) => {
-                Ok(Value::Bool(map.positions.contains_key(&MapKey::of(key)?)))
-            }
-            ("contains", _, _) => Err("contains() is called on a map, with one key".into()),
+            ("contains", _, [needle]) => Ok(Value::Bool(self.contains(&receiver, needle)?)),
+            ("contains", _, _) => Err("contains() is called with one value".into()),
             ("get", Value::Map(map), [key]) => Ok(match map.positions.get(&MapKey::of(key)?) {
                 Some(&at) => some(map.entries[at].1.clone()),
                 None => none(),

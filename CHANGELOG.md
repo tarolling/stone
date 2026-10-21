@@ -10,6 +10,16 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `in` and `not in`: `k in m` tests whether a map has the key `k`, `x in xs` whether a list has
+  an element equal to `x` (compared as `==` compares, from the first, stopping at the first
+  match, so a struct with its own `eq` uses it), and `t in s` whether the string `s` has the
+  text `t` in it. Unlike in Python, they never chain with other comparisons: `x in xs == b` is
+  an error that suggests `(x in xs) == b`.
+- `contains` works on lists and strings too, as `xs.contains(x)` and `s.contains(t)`, making the
+  same test as `in`.
+
 ## [0.3.2] - 2026-10-19
 
 ### Added

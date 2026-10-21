@@ -1361,3 +1361,19 @@ fn a_question_mark_returns_the_err_it_found_and_moves_like_a_call() {
     let f = second.split("fn f").nth(1).unwrap();
     assert!(f.contains("b1:\n  release_str v2\n  ret v3\n"), "{f}");
 }
+
+#[test]
+fn in_loops_over_a_list_borrowing_each_element_until_one_is_equal() {
+    let source = "fn f(xs: list[int], x: int) -> bool:\n    ret x not in xs\n";
+    assert_eq!(
+        dump(source).split("fn main").next().unwrap(),
+        "fn f(v0, v1):\n\
+         b0:\n  v2 = len v0\n  v4 = copy 0\n  jmp b1\n\
+         b1:\n  br_lt v4, v2 -> b2, b5\n\
+         b2:\n  v5 = list_get v0, v4\n  br_eq v1, v5 -> b4, b3\n\
+         b3:\n  v4 = add v4, 1\n  jmp b1\n\
+         b4:\n  v3 = copy 1\n  jmp b6\n\
+         b5:\n  v3 = copy 0\n  jmp b6\n\
+         b6:\n  v6 = not v3\n  ret v6\n"
+    );
+}

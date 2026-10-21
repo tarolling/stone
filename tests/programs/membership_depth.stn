@@ -1,0 +1,17 @@
+// looking for an enum value nested more than 10000 levels deep in a list stops the program where
+// in compares it
+enum IntList:
+    Nil
+    Cons(int, IntList)
+
+fn numbers(n: int) -> IntList:
+    l = IntList.Nil
+    for i in range(n):
+        l = IntList.Cons(i, l)
+    ret l
+
+print(numbers(9999) in [IntList.Nil, numbers(9999)])
+deep = [IntList.Nil, numbers(10000)]
+print(IntList.Nil in deep, numbers(5) not in deep)
+print("before")
+print(numbers(10000) in deep)

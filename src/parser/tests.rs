@@ -1196,6 +1196,71 @@ fn every_comparison_operator_parses() {
 }
 
 #[test]
+fn in_and_not_in_are_comparisons() {
+    for (text, op) in [("in", CompOp::In), ("not in", CompOp::NotIn)] {
+        assert_eq!(
+            expr_of(&format!("a + 1 {text} xs\n")),
+            ExprKind::Compare {
+                left: Box::new(
+                    ExprKind::BinOp {
+                        op: Operator::Add,
+                        left: name("a"),
+                        right: int(1),
+                    }
+                    .into()
+                ),
+                ops: vec![op],
+                comparators: vec![*name("xs")],
+            }
+            .into()
+        );
+    }
+}
+
+#[test]
+fn not_before_a_membership_test_negates_the_whole_test() {
+    assert_eq!(
+        expr_of("not a in xs\n"),
+        ExprKind::UnaryOp {
+            op: UnaryOp::Not,
+            operand: Box::new(
+                ExprKind::Compare {
+                    left: name("a"),
+                    ops: vec![CompOp::In],
+                    comparators: vec![*name("xs")],
+                }
+                .into()
+            ),
+        }
+        .into()
+    );
+}
+
+#[test]
+fn a_for_loop_over_a_membership_test_takes_the_first_in() {
+    let Mod::Module { body } = parse_within(
+        "for x in a in b:\n    print(x)\n".to_string(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let StmtKind::For { iter, .. } = &body[0].kind else {
+        panic!("expected a for loop");
+    };
+    assert!(matches!(
+        &iter.kind,
+        ExprKind::Compare { ops, .. } if ops == &[CompOp::In]
+    ));
+}
+
+#[test]
+fn not_without_in_after_a_value_is_an_error() {
+    assert_eq!(
+        error_of("x = a not b\n"),
+        ("expected 'in', found 'b'".to_string(), 1, 11)
+    );
+}
+
+#[test]
 fn parentheses_group_expressions() {
     assert_eq!(
         expr_of("(1 + 2) * 3\n"),

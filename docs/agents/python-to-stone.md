@@ -46,17 +46,18 @@ since stone copies values.
 | `for a, b in zip(xs, ys):` | `for i in range(xs.len()):` with `xs[i]` and `ys[i]` |
 | `sum(xs)`, `max(xs)` | a loop; `math.max(xs)` and `math.min(xs)` for a list of numbers |
 | `sorted(xs)` | `ys = xs` then `ys.sort()` (a copy, since lists are values) |
+| `x in xs`, `t in s`, `x not in xs` | the same; elements compare with `==`, so not lists or maps, and `in` never chains |
 | `xs.sort(key=..., reverse=True)` | a struct with `impl ord`, whose `cmp` defines the order |
 | `xs.remove(x)`, `xs.index(x)` | a loop that finds the index, then `pop(i)` |
 | `d.get(k, default)` | `d.get(k).unwrap_or(default)` |
-| `k in d` | `d.contains(k)` |
+| `k in d`, `k not in d` | the same, or `d.contains(k)` |
 | `for k in d:`, `for k, v in d.items():` | the same, in insertion order |
 | `d.keys()`, `d.values()`, `list(d.items())` | `d.keys()`, `d.values()`, `d.items()`: new lists |
 | `d.pop(k)`, `del d[k]` | `d.pop(k)`, which returns an option, `none` if `k` is missing |
 | `d.pop(k, default)` | `d.pop(k).unwrap_or(default)` |
 | `d[k] += 1`, `d[k].append(x)` | the same, but the key must exist |
-| `defaultdict(int)` | check `d.contains(k)` before reading or changing |
-| `set()`, `s.add(x)`, `x in s` | `map[T, bool]`: `s[x] = true`, `s.contains(x)` |
+| `defaultdict(int)` | check `k in d` before reading or changing |
+| `set()`, `s.add(x)`, `x in s` | `map[T, bool]`: `s[x] = true`, `x in s` |
 | `collections.Counter` | a map of counts, or a list of structs as in the worked example |
 
 An entry changes in place as a list's element does, through any place, but stone has no
@@ -68,7 +69,7 @@ so add it first, as `defaultdict` would:
 words = ["apple", "bean", "avocado", "beet", "cherry"]
 groups = {}
 for w in words:
-    if not groups.contains(w[0]):
+    if w[0] not in groups:
         groups[w[0]] = []
     groups[w[0]].append(w)
 for letter, group in groups.items():
@@ -78,7 +79,7 @@ for letter, group in groups.items():
 seen = {}
 for n in [3, 1, 3, 2, 1]:
     seen[n] = true
-print(seen.len(), seen.contains(2), seen.contains(7))
+print(seen.len(), 2 in seen, 7 in seen)
 ```
 
 ### Classes
@@ -309,7 +310,7 @@ fn total_value(items: list[Item]) -> float:
 fn word_counts(text: str) -> map[str, int]:
     counts = {}
     for word in text.split():
-        if counts.contains(word):
+        if word in counts:
             counts[word] += 1
         else:
             counts[word] = 1

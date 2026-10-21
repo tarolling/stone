@@ -76,9 +76,11 @@ impl AssemblyGenerator for Arm64Generator {
         self.emit("\t.text");
 
         // only emit the print routines if the program prints
-        if self.ctx.needs_print(module) {
+        let prints = self.ctx.needs_print(module);
+        if prints {
             self.emit("\t// Standard Library Functions");
-            builtins::print(self);
+            let strings = self.ctx.needs_strings();
+            builtins::print(self, strings);
         }
 
         // stone functions first, then main, which the lowering puts last
@@ -118,6 +120,9 @@ impl AssemblyGenerator for Arm64Generator {
             if enums {
                 builtins::enum_runtime(self);
             }
+        } else if prints {
+            // the text print builds
+            builtins::allocator(self);
         }
         if self.ctx.needs_env() {
             builtins::env_runtime(self);

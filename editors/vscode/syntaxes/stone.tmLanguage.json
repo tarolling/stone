@@ -30,7 +30,31 @@
       "endCaptures": { "0": { "name": "punctuation.definition.string.end.stone" } },
       "patterns": [
         { "name": "constant.character.escape.stone", "match": "\\\\(x[0-9a-fA-F]{2}|[\"'\\\\ntr])" },
-        { "name": "invalid.illegal.escape.stone", "match": "\\\\." }
+        { "name": "invalid.illegal.escape.stone", "match": "\\\\." },
+        { "name": "constant.character.escape.stone", "match": "\\{\\{|\\}\\}" },
+        { "include": "#interpolation" }
+      ]
+    },
+    "interpolation": {
+      "name": "meta.interpolation.stone",
+      "contentName": "source.stone",
+      "begin": "\\{",
+      "end": "\\}|$",
+      "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.stone" } },
+      "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.stone" } },
+      "patterns": [
+        { "include": "#braces" },
+        { "include": "$self" }
+      ]
+    },
+    "braces": {
+      "begin": "\\{",
+      "end": "\\}|$",
+      "beginCaptures": { "0": { "name": "punctuation.section.braces.begin.stone" } },
+      "endCaptures": { "0": { "name": "punctuation.section.braces.end.stone" } },
+      "patterns": [
+        { "include": "#braces" },
+        { "include": "$self" }
       ]
     },
     "function-definition": {

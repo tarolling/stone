@@ -1,0 +1,12 @@
+$12.34
+$12.34 $12.34 -$0.05
+[$12.34, $0.07] ($12.34, 'a') some($12.34) Entry.Paid($12.34) Entry.Free
+Wallet(owner='ann', money=[$12.34])
+{'rent': $1000.00}
+Box of $12.34 Box of [1, 2] Box of s [Box of Box of 1]
+writing 1
+writing 2
+a noisy 1 b noisy 2
+writing 3
+[noisy 3]
+$12.34 [$12.34] Box of $12.34

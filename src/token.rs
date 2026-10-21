@@ -11,6 +11,12 @@ pub enum TokenType {
     Number(i64),
     Float(f64),
     String(String),
+    /// The text of a string up to its first `{value}`, as `"a` in `"a{x}b"`.
+    StringStart(String),
+    /// The text of a string between two of its values, as `b` in `"a{x}b{y}c"`.
+    StringMiddle(String),
+    /// The text of a string after its last value, as `b"` in `"a{x}b"`.
+    StringEnd(String),
     Operator(String),
     Newline,
     Indent,

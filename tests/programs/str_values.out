@@ -1,0 +1,13 @@
+['1', '-2.5', 'true', 'plain', '[1, 2]', '[\'a\', "b\'c"]']
+(1, 'a', (2.0, false))
+{'k': [1], 'j': []} {1: 'one'} {true: (1, 2)}
+Point(x=1.0, y=2.0) [Point(x=1.0, y=2.0), Point(x=1.0, y=2.0)]
+Shape.Circle(1.5) Shape.Rect(Point(x=1.0, y=2.0), Point(x=1.0, y=2.0)) Shape.Empty
+some(1) none some(['x']) [some(Shape.Empty), none]
+ok(1) err('bad') some(2)
+Pair(a='s', b=[Pair(a=1, b=none)])
+<1> <s> <['s']> <Point(x=1.0, y=2.0)> <less>
+Point(x=1.0, y=2.0) [1] s 2
+[some((Point(x=1.0, y=2.0), 'q'))]
+[some((Point(x=1.0, y=2.0), 'q'))]
+true

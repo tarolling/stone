@@ -81,7 +81,7 @@ module's name in a `use` or before a `.`.
 | --- | --- |
 | int | `0`, `42`, `9223372036854775807` |
 | float | `1.5`, `2.5e-3`, `1e9`, `1E+9` |
-| string | `"hello"`, `""` |
+| string | `"hello"`, `""`, `"x is {x}"` |
 | bool | `true`, `false` |
 | option | `none`, `some(1)` |
 | result | `ok(1)`, `err("bad")` |
@@ -106,6 +106,20 @@ and must close on the line they open on. A backslash starts an escape sequence:
 So `"say \"hi\"\n"` holds `say "hi"` and a line break. Any other escape is an error, and so is
 `\x00`, since a string cannot hold a null byte. Characters outside ASCII are written as
 themselves, as in `"café"`.
+
+An expression in braces inside a string is written into it, as `print` writes it, so
+`"{n} items, the first {xs[0]}"` holds the values of `n` and `xs[0]`. Strings written one after
+another join, as in `"a" "b"`. Inside a string:
+
+| text | means |
+| --- | --- |
+| `{expression}` | the value of the expression; it may hold strings, brackets, and braces of its own |
+| `{{` | a `{` |
+| `}}` | a `}` |
+
+A lone `}`, an empty `{}`, and a value that does not close before the end of the line are
+errors. A `:` after the expression, as in `{x:.2f}`, is kept for format specs, which are not
+supported yet.
 
 ## Statements
 

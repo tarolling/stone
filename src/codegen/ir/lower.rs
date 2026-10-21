@@ -41,9 +41,9 @@ use crate::ast::{
     Stmt, StmtKind, UnaryOp, constant_int,
 };
 use crate::checker::{
-    Analysis, EQ, Enums, Instance, Method, Methods, OPTION, ORD, RESULT, Step, Structs, SymbolKind,
-    Type, collect_assigned, collect_changed, may_name_enum, place, place_root, place_spans,
-    range_args, struct_display, variant_display, variants,
+    Analysis, DISPLAY, EQ, Enums, Instance, Method, Methods, OPTION, ORD, RESULT, Step, Structs,
+    SymbolKind, Type, collect_assigned, collect_changed, may_name_enum, place, place_root,
+    place_spans, range_args, struct_display, variant_display, variants,
 };
 use crate::codegen::context::module_routine;
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
@@ -843,7 +843,7 @@ impl<'a> Lowerer<'a> {
 
     /// Calls the method `name` of the struct type `ty`, which takes its values `lhs` as `self`
     /// and `rhs` as its other value, borrowing both unless it owns them, as `eq` and `cmp` do,
-    /// and returns its result.
+    /// and returns its result. `display` takes no other value, so its `rhs` is empty.
     fn compare_call(&mut self, ty: &Type, name: &str, lhs: &[Operand], rhs: &[Operand]) -> VReg {
         let Type::Struct { name: owner, args } = ty else {
             unreachable!("only a struct has its own '{name}'")
@@ -3014,6 +3014,7 @@ impl<'a> Lowerer<'a> {
                 let values = self.try_values(value)?;
                 Ok(self.finish(values[0], into))
             }
+            ExprKind::JoinedStr { values } => self.joined(values, into, kind),
             ExprKind::Dict { keys, values } => {
                 let (width, codes) = self.element_layout(expr);
                 let kinds = self.element_kinds(expr);
@@ -4156,6 +4157,13 @@ impl<'a> Lowerer<'a> {
                 self.own(order, Some(RcKind::Enum));
                 Ok(order)
             }
+            "display" => self.call(
+                "str",
+                receiver.span,
+                std::slice::from_ref(receiver),
+                into,
+                kind,
+            ),
             // a type that compares part by part compares as `==` does
             "eq" => {
                 let ty = self.type_of(receiver)?;
@@ -4801,6 +4809,8 @@ impl<'a> Lowerer<'a> {
                 for arg in args {
                     values.push((self.expr_flat(arg)?, self.type_of(arg)?));
                 }
+                // the whole line is built first, so a print that fails writes nothing
+                let outer = self.runtime_call("stone.text_begin", vec![], None);
                 let count = values.len();
                 for (i, (leaves, ty)) in values.iter().enumerate() {
                     self.print_flat(ty, leaves, false);
@@ -4808,12 +4818,24 @@ impl<'a> Lowerer<'a> {
                         self.print_char(' ');
                     }
                 }
-                self.print_char('\n');
+                self.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Runtime("stone.text_print"),
+                    args: vec![outer],
+                });
                 for value in values.into_iter().flat_map(|(leaves, _)| leaves) {
                     self.release_temp(value);
                 }
                 // print returns none
                 Ok(self.finish(Operand::Imm(0), into))
+            }
+            "str"
+                if !matches!(
+                    self.type_of(&args[0])?,
+                    Type::Int | Type::Float | Type::Bool | Type::Str
+                ) =>
+            {
+                self.display(&args[0], into, kind)
             }
             "float" | "int" | "str" => {
                 let from = self.type_of(&args[0])?;
@@ -6227,6 +6249,17 @@ impl<'a> Lowerer<'a> {
                 self.print_elements(elem, values[0])
             }
             Type::Map(key, value) => self.print_entries(Some(key), value, values[0]),
+            // its own display says how it is written
+            Type::Struct { .. } if self.implements(ty, DISPLAY) => {
+                let text = Operand::Reg(self.compare_call(ty, DISPLAY, values, &[]));
+                self.own(text, Some(RcKind::Str));
+                self.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Print(Type::Str),
+                    args: vec![text],
+                });
+                self.release_temp(text);
+            }
             Type::Struct { .. } | Type::Enum { .. } => {
                 let label = self.helper(Helper::Print(ty.clone()));
                 let mut args = values.to_vec();
@@ -6367,6 +6400,69 @@ impl<'a> Lowerer<'a> {
             ExprKind::Name { id, .. } => self.context.owned_params.contains_key(id),
             _ => self.context.methods.contains_key(&expr.span),
         }
+    }
+
+    /// Lowers `str(value)` of a value that is not a number, bool, or string, which writes it as
+    /// `print` would into a new text and makes a string of that.
+    ///
+    /// For example, `str([1])` evaluates `[1]`, calls `stone.text_begin`, prints the list, and
+    /// takes the string `"[1]"` from `stone.text_end`.
+    fn display(
+        &mut self,
+        value: &Expr,
+        into: Option<VReg>,
+        kind: Option<RcKind>,
+    ) -> Result<Operand, String> {
+        let ty = self.type_of(value)?;
+        let values = self.expr_flat(value)?;
+        let outer = self.runtime_call("stone.text_begin", vec![], None);
+        self.print_flat(&ty, &values, false);
+        let text = self.runtime_call("stone.text_end", vec![outer], into);
+        for value in values {
+            self.release_temp(value);
+        }
+        self.own(text, kind);
+        Ok(text)
+    }
+
+    /// Lowers a string with values in it, such as `"x is {x}"`, which evaluates every value
+    /// first, left to right, then writes its text and its values in turn into a new text, as
+    /// `print` would, and makes a string of that.
+    ///
+    /// For example, `"x is {x}"` calls `stone.text_begin`, prints `x is ` and then `x`, and takes
+    /// the string from `stone.text_end`.
+    fn joined(
+        &mut self,
+        pieces: &[Expr],
+        into: Option<VReg>,
+        kind: Option<RcKind>,
+    ) -> Result<Operand, String> {
+        let mut values = Vec::with_capacity(pieces.len());
+        for piece in pieces {
+            values.push(match &piece.kind {
+                ExprKind::Constant { value, .. } if matches!(&**value, Constant::Str(_)) => None,
+                _ => Some((self.expr_flat(piece)?, self.type_of(piece)?)),
+            });
+        }
+        let outer = self.runtime_call("stone.text_begin", vec![], None);
+        for (piece, value) in pieces.iter().zip(&values) {
+            match value {
+                Some((leaves, ty)) => self.print_flat(ty, leaves, false),
+                None => {
+                    if let ExprKind::Constant { value, .. } = &piece.kind
+                        && let Constant::Str(text) = &**value
+                    {
+                        self.print_text(text);
+                    }
+                }
+            }
+        }
+        let text = self.runtime_call("stone.text_end", vec![outer], into);
+        for value in values.into_iter().flatten().flat_map(|(leaves, _)| leaves) {
+            self.release_temp(value);
+        }
+        self.own(text, kind);
+        Ok(text)
     }
 
     /// Prints `text` as it is, through the string printer.
@@ -6628,7 +6724,8 @@ fn bin_op(op: Operator) -> BinOp {
 /// For example, `i + 1` and `a[i]` make no calls, but `f(i)` and `xs.len()` do.
 fn has_call(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Call { .. } => true,
+        // a struct among a string's values may be written by its own `display`
+        ExprKind::Call { .. } | ExprKind::JoinedStr { .. } => true,
         ExprKind::Constant { .. } | ExprKind::Name { .. } => false,
         ExprKind::BinOp { left, right, .. } => has_call(left) || has_call(right),
         ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => has_call(operand),

@@ -37,6 +37,7 @@ module stone
          | UnaryOp(unaryop op, expr operand)
          | Compare(expr left, cmpop* ops, expr* comparators)
          | Call(expr func, expr* args, keyword* keywords)
+         | JoinedStr(expr* values)
          | Constant(constant value, string? kind)
 
          | Attribute(expr value, identifier attr, expr_context ctx)

@@ -1,0 +1,37 @@
+// str writes any value as print does, with strings quoted only inside other values
+
+struct Point:
+    x: float
+    y: float
+
+struct Pair[A, B]:
+    a: A
+    b: B
+
+enum Shape:
+    Circle(float)
+    Rect(Point, Point)
+    Empty
+
+fn show[T](x: T) -> str:
+    ret "<" + str(x) + ">"
+
+values = [str(1), str(-2.5), str(true), str("plain"), str([1, 2]), str(["a", "b'c"])]
+print(values)
+print(str((1, "a", (2.0, false))))
+print(str({"k": [1], "j": []}), str({1: "one"}), str({true: (1, 2)}))
+p = Point(x=1.0, y=2.0)
+print(str(p), str([p, p]))
+print(str(Shape.Circle(1.5)), str(Shape.Rect(p, p)), str(Shape.Empty))
+print(str(some(1)), str(none), str(some(["x"])), str([some(Shape.Empty), none]))
+
+print(str(ok(1)), str(err("bad")), str("abc".find("c")))
+print(str(Pair(a="s", b=[Pair(a=1, b=none)])))
+print(show(1), show("s"), show(["s"]), show(p), show(less))
+// display is the same as str
+print(p.display(), [1].display(), "s".display(), 2.display())
+// str is what print writes
+x = [some((p, "q"))]
+print(x)
+print(str(x))
+print(str(x) == x.display())

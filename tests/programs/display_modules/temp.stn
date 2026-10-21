@@ -1,0 +1,9 @@
+pub struct Celsius:
+    degrees: float
+
+impl display for Celsius:
+    fn display(self) -> str:
+        ret str(self.degrees) + " C"
+
+pub fn freezing() -> Celsius:
+    ret Celsius(degrees=0.0)

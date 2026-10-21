@@ -225,6 +225,10 @@ pub const SORT_SPLIT_MIN: i64 = 1 << 16;
 /// rather than by radix.
 pub const SORT_PART_MIN: i64 = 128;
 
+/// The size of the block from `stone.mem_alloc` that each text `print` or `str` builds starts
+/// in, header included, which holds a line of about 100 bytes before it grows.
+pub const TEXT_BLOCK: i64 = 120;
+
 /// The size of the buffer compiled programs read stdin into, one `read` syscall at a time.
 pub const STDIN_BUFFER: i64 = 1 << 16;
 
@@ -671,7 +675,10 @@ impl Context {
                 }
             }
         }
-        calls.contains("print") || self.uses(&["stone.input", "stone.str_float"])
+        // `str` of a value other than a number or string, and a string with values in it,
+        // print into a text
+        calls.contains("print")
+            || self.uses(&["stone.input", "stone.str_float", "stone.text_begin"])
     }
 
     /// Returns every interned string literal as `(label, text)`, sorted by label so the output
@@ -942,7 +949,7 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
         ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
             collect_calls_from_expr(operand, calls)
         }
-        ExprKind::BoolOp { values, .. } => {
+        ExprKind::BoolOp { values, .. } | ExprKind::JoinedStr { values } => {
             for val in values {
                 collect_calls_from_expr(val, calls);
             }

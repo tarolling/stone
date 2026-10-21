@@ -1,0 +1,56 @@
+// a struct that implements display says how print, str, and display write it, wherever it is
+
+struct Money:
+    cents: int
+
+impl display for Money:
+    fn display(self) -> str:
+        sign = ""
+        cents = self.cents
+        if cents < 0:
+            sign = "-"
+            cents = -cents
+        rest = str(cents % 100)
+        if rest.len() < 2:
+            rest = "0" + rest
+        ret sign + "$" + str(cents / 100) + "." + rest
+
+struct Wallet:
+    owner: str
+    money: list[Money]
+
+struct Box[T]:
+    item: T
+
+impl display for Box:
+    fn display(self) -> str:
+        ret "Box of " + str(self.item)
+
+struct Noisy:
+    n: int
+
+impl display for Noisy:
+    fn display(self) -> str:
+        // runs before print writes the line holding it
+        print("writing", self.n)
+        ret "noisy " + str(self.n)
+
+enum Entry:
+    Paid(Money)
+    Free
+
+m = Money(cents=1234)
+print(m)
+print(str(m), m.display(), str(Money(cents=-5)))
+print([m, Money(cents=7)], (m, "a"), some(m), Entry.Paid(m), Entry.Free)
+print(Wallet(owner="ann", money=[m]))
+print({"rent": Money(cents=100000)})
+print(Box(item=m), Box(item=[1, 2]), Box(item="s"), [Box(item=Box(item=1))])
+print("a", Noisy(n=1), "b", Noisy(n=2))
+s = str([Noisy(n=3)])
+print(s)
+
+fn shown[T](x: T) -> str:
+    ret x.display()
+
+print(shown(m), shown([m]), shown(Box(item=m)))

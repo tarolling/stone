@@ -62,13 +62,16 @@ print("apple" < "banana", line.startswith("name"))   // true true
 print("-".join(line.split("=")))                     // name-stone
 ```
 
-Indexes count bytes, so a character outside ASCII, such as `é`, takes more than one. See
+Any expression in braces inside a string is written into it, so `"{name} has {xs.len()}
+items"` builds a string from values of any type, with no prefix needed, and `{{` and `}}` write
+braces. Indexes count bytes, so a character outside ASCII, such as `é`, takes more than one. See
 {doc}`../reference/types` for the details.
 
 ## Printing
 
 `print` takes any number of values, prints them separated by spaces, and ends the line. Floats
 print the way Python's `repr` shows them: the shortest digits that read back as the same float,
-which is why `0.1 + 0.2` prints as `0.30000000000000004`.
+which is why `0.1 + 0.2` prints as `0.30000000000000004`. `str(x)` gives the text `print` would
+write for any value, and a value in a string is written the same way.
 
 Next, {doc}`control-flow`.

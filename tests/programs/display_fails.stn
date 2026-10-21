@@ -1,0 +1,11 @@
+// a failure inside a struct's display stops print before it writes anything
+struct Ratio:
+    a: int
+    b: int
+
+impl display for Ratio:
+    fn display(self) -> str:
+        ret str(self.a / self.b)
+
+print(Ratio(a=6, b=3))
+print("before", Ratio(a=1, b=0))

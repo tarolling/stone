@@ -53,4 +53,11 @@ one of `less`, `equal`, or `greater`. Bounds work with them too, so `fn largest[
 Sorting a list of a struct uses its `cmp` and keeps values it finds equal in the order they were
 in.
 
+## Writing values as text
+
+A third trait, `display`, is how `print`, `str`, and a value in a string write a value. Every type
+implements it, which is why anything can be printed, and a struct can say how it is written
+instead, with `impl display for Version:` and `fn display(self) -> str`. Its text then appears
+wherever a `Version` does, inside a list or another struct too, as `print(vs)` shows above.
+
 Next, {doc}`input`.

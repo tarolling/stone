@@ -52,7 +52,7 @@ fn report(label: str, values: list[int]):
         if v == 0:
             cont
         total += v
-    print(label, total, classify(total))
+    print("{label}: {total} is {classify(total)}")
 
 nums = [3, -1, 0, 4]
 report("sum", nums)
@@ -66,8 +66,9 @@ print("last:", nums[-1], "reversed:", nums[::-1])
 
 The differences from Python here: `fn` instead of `def`, a type on every parameter, `-> T` for a
 return value, `ret` instead of `return`, `cont` instead of `continue`, `true`/`false`, `//`
-comments, double-quoted strings only, `xs.len()` instead of `len(xs)`, and `math.abs` instead of
-`abs`. Variables are never annotated; their types are inferred. `for _ in range(n):` works for
+comments, double-quoted strings only, every string writing the values of the `{expression}`s in
+it with no `f` prefix (`{{` and `}}` for braces), `xs.len()` instead of `len(xs)`, and `math.abs`
+instead of `abs`. Variables are never annotated; their types are inferred. `for _ in range(n):` works for
 a loop variable you do not need, and `main` is an ordinary function name.
 
 ## Types
@@ -275,7 +276,9 @@ print(first(vs), first(["a", "b"]), vs[0] < vs[1])
 
 Inside a generic function a `T` can only be moved, stored, returned, and printed, plus the methods
 of its bounds. `[T: eq]` allows `==`, and `[T: ord]` allows `<` and `sort`. Implementing `ord`
-(with `cmp`) is how you sort a list of structs; there is no `key=`. Functions cannot be passed as
+(with `cmp`) is how you sort a list of structs; there is no `key=`. Implementing `display` (with
+`fn display(self) -> str`) changes how `print`, `str`, and `"{x}"` write a struct, everywhere it
+appears. Functions cannot be passed as
 values, so traits are also how you parameterize behavior.
 
 ## Values are copied: the one idea to learn
@@ -319,7 +322,8 @@ assign the result where 'add' is called
 ## Rules the checker enforces
 
 - No implicit conversion: `1 + 2.0` is an error. Convert with `float(n)` or `int(x)`, and build
-  strings with `str(n)`: `"n = " + str(n)`.
+  strings with values in them: `"n = {n}"`, or `"n = " + str(n)`. `str` and `{x}` take any value
+  and write it as `print` does.
 - Conditions must be `bool`: write `if xs.len() > 0:`, `if s != "":`, `if n != 0:`.
 - `==` does not compare lists or maps (it does compare numbers, strings, bools, tuples, structs,
   options, and enums). Compare lists with a loop.
@@ -349,7 +353,9 @@ assign the result where 'add' is called
 | Python | stone |
 | --- | --- |
 | `[f(x) for x in xs if p(x)]` | a `for` loop with `if` and `append` |
-| `f"{a} and {b}"`, `"%d" % n`, `.format` | `str(a) + " and " + str(b)` |
+| `f"{a} and {b}"`, `"%d" % n`, `.format` | `"{a} and {b}"`: every string takes values, with no `f`; format specs (`{x:.2f}`) are not supported yet |
+| `"{}"` in a string that is not an f-string | `"{{}}"`, since braces hold values |
+| `__str__`, `__repr__` | `impl display for T:` with `fn display(self) -> str` |
 | `a if cond else b` | an `if`/`else` assigning a variable |
 | `for k, v in d.items():` | the same; `d.items()` is a list of tuples |
 | `d.pop(k)`, `d.pop(k, default)` | `d.pop(k)` returns an option: `.unwrap_or(default)` |

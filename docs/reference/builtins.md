@@ -16,7 +16,9 @@ print(values...)
 Prints the values separated by spaces, followed by a newline. `print()` prints an empty line.
 Floats print like Python's `repr`, bools as `true` and `false`, lists with their elements in
 brackets, with strings inside a list in single quotes, enum values as they are written, and
-struct values with their fields named, as in `Point(x=1.0, y=2.0)`:
+struct values with their fields named, as in `Point(x=1.0, y=2.0)`, unless the struct
+implements the trait `display`, whose `display` method then says how it is written. The whole
+line is built before any of it is written, so a print that fails writes nothing:
 
 ```stone
 print("total", 3, 0.5, true, some(1), [1, 2], ["a"])   // total 3 0.5 true some(1) [1, 2] ['a']
@@ -79,13 +81,16 @@ print(float("2.5e3"), float("-inf"))       // 2500.0 -inf
 ## `str`
 
 ```text
-str(value: int | float | bool | str) -> str
+str(value) -> str
 ```
 
-Returns the text `print` would write for `value`, which is how to build a string from numbers.
+Returns the text `print` would write for `value`, of any type, so strings inside a list or
+another value are quoted and a string on its own is not. A struct that implements the trait
+`display` is written as its `display` method says, wherever it appears.
 
 ```stone
 print("x = " + str(1.5) + ", done = " + str(true))   // x = 1.5, done = true
+print(str([1, 2]) + str(some("a")))                  // [1, 2]some('a')
 ```
 
 ## `input`
@@ -590,6 +595,20 @@ block. Floats are in the order `sort` uses, so unlike `<`, `cmp` puts `-0.0` bef
 
 ```stone
 print(1.cmp(2), "b".cmp("a"), (-0.0).cmp(0.0))   // less greater less
+```
+
+### `display`
+
+```text
+T.display() -> str
+```
+
+Returns the text `print` writes for the value, as `str` does, for any type: every type
+implements the trait `display`, and a struct whose `impl display` block says how to write it
+uses that.
+
+```stone
+print([1, 2].display().len())   // 6
 ```
 
 ## The `os` module

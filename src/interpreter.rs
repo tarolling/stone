@@ -348,9 +348,6 @@ fn is_result(value: &EnumValue) -> bool {
     matches!(&*value.name, "ok" | "err")
 }
 
-/// Printing stopped because an enum value is nested more than [`stdlib::MAX_PRINT_DEPTH`] deep.
-struct TooDeep;
-
 /// Makes a new list of strings, such as the pieces `split` returns.
 fn str_list(items: Vec<&str>) -> Value {
     Value::list(items.into_iter().map(|s| Value::Str(s.into())).collect())
@@ -401,19 +398,29 @@ impl Value {
     ///
     /// For example, `[1, 2]` prints as `[1, 2]`, `["a"]` as `['a']`, and `(1, "a")` as
     /// `(1, 'a')`.
+    /// It never runs a struct's own `display`, so it serves error messages, which
+    /// [`Interpreter::write_value`] does not.
     fn display(&self, nested: bool) -> String {
         let mut out = String::new();
-        // only `print` stops at a value nested too deeply, and writes what it has first
-        let _ = self.write(&mut out, nested, 0);
+        // an error message writes what it can of a value nested too deeply
+        let _ = self.write(&mut out, nested, 0, &mut |_, _| Ok(false));
         out
     }
 
     /// Writes the value as [`Value::display`] does to `out`, inside `depth` enum and struct
-    /// values, stopping at one nested more than [`stdlib::MAX_PRINT_DEPTH`] deep.
+    /// values, failing with [`stdlib::PRINT_DEPTH`] at one nested more than
+    /// [`stdlib::MAX_PRINT_DEPTH`] deep. `custom` is offered each struct value first, and writes
+    /// it itself when it returns true, as a struct's own `display` does.
     ///
     /// For example, `some(Shape.Circle(1.0))` writes `some(Shape.Circle(1.0))`, and a struct
     /// writes its name and each field's, as in `Point(x=1.0, y=2.0)`.
-    fn write(&self, out: &mut String, nested: bool, depth: usize) -> Result<(), TooDeep> {
+    fn write(
+        &self,
+        out: &mut String,
+        nested: bool,
+        depth: usize,
+        custom: &mut dyn FnMut(&Value, &mut String) -> EvalResult<bool>,
+    ) -> EvalResult<()> {
         match self {
             Value::Int(i) => out.push_str(&i.to_string()),
             Value::Float(x) => out.push_str(&stdlib::format_float(*x)),
@@ -427,7 +434,7 @@ impl Value {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    item.write(out, true, depth)?;
+                    item.write(out, true, depth, custom)?;
                 }
                 out.push(']');
             }
@@ -437,9 +444,9 @@ impl Value {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    key.value().write(out, true, depth)?;
+                    key.value().write(out, true, depth, custom)?;
                     out.push_str(": ");
-                    value.write(out, true, depth)?;
+                    value.write(out, true, depth, custom)?;
                 }
                 out.push('}');
             }
@@ -449,13 +456,13 @@ impl Value {
                     if i > 0 {
                         out.push_str(", ");
                     }
-                    field.write(out, true, depth)?;
+                    field.write(out, true, depth, custom)?;
                 }
                 out.push(')');
             }
             Value::Enum(value) => {
                 if depth >= stdlib::MAX_PRINT_DEPTH {
-                    return Err(TooDeep);
+                    return Err(stdlib::PRINT_DEPTH.into());
                 }
                 out.push_str(&value.name);
                 if !value.fields.is_empty() {
@@ -464,14 +471,15 @@ impl Value {
                         if i > 0 {
                             out.push_str(", ");
                         }
-                        field.write(out, true, depth + 1)?;
+                        field.write(out, true, depth + 1, custom)?;
                     }
                     out.push(')');
                 }
             }
+            Value::Struct(_) if custom(self, out)? => {}
             Value::Struct(value) => {
                 if depth >= stdlib::MAX_PRINT_DEPTH {
-                    return Err(TooDeep);
+                    return Err(stdlib::PRINT_DEPTH.into());
                 }
                 out.push_str(&value.def.name);
                 out.push('(');
@@ -481,7 +489,7 @@ impl Value {
                     }
                     out.push_str(name);
                     out.push('=');
-                    field.write(out, true, depth + 1)?;
+                    field.write(out, true, depth + 1, custom)?;
                 }
                 out.push(')');
             }
@@ -1119,7 +1127,9 @@ impl<'out> Interpreter<'out> {
                 StmtKind::Expr { value } => {
                     let value = self.eval_expr(value)?;
                     if !matches!(value, Value::Unit) {
-                        writeln!(self.out, "{}", value.display(true))?;
+                        let mut text = String::new();
+                        self.write_value(&mut text, &value, true)?;
+                        writeln!(self.out, "{text}")?;
                     }
                 }
                 _ => {
@@ -1710,6 +1720,18 @@ impl<'out> Interpreter<'out> {
                     _ => Err(Box::new(Propagate(value))),
                 }
             }
+            // every value is evaluated before any is written, like a call's arguments
+            ExprKind::JoinedStr { values } => {
+                let values = values
+                    .iter()
+                    .map(|value| self.eval_expr(value))
+                    .collect::<EvalResult<Vec<Value>>>()?;
+                let mut text = String::new();
+                for value in &values {
+                    self.write_value(&mut text, value, false)?;
+                }
+                Ok(Value::Str(text.into()))
+            }
             ExprKind::Dict { keys, values } => {
                 let mut map = MapValue::default();
                 for (key, value) in keys.iter().zip(values) {
@@ -1957,6 +1979,26 @@ impl<'out> Interpreter<'out> {
         }
     }
 
+    /// Writes `value` to `out` as `print` does, with strings quoted if `nested`, and each struct
+    /// whose type implements `display` itself written as its `display` method returns.
+    ///
+    /// For example, `[p]` writes `[(1, 2)]` when `p`'s `display` returns `"(1, 2)"`.
+    fn write_value(&mut self, out: &mut String, value: &Value, nested: bool) -> EvalResult<()> {
+        value.write(out, nested, 0, &mut |value, out| {
+            let Value::Struct(s) = value else {
+                return Ok(false);
+            };
+            let function = format!("{}.display", s.def.linked);
+            if !self.functions.contains_key(&function) {
+                return Ok(false);
+            }
+            if let (Value::Str(text), _) = self.invoke(&function, vec![value.clone()], false)? {
+                out.push_str(&text);
+            }
+            Ok(true)
+        })
+    }
+
     /// Calls the builtin method `name` on an already evaluated receiver and arguments.
     ///
     /// For example, `call_method("len", Value::Str("abc".into()), vec![])` returns `Value::Int(3)`.
@@ -2028,6 +2070,11 @@ impl<'out> Interpreter<'out> {
     fn call_method(&mut self, name: &str, receiver: Value, args: Vec<Value>) -> EvalResult<Value> {
         match (name, &receiver, &args[..]) {
             ("eq", _, [other]) => Ok(Value::Bool(self.values_equal(&receiver, other, 0)?)),
+            ("display", _, []) => {
+                let mut text = String::new();
+                self.write_value(&mut text, &receiver, false)?;
+                Ok(Value::Str(text.into()))
+            }
             ("cmp", Value::Int(a), [Value::Int(b)]) => Ok(ordering(a.cmp(b))),
             // the order `sort` uses, in which every float has its place
             ("cmp", Value::Float(a), [Value::Float(b)]) => {
@@ -2351,16 +2398,13 @@ impl<'out> Interpreter<'out> {
     fn call(&mut self, name: &str, args: Vec<Value>) -> EvalResult<Value> {
         match (name, &args[..]) {
             ("print", _) => {
+                // the whole line, so a print that fails writes nothing
                 let mut line = String::new();
                 for (i, value) in args.iter().enumerate() {
                     if i > 0 {
                         line.push(' ');
                     }
-                    if value.write(&mut line, false, 0).is_err() {
-                        // what was written before the value nested too deeply stays written
-                        write!(self.out, "{line}")?;
-                        return Err(stdlib::PRINT_DEPTH.into());
-                    }
+                    self.write_value(&mut line, value, false)?;
                 }
                 writeln!(self.out, "{line}")?;
                 return Ok(Value::Unit);
@@ -2379,7 +2423,11 @@ impl<'out> Interpreter<'out> {
             }
             ("int", [Value::Str(s)]) => return Ok(Value::Int(stdlib::parse_int(s)?)),
             ("int", _) => return Err("int() takes one int, float, or str".into()),
-            ("str", [value]) => return Ok(Value::Str(value.display(false).into())),
+            ("str", [value]) => {
+                let mut text = String::new();
+                self.write_value(&mut text, value, false)?;
+                return Ok(Value::Str(text.into()));
+            }
             ("input", [] | [Value::Str(_)]) => {
                 if let [prompt] = &args[..] {
                     write!(self.out, "{}", prompt.display(false))?;

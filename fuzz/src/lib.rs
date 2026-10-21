@@ -1316,6 +1316,8 @@ mod tests {
             "for k",
             "print(\"p",
             "] += ",
+            "print(str(",
+            "print(\"text",
         ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 5, "only {count} of 500 programs use {feature:?}");

@@ -1,0 +1,15 @@
+hello ann, you have 3 new messages
+33 4 -3 true
+p = Point(x=3.0, y=4.0), x = 3.0, |p|^2 = 25.0
+['a', 'b'] a 2 {'k': [1, 2]} [1, 2] [2]
+some(1) none Shape.Circle(1.5) Shape.Empty (1, 'a') ok(2)
+$12.34 and [$0.5]
+{n} is {3}, and } alone
+inner ann! ['3']
+a 3 b ann c
+1 33 true
+evaluating first
+evaluating second
+1 2
+ok('got 12') err("invalid literal for int() with base 10: 'x'")
+<1> <s> <[Point(x=3.0, y=4.0)]> <$1.0>

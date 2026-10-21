@@ -19,6 +19,23 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   an error that suggests `(x in xs) == b`.
 - `contains` works on lists and strings too, as `xs.contains(x)` and `s.contains(t)`, making the
   same test as `in`.
+- Values in strings: every string writes the value of each expression in braces inside it, as
+  `"{name} has {xs.len()} items: {xs}"`, with no prefix. A value is any expression, including
+  fields, method calls, indexes, and strings of its own, and is written as `print` writes it.
+  The values are evaluated left to right before any is written. `{{` and `}}` write braces, and a
+  lone `}`, an empty `{}`, and a format spec such as `{x:.2f}` (not supported yet) are errors.
+- `str(x)` takes any value, giving the text `print` writes for it, so `str([1, 2])` is
+  `"[1, 2]"`, and `x.display()` is the same.
+- The prelude trait `display`, which `print`, `str`, and values in strings use. Every type
+  implements it, and a struct can implement it itself, as `impl display for Money:` with
+  `fn display(self) -> str`, to say how it is written wherever it appears, inside lists, maps,
+  options, and other structs too.
+
+### Changed
+
+- `print` builds its whole line before writing it, so a print that fails, such as one whose
+  value is nested too deeply, writes nothing rather than part of its line, and compiled code
+  writes each line with one system call rather than one for each value and separator.
 
 ## [0.3.2] - 2026-10-19
 

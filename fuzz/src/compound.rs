@@ -1261,7 +1261,14 @@ impl Generator {
             10 => {
                 let ty = self.any_type(u)?;
                 let value = self.value(u, scope, &ty, 0, false)?;
-                self.line(indent, &format!("print({value})"));
+                // as print writes it, as str makes it, or inside a string; spaces keep a map's
+                // braces from doubling the string's
+                let line = match u.int_in_range(0..=2)? {
+                    0 => format!("print({value})"),
+                    1 => format!("print(str({value}))"),
+                    _ => format!("print(\"{} {{ {value} }} end\")", self.fresh("text")),
+                };
+                self.line(indent, &line);
                 true
             }
             _ => false,

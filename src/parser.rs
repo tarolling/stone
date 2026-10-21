@@ -398,6 +398,9 @@ fn describe_found(r#type: &TokenType) -> String {
         TokenType::Number(n) => format!("'{n}'"),
         TokenType::Float(x) => format!("'{}'", crate::stdlib::format_float(*x)),
         TokenType::String(s) => format!("string \"{s}\""),
+        TokenType::StringStart(s) => format!("string \"{s}{{\""),
+        // which starts at the `}` that ends a value in a string
+        TokenType::StringMiddle(_) | TokenType::StringEnd(_) => "'}'".to_string(),
         TokenType::Operator(op) => format!("'{op}'"),
         TokenType::Newline => "end of line".to_string(),
         TokenType::Indent => "an indented block".to_string(),

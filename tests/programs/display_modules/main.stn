@@ -1,0 +1,7 @@
+// a library struct's display is used wherever its values are written
+use temp
+use temp.Celsius
+
+today = Celsius(degrees=21.5)
+print(today, [temp.freezing(), today])
+print("it is " + str(today))

@@ -236,6 +236,10 @@ pub const EQ: &str = "eq";
 /// and a struct may too.
 pub const ORD: &str = "ord";
 
+/// The name of the prelude's trait of values that `print`, `str`, and interpolation write as
+/// text, which every type implements, and a struct may implement itself.
+pub const DISPLAY: &str = "display";
+
 /// Returns whether the variants of the enum `name` are written and printed alone, as the
 /// prelude's are: `some(1)`, not `option.some(1)`.
 ///
@@ -777,8 +781,6 @@ const ORDERED: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
 const CONVERTIBLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
 /// What the `math` functions take.
 const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
-/// What `str` converts from.
-const PRINTABLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Bool, Kind::Str];
 /// The names of the types built into the language, which no enum or struct may take.
 const BUILTIN_TYPES: &[&str] = &[
     "int", "float", "bool", "str", "list", "tuple", OPTION, RESULT, "Self",
@@ -2105,7 +2107,7 @@ impl Inference {
             return None;
         };
         self.add_reference(trait_name.span, info.symbol);
-        if (name == EQ || name == ORD) && !self.structs.contains_key(owner) {
+        if (name == EQ || name == ORD || name == DISPLAY) && !self.structs.contains_key(owner) {
             self.error(owner_span, format!("{owner} already implements '{name}'"));
             return None;
         }
@@ -2168,6 +2170,7 @@ impl Inference {
         let builtin_trait = match name.as_str() {
             "eq" => Some(EQ),
             "cmp" => Some(ORD),
+            "display" => Some(DISPLAY),
             _ => None,
         };
         let error = if let Some(builtin) = builtin_trait
@@ -4795,6 +4798,13 @@ impl Inference {
     fn infer_kind(&mut self, expr: &Expr) -> Ty {
         match &expr.kind {
             ExprKind::Try { value } => self.infer_try(expr, value),
+            // any value is written as text, as `print` writes it
+            ExprKind::JoinedStr { values } => {
+                for value in values {
+                    self.infer(value);
+                }
+                Ty::Str
+            }
             ExprKind::Constant { value, .. } => match **value {
                 Constant::Bool(_) => Ty::Bool,
                 Constant::Str(_) | Constant::Char(_) => Ty::Str,
@@ -5455,9 +5465,10 @@ impl Inference {
     ) -> Ty {
         let receiver_ty = self.infer(receiver);
         match self.shallow(&receiver_ty) {
-            // a struct that does not implement `eq` itself compares part by part
+            // a struct that does not implement `eq` or `display` itself compares or is written
+            // part by part
             Ty::Struct(owner, _)
-                if name == "eq"
+                if (name == "eq" || name == DISPLAY)
                     && !self
                         .struct_methods
                         .get(&owner)
@@ -5472,6 +5483,8 @@ impl Inference {
                     args,
                 );
             }
+            // every value is written as text, whatever its bounds
+            Ty::Param(_) if name == DISPLAY => {}
             Ty::Param(param) => {
                 let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
                 return self.infer_trait_call(call, func, receiver, param, name, args, &arg_types);
@@ -5654,6 +5667,12 @@ impl Inference {
                 );
                 Ty::Enum(ORDERING.to_string(), vec![])
             }
+            "display" => {
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                Ty::Str
+            }
             "eq" => {
                 if args.len() != 1 {
                     self.arity_error(call.span, name, "1", args.len());
@@ -5810,15 +5829,15 @@ impl Inference {
                 if args.len() != 1 {
                     self.arity_error(call.span, name, "1", args.len());
                 } else {
-                    let (allowed, message) = match name {
-                        "int" => (CONVERTIBLE, "'int' needs an int, float, or str, found {}"),
-                        "float" => (CONVERTIBLE, "'float' needs an int, float, or str, found {}"),
-                        _ => (
-                            PRINTABLE,
-                            "'str' needs an int, float, bool, or str, found {}",
-                        ),
+                    // `str` writes any value as `print` does
+                    let message = match name {
+                        "int" => Some("'int' needs an int, float, or str, found {}"),
+                        "float" => Some("'float' needs an int, float, or str, found {}"),
+                        _ => None,
                     };
-                    self.require(arg_types[0].clone(), allowed, args[0].span, message);
+                    if let Some(message) = message {
+                        self.require(arg_types[0].clone(), CONVERTIBLE, args[0].span, message);
+                    }
                 }
                 match name {
                     "int" => Ty::Int,
@@ -6300,6 +6319,8 @@ impl Inference {
     /// it is bounded by the trait, and any other type if it implements it.
     fn satisfies(&self, ty: &Ty, trait_: &str) -> bool {
         match self.shallow(ty) {
+            // every value is written as text
+            ty if trait_ == DISPLAY => !matches!(ty, Ty::Unit),
             Ty::Param(p) => self.type_params[p].bounds.iter().any(|b| b == trait_),
             // every type `==` compares part by part
             ty if trait_ == EQ => {
@@ -7121,7 +7142,7 @@ impl<'a> AssignmentCheck<'a> {
                     ));
                 }
             }
-            ExprKind::BoolOp { values, .. } => {
+            ExprKind::BoolOp { values, .. } | ExprKind::JoinedStr { values } => {
                 for value in values {
                     self.reads(value, assigned);
                 }
@@ -7643,7 +7664,9 @@ impl ParameterUse<'_> {
         }
         match &expr.kind {
             ExprKind::Name { id, .. } => self.read |= id == self.name && !expr.is_unwritten(),
-            ExprKind::BoolOp { values, .. } => values.iter().for_each(|value| self.expr(value)),
+            ExprKind::BoolOp { values, .. } | ExprKind::JoinedStr { values } => {
+                values.iter().for_each(|value| self.expr(value))
+            }
             ExprKind::BinOp { left, right, .. } => {
                 self.expr(left);
                 self.expr(right);

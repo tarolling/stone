@@ -249,6 +249,7 @@ impl Expr {
         match &self.kind {
             ExprKind::Name { .. } | ExprKind::Constant { .. } => vec![],
             ExprKind::BoolOp { values, .. }
+            | ExprKind::JoinedStr { values }
             | ExprKind::List { elts: values, .. }
             | ExprKind::Tuple { elts: values, .. } => values.iter().collect(),
             ExprKind::BinOp { left, right, .. } => vec![left, right],
@@ -307,6 +308,10 @@ pub enum ExprKind {
         args: Vec<Expr>,
         keywords: Vec<Keyword>,
     },
+    /// A string with values in it, such as `"x is {x}"`, as its pieces in order: each a
+    /// [`Constant::Str`] of text between values, or a value, which is written as `print` writes
+    /// it. A string with no values is a [`ExprKind::Constant`].
+    JoinedStr { values: Vec<Expr> },
     /// A literal value, such as `42`, `"hi"`, or `true`.
     Constant {
         value: Box<Constant>,

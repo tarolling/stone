@@ -1277,6 +1277,7 @@ fn method_applies(method: &str, ty: &Type) -> bool {
     match method {
         "eq" => return kind != "list" && kind != "map",
         "cmp" => return matches!(kind, "int" | "float" | "str"),
+        "display" => return true,
         _ => {}
     }
     let Some(doc) = method_doc(method) else {

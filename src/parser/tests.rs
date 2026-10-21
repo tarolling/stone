@@ -248,6 +248,9 @@ fn strip_expr(expr: Expr) -> Expr {
             op,
             values: strip_all(values),
         },
+        ExprKind::JoinedStr { values } => ExprKind::JoinedStr {
+            values: strip_all(values),
+        },
         ExprKind::BinOp { op, left, right } => ExprKind::BinOp {
             op,
             left: strip_box(left),
@@ -2995,4 +2998,76 @@ fn a_question_mark_cannot_end_a_target() {
         error_of("f()? = 1\n").0,
         "expected end of line, found '='".to_string()
     );
+}
+
+/// Returns the expression of the only statement of `source`, an expression statement, without
+/// spans.
+fn only_expr(source: &str) -> ExprKind {
+    let Mod::Module { body } = parse_ok(source);
+    let [stmt] = &body[..] else {
+        panic!("expected one statement in {source:?}");
+    };
+    let StmtKind::Expr { value } = &stmt.kind else {
+        panic!("expected an expression statement in {source:?}");
+    };
+    value.kind.clone()
+}
+
+fn text(value: &str) -> Expr {
+    ExprKind::Constant {
+        value: Box::new(Constant::Str(value.to_string())),
+        kind: None,
+    }
+    .into()
+}
+
+fn named(id: &str) -> Expr {
+    ExprKind::Name {
+        id: id.to_string(),
+        ctx: ExprContext::Load,
+    }
+    .into()
+}
+
+#[test]
+fn a_string_with_values_is_a_joined_string() {
+    assert_eq!(
+        only_expr("\"a{x}b{y}\"\n"),
+        ExprKind::JoinedStr {
+            values: vec![text("a"), named("x"), text("b"), named("y")],
+        }
+    );
+    // a string with none is a constant, even with braces
+    assert_eq!(only_expr("\"{{x}}\"\n"), text("{x}").kind);
+}
+
+#[test]
+fn strings_written_together_join_their_pieces() {
+    assert_eq!(
+        only_expr("\"a{x}\" \"b\" \"{y}c\"\n"),
+        ExprKind::JoinedStr {
+            values: vec![text("a"), named("x"), text("b"), named("y"), text("c")],
+        }
+    );
+    assert_eq!(only_expr("\"a\" \"b\"\n"), text("ab").kind);
+}
+
+#[test]
+fn a_value_in_a_string_is_one_expression() {
+    let message = |source: &str| {
+        let tokens = Lexer::new(source).lex().unwrap();
+        Parser::new(&tokens).parse().unwrap_err().message
+    };
+    assert_eq!(message("x = \"{a b}\"\n"), "expected '}', found 'b'");
+    assert_eq!(
+        message("x = \"{a +}\"\n"),
+        "expected an expression, found '}'"
+    );
+}
+
+#[test]
+fn strings_nested_in_values_count_toward_the_depth_limit() {
+    let depth = 10_000;
+    let source = format!("x = {}y{}\n", "\"{".repeat(depth), "}\"".repeat(depth));
+    assert!(parse_within(source, Duration::from_secs(5)).is_err());
 }

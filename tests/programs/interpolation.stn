@@ -1,0 +1,58 @@
+// a string writes the value of each {expression} in it, as print writes it
+
+struct Point:
+    x: float
+    y: float
+
+impl Point:
+    fn norm2(self) -> float:
+        ret self.x * self.x + self.y * self.y
+
+struct Money:
+    cents: int
+
+impl display for Money:
+    fn display(self) -> str:
+        ret "${self.cents / 100}.{self.cents % 100}"
+
+enum Shape:
+    Circle(float)
+    Empty
+
+name = "ann"
+n = 3
+print("hello {name}, you have {n} new messages")
+print("{n}{n} {n + 1} {-n} {float(n) * 2.5 > 7.0}")
+p = Point(x=3.0, y=4.0)
+print("p = {p}, x = {p.x}, |p|^2 = {p.norm2()}")
+xs = ["a", "b"]
+m = {"k": [1, 2]}
+print("{xs} {xs[0]} {xs.len()} {m} {m["k"]} {m["k"][1:]}")
+print("{some(1)} {none} {Shape.Circle(1.5)} {Shape.Empty} {(1, "a")} {ok(2)}")
+print("{Money(cents=1234)} and {[Money(cents=5)]}")
+// braces are written doubled
+print("{{n}} is {{{n}}}, and }} alone")
+// strings inside a value, quoted or not as print writes them
+print("{"in" + "ner"} {"{name}!"} {["{n}"]}")
+// written one after another, strings join
+print("a {n} " "b {name}" " c")
+s = "{n}"
+print(s.len(), s + s, "" == "{""}")
+
+fn trace(label: str, value: int) -> int:
+    print("evaluating", label)
+    ret value
+
+// every value is evaluated first, left to right, then written
+print("{trace("first", 1)} {trace("second", 2)}")
+
+fn parsed(text: str) -> result[str, str]:
+    value = text.parse_int()?
+    ret ok("got {value}")
+
+print(parsed("12"), parsed("x"))
+
+fn show[T](value: T) -> str:
+    ret "<{value}>"
+
+print(show(1), show("s"), show([p]), show(Money(cents=100)))

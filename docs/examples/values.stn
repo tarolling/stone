@@ -20,5 +20,9 @@ name = "stone"
 print(ready, not ready, name + "!", name.len())
 print(some(name), none)
 
+// a string writes the value of each {expression} in it, and str gives what print writes
+print("{name} has {name.len()} letters, and {count} * 2 is {count * 2}")
+print(str([1, 2]) + "!", "{{braces}}")
+
 // floats print the way Python shows them
 print(0.1 + 0.2, 1e16, 1.0 / 3.0)

@@ -89,7 +89,7 @@ pub static BUILTINS: [&str; 8] = [
 ];
 
 /// The prelude, a stone file linked into every program, which defines `option[T]`, `ordering`,
-/// `result[T, E]`, the traits `eq` and `ord`, and the sort `xs.sort()` uses for values of other
+/// `result[T, E]`, the traits `eq`, `ord`, and `display`, and the sort `xs.sort()` uses for values of other
 /// types.
 pub const PRELUDE: &str = include_str!("prelude.stn");
 
@@ -119,7 +119,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 30] = [
+pub static METHODS: [&str; 31] = [
     "len",
     "append",
     "pop",
@@ -150,6 +150,7 @@ pub static METHODS: [&str; 30] = [
     "items",
     "eq",
     "cmp",
+    "display",
 ];
 
 /// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
@@ -200,8 +201,10 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     },
     BuiltinDoc {
         name: "str",
-        signature: "str(value: int | float | bool | str) -> str",
-        description: "Returns the text `print` would write for `value`, so `str(1.0)` is `\"1.0\"`.",
+        signature: "str(value) -> str",
+        description: "Returns the text `print` would write for `value`, so `str(1.0)` is `\"1.0\"` \
+                      and `str([\"a\"])` is `\"['a']\"`. A struct with an `impl display` block \
+                      is written as its `display` method says.",
     },
     BuiltinDoc {
         name: "input",
@@ -224,7 +227,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 30] = [
+pub static METHOD_DOCS: [BuiltinDoc; 31] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T] | map[K, V]).len() -> int",
@@ -429,6 +432,13 @@ pub static METHOD_DOCS: [BuiltinDoc; 30] = [
                       and a struct with an `impl ord` block. Floats are in the order `sort` \
                       uses, so `-0.0` is less than `0.0` and `nan` is greater than every other \
                       float.",
+    },
+    BuiltinDoc {
+        name: "display",
+        signature: "T.display() -> str",
+        description: "Returns the text `print` writes for the value, as `str` does, for any \
+                      type: every type implements `display`, and a struct whose `impl display` \
+                      block says how to write it uses that.",
     },
 ];
 
@@ -1047,7 +1057,7 @@ mod tests {
     }
 
     #[test]
-    fn the_prelude_defines_option_ordering_result_eq_ord_and_sort() {
+    fn the_prelude_defines_option_ordering_result_its_traits_and_sort() {
         use crate::ast::{Mod, StmtKind};
         use crate::lexer::Lexer;
         use crate::parser::Parser;
@@ -1106,6 +1116,7 @@ mod tests {
             [
                 ("eq".to_string(), vec!["eq".to_string()]),
                 ("ord".to_string(), vec!["cmp".to_string()]),
+                ("display".to_string(), vec!["display".to_string()]),
             ]
         );
         assert_eq!(functions, ["sort"]);

@@ -154,8 +154,9 @@ fn top_level_list_loops_hold_their_list_and_main_releases_globals() {
          b2:\n  v5 = list_get v3, v2\n  store_global x, v5\n  v2 = add v2, 1\n  \
          v6 = load_global x\n  br_gt v6, 1 -> b3, b4\n\
          b3:\n  jmp b5\n\
-         b4:\n  v7 = load_global x\n  call print[int](v7)\n  call stone.print_char(10)\n  jmp b1\n\
-         b5:\n  release_list v3\n  v8 = load_global xs\n  release_list v8\n  ret 0\n"
+         b4:\n  v7 = load_global x\n  v8 = call stone.text_begin()\n  call print[int](v7)\n  \
+         call stone.text_print(v8)\n  jmp b1\n\
+         b5:\n  release_list v3\n  v9 = load_global xs\n  release_list v9\n  ret 0\n"
     );
 }
 
@@ -194,9 +195,36 @@ fn assigning_a_string_releases_the_old_value_after_computing_the_new_one() {
          b0:\n  v1 = str \"x\"\n  v2 = call stone.str_concat(v0, v1)\n  \
          release_str v0\n  v0 = copy v2\n  ret v0\n\
          fn main():\n\
-         b0:\n  v0 = str \"a\"\n  retain v0\n  v1 = call f(v0)\n  call print[str](v1)\n  \
-         call stone.print_char(10)\n  release_str v1\n  ret 0\n"
+         b0:\n  v0 = str \"a\"\n  retain v0\n  v1 = call f(v0)\n  v2 = call stone.text_begin()\n  \
+         call print[str](v1)\n  call stone.text_print(v2)\n  release_str v1\n  ret 0\n"
     );
+}
+
+#[test]
+fn str_of_a_list_writes_it_into_a_new_text() {
+    assert_eq!(
+        dump("xs = [1]\ns = str(xs)\n")
+            .split("b0:\n")
+            .nth(1)
+            .unwrap(),
+        "  v0 = call stone.list_new(1, 0)\n  list_init v0[0], 1\n  v1 = load_global xs\n  \
+         store_global xs, v0\n  release_list v1\n  v2 = load_global xs\n  \
+         v3 = call stone.text_begin()\n  call print[list[int]](v2)\n  \
+         v4 = call stone.text_end(v3)\n  v5 = load_global s\n  store_global s, v4\n  \
+         release_str v5\n  v6 = load_global xs\n  release_list v6\n  v7 = load_global s\n  \
+         release_str v7\n  ret 0\n"
+    );
+}
+
+#[test]
+fn a_struct_that_implements_display_is_written_by_its_display() {
+    let dump = dump(
+        "struct P:\n    x: int\nimpl display for P:\n    fn display(self) -> str:\n        \
+         ret \"p\"\nprint(P(x=1))\n",
+    );
+    let main = dump.split("fn main():\n").nth(1).unwrap();
+    assert!(main.contains("call P.display(1)\n"), "{main}");
+    assert!(!dump.contains("print_struct"), "{dump}");
 }
 
 #[test]
@@ -1375,5 +1403,19 @@ fn in_loops_over_a_list_borrowing_each_element_until_one_is_equal() {
          b4:\n  v3 = copy 1\n  jmp b6\n\
          b5:\n  v3 = copy 0\n  jmp b6\n\
          b6:\n  v6 = not v3\n  ret v6\n"
+    );
+}
+
+#[test]
+fn a_string_with_values_writes_its_text_and_values_into_a_new_text() {
+    assert_eq!(
+        dump("fn f(n: int) -> str:\n    ret \"n = {n}!\"\n")
+            .split("fn main")
+            .next()
+            .unwrap(),
+        "fn f(v0):\n\
+         b0:\n  v1 = call stone.text_begin()\n  v2 = str \"n = \"\n  call print[str](v2)\n  \
+         call print[int](v0)\n  v3 = str \"!\"\n  call print[str](v3)\n  \
+         v4 = call stone.text_end(v1)\n  ret v4\n"
     );
 }

@@ -841,12 +841,8 @@ fn printing_stops_at_an_enum_value_nested_too_deeply_in_both_backends() {
     let source = "enum N:\n    S(N)\n    Z\n\nn = N.Z\nfor i in range(9999):\n    n = N.S(n)\n\
                   print(n)\nn = N.S(n)\nprint(\"start\", n)\n";
     let (_, [run, built]) = run_and_build_in("print_too_deep", source);
-    let expected = format!(
-        "{}N.Z{}\nstart {}",
-        "N.S(".repeat(9999),
-        ")".repeat(9999),
-        "N.S(".repeat(10000)
-    );
+    // a print that fails writes nothing of its line
+    let expected = format!("{}N.Z{}\n", "N.S(".repeat(9999), ")".repeat(9999));
     for output in [&run, &built] {
         assert_eq!(output.status.code(), Some(1), "{output:?}");
         assert!(String::from_utf8_lossy(&output.stdout) == expected);
@@ -859,16 +855,31 @@ fn printing_stops_at_an_enum_value_nested_too_deeply_in_both_backends() {
 }
 
 #[test]
+fn str_stops_at_a_value_nested_too_deeply_in_both_backends() {
+    let source = "enum N:\n    S(N)\n    Z\n\nn = N.Z\nfor i in range(10000):\n    n = N.S(n)\n\
+                  print(\"start\")\ns = str(n)\nprint(s.len())\n";
+    let (_, [run, built]) = run_and_build_in("str_too_deep", source);
+    for output in [&run, &built] {
+        assert_eq!(output.status.code(), Some(1), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "start\n");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "main.stn:9:5: error: value is nested too deeply to print (more than 10000 levels)\n  \
+             |\n9 | s = str(n)\n  |     ^^^^^^\n"
+        );
+    }
+}
+
+#[test]
 fn printing_counts_struct_values_toward_the_depth_limit_in_both_backends() {
     // a leaf inside 9,999 trees is 10,000 levels, which prints, and one more does not
     let source = "struct T:\n    kids: list[T]\n\nt = T(kids=[])\nfor i in range(9999):\n    \
                   t = T(kids=[t])\nprint(t)\nt = T(kids=[t])\nprint(\"start\", t)\n";
     let (_, [run, built]) = run_and_build_in("print_struct_too_deep", source);
     let expected = format!(
-        "{}T(kids=[]){}\nstart {}",
+        "{}T(kids=[]){}\n",
         "T(kids=[".repeat(9999),
-        "])".repeat(9999),
-        "T(kids=[".repeat(10000)
+        "])".repeat(9999)
     );
     for output in [&run, &built] {
         assert_eq!(output.status.code(), Some(1), "{output:?}");

@@ -300,6 +300,31 @@ fn rename_edits_an_augmented_name_once() {
 }
 
 #[test]
+fn names_inside_a_strings_values_work_like_any_other() {
+    let doc = doc("count = 2\nprint(\"{count} and {count + 1}\")\n");
+    assert_eq!(
+        hover_text(&doc, at(2, 9)).unwrap(),
+        "```stone\n(global) count: int\n```"
+    );
+    let location = definition(&doc, &uri(), at(2, 21), None).unwrap();
+    assert_eq!(
+        location.range,
+        Range::new(Position::new(0, 0), Position::new(0, 5))
+    );
+    let edit = rename(&doc, &uri(), at(2, 9), "n").unwrap();
+    let edits = &edit.changes.unwrap()[&uri()];
+    let starts: Vec<Position> = edits.iter().map(|e| e.range.start).collect();
+    assert_eq!(
+        starts,
+        [
+            Position::new(0, 0),
+            Position::new(1, 8),
+            Position::new(1, 20)
+        ]
+    );
+}
+
+#[test]
 fn rename_rejects_bad_names() {
     let doc = doc(SOURCE);
     assert_eq!(
@@ -429,13 +454,16 @@ fn completion_after_a_dot_offers_methods() {
         "items",
         "eq",
         "cmp",
+        "display",
     ]
     .iter()
     .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
     .collect();
-    // a list offers the list methods, even once a name is started
+    // a list offers the list methods, even once a name is started, and display, as every
+    // value does
     let mut list_methods = methods[..6].to_vec();
     list_methods.push(("contains".to_string(), Some(CompletionItemKind::METHOD)));
+    list_methods.push(("display".to_string(), Some(CompletionItemKind::METHOD)));
     assert_eq!(labels(at(2, 4)), list_methods);
     assert_eq!(labels(at(3, 6)), list_methods);
     // and a receiver of unknown type offers every method
@@ -464,7 +492,7 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
     assert_eq!(
         labels(at(2, 4)),
         [
-            "len", "append", "pop", "insert", "extend", "sort", "contains"
+            "len", "append", "pop", "insert", "extend", "sort", "contains", "display"
         ]
     );
     assert_eq!(
@@ -481,19 +509,22 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "parse_float",
             "contains",
             "eq",
-            "cmp"
+            "cmp",
+            "display"
         ]
     );
     assert_eq!(
         labels(at(6, 3)),
-        ["len", "pop", "contains", "get", "keys", "values", "items"]
+        [
+            "len", "pop", "contains", "get", "keys", "values", "items", "display"
+        ]
     );
     assert_eq!(
         labels(at(8, 3)),
-        ["is_some", "is_none", "unwrap", "unwrap_or", "eq"]
+        ["is_some", "is_none", "unwrap", "unwrap_or", "eq", "display"]
     );
     // a number has the methods of the prelude's traits
-    assert_eq!(labels(at(10, 3)), ["eq", "cmp"]);
+    assert_eq!(labels(at(10, 3)), ["eq", "cmp", "display"]);
     assert_eq!(
         labels(at(12, 3)),
         [
@@ -504,7 +535,8 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "unwrap_err",
             "ok",
             "err",
-            "eq"
+            "eq",
+            "display"
         ]
     );
 }

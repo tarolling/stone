@@ -203,9 +203,9 @@ does. A type's method changes `self` exactly when the trait's does: a definition
 `self` where the trait's does not is an error, and one that does not still follows the rules of a
 method that does, being a statement of its own, called on a variable, an element, or a field.
 
-### eq and ord
+### eq, ord, and display
 
-The prelude defines two traits that the operators use:
+The prelude defines three traits that the operators and printing use:
 
 ```stone
 pub trait eq:
@@ -213,6 +213,9 @@ pub trait eq:
 
 pub trait ord:
     fn cmp(self, other: Self) -> ordering
+
+pub trait display:
+    fn display(self) -> str
 ```
 
 `==` and `!=` use `eq`. Every type `==` compares part by part implements it, and a struct can
@@ -225,6 +228,26 @@ generic function use `==` on a `T`, and `[T: ord]` lets it use `<` and `sort`; `
 imply `eq`. `x.eq(y)` and `x.cmp(y)` work on every type that implements the trait. A struct's
 method named `eq` or `cmp` belongs in its `impl eq` or `impl ord` block, and an enum cannot have
 an `impl` block yet, so it always compares part by part.
+
+`print`, `str`, and a value in a string (`"{x}"`) use `display`. Every type implements it,
+writing a value as `print` always has, and a struct can implement it itself, in which case its
+`display` decides how its values are written wherever they appear, inside lists, maps, tuples,
+options, enums, and other structs too, with no quotes around what it returns:
+
+```stone
+struct Money:
+    cents: int
+
+impl display for Money:
+    fn display(self) -> str:
+        ret "${self.cents / 100}.{self.cents % 100}"
+
+print(Money(cents=250), [Money(cents=5)])   // $2.50 [$0.5]
+```
+
+`x.display()` is the same as `str(x)`, and printing or writing a `T` in a string needs no bound,
+since every type implements `display`. A struct's method named `display` belongs in its
+`impl display` block.
 
 `ordering` is a prelude enum like `option`, whose variants are written and printed alone:
 
@@ -271,6 +294,23 @@ print("ell" in "hello", "" in "hello", "x" not in "hello")   // true true true
 it starts, and the order of characters is the order of their Unicode code points, as in Python.
 Strings cannot be changed in place, so `s[0] = "x"` is an error; build a new string instead,
 as in `s = "x" + s[1:]`.
+
+### Values in strings
+
+Any expression in braces inside a string is written into it, as `print` writes it, so a string
+on its own appears without quotes and one inside a list with them:
+
+```stone
+name = "ann"
+xs = [1, 2]
+print("{name} has {xs.len()} items: {xs}, first {xs[0] * 10}")   // ann has 2 items: [1, 2], first 10
+```
+
+Every string works this way, with no prefix. The values are evaluated left to right before any
+is written, like a call's arguments, and a value may hold strings of its own, even with values in
+them (`"{"{x}!"}"`), as well as indexes, slices, and maps. `{{` and `}}` write a brace, and a
+lone `}`, an empty `{}`, or a value that runs past the end of the line is an error. A `:` after
+a value is kept for format specs such as `{x:.2f}`, which are not supported yet.
 
 ## Tuples
 

@@ -10,6 +10,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Values in strings are highlighted as code, as `name` in `"hello {name}"`, with `{{` and `}}`
+  shown as escapes, and hover, go to definition, and rename work on names inside them.
+- Completion offers `display` on every value, and `{` closes itself like `(` and `[`.
+
 ## [0.3.2] - 2026-10-19
 
 ### Added

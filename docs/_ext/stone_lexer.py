@@ -4,7 +4,7 @@ The keywords, builtins, and methods mirror RESERVED_KEYWORDS in src/token.rs and
 METHODS in src/stdlib.rs.
 """
 
-from pygments.lexer import RegexLexer, bygroups, words
+from pygments.lexer import RegexLexer, bygroups, include, words
 from pygments.token import (
     Comment,
     Keyword,
@@ -55,6 +55,7 @@ METHODS = (
     "items",
     "eq",
     "cmp",
+    "display",
 )
 
 
@@ -69,9 +70,26 @@ class StoneLexer(RegexLexer):
         "string": [
             (r'"', String.Double, "#pop"),
             (r"\\(x[0-9a-fA-F]{2}|.)", String.Escape),
-            (r'[^"\\\n]+', String.Double),
+            (r"\{\{|\}\}", String.Escape),
+            # a value written into the string, as `{x}` in `"x is {x}"`
+            (r"\{", String.Interpol, "value"),
+            (r'[^"\\\n{}]+', String.Double),
+            (r"\}", String.Double),
             # a string that never closes ends at the line break
             (r"\n", Whitespace, "#pop"),
+        ],
+        "value": [
+            (r"\}", String.Interpol, "#pop"),
+            (r"\{", Punctuation, "braces"),
+            (r"\n", Whitespace, "#pop:2"),
+            include("root"),
+        ],
+        # braces inside a value, as a map's, which a `}` closes before it ends the value
+        "braces": [
+            (r"\}", Punctuation, "#pop"),
+            (r"\{", Punctuation, "braces"),
+            (r"\n", Whitespace, "#pop:3"),
+            include("root"),
         ],
         "root": [
             (r"\s+", Whitespace),
@@ -94,7 +112,7 @@ class StoneLexer(RegexLexer):
             (r"\d+\.\d*([eE][+-]?\d+)?|\d+[eE][+-]?\d+", Number.Float),
             (r"\d+", Number.Integer),
             (r"\*\*=|[-+*/%]=|==|!=|<=|>=|\*\*|[-+*/%<>=?]", Operator),
-            (r"[()\[\],:.]", Punctuation),
+            (r"[()\[\]{},:.]", Punctuation),
             (r"[A-Za-z_]\w*", Name),
             (r".", Text),
         ],

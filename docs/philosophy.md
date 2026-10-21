@@ -53,7 +53,8 @@ What stone already infers:
   function calls the method of its own type directly, so there is no `dyn` to write and no
   lookup while the program runs. Whether a trait's method changes `self` is decided by the
   trait, from its default body, so no `mut` marks it either. Even `==` and `<` are the prelude's
-  traits `eq` and `ord`, which a struct can implement to compare its own way.
+  traits `eq` and `ord`, which a struct can implement to compare its own way, and printing is
+  its trait `display`.
 - **Memory management.** Compiled programs count references, with no garbage collector. The
   compiler places every retain and release, decides which parameters are only borrowed, and
   skips counting where it can prove a count would not matter.
@@ -83,6 +84,12 @@ the compiler should handle it instead.
 
 stone's syntax differs from Python's in a few small ways (functions return with `ret`, and loops
 skip ahead with `cont`), listed in [syntax](reference/syntax.md).
+
+Status: every string writes the values of the expressions in braces inside it, as Python's
+f-strings do, but with no `f` to remember, since a string that should hold braces writes `{{`
+and `}}`. `str` and `print` write any value, through the prelude's trait `display`, which a
+struct can implement to say how it is written everywhere it appears. Format specs such as
+`{x:.2f}` are not supported yet.
 
 ## Memory safety and value semantics
 

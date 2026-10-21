@@ -278,6 +278,11 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
         | ExprKind::Tuple { elts: values, .. } => {
             values.iter().for_each(|value| expr_names(value, out))
         }
+        // a struct among the values may be written as its own `display` says
+        ExprKind::JoinedStr { values } => {
+            out.methods.push("display");
+            values.iter().for_each(|value| expr_names(value, out))
+        }
         ExprKind::Dict { keys, values } => {
             for (key, value) in keys.iter().zip(values) {
                 expr_names(key, out);
@@ -313,6 +318,12 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
                     "contains" => out.methods.push("eq"),
                     _ => {}
                 }
+            }
+            // a struct may be written as its own `display` says
+            if let ExprKind::Name { id, .. } = &func.kind
+                && matches!(id.as_str(), "print" | "str")
+            {
+                out.methods.push("display");
             }
             expr_names(func, out);
             args.iter().for_each(|arg| expr_names(arg, out));
@@ -764,6 +775,21 @@ mod tests {
         assert_eq!(reads["lt"], HashSet::from(["ws".to_string()]));
         assert_eq!(reads["same"], HashSet::from(["ys".to_string()]));
         assert_eq!(reads["sorted"], HashSet::from(["ws".to_string()]));
+    }
+
+    #[test]
+    fn writing_a_value_as_text_reads_the_globals_display_reads() {
+        let source = "struct V:\n    n: int\nimpl display for V:\n    fn display(self) -> str:\n        \
+                      ret str(ws[0])\nfn show(v: V):\n    print(v)\nfn text(v: V) -> str:\n    \
+                      ret str(v)\nfn own(v: V) -> str:\n    ret v.display()\nfn other(v: V) -> int:\n    \
+                      ret v.n\nws = [1]\n";
+        let module = parse(source).unwrap();
+        let crate::ast::Mod::Module { body } = &module;
+        let reads = global_reads(body, &HashSet::from(["ws".to_string()]));
+        for name in ["show", "text", "own"] {
+            assert_eq!(reads[name], HashSet::from(["ws".to_string()]), "{name}");
+        }
+        assert!(reads["other"].is_empty());
     }
 
     #[test]

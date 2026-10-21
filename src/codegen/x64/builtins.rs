@@ -2,7 +2,7 @@ use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{CPU_ONLINE, PATH_BUFFER, UTSNAME_FIELD, UTSNAME_SIZE};
 use crate::codegen::context::{
     HEAP_REGION, LARGEST_CLASS, LEAK_PREFIX, LEAK_SUFFIX, OUT_OF_MEMORY, OUT_OF_MEMORY_LENGTH,
-    SMALLEST_CLASS, STDIN_BUFFER,
+    SMALLEST_CLASS, STDIN_BUFFER, TEXT_BLOCK,
 };
 pub use crate::codegen::context::{IMMORTAL, immortal_string};
 use crate::codegen::x64::sort::sort_runtime;
@@ -42,6 +42,9 @@ pub fn start_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// can call them. If the system has no memory to give, the program stops with
 /// [`OUT_OF_MEMORY`].
 pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\t.section\t.rodata");
+    r#gen.emit(".Lstone_out_of_memory:");
+    r#gen.emit(&format!("\t.string \"{OUT_OF_MEMORY}\""));
     r#gen.emit("\t.bss");
     r#gen.emit("\t.p2align\t3");
     r#gen.emit("stone.heap_next:");
@@ -248,8 +251,6 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit(&format!("\t.string \"{LEAK_PREFIX}\""));
     r#gen.emit(".Lstone_leak_suffix:");
     r#gen.emit(&format!("\t.string \"{LEAK_SUFFIX}\\n\""));
-    r#gen.emit(".Lstone_out_of_memory:");
-    r#gen.emit(&format!("\t.string \"{OUT_OF_MEMORY}\""));
     r#gen.emit("\t.text");
 
     allocator(r#gen);
@@ -578,9 +579,10 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.print_str_quoted` writes the string `rdi` points to as a printed list shows its
 ///   strings, quoted and escaped like Python's `repr`
 ///
-/// They write with the `write` syscall and clobber `rax`, `rcx`, `rdx`, `rsi`, `rdi`, `r8`, and
-/// `r11`.
-pub fn print(r#gen: &mut dyn AssemblyGenerator) {
+/// They write into the text being built (see [`text_runtime`]), which `print` then writes to
+/// stdout in one go and `str` makes a string of, and clobber `rax`, `rcx`, `rdx`, `rsi`, `rdi`,
+/// `r8`, and `r11`.
+pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\t.section\t.rodata");
     r#gen.emit(".Lstone_true:");
     r#gen.emit("\t.string \"true\"");
@@ -619,9 +621,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lprint_int_write:");
     r#gen.emit("\tmov\trdx, rbp");
     r#gen.emit("\tsub\trdx, rsi");
-    r#gen.emit("\tmov\trax, 1"); // sys_write
-    r#gen.emit("\tmov\trdi, 1"); // stdout
-    r#gen.emit("\tsyscall");
+    r#gen.emit("\tcall\tstone.text_append");
     r#gen.emit("\tleave");
     r#gen.emit("\tret");
 
@@ -636,9 +636,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lprint_str_write:");
     r#gen.emit("\ttest\trdx, rdx");
     r#gen.emit("\tjz\t.Lprint_str_done"); // empty string
-    r#gen.emit("\tmov\trax, 1"); // sys_write
-    r#gen.emit("\tmov\trdi, 1"); // stdout
-    r#gen.emit("\tsyscall");
+    r#gen.emit("\tjmp\tstone.text_append");
     r#gen.emit(".Lprint_str_done:");
     r#gen.emit("\tret");
 
@@ -656,19 +654,132 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tbyte ptr [rbp - 1], dil");
     r#gen.emit("\tlea\trsi, [rbp - 1]");
     r#gen.emit("\tmov\trdx, 1");
-    r#gen.emit("\tmov\trax, 1"); // sys_write
-    r#gen.emit("\tmov\trdi, 1"); // stdout
-    r#gen.emit("\tsyscall");
+    r#gen.emit("\tcall\tstone.text_append");
     r#gen.emit("\tleave");
     r#gen.emit("\tret");
 
     print_str_quoted(r#gen);
+    text_runtime(r#gen, strings);
+}
+
+/// Emits the text builder that every `stone.print_*` routine writes into. The text being built
+/// is a block from `stone.mem_alloc` laid out as a string will be, its length at `[p]` and its
+/// room for bytes at `[p + 8]`, where the string's count goes, then the bytes, so finishing it
+/// as a string copies nothing. `stone.text` points to the block of the text being built.
+///
+/// - `stone.text_begin` starts a new text and returns the one being built before, to give back
+///   when the new one is done, so building nests, as when a struct's `display` runs inside a
+///   `print`
+/// - `stone.text_append` adds the `rdx` bytes at `rsi` to the text, growing its block to twice
+///   what it must hold
+/// - `stone.text_end` finishes the text as a new string with a count of 1, and goes back to
+///   building the text in `rdi`
+/// - `stone.text_print` writes the text and a newline to stdout, frees it, and goes back to
+///   building the text in `rdi`
+/// - `stone.write_out` writes the `rdx` bytes at `rsi` to stdout, however many `write` syscalls
+///   that takes
+///
+/// `stone.text_print` preserves the callee-saved registers, and the others clobber `rax`, `rcx`,
+/// `rdx`, `rsi`, `rdi`, and `r11`, as a `write` syscall does. `stone.text_end` is emitted only
+/// if the program has `strings`, since it counts the string it makes in `stone.live`.
+fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
+    r#gen.emit("\t.bss");
+    r#gen.emit("\t.p2align\t3");
+    r#gen.emit("stone.text:");
+    r#gen.emit("\t.zero\t8");
+    r#gen.emit("\t.text");
+
+    // a block of 128 bytes, of which the header, the length, the room, and the terminator take
+    // 8, 8, 8, and 1
+    r#gen.emit("stone.text_begin:");
+    r#gen.emit(&format!("\tmov\tedi, {}", TEXT_BLOCK));
+    r#gen.emit("\tcall\tstone.mem_alloc");
+    r#gen.emit("\tmov\tQWORD PTR [rax], 0");
+    r#gen.emit(&format!("\tmov\tQWORD PTR [rax + 8], {}", TEXT_BLOCK - 17));
+    r#gen.emit("\tmov\trcx, QWORD PTR [rip + stone.text]");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.text], rax");
+    r#gen.emit("\tmov\trax, rcx");
+    r#gen.emit("\tret");
+
+    r#gen.emit("stone.text_append:");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rip + stone.text]");
+    r#gen.emit("\tmov\trax, QWORD PTR [rdi]");
+    r#gen.emit("\tadd\trax, rdx");
+    r#gen.emit("\tcmp\trax, QWORD PTR [rdi + 8]");
+    r#gen.emit("\tjbe\t.Ltext_append_copy");
+    r#gen.emit("\tpush\trsi");
+    r#gen.emit("\tpush\trdx");
+    r#gen.emit("\tpush\trax");
+    r#gen.emit("\tlea\trsi, [rax + rax + 17]");
+    r#gen.emit("\tcall\tstone.mem_realloc");
+    r#gen.emit("\tpop\trcx");
+    r#gen.emit("\tadd\trcx, rcx");
+    r#gen.emit("\tmov\tQWORD PTR [rax + 8], rcx");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.text], rax");
+    r#gen.emit("\tmov\trdi, rax");
+    r#gen.emit("\tpop\trdx");
+    r#gen.emit("\tpop\trsi");
+    r#gen.emit(".Ltext_append_copy:");
+    r#gen.emit("\tmov\trax, QWORD PTR [rdi]");
+    r#gen.emit("\tlea\trcx, [rax + rdx]");
+    r#gen.emit("\tmov\tQWORD PTR [rdi], rcx");
+    r#gen.emit("\tlea\trdi, [rdi + rax + 16]");
+    r#gen.emit("\tmov\trcx, rdx");
+    r#gen.emit("\trep\tmovsb");
+    r#gen.emit("\tret");
+
+    if strings {
+        r#gen.emit("stone.text_end:");
+        r#gen.emit("\tmov\trax, QWORD PTR [rip + stone.text]");
+        r#gen.emit("\tmov\tQWORD PTR [rip + stone.text], rdi");
+        r#gen.emit("\tmov\trcx, QWORD PTR [rax]");
+        r#gen.emit("\tmov\tbyte ptr [rax + rcx + 16], 0");
+        r#gen.emit("\tmov\tQWORD PTR [rax + 8], 1");
+        r#gen.emit("\tinc\tQWORD PTR [rip + stone.live]");
+        r#gen.emit("\tadd\trax, 16");
+        r#gen.emit("\tret");
+    }
+
+    // rbx holds the text to go back to and r12 the one written
+    r#gen.emit("stone.text_print:");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tedi, 10"); // '\n'
+    r#gen.emit("\tcall\tstone.print_char");
+    r#gen.emit("\tmov\tr12, QWORD PTR [rip + stone.text]");
+    r#gen.emit("\tlea\trsi, [r12 + 16]");
+    r#gen.emit("\tmov\trdx, QWORD PTR [r12]");
+    r#gen.emit("\tcall\tstone.write_out");
+    r#gen.emit("\tmov\trax, r12");
+    r#gen.emit("\tcall\tstone.mem_free");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.text], rbx");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tret");
+
+    // a write may take fewer bytes than asked, or be interrupted before it takes any
+    r#gen.emit("stone.write_out:");
+    r#gen.emit("\ttest\trdx, rdx");
+    r#gen.emit("\tjz\t.Lwrite_out_done");
+    r#gen.emit("\tmov\teax, 1"); // sys_write
+    r#gen.emit("\tmov\tedi, 1"); // stdout
+    r#gen.emit("\tsyscall");
+    r#gen.emit("\tcmp\trax, -4"); // EINTR
+    r#gen.emit("\tje\tstone.write_out");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjle\t.Lwrite_out_done");
+    r#gen.emit("\tadd\trsi, rax");
+    r#gen.emit("\tsub\trdx, rax");
+    r#gen.emit("\tjmp\tstone.write_out");
+    r#gen.emit(".Lwrite_out_done:");
+    r#gen.emit("\tret");
 }
 
 /// Emits `stone.print_str_quoted`, which prints a string inside a list the way
 /// `stdlib::repr_in_list` writes it: in single quotes, or double quotes if it holds a `'` but no
 /// `"`, with backslashes, the quote, and control characters escaped. Each run of bytes that needs
-/// no escape is one `write`.
+/// no escape is appended at once.
 fn print_str_quoted(r#gen: &mut dyn AssemblyGenerator) {
     // rbx holds where the run starts, r12 the quote, and r13 where the run ends, then the byte
     // that ended it
@@ -726,9 +837,7 @@ fn print_str_quoted(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tsub\trdx, rbx");
     r#gen.emit("\tjz\t.Lprint_quoted_special");
     r#gen.emit("\tmov\trsi, rbx");
-    r#gen.emit("\tmov\teax, 1"); // sys_write
-    r#gen.emit("\tmov\tedi, 1"); // stdout
-    r#gen.emit("\tsyscall");
+    r#gen.emit("\tcall\tstone.text_append");
     r#gen.emit(".Lprint_quoted_special:");
     r#gen.emit("\tmovzx\teax, byte ptr [r13]");
     r#gen.emit("\ttest\teax, eax");
@@ -1719,10 +1828,11 @@ pub(super) fn jump_if_space(r#gen: &mut dyn AssemblyGenerator, reg: &str, label:
 
 /// Emits the input routines named in `used`, which read stdin with the `read` syscall into a
 /// buffer of [`STDIN_BUFFER`] bytes, `stone.stdin_buffer`, of which the bytes from
-/// `stone.stdin_pos` up to `stone.stdin_len` are still to be read. Printing writes with
-/// syscalls too, so a prompt shows before the program waits.
+/// `stone.stdin_pos` up to `stone.stdin_len` are still to be read. `print` writes each line with
+/// syscalls as it finishes it, and a prompt is written at once, so it shows before the program
+/// waits.
 ///
-/// - `stone.input` prints the string in `rdi` unless it is null, then returns the next line of
+/// - `stone.input` writes the string in `rdi` to stdout unless it is null, then returns the next line of
 ///   stdin as a new string without its newline, or an empty string at the end of the input. A
 ///   line that the buffer holds whole is copied straight out of it, and a longer one is first
 ///   gathered in a block from `stone.mem_alloc`
@@ -1791,7 +1901,10 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
     r#gen.emit("\ttest\trdi, rdi");
     r#gen.emit("\tjz\t.Linput_read");
-    r#gen.emit("\tcall\tstone.print_str");
+    // straight to stdout, since a prompt is never part of a text being built
+    r#gen.emit("\tmov\trsi, rdi");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rdi - 16]");
+    r#gen.emit("\tcall\tstone.write_out");
     r#gen.emit(".Linput_read:");
     r#gen.emit("\txor\tebx, ebx");
     r#gen.emit("\txor\tr12d, r12d");

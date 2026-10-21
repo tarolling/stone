@@ -6,6 +6,7 @@ use crate::ast::{
     PrimaryOp, UnaryOp,
 };
 use crate::debug;
+use crate::span::Span;
 use crate::token::TokenType;
 
 impl Parser {
@@ -422,16 +423,61 @@ impl Parser {
         })
     }
 
+    /// Parses one string literal: a `STRING`, or a string with values in it, such as
+    /// `"x is {x}"`, whose values are expressions between its pieces of text.
+    ///
+    /// ```text
+    /// string:
+    ///     | STRING
+    ///     | STRING_START expression (STRING_MIDDLE expression)* STRING_END
+    /// ```
     pub(super) fn parse_string(&mut self) -> ParseExprResult {
         let mark = self.pos;
-        if let TokenType::String(value) = self.advance().r#type {
-            return Ok(Box::new(Expr::new(
+        let text = |value: String, span: Span| {
+            Expr::new(
                 ExprKind::Constant {
-                    value: Box::new(Constant::Str(value.to_string())),
+                    value: Box::new(Constant::Str(value)),
                     kind: None,
                 },
-                self.span_from(mark),
-            )));
+                span,
+            )
+        };
+        match self.peek().r#type.clone() {
+            TokenType::String(value) => {
+                self.advance();
+                return Ok(Box::new(text(value, self.span_from(mark))));
+            }
+            TokenType::StringStart(value) => {
+                let mut values = vec![text(value, self.advance().span)];
+                loop {
+                    values.push(*self.parse_expression()?);
+                    let token = self.peek().clone();
+                    match token.r#type {
+                        TokenType::StringMiddle(value) => {
+                            self.advance();
+                            values.push(text(value, token.span));
+                        }
+                        TokenType::StringEnd(value) => {
+                            self.advance();
+                            values.push(text(value, token.span));
+                            break;
+                        }
+                        _ => {
+                            self.record_expected("'}'".to_string(), false);
+                            return Err(ParserError {
+                                method: "parse_string".to_string(),
+                                token: token.r#type,
+                                span: token.span,
+                            });
+                        }
+                    }
+                }
+                return Ok(Box::new(Expr::new(
+                    ExprKind::JoinedStr { values },
+                    self.span_from(mark),
+                )));
+            }
+            _ => {}
         }
 
         Err(ParserError {
@@ -441,40 +487,60 @@ impl Parser {
         })
     }
 
+    /// Parses string literals written one after another, which make one string, as `"a" "b"`
+    /// makes `"ab"`. Pieces of text next to each other join, empty ones are left out, and the
+    /// result is a [`ExprKind::JoinedStr`] only if a value is among them.
     pub(super) fn parse_strings_loop(&mut self) -> ParseExprResult {
         let start = self.pos;
-        let mut results = vec![];
-
-        let expr = self.parse_string()?;
-        results.push(expr);
-
+        let mut results = vec![*self.parse_string()?];
         loop {
             let mark = self.pos;
             if let Ok(expr) = self.parse_string() {
-                results.push(expr);
+                results.push(*expr);
             } else {
                 self.pos = mark;
                 break;
             }
         }
 
-        // concatenate all strings
-        let mut concatenated = String::new();
+        let mut values: Vec<Expr> = vec![];
         for expr in results {
-            if let ExprKind::Constant { value, .. } = expr.kind
-                && let Constant::Str(s) = *value
-            {
-                concatenated.push_str(&s);
+            let pieces = match expr.kind {
+                ExprKind::JoinedStr { values } => values,
+                _ => vec![expr],
+            };
+            for piece in pieces {
+                if let ExprKind::Constant { value, .. } = &piece.kind
+                    && let Constant::Str(text) = &**value
+                    && let Some(last) = values.last_mut()
+                    && let ExprKind::Constant { value: before, .. } = &mut last.kind
+                    && let Constant::Str(joined) = &mut **before
+                {
+                    joined.push_str(text);
+                    last.span = last.span.to(piece.span);
+                    continue;
+                }
+                values.push(piece);
             }
         }
-
-        Ok(Box::new(Expr::new(
-            ExprKind::Constant {
-                value: Box::new(Constant::Str(concatenated)),
+        let span = self.span_from(start);
+        let kind = match values.as_slice() {
+            [] => ExprKind::Constant {
+                value: Box::new(Constant::Str(String::new())),
                 kind: None,
             },
-            self.span_from(start),
-        )))
+            [only] if matches!(&only.kind, ExprKind::Constant { .. }) => {
+                values.pop().expect("one piece").kind
+            }
+            _ => {
+                values.retain(|piece| {
+                    !matches!(&piece.kind, ExprKind::Constant { value, .. }
+                        if matches!(&**value, Constant::Str(text) if text.is_empty()))
+                });
+                ExprKind::JoinedStr { values }
+            }
+        };
+        Ok(Box::new(Expr::new(kind, span)))
     }
 
     pub(super) fn parse_strings(&mut self) -> ParseExprResult {

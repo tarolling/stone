@@ -49,6 +49,16 @@ pub struct Lexer {
     pending_dedents: Vec<Token>,
     /// The file every span is in.
     file: FileId,
+    /// The `{value}`s of strings being lexed, innermost last.
+    holes: Vec<Hole>,
+}
+
+/// A `{value}` in a string whose value is being lexed.
+struct Hole {
+    /// Where the string the value is in starts, for an error that it never ends.
+    string: Pos,
+    /// How many brackets are open inside the value, so `}` ends it only at 0.
+    depth: usize,
 }
 
 impl Lexer {
@@ -71,6 +81,7 @@ impl Lexer {
             indent_stack: vec![0],
             at_line_start: true,
             pending_dedents: vec![],
+            holes: vec![],
         }
     }
 
@@ -307,24 +318,66 @@ impl Lexer {
         digits
     }
 
-    /// Lexes a string literal starting at its opening quote and returns its contents.
+    /// Lexes the text of a string after its opening quote, if `first`, or after the `}` that
+    /// ends one of its values, up to its closing quote or the `{` of its next value, and returns
+    /// it as a token. `start` is where the string starts.
     ///
-    /// For example, `"hi"` returns `hi`. A string must close on the line it opens on, so `"abc`
-    /// followed by a newline is an error spanning `"abc`. A backslash starts an escape sequence,
-    /// so `"say \"hi\"\n"` returns `say "hi"` and a newline.
-    fn lex_string(&mut self) -> Result<String, LexError> {
-        let start = self.pos();
-        self.advance();
+    /// For example, `"hi"` gives `String("hi")`, and `"a{x}b"` gives `StringStart("a")`, then the
+    /// tokens of `x`, then `StringEnd("b")`. A string must close on the line it opens on, so
+    /// `"abc` followed by a newline is an error spanning `"abc`. A backslash starts an escape
+    /// sequence, so `"say \"hi\"\n"` holds `say "hi"` and a newline, and `{{` and `}}` are braces.
+    fn lex_text(&mut self, start: Pos, first: bool) -> Result<TokenType, LexError> {
         let mut s = String::new();
         while let Some(ch) = self.peek() {
             match ch {
                 '"' => {
                     self.advance();
-                    return Ok(s);
+                    return Ok(match first {
+                        true => TokenType::String(s),
+                        false => TokenType::StringEnd(s),
+                    });
                 }
                 '\n' => break,
                 '\\' if self.peek_at(1).is_some_and(|next| next != '\n') => {
                     s.push(self.lex_escape()?);
+                }
+                '{' | '}' if self.peek_at(1) == Some(ch) => {
+                    s.push(ch);
+                    self.advance();
+                    self.advance();
+                }
+                '{' => {
+                    let brace = self.pos();
+                    self.advance();
+                    let blank = (0..)
+                        .take_while(|&k| matches!(self.peek_at(k), Some(' ' | '\t')))
+                        .count();
+                    if self.peek_at(blank) == Some('}') {
+                        for _ in 0..=blank {
+                            self.advance();
+                        }
+                        return Err(LexError {
+                            message: "empty '{}' in a string; write '{{' and '}}' for braces"
+                                .to_string(),
+                            span: Span::new(brace, self.pos()),
+                        });
+                    }
+                    self.holes.push(Hole {
+                        string: start,
+                        depth: 0,
+                    });
+                    return Ok(match first {
+                        true => TokenType::StringStart(s),
+                        false => TokenType::StringMiddle(s),
+                    });
+                }
+                '}' => {
+                    let brace = self.pos();
+                    self.advance();
+                    return Err(LexError {
+                        message: "a '}' in a string is written '}}'".to_string(),
+                        span: Span::new(brace, self.pos()),
+                    });
                 }
                 _ => {
                     s.push(ch);
@@ -336,6 +389,21 @@ impl Lexer {
             message: "unterminated string".to_string(),
             span: Span::new(start, self.pos()),
         })
+    }
+
+    /// Notes a bracket opening inside a string's value, which a `}` must close before it can end
+    /// the value.
+    fn open_bracket(&mut self) {
+        if let Some(hole) = self.holes.last_mut() {
+            hole.depth += 1;
+        }
+    }
+
+    /// Notes a bracket closing inside a string's value.
+    fn close_bracket(&mut self) {
+        if let Some(hole) = self.holes.last_mut() {
+            hole.depth = hole.depth.saturating_sub(1);
+        }
     }
 
     /// Lexes the escape sequence starting at a backslash inside a string and returns the
@@ -419,6 +487,15 @@ impl Lexer {
         self.skip_whitespace();
         let start = self.pos();
 
+        // a value in a string ends with the string's line
+        if let Some(hole) = self.holes.last()
+            && matches!(self.peek(), None | Some('\n'))
+        {
+            return Err(LexError {
+                message: "unterminated string".to_string(),
+                span: Span::new(hole.string, self.pos()),
+            });
+        }
         let r#type = match self.peek() {
             None => TokenType::Eof,
             Some('\n') => {
@@ -434,31 +511,50 @@ impl Lexer {
             }
             Some('(') => {
                 self.advance();
+                self.open_bracket();
                 TokenType::LParen
             }
             Some(')') => {
                 self.advance();
+                self.close_bracket();
                 TokenType::RParen
             }
             Some('[') => {
                 self.advance();
+                self.open_bracket();
                 TokenType::LBracket
             }
             Some(']') => {
                 self.advance();
+                self.close_bracket();
                 TokenType::RBracket
             }
             Some('{') => {
                 self.advance();
+                self.open_bracket();
                 TokenType::LBrace
+            }
+            // the end of a value in a string, where the string's text goes on
+            Some('}') if self.holes.last().is_some_and(|hole| hole.depth == 0) => {
+                self.advance();
+                let hole = self.holes.pop().expect("a value is open");
+                self.lex_text(hole.string, false)?
             }
             Some('}') => {
                 self.advance();
+                self.close_bracket();
                 TokenType::RBrace
             }
             Some('.') => {
                 self.advance();
                 TokenType::Dot
+            }
+            Some(':') if self.holes.last().is_some_and(|hole| hole.depth == 0) => {
+                self.advance();
+                return Err(LexError {
+                    message: "format specs such as '{x:.2f}' are not supported yet".to_string(),
+                    span: Span::new(start, self.pos()),
+                });
             }
             Some(':') => {
                 self.advance();
@@ -504,7 +600,10 @@ impl Lexer {
                 self.advance();
                 TokenType::Operator("?".to_string())
             }
-            Some('"') => TokenType::String(self.lex_string()?),
+            Some('"') => {
+                self.advance();
+                self.lex_text(start, true)?
+            }
             Some(ch) if ch.is_ascii_digit() => self.lex_number()?,
             Some(ch) if ch.is_alphabetic() || ch == '_' => {
                 let ident = self.lex_name();
@@ -1097,6 +1196,124 @@ testing(1, 2, 3)"#;
                 "'\\x' needs two hex digits, as in '\\x41'",
                 (6, 9),
             ),
+        ] {
+            let err = Lexer::new(source).lex().unwrap_err();
+            assert_eq!(err.message, message, "{source}");
+            assert_eq!(
+                err.span,
+                Span::new(Pos::new(1, cols.0), Pos::new(1, cols.1)),
+                "{source}"
+            );
+        }
+    }
+
+    fn text(kind: fn(String) -> TokenType, text: &str) -> TokenType {
+        kind(text.to_string())
+    }
+
+    #[test]
+    fn braces_in_a_string_hold_values() {
+        use TokenType::{StringEnd, StringMiddle, StringStart};
+        let tokens = Lexer::new("\"a{x}b\"\n").lex().unwrap();
+        let spans: Vec<(TokenType, Span)> =
+            tokens.into_iter().map(|t| (t.r#type, t.span)).collect();
+        let at = |start, end| Span::new(Pos::new(1, start), Pos::new(1, end));
+        assert_eq!(
+            spans[..3],
+            [
+                (text(StringStart, "a"), at(1, 4)),
+                (name("x"), at(4, 5)),
+                (text(StringEnd, "b"), at(5, 8)),
+            ]
+        );
+        assert_eq!(
+            types_of("\"a{x}b{y}c\"\n")[..5],
+            [
+                text(StringStart, "a"),
+                name("x"),
+                text(StringMiddle, "b"),
+                name("y"),
+                text(StringEnd, "c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn doubled_braces_are_braces() {
+        assert_eq!(
+            types_of("\"{{x}} }}{{\"\n")[0],
+            TokenType::String("{x} }{".to_string())
+        );
+    }
+
+    #[test]
+    fn a_value_in_a_string_may_hold_strings_and_brackets() {
+        use TokenType::{StringEnd, StringStart};
+        assert_eq!(
+            types_of("\"{\"{y}\"}\"\n")[..5],
+            [
+                text(StringStart, ""),
+                text(StringStart, ""),
+                name("y"),
+                text(StringEnd, ""),
+                text(StringEnd, ""),
+            ]
+        );
+        assert_eq!(
+            types_of("\"{m[\"k\"]}\"\n")[..6],
+            [
+                text(StringStart, ""),
+                name("m"),
+                TokenType::LBracket,
+                TokenType::String("k".to_string()),
+                TokenType::RBracket,
+                text(StringEnd, ""),
+            ]
+        );
+        // a colon inside brackets is a slice's, and a brace opens a map
+        assert_eq!(
+            types_of("\"{xs[1:2]} { {1: 2} }\"\n")[..15],
+            [
+                text(StringStart, ""),
+                name("xs"),
+                TokenType::LBracket,
+                TokenType::Number(1),
+                TokenType::Colon,
+                TokenType::Number(2),
+                TokenType::RBracket,
+                text(TokenType::StringMiddle, " "),
+                TokenType::LBrace,
+                TokenType::Number(1),
+                TokenType::Colon,
+                TokenType::Number(2),
+                TokenType::RBrace,
+                text(StringEnd, ""),
+                TokenType::Newline,
+            ]
+        );
+    }
+
+    #[test]
+    fn misplaced_braces_in_a_string_are_errors() {
+        for (source, message, cols) in [
+            (
+                "x = \"{}\"\n",
+                "empty '{}' in a string; write '{{' and '}}' for braces",
+                (6, 8),
+            ),
+            (
+                "x = \"{  }\"\n",
+                "empty '{}' in a string; write '{{' and '}}' for braces",
+                (6, 10),
+            ),
+            ("x = \"a}b\"\n", "a '}' in a string is written '}}'", (7, 8)),
+            (
+                "x = \"{x:.2f}\"\n",
+                "format specs such as '{x:.2f}' are not supported yet",
+                (8, 9),
+            ),
+            ("x = \"{x\ny = 1\n", "unterminated string", (5, 8)),
+            ("x = \"{(x\n", "unterminated string", (5, 9)),
         ] {
             let err = Lexer::new(source).lex().unwrap_err();
             assert_eq!(err.message, message, "{source}");

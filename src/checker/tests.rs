@@ -1714,22 +1714,59 @@ fn int_and_float_parse_strs() {
 }
 
 #[test]
-fn str_converts_scalars() {
-    let source = "a = str(1)\nb = str(1.5)\nc = str(true)\nd = str(\"x\")\n";
-    for name in ["a", "b", "c", "d"] {
+fn str_converts_every_value() {
+    let source = "struct P:\n    n: int\nenum E:\n    A(int)\n    B\n\
+                  a = str(1)\nb = str(1.5)\nc = str(true)\nd = str(\"x\")\ne = str([1])\n\
+                  f = str((1, \"a\"))\ng = str({\"k\": [2]})\nh = str(P(n=1))\ni = str(E.A(1))\n\
+                  j = str(some(E.B))\nk = P(n=1).display()\nl = [1].display()\n";
+    for name in ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"] {
         assert_eq!(type_of_symbol(source, name), "str");
     }
+    let generic = "fn show[T](v: T) -> str:\n    ret str(v) + v.display()\nshown = show([1])\n";
+    assert_eq!(type_of_symbol(generic, "shown"), "str");
     assert_error(
-        "x = str([1])\n",
-        "'str' needs an int, float, bool, or str, found list[int]",
-        1,
+        "fn f():\n    ret\nx = str(f())\n",
+        "'f' returns no value, so it can only be called as a statement of its own",
+        3,
         9,
+    );
+    assert_error(
+        "x = 1.display(2)\n",
+        "'display' takes 0 arguments, but 1 was given",
+        1,
+        5,
     );
     assert_error(
         "x = str()\n",
         "'str' takes 1 argument, but 0 were given",
         1,
         5,
+    );
+}
+
+#[test]
+fn a_string_with_values_is_a_str() {
+    let source = "n = 1\nxs = [n]\ns = \"{n} {xs} {some(xs)} {(n, xs)}\"\n";
+    assert_eq!(type_of_symbol(source, "s"), "str");
+    assert_error(
+        "n = 1\ns = \"{n + 1.5}\"\n",
+        "expected int, found float",
+        2,
+        11,
+    );
+    assert_error(
+        "fn f():\n    ret\ns = \"a {f()} b\"\n",
+        "'f' returns no value, so it can only be called as a statement of its own",
+        3,
+        9,
+    );
+    assert_error("s = \"{y}\"\n", "undefined name 'y'", 1, 7);
+    // a value is read like any other
+    assert_error(
+        "if true:\n    print(\"{n}\")\nn = 1\n",
+        "'n' might be used before it is assigned",
+        2,
+        13,
     );
 }
 
@@ -2225,12 +2262,8 @@ fn tuples_are_not_numbers_strings_or_lists() {
         2,
         7,
     );
-    assert_error(
-        "t = (1, 2)\nprint(str(t))\n",
-        "'str' needs an int, float, bool, or str, found tuple[int, int]",
-        2,
-        11,
-    );
+    // `str` writes a tuple as `print` does
+    assert_eq!(errors("t = (1, 2)\nprint(str(t))\n"), []);
     assert_error(
         "t = (1, 2)\nfor x in t:\n    print(x)\n",
         "a tuple cannot be iterated; unpack it, or use a list",
@@ -2838,12 +2871,7 @@ fn structs_are_not_numbers_or_strings() {
         5,
         7,
     );
-    assert_error(
-        &format!("{p}print(str(p))\n"),
-        "'str' needs an int, float, bool, or str, found Point",
-        5,
-        11,
-    );
+    assert_eq!(errors(&format!("{p}print(str(p))\n")), []);
     assert_error(
         &format!("{p}if p:\n    print(1)\n"),
         "a condition must be bool, found Point",
@@ -3534,12 +3562,8 @@ fn a_type_parameter_is_any_type_inside_its_function() {
         2,
         9,
     );
-    assert_error(
-        "fn f[T](x: T) -> str:\n    ret str(x)\n",
-        "'str' needs an int, float, bool, or str, found T",
-        2,
-        13,
-    );
+    // printed, so written as text too
+    assert_eq!(errors("fn f[T](x: T) -> str:\n    ret str(x)\n"), []);
     assert_error(
         "fn f[T](x: T):\n    if x:\n        ret\n",
         "a condition must be bool, found T",
@@ -4360,6 +4384,20 @@ fn a_struct_that_implements_ord_is_ordered() {
 }
 
 #[test]
+fn a_struct_may_implement_display() {
+    let source = "struct P:\n    x: int\nimpl display for P:\n    fn display(self) -> str:\n        \
+                  ret \"P\" + str(self.x)\na = P(x=1).display()\nb = str([P(x=1)])\n";
+    assert_eq!(type_of_symbol(source, "a"), "str");
+    assert_eq!(type_of_symbol(source, "b"), "str");
+    assert_error(
+        "struct P:\n    x: int\nimpl display for P:\n    fn display(self) -> int:\n        ret 1\n",
+        "'display' must take and return what 'display' says, as in 'fn display(self) -> str'",
+        4,
+        8,
+    );
+}
+
+#[test]
 fn eq_and_cmp_are_only_the_traits_methods() {
     assert_error(
         "struct P:\n    x: int\nimpl P:\n    fn eq(self, other: P) -> bool:\n        ret true\n",
@@ -4378,6 +4416,19 @@ fn eq_and_cmp_are_only_the_traits_methods() {
         "'cmp' is the method of the trait 'ord', so it goes in an 'impl ord for Version:' block",
         10,
         8,
+    );
+    assert_error(
+        "struct P:\n    x: int\nimpl P:\n    fn display(self) -> str:\n        ret \"p\"\n",
+        "'display' is the method of the trait 'display', so it goes in an 'impl display for P:' \
+         block",
+        4,
+        8,
+    );
+    assert_error(
+        "impl display for int:\n    fn display(self) -> str:\n        ret \"i\"\n",
+        "int already implements 'display'",
+        1,
+        18,
     );
     assert_error(
         "fn less() -> int:\n    ret 1\n",

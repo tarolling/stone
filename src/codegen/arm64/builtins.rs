@@ -12,7 +12,7 @@ use super::{address, pop_frame, push_frame};
 use crate::codegen::context::{CPU_ONLINE, PATH_BUFFER, UTSNAME_FIELD, UTSNAME_SIZE};
 use crate::codegen::context::{
     HEAP_REGION, IMMORTAL, LARGEST_CLASS, LEAK_PREFIX, LEAK_SUFFIX, OUT_OF_MEMORY,
-    OUT_OF_MEMORY_LENGTH, SMALLEST_CLASS, STDIN_BUFFER, immortal_string,
+    OUT_OF_MEMORY_LENGTH, SMALLEST_CLASS, STDIN_BUFFER, TEXT_BLOCK, immortal_string,
 };
 use crate::codegen::{AssemblyGenerator, Os};
 use crate::stdlib::os::HOSTNAME_BUFFER;
@@ -312,6 +312,9 @@ pub fn start_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// `stone.list_copy` can call them. If the system has no memory to give, the program stops with
 /// [`OUT_OF_MEMORY`].
 pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\t.section\t.rodata");
+    r#gen.emit(".Lstone_out_of_memory:");
+    r#gen.emit(&format!("\t.string \"{OUT_OF_MEMORY}\""));
     r#gen.emit("\t.bss");
     r#gen.emit("\t.p2align\t3");
     r#gen.emit("stone.heap_next:");
@@ -545,8 +548,6 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit(&format!("\t.string \"{LEAK_PREFIX}\""));
     r#gen.emit(".Lstone_leak_suffix:");
     r#gen.emit(&format!("\t.string \"{LEAK_SUFFIX}\\n\""));
-    r#gen.emit(".Lstone_out_of_memory:");
-    r#gen.emit(&format!("\t.string \"{OUT_OF_MEMORY}\""));
     r#gen.emit("\t.text");
 
     allocator(r#gen);
@@ -871,8 +872,10 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.print_str_quoted` writes the string `x0` points to as a printed list shows its
 ///   strings, quoted and escaped like Python's `repr`
 ///
-/// They write with the `write` system call and clobber `x0` to `x2`, `x8` to `x13`, and `x16`.
-pub fn print(r#gen: &mut dyn AssemblyGenerator) {
+/// They write into the text being built (see [`text_runtime`]), which `print` then writes to
+/// stdout in one go and `str` makes a string of, and clobber `x0` to `x2`, `x8` to `x13`, `x16`,
+/// `x17`, and `x30`.
+pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\t.section\t.rodata");
     r#gen.emit(".Lstone_true:");
     r#gen.emit("\t.string \"true\"");
@@ -882,6 +885,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
 
     // digits are written backwards from the end of 32 bytes, which holds all 20 and a sign
     r#gen.emit("stone.print_int:");
+    push_frame(r#gen, &[]);
     r#gen.emit("\tsub\tsp, sp, #32");
     r#gen.emit("\tadd\tx1, sp, #32");
     r#gen.emit("\tmov\tx9, x0");
@@ -907,10 +911,8 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lprint_int_write:");
     r#gen.emit("\tadd\tx2, sp, #32");
     r#gen.emit("\tsub\tx2, x2, x1");
-    r#gen.emit("\tmov\tx0, #1"); // stdout
-    system_call(r#gen, Sys::Write);
-    r#gen.emit("\tadd\tsp, sp, #32");
-    r#gen.emit("\tret");
+    r#gen.emit("\tbl\tstone.text_append");
+    pop_frame(r#gen, &[]);
 
     r#gen.emit("stone.print_str:");
     r#gen.emit("\tmov\tx1, x0");
@@ -922,8 +924,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tb\t.Lprint_str_len");
     r#gen.emit(".Lprint_str_write:");
     r#gen.emit("\tcbz\tx2, .Lprint_str_done"); // empty string
-    r#gen.emit("\tmov\tx0, #1"); // stdout
-    system_call(r#gen, Sys::Write);
+    r#gen.emit("\tb\tstone.text_append");
     r#gen.emit(".Lprint_str_done:");
     r#gen.emit("\tret");
 
@@ -935,21 +936,135 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tb\tstone.print_str");
 
     r#gen.emit("stone.print_char:");
+    push_frame(r#gen, &[]);
     r#gen.emit("\tsub\tsp, sp, #16");
     r#gen.emit("\tstrb\tw0, [sp]");
     r#gen.emit("\tmov\tx1, sp");
     r#gen.emit("\tmov\tx2, #1");
-    r#gen.emit("\tmov\tx0, #1"); // stdout
-    system_call(r#gen, Sys::Write);
-    r#gen.emit("\tadd\tsp, sp, #16");
-    r#gen.emit("\tret");
+    r#gen.emit("\tbl\tstone.text_append");
+    pop_frame(r#gen, &[]);
 
     print_str_quoted(r#gen);
+    text_runtime(r#gen, strings);
+}
+
+/// Emits the text builder that every `stone.print_*` routine writes into, as the x86-64
+/// `text_runtime` does, with `stone.text` pointing to the block of the text being built.
+///
+/// - `stone.text_begin` starts a new text and returns the one being built before
+/// - `stone.text_append` adds the `x2` bytes at `x1` to the text
+/// - `stone.text_end` finishes the text as a new string with a count of 1, and goes back to
+///   building the text in `x0`
+/// - `stone.text_print` writes the text and a newline to stdout, frees it, and goes back to
+///   building the text in `x0`
+/// - `stone.write_out` writes the `x2` bytes at `x1` to stdout, however many `write` calls that
+///   takes
+///
+/// `stone.text_print` preserves the callee-saved registers, and the others clobber `x0` to `x2`,
+/// `x8` to `x13`, `x16`, `x17`, and `x30`. `stone.text_end` is emitted only if the program has
+/// `strings`, since it counts the string it makes in `stone.live`.
+fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
+    r#gen.emit("\t.bss");
+    r#gen.emit("\t.p2align\t3");
+    r#gen.emit("stone.text:");
+    r#gen.emit("\t.zero\t8");
+    r#gen.emit("\t.text");
+
+    r#gen.emit("stone.text_begin:");
+    push_frame(r#gen, &[]);
+    r#gen.emit(&format!("\tmov\tx0, #{TEXT_BLOCK}"));
+    r#gen.emit("\tbl\tstone.mem_alloc");
+    r#gen.emit("\tstr\txzr, [x0]");
+    r#gen.emit(&format!("\tmov\tx9, #{}", TEXT_BLOCK - 17));
+    r#gen.emit("\tstr\tx9, [x0, #8]");
+    r#gen.emit("\tadrp\tx9, stone.text");
+    r#gen.emit("\tldr\tx10, [x9, :lo12:stone.text]");
+    r#gen.emit("\tstr\tx0, [x9, :lo12:stone.text]");
+    r#gen.emit("\tmov\tx0, x10");
+    pop_frame(r#gen, &[]);
+
+    // x12 holds the block and x13 the length it will have
+    r#gen.emit("stone.text_append:");
+    push_frame(r#gen, &[]);
+    r#gen.emit("\tadrp\tx9, stone.text");
+    r#gen.emit("\tldr\tx12, [x9, :lo12:stone.text]");
+    r#gen.emit("\tldr\tx13, [x12]");
+    r#gen.emit("\tadd\tx13, x13, x2");
+    r#gen.emit("\tldr\tx9, [x12, #8]");
+    r#gen.emit("\tcmp\tx13, x9");
+    r#gen.emit("\tb.ls\t.Ltext_append_copy");
+    r#gen.emit("\tstp\tx1, x2, [sp, #-16]!");
+    r#gen.emit("\tmov\tx0, x12");
+    r#gen.emit("\tadd\tx1, x13, x13");
+    r#gen.emit("\tadd\tx1, x1, #17");
+    r#gen.emit("\tbl\tstone.mem_realloc");
+    r#gen.emit("\tldp\tx1, x2, [sp], #16");
+    r#gen.emit("\tmov\tx12, x0");
+    r#gen.emit("\tadd\tx9, x13, x13");
+    r#gen.emit("\tstr\tx9, [x12, #8]");
+    r#gen.emit("\tadrp\tx9, stone.text");
+    r#gen.emit("\tstr\tx12, [x9, :lo12:stone.text]");
+    r#gen.emit(".Ltext_append_copy:");
+    r#gen.emit("\tldr\tx9, [x12]");
+    r#gen.emit("\tstr\tx13, [x12]");
+    r#gen.emit("\tadd\tx10, x12, #16");
+    r#gen.emit("\tadd\tx10, x10, x9");
+    copy_bytes(r#gen, "x10", "x1", "x2", ".Ltext_append_bytes");
+    pop_frame(r#gen, &[]);
+
+    if strings {
+        r#gen.emit("stone.text_end:");
+        r#gen.emit("\tadrp\tx9, stone.text");
+        r#gen.emit("\tldr\tx10, [x9, :lo12:stone.text]");
+        r#gen.emit("\tstr\tx0, [x9, :lo12:stone.text]");
+        r#gen.emit("\tldr\tx11, [x10]");
+        r#gen.emit("\tadd\tx0, x10, #16");
+        r#gen.emit("\tstrb\twzr, [x0, x11]");
+        r#gen.emit("\tmov\tx11, #1");
+        r#gen.emit("\tstr\tx11, [x10, #8]");
+        count_live(r#gen, 1);
+        r#gen.emit("\tret");
+    }
+
+    // x19 holds the text to go back to and x20 the one written
+    let saved = ["x19", "x20"];
+    r#gen.emit("stone.text_print:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx0, #10"); // '\n'
+    r#gen.emit("\tbl\tstone.print_char");
+    r#gen.emit("\tadrp\tx9, stone.text");
+    r#gen.emit("\tldr\tx20, [x9, :lo12:stone.text]");
+    r#gen.emit("\tadd\tx1, x20, #16");
+    r#gen.emit("\tldr\tx2, [x20]");
+    r#gen.emit("\tbl\tstone.write_out");
+    r#gen.emit("\tmov\tx9, x20");
+    r#gen.emit("\tbl\tstone.mem_free");
+    r#gen.emit("\tadrp\tx9, stone.text");
+    r#gen.emit("\tstr\tx19, [x9, :lo12:stone.text]");
+    pop_frame(r#gen, &saved);
+
+    // a write may take fewer bytes than asked, or be interrupted before it takes any
+    r#gen.emit("stone.write_out:");
+    push_frame(r#gen, &[]);
+    r#gen.emit(".Lwrite_out_next:");
+    r#gen.emit("\tcbz\tx2, .Lwrite_out_done");
+    r#gen.emit("\tmov\tx0, #1"); // stdout
+    system_call(r#gen, Sys::Write);
+    r#gen.emit("\tcmn\tx0, #4"); // EINTR
+    r#gen.emit("\tb.eq\t.Lwrite_out_next");
+    r#gen.emit("\tcmp\tx0, #0");
+    r#gen.emit("\tb.le\t.Lwrite_out_done");
+    r#gen.emit("\tadd\tx1, x1, x0");
+    r#gen.emit("\tsub\tx2, x2, x0");
+    r#gen.emit("\tb\t.Lwrite_out_next");
+    r#gen.emit(".Lwrite_out_done:");
+    pop_frame(r#gen, &[]);
 }
 
 /// Emits `stone.print_str_quoted`, which prints a string inside a list the way
 /// `stdlib::repr_in_list` writes it, as the x86-64 routine does. Each run of bytes that needs no
-/// escape is one `write`.
+/// escape is appended at once.
 fn print_str_quoted(r#gen: &mut dyn AssemblyGenerator) {
     // x19 holds where the run starts, x20 the quote, and x21 where the run ends, then the byte
     // that ended it
@@ -1000,8 +1115,7 @@ fn print_str_quoted(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tsub\tx2, x21, x19");
     r#gen.emit("\tcbz\tx2, .Lprint_quoted_special");
     r#gen.emit("\tmov\tx1, x19");
-    r#gen.emit("\tmov\tx0, #1"); // stdout
-    system_call(r#gen, Sys::Write);
+    r#gen.emit("\tbl\tstone.text_append");
     r#gen.emit(".Lprint_quoted_special:");
     r#gen.emit("\tldrb\tw9, [x21]");
     r#gen.emit("\tcbz\tw9, .Lprint_quoted_close");
@@ -1929,7 +2043,10 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     r#gen.emit("stone.input:");
     push_frame(r#gen, &saved);
     r#gen.emit("\tcbz\tx0, .Linput_read");
-    r#gen.emit("\tbl\tstone.print_str");
+    // straight to stdout, since a prompt is never part of a text being built
+    r#gen.emit("\tmov\tx1, x0");
+    r#gen.emit("\tldur\tx2, [x0, #-16]");
+    r#gen.emit("\tbl\tstone.write_out");
     r#gen.emit(".Linput_read:");
     r#gen.emit("\tmov\tx19, #0");
     r#gen.emit("\tmov\tx20, #0");

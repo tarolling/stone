@@ -26,7 +26,7 @@ use crate::ast::{
     Expr, ExprContext, ExprKind, Mod, Pattern, PatternKind, Stmt, StmtKind, TraitName, TypeExpr,
     TypeExprKind, TypeParam,
 };
-use crate::checker::{EQ, OPTION, ORD, RESULT, collect_assigned};
+use crate::checker::{DISPLAY, EQ, OPTION, ORD, RESULT, collect_assigned};
 use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -657,7 +657,7 @@ impl Loader<'_> {
                             Err(message) => Some(message.clone()),
                             // the checker says a builtin type already implements the prelude's
                             Ok((linked, _, _))
-                                if [EQ, ORD].contains(&trait_name.name.as_str())
+                                if [EQ, ORD, DISPLAY].contains(&trait_name.name.as_str())
                                     && matches!(
                                         linked.as_str(),
                                         "int" | "float" | "bool" | "str"
@@ -1350,7 +1350,9 @@ impl Rewriter<'_> {
                 keywords.iter_mut().for_each(|k| self.expr(&mut k.value));
             }
             ExprKind::Name { id, .. } => self.name(id, expr.span, false),
-            ExprKind::BoolOp { values, .. } => values.iter_mut().for_each(|v| self.expr(v)),
+            ExprKind::BoolOp { values, .. } | ExprKind::JoinedStr { values } => {
+                values.iter_mut().for_each(|v| self.expr(v))
+            }
             ExprKind::BinOp { left, right, .. } => {
                 self.expr(left);
                 self.expr(right);

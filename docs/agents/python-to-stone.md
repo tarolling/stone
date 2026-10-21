@@ -11,7 +11,7 @@ since stone copies values.
 
 1. **Inventory before writing.** Read the whole Python program and list what it uses that stone
    lacks (see "Not in stone" in the stone guide): classes with inheritance, exceptions, lambdas
-   and functions passed as values, comprehensions, f-strings, default and keyword arguments,
+   and functions passed as values, comprehensions, format specs in f-strings, default and keyword arguments,
    sets, and values whose type varies (a variable that is
    sometimes `None`, a name reused for an int and then a float, or a list that mixes types). Find
    arithmetic that could pass 64 bits, such as products in hashes and random number generators,
@@ -161,7 +161,10 @@ The error is the message `int(s)` would stop with, such as
 
 | Python | stone |
 | --- | --- |
-| `f"{name}: {score:.2f}"` | `name + ": " + str(score)` (no format specifiers; round by hand if needed) |
+| `f"{name}: {score}"` | `"{name}: {score}"`: drop the `f`, since every stone string takes values |
+| `f"{score:.2f}"`, `f"{n:>5}"` | no format specs yet; round or pad by hand |
+| `"{}"` or `"a {b}"` that is not an f-string | `"{{}}"`, `"a {{b}}"`: double the braces |
+| `__str__` | `impl display for T:` with `fn display(self) -> str`, which `print` and `str` use |
 | `print(a, b, sep=", ")`, `end=""` | build one string, then `print` it |
 | `s.lower()`, `s.replace()`, `s.isdigit()` | loops over characters, comparing with `<` and `>` |
 | `s * 3` | a loop of `+=` |
@@ -325,8 +328,8 @@ in_stock = []
 for item in items:
     if item.qty > 0:
         in_stock.append(item.name)
-print("in stock: " + ", ".join(in_stock))
-print("total value: " + str(total_value(items)))
+print("in stock: {", ".join(in_stock)}")
+print("total value: {total_value(items)}")
 cheapest = items[0]
 for item in items:
     if item.price < cheapest.price:
@@ -348,7 +351,7 @@ The decisions:
   loops over indexes.
 - `qty * price` mixed an int and a float; stone needs `float(item.qty)`.
 - The generator expression, the comprehension, and `min(key=...)` became loops, and the f-strings
-  became `+` with `str`.
+  kept their braces and lost their `f`.
 - `counts.get(word, 0) + 1` became a `contains` check, since `counts[word] += 1` needs the key.
 - `sorted(..., key=...)` became a list of structs built from `items()`. `WordCount`'s `cmp`
   orders by count, highest first, and stone's sort of structs is stable like Python's, so ties

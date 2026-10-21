@@ -34,6 +34,12 @@ pub trait eq:
 pub trait ord:
     fn cmp(self, other: Self) -> ordering
 
+// Values that `print`, `str`, and a string's `{value}` write as text. Every type implements it,
+// and a struct may say how it is written instead, as in `impl display for Point:`, which `print`
+// and `str` then use wherever a `Point` appears, inside lists and other values too.
+pub trait display:
+    fn display(self) -> str
+
 // Sorts a list of values of a type that implements `ord`, for `xs.sort()` on a list of anything
 // but `int`, `float`, and `str`. It merges ever longer runs, taking from the right run only when
 // its value is less than the left's, so equal values keep their order, and every program gets

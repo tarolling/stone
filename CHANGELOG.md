@@ -10,6 +10,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.3.3] - 2026-10-21
+
 ### Added
 
 - `os.run(cmd, args)` runs another program and waits for it, returning a

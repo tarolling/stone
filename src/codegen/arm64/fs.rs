@@ -8,23 +8,25 @@
 use super::builtins::{Sys, system_call};
 use super::{address, pop_frame, push_frame};
 use crate::codegen::context::{
-    DIR_BUFFER, FILE_BUFFER, INVALID_TEXT_CODE, NULL_IN_PATH_CODE, OpenFlags, immortal_string,
+    DIR_BUFFER, FILE_BUFFER, INVALID_TEXT_CODE, NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags,
+    immortal_string,
 };
 use crate::codegen::{AssemblyGenerator, Os};
 use crate::stdlib::fs::{INVALID_TEXT, NULL_IN_PATH, errors};
+use crate::stdlib::os::NULL_IN_COMMAND;
 
 /// `openat`'s directory for a path relative to the working directory, which macOS's shims drop.
 const AT_FDCWD: i64 = -100;
 
 /// The error number of a system call a signal interrupted, which is made again. It is 4 on both
 /// systems.
-const EINTR: i64 = 4;
+pub(super) const EINTR: i64 = 4;
 
 /// The registers every routine with a path keeps its values in: `x19` holds the path.
 const SAVED: [&str; 8] = ["x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26"];
 
 /// Emits the routines of the `fs` module that `used` lists, as `x64::fs::fs_runtime` describes
-/// them.
+/// them, with `stone.os_run` too if `used` holds it.
 pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     let uses = |label: &str| used.contains(&label);
     let flags = OpenFlags::of(r#gen.target());
@@ -43,8 +45,15 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     {
         open(r#gen);
     }
-    if uses("stone.fs_read") || uses("stone.fs_read_lines") || uses("stone.fs_list_dir") {
+    if uses("stone.fs_read")
+        || uses("stone.fs_read_lines")
+        || uses("stone.fs_list_dir")
+        || uses("stone.os_run")
+    {
         utf8_check(r#gen);
+    }
+    if uses("stone.os_run") {
+        super::process::run_runtime(r#gen);
     }
     if uses("stone.fs_read") || uses("stone.fs_read_lines") {
         read_all(r#gen, flags.read);
@@ -97,7 +106,7 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
 /// them, since few such values fit one `mov`.
 ///
 /// For example, `load(gen, "x1", 0x80241)` emits `mov x1, #577` and `movk x1, #8, lsl #16`.
-fn load(r#gen: &mut dyn AssemblyGenerator, reg: &str, value: i64) {
+pub(super) fn load(r#gen: &mut dyn AssemblyGenerator, reg: &str, value: i64) {
     r#gen.emit(&format!("\tmov\t{reg}, #{}", value & 0xffff));
     if value >> 16 != 0 {
         r#gen.emit(&format!("\tmovk\t{reg}, #{}, lsl #16", value >> 16));
@@ -113,6 +122,7 @@ fn errors_and_results(r#gen: &mut dyn AssemblyGenerator) {
         .chain([
             (INVALID_TEXT_CODE, INVALID_TEXT),
             (NULL_IN_PATH_CODE, NULL_IN_PATH),
+            (NULL_IN_COMMAND_CODE, NULL_IN_COMMAND),
         ])
         .collect();
     r#gen.emit("\t.data");
@@ -305,7 +315,7 @@ fn open(r#gen: &mut dyn AssemblyGenerator) {
 }
 
 /// Emits a `close` of the descriptor in `reg`, whose result is ignored.
-fn close(r#gen: &mut dyn AssemblyGenerator, reg: &str) {
+pub(super) fn close(r#gen: &mut dyn AssemblyGenerator, reg: &str) {
     r#gen.emit(&format!("\tmov\tx0, {reg}"));
     system_call(r#gen, Sys::Close);
 }
@@ -365,20 +375,20 @@ fn read_all(r#gen: &mut dyn AssemblyGenerator, flags: i64) {
 }
 
 /// Emits the start of a routine that keeps the path string `x0` in `x19` and saves `x20` through
-/// `x26` for its own use, then fails with [`NULL_IN_PATH_CODE`] if the path holds a null
-/// character. [`routine_end`] emits `<label>_err`, which returns the error for the code in `x0`,
-/// and `<label>_done`, which returns `x0`.
-fn routine_start(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+/// `x26` for its own use, then fails with `null_code`, such as [`NULL_IN_PATH_CODE`], if the path
+/// holds a null character, leaving `x1` as it was. [`routine_end`] emits `<label>_err`, which
+/// returns the error for the code in `x0`, and `<label>_done`, which returns `x0`.
+pub(super) fn routine_start(r#gen: &mut dyn AssemblyGenerator, label: &str, null_code: i64) {
     r#gen.emit(&format!("{label}:"));
     push_frame(r#gen, &SAVED);
     r#gen.emit("\tmov\tx19, x0");
     r#gen.emit("\tbl\t.Lfs_check_path");
-    r#gen.emit(&format!("\tmov\tx0, #{NULL_IN_PATH_CODE}"));
+    r#gen.emit(&format!("\tmov\tx0, #{null_code}"));
     r#gen.emit(&format!("\tcbnz\tx9, {label}_err"));
 }
 
 /// Emits the end of a routine [`routine_start`] began.
-fn routine_end(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+pub(super) fn routine_end(r#gen: &mut dyn AssemblyGenerator, label: &str) {
     r#gen.emit(&format!("{label}_err:"));
     r#gen.emit("\tmov\tx1, x19");
     r#gen.emit("\tbl\t.Lfs_err");
@@ -396,7 +406,7 @@ fn fail_with_errno(r#gen: &mut dyn AssemblyGenerator, label: &str) {
 fn read(r#gen: &mut dyn AssemblyGenerator) {
     let label = "stone.fs_read";
     // x20 holds the buffer and x21 its length, then x22 the string
-    routine_start(r#gen, label);
+    routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\tx0, x19");
     r#gen.emit("\tbl\t.Lfs_read_all");
     r#gen.emit(&format!("\ttbz\tx0, #63, {label}_read"));
@@ -426,7 +436,7 @@ fn read_lines(r#gen: &mut dyn AssemblyGenerator) {
     let label = "stone.fs_read_lines";
     // x20 holds the buffer, x21 its end, x22 the list, x23 where the line starts, and x24 where
     // the next one does
-    routine_start(r#gen, label);
+    routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\tx0, x19");
     r#gen.emit("\tbl\t.Lfs_read_all");
     r#gen.emit(&format!("\ttbz\tx0, #63, {label}_read"));
@@ -507,7 +517,7 @@ fn write(r#gen: &mut dyn AssemblyGenerator, flags: OpenFlags, write: bool, appen
     r#gen.emit(&format!("{label}:"));
     r#gen.emit("\tmov\tx13, x1");
     let path = format!("{label}_path");
-    routine_start(r#gen, &path);
+    routine_start(r#gen, &path, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\tx20, x13");
     r#gen.emit("\tmov\tx0, x19");
     r#gen.emit("\tmov\tx1, x12");
@@ -551,7 +561,7 @@ fn list_dir(r#gen: &mut dyn AssemblyGenerator, flags: i64) {
     let linux = r#gen.target().os == Os::Linux;
     // x20 holds the descriptor (or the macOS DIR), x21 the buffer, x22 the list, x23 the bytes of
     // entries read, x24 where the next entry starts, and x25 the name
-    routine_start(r#gen, label);
+    routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\tx0, x19");
     if linux {
         load(r#gen, "x1", flags);
@@ -673,7 +683,7 @@ fn dot_check(r#gen: &mut dyn AssemblyGenerator, skip: &str) {
 /// directory, with `third` as its third argument, and returns `ok` of the path or `err` of the
 /// call's error.
 fn path_call(r#gen: &mut dyn AssemblyGenerator, label: &str, call: Sys, third: i64) {
-    routine_start(r#gen, label);
+    routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\tx1, x19");
     r#gen.emit(&format!("\tmov\tx0, #{AT_FDCWD}"));
     r#gen.emit(&format!("\tmov\tx2, #{third}"));

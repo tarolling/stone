@@ -7,8 +7,10 @@
 //! behind the same libc functions from `stone.os_*` routines, reading what they read, so both
 //! backends agree.
 
-use super::BuiltinDoc;
+use super::{BuiltinDoc, fs};
 use std::ffi::{c_char, c_int, c_long};
+use std::os::unix::process::{CommandExt, ExitStatusExt};
+use std::process::{Child, Command, Stdio};
 
 /// The name a program imports the module by, as in `use os`.
 pub const MODULE: &str = "os";
@@ -17,7 +19,7 @@ pub const MODULE: &str = "os";
 pub const MODULE_DOC: &str = "The builtin module that tells a program about the machine and \
                               process it runs on.";
 
-pub static DOCS: [BuiltinDoc; 9] = [
+pub static DOCS: [BuiltinDoc; 10] = [
     BuiltinDoc {
         name: "os.env",
         signature: "os.env(name: str) -> option[str]",
@@ -68,6 +70,17 @@ pub static DOCS: [BuiltinDoc; 9] = [
         signature: "os.exit(code: int)",
         description: "Stops the program at once with the exit status `code`, of which the \
                       system keeps the low 8 bits, so `os.exit(256)` exits with 0.",
+    },
+    BuiltinDoc {
+        name: "os.run",
+        signature: "os.run(cmd: str, args: list[str]) -> result[output, str]",
+        description: "Runs the program `cmd` with the arguments `args` and waits for it to \
+                      finish, returning `ok` of an `output` holding its exit status (or minus \
+                      the number of the signal that stopped it), and the text it wrote to \
+                      stdout and to stderr. A `cmd` without `/` is looked for in each \
+                      directory of `PATH`. The program reads nothing from stdin. Only a \
+                      program that cannot start is an `err`, of a message such as `no such \
+                      file or directory: 'gti'`, and so is output that is not UTF-8 text.",
     },
 ];
 
@@ -152,6 +165,112 @@ pub fn cwd() -> Result<String, String> {
         .map_err(|_| CWD_FAILURE.to_string())
 }
 
+/// The reason `os.run` gives for a command or argument holding a null character, which no
+/// program can be given.
+pub const NULL_IN_COMMAND: &str = "command holds a null character";
+
+/// The reason `os.run` gives under `cargo fuzz`, where it runs nothing, so mutated programs
+/// cannot start other programs.
+pub const RUN_DISABLED: &str = "running programs is disabled while fuzzing";
+
+/// The directories a command is looked for in when `PATH` is not set, as glibc's `execvp`
+/// looks.
+pub const DEFAULT_PATH: &str = "/bin:/usr/bin";
+
+/// The error numbers `os.run` treats specially while it looks for a program.
+const ENOENT: i32 = 2;
+const EACCES: i32 = 13;
+const ENOTDIR: i32 = 20;
+
+/// Returns the paths `os.run` tries, in order, for the command `cmd` when `PATH` is `path`.
+///
+/// A command holding `/` is itself the only path, an empty one has none, and any other is
+/// joined to each directory of `path` (or [`DEFAULT_PATH`]), an empty directory being the
+/// working directory. For example, `candidates("ls", Some("/usr/bin::/bin"))` is
+/// `["/usr/bin/ls", "./ls", "/bin/ls"]`, and `candidates("./ls", None)` is `["./ls"]`.
+pub fn candidates(cmd: &str, path: Option<&str>) -> Vec<String> {
+    if cmd.contains('/') {
+        return vec![cmd.to_string()];
+    }
+    if cmd.is_empty() {
+        return vec![];
+    }
+    path.unwrap_or(DEFAULT_PATH)
+        .split(':')
+        .map(|dir| match dir {
+            "" => format!("./{cmd}"),
+            _ => format!("{dir}/{cmd}"),
+        })
+        .collect()
+}
+
+/// Runs the program `cmd` with the arguments `args`, its stdin empty and its stdout and stderr
+/// captured, and returns its status and what it wrote, or the message of why it could not run.
+///
+/// It tries each of [`candidates`] in turn, as `execvp` does: a path that names nothing (or
+/// goes through a file) moves on to the next, and so does one that may not be run, though
+/// that error is remembered, while any other error stops. The error is then `permission
+/// denied` if any path gave it, else the last path's. The status is the exit status, or minus
+/// the number of the signal that stopped the program, and output that is not UTF-8 text, or
+/// holds a null byte, is an error.
+///
+/// For example, `run("sh", &["-c".into(), "echo hi; exit 2".into()])` returns
+/// `Ok((2, "hi\n", ""))`, and `run("gti", &[])` returns
+/// `Err("no such file or directory: 'gti'")`.
+pub fn run(cmd: &str, args: &[String]) -> Result<(i64, String, String), String> {
+    if cmd.contains('\0') || args.iter().any(|arg| arg.contains('\0')) {
+        return Err(fs::message(NULL_IN_COMMAND, cmd));
+    }
+    if cfg!(fuzzing) {
+        return Err(fs::message(RUN_DISABLED, cmd));
+    }
+    let path = std::env::var_os("PATH").map(|path| path.to_string_lossy().into_owned());
+    let mut denied = false;
+    let mut last = ENOENT;
+    for candidate in candidates(cmd, path.as_deref()) {
+        let spawned = Command::new(&candidate)
+            .arg0(cmd)
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn();
+        let error = match spawned {
+            Ok(child) => return finish(cmd, child),
+            Err(error) => error,
+        };
+        match error.raw_os_error() {
+            Some(errno @ (ENOENT | ENOTDIR)) => last = errno,
+            Some(EACCES) => {
+                denied = true;
+                last = EACCES;
+            }
+            Some(_) | None => return Err(fs::io_message(&error, cmd)),
+        }
+    }
+    let errno = if denied { EACCES } else { last };
+    Err(fs::io_message(
+        &std::io::Error::from_raw_os_error(errno),
+        cmd,
+    ))
+}
+
+/// Waits for the program `child` that `cmd` started and returns its status and output.
+fn finish(cmd: &str, child: Child) -> Result<(i64, String, String), String> {
+    let output = child
+        .wait_with_output()
+        .map_err(|error| fs::io_message(&error, cmd))?;
+    let status = match output.status.code() {
+        Some(code) => code as i64,
+        None => -(output.status.signal().unwrap_or(0) as i64),
+    };
+    let text = |bytes: Vec<u8>| match fs::is_text(&bytes) {
+        true => Ok(String::from_utf8(bytes).unwrap_or_default()),
+        false => Err(fs::message(fs::INVALID_TEXT, cmd)),
+    };
+    Ok((status, text(output.stdout)?, text(output.stderr)?))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -172,6 +291,75 @@ mod tests {
         assert!(!has_env("=PATH"));
         // getenv stops at the null character
         assert_eq!(env("PATH\0junk"), env("PATH"));
+    }
+
+    #[test]
+    fn commands_are_looked_for_in_each_directory_of_path() {
+        assert_eq!(candidates("./tool", Some("/bin")), ["./tool"]);
+        assert_eq!(candidates("a/b", None), ["a/b"]);
+        assert_eq!(candidates("", Some("/bin")), Vec::<String>::new());
+        assert_eq!(
+            candidates("ls", Some("/usr/bin::/bin/")),
+            ["/usr/bin/ls", "./ls", "/bin//ls"]
+        );
+        assert_eq!(candidates("ls", Some("")), ["./ls"]);
+        assert_eq!(candidates("ls", None), ["/bin/ls", "/usr/bin/ls"]);
+    }
+
+    #[test]
+    fn run_captures_status_and_output() {
+        let script = "echo out; echo err >&2; exit 3";
+        let ran = run("sh", &["-c".into(), script.into()]).unwrap();
+        assert_eq!(ran, (3, "out\n".to_string(), "err\n".to_string()));
+        // the program's name comes first, and stdin holds nothing
+        let ran = run(
+            "sh",
+            &[
+                "-c".into(),
+                "echo $0 $1; cat".into(),
+                "x".into(),
+                "y".into(),
+            ],
+        );
+        assert_eq!(ran.unwrap(), (0, "x y\n".to_string(), String::new()));
+        let killed = run("sh", &["-c".into(), "kill -9 $$".into()]).unwrap();
+        assert_eq!(killed.0, -9);
+    }
+
+    #[test]
+    fn run_fails_when_the_program_cannot_start() {
+        assert_eq!(
+            run("stone-surely-missing-command", &[]),
+            Err("no such file or directory: 'stone-surely-missing-command'".to_string())
+        );
+        assert_eq!(
+            run("./stone/surely/missing", &[]),
+            Err("no such file or directory: './stone/surely/missing'".to_string())
+        );
+        assert_eq!(
+            run("", &[]),
+            Err("no such file or directory: ''".to_string())
+        );
+        assert_eq!(
+            run("sh", &["a\0b".into()]),
+            Err(format!("{NULL_IN_COMMAND}: 'sh'"))
+        );
+        assert_eq!(
+            run("sh", &["-c".into(), "printf '\\377'".into()]),
+            Err(format!("{}: 'sh'", fs::INVALID_TEXT))
+        );
+    }
+
+    #[test]
+    fn run_cannot_start_a_file_that_is_not_executable() {
+        let dir = std::env::temp_dir().join(format!("stone-os-run-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let file = dir.join("data.txt");
+        std::fs::write(&file, "text").unwrap();
+        for path in [file.to_str().unwrap(), dir.to_str().unwrap()] {
+            assert_eq!(run(path, &[]), Err(format!("permission denied: '{path}'")));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

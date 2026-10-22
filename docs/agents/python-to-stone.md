@@ -178,6 +178,10 @@ The error is the message `int(s)` would stop with, such as
 | `except FileNotFoundError:` | `match` the result: `err(message)` holds a message such as `no such file or directory: 'x'` |
 | `sys.argv[1:]` | `args()` (without the program's name) |
 | `sys.exit(n)` | `os.exit(n)` |
+| `subprocess.run([cmd, *args], capture_output=True, text=True)` | `os.run(cmd, args)`, after `use os`: `ok(out)` with `out.status`, `out.stdout`, `out.stderr`, even for a nonzero status; `err(message)` only if the program cannot start |
+| `check=True`, `CalledProcessError` | test `out.status != 0` and return an `err` yourself |
+| `subprocess.run("a \| b", shell=True)` | `os.run("sh", ["-c", "a \| b"])` |
+| `input=` to a subprocess | not available: the program's stdin is empty |
 | `os.environ.get("X", "d")` | `os.env("X").unwrap_or("d")`, after `use os` |
 | `random.randint`, `time.time()` | `random.randint`, `time.now()`, after `use random` and `use time` |
 

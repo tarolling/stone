@@ -52,11 +52,28 @@ pub enum Sys {
     /// macOS calls.
     Readdir,
     Closedir,
+    /// Makes a pipe, writing its two descriptors where `x0` points: `pipe2` with the flags `x1`
+    /// on Linux, and `pipe` on macOS, which ignores them.
+    Pipe2,
+    /// Starts a child process: `clone` on Linux, which takes `fork`'s flags in `x0` (`SIGCHLD`)
+    /// and zeros in `x1` through `x4`, and `fork` on macOS, which takes nothing.
+    Clone,
+    /// Moves the descriptor `x0` to `x1`: `dup3` on Linux, with the flags `x2`, and `dup2` on
+    /// macOS, which ignores them.
+    Dup3,
+    Execve,
+    /// Waits for the descriptors `x0` points to: `ppoll` on Linux, whose timeout `x2` and signal
+    /// mask `x3` are pointers, and `poll` on macOS, whose timeout `x2` is milliseconds, -1
+    /// for none.
+    Ppoll,
+    Wait4,
+    /// Changes a descriptor's flags, which only macOS calls, since Linux's `pipe2` takes them.
+    Fcntl,
 }
 
 impl Sys {
     /// Every call, in the order their shims are emitted.
-    pub const ALL: [Sys; 22] = [
+    pub const ALL: [Sys; 29] = [
         Sys::Read,
         Sys::Write,
         Sys::Openat,
@@ -79,6 +96,13 @@ impl Sys {
         Sys::Opendir,
         Sys::Readdir,
         Sys::Closedir,
+        Sys::Pipe2,
+        Sys::Clone,
+        Sys::Dup3,
+        Sys::Execve,
+        Sys::Ppoll,
+        Sys::Wait4,
+        Sys::Fcntl,
     ];
 
     /// Returns the call's Linux system call number, such as 64 for `write`, or `None` if the
@@ -103,7 +127,15 @@ impl Sys {
             Sys::Unlinkat => 35,
             Sys::Mkdirat => 34,
             Sys::Faccessat => 48,
-            Sys::Sysctl | Sys::Opendir | Sys::Readdir | Sys::Closedir => return None,
+            Sys::Pipe2 => 59,
+            Sys::Clone => 220,
+            Sys::Dup3 => 24,
+            Sys::Execve => 221,
+            Sys::Ppoll => 73,
+            Sys::Wait4 => 260,
+            Sys::Sysctl | Sys::Opendir | Sys::Readdir | Sys::Closedir | Sys::Fcntl => {
+                return None;
+            }
         })
     }
 
@@ -130,6 +162,13 @@ impl Sys {
             Sys::Opendir => "opendir",
             Sys::Readdir => "readdir",
             Sys::Closedir => "closedir",
+            Sys::Pipe2 => "pipe",
+            Sys::Clone => "fork",
+            Sys::Dup3 => "dup2",
+            Sys::Execve => "execve",
+            Sys::Ppoll => "poll",
+            Sys::Wait4 => "wait4",
+            Sys::Fcntl => "fcntl",
             Sys::Mremap | Sys::Uname | Sys::Getdents64 => return None,
         })
     }
@@ -179,9 +218,9 @@ const SHIM_SAVED: [&str; 17] = [
 /// and `opendir`, with the number in `errno`, which `__error` points to.
 ///
 /// The calls named for Linux's `*at` system calls take a directory in `x0`, which the shim drops,
-/// since every path the runtime passes is relative to the working directory. `open` is variadic,
-/// and Apple's arm64 calling convention passes variadic arguments on the stack, so its shim
-/// stores the mode there. `readdir` returns null both at the end and on an error, so its shim
+/// since every path the runtime passes is relative to the working directory. `open` and `fcntl`
+/// are variadic, and Apple's arm64 calling convention passes variadic arguments on the stack, so
+/// their shims store the last argument there. `readdir` returns null both at the end and on an error, so its shim
 /// clears `errno` first and returns 0 at the end.
 pub fn system_shims(r#gen: &mut dyn AssemblyGenerator, assembly: &str) {
     for call in Sys::ALL {
@@ -201,9 +240,9 @@ pub fn system_shims(r#gen: &mut dyn AssemblyGenerator, assembly: &str) {
             r#gen.emit("\tmov\tx2, x3");
         }
         match call {
-            Sys::Openat => {
+            Sys::Openat | Sys::Fcntl => {
                 r#gen.emit("\tstr\tx2, [sp, #-16]!");
-                r#gen.emit("\tbl\topen");
+                r#gen.emit(&format!("\tbl\t{name}"));
                 r#gen.emit("\tadd\tsp, sp, #16");
             }
             Sys::Readdir => {

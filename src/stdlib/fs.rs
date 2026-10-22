@@ -77,10 +77,12 @@ pub static DOCS: [BuiltinDoc; 8] = [
 
 /// The reason an error gives for each error number that Linux and macOS share, as
 /// `strerror` words it, in lowercase.
-pub const COMMON_ERRORS: [(i64, &str); 17] = [
+pub const COMMON_ERRORS: [(i64, &str); 19] = [
     (1, "operation not permitted"),
     (2, "no such file or directory"),
     (5, "input/output error"),
+    (7, "argument list too long"),
+    (8, "exec format error"),
     (9, "bad file descriptor"),
     (12, "cannot allocate memory"),
     (13, "permission denied"),
@@ -98,7 +100,8 @@ pub const COMMON_ERRORS: [(i64, &str); 17] = [
 ];
 
 /// The reasons for error numbers that only Linux uses.
-pub const LINUX_ERRORS: [(i64, &str); 4] = [
+pub const LINUX_ERRORS: [(i64, &str); 5] = [
+    (11, "resource temporarily unavailable"),
     (36, "file name too long"),
     (39, "directory not empty"),
     (40, "too many levels of symbolic links"),
@@ -106,7 +109,8 @@ pub const LINUX_ERRORS: [(i64, &str); 4] = [
 ];
 
 /// The reasons for the same errors under macOS's numbers.
-pub const MACOS_ERRORS: [(i64, &str); 4] = [
+pub const MACOS_ERRORS: [(i64, &str); 5] = [
+    (35, "resource temporarily unavailable"),
     (62, "too many levels of symbolic links"),
     (63, "file name too long"),
     (66, "directory not empty"),
@@ -158,7 +162,7 @@ pub fn error_message(os: Os, errno: i64, path: &str) -> String {
 }
 
 /// Returns the message for an I/O error about `path`.
-fn io_message(error: &std::io::Error, path: &str) -> String {
+pub(super) fn io_message(error: &std::io::Error, path: &str) -> String {
     match error.raw_os_error() {
         Some(errno) => error_message(host(), errno as i64, path),
         None if error.kind() == ErrorKind::InvalidData => message(INVALID_TEXT, path),
@@ -296,6 +300,11 @@ mod tests {
         assert_eq!(error_message(Os::MacOs, 63, "x"), "file name too long: 'x'");
         assert_eq!(error_message(Os::MacOs, 36, "x"), "os error 36: 'x'");
         assert_eq!(error_message(Os::Linux, 999, "x"), "os error 999: 'x'");
+        assert_eq!(error_message(Os::Linux, 8, "x"), "exec format error: 'x'");
+        assert_eq!(
+            error_message(Os::MacOs, 35, "x"),
+            "resource temporarily unavailable: 'x'"
+        );
     }
 
     #[test]

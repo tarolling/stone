@@ -5,7 +5,8 @@
 // Builtins such as `find`, `pop`, `get`, and `os.env` make options by tag, so `none` stays the
 // first variant and `some` the second, `cmp` on builtin types makes orderings by tag, so `less`,
 // `equal`, and `greater` stay in that order, and `parse_int` and `parse_float` make results by
-// tag, so `ok` stays before `err`.
+// tag, so `ok` stays before `err`. `os.run` fills an `output` by field order, so `status`,
+// `stdout`, and `stderr` stay in that order.
 
 // A value that may be missing: `some(x)` holds one, and `none` holds nothing.
 pub enum option[T]:
@@ -23,6 +24,13 @@ pub enum ordering:
 pub enum result[T, E]:
     ok(T)
     err(E)
+
+// What a command `os.run` ran did: the status it exited with (or minus the number of the signal
+// that stopped it), and the text it wrote to stdout and to stderr.
+pub struct output:
+    status: int
+    stdout: str
+    stderr: str
 
 // Values that `==` and `!=` compare. Every type `==` compares part by part implements it, and a
 // struct may define what `==` means for it instead, as in `impl eq for Point:`.

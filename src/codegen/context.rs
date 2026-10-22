@@ -80,6 +80,7 @@ const STRING_ROUTINES: &[&str] = &[
     "stone.fs_exists",
     "stone.fs_remove",
     "stone.fs_make_dir",
+    "stone.os_run",
 ];
 
 /// The runtime routine behind each function of a builtin module that calls the runtime, by its
@@ -87,7 +88,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 22] = [
+pub const MODULE_ROUTINES: [(&str, &str); 23] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -97,6 +98,7 @@ pub const MODULE_ROUTINES: [(&str, &str); 22] = [
     ("os.pid", "stone.os_pid"),
     ("os.cwd", "stone.os_cwd"),
     ("os.exit", "stone.os_exit"),
+    ("os.run", "stone.os_run"),
     ("random.seed", "stone.random_seed"),
     ("random.random", "stone.random_float"),
     ("time.now", "stone.time_now"),
@@ -122,6 +124,7 @@ const FS_FAILING: &[&str] = &[
     "stone.fs_list_dir",
     "stone.fs_remove",
     "stone.fs_make_dir",
+    "stone.os_run",
 ];
 
 /// Returns the runtime routine behind the function of a builtin module with the linked name
@@ -252,6 +255,18 @@ pub const INVALID_TEXT_CODE: i64 = -1;
 
 /// The code for a path holding a null character (`stdlib::fs::NULL_IN_PATH`).
 pub const NULL_IN_PATH_CODE: i64 = -2;
+
+/// The code for a command or argument of `os.run` holding a null character
+/// (`stdlib::os::NULL_IN_COMMAND`).
+pub const NULL_IN_COMMAND_CODE: i64 = -3;
+
+/// The kinds of the slots of the `ok` that `os.run` returns, an `output`'s status, stdout, and
+/// stderr, as `RcKind::codes` writes them.
+pub const OUTPUT_KINDS: i64 = 0b01_01_00;
+
+/// The bits of a `wait4` status that hold the signal that stopped a child, which are 0 when it
+/// exited, its exit status then in bits 8 through 15, on Linux and macOS alike.
+pub const WAIT_SIGNAL_MASK: i64 = 0x7f;
 
 /// The `open` flags the `fs` routines use, which differ by system.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -632,7 +647,7 @@ impl Context {
     /// through the leak check every program with strings or lists ends with, which looks for
     /// `STONE_LEAK_CHECK`.
     pub fn needs_env(&self) -> bool {
-        self.counts_references || self.uses(&["stone.os_env", "stone.os_has_env"])
+        self.counts_references || self.uses(&["stone.os_env", "stone.os_has_env", "stone.os_run"])
     }
 
     /// Returns the runtime routines of a builtin module that the program calls, by the prefix
@@ -989,6 +1004,15 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::codegen::ir::RcKind;
+
+    #[test]
+    fn output_kinds_are_an_int_then_two_strings() {
+        assert_eq!(
+            OUTPUT_KINDS,
+            RcKind::codes(&[None, Some(RcKind::Str), Some(RcKind::Str)])
+        );
+    }
 
     #[test]
     fn escape_writes_control_bytes_in_octal() {

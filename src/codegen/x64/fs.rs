@@ -8,15 +8,17 @@
 
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{
-    DIR_BUFFER, FILE_BUFFER, INVALID_TEXT_CODE, NULL_IN_PATH_CODE, OpenFlags, immortal_string,
+    DIR_BUFFER, FILE_BUFFER, INVALID_TEXT_CODE, NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags,
+    immortal_string,
 };
 use crate::stdlib::fs::{INVALID_TEXT, NULL_IN_PATH, errors};
+use crate::stdlib::os::NULL_IN_COMMAND;
 
 /// `openat`'s directory for a path relative to the working directory.
 const AT_FDCWD: i64 = -100;
 
 /// The error number of a system call a signal interrupted, which is made again.
-const EINTR: i64 = 4;
+pub(super) const EINTR: i64 = 4;
 
 /// Emits the routines of the `fs` module that `used` lists, each following the function of
 /// `stdlib::fs` with the same name:
@@ -33,7 +35,8 @@ const EINTR: i64 = 4;
 ///
 /// They follow the System V calling convention and need the string, list, and enum runtimes,
 /// `stone.str_int` for an error number with no reason in the tables, and `stone.list_sort_str`
-/// for `stone.fs_list_dir`.
+/// for `stone.fs_list_dir`. `used` may also hold `stone.os_run`, which shares their pieces, so
+/// they are emitted once (see `process::run_runtime`).
 pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     let uses = |label: &str| used.contains(&label);
     let flags = OpenFlags::of(r#gen.target());
@@ -43,6 +46,10 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         errors_and_results(r#gen);
     }
     path_check(r#gen);
+    if uses("stone.os_run") {
+        utf8_check(r#gen);
+        super::process::run_runtime(r#gen);
+    }
     if used.iter().any(|label| {
         matches!(
             *label,
@@ -57,7 +64,9 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
     if uses("stone.fs_read") || uses("stone.fs_read_lines") {
         read_all(r#gen, flags.read);
-        utf8_check(r#gen);
+        if !uses("stone.os_run") {
+            utf8_check(r#gen);
+        }
     }
     if uses("stone.fs_read") {
         read(r#gen);
@@ -74,7 +83,7 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         );
     }
     if uses("stone.fs_list_dir") {
-        if !uses("stone.fs_read") && !uses("stone.fs_read_lines") {
+        if !uses("stone.fs_read") && !uses("stone.fs_read_lines") && !uses("stone.os_run") {
             utf8_check(r#gen);
         }
         list_dir(r#gen, flags.directory);
@@ -120,6 +129,7 @@ fn errors_and_results(r#gen: &mut dyn AssemblyGenerator) {
         .chain([
             (INVALID_TEXT_CODE, INVALID_TEXT),
             (NULL_IN_PATH_CODE, NULL_IN_PATH),
+            (NULL_IN_COMMAND_CODE, NULL_IN_COMMAND),
         ])
         .collect();
     r#gen.emit("\t.data");
@@ -377,17 +387,17 @@ fn read_all(r#gen: &mut dyn AssemblyGenerator, flags: i64) {
 
 /// Emits a `close` of the descriptor in `reg`, whose result is ignored, as Rust ignores it when
 /// a file is dropped.
-fn close(r#gen: &mut dyn AssemblyGenerator, reg: &str) {
+pub(super) fn close(r#gen: &mut dyn AssemblyGenerator, reg: &str) {
     r#gen.emit(&format!("\tmov\trdi, {reg}"));
     r#gen.emit("\tmov\teax, 3"); // sys_close
     r#gen.emit("\tsyscall");
 }
 
 /// Emits the start of a routine that keeps the path string `rdi` in `rbx` and saves `r12` through
-/// `r15` for its own use, then fails with [`NULL_IN_PATH_CODE`] if the path holds a null
-/// character. [`routine_end`] emits the matching end, `<label>_done`, and `<label>_err`, which
-/// returns the error for the code in `rdi`.
-fn routine_start(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+/// `r15` for its own use, then fails with `null_code`, such as [`NULL_IN_PATH_CODE`], if the
+/// path holds a null character. [`routine_end`] emits the matching end, `<label>_done`, and
+/// `<label>_err`, which returns the error for the code in `rdi`.
+pub(super) fn routine_start(r#gen: &mut dyn AssemblyGenerator, label: &str, null_code: i64) {
     r#gen.emit(&format!("{label}:"));
     r#gen.emit("\tpush\trbp");
     r#gen.emit("\tmov\trbp, rsp");
@@ -397,14 +407,14 @@ fn routine_start(r#gen: &mut dyn AssemblyGenerator, label: &str) {
     r#gen.emit("\tsub\trsp, 8");
     r#gen.emit("\tmov\trbx, rdi");
     r#gen.emit("\tcall\t.Lfs_check_path");
-    r#gen.emit(&format!("\tmov\trdi, {NULL_IN_PATH_CODE}"));
+    r#gen.emit(&format!("\tmov\trdi, {null_code}"));
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjnz\t{label}_err"));
 }
 
 /// Emits the end of a routine [`routine_start`] began: `<label>_err`, which makes an `err` for the
 /// error code in `rdi` about the path, and `<label>_done`, which returns `rax`.
-fn routine_end(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+pub(super) fn routine_end(r#gen: &mut dyn AssemblyGenerator, label: &str) {
     r#gen.emit(&format!("{label}_err:"));
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit("\tcall\t.Lfs_err");
@@ -429,7 +439,7 @@ fn fail_with_errno(r#gen: &mut dyn AssemblyGenerator, label: &str) {
 fn read(r#gen: &mut dyn AssemblyGenerator) {
     let label = "stone.fs_read";
     // r12 holds the buffer and r13 its length, then r14 the string
-    routine_start(r#gen, label);
+    routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\trdi, rbx");
     r#gen.emit("\tcall\t.Lfs_read_all");
     r#gen.emit("\ttest\trax, rax");
@@ -468,7 +478,7 @@ fn read_lines(r#gen: &mut dyn AssemblyGenerator) {
     let label = "stone.fs_read_lines";
     // r12 holds the buffer, r13 its end, r14 the list, r15 where the line starts, and [rbp - 48]
     // the next line's start, found before the line is copied
-    routine_start(r#gen, label);
+    routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\trdi, rbx");
     r#gen.emit("\tcall\t.Lfs_read_all");
     r#gen.emit("\ttest\trax, rax");
@@ -551,7 +561,7 @@ fn write(r#gen: &mut dyn AssemblyGenerator, flags: OpenFlags, write: bool, appen
     r#gen.emit(&format!("{label}:"));
     r#gen.emit("\tmov\tr8, rdx");
     r#gen.emit("\tmov\tr9, rsi");
-    routine_start(r#gen, &format!("{label}_path"));
+    routine_start(r#gen, &format!("{label}_path"), NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\tr12, r9");
     r#gen.emit("\tmov\trdi, rbx");
     r#gen.emit("\tmov\trsi, r8");
@@ -597,7 +607,7 @@ fn list_dir(r#gen: &mut dyn AssemblyGenerator, flags: i64) {
     let label = "stone.fs_list_dir";
     // r12 holds the descriptor, r13 the buffer, r14 the list, r15 the bytes of entries read, and
     // [rbp - 48] where the next entry starts
-    routine_start(r#gen, label);
+    routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit(&format!("\tmov\trsi, {flags}"));
     r#gen.emit("\txor\tedx, edx");
     r#gen.emit("\tmov\trdi, rbx");
@@ -695,7 +705,7 @@ fn dot_check(r#gen: &mut dyn AssemblyGenerator, skip: &str) {
 /// to the working directory, with `extra` setting its third argument, and returns `ok` of the
 /// path or `err` of the call's error.
 fn path_call(r#gen: &mut dyn AssemblyGenerator, label: &str, number: i64, extra: &str) {
-    routine_start(r#gen, label);
+    routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit(&format!("\tmov\trdi, {AT_FDCWD}"));
     r#gen.emit(extra);

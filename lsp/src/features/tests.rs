@@ -1126,6 +1126,16 @@ fn completion_after_a_struct_value_offers_its_fields() {
     );
 }
 
+#[test]
+fn completion_offers_the_fields_of_what_os_run_returns() {
+    let doc = doc("use os\nout = os.run(\"ls\", []).unwrap()\nq = out.\n");
+    let labels: Vec<String> = completion(&doc, at(3, 9), &MapSources::default())
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert_eq!(labels, ["status", "stdout", "stderr"]);
+}
+
 const METHODS_SOURCE: &str = "\
 struct Point:
     x: float

@@ -14,7 +14,7 @@ use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
 use crate::span::Span;
 use crate::stdlib::random::Rng;
-use crate::stdlib::{self, MAX_CALL_DEPTH, fs, math, os, time};
+use crate::stdlib::{self, MAX_CALL_DEPTH, OUTPUT, fs, math, os, time};
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
@@ -2480,6 +2480,25 @@ impl<'out> Interpreter<'out> {
                     _ => fs::make_dir(path),
                 };
                 return Ok(result(done.map(|path| Value::Str(path.into()))));
+            }
+            ("os.run", [Value::Str(cmd), Value::List(args)]) => {
+                let args: Vec<String> = args
+                    .iter()
+                    .map(|arg| match arg {
+                        Value::Str(arg) => arg.to_string(),
+                        other => other.display(false),
+                    })
+                    .collect();
+                let ran = os::run(cmd, &args).map(|(status, stdout, stderr)| {
+                    let def = self.structs[OUTPUT].clone();
+                    let fields = vec![
+                        Value::Int(status),
+                        Value::Str(stdout.into()),
+                        Value::Str(stderr.into()),
+                    ];
+                    Value::Struct(Rc::new(StructValue { def, fields }))
+                });
+                return Ok(result(ran));
             }
             ("os.exit", [Value::Int(code)]) => {
                 self.out.flush()?;

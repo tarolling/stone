@@ -12,6 +12,14 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- `os.run(cmd, args)` runs another program and waits for it, returning a
+  `result[output, str]`: `ok` of an `output`, a new prelude struct holding the program's
+  `status` (minus the signal's number if one stopped it), `stdout`, and `stderr`, or `err` of a
+  message such as `no such file or directory: 'gti'` if it cannot start. A nonzero status is
+  still `ok`. No shell is involved: a `cmd` without `/` is looked for in each directory of
+  `PATH`, the arguments reach the program as written, and its stdin is empty. Output that is
+  not UTF-8 text is an `err`, as for `fs.read`. Values may still be named `output`.
+
 - `in` and `not in`: `k in m` tests whether a map has the key `k`, `x in xs` whether a list has
   an element equal to `x` (compared as `==` compares, from the first, stopping at the first
   match, so a struct with its own `eq` uses it), and `t in s` whether the string `s` has the

@@ -645,6 +645,13 @@ fn fs_functions_call_the_runtime_and_own_their_results() {
 }
 
 #[test]
+fn os_run_calls_the_runtime_and_owns_its_result() {
+    let text = dump_linked("use os\nprint(os.run(\"ls\", [\"-l\"]))\n");
+    assert!(text.contains("call stone.os_run(v0, v"), "{text}");
+    assert!(text.contains("release_enum"), "{text}");
+}
+
+#[test]
 fn os_strings_are_owned_by_whoever_uses_them() {
     // a printed result is a temporary, released after the print
     let text = dump_linked("use os\nprint(os.cwd())\n");

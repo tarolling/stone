@@ -727,6 +727,53 @@ if args().len() == 0:
 print("hello", args()[0])
 ```
 
+### `os.run`
+
+```text
+os.run(cmd: str, args: list[str]) -> result[output, str]
+```
+
+Runs the program `cmd` with the arguments `args`, waits for it to finish, and returns `ok` of an
+`output`, a struct from the prelude with three fields:
+
+- `status: int`, the status the program exited with, or minus the number of the signal that
+  stopped it (`-9` for `kill -9`), as Python's `subprocess` gives it
+- `stdout: str`, everything it wrote to stdout
+- `stderr: str`, everything it wrote to stderr
+
+The program gets the environment and working directory of the one that runs it, and reads
+nothing from stdin, as if it were `/dev/null`. No shell is involved, so each argument reaches the
+program exactly as written, spaces and `*` included; to run a shell command, run
+`os.run("sh", ["-c", "ls *.stn | wc -l"])`.
+
+A `cmd` holding `/` names the program's file, relative to the working directory unless it starts
+with `/`. Any other `cmd` is looked for in each directory of `PATH` in turn, the working directory
+for an empty one, or `/bin` and `/usr/bin` if `PATH` is not set, as a shell looks. A directory
+where the file is missing is skipped, and so is one where it cannot be run, though that error is
+kept in case nothing else runs.
+
+A program that exits with a status other than 0 has still run, so its result is `ok`: check
+`out.status`. Only a program that cannot start is an `err`, of a message naming `cmd`, such as
+`no such file or directory: 'gti'` or `permission denied: './notes.txt'`, and so is a program
+whose stdout or stderr is not UTF-8 text, or holds a null byte (`not valid UTF-8 text: 'cmd'`),
+and a `cmd` or argument holding a null character. A file with no `#!` line is not run through a
+shell, so it gives `exec format error`.
+
+```stone
+use os
+
+out = os.run("git", ["rev-parse", "--short", "HEAD"]).unwrap()
+if out.status == 0:
+    print("at", out.stdout.strip())
+else:
+    print("not a repository:", out.stderr.strip())
+
+// ? passes on an err, as anywhere else
+fn word_count(path: str) -> result[int, str]:
+    out = os.run("wc", ["-w", path])?
+    ret ok(out.stdout.split()[0].parse_int().unwrap_or(0))
+```
+
 ## The `math` module
 
 `math` is a builtin module like [`os`](#the-os-module): `use math` to call `math.sqrt(2)`, or

@@ -93,6 +93,10 @@ pub static BUILTINS: [&str; 8] = [
 /// types.
 pub const PRELUDE: &str = include_str!("prelude.stn");
 
+/// The prelude's struct of what a command run by `os.run` did: its exit status, then what it
+/// wrote to stdout and to stderr.
+pub const OUTPUT: &str = "output";
+
 /// The linked name of the prelude's sort, which `sort` uses for values that are not numbers or
 /// strings.
 pub const PRELUDE_SORT: &str = "prelude.sort";
@@ -1066,6 +1070,7 @@ mod tests {
         let tokens = Lexer::with_file(PRELUDE, FileId::PRELUDE).lex().unwrap();
         let Mod::Module { body } = Parser::new(&tokens).parse().unwrap();
         let mut enums = vec![];
+        let mut structs = vec![];
         let mut traits = vec![];
         let mut functions = vec![];
         for stmt in &body {
@@ -1095,6 +1100,17 @@ mod tests {
                         .collect();
                     traits.push((name.clone(), names));
                 }
+                StmtKind::StructDef {
+                    name,
+                    public,
+                    fields,
+                    ..
+                } => {
+                    assert!(public, "{name}");
+                    // os.run fills an output by field order
+                    let names: Vec<&str> = fields.iter().map(|f| f.name.as_str()).collect();
+                    structs.push((name.as_str(), names));
+                }
                 StmtKind::FunctionDef { name, .. } => functions.push(name.clone()),
                 other => panic!("the prelude should hold no {other:?}"),
             }
@@ -1111,6 +1127,7 @@ mod tests {
                 ("result", 2, vec![("ok", 1), ("err", 1)]),
             ]
         );
+        assert_eq!(structs, [(OUTPUT, vec!["status", "stdout", "stderr"])]);
         assert_eq!(
             traits,
             [

@@ -1968,6 +1968,54 @@ fn fs_errors_pass_on_with_try() {
 }
 
 #[test]
+fn os_run_has_a_type_and_checks_its_arguments() {
+    assert_eq!(
+        linked_type("use os\nx = os.run(\"ls\", [\"-l\"])\n", "x"),
+        "result[output, str]"
+    );
+    assert_eq!(
+        linked_type("use os\nx = os.run(\"ls\", []).unwrap().stdout\n", "x"),
+        "str"
+    );
+    assert_eq!(
+        linked_errors("use os\nos.run(\"ls\")\n"),
+        [(
+            "'os.run' takes 2 arguments, but 1 was given".to_string(),
+            2,
+            1
+        )]
+    );
+    assert_eq!(
+        linked_errors("use os\nos.run(1, [])\n"),
+        [("expected str, found int".to_string(), 2, 8)]
+    );
+    assert_eq!(
+        linked_errors("use os\nos.run(\"ls\", [1])\n"),
+        [("expected list[str], found list[int]".to_string(), 2, 14)]
+    );
+}
+
+#[test]
+fn a_value_may_be_named_like_the_prelude_struct() {
+    let source = "use os\noutput = os.run(\"ls\", []).unwrap()\nprint(output.stdout.len())\n\
+                  fn run(cmd: str) -> result[output, str]:\n    output = os.run(cmd, [])?\n    \
+                  ret ok(output)\nfn status(output: output) -> int:\n    ret output.status\n\
+                  print(status(run(\"ls\").unwrap()))\n";
+    assert_eq!(linked_errors(source), []);
+    assert_eq!(linked_type("output = 1\no = output + 1\n", "o"), "int");
+    // without a variable of that name, the name makes one
+    assert_eq!(
+        linked_type("o = output(status=0, stdout=\"\", stderr=\"\")\n", "o"),
+        "output"
+    );
+    // a function cannot take the name, since a call of it would make the struct
+    assert_eq!(
+        linked_errors("fn output() -> int:\n    ret 1\n"),
+        [("'output' is already defined as a struct".to_string(), 1, 4)]
+    );
+}
+
+#[test]
 fn an_os_function_is_not_a_value() {
     assert_eq!(
         linked_errors("use os.pid\nx = pid\n"),

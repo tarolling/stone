@@ -1,0 +1,22 @@
+3
+out
+
+err
+
+output(status=3, stdout='out\n', stderr='err\n')
+zero one two  spaces
+
+ok(output(status=0, stdout='', stderr=''))
+hello from the parent
+
+1
+-9
+err("no such file or directory: 'stone-surely-missing-command'")
+err("no such file or directory: './nope'")
+err("permission denied: './data.txt'")
+err("no such file or directory: ''")
+err("not valid UTF-8 text: 'sh'")
+188890 188890 20001 out 19999
+ok('a b')
+err('sh exited with 4')
+err("no such file or directory: 'stone-surely-missing-command'")

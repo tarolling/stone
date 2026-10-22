@@ -1,0 +1,45 @@
+// os.run runs a program, captures what it writes, and gives its exit status
+use os
+
+out = os.run("sh", ["-c", "echo out; echo err >&2; exit 3"]).unwrap()
+print(out.status)
+print(out.stdout)
+print(out.stderr)
+print(out)
+
+// the program's name comes first, and arguments pass through untouched
+print(os.run("sh", ["-c", "echo $0 $1 \"$2\"", "zero", "one", "two  spaces"]).unwrap().stdout)
+
+// the program reads nothing from stdin
+print(os.run("cat", []))
+
+// the program gets the environment
+print(os.run("sh", ["-c", "echo $STONE_RUN_GREETING"]).unwrap().stdout)
+
+// a nonzero status is still ok, and a signal gives minus its number
+print(os.run("false", []).unwrap().status)
+print(os.run("sh", ["-c", "kill -9 $$"]).unwrap().status)
+
+// only a program that cannot start is an err
+print(os.run("stone-surely-missing-command", []))
+print(os.run("./nope", []))
+print(os.run("./data.txt", []))
+print(os.run("", []))
+print(os.run("sh", ["-c", "printf '\\377'"]))
+
+// output far past what a pipe holds, on both streams at once
+script = "i=0; while [ $i -lt 20000 ]; do echo out $i; echo err $i >&2; i=$((i + 1)); done"
+big = os.run("sh", ["-c", script]).unwrap()
+lines = big.stdout.split("\n")
+print(big.stdout.len(), big.stderr.len(), lines.len(), lines[19999])
+
+// a value may be named output, and ? passes an err on
+fn first_line(cmd: str, args: list[str]) -> result[str, str]:
+    output = os.run(cmd, args)?
+    if output.status != 0:
+        ret err("{cmd} exited with {output.status}")
+    ret ok(output.stdout.split("\n")[0])
+
+print(first_line("echo", ["a", "b"]))
+print(first_line("sh", ["-c", "exit 4"]))
+print(first_line("stone-surely-missing-command", []))

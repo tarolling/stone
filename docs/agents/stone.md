@@ -375,6 +375,7 @@ assign the result where 'add' is called
 | `open(path).read()`, `.readlines()`, `f.write(s)` | `fs.read(path)`, `fs.read_lines(path)`, `fs.write(path, s)`, each a `result` |
 | `os.listdir`, `os.path.exists`, `os.remove`, `os.mkdir` | `fs.list_dir` (sorted), `fs.exists`, `fs.remove`, `fs.make_dir` |
 | `sys.argv[1:]`, `sys.exit(n)` | `args()`, `os.exit(n)` |
+| `subprocess.run([cmd, *args], capture_output=True, text=True)` | `os.run(cmd, args)`, a `result[output, str]` with `.status`, `.stdout`, `.stderr` |
 
 ## Builtins
 
@@ -394,7 +395,11 @@ Builtin modules, imported with `use math` (or `use math.sqrt`):
 - `random`: `seed`, `random`, `randint(low, high)`, `choice(xs)`
 - `time`: `now`, `clock`, `sleep(seconds)`
 - `os`: `env(name)` (option), `has_env`, `platform`, `arch`, `hostname`, `cpu_count`, `pid`,
-  `cwd`, `exit(code)`
+  `cwd`, `exit(code)`, `run(cmd, args)`, which runs a program (no shell; a `cmd` without `/` is
+  looked up in `PATH`, and stdin is empty) and returns a `result[output, str]`: `ok` of the
+  prelude struct `output` with `status: int` (minus the signal's number if one stopped it),
+  `stdout: str`, and `stderr: str`, even for a nonzero status, or `err` of a message if the
+  program cannot start, such as `no such file or directory: 'gti'`
 - `fs`: `read(path)`, `read_lines(path)`, `write(path, text)`, `append(path, text)`,
   `list_dir(path)` (sorted names), `exists(path)` (bool), `remove(path)`, `make_dir(path)`;
   all but `exists` return a `result` whose error is a message such as
@@ -433,6 +438,23 @@ print(save("numbers.txt", [1, 2, 3]))   // ok(3)
 print(total("numbers.txt"))             // ok(6)
 print(total("missing.txt"))             // err("no such file or directory: 'missing.txt'")
 fs.remove("numbers.txt").unwrap()
+```
+
+Running other programs, where a nonzero status is still `ok`:
+
+```stone
+use os
+
+fn lines_of(cmd: str, args: list[str]) -> result[list[str], str]:
+    out = os.run(cmd, args)?
+    if out.status != 0:
+        ret err("{cmd} failed with status {out.status}: {out.stderr.strip()}")
+    ret ok(out.stdout.strip().split("\n"))
+
+print(lines_of("echo", ["one two"]))                   // ok(['one two'])
+print(lines_of("sh", ["-c", "echo oops >&2; exit 3"]))  // err('sh failed with status 3: oops')
+print(lines_of("no-such-program", []))
+// err("no such file or directory: 'no-such-program'")
 ```
 
 ## Modules

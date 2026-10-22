@@ -382,6 +382,10 @@ A field can hold any type, including other structs. A struct can hold itself onl
 an option, or an enum, as in `kids: list[Tree]` or `next: option[Node]`, since a value that held
 itself directly would never end; `next: Node` is an error that suggests `option[Node]`.
 
+The prelude defines one struct, `output`, which [`os.run`](builtins.md#the-os-module) returns:
+its fields are `status: int`, `stdout: str`, and `stderr: str`. As with the prelude's `result`, a
+variable may still be named `output`, though a function may not.
+
 A struct prints with its name and fields, as in `Point(x=1.0, y=2.0)`, with the strings it holds
 quoted. `==` and `!=` compare two structs field by field, as long as no field holds a list or a
 map. A struct cannot be ordered with `<`, converted with `str`, iterated, or used in arithmetic or

@@ -16,6 +16,7 @@ pub mod builtins;
 mod emit;
 pub mod floats;
 pub mod fs;
+pub mod process;
 pub mod sort;
 
 use crate::ast::Mod;
@@ -375,14 +376,20 @@ impl Arm64Generator {
         if self.ctx.uses(&["stone.args"]) {
             builtins::args_runtime(self);
         }
-        let os = self.ctx.module_routines("stone.os_");
+        // os.run shares the fs routines' pieces, so it comes with them
+        let (run, os): (Vec<&str>, Vec<&str>) = self
+            .ctx
+            .module_routines("stone.os_")
+            .into_iter()
+            .partition(|label| *label == "stone.os_run");
         if !os.is_empty() {
             let cwd_failure = self
                 .ctx
                 .failure_of("stone.os_cwd", crate::stdlib::os::CWD_FAILURE);
             builtins::os_runtime(self, &os, &cwd_failure);
         }
-        let fs = self.ctx.module_routines("stone.fs_");
+        let mut fs = self.ctx.module_routines("stone.fs_");
+        fs.extend(run);
         if !fs.is_empty() {
             fs::fs_runtime(self, &fs);
         }
@@ -817,6 +824,29 @@ mod tests {
         for label in ["stone.fs_list_dir:", "stone.list_sort_str:"] {
             assert!(list.contains(label), "{label} in {list}");
         }
+    }
+
+    #[test]
+    fn os_run_is_only_emitted_when_used_and_shares_the_fs_pieces() {
+        let plain = assemble_linked("use os\nprint(os.pid())\n");
+        assert!(!plain.contains("stone.os_run:"), "{plain}");
+        assert!(!plain.contains(".Lfs_err:"), "{plain}");
+
+        let run = assemble_linked("use os\nprint(os.run(\"ls\", []))\n");
+        for label in [
+            "stone.os_run:",
+            ".Lfs_err:",
+            ".Lfs_utf8:",
+            ".Lfs_check_path:",
+            "stone.getenv:",
+            "stone.str_int:",
+        ] {
+            assert!(run.contains(label), "{label} in {run}");
+        }
+        assert!(!run.contains("stone.fs_read:"), "{run}");
+        // with fs.read too, the shared pieces are emitted once
+        let both = assemble_linked("use os\nuse fs\nprint(os.run(\"ls\", []), fs.read(\"a\"))\n");
+        assert_eq!(both.matches(".Lfs_utf8:").count(), 1, "{both}");
     }
 
     #[test]

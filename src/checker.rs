@@ -28,7 +28,9 @@ use crate::ast::{
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
-use crate::stdlib::{MAX_ELEMENT_VALUES, METHODS, changes_receiver, is_builtin, is_reserved};
+use crate::stdlib::{
+    MAX_ELEMENT_VALUES, METHODS, OUTPUT, changes_receiver, is_builtin, is_reserved,
+};
 
 #[cfg(test)]
 mod tests;
@@ -1701,7 +1703,7 @@ impl Inference {
             if !self.globals.contains_key(&name)
                 && !self.functions.contains_key(&name)
                 && !self.value_enum(&name)
-                && !self.structs.contains_key(&name)
+                && !self.value_struct(&name)
                 && !is_reserved(&name)
             {
                 let ty = self.fresh();
@@ -3684,7 +3686,7 @@ impl Inference {
             // assigning an enum's or struct's name is reported where it happens
             if self.local(&local).is_none()
                 && !self.value_enum(&local)
-                && !self.structs.contains_key(&local)
+                && !self.value_struct(&local)
             {
                 let ty = self.fresh();
                 let symbol = self.add_symbol(&local, SymbolKind::Local, span, ty);
@@ -4320,6 +4322,15 @@ impl Inference {
     /// whose variants are written alone, so that a value may be named `result`.
     fn value_enum(&self, name: &str) -> bool {
         self.enums.contains_key(name) && !prints_bare(name)
+    }
+
+    /// Returns whether `name` is a struct whose name no variable may take: any but the prelude's,
+    /// so that a value may be named `output`. A function still may not take it, since a call of
+    /// the name makes the struct.
+    fn value_struct(&self, name: &str) -> bool {
+        self.structs
+            .get(name)
+            .is_some_and(|info| self.symbols[info.symbol].span.file != FileId::PRELUDE)
     }
 
     /// Returns the name of the enum `value` names, if it is one, as in `Shape` in `Shape.Circle`.
@@ -5881,6 +5892,19 @@ impl Inference {
                     "os.has_env" => Ty::Bool,
                     _ => Ty::Unit,
                 }
+            }
+            "os.run" => {
+                match args {
+                    [cmd, list] => {
+                        self.expect(&Ty::Str, &arg_types[0], cmd.span);
+                        self.expect(&Ty::List(Box::new(Ty::Str)), &arg_types[1], list.span);
+                    }
+                    _ => self.arity_error(call.span, name, "2", args.len()),
+                }
+                Ty::Enum(
+                    RESULT.to_string(),
+                    vec![Ty::Struct(OUTPUT.to_string(), vec![]), Ty::Str],
+                )
             }
             "fs.read" | "fs.read_lines" | "fs.list_dir" | "fs.exists" | "fs.remove"
             | "fs.make_dir" | "fs.write" | "fs.append" => {

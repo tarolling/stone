@@ -258,7 +258,9 @@ interpreter, so each one is a static executable. On arm64 macOS, the same runtim
 each through a shim that keeps the contract of a Linux system call, error numbers included, so
 the rest of the runtime is shared. The one exception is reading a directory, for `fs.list_dir`:
 Linux's `getdents64` has no public counterpart on macOS, so there the runtime calls
-`opendir` and `readdir`, the interface Apple supports. `stone build` writes either executable itself, with its own assembler and linkers,
+`opendir` and `readdir`, the interface Apple supports. Running another program, for `os.run`,
+forks and calls `execve` itself on Linux, searching `PATH` as the interpreter does, and goes
+through the `fork`, `execve`, `pipe`, `poll`, and `wait4` wrappers on macOS. `stone build` writes either executable itself, with its own assembler and linkers,
 including the Mach-O file's imports and its code signature, so it needs no assembler, linker,
 or C compiler installed, and builds for every target from any machine. Windows is not supported
 yet.

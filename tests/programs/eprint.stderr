@@ -1,0 +1,5 @@
+to stderr 1 2.5 true
+
+<1, 2> [<3, 4>] ['a', 'b'] (1, 'c') some(3)
+warning: low disk
+{'a': 1} 1 item

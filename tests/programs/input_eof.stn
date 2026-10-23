@@ -1,4 +1,4 @@
-// with nothing on stdin, eof is true at once and input returns ""
+// with nothing on stdin, eof is true at once and input returns err
 print(eof())
 s = input("prompt> ")
-print("[" + s + "]", s.len())
+print(s, s.is_err())

@@ -84,8 +84,8 @@ pub const MAX_ELEMENT_VALUES: usize = 32;
 /// Names of the builtin functions.
 ///
 /// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3):`.
-pub static BUILTINS: [&str; 8] = [
-    "print", "range", "int", "float", "str", "input", "eof", "args",
+pub static BUILTINS: [&str; 9] = [
+    "print", "eprint", "range", "int", "float", "str", "input", "eof", "args",
 ];
 
 /// The prelude, a stone file linked into every program, which defines `option[T]`, `ordering`,
@@ -176,11 +176,17 @@ pub struct BuiltinDoc {
     pub description: &'static str,
 }
 
-pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
+pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
     BuiltinDoc {
         name: "print",
         signature: "print(values...)",
         description: "Prints the values separated by spaces, followed by a newline.",
+    },
+    BuiltinDoc {
+        name: "eprint",
+        signature: "eprint(values...)",
+        description: "Writes the values as `print` does, but to standard error, so they stay \
+                      out of the output when it is piped into another program.",
     },
     BuiltinDoc {
         name: "range",
@@ -212,10 +218,10 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 8] = [
     },
     BuiltinDoc {
         name: "input",
-        signature: "input() | input(prompt: str) -> str",
+        signature: "input() | input(prompt: str) -> result[str, str]",
         description: "Writes `prompt`, if given, then reads a line from standard input and \
-                      returns it without its newline. It returns `\"\"` at the end of the input, \
-                      so check `eof()` to tell that apart from an empty line.",
+                      returns `ok` of it without its newline, or `err(\"end of input\")` once \
+                      the input is over, so `line = input()?` passes the end on.",
     },
     BuiltinDoc {
         name: "eof",
@@ -335,7 +341,8 @@ pub static METHOD_DOCS: [BuiltinDoc; 31] = [
         signature: "(option[T] | result[T, E]).unwrap() -> T",
         description: "Returns the value an option or an `ok` holds, so `some(3).unwrap()` and \
                       `ok(3).unwrap()` are 3. It stops the program if the option is `none` or \
-                      the result is an `err`.",
+                      the result is an `err`, whose error the message shows, as in \
+                      `cannot unwrap err: bad`.",
     },
     BuiltinDoc {
         name: "unwrap_or",
@@ -357,7 +364,8 @@ pub static METHOD_DOCS: [BuiltinDoc; 31] = [
         name: "unwrap_err",
         signature: "result[T, E].unwrap_err() -> E",
         description: "Returns the error an `err` holds, so `err(\"bad\").unwrap_err()` is \
-                      `\"bad\"`. It stops the program if the result is an `ok`.",
+                      `\"bad\"`. It stops the program if the result is an `ok`, whose value the \
+                      message shows.",
     },
     BuiltinDoc {
         name: "ok",
@@ -598,14 +606,21 @@ pub fn float_pow(base: f64, exp: i64) -> f64 {
     if exp < 0 { 1.0 / result } else { result }
 }
 
-/// The runtime error for a slice whose step is 0, such as `xs[::0]`.
+/// The error `input` returns once the input is over.
+pub const END_OF_INPUT: &str = "end of input";
+
 /// What `unwrap` stops the program with when the option is `none`.
 pub const UNWRAP_NONE: &str = "cannot unwrap none";
 
-/// The error `unwrap` stops the program with on an `err`.
+/// The start of the error `unwrap` stops the program with on an `err`, which goes on with `: `
+/// and the error as `print` writes it.
+///
+/// For example, `"x".parse_int().unwrap()` stops with
+/// `cannot unwrap err: invalid literal for int() with base 10: 'x'`.
 pub const UNWRAP_ERR: &str = "cannot unwrap err";
 
-/// The error `unwrap_err` stops the program with on an `ok`.
+/// The start of the error `unwrap_err` stops the program with on an `ok`, which goes on with `: `
+/// and the value as `print` writes it, such as `cannot unwrap_err ok: 12`.
 pub const UNWRAP_OK: &str = "cannot unwrap_err ok";
 
 /// The most enum values nested inside one another that `print` writes, in both backends, since
@@ -622,6 +637,7 @@ pub const PRINT_DEPTH: &str = "value is nested too deeply to print (more than 10
 /// the program with, since comparing one inside another takes stack too.
 pub const COMPARE_DEPTH: &str = "value is nested too deeply to compare (more than 10000 levels)";
 
+/// The runtime error for a slice whose step is 0, such as `xs[::0]`.
 pub const SLICE_STEP_ZERO: &str = "slice step cannot be zero";
 
 /// The runtime error for an index past either end of a list, as in `[1][1]`, with a `{}` for the

@@ -26,6 +26,23 @@ print("total", 3, 0.5, true, some(1), [1, 2], ["a"])   // total 3 0.5 true some(
 
 `print` returns no value, so a call to it is a statement of its own.
 
+## `eprint`
+
+```text
+eprint(values...)
+```
+
+Writes the values to standard error exactly as `print` writes them to standard output. Use it
+for messages about the run, such as warnings and progress, so they stay out of the output when it
+is piped into another program:
+
+```stone
+eprint("warning: skipping line", 3)   // on stderr: warning: skipping line 3
+```
+
+Each line is written as soon as it is built, so when both streams go to the same place, as with
+`2>&1`, lines appear in the order the program wrote them.
+
 ## `range`
 
 ```text
@@ -96,17 +113,21 @@ print(str([1, 2]) + str(some("a")))                  // [1, 2]some('a')
 ## `input`
 
 ```text
-input() | input(prompt: str) -> str
+input() | input(prompt: str) -> result[str, str]
 ```
 
 Writes `prompt`, if given, with no newline, then reads the next line from standard input and
-returns it without its newline. Only `\n` is removed, so a line ending in `\r\n` keeps its `\r`
-(`strip` removes it). At the end of the input, `input` returns `""`, which looks the same as an
-empty line, so check `eof` to tell them apart.
+returns `ok` of it without its newline. Only `\n` is removed, so a line ending in `\r\n` keeps
+its `\r` (`strip` removes it), and a last line with no newline is still a line. Once the input is
+over, `input` returns `err("end of input")`, so an empty line, `ok("")`, never looks like the
+end. In a function that returns a `result[T, str]`, `?` passes the end on:
 
 ```stone
-name = input("name? ")
-print("hello, " + name)
+fn read_number() -> result[int, str]:
+    line = input("number? ")?
+    ret line.strip().parse_int()
+
+print(read_number())   // ok(42) for the line 42, err('end of input') with no input
 ```
 
 ## `eof`
@@ -115,12 +136,13 @@ print("hello, " + name)
 eof() -> bool
 ```
 
-Returns whether standard input has nothing left to read. If no input has arrived yet, as when
-someone is typing, it waits for some. The usual way to read every line is:
+Returns whether standard input has nothing left to read, so whether `input` would return an
+`err`. If no input has arrived yet, as when someone is typing, it waits for some. The usual way
+to read every line is:
 
 ```stone
 while not eof():
-    line = input()
+    line = input().unwrap()
     print(line.len())
 ```
 
@@ -413,8 +435,9 @@ print(some(1).is_some(), some(1).is_none(), none.is_none())   // true false true
 ```
 
 Returns the value the option or the `ok` holds. It stops the program with `cannot unwrap none` if
-the option is `none`, or `cannot unwrap err` if the result is an `err`, so use it where that
-cannot happen, and `match`, `unwrap_or`, or `?` elsewhere.
+the option is `none`, or, if the result is an `err`, with `cannot unwrap err: ` and the error as
+`print` writes it, such as `cannot unwrap err: invalid literal for int() with base 10: 'x'`. Use
+it where that cannot happen, and `match`, `unwrap_or`, or `?` elsewhere.
 
 ```stone
 print(some("a").unwrap(), ok(2).unwrap())   // a 2
@@ -459,8 +482,8 @@ print(r.is_ok(), r.is_err())   // true false
 result[T, E].unwrap_err() -> E
 ```
 
-Returns the error the `err` holds. It stops the program with `cannot unwrap_err ok` if the result
-is an `ok`.
+Returns the error the `err` holds. It stops the program with `cannot unwrap_err ok: ` and the
+value, as `print` writes it, if the result is an `ok`, such as `cannot unwrap_err ok: 12`.
 
 ```stone
 print("x".parse_float().unwrap_err())   // could not convert string to float: 'x'

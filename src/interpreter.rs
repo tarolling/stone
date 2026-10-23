@@ -933,6 +933,8 @@ pub struct Interpreter<'out> {
     top_call: Option<(Span, Vec<String>)>,
     /// Where `print` writes, which is stdout unless a caller captures it.
     out: Box<dyn Write + 'out>,
+    /// Where `eprint` writes, which is stderr unless a caller captures it.
+    errors: Box<dyn Write + 'out>,
     /// Where `input` and `eof` read, which is empty unless a caller gives one.
     input: Box<dyn BufRead + 'out>,
     /// What `args` returns.
@@ -950,6 +952,16 @@ pub struct Interpreter<'out> {
     /// The `random` module's generator, seeded from the system's entropy on first use unless
     /// `random.seed` seeds it first. It lasts the whole run, or the whole interactive session.
     rng: Option<Rng>,
+}
+
+/// Returns where `eprint` writes by default: stderr, or nowhere under `cargo fuzz`, whose inputs
+/// would otherwise flood it.
+fn default_errors() -> Box<dyn Write> {
+    if cfg!(fuzzing) {
+        Box::new(std::io::sink())
+    } else {
+        Box::new(std::io::stderr())
+    }
 }
 
 impl Default for Interpreter<'static> {
@@ -983,6 +995,7 @@ impl<'out> Interpreter<'out> {
             moves_globals: false,
             top_call: None,
             out: Box::new(out),
+            errors: default_errors(),
             input: Box::new(std::io::empty()),
             args: vec![],
             limits,
@@ -1003,6 +1016,15 @@ impl<'out> Interpreter<'out> {
         self
     }
 
+    /// Makes `eprint` write to `errors` instead of stderr.
+    ///
+    /// For example, `Interpreter::with_output(out, limits).with_errors(&mut buffer)` collects
+    /// what `eprint` writes in a `Vec<u8>` named `buffer`.
+    pub fn with_errors(mut self, errors: impl Write + 'out) -> Self {
+        self.errors = Box::new(errors);
+        self
+    }
+
     /// Calls the functions of `impl` blocks as `methods`, the checker's resolution of each method
     /// call, says, which a program with an `impl` block needs.
     pub fn with_methods(mut self, methods: Methods) -> Self {
@@ -1016,18 +1038,22 @@ impl<'out> Interpreter<'out> {
         self
     }
 
-    /// Reads one line for `input`, without its newline, or `""` at the end of the input.
+    /// Reads one line for `input`, without its newline, or `None` at the end of the input. A
+    /// last line without a newline is still a line.
     ///
-    /// A read error counts as the end of the input, and bytes that are not UTF-8 become U+FFFD.
-    fn read_line(&mut self) -> String {
+    /// A read error counts as the end of the input, after any bytes read before it, as in
+    /// compiled code, and bytes that are not UTF-8 become U+FFFD.
+    fn read_line(&mut self) -> Option<String> {
         let mut line = Vec::new();
-        if self.input.read_until(b'\n', &mut line).is_err() {
-            return String::new();
+        // what was read before an error is still a line
+        let _ = self.input.read_until(b'\n', &mut line);
+        if line.is_empty() {
+            return None;
         }
         if line.last() == Some(&b'\n') {
             line.pop();
         }
-        String::from_utf8_lossy(&line).into_owned()
+        Some(String::from_utf8_lossy(&line).into_owned())
     }
 
     /// Returns whether `input` has nothing left, which is what `eof` returns.
@@ -2153,7 +2179,7 @@ impl<'out> Interpreter<'out> {
             ("is_err", Value::Enum(result), []) => Ok(Value::Bool(result.tag == 1)),
             ("unwrap", Value::Enum(result), []) if is_result(result) => match result.tag {
                 0 => Ok(result.fields[0].clone()),
-                _ => Err(stdlib::UNWRAP_ERR.into()),
+                _ => Err(self.unwrap_failure(stdlib::UNWRAP_ERR, &result.fields[0])?),
             },
             ("unwrap_or", Value::Enum(result), [default]) if is_result(result) => {
                 Ok(match result.tag {
@@ -2163,7 +2189,7 @@ impl<'out> Interpreter<'out> {
             }
             ("unwrap_err", Value::Enum(result), []) => match result.tag {
                 1 => Ok(result.fields[0].clone()),
-                _ => Err(stdlib::UNWRAP_OK.into()),
+                _ => Err(self.unwrap_failure(stdlib::UNWRAP_OK, &result.fields[0])?),
             },
             ("ok", Value::Enum(result), []) => Ok(match result.tag {
                 0 => some(result.fields[0].clone()),
@@ -2184,6 +2210,20 @@ impl<'out> Interpreter<'out> {
             }
             _ => Err(format!("there is no method '{name}'").into()),
         }
+    }
+
+    /// Returns the error a failed `unwrap` or `unwrap_err` stops the program with: `start`, then
+    /// the value the result holds instead, as `print` writes it.
+    ///
+    /// For example, `unwrap` of `err("odd")` fails with `cannot unwrap err: odd`.
+    fn unwrap_failure(
+        &mut self,
+        start: &str,
+        value: &Value,
+    ) -> EvalResult<Box<dyn std::error::Error>> {
+        let mut message = format!("{start}: ");
+        self.write_value(&mut message, value, false)?;
+        Ok(message.into())
     }
 
     /// Returns the `random` module's generator, seeding it from the system's entropy if nothing
@@ -2397,7 +2437,7 @@ impl<'out> Interpreter<'out> {
 
     fn call(&mut self, name: &str, args: Vec<Value>) -> EvalResult<Value> {
         match (name, &args[..]) {
-            ("print", _) => {
+            ("print" | "eprint", _) => {
                 // the whole line, so a print that fails writes nothing
                 let mut line = String::new();
                 for (i, value) in args.iter().enumerate() {
@@ -2406,7 +2446,13 @@ impl<'out> Interpreter<'out> {
                     }
                     self.write_value(&mut line, value, false)?;
                 }
-                writeln!(self.out, "{line}")?;
+                if name == "print" {
+                    writeln!(self.out, "{line}")?;
+                } else {
+                    // what was printed before shows first, as compiled code writes each line at once
+                    self.out.flush()?;
+                    writeln!(self.errors, "{line}")?;
+                }
                 return Ok(Value::Unit);
             }
             ("float", [Value::Int(i)]) => return Ok(Value::Float(*i as f64)),
@@ -2434,7 +2480,10 @@ impl<'out> Interpreter<'out> {
                 }
                 // a prompt, or earlier output a pipe buffered, shows before waiting for input
                 self.out.flush()?;
-                return Ok(Value::Str(self.read_line().into()));
+                let line = self
+                    .read_line()
+                    .ok_or_else(|| stdlib::END_OF_INPUT.to_string());
+                return Ok(result(line.map(|line| Value::Str(line.into()))));
             }
             ("eof", []) => {
                 self.out.flush()?;

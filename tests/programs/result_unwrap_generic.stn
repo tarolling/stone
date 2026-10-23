@@ -1,0 +1,15 @@
+// a failed unwrap in a generic function shows the err as print writes it
+fn must[T, E](r: result[T, E]) -> T:
+    ret r.unwrap()
+
+fn expect_err[T, E](r: result[T, E]) -> E:
+    ret r.unwrap_err()
+
+fn lookup(found: bool) -> result[list[str], tuple[int, str]]:
+    if found:
+        ret ok(["a", "b"])
+    ret err((2, "a 'quoted' word"))
+
+print(must(lookup(true)))
+print(expect_err("x".parse_int()))
+print(must(lookup(false)))

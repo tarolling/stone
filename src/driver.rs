@@ -181,7 +181,7 @@ pub fn interpret_with(
 /// Runs source code with the tree-walking interpreter, reading `input` for `input` and `eof`,
 /// printing to `out`, giving `args` to `args`, and stopping the program once it exceeds `limits`.
 ///
-/// For example, `interpret_with_io("print(input())\n", &mut "hi\n".as_bytes(), &mut buffer, &[],
+/// For example, `interpret_with_io("print(input().unwrap())\n", &mut "hi\n".as_bytes(), &mut buffer, &[],
 /// limits)` appends `hi\n` to `buffer`.
 pub fn interpret_with_io(
     source: &str,
@@ -608,7 +608,7 @@ ret y
     /// Interprets `source` reading `input` as stdin with `args`, returning what it printed or the
     /// error message.
     ///
-    /// For example, `run_io("print(input())\n", "a\n", &[])` returns `Ok("a\n")`.
+    /// For example, `run_io("print(input().unwrap())\n", "a\n", &[])` returns `Ok("a\n")`.
     fn run_io(source: &str, input: &str, args: &[&str]) -> Result<String, String> {
         let mut out = Vec::new();
         let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
@@ -669,10 +669,10 @@ ret y
     #[test]
     fn input_reads_lines_until_eof() {
         let source =
-            "while not eof():\n    print(\"[\" + input() + \"]\")\nprint(input() == \"\")\n";
+            "while not eof():\n    print(\"[\" + input().unwrap() + \"]\")\nprint(input())\n";
         assert_eq!(
             run_io(source, "a\n\nb c\r\nlast", &[]),
-            Ok("[a]\n[]\n[b c\r]\n[last]\ntrue\n".to_string())
+            Ok("[a]\n[]\n[b c\r]\n[last]\nerr('end of input')\n".to_string())
         );
     }
 
@@ -680,15 +680,15 @@ ret y
     fn input_writes_its_prompt_first() {
         assert_eq!(
             run_io("x = input(\"name? \")\nprint(x)\n", "Ada\n", &[]),
-            Ok("name? Ada\n".to_string())
+            Ok("name? ok('Ada')\n".to_string())
         );
     }
 
     #[test]
     fn interpret_with_has_no_input() {
         assert_eq!(
-            run_limited("print(eof(), input() == \"\")\n"),
-            Ok("true true\n".to_string())
+            run_limited("print(eof(), input())\n"),
+            Ok("true err('end of input')\n".to_string())
         );
     }
 

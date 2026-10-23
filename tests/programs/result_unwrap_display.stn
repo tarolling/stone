@@ -1,0 +1,17 @@
+// a failed unwrap shows the err, written as its display method says
+struct Problem:
+    line: int
+    message: str
+
+impl display for Problem:
+    fn display(self) -> str:
+        ret "line {self.line}: {self.message}"
+
+fn check(line: int) -> result[int, Problem]:
+    if line > 2:
+        ret err(Problem(line=line, message="too long"))
+    ret ok(line * 10)
+
+print(check(1).unwrap())
+print(check(3).unwrap())
+print("never printed")

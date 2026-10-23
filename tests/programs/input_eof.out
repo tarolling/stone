@@ -1,2 +1,2 @@
 true
-prompt> [] 0
+prompt> err('end of input') true

@@ -227,7 +227,8 @@ Status: every error from the lexer, parser, linker, and checker prints as
 shows the same errors in the editor. Runtime errors print the same way, pointing at the
 expression that failed, from compiled programs as well as from the interpreter: the compiler
 renders each place an error can happen into the executable, so it costs nothing until the error
-happens. Labels, notes, suggestions, error codes, and the chain of calls behind a runtime error
+happens. A failed `unwrap` of an `err` shows the error it found, as in
+`cannot unwrap err: end of input`. Labels, notes, suggestions, error codes, and the chain of calls behind a runtime error
 are future work.
 
 ## Run anywhere: no libc

@@ -166,10 +166,12 @@ The error is the message `int(s)` would stop with, such as
 | `"{}"` or `"a {b}"` that is not an f-string | `"{{}}"`, `"a {{b}}"`: double the braces |
 | `__str__` | `impl display for T:` with `fn display(self) -> str`, which `print` and `str` use |
 | `print(a, b, sep=", ")`, `end=""` | build one string, then `print` it |
+| `print(msg, file=sys.stderr)`, `sys.stderr.write(msg)` | `eprint(msg)` |
 | `s.lower()`, `s.replace()`, `s.isdigit()` | loops over characters, comparing with `<` and `>` |
 | `s * 3` | a loop of `+=` |
 | `ord(c)`, `chr(n)` | not available; compare characters as strings (`c >= "a" and c <= "z"`) |
-| `sys.stdin`, `for line in sys.stdin` | `while not eof(): line = input()` |
+| `input()`, `except EOFError:` | `input()` is a `result[str, str]`: `input().unwrap()` where a line must be there, or `match` it, whose `err` is the end of the input |
+| `sys.stdin`, `for line in sys.stdin` | `while not eof(): line = input().unwrap()` |
 | `open(path).read()` | `fs.read(path)`, a `result[str, str]`, after `use fs` |
 | `open(path).read().splitlines()`, `f.readlines()` | `fs.read_lines(path)` (lines without endings) |
 | `open(path, "w").write(s)`, mode `"a"` | `fs.write(path, s)`, `fs.append(path, s)` |

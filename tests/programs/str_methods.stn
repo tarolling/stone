@@ -1,5 +1,5 @@
 // strip and split, with tabs and other whitespace read from stdin
-s = input()
+s = input().unwrap()
 print("[" + s.strip() + "]", s.len(), s.strip().len())
 print(s.split(), s.split().len())
 print("[" + "".strip() + "]", "[" + "   ".strip() + "]", "[" + "x".strip() + "]")

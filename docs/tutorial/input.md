@@ -6,16 +6,19 @@ with `args`.
 
 ## Reading lines
 
-`input()` returns the next line of standard input without its newline. `input("prompt ")`
-writes the prompt first, without a newline, for programs someone runs by hand:
+`input()` reads the next line of standard input, without its newline. Since the input may have
+run out, it returns a result, which {doc}`errors` covers: `ok` of the line, or
+`err("end of input")` once nothing is left. `unwrap()` gives the line, and stops the program
+with `cannot unwrap err: end of input` if there was none. `input("prompt ")` writes the prompt
+first, without a newline, for programs someone runs by hand:
 
 ```stone
-name = input("what is your name? ")
+name = input("what is your name? ").unwrap()
 print("hello, " + name)
 ```
 
-Once the input runs out, `input()` returns `""`. An empty line also gives `""`, so to read
-every line, loop until `eof()` says nothing is left:
+An empty line gives `ok("")`, which is not the end. To read every line, loop until `eof()` says
+nothing is left, so each `unwrap()` finds one:
 
 ```{literalinclude} ../examples/input.stn
 :language: stone

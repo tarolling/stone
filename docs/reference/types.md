@@ -598,8 +598,9 @@ pub enum result[T, E]:
 
 `match` reads a result with the patterns `ok(x)` and `err(e)`, and its methods read it too:
 `r.is_ok()` and `r.is_err()` say which it is, `r.unwrap()` returns the value an `ok` holds and
-stops the program with `cannot unwrap err` on an `err`, `r.unwrap_or(default)` returns `default`
-instead, `r.unwrap_err()` returns the error and stops with `cannot unwrap_err ok` on an `ok`, and
+stops the program with `cannot unwrap err: ` and the error on an `err`, `r.unwrap_or(default)`
+returns `default` instead, `r.unwrap_err()` returns the error and stops with
+`cannot unwrap_err ok: ` and the value on an `ok`, and
 `r.ok()` and `r.err()` give `some` of the value or the error, or `none`. `s.parse_int()` and
 `s.parse_float()` return results, whose error is the message `int(s)` or `float(s)` would stop
 the program with. A result prints as `ok(1)` or `err('bad')`, and compares with `==` when what it

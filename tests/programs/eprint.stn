@@ -1,0 +1,20 @@
+struct Point:
+    x: int
+    y: int
+
+impl display for Point:
+    fn display(self) -> str:
+        ret "<{self.x}, {self.y}>"
+
+fn shout(message: str):
+    eprint("warning:", message)
+
+print("start")
+eprint("to stderr", 1, 2.5, true)
+eprint()
+print("middle")
+eprint(Point(x=1, y=2), [Point(x=3, y=4)], ["a", "b"], (1, "c"), some(3))
+shout("low disk")
+names = {"a": 1}
+eprint(names, "{names["a"]} item")
+print("end")

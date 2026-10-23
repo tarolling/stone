@@ -571,7 +571,7 @@ mod tests {
 
     #[test]
     fn input_reads_the_line_after_the_entry() {
-        let (out, _) = session("name = input()\nAda\nprint(\"hi\", name)\n");
+        let (out, _) = session("name = input().unwrap()\nAda\nprint(\"hi\", name)\n");
         assert_eq!(out, "hi Ada\n");
     }
 

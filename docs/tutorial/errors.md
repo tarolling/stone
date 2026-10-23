@@ -81,8 +81,13 @@ right there. A function can only use `?` on a result if it returns a result with
 type, so every error is either handled with `match` or passed on, in plain sight. `?` works on
 options the same way, in a function that returns an option.
 
+`input()` returns a result too, whose `err` says the input is over, so `line = input()?` in a
+function that returns a `result[T, str]` passes the end of the input on like any other error.
+
 A result also has methods: `is_ok()`, `is_err()`, `unwrap()`, `unwrap_or(default)`,
-`unwrap_err()`, and `ok()` and `err()`, which turn it into an option.
+`unwrap_err()`, and `ok()` and `err()`, which turn it into an option. `unwrap()` of an `err`
+stops the program with the error in the message, as in
+`cannot unwrap err: invalid literal for int() with base 10: '4x'`.
 
 That is the whole tutorial. The {doc}`../reference/syntax` and {doc}`../reference/builtins`
 pages cover the details.

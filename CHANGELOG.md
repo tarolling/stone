@@ -10,6 +10,23 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `eprint(values...)` writes its values to standard error exactly as `print` writes them to
+  standard output, so a script's messages stay out of its output when that is piped into another
+  program. Each line is written at once, so with `2>&1` lines appear in the order the program
+  wrote them, under both `stone run` and a built program.
+
+### Changed
+
+- **Breaking:** `input()` returns a `result[str, str]`: `ok` of the line, or
+  `err("end of input")` once the input is over, instead of `""`, which an empty line also gave.
+  Write `input().unwrap()` where a line must be there (after checking `eof()`), `input()?` in a
+  function that returns a `result[T, str]`, or `match` it.
+- A failed `unwrap()` of an `err` shows the error, as in
+  `cannot unwrap err: invalid literal for int() with base 10: 'x'`, written as `print` writes it,
+  and a failed `unwrap_err()` of an `ok` shows the value, as in `cannot unwrap_err ok: 12`.
+
 ## [0.3.3] - 2026-10-21
 
 ### Added

@@ -69,7 +69,8 @@ impl AssemblyGenerator for X64Generator {
         if prints {
             self.emit("\t# Standard Library Functions");
             let strings = self.ctx.needs_strings();
-            print(self, strings);
+            let eprints = self.ctx.uses(&["stone.text_eprint"]);
+            print(self, strings, eprints);
         }
 
         // stone functions first, then main, which the lowering puts last

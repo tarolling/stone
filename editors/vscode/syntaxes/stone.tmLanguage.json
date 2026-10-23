@@ -126,7 +126,7 @@
     },
     "builtin": {
       "name": "support.function.builtin.stone",
-      "match": "\\b(print|len|range|append|some|ok|err)\\b(?=\\s*\\()"
+      "match": "\\b(print|eprint|len|range|append|some|ok|err)\\b(?=\\s*\\()"
     },
     "function-call": {
       "match": "\\b([A-Za-z_][A-Za-z0-9_]*)\\s*(?=\\()",

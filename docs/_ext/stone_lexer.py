@@ -23,7 +23,7 @@ KEYWORDS = (
 )
 CONSTANTS = ("true", "false", "none")
 BUILTINS = (
-    "print", "range", "int", "float", "str", "input", "eof", "args", "some", "less", "equal",
+    "print", "eprint", "range", "int", "float", "str", "input", "eof", "args", "some", "less", "equal",
     "greater", "ok", "err",
 )
 METHODS = (

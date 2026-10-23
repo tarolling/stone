@@ -528,7 +528,7 @@ use time
 use fs
 xs = [1.5, float(\" 2.5 \")]
 xs.append(xs[0] % 0.5)
-words = input(\"> \").strip().split()
+words = input(\"> \").unwrap().strip().split()
 words.append(str(xs[0]) + str(int(\"-7\")) + str(true))
 parts = \"a,b\".split(\",\")
 print(xs, words, parts, eof(), args(), words.len())

@@ -321,7 +321,7 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
             }
             // a struct may be written as its own `display` says
             if let ExprKind::Name { id, .. } = &func.kind
-                && matches!(id.as_str(), "print" | "str")
+                && matches!(id.as_str(), "print" | "eprint" | "str")
             {
                 out.methods.push("display");
             }

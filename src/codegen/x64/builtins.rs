@@ -581,8 +581,8 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
 ///
 /// They write into the text being built (see [`text_runtime`]), which `print` then writes to
 /// stdout in one go and `str` makes a string of, and clobber `rax`, `rcx`, `rdx`, `rsi`, `rdi`,
-/// `r8`, and `r11`.
-pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
+/// `r8`, and `r11`. `stone.text_eprint` is emitted only if the program `eprints`.
+pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool, eprints: bool) {
     r#gen.emit("\t.section\t.rodata");
     r#gen.emit(".Lstone_true:");
     r#gen.emit("\t.string \"true\"");
@@ -659,7 +659,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tret");
 
     print_str_quoted(r#gen);
-    text_runtime(r#gen, strings);
+    text_runtime(r#gen, strings, eprints);
 }
 
 /// Emits the text builder that every `stone.print_*` routine writes into. The text being built
@@ -676,13 +676,15 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
 ///   building the text in `rdi`
 /// - `stone.text_print` writes the text and a newline to stdout, frees it, and goes back to
 ///   building the text in `rdi`
+/// - `stone.text_eprint` does the same, writing to stderr
 /// - `stone.write_out` writes the `rdx` bytes at `rsi` to stdout, however many `write` syscalls
 ///   that takes
 ///
-/// `stone.text_print` preserves the callee-saved registers, and the others clobber `rax`, `rcx`,
-/// `rdx`, `rsi`, `rdi`, and `r11`, as a `write` syscall does. `stone.text_end` is emitted only
-/// if the program has `strings`, since it counts the string it makes in `stone.live`.
-fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
+/// `stone.text_print` and `stone.text_eprint` preserve the callee-saved registers, and the others
+/// clobber `rax`, `rcx`, `rdx`, `rsi`, `rdi`, and `r11`, as a `write` syscall does.
+/// `stone.text_end` is emitted only if the program has `strings`, since it counts the string it
+/// makes in `stone.live`, and `stone.text_eprint` only if the program `eprints`.
+fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool, eprints: bool) {
     r#gen.emit("\t.bss");
     r#gen.emit("\t.p2align\t3");
     r#gen.emit("stone.text:");
@@ -740,38 +742,51 @@ fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
         r#gen.emit("\tret");
     }
 
-    // rbx holds the text to go back to and r12 the one written
+    // rbx holds the text to go back to, r12 the one written, and r13 the file it goes to
+    if eprints {
+        r#gen.emit("stone.text_eprint:");
+        r#gen.emit("\tmov\teax, 2"); // stderr
+        r#gen.emit("\tjmp\t.Ltext_write");
+    }
     r#gen.emit("stone.text_print:");
+    r#gen.emit("\tmov\teax, 1"); // stdout
+    r#gen.emit(".Ltext_write:");
     r#gen.emit("\tpush\trbx");
     r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
     r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr13, rax");
     r#gen.emit("\tmov\tedi, 10"); // '\n'
     r#gen.emit("\tcall\tstone.print_char");
     r#gen.emit("\tmov\tr12, QWORD PTR [rip + stone.text]");
     r#gen.emit("\tlea\trsi, [r12 + 16]");
     r#gen.emit("\tmov\trdx, QWORD PTR [r12]");
-    r#gen.emit("\tcall\tstone.write_out");
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tcall\t.Lwrite_fd");
     r#gen.emit("\tmov\trax, r12");
     r#gen.emit("\tcall\tstone.mem_free");
     r#gen.emit("\tmov\tQWORD PTR [rip + stone.text], rbx");
+    r#gen.emit("\tpop\tr13");
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbx");
     r#gen.emit("\tret");
 
-    // a write may take fewer bytes than asked, or be interrupted before it takes any
+    // a write may take fewer bytes than asked, or be interrupted before it takes any; the
+    // syscall keeps rdi, the file
     r#gen.emit("stone.write_out:");
+    r#gen.emit("\tmov\tedi, 1"); // stdout
+    r#gen.emit(".Lwrite_fd:");
     r#gen.emit("\ttest\trdx, rdx");
     r#gen.emit("\tjz\t.Lwrite_out_done");
     r#gen.emit("\tmov\teax, 1"); // sys_write
-    r#gen.emit("\tmov\tedi, 1"); // stdout
     r#gen.emit("\tsyscall");
     r#gen.emit("\tcmp\trax, -4"); // EINTR
-    r#gen.emit("\tje\tstone.write_out");
+    r#gen.emit("\tje\t.Lwrite_fd");
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit("\tjle\t.Lwrite_out_done");
     r#gen.emit("\tadd\trsi, rax");
     r#gen.emit("\tsub\trdx, rax");
-    r#gen.emit("\tjmp\tstone.write_out");
+    r#gen.emit("\tjmp\t.Lwrite_fd");
     r#gen.emit(".Lwrite_out_done:");
     r#gen.emit("\tret");
 }
@@ -1833,7 +1848,7 @@ pub(super) fn jump_if_space(r#gen: &mut dyn AssemblyGenerator, reg: &str, label:
 /// waits.
 ///
 /// - `stone.input` writes the string in `rdi` to stdout unless it is null, then returns the next line of
-///   stdin as a new string without its newline, or an empty string at the end of the input. A
+///   stdin as a new string without its newline, or 0 at the end of the input. A
 ///   line that the buffer holds whole is copied straight out of it, and a longer one is first
 ///   gathered in a block from `stone.mem_alloc`
 /// - `stone.eof` returns 1 if stdin has nothing left and 0 otherwise, reading more into the
@@ -1886,10 +1901,6 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if !used.contains(&"stone.input") {
         return;
     }
-    r#gen.emit("\t.data");
-    immortal_string(r#gen, ".Lstone_empty", "");
-    r#gen.emit("\t.text");
-
     // rbx holds the block a long line is gathered in, or 0 before there is one, r12 how many
     // bytes it holds, and r13 how many it has room for
     let saved = ["rbx", "r12", "r13"];
@@ -1920,7 +1931,7 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     // the input ended, so what was gathered is the last line, unless nothing was
     r#gen.emit("\ttest\trbx, rbx");
     r#gen.emit("\tjnz\t.Linput_gathered");
-    r#gen.emit("\tlea\trax, [rip + .Lstone_empty]");
+    r#gen.emit("\txor\teax, eax");
     r#gen.emit("\tjmp\t.Linput_done");
     // rcx looks for a newline from rsi up to rdx in the buffer at rdi
     r#gen.emit(".Linput_search:");

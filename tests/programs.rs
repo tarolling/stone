@@ -8,6 +8,9 @@
 //! sibling `.err` file too. It must then exit with an error under both backends, print the `.out`
 //! text first, and print the `.err` text somewhere in its stderr.
 //!
+//! A program that writes to stderr with `eprint` has a sibling `.stderr` file holding exactly what
+//! its stderr must be under every backend.
+//!
 //! A program that reads input has a sibling `.in` file, which becomes its stdin (otherwise stdin
 //! is empty), and one that reads `args()` has a sibling `.args` file holding one argument per
 //! line, passed after the program under `stone run` and to the built binary. One that reads the
@@ -140,6 +143,7 @@ fn skip_reason(program: &Path, backend: Backend) -> Option<&'static str> {
 /// How a run of a program ended.
 struct Outcome {
     stdout: String,
+    stderr: String,
     /// The stderr of a run that exited with an error, or `None` if it succeeded.
     error: Option<String>,
 }
@@ -159,10 +163,11 @@ fn outcome_of(command: &mut Command, input: &[u8]) -> Result<Outcome, String> {
     let output = child
         .wait_with_output()
         .map_err(|e| format!("failed to wait for {command:?}: {e}"))?;
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     Ok(Outcome {
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
-        error: (!output.status.success())
-            .then(|| String::from_utf8_lossy(&output.stderr).into_owned()),
+        error: (!output.status.success()).then(|| stderr.clone()),
+        stderr,
     })
 }
 
@@ -279,6 +284,7 @@ fn check_all(backend: Backend) {
         let expected_error = std::fs::read_to_string(program.with_extension("err"))
             .ok()
             .map(|e| e.trim().to_string());
+        let expected_stderr = std::fs::read_to_string(program.with_extension("stderr")).ok();
 
         let problem = match execute(&program, backend) {
             Err(e) => Some(e),
@@ -286,6 +292,17 @@ fn check_all(backend: Backend) {
                 "expected:\n{expected:?}\nactual:\n{:?}",
                 outcome.stdout
             )),
+            Ok(outcome)
+                if expected_stderr
+                    .as_ref()
+                    .is_some_and(|want| *want != outcome.stderr) =>
+            {
+                Some(format!(
+                    "expected stderr:\n{:?}\nactual:\n{:?}",
+                    expected_stderr.unwrap_or_default(),
+                    outcome.stderr
+                ))
+            }
             Ok(outcome) => match (outcome.error, &expected_error) {
                 (None, None) => None,
                 (Some(stderr), Some(want)) if stderr.contains(want.as_str()) => None,

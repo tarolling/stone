@@ -1,0 +1,7 @@
+ok('first')
+ok('')
+ok(12)
+got last
+true err('end of input')
+err('end of input')
+prompt> 

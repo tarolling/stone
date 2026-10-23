@@ -81,7 +81,8 @@ impl AssemblyGenerator for Arm64Generator {
         if prints {
             self.emit("\t// Standard Library Functions");
             let strings = self.ctx.needs_strings();
-            builtins::print(self, strings);
+            let eprints = self.ctx.uses(&["stone.text_eprint"]);
+            builtins::print(self, strings, eprints);
         }
 
         // stone functions first, then main, which the lowering puts last

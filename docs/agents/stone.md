@@ -379,8 +379,10 @@ assign the result where 'add' is called
 
 ## Builtins
 
-Functions: `print(values...)` (space-separated, newline), `range(end)` and `range(start, end)`
-(only as a `for` iterable), `int(x)`, `float(x)`, `str(x)`, `input()` and `input(prompt)`,
+Functions: `print(values...)` (space-separated, newline), `eprint(values...)` (the same, to
+stderr), `range(end)` and `range(start, end)`
+(only as a `for` iterable), `int(x)`, `float(x)`, `str(x)`, `input()` and `input(prompt)`
+(a `result[str, str]`: `ok` of the line without its newline, or `err("end of input")`),
 `eof()`, `args()`.
 
 Methods: `len` (str, list, map); lists: `append`, `pop()` (option) and `pop(i)`, `insert`,
@@ -410,7 +412,7 @@ Reading all of standard input:
 ```stone
 total = 0
 while not eof():
-    line = input().strip()
+    line = input().unwrap().strip()
     if line == "":
         cont
     total += int(line)

@@ -81,6 +81,7 @@ const STRING_ROUTINES: &[&str] = &[
     "stone.fs_remove",
     "stone.fs_make_dir",
     "stone.os_run",
+    "stone.text_end",
 ];
 
 /// The runtime routine behind each function of a builtin module that calls the runtime, by its
@@ -140,8 +141,10 @@ pub fn module_routine(name: &str) -> Option<&'static str> {
 /// first records where it is, for the error to point at.
 ///
 /// For example, `int("x")` calls `stone.parse_int`, which fails with
-/// `invalid literal for int() with base 10: 'x'` at the call.
+/// `invalid literal for int() with base 10: 'x'` at the call. `stone.fail` itself is called
+/// with a message built at runtime, as a failed `unwrap` of an `err` does.
 pub const FALLIBLE_ROUTINES: &[&str] = &[
+    "stone.fail",
     "stone.parse_int",
     "stone.parse_float",
     "stone.str_split",
@@ -339,8 +342,9 @@ pub const OUT_OF_MEMORY_LENGTH: usize = OUT_OF_MEMORY.len() - 1;
 /// every string has: its length in bytes at `[label - 16]` and its reference count at
 /// `[label - 8]`, so measuring, retaining, and releasing it works like any other string's.
 ///
-/// For example, `immortal_string(gen, ".Lstone_empty", "")` emits the empty string `stone.input`
-/// returns at the end of the input. The caller picks the section, which must be writable.
+/// For example, `immortal_string(gen, ".Lstone_quote", "'")` emits the closing quote that
+/// `stone.fail_quoted` ends its message with. The caller picks the section, which must be
+/// writable.
 pub fn immortal_string(r#gen: &mut dyn AssemblyGenerator, label: &str, text: &str) {
     r#gen.emit("\t.balign\t8");
     r#gen.emit(&format!("\t.quad\t{}", text.len()));
@@ -679,8 +683,9 @@ impl Context {
         labels.iter().any(|label| self.runtime.contains(label))
     }
 
-    /// Returns whether the program needs the `print` routines: it calls `print`, or `input`, which
-    /// prints its prompt, or `str` of a float, which shares `stone.print_float`'s code.
+    /// Returns whether the program needs the `print` routines: it calls `print` or `eprint`, or
+    /// `input`, which prints its prompt, or `str` of a float, which shares `stone.print_float`'s
+    /// code.
     pub fn needs_print(&self, module: &Mod) -> bool {
         let mut calls = HashSet::new();
         match module {
@@ -693,6 +698,7 @@ impl Context {
         // `str` of a value other than a number or string, and a string with values in it,
         // print into a text
         calls.contains("print")
+            || calls.contains("eprint")
             || self.uses(&["stone.input", "stone.str_float", "stone.text_begin"])
     }
 

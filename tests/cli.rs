@@ -135,6 +135,40 @@ fn built_programs_render_runtime_errors_byte_for_byte_as_run_does() {
     assert_eq!(built.status.code(), Some(1));
 }
 
+/// Runs `program` with `args` under `sh` with its stderr sent where its stdout goes, and returns
+/// what both wrote, in the order they wrote it.
+fn merged_output(program: &Path, args: &[&Path]) -> String {
+    let output = Command::new("sh")
+        .arg("-c")
+        .arg("\"$0\" \"$@\" 2>&1")
+        .arg(program)
+        .args(args)
+        .output()
+        .expect("sh should run");
+    assert!(output.status.success(), "{output:?}");
+    String::from_utf8_lossy(&output.stdout).into_owned()
+}
+
+#[test]
+fn eprint_and_print_interleave_in_program_order_under_both_backends() {
+    let source = "print(\"one\")\neprint(\"two\")\nprint(\"three\")\neprint(\"four\", 4)\n";
+    let (run, file) = stone(&["check"], "interleaved", source);
+    assert!(run.status.success(), "{run:?}");
+    let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("interleaved");
+    let build = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("build")
+        .arg(&file)
+        .arg("-o")
+        .arg(&exe)
+        .output()
+        .expect("stone should run");
+    assert!(build.status.success(), "{build:?}");
+    let expected = "one\ntwo\nthree\nfour 4\n";
+    let stone = Path::new(env!("CARGO_BIN_EXE_stone"));
+    assert_eq!(merged_output(stone, &[Path::new("run"), &file]), expected);
+    assert_eq!(merged_output(&exe, &[]), expected);
+}
+
 #[cfg(not(feature = "self-update"))]
 #[test]
 fn update_without_feature_explains_how_to_upgrade() {
@@ -513,7 +547,7 @@ longest = 0
 total = 0
 last = \"\"
 while not eof():
-    last = input()
+    last = input().unwrap()
     count = count + 1
     total = total + last.len()
     if last.len() > longest:

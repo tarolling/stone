@@ -913,8 +913,8 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
 ///
 /// They write into the text being built (see [`text_runtime`]), which `print` then writes to
 /// stdout in one go and `str` makes a string of, and clobber `x0` to `x2`, `x8` to `x13`, `x16`,
-/// `x17`, and `x30`.
-pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
+/// `x17`, and `x30`. `stone.text_eprint` is emitted only if the program `eprints`.
+pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool, eprints: bool) {
     r#gen.emit("\t.section\t.rodata");
     r#gen.emit(".Lstone_true:");
     r#gen.emit("\t.string \"true\"");
@@ -984,7 +984,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     pop_frame(r#gen, &[]);
 
     print_str_quoted(r#gen);
-    text_runtime(r#gen, strings);
+    text_runtime(r#gen, strings, eprints);
 }
 
 /// Emits the text builder that every `stone.print_*` routine writes into, as the x86-64
@@ -996,13 +996,15 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
 ///   building the text in `x0`
 /// - `stone.text_print` writes the text and a newline to stdout, frees it, and goes back to
 ///   building the text in `x0`
+/// - `stone.text_eprint` does the same, writing to stderr
 /// - `stone.write_out` writes the `x2` bytes at `x1` to stdout, however many `write` calls that
 ///   takes
 ///
-/// `stone.text_print` preserves the callee-saved registers, and the others clobber `x0` to `x2`,
-/// `x8` to `x13`, `x16`, `x17`, and `x30`. `stone.text_end` is emitted only if the program has
-/// `strings`, since it counts the string it makes in `stone.live`.
-fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
+/// `stone.text_print` and `stone.text_eprint` preserve the callee-saved registers, and the others
+/// clobber `x0` to `x3`, `x8` to `x13`, `x16`, `x17`, and `x30`. `stone.text_end` is emitted only
+/// if the program has `strings`, since it counts the string it makes in `stone.live`, and
+/// `stone.text_eprint` only if the program `eprints`.
+fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool, eprints: bool) {
     r#gen.emit("\t.bss");
     r#gen.emit("\t.p2align\t3");
     r#gen.emit("stone.text:");
@@ -1065,30 +1067,42 @@ fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
         r#gen.emit("\tret");
     }
 
-    // x19 holds the text to go back to and x20 the one written
-    let saved = ["x19", "x20"];
+    // x19 holds the text to go back to, x20 the one written, and x21 the file it goes to
+    let saved = ["x19", "x20", "x21"];
+    if eprints {
+        r#gen.emit("stone.text_eprint:");
+        r#gen.emit("\tmov\tx3, #2"); // stderr
+        r#gen.emit("\tb\t.Ltext_write");
+    }
     r#gen.emit("stone.text_print:");
+    r#gen.emit("\tmov\tx3, #1"); // stdout
+    r#gen.emit(".Ltext_write:");
     push_frame(r#gen, &saved);
     r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx21, x3");
     r#gen.emit("\tmov\tx0, #10"); // '\n'
     r#gen.emit("\tbl\tstone.print_char");
     r#gen.emit("\tadrp\tx9, stone.text");
     r#gen.emit("\tldr\tx20, [x9, :lo12:stone.text]");
     r#gen.emit("\tadd\tx1, x20, #16");
     r#gen.emit("\tldr\tx2, [x20]");
-    r#gen.emit("\tbl\tstone.write_out");
+    r#gen.emit("\tmov\tx3, x21");
+    r#gen.emit("\tbl\t.Lwrite_fd");
     r#gen.emit("\tmov\tx9, x20");
     r#gen.emit("\tbl\tstone.mem_free");
     r#gen.emit("\tadrp\tx9, stone.text");
     r#gen.emit("\tstr\tx19, [x9, :lo12:stone.text]");
     pop_frame(r#gen, &saved);
 
-    // a write may take fewer bytes than asked, or be interrupted before it takes any
+    // a write may take fewer bytes than asked, or be interrupted before it takes any; x3 holds
+    // the file, which the call keeps
     r#gen.emit("stone.write_out:");
+    r#gen.emit("\tmov\tx3, #1"); // stdout
+    r#gen.emit(".Lwrite_fd:");
     push_frame(r#gen, &[]);
     r#gen.emit(".Lwrite_out_next:");
     r#gen.emit("\tcbz\tx2, .Lwrite_out_done");
-    r#gen.emit("\tmov\tx0, #1"); // stdout
+    r#gen.emit("\tmov\tx0, x3");
     system_call(r#gen, Sys::Write);
     r#gen.emit("\tcmn\tx0, #4"); // EINTR
     r#gen.emit("\tb.eq\t.Lwrite_out_next");
@@ -2021,7 +2035,7 @@ pub(super) fn jump_if_space(r#gen: &mut dyn AssemblyGenerator, reg: &str, label:
 /// buffer, the same way as x64's `io_runtime`.
 ///
 /// - `stone.input` prints the string in `x0` unless it is null, then returns the next line of
-///   stdin as a new string without its newline, or an empty string at the end of the input
+///   stdin as a new string without its newline, or 0 at the end of the input
 /// - `stone.eof` returns 1 if stdin has nothing left and 0 otherwise
 /// - `stone.stdin_fill` reads into the buffer from its start and returns how many bytes it
 ///   read, or 0 at the end of the input or on an error
@@ -2072,9 +2086,6 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if !used.contains(&"stone.input") {
         return;
     }
-    r#gen.emit("\t.data");
-    immortal_string(r#gen, ".Lstone_empty", "");
-    r#gen.emit("\t.text");
 
     // x19 holds the block a long line is gathered in, or 0 before there is one, x20 how many
     // bytes it holds, and x21 how many it has room for
@@ -2101,7 +2112,7 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     r#gen.emit("\tcbnz\tx0, .Linput_scan");
     // the input ended, so what was gathered is the last line, unless nothing was
     r#gen.emit("\tcbnz\tx19, .Linput_gathered");
-    address(r#gen, "x0", ".Lstone_empty");
+    r#gen.emit("\tmov\tx0, #0");
     r#gen.emit("\tb\t.Linput_done");
     // x3 looks for a newline from x1 up to x2 in the buffer at x0
     r#gen.emit(".Linput_search:");

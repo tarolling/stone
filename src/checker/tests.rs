@@ -1772,8 +1772,11 @@ fn a_string_with_values_is_a_str() {
 
 #[test]
 fn input_reads_strs() {
-    assert_eq!(type_of_symbol("a = input()\n", "a"), "str");
-    assert_eq!(type_of_symbol("a = input(\"? \")\n", "a"), "str");
+    assert_eq!(type_of_symbol("a = input()\n", "a"), "result[str, str]");
+    assert_eq!(
+        type_of_symbol("a = input(\"? \")\n", "a"),
+        "result[str, str]"
+    );
     assert_error("x = input(1)\n", "expected str, found int", 1, 11);
     assert_error(
         "x = input(\"a\", \"b\")\n",

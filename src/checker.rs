@@ -5835,7 +5835,7 @@ impl Inference {
 
     fn infer_builtin(&mut self, call: &Expr, name: &str, args: &[Expr], arg_types: &[Ty]) -> Ty {
         match name {
-            "print" => Ty::Unit,
+            "print" | "eprint" => Ty::Unit,
             "int" | "float" | "str" => {
                 if args.len() != 1 {
                     self.arity_error(call.span, name, "1", args.len());
@@ -5862,7 +5862,7 @@ impl Inference {
                     [prompt] => self.expect(&Ty::Str, &arg_types[0], prompt.span),
                     _ => self.arity_error(call.span, name, "0 or 1", args.len()),
                 }
-                Ty::Str
+                Ty::Enum(RESULT.to_string(), vec![Ty::Str, Ty::Str])
             }
             "eof" | "args" => {
                 if !args.is_empty() {

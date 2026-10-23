@@ -1,0 +1,8 @@
+// a failed unwrap shows the err in a program with no strings of its own
+fn halve(n: int) -> result[int, int]:
+    if n % 2 == 1:
+        ret err(n)
+    ret ok(n / 2)
+
+print(halve(8).unwrap())
+print(halve(7).unwrap())

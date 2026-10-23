@@ -478,7 +478,7 @@ fn modulo_and_power_lower_to_arithmetic() {
 #[test]
 fn io_and_string_builtins_call_the_runtime() {
     let source = "fn f(s: str, n: int, x: float, b: bool) -> list[str]:\n    \
-                  ret [input(), input(s), str(n), str(x), str(b), str(s), s.strip()]\n\
+                  ret [input().unwrap(), input(s).unwrap(), str(n), str(x), str(b), str(s), s.strip()]\n\
                   fn g(s: str) -> int:\n    \
                   ret int(s) + int(float(s)) + args().len() + s.split().len() + s.split(s).len()\n\
                   f(\"a\", 1, 1.5, true)\ng(\"1\")\nprint(eof())\n";

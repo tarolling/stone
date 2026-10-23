@@ -49,9 +49,9 @@ use crate::codegen::context::module_routine;
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::Span;
 use crate::stdlib::{
-    COMPARE_DEPTH, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE,
-    PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE,
-    UNWRAP_OK, math, random,
+    COMPARE_DEPTH, END_OF_INPUT, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY,
+    POP_RANGE, PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR,
+    UNWRAP_NONE, UNWRAP_OK, math, random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -332,6 +332,12 @@ struct Context<'a> {
 /// A name a `match` case binds, the values it takes, one for each value of a tuple, and how each
 /// is counted.
 type Binding = (String, Vec<Operand>, Vec<Option<RcKind>>);
+
+/// What [`Lowerer::unwrapped`] finds for `unwrap`, `unwrap_or`, or `unwrap_err`: the tag of the
+/// variant whose value it gives, that value's position among the enum's type arguments, the
+/// error it stops the program with otherwise, and, for a result, the position of the other
+/// variant's value, which the error goes on with.
+type Unwrapped = (usize, usize, &'static str, Option<usize>);
 
 /// What a `for` loop walks: a range up to an end, or a list.
 #[derive(Clone, Copy)]
@@ -1885,18 +1891,19 @@ impl<'a> Lowerer<'a> {
     /// Returns, for the method `method` (`unwrap`, `unwrap_or`, or `unwrap_err`) of an option
     /// or a result of type `ty`, the tag of the variant whose value it gives, the position of
     /// that value's type among the enum's type arguments, and the error it stops the program
-    /// with on the other variant.
+    /// with on the other variant, with the position of the other variant's value for a result,
+    /// whose failure goes on with that value.
     ///
     /// For example, `unwrap` of a `result[int, str]` gives `ok`'s value, the first argument, and
-    /// stops with `cannot unwrap err`.
-    fn unwrapped(&self, ty: &Type, method: &str) -> Result<(usize, usize, &'static str), String> {
+    /// stops with `cannot unwrap err: ` and the `err`'s value, the second.
+    fn unwrapped(&self, ty: &Type, method: &str) -> Result<Unwrapped, String> {
         let Type::Enum { name, .. } = ty else {
             return Err("only an option or a result holds a value".to_string());
         };
         Ok(match (name.as_str(), method) {
-            (RESULT, "unwrap_err") => (self.tag_of(RESULT, "err")?, 1, UNWRAP_OK),
-            (RESULT, _) => (self.tag_of(RESULT, "ok")?, 0, UNWRAP_ERR),
-            _ => (self.tag_of(OPTION, "some")?, 0, UNWRAP_NONE),
+            (RESULT, "unwrap_err") => (self.tag_of(RESULT, "err")?, 1, UNWRAP_OK, Some(0)),
+            (RESULT, _) => (self.tag_of(RESULT, "ok")?, 0, UNWRAP_ERR, Some(1)),
+            _ => (self.tag_of(OPTION, "some")?, 0, UNWRAP_NONE, None),
         })
     }
 
@@ -1911,7 +1918,7 @@ impl<'a> Lowerer<'a> {
         default: Option<&Expr>,
     ) -> Result<Vec<Operand>, String> {
         let ty = self.type_of(receiver)?;
-        let (holding, position, failure) = self.unwrapped(&ty, method)?;
+        let (holding, position, failure, other) = self.unwrapped(&ty, method)?;
         let Type::Enum { args, .. } = &ty else {
             return Err("only an option or a result holds a value".to_string());
         };
@@ -1976,7 +1983,25 @@ impl<'a> Lowerer<'a> {
                 }
                 self.jump(end);
             }
-            None => self.terminate(Terminator::Fail(failure.to_string(), vec![])),
+            None => {
+                if let Some(other) = other {
+                    // the message goes on with the other variant's value, as print writes it
+                    let other_ty = args.get(other).cloned().unwrap_or(Type::Int);
+                    let count = self.leaves(&other_ty).len();
+                    let values = self.field_values(option, 0, count);
+                    let outer = self.runtime_call("stone.text_begin", vec![], None);
+                    self.print_text(&format!("{failure}: "));
+                    self.print_flat(&other_ty, &values, false);
+                    let message = self.runtime_call("stone.text_end", vec![outer], None);
+                    self.push(Inst::Call {
+                        dsts: vec![],
+                        callee: Callee::Runtime("stone.fail"),
+                        args: vec![message],
+                    });
+                }
+                // the call above stops the program first
+                self.terminate(Terminator::Fail(failure.to_string(), vec![]));
+            }
         }
         self.start(end);
         self.release_temp(option);
@@ -4803,7 +4828,7 @@ impl<'a> Lowerer<'a> {
         kind: Option<RcKind>,
     ) -> Result<Operand, String> {
         match name {
-            "print" => {
+            "print" | "eprint" => {
                 // every argument is evaluated before anything prints, like the interpreter
                 let mut values = Vec::new();
                 for arg in args {
@@ -4818,9 +4843,13 @@ impl<'a> Lowerer<'a> {
                         self.print_char(' ');
                     }
                 }
+                let write = match name {
+                    "print" => "stone.text_print",
+                    _ => "stone.text_eprint",
+                };
                 self.push(Inst::Call {
                     dsts: vec![],
-                    callee: Callee::Runtime("stone.text_print"),
+                    callee: Callee::Runtime(write),
                     args: vec![outer],
                 });
                 for value in values.into_iter().flat_map(|(leaves, _)| leaves) {
@@ -4876,10 +4905,38 @@ impl<'a> Lowerer<'a> {
                     [prompt] => self.expr(prompt)?,
                     _ => Operand::Imm(0),
                 };
-                let result = self.runtime_call("stone.input", vec![prompt], into);
+                // a null line is the end of the input
+                let line = self.runtime_call("stone.input", vec![prompt], None);
                 self.release_temp(prompt);
-                self.own(result, kind);
-                Ok(result)
+                let (ok, err) = (self.tag_of(RESULT, "ok")?, self.tag_of(RESULT, "err")?);
+                let dst = self.dst(into);
+                let (read, ended, end) = (self.new_block(), self.new_block(), self.new_block());
+                self.terminate(Terminator::CmpBranch {
+                    cond: Cond::Ne,
+                    float: false,
+                    lhs: line,
+                    rhs: Operand::Imm(0),
+                    then: read,
+                    otherwise: ended,
+                });
+                self.start(read);
+                // the new line's reference goes to the ok
+                self.new_variant(dst, ok, vec![line], &[Some(RcKind::Str)]);
+                self.jump(end);
+                self.start(ended);
+                let message = self.fresh();
+                self.push(Inst::StrAddr {
+                    dst: message,
+                    text: END_OF_INPUT.to_string(),
+                });
+                self.push(Inst::Retain {
+                    src: Operand::Reg(message),
+                });
+                self.new_variant(dst, err, vec![Operand::Reg(message)], &[Some(RcKind::Str)]);
+                self.jump(end);
+                self.start(end);
+                self.own(Operand::Reg(dst), Some(RcKind::Enum));
+                Ok(Operand::Reg(dst))
             }
             "eof" => Ok(self.runtime_call("stone.eof", vec![], into)),
             "args" => {

@@ -19,7 +19,11 @@ class Body:
         self.z += dt * self.vz
 
     def kinetic(self):
-        return 0.5 * self.mass * (self.vx * self.vx + self.vy * self.vy + self.vz * self.vz)
+        return (
+            0.5
+            * self.mass
+            * (self.vx * self.vx + self.vy * self.vy + self.vz * self.vz)
+        )
 
 
 def advance(bodies, dt, steps):
@@ -55,7 +59,9 @@ def energy(bodies):
             dx = bodies[i].x - bodies[j].x
             dy = bodies[i].y - bodies[j].y
             dz = bodies[i].z - bodies[j].z
-            e -= bodies[i].mass * bodies[j].mass / math.sqrt(dx * dx + dy * dy + dz * dz)
+            e -= (
+                bodies[i].mass * bodies[j].mass / math.sqrt(dx * dx + dy * dy + dz * dz)
+            )
     return e
 
 

@@ -18,13 +18,46 @@ from pygments.token import (
 )
 
 KEYWORDS = (
-    "and", "as", "break", "case", "cont", "elif", "else", "enum", "fn", "for", "if", "impl", "in",
-    "match", "not", "or", "pub", "ret", "struct", "trait", "use", "while",
+    "and",
+    "as",
+    "break",
+    "case",
+    "cont",
+    "elif",
+    "else",
+    "enum",
+    "fn",
+    "for",
+    "if",
+    "impl",
+    "in",
+    "match",
+    "not",
+    "or",
+    "pub",
+    "ret",
+    "struct",
+    "trait",
+    "use",
+    "while",
 )
 CONSTANTS = ("true", "false", "none")
 BUILTINS = (
-    "print", "eprint", "range", "int", "float", "str", "input", "eof", "args", "some", "less", "equal",
-    "greater", "ok", "err",
+    "print",
+    "eprint",
+    "range",
+    "int",
+    "float",
+    "str",
+    "input",
+    "eof",
+    "args",
+    "some",
+    "less",
+    "equal",
+    "greater",
+    "ok",
+    "err",
 )
 METHODS = (
     "len",
@@ -96,8 +129,14 @@ class StoneLexer(RegexLexer):
             (r"//.*$", Comment.Single),
             (r'"', String.Double, "string"),
             (r"(fn)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
-            (r"(enum|struct|impl|trait)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Class)),
-            (r"(use)(\s+)([A-Za-z_][\w.]*)", bygroups(Keyword.Namespace, Whitespace, Name.Namespace)),
+            (
+                r"(enum|struct|impl|trait)(\s+)([A-Za-z_]\w*)",
+                bygroups(Keyword, Whitespace, Name.Class),
+            ),
+            (
+                r"(use)(\s+)([A-Za-z_][\w.]*)",
+                bygroups(Keyword.Namespace, Whitespace, Name.Namespace),
+            ),
             (
                 # a type name, maybe inside list[, map[, tuple[, option[, or result[, then closing
                 # brackets or more types

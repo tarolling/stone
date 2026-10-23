@@ -27,7 +27,11 @@ def main(n):
     total = 0.0
     for f in floats:
         total = total * 0.5 + f
-    print(int(total * 1000000000.0), int(floats[0] * 1000000000.0), int(floats[n - 1] * 1000000000.0))
+    print(
+        int(total * 1000000000.0),
+        int(floats[0] * 1000000000.0),
+        int(floats[n - 1] * 1000000000.0),
+    )
 
 
 main(int(sys.argv[1]))

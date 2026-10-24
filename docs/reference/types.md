@@ -21,6 +21,7 @@ runs, reporting every place they conflict.
 | enums | the variants an `enum` lists, such as `Shape.Circle(1.0)`, which never change |
 | `ordering` | `less`, `equal`, or `greater`, which `cmp` returns |
 | `fn(T1, ...) -> R` | functions, such as `fn(int, list[str]) -> bool`, which are values: named, passed, stored, and called |
+| `socket`, `listener` | a TCP connection, and a port waiting for connections, from the [`net` module](builtins.md#the-net-module): handles, so a copy refers to the same connection, which closes right after the last statement that uses it |
 
 ## Writing types
 
@@ -36,7 +37,7 @@ of floats is `list[list[float]]`, a map as `map[K, V]`, so word counts are `map[
 tuple as `tuple[` and the type of each value, so a name and a
 score is `tuple[str, int]`, an option as `option[T]`, a function as `fn` and its parameters'
 types in parentheses, then `->` and the type it returns if it returns one, so a test of an int is
-`fn(int) -> bool`, and a struct or an enum by its name, such
+`fn(int) -> bool`, a connection as `socket` and a server as `listener`, and a struct or an enum by its name, such
 as `Point` or `Shape`, or `shapes.Shape` for one of the module `shapes`. A function without `->` returns no value: a call
 to it can only be a statement of its own, so `x = f()` and `print(f())` are errors, and returning
 a value from it is an error that suggests the `->` to add. A parameter without a type is an error
@@ -675,7 +676,8 @@ These keep the two backends identical and catch common mistakes:
   floats, strings, lists, and `none`, so `if 1 or 0:` is an error; write `n != 0` instead of `n`.
 - **Lists and maps are not comparable.** `==` and `!=` compare numbers, bools, strings, and
   tuples, structs, options, and enum values of them, part by part, but not lists or maps, even
-  inside another value, unless a struct holding one implements `eq`. `<`, `<=`, `>`, and `>=`
+  inside another value, unless a struct holding one implements `eq`. Functions, sockets, and
+  listeners are never compared. `<`, `<=`, `>`, and `>=`
   compare only numbers, strings, and structs that implement `ord`.
 - **A call without a value is a statement.** A function without `->`, and builtins such as
   `print`, return no value, so their calls can only be statements of their own.

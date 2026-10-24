@@ -3,8 +3,8 @@
 These functions are part of the language and available everywhere. Their names cannot be
 assigned to. The builtin [methods](#methods) are called on a value instead, as in `xs.len()`.
 The builtin modules, [`os`](#the-os-module), [`math`](#the-math-module),
-[`random`](#the-random-module), [`time`](#the-time-module), and [`fs`](#the-fs-module), are
-imported like module files, as in `use math`. The same descriptions appear on hover in the
+[`random`](#the-random-module), [`time`](#the-time-module), [`fs`](#the-fs-module), and
+[`net`](#the-net-module), are imported like module files, as in `use math`. The same descriptions appear on hover in the
 editor.
 
 ## `print`
@@ -727,6 +727,82 @@ uses that.
 print([1, 2].display().len())   // 6
 ```
 
+### `send`
+
+```text
+socket.send(text: str) -> result[int, str]
+```
+
+Sends all of `text` over the connection and returns `ok` of the number of bytes sent, or `err`
+of the reason it could not, such as `broken pipe` or `connection reset by peer` once the other
+end has closed the connection.
+
+### `read_line`
+
+```text
+socket.read_line() -> result[option[str], str]
+```
+
+Waits for the next line from the connection and returns `ok` of `some` of it, without its `\n`
+or `\r\n`, or `ok(none)` once the other end has closed the connection and every line has been
+read. A last line without a line ending is still a line. Data that is not UTF-8 text is the
+error `not valid UTF-8 text`.
+
+```stone
+use net
+
+fn greeting(host: str, port: int) -> result[str, str]:
+    c = net.connect(host, port)?
+    ret ok(c.read_line()?.unwrap_or(""))
+```
+
+### `read`
+
+```text
+socket.read() -> result[str, str]
+```
+
+Waits for data from the connection and returns `ok` of whatever has arrived, or `ok("")` once
+the other end has closed the connection. A character whose bytes arrive in two parts comes whole
+with the second read, so the text is never cut inside a character.
+
+### `read_all`
+
+```text
+socket.read_all() -> result[str, str]
+```
+
+Reads from the connection until the other end closes it, and returns `ok` of everything that
+arrived.
+
+### `accept`
+
+```text
+listener.accept() -> result[socket, str]
+```
+
+Waits for the next connection to the listener's port and returns `ok` of a socket for it.
+
+### `port`
+
+```text
+listener.port() -> int
+```
+
+Returns the port the listener waits on, which is the port the system picked if
+`net.listen` was given 0.
+
+### `close`
+
+```text
+(socket | listener).close()
+```
+
+Closes the connection, or stops listening, now. A socket or listener also closes by itself
+right after the last statement that uses it, so `close` is only needed to close one sooner, as
+when the other end reads until the connection closes. Once closed, a socket's methods return
+`err("socket is closed")`, and `accept` returns `err("listener is closed")`.
+
 ## The `os` module
 
 `os` is a builtin module: it has no file, and a program imports it like any other module, with
@@ -1270,4 +1346,118 @@ use fs
 if not fs.exists("out"):
     fs.make_dir("out").unwrap()
 fs.write("out/report.txt", "done\n").unwrap()
+```
+
+## The `net` module
+
+`net` makes TCP connections and finds the addresses of hosts. Import it like a builtin module,
+with `use net` to call `net.connect("example.com", 80)`, or with `use net.connect` to call
+`connect("example.com", 80)`. Unlike the other builtin modules, it is written in stone, and a
+program that uses it is linked with its source, so its functions behave alike under `stone run`
+and in a built program, and an editor can show their code. A file named `net.stn` next to the
+entry file cannot be imported. TLS (`https`) is not supported.
+
+A connection is a `socket`, and a port waiting for connections a `listener`. Both are types a
+signature can name, as in `fn serve(l: listener)`. A copy of one refers to the same connection,
+since a connection cannot be copied, and they cannot be compared with `==`. Each closes by
+itself right after the last statement that uses it, at the same point under both backends, or
+sooner with [`close`](#close). Their methods, [`send`](#send), `read_line`,
+[`read`](#read), `read_all`, [`accept`](#accept), and [`port`](#port), are listed
+with the other methods. Text is sent and read as UTF-8; there is no type for other bytes yet.
+
+```stone
+use net
+
+fn ask(host: str, port: int, question: str) -> result[str, str]:
+    c = net.connect(host, port)?
+    c.send("{question}\n")?
+    ret c.read_all()
+
+print(ask("localhost", 7777, "hello"))
+```
+
+A program is one thread, so a server handles one connection at a time. A connection to a port
+the same program listens on completes before the program accepts it, so a program can talk to
+itself:
+
+```stone
+use net
+
+l = net.listen("127.0.0.1", 0).unwrap()
+c = net.connect("127.0.0.1", l.port()).unwrap()
+s = l.accept().unwrap()
+c.send("ping\n").unwrap()
+print(s.read_line())   // ok(some('ping'))
+```
+
+Errors are messages, as the [`fs`](#the-fs-module) module's are: the reason the system gives,
+in lowercase, and the host and port as the program wrote them, such as
+`connection refused: 'localhost:7777'`, or the reason alone for an error on an open
+connection, such as `connection reset by peer`.
+
+### Finding addresses
+
+A host is an address, `127.0.0.1` or `::1`, or a name. `net` finds a name's addresses itself,
+the same way under both backends:
+
+1. A name in `/etc/hosts` has the addresses the file gives it, compared without regard to case.
+2. Otherwise `localhost`, and any name ending in `.localhost`, is `127.0.0.1` and `::1`.
+3. Otherwise the DNS servers named by `nameserver` lines in `/etc/resolv.conf` are asked, as
+   the C library asks them: in turn, waiting `timeout` seconds for each (5 unless an `options`
+   line says otherwise), going through them `attempts` times (2), and trying a name with fewer
+   dots than `ndots` (1) in each `search` domain before trying it alone. With no `nameserver`
+   line, the server on this machine, `127.0.0.1`, is asked.
+
+IPv4 addresses come before IPv6 ones. The environment variables `STONE_HOSTS` and
+`STONE_RESOLV_CONF` name other files to read instead, and a `nameserver` line may give a port
+of its own, as in `nameserver 127.0.0.1:5353`, which tests use for a DNS server of their own.
+A name that no server knows is the error `unknown host: 'name'`.
+
+### `net.connect`
+
+```text
+net.connect(host: str, port: int) -> result[socket, str]
+```
+
+Connects to `port` on `host`, trying each of the host's addresses in the order
+[Finding addresses](#finding-addresses) gives them until one connects, and returns `ok` of the
+socket, or `err` of the last address's error.
+
+### `net.listen`
+
+```text
+net.listen(host: str, port: int) -> result[listener, str]
+```
+
+Listens for connections to `port` at the first address of `host`: `127.0.0.1` for this machine
+alone, `0.0.0.0` for every IPv4 address, or `::` for every address. A port of 0 lets the system
+pick a free one, which the listener's [`port`](#port) gives. A port another listener holds is
+the error `address already in use`.
+
+```stone
+use net
+
+l = net.listen("0.0.0.0", 8080).unwrap()
+while true:
+    match l.accept():
+        case ok(c):
+            c.send("hello\n").unwrap_or(0)
+        case err(e):
+            eprint(e)
+```
+
+### `net.resolve`
+
+```text
+net.resolve(host: str) -> result[list[str], str]
+```
+
+Returns `ok` of the addresses of `host`, as text, in the order `net.connect`
+tries them, or `err` of a message.
+
+```stone
+use net
+
+print(net.resolve("localhost"))   // ok(['127.0.0.1', '::1'])
+print(net.resolve("::FFFF:1.2.3.4"))   // ok(['::ffff:1.2.3.4'])
 ```

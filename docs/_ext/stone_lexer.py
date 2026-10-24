@@ -96,6 +96,13 @@ METHODS = (
     "eq",
     "cmp",
     "display",
+    "send",
+    "read_line",
+    "read",
+    "read_all",
+    "accept",
+    "port",
+    "close",
 )
 
 
@@ -147,7 +154,7 @@ class StoneLexer(RegexLexer):
             (
                 # a type name, maybe inside list[, map[, tuple[, option[, or result[, then closing
                 # brackets or more types
-                r"(->|:)(\s*)((?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str)(?:\]|,\s*(?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str))*)(?![\w(])",
+                r"(->|:)(\s*)((?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str|socket|listener)(?:\]|,\s*(?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str|socket|listener))*)(?![\w(])",
                 bygroups(Punctuation, Whitespace, Keyword.Type),
             ),
             (r"\b(self|Self)\b", Name.Builtin.Pseudo),

@@ -5024,3 +5024,95 @@ fn a_function_can_test_a_global_assigned_after_it() {
         14,
     );
 }
+
+#[test]
+fn sockets_and_listeners_have_types() {
+    let cases = [
+        ("net.connect(\"127.0.0.1\", 80)", "result[socket, str]"),
+        ("net.listen(\"127.0.0.1\", 0)", "result[listener, str]"),
+        (
+            "net.listen(\"\", 0).unwrap().accept()",
+            "result[socket, str]",
+        ),
+        ("net.listen(\"\", 0).unwrap().port()", "int"),
+        (
+            "net.connect(\"\", 1).unwrap().send(\"hi\")",
+            "result[int, str]",
+        ),
+        (
+            "net.connect(\"\", 1).unwrap().read_line()",
+            "result[option[str], str]",
+        ),
+        ("net.connect(\"\", 1).unwrap().read()", "result[str, str]"),
+        (
+            "net.connect(\"\", 1).unwrap().read_all()",
+            "result[str, str]",
+        ),
+    ];
+    for (call, ty) in cases {
+        assert_eq!(
+            linked_type(&format!("use net\nx = {call}\n"), "x"),
+            ty,
+            "{call}"
+        );
+    }
+}
+
+#[test]
+fn signatures_name_sockets_and_listeners() {
+    let source = "use net\nfn greet(c: socket) -> result[int, str]:\n    ret c.send(\"hi\")\n\
+                  fn serve(l: listener) -> result[socket, str]:\n    ret l.accept()\n\
+                  fn stop(c: socket, l: listener):\n    c.close()\n    l.close()\n";
+    assert_eq!(linked_errors(source), []);
+    assert_eq!(
+        linked_errors("fn f(c: socket[int]):\n    c.close()\n"),
+        [("'socket' takes no types".to_string(), 1, 9)]
+    );
+    assert_eq!(
+        linked_errors("struct socket:\n    x: int\n"),
+        [("cannot redefine builtin 'socket'".to_string(), 1, 8)]
+    );
+    // a variable may still take the name
+    assert_eq!(
+        linked_type("use net\nsocket = net.connect(\"\", 1)\n", "socket"),
+        "result[socket, str]"
+    );
+}
+
+#[test]
+fn handle_methods_check_their_receivers_and_arguments() {
+    assert_eq!(
+        linked_errors("use net\nl = net.listen(\"\", 0).unwrap()\nx = l.send(\"a\")\n"),
+        [("expected socket, found listener".to_string(), 3, 5)]
+    );
+    assert_eq!(
+        linked_errors("use net\nc = net.connect(\"\", 1).unwrap()\nx = c.send(1)\n"),
+        [("expected str, found int".to_string(), 3, 12)]
+    );
+    assert_eq!(
+        linked_errors("x = 1\nx.close()\n"),
+        [(
+            "'close' needs a socket or listener, found int".to_string(),
+            2,
+            1
+        )]
+    );
+}
+
+#[test]
+fn handles_are_never_compared_or_map_keys() {
+    let source = "use net\nc = net.connect(\"\", 1).unwrap()\nd = c\nprint(c == d)\n";
+    assert_eq!(
+        linked_errors(source),
+        [("'==' and '!=' cannot compare socket".to_string(), 4, 7)]
+    );
+    let source = "use net\nc = net.connect(\"\", 1).unwrap()\nm = {c: 1}\n";
+    assert_eq!(
+        linked_errors(source),
+        [(
+            "a map key must be int, str, or bool, found socket".to_string(),
+            3,
+            6
+        )]
+    );
+}

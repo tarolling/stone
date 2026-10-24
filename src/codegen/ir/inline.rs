@@ -352,6 +352,28 @@ fn rename_inst(
             dst: reg(dst),
             list: o(list),
         },
+        Inst::DataGet {
+            dst,
+            data,
+            index,
+            offset,
+        } => Inst::DataGet {
+            dst: reg(dst),
+            data: o(data),
+            index: o(index),
+            offset,
+        },
+        Inst::DataSet {
+            data,
+            index,
+            value,
+            offset,
+        } => Inst::DataSet {
+            data: o(data),
+            index: o(index),
+            value: o(value),
+            offset,
+        },
         Inst::Packed {
             done,
             float,

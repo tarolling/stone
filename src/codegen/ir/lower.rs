@@ -139,6 +139,9 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         shrinks_maps: pops_maps(body, types),
         global_reads,
         global_set,
+        handles: types
+            .values()
+            .any(|ty| holds_handle(ty, structs, enums, &mut HashSet::new())),
         enums,
         structs,
         methods,
@@ -503,6 +506,8 @@ struct Context<'a> {
     global_reads: GlobalReads,
     /// The variants of every enum the program defines.
     enums: &'a Enums,
+    /// Whether any variable holds a socket or listener, which is released at its last use.
+    handles: bool,
     /// The fields of every struct the program defines.
     structs: &'a Structs,
     /// How every call of a function of an `impl` block was resolved, by the call's span.
@@ -1768,8 +1773,80 @@ impl<'a> Lowerer<'a> {
                 self.release_temp(key);
             }
         }
+        if result.is_ok() && self.current.is_some() {
+            self.release_handles(stmt);
+        }
         self.span = outer;
         result
+    }
+
+    /// Releases each variable that holds a socket or listener and that `stmt` used for the last
+    /// time, leaving it null, so the connection closes right after the statement, where the
+    /// interpreter drops it, and the other end sees it close at the same point in both backends.
+    /// A variable `stmt` moved into a call is left to the callee.
+    fn release_handles(&mut self, stmt: &Stmt) {
+        let holds = |name: &str| {
+            self.variable_type(variable_of(name)).is_some_and(|ty| {
+                holds_handle(
+                    ty,
+                    self.context.structs,
+                    self.context.enums,
+                    &mut HashSet::new(),
+                )
+            })
+        };
+        if !self.context.handles {
+            return;
+        }
+        let names: Vec<String> = self
+            .last_uses(stmt)
+            .into_iter()
+            .filter(|name| holds(name))
+            .collect();
+        for name in names {
+            match self.locals.get(&name) {
+                Some(&local) => {
+                    if self.moved_locals.contains(&local) {
+                        continue;
+                    }
+                    let Some(&(_, kind)) =
+                        self.counted_locals.iter().find(|(reg, _)| *reg == local)
+                    else {
+                        continue;
+                    };
+                    self.push(Inst::Release {
+                        src: Operand::Reg(local),
+                        kind,
+                    });
+                    self.push(Inst::Copy {
+                        dst: local,
+                        src: Operand::Imm(0),
+                    });
+                }
+                None => {
+                    let Some(kind) = self.global_kind(&name) else {
+                        continue;
+                    };
+                    if self.moved_globals.contains(&name) {
+                        continue;
+                    }
+                    let global = self.fresh();
+                    self.push(Inst::LoadGlobal {
+                        dst: global,
+                        name: name.clone(),
+                        checked: false,
+                    });
+                    self.push(Inst::Release {
+                        src: Operand::Reg(global),
+                        kind,
+                    });
+                    self.push(Inst::StoreGlobal {
+                        name,
+                        src: Operand::Imm(0),
+                    });
+                }
+            }
+        }
     }
 
     fn stmt_unspanned(&mut self, stmt: &Stmt) -> Result<(), String> {
@@ -4918,6 +4995,27 @@ impl<'a> Lowerer<'a> {
                 self.own(result, kind);
                 Ok(result)
             }
+            "send" | "read_line" | "read" | "read_all" | "accept" | "port" | "close" => {
+                let mut values = vec![self.expr(receiver)?];
+                for arg in args {
+                    values.push(self.expr(arg)?);
+                }
+                let label = match name {
+                    "send" => "stone.net_send",
+                    "read_line" => "stone.net_read_line",
+                    "read" => "stone.net_read",
+                    "read_all" => "stone.net_read_all",
+                    "accept" => "stone.net_accept",
+                    "port" => "stone.net_port",
+                    _ => "stone.net_close",
+                };
+                let result = self.runtime_call(label, values.clone(), into);
+                for value in values {
+                    self.release_temp(value);
+                }
+                self.own(result, kind);
+                Ok(result)
+            }
             _ => Err(format!("there is no method '{name}'")),
         }
     }
@@ -6811,8 +6909,8 @@ impl<'a> Lowerer<'a> {
             Type::List(elem) if holds_flat(elem) || holds_enum(elem) || holds_function(elem) => {
                 self.print_elements(elem, values[0])
             }
-            // a function value is written as its type, which this copy knows
-            Type::Function { .. } => {
+            // a function value or a handle is written as its type, which this copy knows
+            Type::Function { .. } | Type::Handle(_) => {
                 let text = self.fresh();
                 self.push(Inst::StrAddr {
                     dst: text,
@@ -7079,11 +7177,40 @@ fn holds_flat(ty: &Type) -> bool {
     }
 }
 
-/// Returns whether a value of type `ty` is a function value or a list of them, at any depth,
-/// which lowering prints as its type rather than with a runtime printer.
+/// Returns whether a value of type `ty` is or holds a socket or listener, looking through lists,
+/// maps, tuples, the fields of structs, and the values of enums' variants, each struct and enum
+/// once, by its name in `seen`.
+///
+/// For example, `socket`, `list[listener]`, and `option[socket]` do, and `list[str]` does not.
+fn holds_handle(ty: &Type, structs: &Structs, enums: &Enums, seen: &mut HashSet<String>) -> bool {
+    match ty {
+        Type::Handle(_) => true,
+        Type::List(elem) => holds_handle(elem, structs, enums, seen),
+        Type::Map(_, value) => holds_handle(value, structs, enums, seen),
+        Type::Tuple(fields) => fields.iter().any(|f| holds_handle(f, structs, enums, seen)),
+        Type::Struct { .. } => {
+            seen.insert(ty.to_string())
+                && ty
+                    .struct_fields(structs)
+                    .iter()
+                    .any(|(_, f)| holds_handle(f, structs, enums, seen))
+        }
+        Type::Enum { .. } => {
+            seen.insert(ty.to_string())
+                && variants(enums, ty)
+                    .iter()
+                    .flat_map(|(_, fields)| fields)
+                    .any(|f| holds_handle(f, structs, enums, seen))
+        }
+        _ => false,
+    }
+}
+
+/// Returns whether a value of type `ty` is a function value or a handle, or a list of them, at
+/// any depth, which lowering prints as its type rather than with a runtime printer.
 fn holds_function(ty: &Type) -> bool {
     match ty {
-        Type::Function { .. } => true,
+        Type::Function { .. } | Type::Handle(_) => true,
         Type::List(elem) => holds_function(elem),
         _ => false,
     }

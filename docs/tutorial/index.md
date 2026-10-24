@@ -22,6 +22,7 @@ function-values
 input
 modules
 errors
+networking
 ```
 
 ## Your first program

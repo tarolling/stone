@@ -26,6 +26,14 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   standard output, so a script's messages stay out of its output when that is piped into another
   program. Each line is written at once, so with `2>&1` lines appear in the order the program
   wrote them, under both `stone run` and a built program.
+- The `net` module makes TCP connections: `net.connect(host, port)`, `net.listen(host, port)`,
+  and `net.resolve(host)`. A connection is a `socket`, with `send`, `read_line`, `read`,
+  `read_all`, and `close`, and a server a `listener`, with `accept`, `port`, and `close`; both
+  are types a signature can name. Each closes by itself right after the last statement that
+  uses it, at the same point under `stone run` and in a built program. Names are found in
+  `/etc/hosts` and then from the DNS servers in `/etc/resolv.conf`, by stone itself rather than
+  the C library, so both backends agree. `net` is the first builtin module written in stone,
+  which an editor can open from `use net`. TLS is not supported.
 
 ### Changed
 
@@ -43,6 +51,12 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   - Small functions that call no others are inlined, so `bodies[i].drift(dt)` changes the
     struct's fields in place.
   - The fields of a list element are read and written at fixed offsets from where it starts.
+  - Floats stay in the processor's floating-point registers (`xmm` on x86-64, `d` on arm64)
+    instead of moving through general registers for every operation, which makes the `nbody`
+    benchmark more than twice as fast.
+  - A loop reads an element that does not change across its turns, such as `a[i]` in
+    `for k in range(n): s += a[i][k]`, once before it starts, loads where a list's elements are
+    once rather than for every element, and tests whether to go on at the bottom of each turn.
 - **Breaking:** `input()` returns a `result[str, str]`: `ok` of the line, or
   `err("end of input")` once the input is over, instead of `""`, which an empty line also gave.
   Write `input().unwrap()` where a line must be there (after checking `eof()`), `input()?` in a

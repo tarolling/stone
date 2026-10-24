@@ -17,7 +17,8 @@ use stone::checker::{
 };
 use stone::diagnostic::Severity;
 use stone::project::{
-    DEFAULT_ENTRY, Import, Linked, MapSources, SourceMap, Sources, Target, link, link_in,
+    DEFAULT_ENTRY, Import, Linked, MapSources, SourceFile, SourceMap, Sources, Target, link,
+    link_in,
 };
 use stone::span::{FileId, Pos, Span};
 use stone::stdlib::{
@@ -108,7 +109,7 @@ impl Document {
     /// The prelude is not in any program's files, so a span in it has no location here; see
     /// [`Builtins::prelude_location`].
     fn location(&self, span: Span, uri: &Uri) -> Option<Location> {
-        if span.file == FileId::PRELUDE {
+        if span.file == FileId::PRELUDE || self.sources.file(span.file).is_builtin() {
             return None;
         }
         if span.file == self.file {
@@ -747,6 +748,20 @@ impl Builtins {
         Some(Location::new(self.prelude.clone()?, index.range(span)))
     }
 
+    /// Returns where `span`, a span in `file`, a module that is part of stone such as `net`, is
+    /// in that module's file, which the server writes beside the prelude.
+    fn builtin_location(
+        &self,
+        file: &SourceFile,
+        span: Span,
+        encoding: Encoding,
+    ) -> Option<Location> {
+        let (dir, _) = self.prelude.as_ref()?.as_str().rsplit_once('/')?;
+        let uri = format!("{dir}/{}.stn", file.module).parse().ok()?;
+        let index = LineIndex::new(&file.source, encoding);
+        Some(Location::new(uri, index.range(span)))
+    }
+
     /// Returns the location of the builtin module `name` in the heading of its functions.
     fn module_location(&self, name: &str) -> Option<Location> {
         let &(line, start) = self.modules.get(name)?;
@@ -783,10 +798,18 @@ pub fn definition(
         if span.file == FileId::PRELUDE {
             return builtins?.prelude_location(span, doc.encoding);
         }
+        let file = doc.sources.file(span.file);
+        if file.is_builtin() {
+            return builtins?.builtin_location(file, span, doc.encoding);
+        }
         return doc.location(span, uri);
     }
     if let Some(import) = doc.import_at(position) {
         match &import.target {
+            Target::Module(file) if doc.sources.file(*file).is_builtin() => {
+                let start = Span::new(Pos::new(1, 1), Pos::new(1, 1)).in_file(*file);
+                return builtins?.builtin_location(doc.sources.file(*file), start, doc.encoding);
+            }
             Target::Module(file) => {
                 let start = Range::new(Position::new(0, 0), Position::new(0, 0));
                 return Some(Location::new(
@@ -829,8 +852,10 @@ pub fn references(
 /// Returns the range of the name at `position` if it can be renamed.
 pub fn prepare_rename(doc: &Document, position: Position) -> Option<PrepareRenameResponse> {
     let (symbol, span) = doc.symbol_at(position)?;
-    // the prelude's names, such as `some`, belong to the language
-    if doc.analysis.symbols[symbol].span.file == FileId::PRELUDE {
+    // the prelude's names, such as `some`, and those of modules like `net` belong to the
+    // language
+    let file = doc.analysis.symbols[symbol].span.file;
+    if file == FileId::PRELUDE || doc.sources.file(file).is_builtin() {
         return None;
     }
     Some(PrepareRenameResponse::Range(doc.index.range(span)))
@@ -859,8 +884,8 @@ pub fn rename(
         return Err(format!("'{new_name}' is a keyword"));
     }
     let symbol = &doc.analysis.symbols[index];
-    if symbol.span.file == FileId::PRELUDE {
-        return Err(format!("'{}' is a builtin", symbol.name));
+    if symbol.span.file == FileId::PRELUDE || doc.sources.file(symbol.span.file).is_builtin() {
+        return Err(format!("'{}' is a builtin", doc.local_name(symbol)));
     }
     if is_reserved(new_name) {
         return Err(format!("'{new_name}' is a builtin"));
@@ -1271,11 +1296,12 @@ fn method_applies(method: &str, ty: &Type) -> bool {
         Type::Map(..) => "map",
         Type::Enum { name, .. } if name == stone::checker::OPTION => "option",
         Type::Enum { name, .. } if name == stone::checker::RESULT => "result",
+        Type::Handle(handle) => handle.name(),
         _ => return false,
     };
     // the methods of the prelude's traits are on every type that implements them
     match method {
-        "eq" => return kind != "list" && kind != "map",
+        "eq" => return !matches!(kind, "list" | "map" | "socket" | "listener"),
         "cmp" => return matches!(kind, "int" | "float" | "str"),
         "display" => return true,
         _ => {}

@@ -90,6 +90,9 @@ fn write_builtins_reference() -> Option<Uri> {
     let dir = std::env::temp_dir().join(format!("stone-lsp-{}", env!("CARGO_PKG_VERSION")));
     std::fs::create_dir_all(&dir).ok()?;
     replace_file(&dir.join("prelude.stn"), stone::stdlib::PRELUDE)?;
+    for (module, source) in &stone::stdlib::SOURCE_MODULES {
+        replace_file(&dir.join(format!("{module}.stn")), source)?;
+    }
     let path = dir.join("builtins.stn");
     replace_file(&path, &stone::stdlib::builtins_reference())?;
     file_uri(&path)

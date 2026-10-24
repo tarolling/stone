@@ -69,11 +69,22 @@ pub enum Sys {
     Wait4,
     /// Changes a descriptor's flags, which only macOS calls, since Linux's `pipe2` takes them.
     Fcntl,
+    Socket,
+    Connect,
+    Bind,
+    Listen,
+    /// Takes the next connection to a listening socket: `accept4` on Linux, with the flags `x3`,
+    /// and `accept` on macOS, which ignores them.
+    Accept,
+    Getsockname,
+    Setsockopt,
+    Sendto,
+    Recvfrom,
 }
 
 impl Sys {
     /// Every call, in the order their shims are emitted.
-    pub const ALL: [Sys; 29] = [
+    pub const ALL: [Sys; 38] = [
         Sys::Read,
         Sys::Write,
         Sys::Openat,
@@ -103,6 +114,15 @@ impl Sys {
         Sys::Ppoll,
         Sys::Wait4,
         Sys::Fcntl,
+        Sys::Socket,
+        Sys::Connect,
+        Sys::Bind,
+        Sys::Listen,
+        Sys::Accept,
+        Sys::Getsockname,
+        Sys::Setsockopt,
+        Sys::Sendto,
+        Sys::Recvfrom,
     ];
 
     /// Returns the call's Linux system call number, such as 64 for `write`, or `None` if the
@@ -133,6 +153,15 @@ impl Sys {
             Sys::Execve => 221,
             Sys::Ppoll => 73,
             Sys::Wait4 => 260,
+            Sys::Socket => 198,
+            Sys::Bind => 200,
+            Sys::Listen => 201,
+            Sys::Connect => 203,
+            Sys::Getsockname => 204,
+            Sys::Sendto => 206,
+            Sys::Recvfrom => 207,
+            Sys::Setsockopt => 208,
+            Sys::Accept => 242, // accept4
             Sys::Sysctl | Sys::Opendir | Sys::Readdir | Sys::Closedir | Sys::Fcntl => {
                 return None;
             }
@@ -169,6 +198,15 @@ impl Sys {
             Sys::Ppoll => "poll",
             Sys::Wait4 => "wait4",
             Sys::Fcntl => "fcntl",
+            Sys::Socket => "socket",
+            Sys::Connect => "connect",
+            Sys::Bind => "bind",
+            Sys::Listen => "listen",
+            Sys::Accept => "accept",
+            Sys::Getsockname => "getsockname",
+            Sys::Setsockopt => "setsockopt",
+            Sys::Sendto => "sendto",
+            Sys::Recvfrom => "recvfrom",
             Sys::Mremap | Sys::Uname | Sys::Getdents64 => return None,
         })
     }
@@ -788,7 +826,10 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
 ///   each value its kinds say is counted, and queuing enum values on `stone.free_pending` rather
 ///   than recursing into them, so freeing a long chain takes no more stack than freeing one. It
 ///   clobbers only the registers the other free routines do.
-pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator) {
+///
+/// With `handles`, a value whose tag is negative is a socket or listener, whose descriptor it
+/// closes first, through `net::free_handle`, before the tag becomes the queue's link.
+pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, handles: bool) {
     // x19 holds the tag and x20 the kinds while stone.alloc runs
     r#gen.emit("stone.enum_new:");
     push_frame(r#gen, &["x19", "x20"]);
@@ -803,6 +844,14 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator) {
     // x19 holds the value being freed, x20 the kinds of its slots left, and x21 the next slot
     let saved = ["x19", "x20", "x21", "x22"];
     r#gen.emit("stone.free_enum:");
+    if handles {
+        r#gen.emit("\tldr\tx16, [x9]");
+        r#gen.emit("\ttbz\tx16, #63, .Lfree_enum_value");
+        r#gen.emit("\tstr\tx30, [sp, #-16]!");
+        r#gen.emit("\tbl\t.Lfree_handle");
+        r#gen.emit("\tldr\tx30, [sp], #16");
+        r#gen.emit(".Lfree_enum_value:");
+    }
     r#gen.emit("\tadrp\tx16, stone.free_pending");
     r#gen.emit("\tldr\tx17, [x16, :lo12:stone.free_pending]");
     r#gen.emit("\tstr\tx17, [x9]");
@@ -837,6 +886,12 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcmp\tx11, #2");
     r#gen.emit("\tb.eq\t.Lfree_enum_list");
     // an enum value joins the queue
+    if handles {
+        r#gen.emit("\tldr\tx16, [x9]");
+        r#gen.emit("\ttbz\tx16, #63, .Lfree_enum_queue");
+        r#gen.emit("\tbl\t.Lfree_handle");
+        r#gen.emit(".Lfree_enum_queue:");
+    }
     r#gen.emit("\tadrp\tx16, stone.free_pending");
     r#gen.emit("\tldr\tx17, [x16, :lo12:stone.free_pending]");
     r#gen.emit("\tstr\tx17, [x9]");
@@ -860,6 +915,9 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator) {
     pop_frame(r#gen, &saved);
     r#gen.emit(".Lfree_enum_queued:");
     r#gen.emit("\tret");
+    if handles {
+        super::net::free_handle(r#gen);
+    }
 }
 
 /// Emits code that writes the `length` bytes at `label` to stderr, clobbering `x0` to `x2` and

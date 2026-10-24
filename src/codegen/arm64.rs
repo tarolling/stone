@@ -16,13 +16,14 @@ pub mod builtins;
 mod emit;
 pub mod floats;
 pub mod fs;
+pub mod net;
 pub mod process;
 pub mod sort;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
-    Context, LIST_ROUTINES, MAP_ROUTINES, STRING_METHOD_ROUTINES, escape, global_label,
-    immortal_string, variant_statics,
+    Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, STRING_METHOD_ROUTINES, escape,
+    global_label, immortal_string, variant_statics,
 };
 use crate::codegen::{AssemblyGenerator, Os, Target};
 use crate::project::SourceMap;
@@ -120,7 +121,8 @@ impl AssemblyGenerator for Arm64Generator {
             let enums = self.ctx.needs_enums();
             builtins::memory_runtime(self, enums);
             if enums {
-                builtins::enum_runtime(self);
+                let handles = self.ctx.needs_handles();
+                builtins::enum_runtime(self, handles);
             }
         } else if prints {
             // the text print builds
@@ -391,6 +393,11 @@ impl Arm64Generator {
         }
         let mut fs = self.ctx.module_routines("stone.fs_");
         fs.extend(run);
+        fs.extend(
+            NET_ROUTINES
+                .into_iter()
+                .filter(|label| self.ctx.uses(&[label])),
+        );
         if !fs.is_empty() {
             fs::fs_runtime(self, &fs);
         }

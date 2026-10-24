@@ -2,6 +2,7 @@
 
 pub mod fs;
 pub mod math;
+pub mod net;
 pub mod os;
 pub mod random;
 pub mod time;
@@ -50,11 +51,36 @@ pub static MODULES: [BuiltinModule; 5] = [
     },
 ];
 
-/// Returns the builtin module named `name`.
+/// The builtin modules that only stone's own modules written in stone, such as `net`, may use,
+/// which editors and the reference do not list.
+pub static INTERNAL_MODULES: [BuiltinModule; 1] = [BuiltinModule {
+    name: net::SYS_MODULE,
+    doc: net::SYS_MODULE_DOC,
+    functions: &net::SYS_DOCS,
+}];
+
+/// The modules that are part of stone but written in stone, by name with their source, which a
+/// program that uses one is linked with like a module file of its own.
+pub static SOURCE_MODULES: [(&str, &str); 1] = [(net::MODULE, net::SOURCE)];
+
+/// Returns the builtin module named `name`, internal ones included.
 ///
 /// For example, `module("os")` is the `os` module, and `module("util")` is `None`.
 pub fn module(name: &str) -> Option<&'static BuiltinModule> {
-    MODULES.iter().find(|module| module.name == name)
+    MODULES
+        .iter()
+        .chain(&INTERNAL_MODULES)
+        .find(|module| module.name == name)
+}
+
+/// Returns the source of the module written in stone named `name`, if there is one.
+///
+/// For example, `source_module("net")` is the text of `net.stn`.
+pub fn source_module(name: &str) -> Option<&'static str> {
+    SOURCE_MODULES
+        .iter()
+        .find(|(module, _)| *module == name)
+        .map(|(_, source)| *source)
 }
 
 /// Returns the documentation for the function of a builtin module with the linked name `name`.
@@ -148,7 +174,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 38] = [
+pub static METHODS: [&str; 45] = [
     "len",
     "append",
     "pop",
@@ -187,6 +213,24 @@ pub static METHODS: [&str; 38] = [
     "eq",
     "cmp",
     "display",
+    "send",
+    "read_line",
+    "read",
+    "read_all",
+    "accept",
+    "port",
+    "close",
+];
+
+/// The builtin methods of a `socket` or `listener`, which [`METHODS`] lists too.
+pub const HANDLE_METHODS: [&str; 7] = [
+    "send",
+    "read_line",
+    "read",
+    "read_all",
+    "accept",
+    "port",
+    "close",
 ];
 
 /// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
@@ -272,7 +316,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 38] = [
+pub static METHOD_DOCS: [BuiltinDoc; 45] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T] | map[K, V]).len() -> int",
@@ -531,6 +575,52 @@ pub static METHOD_DOCS: [BuiltinDoc; 38] = [
         description: "Returns the text `print` writes for the value, as `str` does, for any \
                       type: every type implements `display`, and a struct whose `impl display` \
                       block says how to write it uses that.",
+    },
+    BuiltinDoc {
+        name: "send",
+        signature: "socket.send(text: str) -> result[int, str]",
+        description: "Sends all of `text` over the connection, giving the number of bytes sent, \
+                      or an error such as `broken pipe` if the other end has closed it.",
+    },
+    BuiltinDoc {
+        name: "read_line",
+        signature: "socket.read_line() -> result[option[str], str]",
+        description: "Waits for the next line from the connection and gives it without its \
+                      `\\n` or `\\r\\n`, or `none` once the other end has closed the connection \
+                      and every line has been read. A last line without a newline is still a \
+                      line.",
+    },
+    BuiltinDoc {
+        name: "read",
+        signature: "socket.read() -> result[str, str]",
+        description: "Waits for data from the connection and gives whatever has arrived, up to \
+                      64 KiB, or `\"\"` once the other end has closed it. A character split \
+                      between two reads comes whole with the second.",
+    },
+    BuiltinDoc {
+        name: "read_all",
+        signature: "socket.read_all() -> result[str, str]",
+        description: "Reads from the connection until the other end closes it, giving \
+                      everything that arrived.",
+    },
+    BuiltinDoc {
+        name: "accept",
+        signature: "listener.accept() -> result[socket, str]",
+        description: "Waits for the next connection to the listener's port and gives a \
+                      socket for it.",
+    },
+    BuiltinDoc {
+        name: "port",
+        signature: "listener.port() -> int",
+        description: "Returns the port the listener waits on, which is the port the system \
+                      picked if `net.listen` was given 0.",
+    },
+    BuiltinDoc {
+        name: "close",
+        signature: "(socket | listener).close()",
+        description: "Closes the connection or stops listening now, rather than once nothing \
+                      refers to it any more. Its methods then give the error `socket is \
+                      closed` or `listener is closed`.",
     },
 ];
 

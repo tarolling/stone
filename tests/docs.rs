@@ -30,6 +30,23 @@ fn builtins_reference_documents_every_builtin() {
 }
 
 #[test]
+fn builtins_reference_documents_every_function_of_the_modules_written_in_stone() {
+    let page = read_doc("reference/builtins.md");
+    for (module, source) in &stone::stdlib::SOURCE_MODULES {
+        for line in source.lines() {
+            let Some(signature) = line.strip_prefix("pub fn ") else {
+                continue;
+            };
+            let signature = format!("{module}.{}", signature.trim_end_matches(':'));
+            assert!(
+                page.contains(&signature),
+                "docs/reference/builtins.md does not mention `{signature}`"
+            );
+        }
+    }
+}
+
+#[test]
 fn syntax_reference_lists_every_keyword() {
     let page = read_doc("reference/syntax.md");
     for keyword in RESERVED_KEYWORDS {

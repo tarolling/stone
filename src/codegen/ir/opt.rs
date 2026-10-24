@@ -1,25 +1,29 @@
 //! Optimizations over lowered IR that remove work the lowering of each statement on its own
-//! repeats: checking an index into a list again, and making a list unique again.
+//! repeats: checking an index into a list again, reading an element again, and making a list
+//! unique again.
 //!
 //! Lowering checks every index and makes every list it changes unique, statement by statement, so
 //! `bodies[i].vx -= dx * m` followed by `bodies[i].vy -= dy * m` checks `i` and the uniqueness of
-//! `bodies` twice, and does it again on every turn of a loop. [`optimize`] runs three passes over
+//! `bodies` twice, and does it again on every turn of a loop. [`optimize`] runs these passes over
 //! each function:
 //!
 //! 1. A `list_unique` of a variable inside a loop that cannot make the list shared again moves
 //!    before the loop, as a `list_unique_or_null`, since the variable may be null when the loop
 //!    never runs. Copying a shared list early is invisible, since lists are values.
-//! 2. An `element_slot` whose list and index the loop never changes, which every turn runs before
-//!    anything that could fail or call out, is checked once before the loop, behind a copy of the
-//!    loop's test, so it fails exactly when the first turn would, and not at all for a loop that
-//!    never runs. The checks inside the loop become copies of its result.
-//! 3. Within a function, an `element_slot` of a list and an index already checked on every path to
-//!    it becomes a copy of the earlier result, and a `list_unique` of a list already unique is
-//!    dropped, as long as nothing between them could change the list's length or share it.
-//!
-//! Then a slot that is a constant past another, such as a field of an element at
-//! `add v4, 3`, is read and written as an offset from it (`list_get v0, v4 + 3`), and work whose
-//! result nothing reads is dropped.
+//! 2. An `element_slot`, or a `list_load` in a loop that changes no list, whose list and index the
+//!    loop never changes, and which every turn runs before anything that could fail or call out,
+//!    runs once before the loop, behind a copy of the loop's test, so it fails exactly when the
+//!    first turn would, and not at all for a loop that never runs. The ones inside the loop
+//!    become copies of its result.
+//! 3. Within a function, an `element_slot` or `list_load` already done on every path to it
+//!    becomes a copy of the earlier result, and a `list_unique` of a list already unique is
+//!    dropped, as long as nothing between them could change the list or share it.
+//! 4. A slot that is a constant past another, such as a field of an element at `add v4, 3`, is
+//!    read and written as an offset from it (`list_get v0, v4 + 3`), and work whose result
+//!    nothing reads is dropped.
+//! 5. Each loop tests at the bottom as well as on entry (see [`rotate_loops`]), and then a list
+//!    the loop reads and writes without moving its elements has its elements' address loaded
+//!    once on the way in (see [`hoist_data`]).
 //!
 //! The IR is not SSA, so every fact is about vregs and dies when any vreg it names is written.
 
@@ -34,6 +38,8 @@ pub fn optimize(program: &mut Program) {
         eliminate(function);
         fold_offsets(function);
         remove_dead(function);
+        rotate_loops(function);
+        hoist_data(function);
     }
 }
 
@@ -49,6 +55,12 @@ enum Fact {
     },
     /// Nothing but this vreg refers to its list.
     Unique(VReg),
+    /// `value` holds element `index` of `list`, already checked and read.
+    Loaded {
+        list: VReg,
+        index: Operand,
+        value: VReg,
+    },
 }
 
 impl Fact {
@@ -58,6 +70,9 @@ impl Fact {
                 list, index, slot, ..
             } => *list == reg || *slot == reg || *index == Operand::Reg(reg),
             Fact::Unique(list) => *list == reg,
+            Fact::Loaded { list, index, value } => {
+                *list == reg || *value == reg || *index == Operand::Reg(reg)
+            }
         }
     }
 }
@@ -76,6 +91,21 @@ fn is_unique_of_itself(inst: &Inst) -> Option<VReg> {
 /// may share any list, since its vreg may hold the same list as another. Making a list unique
 /// keeps what is known of its elements, since a copy has the same length.
 fn transfer(facts: &mut HashSet<Fact>, inst: &Inst) {
+    // what was read from a list may have changed, or been freed
+    let changes_elements = matches!(
+        inst,
+        Inst::ListStore { .. }
+            | Inst::ListSet { .. }
+            | Inst::DataSet { .. }
+            | Inst::ListInit { .. }
+            | Inst::Packed { .. }
+            | Inst::FieldInit { .. }
+            | Inst::ListUnique { .. }
+            | Inst::Release { .. }
+    );
+    if changes_elements {
+        facts.retain(|fact| !matches!(fact, Fact::Loaded { .. }));
+    }
     match inst {
         Inst::Call { .. } => facts.clear(),
         Inst::Retain { .. } => facts.retain(|fact| !matches!(fact, Fact::Unique(_))),
@@ -108,6 +138,32 @@ fn transfer(facts: &mut HashSet<Fact>, inst: &Inst) {
             slot: *dst,
         });
     }
+    if let Inst::ListLoad {
+        dst,
+        list: Operand::Reg(list),
+        index,
+    } = inst
+        && dst != list
+        && *index != Operand::Reg(*dst)
+    {
+        facts.insert(Fact::Loaded {
+            list: *list,
+            index: *index,
+            value: *dst,
+        });
+    }
+}
+
+/// Returns the value an earlier read of the same element left in `facts`, if any.
+fn loaded_value(facts: &HashSet<Fact>, list: VReg, index: Operand) -> Option<VReg> {
+    facts.iter().find_map(|fact| match fact {
+        Fact::Loaded {
+            list: l,
+            index: i,
+            value,
+        } if *l == list && *i == index => Some(*value),
+        _ => None,
+    })
 }
 
 /// Returns the slot an earlier check of the same element left in `facts`, if any.
@@ -204,6 +260,21 @@ fn eliminate(function: &mut Function) {
                         width,
                     },
                 },
+                Inst::ListLoad {
+                    dst,
+                    list: Operand::Reg(list),
+                    index,
+                } => match loaded_value(&facts, list, index) {
+                    Some(value) => Inst::Copy {
+                        dst,
+                        src: Operand::Reg(value),
+                    },
+                    None => Inst::ListLoad {
+                        dst,
+                        list: Operand::Reg(list),
+                        index,
+                    },
+                },
                 // the list is already unique, so this would do nothing
                 inst if is_unique_of_itself(&inst)
                     .is_some_and(|list| facts.contains(&Fact::Unique(list))) =>
@@ -279,6 +350,7 @@ fn is_removable(inst: &Inst) -> bool {
         | Inst::IntToFloat { .. }
         | Inst::ListLen { .. }
         | Inst::ListGet { .. }
+        | Inst::DataGet { .. }
         | Inst::ListData { .. }
         | Inst::StrAddr { .. }
         | Inst::VariantStatic { .. }
@@ -520,6 +592,175 @@ fn hoist_unique(function: &mut Function) -> bool {
     false
 }
 
+/// Copies the test of each loop whose header does nothing but test to the end of each block that
+/// jumps back to it, so a turn of the loop takes one branch, back to its first block, rather than
+/// a jump to the test and a branch past it, as gcc lays loops out. The header then runs only on
+/// entry.
+///
+/// For example, `b1: br_lt v2, v4 -> b2, b3` with `b2` ending in `jmp b1` becomes `b2` ending in
+/// `br_lt v2, v4 -> b2, b3`.
+fn rotate_loops(function: &mut Function) {
+    let preds = predecessors(function);
+    for l in loops(function, &preds) {
+        let header = &function.blocks[l.header];
+        let tests_only = header.insts.len() <= 4 && header.insts.iter().all(is_pure);
+        let leaves = match &header.term {
+            Terminator::Branch {
+                then, otherwise, ..
+            }
+            | Terminator::CmpBranch {
+                then, otherwise, ..
+            } => l.body[then.0] != l.body[otherwise.0],
+            _ => false,
+        };
+        if !tests_only || !leaves {
+            continue;
+        }
+        let (insts, spans, term, term_span) = (
+            header.insts.clone(),
+            header.spans.clone(),
+            header.term.clone(),
+            header.term_span,
+        );
+        for &latch in &preds[l.header] {
+            let block = &mut function.blocks[latch];
+            if !l.body[latch] || block.term != Terminator::Jump(BlockId(l.header)) {
+                continue;
+            }
+            block.insts.extend(insts.iter().cloned());
+            block.spans.extend(spans.iter().copied());
+            block.term = term.clone();
+            block.term_span = term_span;
+        }
+    }
+}
+
+/// Loads, once on the way into each loop that [`rotate_loops`] rotated, the address of the
+/// elements of each list the loop reads or writes at slots known to be in range, and reads and
+/// writes them through it (`data_get`, `data_set`), rather than reloading it from the list for
+/// every element.
+///
+/// The address stays right as long as the loop never writes the variable holding the list,
+/// calls nothing (appending, the only way a list's elements move, is a call), makes no list
+/// unique (which may copy it), and releases nothing (which could free it). A new block on the
+/// loop's one way in loads the addresses, which after rotation runs once each time the loop
+/// starts, and only if it runs at all.
+fn hoist_data(function: &mut Function) {
+    let preds = predecessors(function);
+    for l in loops(function, &preds) {
+        // the one way in, which a rotated loop takes once each time it starts
+        let outside: Vec<usize> = preds[l.header]
+            .iter()
+            .copied()
+            .filter(|p| !l.body[*p])
+            .collect();
+        let [before] = outside[..] else {
+            continue;
+        };
+        let entry = BlockId(l.header);
+        let moves = l.insts(function).any(|inst| {
+            matches!(
+                inst,
+                Inst::Call { .. } | Inst::ListUnique { .. } | Inst::Release { .. }
+            )
+        });
+        if moves {
+            continue;
+        }
+        let mut lists: Vec<VReg> = Vec::new();
+        for inst in l.insts(function) {
+            if let Inst::ListGet {
+                list: Operand::Reg(list),
+                ..
+            }
+            | Inst::ListSet {
+                list: Operand::Reg(list),
+                ..
+            } = inst
+                && !lists.contains(list)
+                && !l.writes(function, *list)
+                && !l.insts(function).any(|inst| inst.defs().contains(list))
+            {
+                lists.push(*list);
+            }
+        }
+        if lists.is_empty() {
+            continue;
+        }
+        let mut addresses = HashMap::new();
+        let mut insts = Vec::new();
+        for &list in &lists {
+            let data = VReg(function.vreg_count);
+            function.vreg_count += 1;
+            addresses.insert(list, data);
+            insts.push(Inst::ListData {
+                dst: data,
+                list: Operand::Reg(list),
+            });
+        }
+        for b in l.blocks().collect::<Vec<_>>() {
+            for inst in &mut function.blocks[b].insts {
+                *inst = match inst.clone() {
+                    Inst::ListGet {
+                        dst,
+                        list: Operand::Reg(list),
+                        index,
+                        offset,
+                    } if addresses.contains_key(&list) => Inst::DataGet {
+                        dst,
+                        data: Operand::Reg(addresses[&list]),
+                        index,
+                        offset,
+                    },
+                    Inst::ListSet {
+                        list: Operand::Reg(list),
+                        index,
+                        value,
+                        offset,
+                    } if addresses.contains_key(&list) => Inst::DataSet {
+                        data: Operand::Reg(addresses[&list]),
+                        index,
+                        value,
+                        offset,
+                    },
+                    inst => inst,
+                };
+            }
+        }
+        // it runs once each time the loop starts, one level outside it
+        let span = function.blocks[before].term_span;
+        let depth = function.blocks[l.header].loop_depth.saturating_sub(1);
+        let way_in = BlockId(function.blocks.len());
+        function.blocks.push(Block {
+            spans: vec![span; insts.len()],
+            insts,
+            term: Terminator::Jump(entry),
+            term_span: span,
+            loop_depth: depth,
+        });
+        let retarget = |b: &mut BlockId| {
+            if *b == entry {
+                *b = way_in;
+            }
+        };
+        match &mut function.blocks[before].term {
+            Terminator::Jump(target) => retarget(target),
+            Terminator::Branch {
+                then, otherwise, ..
+            }
+            | Terminator::CmpBranch {
+                then, otherwise, ..
+            } => {
+                retarget(then);
+                retarget(otherwise);
+            }
+            Terminator::Return(_) | Terminator::Fail(..) => {
+                unreachable!("the way in goes to the loop")
+            }
+        }
+    }
+}
+
 /// Returns whether `inst` may stop the program or call out, which a check must not move before.
 fn may_fail(inst: &Inst) -> bool {
     match inst {
@@ -555,6 +796,7 @@ fn is_pure(inst: &Inst) -> bool {
             inst,
             Inst::StoreGlobal { .. }
                 | Inst::ListSet { .. }
+                | Inst::DataSet { .. }
                 | Inst::ListInit { .. }
                 | Inst::FieldInit { .. }
                 | Inst::Retain { .. }
@@ -569,9 +811,11 @@ fn is_pure(inst: &Inst) -> bool {
 ///
 /// A check qualifies when the loop calls nothing (so no list changes length), never writes its
 /// list (other than to make it unique, which keeps its length) or its index, and every turn
-/// reaches it from the loop's test without passing anything that could fail first. A new block
-/// runs the checks between a copy of the test, for the loop's first turn, and the loop, and the
-/// checks in the loop become copies of their results there.
+/// reaches it from the loop's test without passing anything that could fail first. A checked read
+/// of an element (`list_load`) qualifies the same way in a loop that changes no list, since it
+/// then reads the same value every turn, as `a[i]` does in `for k in range(n): s += a[i][k]`. A
+/// new block runs the checks between a copy of the test, for the loop's first turn, and the loop,
+/// and the checks in the loop become copies of their results there.
 fn hoist_checks(function: &mut Function) -> bool {
     let preds = predecessors(function);
     for l in loops(function, &preds) {
@@ -605,6 +849,18 @@ fn hoist_checks(function: &mut Function) -> bool {
             Operand::Reg(reg) => !l.writes(function, *reg),
             Operand::Imm(_) => true,
         };
+        // an element read in a loop that changes no list reads the same value every turn
+        let stores = l.insts(function).any(|inst| {
+            matches!(
+                inst,
+                Inst::ListStore { .. }
+                    | Inst::ListSet { .. }
+                    | Inst::DataSet { .. }
+                    | Inst::ListInit { .. }
+                    | Inst::Packed { .. }
+                    | Inst::FieldInit { .. }
+            )
+        });
         // the checks every turn makes before anything that could fail, by block and position
         let mut hoisted: Vec<(usize, usize)> = Vec::new();
         let mut block = entry;
@@ -613,6 +869,14 @@ fn hoist_checks(function: &mut Function) -> bool {
                 match inst {
                     Inst::ElementSlot { list, index, .. }
                         if matches!(list, Operand::Reg(_))
+                            && invariant(list)
+                            && invariant(index) =>
+                    {
+                        hoisted.push((block, i));
+                    }
+                    Inst::ListLoad { list, index, .. }
+                        if !stores
+                            && matches!(list, Operand::Reg(_))
                             && invariant(list)
                             && invariant(index) =>
                     {
@@ -639,23 +903,16 @@ fn hoist_checks(function: &mut Function) -> bool {
         let mut checks = Vec::new();
         let mut spans = Vec::new();
         for &(b, i) in &hoisted {
-            let Inst::ElementSlot {
-                dst,
-                list,
-                index,
-                width,
-            } = function.blocks[b].insts[i].clone()
-            else {
-                unreachable!("only checks are hoisted");
-            };
             let slot = VReg(function.vreg_count);
             function.vreg_count += 1;
-            checks.push(Inst::ElementSlot {
-                dst: slot,
-                list,
-                index,
-                width,
-            });
+            let mut check = function.blocks[b].insts[i].clone();
+            let dst = match &mut check {
+                Inst::ElementSlot { dst, .. } | Inst::ListLoad { dst, .. } => {
+                    std::mem::replace(dst, slot)
+                }
+                _ => unreachable!("only checks and checked reads are hoisted"),
+            };
+            checks.push(check);
             spans.push(function.blocks[b].spans[i]);
             function.blocks[b].insts[i] = Inst::Copy {
                 dst,
@@ -845,6 +1102,68 @@ mod tests {
         let text = f.to_string();
         assert!(text.contains("list_get v0, v2 + 1"), "{text}");
         assert!(!text.contains(" = add "), "{text}");
+    }
+
+    #[test]
+    fn a_loop_tests_again_at_the_end_of_each_turn() {
+        let f = optimized(
+            "fn f(n: int) -> int:\n    t = 0\n    for i in range(n):\n        t += i\n    ret t\n",
+            "f",
+        );
+        // the body branches back to itself instead of jumping to the header
+        let body = f
+            .blocks
+            .iter()
+            .enumerate()
+            .find(|(_, block)| block.loop_depth > 0 && !block.insts.is_empty())
+            .unwrap();
+        assert!(
+            matches!(&body.1.term, Terminator::CmpBranch { then, .. } if then.0 == body.0),
+            "{f}"
+        );
+    }
+
+    #[test]
+    fn an_invariant_row_is_read_once_before_the_loop() {
+        let f = optimized(
+            "fn f(a: list[list[int]], b: list[list[int]], i: int, j: int, n: int) -> int:\n    \
+             s = 0\n    for k in range(n):\n        s += a[i][k] * b[k][j]\n    ret s\n",
+            "f",
+        );
+        let loads = |inst: &Inst| matches!(inst, Inst::ListLoad { .. });
+        // a[i] once before the loop; a[i][k], b[k], and b[k][j] each turn
+        assert_eq!(count(&f, loads), (3, 1), "{f}");
+    }
+
+    #[test]
+    fn a_row_read_twice_is_read_once_unless_a_store_comes_between() {
+        let twice = optimized(
+            "fn f(a: list[list[int]], i: int) -> int:\n    ret a[i][0] + a[i][1]\n",
+            "f",
+        );
+        let loads = |inst: &Inst| matches!(inst, Inst::ListLoad { .. });
+        assert_eq!(count(&twice, loads), (0, 3), "{twice}");
+        let stored = optimized(
+            "fn f(a: list[list[int]], i: int) -> list[list[int]]:\n    \
+             a[i][0] = a[i][1]\n    a[i][1] = a[i][0]\n    ret a\n",
+            "f",
+        );
+        assert!(count(&stored, loads).1 >= 2, "{stored}");
+    }
+
+    #[test]
+    fn a_loop_reads_elements_through_their_address_loaded_on_the_way_in() {
+        let f = optimized(
+            &format!(
+                "{POINT}fn f(ps: list[P], n: int) -> list[P]:\n    for i in range(n):\n        \
+                 ps[i].x += ps[i].y\n    ret ps\n"
+            ),
+            "f",
+        );
+        let data = |inst: &Inst| matches!(inst, Inst::ListData { .. });
+        let get = |inst: &Inst| matches!(inst, Inst::ListGet { .. } | Inst::ListSet { .. });
+        assert_eq!(count(&f, data), (0, 1), "{f}");
+        assert_eq!(count(&f, get).0, 0, "{f}");
     }
 
     #[test]

@@ -153,7 +153,8 @@ impl RcKind {
             Type::Str => Some(RcKind::Str),
             // a map is a list of its entries
             Type::List(_) | Type::Map(..) => Some(RcKind::List),
-            Type::Enum { .. } => Some(RcKind::Enum),
+            // a handle is laid out as an enum value whose tag says what it is
+            Type::Enum { .. } | Type::Handle(_) => Some(RcKind::Enum),
             _ => None,
         }
     }
@@ -363,6 +364,23 @@ pub enum Inst {
     },
     /// The address of the first element of a list.
     ListData { dst: VReg, list: Operand },
+    /// `dst = data[index + offset]`, an element of the list whose first element is at `data`,
+    /// from [`Inst::ListData`], at a slot already known to be in range. Only the optimizer makes
+    /// it, for a list a loop reads without changing where its elements are.
+    DataGet {
+        dst: VReg,
+        data: Operand,
+        index: Operand,
+        offset: usize,
+    },
+    /// `data[index + offset] = value`, the store [`Inst::DataGet`] pairs with, into a list whose
+    /// elements are not counted.
+    DataSet {
+        data: Operand,
+        index: Operand,
+        value: Operand,
+        offset: usize,
+    },
     /// Computes `kernel` for the elements of lists two at a time, with packed (SIMD) instructions,
     /// on floats if `float` and ints otherwise, writing each result to the same position of the
     /// list whose elements start at `out`. It starts at position 0, does every whole pair below
@@ -468,6 +486,7 @@ impl Inst {
             | Inst::ListLoad { dst, .. }
             | Inst::ListGet { dst, .. }
             | Inst::ListData { dst, .. }
+            | Inst::DataGet { dst, .. }
             | Inst::ElementSlot { dst, .. }
             | Inst::Packed { done: dst, .. }
             | Inst::ListUnique { dst, .. }
@@ -482,6 +501,7 @@ impl Inst {
             Inst::StoreGlobal { .. }
             | Inst::ListInit { .. }
             | Inst::ListSet { .. }
+            | Inst::DataSet { .. }
             | Inst::FieldInit { .. }
             | Inst::Retain { .. }
             | Inst::Release { .. }
@@ -523,12 +543,21 @@ impl Inst {
             }
             Inst::ListLoad { list, index, .. }
             | Inst::ListGet { list, index, .. }
-            | Inst::ElementSlot { list, index, .. } => vec![*list, *index],
+            | Inst::ElementSlot { list, index, .. }
+            | Inst::DataGet {
+                data: list, index, ..
+            } => vec![*list, *index],
             Inst::ListStore {
                 list, index, value, ..
             }
             | Inst::ListSet {
                 list, index, value, ..
+            }
+            | Inst::DataSet {
+                data: list,
+                index,
+                value,
+                ..
             } => vec![*list, *index, *value],
             Inst::ListInit { list, value, .. } => vec![*list, *value],
             // the function a value calls is read after the arguments
@@ -780,6 +809,18 @@ impl fmt::Display for Inst {
                 offset,
             } => write!(f, "list_set {list}, {index}{}, {value}", plus(*offset)),
             Inst::ListData { dst, list } => write!(f, "{dst} = list_data {list}"),
+            Inst::DataGet {
+                dst,
+                data,
+                index,
+                offset,
+            } => write!(f, "{dst} = data_get {data}, {index}{}", plus(*offset)),
+            Inst::DataSet {
+                data,
+                index,
+                value,
+                offset,
+            } => write!(f, "data_set {data}, {index}{}, {value}", plus(*offset)),
             Inst::ElementSlot {
                 dst,
                 list,

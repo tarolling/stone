@@ -30,7 +30,8 @@ use crate::ast::{
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::{
-    MAX_ELEMENT_VALUES, METHODS, OUTPUT, changes_receiver, is_builtin, is_reserved, prelude_method,
+    HANDLE_METHODS, MAX_ELEMENT_VALUES, METHODS, OUTPUT, changes_receiver, is_builtin, is_reserved,
+    prelude_method,
 };
 
 #[cfg(test)]
@@ -69,6 +70,36 @@ pub enum Type {
         params: Vec<Type>,
         ret: Box<Type>,
     },
+    /// A handle on something the system holds, such as a connection, which closes once nothing
+    /// refers to it.
+    Handle(Handle),
+}
+
+/// What a [`Type::Handle`] holds on to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Handle {
+    /// A TCP connection, which `net.connect` and `listener.accept()` make.
+    Socket,
+    /// A TCP port waiting for connections, which `net.listen` makes.
+    Listener,
+}
+
+impl Handle {
+    /// Every kind of handle.
+    pub const ALL: [Handle; 2] = [Handle::Socket, Handle::Listener];
+
+    /// Returns the name a signature writes this type by, such as `socket`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Handle::Socket => "socket",
+            Handle::Listener => "listener",
+        }
+    }
+
+    /// Returns the handle type a signature names by `name`, if it names one.
+    pub fn named(name: &str) -> Option<Handle> {
+        Handle::ALL.into_iter().find(|h| h.name() == name)
+    }
 }
 
 impl Type {
@@ -146,7 +177,9 @@ impl Type {
                 params: each(params),
                 ret: Box::new(ret.substitute(substitution)),
             },
-            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Unit => self.clone(),
+            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Unit | Type::Handle(_) => {
+                self.clone()
+            }
         }
     }
 
@@ -215,6 +248,7 @@ impl Display for Type {
                     _ => write!(f, "fn({}) -> {ret}", params.join(", ")),
                 }
             }
+            Type::Handle(handle) => write!(f, "{}", handle.name()),
         }
     }
 }
@@ -665,6 +699,7 @@ enum Ty {
     /// A function's type: the types of its parameters, and the type it returns, which is
     /// [`Ty::Unit`] for one that returns no value.
     Fn(Vec<Ty>, Box<Ty>),
+    Handle(Handle),
 }
 
 /// Returns the builtin type a trait's `impl` block names by `key`, such as `int`, if it is one.
@@ -689,6 +724,33 @@ fn ty_key(ty: &Ty) -> Option<String> {
         Ty::Str => Some("str".to_string()),
         _ => None,
     }
+}
+
+/// Returns what the method `name` of a socket or listener takes and gives: the handle it is
+/// called on (`None` for either), the types of its arguments, and the type it returns, or `None`
+/// if `name` is not such a method.
+///
+/// For example, `send` is called on a `socket` with a `str` and returns `result[int, str]`.
+fn handle_method(name: &str) -> Option<(Option<Handle>, Vec<Ty>, Ty)> {
+    let result = |value| Ty::Enum(RESULT.to_string(), vec![value, Ty::Str]);
+    let text = || result(Ty::Str);
+    Some(match name {
+        "send" => (Some(Handle::Socket), vec![Ty::Str], result(Ty::Int)),
+        "read_line" => (
+            Some(Handle::Socket),
+            vec![],
+            result(Ty::Enum(OPTION.to_string(), vec![Ty::Str])),
+        ),
+        "read" | "read_all" => (Some(Handle::Socket), vec![], text()),
+        "accept" => (
+            Some(Handle::Listener),
+            vec![],
+            result(Ty::Handle(Handle::Socket)),
+        ),
+        "port" => (Some(Handle::Listener), vec![], Ty::Int),
+        "close" => (None, vec![], Ty::Unit),
+        _ => return None,
+    })
 }
 
 /// A requirement that a type turn out to be one of a few kinds, checked once inference is done
@@ -826,6 +888,7 @@ enum Kind {
     /// A type parameter, which no constraint admits, since it may be any type.
     Param,
     Function,
+    Handle,
 }
 
 impl Kind {
@@ -843,6 +906,7 @@ impl Kind {
             Ty::Struct(..) => Some(Kind::Struct),
             Ty::Param(_) => Some(Kind::Param),
             Ty::Fn(..) => Some(Kind::Function),
+            Ty::Handle(_) => Some(Kind::Handle),
             Ty::Var(_) => None,
         }
     }
@@ -858,7 +922,7 @@ const CONVERTIBLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
 const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
 /// The names of the types built into the language, which no enum or struct may take.
 const BUILTIN_TYPES: &[&str] = &[
-    "int", "float", "bool", "str", "list", "tuple", OPTION, RESULT, "Self",
+    "int", "float", "bool", "str", "list", "tuple", OPTION, RESULT, "Self", "socket", "listener",
 ];
 /// The message for a map key of another kind.
 const MAP_KEY: &str = "a map key must be int, str, or bool, found {}";
@@ -1469,6 +1533,7 @@ impl Inference {
                 Some(bound) => self.show(&bound.default()),
                 None => "unknown".to_string(),
             },
+            Ty::Handle(handle) => handle.name().to_string(),
         }
     }
 
@@ -3401,6 +3466,12 @@ impl Inference {
                         }
                     };
                 }
+                if let Some(handle) = Handle::named(name) {
+                    if !args.is_empty() {
+                        errors.push((annotation.span, format!("'{name}' takes no types")));
+                    }
+                    return Ty::Handle(handle);
+                }
                 if let Some(info) = self.traits.get(name) {
                     let symbol = info.symbol;
                     self.add_reference(annotation.span, symbol);
@@ -4875,6 +4946,26 @@ impl Inference {
         let name = &deferred.name;
         let (owner, type_args) = match self.shallow(&deferred.value_ty) {
             Ty::Struct(owner, args) => (owner, args),
+            ty @ Ty::Handle(_) if handle_method(name).is_some() => {
+                let ret = self.check_handle_method(
+                    deferred.call,
+                    (&ty, deferred.receiver.span),
+                    name,
+                    &deferred.args,
+                );
+                if ret == Ty::Unit && !deferred.statement {
+                    self.error(
+                        deferred.call,
+                        format!(
+                            "'{name}' returns no value, so it can only be called as a statement \
+                             of its own"
+                        ),
+                    );
+                    return;
+                }
+                self.expect(&ret, &deferred.result, deferred.call);
+                return;
+            }
             ty if ty_key(&ty).is_some_and(|key| self.struct_methods.contains_key(&key)) => {
                 (ty_key(&ty).unwrap_or_default(), vec![])
             }
@@ -5819,7 +5910,7 @@ impl Inference {
                 let key = ty_key(&ty).unwrap_or_default();
                 return self.infer_struct_method(call, func, receiver, (&key, &[]), name, args);
             }
-            Ty::Var(_) if !METHODS.contains(&name) => {
+            Ty::Var(_) if !METHODS.contains(&name) || HANDLE_METHODS.contains(&name) => {
                 // as a global a function checked before the global's assignment reads, which
                 // makes it a struct
                 let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
@@ -6141,6 +6232,14 @@ impl Inference {
                 }
                 result
             }
+            _ if handle_method(name).is_some() => {
+                let arg_spans: Vec<(Ty, Span)> = arg_types
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().map(|a| a.span))
+                    .collect();
+                self.check_handle_method(call.span, (&receiver_ty, receiver.span), name, &arg_spans)
+            }
             _ => {
                 // the name is the last token of `func`
                 let end = func.span.end;
@@ -6151,6 +6250,37 @@ impl Inference {
                 self.fresh()
             }
         }
+    }
+
+    /// Checks a call of the method `name` of a socket or listener, given the receiver's type and
+    /// span and each argument's, and returns the call's type.
+    fn check_handle_method(
+        &mut self,
+        call: Span,
+        (receiver_ty, receiver): (&Ty, Span),
+        name: &str,
+        args: &[(Ty, Span)],
+    ) -> Ty {
+        let Some((owner, params, ret)) = handle_method(name) else {
+            return self.fresh();
+        };
+        match owner {
+            Some(handle) => self.expect(&Ty::Handle(handle), receiver_ty, receiver),
+            None => self.require(
+                receiver_ty.clone(),
+                &[Kind::Handle],
+                receiver,
+                "'close' needs a socket or listener, found {}",
+            ),
+        }
+        if args.len() == params.len() {
+            for ((ty, span), param) in args.iter().zip(&params) {
+                self.expect(param, ty, *span);
+            }
+        } else {
+            self.arity_error(call, name, &params.len().to_string(), args.len());
+        }
+        ret
     }
 
     fn infer_builtin(&mut self, call: &Expr, name: &str, args: &[Expr], arg_types: &[Ty]) -> Ty {
@@ -6225,6 +6355,28 @@ impl Inference {
                     RESULT.to_string(),
                     vec![Ty::Struct(OUTPUT.to_string(), vec![]), Ty::Str],
                 )
+            }
+            "net_sys.connect" | "net_sys.listen" | "net_sys.exchange" => {
+                let bytes = Ty::List(Box::new(Ty::Int));
+                let params = match name {
+                    "net_sys.exchange" => {
+                        vec![bytes.clone(), Ty::Int, Ty::Str, bytes.clone(), Ty::Int]
+                    }
+                    _ => vec![bytes.clone(), Ty::Int, Ty::Str],
+                };
+                if args.len() == params.len() {
+                    for ((arg, ty), param) in args.iter().zip(arg_types).zip(&params) {
+                        self.expect(param, ty, arg.span);
+                    }
+                } else {
+                    self.arity_error(call.span, name, &params.len().to_string(), args.len());
+                }
+                let value = match name {
+                    "net_sys.connect" => Ty::Handle(Handle::Socket),
+                    "net_sys.listen" => Ty::Handle(Handle::Listener),
+                    _ => bytes,
+                };
+                Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
             }
             "fs.read" | "fs.read_lines" | "fs.list_dir" | "fs.exists" | "fs.remove"
             | "fs.make_dir" | "fs.write" | "fs.append" => {
@@ -6398,7 +6550,7 @@ impl Inference {
             Ty::Var(_) => {
                 self.unify(&ty, &Ty::Int);
             }
-            Ty::List(_) | Ty::Map(..) | Ty::Unit | Ty::Fn(..) => {
+            Ty::List(_) | Ty::Map(..) | Ty::Unit | Ty::Fn(..) | Ty::Handle(_) => {
                 let message = format!("{what} cannot compare {}", self.show(&ty));
                 self.error(span, message);
             }
@@ -6437,7 +6589,7 @@ impl Inference {
             // a struct that implements `eq` compares however it says
             Ty::Struct(name, _) if self.impls.contains_key(&(EQ.to_string(), name.clone())) => None,
             // a type parameter may be a list or a map
-            ty @ (Ty::List(_) | Ty::Map(..) | Ty::Param(_) | Ty::Fn(..)) => {
+            ty @ (Ty::List(_) | Ty::Map(..) | Ty::Param(_) | Ty::Fn(..) | Ty::Handle(_)) => {
                 Some(Uncomparable { ty, field: None })
             }
             Ty::Tuple(fields) => fields
@@ -6931,7 +7083,8 @@ impl Inference {
                     | Kind::Enum
                     | Kind::Struct
                     | Kind::Param
-                    | Kind::Function => continue,
+                    | Kind::Function
+                    | Kind::Handle => continue,
                 };
                 self.unify(&ty, &default);
                 continue;
@@ -7138,6 +7291,7 @@ impl Inference {
                 params: params.iter().map(|p| self.finalize(p)).collect(),
                 ret: Box::new(self.finalize(&ret)),
             },
+            Ty::Handle(handle) => Type::Handle(handle),
         }
     }
 

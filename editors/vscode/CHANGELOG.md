@@ -16,6 +16,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   named as a value hovers, goes to its definition, and is found by references and rename like a
   call of it. Completion after a list and a `.` offers `map`, `filter`, `any`, `all`,
   `sort_by_key`, `min_by_key`, and `max_by_key`.
+- The `net` module: going to the definition of `net` or one of its functions, such as
+  `net.connect`, opens the module's stone source, which the server writes beside the prelude,
+  and its names cannot be renamed. Completion after a `socket` or `listener` and a `.` offers
+  their methods, and `socket` and `listener` are highlighted as types in signatures.
 
 ## [0.3.3] - 2026-10-21
 

@@ -77,7 +77,7 @@ pub static DOCS: [BuiltinDoc; 8] = [
 
 /// The reason an error gives for each error number that Linux and macOS share, as
 /// `strerror` words it, in lowercase.
-pub const COMMON_ERRORS: [(i64, &str); 19] = [
+pub const COMMON_ERRORS: [(i64, &str); 20] = [
     (1, "operation not permitted"),
     (2, "no such file or directory"),
     (5, "input/output error"),
@@ -97,22 +97,45 @@ pub const COMMON_ERRORS: [(i64, &str); 19] = [
     (27, "file too large"),
     (28, "no space left on device"),
     (30, "read-only file system"),
+    (32, "broken pipe"),
 ];
 
 /// The reasons for error numbers that only Linux uses.
-pub const LINUX_ERRORS: [(i64, &str); 5] = [
+pub const LINUX_ERRORS: [(i64, &str); 16] = [
     (11, "resource temporarily unavailable"),
     (36, "file name too long"),
     (39, "directory not empty"),
     (40, "too many levels of symbolic links"),
+    (97, "address family not supported"),
+    (98, "address already in use"),
+    (99, "cannot assign requested address"),
+    (100, "network is down"),
+    (101, "network is unreachable"),
+    (103, "connection aborted"),
+    (104, "connection reset by peer"),
+    (107, "socket is not connected"),
+    (110, "connection timed out"),
+    (111, "connection refused"),
+    (113, "no route to host"),
     (122, "disk quota exceeded"),
 ];
 
 /// The reasons for the same errors under macOS's numbers.
-pub const MACOS_ERRORS: [(i64, &str); 5] = [
+pub const MACOS_ERRORS: [(i64, &str); 16] = [
     (35, "resource temporarily unavailable"),
+    (47, "address family not supported"),
+    (48, "address already in use"),
+    (49, "cannot assign requested address"),
+    (50, "network is down"),
+    (51, "network is unreachable"),
+    (53, "connection aborted"),
+    (54, "connection reset by peer"),
+    (57, "socket is not connected"),
+    (60, "connection timed out"),
+    (61, "connection refused"),
     (62, "too many levels of symbolic links"),
     (63, "file name too long"),
+    (65, "no route to host"),
     (66, "directory not empty"),
     (69, "disk quota exceeded"),
 ];

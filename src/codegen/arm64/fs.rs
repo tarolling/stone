@@ -8,11 +8,13 @@
 use super::builtins::{Sys, system_call};
 use super::{address, pop_frame, push_frame};
 use crate::codegen::context::{
-    DIR_BUFFER, FILE_BUFFER, INVALID_TEXT_CODE, NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags,
+    DIR_BUFFER, FILE_BUFFER, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE,
+    NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags, SOCKET_CLOSED_CODE, TIMED_OUT_CODE,
     immortal_string,
 };
 use crate::codegen::{AssemblyGenerator, Os};
 use crate::stdlib::fs::{INVALID_TEXT, NULL_IN_PATH, errors};
+use crate::stdlib::net::{INVALID_ADDRESS, LISTENER_CLOSED, SOCKET_CLOSED, TIMED_OUT};
 use crate::stdlib::os::NULL_IN_COMMAND;
 
 /// `openat`'s directory for a path relative to the working directory, which macOS's shims drop.
@@ -26,14 +28,19 @@ pub(super) const EINTR: i64 = 4;
 const SAVED: [&str; 8] = ["x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26"];
 
 /// Emits the routines of the `fs` module that `used` lists, as `x64::fs::fs_runtime` describes
-/// them, with `stone.os_run` too if `used` holds it.
+/// them, with `stone.os_run` and the `stone.net_` routines too if `used` holds them.
 pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     let uses = |label: &str| used.contains(&label);
     let flags = OpenFlags::of(r#gen.target());
     let fails = used.iter().any(|label| *label != "stone.fs_exists");
+    let net: Vec<&str> = used
+        .iter()
+        .copied()
+        .filter(|label| label.starts_with("stone.net_"))
+        .collect();
 
     if fails {
-        errors_and_results(r#gen);
+        errors_and_results(r#gen, !net.is_empty());
     }
     path_check(r#gen);
     if used.iter().any(|label| {
@@ -49,11 +56,15 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         || uses("stone.fs_read_lines")
         || uses("stone.fs_list_dir")
         || uses("stone.os_run")
+        || !net.is_empty()
     {
         utf8_check(r#gen);
     }
     if uses("stone.os_run") {
         super::process::run_runtime(r#gen);
+    }
+    if !net.is_empty() {
+        super::net::net_runtime(r#gen, &net);
     }
     if uses("stone.fs_read") || uses("stone.fs_read_lines") {
         read_all(r#gen, flags.read);
@@ -114,17 +125,25 @@ pub(super) fn load(r#gen: &mut dyn AssemblyGenerator, reg: &str, value: i64) {
 }
 
 /// Emits the pieces every failing routine shares, as `x64::fs` describes them, with the error in
-/// `x0` and the path in `x1` for `.Lfs_err`, the value and its kind in `x0` and `x1` for
-/// `.Lfs_ok`, and the two strings in `x0` and `x1` for `.Lfs_join`.
-fn errors_and_results(r#gen: &mut dyn AssemblyGenerator) {
+/// `x0` and the path, or 0 for the reason alone, in `x1` for `.Lfs_err`, the value and its kind in
+/// `x0` and `x1` for `.Lfs_ok`, and the two strings in `x0` and `x1` for `.Lfs_join`.
+fn errors_and_results(r#gen: &mut dyn AssemblyGenerator, net: bool) {
     let os = r#gen.target().os;
-    let reasons: Vec<(i64, &str)> = errors(os)
+    let mut reasons: Vec<(i64, &str)> = errors(os)
         .chain([
             (INVALID_TEXT_CODE, INVALID_TEXT),
             (NULL_IN_PATH_CODE, NULL_IN_PATH),
             (NULL_IN_COMMAND_CODE, NULL_IN_COMMAND),
         ])
         .collect();
+    if net {
+        reasons.extend([
+            (INVALID_ADDRESS_CODE, INVALID_ADDRESS),
+            (TIMED_OUT_CODE, TIMED_OUT),
+            (SOCKET_CLOSED_CODE, SOCKET_CLOSED),
+            (LISTENER_CLOSED_CODE, LISTENER_CLOSED),
+        ]);
+    }
     r#gen.emit("\t.data");
     for (number, reason) in &reasons {
         immortal_string(r#gen, &reason_label(*number), reason);
@@ -160,14 +179,17 @@ fn errors_and_results(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx21, x0");
     release(r#gen, "x19", ".Lfs_err_number");
     r#gen.emit("\tmov\tx0, x21");
-    // the reason is owned, or immortal, which releasing never frees
+    // the reason is owned, or immortal, which releasing never frees, and stands alone without a
+    // path
     r#gen.emit(".Lfs_err_reason:");
+    r#gen.emit("\tcbz\tx20, .Lfs_err_alone");
     address(r#gen, "x1", ".Lfs_open_quote");
     r#gen.emit("\tbl\t.Lfs_join");
     r#gen.emit("\tmov\tx1, x20");
     r#gen.emit("\tbl\t.Lfs_join");
     address(r#gen, "x1", ".Lfs_close_quote");
     r#gen.emit("\tbl\t.Lfs_join");
+    r#gen.emit(".Lfs_err_alone:");
     r#gen.emit("\tmov\tx21, x0");
     r#gen.emit("\tmov\tx0, #1"); // err
     r#gen.emit("\tmov\tx1, #1"); // a string slot

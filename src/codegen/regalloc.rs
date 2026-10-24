@@ -5,8 +5,8 @@
 //! arm64 backend's register names.
 
 use crate::codegen::ir::liveness::Interval;
-use crate::codegen::ir::{BinOp, Function, Inst, Operand, VReg};
-use std::collections::HashMap;
+use crate::codegen::ir::{BinOp, Callee, Function, Inst, Operand, Terminator, VReg};
+use std::collections::{HashMap, HashSet};
 
 /// Where a vreg lives for its whole interval: a register, or a numbered spill slot in memory.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -77,6 +77,14 @@ pub fn hints<R: Copy>(function: &Function, arg_regs: &[R]) -> HashMap<VReg, Vec<
                     add(*dst, Hint::Like(*rhs));
                 }
             }
+            Inst::FloatBinary {
+                op: BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div,
+                dst,
+                lhs: Operand::Reg(lhs),
+                ..
+            } => {
+                add(*dst, Hint::Like(*lhs));
+            }
             Inst::Neg {
                 dst,
                 src: Operand::Reg(src),
@@ -97,6 +105,155 @@ pub fn hints<R: Copy>(function: &Function, arg_regs: &[R]) -> HashMap<VReg, Vec<
     hints
 }
 
+/// Returns the vregs that hold floats and are only ever used as floats or moved, which a vector
+/// register can hold: those that float arithmetic, a float comparison, or a conversion reads or
+/// writes, together with every vreg copied to or from one, unless any of them is also used as an
+/// int, a pointer, or an index.
+///
+/// For example, in `v1 = fadd v0, v0; v2 = copy v1; list_set v3, v4, v2`, `v0`, `v1`, and `v2`
+/// hold floats, while `v3` and `v4` do not. A vreg that is only moved, such as an element read
+/// and stored again, is left out, since nothing would gain from it.
+pub fn float_vregs(function: &Function) -> HashSet<VReg> {
+    let count = function.vreg_count as usize;
+    // vregs joined by copies, which want to be in the same kind of register
+    let mut parent: Vec<usize> = (0..count).collect();
+    fn find(parent: &mut [usize], mut i: usize) -> usize {
+        while parent[i] != i {
+            parent[i] = parent[parent[i]];
+            i = parent[i];
+        }
+        i
+    }
+    let mut float = vec![false; count];
+    let mut int = vec![false; count];
+    let mark = |flags: &mut Vec<bool>, operand: &Operand| {
+        if let Operand::Reg(reg) = operand {
+            flags[reg.0 as usize] = true;
+        }
+    };
+    for block in &function.blocks {
+        for inst in &block.insts {
+            match inst {
+                Inst::Copy {
+                    dst,
+                    src: Operand::Reg(src),
+                } => {
+                    let (a, b) = (
+                        find(&mut parent, dst.0 as usize),
+                        find(&mut parent, src.0 as usize),
+                    );
+                    parent[a] = b;
+                }
+                Inst::Copy { .. }
+                | Inst::LoadGlobal { .. }
+                | Inst::StoreGlobal { .. }
+                | Inst::DepthCheck => {}
+                Inst::FloatBinary { op, dst, lhs, rhs } => {
+                    float[dst.0 as usize] = true;
+                    mark(&mut float, lhs);
+                    // a power's exponent is an int
+                    mark(
+                        if *op == BinOp::Pow {
+                            &mut int
+                        } else {
+                            &mut float
+                        },
+                        rhs,
+                    );
+                }
+                Inst::FloatNeg { dst, src } | Inst::FloatSqrt { dst, src } => {
+                    float[dst.0 as usize] = true;
+                    mark(&mut float, src);
+                }
+                Inst::IntToFloat { dst, src } => {
+                    float[dst.0 as usize] = true;
+                    mark(&mut int, src);
+                }
+                Inst::FloatToInt { dst, src } => {
+                    int[dst.0 as usize] = true;
+                    mark(&mut float, src);
+                }
+                Inst::Compare {
+                    float: true,
+                    dst,
+                    lhs,
+                    rhs,
+                    ..
+                } => {
+                    int[dst.0 as usize] = true;
+                    mark(&mut float, lhs);
+                    mark(&mut float, rhs);
+                }
+                // what is only moved through memory can be in either kind of register
+                Inst::ListGet { list, index, .. } => {
+                    mark(&mut int, list);
+                    mark(&mut int, index);
+                }
+                Inst::ListSet { list, index, .. } | Inst::ListStore { list, index, .. } => {
+                    mark(&mut int, list);
+                    mark(&mut int, index);
+                    if let Inst::ListStore { old: Some(old), .. } = inst {
+                        int[old.0 as usize] = true;
+                    }
+                }
+                Inst::DataGet { data, index, .. } | Inst::DataSet { data, index, .. } => {
+                    mark(&mut int, data);
+                    mark(&mut int, index);
+                }
+                Inst::ListInit { list, .. } => mark(&mut int, list),
+                Inst::FieldGet { value, .. } => mark(&mut int, value),
+                Inst::FieldInit { value, .. } => mark(&mut int, value),
+                Inst::Call { callee, .. } => {
+                    if let Callee::Value(function) = callee {
+                        mark(&mut int, function);
+                    }
+                }
+                // everything else, a packed loop's numbers included, is an int or a pointer
+                inst => {
+                    for operand in inst.operands() {
+                        mark(&mut int, &operand);
+                    }
+                    for def in inst.defs() {
+                        int[def.0 as usize] = true;
+                    }
+                }
+            }
+        }
+        match &block.term {
+            Terminator::CmpBranch {
+                float: true,
+                lhs,
+                rhs,
+                ..
+            } => {
+                mark(&mut float, lhs);
+                mark(&mut float, rhs);
+            }
+            // a function's results are moved like its arguments
+            Terminator::Return(_) => {}
+            term => {
+                for operand in term.operands() {
+                    mark(&mut int, &operand);
+                }
+            }
+        }
+    }
+    let mut group_float = vec![false; count];
+    let mut group_int = vec![false; count];
+    for i in 0..count {
+        let root = find(&mut parent, i);
+        group_float[root] |= float[i];
+        group_int[root] |= int[i];
+    }
+    (0..count)
+        .filter(|&i| {
+            let root = find(&mut parent, i);
+            group_float[root] && !group_int[root]
+        })
+        .map(|i| VReg(i as u32))
+        .collect()
+}
+
 /// Assigns each interval a register or a spill slot, in the style of Poletto and Sarkar.
 ///
 /// Intervals that cross a call may only use `callee_saved` registers. Others try `caller_saved`
@@ -108,12 +265,18 @@ pub fn hints<R: Copy>(function: &Function, arg_regs: &[R]) -> HashMap<VReg, Vec<
 /// A free register that `hints` lists for the vreg is taken before any other, in the order
 /// listed, as long as the vreg may use it.
 ///
+/// A vreg in `floats` that crosses no call and no packed loop first tries the `vector` registers,
+/// which calls clobber, preferring the one a vreg it is copied to or from got, and otherwise
+/// takes a general register as any other vreg would.
+///
 /// `intervals` must be sorted by start, as [`analyze`](crate::codegen::ir::liveness::analyze)
 /// returns them.
 pub fn linear_scan<R: Copy + Eq>(
     intervals: &[Interval],
     callee_saved: &[R],
     caller_saved: &[R],
+    vector: &[R],
+    floats: &HashSet<VReg>,
     hints: &HashMap<VReg, Vec<Hint<R>>>,
 ) -> Allocation<R> {
     let mut locations = HashMap::new();
@@ -129,6 +292,29 @@ pub fn linear_scan<R: Copy + Eq>(
 
     for (i, current) in intervals.iter().enumerate() {
         active.retain(|&(j, _)| intervals[j].end >= current.start);
+
+        if floats.contains(&current.vreg) && !current.crosses_call && !current.touches_vector {
+            let is_free = |reg: &R| !active.iter().any(|(_, r)| r == reg);
+            let liked =
+                hints
+                    .get(&current.vreg)
+                    .into_iter()
+                    .flatten()
+                    .find_map(|hint| match hint {
+                        Hint::Like(other) => match locations.get(other) {
+                            Some(Location::Reg(reg)) if vector.contains(reg) && is_free(reg) => {
+                                Some(*reg)
+                            }
+                            _ => None,
+                        },
+                        Hint::Reg(_) => None,
+                    });
+            if let Some(reg) = liked.or_else(|| vector.iter().find(|reg| is_free(reg)).copied()) {
+                locations.insert(current.vreg, Location::Reg(reg));
+                active.push((i, reg));
+                continue;
+            }
+        }
 
         let allowed: Vec<R> = if current.crosses_call {
             callee_saved.to_vec()
@@ -240,6 +426,7 @@ mod tests {
             end,
             weight,
             crosses_call,
+            touches_vector: false,
         }
     }
 
@@ -249,7 +436,14 @@ mod tests {
             interval(0, 0, 10, 1.0, true),
             interval(1, 0, 10, 1.0, false),
         ];
-        let allocation = linear_scan(&intervals, &["rbx"], &["rsi"], &HashMap::new());
+        let allocation = linear_scan(
+            &intervals,
+            &["rbx"],
+            &["rsi"],
+            &[],
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         assert_eq!(allocation.locations[&VReg(0)], Location::Reg("rbx"));
         assert_eq!(allocation.locations[&VReg(1)], Location::Reg("rsi"));
         assert_eq!(allocation.used_callee_saved, ["rbx"]);
@@ -262,7 +456,14 @@ mod tests {
             interval(1, 2, 10, 100.0, true),
             interval(2, 4, 8, 0.5, true),
         ];
-        let allocation = linear_scan(&intervals, &["rbx"], &["rsi"], &HashMap::new());
+        let allocation = linear_scan(
+            &intervals,
+            &["rbx"],
+            &["rsi"],
+            &[],
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         assert_eq!(allocation.locations[&VReg(0)], Location::Stack(0));
         assert_eq!(allocation.locations[&VReg(1)], Location::Reg("rbx"));
         assert_eq!(allocation.locations[&VReg(2)], Location::Stack(1));
@@ -273,7 +474,14 @@ mod tests {
     fn a_result_reuses_the_register_of_an_input_it_reads_last() {
         // v0 is last read at 2, and v1 is written at 3
         let intervals = [interval(0, 0, 2, 1.0, false), interval(1, 3, 4, 1.0, false)];
-        let allocation = linear_scan(&intervals, &[], &["rsi"], &HashMap::new());
+        let allocation = linear_scan(
+            &intervals,
+            &[],
+            &["rsi"],
+            &[],
+            &HashSet::new(),
+            &HashMap::new(),
+        );
         assert_eq!(allocation.locations[&VReg(0)], Location::Reg("rsi"));
         assert_eq!(allocation.locations[&VReg(1)], Location::Reg("rsi"));
     }
@@ -281,7 +489,8 @@ mod tests {
     #[test]
     fn running_out_of_registers_spills_instead_of_failing() {
         let intervals: Vec<Interval> = (0..20).map(|i| interval(i, i, 100, 1.0, true)).collect();
-        let allocation = linear_scan::<&str>(&intervals, &[], &[], &HashMap::new());
+        let allocation =
+            linear_scan::<&str>(&intervals, &[], &[], &[], &HashSet::new(), &HashMap::new());
         assert_eq!(allocation.spill_slots, 20);
         assert!(allocation.used_callee_saved.is_empty());
     }
@@ -290,7 +499,14 @@ mod tests {
     fn a_hinted_register_is_preferred_when_free() {
         let intervals = [interval(0, 0, 4, 1.0, false)];
         let hints = HashMap::from([(VReg(0), vec![Hint::Reg("rdi")])]);
-        let allocation = linear_scan(&intervals, &["rbx"], &["rsi", "rdi"], &hints);
+        let allocation = linear_scan(
+            &intervals,
+            &["rbx"],
+            &["rsi", "rdi"],
+            &[],
+            &HashSet::new(),
+            &hints,
+        );
         assert_eq!(allocation.locations[&VReg(0)], Location::Reg("rdi"));
     }
 
@@ -301,7 +517,14 @@ mod tests {
             (VReg(0), vec![Hint::Reg("rdi")]),
             (VReg(1), vec![Hint::Reg("rbx")]),
         ]);
-        let allocation = linear_scan(&intervals, &["rbx"], &["rsi", "rdi"], &hints);
+        let allocation = linear_scan(
+            &intervals,
+            &["rbx"],
+            &["rsi", "rdi"],
+            &[],
+            &HashSet::new(),
+            &hints,
+        );
         assert_eq!(allocation.locations[&VReg(0)], Location::Reg("rbx"));
         assert_eq!(allocation.locations[&VReg(1)], Location::Reg("rsi"));
     }
@@ -314,7 +537,14 @@ mod tests {
             (VReg(0), vec![Hint::Reg("rdi")]),
             (VReg(1), vec![Hint::Like(VReg(0))]),
         ]);
-        let allocation = linear_scan(&intervals, &[], &["rsi", "rdi"], &hints);
+        let allocation = linear_scan(
+            &intervals,
+            &[],
+            &["rsi", "rdi"],
+            &[],
+            &HashSet::new(),
+            &hints,
+        );
         assert_eq!(allocation.locations[&VReg(1)], Location::Reg("rdi"));
     }
 

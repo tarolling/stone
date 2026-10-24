@@ -1419,3 +1419,40 @@ fn result_variants_are_written_alone() {
         5,
     );
 }
+
+#[test]
+fn net_is_a_module_of_stone_source_that_any_program_can_use() {
+    assert_eq!(
+        output(&[("main.stn", "use net\nprint(net.connect)\n")]),
+        "fn(str, int) -> result[socket, str]\n"
+    );
+    assert_eq!(
+        output(&[("main.stn", "use net.listen\nprint(listen)\n")]),
+        "fn(str, int) -> result[listener, str]\n"
+    );
+}
+
+#[test]
+fn a_file_cannot_take_the_net_modules_name() {
+    assert_error(
+        &[
+            ("main.stn", "use net\n"),
+            ("net.stn", "pub fn f() -> int:\n    ret 0\n"),
+        ],
+        "main.stn",
+        "'net' is a builtin module, so rename net.stn",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn only_stones_own_modules_can_use_net_sys() {
+    assert_error(
+        &[("main.stn", "use net_sys\n")],
+        "main.stn",
+        "no module named 'net_sys'",
+        1,
+        5,
+    );
+}

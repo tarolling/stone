@@ -1,0 +1,31 @@
+// A connection to this machine: a listener on a port the system picks, a client that connects
+// to it, and both ends sending and reading lines and text.
+use net
+
+fn talk() -> result[int, str]:
+    l = net.listen("127.0.0.1", 0)?
+    print(l.port() > 0, l)
+    c = net.connect("127.0.0.1", l.port())?
+    s = l.accept()?
+    print(c, s)
+    // writing a socket as text leaves it open
+    print("{c} {s.display()} {[c, s]}")
+    print(c.send("hello\r\nworld\n")?)
+    print(s.read_line()?)
+    print(s.read_line()?.unwrap())
+    s.send("café ")?
+    s.send("au lait")?
+    s.close()
+    print(c.read_all()?)
+    print(c.read()? == "", c.read_line()?)
+    print(s.send("more"))
+    print(s.read())
+    l.close()
+    print(l.accept().is_err(), l.port() > 0)
+    ret ok(0)
+
+match talk():
+    case ok(_):
+        print("done")
+    case err(e):
+        print("failed:", e)

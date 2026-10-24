@@ -499,6 +499,13 @@ fn completion_after_a_dot_offers_methods() {
         "eq",
         "cmp",
         "display",
+        "send",
+        "read_line",
+        "read",
+        "read_all",
+        "accept",
+        "port",
+        "close",
     ]
     .iter()
     .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
@@ -1570,5 +1577,49 @@ fn completion_offers_the_methods_of_a_bound_and_a_traits_defaults() {
             at(17, 11)
         ),
         ["area", "half"]
+    );
+}
+
+#[test]
+fn completion_after_a_socket_or_listener_offers_their_methods() {
+    let doc = doc("use net\nfn f(c: socket, l: listener):\n    c.\n    l.\n");
+    let labels = |pos: Position| -> Vec<String> {
+        completion(&doc, pos, &MapSources::default())
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    };
+    assert_eq!(
+        labels(at(3, 7)),
+        ["display", "send", "read_line", "read", "read_all", "close"]
+    );
+    assert_eq!(labels(at(4, 7)), ["display", "accept", "port", "close"]);
+}
+
+#[test]
+fn the_net_modules_names_lead_to_its_file_and_cannot_be_renamed() {
+    let reference: Uri = "file:///cache/builtins.stn".parse().unwrap();
+    let builtins = Builtins::new(reference);
+    let net: Uri = "file:///cache/net.stn".parse().unwrap();
+    let doc = doc("use net\nc = net.connect(\"a\", 1)\n");
+    let connect = definition(&doc, &uri(), at(2, 10), Some(&builtins)).unwrap();
+    let line = stone::stdlib::net::SOURCE
+        .lines()
+        .position(|line| line.starts_with("pub fn connect("))
+        .unwrap() as u32;
+    assert_eq!(
+        (connect.uri, connect.range),
+        (
+            net.clone(),
+            Range::new(Position::new(line, 7), Position::new(line, 14))
+        )
+    );
+    // the module itself leads to the top of the file
+    let module = definition(&doc, &uri(), at(1, 6), Some(&builtins)).unwrap();
+    assert_eq!((module.uri, module.range.start), (net, Position::new(0, 0)));
+    assert_eq!(prepare_rename(&doc, at(2, 10)), None);
+    assert_eq!(
+        rename(&doc, &uri(), at(2, 10), "join").unwrap_err(),
+        "'connect' is a builtin"
     );
 }

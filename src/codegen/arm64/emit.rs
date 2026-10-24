@@ -18,7 +18,7 @@ use crate::codegen::ir::{
     BinOp, BlockId, Callee, Cond, FIELDS_OFFSET, Function, Inst, Kernel, Operand, RcKind,
     Terminator, VReg, variable_of,
 };
-use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
+use crate::codegen::regalloc::{Location, float_vregs, hints, linear_scan, parallel_moves};
 use crate::codegen::{AssemblyGenerator, magic_signed};
 use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
 use std::collections::HashMap;
@@ -32,6 +32,14 @@ const CALLEE_SAVED: [&str; 10] = [
 /// routines and `stone.fmod` preserve all of them (see `builtins.rs`).
 pub(super) const CALLER_SAVED: [&str; 12] = [
     "x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7", "x12", "x13", "x14", "x15",
+];
+
+/// The `d` registers that can hold a float that crosses no call, all of which calls may clobber:
+/// `d0` to `d2` are scratch, `d8` to `d15` would need saving, and a packed loop takes `v16` to
+/// `v31` for itself while it runs.
+const VECTOR: [&str; 21] = [
+    "d3", "d4", "d5", "d6", "d7", "d16", "d17", "d18", "d19", "d20", "d21", "d22", "d23", "d24",
+    "d25", "d26", "d27", "d28", "d29", "d30", "d31",
 ];
 
 /// The registers a stone function returns its first values in, which are its argument
@@ -48,10 +56,12 @@ pub(super) const FAIL_VALUES: [&str; 2] = ["x10", "x11"];
 /// The largest offset an 8-byte `ldr` or `str` can add to its base register.
 const MAX_SCALED_OFFSET: i64 = 8 * 4095;
 
-/// Where a value is while generating code: a register, a slot in the frame, or an immediate.
+/// Where a value is while generating code: a general register, a `d` register holding a float's
+/// bits, a slot in the frame, or an immediate.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Value {
     Reg(&'static str),
+    Freg(&'static str),
     /// A spill slot at `[sp, #offset]`.
     Stack(i64),
     Imm(i64),
@@ -147,6 +157,7 @@ impl Frame {
         match operand {
             Operand::Imm(n) => Ok(Value::Imm(n)),
             Operand::Reg(reg) => match self.locations.get(&reg) {
+                Some(Location::Reg(name)) if name.starts_with('d') => Ok(Value::Freg(name)),
                 Some(Location::Reg(name)) => Ok(Value::Reg(name)),
                 Some(Location::Stack(slot)) => Ok(Value::Stack(self.outgoing + 8 * *slot as i64)),
                 None => Err(format!("{reg} was never allocated")),
@@ -180,6 +191,8 @@ impl Arm64Generator {
             &liveness.intervals,
             &CALLEE_SAVED,
             &CALLER_SAVED,
+            &VECTOR,
+            &float_vregs(function),
             &hints(function, &ARG_REGS),
         );
         crate::debug!("{function}");
@@ -470,6 +483,7 @@ impl Arm64Generator {
         match src {
             Value::Reg(from) if from == reg => {}
             Value::Reg(from) => self.emit(&format!("\tmov\t{reg}, {from}")),
+            Value::Freg(from) => self.emit(&format!("\tfmov\t{reg}, {from}")),
             Value::Stack(offset) => {
                 let slot = self.slot(offset);
                 self.emit(&format!("\tldr\t{reg}, {slot}"));
@@ -483,6 +497,7 @@ impl Arm64Generator {
         match dst {
             Value::Reg(to) if to == reg => {}
             Value::Reg(to) => self.emit(&format!("\tmov\t{to}, {reg}")),
+            Value::Freg(to) => self.emit(&format!("\tfmov\t{to}, {reg}")),
             Value::Stack(offset) => {
                 let slot = self.slot(offset);
                 self.emit(&format!("\tstr\t{reg}, {slot}"));
@@ -498,6 +513,8 @@ impl Arm64Generator {
             return;
         }
         match (dst, src) {
+            (Value::Freg(to), _) => self.load_float(to, src),
+            (_, Value::Freg(from)) => self.store_float(dst, from),
             (Value::Reg(reg), _) => self.load(reg, src),
             (_, Value::Reg(reg)) => self.store(dst, reg),
             _ => {
@@ -535,6 +552,8 @@ impl Arm64Generator {
     /// Moves a float's bits from `value` into the `d` register `float`.
     fn load_float(&mut self, float: &str, value: Value) {
         match value {
+            Value::Freg(from) if from == float => {}
+            Value::Freg(from) => self.emit(&format!("\tfmov\t{float}, {from}")),
             Value::Stack(offset) => {
                 let slot = self.slot(offset);
                 self.emit(&format!("\tldr\t{float}, {slot}"));
@@ -549,12 +568,34 @@ impl Arm64Generator {
     /// Moves a float's bits from the `d` register `float` into `dst`.
     fn store_float(&mut self, dst: Value, float: &str) {
         match dst {
+            Value::Freg(to) if to == float => {}
+            Value::Freg(to) => self.emit(&format!("\tfmov\t{to}, {float}")),
             Value::Reg(reg) => self.emit(&format!("\tfmov\t{reg}, {float}")),
             Value::Stack(offset) => {
                 let slot = self.slot(offset);
                 self.emit(&format!("\tstr\t{float}, {slot}"));
             }
             Value::Imm(_) => {}
+        }
+    }
+
+    /// Returns a `d` register holding the float `value`, moving it into `scratch` unless it is in
+    /// one already.
+    fn float_operand(&mut self, value: Value, scratch: &'static str) -> &'static str {
+        match value {
+            Value::Freg(reg) => reg,
+            _ => {
+                self.load_float(scratch, value);
+                scratch
+            }
+        }
+    }
+
+    /// Returns the `d` register to compute a float for `dst` in: its own, or `d0`.
+    fn float_target(dst: Value) -> &'static str {
+        match dst {
+            Value::Freg(reg) => reg,
+            _ => "d0",
         }
     }
 
@@ -725,6 +766,42 @@ impl Arm64Generator {
 
     fn emit_inst(&mut self, frame: &Frame, inst: &Inst) -> Result<(), String> {
         match inst {
+            Inst::DataGet {
+                dst,
+                data,
+                index,
+                offset,
+            } => {
+                let (dst, data, index) =
+                    (frame.reg(*dst)?, frame.value(*data)?, frame.value(*index)?);
+                let slot = self.data_slot(data, index, *offset);
+                let target = match dst {
+                    Value::Freg(reg) => reg,
+                    _ => self.target(dst),
+                };
+                self.emit(&format!("\tldr\t{target}, {slot}"));
+                self.store(dst, target);
+            }
+
+            Inst::DataSet {
+                data,
+                index,
+                value,
+                offset,
+            } => {
+                let (data, index, value) = (
+                    frame.value(*data)?,
+                    frame.value(*index)?,
+                    frame.value(*value)?,
+                );
+                let slot = self.data_slot(data, index, *offset);
+                let reg = match value {
+                    Value::Freg(reg) => reg,
+                    _ => self.operand(value, "x16"),
+                };
+                self.emit(&format!("\tstr\t{reg}, {slot}"));
+            }
+
             Inst::DepthCheck => self.depth_check(),
 
             Inst::ElementSlot {
@@ -903,27 +980,51 @@ impl Arm64Generator {
                 self.store_float(dst, "d0");
             }
 
+            Inst::FloatBinary {
+                op: op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div),
+                dst,
+                lhs,
+                rhs,
+            } => {
+                let (dst, lhs, rhs) = (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
+                let left = self.float_operand(lhs, "d0");
+                let right = self.float_operand(rhs, "d1");
+                let name = match op {
+                    BinOp::Add => "fadd",
+                    BinOp::Sub => "fsub",
+                    BinOp::Mul => "fmul",
+                    _ => {
+                        self.fail_on_float_zero(right);
+                        "fdiv"
+                    }
+                };
+                let target = Self::float_target(dst);
+                self.emit(&format!("\t{name}\t{target}, {left}, {right}"));
+                self.store_float(dst, target);
+            }
+
             Inst::FloatBinary { op, dst, lhs, rhs } => {
                 let (dst, lhs, rhs) = (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
                 self.load_float("d0", lhs);
                 self.load_float("d1", rhs);
                 match op {
-                    BinOp::Add => self.emit("\tfadd\td0, d0, d1"),
-                    BinOp::Sub => self.emit("\tfsub\td0, d0, d1"),
-                    BinOp::Mul => self.emit("\tfmul\td0, d0, d1"),
-                    BinOp::Div => {
-                        self.fail_on_float_zero("d1");
-                        self.emit("\tfdiv\td0, d0, d1");
-                    }
                     BinOp::Rem => {
                         // fmod is exact, with the dividend's sign, as Rust's `%` is
                         self.fail_on_float_zero("d1");
                         self.uses_fmod = true;
                         self.emit("\tbl\tstone.fmod");
                     }
-                    BinOp::Pow => return Err("float Pow is emitted separately".to_string()),
+                    _ => return Err(format!("float {op:?} is emitted separately")),
                 }
                 self.store_float(dst, "d0");
+            }
+
+            Inst::FloatNeg { dst, src } if matches!(frame.reg(*dst)?, Value::Freg(_)) => {
+                let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
+                // flips the sign bit, which also negates 0.0 and nan like the interpreter
+                let src = self.float_operand(src, "d0");
+                let target = Self::float_target(dst);
+                self.emit(&format!("\tfneg\t{target}, {src}"));
             }
 
             Inst::Neg { dst, src } | Inst::FloatNeg { dst, src } => {
@@ -1067,7 +1168,10 @@ impl Arm64Generator {
                 let (dst, list, index) =
                     (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
                 let slot = self.known_slot(list, index, *offset);
-                let target = self.target(dst);
+                let target = match dst {
+                    Value::Freg(reg) => reg,
+                    _ => self.target(dst),
+                };
                 self.emit(&format!("\tldr\t{target}, {slot}"));
                 self.store(dst, target);
             }
@@ -1107,7 +1211,10 @@ impl Arm64Generator {
                     frame.value(*value)?,
                 );
                 let slot = self.known_slot(list, index, *offset);
-                let reg = self.operand(value, "x16");
+                let reg = match value {
+                    Value::Freg(reg) => reg,
+                    _ => self.operand(value, "x16"),
+                };
                 self.emit(&format!("\tstr\t{reg}, {slot}"));
             }
 
@@ -1179,16 +1286,18 @@ impl Arm64Generator {
 
             Inst::FloatSqrt { dst, src } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
-                self.load_float("d0", src);
-                self.emit("\tfsqrt\td0, d0");
-                self.store_float(dst, "d0");
+                let src = self.float_operand(src, "d0");
+                let target = Self::float_target(dst);
+                self.emit(&format!("\tfsqrt\t{target}, {src}"));
+                self.store_float(dst, target);
             }
 
             Inst::IntToFloat { dst, src } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 let src = self.operand(src, "x10");
-                self.emit(&format!("\tscvtf\td0, {src}"));
-                self.store_float(dst, "d0");
+                let target = Self::float_target(dst);
+                self.emit(&format!("\tscvtf\t{target}, {src}"));
+                self.store_float(dst, target);
             }
 
             Inst::FloatToInt { dst, src } => {
@@ -1404,10 +1513,21 @@ impl Arm64Generator {
     /// `ldr x17, [x19, #16]` and `add x17, x17, #24`.
     fn known_slot(&mut self, list: Value, index: Value, offset: usize) -> String {
         let base = self.base(list, "x10");
+        self.emit(&format!("\tldr\tx17, [{base}, #16]"));
+        self.data_slot(Value::Reg("x17"), index, offset)
+    }
+
+    /// Returns the memory operand for slot `index + offset` of the elements starting at `data`,
+    /// already known to be in range, using an index in a register as it is. This uses `x17` for
+    /// elements in memory or past an offset, and `x11` for an index in memory.
+    ///
+    /// For example, slot `x20 + 3` of the elements at `x19` is `[x17, x20, lsl #3]` after
+    /// `add x17, x19, #24`.
+    fn data_slot(&mut self, data: Value, index: Value, offset: usize) -> String {
+        let base = self.base(data, "x17");
         let index = match index {
             Value::Imm(n) if (0..4096).contains(&(n + offset as i64)) => {
-                self.emit(&format!("\tldr\tx17, [{base}, #16]"));
-                return format!("[x17, #{}]", 8 * (n + offset as i64));
+                return format!("[{base}, #{}]", 8 * (n + offset as i64));
             }
             Value::Reg(reg) => reg,
             _ => {
@@ -1415,10 +1535,10 @@ impl Arm64Generator {
                 "x11"
             }
         };
-        self.emit(&format!("\tldr\tx17, [{base}, #16]"));
-        if offset > 0 {
-            self.emit(&format!("\tadd\tx17, x17, #{}", 8 * offset));
+        if offset == 0 {
+            return format!("[{base}, {index}, lsl #3]");
         }
+        self.emit(&format!("\tadd\tx17, {base}, #{}", 8 * offset));
         format!("[x17, {index}, lsl #3]")
     }
 

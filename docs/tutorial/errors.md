@@ -89,5 +89,5 @@ A result also has methods: `is_ok()`, `is_err()`, `unwrap()`, `unwrap_or(default
 stops the program with the error in the message, as in
 `cannot unwrap err: invalid literal for int() with base 10: '4x'`.
 
-That is the whole tutorial. The {doc}`../reference/syntax` and {doc}`../reference/builtins`
-pages cover the details.
+With results in hand, {doc}`networking` shows a program that talks over the network, where
+almost anything can fail.

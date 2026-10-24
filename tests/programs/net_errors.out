@@ -1,0 +1,6 @@
+err("invalid port: '127.0.0.1:70000'")
+err("invalid port: '[::1]:-1'")
+err("invalid host name: 'no such host!'")
+err("invalid host name: 'a..b'")
+true
+true

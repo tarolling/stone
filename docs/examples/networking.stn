@@ -1,0 +1,26 @@
+// A server and its client in one program: the client sends words, the server answers each, and
+// the client reads every answer once the server is done.
+use net
+
+// Answers each of the `n` lines a client sends with its length.
+fn answer(l: listener, n: int) -> result[int, str]:
+    c = l.accept()?
+    for i in range(n):
+        word = c.read_line()?.unwrap_or("")
+        c.send("{word} has {word.len()} letters\n")?
+    ret ok(n)
+
+fn talk() -> result[str, str]:
+    l = net.listen("127.0.0.1", 0)?
+    client = net.connect("127.0.0.1", l.port())?
+    words = ["stone", "net", "socket"]
+    for word in words:
+        client.send("{word}\n")?
+    answer(l, words.len())?
+    ret client.read_all()
+
+match talk():
+    case ok(text):
+        print(text.strip())
+    case err(e):
+        print("error:", e)

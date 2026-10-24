@@ -241,8 +241,9 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
 ///   and any object is still allocated, which tests use to find leaks
 ///
 /// The free routines are reached from inline releases that do not count as calls, so they
-/// preserve every register except `rax`, `rcx`, `rdx`, and the `xmm` registers. `stone.leak_check`
-/// also preserves `rax`, which holds `main`'s exit status. Memory comes from [`allocator`].
+/// preserve every register except `rax`, `rcx`, `rdx`, and `xmm0` to `xmm2`, since vregs live in
+/// the rest. `stone.leak_check` also preserves `rax`, which holds `main`'s exit status. Memory
+/// comes from [`allocator`].
 pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit("\t.section\t.rodata");
     r#gen.emit(".Lstone_leak_env:");
@@ -454,9 +455,12 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
 /// recurses into them: it queues each one whose count reaches 0 on `stone.free_pending`, linked
 /// through its tag, and frees the queue in a loop, which a call made while it runs, through
 /// `stone.free_list`, only adds to. Freeing a list of a million nodes takes no more stack than
-/// freeing one. It preserves every register except `rax`, `rcx`, `rdx`, and the `xmm` registers,
-/// like the other free routines.
-pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator) {
+/// freeing one. It preserves every register except `rax`, `rcx`, `rdx`, and `xmm0` to `xmm2`,
+/// since vregs live in the rest, like the other free routines.
+///
+/// With `handles`, a value whose tag is negative is a socket or listener, whose descriptor it
+/// closes first, through `net::free_handle`, before the tag becomes the queue's link.
+pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, handles: bool) {
     r#gen.emit("stone.enum_new:");
     r#gen.emit("\tpush\trdi");
     r#gen.emit("\tpush\trsi");
@@ -472,6 +476,12 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator) {
 
     // rbx holds the value being freed, r12 the kinds of its slots left, and r13 the next slot
     r#gen.emit("stone.free_enum:");
+    if handles {
+        r#gen.emit("\tcmp\tQWORD PTR [rax], 0");
+        r#gen.emit("\tjge\t.Lfree_enum_value");
+        r#gen.emit("\tcall\t.Lfree_handle");
+        r#gen.emit(".Lfree_enum_value:");
+    }
     r#gen.emit("\tmov\trcx, QWORD PTR [rip + stone.free_pending]");
     r#gen.emit("\tmov\tQWORD PTR [rax], rcx");
     r#gen.emit("\tmov\tQWORD PTR [rip + stone.free_pending], rax");
@@ -506,6 +516,12 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcmp\trcx, 2");
     r#gen.emit("\tje\t.Lfree_enum_list");
     // an enum value joins the queue
+    if handles {
+        r#gen.emit("\tcmp\tQWORD PTR [rax], 0");
+        r#gen.emit("\tjge\t.Lfree_enum_queue");
+        r#gen.emit("\tcall\t.Lfree_handle");
+        r#gen.emit(".Lfree_enum_queue:");
+    }
     r#gen.emit("\tmov\trcx, QWORD PTR [rip + stone.free_pending]");
     r#gen.emit("\tmov\tQWORD PTR [rax], rcx");
     r#gen.emit("\tmov\tQWORD PTR [rip + stone.free_pending], rax");
@@ -528,6 +544,9 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tpop\trbx");
     r#gen.emit(".Lfree_enum_queued:");
     r#gen.emit("\tret");
+    if handles {
+        super::net::free_handle(r#gen);
+    }
 }
 
 /// Emits code that writes the `length` bytes at `label` to stderr, clobbering `rax`, `rcx`,
@@ -1055,8 +1074,8 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.list_copy` returns in `rax` a copy of the list in `rax`, retaining each element if
 ///   they are counted, and drops one reference to the original, which something else still
 ///   holds. Like the free routines, it is reached from an inline `list_unique` that does not
-///   count as a call, so it preserves every register except `rax`, `rcx`, `rdx`, and the `xmm`
-///   registers. When `maps_shrink`, as when the program removes map entries, it first closes up
+///   count as a call, so it preserves every register except `rax`, `rcx`, `rdx`, and `xmm0` to
+///   `xmm2`. When `maps_shrink`, as when the program removes map entries, it first closes up
 ///   a map that has removed entries (see [`map_runtime`]).
 ///
 /// Indexing is generated inline by `X64Generator::list_slot` (in `emit.rs`) rather than called here.

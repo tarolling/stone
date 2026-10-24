@@ -416,6 +416,8 @@ assign the result where 'add' is called
 | `os.listdir`, `os.path.exists`, `os.remove`, `os.mkdir` | `fs.list_dir` (sorted), `fs.exists`, `fs.remove`, `fs.make_dir` |
 | `sys.argv[1:]`, `sys.exit(n)` | `args()`, `os.exit(n)` |
 | `subprocess.run([cmd, *args], capture_output=True, text=True)` | `os.run(cmd, args)`, a `result[output, str]` with `.status`, `.stdout`, `.stderr` |
+| `socket.create_connection((host, port))`, `sock.sendall(b)`, `sock.recv(n)` | `net.connect(host, port)`, `c.send(text)`, `c.read_line()`/`c.read()`/`c.read_all()`, each a `result`; text only |
+| `socketserver`, `s.bind(...); s.listen(); s.accept()` | `l = net.listen(host, port)?` then `c = l.accept()?`, one connection at a time |
 
 ## Builtins
 
@@ -447,6 +449,12 @@ Builtin modules, imported with `use math` (or `use math.sqrt`):
   `list_dir(path)` (sorted names), `exists(path)` (bool), `remove(path)`, `make_dir(path)`;
   all but `exists` return a `result` whose error is a message such as
   `no such file or directory: 'data.txt'`
+- `net`: `connect(host, port)` (a `result[socket, str]`), `listen(host, port)` (a
+  `result[listener, str]`; port 0 picks a free one), `resolve(host)` (a `result[list[str], str]`
+  of addresses). A `socket` has `send(text)`, `read_line()` (`ok(none)` at the end),
+  `read()`, `read_all()`, and `close()`; a `listener` has `accept()`, `port()`, and `close()`.
+  Both are types for signatures (`fn serve(l: listener)`), copies share the connection, and each
+  closes by itself right after the last statement that uses it. No TLS
 
 Reading all of standard input:
 
@@ -498,6 +506,25 @@ print(lines_of("echo", ["one two"]))                   // ok(['one two'])
 print(lines_of("sh", ["-c", "echo oops >&2; exit 3"]))  // err('sh failed with status 3: oops')
 print(lines_of("no-such-program", []))
 // err("no such file or directory: 'no-such-program'")
+```
+
+A server and a client in one program, since a connection to its own port completes before it
+is accepted:
+
+```stone
+use net
+
+fn echo() -> result[str, str]:
+    l = net.listen("127.0.0.1", 0)?
+    c = net.connect("127.0.0.1", l.port())?
+    s = l.accept()?
+    c.send("hello\n")?
+    line = s.read_line()?.unwrap_or("")
+    s.send("you said {line}\n")?
+    // s closes after its last use above, so read_all sees the end
+    ret c.read_all()
+
+print(echo())   // ok('you said hello\n')
 ```
 
 ## Modules

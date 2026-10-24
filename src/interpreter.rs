@@ -7,14 +7,15 @@ use crate::ast::{
     StmtKind, UnaryOp, target_names,
 };
 use crate::checker::{
-    Calls, FunctionValue, Method, Step, collect_assigned, may_name_enum, place, place_spans,
-    prints_bare, range_args, struct_display,
+    Calls, FunctionValue, Handle, Method, Step, collect_assigned, may_name_enum, place,
+    place_spans, prints_bare, range_args, struct_display,
 };
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
 use crate::span::Span;
 use crate::stdlib::random::Rng;
-use crate::stdlib::{self, MAX_CALL_DEPTH, OUTPUT, fs, math, os, time};
+use crate::stdlib::{self, MAX_CALL_DEPTH, OUTPUT, fs, math, net, os, time};
+use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
@@ -112,6 +113,11 @@ pub enum Value {
     /// A function named as a value, such as `double` in `xs.map(double)`, which prints as its
     /// type.
     Function(Arc<FunctionValue>),
+    /// A TCP connection, which copies share and which closes once nothing holds it.
+    Socket(Rc<RefCell<net::Socket>>),
+    /// A TCP port waiting for connections, which copies share and which closes once nothing
+    /// holds it.
+    Listener(Rc<RefCell<net::Listener>>),
 }
 
 /// A map key, which is an int, a string, or a bool, since those hash and compare exactly.
@@ -400,6 +406,17 @@ fn is_result(value: &EnumValue) -> bool {
     matches!(&*value.name, "ok" | "err")
 }
 
+/// Returns the ints of a list the checker knows holds only ints, such as an address's bytes.
+fn ints(values: &[Value]) -> Vec<i64> {
+    values
+        .iter()
+        .map(|value| match value {
+            Value::Int(n) => *n,
+            _ => 0,
+        })
+        .collect()
+}
+
 /// Makes a new list of strings, such as the pieces `split` returns.
 fn str_list(items: Vec<&str>) -> Value {
     Value::list(items.into_iter().map(|s| Value::Str(s.into())).collect())
@@ -481,6 +498,9 @@ impl Value {
             Value::Str(s) => out.push_str(s),
             Value::Unit => {}
             Value::Function(function) => out.push_str(&function.text),
+            // a handle prints as its type, as a function does
+            Value::Socket(_) => out.push_str(Handle::Socket.name()),
+            Value::Listener(_) => out.push_str(Handle::Listener.name()),
             Value::List(items) => {
                 out.push('[');
                 for (i, item) in items.iter().enumerate() {
@@ -550,13 +570,16 @@ impl Value {
         Ok(())
     }
 
-    /// Returns whether this value may hold a list, which a change can copy: a list, a tuple or
-    /// struct with one among its fields at any depth, or an enum value.
-    fn holds_list(&self) -> bool {
+    /// Returns whether a variable holding this value is dropped at its last use: if it may hold
+    /// a list, which a change can copy, a list, a tuple or struct with one among its fields at
+    /// any depth, or an enum value; or a socket or listener, which closes once nothing holds it,
+    /// so the other end sees it close where compiled code closes it.
+    fn drops_early(&self) -> bool {
         match self {
             Value::List(_) | Value::Map(_) | Value::Enum(_) => true,
-            Value::Tuple(fields) => fields.iter().any(Value::holds_list),
-            Value::Struct(value) => value.fields.iter().any(Value::holds_list),
+            Value::Socket(_) | Value::Listener(_) => true,
+            Value::Tuple(fields) => fields.iter().any(Value::drops_early),
+            Value::Struct(value) => value.fields.iter().any(Value::drops_early),
             _ => false,
         }
     }
@@ -1333,11 +1356,11 @@ impl<'out> Interpreter<'out> {
     }
 
     /// Drops the variable `name` of the running body if it holds a list, the only value a
-    /// change can copy, directly or in a tuple: a local of the running function, or a global at the top level, unless
+    /// change can copy, directly or in a tuple, or a handle (see [`Value::drops_early`]): a local of the running function, or a global at the top level, unless
     /// globals cannot move or the function `callee` may read it.
     fn drop_variable(&mut self, name: &str, callee: Option<&str>) {
         let holds_list =
-            |scope: &HashMap<String, Value>| scope.get(name).is_some_and(Value::holds_list);
+            |scope: &HashMap<String, Value>| scope.get(name).is_some_and(Value::drops_early);
         match self.scopes.last_mut() {
             Some(scope) => {
                 if holds_list(scope) {
@@ -1390,7 +1413,7 @@ impl<'out> Interpreter<'out> {
             };
             value = &mut inner.fields[position];
         }
-        if value.holds_list() {
+        if value.drops_early() {
             *value = Value::Unit;
         }
     }
@@ -2173,6 +2196,46 @@ impl<'out> Interpreter<'out> {
                 self.write_value(&mut text, &receiver, false)?;
                 Ok(Value::Str(text.into()))
             }
+            (_, Value::Socket(socket), _) => {
+                // a read may wait, so what was printed shows first
+                self.out.flush()?;
+                let mut socket = socket.borrow_mut();
+                Ok(match (name, &args[..]) {
+                    ("send", [Value::Str(text)]) => result(socket.send(text).map(Value::Int)),
+                    ("read_line", []) => result(socket.read_line().map(|line| match line {
+                        Some(line) => some(Value::Str(line.into())),
+                        None => none(),
+                    })),
+                    ("read", []) => result(socket.read().map(|text| Value::Str(text.into()))),
+                    ("read_all", []) => {
+                        result(socket.read_all().map(|text| Value::Str(text.into())))
+                    }
+                    ("close", []) => {
+                        socket.close();
+                        Value::Unit
+                    }
+                    _ => return Err(format!("there is no method '{name}' of a socket").into()),
+                })
+            }
+            (_, Value::Listener(listener), _) => {
+                let mut listener = listener.borrow_mut();
+                Ok(match name {
+                    "accept" => {
+                        self.out.flush()?;
+                        result(
+                            listener
+                                .accept()
+                                .map(|socket| Value::Socket(Rc::new(RefCell::new(socket)))),
+                        )
+                    }
+                    "port" => Value::Int(listener.port()),
+                    "close" => {
+                        listener.close();
+                        Value::Unit
+                    }
+                    _ => return Err(format!("there is no method '{name}' of a listener").into()),
+                })
+            }
             ("cmp", Value::Int(a), [Value::Int(b)]) => Ok(ordering(a.cmp(b))),
             // the order `sort` uses, in which every float has its place
             ("cmp", Value::Float(a), [Value::Float(b)]) => {
@@ -2667,6 +2730,34 @@ impl<'out> Interpreter<'out> {
             }
             ("time.now", []) => return Ok(Value::Float(time::now())),
             ("time.clock", []) => return Ok(Value::Float(time::clock())),
+            ("net_sys.connect", [Value::List(address), Value::Int(port), Value::Str(name)]) => {
+                self.out.flush()?;
+                let address = ints(address);
+                let connected = net::connect(&address, *port, name)
+                    .map(|socket| Value::Socket(Rc::new(RefCell::new(socket))));
+                return Ok(result(connected));
+            }
+            ("net_sys.listen", [Value::List(address), Value::Int(port), Value::Str(name)]) => {
+                let address = ints(address);
+                let listening = net::listen(&address, *port, name)
+                    .map(|listener| Value::Listener(Rc::new(RefCell::new(listener))));
+                return Ok(result(listening));
+            }
+            (
+                "net_sys.exchange",
+                [
+                    Value::List(address),
+                    Value::Int(port),
+                    Value::Str(name),
+                    Value::List(query),
+                    Value::Int(timeout),
+                ],
+            ) => {
+                self.out.flush()?;
+                let reply = net::exchange(&ints(address), *port, name, &ints(query), *timeout)
+                    .map(|bytes| Value::list(bytes.into_iter().map(Value::Int).collect()));
+                return Ok(result(reply));
+            }
             ("time.sleep", [Value::Int(seconds)]) => {
                 self.out.flush()?;
                 time::sleep(*seconds as f64)?;

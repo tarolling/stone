@@ -79,7 +79,7 @@
       }
     },
     "type-annotation": {
-      "match": "(->|:)\\s*((?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str)(?:\\]|,\\s*(?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str))*)(?![A-Za-z0-9_(])",
+      "match": "(->|:)\\s*((?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str|socket|listener)(?:\\]|,\\s*(?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str|socket|listener))*)(?![A-Za-z0-9_(])",
       "captures": {
         "1": { "name": "punctuation.separator.annotation.stone" },
         "2": { "name": "support.type.stone" }

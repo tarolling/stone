@@ -121,6 +121,16 @@ pub struct SourceFile {
     pub source: String,
 }
 
+impl SourceFile {
+    /// Returns whether the file is part of stone, written in stone, such as the `net` module's,
+    /// rather than one of the program's, which is named by its module in angle brackets, as
+    /// `<net>`.
+    pub fn is_builtin(&self) -> bool {
+        crate::stdlib::source_module(&self.module).is_some()
+            && self.path == Path::new(&format!("<{}>", self.module))
+    }
+}
+
 /// Every file of a program, indexed by [`FileId`], with the entry file first.
 #[derive(Debug, Clone, Default)]
 pub struct SourceMap {
@@ -262,6 +272,7 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
         modules: vec![],
         by_name: HashMap::new(),
         uses: vec![],
+        own: HashSet::new(),
         diagnostics: vec![],
     };
     loader.add(entry.to_path_buf(), String::new(), source.to_string());
@@ -326,6 +337,9 @@ struct Loader<'a> {
     by_name: HashMap<String, FileId>,
     /// Each file's `use` statements, in order.
     uses: Vec<Vec<Use>>,
+    /// The files that are part of stone, written in stone, such as `net`'s, which alone may use
+    /// the internal builtin modules.
+    own: HashSet<FileId>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -359,6 +373,20 @@ impl Loader<'_> {
         if let Some(&id) = self.by_name.get(&name) {
             return Some(id);
         }
+        // a module written in stone has no file of the program, and no modules inside it
+        if let Some(source) = crate::stdlib::source_module(&names[0]) {
+            if names.len() != 1 {
+                return None;
+            }
+            let id = self.add(
+                PathBuf::from(format!("<{name}>")),
+                name.clone(),
+                source.to_string(),
+            );
+            self.own.insert(id);
+            self.by_name.insert(name, id);
+            return Some(id);
+        }
         let path = self.root.join(module_path(names));
         let source = self.sources.read(&path)?;
         let id = self.add(path, name.clone(), source);
@@ -366,9 +394,11 @@ impl Loader<'_> {
         Some(id)
     }
 
-    /// Returns whether a module name refers to the entry file, such as `main` for `main.stn`.
+    /// Returns whether a module name refers to the entry file, such as `main` for `main.stn`,
+    /// which a module that is part of stone, such as `net`, never does.
     fn is_entry(&self, names: &[String]) -> bool {
         names == self.entry_names
+            && !(names.len() == 1 && crate::stdlib::source_module(&names[0]).is_some())
     }
 
     /// Resolves the `use` statements at the top level of `file`, loading the modules they name.
@@ -422,8 +452,20 @@ impl Loader<'_> {
                 ),
             ));
         }
+        let internal = crate::stdlib::INTERNAL_MODULES
+            .iter()
+            .any(|module| module.name == names[0]);
+        if internal && !self.own.contains(&file) {
+            return Err(Diagnostic::error(
+                span,
+                format!("no module named '{}'", names.join(".")),
+            ));
+        }
         if let Some(module) = crate::stdlib::module(&names[0]) {
             return self.resolve_builtin_module(module, path, span);
+        }
+        if crate::stdlib::source_module(&names[0]).is_some() {
+            self.check_builtin_name(&names[0], span)?;
         }
         let entry = self.entry_names.join(".");
         let entry_error = || {
@@ -506,18 +548,7 @@ impl Loader<'_> {
         span: Span,
     ) -> Result<Target, Diagnostic> {
         let name = module.name;
-        let names = [name.to_string()];
-        if !self.is_entry(&names)
-            && self
-                .sources
-                .read(&self.root.join(module_path(&names)))
-                .is_some()
-        {
-            return Err(Diagnostic::error(
-                span,
-                format!("'{name}' is a builtin module, so rename {name}.stn"),
-            ));
-        }
+        self.check_builtin_name(name, span)?;
         match path {
             [_] => Ok(Target::BuiltinModule(name.to_string())),
             [_, (function, function_span)] => {
@@ -538,6 +569,24 @@ impl Loader<'_> {
                     format!("no module named '{}'", dotted.join(".")),
                 ))
             }
+        }
+    }
+
+    /// Fails if a file next to the entry file takes the name of the builtin module `name`, which
+    /// would make `use` ambiguous.
+    fn check_builtin_name(&self, name: &str, span: Span) -> Result<(), Diagnostic> {
+        let names = [name.to_string()];
+        let taken = names != *self.entry_names
+            && self
+                .sources
+                .read(&self.root.join(module_path(&names)))
+                .is_some();
+        match taken {
+            true => Err(Diagnostic::error(
+                span,
+                format!("'{name}' is a builtin module, so rename {name}.stn"),
+            )),
+            false => Ok(()),
         }
     }
 

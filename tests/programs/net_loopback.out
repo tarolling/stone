@@ -1,0 +1,12 @@
+true listener
+socket socket
+socket socket [socket, socket]
+13
+some('hello')
+world
+café au lait
+true none
+err('socket is closed')
+err('socket is closed')
+true true
+done

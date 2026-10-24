@@ -1,0 +1,4 @@
+ok('once')
+ok('twice')
+0
+ok(['a!'])

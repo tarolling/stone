@@ -641,7 +641,9 @@ fn vector(mnemonic: &str, operands: &[&str]) -> Option<Result<u32>> {
         .strip_prefix('q')
         .is_some_and(|num| num.parse::<u32>().is_ok());
     let is_vector = q || (first.starts_with('v') && first.contains('.'));
-    let only_vector = matches!(mnemonic, "fneg" | "dup" | "fcmeq" | "addp");
+    // a scalar fneg takes d registers
+    let only_vector = matches!(mnemonic, "dup" | "fcmeq" | "addp")
+        || (mnemonic == "fneg" && !first.starts_with('d'));
     if !is_vector && !only_vector {
         return None;
     }
@@ -1106,10 +1108,15 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
                 _ => Err("bad operands for 'fmov'".to_string()),
             }
         }
-        "fsqrt" => {
+        "fsqrt" | "fneg" => {
             count(2)?;
             let (rd, rn) = (dreg(operands[0])?, dreg(operands[1])?);
-            Ok((0x1e61c000 | rn.num << 5 | rd.num, None))
+            let base = if mnemonic == "fsqrt" {
+                0x1e61c000
+            } else {
+                0x1e614000
+            };
+            Ok((base | rn.num << 5 | rd.num, None))
         }
         "fadd" | "fsub" | "fmul" | "fdiv" => {
             count(3)?;
@@ -1356,6 +1363,10 @@ mod tests {
             ("fcmeq v17.2d, v16.2d, #0.0", "4ee0da11"),
             ("addp d17, v17.2d", "5ef1ba31"),
             ("fmov x16, d17", "9e660230"),
+            ("fneg d3, d17", "1e614223"),
+            ("fmov d5, xzr", "9e6703e5"),
+            ("ldr d4, [x17, x20, lsl #3]", "fc747a24"),
+            ("str d20, [x17, x11, lsl #3]", "fc2b7a34"),
             ("mov v16.16b, v17.16b", "4eb11e30"),
         ]);
     }

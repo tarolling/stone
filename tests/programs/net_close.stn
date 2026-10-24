@@ -1,0 +1,26 @@
+// A socket closes once nothing will use it again, so the other end reads to the end of the
+// stream without either side calling close().
+use net
+
+fn handoff(l: listener, text: str) -> result[str, str]:
+    c = net.connect("127.0.0.1", l.port())?
+    s = l.accept()?
+    s.send(text)?
+    // nothing uses s after the send, so it is closed by now
+    ret c.read_all()
+
+fn echo_lines(l: listener) -> result[list[str], str]:
+    c = net.connect("127.0.0.1", l.port())?
+    c.send("a\nb\n")?
+    servers = [l.accept()?]
+    // the list holding the server's socket is used for the last time here
+    line = servers[0].read_line()?.unwrap()
+    servers[0].send("{line}!")?
+    servers = []
+    print(servers.len())
+    ret ok(c.read_all()?.split("\n"))
+
+l = net.listen("127.0.0.1", 0).unwrap()
+print(handoff(l, "once"))
+print(handoff(l, "twice"))
+print(echo_lines(l))

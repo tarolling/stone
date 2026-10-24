@@ -1,0 +1,14 @@
+// Finding addresses: written ones, names in a hosts file (`STONE_HOSTS` names the fixture),
+// and `localhost`, which this hosts file leaves out.
+use net
+
+for host in ["alpha", "ALPHA.example.", "beta", "beta.example", "sixy", "localhost", "a.localhost"]:
+    print(host, net.resolve(host))
+
+// written addresses come back as they are written in their shortest form
+for address in ["127.0.0.1", "0.0.0.0", "::", "::1", "1::", "2001:DB8:0:0:1:0:0:1", "::ffff:1.2.3.4", "fe80:0:0:0:0:0:0:0", "1:0:0:2:0:0:0:3", "1:2:3:4:5:6:7:8"]:
+    print(address, net.resolve(address))
+
+// and others are not addresses, so they are names, and not valid ones
+for text in ["256.0.0.1", "1.2.3", "01.2.3.4", "1:2:3:4:5:6:7:8:9", "1::2::3", "12345::", "::1.2.3.4:5", "g::"]:
+    print(text, net.resolve(text))

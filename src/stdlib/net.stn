@@ -1,0 +1,555 @@
+// The builtin `net` module, which a program that says `use net` is linked with: TCP
+// connections, and finding the addresses of a host.
+//
+// It finds addresses itself, as the C library would: an address written as text is used as it
+// is, a name is looked up in `/etc/hosts`, then `localhost` is the loopback addresses, and any
+// other name is asked of the DNS servers `/etc/resolv.conf` lists. The environment variables
+// `STONE_HOSTS` and `STONE_RESOLV_CONF` name other files to read instead. Addresses are lists of
+// 4 (IPv4) or 16 (IPv6) bytes, and IPv4 addresses come before IPv6 ones.
+//
+// It reaches the system through `net_sys`, which only stone's own modules may use.
+
+use fs
+use os
+use net_sys
+
+// The most addresses `nameserver` lines may list, as in the C library.
+fn max_servers() -> int:
+    ret 3
+
+// The port DNS servers answer on.
+fn dns_port() -> int:
+    ret 53
+
+// The DNS record types of an IPv4 address, an IPv6 address, and another name for a host.
+fn type_a() -> int:
+    ret 1
+
+fn type_aaaa() -> int:
+    ret 28
+
+fn type_cname() -> int:
+    ret 5
+
+// Every printable ASCII character, from code 32 to 126, so a character's code is 32 more than
+// its position.
+fn printable() -> str:
+    ret " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{{|}}~"
+
+////////////////////////////////////////////////////////////////
+// connections
+////////////////////////////////////////////////////////////////
+
+// Connects to `port` on `host`, which is a name such as `example.com` or an address such as
+// `127.0.0.1` or `::1`, trying each of the host's addresses in turn until one connects.
+pub fn connect(host: str, port: int) -> result[socket, str]:
+    name = endpoint(host, port)
+    check_port(port, name)?
+    failure = "no address: '{name}'"
+    for address in addresses(host)?:
+        match net_sys.connect(address, port, name):
+            case ok(connection):
+                ret ok(connection)
+            case err(e):
+                failure = e
+    ret err(failure)
+
+// Listens for connections to `port` at the first address of `host`: `127.0.0.1` for this
+// machine alone, `0.0.0.0` for every IPv4 address, or `::` for every address. A port of 0 lets
+// the system pick a free one, which the listener's `port()` gives.
+pub fn listen(host: str, port: int) -> result[listener, str]:
+    name = endpoint(host, port)
+    check_port(port, name)?
+    found = addresses(host)?
+    ret net_sys.listen(found[0], port, name)
+
+// Returns the addresses of `host` as text, such as `["93.184.215.14", "2606:2800:21f:cb07::1"]`.
+pub fn resolve(host: str) -> result[list[str], str]:
+    found = addresses(host)?
+    ret ok(found.map(format_address))
+
+// Returns how errors name `port` on `host`, with brackets around an IPv6 address, such as
+// `[::1]:80`.
+fn endpoint(host: str, port: int) -> str:
+    if ":" in host:
+        ret "[{host}]:{port}"
+    ret "{host}:{port}"
+
+// Fails unless `port` is a TCP port, from 0 to 65535.
+fn check_port(port: int, name: str) -> result[int, str]:
+    if port < 0 or port > 65535:
+        ret err("invalid port: '{name}'")
+    ret ok(port)
+
+////////////////////////////////////////////////////////////////
+// finding addresses
+////////////////////////////////////////////////////////////////
+
+// Returns the addresses of `host`, never none.
+fn addresses(host: str) -> result[list[list[int]], str]:
+    literal = parse_address(host)
+    if literal.is_some():
+        ret ok([literal.unwrap()])
+    name = lower(host)
+    if name.endswith("."):
+        name = name[:-1]
+    if not valid_name(name):
+        ret err("invalid host name: '{host}'")
+    found = hosts_lookup(name)
+    if found.len() > 0:
+        ret ok(found)
+    if name == "localhost" or name.endswith(".localhost"):
+        ret ok([[127, 0, 0, 1], loopback6()])
+    ret dns_lookup(host, name)
+
+// Returns the IPv6 loopback address, `::1`.
+fn loopback6() -> list[int]:
+    address = []
+    for i in range(15):
+        address.append(0)
+    address.append(1)
+    ret address
+
+// Returns whether `name` can be looked up: labels of letters, digits, `-`, and `_`, separated
+// by dots, each from 1 to 63 bytes, 253 in all.
+fn valid_name(name: str) -> bool:
+    if name.len() == 0 or name.len() > 253:
+        ret false
+    for label in name.split("."):
+        if label.len() == 0 or label.len() > 63:
+            ret false
+        for c in label:
+            if c not in "abcdefghijklmnopqrstuvwxyz0123456789-_":
+                ret false
+    ret true
+
+// Returns `text` with ASCII capital letters made small.
+fn lower(text: str) -> str:
+    out = ""
+    for c in text:
+        i = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".find(c)
+        if i.is_some():
+            out += "abcdefghijklmnopqrstuvwxyz"[i.unwrap()]
+        else:
+            out += c
+    ret out
+
+// Returns every address `/etc/hosts` (or `STONE_HOSTS`) gives `name`, IPv4 first, or none if
+// the file is missing or does not name it.
+fn hosts_lookup(name: str) -> list[list[int]]:
+    path = os.env("STONE_HOSTS").unwrap_or("/etc/hosts")
+    found = []
+    for line in fs.read(path).unwrap_or("").split("\n"):
+        fields = before_comment(line, "#").split()
+        if fields.len() < 2:
+            cont
+        address = parse_address(fields[0])
+        if address.is_none():
+            cont
+        for alias in fields[1:]:
+            if lower(alias) == name:
+                found.append(address.unwrap())
+                break
+    ret ipv4_first(found)
+
+// Returns `line` up to the first of `marks`, which start a comment.
+fn before_comment(line: str, marks: str) -> str:
+    end = line.len()
+    for mark in marks:
+        at = line.find(mark)
+        if at.is_some() and at.unwrap() < end:
+            end = at.unwrap()
+    ret line[:end]
+
+// Returns `found` with its IPv4 addresses first, each kind in its order, without repeats.
+fn ipv4_first(found: list[list[int]]) -> list[list[int]]:
+    out = []
+    seen = []
+    for width in [4, 16]:
+        for address in found:
+            text = format_address(address)
+            if address.len() == width and text not in seen:
+                out.append(address)
+                seen.append(text)
+    ret out
+
+////////////////////////////////////////////////////////////////
+// addresses as text
+////////////////////////////////////////////////////////////////
+
+// Returns the address `text` writes, such as `127.0.0.1` or `::1`, or none if it writes none.
+fn parse_address(text: str) -> option[list[int]]:
+    if ":" in text:
+        ret parse_ipv6(text)
+    ret parse_ipv4(text)
+
+// Returns the IPv4 address `text` writes as four decimal numbers from 0 to 255, without
+// leading zeros, as `inet_pton` reads them.
+fn parse_ipv4(text: str) -> option[list[int]]:
+    parts = text.split(".")
+    if parts.len() != 4:
+        ret none
+    address = []
+    for part in parts:
+        address.append(decimal_byte(part)?)
+    ret some(address)
+
+// Returns the number from 0 to 255 that `part` writes in decimal without leading zeros.
+fn decimal_byte(part: str) -> option[int]:
+    if part.len() == 0 or part.len() > 3 or (part.len() > 1 and part.startswith("0")):
+        ret none
+    n = 0
+    for c in part:
+        n = n * 10 + "0123456789".find(c)?
+    if n > 255:
+        ret none
+    ret some(n)
+
+// Returns the IPv6 address `text` writes: eight groups of up to four hex digits separated by
+// colons, with `::` standing for one or more groups of zeros, and possibly an IPv4 address as
+// the last two groups, as in `::ffff:1.2.3.4`.
+fn parse_ipv6(text: str) -> option[list[int]]:
+    halves = text.split("::")
+    if halves.len() > 2:
+        ret none
+    groups = hex_groups(halves[0], halves.len() == 1)?
+    if halves.len() == 2:
+        tail = hex_groups(halves[1], true)?
+        if groups.len() + tail.len() > 7:
+            ret none
+        for i in range(8 - groups.len() - tail.len()):
+            groups.append(0)
+        groups.extend(tail)
+    if groups.len() != 8:
+        ret none
+    address = []
+    for group in groups:
+        address.append(group / 256)
+        address.append(group % 256)
+    ret some(address)
+
+// Returns the 16-bit groups `part` writes between colons, where the last may be an IPv4 address
+// if `last` says `part` ends the address.
+fn hex_groups(part: str, last: bool) -> option[list[int]]:
+    groups = []
+    if part.len() == 0:
+        ret some(groups)
+    pieces = part.split(":")
+    for i in range(pieces.len()):
+        piece = pieces[i]
+        if last and i == pieces.len() - 1 and "." in piece:
+            v4 = parse_ipv4(piece)?
+            groups.append(v4[0] * 256 + v4[1])
+            groups.append(v4[2] * 256 + v4[3])
+        else:
+            groups.append(hex_group(piece)?)
+    ret some(groups)
+
+// Returns the number one to four hex digits write.
+fn hex_group(piece: str) -> option[int]:
+    if piece.len() == 0 or piece.len() > 4:
+        ret none
+    n = 0
+    for c in piece:
+        n = n * 16 + hex_digit(c)?
+    ret some(n)
+
+// Returns the value of the hex digit `c`, small or capital.
+fn hex_digit(c: str) -> option[int]:
+    i = "0123456789abcdefABCDEF".find(c)?
+    if i >= 16:
+        ret some(i - 6)
+    ret some(i)
+
+// Returns `address` as text: IPv4 as four decimal numbers, and IPv6 as RFC 5952 writes it, in
+// small hex digits without leading zeros, with the longest run of two or more zero groups (the
+// first of equal runs) written `::`, and an IPv4-mapped address as `::ffff:1.2.3.4`.
+fn format_address(address: list[int]) -> str:
+    if address.len() == 4:
+        ret "{address[0]}.{address[1]}.{address[2]}.{address[3]}"
+    groups = []
+    for i in range(8):
+        groups.append(address[2 * i] * 256 + address[2 * i + 1])
+    mapped = groups[5] == 65535
+    for i in range(5):
+        mapped = mapped and groups[i] == 0
+    if mapped:
+        ret "::ffff:{address[12]}.{address[13]}.{address[14]}.{address[15]}"
+    best = -1
+    best_len = 1
+    i = 0
+    while i < 8:
+        if groups[i] == 0:
+            j = i
+            while j < 8 and groups[j] == 0:
+                j += 1
+            if j - i > best_len:
+                best = i
+                best_len = j - i
+            i = j
+        else:
+            i += 1
+    if best < 0:
+        ret ":".join(groups.map(hex))
+    head = ":".join(groups[:best].map(hex))
+    tail = ":".join(groups[best + best_len:].map(hex))
+    ret "{head}::{tail}"
+
+// Returns `n` in small hex digits without leading zeros.
+fn hex(n: int) -> str:
+    if n == 0:
+        ret "0"
+    out = ""
+    while n > 0:
+        out = "0123456789abcdef"[n % 16] + out
+        n = n / 16
+    ret out
+
+////////////////////////////////////////////////////////////////
+// DNS
+////////////////////////////////////////////////////////////////
+
+// What `/etc/resolv.conf` says about asking DNS servers.
+struct Resolver:
+    // each server's address and port
+    servers: list[tuple[list[int], int]]
+    // the domains to try a short name in
+    search: list[str]
+    // how many dots a name needs to be tried as it is before the search domains
+    ndots: int
+    // seconds to wait for each server's answer
+    timeout: int
+    // how many times to go through the servers
+    attempts: int
+
+// How a DNS question went: the addresses found, a name with nothing found, or a failure no
+// server got past, such as a timeout.
+enum Answer:
+    Found(list[list[int]])
+    Missing
+    Failed(str)
+
+// Returns the settings `/etc/resolv.conf` (or `STONE_RESOLV_CONF`) gives, with the C library's
+// defaults for what it leaves out: the server on this machine, no search domains, 1 dot, 5
+// seconds, and 2 attempts.
+fn read_resolver() -> Resolver:
+    path = os.env("STONE_RESOLV_CONF").unwrap_or("/etc/resolv.conf")
+    settings = Resolver(servers=[], search=[], ndots=1, timeout=5, attempts=2)
+    text = fs.read(path).unwrap_or("")
+    for line in text.split("\n"):
+        fields = before_comment(line, "#;").split()
+        if fields.len() < 2:
+            cont
+        key = fields[0]
+        if key == "nameserver":
+            server = parse_server(fields[1])
+            if server.is_some() and settings.servers.len() < max_servers():
+                settings.servers.append(server.unwrap())
+        elif key == "domain":
+            settings.search = [lower(fields[1])]
+        elif key == "search":
+            settings.search = fields[1:].map(lower)
+        elif key == "options":
+            for option in fields[1:]:
+                parts = option.split(":")
+                if parts.len() != 2:
+                    cont
+                value = parts[1].parse_int().unwrap_or(-1)
+                if value < 0:
+                    cont
+                if parts[0] == "ndots":
+                    settings.ndots = min(value, 15)
+                elif parts[0] == "timeout":
+                    settings.timeout = max(min(value, 30), 1)
+                elif parts[0] == "attempts":
+                    settings.attempts = max(min(value, 5), 1)
+    if settings.servers.len() == 0:
+        settings.servers.append(([127, 0, 0, 1], dns_port()))
+    ret settings
+
+// Returns the server a `nameserver` line names: an address, which uses port 53, or, as stone
+// also reads, `1.2.3.4:5353` or `[::1]:5353` with a port of its own.
+fn parse_server(text: str) -> option[tuple[list[int], int]]:
+    if text.startswith("["):
+        close = text.find("]:")?
+        port = text[close + 2:].parse_int().ok()?
+        if port < 1 or port > 65535:
+            ret none
+        ret some((parse_ipv6(text[1:close])?, port))
+    parts = text.split(":")
+    if parts.len() == 2:
+        port = parts[1].parse_int().ok()?
+        if port < 1 or port > 65535:
+            ret none
+        ret some((parse_ipv4(parts[0])?, port))
+    ret some((parse_address(text)?, dns_port()))
+
+fn min(a: int, b: int) -> int:
+    if a < b:
+        ret a
+    ret b
+
+fn max(a: int, b: int) -> int:
+    if a > b:
+        ret a
+    ret b
+
+// Asks the DNS servers for the addresses of `name` (as `host` was written), trying it in each
+// search domain as the C library's `res_search` does: as it is first if it has at least `ndots`
+// dots, and last otherwise, and never in a search domain if it ends with a dot.
+fn dns_lookup(host: str, name: str) -> result[list[list[int]], str]:
+    settings = read_resolver()
+    candidates = []
+    if host.endswith("."):
+        candidates.append(name)
+    else:
+        dots = name.split(".").len() - 1
+        if dots >= settings.ndots:
+            candidates.append(name)
+        for domain in settings.search:
+            candidates.append("{name}.{domain}")
+        if dots < settings.ndots:
+            candidates.append(name)
+    failure = "unknown host: '{host}'"
+    for candidate in candidates:
+        if not valid_name(candidate):
+            cont
+        match ask(candidate, settings):
+            case Answer.Found(found):
+                ret ok(found)
+            case Answer.Missing:
+                cont
+            case Answer.Failed(e):
+                failure = e
+    ret err(failure)
+
+// Asks for the IPv4 and then the IPv6 addresses of `name`.
+fn ask(name: str, settings: Resolver) -> Answer:
+    found = []
+    for record in [type_a(), type_aaaa()]:
+        match ask_type(name, record, settings):
+            case Answer.Found(addresses):
+                found.extend(addresses)
+            case Answer.Missing:
+                cont
+            case Answer.Failed(e):
+                if found.len() == 0:
+                    ret Answer.Failed(e)
+    if found.len() > 0:
+        ret Answer.Found(found)
+    ret Answer.Missing
+
+// Asks the servers in turn for the records of type `record` of `name`, going through them
+// `attempts` times, until one answers.
+fn ask_type(name: str, record: int, settings: Resolver) -> Answer:
+    query = encode_query(name, record)
+    failure = ""
+    for attempt in range(settings.attempts):
+        for server in settings.servers:
+            address, port = server
+            where = format_address(address)
+            match net_sys.exchange(address, port, where, query, settings.timeout * 1000):
+                case ok(reply):
+                    match decode_reply(reply, name, record):
+                        case some(answer):
+                            match answer:
+                                case Answer.Failed(e):
+                                    failure = "{e}: '{where}'"
+                                case _:
+                                    ret answer
+                        case none:
+                            failure = "bad DNS reply: '{where}'"
+                case err(e):
+                    failure = e
+    ret Answer.Failed(failure)
+
+// Returns a query for the records of type `record` of `name`, with an ID of 0 that
+// `net_sys.exchange` fills in, asking the server to recurse.
+fn encode_query(name: str, record: int) -> list[int]:
+    query = [0, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0]
+    for label in name.split("."):
+        query.append(label.len())
+        for c in label:
+            query.append(code(c))
+    query.append(0)
+    query.extend([record / 256, record % 256, 0, 1])
+    ret query
+
+// Returns the ASCII code of the printable character `c`.
+fn code(c: str) -> int:
+    ret 32 + printable().find(c).unwrap_or(0)
+
+// Returns what a reply to a query for `name`'s records of type `record` says: the addresses it
+// gives `name`, following the other names it gives it, nothing if it has no such name, or a
+// failure the server reported. Returns none for a reply that is not well formed.
+fn decode_reply(reply: list[int], name: str, record: int) -> option[Answer]:
+    if reply.len() < 12 or reply[2] < 128:
+        ret none
+    rcode = reply[3] % 16
+    if rcode == 3:
+        ret some(Answer.Missing)
+    if rcode == 2:
+        ret some(Answer.Failed("server failure"))
+    if rcode == 5:
+        ret some(Answer.Failed("refused"))
+    if rcode != 0:
+        ret some(Answer.Failed("DNS error {rcode}"))
+    questions = reply[4] * 256 + reply[5]
+    answers = reply[6] * 256 + reply[7]
+    at = 12
+    for i in range(questions):
+        at = read_name(reply, at)?[1] + 4
+    target = name
+    found = []
+    for i in range(answers):
+        owner, next = read_name(reply, at)?
+        if next + 10 > reply.len():
+            ret none
+        kind = reply[next] * 256 + reply[next + 1]
+        class = reply[next + 2] * 256 + reply[next + 3]
+        length = reply[next + 8] * 256 + reply[next + 9]
+        start = next + 10
+        if start + length > reply.len():
+            ret none
+        if class == 1 and owner == target:
+            if kind == type_cname():
+                target = read_name(reply, start)?[0]
+            elif kind == record and (length == 4 or length == 16):
+                found.append(reply[start:start + length])
+        at = start + length
+    if found.len() == 0:
+        ret some(Answer.Missing)
+    ret some(Answer.Found(found))
+
+// Returns the name at `at` in `reply`, in small letters, and where what follows it starts,
+// following pointers to names earlier in the reply, or none if it is not well formed.
+fn read_name(reply: list[int], at: int) -> option[tuple[str, int]]:
+    labels = []
+    end = -1
+    hops = 0
+    while true:
+        if at >= reply.len():
+            ret none
+        length = reply[at]
+        if length == 0:
+            if end < 0:
+                end = at + 1
+            break
+        if length >= 192:
+            if at + 1 >= reply.len() or hops >= 64:
+                ret none
+            if end < 0:
+                end = at + 2
+            at = (length - 192) * 256 + reply[at + 1]
+            hops += 1
+            cont
+        if length > 63 or at + 1 + length > reply.len():
+            ret none
+        label = ""
+        for b in reply[at + 1:at + 1 + length]:
+            if b < 32 or b > 126:
+                ret none
+            label += printable()[b - 32]
+        labels.append(lower(label))
+        at += 1 + length
+    ret some((".".join(labels), end))

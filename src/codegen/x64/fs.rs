@@ -8,10 +8,12 @@
 
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{
-    DIR_BUFFER, FILE_BUFFER, INVALID_TEXT_CODE, NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags,
+    DIR_BUFFER, FILE_BUFFER, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE,
+    NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags, SOCKET_CLOSED_CODE, TIMED_OUT_CODE,
     immortal_string,
 };
 use crate::stdlib::fs::{INVALID_TEXT, NULL_IN_PATH, errors};
+use crate::stdlib::net::{INVALID_ADDRESS, LISTENER_CLOSED, SOCKET_CLOSED, TIMED_OUT};
 use crate::stdlib::os::NULL_IN_COMMAND;
 
 /// `openat`'s directory for a path relative to the working directory.
@@ -35,20 +37,33 @@ pub(super) const EINTR: i64 = 4;
 ///
 /// They follow the System V calling convention and need the string, list, and enum runtimes,
 /// `stone.str_int` for an error number with no reason in the tables, and `stone.list_sort_str`
-/// for `stone.fs_list_dir`. `used` may also hold `stone.os_run`, which shares their pieces, so
-/// they are emitted once (see `process::run_runtime`).
+/// for `stone.fs_list_dir`. `used` may also hold `stone.os_run` and the `stone.net_` routines,
+/// which share their pieces, so they are emitted once (see `process::run_runtime` and
+/// `net::net_runtime`).
 pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     let uses = |label: &str| used.contains(&label);
     let flags = OpenFlags::of(r#gen.target());
     let fails = used.iter().any(|label| *label != "stone.fs_exists");
+    let net: Vec<&str> = used
+        .iter()
+        .copied()
+        .filter(|label| label.starts_with("stone.net_"))
+        .collect();
 
     if fails {
-        errors_and_results(r#gen);
+        errors_and_results(r#gen, !net.is_empty());
     }
     path_check(r#gen);
-    if uses("stone.os_run") {
+    // os.run and the net routines check text as fs.read does
+    let checks_text = uses("stone.os_run") || !net.is_empty();
+    if checks_text {
         utf8_check(r#gen);
+    }
+    if uses("stone.os_run") {
         super::process::run_runtime(r#gen);
+    }
+    if !net.is_empty() {
+        super::net::net_runtime(r#gen, &net);
     }
     if used.iter().any(|label| {
         matches!(
@@ -64,7 +79,7 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
     if uses("stone.fs_read") || uses("stone.fs_read_lines") {
         read_all(r#gen, flags.read);
-        if !uses("stone.os_run") {
+        if !checks_text {
             utf8_check(r#gen);
         }
     }
@@ -83,7 +98,7 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         );
     }
     if uses("stone.fs_list_dir") {
-        if !uses("stone.fs_read") && !uses("stone.fs_read_lines") && !uses("stone.os_run") {
+        if !uses("stone.fs_read") && !uses("stone.fs_read_lines") && !checks_text {
             utf8_check(r#gen);
         }
         list_dir(r#gen, flags.directory);
@@ -117,21 +132,31 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
 }
 
-/// Emits the pieces every failing routine shares:
+/// Emits the pieces every failing routine shares, with the reasons of the `net` routines' own
+/// errors if `net`:
 ///
-/// - `.Lfs_err` returns a new `err` of the message for the error `rdi` about the path `rsi`:
-///   a positive error number, [`INVALID_TEXT_CODE`], or [`NULL_IN_PATH_CODE`]
+/// - `.Lfs_err` returns a new `err` of the message for the error `rdi` about the path `rsi`, or
+///   of the reason alone if `rsi` is 0: a positive error number, [`INVALID_TEXT_CODE`], or
+///   another of the codes in `context`, such as [`NULL_IN_PATH_CODE`]
 /// - `.Lfs_ok` returns a new `ok` of `rdi`, a slot counted as the kind `rsi` says
 /// - `.Lfs_join` returns a new string holding `rdi` followed by `rsi`, releasing `rdi`
-fn errors_and_results(r#gen: &mut dyn AssemblyGenerator) {
+fn errors_and_results(r#gen: &mut dyn AssemblyGenerator, net: bool) {
     let os = r#gen.target().os;
-    let reasons: Vec<(i64, &str)> = errors(os)
+    let mut reasons: Vec<(i64, &str)> = errors(os)
         .chain([
             (INVALID_TEXT_CODE, INVALID_TEXT),
             (NULL_IN_PATH_CODE, NULL_IN_PATH),
             (NULL_IN_COMMAND_CODE, NULL_IN_COMMAND),
         ])
         .collect();
+    if net {
+        reasons.extend([
+            (INVALID_ADDRESS_CODE, INVALID_ADDRESS),
+            (TIMED_OUT_CODE, TIMED_OUT),
+            (SOCKET_CLOSED_CODE, SOCKET_CLOSED),
+            (LISTENER_CLOSED_CODE, LISTENER_CLOSED),
+        ]);
+    }
     r#gen.emit("\t.data");
     for (number, reason) in &reasons {
         immortal_string(r#gen, &reason_label(*number), reason);
@@ -161,8 +186,11 @@ fn errors_and_results(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trsi, rax");
     r#gen.emit("\tcall\tstone.str_concat");
     release(r#gen, "rbx", ".Lfs_err_number");
-    // the reason is owned, or immortal, which releasing never frees
+    // the reason is owned, or immortal, which releasing never frees, and stands alone without a
+    // path
     r#gen.emit(".Lfs_err_reason:");
+    r#gen.emit("\ttest\tr12, r12");
+    r#gen.emit("\tjz\t.Lfs_err_alone");
     for piece in [
         "lea\trsi, [rip + .Lfs_open_quote]",
         "mov\trsi, r12",
@@ -172,6 +200,7 @@ fn errors_and_results(r#gen: &mut dyn AssemblyGenerator) {
         r#gen.emit(&format!("\t{piece}"));
         r#gen.emit("\tcall\t.Lfs_join");
     }
+    r#gen.emit(".Lfs_err_alone:");
     r#gen.emit("\tmov\trbx, rax");
     r#gen.emit("\tmov\tedi, 1"); // err
     r#gen.emit("\tmov\tesi, 1"); // a string slot

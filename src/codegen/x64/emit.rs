@@ -14,7 +14,7 @@ use crate::codegen::ir::{
     BinOp, BlockId, Callee, Cond, FIELDS_OFFSET, Function, Inst, Kernel, Operand, RcKind,
     Terminator, VReg, variable_of,
 };
-use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
+use crate::codegen::regalloc::{Location, float_vregs, hints, linear_scan, parallel_moves};
 use crate::codegen::{AssemblyGenerator, magic_signed};
 use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
 use std::collections::HashMap;
@@ -25,6 +25,13 @@ const CALLEE_SAVED: [&str; 5] = ["rbx", "r12", "r13", "r14", "r15"];
 
 /// Registers that calls clobber, which hold values that do not live across one.
 const CALLER_SAVED: [&str; 6] = ["rsi", "rdi", "r8", "r9", "r10", "r11"];
+
+/// The vector registers that can hold a float that crosses no call, all of which calls clobber.
+/// `xmm0` to `xmm2` are scratch, and a packed loop takes these for itself.
+const VECTOR: [&str; 13] = [
+    "xmm3", "xmm4", "xmm5", "xmm6", "xmm7", "xmm8", "xmm9", "xmm10", "xmm11", "xmm12", "xmm13",
+    "xmm14", "xmm15",
+];
 
 /// The registers a stone function returns its first values in. A tuple's values past these go in
 /// an area the caller reserves just above the arguments it passes on the stack, so the callee
@@ -37,12 +44,14 @@ const RESULT_REGS: [&str; 3] = ["rax", "rdx", "rcx"];
 /// `list index out of range (index {}, length {})`. They are never allocated.
 pub(super) const FAIL_VALUES: [&str; 2] = ["rcx", "rdx"];
 
-/// Where a value is while generating code: a register, a slot in the frame, or an immediate.
+/// Where a value is while generating code: a general register, a vector register holding a
+/// float's bits, a slot in the frame, or an immediate.
 ///
-/// Its `Display` is the operand text, such as `rbx`, `QWORD PTR [rbp - 16]`, or `42`.
+/// Its `Display` is the operand text, such as `rbx`, `xmm3`, `QWORD PTR [rbp - 16]`, or `42`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Value {
     Reg(&'static str),
+    Xmm(&'static str),
     /// A spill slot at `[rbp - offset]`.
     Stack(i32),
     Imm(i64),
@@ -51,7 +60,7 @@ enum Value {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Reg(reg) => write!(f, "{reg}"),
+            Value::Reg(reg) | Value::Xmm(reg) => write!(f, "{reg}"),
             Value::Stack(offset) => write!(f, "QWORD PTR [rbp - {offset}]"),
             Value::Imm(n) => write!(f, "{n}"),
         }
@@ -147,6 +156,7 @@ impl Frame {
         match operand {
             Operand::Imm(n) => Ok(Value::Imm(n)),
             Operand::Reg(reg) => match self.locations.get(&reg) {
+                Some(Location::Reg(name)) if name.starts_with("xmm") => Ok(Value::Xmm(name)),
                 Some(Location::Reg(name)) => Ok(Value::Reg(name)),
                 Some(Location::Stack(slot)) => Ok(Value::Stack(8 * (self.saved + slot + 1) as i32)),
                 None => Err(format!("{reg} was never allocated")),
@@ -173,6 +183,8 @@ impl X64Generator {
             &liveness.intervals,
             &CALLEE_SAVED,
             &CALLER_SAVED,
+            &VECTOR,
+            &float_vregs(function),
             &hints(function, &ARG_REGS),
         );
         crate::debug!("{function}");
@@ -443,6 +455,14 @@ impl X64Generator {
             return;
         }
         match (dst, src) {
+            (Value::Xmm(to), Value::Xmm(from)) => self.emit(&format!("\tmovapd\t{to}, {from}")),
+            (Value::Xmm(to), Value::Imm(0)) => self.emit(&format!("\txorpd\t{to}, {to}")),
+            (Value::Xmm(to), Value::Imm(n)) => {
+                self.emit(&format!("\tmov\trax, {n}"));
+                self.emit(&format!("\tmovq\t{to}, rax"));
+            }
+            (Value::Xmm(to), _) => self.emit(&format!("\tmovq\t{to}, {src}")),
+            (_, Value::Xmm(from)) => self.emit(&format!("\tmovq\t{dst}, {from}")),
             (Value::Reg(reg), _) => self.emit(&format!("\tmov\t{reg}, {src}")),
             (_, Value::Reg(_)) => self.emit(&format!("\tmov\t{dst}, {src}")),
             (_, Value::Imm(n)) if fits_i32(n) => self.emit(&format!("\tmov\t{dst}, {n}")),
@@ -467,6 +487,10 @@ impl X64Generator {
     /// a register, memory, or a 32-bit immediate, loading a wider immediate into `scratch` first.
     fn source(&mut self, value: Value, scratch: &'static str) -> String {
         match value {
+            Value::Xmm(_) => {
+                self.load(scratch, value);
+                scratch.to_string()
+            }
             Value::Imm(n) if !fits_i32(n) => {
                 self.load(scratch, value);
                 scratch.to_string()
@@ -489,6 +513,8 @@ impl X64Generator {
     /// Moves a float's bits from `value` into an `xmm` register.
     fn load_xmm(&mut self, xmm: &str, value: Value) {
         match value {
+            Value::Xmm(from) if from == xmm => {}
+            Value::Xmm(from) => self.emit(&format!("\tmovapd\t{xmm}, {from}")),
             Value::Imm(_) => {
                 self.load("rax", value);
                 self.emit(&format!("\tmovq\t{xmm}, rax"));
@@ -497,11 +523,32 @@ impl X64Generator {
         }
     }
 
+    /// Moves a float's bits from the `xmm` register `xmm` to `dst`.
+    fn store_xmm(&mut self, dst: Value, xmm: &str) {
+        match dst {
+            Value::Xmm(to) if to == xmm => {}
+            Value::Xmm(to) => self.emit(&format!("\tmovapd\t{to}, {xmm}")),
+            _ => self.emit(&format!("\tmovq\t{dst}, {xmm}")),
+        }
+    }
+
+    /// Returns `value` as the source operand of a scalar SSE instruction, which takes a vector
+    /// register or memory, moving a float in a general register or an immediate into `scratch`.
+    fn float_source(&mut self, value: Value, scratch: &'static str) -> String {
+        match value {
+            Value::Xmm(_) | Value::Stack(_) => value.to_string(),
+            _ => {
+                self.load_xmm(scratch, value);
+                scratch.to_string()
+            }
+        }
+    }
+
     /// Emits `cmp lhs, rhs` for an int comparison, loading `lhs` into `rax` when `cmp` cannot
     /// take it as its first operand.
     fn compare_ints(&mut self, lhs: Value, rhs: Value) {
         let lhs = match (lhs, rhs) {
-            (Value::Imm(_), _) | (Value::Stack(_), Value::Stack(_)) => {
+            (Value::Imm(_) | Value::Xmm(_), _) | (Value::Stack(_), Value::Stack(_)) => {
                 self.load("rax", lhs);
                 "rax".to_string()
             }
@@ -655,6 +702,40 @@ impl X64Generator {
 
     fn emit_inst(&mut self, frame: &Frame, inst: &Inst) -> Result<(), String> {
         match inst {
+            Inst::DataGet {
+                dst,
+                data,
+                index,
+                offset,
+            } => {
+                let (dst, data, index) =
+                    (frame.reg(*dst)?, frame.value(*data)?, frame.value(*index)?);
+                let slot = self.data_slot(data, index, *offset);
+                match dst {
+                    Value::Xmm(reg) => self.emit(&format!("\tmovq\t{reg}, QWORD PTR {slot}")),
+                    _ => {
+                        let target = self.target(dst, None);
+                        self.emit(&format!("\tmov\t{target}, QWORD PTR {slot}"));
+                        self.store(dst, target);
+                    }
+                }
+            }
+
+            Inst::DataSet {
+                data,
+                index,
+                value,
+                offset,
+            } => {
+                let (data, index, value) = (
+                    frame.value(*data)?,
+                    frame.value(*index)?,
+                    frame.value(*value)?,
+                );
+                let slot = self.data_slot(data, index, *offset);
+                self.store_qword(&slot, value);
+            }
+
             Inst::DepthCheck => self.depth_check(),
 
             Inst::ElementSlot {
@@ -867,27 +948,55 @@ impl X64Generator {
                         self.emit(&format!("{done}:"));
                     }
                 }
-                self.emit(&format!("\tmovq\t{dst}, xmm0"));
+                self.store_xmm(dst, "xmm0");
             }
 
             Inst::FloatBinary { op, dst, lhs, rhs } => {
                 let (dst, lhs, rhs) = (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
-                self.load_xmm("xmm0", lhs);
-                self.load_xmm("xmm1", rhs);
                 let instruction = match op {
                     BinOp::Add => "addsd",
                     BinOp::Sub => "subsd",
                     BinOp::Mul => "mulsd",
-                    BinOp::Div => {
-                        self.fail_on_float_zero("xmm1");
-                        "divsd"
-                    }
+                    BinOp::Div => "divsd",
                     BinOp::Rem | BinOp::Pow => {
                         return Err(format!("float {op:?} is emitted separately"));
                     }
                 };
-                self.emit(&format!("\t{instruction}\txmm0, xmm1"));
-                self.emit(&format!("\tmovq\t{dst}, xmm0"));
+                // computed in dst's own register when it has one that the divisor is not in
+                let result = match dst {
+                    Value::Xmm(reg) if lhs == dst || rhs != dst => reg,
+                    _ => "xmm0",
+                };
+                let rhs = match op {
+                    BinOp::Div => {
+                        // the divisor must be in a register to compare it with zero
+                        let divisor = match rhs {
+                            Value::Xmm(reg) => reg,
+                            _ => {
+                                self.load_xmm("xmm1", rhs);
+                                "xmm1"
+                            }
+                        };
+                        self.fail_on_float_zero(divisor);
+                        divisor.to_string()
+                    }
+                    _ => self.float_source(rhs, "xmm1"),
+                };
+                self.load_xmm(result, lhs);
+                self.emit(&format!("\t{instruction}\t{result}, {rhs}"));
+                self.store_xmm(dst, result);
+            }
+
+            Inst::FloatNeg { dst, src } if matches!(frame.reg(*dst)?, Value::Xmm(_)) => {
+                let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
+                let Value::Xmm(reg) = dst else {
+                    unreachable!("the destination is a vector register")
+                };
+                // flip the sign bit, which also negates 0.0 and nan like the interpreter
+                self.load_xmm(reg, src);
+                self.emit(&format!("\tmov\trax, {}", i64::MIN));
+                self.emit("\tmovq\txmm0, rax");
+                self.emit(&format!("\txorpd\t{reg}, xmm0"));
             }
 
             Inst::Neg { dst, src } | Inst::FloatNeg { dst, src } => {
@@ -905,9 +1014,13 @@ impl X64Generator {
 
             Inst::FloatSqrt { dst, src } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
-                self.load_xmm("xmm0", src);
-                self.emit("\tsqrtsd\txmm0, xmm0");
-                self.emit(&format!("\tmovq\t{dst}, xmm0"));
+                let result = match dst {
+                    Value::Xmm(reg) => reg,
+                    _ => "xmm0",
+                };
+                let src = self.float_source(src, "xmm1");
+                self.emit(&format!("\tsqrtsd\t{result}, {src}"));
+                self.store_xmm(dst, result);
             }
 
             Inst::Not { dst, src } => {
@@ -1055,9 +1168,14 @@ impl X64Generator {
                 let (dst, list, index) =
                     (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
                 let slot = self.known_slot(list, index, *offset);
-                let target = self.target(dst, None);
-                self.emit(&format!("\tmov\t{target}, QWORD PTR {slot}"));
-                self.store(dst, target);
+                match dst {
+                    Value::Xmm(reg) => self.emit(&format!("\tmovq\t{reg}, QWORD PTR {slot}")),
+                    _ => {
+                        let target = self.target(dst, None);
+                        self.emit(&format!("\tmov\t{target}, QWORD PTR {slot}"));
+                        self.store(dst, target);
+                    }
+                }
             }
 
             Inst::ListStore {
@@ -1171,8 +1289,18 @@ impl X64Generator {
                     }
                     _ => src.to_string(),
                 };
-                self.emit(&format!("\tcvtsi2sd\txmm0, {src}"));
-                self.emit(&format!("\tmovq\t{dst}, xmm0"));
+                match dst {
+                    Value::Xmm(reg) => {
+                        // cvtsi2sd keeps the register's upper half, so clear it first rather
+                        // than wait on whatever wrote it last
+                        self.emit(&format!("\txorpd\t{reg}, {reg}"));
+                        self.emit(&format!("\tcvtsi2sd\t{reg}, {src}"));
+                    }
+                    _ => {
+                        self.emit(&format!("\tcvtsi2sd\txmm0, {src}"));
+                        self.emit(&format!("\tmovq\t{dst}, xmm0"));
+                    }
+                }
             }
 
             Inst::FloatToInt { dst, src } => {
@@ -1207,6 +1335,10 @@ impl X64Generator {
                             self.emit("\tpush\trax");
                         }
                         Value::Imm(n) => self.emit(&format!("\tpush\t{n}")),
+                        Value::Xmm(_) => {
+                            self.load("rax", *value);
+                            self.emit("\tpush\trax");
+                        }
                         _ => self.emit(&format!("\tpush\t{value}")),
                     }
                 }
@@ -1261,6 +1393,7 @@ impl X64Generator {
     fn store_qword(&mut self, slot: &str, value: Value) {
         match value {
             Value::Reg(reg) => self.emit(&format!("\tmov\tQWORD PTR {slot}, {reg}")),
+            Value::Xmm(reg) => self.emit(&format!("\tmovq\tQWORD PTR {slot}, {reg}")),
             Value::Imm(n) if fits_i32(n) => self.emit(&format!("\tmov\tQWORD PTR {slot}, {n}")),
             _ => {
                 self.load("rdx", value);
@@ -1398,21 +1531,36 @@ impl X64Generator {
     /// `mov rax, QWORD PTR [rbx + 16]`.
     fn known_slot(&mut self, list: Value, index: Value, offset: usize) -> String {
         let base = self.base(list, "rax");
+        // an index in memory goes to rcx before rax is reused for the elements
         let index = match index {
-            Value::Imm(n) => {
-                self.emit(&format!("\tmov\trax, QWORD PTR [{base} + 16]"));
-                return format!("[rax + {}]", 8 * (n + offset as i64));
-            }
-            Value::Reg(reg) => reg,
-            Value::Stack(_) => {
+            Value::Stack(_) | Value::Xmm(_) => {
                 self.load("rcx", index);
-                "rcx"
+                Value::Reg("rcx")
             }
+            _ => index,
         };
         self.emit(&format!("\tmov\trax, QWORD PTR [{base} + 16]"));
-        match offset {
-            0 => format!("[rax + {index} * 8]"),
-            n => format!("[rax + {index} * 8 + {}]", 8 * n),
+        self.data_slot(Value::Reg("rax"), index, offset)
+    }
+
+    /// Returns the memory operand for slot `index + offset` of the elements starting at `data`,
+    /// already known to be in range, without its size prefix, using an index in a register as it
+    /// is. This uses `rax` for elements in memory and `rcx` for an index in memory.
+    ///
+    /// For example, slot `r12 + 3` of the elements at `rbx` is `[rbx + r12 * 8 + 24]`.
+    fn data_slot(&mut self, data: Value, index: Value, offset: usize) -> String {
+        let index = match index {
+            Value::Stack(_) | Value::Xmm(_) => {
+                self.load("rcx", index);
+                Value::Reg("rcx")
+            }
+            _ => index,
+        };
+        let base = self.base(data, "rax");
+        match index {
+            Value::Imm(n) => format!("[{base} + {}]", 8 * (n + offset as i64)),
+            _ if offset == 0 => format!("[{base} + {index} * 8]"),
+            _ => format!("[{base} + {index} * 8 + {}]", 8 * offset),
         }
     }
 

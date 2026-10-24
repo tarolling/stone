@@ -175,6 +175,13 @@ values never change
 either, so they are shared freely: each is stored once, with a count of the variables that hold
 it, and a `match` hands out its values with a reference each.
 
+A connection is the one thing that is not a value, since it cannot be copied: a `socket` or
+`listener` from the `net` module is a handle, and copies of it refer to the same connection.
+Nothing asks the programmer to close one, as nothing asks them to free memory: both backends
+close it right after the last statement that uses it, the point where the interpreter drops
+the variable and compiled code releases it, so the other end sees the connection close at the
+same moment under `stone run` and in a built program. `close()` closes one sooner.
+
 ## Fast like Rust
 
 A compiled stone program should run about as fast as the equivalent C or Rust. The
@@ -188,8 +195,9 @@ stay in the language, and the compiler's job is to prove them unnecessary and re
 to let the programmer turn them off.
 
 Status: the compiler lowers to an IR, inlines small functions that call no others, removes
-index checks and uniqueness checks it can prove repeated (moving those a loop repeats before
-it), allocates registers with linear scan, and specializes a few cases such as division and
+index checks, reads, and uniqueness checks it can prove repeated (moving those a loop repeats
+before it), allocates registers with linear scan, keeping floats in the processor's
+floating-point registers, and specializes a few cases such as division and
 remainder by a constant, which multiply by a magic number, and globals that hold one literal for
 the whole program, which read as that literal. Arithmetic on whole lists, such as `a * 2.0 + b`,
 compiles to one loop with no intermediate lists and no index checks, which handles two elements
@@ -199,9 +207,7 @@ never allocated: its values live in registers like any other variables, a functi
 returns them as separate values, and a list of tuples stores each element's values side by side,
 like a Rust `Vec<(i64, String)>`, which is a first step toward choosing where every value lives.
 Structs are compiled the same way, so a `list[Point]` is a flat array of coordinates whose fields
-are read at fixed offsets. The `nbody` benchmark is still about 4.4 times slower than C, mostly
-because floats are kept in general registers and move into floating-point registers for each
-operation.
+are read at fixed offsets, so the `nbody` benchmark runs within about 1.5 times of C.
 A generic function, or a method of a generic struct, is compiled once for each set of types it is
 used with, so its copies are as fast as functions written for each type, and a generic struct is
 flattened like any other. A call through a trait's bound is a direct call in each copy, and a
@@ -273,7 +279,13 @@ the rest of the runtime is shared. The one exception is reading a directory, for
 Linux's `getdents64` has no public counterpart on macOS, so there the runtime calls
 `opendir` and `readdir`, the interface Apple supports. Running another program, for `os.run`,
 forks and calls `execve` itself on Linux, searching `PATH` as the interpreter does, and goes
-through the `fork`, `execve`, `pipe`, `poll`, and `wait4` wrappers on macOS. `stone build` writes either executable itself, with its own assembler and linkers,
+through the `fork`, `execve`, `pipe`, `poll`, and `wait4` wrappers on macOS. Networking makes
+the socket system calls itself on Linux and goes through `libSystem`'s socket wrappers on macOS,
+and finds the addresses of a host without the C library's `getaddrinfo`: the `net` module is
+written in stone, reads `/etc/hosts` and `/etc/resolv.conf`, and asks DNS servers itself, over
+one primitive that sends a UDP packet and waits for its reply, so both backends find the same
+addresses the same way. On macOS that skips the system's own resolver, which also knows names
+from mDNS and per-network DNS settings. `stone build` writes either executable itself, with its own assembler and linkers,
 including the Mach-O file's imports and its code signature, so it needs no assembler, linker,
 or C compiler installed, and builds for every target from any machine. Windows is not supported
 yet.

@@ -98,7 +98,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 23] = [
+pub const MODULE_ROUTINES: [(&str, &str); 26] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -122,6 +122,9 @@ pub const MODULE_ROUTINES: [(&str, &str); 23] = [
     ("fs.exists", "stone.fs_exists"),
     ("fs.remove", "stone.fs_remove"),
     ("fs.make_dir", "stone.fs_make_dir"),
+    ("net_sys.connect", "stone.net_connect"),
+    ("net_sys.listen", "stone.net_listen"),
+    ("net_sys.exchange", "stone.net_exchange"),
 ];
 
 /// The routines of the `fs` module that can return an error, which needs the routines that
@@ -135,6 +138,29 @@ const FS_FAILING: &[&str] = &[
     "stone.fs_remove",
     "stone.fs_make_dir",
     "stone.os_run",
+    "stone.net_connect",
+    "stone.net_listen",
+    "stone.net_exchange",
+    "stone.net_accept",
+    "stone.net_send",
+    "stone.net_read_line",
+    "stone.net_read",
+    "stone.net_read_all",
+];
+
+/// The runtime routines of `net_sys` and of the methods of sockets and listeners, which the
+/// `fs` routines' pieces come with (see `x64::net::net_runtime`).
+pub const NET_ROUTINES: [&str; 10] = [
+    "stone.net_connect",
+    "stone.net_listen",
+    "stone.net_exchange",
+    "stone.net_accept",
+    "stone.net_port",
+    "stone.net_close",
+    "stone.net_send",
+    "stone.net_read_line",
+    "stone.net_read",
+    "stone.net_read_all",
 ];
 
 /// Returns the runtime routine behind the function of a builtin module with the linked name
@@ -271,6 +297,19 @@ pub const NULL_IN_PATH_CODE: i64 = -2;
 /// The code for a command or argument of `os.run` holding a null character
 /// (`stdlib::os::NULL_IN_COMMAND`).
 pub const NULL_IN_COMMAND_CODE: i64 = -3;
+
+/// The code for an address or port `net_sys` cannot use (`stdlib::net::INVALID_ADDRESS`).
+pub const INVALID_ADDRESS_CODE: i64 = -4;
+
+/// The code for a DNS question no reply came back to in time (`stdlib::net::TIMED_OUT`).
+pub const TIMED_OUT_CODE: i64 = -5;
+
+/// The code for a method of a closed socket (`stdlib::net::SOCKET_CLOSED`), which is written
+/// alone.
+pub const SOCKET_CLOSED_CODE: i64 = -6;
+
+/// The code for `accept` on a closed listener (`stdlib::net::LISTENER_CLOSED`).
+pub const LISTENER_CLOSED_CODE: i64 = -7;
 
 /// The kinds of the slots of the `ok` that `os.run` returns, an `output`'s status, stdout, and
 /// stderr, as `RcKind::codes` writes them.
@@ -595,6 +634,7 @@ impl Context {
             Type::Function { .. } => return Err("functions cannot be printed".to_string()),
             // lowering fills in a generic function's type parameters before printing
             Type::Param(name) => return Err(format!("type parameter '{name}' was not filled in")),
+            Type::Handle(handle) => format!("stone.print_{}", handle.name()),
         })
     }
 
@@ -649,7 +689,14 @@ impl Context {
                 "stone.str_split",
                 "stone.fs_read_lines",
                 "stone.fs_list_dir",
+                "stone.net_exchange",
             ])
+    }
+
+    /// Returns whether the program can make sockets or listeners, whose descriptors
+    /// `stone.free_enum` closes.
+    pub fn needs_handles(&self) -> bool {
+        self.uses(&["stone.net_connect", "stone.net_listen", "stone.net_accept"])
     }
 
     /// Returns whether the program has enum values, which need `stone.free_enum`.
@@ -837,7 +884,8 @@ fn contains_list(ty: &Type, analysis: &Analysis, seen: &mut HashSet<String>) -> 
 /// needed. `seen` holds the structs already looked through.
 fn contains_enum(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bool {
     match ty {
-        Type::Enum { .. } => true,
+        // a handle is laid out as an enum value
+        Type::Enum { .. } | Type::Handle(_) => true,
         Type::List(elem) => contains_enum(elem, structs, seen),
         Type::Map(_, value) => contains_enum(value, structs, seen),
         Type::Tuple(fields) => fields.iter().any(|f| contains_enum(f, structs, seen)),

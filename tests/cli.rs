@@ -440,12 +440,24 @@ fn run_and_build_with(
     source: &str,
     setup: impl FnOnce(&Path),
 ) -> (PathBuf, [Output; 2]) {
+    run_and_build_env(name, source, setup, &[])
+}
+
+/// Does what [`run_and_build_with`] does, running the program under both backends with the
+/// environment variables `env` added.
+fn run_and_build_env(
+    name: &str,
+    source: &str,
+    setup: impl FnOnce(&Path),
+    env: &[(&str, &str)],
+) -> (PathBuf, [Output; 2]) {
     let dir = project(name, &[("main.stn", source)]);
     setup(&dir);
     let run = Command::new(env!("CARGO_BIN_EXE_stone"))
         .arg("run")
         .arg("main.stn")
         .current_dir(&dir)
+        .envs(env.iter().copied())
         .output()
         .expect("stone should run");
     let build = Command::new(env!("CARGO_BIN_EXE_stone"))
@@ -457,6 +469,7 @@ fn run_and_build_with(
     let built = Command::new(dir.join("out"))
         .current_dir(&dir)
         .env("STONE_LEAK_CHECK", "1")
+        .envs(env.iter().copied())
         .output()
         .expect("the binary should run");
     (dir, [run, built])
@@ -1133,5 +1146,120 @@ fn file_errors_are_worded_the_same_in_both_backends() {
         assert!(text.ends_with(&(expected.join("\n") + "\n")), "{text}");
     } else {
         assert_eq!(text, expected.join("\n") + "\n");
+    }
+}
+
+/// Encodes `name` as a DNS name, a length before each dot-separated label and a 0 at the end.
+fn dns_name(name: &str) -> Vec<u8> {
+    let mut out = vec![];
+    for label in name.split('.') {
+        out.push(label.len() as u8);
+        out.extend_from_slice(label.as_bytes());
+    }
+    out.push(0);
+    out
+}
+
+/// Returns a DNS server's reply to `query` from a fixed set of answers: the question's name and
+/// type decide the reply, which may be malformed or never come, as the stone resolver must
+/// handle.
+fn dns_reply(query: &[u8]) -> Option<Vec<u8>> {
+    let mut at = 12;
+    let mut labels = vec![];
+    while query[at] != 0 {
+        let length = query[at] as usize;
+        labels.push(String::from_utf8_lossy(&query[at + 1..at + 1 + length]).to_string());
+        at += 1 + length;
+    }
+    let name = labels.join(".");
+    let question = &query[12..at + 5];
+    let kind = u16::from_be_bytes([query[at + 1], query[at + 2]]);
+    let record = |rtype: u16, data: &[u8]| {
+        let mut out = vec![0xc0, 12];
+        out.extend_from_slice(&rtype.to_be_bytes());
+        out.extend_from_slice(&[0, 1, 0, 0, 0, 60]);
+        out.extend_from_slice(&(data.len() as u16).to_be_bytes());
+        out.extend_from_slice(data);
+        out
+    };
+    let v6 = [0x20, 0x01, 0x0d, 0xb8, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 7];
+    let (rcode, answers): (u8, Vec<Vec<u8>>) = match (name.as_str(), kind) {
+        ("alpha.test", 1) => (0, vec![record(1, &[10, 1, 2, 3])]),
+        ("alpha.test", 28) => (0, vec![record(28, &v6)]),
+        // another name for alpha.test, whose own record follows under that name
+        ("www.test", _) => {
+            let alias = record(5, &dns_name("alpha.test"));
+            let mut target = dns_name("alpha.test");
+            let data: &[u8] = if kind == 1 { &[10, 1, 2, 3] } else { &v6 };
+            target.extend_from_slice(&kind.to_be_bytes());
+            target.extend_from_slice(&[0, 1, 0, 0, 0, 60]);
+            target.extend_from_slice(&(data.len() as u16).to_be_bytes());
+            target.extend_from_slice(data);
+            (0, vec![alias, target])
+        }
+        ("short.corp.test", 1) => (0, vec![record(1, &[10, 9, 9, 9])]),
+        ("short.corp.test", _) => (0, vec![]),
+        ("broken.test", _) => return Some(query[..5].to_vec()),
+        ("refused.test", _) => (5, vec![]),
+        ("slow.test", _) => return None,
+        _ => (3, vec![]),
+    };
+    let mut reply = vec![
+        query[0],
+        query[1],
+        0x81,
+        0x80 | rcode,
+        0,
+        1,
+        0,
+        answers.len() as u8,
+    ];
+    reply.extend_from_slice(&[0, 0, 0, 0]);
+    reply.extend_from_slice(question);
+    for answer in answers {
+        reply.extend_from_slice(&answer);
+    }
+    Some(reply)
+}
+
+#[test]
+fn both_backends_resolve_names_through_dns_alike() {
+    let server = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    let port = server.local_addr().unwrap().port();
+    std::thread::spawn(move || {
+        let mut query = [0; 512];
+        while let Ok((n, from)) = server.recv_from(&mut query) {
+            if let Some(reply) = dns_reply(&query[..n]) {
+                server.send_to(&reply, from).unwrap();
+            }
+        }
+    });
+    let source = "use net\nfor host in [\"alpha.test\", \"WWW.test.\", \"short\", \"missing.test\", \
+                  \"broken.test\", \"refused.test\", \"slow.test\"]:\n    \
+                  print(host, net.resolve(host))\n";
+    let conf =
+        format!("nameserver 127.0.0.1:{port}\nsearch corp.test\noptions timeout:1 attempts:1\n");
+    let (_, [run, built]) = run_and_build_env(
+        "net_dns",
+        source,
+        |dir| {
+            std::fs::write(dir.join("resolv.conf"), &conf).unwrap();
+            std::fs::write(dir.join("hosts"), "").unwrap();
+        },
+        &[
+            ("STONE_RESOLV_CONF", "resolv.conf"),
+            ("STONE_HOSTS", "hosts"),
+        ],
+    );
+    let expected = "alpha.test ok(['10.1.2.3', '2001:db8::7'])\n\
+                    WWW.test. ok(['10.1.2.3', '2001:db8::7'])\n\
+                    short ok(['10.9.9.9'])\n\
+                    missing.test err(\"unknown host: 'missing.test'\")\n\
+                    broken.test err(\"bad DNS reply: '127.0.0.1'\")\n\
+                    refused.test err(\"refused: '127.0.0.1'\")\n\
+                    slow.test err(\"timed out: '127.0.0.1'\")\n";
+    for output in [run, built] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
     }
 }

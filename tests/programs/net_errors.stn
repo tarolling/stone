@@ -1,0 +1,19 @@
+// What connecting and listening report when they cannot.
+use net
+
+print(net.connect("127.0.0.1", 70000))
+print(net.connect("::1", -1))
+print(net.listen("no such host!", 80))
+print(net.resolve("a..b"))
+
+// a port the system gave out and took back, so nothing listens there
+l = net.listen("127.0.0.1", 0).unwrap()
+port = l.port()
+l.close()
+refused = net.connect("127.0.0.1", port).unwrap_err()
+print(refused == "connection refused: '127.0.0.1:{port}'")
+
+// a port already taken
+taken = net.listen("127.0.0.1", 0).unwrap()
+again = net.listen("127.0.0.1", taken.port()).unwrap_err()
+print(again == "address already in use: '127.0.0.1:{taken.port()}'")

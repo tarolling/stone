@@ -21,6 +21,9 @@ pub struct Interval {
     /// Whether a call happens while the vreg holds a value it needs afterward, so a register
     /// that calls clobber cannot hold it.
     pub crosses_call: bool,
+    /// Whether a packed loop ([`super::Inst::Packed`]) reads or runs while the vreg holds a
+    /// value, so a vector register, which the loop takes for itself, cannot hold it.
+    pub touches_vector: bool,
 }
 
 /// The result of [`analyze`].
@@ -134,6 +137,7 @@ pub fn analyze(function: &Function) -> Liveness {
     };
 
     let mut calls = Vec::new();
+    let mut vectors = Vec::new();
     let mut slot = 0u32;
     for (b, block) in blocks.iter().enumerate() {
         let block_start = 2 * slot;
@@ -159,6 +163,9 @@ pub fn analyze(function: &Function) -> Liveness {
             if inst.is_call() {
                 calls.push(use_pos);
             }
+            if matches!(inst, super::Inst::Packed { .. }) {
+                vectors.push(use_pos);
+            }
             for reg in inst.defs() {
                 extend(reg, use_pos + 1);
                 weight[reg.0 as usize] += cost;
@@ -183,12 +190,14 @@ pub fn analyze(function: &Function) -> Liveness {
             // the first call after the start, which must also be before the end's write slot
             let next_call = calls.partition_point(|&call| call <= s);
             let crosses_call = calls.get(next_call).is_some_and(|&call| e > call + 1);
+            let touches_vector = vectors.iter().any(|&p| s <= p + 1 && p <= e);
             Interval {
                 vreg: VReg(i),
                 start: s,
                 end: e,
                 weight: weight[i as usize],
                 crosses_call,
+                touches_vector,
             }
         })
         .collect();

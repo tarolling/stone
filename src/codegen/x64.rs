@@ -424,7 +424,8 @@ impl X64Generator {
         if !self.ctx.needs_lists() {
             return Ok(());
         }
-        builtins::list_runtime(self);
+        let maps_shrink = self.ctx.uses(&["stone.map_take"]);
+        builtins::list_runtime(self, maps_shrink);
         let methods: Vec<&str> = LIST_ROUTINES
             .iter()
             .copied()
@@ -568,7 +569,9 @@ mod tests {
     #[test]
     fn division_by_another_nonzero_constant_skips_the_checks() {
         let assembly = assemble("x = 7\nprint(x / 10, x / -3)\n").unwrap();
-        assert!(assembly.contains("\tidiv\trcx"), "{assembly}");
+        // a magic multiplier instead of idiv
+        assert!(!assembly.contains("idiv"), "{assembly}");
+        assert!(assembly.contains("\timul\trdx"), "{assembly}");
         assert!(!assembly.contains("division by zero"), "{assembly}");
         assert!(!assembly.contains("integer overflow"), "{assembly}");
     }
@@ -584,9 +587,10 @@ mod tests {
     #[test]
     fn modulo_by_a_safe_constant_skips_the_checks() {
         let assembly = assemble("x = 7\nprint(x % 10, x % -3)\n").unwrap();
-        assert!(assembly.contains("\tidiv\trcx"), "{assembly}");
+        assert!(!assembly.contains("idiv"), "{assembly}");
+        assert!(assembly.contains("\timul\trdx"), "{assembly}");
         assert!(!assembly.contains("division by zero"), "{assembly}");
-        let checked = assemble("x = 7\ny = 3\nprint(x % y)\n").unwrap();
+        let checked = assemble("x = 7\ny = int(\"3\")\nprint(x % y)\n").unwrap();
         assert!(checked.contains("division by zero"), "{checked}");
         assert!(!checked.contains("integer overflow"), "{checked}");
     }
@@ -594,7 +598,8 @@ mod tests {
     #[test]
     fn powers_and_float_remainders_do_not_call_libc() {
         let assembly =
-            assemble("x = 2.5\nn = 3\nprint(x ** n, x ** -2, x % 0.75, n ** n, n ** 2)\n").unwrap();
+            assemble("x = 2.5\nn = int(\"3\")\nprint(x ** n, x ** -2, x % 0.75, n ** n, n ** 2)\n")
+                .unwrap();
         assert!(!assembly.contains("\tcall\tpow"), "{assembly}");
         assert!(!assembly.contains("\tcall\tfmod"), "{assembly}");
         assert!(assembly.contains("\tfprem"), "{assembly}");
@@ -856,7 +861,7 @@ mod tests {
     #[test]
     fn division_by_a_variable_zero_or_minus_one_keeps_the_checks() {
         for divisor in ["y", "0", "-1"] {
-            let source = format!("x = 7\ny = 2\nprint(x / {divisor})\n");
+            let source = format!("x = 7\ny = int(\"2\")\nprint(x / {divisor})\n");
             let assembly = assemble(&source).unwrap();
             assert!(assembly.contains("division by zero"), "{divisor}");
             assert!(

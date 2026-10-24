@@ -187,17 +187,21 @@ compiler can keep values in registers and reorder freely. Runtime checks such as
 stay in the language, and the compiler's job is to prove them unnecessary and remove them, not
 to let the programmer turn them off.
 
-Status: the compiler lowers to an IR, allocates registers with linear scan, and specializes a
-few cases such as division and remainder by a constant. Arithmetic on whole lists, such as `a * 2.0 + b`,
+Status: the compiler lowers to an IR, inlines small functions that call no others, removes
+index checks and uniqueness checks it can prove repeated (moving those a loop repeats before
+it), allocates registers with linear scan, and specializes a few cases such as division and
+remainder by a constant, which multiply by a magic number, and globals that hold one literal for
+the whole program, which read as that literal. Arithmetic on whole lists, such as `a * 2.0 + b`,
 compiles to one loop with no intermediate lists and no index checks, which handles two elements
 at a time with SSE2 or NEON where the operations allow, so on the `vector` benchmark it is
 about 2.7 times as fast as numpy, which builds a temporary array for each operator. A tuple is
 never allocated: its values live in registers like any other variables, a function takes and
 returns them as separate values, and a list of tuples stores each element's values side by side,
 like a Rust `Vec<(i64, String)>`, which is a first step toward choosing where every value lives.
-Structs are compiled the same way, so a `list[Point]` is a flat array of coordinates, though each
-change to a field of one still checks the list's bounds and that it is not shared, which keeps
-the `nbody` benchmark about 5 times slower than C.
+Structs are compiled the same way, so a `list[Point]` is a flat array of coordinates whose fields
+are read at fixed offsets. The `nbody` benchmark is still about 4.4 times slower than C, mostly
+because floats are kept in general registers and move into floating-point registers for each
+operation.
 A generic function, or a method of a generic struct, is compiled once for each set of types it is
 used with, so its copies are as fast as functions written for each type, and a generic struct is
 flattened like any other. A call through a trait's bound is a direct call in each copy, and a

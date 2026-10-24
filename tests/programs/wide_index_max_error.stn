@@ -1,0 +1,11 @@
+// the largest index is out of range of a list of structs without overflowing
+struct P:
+    a: int
+    b: int
+    c: int
+
+fn get(ps: list[P], i: int) -> int:
+    ret ps[i].c
+
+print(get([P(a=1, b=2, c=3)], 0))
+print(get([P(a=1, b=2, c=3)], 9223372036854775807))

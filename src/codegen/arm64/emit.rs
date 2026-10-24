@@ -12,7 +12,6 @@
 //! makes, so `sp` never moves in the body and every slot is addressed from it.
 
 use super::{ARG_REGS, Arm64Generator, pop_frame, push_frame};
-use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label, variant_label};
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::{
@@ -20,6 +19,7 @@ use crate::codegen::ir::{
     Terminator, VReg, variable_of,
 };
 use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
+use crate::codegen::{AssemblyGenerator, magic_signed};
 use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
 use std::collections::HashMap;
 
@@ -725,6 +725,20 @@ impl Arm64Generator {
 
     fn emit_inst(&mut self, frame: &Frame, inst: &Inst) -> Result<(), String> {
         match inst {
+            Inst::DepthCheck => self.depth_check(),
+
+            Inst::ElementSlot {
+                dst,
+                list,
+                index,
+                width,
+            } => {
+                let (dst, list, index) =
+                    (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
+                self.element_slot(list, index, *width as i64);
+                self.store(dst, "x11");
+            }
+
             Inst::ListData { dst, list } => {
                 let (dst, list) = (frame.reg(*dst)?, frame.value(*list)?);
                 let base = self.base(list, "x9");
@@ -1035,11 +1049,24 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
-            Inst::ListLoad { dst, list, index } | Inst::ListGet { dst, list, index } => {
-                let checked = matches!(inst, Inst::ListLoad { .. });
+            Inst::ListLoad { dst, list, index } => {
                 let (dst, list, index) =
                     (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
-                let slot = self.list_slot(list, index, checked);
+                let slot = self.list_slot(list, index, true);
+                let target = self.target(dst);
+                self.emit(&format!("\tldr\t{target}, {slot}"));
+                self.store(dst, target);
+            }
+
+            Inst::ListGet {
+                dst,
+                list,
+                index,
+                offset,
+            } => {
+                let (dst, list, index) =
+                    (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
+                let slot = self.known_slot(list, index, *offset);
                 let target = self.target(dst);
                 self.emit(&format!("\tldr\t{target}, {slot}"));
                 self.store(dst, target);
@@ -1068,13 +1095,18 @@ impl Arm64Generator {
                 }
             }
 
-            Inst::ListSet { list, index, value } => {
+            Inst::ListSet {
+                list,
+                index,
+                value,
+                offset,
+            } => {
                 let (list, index, value) = (
                     frame.value(*list)?,
                     frame.value(*index)?,
                     frame.value(*value)?,
                 );
-                let slot = self.list_slot(list, index, false);
+                let slot = self.known_slot(list, index, *offset);
                 let reg = self.operand(value, "x16");
                 self.emit(&format!("\tstr\t{reg}, {slot}"));
             }
@@ -1124,12 +1156,19 @@ impl Arm64Generator {
                 }
             },
 
-            Inst::ListUnique { dst, src } => {
+            Inst::ListUnique {
+                dst,
+                src,
+                maybe_null,
+            } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 // a list nothing else refers to is changed in place, and any other is copied
                 // first by `stone.list_copy`, which takes and returns it in x9
                 self.load("x9", src);
                 let skip = self.ctx.new_label("unique");
+                if *maybe_null {
+                    self.emit(&format!("\tcbz\tx9, {skip}"));
+                }
                 self.emit("\tldur\tx16, [x9, #-8]");
                 self.emit("\tcmp\tx16, #1");
                 self.emit(&format!("\tb.eq\t{skip}"));
@@ -1166,14 +1205,7 @@ impl Arm64Generator {
                     return Err(format!("{callee} returns one value"));
                 }
                 if let Callee::User(_) | Callee::Value(_) = callee {
-                    // the same limit as the interpreter, rather than overflowing the stack
-                    let too_deep = self.fail_here(&format!(
-                        "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
-                    ));
-                    self.emit("\tadrp\tx16, stone.call_depth");
-                    self.emit("\tldr\tx17, [x16, :lo12:stone.call_depth]");
-                    self.compare_with(Value::Reg("x17"), MAX_CALL_DEPTH as i64);
-                    self.emit(&format!("\tb.ge\t{too_deep}"));
+                    self.depth_check();
                 }
                 let mut values = Vec::new();
                 for arg in args {
@@ -1298,6 +1330,98 @@ impl Arm64Generator {
         }
     }
 
+    /// Branches to the `recursion is too deep` failure if a call made here would nest more calls
+    /// than the interpreter allows, rather than overflowing the stack.
+    fn depth_check(&mut self) {
+        let too_deep = self.fail_here(&format!(
+            "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
+        ));
+        self.emit("\tadrp\tx16, stone.call_depth");
+        self.emit("\tldr\tx17, [x16, :lo12:stone.call_depth]");
+        self.compare_with(Value::Reg("x17"), MAX_CALL_DEPTH as i64);
+        self.emit(&format!("\tb.ge\t{too_deep}"));
+    }
+
+    /// Leaves in `x11` the slot where element `index` of `list` starts, whose elements are
+    /// `width` slots each, counting a negative index from the end and branching to the
+    /// `INDEX_RANGE` failure unless that is an element. This uses `x9`, `x16`, `x17`, and `x10`
+    /// for a list in memory.
+    ///
+    /// An index from 0 is checked against the slot count before it is multiplied, so the product
+    /// cannot overflow, and then the slot it starts at is. A negative one must not be below minus
+    /// the slot count, and then the slot count plus the index times the width must not be
+    /// negative. For example, with 7 slots per element and 14 slots, index 1 starts at slot 7 and
+    /// index -3 fails.
+    fn element_slot(&mut self, list: Value, index: Value, width: i64) {
+        let base = self.base(list, "x10");
+        // the error reports the index as written, kept in x17, and the number of elements, from
+        // the slot count in x16, in FAIL_VALUES
+        let mut setup = vec!["\tmov\tx10, x17".to_string()];
+        if width > 1 {
+            setup.push(format!("\tmov\tx9, #{width}"));
+            setup.push("\tsdiv\tx11, x16, x9".to_string());
+        } else {
+            setup.push("\tmov\tx11, x16".to_string());
+        }
+        let out_of_range = self.ctx.fail_at_after(INDEX_RANGE, self.span, setup);
+        let done = self.ctx.new_label("slot_done");
+        self.load("x17", index);
+        self.emit(&format!("\tldr\tx16, [{base}]"));
+        if !matches!(index, Value::Imm(n) if n >= 0) {
+            let from_start = self.ctx.new_label("slot_from_start");
+            self.emit("\tcmp\tx17, #0");
+            self.emit(&format!("\tb.ge\t{from_start}"));
+            // negative indexes count from the end
+            self.emit("\tadds\tx11, x17, x16");
+            self.emit(&format!("\tb.mi\t{out_of_range}"));
+            if width > 1 {
+                self.emit(&format!("\tmov\tx9, #{width}"));
+                self.emit("\tmul\tx11, x17, x9");
+                self.emit("\tadds\tx11, x11, x16");
+                self.emit(&format!("\tb.mi\t{out_of_range}"));
+            }
+            self.emit(&format!("\tb\t{done}"));
+            self.emit(&format!("{from_start}:"));
+        }
+        self.emit("\tcmp\tx17, x16");
+        self.emit(&format!("\tb.ge\t{out_of_range}"));
+        if width > 1 {
+            self.emit(&format!("\tmov\tx9, #{width}"));
+            self.emit("\tmul\tx11, x17, x9");
+            self.emit("\tcmp\tx11, x16");
+            self.emit(&format!("\tb.ge\t{out_of_range}"));
+        } else {
+            self.emit("\tmov\tx11, x17");
+        }
+        self.emit(&format!("{done}:"));
+    }
+
+    /// Returns the memory operand for slot `index + offset` of `list`, already known to be in
+    /// range, using an index in a register as it is. This uses `x17` for the elements, `x11` for
+    /// an index in memory, and `x10` for a list in memory.
+    ///
+    /// For example, slot `x20 + 3` of a list in `x19` is `[x17, x20, lsl #3]` after
+    /// `ldr x17, [x19, #16]` and `add x17, x17, #24`.
+    fn known_slot(&mut self, list: Value, index: Value, offset: usize) -> String {
+        let base = self.base(list, "x10");
+        let index = match index {
+            Value::Imm(n) if (0..4096).contains(&(n + offset as i64)) => {
+                self.emit(&format!("\tldr\tx17, [{base}, #16]"));
+                return format!("[x17, #{}]", 8 * (n + offset as i64));
+            }
+            Value::Reg(reg) => reg,
+            _ => {
+                self.load("x11", index);
+                "x11"
+            }
+        };
+        self.emit(&format!("\tldr\tx17, [{base}, #16]"));
+        if offset > 0 {
+            self.emit(&format!("\tadd\tx17, x17, #{}", 8 * offset));
+        }
+        format!("[x17, {index}, lsl #3]")
+    }
+
     /// Jumps to the `division by zero` failure if the float divisor in `float` is 0.0 or -0.0, as
     /// in the interpreter, rather than letting `/` or `%` give inf or nan. A nan divisor compares
     /// unordered, which is not equal, so it is let through.
@@ -1337,8 +1461,7 @@ impl Arm64Generator {
     fn divide_by_constant(&mut self, dividend: &str, divisor: i64) {
         let magnitude = divisor.unsigned_abs();
         if !magnitude.is_power_of_two() {
-            self.mov_imm("x11", divisor);
-            self.emit(&format!("\tsdiv\tx9, {dividend}, x11"));
+            self.magic_quotient(dividend, divisor);
             return;
         }
 
@@ -1367,8 +1490,8 @@ impl Arm64Generator {
     fn remainder_by_constant(&mut self, dividend: &str, divisor: i64) {
         let magnitude = divisor.unsigned_abs();
         if !magnitude.is_power_of_two() {
+            self.magic_quotient(dividend, divisor);
             self.mov_imm("x11", divisor);
-            self.emit(&format!("\tsdiv\tx9, {dividend}, x11"));
             self.emit(&format!("\tmsub\tx9, x9, x11, {dividend}"));
             return;
         }
@@ -1384,6 +1507,28 @@ impl Arm64Generator {
         self.emit(&format!("\tasr\tx9, x9, #{shift}"));
         self.emit(&format!("\tlsl\tx9, x9, #{shift}"));
         self.emit(&format!("\tsub\tx9, {dividend}, x9"));
+    }
+
+    /// Leaves in `x9` the quotient of `dividend` by a constant whose magnitude is at least 3 and
+    /// not a power of two, rounding toward zero like `sdiv`, by multiplying by the divisor's magic
+    /// number from [`magic_signed`]. Uses `x11`.
+    ///
+    /// For example, dividing by `7` takes the high half of the product with
+    /// `5270498306774157605`, shifts it right by 1, and adds 1 if that is negative.
+    fn magic_quotient(&mut self, dividend: &str, divisor: i64) {
+        let (multiplier, shift) = magic_signed(divisor);
+        self.mov_imm("x11", multiplier);
+        self.emit(&format!("\tsmulh\tx9, {dividend}, x11"));
+        if divisor > 0 && multiplier < 0 {
+            self.emit(&format!("\tadd\tx9, x9, {dividend}"));
+        } else if divisor < 0 && multiplier > 0 {
+            self.emit(&format!("\tsub\tx9, x9, {dividend}"));
+        }
+        if shift > 0 {
+            self.emit(&format!("\tasr\tx9, x9, #{shift}"));
+        }
+        // a negative quotient rounds toward zero
+        self.emit("\tadd\tx9, x9, x9, lsr #63");
     }
 
     /// Jumps to the conversion failure unless the float in `d0` truncates to an int, which is

@@ -1,0 +1,86 @@
+// popping entries in any order keeps the others in order, through many pops and adds, and
+// everything that reads the whole map afterward sees only the entries left
+struct Item:
+    name: str
+    tags: list[str]
+
+fn pop_every(m: map[int, int], step: int, start: int, end: int) -> map[int, int]:
+    k = start
+    while k < end:
+        m.pop(k)
+        k += step
+    ret m
+
+fn show(m: map[int, int]):
+    total = 0
+    for k in m:
+        total += k * m[k]
+    print(m.len(), total, m.keys().len(), m.values().len(), m.items().len())
+
+m = {}
+for k in range(200):
+    m[k] = k + 1
+show(m)
+m = pop_every(m, 2, 0, 200)
+show(m)
+print(m.get(10), m.get(11), 10 in m, 11 in m)
+copy = m
+m = pop_every(m, 3, 1, 200)
+show(m)
+// the copy taken before keeps its entries
+show(copy)
+for k in range(1000, 1300):
+    m[k] = -k
+m[1] = 7
+m = pop_every(m, 1, 1000, 1290)
+show(m)
+small = {}
+small[5] = 50
+small[6] = 60
+small[7] = 70
+a = small.pop(6)
+b = small.pop(6)
+print(a, b, small)
+print(small.items(), small.keys(), small.values())
+small[6] = 61
+print(small)
+for k in [5, 7, 6]:
+    print(small.pop(k))
+print(small, small.len())
+small[1] = 1
+print(small)
+
+words = {}
+for i in range(60):
+    words["w{i}"] = i
+for i in range(30):
+    words.pop("w{2 * i}")
+words["w0"] = 100
+print(words.len(), words["w1"], words["w59"], words["w0"])
+keys = words.keys()
+print(keys[0], keys[keys.len() - 1])
+first = ""
+for w, v in words.items():
+    if first == "":
+        first = "{w}={v}"
+print(first)
+print(words.pop("nope"))
+
+flags = {true: "yes", false: "no"}
+yes = flags.pop(true)
+print(yes, flags)
+no = flags.pop(false)
+print(no, flags, flags.len())
+flags[false] = "again"
+print(flags)
+
+items = {}
+for i in range(10):
+    items[i] = Item(name="item{i}", tags=["t{i}", "u{i}"])
+for i in range(4):
+    items.pop(3 * i)
+items[1].tags.append("extra")
+print(items.len(), items[1], items[8].name)
+popped = items.pop(1)
+print(popped)
+print(items)

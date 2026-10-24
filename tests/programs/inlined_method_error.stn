@@ -1,0 +1,21 @@
+// a runtime error in a method the compiler inlines points at the method's own line
+struct Acc:
+    total: int
+    count: int
+
+impl Acc:
+    fn add(self, d: int):
+        self.total += 100 / d
+        self.count += 1
+
+    fn mean(self) -> int:
+        ret self.total / self.count
+
+fn run(xs: list[int]) -> int:
+    a = Acc(total=0, count=0)
+    for x in xs:
+        a.add(x)
+    ret a.mean()
+
+print(run([1, 2, 5]))
+print(run([4, 0]))

@@ -452,7 +452,8 @@ impl Arm64Generator {
         if !self.ctx.needs_lists() {
             return Ok(());
         }
-        builtins::list_runtime(self);
+        let maps_shrink = self.ctx.uses(&["stone.map_take"]);
+        builtins::list_runtime(self, maps_shrink);
         let methods: Vec<&str> = LIST_ROUTINES
             .iter()
             .copied()
@@ -642,7 +643,9 @@ mod tests {
 
     #[test]
     fn arguments_past_the_eighth_go_on_the_stack() {
-        let source = "fn f(a: int, b: int, c: int, d: int, e: int, g: int, h: int, i: int, j: int, k: int) -> int:\n    ret k - j\n\
+        // recursive, so the call is not inlined
+        let source = "fn f(a: int, b: int, c: int, d: int, e: int, g: int, h: int, i: int, j: int, k: int) -> int:\n    \
+                      if a > 1:\n        ret f(a - 1, b, c, d, e, g, h, i, j, k)\n    ret k - j\n\
                       print(f(1, 2, 3, 4, 5, 6, 7, 8, 9, 10))\n";
         let assembly = assemble(source).unwrap();
         let f = function_text(&assembly, "f");
@@ -670,7 +673,7 @@ mod tests {
     #[test]
     fn division_by_a_variable_keeps_both_checks() {
         for divisor in ["y", "0", "-1"] {
-            let source = format!("x = 7\ny = 2\nprint(x / {divisor}, x % {divisor})\n");
+            let source = format!("x = 7\ny = int(\"2\")\nprint(x / {divisor}, x % {divisor})\n");
             let assembly = assemble(&source).unwrap();
             assert!(assembly.contains("\tsdiv\t"), "{divisor}");
             assert!(assembly.contains("division by zero"), "{divisor}");
@@ -681,6 +684,8 @@ mod tests {
         }
         let constant = assemble("x = 7\nprint(x / 10, x % 10)\n").unwrap();
         assert!(constant.contains("\tmsub\t"), "{constant}");
+        assert!(constant.contains("\tsmulh\t"), "{constant}");
+        assert!(!constant.contains("\tsdiv\t"), "{constant}");
         assert!(!constant.contains("division by zero"), "{constant}");
     }
 

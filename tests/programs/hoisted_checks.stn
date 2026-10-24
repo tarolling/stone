@@ -1,0 +1,29 @@
+// index checks the compiler moves before a loop fail exactly where the loop would, and not at
+// all when the loop never runs
+struct P:
+    x: float
+    y: float
+
+fn total(ps: list[P], i: int, n: int) -> float:
+    t = 0.0
+    for j in range(n):
+        t += ps[i].x * ps[j].y + ps[i].y
+    ret t
+
+fn shift(ps: list[P], n: int) -> list[P]:
+    for k in range(n):
+        ps[0].x += 1.0
+        ps[-1].y -= 0.5
+    ret ps
+
+ps = [P(x=1.0, y=2.0), P(x=3.0, y=4.0)]
+print(total(ps, 1, 2))
+print(total(ps, -2, 2))
+// out of range, but the loop never runs
+print(total(ps, 7, 0))
+qs = ps
+qs = shift(qs, 3)
+// changing the copy leaves the original alone
+print(ps[0].x, ps[1].y, qs[0].x, qs[1].y)
+print(shift([P(x=0.0, y=0.0)], 0)[0].x)
+print(total(ps, 5, 2))

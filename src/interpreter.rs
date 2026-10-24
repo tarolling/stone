@@ -146,26 +146,52 @@ impl MapKey {
 /// key's entry.
 ///
 /// For example, `{"b": 1, "a": 2}` keeps `"b"` first, and assigning `m["b"] = 3` keeps its place.
+/// Removing an entry leaves a hole where it was, so that no later entry moves, and the entries
+/// close up once holes are more than half of them, which keeps `pop` constant time on average.
 #[derive(Debug, Clone, Default)]
 pub struct MapValue {
-    entries: Vec<(MapKey, Value)>,
+    entries: Vec<Option<(MapKey, Value)>>,
     positions: HashMap<MapKey, usize>,
+    holes: usize,
 }
 
 impl MapValue {
+    /// Returns how many entries the map has.
+    fn len(&self) -> usize {
+        self.entries.len() - self.holes
+    }
+
+    /// Returns the entries in order.
+    fn iter(&self) -> impl Iterator<Item = &(MapKey, Value)> {
+        self.entries.iter().flatten()
+    }
+
+    /// Returns whether the map has an entry for `key`.
+    fn contains(&self, key: &MapKey) -> bool {
+        self.positions.contains_key(key)
+    }
+
     /// Returns the value of `key`'s entry, or the error compiled code also gives if there is
     /// none, such as `key not found: 'apple'`.
     fn get(&self, key: &MapKey) -> EvalResult<&Value> {
-        match self.positions.get(key) {
-            Some(&position) => Ok(&self.entries[position].1),
-            None => Err(format!("key not found: {}", key.value().display(true)).into()),
-        }
+        self.find(key)
+            .ok_or_else(|| format!("key not found: {}", key.value().display(true)).into())
+    }
+
+    /// Returns the value of `key`'s entry, if there is one.
+    fn find(&self, key: &MapKey) -> Option<&Value> {
+        let &position = self.positions.get(key)?;
+        self.entries[position].as_ref().map(|(_, value)| value)
     }
 
     /// Returns the value of `key`'s entry for changing, or the error [`MapValue::get`] gives.
     fn get_mut(&mut self, key: &MapKey) -> EvalResult<&mut Value> {
-        match self.positions.get(key) {
-            Some(&position) => Ok(&mut self.entries[position].1),
+        let found = self
+            .positions
+            .get(key)
+            .and_then(|&position| self.entries[position].as_mut());
+        match found {
+            Some((_, value)) => Ok(value),
             None => Err(format!("key not found: {}", key.value().display(true)).into()),
         }
     }
@@ -174,24 +200,45 @@ impl MapValue {
     /// order.
     fn remove(&mut self, key: &MapKey) -> Option<Value> {
         let position = self.positions.remove(key)?;
-        let (_, value) = self.entries.remove(position);
-        for (key, _) in &self.entries[position..] {
-            if let Some(later) = self.positions.get_mut(key) {
-                *later -= 1;
-            }
+        let (_, value) = self.entries[position].take()?;
+        self.holes += 1;
+        if 2 * self.holes > self.entries.len() {
+            self.close_up();
         }
         Some(value)
+    }
+
+    /// Removes the holes, moving each entry down to its place among those left.
+    fn close_up(&mut self) {
+        self.entries.retain(Option::is_some);
+        self.holes = 0;
+        for (position, (key, _)) in self.entries.iter().flatten().enumerate() {
+            if let Some(at) = self.positions.get_mut(key) {
+                *at = position;
+            }
+        }
     }
 
     /// Sets `key`'s entry to `value`, adding it at the end if there is none.
     fn insert(&mut self, key: MapKey, value: Value) {
         match self.positions.get(&key) {
-            Some(&position) => self.entries[position].1 = value,
+            Some(&position) => {
+                if let Some(entry) = self.entries[position].as_mut() {
+                    entry.1 = value;
+                }
+            }
             None => {
                 self.positions.insert(key.clone(), self.entries.len());
-                self.entries.push((key, value));
+                self.entries.push(Some((key, value)));
             }
         }
+    }
+
+    /// Takes every value out of the map, leaving it empty.
+    fn drain_values(&mut self) -> impl Iterator<Item = Value> + '_ {
+        self.positions.clear();
+        self.holes = 0;
+        self.entries.drain(..).flatten().map(|(_, value)| value)
     }
 }
 
@@ -273,7 +320,7 @@ fn drop_values(mut pending: Vec<Value>) {
                 }
                 Value::Map(mut map) => {
                     if let Some(map) = Rc::get_mut(&mut map) {
-                        pending.extend(map.entries.drain(..).map(|(_, value)| value));
+                        pending.extend(map.drain_values());
                     }
                 }
                 Value::Tuple(mut fields) => {
@@ -446,7 +493,7 @@ impl Value {
             }
             Value::Map(map) => {
                 out.push('{');
-                for (i, (key, value)) in map.entries.iter().enumerate() {
+                for (i, (key, value)) in map.iter().enumerate() {
                     if i > 0 {
                         out.push_str(", ");
                     }
@@ -1484,7 +1531,7 @@ impl<'out> Interpreter<'out> {
                 // a map gives its keys, as they were, so changing the map copies it first
                 if let Value::Map(map) = &list {
                     let map = map.clone();
-                    for (key, _) in &map.entries {
+                    for (key, _) in map.iter() {
                         self.assign_target(target, &key.value())?;
                         if let Some(flow) = self.run_iteration(body)? {
                             return Ok(flow);
@@ -2093,7 +2140,7 @@ impl<'out> Interpreter<'out> {
     /// For example, `2 in [1, 2, 3]` compares 2 with 1 and then 2, and `"" in "abc"` is true.
     fn contains(&mut self, container: &Value, needle: &Value) -> EvalResult<bool> {
         match (container, needle) {
-            (Value::Map(map), key) => Ok(map.positions.contains_key(&MapKey::of(key)?)),
+            (Value::Map(map), key) => Ok(map.contains(&MapKey::of(key)?)),
             (Value::Str(text), Value::Str(part)) => Ok(text.contains(&**part)),
             (Value::List(items), _) => {
                 for item in items.iter() {
@@ -2138,28 +2185,27 @@ impl<'out> Interpreter<'out> {
             // len counts bytes, like the compiled strlen
             ("len", Value::Str(s), []) => Ok(Value::Int(s.len() as i64)),
             ("len", Value::List(items), []) => Ok(Value::Int(items.len() as i64)),
-            ("len", Value::Map(map), []) => Ok(Value::Int(map.entries.len() as i64)),
+            ("len", Value::Map(map), []) => Ok(Value::Int(map.len() as i64)),
             ("len", _, _) => {
                 Err("len() is called on a str, list, or map, with no arguments".into())
             }
             ("contains", _, [needle]) => Ok(Value::Bool(self.contains(&receiver, needle)?)),
             ("contains", _, _) => Err("contains() is called with one value".into()),
-            ("get", Value::Map(map), [key]) => Ok(match map.positions.get(&MapKey::of(key)?) {
-                Some(&at) => some(map.entries[at].1.clone()),
+            ("get", Value::Map(map), [key]) => Ok(match map.find(&MapKey::of(key)?) {
+                Some(value) => some(value.clone()),
                 None => none(),
             }),
             ("get", _, _) => Err("get() is called on a map, with one key".into()),
             ("keys", Value::Map(map), []) => {
-                let keys = map.entries.iter().map(|(key, _)| key.value()).collect();
+                let keys = map.iter().map(|(key, _)| key.value()).collect();
                 Ok(Value::List(Rc::new(keys)))
             }
             ("values", Value::Map(map), []) => {
-                let values = map.entries.iter().map(|(_, value)| value.clone()).collect();
+                let values = map.iter().map(|(_, value)| value.clone()).collect();
                 Ok(Value::List(Rc::new(values)))
             }
             ("items", Value::Map(map), []) => {
                 let items = map
-                    .entries
                     .iter()
                     .map(|(key, value)| Value::Tuple(Rc::from([key.value(), value.clone()])))
                     .collect();
@@ -2915,6 +2961,46 @@ fn is_definition(stmt: &Stmt) -> bool {
 mod tests {
     use super::*;
     use crate::driver::parse_program;
+
+    #[test]
+    fn removing_map_entries_keeps_the_rest_in_order() {
+        let mut map = MapValue::default();
+        let mut expected: Vec<i64> = Vec::new();
+        for k in 0..100 {
+            map.insert(MapKey::Int(k), Value::Int(k * 10));
+            expected.push(k);
+        }
+        for round in 0..3 {
+            for k in (round..100).step_by(3) {
+                let removed = map.remove(&MapKey::Int(k));
+                assert_eq!(removed.is_some(), expected.contains(&k), "{k}");
+                expected.retain(|&e| e != k);
+            }
+            for k in 0..5 {
+                let key = 1000 * (round + 1) + k;
+                map.insert(MapKey::Int(key), Value::Int(key * 10));
+                expected.push(key);
+            }
+            // setting an entry that is left keeps its place
+            map.insert(MapKey::Int(expected[0]), Value::Int(expected[0] * 10));
+            let keys: Vec<i64> = map
+                .iter()
+                .map(|(key, _)| match key {
+                    MapKey::Int(k) => *k,
+                    _ => unreachable!(),
+                })
+                .collect();
+            assert_eq!(keys, expected);
+            assert_eq!(map.len(), expected.len());
+            for &k in &expected {
+                assert!(matches!(map.get(&MapKey::Int(k)), Ok(Value::Int(v)) if *v == k * 10));
+            }
+            assert!(
+                map.entries.len() <= 2 * map.len() + 1,
+                "holes are closed up"
+            );
+        }
+    }
 
     #[test]
     fn dropping_a_long_chain_of_enum_values_takes_no_stack() {

@@ -29,6 +29,20 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Changed
 
+- A map's `pop` takes constant time on average, under `stone run` and in built programs, instead
+  of moving every later entry and rebuilding the map's hash index: popping half of 400,000 keys,
+  which took minutes, takes a few hundredths of a second. The entries left keep their order.
+- Built programs run faster:
+  - Division and remainder by any constant multiply by a magic number instead of dividing.
+  - A global that the program assigns one literal, once, at its top level reads as that literal,
+    so `x % modulus` with `modulus = 2147483648` shifts like `x % 2147483648`. The `globals`
+    benchmark runs about four times as fast.
+  - An index check or a check that a list is not shared, repeated in a function, is done once,
+    and one that every turn of a loop repeats moves before the loop, failing exactly where the
+    loop would.
+  - Small functions that call no others are inlined, so `bodies[i].drift(dt)` changes the
+    struct's fields in place.
+  - The fields of a list element are read and written at fixed offsets from where it starts.
 - **Breaking:** `input()` returns a `result[str, str]`: `ok` of the line, or
   `err("end of input")` once the input is over, instead of `""`, which an empty line also gave.
   Write `input().unwrap()` where a line must be there (after checking `eof()`), `input()?` in a

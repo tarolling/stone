@@ -45,6 +45,36 @@ impl GlobalReads {
         &self.values
     }
 
+    /// Returns the globals that running the top-level statements `stmts` may read through the
+    /// functions they call, directly, as values, or as methods, but not the globals they read
+    /// themselves.
+    ///
+    /// For example, after `fn f() -> int: ret g`, the statement `print(f())` may read `g`, and
+    /// `print(1)` reads nothing.
+    pub(crate) fn of_statements(&self, stmts: &[Stmt]) -> HashSet<String> {
+        let mut names = Names::default();
+        for stmt in stmts {
+            stmt_names(stmt, &mut names);
+        }
+        let mut read: HashSet<String> = names
+            .names
+            .iter()
+            .filter_map(|name| self.functions.get(*name))
+            .flatten()
+            .cloned()
+            .collect();
+        for method in &names.methods {
+            for function in self.methods_named(method) {
+                read.extend(self.functions[function].iter().cloned());
+            }
+        }
+        let is_function = |name: &str| self.functions.contains_key(name);
+        if names.calls_a_value(is_function, &self.value_fields) {
+            read.extend(self.values.iter().cloned());
+        }
+        read
+    }
+
     /// Returns the functions of `impl` blocks a call of `name` after a dot may call, as in
     /// `p.get()` or `Point.origin()`.
     fn methods_named(&self, name: &str) -> &[String] {

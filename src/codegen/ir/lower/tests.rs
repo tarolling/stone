@@ -278,9 +278,50 @@ fn returning_from_a_list_loop_releases_the_list_and_gives_up_the_local() {
 
 #[test]
 fn functions_read_globals_with_a_check_and_main_without() {
-    let dump = dump("g = 1\nfn f() -> int:\n    ret g\nprint(g + f())\n");
+    let dump = dump("g = int(\"1\")\nfn f() -> int:\n    ret g\nprint(g + f())\n");
     assert!(dump.contains("v0 = load_global_checked g"), "{dump}");
     assert!(dump.contains("= load_global g"), "{dump}");
+}
+
+#[test]
+fn a_global_assigned_one_literal_reads_as_an_immediate() {
+    let source = "m = 7\nhalf = -0.5\nfn f(x: int) -> int:\n    ret x % m\n\
+                  fn g(x: float) -> float:\n    ret x * half\nprint(f(9))\nprint(g(1.0) + half)\n";
+    let dump = dump(source);
+    assert!(dump.contains("rem v0, 7"), "{dump}");
+    let half = (-0.5f64).to_bits() as i64;
+    assert!(dump.contains(&format!("fmul v0, {half}")), "{dump}");
+    assert!(!dump.contains("load_global"), "{dump}");
+}
+
+#[test]
+fn a_global_assigned_more_than_once_is_read_from_memory() {
+    for source in [
+        "m = 7\nfn f(x: int) -> int:\n    ret x % m\nm = 8\nprint(f(9))\n",
+        "m = 7\nfn f(x: int) -> int:\n    ret x % m\nif f(1) > 0:\n    m += 1\nprint(f(9))\n",
+        "m = 7\nfn f(x: int) -> int:\n    ret x % m\nfor m in range(2, 4):\n    print(f(9))\n",
+        "trait Bump:\n    fn step(self) -> Self\n    fn bump(self):\n        self = self.step()\n\
+         impl Bump for int:\n    fn step(self) -> int:\n        ret self + 1\n\
+         m = 7\nfn f(x: int) -> int:\n    ret x % m\nm.bump()\nprint(f(9))\n",
+    ] {
+        let dump = dump(source);
+        assert!(dump.contains("load_global_checked m"), "{dump}");
+    }
+}
+
+#[test]
+fn a_global_a_function_may_read_before_its_assignment_is_read_from_memory() {
+    let direct =
+        dump("fn f() -> int:\n    ret m\nfn g() -> int:\n    ret f()\nprint(g())\nm = 7\n");
+    assert!(direct.contains("load_global_checked m"), "{direct}");
+    let value = dump(
+        "fn f() -> int:\n    ret m\nfn call(h: fn() -> int) -> int:\n    ret h()\nk = 1\n\
+         print(call(f))\nm = 7\n",
+    );
+    assert!(value.contains("load_global_checked m"), "{value}");
+    // a function called only after the assignment sees the literal
+    let after = dump("fn f() -> int:\n    ret m\nprint(1)\nm = 7\nprint(f())\n");
+    assert!(!after.contains("load_global_checked m"), "{after}");
 }
 
 #[test]
@@ -955,7 +996,7 @@ fn a_field_of_a_list_element_reads_only_its_slot() {
     let first = ir.split("fn main").next().unwrap();
     // the element's slots start at twice its position, and only the int's is read
     assert_eq!(first.matches("list_get").count(), 1, "{first}");
-    assert!(first.contains("mul v"), "{first}");
+    assert!(first.contains("element_slot v0, v1, 2"), "{first}");
     assert!(!first.contains("retain"), "{first}");
 }
 
@@ -1097,13 +1138,8 @@ fn a_field_of_a_list_element_is_one_slot_of_it() {
         .split("fn main")
         .next()
         .unwrap(),
-        "fn f(v0, v1):\n\
-         b0:\n  v0 = list_unique v0\n  v2 = len v0\n  v3 = copy v1\n  br_lt v3, 0 -> b1, b2\n\
-         b1:\n  v4 = div v2, 2\n  v3 = add v3, v4\n  br_lt v3, 0 -> b4, b2\n\
-         b2:\n  br_lt v3, v2 -> b3, b4\n\
-         b3:\n  v5 = mul v3, 2\n  br_lt v5, v2 -> b5, b4\n\
-         b4:\n  v6 = div v2, 2\n  fail \"list index out of range (index {}, length {})\", v1, v6\n\
-         b5:\n  v7 = add v5, 1\n  list_set v0, v7, 7\n  ret v0\n"
+        "fn f(v0, v1):\nb0:\n  v0 = list_unique v0\n  v2 = element_slot v0, v1, 2\n  \
+         v3 = add v2, 1\n  list_set v0, v3, 7\n  ret v0\n"
     );
 }
 

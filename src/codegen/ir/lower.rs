@@ -129,12 +129,15 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         })
         .collect();
     let global_set: HashSet<String> = globals.iter().cloned().collect();
+    let global_reads = global_reads(body, &stone_globals);
     let context = Context {
         types,
         variables: &variables,
         globals: &globals,
         owned_params: owned_params(body, methods),
-        global_reads: global_reads(body, &stone_globals),
+        constant_globals: constant_globals(body, &global_reads),
+        shrinks_maps: pops_maps(body, types),
+        global_reads,
         global_set,
         enums,
         structs,
@@ -255,6 +258,149 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
     Ok(Program { functions, globals })
 }
 
+/// Returns the globals of the top-level code `body` that read as the same int, float, or bool
+/// literal everywhere, with the immediate each reads as, so that reading one needs no load and no
+/// check that it was assigned, and a divisor held in one divides like a literal.
+///
+/// A global qualifies when one statement of the top level itself, not inside a block, assigns it
+/// a literal, nothing else assigns it anywhere (a function never assigns a global), and no
+/// statement before that one can call a function that reads it, which would fail because the
+/// global is not assigned yet. For example, `m = 7` at the start of a program makes every `m`
+/// read as `7`.
+fn constant_globals(body: &[Stmt], reads: &GlobalReads) -> HashMap<String, i64> {
+    // a method that changes `self`, such as a trait's on `int`, changes its receiver without
+    // assigning it
+    let mut receivers = HashSet::new();
+    method_receivers(body, &mut receivers);
+    let mut constants = HashMap::new();
+    for (i, stmt) in body.iter().enumerate() {
+        let StmtKind::Assign { targets, value } = &stmt.kind else {
+            continue;
+        };
+        let [target] = targets.as_slice() else {
+            continue;
+        };
+        let ExprKind::Name { id, .. } = &target.kind else {
+            continue;
+        };
+        let literal = match &value.kind {
+            ExprKind::Constant {
+                value: constant, ..
+            } => match **constant {
+                Constant::Float(x) => Some(x.to_bits() as i64),
+                Constant::Bool(b) => Some(b as i64),
+                _ => constant_int(value),
+            },
+            ExprKind::UnaryOp {
+                op: UnaryOp::UnarySub,
+                operand,
+            } => match &operand.kind {
+                ExprKind::Constant {
+                    value: constant, ..
+                } => match **constant {
+                    Constant::Float(x) => Some((-x).to_bits() as i64),
+                    _ => constant_int(value),
+                },
+                _ => None,
+            },
+            _ => None,
+        };
+        let Some(literal) = literal else {
+            continue;
+        };
+        let assigned_elsewhere = body.iter().enumerate().any(|(j, other)| {
+            let mut assigned = Vec::new();
+            collect_assigned(std::slice::from_ref(other), &mut assigned);
+            j != i && assigned.iter().any(|(name, _)| name == id)
+        });
+        if !assigned_elsewhere
+            && !receivers.contains(id.as_str())
+            && !reads.of_statements(&body[..i]).contains(id)
+        {
+            constants.insert(id.clone(), literal);
+        }
+    }
+    constants
+}
+
+/// Returns whether any code in `body`, functions included, calls `pop` with a key on a map, whose
+/// type `types` gives by span.
+fn pops_maps(body: &[Stmt], types: &HashMap<Span, Type>) -> bool {
+    let mut found = false;
+    visit_statements(body, &mut |stmt| {
+        for expr in stmt.exprs() {
+            expr.visit(&mut |expr| {
+                if let ExprKind::Call { func, args, .. } = &expr.kind
+                    && let ExprKind::Attribute { value, attr, .. } = &func.kind
+                    && attr == "pop"
+                    && args.len() == 1
+                    && matches!(types.get(&value.span), Some(Type::Map(..)))
+                {
+                    found = true;
+                }
+            });
+        }
+    });
+    found
+}
+
+/// Calls `f` on every statement of `body`, in blocks and function bodies too.
+fn visit_statements<'a>(body: &'a [Stmt], f: &mut impl FnMut(&'a Stmt)) {
+    for stmt in body {
+        f(stmt);
+        match &stmt.kind {
+            StmtKind::If { body, orelse, .. } => {
+                visit_statements(body, f);
+                visit_statements(orelse, f);
+            }
+            StmtKind::While { body, .. }
+            | StmtKind::For { body, .. }
+            | StmtKind::FunctionDef { body, .. } => visit_statements(body, f),
+            StmtKind::ImplDef { methods, .. } | StmtKind::TraitDef { methods, .. } => {
+                visit_statements(methods, f)
+            }
+            StmtKind::Match { cases, .. } => {
+                for case in cases {
+                    visit_statements(&case.body, f);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Adds to `out` every variable that top-level code `body`, in blocks too, calls a method on,
+/// as `n` in `n.bump()`.
+fn method_receivers<'a>(body: &'a [Stmt], out: &mut HashSet<&'a str>) {
+    for stmt in body {
+        for expr in stmt.exprs() {
+            expr.visit(&mut |expr| {
+                if let ExprKind::Call { func, .. } = &expr.kind
+                    && let ExprKind::Attribute { value, .. } = &func.kind
+                    && let ExprKind::Name { id, .. } = &value.kind
+                {
+                    out.insert(id);
+                }
+            });
+        }
+        match &stmt.kind {
+            StmtKind::If { body, orelse, .. } => {
+                method_receivers(body, out);
+                method_receivers(orelse, out);
+            }
+            StmtKind::While { body, .. } | StmtKind::For { body, .. } => {
+                method_receivers(body, out)
+            }
+            StmtKind::Match { cases, .. } => {
+                for case in cases {
+                    method_receivers(&case.body, out);
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// A function lowering makes for a type some code needs it for, called through
 /// [`Callee::Helper`].
 #[derive(Clone, PartialEq)]
@@ -343,6 +489,12 @@ struct Context<'a> {
     /// Every global, in the order they are first assigned, each value of a tuple as its own.
     globals: &'a [String],
     global_set: HashSet<String>,
+    /// The globals that hold one literal for the whole program, with the immediate each reads as
+    /// (see [`constant_globals`]).
+    constant_globals: HashMap<String, i64>,
+    /// Whether the program removes entries from maps, which can leave holes in a map's entries
+    /// that must close up before anything reads them as a list (see `builtins::map_runtime`).
+    shrinks_maps: bool,
     /// For each function, whether it owns each parameter, which it does if it assigns or changes
     /// it. A caller gives an owned parameter a reference of its own.
     owned_params: HashMap<String, Vec<bool>>,
@@ -2599,7 +2751,7 @@ impl<'a> Lowerer<'a> {
                     let width = self.leaves(&elem).len();
                     // an index out of range points at its own subscript
                     self.span = span;
-                    let first = self.element_slot(list, index, width, INDEX_RANGE);
+                    let first = self.element_slot(list, index, width);
                     self.span = outer;
                     location = Location::Slots {
                         list,
@@ -2625,6 +2777,7 @@ impl<'a> Lowerer<'a> {
                     self.push(Inst::ListUnique {
                         dst: local,
                         src: Operand::Reg(local),
+                        maybe_null: false,
                     });
                     return Ok(Operand::Reg(local));
                 }
@@ -2644,6 +2797,7 @@ impl<'a> Lowerer<'a> {
                 self.push(Inst::ListUnique {
                     dst: unique,
                     src: Operand::Reg(loaded),
+                    maybe_null: false,
                 });
                 self.push(Inst::StoreGlobal {
                     name: name.clone(),
@@ -2657,16 +2811,19 @@ impl<'a> Lowerer<'a> {
                     dst: row,
                     list,
                     index: first,
+                    offset: 0,
                 });
                 self.push(Inst::ListUnique {
                     dst: row,
                     src: Operand::Reg(row),
+                    maybe_null: false,
                 });
                 // the slot's reference moves to the unique row, which may be a copy
                 self.push(Inst::ListSet {
                     list,
                     index: first,
                     value: Operand::Reg(row),
+                    offset: 0,
                 });
                 Ok(Operand::Reg(row))
             }
@@ -2699,6 +2856,7 @@ impl<'a> Lowerer<'a> {
                         dst,
                         list: *list,
                         index,
+                        offset: 0,
                     });
                     Operand::Reg(dst)
                 })
@@ -2721,10 +2879,20 @@ impl<'a> Lowerer<'a> {
                     let index = self.slot(first, field);
                     if let Some(kind) = kind {
                         let dst = self.fresh();
-                        self.push(Inst::ListGet { dst, list, index });
+                        self.push(Inst::ListGet {
+                            dst,
+                            list,
+                            index,
+                            offset: 0,
+                        });
                         old.push((dst, kind));
                     }
-                    self.push(Inst::ListSet { list, index, value });
+                    self.push(Inst::ListSet {
+                        list,
+                        index,
+                        value,
+                        offset: 0,
+                    });
                 }
                 for (src, kind) in old {
                     self.push(Inst::Release {
@@ -2810,6 +2978,7 @@ impl<'a> Lowerer<'a> {
             self.push(Inst::ListUnique {
                 dst: local,
                 src: Operand::Reg(local),
+                maybe_null: false,
             });
             Operand::Reg(local)
         } else if self.name.is_none() && self.context.global_set.contains(root) {
@@ -2823,6 +2992,7 @@ impl<'a> Lowerer<'a> {
             self.push(Inst::ListUnique {
                 dst: unique,
                 src: Operand::Reg(loaded),
+                maybe_null: false,
             });
             self.push(Inst::StoreGlobal {
                 name: root.to_string(),
@@ -2845,6 +3015,7 @@ impl<'a> Lowerer<'a> {
             self.push(Inst::ListUnique {
                 dst: row,
                 src: Operand::Reg(row),
+                maybe_null: false,
             });
             // the slot's reference moves to the unique row, which may be a copy
             self.push(Inst::ListStore {
@@ -2924,6 +3095,9 @@ impl<'a> Lowerer<'a> {
             None => {
                 let list = self.expr(iter)?;
                 let list = self.snapshot(list);
+                if self.map_key(iter).is_some() {
+                    self.close_up(list);
+                }
                 self.take(list, Some(RcKind::List));
                 self.push(Inst::Copy {
                     dst: next,
@@ -2996,6 +3170,7 @@ impl<'a> Lowerer<'a> {
                     dst,
                     list,
                     index: Operand::Reg(next),
+                    offset: 0,
                 });
                 if elem.is_some() {
                     self.push(Inst::Retain {
@@ -3272,6 +3447,9 @@ impl<'a> Lowerer<'a> {
                 }
                 if let Some(&local) = self.locals.get(id) {
                     return Ok(self.finish(Operand::Reg(local), into));
+                }
+                if let Some(&literal) = self.context.constant_globals.get(id) {
+                    return Ok(self.finish(Operand::Imm(literal), into));
                 }
                 if self.context.global_set.contains(id) {
                     let dst = self.dst(into);
@@ -3618,6 +3796,7 @@ impl<'a> Lowerer<'a> {
             list: Operand::Reg(result),
             index: Operand::Reg(index),
             value,
+            offset: 0,
         });
         self.push(Inst::Binary {
             op: BinOp::Add,
@@ -3736,6 +3915,7 @@ impl<'a> Lowerer<'a> {
                     dst,
                     list: leaf.value,
                     index,
+                    offset: 0,
                 });
                 loaded.insert(leaf.value, Operand::Reg(dst));
                 Operand::Reg(dst)
@@ -4520,7 +4700,19 @@ impl<'a> Lowerer<'a> {
             "len" if self.holds_flat(receiver) || self.map_key(receiver).is_some() => {
                 let width = self.element_layout(receiver).0;
                 let list = self.list_operand(receiver, &[])?;
-                let count = self.element_count(list, width);
+                let mut count = self.element_count(list, width);
+                if self.map_key(receiver).is_some() && self.context.shrinks_maps {
+                    // entries removed but not closed up yet still take their place
+                    let holes = self.runtime_call("stone.map_holes", vec![list], None);
+                    let live = self.fresh();
+                    self.push(Inst::Binary {
+                        op: BinOp::Sub,
+                        dst: live,
+                        lhs: count,
+                        rhs: holes,
+                    });
+                    count = Operand::Reg(live);
+                }
                 self.release_temp(list);
                 Ok(self.finish(count, into))
             }
@@ -4580,6 +4772,7 @@ impl<'a> Lowerer<'a> {
                 // a map's entries are laid out as a list of (key, value) tuples, with an index the
                 // list never reads
                 let map = self.expr(receiver)?;
+                self.close_up(map);
                 self.take(map, Some(RcKind::List));
                 let list = self.fresh();
                 self.push(Inst::Copy {
@@ -4943,6 +5136,7 @@ impl<'a> Lowerer<'a> {
             dst: result,
             list,
             index: Operand::Imm(0),
+            offset: 0,
         });
         let index = self.fresh();
         self.push(Inst::Copy {
@@ -4971,6 +5165,7 @@ impl<'a> Lowerer<'a> {
             dst: element,
             list,
             index: Operand::Reg(index),
+            offset: 0,
         });
         self.terminate(Terminator::CmpBranch {
             cond: better,
@@ -5217,7 +5412,12 @@ impl<'a> Lowerer<'a> {
                 self.start(ok);
                 let index = self.runtime_call("stone.random_below", vec![Operand::Reg(len)], None);
                 let dst = self.dst(into);
-                self.push(Inst::ListGet { dst, list, index });
+                self.push(Inst::ListGet {
+                    dst,
+                    list,
+                    index,
+                    offset: 0,
+                });
                 // the element gets a reference of its own, as when a subscript reads it
                 if kind.is_some() {
                     self.push(Inst::Retain {
@@ -5797,6 +5997,10 @@ impl<'a> Lowerer<'a> {
                         values.push(Operand::Reg(local));
                         continue;
                     }
+                    if let Some(&literal) = self.context.constant_globals.get(leaf) {
+                        values.push(Operand::Imm(literal));
+                        continue;
+                    }
                     // the values are assigned together, so checking the first checks them all
                     let dst = self.fresh();
                     self.push(Inst::LoadGlobal {
@@ -6034,104 +6238,18 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Returns the slot where element `index` of `list` starts, whose elements are `width` slots
-    /// each, counting a negative index from the end and stopping the program with `message`
-    /// unless that is an element, as [`Lowerer::list_position`] does.
-    ///
-    /// Only a negative index or a failure divides the slot count by `width` for the element
-    /// count, since an index from 0 is in range exactly when the slot it starts at is below the
-    /// slot count. Checking it against the slot count first keeps that multiplication from
-    /// overflowing.
-    fn element_slot(
-        &mut self,
-        list: Operand,
-        index: Operand,
-        width: usize,
-        message: &str,
-    ) -> Operand {
-        if width == 1 {
-            let count = self.element_count(list, width);
-            return self.list_position(index, count, false, message);
-        }
-        let slots = self.fresh();
-        self.push(Inst::ListLen { dst: slots, list });
-        let position = self.fresh();
-        self.push(Inst::Copy {
-            dst: position,
-            src: index,
+    /// each, counting a negative index from the end and stopping the program with
+    /// `stdlib::INDEX_RANGE` unless that is an element, through one [`Inst::ElementSlot`], which
+    /// the optimizer can tell is the same check as an earlier one.
+    fn element_slot(&mut self, list: Operand, index: Operand, width: usize) -> Operand {
+        let dst = self.fresh();
+        self.push(Inst::ElementSlot {
+            dst,
+            list,
+            index,
+            width,
         });
-        let (negative, check, bounded, fails, holds) = (
-            self.new_block(),
-            self.new_block(),
-            self.new_block(),
-            self.new_block(),
-            self.new_block(),
-        );
-        self.terminate(Terminator::CmpBranch {
-            cond: Cond::Lt,
-            float: false,
-            lhs: Operand::Reg(position),
-            rhs: Operand::Imm(0),
-            then: negative,
-            otherwise: check,
-        });
-        self.start(negative);
-        let count = self.fresh();
-        self.push(Inst::Binary {
-            op: BinOp::Div,
-            dst: count,
-            lhs: Operand::Reg(slots),
-            rhs: Operand::Imm(width as i64),
-        });
-        self.push(Inst::Binary {
-            op: BinOp::Add,
-            dst: position,
-            lhs: Operand::Reg(position),
-            rhs: Operand::Reg(count),
-        });
-        self.terminate(Terminator::CmpBranch {
-            cond: Cond::Lt,
-            float: false,
-            lhs: Operand::Reg(position),
-            rhs: Operand::Imm(0),
-            then: fails,
-            otherwise: check,
-        });
-        self.start(check);
-        self.terminate(Terminator::CmpBranch {
-            cond: Cond::Lt,
-            float: false,
-            lhs: Operand::Reg(position),
-            rhs: Operand::Reg(slots),
-            then: bounded,
-            otherwise: fails,
-        });
-        self.start(bounded);
-        let first = self.first_slot(Operand::Reg(position), width);
-        self.terminate(Terminator::CmpBranch {
-            cond: Cond::Lt,
-            float: false,
-            lhs: first,
-            rhs: Operand::Reg(slots),
-            then: holds,
-            otherwise: fails,
-        });
-        self.start(fails);
-        let values = match message.contains("{}") {
-            true => {
-                let count = self.fresh();
-                self.push(Inst::Binary {
-                    op: BinOp::Div,
-                    dst: count,
-                    lhs: Operand::Reg(slots),
-                    rhs: Operand::Imm(width as i64),
-                });
-                vec![index, Operand::Reg(count)]
-            }
-            false => Vec::new(),
-        };
-        self.terminate(Terminator::Fail(message.to_string(), values));
-        self.start(holds);
-        first
+        Operand::Reg(dst)
     }
 
     /// Returns slot `field` of the element starting at slot `first`.
@@ -6177,7 +6295,12 @@ impl<'a> Lowerer<'a> {
         for field in leaves {
             let index = self.slot(first, field);
             let dst = self.fresh();
-            self.push(Inst::ListGet { dst, list, index });
+            self.push(Inst::ListGet {
+                dst,
+                list,
+                index,
+                offset: 0,
+            });
             if kinds[field].is_some() {
                 self.push(Inst::Retain {
                     src: Operand::Reg(dst),
@@ -6201,7 +6324,7 @@ impl<'a> Lowerer<'a> {
         let kinds = self.element_kinds(list_expr);
         let list = self.list_operand(list_expr, &[index])?;
         let index = self.expr(index)?;
-        let first = self.element_slot(list, index, width, INDEX_RANGE);
+        let first = self.element_slot(list, index, width);
         let values = self.load_slots_from(list, first, leaves.clone(), &kinds);
         for (&value, field) in values.iter().zip(leaves) {
             self.own(value, kinds[field]);
@@ -6320,10 +6443,20 @@ impl<'a> Lowerer<'a> {
             let index = self.slot(first, field);
             if let Some(kind) = kind {
                 let dst = self.fresh();
-                self.push(Inst::ListGet { dst, list, index });
+                self.push(Inst::ListGet {
+                    dst,
+                    list,
+                    index,
+                    offset: 0,
+                });
                 old.push((dst, kind));
             }
-            self.push(Inst::ListSet { list, index, value });
+            self.push(Inst::ListSet {
+                list,
+                index,
+                value,
+                offset: 0,
+            });
         }
         for (src, kind) in old {
             self.push(Inst::Release {
@@ -6430,7 +6563,9 @@ impl<'a> Lowerer<'a> {
     /// Lowers `receiver.pop(key)` for a map, which is `some` of the value of `key`'s entry,
     /// holding the map's references to its values, or `none` if it has none, into `into` if
     /// given. The receiver's indexes and keys are evaluated, then the key, then the entry is
-    /// removed, which moves the later ones down, so the map's index is rebuilt on its next lookup.
+    /// removed: `stone.map_take` marks it removed where it is, the values move out, and its
+    /// counted slots are zeroed, so nothing releases them again, before `stone.map_settle` closes
+    /// up the map if removed entries are more than half of it.
     fn map_pop(
         &mut self,
         receiver: &Expr,
@@ -6442,15 +6577,31 @@ impl<'a> Lowerer<'a> {
         let indexes = self.place_indexes(receiver)?;
         let key = self.expr(key_expr)?;
         let map = self.unique_place(receiver, &indexes)?;
-        let first = self.map_find(map, key, &key_ty, None);
+        let string = Operand::Imm((key_ty == Type::Str) as i64);
+        let first = self.runtime_call("stone.map_take", vec![map, key, string], None);
         self.release_temp(key);
         Ok(
             self.option_if((Cond::Ge, first, Operand::Imm(0)), into, |this| {
-                // each value removed moves the next one down to the same slot
-                let removed: Vec<Operand> = kinds
-                    .iter()
-                    .map(|_| this.runtime_call("stone.list_pop", vec![map, first], None))
-                    .collect();
+                let mut removed = Vec::new();
+                for (field, kind) in kinds.iter().enumerate() {
+                    let index = this.slot(first, field);
+                    let dst = this.fresh();
+                    this.push(Inst::ListGet {
+                        dst,
+                        list: map,
+                        index,
+                        offset: 0,
+                    });
+                    if kind.is_some() {
+                        this.push(Inst::ListSet {
+                            list: map,
+                            index,
+                            value: Operand::Imm(0),
+                            offset: 0,
+                        });
+                    }
+                    removed.push(Operand::Reg(dst));
+                }
                 // the entry's key goes with it
                 if let Some(kind) = kinds[0] {
                     this.push(Inst::Release {
@@ -6460,7 +6611,7 @@ impl<'a> Lowerer<'a> {
                 }
                 this.push(Inst::Call {
                     dsts: vec![],
-                    callee: Callee::Runtime("stone.map_unindex"),
+                    callee: Callee::Runtime("stone.map_settle"),
                     args: vec![map],
                 });
                 removed[1..]
@@ -6470,6 +6621,18 @@ impl<'a> Lowerer<'a> {
                     .collect()
             }),
         )
+    }
+
+    /// Closes up the entries of `map` if the program removes any from maps, before code reads them
+    /// as a list.
+    fn close_up(&mut self, map: Operand) {
+        if self.context.shrinks_maps {
+            self.push(Inst::Call {
+                dsts: vec![],
+                callee: Callee::Runtime("stone.map_compact"),
+                args: vec![map],
+            });
+        }
     }
 
     /// Lowers `receiver.keys()` or `receiver.values()` for a map to a new list holding, for each
@@ -6485,6 +6648,7 @@ impl<'a> Lowerer<'a> {
         let width = kinds.len();
         let taken = &kinds[leaves.clone()];
         let map = self.list_operand(receiver, &[])?;
+        self.close_up(map);
         let count = self.element_count(map, width);
         let slots = self.first_slot(count, taken.len());
         let list = self.fresh();
@@ -6528,6 +6692,7 @@ impl<'a> Lowerer<'a> {
                 list: Operand::Reg(list),
                 index,
                 value,
+                offset: 0,
             });
         }
         self.push(Inst::Binary {
@@ -6602,6 +6767,7 @@ impl<'a> Lowerer<'a> {
                     dst: old,
                     list: map,
                     index,
+                    offset: 0,
                 });
                 self.push(Inst::Release {
                     src: Operand::Reg(old),
@@ -6617,6 +6783,7 @@ impl<'a> Lowerer<'a> {
                 list: map,
                 index,
                 value,
+                offset: 0,
             });
         }
     }
@@ -6714,6 +6881,9 @@ impl<'a> Lowerer<'a> {
             self.new_block(),
             self.new_block(),
         );
+        if key.is_some() {
+            self.close_up(list);
+        }
         self.print_char(open);
         let count = self.element_count(list, width);
         let next = self.fresh();

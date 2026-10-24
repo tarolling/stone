@@ -1220,6 +1220,7 @@ mod tests {
             ("not ecx", "f7 d1"),
             ("div rcx", "48 f7 f1"),
             ("idiv r8", "49 f7 f8"),
+            ("imul rdx", "48 f7 ea"),
             ("mul rdx", "48 f7 e2"),
             ("imul rax, rcx", "48 0f af c1"),
             ("imul rax, rax, 10", "48 6b c0 0a"),

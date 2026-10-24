@@ -8,7 +8,6 @@
 //! `mov r13, rbx` then `add r13, r12`.
 
 use super::{ARG_REGS, X64Generator};
-use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label, variant_label};
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::{
@@ -16,6 +15,7 @@ use crate::codegen::ir::{
     Terminator, VReg, variable_of,
 };
 use crate::codegen::regalloc::{Location, hints, linear_scan, parallel_moves};
+use crate::codegen::{AssemblyGenerator, magic_signed};
 use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
 use std::collections::HashMap;
 use std::fmt;
@@ -655,6 +655,20 @@ impl X64Generator {
 
     fn emit_inst(&mut self, frame: &Frame, inst: &Inst) -> Result<(), String> {
         match inst {
+            Inst::DepthCheck => self.depth_check(),
+
+            Inst::ElementSlot {
+                dst,
+                list,
+                index,
+                width,
+            } => {
+                let (dst, list, index) =
+                    (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
+                self.element_slot(list, index, *width as i64);
+                self.store(dst, "rcx");
+            }
+
             Inst::ListData { dst, list } => {
                 let (dst, list) = (frame.reg(*dst)?, frame.value(*list)?);
                 let base = self.base(list, "rax");
@@ -1023,11 +1037,24 @@ impl X64Generator {
                 self.store(dst, target);
             }
 
-            Inst::ListLoad { dst, list, index } | Inst::ListGet { dst, list, index } => {
-                let checked = matches!(inst, Inst::ListLoad { .. });
+            Inst::ListLoad { dst, list, index } => {
                 let (dst, list, index) =
                     (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
-                let slot = self.list_slot(list, index, checked);
+                let slot = self.list_slot(list, index, true);
+                let target = self.target(dst, None);
+                self.emit(&format!("\tmov\t{target}, QWORD PTR {slot}"));
+                self.store(dst, target);
+            }
+
+            Inst::ListGet {
+                dst,
+                list,
+                index,
+                offset,
+            } => {
+                let (dst, list, index) =
+                    (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
+                let slot = self.known_slot(list, index, *offset);
                 let target = self.target(dst, None);
                 self.emit(&format!("\tmov\t{target}, QWORD PTR {slot}"));
                 self.store(dst, target);
@@ -1057,13 +1084,18 @@ impl X64Generator {
                 }
             }
 
-            Inst::ListSet { list, index, value } => {
+            Inst::ListSet {
+                list,
+                index,
+                value,
+                offset,
+            } => {
                 let (list, index, value) = (
                     frame.value(*list)?,
                     frame.value(*index)?,
                     frame.value(*value)?,
                 );
-                let slot = self.list_slot(list, index, false);
+                let slot = self.known_slot(list, index, *offset);
                 self.store_qword(&slot, value);
             }
 
@@ -1103,12 +1135,20 @@ impl X64Generator {
                 }
             },
 
-            Inst::ListUnique { dst, src } => {
+            Inst::ListUnique {
+                dst,
+                src,
+                maybe_null,
+            } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 // a list nothing else refers to is changed in place, and any other is copied
                 // first by `stone.list_copy`, which takes and returns it in rax
                 self.load("rax", src);
                 let skip = self.ctx.new_label("unique");
+                if *maybe_null {
+                    self.emit("\ttest\trax, rax");
+                    self.emit(&format!("\tjz\t{skip}"));
+                }
                 self.emit("\tcmp\tQWORD PTR [rax - 8], 1");
                 self.emit(&format!("\tje\t{skip}"));
                 self.emit("\tcall\tstone.list_copy");
@@ -1148,14 +1188,7 @@ impl X64Generator {
                     return Err(format!("{callee} returns one value"));
                 }
                 if let Callee::User(_) | Callee::Value(_) = callee {
-                    // the same limit as the interpreter, rather than overflowing the stack
-                    let too_deep = self.fail_here(&format!(
-                        "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
-                    ));
-                    self.emit(&format!(
-                        "\tcmp\tQWORD PTR [rip + stone.call_depth], {MAX_CALL_DEPTH}"
-                    ));
-                    self.emit(&format!("\tjge\t{too_deep}"));
+                    self.depth_check();
                 }
                 let mut values = Vec::new();
                 for arg in args {
@@ -1293,6 +1326,96 @@ impl X64Generator {
         }
     }
 
+    /// Jumps to the `recursion is too deep` failure if a call made here would nest more calls
+    /// than the interpreter allows, rather than overflowing the stack.
+    fn depth_check(&mut self) {
+        let too_deep = self.fail_here(&format!(
+            "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
+        ));
+        self.emit(&format!(
+            "\tcmp\tQWORD PTR [rip + stone.call_depth], {MAX_CALL_DEPTH}"
+        ));
+        self.emit(&format!("\tjge\t{too_deep}"));
+    }
+
+    /// Leaves in `rcx` the slot where element `index` of `list` starts, whose elements are
+    /// `width` slots each, counting a negative index from the end and jumping to the
+    /// `INDEX_RANGE` failure unless that is an element. This uses `rcx` and `rdx`, and `rax` for a
+    /// list in memory.
+    ///
+    /// An index from 0 is checked against the slot count before it is multiplied, so the product
+    /// cannot overflow, and then the slot it starts at is. A negative one must not be below minus
+    /// the slot count, and then the slot count plus the index times the width must not be
+    /// negative. For example, with 7 slots per element and 14 slots, index 1 starts at slot 7 and
+    /// index -3 fails.
+    fn element_slot(&mut self, list: Value, index: Value, width: i64) {
+        let base = self.base(list, "rax");
+        // the error reports the index as written and the number of elements, in FAIL_VALUES, and
+        // stone.fail never returns, so its setup may use any register
+        let mut setup = vec![format!("\tmov\trax, QWORD PTR [{base}]")];
+        if width > 1 {
+            setup.push("\tcqo".to_string());
+            setup.push(format!("\tmov\trcx, {width}"));
+            setup.push("\tidiv\trcx".to_string());
+        }
+        setup.push("\tmov\trdx, rax".to_string());
+        setup.push(format!("\tmov\trcx, {index}"));
+        let out_of_range = self.ctx.fail_at_after(INDEX_RANGE, self.span, setup);
+        let done = self.ctx.new_label("slot_done");
+        self.load("rcx", index);
+        self.emit(&format!("\tmov\trdx, QWORD PTR [{base}]"));
+        if !matches!(index, Value::Imm(n) if n >= 0) {
+            let from_start = self.ctx.new_label("slot_from_start");
+            self.emit("\ttest\trcx, rcx");
+            self.emit(&format!("\tjns\t{from_start}"));
+            // negative indexes count from the end
+            self.emit("\tadd\trcx, rdx");
+            self.emit(&format!("\tjs\t{out_of_range}"));
+            if width > 1 {
+                self.emit("\tsub\trcx, rdx");
+                self.emit(&format!("\timul\trcx, rcx, {width}"));
+                self.emit("\tadd\trcx, rdx");
+                self.emit(&format!("\tjs\t{out_of_range}"));
+            }
+            self.emit(&format!("\tjmp\t{done}"));
+            self.emit(&format!("{from_start}:"));
+        }
+        self.emit("\tcmp\trcx, rdx");
+        self.emit(&format!("\tjge\t{out_of_range}"));
+        if width > 1 {
+            self.emit(&format!("\timul\trcx, rcx, {width}"));
+            self.emit("\tcmp\trcx, rdx");
+            self.emit(&format!("\tjge\t{out_of_range}"));
+        }
+        self.emit(&format!("{done}:"));
+    }
+
+    /// Returns the memory operand for slot `index + offset` of `list`, already known to be in
+    /// range, without its size prefix, using an index in a register as it is. This uses `rax`,
+    /// and `rcx` for an index in memory.
+    ///
+    /// For example, slot `r12 + 3` of a list in `rbx` is `[rax + r12 * 8 + 24]` after
+    /// `mov rax, QWORD PTR [rbx + 16]`.
+    fn known_slot(&mut self, list: Value, index: Value, offset: usize) -> String {
+        let base = self.base(list, "rax");
+        let index = match index {
+            Value::Imm(n) => {
+                self.emit(&format!("\tmov\trax, QWORD PTR [{base} + 16]"));
+                return format!("[rax + {}]", 8 * (n + offset as i64));
+            }
+            Value::Reg(reg) => reg,
+            Value::Stack(_) => {
+                self.load("rcx", index);
+                "rcx"
+            }
+        };
+        self.emit(&format!("\tmov\trax, QWORD PTR [{base} + 16]"));
+        match offset {
+            0 => format!("[rax + {index} * 8]"),
+            n => format!("[rax + {index} * 8 + {}]", 8 * n),
+        }
+    }
+
     /// Jumps to the `division by zero` failure if the float divisor in `xmm` is 0.0 or -0.0, as
     /// in the interpreter, rather than letting `/` or `%` give inf or nan. Clobbers `xmm2`.
     fn fail_on_float_zero(&mut self, xmm: &str) {
@@ -1331,15 +1454,14 @@ impl X64Generator {
 
     /// Divides `rax` by a constant that is neither 0 nor -1, rounding toward zero like `idiv`.
     ///
-    /// Neither `idiv` trap can happen for such a divisor, so no checks are emitted, and a power
-    /// of two becomes shifts. For example, dividing by `8` emits a bias for negative dividends
-    /// and then `sar rax, 3`, and dividing by `10` emits a plain `idiv`.
+    /// Neither `idiv` trap can happen for such a divisor, so no checks are emitted. A power of
+    /// two becomes shifts, and any other divisor a multiplication by its magic number
+    /// (`magic_quotient`). For example, dividing by `8` emits a bias for negative dividends and
+    /// then `sar rax, 3`, and dividing by `10` emits `imul rdx` and shifts. Uses `rcx` and `rdx`.
     fn divide_by_constant(&mut self, divisor: i64) {
         let magnitude = divisor.unsigned_abs();
         if !magnitude.is_power_of_two() {
-            self.emit(&format!("\tmov\trcx, {divisor}"));
-            self.emit("\tcqo"); // sign-extend rax into rdx
-            self.emit("\tidiv\trcx");
+            self.magic_quotient(divisor);
             return;
         }
 
@@ -1363,14 +1485,21 @@ impl X64Generator {
     ///
     /// A power of two becomes shifts: the quotient rounded toward zero, as `divide_by_constant`
     /// computes it, shifted back and subtracted. The sign of the divisor never matters. For
-    /// example, `x % 8` emits `sar rcx, 3`, `shl rcx, 3`, and `sub rdx, rcx`, and `x % 10` emits
-    /// a plain `idiv`.
+    /// example, `x % 8` emits `sar rcx, 3`, `shl rcx, 3`, and `sub rdx, rcx`, and `x % 10`
+    /// subtracts ten times the quotient `magic_quotient` gives.
     fn remainder_by_constant(&mut self, divisor: i64) {
         let magnitude = divisor.unsigned_abs();
         if !magnitude.is_power_of_two() {
-            self.emit(&format!("\tmov\trcx, {divisor}"));
-            self.emit("\tcqo"); // sign-extend rax into rdx
-            self.emit("\tidiv\trcx");
+            self.magic_quotient(divisor);
+            // the product is no bigger than the dividend, so it cannot overflow
+            if fits_i32(divisor) {
+                self.emit(&format!("\timul\trax, rax, {divisor}"));
+            } else {
+                self.emit(&format!("\tmov\trdx, {divisor}"));
+                self.emit("\timul\trax, rdx");
+            }
+            self.emit("\tmov\trdx, rcx");
+            self.emit("\tsub\trdx, rax");
             return;
         }
 
@@ -1388,6 +1517,31 @@ impl X64Generator {
         self.emit(&format!("\tshl\trcx, {shift}"));
         self.emit("\tmov\trdx, rax");
         self.emit("\tsub\trdx, rcx");
+    }
+
+    /// Divides `rax` by a constant whose magnitude is at least 3 and not a power of two, rounding
+    /// toward zero like `idiv`, by multiplying by the divisor's magic number from
+    /// [`magic_signed`]. Leaves the quotient in `rax` and the dividend in `rcx`, and uses `rdx`.
+    ///
+    /// For example, dividing by `7` takes the high half of the product with
+    /// `5270498306774157605`, shifts it right by 1, and adds 1 if that is negative.
+    fn magic_quotient(&mut self, divisor: i64) {
+        let (multiplier, shift) = magic_signed(divisor);
+        self.emit("\tmov\trcx, rax");
+        self.emit(&format!("\tmov\trdx, {multiplier}"));
+        self.emit("\timul\trdx"); // the high half of the product goes to rdx
+        if divisor > 0 && multiplier < 0 {
+            self.emit("\tadd\trdx, rcx");
+        } else if divisor < 0 && multiplier > 0 {
+            self.emit("\tsub\trdx, rcx");
+        }
+        if shift > 0 {
+            self.emit(&format!("\tsar\trdx, {shift}"));
+        }
+        // a negative quotient rounds toward zero
+        self.emit("\tmov\trax, rdx");
+        self.emit("\tshr\trax, 63");
+        self.emit("\tadd\trax, rdx");
     }
 
     /// Converts the float whose bits are in `rax` to an int in `rax`, dropping any fraction.

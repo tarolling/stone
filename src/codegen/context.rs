@@ -6,7 +6,9 @@
 
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
 use crate::checker::{Analysis, Structs, Type, TypeChecker, variants};
+use crate::codegen::ir::inline::inline;
 use crate::codegen::ir::lower::lower;
+use crate::codegen::ir::opt::optimize;
 use crate::codegen::ir::{Callee, Inst, Program};
 use crate::codegen::{Architecture, AssemblyGenerator, Os, Target};
 use crate::diagnostic::Severity;
@@ -29,7 +31,14 @@ pub const LIST_ROUTINES: &[&str] = &[
 
 /// The runtime routines behind maps, which each backend's `builtins::map_runtime` emits when the
 /// program calls them.
-pub const MAP_ROUTINES: &[&str] = &["stone.map_find", "stone.map_add", "stone.map_unindex"];
+pub const MAP_ROUTINES: &[&str] = &[
+    "stone.map_find",
+    "stone.map_add",
+    "stone.map_take",
+    "stone.map_settle",
+    "stone.map_compact",
+    "stone.map_holes",
+];
 
 /// The runtime routines behind string methods, indexes, slices, and ordering, which each
 /// backend's `builtins::string_methods` emits when the program calls them.
@@ -409,6 +418,8 @@ impl Context {
     /// counts references.
     pub fn lower(&mut self, module: &Mod) -> Result<(), String> {
         self.program = lower(module, &self.analysis)?;
+        inline(&mut self.program);
+        optimize(&mut self.program);
         let insts = self
             .program
             .functions

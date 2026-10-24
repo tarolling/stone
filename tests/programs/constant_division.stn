@@ -1,0 +1,17 @@
+// division and remainder by constants that are not powers of two, which compile to a
+// multiplication by a magic number, must round toward zero like the interpreter
+fn show(n: int):
+    print("{n}: {n / 3} {n % 3} {n / 7} {n % 7} {n / 10} {n % 10} {n / -10} {n % -10}")
+    print("  {n / 1000003} {n % 1000003} {n / 9223372036854775807} {n % 9223372036854775807}")
+    print("  {n / -9223372036854775807} {n % -9223372036854775807} {n / 641} {n % -641}")
+
+big = 9223372036854775807
+for n in [0, 1, -1, 2, -2, 6, 7, -7, 9, -9, 10, -10, 99, -99, 123456789, -123456789]:
+    show(n)
+show(big)
+show(-big)
+show(-big - 1)
+x = 88172645463325252
+for i in range(200):
+    x = x * 6364136223846793005 + 1442695040888963407
+    show(x)

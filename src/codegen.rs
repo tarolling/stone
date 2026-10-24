@@ -370,10 +370,116 @@ pub trait AssemblyGenerator {
     fn set_sources(&mut self, sources: SourceMap);
 }
 
+/// Returns the magic multiplier and shift that divide by the constant `divisor` with a
+/// multiplication, as Hacker's Delight (section 10-4) computes them, for a divisor whose
+/// magnitude is at least 3 and not a power of two.
+///
+/// The quotient of `n`, rounded toward zero as `idiv` rounds it, is the high 64 bits of
+/// `n * multiplier`, plus `n` when the divisor is positive and the multiplier negative (or minus
+/// `n` when the divisor is negative and the multiplier positive), shifted right arithmetically by
+/// `shift`, plus 1 if that is negative. For example, `magic_signed(7)` is
+/// `(5270498306774157605, 1)`, and `magic_signed(3)` is `(6148914691236517206, 0)`.
+pub(crate) fn magic_signed(divisor: i64) -> (i64, u32) {
+    let two63: u64 = 1 << 63;
+    let magnitude = divisor.unsigned_abs();
+    let t = two63 + ((divisor as u64) >> 63);
+    let anc = t - 1 - t % magnitude;
+    let mut p = 63;
+    let (mut q1, mut r1) = (two63 / anc, two63 % anc);
+    let (mut q2, mut r2) = (two63 / magnitude, two63 % magnitude);
+    loop {
+        p += 1;
+        q1 = q1.wrapping_mul(2);
+        r1 = r1.wrapping_mul(2);
+        if r1 >= anc {
+            q1 = q1.wrapping_add(1);
+            r1 = r1.wrapping_sub(anc);
+        }
+        q2 = q2.wrapping_mul(2);
+        r2 = r2.wrapping_mul(2);
+        if r2 >= magnitude {
+            q2 = q2.wrapping_add(1);
+            r2 = r2.wrapping_sub(magnitude);
+        }
+        let delta = magnitude - r2;
+        if !(q1 < delta || (q1 == delta && r1 == 0)) {
+            break;
+        }
+    }
+    let multiplier = q2.wrapping_add(1) as i64;
+    let multiplier = if divisor < 0 {
+        multiplier.wrapping_neg()
+    } else {
+        multiplier
+    };
+    (multiplier, p - 64)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::process::Command;
+
+    /// Divides `n` by `divisor` the way the backends do with [`magic_signed`].
+    fn magic_divide(n: i64, divisor: i64) -> i64 {
+        let (multiplier, shift) = magic_signed(divisor);
+        let mut q = ((n as i128 * multiplier as i128) >> 64) as i64;
+        if divisor > 0 && multiplier < 0 {
+            q = q.wrapping_add(n);
+        } else if divisor < 0 && multiplier > 0 {
+            q = q.wrapping_sub(n);
+        }
+        q >>= shift;
+        q + ((q as u64) >> 63) as i64
+    }
+
+    #[test]
+    fn magic_numbers_divide_like_idiv() {
+        assert_eq!(magic_signed(7), (5270498306774157605, 1));
+        assert_eq!(magic_signed(3), (6148914691236517206, 0));
+        let mut divisors = vec![
+            3,
+            5,
+            6,
+            7,
+            10,
+            12,
+            25,
+            100,
+            641,
+            1000003,
+            i64::MAX,
+            i64::MIN + 1,
+        ];
+        divisors.extend(divisors.clone().iter().map(|d: &i64| -d));
+        let mut dividends = vec![
+            0,
+            1,
+            -1,
+            2,
+            -2,
+            6,
+            7,
+            -7,
+            99,
+            i64::MAX,
+            i64::MIN,
+            i64::MIN + 1,
+        ];
+        let mut x: u64 = 0x9e37_79b9_7f4a_7c15;
+        for _ in 0..2000 {
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            dividends.push(x as i64);
+            dividends.push((x >> (x % 60)) as i64);
+        }
+        for &d in &divisors {
+            for &n in &dividends {
+                assert_eq!(magic_divide(n, d), n.wrapping_div(d), "{n} / {d}");
+            }
+        }
+    }
 
     #[test]
     fn targets_parse_by_any_name_and_display_their_canonical_one() {

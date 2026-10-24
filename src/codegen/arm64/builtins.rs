@@ -703,6 +703,8 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit("\tldr\tx9, [x10, x20, lsl #3]");
     r#gen.emit("\tadd\tx20, x20, #1");
     r#gen.emit("\tcbz\tx11, .Lfree_list_wide_loop"); // this field is not counted
+    // a removed map entry's counted values were zeroed
+    r#gen.emit("\tcbz\tx9, .Lfree_list_wide_loop");
     r#gen.emit("\tldur\tx10, [x9, #-8]");
     r#gen.emit("\tsubs\tx10, x10, #1");
     r#gen.emit("\tstur\tx10, [x9, #-8]");
@@ -1335,7 +1337,7 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
 ///
 /// Indexing is generated inline by `Arm64Generator::list_slot` (in `emit.rs`) rather than called
 /// here.
-pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
+pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator, maps_shrink: bool) {
     // x19 holds the list, x20 its length, x21 what its elements are, and x22 their width
     let saved = ["x19", "x20", "x21", "x22"];
     r#gen.emit("stone.list_new:");
@@ -1418,6 +1420,13 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("stone.list_copy:");
     push_frame(r#gen, &saved);
     r#gen.emit("\tmov\tx19, x9");
+    if maps_shrink {
+        // a map's removed entries go before it is copied, since the copy has no index to tell
+        r#gen.emit("\tldr\tx16, [x19, #40]");
+        r#gen.emit("\tcbz\tx16, .Llist_copy_closed");
+        r#gen.emit("\tbl\t.Lmap_compact");
+        r#gen.emit(".Llist_copy_closed:");
+    }
     r#gen.emit("\tldr\tx0, [x19]");
     r#gen.emit("\tldr\tx1, [x19, #24]");
     r#gen.emit("\tldr\tx2, [x19, #32]");
@@ -1460,14 +1469,20 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator) {
     pop_frame(r#gen, &saved);
 }
 
-/// Emits the map runtime, the port of x64's `map_runtime` with the same layout and contracts:
+/// Emits the map runtime, the port of x64's `map_runtime` with the same layout and contracts: a
+/// map's index holds its capacity, how many entries were removed, and whether the keys are
+/// strings, then its slots, each 0 if empty, -1 if its entry was removed, or else 1 more than the
+/// first slot of an entry.
 ///
 /// - `stone.map_find` returns the first slot of the entry of key `x1` in map `x0`, or -1 if there
 ///   is none, with `x2` 1 for a string key
 /// - `stone.map_add` adds an entry for key `x1`, which the map does not have, at the end of map
 ///   `x0`, retaining a string key, and returns its first slot. The caller fills in its values.
-/// - `stone.map_unindex` frees the index of map `x0`, whose entries moved, so the next lookup
-///   builds a new one
+/// - `stone.map_take` removes the entry of key `x1` from map `x0` and returns its first slot, or
+///   -1 if there is none. The caller takes its values and zeroes the counted ones.
+/// - `stone.map_settle` closes up map `x0` if more than half of its entries were removed
+/// - `stone.map_compact` closes up map `x0` if any of its entries were removed
+/// - `stone.map_holes` returns how many entries were removed from map `x0` and not closed up
 pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     // x19 holds the map, x20 the key, and x21 whether it is a string
     let saved = ["x19", "x20", "x21", "x22", "x23"];
@@ -1516,6 +1531,8 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tcmp\tx10, x16");
     r#gen.emit("\tb.le\t.Lmap_add_room");
     r#gen.emit(".Lmap_add_rebuild:");
+    // removed entries make room first
+    r#gen.emit("\tbl\t.Lmap_squeeze");
     r#gen.emit("\tbl\t.Lmap_rebuild");
     r#gen.emit(".Lmap_add_room:");
     r#gen.emit("\tldr\tx22, [x19]");
@@ -1538,18 +1555,125 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tmov\tx0, x22");
     pop_frame(r#gen, &saved);
 
-    r#gen.emit("stone.map_unindex:");
+    r#gen.emit("stone.map_take:");
+    enter(r#gen);
+    r#gen.emit("\tldr\tx9, [x19, #40]");
+    r#gen.emit("\tcbnz\tx9, .Lmap_take_indexed");
+    r#gen.emit("\tbl\t.Lmap_rebuild");
+    r#gen.emit(".Lmap_take_indexed:");
+    r#gen.emit("\tbl\t.Lmap_probe");
+    r#gen.emit("\tldr\tx9, [x0]");
+    r#gen.emit("\tcbz\tx9, .Lmap_take_missing");
+    r#gen.emit("\tmov\tx10, #-1");
+    r#gen.emit("\tstr\tx10, [x0]");
+    r#gen.emit("\tldr\tx11, [x19, #40]");
+    r#gen.emit("\tldr\tx12, [x11, #8]");
+    r#gen.emit("\tadd\tx12, x12, #1");
+    r#gen.emit("\tstr\tx12, [x11, #8]");
+    r#gen.emit(".Lmap_take_missing:");
+    // an empty slot holds 0, which becomes -1
+    r#gen.emit("\tsub\tx0, x9, #1");
+    pop_frame(r#gen, &saved);
+
+    r#gen.emit("stone.map_holes:");
     r#gen.emit("\tldr\tx9, [x0, #40]");
-    r#gen.emit("\tcbz\tx9, .Lmap_unindex_done");
-    r#gen.emit("\tstr\txzr, [x0, #40]");
-    push_frame(r#gen, &[]);
-    r#gen.emit("\tbl\tstone.mem_free");
-    pop_frame(r#gen, &[]);
-    r#gen.emit(".Lmap_unindex_done:");
+    r#gen.emit("\tmov\tx0, #0");
+    r#gen.emit("\tcbz\tx9, .Lmap_holes_done");
+    r#gen.emit("\tldr\tx0, [x9, #8]");
+    r#gen.emit(".Lmap_holes_done:");
     r#gen.emit("\tret");
 
-    // replaces map x19's index with one for its entries and one more, keeping x20 and x21 for its
-    // caller: x22 is the first slot of each entry in turn, and x23 the capacity
+    // closes up when removed entries are more than half: 2 * removed * width > len
+    r#gen.emit("stone.map_settle:");
+    r#gen.emit("\tldr\tx9, [x0, #40]");
+    r#gen.emit("\tcbz\tx9, .Lmap_settle_done");
+    r#gen.emit("\tldr\tx9, [x9, #8]");
+    r#gen.emit("\tldr\tx10, [x0, #32]");
+    r#gen.emit("\tmul\tx9, x9, x10");
+    r#gen.emit("\tadd\tx9, x9, x9");
+    r#gen.emit("\tldr\tx10, [x0]");
+    r#gen.emit("\tcmp\tx9, x10");
+    r#gen.emit("\tb.gt\tstone.map_compact");
+    r#gen.emit(".Lmap_settle_done:");
+    r#gen.emit("\tret");
+
+    r#gen.emit("stone.map_compact:");
+    enter(r#gen);
+    r#gen.emit("\tbl\t.Lmap_compact");
+    pop_frame(r#gen, &saved);
+
+    // closes up map x19 if any of its entries were removed, keeping x20 and x21 for its caller
+    let kept = ["x20", "x21"];
+    r#gen.emit(".Lmap_compact:");
+    r#gen.emit("\tldr\tx9, [x19, #40]");
+    r#gen.emit("\tcbz\tx9, .Lmap_compact_done");
+    r#gen.emit("\tldr\tx10, [x9, #8]");
+    r#gen.emit("\tcbnz\tx10, .Lmap_compact_holes");
+    r#gen.emit(".Lmap_compact_done:");
+    r#gen.emit("\tret");
+    r#gen.emit(".Lmap_compact_holes:");
+    push_frame(r#gen, &kept);
+    r#gen.emit("\tldr\tx9, [x19, #40]");
+    r#gen.emit("\tldr\tx21, [x9, #16]");
+    r#gen.emit("\tbl\t.Lmap_squeeze");
+    r#gen.emit("\tbl\t.Lmap_rebuild");
+    pop_frame(r#gen, &kept);
+
+    // moves the entries of map x19 left over removed ones, for .Lmap_rebuild to index, keeping
+    // x20 for its caller: x22 is the first slot of each entry in turn, x23 where the next entry
+    // kept goes, and x24 the width
+    let kept = ["x20", "x22", "x23", "x24"];
+    r#gen.emit(".Lmap_squeeze:");
+    r#gen.emit("\tldr\tx9, [x19, #40]");
+    r#gen.emit("\tcbz\tx9, .Lmap_squeeze_none");
+    r#gen.emit("\tldr\tx10, [x9, #8]");
+    r#gen.emit("\tcbnz\tx10, .Lmap_squeeze_holes");
+    r#gen.emit(".Lmap_squeeze_none:");
+    r#gen.emit("\tret");
+    r#gen.emit(".Lmap_squeeze_holes:");
+    push_frame(r#gen, &kept);
+    r#gen.emit("\tmov\tx22, #0");
+    r#gen.emit("\tmov\tx23, #0");
+    r#gen.emit("\tldr\tx24, [x19, #32]");
+    r#gen.emit(".Lmap_squeeze_next:");
+    r#gen.emit("\tldr\tx9, [x19]");
+    r#gen.emit("\tcmp\tx22, x9");
+    r#gen.emit("\tb.ge\t.Lmap_squeeze_done");
+    r#gen.emit("\tldr\tx9, [x19, #16]");
+    r#gen.emit("\tldr\tx20, [x9, x22, lsl #3]");
+    if strings {
+        // a removed entry's string key was zeroed
+        r#gen.emit("\tcbz\tx21, .Lmap_squeeze_probe");
+        r#gen.emit("\tcbz\tx20, .Lmap_squeeze_skip");
+        r#gen.emit(".Lmap_squeeze_probe:");
+    }
+    // an entry is kept if its key still finds it
+    r#gen.emit("\tbl\t.Lmap_probe");
+    r#gen.emit("\tldr\tx9, [x0]");
+    r#gen.emit("\tadd\tx10, x22, #1");
+    r#gen.emit("\tcmp\tx9, x10");
+    r#gen.emit("\tb.ne\t.Lmap_squeeze_skip");
+    r#gen.emit("\tldr\tx9, [x19, #16]");
+    r#gen.emit("\tmov\tx11, #0");
+    r#gen.emit(".Lmap_squeeze_move:");
+    r#gen.emit("\tadd\tx12, x22, x11");
+    r#gen.emit("\tldr\tx13, [x9, x12, lsl #3]");
+    r#gen.emit("\tadd\tx12, x23, x11");
+    r#gen.emit("\tstr\tx13, [x9, x12, lsl #3]");
+    r#gen.emit("\tadd\tx11, x11, #1");
+    r#gen.emit("\tcmp\tx11, x24");
+    r#gen.emit("\tb.lt\t.Lmap_squeeze_move");
+    r#gen.emit("\tadd\tx23, x23, x24");
+    r#gen.emit(".Lmap_squeeze_skip:");
+    r#gen.emit("\tadd\tx22, x22, x24");
+    r#gen.emit("\tb\t.Lmap_squeeze_next");
+    r#gen.emit(".Lmap_squeeze_done:");
+    r#gen.emit("\tstr\tx23, [x19]");
+    pop_frame(r#gen, &kept);
+
+    // replaces map x19's index with one for its entries and one more, none of them removed,
+    // keeping x20 and x21 for its caller: x22 is the first slot of each entry in turn, and x23
+    // the capacity
     let kept = ["x20", "x22", "x23"];
     r#gen.emit(".Lmap_rebuild:");
     push_frame(r#gen, &kept);
@@ -1570,13 +1694,16 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tb\t.Lmap_rebuild_grow");
     r#gen.emit(".Lmap_rebuild_alloc:");
     r#gen.emit("\tlsl\tx0, x23, #3");
-    r#gen.emit("\tadd\tx0, x0, #8");
+    r#gen.emit("\tadd\tx0, x0, #24");
     r#gen.emit("\tbl\tstone.mem_alloc");
     r#gen.emit("\tstr\tx0, [x19, #40]");
     r#gen.emit("\tstr\tx23, [x0]");
+    r#gen.emit("\tstr\txzr, [x0, #8]");
+    r#gen.emit("\tstr\tx21, [x0, #16]");
+    r#gen.emit("\tadd\tx10, x0, #16");
     r#gen.emit("\tmov\tx9, x23");
     r#gen.emit(".Lmap_rebuild_zero:");
-    r#gen.emit("\tstr\txzr, [x0, x9, lsl #3]");
+    r#gen.emit("\tstr\txzr, [x10, x9, lsl #3]");
     r#gen.emit("\tsub\tx9, x9, #1");
     r#gen.emit("\tcbnz\tx9, .Lmap_rebuild_zero");
     r#gen.emit("\tmov\tx22, #0");
@@ -1597,9 +1724,9 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     pop_frame(r#gen, &kept);
 
     // returns in x0 the address of the slot of map x19's index that holds key x20's entry, or
-    // of the empty slot where it would go, probing one slot after another: x9 is the slot
-    // number, x13 the index's first slot, x14 the mask of a slot number, x15 the slot's address,
-    // and x16 what it holds
+    // of the empty slot where it would go, probing one slot after another and passing removed
+    // entries' slots: x9 is the slot number, x13 the index's first slot, x14 the mask of a slot
+    // number, x15 the slot's address, and x16 what it holds
     r#gen.emit(".Lmap_probe:");
     push_frame(r#gen, &[]);
     // the hash, FNV-1a over a string's bytes, then mixed by Fibonacci hashing
@@ -1624,13 +1751,15 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tldr\tx13, [x19, #40]");
     r#gen.emit("\tldr\tx14, [x13]");
     r#gen.emit("\tsub\tx14, x14, #1");
-    r#gen.emit("\tadd\tx13, x13, #8");
+    r#gen.emit("\tadd\tx13, x13, #24");
     r#gen.emit(".Lmap_probe_slot:");
     r#gen.emit("\tand\tx9, x9, x14");
     r#gen.emit("\tlsl\tx15, x9, #3");
     r#gen.emit("\tadd\tx15, x13, x15");
     r#gen.emit("\tldr\tx16, [x15]");
     r#gen.emit("\tcbz\tx16, .Lmap_probe_done");
+    r#gen.emit("\tcmn\tx16, #1");
+    r#gen.emit("\tb.eq\t.Lmap_probe_next"); // a removed entry's
     r#gen.emit("\tldr\tx17, [x19, #16]");
     r#gen.emit("\tsub\tx16, x16, #1");
     r#gen.emit("\tldr\tx17, [x17, x16, lsl #3]");
@@ -1645,8 +1774,8 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
         r#gen.emit("\tbl\tstone.str_eq");
         r#gen.emit("\tmov\tx9, x12");
         r#gen.emit("\tcbnz\tx0, .Lmap_probe_done");
-        r#gen.emit(".Lmap_probe_next:");
     }
+    r#gen.emit(".Lmap_probe_next:");
     r#gen.emit("\tadd\tx9, x9, #1");
     r#gen.emit("\tb\t.Lmap_probe_slot");
     r#gen.emit(".Lmap_probe_done:");

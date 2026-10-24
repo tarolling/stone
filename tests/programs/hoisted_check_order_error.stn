@@ -1,0 +1,10 @@
+// a division that fails in a loop's first turn fails before an index checked after it
+fn f(xs: list[tuple[int, int]], i: int, d: int, n: int) -> int:
+    t = 0
+    for j in range(n):
+        t += 10 / d
+        t += xs[i][0]
+    ret t
+
+print(f([(1, 2)], 0, 1, 3))
+print(f([(1, 2)], 5, 0, 3))

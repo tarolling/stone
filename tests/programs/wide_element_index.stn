@@ -1,0 +1,31 @@
+// indexes into lists whose elements are several slots, counted from either end
+struct Body:
+    x: float
+    y: float
+    z: float
+    vx: float
+    vy: float
+    vz: float
+    mass: float
+
+fn read(bs: list[Body], i: int) -> float:
+    ret bs[i].mass
+
+fn bump(bs: list[Body], i: int) -> list[Body]:
+    bs[i].vx += 1.0
+    ret bs
+
+bs = []
+for k in range(3):
+    bs.append(Body(x=0.0, y=0.0, z=0.0, vx=0.0, vy=0.0, vz=0.0, mass=float(k)))
+for i in [0, 1, 2, -1, -2, -3]:
+    print(i, read(bs, i))
+    bs = bump(bs, i)
+print(bs[0].vx, bs[1].vx, bs[2].vx)
+pairs = [(1, "a"), (2, "b")]
+print(pairs[-2][1], pairs[-1][0], pairs[1][1])
+grid = [[1], [2, 3]]
+grid[-1].append(4)
+grid[0][-1] = 9
+print(grid)
+print(read(bs, -4))

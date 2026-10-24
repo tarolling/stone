@@ -15,8 +15,10 @@
 //!   ret v1
 //! ```
 
+pub mod inline;
 pub mod liveness;
 pub mod lower;
+pub mod opt;
 
 use crate::ast::CompOp;
 use crate::checker::Type;
@@ -332,18 +334,32 @@ pub enum Inst {
         index: Operand,
         value: Operand,
     },
-    /// `dst = list[index]` for an index already known to be in range.
+    /// `dst = list[index + offset]` for a slot already known to be in range, where `offset` is
+    /// usually a field's place in an element starting at slot `index`.
     ListGet {
         dst: VReg,
         list: Operand,
         index: Operand,
+        offset: usize,
     },
-    /// `list[index] = value` for an index already known to be in range, in a list whose elements
-    /// are not counted, so nothing is released.
+    /// `list[index + offset] = value` for a slot already known to be in range, in a list whose
+    /// elements are not counted, so nothing is released.
     ListSet {
         list: Operand,
         index: Operand,
         value: Operand,
+        offset: usize,
+    },
+    /// The slot where element `index` of `list` starts, whose elements are `width` slots each,
+    /// counting a negative index from the end and failing with `stdlib::INDEX_RANGE` (the index
+    /// as written and the number of elements) unless that is an element, as
+    /// `v5 = element_slot v0, v3, 7`. A [`Inst::ListGet`] or [`Inst::ListSet`] of the slot, or of
+    /// one after it in the same element, then needs no check.
+    ElementSlot {
+        dst: VReg,
+        list: Operand,
+        index: Operand,
+        width: usize,
     },
     /// The address of the first element of a list.
     ListData { dst: VReg, list: Operand },
@@ -364,8 +380,13 @@ pub enum Inst {
     /// elements before they change: `dst` is `src` when nothing else refers to it, and otherwise a
     /// copy, in which case the holder gives up its reference to `src`. Whatever held `src` must
     /// then hold `dst`. Like [`Inst::Release`], it is not a call: copying preserves every register
-    /// a vreg can be in.
-    ListUnique { dst: VReg, src: Operand },
+    /// a vreg can be in. When `maybe_null`, as when the optimizer moved it before a loop that may
+    /// not run, a null `src` stays null.
+    ListUnique {
+        dst: VReg,
+        src: Operand,
+        maybe_null: bool,
+    },
     /// Fills slot `index` of a list that was just created with room for it.
     ListInit {
         list: Operand,
@@ -403,6 +424,10 @@ pub enum Inst {
     /// Writes the address of the function at the assembly label `label` to `dst`, which makes a
     /// function value, as in `v1 = fn_addr fn.double`.
     FunctionAddress { dst: VReg, label: String },
+    /// Stops the program with `recursion is too deep` if a call made here would nest one call
+    /// too many, as the check before every call of a stone function does. It stands for a call
+    /// the optimizer inlined, which calls nothing itself, so the limit stays the interpreter's.
+    DepthCheck,
     /// Calls a function with `args` and stores its results in `dsts`: none, one, or one for each
     /// value of a tuple a stone function returns, as in `v2, v3 = call divide(v0, v1)`. A call may
     /// change globals and lists, but never a caller's vregs.
@@ -443,6 +468,7 @@ impl Inst {
             | Inst::ListLoad { dst, .. }
             | Inst::ListGet { dst, .. }
             | Inst::ListData { dst, .. }
+            | Inst::ElementSlot { dst, .. }
             | Inst::Packed { done: dst, .. }
             | Inst::ListUnique { dst, .. }
             | Inst::IntToFloat { dst, .. }
@@ -458,7 +484,8 @@ impl Inst {
             | Inst::ListSet { .. }
             | Inst::FieldInit { .. }
             | Inst::Retain { .. }
-            | Inst::Release { .. } => None,
+            | Inst::Release { .. }
+            | Inst::DepthCheck => None,
         }
     }
 
@@ -480,7 +507,7 @@ impl Inst {
             | Inst::ListUnique { src, .. } => vec![*src],
             Inst::EnumTag { value, .. } | Inst::FieldGet { value, .. } => vec![*value],
             Inst::FieldInit { value, src, .. } => vec![*value, *src],
-            Inst::VariantStatic { .. } | Inst::FunctionAddress { .. } => vec![],
+            Inst::VariantStatic { .. } | Inst::FunctionAddress { .. } | Inst::DepthCheck => vec![],
             Inst::Binary { lhs, rhs, .. }
             | Inst::FloatBinary { lhs, rhs, .. }
             | Inst::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
@@ -494,13 +521,15 @@ impl Inst {
                 operands.extend([*out, *len]);
                 operands
             }
-            Inst::ListLoad { list, index, .. } | Inst::ListGet { list, index, .. } => {
-                vec![*list, *index]
-            }
+            Inst::ListLoad { list, index, .. }
+            | Inst::ListGet { list, index, .. }
+            | Inst::ElementSlot { list, index, .. } => vec![*list, *index],
             Inst::ListStore {
                 list, index, value, ..
             }
-            | Inst::ListSet { list, index, value } => vec![*list, *index, *value],
+            | Inst::ListSet {
+                list, index, value, ..
+            } => vec![*list, *index, *value],
             Inst::ListInit { list, value, .. } => vec![*list, *value],
             // the function a value calls is read after the arguments
             Inst::Call { args, callee, .. } => {
@@ -677,6 +706,14 @@ fn bin_name(op: BinOp) -> &'static str {
     }
 }
 
+/// Writes a slot's offset after its index, as in `list_get v0, v3 + 2`, or nothing for 0.
+fn plus(offset: usize) -> String {
+    match offset {
+        0 => String::new(),
+        n => format!(" + {n}"),
+    }
+}
+
 fn list(operands: &[Operand]) -> String {
     operands
         .iter()
@@ -730,11 +767,25 @@ impl fmt::Display for Inst {
                 }
                 write!(f, "list_store {list}, {index}, {value}")
             }
-            Inst::ListGet { dst, list, index } => write!(f, "{dst} = list_get {list}, {index}"),
-            Inst::ListSet { list, index, value } => {
-                write!(f, "list_set {list}, {index}, {value}")
-            }
+            Inst::ListGet {
+                dst,
+                list,
+                index,
+                offset,
+            } => write!(f, "{dst} = list_get {list}, {index}{}", plus(*offset)),
+            Inst::ListSet {
+                list,
+                index,
+                value,
+                offset,
+            } => write!(f, "list_set {list}, {index}{}, {value}", plus(*offset)),
             Inst::ListData { dst, list } => write!(f, "{dst} = list_data {list}"),
+            Inst::ElementSlot {
+                dst,
+                list,
+                index,
+                width,
+            } => write!(f, "{dst} = element_slot {list}, {index}, {width}"),
             Inst::Packed {
                 done,
                 float,
@@ -745,7 +796,14 @@ impl fmt::Display for Inst {
                 write!(f, "{done} = packed {out}, {len}, ")?;
                 kernel.show(*float, f)
             }
-            Inst::ListUnique { dst, src } => write!(f, "{dst} = list_unique {src}"),
+            Inst::ListUnique {
+                dst,
+                src,
+                maybe_null,
+            } => {
+                let suffix = if *maybe_null { "_or_null" } else { "" };
+                write!(f, "{dst} = list_unique{suffix} {src}")
+            }
             Inst::ListInit { list, index, value } => {
                 write!(f, "list_init {list}[{index}], {value}")
             }
@@ -758,6 +816,7 @@ impl fmt::Display for Inst {
             }
             Inst::VariantStatic { dst, tag } => write!(f, "{dst} = variant {tag}"),
             Inst::FunctionAddress { dst, label } => write!(f, "{dst} = fn_addr {label}"),
+            Inst::DepthCheck => write!(f, "depth_check"),
             Inst::Retain { src } => write!(f, "retain {src}"),
             Inst::Release { src, kind } => match kind {
                 RcKind::Str => write!(f, "release_str {src}"),

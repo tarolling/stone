@@ -1,0 +1,13 @@
+// a call the compiler inlines still counts toward the limit on nested calls: the deepest
+// call here is the leaf's, one past the limit
+fn leaf(n: int) -> int:
+    ret n + 1
+
+fn down(n: int) -> int:
+    if n == 0:
+        ret leaf(n)
+    ret down(n - 1)
+
+print(down(10))
+print(down(998))
+print(down(999))

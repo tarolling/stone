@@ -1,0 +1,116 @@
+// functions are values: passed, returned, stored, and called through
+fn double(x: int) -> int:
+    ret x * 2
+
+fn square(x: int) -> int:
+    ret x * x
+
+fn apply(f: fn(int) -> int, x: int) -> int:
+    ret f(x)
+
+fn twice(f: fn(int) -> int, x: int) -> int:
+    ret f(f(x))
+
+fn pick(big: bool) -> fn(int) -> int:
+    if big:
+        ret square
+    ret double
+
+print(apply(double, 5), apply(square, 5), twice(square, 3))
+print(pick(true)(4), pick(false)(4))
+
+// in a variable, a list, a tuple, a map, and an option
+f = double
+print(f(21))
+fs = [double, square, f]
+total = 0
+for g in fs:
+    total += g(3)
+print(total, fs[1](9))
+named = {"double": double, "square": square}
+print(named["square"](7))
+pair = (square, 10)
+op, n = pair
+print(op(n))
+maybe = some(square)
+match maybe:
+    case some(h):
+        print(h(6))
+    case none:
+        print("nothing")
+
+// in a struct and an enum
+struct Step:
+    name: str
+    run: fn(int) -> int
+
+enum Action:
+    Keep
+    Change(fn(int) -> int)
+
+steps = [Step(name="double", run=double), Step(name="square", run=square)]
+x = 3
+for step in steps:
+    g = step.run
+    x = g(x)
+    print(step.name, x)
+
+fn perform(action: Action, x: int) -> int:
+    match action:
+        case Action.Keep:
+            ret x
+        case Action.Change(g):
+            ret g(x)
+
+print(perform(Action.Keep, 5), perform(Action.Change(square), 5))
+
+// a generic function as a value takes its types from how it is used
+fn first[T](xs: list[T]) -> T:
+    ret xs[0]
+
+head = first
+print(head(["a", "b"]))
+
+fn apply_to_words(f: fn(list[str]) -> str, words: list[str]) -> str:
+    ret f(words)
+
+print(apply_to_words(first, ["x", "y"]))
+
+// functions that return several values or none
+fn divide(a: int, b: int) -> tuple[int, int]:
+    ret (a / b, a % b)
+
+fn shout(s: str):
+    print(s + "!")
+
+d = divide
+q, r = d(17, 5)
+print(q, r)
+say = shout
+say("hey")
+
+// a generic function takes a function value as any other value
+fn call_all[T](xs: list[T], f: fn(T) -> T) -> list[T]:
+    out = []
+    for x in xs:
+        out.append(f(x))
+    ret out
+
+print(call_all([1, 2, 3], square))
+
+// printing a function value writes its type
+print(double, [double, square])
+print(divide, shout, Step(name="s", run=square))
+print("f is {f}, and say is {say}")
+print(str(first), head)
+
+// a field that holds a function is called like a method
+stage = Step(name="square", run=square)
+print(stage.run(12), steps[0].run(stage.run(2)))
+
+// even on a global a function reads before the code assigning it
+fn run_later(x: int) -> int:
+    ret later.run(x)
+
+later = Step(name="double", run=double)
+print(run_later(8))

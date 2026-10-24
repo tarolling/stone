@@ -101,6 +101,31 @@ pub const OUTPUT: &str = "output";
 /// strings.
 pub const PRELUDE_SORT: &str = "prelude.sort";
 
+/// The methods of lists that take a function, each with the linked name of the prelude's function
+/// that gives it, which takes the list first: `xs.map(f)` is `prelude.map(xs, f)`.
+/// `sort_by_key` changes the list, to what its function returns.
+pub static PRELUDE_METHODS: [(&str, &str); 7] = [
+    ("map", "prelude.map"),
+    ("filter", "prelude.filter"),
+    ("any", "prelude.any"),
+    ("all", "prelude.all"),
+    ("sort_by_key", "prelude.sort_by_key"),
+    ("min_by_key", "prelude.min_by_key"),
+    ("max_by_key", "prelude.max_by_key"),
+];
+
+/// Returns the linked name of the prelude's function that gives the list method `name`, if it is
+/// one of [`PRELUDE_METHODS`].
+///
+/// For example, `prelude_method("map")` is `Some("prelude.map")`, and `prelude_method("len")` is
+/// `None`.
+pub fn prelude_method(name: &str) -> Option<&'static str> {
+    PRELUDE_METHODS
+        .iter()
+        .find(|(method, _)| *method == name)
+        .map(|(_, function)| *function)
+}
+
 /// The variants of the prelude's enums, which every file writes by name alone, as in `some(x)`
 /// and `none`, each with its enum, in the order the prelude defines them.
 pub static PRELUDE_VARIANTS: [(&str, &str); 7] = [
@@ -123,13 +148,20 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 31] = [
+pub static METHODS: [&str; 38] = [
     "len",
     "append",
     "pop",
     "insert",
     "extend",
     "sort",
+    "sort_by_key",
+    "map",
+    "filter",
+    "any",
+    "all",
+    "min_by_key",
+    "max_by_key",
     "strip",
     "split",
     "join",
@@ -165,7 +197,10 @@ pub static METHODS: [&str; 31] = [
 /// `grid[0].append(1)`. `pop`, which also returns a value, may instead be inside any expression
 /// that nothing else in its statement uses the list in, as in `print(xs.pop().unwrap())`.
 pub fn changes_receiver(name: &str) -> bool {
-    matches!(name, "append" | "pop" | "insert" | "extend" | "sort")
+    matches!(
+        name,
+        "append" | "pop" | "insert" | "extend" | "sort" | "sort_by_key"
+    )
 }
 
 /// Documentation for a builtin function or method, for editor tooling.
@@ -237,7 +272,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 31] = [
+pub static METHOD_DOCS: [BuiltinDoc; 38] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | list[T] | map[K, V]).len() -> int",
@@ -286,6 +321,51 @@ pub static METHOD_DOCS: [BuiltinDoc; 31] = [
                       floats in the order `-inf`, the negative numbers, `-0.0`, `0.0`, the \
                       positive numbers, `inf`, then `nan`. Other values compare by their `cmp`, \
                       and equal ones keep their order. It is a statement of its own.",
+    },
+    BuiltinDoc {
+        name: "sort_by_key",
+        signature: "list[T].sort_by_key(key: fn(T) -> K)",
+        description: "Puts the elements in ascending order of what `key` gives for each, which \
+                      must be a type `<` orders, such as `int` or `str`. It calls `key` once \
+                      for each element, in order, before it sorts, and elements with equal keys \
+                      keep their order. It is a statement of its own.",
+    },
+    BuiltinDoc {
+        name: "map",
+        signature: "list[T].map(f: fn(T) -> U) -> list[U]",
+        description: "Returns a new list of what `f` gives for each element, in order, so \
+                      `[1, 2].map(double)` is `[2, 4]`.",
+    },
+    BuiltinDoc {
+        name: "filter",
+        signature: "list[T].filter(keep: fn(T) -> bool) -> list[T]",
+        description: "Returns a new list of the elements `keep` gives true for, in order.",
+    },
+    BuiltinDoc {
+        name: "any",
+        signature: "list[T].any(test: fn(T) -> bool) -> bool",
+        description: "Returns whether `test` gives true for any element, calling it on each in \
+                      order until one does. It is false for an empty list.",
+    },
+    BuiltinDoc {
+        name: "all",
+        signature: "list[T].all(test: fn(T) -> bool) -> bool",
+        description: "Returns whether `test` gives true for every element, calling it on each in \
+                      order until one does not. It is true for an empty list.",
+    },
+    BuiltinDoc {
+        name: "min_by_key",
+        signature: "list[T].min_by_key(key: fn(T) -> K) -> option[T]",
+        description: "Returns the first element with the least key, the one `sort_by_key` puts \
+                      first, or `none` for an empty list. It calls `key` once for each \
+                      element, in order.",
+    },
+    BuiltinDoc {
+        name: "max_by_key",
+        signature: "list[T].max_by_key(key: fn(T) -> K) -> option[T]",
+        description: "Returns the last element with the greatest key, the one `sort_by_key` \
+                      puts last, or `none` for an empty list. It calls `key` once for each \
+                      element, in order.",
     },
     BuiltinDoc {
         name: "strip",
@@ -1152,7 +1232,24 @@ mod tests {
                 ("display".to_string(), vec!["display".to_string()]),
             ]
         );
-        assert_eq!(functions, ["sort"]);
+        assert_eq!(
+            functions,
+            [
+                "sort",
+                "map",
+                "filter",
+                "any",
+                "all",
+                "sort_by_key",
+                "min_by_key",
+                "max_by_key"
+            ]
+        );
+        // each list method that takes a function is a prelude function of the same name
+        for (method, function) in PRELUDE_METHODS {
+            assert_eq!(function, format!("prelude.{method}"));
+            assert!(functions.iter().any(|f| f == method));
+        }
         let variants: Vec<(&str, &str)> = enums
             .iter()
             .flat_map(|(name, _, shape)| shape.iter().map(move |(v, _)| (*v, *name)))

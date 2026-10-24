@@ -168,6 +168,7 @@ type:
     | 'list' '[' type ']'
     | 'map' '[' type ',' type [','] ']'
     | 'tuple' '[' type (',' type)+ [','] ']'
+    | 'fn' '(' [','.type+ [',']] ')' ['->' type]
     | NAME ('.' NAME)* ['[' ','.type+ [','] ']']
 
 # Enum definitions

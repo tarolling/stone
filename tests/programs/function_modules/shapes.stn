@@ -1,0 +1,5 @@
+pub fn square(side: int) -> int:
+    ret side * side
+
+pub fn circle_ish(radius: int) -> int:
+    ret 3 * square(radius)

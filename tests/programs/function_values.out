@@ -1,0 +1,21 @@
+10 25 81
+16 8
+42
+21 81
+49
+100
+36
+double 6
+square 36
+5 25
+a
+x
+3 2
+hey!
+[1, 4, 9]
+fn(int) -> int [fn(int) -> int, fn(int) -> int]
+fn(int, int) -> tuple[int, int] fn(str) Step(name='s', run=fn(int) -> int)
+f is fn(int) -> int, and say is fn(str)
+fn(list[int]) -> int fn(list[str]) -> str
+144 8
+16

@@ -1008,6 +1008,13 @@ impl X64Generator {
                 self.store(dst, target);
             }
 
+            Inst::FunctionAddress { dst, label } => {
+                let dst = frame.reg(*dst)?;
+                let target = self.target(dst, None);
+                self.emit(&format!("\tlea\t{target}, [rip + {label}]"));
+                self.store(dst, target);
+            }
+
             Inst::ListLen { dst, list } => {
                 let (dst, list) = (frame.reg(*dst)?, frame.value(*list)?);
                 let base = self.base(list, "rax");
@@ -1137,10 +1144,10 @@ impl X64Generator {
 
             Inst::Call { dsts, callee, args } => {
                 let extra_results = dsts.len().saturating_sub(RESULT_REGS.len());
-                if dsts.len() > 1 && !matches!(callee, Callee::User(_)) {
+                if dsts.len() > 1 && !matches!(callee, Callee::User(_) | Callee::Value(_)) {
                     return Err(format!("{callee} returns one value"));
                 }
-                if let Callee::User(_) = callee {
+                if let Callee::User(_) | Callee::Value(_) = callee {
                     // the same limit as the interpreter, rather than overflowing the stack
                     let too_deep = self.fail_here(&format!(
                         "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
@@ -1170,11 +1177,15 @@ impl X64Generator {
                         _ => self.emit(&format!("\tpush\t{value}")),
                     }
                 }
-                let moves: Vec<(Value, Value)> = ARG_REGS
+                let mut moves: Vec<(Value, Value)> = ARG_REGS
                     .iter()
                     .zip(&values)
                     .map(|(reg, value)| (Value::Reg(reg), *value))
                     .collect();
+                // a function value is called through r11, which holds no argument
+                if let Callee::Value(function) = callee {
+                    moves.push((Value::Reg("r11"), frame.value(*function)?));
+                }
                 for (to, from) in parallel_moves(&moves, Value::Reg("rax")) {
                     self.mov(to, from);
                 }
@@ -1183,6 +1194,7 @@ impl X64Generator {
                     Callee::Runtime(label) => label.to_string(),
                     Callee::Print(ty) => self.ctx.print_routine(ty, false)?,
                     Callee::Helper(label) => label.clone(),
+                    Callee::Value(_) => "r11".to_string(),
                 };
                 // the routine's own runtime errors point at this call
                 if (FALLIBLE_ROUTINES.contains(&label.as_str())

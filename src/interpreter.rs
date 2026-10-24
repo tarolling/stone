@@ -7,8 +7,8 @@ use crate::ast::{
     StmtKind, UnaryOp, target_names,
 };
 use crate::checker::{
-    Method, Methods, Step, collect_assigned, may_name_enum, place, place_spans, prints_bare,
-    range_args, struct_display,
+    Calls, FunctionValue, Method, Step, collect_assigned, may_name_enum, place, place_spans,
+    prints_bare, range_args, struct_display,
 };
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
@@ -19,6 +19,7 @@ use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::rc::Rc;
+use std::sync::Arc;
 
 type EvalResult<T> = Result<T, Box<dyn std::error::Error>>;
 
@@ -78,9 +79,10 @@ struct Function {
     body: Vec<Stmt>,
     /// The variables each statement of the body uses for the last time.
     last_uses: Rc<LastUses>,
-    /// How the method calls of the check that saw this body were resolved, since in an
-    /// interactive session a later entry's check can place the same code at other lines.
-    methods: Rc<Methods>,
+    /// How the method calls of the check that saw this body were resolved, and its function
+    /// values and calls of them, since in an interactive session a later entry's check can
+    /// place the same code at other lines.
+    resolved: Rc<Calls>,
 }
 
 /// A value a running program works with.
@@ -107,6 +109,9 @@ pub enum Value {
     /// A map, such as `{"a": 1}`, whose entries a change copies first if anything else shares
     /// them, as a list's elements are.
     Map(Rc<MapValue>),
+    /// A function named as a value, such as `double` in `xs.map(double)`, which prints as its
+    /// type.
+    Function(Arc<FunctionValue>),
 }
 
 /// A map key, which is an int, a string, or a bool, since those hash and compare exactly.
@@ -428,6 +433,7 @@ impl Value {
             Value::Str(s) if nested => out.push_str(&stdlib::repr_in_list(s)),
             Value::Str(s) => out.push_str(s),
             Value::Unit => {}
+            Value::Function(function) => out.push_str(&function.text),
             Value::List(items) => {
                 out.push('[');
                 for (i, item) in items.iter().enumerate() {
@@ -923,8 +929,9 @@ pub struct Interpreter<'out> {
     last_uses: Vec<Rc<LastUses>>,
     /// For each function, the globals it may read, which must not move into a call to it.
     global_reads: GlobalReads,
-    /// How each method call of the running body was resolved, by the call's span.
-    methods: Rc<Methods>,
+    /// How each method call of the running body was resolved, and its function values and calls
+    /// of them, by span.
+    resolved: Rc<Calls>,
     /// Whether globals can move at their last use, which is never in an interactive session,
     /// since a later entry may read them.
     moves_globals: bool,
@@ -991,7 +998,7 @@ impl<'out> Interpreter<'out> {
             structs: HashMap::new(),
             last_uses: vec![],
             global_reads: GlobalReads::default(),
-            methods: Rc::default(),
+            resolved: Rc::default(),
             moves_globals: false,
             top_call: None,
             out: Box::new(out),
@@ -1025,10 +1032,10 @@ impl<'out> Interpreter<'out> {
         self
     }
 
-    /// Calls the functions of `impl` blocks as `methods`, the checker's resolution of each method
-    /// call, says, which a program with an `impl` block needs.
-    pub fn with_methods(mut self, methods: Methods) -> Self {
-        self.methods = Rc::new(methods);
+    /// Calls the functions of `impl` blocks and function values as `calls`, the checker's
+    /// resolution of each, says, which a program with an `impl` block or a function value needs.
+    pub fn with_calls(mut self, calls: Calls) -> Self {
+        self.resolved = Rc::new(calls);
         self
     }
 
@@ -1136,10 +1143,10 @@ impl<'out> Interpreter<'out> {
     ///
     /// For example, after an entry `x = 1`, running the entry `x + 1` prints `2`, and running
     /// `"hi"` prints `'hi'`, quoted as it would be inside a list.
-    pub fn run_entry(&mut self, body: &[Stmt], methods: Methods) -> EvalResult<()> {
+    pub fn run_entry(&mut self, body: &[Stmt], calls: Calls) -> EvalResult<()> {
         // a later entry may read any global, so none moves
         self.moves_globals = false;
-        self.methods = Rc::new(methods);
+        self.resolved = Rc::new(calls);
         self.last_uses = vec![Rc::default()];
         // functions, enums, and structs can be used before their definition
         for stmt in body {
@@ -1217,7 +1224,7 @@ impl<'out> Interpreter<'out> {
             params: args.iter().map(|arg| arg.arg.clone()).collect(),
             last_uses: Rc::new(LastUses::new(body, &self.global_reads, &kept_at_exit(args))),
             body: body.to_vec(),
-            methods: self.methods.clone(),
+            resolved: self.resolved.clone(),
         };
         self.functions.insert(name, Rc::new(function));
     }
@@ -1232,8 +1239,9 @@ impl<'out> Interpreter<'out> {
             return;
         };
         let stone = match &func.kind {
+            _ if self.resolved.indirect_calls.contains(&value.span) => true,
             ExprKind::Name { id, .. } => self.functions.contains_key(id),
-            _ => self.methods.contains_key(&value.span),
+            _ => self.resolved.methods.contains_key(&value.span),
         };
         if !stone {
             return;
@@ -1846,6 +1854,10 @@ impl<'out> Interpreter<'out> {
                 args,
                 keywords,
             } => {
+                // a function value, as `f(x)`, `fs[0](x)`, or `p.run(x)` with a field `run` call
+                if self.resolved.indirect_calls.contains(&expr.span) {
+                    return self.call_value(expr.span, func, args);
+                }
                 if let ExprKind::Name { id, .. } = &func.kind
                     && let Some(def) = self.structs.get(id).cloned()
                 {
@@ -1874,7 +1886,7 @@ impl<'out> Interpreter<'out> {
                     return self.variant(id, attr, values);
                 }
                 if let ExprKind::Attribute { value, .. } = &func.kind
-                    && let Some(method) = self.methods.get(&expr.span).cloned()
+                    && let Some(method) = self.resolved.methods.get(&expr.span).cloned()
                 {
                     return self.call_method_of_struct(expr.span, &method, value, args);
                 }
@@ -1895,6 +1907,16 @@ impl<'out> Interpreter<'out> {
                         return result;
                     }
                     let items = self.place_list(root, &steps, &spans)?;
+                    // sorted by the prelude's function, which gives the list back sorted
+                    if let Some(function) = stdlib::prelude_method(attr) {
+                        let list = Value::List(Rc::new(items.clone()));
+                        let mut args = vec![list];
+                        args.extend(values);
+                        let (sorted, _) = self.invoke(function, args, false)?;
+                        let sorted = sorted.as_list()?.to_vec();
+                        *self.place_list(root, &steps, &spans)? = sorted;
+                        return Ok(Value::Unit);
+                    }
                     // values of other types sort by their `cmp`, in the prelude's sort
                     if attr == "sort"
                         && items.first().is_some_and(|v| matches!(v, Value::Struct(_)))
@@ -1917,7 +1939,7 @@ impl<'out> Interpreter<'out> {
                     return self.call_method(attr, receiver, values);
                 }
                 let ExprKind::Name { id, .. } = &func.kind else {
-                    return Err("only functions can be called, by name".into());
+                    return Err("only a function or a function value can be called".into());
                 };
                 // claimed first, since a call among the arguments runs statements of its own
                 let movable = self.top_call.take_if(|(span, _)| *span == expr.span);
@@ -1986,7 +2008,10 @@ impl<'out> Interpreter<'out> {
                 let position = list_position(index, items.len())?;
                 Ok(items[position].clone())
             }
-            ExprKind::Name { id, ctx: _ } => self.get_var(id),
+            ExprKind::Name { id, ctx: _ } => match self.resolved.function_values.get(&expr.span) {
+                Some(function) => Ok(Value::Function(function.clone())),
+                None => self.get_var(id),
+            },
             ExprKind::List { elts, ctx: _ } => {
                 let mut items = Vec::with_capacity(elts.len());
                 for elt in elts {
@@ -2258,6 +2283,25 @@ impl<'out> Interpreter<'out> {
                 self.take_field(arg, callee);
             }
         }
+    }
+
+    /// Calls the function value `func` evaluates to with `args`, for the call at `span`. The
+    /// value is evaluated first, then the arguments, which may move into the call as they do
+    /// into a call of a function by its name.
+    fn call_value(&mut self, span: Span, func: &Expr, args: &[Expr]) -> EvalResult<Value> {
+        // claimed first, since a call among the arguments runs statements of its own
+        let movable = self.top_call.take_if(|(call, _)| *call == span);
+        let Value::Function(function) = self.eval_expr(func)? else {
+            return Err("only a function can be called".into());
+        };
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args {
+            values.push(self.eval_expr(arg)?);
+        }
+        if let Some((_, names)) = movable {
+            self.move_arguments(args, &names, &function.function, None);
+        }
+        Ok(self.invoke(&function.function, values, false)?.0)
     }
 
     /// Calls a function of an `impl` block as `method` resolved the call at `span`: an associated
@@ -2621,7 +2665,7 @@ impl<'out> Interpreter<'out> {
         // bind parameters directly so they shadow globals of the same name
         self.calls += 1;
         self.last_uses.push(function.last_uses.clone());
-        let methods = std::mem::replace(&mut self.methods, function.methods.clone());
+        let resolved = std::mem::replace(&mut self.resolved, function.resolved.clone());
         self.enter_scope();
         let scope = self.scopes.last_mut().expect("scope was just entered");
         for (param, value) in function.params.iter().zip(args) {
@@ -2636,7 +2680,7 @@ impl<'out> Interpreter<'out> {
             false => None,
         };
         self.exit_scope();
-        self.methods = methods;
+        self.resolved = resolved;
         self.last_uses.pop();
         self.calls -= 1;
 
@@ -2898,7 +2942,7 @@ mod tests {
         let analysis = crate::checker::TypeChecker::new().analyze(&module);
         let mut out = Vec::new();
         let mut interpreter =
-            Interpreter::with_output(&mut out, Limits::DEFAULT).with_methods(analysis.methods);
+            Interpreter::with_output(&mut out, Limits::DEFAULT).with_calls(analysis.calls());
         interpreter.evaluate(&module).unwrap();
         let copies = interpreter.copies;
         drop(interpreter);

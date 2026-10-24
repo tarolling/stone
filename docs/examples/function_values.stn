@@ -1,0 +1,34 @@
+struct Player:
+    name: str
+    score: int
+
+fn score(p: Player) -> int:
+    ret p.score
+
+fn name(p: Player) -> str:
+    ret p.name
+
+fn passed(p: Player) -> bool:
+    ret p.score >= 50
+
+// a function can take another, and call it like any function
+fn apply_twice(f: fn(int) -> int, x: int) -> int:
+    ret f(f(x))
+
+fn bonus(points: int) -> int:
+    ret points + 10
+
+players = [Player(name="ada", score=72), Player(name="bo", score=41)]
+players.append(Player(name="cy", score=88))
+
+print(players.map(name))
+print(players.filter(passed).map(name))
+print(players.any(passed), players.all(passed))
+print(players.max_by_key(score).unwrap().name)
+
+players.sort_by_key(score)
+print(players.map(name))
+
+print(apply_twice(bonus, 5))
+steps = [bonus, bonus]
+print(steps[0](1), bonus)

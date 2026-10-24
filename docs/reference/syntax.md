@@ -25,7 +25,9 @@ grammar is
 | `2 ** -1 == 0.5`, `2 ** 0.5` | `2.0 ** -1 == 0.5`; the exponent is always an `int` |
 | `[1, 2] + [3]` joins, `[0] * 3` repeats | `+ - * / % **` on lists work element by element, as in numpy; join with `xs.extend(ys)` |
 | `xs.insert(9, x)` clamps the index | an index past either end is an error |
-| `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `xs.sort()` only, on a list of `int`, `float`, or `str`; `-0.0` sorts before `0.0`, and `nan` last |
+| `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `xs.sort()`, on a list of `int`, `float`, `str`, or an `ord` type, and `xs.sort_by_key(f)`; `-0.0` sorts before `0.0`, and `nan` last |
+| `lambda x: x * 2` | a named `fn`, passed by its name; closures are not supported yet |
+| `map(f, xs)`, `filter(f, xs)`, `any(...)`, `min(xs, key=f)` | `xs.map(f)`, `xs.filter(f)`, `xs.any(f)`, `xs.min_by_key(f)`, each a new list or value |
 | `t = 1, 2`, `return a, b` | `t = (1, 2)`, `ret (a, b)`; a tuple's values always need parentheses |
 | `()`, `(x,)` | no empty or one-value tuples; a tuple has two or more values |
 | `t[i]`, `t[1:]` | `t[1]`, `t[-1]`: a constant index only, and no slices |
@@ -194,7 +196,8 @@ A type is `int`, `float`, `bool`, `str`, `list[T]` for any type `T`, such as
 `map[str, list[int]]`, `tuple[T1, T2, ...]` with a type for each of two or more values, such as
 `tuple[str, list[int]]`, `option[T]`, or a struct's or enum's name, such as `Shape`, or
 `shapes.Shape` for one of a module, followed by its types in brackets if it is generic, such as
-`Pair[int, str]`. Inside a generic function, struct, or enum, its type parameters, such as `T`,
+`Pair[int, str]`, or a function type, `fn(T1, ...) -> R`, such as `fn(int, str) -> bool`, or
+`fn(str)` for a function that returns no value. Inside a generic function, struct, or enum, its type parameters, such as `T`,
 are types too. A function without `->` returns no value, so a call to it can only be a
 statement of its own, and its `ret` takes no value. Types are written only in signatures:
 variables, including a function's locals, never have them. See [Types](types.md).

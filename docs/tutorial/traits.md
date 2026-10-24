@@ -60,4 +60,4 @@ implements it, which is why anything can be printed, and a struct can say how it
 instead, with `impl display for Version:` and `fn display(self) -> str`. Its text then appears
 wherever a `Version` does, inside a list or another struct too, as `print(vs)` shows above.
 
-Next, {doc}`input`.
+Next, {doc}`function-values`.

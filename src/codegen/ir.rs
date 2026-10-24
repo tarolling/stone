@@ -210,6 +210,9 @@ pub enum Callee {
     /// A function lowering made for the program, such as the one that prints an enum, by its
     /// assembly label. Calling one is not counted as a call of a stone function.
     Helper(String),
+    /// The function whose address the operand holds, a function value from
+    /// [`Inst::FunctionAddress`], which borrows every argument.
+    Value(Operand),
 }
 
 /// What a [`Inst::Packed`] loop computes for each element, over list data pointers from
@@ -397,6 +400,9 @@ pub enum Inst {
     /// Drops a reference to the counted value `src`, unless it is null, freeing it when no
     /// references are left. It is not a call: freeing preserves every register a vreg can be in.
     Release { src: Operand, kind: RcKind },
+    /// Writes the address of the function at the assembly label `label` to `dst`, which makes a
+    /// function value, as in `v1 = fn_addr fn.double`.
+    FunctionAddress { dst: VReg, label: String },
     /// Calls a function with `args` and stores its results in `dsts`: none, one, or one for each
     /// value of a tuple a stone function returns, as in `v2, v3 = call divide(v0, v1)`. A call may
     /// change globals and lists, but never a caller's vregs.
@@ -443,6 +449,7 @@ impl Inst {
             | Inst::FloatToInt { dst, .. }
             | Inst::EnumTag { dst, .. }
             | Inst::FieldGet { dst, .. }
+            | Inst::FunctionAddress { dst, .. }
             | Inst::VariantStatic { dst, .. } => Some(*dst),
             Inst::Call { dsts, .. } => dsts.first().copied(),
             Inst::ListStore { old: dst, .. } => *dst,
@@ -473,7 +480,7 @@ impl Inst {
             | Inst::ListUnique { src, .. } => vec![*src],
             Inst::EnumTag { value, .. } | Inst::FieldGet { value, .. } => vec![*value],
             Inst::FieldInit { value, src, .. } => vec![*value, *src],
-            Inst::VariantStatic { .. } => vec![],
+            Inst::VariantStatic { .. } | Inst::FunctionAddress { .. } => vec![],
             Inst::Binary { lhs, rhs, .. }
             | Inst::FloatBinary { lhs, rhs, .. }
             | Inst::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
@@ -495,7 +502,14 @@ impl Inst {
             }
             | Inst::ListSet { list, index, value } => vec![*list, *index, *value],
             Inst::ListInit { list, value, .. } => vec![*list, *value],
-            Inst::Call { args, .. } => args.clone(),
+            // the function a value calls is read after the arguments
+            Inst::Call { args, callee, .. } => {
+                let mut operands = args.clone();
+                if let Callee::Value(function) = callee {
+                    operands.push(*function);
+                }
+                operands
+            }
         }
     }
 
@@ -647,6 +661,7 @@ impl fmt::Display for Callee {
             Callee::Runtime(label) => write!(f, "{label}"),
             Callee::Print(ty) => write!(f, "print[{ty}]"),
             Callee::Helper(label) => write!(f, "{label}"),
+            Callee::Value(function) => write!(f, "value {function}"),
         }
     }
 }
@@ -742,6 +757,7 @@ impl fmt::Display for Inst {
                 write!(f, "field_init {value}[{slot}], {src}")
             }
             Inst::VariantStatic { dst, tag } => write!(f, "{dst} = variant {tag}"),
+            Inst::FunctionAddress { dst, label } => write!(f, "{dst} = fn_addr {label}"),
             Inst::Retain { src } => write!(f, "retain {src}"),
             Inst::Release { src, kind } => match kind {
                 RcKind::Str => write!(f, "release_str {src}"),

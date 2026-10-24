@@ -1424,6 +1424,31 @@ mod tests {
     }
 
     #[test]
+    fn generated_programs_use_function_values() {
+        let sources = compound_sources(500);
+        // past the declarations, which end with the last function value's function
+        let end = "    ret f(f(xs))\n";
+        let uses = |feature: &str| {
+            sources
+                .iter()
+                .filter(|s| {
+                    s.split(end)
+                        .nth(1)
+                        .is_some_and(|rest| rest.contains(feature))
+                })
+                .count()
+        };
+        for feature in [
+            "through(plus_one, ",
+            "F(f=plus_one).f(",
+            "each_grown(grown, ",
+        ] {
+            let count = uses(feature);
+            assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
+        }
+    }
+
+    #[test]
     fn compound_programs_type_check() {
         for source in compound_sources(1_000) {
             let diagnostics = stone::driver::check(&source);

@@ -1,0 +1,51 @@
+# Functions as values
+
+```{literalinclude} ../examples/function_values.stn
+:language: stone
+```
+
+prints
+
+```{literalinclude} ../examples/function_values.out
+:language: text
+```
+
+## Passing functions
+
+A function's name without parentheses is a value, which can be passed to another function,
+returned, or kept in a variable, a list, a struct, or anything else that holds values. Its type
+is written `fn`, the types of its parameters in parentheses, and `->` and the type it returns,
+so `bonus` above is a `fn(int) -> int`. A function that returns no value has a type without
+`->`, such as `fn(str)`, and calling it is a statement of its own, as for any such function.
+
+Any value of a function type can be called: a parameter, as `f(f(x))` calls `apply_twice`'s, an
+element, as in `steps[0](1)`, or a field, as `p.run(x)` calls the function a struct's field
+`run` holds. Calls through a value are checked like any other: the checker knows the value's
+type, so a wrong argument is an error at the argument.
+
+A generic function can be passed too, and gets its types from where it goes, as a call does:
+`first` passed where a `fn(list[str]) -> str` is wanted takes `str` for `T`. Builtins such as
+`print` and `str`, methods, and variants are not values yet; define a function that calls one
+and pass that instead. Functions cannot be compared with `==`, and printing one writes its type,
+as `bonus` prints `fn(int) -> int`.
+
+## Lists' helpers
+
+Lists have methods that take a function and call it on each element, in order:
+
+- `xs.map(f)` is a new list of what `f` gives for each element, and `xs.filter(keep)` a new
+  list of the elements `keep` gives true for.
+- `xs.any(test)` is whether `test` gives true for some element, and `xs.all(test)` whether it
+  does for every one. Each stops at the first element that decides the answer.
+- `xs.sort_by_key(key)` sorts the list in place by what `key` gives for each element, which must
+  be a type `<` orders. It calls `key` once per element before sorting, and elements with equal
+  keys keep their order.
+- `xs.min_by_key(key)` and `xs.max_by_key(key)` give the element with the least or greatest key
+  as an option, `none` for an empty list. Of several with an equal key, `min_by_key` gives the
+  first and `max_by_key` the last, the two ends of what `sort_by_key` would give.
+
+When `stone build` compiles a call that passes a function by name, as `players.map(name)` does,
+it makes a copy of `map` that calls `name` directly, so the helpers cost no more than the loop
+they stand for.
+
+Next, {doc}`input`.

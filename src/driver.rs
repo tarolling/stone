@@ -3,7 +3,7 @@
 //! For example, `interpret("print(1)\n")` lexes, parses, checks, and evaluates the source, printing `1`.
 
 use crate::ast::Mod;
-use crate::checker::{Analysis, Methods, TypeChecker};
+use crate::checker::{Analysis, Calls, TypeChecker};
 use crate::codegen::Target;
 use crate::debug;
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
@@ -59,9 +59,9 @@ pub struct Checked {
     pub module: Mod,
     /// The checker's warnings, which `run` and `build` print before going on.
     pub warnings: Vec<Diagnostic>,
-    /// How every call of a function of an `impl` block was resolved, which the interpreter
-    /// needs.
-    pub methods: Methods,
+    /// How every call of a function of an `impl` block was resolved, and every function value
+    /// and call of one, which the interpreter needs.
+    pub calls: Calls,
 }
 
 /// Loads, links, and checks the program whose entry file is at `entry` and holds `source`,
@@ -90,8 +90,8 @@ pub fn load(
     }
     let checked = Checked {
         module,
+        calls: analysis.calls(),
         warnings: analysis.diagnostics,
-        methods: analysis.methods,
     };
     (sources, Ok(checked))
 }
@@ -191,7 +191,7 @@ pub fn interpret_with_io(
     limits: Limits,
 ) -> Result<(), Box<dyn Error>> {
     let checked = checked(source)?;
-    run_module(&checked.module, &checked.methods, input, out, args, limits)
+    run_module(&checked.module, &checked.calls, input, out, args, limits)
 }
 
 /// Runs a checked module, such as one from [`load`], with the tree-walking interpreter. It reads
@@ -204,7 +204,7 @@ pub fn interpret_with_io(
 /// callers report by exiting with that status, while `os.exit(0)` ends it successfully.
 pub fn run_module(
     ast: &Mod,
-    methods: &Methods,
+    calls: &Calls,
     input: &mut (impl BufRead + Send),
     out: &mut (impl Write + Send),
     args: &[String],
@@ -218,7 +218,7 @@ pub fn run_module(
                 let result = Interpreter::with_output(out, limits)
                     .with_input(input)
                     .with_args(args.to_vec())
-                    .with_methods(methods.clone())
+                    .with_calls(calls.clone())
                     .evaluate(ast);
                 Ending::of(result)
             })

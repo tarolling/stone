@@ -20,6 +20,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Display;
+use std::sync::Arc;
 
 use crate::ast::{
     Arguments, CompOp, Constant, Expr, ExprKind, Field, Keyword, MatchCase, Mod, Operator, Pattern,
@@ -29,7 +30,7 @@ use crate::ast::{
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::{
-    MAX_ELEMENT_VALUES, METHODS, OUTPUT, changes_receiver, is_builtin, is_reserved,
+    MAX_ELEMENT_VALUES, METHODS, OUTPUT, changes_receiver, is_builtin, is_reserved, prelude_method,
 };
 
 #[cfg(test)]
@@ -408,6 +409,48 @@ pub fn type_key(ty: &Type) -> Option<&'static str> {
 /// Every call of a function of an `impl` block, keyed by the call's span.
 pub type Methods = HashMap<Span, Method>;
 
+/// A function named as a value: its linked name, and its type as `print` writes it
+/// ([`type_text`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct FunctionValue {
+    pub function: String,
+    pub text: String,
+}
+
+/// What running a checked program needs from its check besides the program: how each call of a
+/// function of an `impl` block was resolved, every function named as a value, and every call
+/// of a value, each by its span.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Calls {
+    pub methods: Methods,
+    pub function_values: HashMap<Span, Arc<FunctionValue>>,
+    pub indirect_calls: HashSet<Span>,
+}
+
+/// Returns `ty` as source writes it, each struct and enum by its own name without its module,
+/// which is how `print` writes a function value: by its type.
+///
+/// For example, `fn(geometry.Point) -> option[int]` is written `fn(Point) -> option[int]`.
+pub fn type_text(ty: &Type) -> String {
+    let all = |types: &[Type]| types.iter().map(type_text).collect::<Vec<_>>().join(", ");
+    match ty {
+        Type::List(elem) => format!("list[{}]", type_text(elem)),
+        Type::Map(key, value) => format!("map[{}, {}]", type_text(key), type_text(value)),
+        Type::Tuple(fields) => format!("tuple[{}]", all(fields)),
+        Type::Enum { name, args } | Type::Struct { name, args } if args.is_empty() => {
+            struct_display(name).to_string()
+        }
+        Type::Enum { name, args } | Type::Struct { name, args } => {
+            format!("{}[{}]", struct_display(name), all(args))
+        }
+        Type::Function { params, ret } => match **ret {
+            Type::Unit => format!("fn({})", all(params)),
+            _ => format!("fn({}) -> {}", all(params), type_text(ret)),
+        },
+        other => other.to_string(),
+    }
+}
+
 /// The type arguments a call of a generic function fills its type parameters with, which
 /// [`Analysis::instances`] holds by the call's span.
 ///
@@ -500,9 +543,34 @@ pub struct Analysis {
     /// The traits each type implements, by the type's linked name (`int` for a builtin type),
     /// sorted.
     pub implemented: HashMap<String, Vec<String>>,
+    /// Every function named as a value rather than called, such as `double` in
+    /// `xs.map(double)`, by the name's span, with the function's linked name. A generic one's
+    /// type arguments are in [`Analysis::instances`] at the same span.
+    pub function_values: HashMap<Span, String>,
+    /// The span of every call of a function value rather than of a function by its name, such as
+    /// `f(x)` with `f` a parameter of type `fn(int) -> int`.
+    pub indirect_calls: HashSet<Span>,
 }
 
 impl Analysis {
+    /// Returns what running the program needs from this analysis, as [`Calls`].
+    pub fn calls(&self) -> Calls {
+        let function_values = self
+            .function_values
+            .iter()
+            .map(|(&span, function)| {
+                let text = self.types.get(&span).map(type_text).unwrap_or_default();
+                let function = function.clone();
+                (span, Arc::new(FunctionValue { function, text }))
+            })
+            .collect();
+        Calls {
+            methods: self.methods.clone(),
+            function_values,
+            indirect_calls: self.indirect_calls.clone(),
+        }
+    }
+
     /// Returns the reference at `pos` in `file`, if the position is on a symbol's name.
     ///
     /// For example, in `x = add(1, 2)`, any position from the `a` of `add` to just past its `d`
@@ -594,6 +662,9 @@ enum Ty {
     /// [`Inference::type_params`]. Inside the function it is an opaque type that unifies only with
     /// itself, and each call replaces it with a fresh variable.
     Param(usize),
+    /// A function's type: the types of its parameters, and the type it returns, which is
+    /// [`Ty::Unit`] for one that returns no value.
+    Fn(Vec<Ty>, Box<Ty>),
 }
 
 /// Returns the builtin type a trait's `impl` block names by `key`, such as `int`, if it is one.
@@ -754,6 +825,7 @@ enum Kind {
     Struct,
     /// A type parameter, which no constraint admits, since it may be any type.
     Param,
+    Function,
 }
 
 impl Kind {
@@ -770,6 +842,7 @@ impl Kind {
             Ty::Enum(..) => Some(Kind::Enum),
             Ty::Struct(..) => Some(Kind::Struct),
             Ty::Param(_) => Some(Kind::Param),
+            Ty::Fn(..) => Some(Kind::Function),
             Ty::Var(_) => None,
         }
     }
@@ -934,6 +1007,11 @@ struct Inference {
     /// Every call of a generic function, which `finish` checks and gives lowering as
     /// [`Analysis::instances`].
     instances: Vec<PendingInstance>,
+    /// Every function named as a value, with its span, its name as written, its linked name,
+    /// and its type, which `finish` checks holds no type parameter.
+    function_values: Vec<(Span, String, String, Ty)>,
+    /// The span of every call of a function value, for [`Analysis::indirect_calls`].
+    indirect_calls: HashSet<Span>,
     diagnostics: Vec<Diagnostic>,
     constraints: Vec<Constraint>,
     /// The type each `==` and `!=` compares (or `in` or `contains` compares a list's elements
@@ -1213,6 +1291,10 @@ impl Inference {
             Ty::Struct(name, args) => {
                 Ty::Struct(name, args.iter().map(|a| self.resolve(a)).collect())
             }
+            Ty::Fn(params, ret) => Ty::Fn(
+                params.iter().map(|p| self.resolve(p)).collect(),
+                Box::new(self.resolve(&ret)),
+            ),
             other => other,
         }
     }
@@ -1224,6 +1306,9 @@ impl Inference {
             Ty::Map(key, value) => self.occurs(var, &key) || self.occurs(var, &value),
             Ty::Tuple(fields) | Ty::Enum(_, fields) | Ty::Struct(_, fields) => {
                 fields.iter().any(|f| self.occurs(var, f))
+            }
+            Ty::Fn(params, ret) => {
+                params.iter().any(|p| self.occurs(var, p)) || self.occurs(var, &ret)
             }
             _ => false,
         }
@@ -1268,6 +1353,14 @@ impl Inference {
                         .iter()
                         .zip(&ys)
                         .fold(true, |same, (x, y)| self.unify(x, y) && same)
+            }
+            (Ty::Fn(xs, x), Ty::Fn(ys, y)) => {
+                let params = xs.len() == ys.len()
+                    && xs
+                        .iter()
+                        .zip(&ys)
+                        .fold(true, |same, (x, y)| self.unify(x, y) && same);
+                self.unify(&x, &y) && params
             }
             (x, y) => x == y,
         }
@@ -1365,6 +1458,13 @@ impl Inference {
                 format!("{name}[{}]", args.join(", "))
             }
             Ty::Param(p) => self.type_params[p].name.clone(),
+            Ty::Fn(params, ret) => {
+                let params: Vec<String> = params.iter().map(|p| self.show(p)).collect();
+                match *ret {
+                    Ty::Unit => format!("fn({})", params.join(", ")),
+                    ret => format!("fn({}) -> {}", params.join(", "), self.show(&ret)),
+                }
+            }
             Ty::Var(x) => match self.bounds.get(&x) {
                 Some(bound) => self.show(&bound.default()),
                 None => "unknown".to_string(),
@@ -1449,6 +1549,7 @@ impl Inference {
                     | Ty::Enum(..)
                     | Ty::Struct(..)
                     | Ty::Param(_)
+                    | Ty::Fn(..)
             )
         };
         match (&left, &right) {
@@ -1534,11 +1635,13 @@ impl Inference {
                     Operator::Modulo => (NUMBERS, "'%' needs int or float operands, found {}"),
                     Operator::Power => unreachable!("handled by solve_power"),
                 };
-                // a tuple, enum, or struct is never an operand, whatever the other one is
-                if let Some(tuple) = [&left, &right]
-                    .into_iter()
-                    .find(|ty| matches!(ty, Ty::Tuple(_) | Ty::Enum(..) | Ty::Struct(..)))
-                {
+                // a tuple, enum, struct, or function is never an operand, whatever the other one is
+                if let Some(tuple) = [&left, &right].into_iter().find(|ty| {
+                    matches!(
+                        ty,
+                        Ty::Tuple(_) | Ty::Enum(..) | Ty::Struct(..) | Ty::Fn(..)
+                    )
+                }) {
                     self.require(tuple.clone(), allowed, op.span, message);
                     self.unify(&op.result, &left);
                     return true;
@@ -1895,6 +1998,9 @@ impl Inference {
             Ty::Tuple(fields) => Ty::Tuple(each(fields)),
             Ty::Enum(name, fields) => Ty::Enum(name.clone(), each(fields)),
             Ty::Struct(name, fields) => Ty::Struct(name.clone(), each(fields)),
+            Ty::Fn(takes, ret) => {
+                Ty::Fn(each(takes), Box::new(Self::substitute(ret, params, args)))
+            }
             other => other.clone(),
         }
     }
@@ -2804,6 +2910,10 @@ impl Inference {
                             stack.push(*value);
                         }
                         Ty::Tuple(fields) => stack.extend(fields),
+                        Ty::Fn(params, ret) => {
+                            stack.extend(params);
+                            stack.push(*ret);
+                        }
                         _ => {}
                     }
                 }
@@ -3180,6 +3290,12 @@ impl Inference {
             TypeExprKind::Named { args, .. } => {
                 args.iter().for_each(|a| self.check_written_width(a))
             }
+            TypeExprKind::Function { params, ret } => {
+                params.iter().for_each(|p| self.check_written_width(p));
+                if let Some(ret) = ret {
+                    self.check_written_width(ret);
+                }
+            }
             _ => {}
         }
     }
@@ -3248,6 +3364,17 @@ impl Inference {
                     .map(|f| self.written_type(f, errors))
                     .collect(),
             ),
+            TypeExprKind::Function { params, ret } => {
+                let params = params
+                    .iter()
+                    .map(|p| self.written_type(p, errors))
+                    .collect();
+                let ret = match ret {
+                    Some(ret) => self.written_type(ret, errors),
+                    None => Ty::Unit,
+                };
+                Ty::Fn(params, Box::new(ret))
+            }
             TypeExprKind::Named { name, args } => {
                 let args: Vec<Ty> = args.iter().map(|a| self.written_type(a, errors)).collect();
                 if let Some(&param) = self.scope_params.get(name) {
@@ -4446,6 +4573,11 @@ impl Inference {
             .and_then(|methods| methods.get(name))
             .map(|method| (method.symbol, method.has_self, method.changes));
         let (symbol, changes) = match method {
+            None if self.function_field(owner, type_args, name).is_some() => {
+                let spans: Vec<Span> = args.iter().map(|arg| arg.span).collect();
+                let typed: Vec<(Ty, Span)> = arg_types.into_iter().zip(spans).collect();
+                return self.field_call(call.span, (owner, type_args), name, name_span, &typed);
+            }
             None => {
                 let mut message = match builtin_key_type(owner) {
                     Some(_) => format!("{owner} has no method '{name}'"),
@@ -4490,6 +4622,91 @@ impl Inference {
             self.check_change_of(receiver, true);
         }
         ret
+    }
+
+    /// Checks `receiver.m(args)`, a method of lists that the prelude's function `function`
+    /// gives, as a call of that function with the list first, so `xs.map(f)` is checked as
+    /// `prelude.map(xs, f)` would be, and calls the copy for its types. Only `sort_by_key`
+    /// changes its list, to what its function returns, so it gives no value.
+    fn infer_prelude_method(
+        &mut self,
+        call: &Expr,
+        receiver: &Expr,
+        receiver_ty: &Ty,
+        function: &str,
+        args: &[Expr],
+        arg_types: &[Ty],
+    ) -> Ty {
+        let name = function.rsplit('.').next().unwrap_or(function);
+        let count = self.functions[function].type_params.len();
+        let type_args = (0..count).map(|_| self.fresh()).collect();
+        let (params, ret) = self.instantiate(call.span, function, type_args);
+        if !self.unify(&params[0], receiver_ty) {
+            let message = format!(
+                "'{name}' is a method of lists, but this is {}",
+                self.show(receiver_ty)
+            );
+            self.error(receiver.span, message);
+        }
+        self.check_method_args(call, name, &params[1..], arg_types, args);
+        if changes_receiver(name) {
+            return Ty::Unit;
+        }
+        self.methods.insert(
+            call.span,
+            Method {
+                function: function.to_string(),
+                receiver: true,
+                changes: false,
+                implementations: None,
+            },
+        );
+        ret
+    }
+
+    /// Returns the type of the field `field` of the struct type `owner[args]` if it holds a
+    /// function, which `p.field(x)` then calls.
+    fn function_field(&self, owner: &str, args: &[Ty], field: &str) -> Option<Ty> {
+        let ty = self.field_type(owner, args, field)?;
+        matches!(self.shallow(&ty), Ty::Fn(..)).then_some(ty)
+    }
+
+    /// Checks the call at `call` of the function the field `field` of a value of the struct
+    /// type `owner[type_args]` holds, written at `name_span`, with arguments of the types and
+    /// at the spans of `args`, and returns what it returns.
+    ///
+    /// For example, with `run: fn(int) -> int`, `s.run(2)` is an `int`.
+    fn field_call(
+        &mut self,
+        call: Span,
+        (owner, type_args): (&str, &[Ty]),
+        field: &str,
+        name_span: Span,
+        args: &[(Ty, Span)],
+    ) -> Ty {
+        if let Some(symbol) = self
+            .structs
+            .get(owner)
+            .and_then(|info| info.fields.iter().find(|f| f.name == field))
+            .map(|f| f.symbol)
+        {
+            self.add_reference(name_span, symbol);
+        }
+        let Some(Ty::Fn(params, ret)) = self
+            .function_field(owner, type_args, field)
+            .map(|ty| self.shallow(&ty))
+        else {
+            return self.fresh();
+        };
+        self.indirect_calls.insert(call);
+        if params.len() != args.len() {
+            self.arity_error(call, field, &params.len().to_string(), args.len());
+        } else {
+            for (param, (arg_ty, span)) in params.iter().zip(args) {
+                self.expect(param, arg_ty, *span);
+            }
+        }
+        *ret
     }
 
     /// Checks the arguments of a call of the method `name`, whose parameters after `self` are
@@ -4681,6 +4898,28 @@ impl Inference {
             .get(&owner)
             .and_then(|methods| methods.get(name))
             .map(|method| (method.symbol, method.has_self, method.changes));
+        if method.is_none() && self.function_field(&owner, &type_args, name).is_some() {
+            let owner = (owner.as_str(), type_args.as_slice());
+            let ret = self.field_call(
+                deferred.call,
+                owner,
+                name,
+                deferred.name_span,
+                &deferred.args,
+            );
+            if self.shallow(&ret) == Ty::Unit && !deferred.statement {
+                self.error(
+                    deferred.call,
+                    format!(
+                        "'{name}' returns no value, so it can only be called as a statement of \
+                         its own"
+                    ),
+                );
+                return;
+            }
+            self.expect(&ret, &deferred.result, deferred.call);
+            return;
+        }
         let Some((symbol, true, changes)) = method else {
             let message = format!("'{}' has no method '{name}'", struct_display(&owner));
             self.error(deferred.name_span, message);
@@ -4829,19 +5068,14 @@ impl Inference {
                     self.add_reference(expr.span, symbol);
                     self.symbol_types[symbol].clone()
                 }
-                Resolved::Function(name) => {
-                    let symbol = self.functions[&name].symbol;
-                    self.add_reference(expr.span, symbol);
-                    self.error(
-                        expr.span,
-                        format!("'{id}' is a function, so it can only be called"),
-                    );
-                    self.fresh()
-                }
+                Resolved::Function(name) => self.function_value(expr.span, id, &name),
                 Resolved::Builtin => {
                     self.error(
                         expr.span,
-                        format!("'{id}' is a function, so it can only be called"),
+                        format!(
+                            "'{id}' is a builtin, which cannot be a value yet; to pass it, define \
+                             a function that calls it"
+                        ),
                     );
                     self.fresh()
                 }
@@ -5243,11 +5477,10 @@ impl Inference {
             return self.infer_method(call, func, value, attr, args);
         }
         let ExprKind::Name { id, .. } = &func.kind else {
-            self.error(func.span, "only functions can be called, by name");
-            for arg in args {
-                self.infer(arg);
-            }
-            return self.fresh();
+            // any other value of a function type, as in `fs[0](x)`
+            let func_ty = self.infer(func);
+            let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+            return self.infer_value_call(call, func, None, &func_ty, args, &arg_types);
         };
         let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
 
@@ -5278,10 +5511,9 @@ impl Inference {
             }
             // made by `infer_struct`, above
             Resolved::Struct(_) => self.fresh(),
-            Resolved::Variable(symbol) => {
-                self.add_reference(func.span, symbol);
-                self.error(func.span, format!("'{id}' is not a function"));
-                self.fresh()
+            Resolved::Variable(_) => {
+                let func_ty = self.infer(func);
+                self.infer_value_call(call, func, Some(id), &func_ty, args, &arg_types)
             }
             Resolved::Undefined if METHODS.contains(&id.as_str()) => {
                 let args = if id == "len" { "" } else { "..." };
@@ -5296,6 +5528,84 @@ impl Inference {
                 self.fresh()
             }
         }
+    }
+
+    /// Gives the type of the function `name` named as a value at `span`, where it is written
+    /// `id`: a generic function's type parameters are filled in with fresh types, as a call's
+    /// are, and the copy is recorded at `span`.
+    ///
+    /// For example, `double` of `fn double(x: int) -> int:` is a `fn(int) -> int`.
+    fn function_value(&mut self, span: Span, id: &str, name: &str) -> Ty {
+        let (symbol, count) = {
+            let info = &self.functions[name];
+            (info.symbol, info.type_params.len())
+        };
+        let type_args = (0..count).map(|_| self.fresh()).collect();
+        let (params, ret) = self.instantiate(span, name, type_args);
+        self.add_reference(span, symbol);
+        let ty = Ty::Fn(params, Box::new(ret));
+        self.function_values
+            .push((span, id.to_string(), name.to_string(), ty.clone()));
+        ty
+    }
+
+    /// Checks the call `call` of `func`, a value of type `func_ty` rather than a function by
+    /// its name, which is `name` if `func` is a variable, with `args` of types `arg_types`.
+    ///
+    /// For example, with `f` a `fn(int) -> bool`, `f(1)` is a `bool`, and `f("a")` is an error.
+    fn infer_value_call(
+        &mut self,
+        call: &Expr,
+        func: &Expr,
+        name: Option<&str>,
+        func_ty: &Ty,
+        args: &[Expr],
+        arg_types: &[Ty],
+    ) -> Ty {
+        let (params, ret) = match self.shallow(func_ty) {
+            Ty::Fn(params, ret) => (params, *ret),
+            Ty::Var(_) => {
+                let params: Vec<Ty> = args.iter().map(|_| self.fresh()).collect();
+                let ret = self.fresh();
+                self.unify(func_ty, &Ty::Fn(params.clone(), Box::new(ret.clone())));
+                (params, ret)
+            }
+            other => {
+                let what = match name {
+                    Some(name) => format!("'{name}' is"),
+                    None => "this is".to_string(),
+                };
+                let message = format!(
+                    "{what} {}, not a function, so it cannot be called",
+                    self.show(&other)
+                );
+                self.error(func.span, message);
+                return self.fresh();
+            }
+        };
+        self.indirect_calls.insert(call.span);
+        if params.len() != args.len() {
+            match name {
+                Some(name) => {
+                    self.arity_error(call.span, name, &params.len().to_string(), args.len())
+                }
+                None => {
+                    let plural = if params.len() == 1 { "" } else { "s" };
+                    let verb = if args.len() == 1 { "was" } else { "were" };
+                    let message = format!(
+                        "this function takes {} argument{plural}, but {} {verb} given",
+                        params.len(),
+                        args.len()
+                    );
+                    self.error(call.span, message);
+                }
+            }
+            return ret;
+        }
+        for ((param, arg_ty), arg) in params.iter().zip(arg_types).zip(args) {
+            self.expect(param, arg_ty, arg.span);
+        }
+        ret
     }
 
     /// Checks a `match` statement: each case's pattern against the subject's type, binding its
@@ -5549,6 +5859,16 @@ impl Inference {
                 );
             }
             self.check_change(receiver);
+        }
+        if let Some(function) = prelude_method(name) {
+            return self.infer_prelude_method(
+                call,
+                receiver,
+                &receiver_ty,
+                function,
+                args,
+                &arg_types,
+            );
         }
         match name {
             "len" => {
@@ -6078,7 +6398,7 @@ impl Inference {
             Ty::Var(_) => {
                 self.unify(&ty, &Ty::Int);
             }
-            Ty::List(_) | Ty::Map(..) | Ty::Unit => {
+            Ty::List(_) | Ty::Map(..) | Ty::Unit | Ty::Fn(..) => {
                 let message = format!("{what} cannot compare {}", self.show(&ty));
                 self.error(span, message);
             }
@@ -6117,7 +6437,7 @@ impl Inference {
             // a struct that implements `eq` compares however it says
             Ty::Struct(name, _) if self.impls.contains_key(&(EQ.to_string(), name.clone())) => None,
             // a type parameter may be a list or a map
-            ty @ (Ty::List(_) | Ty::Map(..) | Ty::Param(_)) => {
+            ty @ (Ty::List(_) | Ty::Map(..) | Ty::Param(_) | Ty::Fn(..)) => {
                 Some(Uncomparable { ty, field: None })
             }
             Ty::Tuple(fields) => fields
@@ -6165,8 +6485,12 @@ impl Inference {
                 self.params_in(&key, found);
                 self.params_in(&value, found);
             }
-            Ty::Tuple(fields) | Ty::Enum(_, fields) => {
+            Ty::Tuple(fields) | Ty::Enum(_, fields) | Ty::Struct(_, fields) => {
                 fields.iter().for_each(|f| self.params_in(f, found))
+            }
+            Ty::Fn(params, ret) => {
+                params.iter().for_each(|p| self.params_in(p, found));
+                self.params_in(&ret, found);
             }
             _ => {}
         }
@@ -6527,6 +6851,32 @@ impl Inference {
         }
     }
 
+    /// Reports a function named as a value whose type depends on a type parameter, as `id` does
+    /// in `f = id` inside `fn wrap[T](x: T)`. The interpreter makes no copy of a generic
+    /// function, so it could not tell which type such a value has, which printing it writes.
+    fn check_function_values(&mut self) {
+        let mut errors = vec![];
+        for (span, id, _, ty) in &self.function_values {
+            let mut found = vec![];
+            self.params_in(ty, &mut found);
+            if let Some(&p) = found.first() {
+                errors.push((
+                    *span,
+                    format!(
+                        "'{id}' would be a value of type {}, which depends on the type parameter \
+                         '{}'; a function value cannot have such a type yet, so take it as a \
+                         parameter instead",
+                        self.show(ty),
+                        self.type_params[p].name
+                    ),
+                ));
+            }
+        }
+        for (span, message) in errors {
+            self.error(span, message);
+        }
+    }
+
     fn finish(mut self) -> Analysis {
         for deferred in std::mem::take(&mut self.deferred_indexes) {
             self.settle_index(deferred);
@@ -6576,7 +6926,12 @@ impl Inference {
                     Kind::List => Ty::List(Box::new(self.fresh())),
                     // no constraint allows a map, tuple, enum, or struct first, and nothing tells
                     // which
-                    Kind::Map | Kind::Tuple | Kind::Enum | Kind::Struct | Kind::Param => continue,
+                    Kind::Map
+                    | Kind::Tuple
+                    | Kind::Enum
+                    | Kind::Struct
+                    | Kind::Param
+                    | Kind::Function => continue,
                 };
                 self.unify(&ty, &default);
                 continue;
@@ -6593,6 +6948,7 @@ impl Inference {
         self.check_instances();
         self.check_variant_widths();
         self.check_captured_params();
+        self.check_function_values();
         for pending in std::mem::take(&mut self.matches) {
             self.check_cases(pending);
         }
@@ -6699,6 +7055,10 @@ impl Inference {
                 .structs
                 .insert(name.clone(), StructDef { params, fields });
         }
+        for (span, _, name, _) in std::mem::take(&mut self.function_values) {
+            analysis.function_values.insert(span, name);
+        }
+        analysis.indirect_calls = std::mem::take(&mut self.indirect_calls);
         for instance in std::mem::take(&mut self.instances) {
             let args = instance.args.iter().map(|a| self.finalize(a)).collect();
             analysis.instances.insert(
@@ -6774,6 +7134,10 @@ impl Inference {
                 args: args.iter().map(|a| self.finalize(a)).collect(),
             },
             Ty::Param(p) => Type::Param(self.type_params[p].name.clone()),
+            Ty::Fn(params, ret) => Type::Function {
+                params: params.iter().map(|p| self.finalize(p)).collect(),
+                ret: Box::new(self.finalize(&ret)),
+            },
         }
     }
 

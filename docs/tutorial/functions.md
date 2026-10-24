@@ -40,4 +40,7 @@ A function can read a global that is assigned later in the file, as long as the 
 run by the time the function is called. If it has not, the program stops with
 `'name' is used before it is assigned`.
 
+Functions are values too, which can be passed to other functions and stored; see
+{doc}`function-values`.
+
 Next, {doc}`lists`.

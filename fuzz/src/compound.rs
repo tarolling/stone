@@ -23,7 +23,9 @@
 //! - Traits only appear in the fixed [`GENERIC_TYPES`]: `G` implements `K` and `ord`, so a `G`'s
 //!   length is also read as `g.key()`, `g.twice()`, or `keyed(g)`, and two `G`s are ordered with
 //!   `<`, picked from the path rather than drawn, so programs without them are unchanged. Results,
-//!   options, and `?` appear there too, in `measured` and `looked_up`, read the same way.
+//!   options, and `?` appear there too, in `measured` and `looked_up`, read the same way, and so
+//!   do function values: `plus_one` passed to `through` or held in an `F`, and `grown`, which owns
+//!   its parameter, passed to `each_grown`.
 
 use crate::{Generator, MAX_BLOCK_LEN, MAX_NESTING, Scope};
 use arbitrary::{Result, Unstructured};
@@ -111,6 +113,22 @@ fn measured[T](g: G[T], n: int) -> result[int, str]:
 fn looked_up[T](g: G[T], n: int) -> option[int]:
     m = {0: g.key()}
     ret some(m.get(n)? + 1)
+
+fn plus_one(x: int) -> int:
+    ret x + 1
+
+fn grown(xs: list[int]) -> list[int]:
+    xs.append(xs.len())
+    ret xs
+
+struct F:
+    f: fn(int) -> int
+
+fn through(f: fn(int) -> int, x: int) -> int:
+    ret f(x)
+
+fn each_grown(f: fn(list[int]) -> list[int], xs: list[int]) -> list[int]:
+    ret f(f(xs))
 ";
 
 impl Ty {
@@ -1000,6 +1018,17 @@ impl Generator {
                     // an err for an n past the list's two elements, and none for n = 1
                     4 => format!("measured({g}, {}).unwrap_or({g}.key())", i % 3),
                     _ => format!("looked_up({g}, {}).unwrap_or(0)", (i / 6) % 2),
+                }
+            }
+            // a length may also go through function values, held by a parameter, a field, and a
+            // list, once the program declares them, picked by the path as above
+            Source::Len(i) if self.generic_types => {
+                let path = fill(u, &paths[i].text)?;
+                match (i + path.len()) % 6 {
+                    0 => format!("through(plus_one, {path}.len())"),
+                    1 => format!("F(f=plus_one).f({path}.len())"),
+                    2 => format!("each_grown(grown, [{path}.len(), 1])[-1]"),
+                    _ => format!("{path}.len()"),
                 }
             }
             Source::Len(i) => format!("{}.len()", fill(u, &paths[i].text)?),

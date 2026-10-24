@@ -48,6 +48,9 @@ What stone already infers:
   one written for a single type. Structs and enums can be generic the same way, as in
   `struct Pair[A, B]:`. Even `option[T]` and `result[T, E]` are, written in stone in the prelude
   that every program is linked with, so they follow the same rules as the programmer's own enums.
+- **Which function a function value calls.** A function passed by its name to a parameter of a
+  function type, as `double` is to `xs.map(double)`, is compiled into a copy of the callee that
+  calls it directly, so passing functions costs nothing over writing the loop by hand.
 - **Which method a bound calls.** A trait lists methods that types implement, and a bound such
   as `fn total[T: Shape](xs: list[T])` lets a generic function call them. Each copy of the
   function calls the method of its own type directly, so there is no `dyn` to write and no
@@ -201,6 +204,11 @@ flattened like any other. A call through a trait's bound is a direct call in eac
 trait's default method is compiled once for each type that keeps it. A trait is not yet a type of
 values, as `dyn Shape` is in Rust, so a list holds values of one type; a list of shapes of
 several types would need its values boxed with a table of their methods.
+A function value is the address of its function, so a call through one is an indirect call,
+but a call that passes a function by its name, as `xs.map(double)` does, compiles to a copy of
+the callee that calls that function directly, as a copy of a generic function does its bound's
+methods, so the list helpers cost no more than the loops they stand for. Closures are future
+work; with value semantics they capture copies, so no closure ever shares a variable.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.

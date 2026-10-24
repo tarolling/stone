@@ -208,6 +208,43 @@ fn hover_on_nothing_is_empty() {
     assert_eq!(hover(&doc(SOURCE), at(2, 1)), None);
 }
 
+const VALUES: &str = "\
+fn double(x: int) -> int:
+    ret x * 2
+fn apply(f: fn(int) -> int, x: int) -> int:
+    ret f(x)
+g = double
+print(apply(double, 1), g(2))
+";
+
+#[test]
+fn function_values_hover_with_their_type_and_lead_to_their_function() {
+    let doc = doc(VALUES);
+    assert_eq!(
+        hover_text(&doc, at(3, 10)).unwrap(),
+        "```stone\n(parameter) f: fn(int) -> int\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(5, 1)).unwrap(),
+        "```stone\n(global) g: fn(int) -> int\n```"
+    );
+    // `double` named as a value is the function
+    assert_eq!(
+        hover_text(&doc, at(6, 14)).unwrap(),
+        "```stone\nfn double(x: int) -> int\n```"
+    );
+    let location = definition(&doc, &uri(), at(5, 6), None).unwrap();
+    assert_eq!(
+        location.range,
+        Range::new(Position::new(0, 3), Position::new(0, 9))
+    );
+    let starts: Vec<Position> = references(&doc, &uri(), at(1, 5), false)
+        .into_iter()
+        .map(|l| l.range.start)
+        .collect();
+    assert_eq!(starts, [Position::new(4, 4), Position::new(5, 12)]);
+}
+
 #[test]
 fn definition_jumps_to_the_name() {
     let doc = doc(SOURCE);
@@ -430,6 +467,13 @@ fn completion_after_a_dot_offers_methods() {
         "insert",
         "extend",
         "sort",
+        "sort_by_key",
+        "map",
+        "filter",
+        "any",
+        "all",
+        "min_by_key",
+        "max_by_key",
         "strip",
         "split",
         "join",
@@ -461,7 +505,7 @@ fn completion_after_a_dot_offers_methods() {
     .collect();
     // a list offers the list methods, even once a name is started, and display, as every
     // value does
-    let mut list_methods = methods[..6].to_vec();
+    let mut list_methods = methods[..13].to_vec();
     list_methods.push(("contains".to_string(), Some(CompletionItemKind::METHOD)));
     list_methods.push(("display".to_string(), Some(CompletionItemKind::METHOD)));
     assert_eq!(labels(at(2, 4)), list_methods);
@@ -492,7 +536,21 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
     assert_eq!(
         labels(at(2, 4)),
         [
-            "len", "append", "pop", "insert", "extend", "sort", "contains", "display"
+            "len",
+            "append",
+            "pop",
+            "insert",
+            "extend",
+            "sort",
+            "sort_by_key",
+            "map",
+            "filter",
+            "any",
+            "all",
+            "min_by_key",
+            "max_by_key",
+            "contains",
+            "display"
         ]
     );
     assert_eq!(

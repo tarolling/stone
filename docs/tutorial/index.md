@@ -18,6 +18,7 @@ structs
 enums
 generics
 traits
+function-values
 input
 modules
 errors

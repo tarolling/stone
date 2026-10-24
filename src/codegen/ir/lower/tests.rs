@@ -1426,3 +1426,37 @@ fn a_string_with_values_writes_its_text_and_values_into_a_new_text() {
          v4 = call stone.text_end(v1)\n  ret v4\n"
     );
 }
+
+#[test]
+fn a_function_value_passed_to_a_function_is_called_directly_in_its_copy() {
+    let source = "fn double(x: int) -> int:\n    ret x * 2\n\
+                  fn apply(f: fn(int) -> int, x: int) -> int:\n    ret f(x)\n\
+                  fn twice(f: fn(int) -> int, x: int) -> int:\n    ret apply(f, apply(f, x))\n\
+                  print([1, 2].map(double), twice(double, 1))\n";
+    let program = lower_source(source);
+    let copy = |label: &str| {
+        program
+            .functions
+            .iter()
+            .find(|f| f.name.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("no copy {label}"))
+            .to_string()
+    };
+    // the copy of `map` calls `double` itself, and takes no function value
+    let map = copy("prelude.map..int..int..fn1.double");
+    assert!(
+        map.starts_with("fn prelude.map..int..int..fn1.double(v0):"),
+        "{map}"
+    );
+    assert!(map.contains("call double("), "{map}");
+    assert!(!map.contains("call value"), "{map}");
+    // and so do copies made for a bound parameter passed on
+    let twice = copy("twice..fn0.double");
+    assert!(twice.contains("call apply..fn0.double("), "{twice}");
+    let apply = copy("apply..fn0.double");
+    assert!(apply.contains("call double("), "{apply}");
+    // a call through a value that nothing binds stays one
+    let ir = dump("fn double(x: int) -> int:\n    ret x * 2\nfs = [double]\nprint(fs[0](1))\n");
+    assert!(ir.contains("fn_addr fn.double"), "{ir}");
+    assert!(ir.contains("call value "), "{ir}");
+}

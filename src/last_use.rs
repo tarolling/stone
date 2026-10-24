@@ -6,10 +6,10 @@
 //! it in place. [`live_after`] says which variables are still read after each statement, and
 //! [`last_uses`] which variables a statement uses for the last time.
 
-use crate::ast::{CompOp, Expr, ExprKind, Stmt, StmtKind, target_names};
+use crate::ast::{CompOp, Expr, ExprKind, Stmt, StmtKind, TypeExprKind, target_names};
 use crate::checker::collect_assigned;
 use crate::span::Span;
-use crate::stdlib::is_builtin;
+use crate::stdlib::{is_builtin, prelude_method};
 use std::collections::{HashMap, HashSet};
 
 /// For each function, the globals it or any function it calls may read, by the function's name,
@@ -20,6 +20,12 @@ pub(crate) struct GlobalReads {
     /// The name of every function of an `impl` block, by its own name, since a call such as
     /// `x.get()` may call any of them named `get`: which struct `x` is, nothing here knows.
     methods: HashMap<String, Vec<String>>,
+    /// The globals a call of a function value may read: those of every function the program
+    /// names as a value, since which one a value holds, nothing here knows.
+    values: HashSet<String>,
+    /// The name of every struct field that may hold a function, written as a function type or a
+    /// type parameter, since `p.run(x)` calls the function a field `run` holds.
+    value_fields: HashSet<String>,
 }
 
 impl GlobalReads {
@@ -31,6 +37,12 @@ impl GlobalReads {
     /// Returns whether `name` is a function of the program.
     pub(crate) fn contains_key(&self, name: &str) -> bool {
         self.functions.contains_key(name)
+    }
+
+    /// Returns the globals a call of a function value may read, as `f(x)` with `f` a parameter
+    /// does: those of every function the program names as a value.
+    pub(crate) fn of_values(&self) -> &HashSet<String> {
+        &self.values
     }
 
     /// Returns the functions of `impl` blocks a call of `name` after a dot may call, as in
@@ -66,6 +78,57 @@ pub(crate) fn kept_at_exit(args: &[crate::ast::Arg]) -> HashSet<String> {
 pub(crate) struct Names<'a> {
     pub(crate) names: Vec<&'a str>,
     methods: Vec<&'a str>,
+    /// The names among `names` that are called, as `f` in `f(x)`, which is a call of a function
+    /// value if `f` is a variable.
+    called: Vec<&'a str>,
+    /// The names among `names` mentioned other than by being called, as `f` in `g(f)`, which
+    /// names a function as a value if `f` is a function.
+    values: Vec<&'a str>,
+    /// Whether the code calls a value that is no name, as in `fs[0](x)`.
+    calls_value: bool,
+}
+
+impl Names<'_> {
+    /// Returns whether the code calls a function value, given `is_function`, which tells a
+    /// function's name from a variable's, and `value_fields`, the fields that may hold one.
+    fn calls_a_value(
+        &self,
+        is_function: impl Fn(&str) -> bool,
+        value_fields: &HashSet<String>,
+    ) -> bool {
+        self.calls_value
+            || self.methods.iter().any(|name| value_fields.contains(*name))
+            || self
+                .called
+                .iter()
+                .any(|name| !is_function(name) && !is_builtin(name))
+    }
+}
+
+/// Returns the name of every field of a struct in `body` that may hold a function: one written
+/// as a function type, or as a type parameter, which a function type may fill in.
+fn value_fields(body: &[Stmt]) -> HashSet<String> {
+    let mut fields = HashSet::new();
+    for stmt in body {
+        if let StmtKind::StructDef {
+            fields: written,
+            type_params,
+            ..
+        } = &stmt.kind
+        {
+            for field in written {
+                let holds = match &field.annotation.kind {
+                    TypeExprKind::Function { .. } => true,
+                    TypeExprKind::Named { name, .. } => type_params.iter().any(|p| p.name == *name),
+                    _ => false,
+                };
+                if holds {
+                    fields.insert(field.name.clone());
+                }
+            }
+        }
+    }
+    fields
 }
 
 /// Returns every function `body` defines, with its parameters and body: each top-level `fn`,
@@ -112,7 +175,10 @@ pub(crate) type LiveAfter = HashMap<Span, HashSet<String>>;
 /// For example, after `fn f() -> int: ret g()` and `fn g() -> int: ret xs[0]`, both `f` and `g`
 /// read `xs`.
 pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalReads {
-    let mut reads = GlobalReads::default();
+    let mut reads = GlobalReads {
+        value_fields: value_fields(body),
+        ..GlobalReads::default()
+    };
     let mut calls = HashMap::new();
     let functions = functions(body);
     for (name, _, _) in &functions {
@@ -126,6 +192,33 @@ pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalRe
                 .push(name.clone());
         }
     }
+    let is_function = |name: &str| functions.iter().any(|(f, _, _)| f == name);
+    // every function named as a value, anywhere, since a call of a value may call any of them
+    let mut valued: HashSet<String> = HashSet::new();
+    let mut top = Names::default();
+    for stmt in body {
+        stmt_names(stmt, &mut top);
+    }
+    let bodies = functions.iter().map(|(_, _, body)| *body);
+    for body in bodies {
+        let mut names = Names::default();
+        for stmt in body {
+            stmt_names(stmt, &mut names);
+        }
+        valued.extend(
+            names
+                .values
+                .iter()
+                .filter(|name| is_function(name))
+                .map(|name| name.to_string()),
+        );
+    }
+    valued.extend(
+        top.values
+            .iter()
+            .filter(|name| is_function(name))
+            .map(|name| name.to_string()),
+    );
     for (name, args, body) in &functions {
         let mut locals: HashSet<String> = args.args.iter().map(|arg| arg.arg.clone()).collect();
         let mut assigned = Vec::new();
@@ -150,6 +243,10 @@ pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalRe
         for method in &names.methods {
             called.extend(reads.methods_named(method).iter().cloned());
         }
+        let is_function = |name: &str| is_function(name) && !locals.contains(name);
+        if names.calls_a_value(is_function, &reads.value_fields) {
+            called.extend(valued.iter().cloned());
+        }
         reads.functions.insert(name.clone(), read);
         calls.insert(name.clone(), called);
     }
@@ -171,6 +268,10 @@ pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalRe
             changed |= read.len() != before;
         }
     }
+    reads.values = valued
+        .iter()
+        .flat_map(|function| reads.functions[function].iter().cloned())
+        .collect();
     reads
 }
 
@@ -264,7 +365,10 @@ fn kill_targets(target: &Expr, live: &mut HashSet<String>) {
 fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
     match &expr.kind {
         ExprKind::Name { .. } if expr.is_unwritten() => {}
-        ExprKind::Name { id, .. } => out.names.push(id),
+        ExprKind::Name { id, .. } => {
+            out.names.push(id);
+            out.values.push(id);
+        }
         ExprKind::Constant { .. } => {}
         ExprKind::BinOp { left, right, .. } => {
             expr_names(left, out);
@@ -312,6 +416,10 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
         } => {
             if let ExprKind::Attribute { attr, .. } = &func.kind {
                 out.methods.push(attr);
+                // a list's method that the prelude gives calls its function
+                if let Some(function) = prelude_method(attr) {
+                    out.names.push(function);
+                }
                 // a list of a struct sorts by its `cmp`, and finds an element by its `eq`
                 match attr.as_str() {
                     "sort" => out.methods.push("cmp"),
@@ -325,7 +433,17 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
             {
                 out.methods.push("display");
             }
-            expr_names(func, out);
+            match &func.kind {
+                ExprKind::Name { id, .. } if !func.is_unwritten() => {
+                    out.names.push(id);
+                    out.called.push(id);
+                }
+                ExprKind::Name { .. } | ExprKind::Attribute { .. } => expr_names(func, out),
+                _ => {
+                    out.calls_value = true;
+                    expr_names(func, out);
+                }
+            }
             args.iter().for_each(|arg| expr_names(arg, out));
             keywords.iter().for_each(|k| expr_names(&k.value, out));
         }
@@ -529,10 +647,16 @@ impl Liveness<'_> {
     fn expr(&self, expr: &Expr, live: &mut HashSet<String>) {
         let mut names = Names::default();
         expr_names(expr, &mut names);
-        for method in names.methods {
+        for method in &names.methods {
             for function in self.reads.methods_named(method) {
                 live.extend(self.reads[function].iter().cloned());
             }
+        }
+        if names.calls_a_value(
+            |name| self.reads.contains_key(name),
+            &self.reads.value_fields,
+        ) {
+            live.extend(self.reads.of_values().iter().cloned());
         }
         for name in names.names {
             match self.reads.get(name) {
@@ -745,6 +869,35 @@ mod tests {
         assert_eq!(last, names(&["x", "y"]));
         assert!(!uses.contains_key(&body[0].span));
         assert!(!uses.contains_key(&body[1].span));
+    }
+
+    #[test]
+    fn a_call_of_a_value_reads_the_globals_of_every_function_named_as_one() {
+        let source = "fn first() -> int:\n    ret xs[0]\nfn other() -> int:\n    ret ys[0]\n\
+                      fn apply(f: fn() -> int) -> int:\n    ret f()\n\
+                      fn pick() -> int:\n    ret [first][0]()\n\
+                      xs = [1]\nys = [2]\nprint(apply(first), other())\n";
+        let module = parse(source).unwrap();
+        let crate::ast::Mod::Module { body } = &module;
+        let globals = HashSet::from(["xs".to_string(), "ys".to_string()]);
+        let reads = global_reads(body, &globals);
+        assert_eq!(reads["apply"], HashSet::from(["xs".to_string()]));
+        assert_eq!(reads["pick"], HashSet::from(["xs".to_string()]));
+        assert_eq!(reads.of_values(), &HashSet::from(["xs".to_string()]));
+        // `xs` is still read after `ys = xs`, through the call of `f`
+        let source = "fn first() -> int:\n    ret xs[0]\nfn apply(f: fn() -> int) -> int:\n    \
+                      ret f()\nxs = [1]\nf = first\nys = xs\nprint(f())\n";
+        assert_eq!(
+            live(source),
+            [
+                names(&[]),
+                names(&[]),
+                names(&["xs"]),
+                names(&["f", "xs"]),
+                names(&["f", "xs"]),
+                names(&[])
+            ]
+        );
     }
 
     #[test]

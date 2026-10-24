@@ -247,6 +247,7 @@ impl Parser {
     /// type:
     ///     | 'list' '[' type ']'
     ///     | 'tuple' '[' type (',' type)+ [','] ']'
+    ///     | 'fn' '(' [','.type+ [',']] ')' ['->' type]
     ///     | NAME ('.' NAME)* ['[' ','.type+ [','] ']']
     /// ```
     pub(super) fn parse_type(&mut self) -> Result<Box<TypeExpr>, ParserError> {
@@ -327,6 +328,29 @@ impl Parser {
                         kind: TypeExprKind::Tuple(elts),
                         span: self.span_from(mark),
                     }));
+                }
+            }
+        } else if self.peek().r#type == TokenType::Keyword("fn".to_string()) {
+            // 'fn' '(' [','.type+ [',']] ')' ['->' type]
+            self.pos += 1;
+            if self.expect(TokenType::LParen).is_some() {
+                let params = match self.peek().r#type == TokenType::RParen {
+                    true => Some(vec![]),
+                    false => self.parse_types(),
+                };
+                if let Some(params) = params
+                    && self.expect(TokenType::RParen).is_some()
+                {
+                    let ret = match self.expect(TokenType::Arrow) {
+                        Some(_) => self.nested(Self::parse_type).ok().map(Some),
+                        None => Some(None),
+                    };
+                    if let Some(ret) = ret {
+                        return Ok(Box::new(TypeExpr {
+                            kind: TypeExprKind::Function { params, ret },
+                            span: self.span_from(mark),
+                        }));
+                    }
                 }
             }
         } else if let Some((first, _)) = self.expect_name("a type", false) {

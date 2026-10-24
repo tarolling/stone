@@ -766,6 +766,7 @@ fn encode(mnemonic: &str, operands: &[Operand]) -> Result<Encoded, String> {
             Inst::new(&[0x68]).imm(*value, 4).finish()
         }
         ("pop", [Reg(reg)]) if reg.size == 8 => Inst::new(&[0x58]).plus(*reg).finish(),
+        ("call", [Reg(reg)]) if reg.size == 8 => Inst::new(&[0xff]).ext(2, Rm::Reg(*reg)).finish(),
         ("call", [Label(target)]) => Ok(Encoded::Fixed(
             vec![0xe8, 0, 0, 0, 0],
             vec![LocalFixup {
@@ -1181,6 +1182,8 @@ mod tests {
             ("push QWORD PTR [r12]", "41 ff 34 24"),
             ("push 1000", "68 e8 03 00 00"),
             ("pop r15", "41 5f"),
+            ("call r11", "41 ff d3"),
+            ("call rax", "ff d0"),
         ]);
     }
 

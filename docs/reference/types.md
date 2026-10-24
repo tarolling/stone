@@ -20,7 +20,7 @@ runs, reporting every place they conflict.
 | structs | the named, typed fields a `struct` lists, such as `Point(x=1.0, y=2.0)`, which are values |
 | enums | the variants an `enum` lists, such as `Shape.Circle(1.0)`, which never change |
 | `ordering` | `less`, `equal`, or `greater`, which `cmp` returns |
-| functions | each function has one signature, such as `fn(int, list[str]) -> bool` |
+| `fn(T1, ...) -> R` | functions, such as `fn(int, list[str]) -> bool`, which are values: named, passed, stored, and called |
 
 ## Writing types
 
@@ -34,7 +34,9 @@ fn scale(xs: list[float], k: float) -> list[float]:
 `int`, `float`, `bool`, and `str` are written as their names, a list as `list[T]`, so a grid
 of floats is `list[list[float]]`, a map as `map[K, V]`, so word counts are `map[str, int]`, a
 tuple as `tuple[` and the type of each value, so a name and a
-score is `tuple[str, int]`, an option as `option[T]`, and a struct or an enum by its name, such
+score is `tuple[str, int]`, an option as `option[T]`, a function as `fn` and its parameters'
+types in parentheses, then `->` and the type it returns if it returns one, so a test of an int is
+`fn(int) -> bool`, and a struct or an enum by its name, such
 as `Point` or `Shape`, or `shapes.Shape` for one of the module `shapes`. A function without `->` returns no value: a call
 to it can only be a statement of its own, so `x = f()` and `print(f())` are errors, and returning
 a value from it is an error that suggests the `->` to add. A parameter without a type is an error
@@ -632,6 +634,33 @@ before it is freed when it returns. The checker requires:
 
 A result becomes an option with `.ok()`, so `t.parse_int().ok()?` works in a function that
 returns an option.
+
+## Functions
+
+A function's name without parentheses is a value of its function type, `fn` and its
+parameters' types, then `->` and the type it returns, if any:
+
+```stone
+fn double(x: int) -> int:
+    ret x * 2
+
+fn apply(f: fn(int) -> int, x: int) -> int:
+    ret f(x)
+
+print(apply(double, 4), [1, 2].map(double))   // 8 [2, 4]
+```
+
+Any expression of a function type can be called, such as a parameter, `fs[0](x)`, or a struct
+field that holds one, as `p.run(x)`. A generic function used as a value takes its types from
+where it is used. Builtins, methods, and variants are not values yet. A function value is never
+compared or used as a map key, and `print` writes it as its type, as `fn(int) -> int`. For
+now, a function named as a value inside a generic function cannot have a type that depends on
+the type parameters, such as `id` at `T`; take it as a parameter instead. Closures, functions
+written inside an expression that capture values around them, are not supported yet.
+
+A function never changes, so passing one copies nothing. The methods `map`, `filter`, `any`,
+`all`, `sort_by_key`, `min_by_key`, and `max_by_key` of lists take a function; see
+[Builtins](builtins.md).
 
 ## Rules the checker enforces
 

@@ -1020,6 +1020,13 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
+            Inst::FunctionAddress { dst, label } => {
+                let dst = frame.reg(*dst)?;
+                let target = self.target(dst);
+                super::address(self, target, label);
+                self.store(dst, target);
+            }
+
             Inst::ListLen { dst, list } => {
                 let (dst, list) = (frame.reg(*dst)?, frame.value(*list)?);
                 let base = self.base(list, "x10");
@@ -1155,10 +1162,10 @@ impl Arm64Generator {
             }
 
             Inst::Call { dsts, callee, args } => {
-                if dsts.len() > 1 && !matches!(callee, Callee::User(_)) {
+                if dsts.len() > 1 && !matches!(callee, Callee::User(_) | Callee::Value(_)) {
                     return Err(format!("{callee} returns one value"));
                 }
-                if let Callee::User(_) = callee {
+                if let Callee::User(_) | Callee::Value(_) = callee {
                     // the same limit as the interpreter, rather than overflowing the stack
                     let too_deep = self.fail_here(&format!(
                         "recursion is too deep (more than {MAX_CALL_DEPTH} nested calls)"
@@ -1177,6 +1184,10 @@ impl Arm64Generator {
                     let reg = self.operand(*value, "x16");
                     self.emit(&format!("\tstr\t{reg}, [sp, #{}]", 8 * k));
                 }
+                // a function value is called through x17, which no vreg is ever in
+                if let Callee::Value(function) = callee {
+                    self.load("x17", frame.value(*function)?);
+                }
                 let moves: Vec<(Value, Value)> = ARG_REGS
                     .iter()
                     .zip(&values)
@@ -1190,6 +1201,7 @@ impl Arm64Generator {
                     Callee::Runtime(label) => label.to_string(),
                     Callee::Print(ty) => self.ctx.print_routine(ty, false)?,
                     Callee::Helper(label) => label.clone(),
+                    Callee::Value(_) => "x17".to_string(),
                 };
                 // the routine's own runtime errors point at this call
                 if (FALLIBLE_ROUTINES.contains(&label.as_str())
@@ -1198,7 +1210,10 @@ impl Arm64Generator {
                 {
                     self.record_site(&site);
                 }
-                self.emit(&format!("\tbl\t{label}"));
+                match callee {
+                    Callee::Value(_) => self.emit(&format!("\tblr\t{label}")),
+                    _ => self.emit(&format!("\tbl\t{label}")),
+                }
                 match dsts[..] {
                     [] => {}
                     [dst] => self.store(frame.reg(dst)?, "x0"),

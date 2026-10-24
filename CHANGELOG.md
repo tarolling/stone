@@ -12,6 +12,16 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Functions are values. A function's name without parentheses, as in `apply(double, 3)`, is a
+  value of its type, written `fn(int) -> int` (or `fn(str)` for one that returns no value), which
+  can be passed, returned, kept in lists, maps, structs, and enums, and called: `f(x)`,
+  `fs[0](x)`, or `p.run(x)` for a struct field that holds one. A generic function takes its types
+  from where it is used, and `print` writes a function value as its type. Builtins, methods, and
+  variants are not values yet, and closures are not supported yet.
+- Lists' methods that take a function, written in stone in the prelude: `map`, `filter`, `any`,
+  `all`, `sort_by_key` (in place and stable, calling the key once per element), and `min_by_key`
+  and `max_by_key`, which return options. A call that passes a function by its name compiles to a
+  copy that calls it directly.
 - `eprint(values...)` writes its values to standard error exactly as `print` writes them to
   standard output, so a script's messages stay out of its output when that is piped into another
   program. Each line is written at once, so with `2>&1` lines appear in the order the program

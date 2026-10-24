@@ -11,7 +11,7 @@ since stone copies values.
 
 1. **Inventory before writing.** Read the whole Python program and list what it uses that stone
    lacks (see "Not in stone" in the stone guide): classes with inheritance, exceptions, lambdas
-   and functions passed as values, comprehensions, format specs in f-strings, default and keyword arguments,
+   and closures (a function passed as a value must be a named `fn`), comprehensions, format specs in f-strings, default and keyword arguments,
    sets, and values whose type varies (a variable that is
    sometimes `None`, a name reused for an int and then a float, or a list that mixes types). Find
    arithmetic that could pass 64 bits, such as products in hashes and random number generators,
@@ -46,8 +46,14 @@ since stone copies values.
 | `for a, b in zip(xs, ys):` | `for i in range(xs.len()):` with `xs[i]` and `ys[i]` |
 | `sum(xs)`, `max(xs)` | a loop; `math.max(xs)` and `math.min(xs)` for a list of numbers |
 | `sorted(xs)` | `ys = xs` then `ys.sort()` (a copy, since lists are values) |
+| `sorted(xs, key=f)` | `ys = xs` then `ys.sort_by_key(f)`, stable like Python's |
+| `[f(x) for x in xs]`, `list(map(f, xs))` | `xs.map(f)`, with `f` a named function |
+| `[x for x in xs if p(x)]`, `list(filter(p, xs))` | `xs.filter(p)` |
+| `any(p(x) for x in xs)`, `all(...)` | `xs.any(p)`, `xs.all(p)` |
+| `min(xs, key=f)`, `max(xs, key=f)` | `xs.min_by_key(f).unwrap()`, `xs.max_by_key(f).unwrap()`; of equal keys, `max_by_key` gives the last, where Python's `max` gives the first |
 | `x in xs`, `t in s`, `x not in xs` | the same; elements compare with `==`, so not lists or maps, and `in` never chains |
-| `xs.sort(key=..., reverse=True)` | a struct with `impl ord`, whose `cmp` defines the order |
+| `xs.sort(key=f)` | `xs.sort_by_key(f)` |
+| `xs.sort(key=f, reverse=True)` | `xs.sort_by_key(g)` with `g` negating `f`'s key, which keeps equal keys in order as Python does, or a struct with `impl ord` |
 | `xs.remove(x)`, `xs.index(x)` | a loop that finds the index, then `pop(i)` |
 | `d.get(k, default)` | `d.get(k).unwrap_or(default)` |
 | `k in d`, `k not in d` | the same, or `d.contains(k)` |
@@ -126,7 +132,9 @@ print(total)
 | --- | --- |
 | `def f(x, n=10):` | `fn f(x: T, n: int)`, and every call passes `n` |
 | `f(*args)`, `**kwargs` | a `list` parameter, or a struct of options |
-| `lambda`, a function argument | a trait with one method, and a generic function bounded by it |
+| `lambda` | a named `fn` at the top level, passed by its name |
+| a function argument | a parameter of type `fn(A, B) -> R`, called as `f(a, b)` |
+| a closure that reads a local | pass the value as another argument, since a function value captures nothing |
 | `return a, b` | `ret (a, b)`, with `-> tuple[A, B]` |
 | returning `None` on failure | `-> option[T]`, returning `none` or `some(x)` |
 | `raise` | return a `result[T, str]` with `err("message")` and let the caller decide; `os.exit(1)` after printing a message for a fatal error |
@@ -292,14 +300,18 @@ struct Item:
     qty: int
     price: float
 
-// a word and how often it appears, ordered by count, highest first
-struct WordCount:
-    word: str
-    n: int
+fn in_stock(item: Item) -> bool:
+    ret item.qty > 0
 
-impl ord for WordCount:
-    fn cmp(self, other: Self) -> ordering:
-        ret other.n.cmp(self.n)
+fn name(item: Item) -> str:
+    ret item.name
+
+fn price(item: Item) -> float:
+    ret item.price
+
+// the key that puts the highest count first
+fn by_count(entry: tuple[str, int]) -> int:
+    ret -entry[1]
 
 // returns the changed list, and whether the item was found
 fn restock(items: list[Item], name: str, amount: int) -> tuple[list[Item], bool]:
@@ -330,23 +342,13 @@ items, found = restock(items, "pear", 4)
 items, found = restock(items, "kiwi", 1)
 if not found:
     print("no kiwi")
-in_stock = []
-for item in items:
-    if item.qty > 0:
-        in_stock.append(item.name)
-print("in stock: {", ".join(in_stock)}")
+print("in stock: {", ".join(items.filter(in_stock).map(name))}")
 print("total value: {total_value(items)}")
-cheapest = items[0]
-for item in items:
-    if item.price < cheapest.price:
-        cheapest = item
-print("cheapest:", cheapest)
-ranked = []
-for word, n in word_counts("the cat and the hat and the bat").items():
-    ranked.append(WordCount(word=word, n=n))
-ranked.sort()
-for c in ranked:
-    print(c.word, c.n)
+print("cheapest:", items.min_by_key(price).unwrap())
+ranked = word_counts("the cat and the hat and the bat").items()
+ranked.sort_by_key(by_count)
+for word, n in ranked:
+    print(word, n)
 ```
 
 The decisions:
@@ -356,11 +358,12 @@ The decisions:
   caller assigns both. Changing `item` from `for item in items` would change only a copy, so it
   loops over indexes.
 - `qty * price` mixed an int and a float; stone needs `float(item.qty)`.
-- The generator expression, the comprehension, and `min(key=...)` became loops, and the f-strings
-  kept their braces and lost their `f`.
+- The generator expression became a loop, since there is no `sum`. The comprehension became
+  `filter` and `map`, and `min(key=...)` became `min_by_key`, each with a named function in
+  place of the lambda or the expression; the f-strings kept their braces and lost their `f`.
 - `counts.get(word, 0) + 1` became a `contains` check, since `counts[word] += 1` needs the key.
-- `sorted(..., key=...)` became a list of structs built from `items()`. `WordCount`'s `cmp`
-  orders by count, highest first, and stone's sort of structs is stable like Python's, so ties
+- `sorted(..., key=..., reverse=True)` became `sort_by_key` on the list of `items()`, with a key
+  that negates the count, so the highest comes first. Like Python's, the sort is stable, so ties
   keep their first-seen order.
 - `print("cheapest:", cheapest)` needed no change: a struct prints as a dataclass does.
 

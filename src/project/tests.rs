@@ -27,7 +27,7 @@ fn output(files: &[(&str, &str)]) -> String {
     let mut out = vec![];
     driver::run_module(
         &checked.module,
-        &checked.methods,
+        &checked.calls,
         &mut std::io::empty(),
         &mut out,
         &[],

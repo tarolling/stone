@@ -819,10 +819,28 @@ fn prelude(diagnostics: &mut Vec<Diagnostic>) -> Vec<Stmt> {
         .and_then(|tokens| Parser::new(&tokens).parse());
     match parsed {
         Ok(Mod::Module { mut body }) => {
-            // a function calls no other of the prelude's, so only its name changes
+            // a function calls no other of the prelude's, so only its name changes, and its
+            // variants written alone become its enums', as in any file
+            let none = HashMap::new();
+            let mut rewriter = Rewriter {
+                file: FileId::PRELUDE,
+                library: false,
+                module: PRELUDE_MODULE,
+                own: &none,
+                own_types: &none,
+                bindings: &HashMap::new(),
+                functions: &[],
+                types: &[],
+                module_names: &[],
+                locals: HashSet::new(),
+                globals: HashSet::new(),
+                type_params: HashSet::new(),
+                diagnostics,
+            };
             for stmt in &mut body {
                 if let StmtKind::FunctionDef { name, .. } = &mut stmt.kind {
                     *name = format!("{PRELUDE_MODULE}.{name}");
+                    rewriter.function(stmt, &[]);
                 }
             }
             body
@@ -1177,6 +1195,12 @@ impl Rewriter<'_> {
                 self.type_expr(value);
             }
             TypeExprKind::Tuple(fields) => fields.iter_mut().for_each(|f| self.type_expr(f)),
+            TypeExprKind::Function { params, ret } => {
+                params.iter_mut().for_each(|p| self.type_expr(p));
+                if let Some(ret) = ret {
+                    self.type_expr(ret);
+                }
+            }
             TypeExprKind::Named { name, args } => {
                 args.iter_mut().for_each(|a| self.type_expr(a));
                 match name.rsplit_once('.') {
@@ -1340,7 +1364,7 @@ impl Rewriter<'_> {
                 args,
                 keywords,
             } => {
-                if !self.prelude_variant(func) && !self.module_call(func) {
+                if !self.prelude_variant(func) && !self.module_member(func) {
                     match &mut func.kind {
                         ExprKind::Name { id, .. } => self.name(id, func.span, true),
                         _ => self.expr(func),
@@ -1371,7 +1395,11 @@ impl Rewriter<'_> {
                 self.expr(slice);
             }
             ExprKind::Attribute { value, .. } => {
-                if !self.qualified_enum(value) {
+                // a module's function named as a value, as in `xs.map(shapes.area)`
+                if !self.qualified_enum(value) && !self.module_member(expr) {
+                    let ExprKind::Attribute { value, .. } = &mut expr.kind else {
+                        unreachable!("checked above")
+                    };
                     self.expr(value);
                 }
             }
@@ -1429,9 +1457,10 @@ impl Rewriter<'_> {
         true
     }
 
-    /// Rewrites `func` if it calls a function of an imported module, such as `shapes.area` in
-    /// `shapes.area(2)`, to that function's linked name, and returns whether it did.
-    fn module_call(&mut self, func: &mut Expr) -> bool {
+    /// Rewrites `func` if it names a function of an imported module, such as `shapes.area` in
+    /// `shapes.area(2)` or in `xs.map(shapes.area)`, to that function's linked name, and returns
+    /// whether it did.
+    fn module_member(&mut self, func: &mut Expr) -> bool {
         let ExprKind::Attribute { value, attr, .. } = &func.kind else {
             return false;
         };

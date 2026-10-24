@@ -707,6 +707,12 @@ pub enum TypeExprKind {
         name: String,
         args: Vec<TypeExpr>,
     },
+    /// A function's type, with the types of its parameters and the type it returns, if it
+    /// returns a value: `fn(int, str) -> bool`, or `fn(int)` for one that returns none.
+    Function {
+        params: Vec<TypeExpr>,
+        ret: Option<Box<TypeExpr>>,
+    },
 }
 
 impl Display for TypeExpr {
@@ -742,6 +748,20 @@ impl Display for TypeExpr {
                     write!(f, "]")?;
                 }
                 Ok(())
+            }
+            TypeExprKind::Function { params, ret } => {
+                write!(f, "fn(")?;
+                for (i, param) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{param}")?;
+                }
+                write!(f, ")")?;
+                match ret {
+                    Some(ret) => write!(f, " -> {ret}"),
+                    None => Ok(()),
+                }
             }
         }
     }

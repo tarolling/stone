@@ -86,6 +86,7 @@ a loop variable you do not need, and `main` is an ordinary function name.
 | `result[T, E]` | `ok(1)`, `err("bad")` | stone's replacement for exceptions |
 | struct | `Point(x=1.0, y=2.0)` | named, typed fields |
 | enum | `Shape.Circle(1.0)` | variants that hold values, as in Rust |
+| `fn(A) -> B` | `double` | a function named without parentheses; `fn(A)` returns no value |
 
 ### Lists, maps, and tuples
 
@@ -276,10 +277,47 @@ print(first(vs), first(["a", "b"]), vs[0] < vs[1])
 
 Inside a generic function a `T` can only be moved, stored, returned, and printed, plus the methods
 of its bounds. `[T: eq]` allows `==`, and `[T: ord]` allows `<` and `sort`. Implementing `ord`
-(with `cmp`) is how you sort a list of structs; there is no `key=`. Implementing `display` (with
-`fn display(self) -> str`) changes how `print`, `str`, and `"{x}"` write a struct, everywhere it
-appears. Functions cannot be passed as
-values, so traits are also how you parameterize behavior.
+(with `cmp`) gives a struct its order for `sort` and `<`; to sort by something else, use
+`sort_by_key`. Implementing `display` (with `fn display(self) -> str`) changes how `print`,
+`str`, and `"{x}"` write a struct, everywhere it appears.
+
+### Functions as values
+
+```stone
+struct City:
+    name: str
+    people: int
+
+fn people(c: City) -> int:
+    ret c.people
+
+fn name(c: City) -> str:
+    ret c.name
+
+fn big(c: City) -> bool:
+    ret c.people > 500
+
+fn apply(f: fn(int) -> int, x: int) -> int:
+    ret f(x)
+
+fn double(x: int) -> int:
+    ret x * 2
+
+cities = [City(name="Oslo", people=700), City(name="Bern", people=130)]
+print(cities.filter(big).map(name), cities.any(big), cities.all(big))
+print(cities.max_by_key(people).unwrap().name)
+cities.sort_by_key(people)
+print(cities.map(name), apply(double, 4))
+```
+
+A top-level function's name without parentheses is a value of type `fn(params) -> ret`, which
+can be passed, returned, stored in lists and structs, and called: `f(x)`, `fs[0](x)`, or
+`p.run(x)` for a struct field `run` that holds one. There are no lambdas or closures, so write a
+named `fn` for each one, and pass it by name. Builtins (`print`, `str`), methods, and variants
+are not values; wrap them in a function. Lists' helpers take functions: `map`, `filter`, `any`,
+`all`, `sort_by_key` (in place, stable, the key computed once per element), and `min_by_key` and
+`max_by_key` (options: the first least and the last greatest). Functions cannot be compared, and
+print as their type. Traits are still how a generic type gets methods.
 
 ## Values are copied: the one idea to learn
 
@@ -352,7 +390,7 @@ assign the result where 'add' is called
 
 | Python | stone |
 | --- | --- |
-| `[f(x) for x in xs if p(x)]` | a `for` loop with `if` and `append` |
+| `[f(x) for x in xs if p(x)]` | `xs.filter(p).map(f)` with named functions, or a `for` loop with `if` and `append` |
 | `f"{a} and {b}"`, `"%d" % n`, `.format` | `"{a} and {b}"`: every string takes values, with no `f`; format specs (`{x:.2f}`) are not supported yet |
 | `"{}"` in a string that is not an f-string | `"{{}}"`, since braces hold values |
 | `__str__`, `__repr__` | `impl display for T:` with `fn display(self) -> str` |
@@ -362,14 +400,16 @@ assign the result where 'add' is called
 | `del d[k]` | `d.pop(k)` as a statement |
 | `set()` | `map[K, bool]` |
 | `def f(x, n=1)`, `f(n=2)` | every argument, positionally (only structs take names) |
-| `lambda`, passing a function | a trait and a generic function with a bound |
+| `lambda` | a named `fn`, passed by its name, of type `fn(A) -> B`; no closures |
+| `map(f, xs)`, `filter(f, xs)`, `any`/`all` with a generator | `xs.map(f)`, `xs.filter(f)`, `xs.any(f)`, `xs.all(f)` |
+| `min(xs, key=f)`, `max(xs, key=f)` | `xs.min_by_key(f)`, `xs.max_by_key(f)`, options (the max is the last of equal ones) |
 | `try`/`except`, `raise` | return a `result` and pass errors on with `?`; `s.parse_int()` instead of `int(s)` |
 | `class` with inheritance | a `struct` plus `impl`, an `enum` for alternatives, a `trait` for shared behavior |
 | `None`, `Optional[T]` | `none`, `option[T]` |
 | `pass` | restructure so every block has a real statement |
 | `del`, `global`, `nonlocal`, `is`, `with`, `yield` | not available |
 | `len(x)`, `abs`, `min`, `max` | `x.len()`, `math.abs`, `math.min`, `math.max` |
-| `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `ys = xs` then `ys.sort()`; `impl ord` for custom orders, reverse with `ys[::-1]` |
+| `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `ys = xs` then `ys.sort()` or `ys.sort_by_key(f)`, both stable; reverse with `ys[::-1]` |
 | `"ab" * 3`, `s.upper()`, `s.replace(...)` | loops over characters; only the string methods below exist |
 | `print(x, end="")` | build the line as a string, then `print` it once |
 | `open(path).read()`, `.readlines()`, `f.write(s)` | `fs.read(path)`, `fs.read_lines(path)`, `fs.write(path, s)`, each a `result` |
@@ -386,7 +426,8 @@ stderr), `range(end)` and `range(start, end)`
 `eof()`, `args()`.
 
 Methods: `len` (str, list, map); lists: `append`, `pop()` (option) and `pop(i)`, `insert`,
-`extend`, `sort`; strings: `strip`, `split()` and `split(sep)`, `sep.join(xs)`, `find`
+`extend`, `sort`, and taking a function, `sort_by_key`, `map`, `filter`, `any`, `all`,
+`min_by_key`, `max_by_key` (options); strings: `strip`, `split()` and `split(sep)`, `sep.join(xs)`, `find`
 (option), `startswith`, `endswith`; options: `is_some`, `is_none`, `unwrap`, `unwrap_or`; maps:
 `contains`, `get` (option), `pop(key)` (option), `keys`, `values`, `items`; any comparable
 value: `eq`, `cmp`.

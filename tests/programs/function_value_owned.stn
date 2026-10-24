@@ -1,0 +1,31 @@
+// a function that changes its list parameter owns it, and is still called through a value,
+// whose callers only lend their arguments
+fn with_zero(xs: list[int]) -> list[int]:
+    xs.append(0)
+    ret xs
+
+fn shout(words: list[str], name: str) -> list[str]:
+    name += "!"
+    words.append(name)
+    ret words
+
+fn each(xs: list[int], f: fn(list[int]) -> list[int]) -> list[int]:
+    ret f(xs)
+
+nums = [1, 2]
+grown = each(nums, with_zero)
+print(nums, grown)
+again = with_zero
+print(again(grown), grown)
+
+add = shout
+names = ["a"]
+name = "bo"
+print(add(names, name), names, name)
+
+// a value in a list keeps its function, whatever owns what
+steps = [with_zero, with_zero]
+xs = [5]
+for step in steps:
+    xs = step(xs)
+print(xs)

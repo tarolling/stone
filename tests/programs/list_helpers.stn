@@ -1,0 +1,83 @@
+// lists' helpers take functions: map, filter, any, all, sort_by_key, min_by_key, max_by_key
+fn double(x: int) -> int:
+    ret x * 2
+
+fn is_even(x: int) -> bool:
+    ret x % 2 == 0
+
+fn shout(s: str) -> str:
+    ret s + "!"
+
+fn length(s: str) -> int:
+    ret s.len()
+
+nums = [3, 1, 4, 1, 5, 9, 2, 6]
+print(nums.map(double), nums.filter(is_even))
+print(nums.any(is_even), nums.all(is_even), [2, 4].all(is_even), [1, 3].any(is_even))
+print(["a", "bc"].map(shout), ["a", "bc", "def"].map(length))
+print(nums.map(double).filter(is_even).map(double))
+
+// an empty list gives an empty list, none, true for all, and false for any
+empty = [1].filter(is_even)
+print(empty, empty.map(double), empty.any(is_even), empty.all(is_even))
+print(empty.min_by_key(double), empty.max_by_key(double))
+
+// sorting by a key is stable, and the first of equal minimums and last of equal maximums win
+words = ["pear", "fig", "apple", "kiwi", "plum", "date"]
+words.sort_by_key(length)
+print(words)
+print(words.min_by_key(length), words.max_by_key(length))
+by_last = ["bb", "ca", "ab", "aa"]
+by_last.sort_by_key(last)
+print(by_last)
+
+fn last(s: str) -> str:
+    ret s[-1]
+
+// on structs, through a key that is a field
+struct City:
+    name: str
+    people: int
+
+fn people(c: City) -> int:
+    ret c.people
+
+fn name(c: City) -> str:
+    ret c.name
+
+oslo = City(name="Oslo", people=700)
+rome = City(name="Rome", people=2800)
+cities = [oslo, rome, City(name="Bern", people=130)]
+print(cities.max_by_key(people).unwrap().name, cities.min_by_key(people).unwrap().name)
+cities.sort_by_key(people)
+print(cities.map(name))
+print(cities.filter(big).map(name))
+
+fn big(c: City) -> bool:
+    ret c.people > 500
+
+// the key runs once per element, in order, before any sorting
+fn noisy(x: int) -> int:
+    print("key", x)
+    ret -x
+
+xs = [2, 3, 1]
+xs.sort_by_key(noisy)
+print(xs)
+
+// any and all stop at the first element that decides them
+fn small(x: int) -> bool:
+    print("test", x)
+    ret x < 3
+
+print([1, 5, 2].all(small), [5, 1, 2].any(small))
+
+// the helpers work on lists that live in places
+struct Bag:
+    items: list[int]
+
+bag = Bag(items=[5, 2, 8])
+bag.items.sort_by_key(double)
+grid = [[3, 1], [2]]
+grid[0].sort_by_key(double)
+print(bag.items, grid, bag.items.map(double)[-1])

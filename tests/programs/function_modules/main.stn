@@ -1,0 +1,13 @@
+// a library's functions are values too, by their module or imported by name
+use shapes
+use shapes.square
+
+fn total(f: fn(int) -> int, sizes: list[int]) -> int:
+    sum = 0
+    for size in sizes:
+        sum += f(size)
+    ret sum
+
+print(total(shapes.square, [1, 2, 3]), total(shapes.circle_ish, [1, 2]))
+area = square
+print(area(9), area)

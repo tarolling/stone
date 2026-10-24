@@ -1068,6 +1068,10 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
             count(0)?;
             Ok((0xd65f03c0, None))
         }
+        "blr" => {
+            count(1)?;
+            Ok((0xd63f0000 | xreg(operands[0])?.num << 5, None))
+        }
         "nop" => {
             count(0)?;
             Ok((0xd503201f, None))
@@ -1378,6 +1382,8 @@ mod tests {
             ("fsqrt d3, d2", "1e61c043"),
             ("scvtf d0, xzr", "9e6203e0"),
             ("ret", "d65f03c0"),
+            ("blr x17", "d63f0220"),
+            ("blr x3", "d63f0060"),
             ("svc #0", "d4000001"),
         ]);
     }

@@ -294,6 +294,99 @@ as large as the list until it is done. Other lists of numbers and strings use a 
 never takes more than `n log n` time. A list of a struct is sorted by a merge sort written in
 stone in the prelude, which calls `cmp` about `n log n` times.
 
+### `sort_by_key`
+
+```text
+list[T].sort_by_key(key: fn(T) -> K)
+```
+
+Puts the elements in ascending order of what `key` gives for each, in place. The keys must be of
+a type `<` orders: `int`, `float`, `str`, or a type that implements `ord`, and they compare as
+`sort` compares them. `key` is called once for each element, in order, before anything moves,
+and elements with equal keys keep the order they were in. It is a statement of its own.
+
+```stone
+fn length(s: str) -> int:
+    ret s.len()
+
+words = ["pear", "fig", "kiwi"]
+words.sort_by_key(length)
+print(words)   // ['fig', 'pear', 'kiwi']
+```
+
+The methods from here to `max_by_key` take a function, and are written in stone in the
+prelude. A call that passes a function by its name, as `words.sort_by_key(length)` does,
+compiles to a copy of the method that calls that function directly.
+
+### `map`
+
+```text
+list[T].map(f: fn(T) -> U) -> list[U]
+```
+
+Returns a new list of what `f` gives for each element, in order.
+
+```stone
+fn double(x: int) -> int:
+    ret x * 2
+
+print([1, 2, 3].map(double))   // [2, 4, 6]
+```
+
+### `filter`
+
+```text
+list[T].filter(keep: fn(T) -> bool) -> list[T]
+```
+
+Returns a new list of the elements `keep` gives true for, in order.
+
+### `any`
+
+```text
+list[T].any(test: fn(T) -> bool) -> bool
+```
+
+Returns whether `test` gives true for any element. It calls `test` on each element in order and
+stops at the first that gives true, so an empty list gives false.
+
+### `all`
+
+```text
+list[T].all(test: fn(T) -> bool) -> bool
+```
+
+Returns whether `test` gives true for every element. It calls `test` on each element in order
+and stops at the first that gives false, so an empty list gives true.
+
+### `min_by_key`
+
+```text
+list[T].min_by_key(key: fn(T) -> K) -> option[T]
+```
+
+Returns `some` of the element with the least key, the first of several with an equal key, or
+`none` for an empty list. It calls `key` once for each element, in order, and the keys compare as
+for `sort_by_key`.
+
+### `max_by_key`
+
+```text
+list[T].max_by_key(key: fn(T) -> K) -> option[T]
+```
+
+Returns `some` of the element with the greatest key, the last of several with an equal key, or
+`none` for an empty list. With `min_by_key`, it gives the two ends of what `sort_by_key` would
+put in order.
+
+```stone
+fn length(s: str) -> int:
+    ret s.len()
+
+words = ["fig", "pear", "kiwi"]
+print(words.min_by_key(length), words.max_by_key(length))   // some('fig') some('kiwi')
+```
+
 ### `strip`
 
 ```text

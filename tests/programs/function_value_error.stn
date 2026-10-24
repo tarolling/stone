@@ -1,0 +1,9 @@
+// a runtime error in a function called through a value points into the function
+fn invert(x: int) -> int:
+    ret 100 / x
+
+fn apply(f: fn(int) -> int, x: int) -> int:
+    ret f(x)
+
+print(apply(invert, 4))
+print(apply(invert, 0))

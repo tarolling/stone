@@ -43,9 +43,9 @@ use crate::ast::{
 use crate::checker::{
     Analysis, DISPLAY, EQ, Enums, Instance, Method, Methods, OPTION, ORD, RESULT, Step, Structs,
     SymbolKind, Type, collect_assigned, collect_changed, may_name_enum, place, place_root,
-    place_spans, range_args, struct_display, variant_display, variants,
+    place_spans, range_args, struct_display, type_text, variant_display, variants,
 };
-use crate::codegen::context::module_routine;
+use crate::codegen::context::{function_label, module_routine};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::Span;
 use crate::stdlib::{
@@ -77,6 +77,8 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         instances,
         type_params,
         implemented,
+        function_values,
+        indirect_calls,
         ..
     } = analysis;
 
@@ -139,14 +141,18 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         methods,
         instances,
         implemented,
+        function_values,
+        indirect_calls,
         helpers: RefCell::new(Vec::new()),
         requested: RefCell::new(Vec::new()),
     };
 
     let mut functions = Vec::new();
     let mut top_level = Vec::new();
-    // a generic function is lowered once for each set of types it is called with
+    // a generic function is lowered once for each set of types it is called with, and any
+    // function again for each function value a call binds a parameter of it to
     let mut generic = HashMap::new();
+    let mut bodies = HashMap::new();
     for stmt in body {
         match &stmt.kind {
             StmtKind::FunctionDef {
@@ -161,6 +167,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
             StmtKind::FunctionDef {
                 name, args, body, ..
             } => {
+                bodies.insert(name.clone(), (&args.args, body));
                 let lowerer = Lowerer::new(&context, Some(name.clone()));
                 functions.push(lowerer.function(&args.args, body)?);
             }
@@ -179,6 +186,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
                             generic.insert(function, (&args.args, body));
                             continue;
                         }
+                        bodies.insert(function.clone(), (&args.args, body));
                         let lowerer = Lowerer::new(&context, Some(function));
                         functions.push(lowerer.function(&args.args, body)?);
                     }
@@ -208,15 +216,20 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
     let (mut made, mut instanced) = (0, 0);
     loop {
         let next = context.requested.borrow().get(instanced).cloned();
-        if let Some(instance) = next {
+        if let Some(copy) = next {
             instanced += 1;
-            let Some(&(args, body)) = generic.get(&instance.function) else {
-                return Err(format!("'{}' is not a generic function", instance.function));
+            let function = &copy.instance.function;
+            let Some(&(args, body)) = generic.get(function).or_else(|| bodies.get(function)) else {
+                return Err(format!("'{function}' has no body to copy"));
             };
-            let names = type_params
-                .get(&instance.function)
-                .ok_or_else(|| format!("'{}' has no type parameters", instance.function))?;
-            let lowerer = Lowerer::new_instance(&context, &instance, names);
+            let names = match generic.contains_key(function) {
+                true => type_params
+                    .get(function)
+                    .ok_or_else(|| format!("'{function}' has no type parameters"))?
+                    .as_slice(),
+                false => &[],
+            };
+            let lowerer = Lowerer::new_instance(&context, &copy, names, args);
             functions.push(lowerer.function(args, body)?);
             continue;
         }
@@ -230,6 +243,12 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
             Helper::Print(ty @ Type::Struct { .. }) => lowerer.struct_printer(&ty)?,
             Helper::Print(ty) => lowerer.enum_printer(&ty)?,
             Helper::Equal(ty) => lowerer.enum_comparer(&ty)?,
+            Helper::FunctionValue {
+                function,
+                owned,
+                params,
+                ret,
+            } => lowerer.function_value_thunk(&function, &owned, &params, &ret)?,
         });
     }
 
@@ -244,6 +263,16 @@ enum Helper {
     Print(Type),
     /// Compares two values of an enum type with `==`.
     Equal(Type),
+    /// Calls the stone function `function` (the label of its copy, for a generic one), whose
+    /// parameters of types `params` it owns where `owned` says so, for a function value of it:
+    /// a call through a value borrows every argument, so this gives each owned one a reference
+    /// first.
+    FunctionValue {
+        function: String,
+        owned: Vec<bool>,
+        params: Vec<Type>,
+        ret: Type,
+    },
 }
 
 impl Helper {
@@ -259,6 +288,7 @@ impl Helper {
             }
             Helper::Print(ty) => format!("stone.print_enum.{}", mangle(ty)),
             Helper::Equal(ty) => format!("stone.eq_enum.{}", mangle(ty)),
+            Helper::FunctionValue { function, .. } => format!("stone.fn_value.{function}"),
         }
     }
 }
@@ -291,6 +321,15 @@ fn mangle(ty: &Type) -> String {
             let args: Vec<String> = args.iter().map(mangle).collect();
             format!("{name}.{}", args.join("_"))
         }
+        // the parameters, then what it returns
+        Type::Function { params, ret } => {
+            let params: Vec<String> = params.iter().map(mangle).collect();
+            let ret = match **ret {
+                Type::Unit => "unit".to_string(),
+                _ => mangle(ret),
+            };
+            format!("fn{}_{}_{ret}", params.len(), params.join("_"))
+        }
         other => other.to_string(),
     }
 }
@@ -321,12 +360,59 @@ struct Context<'a> {
     /// The traits each type implements, by the type's linked name, which say whether a struct
     /// compares and orders by methods of its own.
     implemented: &'a HashMap<String, Vec<String>>,
-    /// Each copy of a generic function some code calls, in the order it was first called.
-    requested: RefCell<Vec<Instance>>,
+    /// Every function named as a value, by the name's span, with its linked name.
+    function_values: &'a HashMap<Span, String>,
+    /// The span of every call of a function value.
+    indirect_calls: &'a HashSet<Span>,
+    /// Each copy of a function some code calls, in the order it was first called: one for each
+    /// set of types a generic function is called with, and for each function value a function
+    /// is passed for a parameter it never assigns.
+    requested: RefCell<Vec<Request>>,
     /// Each helper some code calls, in the order it was first called: one that prints values of
     /// each enum and struct type the program prints, and one that compares values of each enum
     /// type it compares.
     helpers: RefCell<Vec<Helper>>,
+}
+
+/// A copy of a function lowering makes: of a generic function for the types `instance` gives
+/// its type parameters, and with each parameter `constants` names bound to the function value
+/// a call passed it, which the copy then calls directly, without taking it as an argument.
+///
+/// For example, `xs.map(double)` with `xs` a `list[int]` calls the copy of `prelude.map` with
+/// `int` for both `T` and `U`, and `f`, its parameter 1, bound to `double`.
+#[derive(Clone, Debug, PartialEq)]
+struct Request {
+    instance: Instance,
+    constants: Vec<(usize, BoundFunction)>,
+}
+
+impl Request {
+    /// Returns the copy's label: its instance's, as [`instance_label`] names it, or the
+    /// function's own name if it is not generic, then each bound parameter's position and
+    /// function's label after two dots.
+    ///
+    /// For example, `prelude.map` for `int` and `str` with `f` bound to `show` is
+    /// `prelude.map..int..str..fn1.show`.
+    fn label(&self) -> String {
+        let mut label = match self.instance.args.is_empty() {
+            true => self.instance.function.clone(),
+            false => instance_label(&self.instance.function, &self.instance.args),
+        };
+        for (position, constant) in &self.constants {
+            label.push_str(&format!("..fn{position}.{}", constant.label));
+        }
+        label
+    }
+}
+
+/// The function a parameter of a copy holds, which every call of the parameter calls directly:
+/// its stone name, for what it owns and reads, and the label of its copy.
+///
+/// For example, `first` used for `list[int]` is `first` with the label `first..list_int`.
+#[derive(Clone, Debug, PartialEq)]
+struct BoundFunction {
+    base: String,
+    label: String,
 }
 
 /// A name a `match` case binds, the values it takes, one for each value of a tuple, and how each
@@ -381,6 +467,9 @@ struct Lowerer<'a> {
     /// The label a call through a bound resolved to in this copy, by the call's span, which
     /// [`Lowerer::callee_label`] gives instead of the trait's method.
     dispatched: Option<(Span, String)>,
+    /// The function each parameter bound in this copy holds, by the parameter's name, which
+    /// the copy takes no argument for.
+    constants: HashMap<String, BoundFunction>,
     /// Each local's vreg. Empty in `main`, where assigned names are globals.
     locals: HashMap<String, VReg>,
     /// The locals that own a reference, which are released when the function returns.
@@ -442,6 +531,7 @@ impl<'a> Lowerer<'a> {
             substitution: HashMap::new(),
             instance_variables: HashMap::new(),
             dispatched: None,
+            constants: HashMap::new(),
             locals: HashMap::new(),
             counted_locals: Vec::new(),
             owned: HashMap::new(),
@@ -466,14 +556,25 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Returns a lowerer for the copy `instance` of a generic function, whose type parameters,
-    /// named `names`, stand for the instance's types.
-    fn new_instance(context: &'a Context<'a>, instance: &Instance, names: &[String]) -> Self {
+    /// Returns a lowerer for `copy` of a function, whose type parameters, named `names`, stand
+    /// for the copy's types, and whose parameters it binds hold their functions.
+    fn new_instance(
+        context: &'a Context<'a>,
+        copy: &Request,
+        names: &[String],
+        args: &[Arg],
+    ) -> Self {
+        let instance = &copy.instance;
         let function = &instance.function;
         let substitution: HashMap<String, Type> =
             names.iter().cloned().zip(instance.args.clone()).collect();
-        let mut lowerer = Lowerer::new(context, Some(instance_label(function, &instance.args)));
+        let mut lowerer = Lowerer::new(context, Some(copy.label()));
         lowerer.base = Some(function.clone());
+        for (position, constant) in &copy.constants {
+            if let Some(arg) = args.get(*position) {
+                lowerer.constants.insert(arg.arg.clone(), constant.clone());
+            }
+        }
         let scope = Some(function.clone());
         for ((owner, name), ty) in context.variables {
             if *owner != scope {
@@ -527,12 +628,82 @@ impl<'a> Lowerer<'a> {
     /// Returns the label of the copy `instance` of a generic function, asking lowering to make
     /// it.
     fn request(&self, instance: Instance) -> String {
-        let label = instance_label(&instance.function, &instance.args);
+        self.request_copy(Request {
+            instance,
+            constants: vec![],
+        })
+    }
+
+    /// Returns the label of `copy`, asking lowering to make it.
+    fn request_copy(&self, copy: Request) -> String {
+        let label = copy.label();
         let mut requested = self.context.requested.borrow_mut();
-        if !requested.contains(&instance) {
-            requested.push(instance);
+        if !requested.contains(&copy) {
+            requested.push(copy);
         }
         label
+    }
+
+    /// Returns the label to call for the stone function `name` at `call`, where the arguments
+    /// `args` go to its parameters from `first` on, and which of those it binds: none, and the
+    /// label [`Lowerer::callee_label`] gives, unless an argument is a function value known here,
+    /// a function named as a value or a parameter this copy binds, for a parameter `name` never
+    /// assigns. Then the label is of the copy that calls that function directly.
+    ///
+    /// For example, `apply(double, 1)` calls `apply..fn0.double`, binding parameter 0.
+    fn specialized_label(
+        &self,
+        name: &str,
+        call: Span,
+        args: &[Expr],
+        first: usize,
+    ) -> (String, HashSet<usize>) {
+        let through_bound = self
+            .dispatched
+            .as_ref()
+            .is_some_and(|(span, _)| *span == call);
+        let owned = self.context.owned_params.get(name);
+        let mut constants = vec![];
+        for (i, arg) in args.iter().enumerate() {
+            let ExprKind::Name { id, .. } = &arg.kind else {
+                continue;
+            };
+            if through_bound || owned.and_then(|owned| owned.get(first + i)) != Some(&false) {
+                continue;
+            }
+            let constant = match self.context.function_values.get(&arg.span) {
+                Some(base) => BoundFunction {
+                    base: base.clone(),
+                    label: self.callee_label(base, arg.span),
+                },
+                None => match self.constants.get(id) {
+                    Some(constant) => constant.clone(),
+                    None => continue,
+                },
+            };
+            constants.push((first + i, constant));
+        }
+        if constants.is_empty() {
+            return (self.callee_label(name, call), HashSet::new());
+        }
+        let instance = match self.context.instances.get(&call) {
+            Some(instance) => Instance {
+                function: instance.function.clone(),
+                args: instance.args.iter().map(|a| self.fill(a)).collect(),
+            },
+            None => Instance {
+                function: name.to_string(),
+                args: vec![],
+            },
+        };
+        let bound = constants.iter().map(|(i, _)| i - first).collect();
+        (
+            self.request_copy(Request {
+                instance,
+                constants,
+            }),
+            bound,
+        )
     }
 
     fn function(mut self, args: &[Arg], body: &[Stmt]) -> Result<Function, String> {
@@ -544,7 +715,10 @@ impl<'a> Lowerer<'a> {
             for arg in args {
                 for leaf in self.leaf_names(&arg.arg) {
                     let reg = self.local(&leaf);
-                    params.push(reg);
+                    // a parameter this copy binds takes no argument
+                    if !self.constants.contains_key(&arg.arg) {
+                        params.push(reg);
+                    }
                 }
             }
             collect_assigned(body, &mut assigned);
@@ -3088,6 +3262,14 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::Name { id, .. } => {
+                if let Some(function) = self.context.function_values.get(&expr.span) {
+                    let copy = self.callee_label(function, expr.span);
+                    return Ok(self.function_value(function, &copy, expr.span, into));
+                }
+                // a parameter this copy binds holds its function
+                if let Some(bound) = self.constants.get(id).cloned() {
+                    return Ok(self.function_value(&bound.base, &bound.label, expr.span, into));
+                }
                 if let Some(&local) = self.locals.get(id) {
                     return Ok(self.finish(Operand::Reg(local), into));
                 }
@@ -3178,6 +3360,10 @@ impl<'a> Lowerer<'a> {
             } => self.compare(left, ops, comparators, into),
 
             ExprKind::Call { func, args, .. } => {
+                if self.context.indirect_calls.contains(&expr.span) {
+                    let kinds = self.leaf_kinds(expr)?;
+                    return Ok(self.value_call(func, expr.span, args, into, &kinds)?[0]);
+                }
                 if let ExprKind::Attribute { value, .. } = &func.kind
                     && let Some(method) = self.context.methods.get(&expr.span)
                 {
@@ -3192,10 +3378,22 @@ impl<'a> Lowerer<'a> {
                         let tag = self.tag_of(id, attr)?;
                         return self.variant(&ty, tag, args, into);
                     }
+                    // the prelude's function moves the list in and gives it back sorted, as a
+                    // method changing `self` does
+                    if attr == "sort_by_key" {
+                        self.changing_call(
+                            ("prelude.sort_by_key", expr.span),
+                            value,
+                            args,
+                            None,
+                            &[],
+                        )?;
+                        return Ok(self.finish(Operand::Imm(0), into));
+                    }
                     return self.method(value, attr, args, into, kind);
                 }
                 let ExprKind::Name { id, .. } = &func.kind else {
-                    return Err("only functions can be called, by name".to_string());
+                    return Err("only a function or a function value can be called".to_string());
                 };
                 self.call(id, expr.span, args, into, kind)
             }
@@ -5152,14 +5350,29 @@ impl<'a> Lowerer<'a> {
         let Some((root, _)) = place(receiver) else {
             return Err("only a value in a variable can be changed".to_string());
         };
+        // the receiver moves in, so the function must own it, as one that assigns it does
+        if self
+            .context
+            .owned_params
+            .get(function)
+            .is_some_and(|owned| owned.first() != Some(&true))
+        {
+            return Err(format!(
+                "'{function}' changes its receiver, so it must own it"
+            ));
+        }
         // taken first, so that no call among the arguments moves what a later one reads, and
         // never the receiver, which moves into the call apart
         let mut movable = std::mem::take(&mut self.movable);
         movable.retain(|name| variable_of(name) != root);
+        let (label, bound) = self.specialized_label(function, call, args, 1);
         let indexes = self.place_indexes(receiver)?;
         let mut values = Vec::new();
-        for arg in args {
-            values.push(self.expr_flat(arg)?);
+        for (i, arg) in args.iter().enumerate() {
+            match bound.contains(&i) {
+                true => values.push(vec![]),
+                false => values.push(self.expr_flat(arg)?),
+            }
         }
         let given = self.give_references(function, args, &values, &movable, 1)?;
         let location = self.locate(receiver, &indexes)?;
@@ -5179,7 +5392,7 @@ impl<'a> Lowerer<'a> {
         call_args.extend(values.iter().flatten());
         self.push(Inst::Call {
             dsts: dsts.clone(),
-            callee: Callee::User(self.callee_label(function, call)),
+            callee: Callee::User(label),
             args: call_args,
         });
         for (value, given) in values
@@ -5206,6 +5419,123 @@ impl<'a> Lowerer<'a> {
         Ok(results)
     }
 
+    /// Makes a function value of the stone function `name`, of the type at `span`: the address
+    /// of its copy `copy`, or of a function that gives each parameter it owns a reference first,
+    /// since a call through a value borrows them all.
+    ///
+    /// For example, `double` is `v1 = fn_addr fn.double`.
+    fn function_value(
+        &mut self,
+        name: &str,
+        copy: &str,
+        span: Span,
+        into: Option<VReg>,
+    ) -> Operand {
+        let copy = copy.to_string();
+        let owned = self
+            .context
+            .owned_params
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        let label = match (owned.contains(&true), self.span_type(span)) {
+            (true, Some(Type::Function { params, ret })) => self.helper(Helper::FunctionValue {
+                function: copy,
+                owned,
+                params,
+                ret: *ret,
+            }),
+            _ => function_label(&copy),
+        };
+        let dst = self.dst(into);
+        self.push(Inst::FunctionAddress { dst, label });
+        Operand::Reg(dst)
+    }
+
+    /// Makes the function [`Helper::FunctionValue`] describes, which calls `function` with its
+    /// own arguments, retaining the counted values of each parameter `owned` says the function
+    /// owns, and returns what it returns.
+    fn function_value_thunk(
+        mut self,
+        function: &str,
+        owned: &[bool],
+        params: &[Type],
+        ret: &Type,
+    ) -> Result<Function, String> {
+        let entry = self.new_block();
+        self.start(entry);
+        let mut args = Vec::new();
+        for (param, &owns) in params.iter().zip(owned) {
+            for leaf in self.leaves(param) {
+                let reg = self.fresh();
+                if owns && RcKind::of(&leaf).is_some() {
+                    self.push(Inst::Retain {
+                        src: Operand::Reg(reg),
+                    });
+                }
+                args.push(reg);
+            }
+        }
+        let dsts: Vec<VReg> = self.leaves(ret).iter().map(|_| self.fresh()).collect();
+        self.push(Inst::Call {
+            dsts: dsts.clone(),
+            callee: Callee::User(function.to_string()),
+            args: args.iter().map(|&reg| Operand::Reg(reg)).collect(),
+        });
+        self.terminate(Terminator::Return(
+            dsts.into_iter().map(Operand::Reg).collect(),
+        ));
+        Ok(Function {
+            name: self.name.clone(),
+            params: args,
+            blocks: self.layout(),
+            vreg_count: self.vreg_count,
+            helper: true,
+        })
+    }
+
+    /// Calls the function value `func` evaluates to with `args`, returning one value for each of
+    /// `kinds` as [`Lowerer::user_call`] does. The value is evaluated first, then the arguments,
+    /// which the call borrows, since which function it calls is known only while it runs.
+    fn value_call(
+        &mut self,
+        func: &Expr,
+        call: Span,
+        args: &[Expr],
+        into: Option<VReg>,
+        kinds: &[Option<RcKind>],
+    ) -> Result<Vec<Operand>, String> {
+        // a parameter this copy binds is called directly
+        if let ExprKind::Name { id, .. } = &func.kind
+            && let Some(bound) = self.constants.get(id).cloned()
+        {
+            self.dispatched = Some((call, bound.label));
+            return self.user_call(&bound.base, call, args, into, kinds);
+        }
+        // nothing moves into a call that borrows, nor into a call among the arguments
+        self.movable.clear();
+        let function = self.expr(func)?;
+        let mut values = Vec::new();
+        for arg in args {
+            values.push(self.expr_flat(arg)?);
+        }
+        let mut dsts = vec![self.dst(into)];
+        dsts.extend((1..kinds.len()).map(|_| self.fresh()));
+        self.push(Inst::Call {
+            dsts: dsts.clone(),
+            callee: Callee::Value(function),
+            args: values.concat(),
+        });
+        for value in values.into_iter().flatten() {
+            self.release_temp(value);
+        }
+        let results: Vec<Operand> = dsts.into_iter().map(Operand::Reg).collect();
+        for (&result, &kind) in results.iter().zip(kinds) {
+            self.own(result, kind);
+        }
+        Ok(results)
+    }
+
     /// Calls the stone function `name`, which returns one value for each of `kinds`, how each is
     /// counted: several for a tuple, the first in `into` if given. The call borrows its arguments,
     /// each tuple as its values, and temporaries among them are released after it.
@@ -5219,16 +5549,21 @@ impl<'a> Lowerer<'a> {
     ) -> Result<Vec<Operand>, String> {
         // taken first, so that no call among the arguments moves what a later one reads
         let movable = std::mem::take(&mut self.movable);
+        let (label, bound) = self.specialized_label(name, call, args, 0);
         let mut values = Vec::new();
-        for arg in args {
-            values.push(self.expr_flat(arg)?);
+        for (i, arg) in args.iter().enumerate() {
+            // the copy holds a function it is given, so it is no argument
+            match bound.contains(&i) {
+                true => values.push(vec![]),
+                false => values.push(self.expr_flat(arg)?),
+            }
         }
         let given = self.give_references(name, args, &values, &movable, 0)?;
         let mut dsts = vec![self.dst(into)];
         dsts.extend((1..kinds.len()).map(|_| self.fresh()));
         self.push(Inst::Call {
             dsts: dsts.clone(),
-            callee: Callee::User(self.callee_label(name, call)),
+            callee: Callee::User(label),
             args: values.concat(),
         });
         for (value, given) in values
@@ -5490,6 +5825,10 @@ impl<'a> Lowerer<'a> {
                 args,
                 keywords,
             } => match &func.kind {
+                _ if self.context.indirect_calls.contains(&expr.span) => {
+                    let kinds = self.leaf_kinds(expr)?;
+                    self.value_call(func, expr.span, args, None, &kinds)
+                }
                 ExprKind::Name { id, .. } if self.context.structs.contains_key(id) => {
                     self.construct(id, keywords)
                 }
@@ -6302,8 +6641,21 @@ impl<'a> Lowerer<'a> {
                 }
                 self.print_char(')');
             }
-            Type::List(elem) if holds_flat(elem) || holds_enum(elem) => {
+            Type::List(elem) if holds_flat(elem) || holds_enum(elem) || holds_function(elem) => {
                 self.print_elements(elem, values[0])
+            }
+            // a function value is written as its type, which this copy knows
+            Type::Function { .. } => {
+                let text = self.fresh();
+                self.push(Inst::StrAddr {
+                    dst: text,
+                    text: type_text(ty),
+                });
+                self.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Print(Type::Str),
+                    args: vec![Operand::Reg(text)],
+                });
             }
             Type::Map(key, value) => self.print_entries(Some(key), value, values[0]),
             // its own display says how it is written
@@ -6553,6 +6905,16 @@ fn holds_flat(ty: &Type) -> bool {
     match ty {
         Type::Tuple(_) | Type::Struct { .. } | Type::Map(..) => true,
         Type::List(elem) => holds_flat(elem),
+        _ => false,
+    }
+}
+
+/// Returns whether a value of type `ty` is a function value or a list of them, at any depth,
+/// which lowering prints as its type rather than with a runtime printer.
+fn holds_function(ty: &Type) -> bool {
+    match ty {
+        Type::Function { .. } => true,
+        Type::List(elem) => holds_function(elem),
         _ => false,
     }
 }

@@ -189,7 +189,7 @@ fn main() -> ExitCode {
         ExecutionMode::Run { file, args } => with_program(&file, |checked, _| {
             driver::run_module(
                 &checked.module,
-                &checked.methods,
+                &checked.calls,
                 &mut std::io::BufReader::new(std::io::stdin()),
                 &mut std::io::stdout(),
                 &args,

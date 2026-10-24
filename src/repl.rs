@@ -5,7 +5,7 @@
 //! and then `x + 1` prints `2`.
 
 use crate::ast::{Mod, Stmt, StmtKind};
-use crate::checker::Methods;
+use crate::checker::Calls;
 use crate::diagnostic::{Diagnostic, Diagnostics};
 use crate::driver;
 use crate::interpreter::{Exit, Interpreter};
@@ -64,8 +64,8 @@ struct Session {
 struct Prepared {
     /// The linked program of the session and the entry.
     module: Mod,
-    /// How the program's method calls were resolved.
-    methods: Methods,
+    /// How the program's method calls were resolved, and its function values and calls of them.
+    calls: Calls,
     /// How many lines of the program come before the entry.
     offset: usize,
     /// The entry's statements, to add to the session.
@@ -106,7 +106,7 @@ impl Session {
             // a warning would repeat with every later entry, so the session leaves them out
             (files, Ok(checked)) => Ok(Prepared {
                 module: checked.module,
-                methods: checked.methods,
+                calls: checked.calls,
                 offset,
                 chunks,
                 files,
@@ -280,7 +280,7 @@ fn submit(
         }
     };
     let statements = prepared.statements();
-    let methods = std::mem::take(&mut prepared.methods);
+    let calls = std::mem::take(&mut prepared.calls);
     let Prepared {
         files,
         history,
@@ -290,7 +290,7 @@ fn submit(
     let (files, history, offset) = (files.clone(), history.clone(), *offset);
     // kept even if it fails, since the statements before the failure have already run
     session.commit(prepared);
-    let result = interpreter.run_entry(&statements, methods);
+    let result = interpreter.run_entry(&statements, calls);
     interpreter.output().flush()?;
     match result {
         Ok(()) => Ok(None),

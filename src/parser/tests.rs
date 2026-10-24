@@ -232,6 +232,10 @@ fn strip_type(ty: TypeExpr) -> TypeExpr {
             name,
             args: args.into_iter().map(strip_type).collect(),
         },
+        TypeExprKind::Function { params, ret } => TypeExprKind::Function {
+            params: params.into_iter().map(strip_type).collect(),
+            ret: ret.map(|ret| Box::new(strip_type(*ret))),
+        },
         kind => kind,
     };
     TypeExpr {
@@ -1512,6 +1516,46 @@ fn map_types_parse() {
             Some("map[int, str]".to_string())
         )
     );
+}
+
+#[test]
+fn function_types_parse() {
+    assert_eq!(
+        signature_of(
+            "fn f(p: fn(int, str) -> bool, q: fn(), r: fn(list[int],)) -> fn(int) -> fn() -> int: ret\n"
+        ),
+        (
+            ["fn(int, str) -> bool", "fn()", "fn(list[int])"]
+                .map(|t| Some(t.to_string()))
+                .to_vec(),
+            Some("fn(int) -> fn() -> int".to_string())
+        )
+    );
+}
+
+#[test]
+fn a_function_type_needs_parentheses() {
+    assert_eq!(
+        error_of("fn f(p: fn -> int): ret\n"),
+        ("expected '(', found '->'".to_string(), 1, 12)
+    );
+}
+
+#[test]
+fn any_value_can_be_called() {
+    let Mod::Module { body } =
+        parse_within("fs[0](1)(2)\n".to_string(), Duration::from_secs(5)).unwrap();
+    let StmtKind::Expr { value } = &body[0].kind else {
+        panic!("expected an expression statement");
+    };
+    let ExprKind::Call { func, args, .. } = &value.kind else {
+        panic!("expected a call");
+    };
+    assert_eq!(args.len(), 1);
+    let ExprKind::Call { func, .. } = &func.kind else {
+        panic!("expected a call of a call");
+    };
+    assert!(matches!(func.kind, ExprKind::Subscript { .. }));
 }
 
 #[test]

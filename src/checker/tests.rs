@@ -776,19 +776,211 @@ fn functions_must_be_top_level() {
     );
 }
 
+const DOUBLE: &str = "fn double(x: int) -> int:\n    ret x * 2\n";
+
 #[test]
-fn functions_are_not_values() {
+fn functions_are_values() {
+    let source = format!(
+        "{DOUBLE}fn first[T](xs: list[T]) -> T:\n    ret xs[0]\n\
+         f = double\nfs = [double, f]\ng = first\ny = g([\"a\"])\nz = fs[1](f(2))\n"
+    );
+    assert_eq!(type_of_symbol(&source, "f"), "fn(int) -> int");
+    assert_eq!(type_of_symbol(&source, "fs"), "list[fn(int) -> int]");
+    assert_eq!(type_of_symbol(&source, "g"), "fn(list[str]) -> str");
+    assert_eq!(type_of_symbol(&source, "z"), "int");
+}
+
+#[test]
+fn function_types_are_written_in_signatures() {
+    let source = format!(
+        "{DOUBLE}fn apply(f: fn(int) -> int, x: int) -> int:\n    ret f(x)\n\
+         fn run(f: fn()):\n    f()\n\
+         fn twice(f: fn(int) -> int) -> fn(int) -> int:\n    ret f\n\
+         y = apply(twice(double), 1)\n"
+    );
+    assert_eq!(type_of_symbol(&source, "y"), "int");
+    assert_eq!(type_of_symbol(&source, "run"), "fn(fn())");
+}
+
+#[test]
+fn a_function_value_must_have_the_right_type() {
+    let source = format!(
+        "{DOUBLE}fn apply(f: fn(int) -> bool, x: int) -> bool:\n    ret f(x)\nb = apply(double, 1)\n"
+    );
     assert_error(
-        "fn f() -> int:\n    ret 1\nx = f\n",
-        "'f' is a function, so it can only be called",
-        3,
+        &source,
+        "expected fn(int) -> bool, found fn(int) -> int",
+        5,
+        11,
+    );
+}
+
+#[test]
+fn a_call_through_a_value_is_checked() {
+    let f = format!("{DOUBLE}f = double\n");
+    assert_error(
+        &format!("{f}x = f(1, 2)\n"),
+        "'f' takes 1 argument, but 2 were given",
+        4,
         5,
     );
     assert_error(
+        &format!("{f}x = f(\"a\")\n"),
+        "expected int, found str",
+        4,
+        7,
+    );
+    assert_error(
+        &format!("{f}x = [f][0](y=1)\n"),
+        "only a struct is made with named values; pass this value without its name",
+        4,
+        12,
+    );
+}
+
+#[test]
+fn a_function_value_that_returns_nothing_is_only_a_statement() {
+    assert_error(
+        "fn hi(n: int):\n    print(n)\nf = hi\nf(1)\nx = f(2)\n",
+        "'f' returns no value, so it can only be called as a statement of its own",
+        5,
+        5,
+    );
+}
+
+#[test]
+fn function_values_cannot_be_compared_or_keys() {
+    let f = format!("{DOUBLE}f = double\n");
+    assert_error(
+        &format!("{f}b = f == double\n"),
+        "'==' and '!=' cannot compare fn(int) -> int",
+        4,
+        5,
+    );
+    assert_error(
+        &format!("{f}b = (1, f) == (1, f)\n"),
+        "'==' and '!=' cannot compare tuple[int, fn(int) -> int], since it holds fn(int) -> int",
+        4,
+        5,
+    );
+    assert_error(
+        &format!("{f}m = {{f: 1}}\n"),
+        "a map key must be int, str, or bool, found fn(int) -> int",
+        4,
+        6,
+    );
+    assert_error(
+        &format!("{f}x = f + 1\n"),
+        "'+' needs int, float, or str operands, found fn(int) -> int",
+        4,
+        5,
+    );
+}
+
+#[test]
+fn a_field_holding_a_function_is_called_like_a_method() {
+    let step = format!(
+        "{DOUBLE}struct Step:\n    run: fn(int) -> int\n    n: int\n\
+         s = Step(run=double, n=1)\n"
+    );
+    assert_eq!(type_of_symbol(&format!("{step}y = s.run(2)\n"), "y"), "int");
+    assert_error(
+        &format!("{step}y = s.run(\"a\")\n"),
+        "expected int, found str",
+        7,
+        11,
+    );
+    assert_error(
+        &format!("{step}y = s.n(1)\n"),
+        "'Step' has no method 'n'; 'n' is a field of 'Step', so read it without parentheses",
+        7,
+        7,
+    );
+    // a global a function reads before its assignment is checked is settled at the end
+    let late = format!(
+        "{DOUBLE}struct Step:\n    run: fn(int) -> int\n\
+         fn go() -> int:\n    ret s.run(3)\ns = Step(run=double)\nprint(go())\n"
+    );
+    assert_eq!(errors(&late), []);
+}
+
+#[test]
+fn list_helpers_take_functions_of_the_elements() {
+    let start = format!("{DOUBLE}fn pair(x: int) -> list[int]:\n    ret [x]\nxs = [1]\n");
+    let source = format!("{start}ys = xs.map(double)\nb = xs.any(pair)\n");
+    assert_eq!(
+        linked_errors(&source),
+        [(
+            "expected fn(int) -> bool, found fn(int) -> list[int]".to_string(),
+            7,
+            12
+        )]
+    );
+    let cases = [
+        (
+            "a = \"s\".map(double)\n",
+            "'map' is a method of lists, but this is str",
+            5,
+        ),
+        (
+            "a = [\"s\"].map(double)\n",
+            "expected fn(str) -> int, found fn(int) -> int",
+            15,
+        ),
+        (
+            "a = xs.sort_by_key(double)\n",
+            "'sort_by_key' changes a list and returns none, so it can only be a statement of its \
+             own",
+            5,
+        ),
+        (
+            "xs.sort_by_key(pair)\n",
+            "'list[int]' does not implement 'ord', which 'sort_by_key' needs for 'K'",
+            1,
+        ),
+        (
+            "a = xs.map(double, 1)\n",
+            "'map' takes 1 argument, but 2 were given",
+            5,
+        ),
+    ];
+    for (line, message, col) in cases {
+        assert_eq!(
+            linked_errors(&format!("{start}{line}")),
+            [(message.to_string(), 6, col)],
+            "{line}"
+        );
+    }
+    assert_eq!(
+        linked_type(&format!("{start}m = xs.max_by_key(double)\n"), "m"),
+        "option[int]"
+    );
+}
+
+#[test]
+fn builtins_are_not_values_yet() {
+    assert_error(
         "x = print\n",
-        "'print' is a function, so it can only be called",
+        "'print' is a builtin, which cannot be a value yet; to pass it, define a function that \
+         calls it",
         1,
         5,
+    );
+}
+
+#[test]
+fn a_function_value_in_generic_code_has_a_known_type() {
+    let source = "fn id[T](x: T) -> T:\n    ret x\n\
+                  fn wrap[T](x: T) -> T:\n    f = id\n    ret f(x)\n\
+                  fn fine[T](x: T) -> int:\n    f = len_of\n    ret f(\"ab\")\n\
+                  fn len_of(s: str) -> int:\n    ret s.len()\n\
+                  y = wrap(1)\nz = fine(1)\n";
+    assert_error(
+        source,
+        "'id' would be a value of type fn(T) -> T, which depends on the type parameter 'T'; a \
+         function value cannot have such a type yet, so take it as a parameter instead",
+        4,
+        9,
     );
 }
 
@@ -805,7 +997,18 @@ fn functions_and_builtins_cannot_be_assigned() {
 
 #[test]
 fn only_functions_can_be_called() {
-    assert_error("x = 1\nx(2)\n", "'x' is not a function", 2, 1);
+    assert_error(
+        "x = 1\nx(2)\n",
+        "'x' is int, not a function, so it cannot be called",
+        2,
+        1,
+    );
+    assert_error(
+        "x = [1]\nx[0](2)\n",
+        "this is int, not a function, so it cannot be called",
+        2,
+        1,
+    );
 }
 
 #[test]
@@ -2023,7 +2226,9 @@ fn an_os_function_is_not_a_value() {
     assert_eq!(
         linked_errors("use os.pid\nx = pid\n"),
         [(
-            "'os.pid' is a function, so it can only be called".to_string(),
+            "'os.pid' is a builtin, which cannot be a value yet; to pass it, define a function \
+             that calls it"
+                .to_string(),
             2,
             5
         )]

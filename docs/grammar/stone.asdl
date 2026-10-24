@@ -89,4 +89,6 @@ module stone
          | Tuple(type* elts)
          -- a struct, such as Point, an enum, such as Shape, option[T], or a type parameter, such as T
          | Named(identifier name, type* args)
+         -- a function, such as fn(int) -> bool, with no ret for one that returns no value
+         | Function(type* params, type? ret)
 }

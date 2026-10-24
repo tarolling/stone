@@ -84,3 +84,109 @@ fn sort[T: ord](xs: list[T]) -> list[T]:
         xs = out
         width *= 2
     ret xs
+
+// The list of what `f` gives for each value of `xs`, in order, for `xs.map(f)`.
+fn map[T, U](xs: list[T], f: fn(T) -> U) -> list[U]:
+    out = []
+    for x in xs:
+        out.append(f(x))
+    ret out
+
+// The values of `xs` that `keep` gives true for, in order, for `xs.filter(keep)`.
+fn filter[T](xs: list[T], keep: fn(T) -> bool) -> list[T]:
+    out = []
+    for x in xs:
+        if keep(x):
+            out.append(x)
+    ret out
+
+// Whether `test` gives true for any value of `xs`, trying them in order until one does, for
+// `xs.any(test)`.
+fn any[T](xs: list[T], test: fn(T) -> bool) -> bool:
+    for x in xs:
+        if test(x):
+            ret true
+    ret false
+
+// Whether `test` gives true for every value of `xs`, trying them in order until one does not,
+// for `xs.all(test)`.
+fn all[T](xs: list[T], test: fn(T) -> bool) -> bool:
+    for x in xs:
+        if not test(x):
+            ret false
+    ret true
+
+// Sorts `xs` by what `key` gives for each value, for `xs.sort_by_key(key)`. It calls `key` once
+// for each value, in order, then merges ever longer runs of their positions as `sort` merges
+// values, so values with equal keys keep their order.
+fn sort_by_key[T, K: ord](xs: list[T], key: fn(T) -> K) -> list[T]:
+    keys = []
+    order = []
+    n = 0
+    for x in xs:
+        keys.append(key(x))
+        order.append(n)
+        n += 1
+    width = 1
+    while width < n:
+        out = []
+        start = 0
+        while start < n:
+            mid = start + width
+            if mid > n:
+                mid = n
+            end = mid + width
+            if end > n:
+                end = n
+            i = start
+            j = mid
+            while i < mid and j < end:
+                if keys[order[j]] < keys[order[i]]:
+                    out.append(order[j])
+                    j += 1
+                else:
+                    out.append(order[i])
+                    i += 1
+            while i < mid:
+                out.append(order[i])
+                i += 1
+            while j < end:
+                out.append(order[j])
+                j += 1
+            start = end
+        order = out
+        width *= 2
+    sorted = []
+    for position in order:
+        sorted.append(xs[position])
+    // `xs.sort_by_key(key)` moves the list in for its sorted copy, so this owns it, as `sort` does
+    xs = sorted
+    ret xs
+
+// The first value of `xs` with the least key, or none if `xs` is empty, for
+// `xs.min_by_key(key)`, which calls `key` once for each value, in order.
+fn min_by_key[T, K: ord](xs: list[T], key: fn(T) -> K) -> option[T]:
+    if xs.len() == 0:
+        ret none
+    best = 0
+    best_key = key(xs[0])
+    for i in range(1, xs.len()):
+        k = key(xs[i])
+        if k < best_key:
+            best = i
+            best_key = k
+    ret some(xs[best])
+
+// The last value of `xs` with the greatest key, or none if `xs` is empty, for
+// `xs.max_by_key(key)`, so it is the value `sort_by_key` puts last.
+fn max_by_key[T, K: ord](xs: list[T], key: fn(T) -> K) -> option[T]:
+    if xs.len() == 0:
+        ret none
+    best = 0
+    best_key = key(xs[0])
+    for i in range(1, xs.len()):
+        k = key(xs[i])
+        if k >= best_key:
+            best = i
+            best_key = k
+    ret some(xs[best])

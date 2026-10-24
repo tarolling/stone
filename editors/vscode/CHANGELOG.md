@@ -10,6 +10,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Function values: hover shows a value's function type, such as `fn(int) -> int`, and a function
+  named as a value hovers, goes to its definition, and is found by references and rename like a
+  call of it. Completion after a list and a `.` offers `map`, `filter`, `any`, `all`,
+  `sort_by_key`, `min_by_key`, and `max_by_key`.
+
 ## [0.3.3] - 2026-10-21
 
 ### Added

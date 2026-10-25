@@ -5,7 +5,7 @@ use fs
 values = []
 for i in range(256):
     values.append(i)
-everything = bytes(values)
+everything = bytes(values).unwrap()
 print(fs.write_bytes("all.bin", everything))
 print(fs.append_bytes("all.bin", b"\x00end"))
 data = fs.read_bytes("all.bin").unwrap()

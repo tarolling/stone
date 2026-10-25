@@ -48,6 +48,18 @@ pub trait ord:
 pub trait display:
     fn display(self) -> str
 
+// How a value of type `T` becomes a value of the implementing type, which `Type(value)` calls,
+// as in `Fahrenheit(c)` after `impl from[Celsius] for Fahrenheit:`. Every type converts from
+// itself, every value to `str` through `display`, and an `int` to a `float`.
+pub trait from[T]:
+    fn from(value: T) -> Self
+
+// How a value of type `T` may become a value of the implementing type, which `Type(value)`
+// calls, giving the error if it cannot, as `int("12")` gives `ok(12)` and `int("x")` an `err`.
+// A `float` or a `str` may become an `int`, a `str` a `float`, and a `list[int]` `bytes`.
+pub trait try_from[T]:
+    fn try_from(value: T) -> result[Self, str]
+
 // Sorts a list of values of a type that implements `ord`, for `xs.sort()` on a list of anything
 // but `int`, `float`, and `str`. It merges ever longer runs, taking from the right run only when
 // its value is less than the left's, so equal values keep their order, and every program gets

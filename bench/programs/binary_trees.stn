@@ -28,4 +28,4 @@ fn run(max_depth: int):
         depth += 2
     print(max_depth, check(long_lived))
 
-run(int(args()[0]))
+run(int(args()[0]).unwrap())

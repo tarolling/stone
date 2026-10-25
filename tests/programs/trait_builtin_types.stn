@@ -25,7 +25,7 @@ impl Describe for bool:
 
 impl Describe for float:
     fn describe(self) -> str:
-        ret "about " + str(int(self))
+        ret "about " + str(int(self).unwrap())
 
 struct Point:
     x: int

@@ -1,0 +1,4 @@
+n = int("12").unwrap()
+print(n)
+m = int("1x").unwrap()
+print(m)

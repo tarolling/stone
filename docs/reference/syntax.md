@@ -16,6 +16,8 @@ grammar is
 | `True`, `False` | `true`, `false` |
 | `None`, `Optional[int]` | `none` and `some(x)`, of type `option[int]` |
 | `raise`, `try:` / `except:` | return a `result[T, E]`, `ok(x)` or `err(e)`, and pass an error on with `?` |
+| `int("x")` raises `ValueError` | `int(s)` and `float(s)` of a string give a `result`, as `int(x)` of a float does |
+| `Fahrenheit.from_celsius(c)` | `Fahrenheit(c)`, a conversion through `impl from[Celsius] for Fahrenheit:` |
 | `class Shape(Enum):` | `enum Shape:`, whose variants can hold values, as in Rust |
 | `@dataclass class Point:` | `struct Point:` with a typed field per line, made as `Point(x=1.0, y=2.0)` |
 | `match x:` / `case P:` | `match x:` / `case P:`, which must cover every value |
@@ -226,7 +228,7 @@ From lowest to highest precedence:
 | calls `f(x)`, method calls `xs.len()`, fields `p.x`, indexing `xs[i]`, slicing `xs[i:j:k]`, `?` | `?`: a result or an option, in a function that returns one |
 
 `x?` gives the value an `ok` or a `some` holds, and on an `err` or `none` returns it from the
-function, so `n = s.parse_int()?` passes a parse error to the caller (see
+function, so `n = int(s)?` passes a parse error to the caller (see
 [Types](types.md#passing-errors-on)).
 
 Comparisons chain, so `a < b <= c` means `a < b and b <= c` with `b` evaluated once.

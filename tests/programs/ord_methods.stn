@@ -2,7 +2,7 @@
 
 print(5.min(3), 5.max(3), 3.min(3), (-2).clamp(0, 10), 7.clamp(0, 10), 12.clamp(0, 10))
 print(1.5.min(2.5), 1.5.max(2.5), 0.0.min(-0.0), (-0.0).max(0.0), 2.5.clamp(1.0, 2.0))
-nan = float("nan")
+nan = float("nan").unwrap()
 print(nan.min(1.0), 1.0.min(nan), nan.max(1.0), 1.0.max(nan), nan.clamp(0.0, 1.0))
 print("pear".min("apple"), "pear".max("apple"), "m".clamp("a", "f"), b"b".max(b"a"))
 

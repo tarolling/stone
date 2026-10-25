@@ -79,6 +79,6 @@ bodies.append(Body(x=1.28943695621391310e+01, y=-1.51111514016986312e+01, z=-2.2
 bodies.append(Body(x=1.53796971148509165e+01, y=-2.59193146099879641e+01, z=1.79258772950371181e-01, vx=2.68067772490389322e-03 * days, vy=1.62824170038242295e-03 * days, vz=-9.51592254519715870e-05 * days, mass=5.15138902046611451e-05 * solar_mass))
 bodies = offset_momentum(bodies, solar_mass)
 // energies scaled to ints, so C need not print floats the way stone does
-print(int(energy(bodies) * 1000000000.0))
-bodies = advance(bodies, 0.01, int(args()[0]))
-print(int(energy(bodies) * 1000000000.0))
+print(int(energy(bodies) * 1000000000.0).unwrap())
+bodies = advance(bodies, 0.01, int(args()[0]).unwrap())
+print(int(energy(bodies) * 1000000000.0).unwrap())

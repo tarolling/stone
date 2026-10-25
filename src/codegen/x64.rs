@@ -88,9 +88,7 @@ impl AssemblyGenerator for X64Generator {
         self.emit_failures();
         self.emit_list_runtime()?;
         let formats_floats = self.ctx.prints_floats || self.ctx.uses(&["stone.str_float"]);
-        let parses_floats = self
-            .ctx
-            .uses(&["stone.parse_float", "stone.parse_float_result"]);
+        let parses_floats = self.ctx.uses(&["stone.parse_float_result"]);
         if formats_floats {
             floats::float_runtime(self);
         }
@@ -402,8 +400,6 @@ impl X64Generator {
             builtins::time_runtime(self, &time, (&negative, &too_large));
         }
         let parsing: Vec<&str> = [
-            "stone.parse_int",
-            "stone.parse_float",
             "stone.parse_int_result",
             "stone.parse_float_result",
             "stone.map_missing_str",
@@ -616,16 +612,17 @@ mod tests {
         assert!(!assembly.contains("idiv"), "{assembly}");
         assert!(assembly.contains("\timul\trdx"), "{assembly}");
         assert!(!assembly.contains("division by zero"), "{assembly}");
-        let checked = assemble("x = 7\ny = int(\"3\")\nprint(x % y)\n").unwrap();
+        let checked = assemble("x = 7\ny = int(\"3\").unwrap()\nprint(x % y)\n").unwrap();
         assert!(checked.contains("division by zero"), "{checked}");
         assert!(!checked.contains("integer overflow"), "{checked}");
     }
 
     #[test]
     fn powers_and_float_remainders_do_not_call_libc() {
-        let assembly =
-            assemble("x = 2.5\nn = int(\"3\")\nprint(x ** n, x ** -2, x % 0.75, n ** n, n ** 2)\n")
-                .unwrap();
+        let assembly = assemble(
+            "x = 2.5\nn = int(\"3\").unwrap()\nprint(x ** n, x ** -2, x % 0.75, n ** n, n ** 2)\n",
+        )
+        .unwrap();
         assert!(!assembly.contains("\tcall\tpow"), "{assembly}");
         assert!(!assembly.contains("\tcall\tfmod"), "{assembly}");
         assert!(assembly.contains("\tfprem"), "{assembly}");
@@ -674,7 +671,7 @@ mod tests {
         let assembly = assemble("x = float(\"1.5\")\n").unwrap();
         assert!(assembly.contains("stone.decimal_to_float:"));
         assert!(!assembly.contains("stone.format_float:"));
-        assert!(!assembly.contains("stone.parse_int:"));
+        assert!(!assembly.contains("stone.parse_int_result:"));
     }
 
     #[test]
@@ -888,7 +885,7 @@ mod tests {
     #[test]
     fn division_by_a_variable_zero_or_minus_one_keeps_the_checks() {
         for divisor in ["y", "0", "-1"] {
-            let source = format!("x = 7\ny = int(\"2\")\nprint(x / {divisor})\n");
+            let source = format!("x = 7\ny = int(\"2\").unwrap()\nprint(x / {divisor})\n");
             let assembly = assemble(&source).unwrap();
             assert!(assembly.contains("division by zero"), "{divisor}");
             assert!(
@@ -1057,7 +1054,7 @@ mod tests {
             "stone.eof:",
             "stone.args:",
             "stone.argc",
-            "stone.parse_int:",
+            "stone.parse_int_result:",
             "stone.str_int:",
             "stone.str_split:",
             "stone.format_float:",
@@ -1077,8 +1074,8 @@ mod tests {
         assert!(arguments.contains("stone.args:"), "{arguments}");
         assert!(arguments.contains("[rip + stone.argc], edi"), "{arguments}");
 
-        let parsing = assemble("x = int(\"1\")\n").unwrap();
-        assert!(parsing.contains("stone.parse_int:"), "{parsing}");
+        let parsing = assemble("x = int(\"1\").unwrap()\n").unwrap();
+        assert!(parsing.contains("stone.parse_int_result:"), "{parsing}");
         assert!(parsing.contains("stone.fail:"), "{parsing}");
 
         let converting = assemble("x = str(1.5)\n").unwrap();

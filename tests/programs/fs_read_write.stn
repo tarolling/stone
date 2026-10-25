@@ -31,7 +31,7 @@ lines = fs.read_lines("big.txt").unwrap()
 print(lines.len(), lines[0], lines[1999])
 total = 0
 for line in lines:
-    total += line.parse_int().unwrap()
+    total += int(line).unwrap()
 print(total)
 
 print(fs.remove("notes.txt"))

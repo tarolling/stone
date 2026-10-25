@@ -16,7 +16,7 @@ fn wait() -> result[int, str]:
     // zero, a negative number, or nan waits forever
     s.set_timeout(0.0)
     s.set_timeout(-1.0)
-    s.set_timeout(float("nan"))
+    s.set_timeout(float("nan").unwrap())
     c.send("again\n")?
     print(s.read_line())
     ret ok(0)

@@ -51,7 +51,7 @@ enum Result[T, E]:
 fn parse(s: str) -> Result[int, str]:
     if s == "":
         ret Result.Err("empty")
-    ret Result.Ok(int(s))
+    ret Result.Ok(int(s).unwrap())
 
 p = Pair(first=1, second="one")
 print(p, p.swap())

@@ -46,7 +46,7 @@ for i in range(6000):
     x = scaled(m, seed % 2150 - 1126)
     seed = next(seed)
     y = float(m % 100000000) * 10.0 ** (seed % 640 - 330)
-    if float(str(x)) != x or float(str(y)) != y:
+    if float(str(x)).unwrap() != x or float(str(y)).unwrap() != y:
         failures = failures + 1
     if i % 6 == 0:
         print(x, y)

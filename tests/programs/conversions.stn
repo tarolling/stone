@@ -1,0 +1,63 @@
+// `Type(value)` converts through the prelude's `from`, or `try_from` for a conversion that may
+// fail, which gives a result
+struct Celsius:
+    degrees: float
+
+struct Fahrenheit:
+    degrees: float
+
+impl from[Celsius] for Fahrenheit:
+    fn from(value: Celsius) -> Self:
+        ret Fahrenheit(degrees=value.degrees * 9.0 / 5.0 + 32.0)
+
+impl try_from[str] for Celsius:
+    fn try_from(value: str) -> result[Self, str]:
+        degrees = float(value.strip())?
+        if degrees < -273.15:
+            ret err("below absolute zero: {degrees}")
+        ret ok(Celsius(degrees=degrees))
+
+// beside `Celsius`, a builtin type may convert from it
+impl from[Celsius] for float:
+    fn from(value: Celsius) -> float:
+        ret value.degrees
+
+struct Box[T]:
+    items: list[T]
+
+impl from[T] for Box:
+    fn from(value: T) -> Self:
+        ret Box(items=[value])
+
+fn widen[T: from[int]](n: int) -> T:
+    ret T(n)
+
+fn parse_all[T: try_from[str]](texts: list[str]) -> result[list[T], str]:
+    out = []
+    for text in texts:
+        out.append(T(text)?)
+    ret ok(out)
+
+fn total(texts: list[str]) -> result[int, str]:
+    t = 0
+    for n in parse_all(texts)?:
+        t += n
+    ret ok(t)
+
+fn boil(texts: list[str]) -> result[list[Celsius], str]:
+    ret parse_all(texts)
+
+boiling = Celsius(degrees=100.0)
+print(Fahrenheit(boiling), float(boiling), Celsius(boiling))
+print(Celsius("21.5"), Celsius("-300"), Celsius("warm"))
+print(Box(3), Box("a").items)
+print(widen(3) + 0.5, str(widen(4)))
+print(total(["1", "2", "39"]), total(["1", "x"]))
+print(boil(["100", " 0 "]), boil(["5", "-500"]))
+
+// the builtin conversions
+print(int(2.9), int(-2.9), int(1e300), int(float("nan").unwrap()))
+print(int("42"), int(" -7\n"), int("4.5"), float("2.5"), float("1e999"), float("x"))
+print(float(3), int(5), str(1.5), str([1, 2]), str(boiling), str(true))
+print(bytes([104, 105]), bytes([1, 300]), bytes([]))
+print(int("9").unwrap() + int(2.5).unwrap_or(0))

@@ -72,7 +72,8 @@ fn milliseconds(seconds: float) -> int:
     ms = seconds * 1000.0
     if ms >= 2147483647.0:
         ret 2147483647
-    whole = int(ms)
+    // in range, so the conversion never fails
+    whole = int(ms).unwrap()
     if float(whole) < ms:
         ret whole + 1
     ret whole
@@ -366,7 +367,7 @@ fn read_resolver() -> Resolver:
                 parts = option.split(":")
                 if parts.len() != 2:
                     cont
-                value = parts[1].parse_int().unwrap_or(-1)
+                value = int(parts[1]).unwrap_or(-1)
                 if value < 0:
                     cont
                 if parts[0] == "ndots":
@@ -384,13 +385,13 @@ fn read_resolver() -> Resolver:
 fn parse_server(text: str) -> option[tuple[list[int], int]]:
     if text.startswith("["):
         close = text.find("]:")?
-        port = text[close + 2:].parse_int().ok()?
+        port = int(text[close + 2:]).ok()?
         if port < 1 or port > 65535:
             ret none
         ret some((parse_ipv6(text[1:close])?, port))
     parts = text.split(":")
     if parts.len() == 2:
-        port = parts[1].parse_int().ok()?
+        port = int(parts[1]).ok()?
         if port < 1 or port > 65535:
             ret none
         ret some((parse_ipv4(parts[0])?, port))

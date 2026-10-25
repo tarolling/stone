@@ -19,4 +19,4 @@ fn longest(limit: int) -> int:
             best_start = start
     ret best_start
 
-print(longest(int(args()[0])))
+print(longest(int(args()[0]).unwrap()))

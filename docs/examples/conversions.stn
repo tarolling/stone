@@ -1,0 +1,39 @@
+struct Celsius:
+    degrees: float
+
+struct Fahrenheit:
+    degrees: float
+
+// a conversion that cannot fail
+impl from[Celsius] for Fahrenheit:
+    fn from(value: Celsius) -> Self:
+        ret Fahrenheit(degrees=value.degrees * 9.0 / 5.0 + 32.0)
+
+// and one that can
+impl try_from[str] for Celsius:
+    fn try_from(value: str) -> result[Self, str]:
+        degrees = float(value)?
+        if degrees < -273.15:
+            ret err("colder than absolute zero")
+        ret ok(Celsius(degrees=degrees))
+
+fn read_all[T: try_from[str]](texts: list[str]) -> result[list[T], str]:
+    out = []
+    for text in texts:
+        out.append(T(text)?)
+    ret ok(out)
+
+// what the result is used as says which type T is
+fn total(texts: list[str]) -> result[int, str]:
+    t = 0
+    for n in read_all(texts)?:
+        t += n
+    ret ok(t)
+
+fn temperatures(texts: list[str]) -> result[list[Celsius], str]:
+    ret read_all(texts)
+
+print(Fahrenheit(Celsius(degrees=100.0)))
+print(Celsius("21.5"), Celsius("-300"), Celsius("warm"))
+print(float(2), int(2.9), int("12"), str(Celsius(degrees=1.0)))
+print(total(["1", "2"]), total(["1", "x"]), temperatures(["0", "37"]))

@@ -1,7 +1,7 @@
 // input returns ok of each line, an empty one too, and err once the input is over
 fn read_number() -> result[int, str]:
     line = input()?
-    ret line.parse_int()
+    ret int(line)
 
 print(input())
 print(input())

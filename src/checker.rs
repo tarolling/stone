@@ -268,8 +268,8 @@ pub const OPTION: &str = "option";
 /// returns.
 pub const ORDERING: &str = "ordering";
 
-/// The name of the prelude's enum whose values are `ok(x)` and `err(e)`, which `parse_int` and
-/// `parse_float` return, and which `?` unwraps.
+/// The name of the prelude's enum whose values are `ok(x)` and `err(e)`, which a conversion that
+/// may fail, such as `int(s)`, returns, and which `?` unwraps.
 pub const RESULT: &str = "result";
 
 /// The name of the prelude's trait of values `==` compares, which every type it compares part by
@@ -283,6 +283,13 @@ pub const ORD: &str = "ord";
 /// The name of the prelude's trait of values that `print`, `str`, and interpolation write as
 /// text, which every type implements, and a struct may implement itself.
 pub const DISPLAY: &str = "display";
+
+/// The name of the prelude's trait of conversions that cannot fail, which `Type(value)` calls.
+pub const FROM: &str = "from";
+
+/// The name of the prelude's trait of conversions that may fail, which `Type(value)` calls,
+/// giving a result.
+pub const TRY_FROM: &str = "try_from";
 
 /// Returns whether the variants of the enum `name` are written and printed alone, as the
 /// prelude's are: `some(1)`, not `option.some(1)`.
@@ -400,22 +407,108 @@ pub struct Method {
     /// Whether the method changes `self`, and so the receiver, in place.
     pub changes: bool,
     /// For a call through a bound, as `x.area()` with `x` of type `T` in
-    /// `fn f[T: Shape](x: T):`, the function each type that implements the trait calls, by the
-    /// type's linked name (`int` for a builtin type), and `function` is the trait's method, such
-    /// as `Shape.area`. A function named by its trait is the trait's default method, called
-    /// with the type as `Self`. `None` for a call whose function is known.
-    pub implementations: Option<HashMap<String, String>>,
+    /// `fn f[T: Shape](x: T):`, the function each type that implements the trait calls, and
+    /// `function` is the trait's method, such as `Shape.area`. A function named by its trait is
+    /// the trait's default method, called with the type as `Self`. `None` for a call whose
+    /// function is known.
+    pub implementations: Option<Vec<Implementation>>,
+    /// For a call through a bound of a generic trait, the bound's type arguments, which may
+    /// name the calling function's type parameters, such as `int` for `[T: add[int]]`.
+    pub trait_args: Vec<Type>,
+}
+
+/// The function a call through a bound calls for one type that implements the trait.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Implementation {
+    /// The type's key: a struct's linked name, or a builtin type's, such as `int`.
+    pub ty: String,
+    /// The names of the struct's type parameters, which `args` may name.
+    pub params: Vec<String>,
+    /// The type arguments its `impl` block gives a generic trait, empty for any other trait.
+    pub args: Vec<Type>,
+    pub function: String,
+}
+
+/// A conversion `Type(value)`, which an impl of the prelude's `from` or `try_from` makes, or a
+/// builtin one, such as `float(1)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Conversion {
+    /// The type converted to, which may be a type parameter of the function the call is in.
+    pub target: Type,
+    /// The type of the value converted, which may be one too.
+    pub source: Type,
+    /// Whether it is a `try_from`, which gives a `result[target, str]`.
+    pub fallible: bool,
+    /// The function of the impl it calls, such as `Fahrenheit.from..Celsius`, whose type
+    /// arguments are the call's instance, or `None` for a builtin one or one through a bound.
+    pub function: Option<String>,
+    /// For a conversion to a type parameter through its bound, the function each type that
+    /// implements the bound's trait calls, as for a [`Method`].
+    pub implementations: Option<Vec<Implementation>>,
+}
+
+/// What makes a conversion for its target and source types, once they are known.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Converter {
+    /// A builtin conversion, such as `int` from `str`, or any value to `str`.
+    Builtin,
+    /// The function of an impl, and the type arguments of its copy.
+    Function(String, Vec<Type>),
+}
+
+impl Conversion {
+    /// Returns what converts a `source` to a `target`, the conversion's types with those of
+    /// the copy it runs in filled in: a builtin conversion, its own impl's function, or the
+    /// impl the target's type has for its bound.
+    ///
+    /// For example, `T(s)` with `[T: try_from[str]]` is builtin for `int`, and calls
+    /// `Celsius.try_from..str` for `Celsius`.
+    pub fn resolve(&self, target: &Type, source: &Type) -> Option<Converter> {
+        if builtin_conversion(target, source).is_some() {
+            return Some(Converter::Builtin);
+        }
+        if let Some(function) = &self.function {
+            return Some(Converter::Function(function.clone(), vec![]));
+        }
+        let (key, args) = match target {
+            Type::Struct { name, args } => (name.as_str(), args.clone()),
+            other => (type_key(other)?, vec![]),
+        };
+        let found = self.implementations.as_ref()?.iter().find(|i| {
+            let substitution = i.params.iter().cloned().zip(args.iter().cloned()).collect();
+            i.ty == key && i.args.len() == 1 && i.args[0].substitute(&substitution) == *source
+        })?;
+        Some(Converter::Function(found.function.clone(), args))
+    }
+}
+
+/// Returns whether a value of `source` converts to `target` without a program's impl, and if
+/// so whether that may fail: every type converts from itself, every value to `str`, and an
+/// `int` to a `float`, while a `float` or a `str` may become an `int`, a `str` a `float`, and
+/// a `list[int]` `bytes`.
+///
+/// For example, `builtin_conversion(&Type::Int, &Type::Str)` is `Some(true)`.
+pub fn builtin_conversion(target: &Type, source: &Type) -> Option<bool> {
+    match (target, source) {
+        (Type::Str, _) => Some(false),
+        (target, source) if target == source => Some(false),
+        (Type::Float, Type::Int) => Some(false),
+        (Type::Int, Type::Float | Type::Str) | (Type::Float, Type::Str) => Some(true),
+        (Type::Bytes, Type::List(elem)) if **elem == Type::Int => Some(true),
+        _ => None,
+    }
 }
 
 impl Method {
-    /// Returns the function a call through a bound calls for a receiver of `ty`, and the type
-    /// arguments of its copy: the struct's own for a method of its `impl` block, or `ty` for
-    /// `Self` of the trait's default method. Returns `function` and no types for a call whose
-    /// function is already known.
+    /// Returns the function a call through a bound calls for a receiver of `ty`, the bound's
+    /// type arguments being `trait_args`, and the type arguments of its copy: the struct's own
+    /// for a method of its `impl` block, or `ty` for `Self` of the trait's default method, then
+    /// `trait_args` for the trait's own type parameters. Returns `function` and no types for a
+    /// call whose function is already known.
     ///
     /// For example, `x.area()` calls `Circle.area` for a `Circle`, and `Shape.half` with
     /// `Circle` for `Self` if `Circle` keeps the default of `half`.
-    pub fn resolve(&self, ty: &Type) -> Option<(String, Vec<Type>)> {
+    pub fn resolve(&self, ty: &Type, trait_args: &[Type]) -> Option<(String, Vec<Type>)> {
         let Some(implementations) = &self.implementations else {
             return Some((self.function.clone(), vec![]));
         };
@@ -423,13 +516,24 @@ impl Method {
             Type::Struct { name, args } => (name.as_str(), args.clone()),
             other => (type_key(other)?, vec![]),
         };
-        let function = implementations.get(key)?;
+        let found = implementations.iter().find(|i| {
+            let substitution = i.params.iter().cloned().zip(args.iter().cloned()).collect();
+            i.ty == key
+                && i.args.len() == trait_args.len()
+                && i.args
+                    .iter()
+                    .zip(trait_args)
+                    .all(|(a, b)| a.substitute(&substitution) == *b)
+        })?;
+        let function = &found.function;
         let (owner, _) = self.function.rsplit_once('.')?;
         if function
             .rsplit_once('.')
             .is_some_and(|(trait_, _)| trait_ == owner)
         {
-            return Some((function.clone(), vec![ty.clone()]));
+            let mut copy = vec![ty.clone()];
+            copy.extend(trait_args.iter().cloned());
+            return Some((function.clone(), copy));
         }
         Some((function.clone(), args))
     }
@@ -466,6 +570,13 @@ pub struct Calls {
     pub methods: Methods,
     pub function_values: HashMap<Span, Arc<FunctionValue>>,
     pub indirect_calls: HashSet<Span>,
+    /// The type arguments of every call of a generic function, from [`Analysis::instances`],
+    /// which the interpreter fills in from the calling function's own as it runs.
+    pub instances: HashMap<Span, Instance>,
+    /// The names of each generic function's type parameters, from [`Analysis::type_params`].
+    pub type_params: HashMap<String, Vec<String>>,
+    /// Every conversion, from [`Analysis::conversions`].
+    pub conversions: HashMap<Span, Conversion>,
 }
 
 /// Returns `ty` as source writes it, each struct and enum by its own name without its module,
@@ -603,9 +714,31 @@ pub struct Analysis {
     /// The span of every call of a function value rather than of a function by its name, such as
     /// `f(x)` with `f` a parameter of type `fn(int) -> int`.
     pub indirect_calls: HashSet<Span>,
+    /// Every conversion `Type(value)`, by the call's span.
+    pub conversions: HashMap<Span, Conversion>,
+    /// The linked name of each method of an `impl` block of a generic trait, by its symbol's
+    /// index, since it is not its struct's name, a dot, and its own, but `V.add..int`.
+    pub method_functions: HashMap<usize, String>,
 }
 
 impl Analysis {
+    /// Returns the linked name of the function of the method or trait method whose symbol is at
+    /// index `symbol`, such as `Point.norm`, or `V.add..int` for a generic trait's.
+    pub fn method_function(&self, symbol: usize) -> String {
+        if let Some(function) = self.method_functions.get(&symbol) {
+            return function.clone();
+        }
+        match self.symbols.get(symbol) {
+            Some(Symbol {
+                scope: Some(owner),
+                name,
+                ..
+            }) => format!("{owner}.{name}"),
+            Some(symbol) => symbol.name.clone(),
+            None => String::new(),
+        }
+    }
+
     /// Returns what running the program needs from this analysis, as [`Calls`].
     pub fn calls(&self) -> Calls {
         let function_values = self
@@ -621,6 +754,9 @@ impl Analysis {
             methods: self.methods.clone(),
             function_values,
             indirect_calls: self.indirect_calls.clone(),
+            instances: self.instances.clone(),
+            type_params: self.type_params.clone(),
+            conversions: self.conversions.clone(),
         }
     }
 
@@ -944,7 +1080,6 @@ const NUMBERS: &[Kind] = &[Kind::Int, Kind::Float];
 /// byte.
 const ORDERED: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str, Kind::Bytes];
 /// What `int` and `float` convert from.
-const CONVERTIBLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
 /// What the `math` functions take.
 const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
 /// The names of the types built into the language, which no enum or struct may take.
@@ -998,6 +1133,15 @@ struct FieldInfo {
 ///
 /// A trait's default method the type keeps is one too, whose function is the trait's.
 struct MethodInfo {
+    /// Its name as written, which is its key in [`Inference::struct_methods`] too, except for
+    /// a generic trait's method, whose key is its name, `..`, and the trait's type arguments
+    /// (`add..int`), since a type may implement the trait once for each set of them.
+    name: String,
+    /// The trait whose `impl` block it is in, or whose default it is, if any.
+    trait_: Option<String>,
+    /// The type arguments of the generic trait it is a method of, as its `impl` block writes
+    /// them, with its struct's own type parameters, empty for any other method.
+    trait_args: Vec<Ty>,
     symbol: usize,
     /// Whether its first parameter is `self`, so it is called on a value rather than the struct.
     has_self: bool,
@@ -1015,12 +1159,17 @@ struct MethodInfo {
 struct TraitInfo {
     symbol: usize,
     self_param: usize,
+    /// The type parameters it is written with, such as `T` in `trait from[T]:`, empty for a
+    /// trait without them.
+    params: Vec<usize>,
     methods: Vec<TraitMethodInfo>,
 }
 
 struct TraitMethodInfo {
     name: String,
     symbol: usize,
+    /// Whether it takes `self`, which only the prelude's conversions do not.
+    has_self: bool,
     /// Whether it has a default body, which a type gets unless it defines the method itself.
     has_body: bool,
     /// Whether it changes `self`: a default that does, found by
@@ -1073,8 +1222,17 @@ struct PendingInstance {
 struct TypeParamInfo {
     name: String,
     symbol: usize,
-    /// The traits its types implement, by linked name, such as `Shape` in `[T: Shape]`.
-    bounds: Vec<String>,
+    /// The traits its types implement, such as `Shape` in `[T: Shape]` or `add[int]` in
+    /// `[T: add[int]]`.
+    bounds: Vec<TraitBound>,
+}
+
+/// A trait a type parameter's types implement, by its linked name, with the types a generic
+/// trait takes, such as `add` and `int` for `add[int]`, which may name type parameters.
+#[derive(Debug, Clone, PartialEq)]
+struct TraitBound {
+    name: String,
+    args: Vec<Ty>,
 }
 
 /// The function whose body is being checked.
@@ -1190,6 +1348,12 @@ struct Inference {
     /// The methods of every implementation of a trait, by the trait's and the type's linked
     /// names, each mapped to the function it calls.
     impls: HashMap<(String, String), HashMap<String, String>>,
+    /// The type arguments of each `impl` block of a trait for a type, by the trait's linked name
+    /// and the type's key, one list for each block, empty for a trait without type parameters.
+    impl_args: HashMap<(String, String), Vec<Vec<Ty>>>,
+    /// The linked name of each method of an `impl` block of a generic trait, by its symbol,
+    /// since it is not its struct's name, a dot, and its own.
+    method_functions: HashMap<usize, String>,
     /// The type `Self` names in the `impl` block whose signatures are being read.
     self_type: Option<Ty>,
     /// How each call of a function of an `impl` block was resolved, by the call's span.
@@ -1197,6 +1361,9 @@ struct Inference {
     /// Methods called on a global a function reads before the code assigning it is checked,
     /// which `finish` settles once the global's type is known.
     deferred_methods: Vec<DeferredMethod>,
+    deferred_overloads: Vec<DeferredOverload>,
+    deferred_conversions: Vec<PendingConversion>,
+    conversions: Vec<(Span, ConversionInfo)>,
     /// Fields read from a global a function reads before the code assigning it is checked,
     /// which `finish` settles once the global's type is known.
     deferred_fields: Vec<DeferredField>,
@@ -1241,6 +1408,54 @@ struct DeferredField {
 
 /// `receiver.name(args)`, where `receiver` is not yet known to be a struct, as a global a function
 /// reads before the code assigning it is checked may not be, whose result is `result`.
+/// A function a method call may call, when a type implements a generic trait for several sets
+/// of type arguments, or a type parameter is bounded by it several times, which the arguments'
+/// types pick.
+#[derive(Clone)]
+struct Candidate {
+    function: String,
+    type_args: Vec<Ty>,
+    symbol: usize,
+    changes: bool,
+    /// The trait of a call through a bound, whose implementations the call may call.
+    bound: Option<String>,
+    trait_args: Vec<Ty>,
+    /// The trait with its type arguments, for errors, such as `add[int]`.
+    text: String,
+}
+
+/// A conversion `Type(value)`, settled once the value's type is known.
+struct PendingConversion {
+    call: Span,
+    arg: Span,
+    target: Ty,
+    source: Ty,
+    result: Ty,
+}
+
+/// A conversion that was settled, for [`Analysis::conversions`].
+struct ConversionInfo {
+    target: Ty,
+    source: Ty,
+    fallible: bool,
+    function: Option<String>,
+    /// The trait of a conversion to a type parameter through its bound.
+    bound: Option<String>,
+}
+
+/// A call of a method that several [`Candidate`]s have, settled in `finish` once its
+/// arguments' types are known.
+struct DeferredOverload {
+    call: Span,
+    name: String,
+    name_span: Span,
+    /// The receiver's type as errors show it, such as `V`.
+    owner: String,
+    candidates: Vec<Candidate>,
+    args: Vec<(Ty, Span)>,
+    result: Ty,
+}
+
 struct DeferredMethod {
     call: Span,
     receiver: Expr,
@@ -2049,23 +2264,26 @@ impl Inference {
             }
             let symbol = self.add_symbol(name, SymbolKind::TypeParam, param.span, Ty::Unit);
             self.symbols[symbol].scope = Some(owner.to_string());
-            let bounds = self.bounds(&param.bounds, bounded);
             self.type_params.push(TypeParamInfo {
                 name: name.clone(),
                 symbol,
-                bounds,
+                bounds: vec![],
             });
             let index = self.type_params.len() - 1;
             self.symbol_types[symbol] = Ty::Param(index);
             self.scope_params.insert(name.clone(), index);
-            declared.push(index);
+            declared.push((index, param));
         }
-        declared
+        // once every parameter is in scope, since a bound's arguments may name any of them
+        for &(index, param) in &declared {
+            self.type_params[index].bounds = self.bounds(&param.bounds, bounded);
+        }
+        declared.into_iter().map(|(index, _)| index).collect()
     }
 
-    /// Returns the traits `bounds` name, reporting any that is no trait, and every one unless
-    /// they bound a function's type parameter (`bounded`).
-    fn bounds(&mut self, bounds: &[TraitName], bounded: bool) -> Vec<String> {
+    /// Returns the traits `bounds` name, with their type arguments, reporting any that is no
+    /// trait, and every one unless they bound a function's type parameter (`bounded`).
+    fn bounds(&mut self, bounds: &[TraitName], bounded: bool) -> Vec<TraitBound> {
         let mut traits = vec![];
         for bound in bounds {
             let name = &bound.name;
@@ -2080,8 +2298,15 @@ impl Inference {
             match self.traits.get(name) {
                 Some(info) => {
                     self.add_reference(bound.span, info.symbol);
-                    if !traits.contains(name) {
-                        traits.push(name.clone());
+                    let Some(args) = self.trait_args(bound) else {
+                        continue;
+                    };
+                    let bound = TraitBound {
+                        name: name.clone(),
+                        args,
+                    };
+                    if !traits.contains(&bound) {
+                        traits.push(bound);
                     }
                 }
                 None if self.structs.contains_key(name) => {
@@ -2094,6 +2319,41 @@ impl Inference {
             }
         }
         traits
+    }
+
+    /// Returns the types `name`, a trait's, gives its type parameters, or `None` after
+    /// reporting that it gives a different number of them than the trait has.
+    ///
+    /// For example, `from[int]` gives `[int]`, and `from` alone is an error.
+    fn trait_args(&mut self, name: &TraitName) -> Option<Vec<Ty>> {
+        let count = self.traits.get(&name.name)?.params.len();
+        if name.args.len() != count {
+            let short = struct_display(&name.name);
+            let message = match count {
+                0 => format!("'{short}' takes no type arguments"),
+                _ => format!(
+                    "'{short}' takes {count} type argument{}, as in '{short}[{}]'",
+                    if count == 1 { "" } else { "s" },
+                    vec!["int"; count].join(", ")
+                ),
+            };
+            self.error(name.span, message);
+            return None;
+        }
+        Some(name.args.iter().map(|arg| self.written(arg)).collect())
+    }
+
+    /// Returns how `name`, a trait, is written with the type arguments `args`, such as
+    /// `add[int]`, or its name alone for a trait without type parameters.
+    fn trait_text(&self, name: &str, args: &[Ty]) -> String {
+        let short = struct_display(name);
+        match args {
+            [] => short.to_string(),
+            _ => {
+                let args: Vec<String> = args.iter().map(|a| self.show(a)).collect();
+                format!("{short}[{}]", args.join(", "))
+            }
+        }
     }
 
     /// Returns `ty` with each of the type parameters `params` replaced by the type at the same
@@ -2247,27 +2507,33 @@ impl Inference {
             };
             let mut declared = HashMap::new();
             for method in methods {
-                if let Some(name) = self.declare_method(owner, &this, method, trait_.as_deref()) {
-                    declared.insert(name.clone(), format!("{owner}.{name}"));
+                let implemented = trait_
+                    .as_ref()
+                    .map(|(t, args)| (t.as_str(), args.as_slice()));
+                if let Some(key) = self.declare_method(owner, &this, method, implemented) {
+                    declared.insert(key.clone(), format!("{owner}.{key}"));
                 }
             }
-            if let Some(trait_) = trait_ {
-                self.report_missing_methods(owner, *name_span, &trait_, &declared);
-                implemented.push((trait_, owner.clone(), *name_span, declared));
+            if let Some((trait_, args)) = trait_ {
+                let suffix = self.method_suffix(&args);
+                self.report_missing_methods(owner, *name_span, (&trait_, &args), &declared);
+                implemented.push((trait_, args, suffix, owner.clone(), *name_span, declared));
             }
         }
-        for (trait_, owner, span, mut declared) in implemented {
+        for (trait_, args, suffix, owner, span, mut declared) in implemented {
             let defaults: Vec<(String, usize)> = self.traits[&trait_]
                 .methods
                 .iter()
-                .filter(|m| m.has_body && !declared.contains_key(&m.name))
+                .filter(|m| m.has_body && !declared.contains_key(&format!("{}{suffix}", m.name)))
                 .map(|m| (m.name.clone(), m.symbol))
                 .collect();
             for (name, symbol) in defaults {
+                let key = format!("{name}{suffix}");
                 if self
                     .struct_methods
                     .get(&owner)
-                    .is_some_and(|methods| methods.contains_key(&name))
+                    .is_some_and(|methods| methods.contains_key(&key))
+                    || (suffix.is_empty() && self.has_struct_method(&owner, &name))
                     || self.struct_field_ty(&owner, &name).is_some()
                 {
                     self.error(
@@ -2286,8 +2552,11 @@ impl Inference {
                     .entry(owner.clone())
                     .or_default()
                     .insert(
-                        name.clone(),
+                        key.clone(),
                         MethodInfo {
+                            name,
+                            trait_: Some(trait_.clone()),
+                            trait_args: args.clone(),
                             symbol,
                             has_self: true,
                             changes: false,
@@ -2295,10 +2564,70 @@ impl Inference {
                             default: true,
                         },
                     );
-                declared.insert(name, function);
+                declared.insert(key, function);
             }
-            self.impls.insert((trait_, owner), declared);
+            self.impls
+                .entry((trait_, owner))
+                .or_default()
+                .extend(declared);
         }
+    }
+
+    /// Returns what follows a method's name in its key, and its function's linked name, for a
+    /// method of an `impl` block of a generic trait with the type arguments `args`: `..` and
+    /// the arguments as labels write types, or nothing for a trait without type parameters.
+    ///
+    /// For example, `impl add[int] for V:` gives `..int`, so its `add` is `V.add..int`.
+    fn method_suffix(&self, args: &[Ty]) -> String {
+        match args {
+            [] => String::new(),
+            _ => {
+                let args: Vec<String> = args.iter().map(|a| self.mangle(a)).collect();
+                format!("..{}", args.join("_"))
+            }
+        }
+    }
+
+    /// Returns `ty` as a label writes it, as lowering names the copies of generic functions.
+    ///
+    /// For example, `list[int]` is `list_int`, and `Pair[int, str]` is `Pair.int_str`.
+    fn mangle(&self, ty: &Ty) -> String {
+        let all = |tys: &[Ty]| tys.iter().map(|t| self.mangle(t)).collect::<Vec<_>>();
+        match self.resolve(ty) {
+            Ty::List(elem) => format!("list_{}", self.mangle(&elem)),
+            Ty::Map(key, value) => format!("map_{}_{}", self.mangle(&key), self.mangle(&value)),
+            Ty::Tuple(fields) => format!("tuple{}_{}", fields.len(), all(&fields).join("_")),
+            Ty::Enum(name, args) | Ty::Struct(name, args) if args.is_empty() => name,
+            Ty::Enum(name, args) | Ty::Struct(name, args) => {
+                format!("{name}.{}", all(&args).join("_"))
+            }
+            Ty::Fn(params, ret) => {
+                let ret = match *ret {
+                    Ty::Unit => "unit".to_string(),
+                    ret => self.mangle(&ret),
+                };
+                format!("fn{}_{}_{ret}", params.len(), all(&params).join("_"))
+            }
+            Ty::Param(p) => self.type_params[p].name.clone(),
+            other => self.show(&other),
+        }
+    }
+
+    /// Returns whether the struct or builtin type `owner` has a method `name`, its own or, for
+    /// a generic trait, of any of its `impl` blocks.
+    fn has_struct_method(&self, owner: &str, name: &str) -> bool {
+        self.struct_methods
+            .get(owner)
+            .is_some_and(|methods| methods.values().any(|m| m.name == name))
+    }
+
+    /// Returns a method `name` of `owner`: its own, or one of a generic trait's `impl` blocks,
+    /// all of which agree on whether they change `self`.
+    fn struct_method(&self, owner: &str, name: &str) -> Option<&MethodInfo> {
+        let methods = self.struct_methods.get(owner)?;
+        methods
+            .get(name)
+            .or_else(|| methods.values().find(|m| m.name == name))
     }
 
     /// Returns the type `Self` is in an `impl` block for `owner`: the struct with its type
@@ -2314,14 +2643,15 @@ impl Inference {
         builtin_key_type(owner)
     }
 
-    /// Finds the trait an `impl` block for `owner` names, reporting a name that is no trait and
-    /// a second block implementing the same trait for the same type.
+    /// Finds the trait an `impl` block for `owner` names, and the type arguments it gives a
+    /// generic one, reporting a name that is no trait and a second block implementing the same
+    /// trait for the same type with arguments that may be the same.
     fn impl_trait(
         &mut self,
         owner: &str,
         owner_span: Span,
         trait_name: &TraitName,
-    ) -> Option<String> {
+    ) -> Option<(String, Vec<Ty>)> {
         let name = &trait_name.name;
         let Some(info) = self.traits.get(name) else {
             let short = struct_display(name);
@@ -2340,35 +2670,180 @@ impl Inference {
             self.error(owner_span, format!("{owner} already implements '{name}'"));
             return None;
         }
-        let key = (name.clone(), owner.to_string());
-        if self.impls.contains_key(&key) {
+        // the arguments may name the struct's type parameters
+        self.scope_params = self
+            .structs
+            .get(owner)
+            .map(|info| info.type_params.clone())
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| (self.type_params[p].name.clone(), p))
+            .collect();
+        let args = self.trait_args(trait_name);
+        self.scope_params.clear();
+        let args = args?;
+        if let Some(message) = self.conversion_conflict(owner, name, &args) {
+            self.error(owner_span, message);
+            return None;
+        }
+        // linking leaves a builtin type's conversions to this check, which needs a struct of
+        // the block's own file among the trait's arguments
+        if [FROM, TRY_FROM].contains(&name.as_str())
+            && builtin_key_type(owner).is_some()
+            && !args
+                .iter()
+                .any(|arg| self.names_struct_of(arg, owner_span.file))
+        {
             self.error(
                 owner_span,
                 format!(
-                    "'{}' already implements '{}'",
-                    struct_display(owner),
-                    struct_display(name)
+                    "an impl of '{name}' for {owner} needs a struct of this file among its type \
+                     arguments, as in 'impl {name}[Celsius] for {owner}:'"
                 ),
             );
             return None;
         }
-        // filled in once every block's functions are declared
-        self.impls.insert(key, HashMap::new());
-        Some(name.clone())
+        let key = (name.clone(), owner.to_string());
+        let earlier = self.impl_args.get(&key).cloned().unwrap_or_default();
+        if let Some(other) = earlier.iter().find(|other| self.args_overlap(other, &args)) {
+            let short = struct_display(owner);
+            let text = self.trait_text(name, other);
+            let message = match *other == args {
+                true => format!("'{short}' already implements '{text}'"),
+                false => format!(
+                    "'{short}' already implements '{text}', which overlaps '{}'",
+                    self.trait_text(name, &args)
+                ),
+            };
+            self.error(owner_span, message);
+            return None;
+        }
+        self.impl_args.entry(key).or_default().push(args.clone());
+        Some((name.clone(), args))
+    }
+
+    /// Returns whether `ty` names, anywhere in it, a struct defined in `file`.
+    fn names_struct_of(&self, ty: &Ty, file: FileId) -> bool {
+        let all = |tys: &[Ty]| tys.iter().any(|t| self.names_struct_of(t, file));
+        match self.shallow(ty) {
+            Ty::Struct(name, args) => {
+                self.structs
+                    .get(&name)
+                    .is_some_and(|info| self.symbols[info.symbol].span.file == file)
+                    || all(&args)
+            }
+            Ty::List(elem) => self.names_struct_of(&elem, file),
+            Ty::Map(key, value) => {
+                self.names_struct_of(&key, file) || self.names_struct_of(&value, file)
+            }
+            Ty::Tuple(tys) | Ty::Enum(_, tys) => all(&tys),
+            Ty::Fn(params, ret) => all(&params) || self.names_struct_of(&ret, file),
+            _ => false,
+        }
+    }
+
+    /// Returns why an `impl` block of `trait_` with the type arguments `args` for `owner`
+    /// cannot be, if it is a conversion that `owner` already has: a builtin one, or one of the
+    /// other conversion trait for the same type.
+    fn conversion_conflict(&self, owner: &str, trait_: &str, args: &[Ty]) -> Option<String> {
+        if ![FROM, TRY_FROM].contains(&trait_) {
+            return None;
+        }
+        let [source] = args else {
+            return None;
+        };
+        let target = self.impl_type(owner, true)?;
+        let shown = match builtin_key_type(owner) {
+            Some(_) => owner.to_string(),
+            None => format!("'{}'", struct_display(owner)),
+        };
+        if target == Ty::Str {
+            return Some(format!(
+                "every value converts to str through 'display', so implement 'display' for \
+                 '{}' instead",
+                self.show(source)
+            ));
+        }
+        let source_type = self.finalize(source);
+        if let Some(fallible) = builtin_conversion(&self.finalize(&target), &source_type)
+            .or_else(|| (target == *source).then_some(false))
+        {
+            let builtin = if fallible { TRY_FROM } else { FROM };
+            return Some(format!(
+                "{shown} already implements '{}'",
+                self.trait_text(builtin, args)
+            ));
+        }
+        let other = if trait_ == FROM { TRY_FROM } else { FROM };
+        let earlier = self
+            .impl_args
+            .get(&(other.to_string(), owner.to_string()))?;
+        earlier
+            .iter()
+            .find(|e| self.args_overlap(e, args))
+            .map(|e| {
+                format!(
+                    "{shown} already implements '{}', so it cannot implement '{}' too",
+                    self.trait_text(other, e),
+                    self.trait_text(trait_, args)
+                )
+            })
+    }
+
+    /// Returns whether two `impl` blocks of a generic trait for one type, with the type
+    /// arguments `a` and `b`, could be for the same arguments, a type parameter of the struct
+    /// standing for any type.
+    ///
+    /// For example, `add[T]` overlaps `add[int]`, but `add[int]` does not overlap `add[str]`.
+    fn args_overlap(&self, a: &[Ty], b: &[Ty]) -> bool {
+        a.len() == b.len() && a.iter().zip(b).all(|(a, b)| self.may_match(a, b, true))
+    }
+
+    /// Returns whether `a` and `b` could be the same type without solving anything: an
+    /// unknown type matches any, and so does a type parameter if `params_match`, as in an
+    /// `impl` block's type arguments. Otherwise a type parameter matches only itself.
+    ///
+    /// For example, `list[?1]` may match `list[int]`, while `int` never matches `str`.
+    fn may_match(&self, a: &Ty, b: &Ty, params_match: bool) -> bool {
+        let all = |a: &[Ty], b: &[Ty]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(a, b)| self.may_match(a, b, params_match))
+        };
+        match (self.shallow(a), self.shallow(b)) {
+            (Ty::Var(_), _) | (_, Ty::Var(_)) => true,
+            (Ty::Param(_), _) | (_, Ty::Param(_)) if params_match => true,
+            (Ty::List(a), Ty::List(b)) => self.may_match(&a, &b, params_match),
+            (Ty::Map(ak, av), Ty::Map(bk, bv)) => {
+                self.may_match(&ak, &bk, params_match) && self.may_match(&av, &bv, params_match)
+            }
+            (Ty::Tuple(a), Ty::Tuple(b)) => all(&a, &b),
+            (Ty::Enum(an, a), Ty::Enum(bn, b)) | (Ty::Struct(an, a), Ty::Struct(bn, b)) => {
+                an == bn && all(&a, &b)
+            }
+            (Ty::Fn(ap, ar), Ty::Fn(bp, br)) => {
+                all(&ap, &bp) && self.may_match(&ar, &br, params_match)
+            }
+            (a, b) => a == b,
+        }
     }
 
     /// Declares `method`, a function of an `impl` block for `owner`, whose `self` is `this`,
-    /// returning its name, or reports why it cannot be declared. In a block implementing
-    /// `trait_`, it must be one of the trait's methods, with the same signature.
+    /// returning its key in [`Inference::struct_methods`], or reports why it cannot be
+    /// declared. In a block implementing `trait_` with the type arguments `trait_args`, it must
+    /// be one of the trait's methods, with the same signature.
     fn declare_method(
         &mut self,
         owner: &str,
         this: &Ty,
         method: &Stmt,
-        trait_: Option<&str>,
+        implemented: Option<(&str, &[Ty])>,
     ) -> Option<String> {
+        let trait_ = implemented.map(|(t, _)| t);
+        let trait_args = implemented.map_or(vec![], |(_, args)| args.to_vec());
         let StmtKind::FunctionDef {
-            name,
+            name: key,
             name_span,
             type_params,
             args,
@@ -2377,6 +2852,11 @@ impl Inference {
         } = &method.kind
         else {
             return None;
+        };
+        // linking names a generic trait's methods by its arguments, as `add..int`
+        let (name, suffix) = match key.split_once("..") {
+            Some((name, _)) => (&name.to_string(), &key[name.len()..]),
+            None => (key, ""),
         };
         // a generic struct's type parameters are its methods' too
         let struct_params = self
@@ -2417,11 +2897,13 @@ impl Inference {
                 ),
                 false => format!("'{name}' is not a method of '{trait_}'"),
             })
-        } else if self
-            .struct_methods
-            .get(owner)
-            .is_some_and(|methods| methods.contains_key(name))
-        {
+        } else if self.struct_methods.get(owner).is_some_and(|methods| {
+            // a generic trait's blocks each have the method, but nothing else shares its name
+            methods
+                .values()
+                .any(|m| m.name == *name && (suffix.is_empty() || m.trait_.as_deref() != trait_))
+                || methods.contains_key(key)
+        }) {
             Some(format!("'{short}' already has a method '{name}'"))
         } else if self.struct_field_ty(owner, name).is_some() {
             Some(format!(
@@ -2444,13 +2926,19 @@ impl Inference {
         self.self_type = None;
         self.scope_params.clear();
         if let Some(trait_) = trait_ {
-            self.check_implemented_signature(trait_, name, *name_span, this, (&params, &ret));
+            self.check_implemented_signature(
+                (trait_, &trait_args),
+                name,
+                *name_span,
+                this,
+                (&params, &ret),
+            );
         }
         let has_self = args.args.first().is_some_and(|arg| arg.arg == "self");
         // the symbol's type is rebuilt from `params` and `ret` in `finish`
         let symbol = self.add_symbol(name, SymbolKind::Method, *name_span, Ty::Unit);
         self.symbols[symbol].scope = Some(owner.to_string());
-        let function = format!("{owner}.{name}");
+        let function = format!("{owner}.{key}");
         self.functions.insert(
             function.clone(),
             FunctionInfo {
@@ -2462,12 +2950,18 @@ impl Inference {
             },
         );
         self.function_spans.insert(function.clone(), method.span);
+        if !suffix.is_empty() {
+            self.method_functions.insert(symbol, function.clone());
+        }
         self.struct_methods
             .entry(owner.to_string())
             .or_default()
             .insert(
-                name.clone(),
+                key.to_string(),
                 MethodInfo {
+                    name: name.clone(),
+                    trait_: trait_.map(str::to_string),
+                    trait_args,
                     symbol,
                     has_self,
                     changes: false,
@@ -2475,14 +2969,14 @@ impl Inference {
                     default: false,
                 },
             );
-        Some(name.clone())
+        Some(key.to_string())
     }
 
     /// Reports a function of an `impl` block of `trait_` whose signature differs from the
     /// trait's method of the same name, with `this` for `Self`.
     fn check_implemented_signature(
         &mut self,
-        trait_: &str,
+        (trait_, trait_args): (&str, &[Ty]),
         name: &str,
         name_span: Span,
         this: &Ty,
@@ -2490,8 +2984,11 @@ impl Inference {
     ) {
         let info = &self.functions[&format!("{trait_}.{name}")];
         let (expected, expected_ret) = (info.params.clone(), info.ret.clone());
-        let self_param = self.traits[trait_].self_param;
-        let fill = |ty: &Ty| Self::substitute(ty, &[self_param], std::slice::from_ref(this));
+        let mut type_params = vec![self.traits[trait_].self_param];
+        type_params.extend(&self.traits[trait_].params);
+        let mut type_args = vec![this.clone()];
+        type_args.extend(trait_args.iter().cloned());
+        let fill = |ty: &Ty| Self::substitute(ty, &type_params, &type_args);
         let same = |a: &Ty, b: &Ty| a == b || matches!(b, Ty::Var(_));
         let matches = expected.len() == params.len()
             && expected.iter().zip(params).all(|(e, p)| same(&fill(e), p))
@@ -2499,23 +2996,27 @@ impl Inference {
         if matches {
             return;
         }
+        let has_self = self.traits[trait_]
+            .methods
+            .iter()
+            .any(|m| m.name == name && m.has_self);
         let rendered: Vec<String> = expected
             .iter()
             .enumerate()
             .map(|(i, ty)| match i {
-                0 => "self".to_string(),
-                _ => self.show(ty),
+                0 if has_self => "self".to_string(),
+                _ => self.show(&fill(ty)),
             })
             .collect();
         let returns = match expected_ret {
             Ty::Unit => String::new(),
-            ty => format!(" -> {}", self.show(&ty)),
+            ty => format!(" -> {}", self.show(&fill(&ty))),
         };
         self.error(
             name_span,
             format!(
                 "'{name}' must take and return what '{}' says, as in 'fn {name}({}){returns}'",
-                struct_display(trait_),
+                self.trait_text(trait_, trait_args),
                 rendered.join(", ")
             ),
         );
@@ -2527,13 +3028,14 @@ impl Inference {
         &mut self,
         owner: &str,
         span: Span,
-        trait_: &str,
+        (trait_, args): (&str, &[Ty]),
         declared: &HashMap<String, String>,
     ) {
+        let suffix = self.method_suffix(args);
         let missing: Vec<String> = self.traits[trait_]
             .methods
             .iter()
-            .filter(|m| !m.has_body && !declared.contains_key(&m.name))
+            .filter(|m| !m.has_body && !declared.contains_key(&format!("{}{suffix}", m.name)))
             .map(|m| format!("'{}'", m.name))
             .collect();
         let list = match missing.as_slice() {
@@ -2546,7 +3048,7 @@ impl Inference {
             format!(
                 "'{}' does not implement {list} of '{}'",
                 struct_display(owner),
-                struct_display(trait_)
+                self.trait_text(trait_, args)
             ),
         );
     }
@@ -2575,6 +3077,11 @@ impl Inference {
                 continue;
             }
             let self_param = info.self_param;
+            let trait_params = info.params.clone();
+            let mut scope = HashMap::from([("Self".to_string(), self_param)]);
+            for &p in &trait_params {
+                scope.insert(self.type_params[p].name.clone(), p);
+            }
             let mut infos: Vec<TraitMethodInfo> = vec![];
             for method in methods {
                 let StmtKind::FunctionDef {
@@ -2603,7 +3110,11 @@ impl Inference {
                     );
                     continue;
                 }
-                if args.args.first().is_none_or(|arg| arg.arg != "self") {
+                let has_self = args.args.first().is_some_and(|arg| arg.arg == "self");
+                // a conversion makes a value, so it has none to be called on
+                let conversion =
+                    [FROM, TRY_FROM].contains(&owner.as_str()) && name_span.file == FileId::PRELUDE;
+                if !has_self && !conversion {
                     self.error(
                         *name_span,
                         format!(
@@ -2613,7 +3124,7 @@ impl Inference {
                     );
                     continue;
                 }
-                self.scope_params = HashMap::from([("Self".to_string(), self_param)]);
+                self.scope_params = scope.clone();
                 let (params, ret) =
                     self.signature(args, returns.as_ref(), Some(&Ty::Param(self_param)));
                 self.scope_params.clear();
@@ -2633,7 +3144,7 @@ impl Inference {
                     function.clone(),
                     FunctionInfo {
                         symbol,
-                        type_params: vec![self_param],
+                        type_params: [vec![self_param], trait_params.clone()].concat(),
                         params,
                         ret,
                         ret_written: returns.is_some(),
@@ -2645,6 +3156,7 @@ impl Inference {
                 infos.push(TraitMethodInfo {
                     name: name.clone(),
                     symbol,
+                    has_self,
                     has_body: !body.is_empty(),
                     changes: false,
                 });
@@ -2660,7 +3172,10 @@ impl Inference {
     fn declare_trait_names(&mut self, body: &[Stmt]) {
         for stmt in body {
             let StmtKind::TraitDef {
-                name, name_span, ..
+                name,
+                name_span,
+                type_params,
+                ..
             } = &stmt.kind
             else {
                 continue;
@@ -2688,16 +3203,27 @@ impl Inference {
             self.type_params.push(TypeParamInfo {
                 name: "Self".to_string(),
                 symbol,
-                bounds: vec![name.clone()],
+                bounds: vec![],
             });
+            let self_param = self.type_params.len() - 1;
             self.traits.insert(
                 name.clone(),
                 TraitInfo {
                     symbol,
-                    self_param: self.type_params.len() - 1,
+                    self_param,
+                    params: vec![],
                     methods: vec![],
                 },
             );
+            let params = self.declare_type_params(name, type_params, false);
+            self.scope_params.clear();
+            self.type_params[self_param].bounds = vec![TraitBound {
+                name: name.clone(),
+                args: params.iter().map(|&p| Ty::Param(p)).collect(),
+            }];
+            if let Some(info) = self.traits.get_mut(name) {
+                info.params = params;
+            }
         }
     }
 
@@ -2722,6 +3248,7 @@ impl Inference {
                     for def in defs {
                         // a method defined twice was reported, and only its first definition
                         // counts
+                        // linking names a generic trait's methods by their keys
                         if let StmtKind::FunctionDef {
                             name,
                             name_span,
@@ -2733,7 +3260,7 @@ impl Inference {
                             && self.symbols[info.symbol].span == *name_span
                             && info.has_self
                         {
-                            methods.push((owner, name, body));
+                            methods.push((owner, name.clone(), body));
                         }
                     }
                 }
@@ -2764,11 +3291,11 @@ impl Inference {
         }
         loop {
             let mut found = false;
-            for &(owner, name, body) in &methods {
-                if !self.struct_methods[owner][name].changes && self.changes_self(owner, body) {
+            for (owner, name, body) in &methods {
+                if !self.struct_methods[*owner][name].changes && self.changes_self(owner, body) {
                     if let Some(info) = self
                         .struct_methods
-                        .get_mut(owner)
+                        .get_mut(*owner)
                         .and_then(|methods| methods.get_mut(name))
                     {
                         info.changes = true;
@@ -2791,9 +3318,11 @@ impl Inference {
                 .iter()
                 .flat_map(|((trait_, owner), implemented)| {
                     let info = &self.traits[trait_];
-                    implemented.keys().filter_map(move |name| {
-                        let changes = info.methods.iter().any(|m| &m.name == name && m.changes);
-                        changes.then(|| (owner.clone(), name.clone()))
+                    let methods = &self.struct_methods;
+                    implemented.keys().filter_map(move |key| {
+                        let name = methods.get(owner)?.get(key)?.name.as_str();
+                        let changes = info.methods.iter().any(|m| m.name == name && m.changes);
+                        changes.then(|| (owner.clone(), key.clone()))
                     })
                 })
                 .collect();
@@ -2816,16 +3345,16 @@ impl Inference {
         // that code calling it through a bound only borrows
         let mut reported = vec![];
         for ((trait_, owner), implemented) in &self.impls {
-            for name in implemented.keys() {
+            for key in implemented.keys() {
+                let Some(info) = self.struct_methods.get(owner).and_then(|m| m.get(key)) else {
+                    continue;
+                };
+                let name = &info.name;
                 let changes = self.traits[trait_]
                     .methods
                     .iter()
                     .any(|m| &m.name == name && m.changes);
-                if let Some(info) = self.struct_methods.get(owner).and_then(|m| m.get(name))
-                    && info.changes
-                    && !info.default
-                    && !changes
-                {
+                if info.changes && !info.default && !changes {
                     reported.push((
                         self.symbols[info.symbol].span,
                         format!(
@@ -2917,18 +3446,15 @@ impl Inference {
             };
         }
         match ty {
-            Some(Ty::Param(param)) => self.type_params[param].bounds.iter().any(|trait_| {
-                self.traits[trait_]
+            Some(Ty::Param(param)) => self.type_params[param].bounds.iter().any(|bound| {
+                self.traits[&bound.name]
                     .methods
                     .iter()
                     .any(|m| m.name == *attr && m.changes)
             }),
             Some(ty)
-                if let Some(method) = ty_key(&ty).and_then(|key| {
-                    self.struct_methods
-                        .get(&key)
-                        .and_then(|methods| methods.get(attr.as_str()))
-                }) =>
+                if let Some(method) =
+                    ty_key(&ty).and_then(|key| self.struct_method(&key, attr.as_str())) =>
             {
                 method.changes
             }
@@ -4341,6 +4867,224 @@ impl Inference {
     /// inferred in the order it is written, which is the order both backends evaluate them in.
     ///
     /// For example, `Point(y=2.0, x=1.0)` is a `Point` if both of its fields are floats.
+    /// Returns the type a call of `id` at `span` with `count` positional values and no named
+    /// ones converts to, if it is a conversion: a builtin type's name, a struct's with one
+    /// value, or a type parameter's of the function being checked.
+    fn conversion_target(&mut self, span: Span, id: &str, count: usize) -> Option<Ty> {
+        let builtin = match id {
+            "int" => Some(Ty::Int),
+            "float" => Some(Ty::Float),
+            "str" => Some(Ty::Str),
+            "bytes" => Some(Ty::Bytes),
+            "bool" => Some(Ty::Bool),
+            _ => None,
+        };
+        let resolved = self.resolve_name(id);
+        if let Some(ty) = builtin
+            && matches!(resolved, Resolved::Builtin | Resolved::Undefined)
+        {
+            return Some(ty);
+        }
+        match resolved {
+            Resolved::Struct(name) if count == 1 => {
+                self.add_reference(span, self.structs[&name].symbol);
+                let args = self.fresh_args(&name);
+                Some(Ty::Struct(name, args))
+            }
+            Resolved::Undefined => {
+                let function = self.function.as_ref()?.name.clone();
+                let param = self
+                    .functions
+                    .get(&function)?
+                    .type_params
+                    .iter()
+                    .copied()
+                    .find(|&p| self.type_params[p].name == id)?;
+                self.add_reference(span, self.type_params[param].symbol);
+                Some(Ty::Param(param))
+            }
+            _ => None,
+        }
+    }
+
+    /// Infers the conversion `id(value)` to `target`, through the prelude's `from` or
+    /// `try_from`, which gives a `target` or a `result[target, str]`.
+    fn infer_conversion(&mut self, call: &Expr, id: &str, target: Ty, args: &[Expr]) -> Ty {
+        let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+        let ([arg], [source]) = (args, arg_types.as_slice()) else {
+            self.arity_error(call.span, id, "1", args.len());
+            return self.fresh();
+        };
+        let result = self.fresh();
+        let pending = PendingConversion {
+            call: call.span,
+            arg: arg.span,
+            target,
+            source: source.clone(),
+            result: result.clone(),
+        };
+        if let Some(pending) = self.settle_conversion(pending, false) {
+            self.deferred_conversions.push(pending);
+        }
+        result
+    }
+
+    /// Settles a conversion, reporting it if it has no impl, or gives it back if the value's
+    /// type is not known yet and this is not the `last` chance.
+    fn settle_conversion(
+        &mut self,
+        pending: PendingConversion,
+        last: bool,
+    ) -> Option<PendingConversion> {
+        let target = self.shallow(&pending.target);
+        let source = self.shallow(&pending.source);
+        if target != Ty::Str && matches!(source, Ty::Var(_)) {
+            if !last {
+                return Some(pending);
+            }
+            self.error(
+                pending.arg,
+                "the type of this value must be known before it is converted",
+            );
+            return None;
+        }
+        let found = match self.builtin_conversion(&target, &source) {
+            Some(fallible) => Ok(ConversionInfo {
+                target: target.clone(),
+                source: source.clone(),
+                fallible,
+                function: None,
+                bound: None,
+            }),
+            None => self.impl_conversion(pending.call, &target, &source),
+        };
+        match found {
+            Ok(info) => {
+                let ty = match info.fallible {
+                    true => Ty::Enum(RESULT.to_string(), vec![target, Ty::Str]),
+                    false => target,
+                };
+                self.unify(&pending.result, &ty);
+                self.conversions.push((pending.call, info));
+            }
+            Err(message) => self.error(pending.arg, message),
+        }
+        None
+    }
+
+    /// Returns whether a value of `source` converts to `target`, both known, as
+    /// [`builtin_conversion`] says, and if so whether that may fail.
+    fn builtin_conversion(&mut self, target: &Ty, source: &Ty) -> Option<bool> {
+        match (target, source) {
+            (Ty::Str, _) => Some(false),
+            (Ty::Float, Ty::Int) => Some(false),
+            (Ty::Int, Ty::Float | Ty::Str) | (Ty::Float, Ty::Str) => Some(true),
+            (Ty::Bytes, Ty::List(elem)) if self.may_match(elem, &Ty::Int, false) => {
+                self.unify(elem, &Ty::Int);
+                Some(true)
+            }
+            // every type converts from itself, its type arguments as they are
+            (target, source)
+                if self.may_match(target, source, false)
+                    && std::mem::discriminant(target) == std::mem::discriminant(source)
+                    && match (target, source) {
+                        (Ty::Struct(a, _), Ty::Struct(b, _)) | (Ty::Enum(a, _), Ty::Enum(b, _)) => {
+                            a == b
+                        }
+                        _ => true,
+                    } =>
+            {
+                self.unify(target, source).then_some(false)
+            }
+            _ => None,
+        }
+    }
+
+    /// Finds the impl of `from` or `try_from` that converts a `source` to a `target`, the
+    /// impl of the target's type or, for a type parameter, its bound, recording the call at
+    /// `call` of its function, or returns why there is none.
+    fn impl_conversion(
+        &mut self,
+        call: Span,
+        target: &Ty,
+        source: &Ty,
+    ) -> Result<ConversionInfo, String> {
+        let shown = self.show(source);
+        if let Ty::Param(param) = target {
+            let name = self.type_params[*param].name.clone();
+            let bounds: Vec<TraitBound> = self.type_params[*param]
+                .bounds
+                .iter()
+                .filter(|b| {
+                    [FROM, TRY_FROM].contains(&b.name.as_str())
+                        && self.may_match(&b.args[0], source, false)
+                })
+                .cloned()
+                .collect();
+            let [bound] = bounds.as_slice() else {
+                return Err(match bounds.is_empty() {
+                    true => format!(
+                        "cannot convert {shown} to '{name}', since '{name}' may be any type; \
+                         bound it, as in '[{name}: from[{shown}]]'"
+                    ),
+                    false => format!(
+                        "'{name}' converts from {shown} through both 'from' and 'try_from', so \
+                         this could mean either"
+                    ),
+                });
+            };
+            self.unify(&bound.args[0], source);
+            return Ok(ConversionInfo {
+                target: target.clone(),
+                source: source.clone(),
+                fallible: bound.name == TRY_FROM,
+                function: None,
+                bound: Some(bound.name.clone()),
+            });
+        }
+        let not_found = || match target {
+            Ty::Struct(..) => {
+                let target = self.show(target);
+                format!(
+                    "cannot convert {shown} to {target}; say how with 'impl from[{shown}] for {target}:'"
+                )
+            }
+            _ => format!("cannot convert {shown} to {}", self.show(target)),
+        };
+        let Some(key) = ty_key(target) else {
+            return Err(not_found());
+        };
+        let type_args = match target {
+            Ty::Struct(_, args) => args.clone(),
+            _ => vec![],
+        };
+        for trait_ in [FROM, TRY_FROM] {
+            let Some(pattern) = self.impl_for(target, trait_, std::slice::from_ref(source)) else {
+                continue;
+            };
+            let method = format!("{trait_}{}", self.method_suffix(&pattern));
+            if !self
+                .struct_methods
+                .get(&key)
+                .is_some_and(|methods| methods.contains_key(&method))
+            {
+                // its block was reported
+                continue;
+            }
+            let (function, copy) = self.method_function(&key, &type_args, &method);
+            let (params, _) = self.instantiate(call, &function, copy);
+            self.unify(&params[0], source);
+            return Ok(ConversionInfo {
+                target: target.clone(),
+                source: source.clone(),
+                fallible: trait_ == TRY_FROM,
+                function: Some(function),
+                bound: None,
+            });
+        }
+        Err(not_found())
+    }
+
     fn infer_struct(
         &mut self,
         call: &Expr,
@@ -4476,10 +5220,7 @@ impl Inference {
                 ty
             }
             None => {
-                let is_method = self
-                    .struct_methods
-                    .get(name)
-                    .is_some_and(|methods| methods.contains_key(attr));
+                let is_method = self.has_struct_method(name, attr);
                 let message = if METHODS.contains(&attr) || is_method {
                     format!("'{attr}' is a method, so it can only be called")
                 } else {
@@ -4688,6 +5429,7 @@ impl Inference {
                 receiver: false,
                 changes: false,
                 implementations: None,
+                trait_args: vec![],
             },
         );
         if params.len() != args.len() {
@@ -4723,6 +5465,21 @@ impl Inference {
             .get(owner)
             .and_then(|methods| methods.get(name))
             .map(|method| (method.symbol, method.has_self, method.changes));
+        if method.is_none() && self.has_struct_method(owner, name) {
+            let shown = match builtin_key_type(owner) {
+                Some(_) => owner.to_string(),
+                None => self.show(&Ty::Struct(owner.to_string(), type_args.to_vec())),
+            };
+            let candidates = self.struct_candidates(owner, type_args, name);
+            return self.call_candidates(
+                call,
+                (func, receiver),
+                (name, &shown),
+                candidates,
+                &arg_types,
+                args,
+            );
+        }
         let (symbol, changes) = match method {
             None if self.function_field(owner, type_args, name).is_some() => {
                 let spans: Vec<Span> = args.iter().map(|arg| arg.span).collect();
@@ -4765,6 +5522,7 @@ impl Inference {
                 receiver: true,
                 changes,
                 implementations: None,
+                trait_args: vec![],
             },
         );
         self.check_method_args(call, name, &params, &arg_types, args);
@@ -4814,6 +5572,7 @@ impl Inference {
                 receiver: true,
                 changes: false,
                 implementations: None,
+                trait_args: vec![],
             },
         );
         self.prelude_result(function, ret)
@@ -4939,7 +5698,269 @@ impl Inference {
         }
         let this = builtin_key_type(owner)
             .unwrap_or_else(|| Ty::Struct(owner.to_string(), type_args.to_vec()));
-        (info.function.clone(), vec![this])
+        let mut copy = vec![this];
+        copy.extend(self.own_trait_args(owner, type_args, &info.trait_args));
+        (info.function.clone(), copy)
+    }
+
+    /// Returns `trait_args`, the type arguments an `impl` block for the struct `owner` gives a
+    /// generic trait, for a value of `owner[type_args]`, its type parameters filled in.
+    fn own_trait_args(&self, owner: &str, type_args: &[Ty], trait_args: &[Ty]) -> Vec<Ty> {
+        let params = self
+            .structs
+            .get(owner)
+            .map(|info| info.type_params.clone())
+            .unwrap_or_default();
+        trait_args
+            .iter()
+            .map(|a| Self::substitute(a, &params, type_args))
+            .collect()
+    }
+
+    /// Returns a [`Candidate`] for each of the generic trait methods `name` of a value of
+    /// `owner[type_args]`, one for each `impl` block.
+    fn struct_candidates(&self, owner: &str, type_args: &[Ty], name: &str) -> Vec<Candidate> {
+        let mut keys: Vec<&String> = self.struct_methods[owner]
+            .iter()
+            .filter(|(_, m)| m.name == name)
+            .map(|(key, _)| key)
+            .collect();
+        // in the order the blocks are written
+        keys.sort_by_key(|key| self.struct_methods[owner][*key].symbol);
+        keys.into_iter()
+            .map(|key| {
+                let info = &self.struct_methods[owner][key];
+                let (function, copy) = self.method_function(owner, type_args, key);
+                let trait_args = self.own_trait_args(owner, type_args, &info.trait_args);
+                Candidate {
+                    function,
+                    type_args: copy,
+                    symbol: info.symbol,
+                    changes: info.changes,
+                    bound: None,
+                    text: self.trait_text(info.trait_.as_deref().unwrap_or_default(), &trait_args),
+                    trait_args,
+                }
+            })
+            .collect()
+    }
+
+    /// Returns which of `candidates` take arguments of the types `arg_types`, as far as they
+    /// are known.
+    fn fitting(&self, candidates: &[Candidate], arg_types: &[Ty]) -> Vec<usize> {
+        (0..candidates.len())
+            .filter(|&i| {
+                let candidate = &candidates[i];
+                let info = &self.functions[&candidate.function];
+                info.params.len() == arg_types.len() + 1
+                    && info.params[1..].iter().zip(arg_types).all(|(param, arg)| {
+                        let param =
+                            Self::substitute(param, &info.type_params, &candidate.type_args);
+                        self.may_match(&param, arg, false)
+                    })
+            })
+            .collect()
+    }
+
+    /// Checks a call of the method `name` on a value of the type `owner` shows, which several
+    /// `candidates` have, calling the one its arguments fit, or deciding in `finish` if more
+    /// than one may fit until their types are known.
+    fn call_candidates(
+        &mut self,
+        call: &Expr,
+        (func, receiver): (&Expr, &Expr),
+        (name, owner): (&str, &str),
+        candidates: Vec<Candidate>,
+        arg_types: &[Ty],
+        args: &[Expr],
+    ) -> Ty {
+        let name_span = Self::attr_span(func, name);
+        // a single candidate reports its arguments' errors as any method does
+        let fits = match candidates.len() {
+            1 => vec![0],
+            _ => self.fitting(&candidates, arg_types),
+        };
+        if let [one] = fits.as_slice() {
+            let candidate = candidates[*one].clone();
+            let ret = self.call_candidate(call.span, name_span, candidate.clone());
+            let params = self.candidate_params(&candidate);
+            self.check_method_args(call, name, &params, arg_types, args);
+            if candidate.changes {
+                self.check_changing_call(call.span, receiver, name, &ret);
+                self.check_change_of(receiver, true);
+            }
+            return ret;
+        }
+        if fits.is_empty() {
+            self.report_no_fit(name_span, (name, owner), &candidates, arg_types);
+            return self.fresh();
+        }
+        // every candidate is the same trait's method, so they agree on changing `self`
+        let candidate = &candidates[fits[0]];
+        if candidate.changes {
+            let ret = Self::substitute(
+                &self.functions[&candidate.function].ret,
+                &self.functions[&candidate.function].type_params,
+                &candidate.type_args,
+            );
+            self.check_changing_call(call.span, receiver, name, &ret);
+            self.check_change_of(receiver, true);
+        }
+        let result = self.fresh();
+        self.deferred_overloads.push(DeferredOverload {
+            call: call.span,
+            name: name.to_string(),
+            name_span,
+            owner: owner.to_string(),
+            candidates: fits.into_iter().map(|i| candidates[i].clone()).collect(),
+            args: arg_types
+                .iter()
+                .cloned()
+                .zip(args.iter().map(|a| a.span))
+                .collect(),
+            result: result.clone(),
+        });
+        result
+    }
+
+    /// Returns the types of the arguments after `self` that `candidate` takes.
+    fn candidate_params(&self, candidate: &Candidate) -> Vec<Ty> {
+        let info = &self.functions[&candidate.function];
+        info.params[1..]
+            .iter()
+            .map(|p| Self::substitute(p, &info.type_params, &candidate.type_args))
+            .collect()
+    }
+
+    /// Records the call at `call` of `candidate`, whose name is at `name_span`, and returns
+    /// what it returns.
+    fn call_candidate(&mut self, call: Span, name_span: Span, candidate: Candidate) -> Ty {
+        self.add_reference(name_span, candidate.symbol);
+        let (_, ret) = self.instantiate(call, &candidate.function, candidate.type_args);
+        let name = candidate
+            .function
+            .rsplit('.')
+            .next()
+            .unwrap_or_default()
+            .to_string();
+        let implementations = candidate
+            .bound
+            .as_ref()
+            .map(|trait_| self.implementations(trait_, &name));
+        let trait_args = match candidate.bound {
+            Some(_) => candidate
+                .trait_args
+                .iter()
+                .map(|a| self.finalize(a))
+                .collect(),
+            None => vec![],
+        };
+        self.methods.insert(
+            call,
+            Method {
+                function: candidate.function,
+                receiver: true,
+                changes: candidate.changes,
+                implementations,
+                trait_args,
+            },
+        );
+        ret
+    }
+
+    /// Reports that none of `candidates`, the methods `name` a value of the type `owner` shows
+    /// has, takes arguments of the types `arg_types`.
+    fn report_no_fit(
+        &mut self,
+        span: Span,
+        (name, owner): (&str, &str),
+        candidates: &[Candidate],
+        arg_types: &[Ty],
+    ) {
+        let taken = match arg_types {
+            [] => "no arguments".to_string(),
+            _ => {
+                let shown: Vec<String> = arg_types.iter().map(|t| self.show(t)).collect();
+                shown.join(", ")
+            }
+        };
+        let texts: Vec<String> = candidates.iter().map(|c| format!("'{}'", c.text)).collect();
+        let list = match texts.as_slice() {
+            [rest @ .., last] if !rest.is_empty() => format!("{} and {last}", rest.join(", ")),
+            _ => texts.join(""),
+        };
+        self.error(
+            span,
+            format!("no '{name}' of '{owner}' takes {taken}: '{owner}' implements {list}"),
+        );
+    }
+
+    /// Settles a call that several candidates may have fit when it was checked.
+    fn settle_overload(&mut self, deferred: DeferredOverload) {
+        let arg_types: Vec<Ty> = deferred.args.iter().map(|(ty, _)| ty.clone()).collect();
+        let fits = self.fitting(&deferred.candidates, &arg_types);
+        let owner = (deferred.name.as_str(), deferred.owner.as_str());
+        let candidate = match fits.as_slice() {
+            [] => {
+                self.report_no_fit(deferred.name_span, owner, &deferred.candidates, &arg_types);
+                return;
+            }
+            [one] => deferred.candidates[*one].clone(),
+            several => {
+                let texts: Vec<String> = several
+                    .iter()
+                    .map(|&i| format!("'{}'", deferred.candidates[i].text))
+                    .collect();
+                self.error(
+                    deferred.name_span,
+                    format!(
+                        "this '{}' could be the method of any of {}, since its arguments' types \
+                         are not known",
+                        deferred.name,
+                        texts.join(", ")
+                    ),
+                );
+                return;
+            }
+        };
+        let params = self.candidate_params(&candidate);
+        let ret = self.call_candidate(deferred.call, deferred.name_span, candidate);
+        for (param, (arg, span)) in params.iter().zip(&deferred.args) {
+            self.expect(param, arg, *span);
+        }
+        self.unify(&deferred.result, &ret);
+    }
+
+    /// Lists the function each type that implements `trait_` calls for its method `name`.
+    fn implementations(&self, trait_: &str, name: &str) -> Vec<Implementation> {
+        let mut found = vec![];
+        for ((t, owner), methods) in &self.impls {
+            if t != trait_ {
+                continue;
+            }
+            for (key, function) in methods {
+                let Some(info) = self.struct_methods.get(owner).and_then(|m| m.get(key)) else {
+                    continue;
+                };
+                if info.name != name {
+                    continue;
+                }
+                let params = self.structs.get(owner).map_or(vec![], |info| {
+                    info.type_params
+                        .iter()
+                        .map(|&p| self.type_params[p].name.clone())
+                        .collect()
+                });
+                found.push(Implementation {
+                    ty: owner.clone(),
+                    params,
+                    args: info.trait_args.iter().map(|a| self.finalize(a)).collect(),
+                    function: function.clone(),
+                });
+            }
+        }
+        found.sort_by(|a, b| (&a.ty, &a.function).cmp(&(&b.ty, &b.function)));
+        found
     }
 
     /// Infers a call of the method `name` on `receiver`, whose type is the type parameter
@@ -4961,14 +5982,16 @@ impl Inference {
     ) -> Ty {
         let name_span = Self::attr_span(func, name);
         let shown = self.type_params[param].name.clone();
-        let traits: Vec<String> = self.type_params[param]
+        let bounds: Vec<TraitBound> = self.type_params[param]
             .bounds
             .iter()
-            .filter(|t| self.traits[*t].methods.iter().any(|m| m.name == name))
+            .filter(|b| self.traits[&b.name].methods.iter().any(|m| m.name == name))
             .cloned()
             .collect();
-        let trait_ = match traits.as_slice() {
-            [trait_] => trait_.clone(),
+        let mut traits: Vec<&String> = bounds.iter().map(|b| &b.name).collect();
+        traits.dedup();
+        match traits.as_slice() {
+            [_] => {}
             [] => {
                 let mut message = format!(
                     "values of type '{shown}' have no method '{name}', since '{shown}' may be any \
@@ -5002,40 +6025,35 @@ impl Inference {
                 );
                 return self.fresh();
             }
-        };
-        let info = self.traits[&trait_]
-            .methods
-            .iter()
-            .find(|m| m.name == name)
-            .map(|m| (m.symbol, m.changes));
-        let Some((symbol, changes)) = info else {
-            return self.fresh();
-        };
-        self.add_reference(name_span, symbol);
-        let function = format!("{trait_}.{name}");
-        let (mut params, ret) = self.instantiate(call.span, &function, vec![Ty::Param(param)]);
-        params.remove(0);
-        let implementations = self
-            .impls
-            .iter()
-            .filter(|((t, _), _)| *t == trait_)
-            .filter_map(|((_, ty), methods)| Some((ty.clone(), methods.get(name)?.clone())))
-            .collect();
-        self.methods.insert(
-            call.span,
-            Method {
-                function,
-                receiver: true,
-                changes,
-                implementations: Some(implementations),
-            },
-        );
-        self.check_method_args(call, name, &params, arg_types, args);
-        if changes {
-            self.check_changing_call(call.span, receiver, name, &ret);
-            self.check_change_of(receiver, true);
         }
-        ret
+        let candidates: Vec<Candidate> = bounds
+            .iter()
+            .filter_map(|bound| {
+                let method = self.traits[&bound.name]
+                    .methods
+                    .iter()
+                    .find(|m| m.name == name)?;
+                let mut type_args = vec![Ty::Param(param)];
+                type_args.extend(bound.args.iter().cloned());
+                Some(Candidate {
+                    function: format!("{}.{name}", bound.name),
+                    type_args,
+                    symbol: method.symbol,
+                    changes: method.changes,
+                    bound: Some(bound.name.clone()),
+                    trait_args: bound.args.clone(),
+                    text: self.trait_text(&bound.name, &bound.args),
+                })
+            })
+            .collect();
+        self.call_candidates(
+            call,
+            (func, receiver),
+            (name, &shown),
+            candidates,
+            arg_types,
+            args,
+        )
     }
 
     /// Returns whether any struct, or builtin type a trait is implemented for, has a method named
@@ -5043,7 +6061,7 @@ impl Inference {
     fn struct_method_named(&self, name: &str) -> bool {
         self.struct_methods
             .values()
-            .any(|methods| methods.contains_key(name))
+            .any(|methods| methods.values().any(|m| m.name == name))
     }
 
     /// Settles a method called on a value whose type was not known when it was found.
@@ -5053,11 +6071,7 @@ impl Inference {
         // a type without its own `min`, `max`, or `clamp` has the prelude's
         if ORD_METHODS.contains(&name.as_str())
             && let Some(function) = prelude_method(name)
-            && !ty_key(&ty).is_some_and(|key| {
-                self.struct_methods
-                    .get(&key)
-                    .is_some_and(|methods| methods.contains_key(name))
-            })
+            && !ty_key(&ty).is_some_and(|key| self.has_struct_method(&key, name))
         {
             let count = self.functions[function].type_params.len();
             let type_args = (0..count).map(|_| self.fresh()).collect();
@@ -5078,6 +6092,7 @@ impl Inference {
                     receiver: true,
                     changes: false,
                     implementations: None,
+                    trait_args: vec![],
                 },
             );
             let ret = self.prelude_result(function, ret);
@@ -5157,6 +6172,23 @@ impl Inference {
             self.expect(&ret, &deferred.result, deferred.call);
             return;
         }
+        if method.is_none() && self.has_struct_method(&owner, name) {
+            let shown = match builtin_key_type(&owner) {
+                Some(_) => owner.clone(),
+                None => self.show(&Ty::Struct(owner.clone(), type_args.clone())),
+            };
+            let candidates = self.struct_candidates(&owner, &type_args, name);
+            self.settle_overload(DeferredOverload {
+                call: deferred.call,
+                name: name.clone(),
+                name_span: deferred.name_span,
+                owner: shown,
+                candidates,
+                args: deferred.args,
+                result: deferred.result,
+            });
+            return;
+        }
         let Some((symbol, true, changes)) = method else {
             let message = format!("'{}' has no method '{name}'", struct_display(&owner));
             self.error(deferred.name_span, message);
@@ -5197,6 +6229,7 @@ impl Inference {
                 receiver: true,
                 changes,
                 implementations: None,
+                trait_args: vec![],
             },
         );
         if params.len() != deferred.args.len() {
@@ -5715,6 +6748,12 @@ impl Inference {
 
     fn infer_call(&mut self, call: &Expr, func: &Expr, args: &[Expr], keywords: &[Keyword]) -> Ty {
         if let ExprKind::Name { id, .. } = &func.kind
+            && keywords.is_empty()
+            && let Some(target) = self.conversion_target(func.span, id, args.len())
+        {
+            return self.infer_conversion(call, id, target, args);
+        }
+        if let ExprKind::Name { id, .. } = &func.kind
             && let Resolved::Struct(name) = self.resolve_name(id)
         {
             return self.infer_struct(call, func, &name, args, keywords);
@@ -6126,18 +7165,11 @@ impl Inference {
             // a struct that does not implement `eq` or `display` itself compares or is written
             // part by part
             Ty::Struct(owner, _)
-                if (name == "eq" || name == DISPLAY)
-                    && !self
-                        .struct_methods
-                        .get(&owner)
-                        .is_some_and(|methods| methods.contains_key(name)) => {}
+                if (name == "eq" || name == DISPLAY) && !self.has_struct_method(&owner, name) => {}
             // nor one without its own `min`, `max`, or `clamp`, which the prelude gives
             Ty::Struct(owner, type_args)
                 if ORD_METHODS.contains(&name)
-                    && !self
-                        .struct_methods
-                        .get(&owner)
-                        .is_some_and(|methods| methods.contains_key(name))
+                    && !self.has_struct_method(&owner, name)
                     && self.function_field(&owner, &type_args, name).is_none() => {}
             Ty::Struct(owner, type_args) => {
                 return self.infer_struct_method(
@@ -6158,17 +7190,12 @@ impl Inference {
                     && !self.type_params[param]
                         .bounds
                         .iter()
-                        .any(|t| self.traits[t].methods.iter().any(|m| m.name == name)) => {}
+                        .any(|t| self.traits[&t.name].methods.iter().any(|m| m.name == name)) => {}
             Ty::Param(param) => {
                 let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
                 return self.infer_trait_call(call, func, receiver, param, name, args, &arg_types);
             }
-            ty if ty_key(&ty).is_some_and(|key| {
-                self.struct_methods
-                    .get(&key)
-                    .is_some_and(|methods| methods.contains_key(name))
-            }) =>
-            {
+            ty if ty_key(&ty).is_some_and(|key| self.has_struct_method(&key, name)) => {
                 let key = ty_key(&ty).unwrap_or_default();
                 return self.infer_struct_method(call, func, receiver, (&key, &[]), name, args);
             }
@@ -6428,22 +7455,6 @@ impl Inference {
                     Ty::Enum(RESULT.to_string(), vec![Ty::Str, Ty::Str])
                 }
             }
-            "parse_int" | "parse_float" => {
-                let message = match name {
-                    "parse_int" => "'parse_int' needs a str, found {}",
-                    _ => "'parse_float' needs a str, found {}",
-                };
-                self.require(receiver_ty, &[Kind::Str], receiver.span, message);
-                if !args.is_empty() {
-                    self.arity_error(call.span, name, "0", args.len());
-                }
-                let value = if name == "parse_int" {
-                    Ty::Int
-                } else {
-                    Ty::Float
-                };
-                Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
-            }
             "is_some" | "is_none" | "unwrap" | "unwrap_or" => {
                 let elem = self.fresh();
                 let option = Ty::Enum(OPTION.to_string(), vec![elem.clone()]);
@@ -6492,7 +7503,16 @@ impl Inference {
                 let end = func.span.end;
                 let start = Pos::new(end.line, end.col - name.chars().count());
                 // a struct's methods are found by `infer_struct_method`
-                let message = format!("there is no method '{name}'");
+                let message = match name {
+                    "parse_int" | "parse_float" => {
+                        let ty = if name == "parse_int" { "int" } else { "float" };
+                        format!(
+                            "str has no method '{name}'; convert with '{ty}(s)', which gives a \
+                             result[{ty}, str]"
+                        )
+                    }
+                    _ => format!("there is no method '{name}'"),
+                };
                 self.error(Span::new(start, end).in_file(func.span.file), message);
                 self.fresh()
             }
@@ -6614,35 +7634,6 @@ impl Inference {
     fn infer_builtin(&mut self, call: &Expr, name: &str, args: &[Expr], arg_types: &[Ty]) -> Ty {
         match name {
             "print" | "eprint" => Ty::Unit,
-            "int" | "float" | "str" => {
-                if args.len() != 1 {
-                    self.arity_error(call.span, name, "1", args.len());
-                } else {
-                    // `str` writes any value as `print` does
-                    let message = match name {
-                        "int" => Some("'int' needs an int, float, or str, found {}"),
-                        "float" => Some("'float' needs an int, float, or str, found {}"),
-                        _ => None,
-                    };
-                    if let Some(message) = message {
-                        self.require(arg_types[0].clone(), CONVERTIBLE, args[0].span, message);
-                    }
-                }
-                match name {
-                    "int" => Ty::Int,
-                    "float" => Ty::Float,
-                    _ => Ty::Str,
-                }
-            }
-            "bytes" => {
-                match args {
-                    [values] => {
-                        self.expect(&Ty::List(Box::new(Ty::Int)), &arg_types[0], values.span)
-                    }
-                    _ => self.arity_error(call.span, name, "1", args.len()),
-                }
-                Ty::Bytes
-            }
             "input" => {
                 match args {
                     [] => {}
@@ -6910,7 +7901,7 @@ impl Inference {
                 let message = format!("{what} cannot compare {}", self.show(&ty));
                 self.error(span, message);
             }
-            Ty::Param(p) if self.type_params[p].bounds.iter().any(|b| b == EQ) => {}
+            Ty::Param(p) if self.type_params[p].bounds.iter().any(|b| b.name == EQ) => {}
             Ty::Param(_) => {
                 let name = self.show(&ty);
                 let message = format!(
@@ -6941,7 +7932,7 @@ impl Inference {
     /// of every variant of enums, each enum and struct once, by its name in `seen`.
     fn uncomparable(&self, ty: &Ty, seen: &mut HashSet<String>) -> Option<Uncomparable> {
         match self.shallow(ty) {
-            Ty::Param(p) if self.type_params[p].bounds.iter().any(|b| b == EQ) => None,
+            Ty::Param(p) if self.type_params[p].bounds.iter().any(|b| b.name == EQ) => None,
             // a struct that implements `eq` compares however it says
             Ty::Struct(name, _) if self.impls.contains_key(&(EQ.to_string(), name.clone())) => None,
             // a type parameter may be a list or a map
@@ -7155,14 +8146,22 @@ impl Inference {
             let params = self.functions[function].type_params.clone();
             for (&q, arg) in params.iter().zip(args) {
                 for bound in self.type_params[q].bounds.clone() {
-                    if self.satisfies(arg, &bound) {
+                    let bound = TraitBound {
+                        args: bound
+                            .args
+                            .iter()
+                            .map(|a| Self::substitute(a, &params, args))
+                            .collect(),
+                        name: bound.name,
+                    };
+                    if self.satisfies_bound(arg, &bound) {
                         continue;
                     }
                     let short = function.rsplit('.').next().unwrap_or(function);
                     let message = format!(
                         "'{}' does not implement '{}', which '{short}' needs for '{}'",
                         self.show(arg),
-                        struct_display(&bound),
+                        self.trait_text(&bound.name, &bound.args),
                         self.type_params[q].name
                     );
                     self.error(*span, message);
@@ -7177,7 +8176,7 @@ impl Inference {
         match self.shallow(ty) {
             // every value is written as text
             ty if trait_ == DISPLAY => !matches!(ty, Ty::Unit),
-            Ty::Param(p) => self.type_params[p].bounds.iter().any(|b| b == trait_),
+            Ty::Param(p) => self.type_params[p].bounds.iter().any(|b| b.name == trait_),
             // every type `==` compares part by part
             ty if trait_ == EQ => {
                 !matches!(ty, Ty::List(_) | Ty::Map(..) | Ty::Unit)
@@ -7190,6 +8189,57 @@ impl Inference {
         }
     }
 
+    /// Returns whether values of type `ty` have the methods of `bound`, a trait with its type
+    /// arguments: a type parameter if it has the same bound, and any other type if it
+    /// implements the trait for those arguments.
+    fn satisfies_bound(&self, ty: &Ty, bound: &TraitBound) -> bool {
+        if bound.args.is_empty() {
+            return self.satisfies(ty, &bound.name);
+        }
+        let same = |a: &[Ty], b: &[Ty]| {
+            a.len() == b.len()
+                && a.iter()
+                    .zip(b)
+                    .all(|(a, b)| self.resolve(a) == self.resolve(b))
+        };
+        match self.shallow(ty) {
+            Ty::Param(p) => self.type_params[p]
+                .bounds
+                .iter()
+                .any(|b| b.name == bound.name && same(&b.args, &bound.args)),
+            ty if [FROM, TRY_FROM].contains(&bound.name.as_str())
+                && let Some(fallible) =
+                    builtin_conversion(&self.finalize(&ty), &self.finalize(&bound.args[0])) =>
+            {
+                fallible == (bound.name == TRY_FROM)
+            }
+            ty => self.impl_for(&ty, &bound.name, &bound.args).is_some(),
+        }
+    }
+
+    /// Returns the type arguments of the `impl` block of the generic trait `trait_` for `ty`, a
+    /// known type, whose type arguments, with the struct's type parameters filled in, fit
+    /// `args`, as the block writes them, or `None` if there is none.
+    fn impl_for(&self, ty: &Ty, trait_: &str, args: &[Ty]) -> Option<Vec<Ty>> {
+        let key = ty_key(ty)?;
+        let type_args = match ty {
+            Ty::Struct(_, type_args) => type_args.clone(),
+            _ => vec![],
+        };
+        self.impl_args
+            .get(&(trait_.to_string(), key.clone()))?
+            .iter()
+            .find(|pattern| {
+                let own = self.own_trait_args(&key, &type_args, pattern);
+                own.len() == args.len()
+                    && own
+                        .iter()
+                        .zip(args)
+                        .all(|(a, b)| self.may_match(a, b, false))
+            })
+            .cloned()
+    }
+
     /// Returns the function that the trait method `function` is for a known type `args[0]`,
     /// as `Circle.area` is for `Shape.area`, with the type arguments of its copy, or `None` if
     /// `function` is not a trait's method or the type is not known.
@@ -7198,11 +8248,18 @@ impl Inference {
         if !self.traits.contains_key(trait_) {
             return None;
         }
-        let [this] = args else {
+        let [this, trait_args @ ..] = args else {
             return None;
         };
         let key = ty_key(this)?;
-        let implemented = self.impls.get(&(trait_.to_string(), key))?.get(name)?;
+        let suffix = match trait_args {
+            [] => String::new(),
+            _ => self.method_suffix(&self.impl_for(this, trait_, trait_args)?),
+        };
+        let implemented = self
+            .impls
+            .get(&(trait_.to_string(), key))?
+            .get(&format!("{name}{suffix}"))?;
         if implemented
             .rsplit_once('.')
             .is_some_and(|(owner, _)| owner == trait_)
@@ -7400,6 +8457,12 @@ impl Inference {
         for deferred in std::mem::take(&mut self.deferred_methods) {
             self.settle_method(deferred);
         }
+        for deferred in std::mem::take(&mut self.deferred_overloads) {
+            self.settle_overload(deferred);
+        }
+        for pending in std::mem::take(&mut self.deferred_conversions) {
+            self.settle_conversion(pending, true);
+        }
         // and so may a container, as in `k in g.inner`
         for deferred in std::mem::take(&mut self.deferred_memberships) {
             self.settle_membership(deferred);
@@ -7494,6 +8557,9 @@ impl Inference {
             let ty = match symbol.kind {
                 SymbolKind::Function | SymbolKind::Method => {
                     let info = match (&symbol.kind, &symbol.scope) {
+                        (SymbolKind::Method, _) if self.method_functions.contains_key(&i) => {
+                            &self.functions[&self.method_functions[&i]]
+                        }
                         (SymbolKind::Method, Some(owner)) => {
                             &self.functions[&format!("{owner}.{}", symbol.name)]
                         }
@@ -7583,6 +8649,22 @@ impl Inference {
                 },
             );
         }
+        for (span, info) in std::mem::take(&mut self.conversions) {
+            let implementations = info
+                .bound
+                .as_ref()
+                .map(|trait_| self.implementations(trait_, trait_));
+            analysis.conversions.insert(
+                span,
+                Conversion {
+                    target: self.finalize(&info.target),
+                    source: self.finalize(&info.source),
+                    fallible: info.fallible,
+                    function: info.function,
+                    implementations,
+                },
+            );
+        }
         for (trait_, owner) in self.impls.keys() {
             analysis
                 .implemented
@@ -7596,7 +8678,8 @@ impl Inference {
             .for_each(|traits| traits.sort());
         for info in &self.type_params {
             if !info.bounds.is_empty() && self.symbols[info.symbol].kind == SymbolKind::TypeParam {
-                analysis.bounds.insert(info.symbol, info.bounds.clone());
+                let bounds = info.bounds.iter().map(|b| b.name.clone()).collect();
+                analysis.bounds.insert(info.symbol, bounds);
             }
         }
         for (name, info) in &self.functions {
@@ -7609,6 +8692,7 @@ impl Inference {
                 analysis.type_params.insert(name.clone(), names);
             }
         }
+        analysis.method_functions = std::mem::take(&mut self.method_functions);
         analysis.references = self.references;
         analysis
             .references

@@ -804,7 +804,7 @@ impl Generator {
             5 if nesting < MAX_NESTING && !scope.floats.is_empty() && u.arbitrary()? => {
                 // fails for nan and huge floats, which the differential check skips
                 let inner = self.float_expression(u, scope, nesting + 1)?;
-                Ok(format!("int({inner})"))
+                Ok(format!("int({inner}).unwrap()"))
             }
             _ => {
                 if let Some(text) = self.read_values(u, scope, &Ty::Int, nesting)? {

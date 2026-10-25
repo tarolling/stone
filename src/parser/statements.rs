@@ -560,12 +560,12 @@ impl Parser {
         Some((None, (first.name, first.span)))
     }
 
-    /// Parses a trait's name, maybe through its module, such as `Shape` or `geo.Shape`, calling
-    /// it `what` if the first name is missing.
+    /// Parses a trait's name, maybe through its module and with type arguments, such as
+    /// `Shape`, `geo.Shape`, or `from[int]`, calling it `what` if the first name is missing.
     ///
     /// ```text
     /// trait_name:
-    ///     | '.'.NAME+
+    ///     | '.'.NAME+ ['[' ','.type+ [','] ']']
     /// ```
     fn parse_trait_name(&mut self, what: &str) -> Option<TraitName> {
         let (mut name, mut span) = self.expect_name(what, false)?;
@@ -579,7 +579,12 @@ impl Parser {
             name = format!("{name}.{next}");
             span = span.to(next_span);
         }
-        Some(TraitName { name, span })
+        let mut args = vec![];
+        if self.expect(TokenType::LBracket).is_some() {
+            args = self.parse_types()?;
+            self.expect(TokenType::RBracket)?;
+        }
+        Some(TraitName { name, span, args })
     }
 
     /// Parses a trait definition, such as `trait Shape:` followed by an indented function for
@@ -587,17 +592,18 @@ impl Parser {
     ///
     /// ```text
     /// trait_def:
-    ///     | ['pub'] 'trait' NAME ':' NEWLINE INDENT trait_method+ DEDENT
+    ///     | ['pub'] 'trait' NAME [type_params] ':' NEWLINE INDENT trait_method+ DEDENT
     /// ```
     pub(super) fn parse_trait_def(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
-        // ['pub'] 'trait' NAME ':' NEWLINE INDENT trait_method+ DEDENT
+        // ['pub'] 'trait' NAME [type_params] ':' NEWLINE INDENT trait_method+ DEDENT
         let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
         if self
             .expect(TokenType::Keyword("trait".to_string()))
             .is_some()
             && let Some((name, name_span)) = self.expect_name("a trait name", false)
+            && let Ok(type_params) = self.parse_type_params("a trait's", "trait from[T]:")
             && self.expect_block_start().is_some()
             && self.expect(TokenType::Newline).is_some()
             && self.expect(TokenType::Indent).is_some()
@@ -609,6 +615,7 @@ impl Parser {
                     name,
                     name_span,
                     public,
+                    type_params,
                     methods,
                 },
                 self.span_from(mark),

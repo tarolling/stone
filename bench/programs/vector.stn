@@ -16,8 +16,8 @@ fn total(xs: list[float]) -> float:
         sum += v
     ret sum
 
-n = int(args()[0])
-reps = int(args()[1])
+n = int(args()[0]).unwrap()
+reps = int(args()[1]).unwrap()
 y = saxpy(0.5, fill(n, 7), fill(n, 5), reps)
 // every value is a multiple of 0.5, so the sum is exact in any order
-print(int(total(y)))
+print(int(total(y)).unwrap())

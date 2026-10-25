@@ -78,8 +78,8 @@ xs.sort()
 print(xs)
 
 // floats in their total order, with every nan last
-nan = float("nan")
-inf = float("inf")
+nan = float("nan").unwrap()
+inf = float("inf").unwrap()
 fs = [1.5, nan, -0.0, inf, 0.0, -inf, -2.5, nan, 0.0, -0.0, 1e-300, -1e-300]
 fs.sort()
 print(fs)

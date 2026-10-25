@@ -23,14 +23,14 @@ fn checksum(xs: list[int]) -> int:
 fn spread(text: str) -> list[int]:
     xs = []
     for word in text.split():
-        xs.append(int(word) * 13000000000000000 - 4600000000000000000)
+        xs.append(int(word).unwrap() * 13000000000000000 - 4600000000000000000)
     ret xs
 
 // the same order as strings, which always go to the quicksort
 fn words(text: str) -> list[str]:
     xs = []
     for word in text.split():
-        n = int(word)
+        n = int(word).unwrap()
         xs.append("w" + str(n / 100) + str(n / 10 % 10) + str(n % 10))
     ret xs
 

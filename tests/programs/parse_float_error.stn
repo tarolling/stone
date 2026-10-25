@@ -1,2 +1,2 @@
-print(float(" 1.5 "))
-print(float("0x1p3"))
+print(float(" 1.5 ").unwrap())
+print(float("0x1p3").unwrap())

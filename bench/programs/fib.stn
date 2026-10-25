@@ -4,4 +4,4 @@ fn fib(n: int) -> int:
         ret n
     ret fib(n - 1) + fib(n - 2)
 
-print(fib(int(args()[0])))
+print(fib(int(args()[0]).unwrap()))

@@ -55,5 +55,5 @@ fn scaled(xs: list[float], k: float) -> list[float]:
 print(scaled([1.5, 2.0], 2.0))
 
 // '?' passes an err on from the lambda itself
-print(["21", "x"].map(|s| ok(s.parse_int()? * 2)))
+print(["21", "x"].map(|s| ok(int(s)? * 2)))
 print([{"a": 1}, {}].map(|m| some(m.get("a")? + 1)))

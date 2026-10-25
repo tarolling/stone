@@ -26,7 +26,7 @@ use crate::ast::{
     Expr, ExprContext, ExprKind, Mod, Pattern, PatternKind, Stmt, StmtKind, TraitName, TypeExpr,
     TypeExprKind, TypeParam,
 };
-use crate::checker::{DISPLAY, EQ, OPTION, ORD, RESULT, collect_assigned};
+use crate::checker::{DISPLAY, EQ, FROM, OPTION, ORD, RESULT, TRY_FROM, collect_assigned};
 use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
@@ -689,11 +689,21 @@ impl Loader<'_> {
                         }
                         rewriter.function(&mut stmt, &[]);
                     }
-                    StmtKind::TraitDef { name, methods, .. } => {
+                    StmtKind::TraitDef {
+                        name,
+                        type_params,
+                        methods,
+                        ..
+                    } => {
                         if library {
                             *name = format!("{}.{name}", module_names[i]);
                         }
-                        methods.iter_mut().for_each(|m| rewriter.function(m, &[]));
+                        // the trait's parameters are its methods' too, as a struct's are
+                        rewriter.set_type_params(&[], type_params);
+                        rewriter.bounds(type_params);
+                        methods
+                            .iter_mut()
+                            .for_each(|m| rewriter.function(m, type_params));
                     }
                     StmtKind::ImplDef {
                         name,
@@ -702,13 +712,22 @@ impl Loader<'_> {
                         methods,
                     } => {
                         let own_trait = traits[i].contains(&trait_name.name);
-                        rewriter.trait_name(trait_name);
                         let found = rewriter.impl_type(name, &structs, &traits, &module_names);
+                        // the trait's arguments may name the struct's type parameters
+                        let outer = found.as_ref().map_or(vec![], |(_, outer, _)| outer.clone());
+                        rewriter.set_type_params(&outer, &[]);
+                        rewriter.trait_name(trait_name);
+                        let names_own_struct = trait_name
+                            .args
+                            .iter()
+                            .any(|arg| names_struct(arg, own_structs, library, &module_names[i]));
                         let error = match &found {
                             Err(message) => Some(message.clone()),
-                            // the checker says a builtin type already implements the prelude's
+                            // the checker says a builtin type already implements the prelude's,
+                            // and which of its conversions a program may give one
                             Ok((linked, _, _))
-                                if [EQ, ORD, DISPLAY].contains(&trait_name.name.as_str())
+                                if [EQ, ORD, DISPLAY, FROM, TRY_FROM]
+                                    .contains(&trait_name.name.as_str())
                                     && matches!(
                                         linked.as_str(),
                                         "int" | "float" | "bool" | "str"
@@ -716,11 +735,15 @@ impl Loader<'_> {
                             {
                                 None
                             }
-                            Ok((_, _, own_type)) if !own_type && !own_trait => Some(format!(
-                                "'{}' and '{name}' are both defined in other files, so their \
+                            Ok((_, _, own_type))
+                                if !own_type && !own_trait && !names_own_struct =>
+                            {
+                                Some(format!(
+                                    "'{}' and '{name}' are both defined in other files, so their \
                                  impl block goes in the file of either",
-                                trait_name.name.rsplit('.').next().unwrap_or_default()
-                            )),
+                                    trait_name.name.rsplit('.').next().unwrap_or_default()
+                                ))
+                            }
                             Ok(_) => None,
                         };
                         if let Some(message) = error {
@@ -732,6 +755,24 @@ impl Loader<'_> {
                         let Ok((linked, outer, _)) = found else {
                             continue;
                         };
+                        // a type implements a generic trait once for each set of arguments,
+                        // so each block's functions are named by them too
+                        if !trait_name.args.is_empty() {
+                            let this = match outer.as_slice() {
+                                [] => linked.clone(),
+                                params => {
+                                    let params: Vec<&str> =
+                                        params.iter().map(|p| p.name.as_str()).collect();
+                                    format!("{linked}.{}", params.join("_"))
+                                }
+                            };
+                            let suffix = method_suffix(&trait_name.args, &this);
+                            for method in methods.iter_mut() {
+                                if let StmtKind::FunctionDef { name, .. } = &mut method.kind {
+                                    name.push_str(&suffix);
+                                }
+                            }
+                        }
                         *name = linked;
                         methods
                             .iter_mut()
@@ -964,6 +1005,77 @@ fn public_types(module: &Mod) -> HashMap<String, bool> {
 }
 
 /// Returns each struct a module defines at the top level, mapped to its type parameters.
+/// Returns what follows the name of a function of an `impl` block of a generic trait with the
+/// type arguments `args`, written after linking: `..` and the arguments as labels write types,
+/// `Self` being `this`, as the checker's `method_suffix` writes them.
+///
+/// For example, `add[int]` gives `..int`, so its `add` is named `add..int`, and
+/// `add[list[geo.Point]]` gives `..list_geo.Point`.
+pub fn method_suffix(args: &[TypeExpr], this: &str) -> String {
+    let args: Vec<String> = args.iter().map(|a| mangle(a, this)).collect();
+    format!("..{}", args.join("_"))
+}
+
+/// Returns `ty`, a type written after linking, as a label writes it, `Self` being `this`.
+fn mangle(ty: &TypeExpr, this: &str) -> String {
+    let all = |tys: &[TypeExpr]| tys.iter().map(|t| mangle(t, this)).collect::<Vec<_>>();
+    match &ty.kind {
+        TypeExprKind::Int => "int".to_string(),
+        TypeExprKind::Float => "float".to_string(),
+        TypeExprKind::Bool => "bool".to_string(),
+        TypeExprKind::Str => "str".to_string(),
+        TypeExprKind::Bytes => "bytes".to_string(),
+        TypeExprKind::List(elem) => format!("list_{}", mangle(elem, this)),
+        TypeExprKind::Map(key, value) => {
+            format!("map_{}_{}", mangle(key, this), mangle(value, this))
+        }
+        TypeExprKind::Tuple(fields) => format!("tuple{}_{}", fields.len(), all(fields).join("_")),
+        TypeExprKind::Named { name, args } if name == "Self" && args.is_empty() => this.to_string(),
+        TypeExprKind::Named { name, args } if args.is_empty() => name.clone(),
+        TypeExprKind::Named { name, args } => format!("{name}.{}", all(args).join("_")),
+        TypeExprKind::Function { params, ret } => {
+            let ret = match ret {
+                Some(ret) => mangle(ret, this),
+                None => "unit".to_string(),
+            };
+            format!("fn{}_{}_{ret}", params.len(), all(params).join("_"))
+        }
+    }
+}
+
+/// Returns whether `ty`, a type written after linking, names anywhere in it a struct of
+/// `structs`, those of the file of module `module`, which is a `library`.
+///
+/// For example, `list[geo.Point]` names `Point` of module `geo`.
+fn names_struct(
+    ty: &TypeExpr,
+    structs: &HashMap<String, Vec<TypeParam>>,
+    library: bool,
+    module: &str,
+) -> bool {
+    let names = |ty: &TypeExpr| names_struct(ty, structs, library, module);
+    match &ty.kind {
+        TypeExprKind::List(elem) => names(elem),
+        TypeExprKind::Map(key, value) => names(key) || names(value),
+        TypeExprKind::Tuple(fields) => fields.iter().any(names),
+        TypeExprKind::Function { params, ret } => {
+            params.iter().any(names) || ret.as_deref().is_some_and(names)
+        }
+        TypeExprKind::Named { name, args } => {
+            let short = match library {
+                true => name.strip_prefix(module).and_then(|n| n.strip_prefix('.')),
+                false => Some(name.as_str()),
+            };
+            short.is_some_and(|short| structs.contains_key(short)) || args.iter().any(names)
+        }
+        TypeExprKind::Int
+        | TypeExprKind::Float
+        | TypeExprKind::Bool
+        | TypeExprKind::Str
+        | TypeExprKind::Bytes => false,
+    }
+}
+
 fn struct_params(module: &Mod) -> HashMap<String, Vec<TypeParam>> {
     let Mod::Module { body } = module;
     body.iter()
@@ -1127,6 +1239,7 @@ impl Rewriter<'_> {
     /// Rewrites a trait named in a bound or an `impl` block to its linked name, as `type_expr`
     /// does a type. A name that is no trait this file can see is left for the checker.
     fn trait_name(&mut self, name: &mut TraitName) {
+        name.args.iter_mut().for_each(|arg| self.type_expr(arg));
         let linked = match name.name.rsplit_once('.') {
             Some((module, short)) => self.module_type(module, short, name.span, "trait"),
             None => self.enum_name(&name.name),

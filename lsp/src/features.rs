@@ -227,7 +227,7 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
         }
         (StoneSymbolKind::Method, Type::Function { params, ret }) => {
             let owner = symbol.scope.as_deref().unwrap_or_default();
-            let function = format!("{owner}.{}", symbol.name);
+            let function = analysis.method_function(symbol_index(analysis, symbol));
             let shown = format!("{}.{}", struct_display(owner), symbol.name);
             function_signature(analysis, &function, &shown, params, ret)
         }
@@ -270,7 +270,8 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                     _ => None,
                 })
                 .collect();
-            format!("trait {}{}", symbol.name, methods.concat())
+            let params = type_params_of(analysis, &symbol.name);
+            format!("trait {}{params}{}", symbol.name, methods.concat())
         }
         (StoneSymbolKind::TypeParam, _) => {
             let index = analysis
@@ -1082,6 +1083,15 @@ fn function_outline(doc: &Document, symbol: &Symbol, function: &str) -> Document
 
 /// Returns the functions of the `impl` blocks of the struct with the linked name `name`, in
 /// order.
+/// Returns the index of `symbol`, one of `analysis`'s symbols.
+fn symbol_index(analysis: &Analysis, symbol: &Symbol) -> usize {
+    analysis
+        .symbols
+        .iter()
+        .position(|s| std::ptr::eq(s, symbol))
+        .unwrap_or(usize::MAX)
+}
+
 fn struct_methods<'a>(analysis: &'a Analysis, name: &'a str) -> impl Iterator<Item = &'a Symbol> {
     analysis
         .symbols
@@ -1092,8 +1102,7 @@ fn struct_methods<'a>(analysis: &'a Analysis, name: &'a str) -> impl Iterator<It
 /// Returns whether `method`, a function of an `impl` block, takes `self`, so it is called on a
 /// value rather than on its struct.
 fn has_self(analysis: &Analysis, method: &Symbol) -> bool {
-    let owner = method.scope.as_deref().unwrap_or_default();
-    let function = format!("{owner}.{}", method.name);
+    let function = analysis.method_function(symbol_index(analysis, method));
     analysis
         .symbols
         .iter()
@@ -1234,9 +1243,12 @@ pub fn completion(
                 detail: Some(signature(&doc.analysis, field)),
                 ..CompletionItem::default()
             });
-            let own: Vec<&Symbol> = struct_methods(&doc.analysis, name)
+            let mut own: Vec<&Symbol> = struct_methods(&doc.analysis, name)
                 .filter(|method| has_self(&doc.analysis, method))
                 .collect();
+            // a generic trait's method is offered once, however many impls it has
+            let mut seen = HashSet::new();
+            own.retain(|method| seen.insert(method.name.clone()));
             // and the defaults of the traits it implements that it does not define again
             let traits = doc.analysis.implemented.get(name.as_str());
             let defaults: Vec<&Symbol> = traits

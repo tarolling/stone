@@ -76,10 +76,10 @@ a loop variable you do not need, and `main` is an ordinary function name.
 | type | example | notes |
 | --- | --- | --- |
 | `int` | `42` | 64-bit; overflow wraps around |
-| `float` | `1.5`, `2e-3` | never mixed with `int`: `float(n)`, `int(x)` |
+| `float` | `1.5`, `2e-3` | never mixed with `int`: `float(n)`, `int(x)?` (see conversions) |
 | `bool` | `true` | the only type a condition accepts |
 | `str` | `"hi\n"` | immutable UTF-8 bytes; `s[i]`, `s[a:b]`, `+` to join |
-| `bytes` | `b"\x00\xff"` | immutable raw bytes; `b[i]` is an int, slices, `+`, `"s".bytes()`, `b.text()` (a result), `bytes([1, 2])` |
+| `bytes` | `b"\x00\xff"` | immutable raw bytes; `b[i]` is an int, slices, `+`, `"s".bytes()`, `b.text()` (a result), `bytes([1, 2])` (a result) |
 | `list[T]` | `[1, 2]`, `[]` | all elements one type |
 | `map[K, V]` | `{"a": 1}`, `{}` | keys `int`, `str`, or `bool`; insertion order |
 | `tuple[A, B]` | `(1, "a")` | two or more values, always in parentheses |
@@ -160,7 +160,7 @@ fn parse_pair(line: str) -> result[tuple[int, int], str]:
     parts = line.split(",")
     if parts.len() != 2:
         ret err("expected two numbers in '" + line + "'")
-    ret ok((parts[0].parse_int()?, parts[1].parse_int()?))
+    ret ok((int(parts[0])?, int(parts[1])?))
 
 for line in ["3,4", "3", "3,x"]:
     match parse_pair(line):
@@ -174,10 +174,48 @@ print(parse_pair("1,2").unwrap(), parse_pair("1").is_err())
 A function that can fail returns `result[T, E]`: `ok(x)` or `err(e)`. `?` after a result gives
 the `ok` value, or returns the `err` from the enclosing function at once; it is only allowed in a
 function that returns a `result` with the same error type (`?` on an option needs a function
-returning an option, and `r.ok()?` turns a result into one). `s.parse_int()` and
-`s.parse_float()` return `result[int, str]` and `result[float, str]` instead of stopping the
-program as `int(s)` and `float(s)` do. Results have `is_ok`, `is_err`, `unwrap`, `unwrap_or`,
-`unwrap_err`, `ok()`, and `err()`.
+returning an option, and `r.ok()?` turns a result into one). Results have `is_ok`, `is_err`,
+`unwrap`, `unwrap_or`, `unwrap_err`, `ok()`, and `err()`.
+
+### Conversions
+
+```stone
+struct Celsius:
+    degrees: float
+
+struct Fahrenheit:
+    degrees: float
+
+impl from[Celsius] for Fahrenheit:
+    fn from(value: Celsius) -> Self:
+        ret Fahrenheit(degrees=value.degrees * 9.0 / 5.0 + 32.0)
+
+impl try_from[str] for Celsius:
+    fn try_from(value: str) -> result[Self, str]:
+        ret ok(Celsius(degrees=float(value)?))
+
+fn parse_all[T: try_from[str]](texts: list[str]) -> result[list[T], str]:
+    out = []
+    for text in texts:
+        out.append(T(text)?)
+    ret ok(out)
+
+print(Fahrenheit(Celsius(degrees=100.0)))       // Fahrenheit(degrees=212.0)
+print(Celsius("21.5"), Celsius("warm").is_err()) // ok(Celsius(degrees=21.5)) true
+print(float(2), int(2.9), int("x"), str([1]))   // 2.0 ok(2) err("invalid literal ...") [1]
+print(parse_all(["1", "2"]).unwrap()[0] + 1)    // 2
+```
+
+A type called with one value, `T(x)`, converts it through the prelude's traits: `from[S]`
+(`fn from(value: S) -> Self`) for a conversion that cannot fail, which gives a `T`, or
+`try_from[S]` (`fn try_from(value: S) -> result[Self, str]`) for one that can, which gives a
+`result[T, str]`. A struct is still made with named values; one positional value converts.
+Builtin: `float(n)` of an int and `str(x)` of anything give the value; `int(x)` of a float or a
+`str`, `float(s)` of a `str`, and `bytes(xs)` of a `list[int]` give results, so write
+`int(s)?` in a function returning `result[_, str]`, or `int(s).unwrap()` where the text is known
+good. A type implements `from` or `try_from` once for each source type, never both for one;
+`impl from[Celsius] for float:` may go beside `Celsius`. A bound `[T: from[int]]` lets
+generic code write `T(n)`.
 
 ### Structs and methods
 
@@ -354,7 +392,7 @@ assign the result where 'add' is called
 
 ## Rules the checker enforces
 
-- No implicit conversion: `1 + 2.0` is an error. Convert with `float(n)` or `int(x)`, and build
+- No implicit conversion: `1 + 2.0` is an error. Convert with `float(n)` or `int(x)?`, and build
   strings with values in them: `"n = {n}"`, or `"n = " + str(n)`. `str` and `{x}` take any value
   and write it as `print` does.
 - Conditions must be `bool`: write `if xs.len() > 0:`, `if s != "":`, `if n != 0:`.
@@ -367,8 +405,8 @@ assign the result where 'add' is called
 - Arithmetic on lists is element by element, as in numpy: `[1, 2] * 2` is `[2, 4]`,
   `[1.0, 2.0] + [3.0, 4.0]` is `[4.0, 6.0]`. So `[0] * n` is not `n` zeros (the checker warns),
   and `+` does not join lists; use `extend`.
-- `int(x)` on a float truncates toward zero, as in Python (`int(-2.7) == -2`), and stops the
-  program on nan or a float too large for an int.
+- `int(x)` on a float truncates toward zero, as in Python (`int(-2.7)` is `ok(-2)`), and is an
+  `err` for nan or a float too large for an int.
 - Every variable is assigned on every path before it is read, and keeps one type: after
   `total = 0`, `total = 0.0` is an error (`cannot assign float to 'total', which is int`), so use
   a second name.
@@ -398,7 +436,7 @@ assign the result where 'add' is called
 | `lambda x: x * 2` | `\|x\| x * 2`, which may use only its own parameters (no closures yet) |
 | `map(f, xs)`, `filter(f, xs)`, `any`/`all` with a generator | `xs.map(f)`, `xs.filter(f)`, `xs.any(f)`, `xs.all(f)` |
 | `min(xs, key=f)`, `max(xs, key=f)` | `xs.min_by_key(f)`, `xs.max_by_key(f)`, options (the max is the last of equal ones) |
-| `try`/`except`, `raise` | return a `result` and pass errors on with `?`; `s.parse_int()` instead of `int(s)` |
+| `try`/`except`, `raise` | return a `result` and pass errors on with `?`, as in `int(s)?` |
 | `class` with inheritance | a `struct` plus `impl`, an `enum` for alternatives, a `trait` for shared behavior |
 | `None`, `Optional[T]` | `none`, `option[T]` |
 | `pass` | restructure so every block has a real statement |
@@ -421,7 +459,8 @@ assign the result where 'add' is called
 
 Functions: `print(values...)` (space-separated, newline), `eprint(values...)` (the same, to
 stderr), `range(end)` and `range(start, end)`
-(only as a `for` iterable), `int(x)`, `float(x)`, `str(x)`, `input()` and `input(prompt)`
+(only as a `for` iterable), the conversions `int(x)`, `float(x)`, `str(x)`, `bytes(xs)`,
+`input()` and `input(prompt)`
 (a `result[str, str]`: `ok` of the line without its newline, or `err("end of input")`),
 `eof()`, `args()`.
 
@@ -468,7 +507,7 @@ while not eof():
     line = input().unwrap().strip()
     if line == "":
         cont
-    total += int(line)
+    total += int(line).unwrap()
 print(total)
 ```
 
@@ -486,7 +525,7 @@ fn save(path: str, values: list[int]) -> result[int, str]:
 fn total(path: str) -> result[int, str]:
     sum = 0
     for line in fs.read_lines(path)?:
-        sum += line.parse_int()?
+        sum += int(line)?
     ret ok(sum)
 
 print(save("numbers.txt", [1, 2, 3]))   // ok(3)

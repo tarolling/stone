@@ -42,7 +42,7 @@ print(t == (1, (word(2), 2.5)), t == (2, ("w1", 2.5)), t == (1, ("w1", 2.0)))
 print(pair(3) == pair(3), pair(3) == pair(4), pair(3) != (3, "w3"))
 
 // floats compare as IEEE numbers inside too
-inf = float("inf")
+inf = float("inf").unwrap()
 nan = inf - inf
 print((nan, 1) == (nan, 1), (nan, 1) != (nan, 1), (0.0, 1) == (-0.0, 1))
 

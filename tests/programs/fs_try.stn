@@ -3,7 +3,7 @@ use fs
 fn total(path: str) -> result[int, str]:
     sum = 0
     for line in fs.read_lines(path)?:
-        sum += line.strip().parse_int()?
+        sum += int(line.strip())?
     ret ok(sum)
 
 fn save(path: str, values: list[int]) -> result[int, str]:

@@ -162,16 +162,19 @@ impl Shape for Circle:
 ```
 
 A block that leaves out a method without a default, defines a function the trait does not have,
-or changes a method's signature is an error. Every method of a trait takes `self` first, and
-cannot have type parameters of its own for now. Inside a trait, `Self` is the type that
+or changes a method's signature is an error. Every method of a trait takes `self` first, except
+those of the prelude's `from` and `try_from`, and cannot have type parameters of its own for
+now. Inside a trait, `Self` is the type that
 implements it, and inside any `impl` block, the block's type, as in `fn same(self, other: Self)`.
 A trait is not a type: a value always has the type of the struct or builtin type it is, and a
 function that takes any type implementing a trait has a type parameter with a bound.
 
-A type implements a trait at most once, and its methods, whether its own or from traits, all
-have different names, so `c.area()` always means one function. The implementation goes in the
-file that defines the trait or the one that defines the struct; `int`, `float`, `bool`, and `str`
-can implement a trait in the trait's file. A trait is imported like a struct, with
+A type implements a trait at most once, or a generic trait once for each set of type arguments
+(see below), and its methods, whether its own or from traits, all have different names, except a
+generic trait's, so `c.area()` always means one function. The implementation goes in the file
+that defines the trait or the one that defines the struct; `int`, `float`, `bool`, and `str`
+can implement a trait in the trait's file, or a generic trait in the file of a struct its type
+arguments name. A trait is imported like a struct, with
 `use shapes.Shape`, and a library marks it `pub` to share it. Its methods need no `use`: they
 are called wherever the type is.
 
@@ -197,6 +200,72 @@ enum's.
 
 The compiler makes a copy of the function for each set of types, and of each default method for
 each type that keeps it, so a call through a bound calls the type's method directly.
+
+### Generic traits
+
+A trait may have type parameters, which its methods' signatures use, and each `impl` block gives
+them types:
+
+```stone
+trait add[R]:
+    fn add(self, other: R) -> Self
+
+impl add[int] for V:
+    fn add(self, other: int) -> Self:
+        ret V(x=self.x + other)
+
+impl add[V] for V:
+    fn add(self, other: V) -> Self:
+        ret V(x=self.x + other.x)
+```
+
+A type implements a generic trait once for each set of type arguments, and blocks whose
+arguments could be the same, such as `add[T]` and `add[int]` for a `Box[T]`, are an error. A
+call such as `v.add(2)` calls the method whose arguments fit, which may be decided only once the
+arguments' types are known; a call that none fits names the blocks, as in
+`no 'add' of 'V' takes str: 'V' implements 'add[int]' and 'add[V]'`. A bound gives the trait its
+arguments, which may be other type parameters: `fn plus[T: add[U], U](x: T, y: U) -> T:` may
+call `x.add(y)`, and each call checks that its `T` implements `add` for its `U`.
+
+### Conversions
+
+The prelude's generic traits `from` and `try_from` say how a value becomes another type:
+
+```stone
+pub trait from[T]:
+    fn from(value: T) -> Self
+
+pub trait try_from[T]:
+    fn try_from(value: T) -> result[Self, str]
+```
+
+A type called with one value, `T(x)`, converts it: through `from`, which gives a `T`, or
+`try_from`, for a conversion that can fail, which gives a `result[T, str]`. A struct is still
+made with named values, so `Fahrenheit(c)` converts and `Fahrenheit(degrees=212.0)` makes one.
+
+```stone
+impl from[Celsius] for Fahrenheit:
+    fn from(value: Celsius) -> Self:
+        ret Fahrenheit(degrees=value.degrees * 9.0 / 5.0 + 32.0)
+
+impl try_from[str] for Celsius:
+    fn try_from(value: str) -> result[Self, str]:
+        ret ok(Celsius(degrees=float(value)?))
+
+impl from[Celsius] for float:
+    fn from(value: Celsius) -> float:
+        ret value.degrees
+```
+
+Every type converts from itself, and every value to `str`, through `display`, so `impl from[P]
+for str` is an error that points to `display`. An `int` converts to a `float`, and a `float` or a
+`str` may become an `int`, a `str` a `float`, and a `list[int]` `bytes`, each through `try_from`
+(see [Builtins](builtins.md#int)), so a type never implements those again. A type implements
+`from` or `try_from` for a source type, never both. A builtin type's conversion from a struct,
+such as `impl from[Celsius] for float`, goes in the file that defines the struct.
+
+A bound lets generic code convert to its type parameter, as `T(n)` with `[T: from[int]]`, or
+`T(s)?` with `[T: try_from[str]]`, which `int`, `float`, and any type with such an impl meet.
 
 ### Methods that change self
 
@@ -335,7 +404,7 @@ tests whether `part` appears in them. `print` writes bytes as Python writes them
 outside printable ASCII escaped, as `b'GET\x00\xff'`. Like strings, bytes never change, and
 they cannot be map keys. `"text".bytes()` gives a string's UTF-8 bytes, `data.text()` gives the
 string bytes hold, if they are UTF-8 text, as a result, and `bytes([104, 105])` makes bytes from
-their values; see [Builtins](builtins.md#bytes). `fs.read_bytes` and a socket's `read_bytes` and
+their values, as a result; see [Builtins](builtins.md#bytes). `fs.read_bytes` and a socket's `read_bytes` and
 `read_exact` read them, and `fs.write_bytes` and `send_bytes` write them.
 
 ## Tuples
@@ -627,9 +696,9 @@ pub enum result[T, E]:
 stops the program with `cannot unwrap err: ` and the error on an `err`, `r.unwrap_or(default)`
 returns `default` instead, `r.unwrap_err()` returns the error and stops with
 `cannot unwrap_err ok: ` and the value on an `ok`, and
-`r.ok()` and `r.err()` give `some` of the value or the error, or `none`. `s.parse_int()` and
-`s.parse_float()` return results, whose error is the message `int(s)` or `float(s)` would stop
-the program with. A result prints as `ok(1)` or `err('bad')`, and compares with `==` when what it
+`r.ok()` and `r.err()` give `some` of the value or the error, or `none`. Conversions that can
+fail return results, such as `int(s)` and `float(s)` of a string, whose error says why the text
+is not a number (see [Conversions](#conversions)). A result prints as `ok(1)` or `err('bad')`, and compares with `==` when what it
 holds can.
 
 ### Passing errors on
@@ -641,7 +710,7 @@ function it is in, right there:
 fn sum(texts: list[str]) -> result[int, str]:
     total = 0
     for t in texts:
-        total += t.parse_int()?
+        total += int(t)?
     ret ok(total)
 
 print(sum(["1", "2"]), sum(["1", "x"]))   // ok(3) err("invalid literal for int() with base 10: 'x'")
@@ -656,7 +725,7 @@ before it is freed when it returns. The checker requires:
   `result[float, str]` for a `?` on a `result[int, str]`; nothing converts one error into another
 - on an option, a function that returns an option, where `?` returns `none`
 
-A result becomes an option with `.ok()`, so `t.parse_int().ok()?` works in a function that
+A result becomes an option with `.ok()`, so `int(t).ok()?` works in a function that
 returns an option.
 
 ## Functions
@@ -696,11 +765,11 @@ A function never changes, so passing one copies nothing. The methods `map`, `fil
 
 These keep the two backends identical and catch common mistakes:
 
-- **No implicit conversion.** Arithmetic and comparisons never mix `int` and `float`; use
-  `int()` or `float()`. The one exception is `**`, whose exponent is always an `int`. The same
+- **No implicit conversion.** Arithmetic and comparisons never mix `int` and `float`; convert
+  with `float(n)`, or `int(x)`, which gives a result, since a float may be nan. The one exception is `**`, whose exponent is always an `int`. The same
   holds element by element, so `list[int] + list[float]` and `[1, 2] * 0.5` are errors. Strings
-  never mix with numbers either: `int("3")` and `float("2.5")` read numbers from strings, and
-  `str(3)` writes them.
+  never mix with numbers either: `int("3")` and `float("2.5")` read numbers from strings, as
+  results, and `str(3)` writes them.
 - **Conditions are `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject ints,
   floats, strings, lists, and `none`, so `if 1 or 0:` is an error; write `n != 0` instead of `n`.
 - **Lists and maps are not comparable.** `==` and `!=` compare numbers, bools, strings, and

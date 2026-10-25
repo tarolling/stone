@@ -703,16 +703,18 @@ ret y
 
     #[test]
     fn strs_parse_and_convert() {
-        let source =
-            "print(int(\" 42 \") + 1, float(\"2.5\") * 2.0, str(1.0) + str(true) + str(-3))\n";
+        let source = "print(int(\" 42 \").unwrap() + 1, float(\"2.5\").unwrap() * 2.0, str(1.0) + str(true) + str(-3))\n";
         assert_eq!(run_limited(source), Ok("43 5.0 1.0true-3\n".to_string()));
         assert_eq!(
-            run_limited("print(int(\"x\"))\n"),
-            Err("1:7: error: invalid literal for int() with base 10: 'x'".to_string())
+            run_limited("print(int(\"x\").unwrap())\n"),
+            Err(
+                "1:7: error: cannot unwrap err: invalid literal for int() with base 10: 'x'"
+                    .to_string()
+            )
         );
         assert_eq!(
-            run_limited("print(float(\"\"))\n"),
-            Err("1:7: error: could not convert string to float: ''".to_string())
+            run_limited("print(float(\"\").unwrap())\n"),
+            Err("1:7: error: cannot unwrap err: could not convert string to float: ''".to_string())
         );
     }
 

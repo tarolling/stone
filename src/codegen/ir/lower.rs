@@ -41,9 +41,10 @@ use crate::ast::{
     Stmt, StmtKind, UnaryOp, constant_int,
 };
 use crate::checker::{
-    Analysis, DISPLAY, EQ, Enums, Instance, Method, Methods, OPTION, ORD, RESULT, Step, Structs,
-    SymbolKind, Type, collect_assigned, collect_changed, may_name_enum, place, place_root,
-    place_spans, range_args, struct_display, type_text, variant_display, variants,
+    Analysis, Conversion, Converter, DISPLAY, EQ, Enums, Instance, Method, Methods, OPTION, ORD,
+    RESULT, Step, Structs, SymbolKind, Type, collect_assigned, collect_changed, may_name_enum,
+    place, place_root, place_spans, range_args, struct_display, type_text, variant_display,
+    variants,
 };
 use crate::codegen::context::{function_label, module_routine};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
@@ -80,6 +81,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         implemented,
         function_values,
         indirect_calls,
+        conversions,
         ..
     } = analysis;
 
@@ -150,6 +152,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
         implemented,
         function_values,
         indirect_calls,
+        conversions,
         helpers: RefCell::new(Vec::new()),
         requested: RefCell::new(Vec::new()),
     };
@@ -522,6 +525,8 @@ struct Context<'a> {
     function_values: &'a HashMap<Span, String>,
     /// The span of every call of a function value.
     indirect_calls: &'a HashSet<Span>,
+    /// Every conversion `Type(value)`, by the call's span.
+    conversions: &'a HashMap<Span, Conversion>,
     /// Each copy of a function some code calls, in the order it was first called: one for each
     /// set of types a generic function is called with, and for each function value a function
     /// is passed for a parameter it never assigns.
@@ -3643,6 +3648,9 @@ impl<'a> Lowerer<'a> {
             } => self.compare(left, ops, comparators, into),
 
             ExprKind::Call { func, args, .. } => {
+                if let Some(conversion) = self.context.conversions.get(&expr.span) {
+                    return Ok(self.conversion(expr, conversion, &args[0], into, kind)?[0]);
+                }
                 if self.context.indirect_calls.contains(&expr.span) {
                     let kinds = self.leaf_kinds(expr)?;
                     return Ok(self.value_call(func, expr.span, args, into, &kinds)?[0]);
@@ -4691,13 +4699,17 @@ impl<'a> Lowerer<'a> {
                 self.own(order, Some(RcKind::Enum));
                 Ok(order)
             }
-            "display" => self.call(
-                "str",
-                receiver.span,
-                std::slice::from_ref(receiver),
-                into,
-                kind,
-            ),
+            // as `str` of the value writes it
+            "display" => {
+                let ty = self.type_of(receiver)?;
+                match ty {
+                    Type::Str => {
+                        let value = self.expr(receiver)?;
+                        Ok(self.finish(value, into))
+                    }
+                    _ => self.builtin_conversion((&Type::Str, &ty), receiver, into, kind),
+                }
+            }
             // a type that compares part by part compares as `==` does
             "eq" => {
                 let ty = self.type_of(receiver)?;
@@ -4786,17 +4798,6 @@ impl<'a> Lowerer<'a> {
                 );
                 self.release_temp(result);
                 Ok(option)
-            }
-            "parse_int" | "parse_float" => {
-                let text = self.expr(receiver)?;
-                let label = match name {
-                    "parse_int" => "stone.parse_int_result",
-                    _ => "stone.parse_float_result",
-                };
-                let result = self.runtime_call(label, vec![text], into);
-                self.release_temp(text);
-                self.own(result, Some(RcKind::Enum));
-                Ok(result)
             }
             "contains" => {
                 let [needle] = args else {
@@ -5435,78 +5436,6 @@ impl<'a> Lowerer<'a> {
                 // print returns none
                 Ok(self.finish(Operand::Imm(0), into))
             }
-            "bytes" => {
-                // the routine gives where the first value that is not a byte is, or -1
-                let values = self.expr(&args[0])?;
-                let bad = self.runtime_call("stone.bytes_check", vec![values], None);
-                let (holds, fails) = (self.new_block(), self.new_block());
-                self.terminate(Terminator::CmpBranch {
-                    cond: Cond::Lt,
-                    float: false,
-                    lhs: bad,
-                    rhs: Operand::Imm(0),
-                    then: holds,
-                    otherwise: fails,
-                });
-                self.start(fails);
-                let value = self.fresh();
-                self.push(Inst::ListGet {
-                    dst: value,
-                    list: values,
-                    index: bad,
-                    offset: 0,
-                });
-                self.terminate(Terminator::Fail(
-                    BYTE_RANGE.to_string(),
-                    vec![Operand::Reg(value)],
-                ));
-                self.start(holds);
-                let result = self.runtime_call("stone.bytes_from_list", vec![values], into);
-                self.release_temp(values);
-                self.own(result, kind);
-                Ok(result)
-            }
-            "str"
-                if !matches!(
-                    self.type_of(&args[0])?,
-                    Type::Int | Type::Float | Type::Bool | Type::Str
-                ) =>
-            {
-                self.display(&args[0], into, kind)
-            }
-            "float" | "int" | "str" => {
-                let from = self.type_of(&args[0])?;
-                let src = self.expr(&args[0])?;
-                let runtime = match (name, &from) {
-                    ("int", Type::Str) => Some("stone.parse_int"),
-                    ("float", Type::Str) => Some("stone.parse_float"),
-                    ("str", Type::Int) => Some("stone.str_int"),
-                    ("str", Type::Float) => Some("stone.str_float"),
-                    ("str", Type::Bool) => Some("stone.str_bool"),
-                    // strings never change, so str of a str can share it
-                    ("str", _) => return Ok(self.finish(src, into)),
-                    _ => None,
-                };
-                if let Some(label) = runtime {
-                    let result = self.runtime_call(label, vec![src], into);
-                    self.release_temp(src);
-                    self.own(result, kind);
-                    return Ok(result);
-                }
-                let converts = match name {
-                    "float" => from == Type::Int,
-                    _ => from == Type::Float,
-                };
-                if !converts {
-                    return Ok(self.finish(src, into));
-                }
-                let dst = self.dst(into);
-                self.push(match name {
-                    "float" => Inst::IntToFloat { dst, src },
-                    _ => Inst::FloatToInt { dst, src },
-                });
-                Ok(Operand::Reg(dst))
-            }
             "input" => {
                 // no prompt is a null pointer
                 let prompt = match args {
@@ -5707,15 +5636,17 @@ impl<'a> Lowerer<'a> {
                 let ty = self
                     .span_type(receiver.span)
                     .ok_or("receiver has no type")?;
+                let trait_args: Vec<Type> =
+                    method.trait_args.iter().map(|a| self.fill(a)).collect();
                 // a number, a string, or a type compared part by part has the builtin method
                 if matches!(method.function.as_str(), "eq.eq" | "ord.cmp")
-                    && method.resolve(&ty).is_none()
+                    && method.resolve(&ty, &trait_args).is_none()
                 {
                     let name = method.function.rsplit('.').next().unwrap_or_default();
                     let value = self.method(receiver, name, args, into, kinds[0])?;
                     return Ok(vec![value]);
                 }
-                let (function, args) = method.resolve(&ty).ok_or_else(|| {
+                let (function, args) = method.resolve(&ty, &trait_args).ok_or_else(|| {
                     format!(
                         "'{ty}' does not implement the trait of '{}'",
                         method.function
@@ -5962,6 +5893,205 @@ impl<'a> Lowerer<'a> {
     /// Calls the stone function `name`, which returns one value for each of `kinds`, how each is
     /// counted: several for a tuple, the first in `into` if given. The call borrows its arguments,
     /// each tuple as its values, and temporaries among them are released after it.
+    /// Lowers the conversion `call`, of `arg`, to its values: a builtin conversion, or a call
+    /// of the function of an impl of `from` or `try_from`, which this copy's types pick for a
+    /// type parameter. `kind` says how a value a builtin conversion gives is counted.
+    fn conversion(
+        &mut self,
+        call: &Expr,
+        conversion: &Conversion,
+        arg: &Expr,
+        into: Option<VReg>,
+        kind: Option<RcKind>,
+    ) -> Result<Vec<Operand>, String> {
+        let target = self.fill(&conversion.target);
+        let source = self.fill(&conversion.source);
+        let converter = conversion
+            .resolve(&target, &source)
+            .ok_or_else(|| format!("cannot convert {source} to {target}"))?;
+        let Converter::Function(function, copy) = converter else {
+            if target == source {
+                // every type converts from itself, whatever its values
+                return match target.is_flat() {
+                    true => self.expr_flat(arg),
+                    false => Ok(vec![self.expr(arg).map(|value| self.finish(value, into))?]),
+                };
+            }
+            let kind = kind.or(RcKind::of(&self.type_of(call)?));
+            return Ok(vec![self.builtin_conversion(
+                (&target, &source),
+                arg,
+                into,
+                kind,
+            )?]);
+        };
+        // through a bound, the copy's target type picks its impl's function
+        if conversion.function.is_none() {
+            let label = match copy.is_empty() {
+                true => function.clone(),
+                false => self.request(Instance {
+                    function: function.clone(),
+                    args: copy,
+                }),
+            };
+            self.dispatched = Some((call.span, label));
+        }
+        let kinds = self.leaf_kinds(call)?;
+        self.user_call(
+            &function,
+            call.span,
+            std::slice::from_ref(arg),
+            into,
+            &kinds,
+        )
+    }
+
+    /// Lowers a builtin conversion of `arg`, a `source`, to a `target`, other than of a type to
+    /// itself, its value counted as `kind`: a `try_from` gives a result.
+    fn builtin_conversion(
+        &mut self,
+        (target, source): (&Type, &Type),
+        arg: &Expr,
+        into: Option<VReg>,
+        kind: Option<RcKind>,
+    ) -> Result<Operand, String> {
+        let runtime = match (target, source) {
+            (Type::Str, Type::Int) => "stone.str_int",
+            (Type::Str, Type::Float) => "stone.str_float",
+            (Type::Str, Type::Bool) => "stone.str_bool",
+            (Type::Str, _) => return self.display(arg, into, kind),
+            (Type::Int, Type::Str) => "stone.parse_int_result",
+            (Type::Float, Type::Str) => "stone.parse_float_result",
+            (Type::Float, Type::Int) => {
+                let src = self.expr(arg)?;
+                let dst = self.dst(into);
+                self.push(Inst::IntToFloat { dst, src });
+                return Ok(Operand::Reg(dst));
+            }
+            (Type::Int, Type::Float) => return self.float_to_int_result(arg, into),
+            (Type::Bytes, _) => return self.bytes_result(arg, into),
+            _ => return Err(format!("cannot convert {source} to {target}")),
+        };
+        let src = self.expr(arg)?;
+        let result = self.runtime_call(runtime, vec![src], into);
+        self.release_temp(src);
+        self.own(result, kind);
+        Ok(result)
+    }
+
+    /// Lowers `int(x)` of a float `arg`: `ok` of the int toward zero, or `err` if it is nan or
+    /// out of range, which fails both of the range's comparisons.
+    fn float_to_int_result(&mut self, arg: &Expr, into: Option<VReg>) -> Result<Operand, String> {
+        let x = self.expr(arg)?;
+        let (ok, err) = (self.tag_of(RESULT, "ok")?, self.tag_of(RESULT, "err")?);
+        let dst = self.dst(into);
+        let (above, fits, fails, end) = (
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+        );
+        // -2^63 fits in an int but 2^63 does not
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Ge,
+            float: true,
+            lhs: x,
+            rhs: Operand::Imm((i64::MIN as f64).to_bits() as i64),
+            then: above,
+            otherwise: fails,
+        });
+        self.start(above);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: true,
+            lhs: x,
+            rhs: Operand::Imm((-(i64::MIN as f64)).to_bits() as i64),
+            then: fits,
+            otherwise: fails,
+        });
+        self.start(fits);
+        let whole = self.fresh();
+        self.push(Inst::FloatToInt { dst: whole, src: x });
+        self.new_variant(dst, ok, vec![Operand::Reg(whole)], &[None]);
+        self.jump(end);
+        self.start(fails);
+        let message = self.literal(math::FLOAT_TO_INT);
+        self.new_variant(dst, err, vec![message], &[Some(RcKind::Str)]);
+        self.jump(end);
+        self.start(end);
+        self.own(Operand::Reg(dst), Some(RcKind::Enum));
+        Ok(Operand::Reg(dst))
+    }
+
+    /// Lowers `bytes(xs)` of a list `arg`: `ok` of the bytes, or `err` naming the first value
+    /// that is not a byte, as `byte out of range (value 300)`.
+    fn bytes_result(&mut self, arg: &Expr, into: Option<VReg>) -> Result<Operand, String> {
+        let values = self.expr(arg)?;
+        // the routine gives where the first value that is not a byte is, or -1
+        let bad = self.runtime_call("stone.bytes_check", vec![values], None);
+        let (ok, err) = (self.tag_of(RESULT, "ok")?, self.tag_of(RESULT, "err")?);
+        let dst = self.dst(into);
+        let (holds, fails, end) = (self.new_block(), self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: bad,
+            rhs: Operand::Imm(0),
+            then: holds,
+            otherwise: fails,
+        });
+        self.start(holds);
+        let bytes = self.runtime_call("stone.bytes_from_list", vec![values], None);
+        self.new_variant(dst, ok, vec![bytes], &[Some(RcKind::Str)]);
+        self.jump(end);
+        self.start(fails);
+        let value = self.fresh();
+        self.push(Inst::ListGet {
+            dst: value,
+            list: values,
+            index: bad,
+            offset: 0,
+        });
+        // the message's pieces around the value, as `stdlib::fill` writes it
+        let (before, after) = BYTE_RANGE.split_once("{}").ok_or("a message with a hole")?;
+        let number = self.runtime_call("stone.str_int", vec![Operand::Reg(value)], None);
+        let start = self.literal_borrowed(before);
+        let text = self.runtime_call("stone.str_concat", vec![start, number], None);
+        self.push(Inst::Release {
+            src: number,
+            kind: RcKind::Str,
+        });
+        let end_text = self.literal_borrowed(after);
+        let message = self.runtime_call("stone.str_concat", vec![text, end_text], None);
+        self.push(Inst::Release {
+            src: text,
+            kind: RcKind::Str,
+        });
+        self.new_variant(dst, err, vec![message], &[Some(RcKind::Str)]);
+        self.jump(end);
+        self.start(end);
+        self.release_temp(values);
+        self.own(Operand::Reg(dst), Some(RcKind::Enum));
+        Ok(Operand::Reg(dst))
+    }
+
+    /// Returns the immortal string `text`, retained, so whatever stores it owns a reference.
+    fn literal(&mut self, text: &str) -> Operand {
+        let value = self.literal_borrowed(text);
+        self.push(Inst::Retain { src: value });
+        value
+    }
+
+    /// Returns the immortal string `text`, borrowed.
+    fn literal_borrowed(&mut self, text: &str) -> Operand {
+        let dst = self.fresh();
+        self.push(Inst::StrAddr {
+            dst,
+            text: text.to_string(),
+        });
+        Operand::Reg(dst)
+    }
+
     fn user_call(
         &mut self,
         name: &str,
@@ -6252,6 +6382,9 @@ impl<'a> Lowerer<'a> {
                 args,
                 keywords,
             } => match &func.kind {
+                _ if let Some(conversion) = self.context.conversions.get(&expr.span) => {
+                    self.conversion(expr, conversion, &args[0], None, None)
+                }
                 _ if self.context.indirect_calls.contains(&expr.span) => {
                     let kinds = self.leaf_kinds(expr)?;
                     self.value_call(func, expr.span, args, None, &kinds)

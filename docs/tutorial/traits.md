@@ -60,4 +60,31 @@ implements it, which is why anything can be printed, and a struct can say how it
 instead, with `impl display for Version:` and `fn display(self) -> str`. Its text then appears
 wherever a `Version` does, inside a list or another struct too, as `print(vs)` shows above.
 
+## Converting between types
+
+Two more traits of the prelude, `from` and `try_from`, say how a value becomes another type.
+Unlike the others, each has a type parameter, the type converted from, so a type can implement
+it once for each source type, as `impl from[Celsius] for Fahrenheit:` does:
+
+```{literalinclude} ../examples/conversions.stn
+:language: stone
+```
+
+prints
+
+```{literalinclude} ../examples/conversions.out
+:language: text
+```
+
+A type called with one value converts it: `Fahrenheit(c)` calls the `from` above. A conversion
+that can fail is a `try_from`, whose `try_from` returns a `result[Self, str]`, so
+`Celsius("warm")` is an `err` that `?` passes on. A struct is still made with named values, as
+`Celsius(degrees=1.0)`, so the two never look alike.
+
+The builtin conversions work the same way. `float(2)` and `str(x)` cannot fail, while `int(2.9)`,
+`int("12")`, and `float("2.5")` give results, since a float may be nan and text may not be a
+number at all. A bound such as `[T: try_from[str]]` lets generic code convert to its type
+parameter, as `T(text)?` does in `read_all`, where what each call's result is used as says which
+type `T` is.
+
 Next, {doc}`function-values`.

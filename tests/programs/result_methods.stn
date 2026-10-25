@@ -27,12 +27,12 @@ print(w.ok(), words(0).err(), words(1).err().is_none())
 
 // parse_int and parse_float give the error int() and float() would stop with
 for text in ["42", " -7\n", "1.5", "", "99999999999999999999", "+0"]:
-    print(text.parse_int())
+    print(int(text))
 for text in ["2.5", "-1e3", "inf", "nan", "x", ".", "1e999"]:
-    print(text.parse_float())
+    print(float(text))
 total = 0
 for text in "3 x 4 5.0 -2".split():
-    match text.parse_int():
+    match int(text):
         case ok(n):
             total += n
         case err(message):

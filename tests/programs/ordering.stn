@@ -2,8 +2,8 @@
 
 print(1.cmp(2), 2.cmp(2), 3.cmp(2))
 print("apple".cmp("banana"), "b".cmp("a"), "".cmp(""))
-nan = float("nan")
-inf = float("inf")
+nan = float("nan").unwrap()
+inf = float("inf").unwrap()
 // floats are in the order sort uses: -0.0 before 0.0, and nan after every other float
 print((-0.0).cmp(0.0), 0.0.cmp(-0.0), 0.0.cmp(0.0))
 print(nan.cmp(inf), inf.cmp(nan), nan.cmp(nan), 1.5.cmp(-inf))

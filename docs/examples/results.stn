@@ -5,7 +5,7 @@ struct Setting:
 fn parse_setting(line: str) -> result[Setting, str]:
     match line.find("="):
         case some(i):
-            value = line[i + 1:].parse_int()?
+            value = int(line[i + 1:])?
             ret ok(Setting(name=line[:i].strip(), value=value))
         case none:
             ret err("no '=' in '" + line + "'")

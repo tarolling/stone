@@ -215,7 +215,10 @@ fn hover_documents_builtin_types_where_they_are_written() {
     starts(at(1, 50), "str");
     // a type name followed by `(` is the conversion
     starts(at(2, 9), "str(value) -> str");
-    starts(at(2, 13), "int(value: int | float | str) -> int");
+    starts(
+        at(2, 13),
+        "int(value: int) -> int | int(value: float | str) -> result[int, str]",
+    );
 }
 
 #[test]
@@ -545,8 +548,6 @@ fn completion_after_a_dot_offers_methods() {
         "unwrap_err",
         "ok",
         "err",
-        "parse_int",
-        "parse_float",
         "contains",
         "get",
         "keys",
@@ -598,7 +599,7 @@ fn completion_after_a_dot_offers_methods() {
 fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
     let doc = doc(
         "xs = [1]\nxs.\ns = \"a\"\ns.\nm = {\"a\": 1}\nm.\no = some(1)\no.\nn = 1\nn.\n\
-         r = \"1\".parse_int()\nr.\n",
+         r = int(\"1\")\nr.\n",
     );
     let labels = |pos: Position| -> Vec<String> {
         completion(&doc, pos, &MapSources::default())
@@ -642,8 +643,6 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "upper",
             "startswith",
             "endswith",
-            "parse_int",
-            "parse_float",
             "contains",
             "eq",
             "cmp",
@@ -1796,4 +1795,48 @@ fn a_lambda_hovers_with_its_type_and_its_parameters_with_theirs() {
         hover_text(&doc, at(2, 17)).unwrap(),
         "```stone\n(parameter) x: int\n```"
     );
+}
+
+const GENERIC_TRAITS: &str = "\
+struct V:
+    x: int
+trait add[R]:
+    fn add(self, other: R) -> Self
+impl add[int] for V:
+    fn add(self, other: int) -> Self:
+        ret V(x=self.x + other)
+impl add[V] for V:
+    fn add(self, other: V) -> Self:
+        ret V(x=self.x + other.x)
+v = V(x=1).add(2)
+w = v.add(3)
+";
+
+#[test]
+fn hover_shows_a_generic_trait_and_the_method_of_each_impl() {
+    let doc = doc(GENERIC_TRAITS);
+    assert_eq!(diagnostics(&doc), []);
+    assert_eq!(
+        hover_text(&doc, at(3, 7)).unwrap(),
+        "```stone\ntrait add[R]\n    fn add(self, other: R) -> Self\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(6, 8)).unwrap(),
+        "```stone\nfn V.add(self, other: int) -> V\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(9, 8)).unwrap(),
+        "```stone\nfn V.add(self, other: V) -> V\n```"
+    );
+    // the call picks the impl its argument fits
+    assert_eq!(
+        hover_text(&doc, at(11, 12)).unwrap(),
+        "```stone\nfn V.add(self, other: int) -> V\n```"
+    );
+    let labels: Vec<String> = completion(&doc, at(12, 7), &MapSources::default())
+        .into_iter()
+        .map(|item| item.label)
+        .filter(|label| label == "add")
+        .collect();
+    assert_eq!(labels, ["add"]);
 }

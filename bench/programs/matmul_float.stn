@@ -29,6 +29,6 @@ fn checksum(c: list[list[float]], n: int) -> float:
             total += c[i][j] * float(i + j + 1)
     ret total
 
-n = int(args()[0])
+n = int(args()[0]).unwrap()
 // scaled to an int, so C need not print floats the way stone does
-print(int(checksum(multiply(matrix(n, 1), matrix(n, 2), n), n) * 1000000.0))
+print(int(checksum(multiply(matrix(n, 1), matrix(n, 2), n), n) * 1000000.0).unwrap())

@@ -100,9 +100,7 @@ impl AssemblyGenerator for Arm64Generator {
         self.emit_failures();
         self.emit_list_runtime()?;
         let formats_floats = self.ctx.prints_floats || self.ctx.uses(&["stone.str_float"]);
-        let parses_floats = self
-            .ctx
-            .uses(&["stone.parse_float", "stone.parse_float_result"]);
+        let parses_floats = self.ctx.uses(&["stone.parse_float_result"]);
         if formats_floats {
             floats::float_runtime(self);
         }
@@ -430,8 +428,6 @@ impl Arm64Generator {
             builtins::time_runtime(self, &time, (&negative, &too_large));
         }
         let parsing: Vec<&str> = [
-            "stone.parse_int",
-            "stone.parse_float",
             "stone.parse_int_result",
             "stone.parse_float_result",
             "stone.map_missing_str",
@@ -699,7 +695,8 @@ mod tests {
     #[test]
     fn division_by_a_variable_keeps_both_checks() {
         for divisor in ["y", "0", "-1"] {
-            let source = format!("x = 7\ny = int(\"2\")\nprint(x / {divisor}, x % {divisor})\n");
+            let source =
+                format!("x = 7\ny = int(\"2\").unwrap()\nprint(x / {divisor}, x % {divisor})\n");
             let assembly = assemble(&source).unwrap();
             assert!(assembly.contains("\tsdiv\t"), "{divisor}");
             assert!(assembly.contains("division by zero"), "{divisor}");
@@ -975,7 +972,7 @@ mod tests {
         for label in [
             "stone.input:",
             "stone.args:",
-            "stone.parse_int:",
+            "stone.parse_int_result:",
             "stone.format_float:",
             "stone.alloc:",
             "stone.fmod:",

@@ -56,8 +56,11 @@ What stone already infers:
   function calls the method of its own type directly, so there is no `dyn` to write and no
   lookup while the program runs. Whether a trait's method changes `self` is decided by the
   trait, from its default body, so no `mut` marks it either. Even `==` and `<` are the prelude's
-  traits `eq` and `ord`, which a struct can implement to compare its own way, and printing is
-  its trait `display`.
+  traits `eq` and `ord`, which a struct can implement to compare its own way, printing is its
+  trait `display`, and `int(s)` is its generic trait `try_from[str]`, which a type implements
+  once for each type it converts from. The impl a call uses is picked by the types of its
+  arguments, so no turbofish or cast names it, and a conversion that can fail gives a result, so
+  it cannot stop a program by surprise.
 - **Memory management.** Compiled programs count references, with no garbage collector. The
   compiler places every retain and release, decides which parameters are only borrowed, and
   skips counting where it can prove a count would not matter.
@@ -211,7 +214,10 @@ are read at fixed offsets, so the `nbody` benchmark runs within about 1.5 times 
 A generic function, or a method of a generic struct, is compiled once for each set of types it is
 used with, so its copies are as fast as functions written for each type, and a generic struct is
 flattened like any other. A call through a trait's bound is a direct call in each copy, and a
-trait's default method is compiled once for each type that keeps it. A trait is not yet a type of
+trait's default method is compiled once for each type that keeps it. A conversion `T(x)` is a
+direct call of its impl, or the builtin conversion's own instructions, in each copy, while the
+interpreter, which makes no copies, carries each generic call's type arguments with it to pick
+the same impl. A trait is not yet a type of
 values, as `dyn Shape` is in Rust, so a list holds values of one type; a list of shapes of
 several types would need its values boxed with a table of their methods.
 A function value is the address of its function, so a call through one is an indirect call,

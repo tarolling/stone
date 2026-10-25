@@ -12,6 +12,20 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Generic traits: a trait may have type parameters, as `trait add[R]:`, which a type implements
+  once for each set of type arguments, as `impl add[int] for V:` and `impl add[V] for V:`. A
+  call such as `v.add(2)` calls the impl its arguments fit, and a bound gives the trait its
+  arguments, which may name other type parameters, as `fn plus[T: add[U], U](x: T, y: U) -> T:`.
+  Blocks whose arguments could be the same are an error.
+
+- Conversions through the prelude's traits `from[T]` (`fn from(value: T) -> Self`) and
+  `try_from[T]` (`fn try_from(value: T) -> result[Self, str]`): a type called with one value,
+  `T(x)`, converts it, as `Fahrenheit(c)` after `impl from[Celsius] for Fahrenheit:`, giving a
+  `T` through `from` or a `result[T, str]` through `try_from`. A builtin type may convert from a
+  struct in the struct's file (`impl from[Celsius] for float:`), and a bound lets generic code
+  convert to its type parameter, as `T(text)?` with `[T: try_from[str]]`. The builtin
+  conversions `int`, `float`, `str`, and `bytes` are impls of the same traits.
+
 - The methods `a.min(b)`, `a.max(b)`, and `x.clamp(lo, hi)` on every type that implements
   `ord`: `int`, `float`, `str`, `bytes`, a struct with an `impl ord` block, and a type parameter
   bounded by `ord`. `min` and `max` keep the receiver of equal values and compare with `<` and
@@ -32,6 +46,19 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `lower` and `upper`, as Python has them, except that `lower` and `upper` change only ASCII
   letters. An empty text matches between every two characters and at both ends, as in Python, so
   `"ab".replace("", "-")` is `"-a-b-"` and `"ab".count("")` is 3.
+
+### Changed
+
+- **Breaking:** every conversion that can fail returns a `result[T, str]` instead of stopping
+  the program: `int(x)` of a float (nan or out of range) or a `str`, `float(s)` of a `str`, and
+  `bytes(xs)` of a `list[int]` (a value outside 0 to 255). Write `int(s)?` to pass the error on,
+  or `int(s).unwrap()`, which stops with `cannot unwrap err:` and the old message. `float(n)`
+  of an int, `str(x)`, and a type converted to itself give the value as before.
+
+### Removed
+
+- **Breaking:** the string methods `parse_int` and `parse_float`; `int(s)` and `float(s)` return
+  the same results.
 
 ## [0.3.4] - 2026-10-24
 

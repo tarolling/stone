@@ -2419,15 +2419,13 @@ pub fn args_runtime(r#gen: &mut dyn AssemblyGenerator) {
 }
 
 /// Emits the routines behind `int(str)` and `float(str)`, which follow `stdlib::parse_int` and
-/// `stdlib::parse_float`, and stop the program through `stone.fail` with the same messages, each
-/// emitted only if named in `used`. They need the string runtime.
+/// `stdlib::parse_float` with the same messages, each emitted only if named in `used`. They need
+/// the string runtime.
 ///
-/// - `stone.parse_int` returns the int in the string in `x0`
-/// - `stone.parse_float` returns the bits of the float in the string in `x0`, checking the
-///   grammar before `stone.decimal_to_float` reads it
-/// - `stone.parse_int_result` and `stone.parse_float_result` read the same way, but return a new
-///   result instead of failing: `ok` of the number (tag 0), or `err` (tag 1) of the message the
-///   others fail with
+/// - `stone.parse_int_result` returns a new result of the int in the string in `x0`: `ok` of
+///   the number (tag 0), or `err` (tag 1) of the message saying why it is none
+/// - `stone.parse_float_result` does the same for a float, checking the grammar before
+///   `stone.decimal_to_float` reads it
 /// - `stone.fail_quoted` stops the program with the message `x0` followed by the string `x1`
 ///   and a closing quote
 pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
@@ -2472,27 +2470,16 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
 
     // each core returns the number in x0 and 0 in x2, or the start of the message in x2 and the
-    // text in x1, for the entry points to fail with or to make an err of
-    let ints = used.contains(&"stone.parse_int") || used.contains(&"stone.parse_int_result");
-    let floats = used.contains(&"stone.parse_float") || used.contains(&"stone.parse_float_result");
+    // text in x1, for the entry points to make an err of
+    let ints = used.contains(&"stone.parse_int_result");
+    let floats = used.contains(&"stone.parse_float_result");
     let result_saved = ["x19", "x20"];
     for (label, core) in [
-        ("stone.parse_int", ".Lparse_int_core"),
-        ("stone.parse_float", ".Lparse_float_core"),
+        ("stone.parse_int_result", ".Lparse_int_core"),
+        ("stone.parse_float_result", ".Lparse_float_core"),
     ] {
         if used.contains(&label) {
             r#gen.emit(&format!("{label}:"));
-            push_frame(r#gen, &[]);
-            r#gen.emit(&format!("\tbl\t{core}"));
-            r#gen.emit(&format!("\tcbnz\tx2, {core}_fail"));
-            pop_frame(r#gen, &[]);
-            r#gen.emit(&format!("{core}_fail:"));
-            r#gen.emit("\tmov\tx0, x2");
-            r#gen.emit("\tb\tstone.fail_quoted");
-        }
-        let result = format!("{label}_result");
-        if used.contains(&result.as_str()) {
-            r#gen.emit(&format!("{result}:"));
             push_frame(r#gen, &result_saved);
             r#gen.emit(&format!("\tbl\t{core}"));
             r#gen.emit("\tb\t.Lparse_result");

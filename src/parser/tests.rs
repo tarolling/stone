@@ -154,12 +154,14 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
         StmtKind::TraitDef {
             name,
             public,
+            type_params,
             methods,
             ..
         } => StmtKind::TraitDef {
             name,
             name_span: Span::default(),
             public,
+            type_params: type_params.into_iter().map(strip_type_param).collect(),
             methods: strip_all(methods),
         },
         StmtKind::Match { subject, cases } => StmtKind::Match {
@@ -189,6 +191,7 @@ fn strip_trait_name(name: TraitName) -> TraitName {
     TraitName {
         name: name.name,
         span: Span::default(),
+        args: name.args.into_iter().map(strip_type).collect(),
     }
 }
 
@@ -2861,7 +2864,87 @@ fn trait_name(name: &str) -> TraitName {
     TraitName {
         name: name.to_string(),
         span: Span::default(),
+        args: vec![],
     }
+}
+
+#[test]
+fn a_trait_may_have_type_parameters() {
+    let Mod::Module { body } = parse_ok("trait add[R]:\n    fn add(self, other: R) -> Self\n");
+    let StmtKind::TraitDef { type_params, .. } = &body[0].kind else {
+        panic!("expected a trait");
+    };
+    let params: Vec<TypeParam> = type_params.iter().cloned().map(strip_type_param).collect();
+    assert_eq!(
+        params,
+        vec![TypeParam {
+            name: "R".to_string(),
+            span: Span::default(),
+            bounds: vec![],
+        }]
+    );
+    assert_eq!(
+        error_of("trait add[]:\n    fn add(self) -> Self\n"),
+        (
+            "a trait's type parameters need at least one name, as in 'trait from[T]:'".to_string(),
+            1,
+            10
+        )
+    );
+}
+
+#[test]
+fn a_trait_name_may_have_type_arguments() {
+    let int_type = TypeExpr {
+        kind: TypeExprKind::Int,
+        span: Span::default(),
+    };
+    let Mod::Module { body } =
+        parse_ok("impl from[int] for Celsius:\n    fn from(value: int) -> Self: ret value\n");
+    let StmtKind::ImplDef {
+        trait_name: implemented,
+        ..
+    } = &body[0].kind
+    else {
+        panic!("expected an impl block");
+    };
+    assert_eq!(
+        implemented.clone().map(strip_trait_name),
+        Some(TraitName {
+            name: "from".to_string(),
+            span: Span::default(),
+            args: vec![int_type.clone()],
+        })
+    );
+    let Mod::Module { body } = parse_ok("fn f[T: geo.add[int, Point] + eq](x: T): ret\n");
+    let StmtKind::FunctionDef { type_params, .. } = &body[0].kind else {
+        panic!("expected function definition");
+    };
+    assert_eq!(
+        strip_type_param(type_params[0].clone()).bounds,
+        vec![
+            TraitName {
+                name: "geo.add".to_string(),
+                span: Span::default(),
+                args: vec![int_type, named_type("Point")],
+            },
+            trait_name("eq"),
+        ]
+    );
+    // the span is the name's alone, which references point at
+    let Mod::Module { body } = parse_within(
+        "fn f[T: from[int]](x: T): ret\n".to_string(),
+        Duration::from_secs(5),
+    )
+    .unwrap();
+    let StmtKind::FunctionDef { type_params, .. } = &body[0].kind else {
+        panic!("expected function definition");
+    };
+    assert_eq!(type_params[0].bounds[0].span, span(1, 9, 1, 13));
+    assert_eq!(
+        error_of("impl from[] for Celsius:\n    fn from(value: int) -> Self: ret value\n"),
+        ("expected a type, found ']'".to_string(), 1, 11)
+    );
 }
 
 #[test]
@@ -2882,6 +2965,7 @@ fn a_trait_holds_signatures_and_default_methods() {
                     name: "Shape".to_string(),
                     name_span: Span::default(),
                     public: true,
+                    type_params: vec![],
                     methods: vec![
                         method_def("area", &["self"], Some(float.clone()), vec![]),
                         method_def("half", &["self"], Some(float), vec![ret(int(1))]),

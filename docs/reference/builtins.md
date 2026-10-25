@@ -57,42 +57,50 @@ for i in range(2, 5):
     print(i)   // 2, then 3, then 4
 ```
 
+Conversions are calls of a type by its name with one value, as `int(x)`, which the prelude's
+traits `from` and `try_from` make. A conversion that cannot fail gives the type, and one that can
+gives a `result[T, str]`, which `?` passes on or `unwrap` takes apart. A program gives its own
+types conversions the same way; see [Conversions](types.md#conversions).
+
 ## `int`
 
 ```text
-int(value: int | float | str) -> int
+int(value: int) -> int | int(value: float | str) -> result[int, str]
 ```
 
-Converts a number to an int, dropping any fraction, so `int(-2.5)` is -2. It stops the program
-with `cannot convert float to int (nan or out of range)` if `value` is nan or does not fit in an
-int.
+An int converts to itself. A float converts to `ok` of the int toward zero, dropping any
+fraction, so `int(-2.5)` is `ok(-2)`, or to `err("cannot convert float to int (nan or out of
+range)")` if it is nan or does not fit in an int.
 
 Given a string, it reads a decimal int: an optional `+` or `-`, then one or more digits, with
 spaces, tabs, and line breaks allowed at either end. Anything else, such as `"1.5"`, `"0x10"`, or
-`""`, stops the program with `invalid literal for int() with base 10: '...'`, and a number that
-does not fit in an int with `int() argument out of range: '...'`.
+`""`, is `err("invalid literal for int() with base 10: '...'")`, and a number that does not fit
+in an int is `err("int() argument out of range: '...'")`.
 
 ```stone
-print(int(2.9), int(-2.9), int(7))   // 2 -2 7
-print(int(" -42 "), int("+7"))       // -42 7
+print(int(2.9), int(-2.9), int(7))     // ok(2) ok(-2) 7
+print(int(" -42 "), int("+7"))         // ok(-42) ok(7)
+print(int("4.5"))                      // err("invalid literal for int() with base 10: '4.5'")
+print(int("12").unwrap() + 1)          // 13
 ```
 
 ## `float`
 
 ```text
-float(value: int | float | str) -> float
+float(value: int | float) -> float | float(value: str) -> result[float, str]
 ```
 
 Converts a number to a float, rounding to the nearest float if needed.
 
 Given a string, it reads a decimal float such as `2.5`, `-.5`, `3.`, or `6.02e23`, or `inf`,
 `infinity`, or `nan` in any case, each with an optional sign and with whitespace allowed at
-either end. A number too large for a float is `inf`. Anything else, such as `"1e"` or the hex
-float `"0x1p3"`, stops the program with `could not convert string to float: '...'`.
+either end, giving `ok` of it. A number too large for a float is `inf`. Anything else, such as
+`"1e"` or the hex float `"0x1p3"`, is `err("could not convert string to float: '...'")`.
 
 ```stone
 print(float(3), float(9007199254740993))   // 3.0 9007199254740992.0
-print(float("2.5e3"), float("-inf"))       // 2500.0 -inf
+print(float("2.5e3"), float("-inf"))       // ok(2500.0) ok(-inf)
+print(float("x").unwrap_err())             // could not convert string to float: 'x'
 ```
 
 ## `str`
@@ -103,7 +111,8 @@ str(value) -> str
 
 Returns the text `print` would write for `value`, of any type, so strings inside a list or
 another value are quoted and a string on its own is not. A struct that implements the trait
-`display` is written as its `display` method says, wherever it appears.
+`display` is written as its `display` method says, wherever it appears. Every type converts to
+`str` this way, so a program implements `display`, never `from`, to choose the text.
 
 ```stone
 print("x = " + str(1.5) + ", done = " + str(true))   // x = 1.5, done = true
@@ -113,15 +122,16 @@ print(str([1, 2]) + str(some("a")))                  // [1, 2]some('a')
 ## `bytes`
 
 ```text
-bytes(values: list[int]) -> bytes
+bytes(values: list[int]) -> result[bytes, str]
 ```
 
-Returns the bytes whose values are `values`, each from 0 to 255. A value outside that range
-stops the program with `byte out of range (value 300)`, pointing at the call. See
+Returns `ok` of the bytes whose values are `values`, each from 0 to 255, or an `err` naming the
+first value outside that range, as `err("byte out of range (value 300)")`. See
 [Bytes](types.md#bytes) for the type itself.
 
 ```stone
-print(bytes([104, 105, 0]))   // b'hi\x00'
+print(bytes([104, 105, 0]))   // ok(b'hi\x00')
+print(bytes([1, 300]))        // err('byte out of range (value 300)')
 ```
 
 ## `input`
@@ -139,7 +149,7 @@ end. In a function that returns a `result[T, str]`, `?` passes the end on:
 ```stone
 fn read_number() -> result[int, str]:
     line = input("number? ")?
-    ret line.strip().parse_int()
+    ret int(line)
 
 print(read_number())   // ok(42) for the line 42, err('end of input') with no input
 ```
@@ -173,7 +183,7 @@ list.
 ```stone
 total = 0
 for a in args():
-    total += int(a)
+    total += int(a).unwrap()
 print(total)
 ```
 
@@ -576,34 +586,6 @@ Returns whether the string ends with `suffix`. Every string ends with `""`.
 print("main.stn".endswith(".stn"), "main.stn".endswith("main"))   // true false
 ```
 
-### `parse_int`
-
-```text
-str.parse_int() -> result[int, str]
-```
-
-Reads the string as `int` does, but returns a result instead of stopping the program: `ok` of the
-int, or `err` of the message `int` would stop with. Use it for text that may not be a number,
-such as input, and `?` to pass the error on.
-
-```stone
-print("42".parse_int(), " -7\n".parse_int())   // ok(42) ok(-7)
-print("4.5".parse_int())   // err("invalid literal for int() with base 10: '4.5'")
-```
-
-### `parse_float`
-
-```text
-str.parse_float() -> result[float, str]
-```
-
-Reads the string as `float` does, returning `ok` of the float, or `err` of the message `float`
-would stop with.
-
-```stone
-print("2.5".parse_float(), "x".parse_float())   // ok(2.5) err("could not convert string to float: 'x'")
-```
-
 ### `bytes`
 
 ```text
@@ -673,7 +655,7 @@ print(some("a").unwrap(), ok(2).unwrap())   // a 2
 Returns the value the option or the `ok` holds, or `default` if it is `none` or an `err`.
 
 ```stone
-print(some(3).unwrap_or(0), none.unwrap_or(0), "x".parse_int().unwrap_or(-1))   // 3 0 -1
+print(some(3).unwrap_or(0), none.unwrap_or(0), int("x").unwrap_or(-1))   // 3 0 -1
 ```
 
 ### `is_ok`
@@ -693,7 +675,7 @@ result[T, E].is_err() -> bool
 Returns whether the result is an `err`.
 
 ```stone
-r = "12".parse_int()
+r = int("12")
 print(r.is_ok(), r.is_err())   // true false
 ```
 
@@ -707,7 +689,7 @@ Returns the error the `err` holds. It stops the program with `cannot unwrap_err 
 value, as `print` writes it, if the result is an `ok`, such as `cannot unwrap_err ok: 12`.
 
 ```stone
-print("x".parse_float().unwrap_err())   // could not convert string to float: 'x'
+print(float("x").unwrap_err())   // could not convert string to float: 'x'
 ```
 
 ### `ok`
@@ -728,7 +710,7 @@ result[T, E].err() -> option[E]
 Returns `some` of the error an `err` holds, or `none` for an `ok`.
 
 ```stone
-r = "7".parse_int()
+r = int("7")
 print(r.ok(), r.err())   // some(7) none
 ```
 
@@ -1025,7 +1007,7 @@ other end closes the connection first, leaving the bytes that did arrive to read
 use net
 
 fn body(c: socket) -> result[bytes, str]:
-    length = c.read_line()?.unwrap_or("0").parse_int()?
+    length = int(c.read_line()?.unwrap_or("0"))?
     ret c.read_exact(length)
 ```
 
@@ -1198,7 +1180,7 @@ else:
 // ? passes on an err, as anywhere else
 fn word_count(path: str) -> result[int, str]:
     out = os.run("wc", ["-w", path])?
-    ret ok(out.stdout.split()[0].parse_int().unwrap_or(0))
+    ret ok(int(out.stdout.split()[0]).unwrap_or(0))
 ```
 
 ## The `math` module
@@ -1448,7 +1430,7 @@ use fs
 fn total(path: str) -> result[int, str]:
     sum = 0
     for line in fs.read_lines(path)?:
-        sum += line.parse_int()?
+        sum += int(line)?
     ret ok(sum)
 
 print(total("numbers.txt"))   // ok(46), or err("no such file or directory: 'numbers.txt'")

@@ -26,4 +26,4 @@ fn run(rounds: int, n: int) -> int:
         total += score(text) + text.find("4242").unwrap_or(-1)
     ret total
 
-print(run(int(args()[0]), int(args()[1])))
+print(run(int(args()[0]).unwrap(), int(args()[1]).unwrap()))

@@ -1,0 +1,4 @@
+Fahrenheit(degrees=212.0)
+ok(Celsius(degrees=21.5)) err('colder than absolute zero') err("could not convert string to float: 'warm'")
+2.0 ok(2) ok(12) Celsius(degrees=1.0)
+ok(3) err("invalid literal for int() with base 10: 'x'") ok([Celsius(degrees=0.0), Celsius(degrees=37.0)])

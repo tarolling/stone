@@ -29,5 +29,5 @@ fn checksum(c: list[list[int]], n: int) -> int:
             total += c[i][j] * (i + j + 1)
     ret total
 
-n = int(args()[0])
+n = int(args()[0]).unwrap()
 print(checksum(multiply(matrix(n, 1), matrix(n, 2), n), n))

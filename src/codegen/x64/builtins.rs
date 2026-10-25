@@ -2213,15 +2213,13 @@ pub fn args_runtime(r#gen: &mut dyn AssemblyGenerator) {
 }
 
 /// Emits the routines behind `int(str)` and `float(str)`, which follow `stdlib::parse_int` and
-/// `stdlib::parse_float`, and stop the program through `stone.fail` with the same messages, each
-/// emitted only if named in `used`. They need the string runtime.
+/// `stdlib::parse_float` with the same messages, each emitted only if named in `used`. They need
+/// the string runtime.
 ///
-/// - `stone.parse_int` returns the int in the string in `rdi`
-/// - `stone.parse_float` returns the bits of the float in the string in `rdi`, checking the
-///   grammar before `stone.decimal_to_float` reads it
-/// - `stone.parse_int_result` and `stone.parse_float_result` read the same way, but return a new
-///   result instead of failing: `ok` of the number (tag 0), or `err` (tag 1) of the message the
-///   others fail with
+/// - `stone.parse_int_result` returns a new result of the int in the string in `rdi`: `ok` of
+///   the number (tag 0), or `err` (tag 1) of the message saying why it is none
+/// - `stone.parse_float_result` does the same for a float, checking the grammar before
+///   `stone.decimal_to_float` reads it
 /// - `stone.fail_quoted` stops the program with the message `rdi` followed by the string `rsi`
 ///   and a closing quote
 /// - `stone.map_missing_str` stops the program because a map has no entry for the string key
@@ -2272,26 +2270,15 @@ pub fn parse_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
 
     // each core returns the number in rax and 0 in rdx, or the start of the message in rdx and
-    // the text in rsi, for the entry points to fail with or to make an err of
-    let ints = used.contains(&"stone.parse_int") || used.contains(&"stone.parse_int_result");
-    let floats = used.contains(&"stone.parse_float") || used.contains(&"stone.parse_float_result");
+    // the text in rsi, for the entry points to make an err of
+    let ints = used.contains(&"stone.parse_int_result");
+    let floats = used.contains(&"stone.parse_float_result");
     for (label, core) in [
-        ("stone.parse_int", ".Lparse_int_core"),
-        ("stone.parse_float", ".Lparse_float_core"),
+        ("stone.parse_int_result", ".Lparse_int_core"),
+        ("stone.parse_float_result", ".Lparse_float_core"),
     ] {
         if used.contains(&label) {
             r#gen.emit(&format!("{label}:"));
-            r#gen.emit(&format!("\tcall\t{core}"));
-            r#gen.emit("\ttest\trdx, rdx");
-            r#gen.emit(&format!("\tjnz\t{core}_fail"));
-            r#gen.emit("\tret");
-            r#gen.emit(&format!("{core}_fail:"));
-            r#gen.emit("\tmov\trdi, rdx");
-            r#gen.emit("\tjmp\tstone.fail_quoted");
-        }
-        let result = format!("{label}_result");
-        if used.contains(&result.as_str()) {
-            r#gen.emit(&format!("{result}:"));
             r#gen.emit(&format!("\tcall\t{core}"));
             r#gen.emit("\tjmp\t.Lparse_result");
         }

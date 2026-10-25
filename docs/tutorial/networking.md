@@ -43,7 +43,7 @@ use net
 
 fn read_message(c: socket) -> result[bytes, str]:
     // a line with the body's length, then the body
-    length = c.read_line()?.unwrap_or("0").parse_int()?
+    length = int(c.read_line()?.unwrap_or("0"))?
     ret c.read_exact(length)
 ```
 

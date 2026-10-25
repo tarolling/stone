@@ -505,17 +505,13 @@ fn lists_can_hold_floats() {
 
 #[test]
 fn int_and_float_convert_numbers() {
-    let source = "a = float(3)\nb = int(2.5)\nc = float(a)\nd = int(b)\n";
+    // a float may be nan or too large for an int, so that conversion may fail
+    let source = "a = float(3)\nb = int(2.5)\nc = float(a)\nd = int(4)\n";
     assert_eq!(type_of_symbol(source, "a"), "float");
-    assert_eq!(type_of_symbol(source, "b"), "int");
+    assert_eq!(type_of_symbol(source, "b"), "result[int, str]");
     assert_eq!(type_of_symbol(source, "c"), "float");
     assert_eq!(type_of_symbol(source, "d"), "int");
-    assert_error(
-        "x = int([3])\n",
-        "'int' needs an int, float, or str, found list[int]",
-        1,
-        9,
-    );
+    assert_error("x = int([3])\n", "cannot convert list[int] to int", 1, 9);
     assert_error(
         "x = float(1, 2)\n",
         "'float' takes 1 argument, but 2 were given",
@@ -2036,14 +2032,17 @@ fn changing_a_parameter_that_is_never_used_again_is_a_warning() {
 
 #[test]
 fn int_and_float_parse_strs() {
-    let source = "a = int(\"3\")\nb = float(\"2.5\")\n";
-    assert_eq!(type_of_symbol(source, "a"), "int");
-    assert_eq!(type_of_symbol(source, "b"), "float");
+    let source = "a = int(\"3\")\nb = float(\"2.5\")\nc = bytes([1, 2])\nd = str(b)\n";
+    assert_eq!(type_of_symbol(source, "a"), "result[int, str]");
+    assert_eq!(type_of_symbol(source, "b"), "result[float, str]");
+    assert_eq!(type_of_symbol(source, "c"), "result[bytes, str]");
+    assert_eq!(type_of_symbol(source, "d"), "str");
+    assert_error("x = float(true)\n", "cannot convert bool to float", 1, 11);
     assert_error(
-        "x = float(true)\n",
-        "'float' needs an int, float, or str, found bool",
+        "x = \"1\".parse_int()\n",
+        "str has no method 'parse_int'; convert with 'int(s)', which gives a result[int, str]",
         1,
-        11,
+        9,
     );
 }
 
@@ -4414,8 +4413,19 @@ fn trait_calls(source: &str) -> Vec<(String, Vec<(String, String)>)> {
         .methods
         .values()
         .filter_map(|m| {
-            let mut implementations: Vec<(String, String)> =
-                m.implementations.clone()?.into_iter().collect();
+            let mut implementations: Vec<(String, String)> = m
+                .implementations
+                .clone()?
+                .into_iter()
+                .map(|i| {
+                    let args: Vec<String> = i.args.iter().map(|a| a.to_string()).collect();
+                    let ty = match args.is_empty() {
+                        true => i.ty,
+                        false => format!("{}[{}]", i.ty, args.join(", ")),
+                    };
+                    (ty, i.function)
+                })
+                .collect();
             implementations.sort();
             Some((m.function.clone(), implementations))
         })
@@ -4869,8 +4879,8 @@ fn result_methods() {
         ("r.unwrap_err()", "str"),
         ("r.ok()", "option[int]"),
         ("r.err()", "option[str]"),
-        ("\"1\".parse_int()", "result[int, str]"),
-        ("\"1.5\".parse_float()", "result[float, str]"),
+        ("int(\"1\")", "result[int, str]"),
+        ("float(\"1.5\")", "result[float, str]"),
     ] {
         assert_eq!(
             type_of_symbol(&format!("{source}x = {expr}\n"), "x"),
@@ -4893,12 +4903,6 @@ fn result_methods() {
     assert_error(
         "x = 1.unwrap()\n",
         "'unwrap' needs an option or a result, found int",
-        1,
-        5,
-    );
-    assert_error(
-        "x = 1.parse_int()\n",
-        "'parse_int' needs a str, found int",
         1,
         5,
     );
@@ -4936,8 +4940,7 @@ fn values_may_take_the_names_of_the_preludes_enums() {
 
 #[test]
 fn a_question_mark_unwraps_a_result_or_returns_its_error() {
-    let parse =
-        "fn twice(s: str) -> result[int, str]:\n    n = s.parse_int()?\n    ret ok(n * 2)\n";
+    let parse = "fn twice(s: str) -> result[int, str]:\n    n = int(s)?\n    ret ok(n * 2)\n";
     assert_eq!(errors(&format!("{parse}print(twice(\"2\"))\n")), []);
     assert_eq!(type_of_symbol(parse, "n"), "int");
     // options work the same way, in a function that returns an option
@@ -4955,7 +4958,7 @@ fn a_question_mark_unwraps_a_result_or_returns_its_error() {
     assert_eq!(
         errors(
             "struct Acc:\n    total: int\nimpl Acc:\n    fn add(self, s: str) -> result[int, str]:\n        \
-             self.total += s.parse_int()?\n        ret ok(self.total)\n\
+             self.total += int(s)?\n        ret ok(self.total)\n\
              a = Acc(total=0)\nprint(a.add(\"3\"))\n"
         ),
         []
@@ -4965,19 +4968,19 @@ fn a_question_mark_unwraps_a_result_or_returns_its_error() {
 #[test]
 fn a_question_mark_needs_a_function_that_returns_a_result_or_an_option() {
     assert_error(
-        "x = \"1\".parse_int()?\n",
+        "x = int(\"1\")?\n",
         "'?' can only return from a function that returns a result or an option",
         1,
         5,
     );
     assert_error(
-        "fn f(s: str) -> int:\n    ret s.parse_int()?\n",
+        "fn f(s: str) -> int:\n    ret int(s)?\n",
         "'?' returns from 'f', which returns int, not a result or an option",
         2,
         9,
     );
     assert_error(
-        "fn f(s: str):\n    print(s.parse_int()?)\n",
+        "fn f(s: str):\n    print(int(s)?)\n",
         "'?' returns from 'f', which returns no value, not a result or an option",
         2,
         11,
@@ -5262,7 +5265,7 @@ fn bytes_have_types() {
         ("b\"ab\".contains(b\"a\")", "bool"),
         ("b\"ab\".text()", "result[str, str]"),
         ("\"ab\".bytes()", "bytes"),
-        ("bytes([1, 2])", "bytes"),
+        ("bytes([1, 2])", "result[bytes, str]"),
         ("b\"ab\".cmp(b\"a\")", "ordering"),
         ("[b\"b\", b\"a\"]", "list[bytes]"),
     ];
@@ -5291,7 +5294,7 @@ fn bytes_are_not_strings_and_never_change() {
     );
     assert_error(
         "x = bytes([\"a\"])\n",
-        "expected list[int], found list[str]",
+        "cannot convert list[str] to bytes",
         1,
         11,
     );
@@ -5448,7 +5451,7 @@ fn a_lambda_needs_no_types() {
 
 #[test]
 fn a_question_mark_in_a_lambda_returns_from_the_lambda() {
-    let source = "ys = [\"1\", \"x\"].map(|s| ok(s.parse_int()? * 2))\n";
+    let source = "ys = [\"1\", \"x\"].map(|s| ok(int(s)? * 2))\n";
     assert_eq!(type_of_symbol(source, "ys"), "list[result[int, str]]");
 }
 
@@ -5467,7 +5470,7 @@ fn errors_name_a_lambda_as_this_lambda() {
         22,
     );
     assert_error(
-        "fn apply(f: fn(str) -> int, s: str) -> int:\n    ret f(s)\nprint(apply(|s| s.parse_int()?, \"1\"))\n",
+        "fn apply(f: fn(str) -> int, s: str) -> int:\n    ret f(s)\nprint(apply(|s| int(s)?, \"1\"))\n",
         "'?' returns from this lambda, which returns int, not a result or an option",
         3,
         17,
@@ -5482,5 +5485,260 @@ fn an_unknown_lambda_parameter_suggests_its_type() {
          parameter its type, as in '|p: Point| p.x'",
         3,
         9,
+    );
+}
+
+const ADD: &str = "struct V:\n    x: int\ntrait add[R]:\n    fn add(self, other: R) -> Self\n    \
+fn twice(self, other: R) -> Self:\n        ret self.add(other).add(other)\n\
+impl add[int] for V:\n    fn add(self, other: int) -> Self:\n        ret V(x=self.x + other)\n\
+impl add[V] for V:\n    fn add(self, other: V) -> Self:\n        ret V(x=self.x + other.x)\n";
+
+#[test]
+fn a_call_picks_the_impl_of_a_generic_trait_its_arguments_fit() {
+    let source = format!(
+        "{ADD}a = V(x=1).add(2)\nb = V(x=1).add(V(x=2))\nc = V(x=1).twice(3)\n\
+         d = V(x=1).twice(V(x=4))\n"
+    );
+    for name in ["a", "b", "c", "d"] {
+        assert_eq!(type_of_symbol(&source, name), "V");
+    }
+    assert_eq!(
+        method_calls(&source),
+        [
+            ("V.add..V".to_string(), true, false),
+            ("V.add..int".to_string(), true, false),
+            ("add.add".to_string(), true, false),
+            ("add.twice".to_string(), true, false),
+        ]
+    );
+    let analysis = analyze_source(&source);
+    let mut twice: Vec<String> = analysis
+        .instances
+        .values()
+        .filter(|i| i.function == "add.twice")
+        .map(|i| format!("{:?}", i.args))
+        .collect();
+    twice.sort();
+    assert_eq!(
+        twice,
+        [
+            r#"[Struct { name: "V", args: [] }, Int]"#,
+            r#"[Struct { name: "V", args: [] }, Struct { name: "V", args: [] }]"#,
+        ]
+    );
+}
+
+#[test]
+fn an_impl_of_a_generic_trait_is_picked_once_the_arguments_are_known() {
+    // `xs[0]` is not known to be an int until the append after it
+    let source = format!(
+        "{ADD}fn f(v: V) -> V:\n    xs = []\n    r = v.add(xs[0])\n    xs.append(3)\n    ret r\n"
+    );
+    assert!(method_calls(&source).contains(&("V.add..int".to_string(), true, false)));
+}
+
+#[test]
+fn a_call_of_a_generic_traits_method_needs_an_impl_that_fits() {
+    assert_error(
+        &format!("{ADD}V(x=1).add(\"s\")\n"),
+        "no 'add' of 'V' takes str: 'V' implements 'add[int]' and 'add[V]'",
+        13,
+        8,
+    );
+}
+
+#[test]
+fn a_generic_trait_is_implemented_once_for_each_set_of_arguments() {
+    assert_error(
+        &format!(
+            "{ADD}impl add[int] for V:\n    fn add(self, other: int) -> Self:\n        ret self\n"
+        ),
+        "'V' already implements 'add[int]'",
+        13,
+        19,
+    );
+    assert_error(
+        "struct B[T]:\n    v: T\ntrait add[R]:\n    fn add(self, other: R) -> Self\n\
+         impl add[T] for B:\n    fn add(self, other: T) -> Self:\n        ret self\n\
+         impl add[int] for B:\n    fn add(self, other: int) -> Self:\n        ret self\n",
+        "'B' already implements 'add[T]', which overlaps 'add[int]'",
+        8,
+        19,
+    );
+}
+
+#[test]
+fn a_trait_takes_as_many_type_arguments_as_it_has_parameters() {
+    assert_error(
+        "struct V:\n    x: int\ntrait add[R]:\n    fn add(self, other: R) -> Self\n\
+         impl add for V:\n    fn add(self, other: int) -> Self:\n        ret self\n",
+        "'add' takes 1 type argument, as in 'add[int]'",
+        5,
+        6,
+    );
+    assert_error(
+        &format!("{SHAPES}fn f[T: Shape[int]](x: T):\n    ret\n"),
+        "'Shape' takes no type arguments",
+        22,
+        9,
+    );
+    assert_error(
+        "trait add[int]:\n    fn add(self, other: int) -> Self\n",
+        "'int' is already a type",
+        1,
+        11,
+    );
+}
+
+#[test]
+fn an_impl_of_a_generic_trait_takes_and_returns_what_its_arguments_say() {
+    assert_error(
+        "struct V:\n    x: int\ntrait add[R]:\n    fn add(self, other: R) -> Self\n\
+         impl add[int] for V:\n    fn add(self, other: str) -> Self:\n        ret self\n",
+        "'add' must take and return what 'add[int]' says, as in 'fn add(self, int) -> V'",
+        6,
+        8,
+    );
+}
+
+#[test]
+fn a_bound_may_give_a_generic_trait_its_arguments() {
+    let source = format!(
+        "{ADD}fn inc[T: add[int]](x: T) -> T:\n    ret x.add(1)\n\
+         fn plus[T: add[U], U](x: T, y: U) -> T:\n    ret x.add(y)\n\
+         a = inc(V(x=1))\nb = plus(V(x=1), V(x=2))\nc = plus(V(x=1), 5)\n"
+    );
+    for name in ["a", "b", "c"] {
+        assert_eq!(type_of_symbol(&source, name), "V");
+    }
+    let calls = trait_calls(&source);
+    assert!(calls.contains(&(
+        "add.add".to_string(),
+        vec![
+            ("V[V]".to_string(), "V.add..V".to_string()),
+            ("V[int]".to_string(), "V.add..int".to_string()),
+        ]
+    )));
+    assert_error(
+        &format!("{ADD}fn inc[T: add[int]](x: T) -> T:\n    ret x.add(1)\nx = inc(3)\n"),
+        "'int' does not implement 'add[int]', which 'inc' needs for 'T'",
+        15,
+        5,
+    );
+    assert_error(
+        &format!("{ADD}fn inc[T: add[str]](x: T) -> T:\n    ret x\nx = inc(V(x=1))\n"),
+        "'V' does not implement 'add[str]', which 'inc' needs for 'T'",
+        15,
+        5,
+    );
+}
+
+const TEMPERATURES: &str = "struct Celsius:\n    degrees: float\nstruct Fahrenheit:\n    \
+degrees: float\nimpl from[Celsius] for Fahrenheit:\n    fn from(value: Celsius) -> Self:\n        \
+ret Fahrenheit(degrees=value.degrees * 9.0 / 5.0 + 32.0)\n\
+impl try_from[str] for Celsius:\n    fn try_from(value: str) -> result[Self, str]:\n        \
+ret ok(Celsius(degrees=float(value)?))\nimpl from[Celsius] for float:\n    \
+fn from(value: Celsius) -> float:\n        ret value.degrees\n";
+
+#[test]
+fn a_type_called_with_one_value_converts_it_through_from_or_try_from() {
+    let source = format!(
+        "{TEMPERATURES}f = Fahrenheit(Celsius(degrees=100.0))\nc = Celsius(\"12.5\")\n\
+         d = float(Celsius(degrees=1.0))\ne = Celsius(Celsius(degrees=2.0))\n"
+    );
+    assert_eq!(type_of_symbol(&source, "f"), "Fahrenheit");
+    assert_eq!(type_of_symbol(&source, "c"), "result[Celsius, str]");
+    assert_eq!(type_of_symbol(&source, "d"), "float");
+    assert_eq!(type_of_symbol(&source, "e"), "Celsius");
+    let analysis = analyze_source(&source);
+    let mut functions: Vec<Option<String>> = analysis
+        .conversions
+        .iter()
+        .filter(|(span, _)| span.file != FileId::PRELUDE && span.start.line > 13)
+        .map(|(_, c)| c.function.clone())
+        .collect();
+    functions.sort();
+    assert_eq!(
+        functions,
+        [
+            None,
+            Some("Celsius.try_from..str".to_string()),
+            Some("Fahrenheit.from..Celsius".to_string()),
+            Some("float.from..Celsius".to_string()),
+        ]
+    );
+}
+
+#[test]
+fn a_conversion_needs_an_impl() {
+    assert_error(
+        "struct P:\n    x: int\np = P(3)\n",
+        "cannot convert int to P; say how with 'impl from[int] for P:'",
+        3,
+        7,
+    );
+    // a variable is never a type, whatever it holds
+    assert_error(
+        "x = 1\ny = x(2)\n",
+        "'x' is int, not a function, so it cannot be called",
+        2,
+        5,
+    );
+}
+
+#[test]
+fn a_type_converts_from_another_through_from_or_try_from_but_not_both() {
+    assert_error(
+        &format!(
+            "{TEMPERATURES}impl from[str] for Celsius:\n    fn from(value: str) -> Self:\n        \
+             ret Celsius(degrees=0.0)\n"
+        ),
+        "'Celsius' already implements 'try_from[str]', so it cannot implement 'from[str]' too",
+        14,
+        20,
+    );
+    assert_error(
+        "impl from[int] for float:\n    fn from(value: int) -> float:\n        ret 0.0\n",
+        "float already implements 'from[int]'",
+        1,
+        20,
+    );
+    assert_error(
+        "struct P:\n    x: int\nimpl from[P] for str:\n    fn from(value: P) -> str:\n        \
+         ret \"p\"\n",
+        "every value converts to str through 'display', so implement 'display' for 'P' instead",
+        3,
+        18,
+    );
+    assert_error(
+        "struct P:\n    x: int\nimpl from[P] for P:\n    fn from(value: P) -> Self:\n        \
+         ret value\n",
+        "'P' already implements 'from[P]'",
+        3,
+        18,
+    );
+}
+
+#[test]
+fn a_bounded_type_parameter_converts_through_its_bounds() {
+    let source = "fn parse_all[T: try_from[str]](xs: list[str]) -> result[list[T], str]:\n    \
+                  out = []\n    for x in xs:\n        out.append(T(x)?)\n    ret ok(out)\n\
+                  fn widen[T: from[int]](n: int) -> T:\n    ret T(n)\n\
+                  fn total(xs: list[str]) -> result[int, str]:\n    ns = parse_all(xs)?\n    \
+                  t = 0\n    for n in ns:\n        t += n\n    ret ok(t)\n\
+                  y = widen(3) + 0.5\n";
+    assert_eq!(type_of_symbol(source, "y"), "float");
+    assert_eq!(type_of_symbol(source, "ns"), "list[int]");
+    assert_error(
+        "fn widen[T: from[int]](n: int) -> T:\n    ret T(n)\nif widen(3):\n    print(1)\n",
+        "'bool' does not implement 'from[int]', which 'widen' needs for 'T'",
+        3,
+        4,
+    );
+    assert_error(
+        "fn f[T](n: int) -> T:\n    ret T(n)\n",
+        "cannot convert int to 'T', since 'T' may be any type; bound it, as in '[T: from[int]]'",
+        2,
+        11,
     );
 }

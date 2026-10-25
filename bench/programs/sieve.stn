@@ -18,4 +18,4 @@ fn count_primes(limit: int) -> int:
         count += is_prime[i]
     ret count
 
-print(count_primes(int(args()[0])))
+print(count_primes(int(args()[0]).unwrap()))

@@ -16,5 +16,5 @@ fn checksum(counts: map[str, int], k: int) -> int:
             total += counts[word] * (j % 7 + 1)
     ret total
 
-k = int(args()[1])
-print(checksum(count_words(int(args()[0]), k), k))
+k = int(args()[1]).unwrap()
+print(checksum(count_words(int(args()[0]).unwrap(), k), k))

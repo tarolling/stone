@@ -1537,3 +1537,120 @@ fn a_library_lambda_is_named_by_its_module() {
         .contains(&"util.lambda.2.16".to_string())
     );
 }
+
+const CONV: (&str, &str) = (
+    "conv.stn",
+    "pub struct Point:\n    x: int\npub trait scale[R]:\n    fn scale(self, by: R) -> Self\n\
+     impl scale[int] for Point:\n    fn scale(self, by: int) -> Self:\n        \
+     ret Point(x=self.x * by)\nimpl scale[Point] for Point:\n    \
+     fn scale(self, by: Point) -> Self:\n        ret Point(x=self.x * by.x)\n\
+     pub trait make[T]:\n    fn make(self) -> T\n",
+);
+
+/// Returns the type arguments of each trait an `impl` block of `body` implements, as written
+/// after linking, in order.
+fn impl_args(body: &[Stmt]) -> Vec<Vec<TypeExprKind>> {
+    body.iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::ImplDef {
+                trait_name: Some(trait_name),
+                ..
+            } => Some(trait_name.args.iter().map(|a| a.kind.clone()).collect()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn named(name: &str) -> TypeExprKind {
+    TypeExprKind::Named {
+        name: name.to_string(),
+        args: vec![],
+    }
+}
+
+#[test]
+fn a_generic_trait_names_its_arguments_by_their_linked_names() {
+    let body = linked_body(&[
+        (
+            "main.stn",
+            "use conv\nuse conv.Point\nfn f[T: conv.scale[Point]](x: T) -> T:\n    ret x\n",
+        ),
+        CONV,
+    ]);
+    assert_eq!(
+        impl_args(&body),
+        [vec![TypeExprKind::Int], vec![named("conv.Point")]]
+    );
+    let bound = body
+        .iter()
+        .find_map(|stmt| match &stmt.kind {
+            StmtKind::FunctionDef {
+                name, type_params, ..
+            } if name == "f" => Some(type_params[0].bounds[0].clone()),
+            _ => None,
+        })
+        .expect("expected the function");
+    assert_eq!(bound.name, "conv.scale");
+    assert_eq!(
+        bound
+            .args
+            .iter()
+            .map(|a| a.kind.clone())
+            .collect::<Vec<_>>(),
+        [named("conv.Point")]
+    );
+    // the trait's own parameter is never renamed
+    let Some(StmtKind::TraitDef { methods, .. }) = body
+        .iter()
+        .map(|stmt| &stmt.kind)
+        .find(|kind| matches!(kind, StmtKind::TraitDef { name, .. } if name == "conv.scale"))
+    else {
+        panic!("expected the trait");
+    };
+    let StmtKind::FunctionDef { args, .. } = &methods[0].kind else {
+        panic!("expected a method");
+    };
+    assert_eq!(
+        args.args[1].annotation.as_ref().map(|a| a.kind.clone()),
+        Some(named("R"))
+    );
+}
+
+#[test]
+fn an_impl_of_another_files_trait_for_a_builtin_type_may_go_beside_a_struct_it_names() {
+    let body = linked_body(&[
+        (
+            "main.stn",
+            "use conv.make\nstruct C:\n    d: int\nimpl make[C] for int:\n    \
+             fn make(self) -> C:\n        ret C(d=self)\nimpl make[list[C]] for str:\n    \
+             fn make(self) -> list[C]:\n        ret []\n",
+        ),
+        CONV,
+    ]);
+    // conv's own two blocks come first
+    assert_eq!(
+        impl_args(&body)[2..],
+        [
+            vec![named("C")],
+            vec![TypeExprKind::List(Box::new(TypeExpr {
+                kind: named("C"),
+                span: Span::new(Pos { line: 7, col: 16 }, Pos { line: 7, col: 17 }),
+            }))]
+        ]
+    );
+    assert_error(
+        &[
+            (
+                "main.stn",
+                "use conv.make\nimpl make[bool] for int:\n    fn make(self) -> bool:\n        \
+                 ret true\n",
+            ),
+            CONV,
+        ],
+        "main.stn",
+        "'make' and 'int' are both defined in other files, so their impl block goes in the \
+         file of either",
+        2,
+        21,
+    );
+}

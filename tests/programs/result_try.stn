@@ -1,7 +1,7 @@
 // ? gives the value of an ok, and returns an err from the function it is in, in every place an
 // expression can be, freeing everything the statement made before it returned
 fn number(s: str) -> result[int, str]:
-    ret s.parse_int()
+    ret int(s)
 
 fn word(n: int) -> result[str, str]:
     if n < 0:

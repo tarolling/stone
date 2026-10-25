@@ -7,8 +7,8 @@ use crate::ast::{
     StmtKind, UnaryOp, is_lambda, target_names,
 };
 use crate::checker::{
-    Calls, FunctionValue, Handle, Method, Step, collect_assigned, may_name_enum, place,
-    place_spans, prints_bare, range_args, struct_display,
+    Calls, Conversion, Converter, FunctionValue, Handle, Method, Step, Type, collect_assigned,
+    may_name_enum, place, place_spans, prints_bare, range_args, struct_display,
 };
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
@@ -93,7 +93,13 @@ struct Function {
 pub struct FunctionRef {
     value: Arc<FunctionValue>,
     body: Option<Rc<Function>>,
+    /// The type arguments of a generic function, from where the value was made.
+    types: Option<Types>,
 }
+
+/// The type each type parameter of the running copy of a generic function stands for, by name,
+/// which calls through bounds of generic traits need to pick their functions.
+type Types = Rc<HashMap<String, Type>>;
 
 impl std::fmt::Debug for FunctionRef {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -404,7 +410,7 @@ fn some(value: Value) -> Value {
 }
 
 /// Makes the result `ok(value)` from `Ok(value)` or `err(message)` from `Err(message)`, as
-/// `parse_int` and `parse_float` return.
+/// `int(s)` and `float(s)` return.
 fn result(outcome: Result<Value, String>) -> Value {
     let (name, tag, value) = match outcome {
         Ok(value) => ("ok", 0, value),
@@ -950,7 +956,7 @@ impl std::error::Error for Exit {}
 /// A `?` found an `err` or a `none`, which the function it is in returns. It travels as an
 /// error from the expression to the statement holding it, which returns it.
 ///
-/// For example, in `n = s.parse_int()?`, an `err("...")` stops evaluating the statement, which
+/// For example, in `n = int(s)?`, an `err("...")` stops evaluating the statement, which
 /// returns that `err` from the function.
 #[derive(Debug)]
 struct Propagate(Value);
@@ -1027,6 +1033,11 @@ pub struct Interpreter<'out> {
     /// How each method call of the running body was resolved, and its function values and calls
     /// of them, by span.
     resolved: Rc<Calls>,
+    /// The type arguments of the running copy of a generic function, empty outside one.
+    types: Types,
+    /// The type arguments of the next function [`Interpreter::invoke_body`] calls, if it is a
+    /// copy of a generic function.
+    next_types: Option<Types>,
     /// Whether globals can move at their last use, which is never in an interactive session,
     /// since a later entry may read them.
     moves_globals: bool,
@@ -1094,6 +1105,8 @@ impl<'out> Interpreter<'out> {
             last_uses: vec![],
             global_reads: GlobalReads::default(),
             resolved: Rc::default(),
+            types: Rc::default(),
+            next_types: None,
             moves_globals: false,
             top_call: None,
             out: Box::new(out),
@@ -1960,6 +1973,9 @@ impl<'out> Interpreter<'out> {
                 args,
                 keywords,
             } => {
+                if let Some(conversion) = self.resolved.conversions.get(&expr.span).cloned() {
+                    return self.eval_conversion(expr.span, &conversion, &args[0]);
+                }
                 // a function value, as `f(x)`, `fs[0](x)`, or `p.run(x)` with a field `run` call
                 if self.resolved.indirect_calls.contains(&expr.span) {
                     return self.call_value(expr.span, func, args);
@@ -2057,7 +2073,10 @@ impl<'out> Interpreter<'out> {
                 if let Some((_, names)) = movable {
                     self.move_arguments(args, &names, id, None);
                 }
-                self.call(id, values)
+                self.next_types = self.instance_types(expr.span);
+                let result = self.call(id, values);
+                self.next_types = None;
+                result
             }
             ExprKind::Attribute { value, attr, .. } => match &value.kind {
                 ExprKind::Name { id, .. }
@@ -2131,7 +2150,8 @@ impl<'out> Interpreter<'out> {
                         false => None,
                     };
                     let value = function.clone();
-                    Ok(Value::Function(FunctionRef { value, body }))
+                    let types = self.instance_types(expr.span);
+                    Ok(Value::Function(FunctionRef { value, body, types }))
                 }
                 None => self.get_var(id),
             },
@@ -2417,10 +2437,6 @@ impl<'out> Interpreter<'out> {
                 Ok(Value::Bool(s.ends_with(&**suffix)))
             }
             ("endswith", _, _) => Err("endswith() is called on a str, with a str".into()),
-            ("parse_int", Value::Str(s), []) => Ok(result(stdlib::parse_int(s).map(Value::Int))),
-            ("parse_float", Value::Str(s), []) => {
-                Ok(result(stdlib::parse_float(s).map(Value::Float)))
-            }
             ("is_ok", Value::Enum(result), []) => Ok(Value::Bool(result.tag == 0)),
             ("is_err", Value::Enum(result), []) => Ok(Value::Bool(result.tag == 1)),
             ("unwrap", Value::Enum(result), []) if is_result(result) => match result.tag {
@@ -2523,6 +2539,7 @@ impl<'out> Interpreter<'out> {
         if let Some((_, names)) = movable {
             self.move_arguments(args, &names, name, None);
         }
+        self.next_types = function.types.clone();
         let result = match &function.body {
             Some(body) => self.invoke_body(name, body.clone(), values, false)?,
             None => self.invoke(name, values, false)?,
@@ -2547,7 +2564,7 @@ impl<'out> Interpreter<'out> {
         // claimed first, since a call among the arguments runs statements of its own
         let movable = self.top_call.take_if(|(call, _)| *call == span);
         if method.implementations.is_some() {
-            return self.call_through_bound(method, receiver, args, movable);
+            return self.call_through_bound(span, method, receiver, args, movable);
         }
         if !method.receiver {
             let mut values = Vec::with_capacity(args.len());
@@ -2557,6 +2574,7 @@ impl<'out> Interpreter<'out> {
             if let Some((_, names)) = movable {
                 self.move_arguments(args, &names, function, None);
             }
+            self.next_types = self.instance_types(span);
             return Ok(self.invoke(function, values, false)?.0);
         }
         if !method.changes {
@@ -2568,6 +2586,7 @@ impl<'out> Interpreter<'out> {
             if let Some((_, names)) = movable {
                 self.move_arguments(args, &names, function, None);
             }
+            self.next_types = self.instance_types(span);
             let value = self.invoke(function, values, false)?.0;
             // the prelude's `clamp` gives first whether its bounds are in order
             if function == stdlib::PRELUDE_CLAMP
@@ -2603,6 +2622,7 @@ impl<'out> Interpreter<'out> {
             true => place.clone(),
             false => std::mem::replace(place, Value::Unit),
         };
+        self.next_types = self.instance_types(span);
         let (result, changed) = self.invoke(function, values, true)?;
         if let Some(changed) = changed {
             *self.place_value(root, &steps, &spans)? = changed;
@@ -2615,6 +2635,7 @@ impl<'out> Interpreter<'out> {
     /// tells.
     fn call_through_bound(
         &mut self,
+        span: Span,
         method: &Method,
         receiver: &Expr,
         args: &[Expr],
@@ -2623,7 +2644,7 @@ impl<'out> Interpreter<'out> {
         // a type that compares part by part, or a number or a string, has the builtin method
         if matches!(method.function.as_str(), "eq.eq" | "ord.cmp") {
             let receiver_value = self.eval_expr(receiver)?;
-            if self.implementation(method, &receiver_value).is_err() {
+            if self.implementation(span, method, &receiver_value).is_err() {
                 let mut values = Vec::with_capacity(args.len());
                 for arg in args {
                     values.push(self.eval_expr(arg)?);
@@ -2631,7 +2652,7 @@ impl<'out> Interpreter<'out> {
                 let name = method.function.rsplit('.').next().unwrap_or_default();
                 return self.call_method(name, receiver_value, values);
             }
-            let function = self.implementation(method, &receiver_value)?;
+            let function = self.implementation(span, method, &receiver_value)?;
             let mut values = vec![receiver_value];
             for arg in args {
                 values.push(self.eval_expr(arg)?);
@@ -2643,7 +2664,7 @@ impl<'out> Interpreter<'out> {
         }
         if !method.changes {
             let receiver = self.eval_expr(receiver)?;
-            let function = self.implementation(method, &receiver)?;
+            let function = self.implementation(span, method, &receiver)?;
             let mut values = Vec::with_capacity(args.len() + 1);
             values.push(receiver);
             for arg in args {
@@ -2662,7 +2683,7 @@ impl<'out> Interpreter<'out> {
         }
         let spans = place_spans(receiver);
         let value = self.place_value(root, &steps, &spans)?.clone();
-        let function = self.implementation(method, &value)?;
+        let function = self.implementation(span, method, &value)?;
         if let Some((_, names)) = movable {
             self.move_arguments(args, &names, &function, Some(root));
         }
@@ -2684,9 +2705,96 @@ impl<'out> Interpreter<'out> {
         Ok(result)
     }
 
-    /// Returns the function a call through a bound calls for the receiver `value`: the method
-    /// of its type.
-    fn implementation(&self, method: &Method, value: &Value) -> EvalResult<String> {
+    /// Evaluates the conversion `Type(arg)` at `span`, with a builtin conversion or the function
+    /// of an impl of `from` or `try_from`, which the running copy's types pick for a type
+    /// parameter.
+    fn eval_conversion(
+        &mut self,
+        span: Span,
+        conversion: &Conversion,
+        arg: &Expr,
+    ) -> EvalResult<Value> {
+        let value = self.eval_expr(arg)?;
+        let target = conversion.target.substitute(&self.types);
+        let source = conversion.source.substitute(&self.types);
+        match conversion.resolve(&target, &source) {
+            Some(Converter::Builtin) => self.convert(&target, value),
+            Some(Converter::Function(function, copy)) => {
+                self.next_types = match conversion.function {
+                    Some(_) => self.instance_types(span),
+                    None => self
+                        .resolved
+                        .type_params
+                        .get(&function)
+                        .map(|params| Rc::new(params.iter().cloned().zip(copy).collect())),
+                };
+                Ok(self.invoke(&function, vec![value], false)?.0)
+            }
+            None => Err(format!("cannot convert {source} to {target}").into()),
+        }
+    }
+
+    /// Converts `value` to `target` as a builtin conversion does: to the same value for its own
+    /// type, written as `print` writes it for `str`, and to a result for a conversion that may
+    /// fail, such as `int` of a `str`.
+    fn convert(&mut self, target: &Type, value: Value) -> EvalResult<Value> {
+        Ok(match (target, value) {
+            (Type::Str, Value::Str(text)) => Value::Str(text),
+            (Type::Str, value) => {
+                let mut text = String::new();
+                self.write_value(&mut text, &value, false)?;
+                Value::Str(text.into())
+            }
+            (Type::Float, Value::Int(i)) => Value::Float(i as f64),
+            // -2^63 fits in an int but 2^63 does not, and nan fails both checks
+            (Type::Int, Value::Float(x)) => {
+                result(match (i64::MIN as f64..-(i64::MIN as f64)).contains(&x) {
+                    true => Ok(Value::Int(x as i64)),
+                    false => Err(stdlib::math::FLOAT_TO_INT.to_string()),
+                })
+            }
+            (Type::Int, Value::Str(s)) => result(stdlib::parse_int(&s).map(Value::Int)),
+            (Type::Float, Value::Str(s)) => result(stdlib::parse_float(&s).map(Value::Float)),
+            (Type::Bytes, Value::List(values)) => result(
+                values
+                    .iter()
+                    .map(|value| match value {
+                        Value::Int(n @ 0..=255) => Ok(*n as u8),
+                        Value::Int(n) => Err(stdlib::fill(stdlib::BYTE_RANGE, &[*n])),
+                        _ => Err("bytes() takes a list of ints".to_string()),
+                    })
+                    .collect::<Result<Vec<u8>, String>>()
+                    .map(|bytes| Value::Bytes(bytes.into())),
+            ),
+            // every type converts from itself
+            (_, value) => value,
+        })
+    }
+
+    /// Returns the function the call through a bound at `span` calls for the receiver `value`:
+    /// the method of its type, whose type arguments it leaves for the call in
+    /// [`Interpreter::next_types`]. The type the running copy gives the bounded type parameter
+    /// picks it, and the value's type if the copy does not know it.
+    fn implementation(&mut self, span: Span, method: &Method, value: &Value) -> EvalResult<String> {
+        if let Some(instance) = self.resolved.instances.get(&span) {
+            let args: Vec<Type> = instance
+                .args
+                .iter()
+                .map(|a| a.substitute(&self.types))
+                .collect();
+            if let [this, trait_args @ ..] = args.as_slice()
+                && !matches!(this, Type::Param(_))
+                && let Some((function, copy)) = method.resolve(this, trait_args)
+            {
+                self.next_types = self
+                    .resolved
+                    .type_params
+                    .get(&function)
+                    .map(|params| Rc::new(params.iter().cloned().zip(copy).collect()));
+                return Ok(function);
+            }
+        }
+        self.next_types = None;
         let key = match value {
             Value::Struct(value) => value.def.linked.to_string(),
             Value::Int(_) => "int".to_string(),
@@ -2695,12 +2803,12 @@ impl<'out> Interpreter<'out> {
             Value::Str(_) => "str".to_string(),
             _ => String::new(),
         };
-        if let Some(function) = method
+        if let Some(found) = method
             .implementations
             .as_ref()
-            .and_then(|implementations| implementations.get(&key))
+            .and_then(|implementations| implementations.iter().find(|i| i.ty == key))
         {
-            return Ok(function.clone());
+            return Ok(found.function.clone());
         }
         // a default method checked in an earlier REPL entry knows only the types that
         // implemented its trait then, but a type's methods have names of their own, so its
@@ -2735,36 +2843,6 @@ impl<'out> Interpreter<'out> {
                     writeln!(self.errors, "{line}")?;
                 }
                 return Ok(Value::Unit);
-            }
-            ("float", [Value::Int(i)]) => return Ok(Value::Float(*i as f64)),
-            ("float", [Value::Float(x)]) => return Ok(Value::Float(*x)),
-            ("float", [Value::Str(s)]) => return Ok(Value::Float(stdlib::parse_float(s)?)),
-            ("float", _) => return Err("float() takes one int, float, or str".into()),
-            ("int", [Value::Int(i)]) => return Ok(Value::Int(*i)),
-            // -2^63 fits in an int but 2^63 does not, and nan fails both checks
-            ("int", [Value::Float(x)]) if (i64::MIN as f64..-(i64::MIN as f64)).contains(x) => {
-                return Ok(Value::Int(*x as i64));
-            }
-            ("int", [Value::Float(_)]) => {
-                return Err("cannot convert float to int (nan or out of range)".into());
-            }
-            ("int", [Value::Str(s)]) => return Ok(Value::Int(stdlib::parse_int(s)?)),
-            ("int", _) => return Err("int() takes one int, float, or str".into()),
-            ("bytes", [Value::List(values)]) => {
-                let bytes = values
-                    .iter()
-                    .map(|value| match value {
-                        Value::Int(n @ 0..=255) => Ok(*n as u8),
-                        Value::Int(n) => Err(stdlib::fill(stdlib::BYTE_RANGE, &[*n])),
-                        _ => Err("bytes() takes a list of ints".to_string()),
-                    })
-                    .collect::<Result<Vec<u8>, String>>()?;
-                return Ok(Value::Bytes(bytes.into()));
-            }
-            ("str", [value]) => {
-                let mut text = String::new();
-                self.write_value(&mut text, value, false)?;
-                return Ok(Value::Str(text.into()));
             }
             ("input", [] | [Value::Str(_)]) => {
                 if let [prompt] = &args[..] {
@@ -2946,6 +3024,26 @@ impl<'out> Interpreter<'out> {
         self.invoke_body(name, function, args, keep_self)
     }
 
+    /// Returns the type arguments of the call of a generic function at `span`, with those of
+    /// the running copy filled in, or `None` if it calls no generic function.
+    fn instance_types(&self, span: Span) -> Option<Types> {
+        let instance = self.resolved.instances.get(&span)?;
+        let params = self.resolved.type_params.get(&instance.function)?;
+        Some(self.types_of(params, &instance.args))
+    }
+
+    /// Returns the type each of `params` stands for, the type at its position in `args` with
+    /// the running copy's type arguments filled in.
+    fn types_of(&self, params: &[String], args: &[Type]) -> Types {
+        Rc::new(
+            params
+                .iter()
+                .cloned()
+                .zip(args.iter().map(|a| a.substitute(&self.types)))
+                .collect(),
+        )
+    }
+
     /// Calls `function`, named `name`, as [`Interpreter::invoke`] does.
     fn invoke_body(
         &mut self,
@@ -2972,6 +3070,7 @@ impl<'out> Interpreter<'out> {
         self.calls += 1;
         self.last_uses.push(function.last_uses.clone());
         let resolved = std::mem::replace(&mut self.resolved, function.resolved.clone());
+        let types = std::mem::replace(&mut self.types, self.next_types.take().unwrap_or_default());
         self.enter_scope();
         let scope = self.scopes.last_mut().expect("scope was just entered");
         for (param, value) in function.params.iter().zip(args) {
@@ -2987,6 +3086,7 @@ impl<'out> Interpreter<'out> {
         };
         self.exit_scope();
         self.resolved = resolved;
+        self.types = types;
         self.last_uses.pop();
         self.calls -= 1;
 

@@ -1,0 +1,48 @@
+// a trait with type parameters, which a type implements once for each set of them
+struct V:
+    x: int
+
+trait add[R]:
+    fn add(self, other: R) -> Self
+    fn twice(self, other: R) -> Self:
+        ret self.add(other).add(other)
+
+impl add[int] for V:
+    fn add(self, other: int) -> Self:
+        ret V(x=self.x + other)
+
+impl add[V] for V:
+    fn add(self, other: V) -> Self:
+        ret V(x=self.x * 10 + other.x)
+
+// a builtin type may implement a trait of the program's
+impl add[str] for int:
+    fn add(self, other: str) -> Self:
+        ret self + other.len()
+
+// a generic struct's block may give the trait the struct's own parameter
+struct Box[T]:
+    items: list[T]
+
+impl add[T] for Box:
+    fn add(self, other: T) -> Self:
+        items = self.items
+        items.append(other)
+        ret Box(items=items)
+
+fn inc[T: add[int]](x: T) -> T:
+    ret x.add(1)
+
+fn plus[T: add[U], U](x: T, y: U) -> T:
+    ret x.add(y).twice(y)
+
+fn pick(xs: list[int]) -> int:
+    ret xs[0]
+
+v = V(x=1)
+print(v.add(2), v.add(V(x=2)), v.twice(3), v.twice(V(x=4)))
+print(inc(v), plus(v, 5), plus(v, V(x=6)))
+print(3.add("abcd"), plus(3, "ab"))
+print(Box(items=[1]).add(2).twice(3), plus(Box(items=["a"]), "b"))
+// the argument's type is known only after the call is checked
+print(v.add(pick([7])))

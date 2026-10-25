@@ -92,8 +92,6 @@ METHODS = (
     "is_ok",
     "is_err",
     "unwrap_err",
-    "parse_int",
-    "parse_float",
     "contains",
     "get",
     "keys",

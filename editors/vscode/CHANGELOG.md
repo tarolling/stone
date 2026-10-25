@@ -12,6 +12,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- Hover shows a generic trait with its type parameters, as `trait add[R]`, and a generic trait's
+  method with the signature of its own impl; completion offers such a method once.
+
 - Lambdas such as `|x| x * 2` are highlighted, hover with their type, and offer their
   parameters in completion inside them; the functions linking makes of them are left out of the
   outline and of completion.
@@ -23,6 +26,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Hover and go to definition on a builtin type in a signature, such as `int` in `x: int` or
   `list` in `list[str]`, show the type and lead to its line in the builtins reference, rather
   than the conversion function `int(...)`; a name followed by `(` is still the conversion.
+
+### Removed
+
+- Completion and hover for the string methods `parse_int` and `parse_float`, which stone no
+  longer has.
 
 ## [0.3.4] - 2026-10-24
 

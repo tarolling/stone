@@ -193,7 +193,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 61] = [
+pub static METHODS: [&str; 59] = [
     "len",
     "append",
     "pop",
@@ -228,8 +228,6 @@ pub static METHODS: [&str; 61] = [
     "unwrap_err",
     "ok",
     "err",
-    "parse_int",
-    "parse_float",
     "contains",
     "get",
     "keys",
@@ -257,8 +255,7 @@ pub static METHODS: [&str; 61] = [
     "read_all_bytes",
 ];
 
-/// The builtin methods only a `str` has, other than `parse_int` and `parse_float`, which
-/// [`METHODS`] lists too. A struct may have methods of the same names.
+/// The builtin methods only a `str` has, which [`METHODS`] lists too. A struct may have methods of the same names.
 pub const STR_METHODS: [&str; 12] = [
     "strip",
     "split",
@@ -332,31 +329,34 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 10] = [
     },
     BuiltinDoc {
         name: "int",
-        signature: "int(value: int | float | str) -> int",
-        description: "Converts a number to an int, dropping any fraction, so `int(-2.5)` is -2, \
-                      or reads a decimal int from a string, such as `int(\" -42\\n\")`. \
-                      It stops the program if `value` is nan, does not fit in an int, \
-                      or is a string that is not an int.",
+        signature: "int(value: int) -> int | int(value: float | str) -> result[int, str]",
+        description: "Converts `value` to an int through the prelude's `from` and `try_from`. \
+                      An int is itself. A float drops its fraction, so `int(-2.5)` is \
+                      `ok(-2)`, and nan or a float too large for an int is an `err`. A string \
+                      is read as a decimal int, so `int(\" -42\\n\")` is `ok(-42)` and \
+                      `int(\"x\")` is `err(\"invalid literal for int() with base 10: 'x'\")`.",
     },
     BuiltinDoc {
         name: "float",
-        signature: "float(value: int | float | str) -> float",
-        description: "Converts a number to a float, rounding to the nearest float if needed, \
-                      or reads a float from a string, such as `float(\"2.5e3\")` or \
-                      `float(\"inf\")`. It stops the program if the string is not a float.",
+        signature: "float(value: int | float) -> float | float(value: str) -> result[float, str]",
+        description: "Converts `value` to a float through the prelude's `from` and `try_from`: \
+                      an int to the nearest float, a float to itself, and a string, such as \
+                      `\"2.5e3\"` or `\"inf\"`, to `ok` of the float it writes, or an `err` if \
+                      it writes none.",
     },
     BuiltinDoc {
         name: "str",
         signature: "str(value) -> str",
         description: "Returns the text `print` would write for `value`, so `str(1.0)` is `\"1.0\"` \
                       and `str([\"a\"])` is `\"['a']\"`. A struct with an `impl display` block \
-                      is written as its `display` method says.",
+                      is written as its `display` method says. Every type converts to `str` \
+                      this way, through the prelude's `from`.",
     },
     BuiltinDoc {
         name: "bytes",
-        signature: "bytes(values: list[int]) -> bytes",
-        description: "Returns the bytes whose values are `values`, so `bytes([104, 105])` is \
-                      `b\"hi\"`. A value outside 0 to 255 stops the program with an error.",
+        signature: "bytes(values: list[int]) -> result[bytes, str]",
+        description: "Returns `ok` of the bytes whose values are `values`, so `bytes([104, 105])` \
+                      is `ok(b\"hi\")`, or an `err` naming the first value outside 0 to 255.",
     },
     BuiltinDoc {
         name: "input",
@@ -442,7 +442,7 @@ pub static TYPE_DOCS: [BuiltinDoc; 10] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 61] = [
+pub static METHOD_DOCS: [BuiltinDoc; 59] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | bytes | list[T] | map[K, V]).len() -> int",
@@ -674,21 +674,6 @@ pub static METHOD_DOCS: [BuiltinDoc; 61] = [
         name: "err",
         signature: "result[T, E].err() -> option[E]",
         description: "Returns `some` of the error an `err` holds, or `none` for an `ok`.",
-    },
-    BuiltinDoc {
-        name: "parse_int",
-        signature: "str.parse_int() -> result[int, str]",
-        description: "Reads the string as `int` does, returning `ok` of the int, or `err` of \
-                      the message `int` would stop the program with, so `\"42\".parse_int()` \
-                      is `ok(42)` and `\"x\".parse_int()` is \
-                      `err(\"invalid literal for int() with base 10: 'x'\")`.",
-    },
-    BuiltinDoc {
-        name: "parse_float",
-        signature: "str.parse_float() -> result[float, str]",
-        description: "Reads the string as `float` does, returning `ok` of the float, or `err` \
-                      of the message `float` would stop the program with, so \
-                      `\"2.5\".parse_float()` is `ok(2.5)`.",
     },
     BuiltinDoc {
         name: "contains",
@@ -1038,7 +1023,7 @@ pub const UNWRAP_NONE: &str = "cannot unwrap none";
 /// The start of the error `unwrap` stops the program with on an `err`, which goes on with `: `
 /// and the error as `print` writes it.
 ///
-/// For example, `"x".parse_int().unwrap()` stops with
+/// For example, `int("x").unwrap()` stops with
 /// `cannot unwrap err: invalid literal for int() with base 10: 'x'`.
 pub const UNWRAP_ERR: &str = "cannot unwrap err";
 
@@ -1647,6 +1632,8 @@ mod tests {
                 ("eq".to_string(), vec!["eq".to_string()]),
                 ("ord".to_string(), vec!["cmp".to_string()]),
                 ("display".to_string(), vec!["display".to_string()]),
+                ("from".to_string(), vec!["from".to_string()]),
+                ("try_from".to_string(), vec!["try_from".to_string()]),
             ]
         );
         assert_eq!(

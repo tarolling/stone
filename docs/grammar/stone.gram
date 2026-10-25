@@ -146,8 +146,9 @@ type_params:
 type_param:
     | NAME [':' '+'.trait_name+]
 
+# a generic trait's name takes its type arguments, as in from[int]
 trait_name:
-    | '.'.NAME+
+    | '.'.NAME+ ['[' ','.type+ [','] ']']
 
 # Function parameters
 # -------------------
@@ -203,7 +204,7 @@ impl_def:
 
 # a method without a body is one every implementing type defines; one with a body is a default
 trait_def:
-    | ['pub'] 'trait' NAME ':' NEWLINE INDENT trait_method+ DEDENT
+    | ['pub'] 'trait' NAME [type_params] ':' NEWLINE INDENT trait_method+ DEDENT
 
 trait_method:
     | function_def

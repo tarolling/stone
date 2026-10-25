@@ -1,1 +1,1 @@
-print(int(""))
+print(int("").unwrap())

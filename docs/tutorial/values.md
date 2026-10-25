@@ -29,8 +29,9 @@ is an error. The only types you write are in function signatures, as {doc}`funct
 
 `+`, `-`, `*`, `/`, and `%` work on two ints or two floats, and `+` also joins two strings. stone
 never converts between `int` and `float` on its own, so `price * count` with a float price and
-an int count is an error. Convert explicitly with `float(count)` or `int(price)`. `int()` drops
-the fraction, so `int(-2.5)` is `-2`.
+an int count is an error. Convert explicitly with `float(count)`, or `int(price)`, which drops
+the fraction and gives a result, since a float may be nan or too large for an int: `int(-2.5)`
+is `ok(-2)`, and `int(-2.5).unwrap()` is `-2`.
 
 Division of ints truncates toward zero, as in C, so `-7 / 2` is `-3` rather than Python's `-4`.
 `%` is the remainder of that division, so it takes the sign of the left side: `-7 % 2` is `-1`

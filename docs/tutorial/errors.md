@@ -29,7 +29,7 @@ forgetting the `:` after `if x > 1` reports `expected ':', found end of line`.
 Among the things the checker reports:
 
 - operands of the wrong type, like `1 + "a"` or `-"a"`
-- mixing `int` and `float` without `int()` or `float()`
+- mixing `int` and `float` without converting one, as `float(count)` does
 - assigning a value of a different type to a variable
 - calling a function with the wrong number of arguments
 - reading a variable that might not be assigned yet, such as one only assigned inside an `if`
@@ -74,10 +74,10 @@ prints
 :language: text
 ```
 
-`s.parse_int()` reads an int as `int(s)` does, but returns `err` of the message `int(s)` would
-stop with instead of stopping. `?` after a result passes an error on: `line[i + 1:].parse_int()?`
-gives the int an `ok` holds, and if the result is an `err`, the function returns that `err`
-right there. A function can only use `?` on a result if it returns a result with the same error
+`int(s)` of a string returns a result: `ok` of the int it reads, or `err` of a message saying why
+it is none, as do `float(s)` and `int(x)` of a float, which may be nan. `?` after a result passes
+an error on: `int(line[i + 1:])?` gives the int an `ok` holds, and if the result is an `err`, the
+function returns that `err` right there. A function can only use `?` on a result if it returns a result with the same error
 type, so every error is either handled with `match` or passed on, in plain sight. `?` works on
 options the same way, in a function that returns an option.
 

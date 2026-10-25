@@ -47,7 +47,7 @@ fn trace(label: str, value: int) -> int:
 print("{trace("first", 1)} {trace("second", 2)}")
 
 fn parsed(text: str) -> result[str, str]:
-    value = text.parse_int()?
+    value = int(text)?
     ret ok("got {value}")
 
 print(parsed("12"), parsed("x"))

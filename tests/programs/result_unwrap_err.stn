@@ -1,4 +1,4 @@
 // unwrap_err stops the program when the result is ok
-r = "12".parse_int()
-print("x".parse_int().unwrap_err())
+r = int("12")
+print(int("x").unwrap_err())
 print(r.unwrap_err())

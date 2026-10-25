@@ -12,4 +12,4 @@ fn lcg(rounds: int) -> int:
         total += x / 65536
     ret total
 
-print(lcg(int(args()[0])))
+print(lcg(int(args()[0]).unwrap()))

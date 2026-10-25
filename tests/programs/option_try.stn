@@ -14,7 +14,7 @@ fn value_of(m: map[str, list[int]], key: str) -> option[int]:
 fn parsed(texts: list[str]) -> option[list[int]]:
     out = []
     for t in texts:
-        out.append(t.parse_int().ok()?)
+        out.append(int(t).ok()?)
     ret some(out)
 
 print(second_word("a b"), second_word("a"))

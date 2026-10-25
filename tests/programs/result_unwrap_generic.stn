@@ -11,5 +11,5 @@ fn lookup(found: bool) -> result[list[str], tuple[int, str]]:
     ret err((2, "a 'quoted' word"))
 
 print(must(lookup(true)))
-print(expect_err("x".parse_int()))
+print(expect_err(int("x")))
 print(must(lookup(false)))

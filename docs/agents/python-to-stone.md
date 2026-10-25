@@ -95,6 +95,7 @@ print(seen.len(), 2 in seen, 7 in seen)
 | `@dataclass class P:` with typed fields | `struct P:` with the same fields |
 | `P(1, 2)` | `P(x=1, y=2)`: every field, named |
 | `__init__` with logic or defaults | an associated function in `impl P:`, such as `fn new(...) -> P:` |
+| a constructor or classmethod that builds a value from another type | `impl from[Other] for P:` with `fn from(value: Other) -> Self`, called as `P(other)`; `impl try_from[str] for P:` (returning `result[Self, str]`) for one that can fail |
 | a method that mutates `self` | the same method; stone changes the receiver in place |
 | `__eq__` | `impl eq for P:` with `fn eq(self, other: Self) -> bool` |
 | `__lt__`, `functools.total_ordering` | `impl ord for P:` with `fn cmp(self, other: Self) -> ordering` |
@@ -138,8 +139,9 @@ print(total)
 | `return a, b` | `ret (a, b)`, with `-> tuple[A, B]` |
 | returning `None` on failure | `-> option[T]`, returning `none` or `some(x)` |
 | `raise` | return a `result[T, str]` with `err("message")` and let the caller decide; `os.exit(1)` after printing a message for a fatal error |
-| `try: int(s) except ValueError:` | `match s.parse_int():` with `case ok(n):` and `case err(message):`; `int(s)` on bad text stops the program, and nothing catches it |
-| an exception passing through a function | `?`: `n = s.parse_int()?` returns the `err` from a function that returns a `result` with the same error type |
+| `try: int(s) except ValueError:` | `match int(s):` with `case ok(n):` and `case err(message):`, since `int(s)` of a `str` (or a float) returns a `result[int, str]` |
+| `int(s)` where bad text should end the program | `int(s).unwrap()`, which stops it with `cannot unwrap err:` and the reason |
+| an exception passing through a function | `?`: `n = int(s)?` returns the `err` from a function that returns a `result` with the same error type |
 | a function that mutates a list argument | return the list: `xs = f(xs)`, which is still in place |
 | a function that mutates a global | take it as a parameter and return it |
 | recursion deeper than 1000 | a loop with an explicit stack (a `list`) |
@@ -147,11 +149,11 @@ print(total)
 | `x * (i + 1)` with a float `x` | `x * float(i + 1)`: convert every int that meets a float |
 
 ```stone
-// int(s) stops the program on bad text, but s.parse_int() returns a result, which ? passes on
+// int(s) of a str returns a result, which ? passes on
 fn total(texts: list[str]) -> result[int, str]:
     sum = 0
     for s in texts:
-        sum += s.parse_int()?
+        sum += int(s)?
     ret ok(sum)
 
 for texts in [["42", " -7 "], ["1", "x1"], ["99999999999999999999"]]:
@@ -162,7 +164,7 @@ for texts in [["42", " -7 "], ["1", "x1"], ["99999999999999999999"]]:
             print("error:", message)
 ```
 
-The error is the message `int(s)` would stop with, such as
+The error is the message Python's `int(s)` raises, such as
 `invalid literal for int() with base 10: 'x1'`.
 
 ### Strings and I/O

@@ -25,6 +25,6 @@ fn main(n: int):
     for i in range(n):
         sum = sum * 0.5 + floats[i]
     // floats print scaled to ints, so C need not print them as stone does
-    print(int(sum * 1000000000.0), int(floats[0] * 1000000000.0), int(floats[n - 1] * 1000000000.0))
+    print(int(sum * 1000000000.0).unwrap(), int(floats[0] * 1000000000.0).unwrap(), int(floats[n - 1] * 1000000000.0).unwrap())
 
-main(int(args()[0]))
+main(int(args()[0]).unwrap())

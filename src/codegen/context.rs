@@ -77,8 +77,6 @@ pub const BYTES_ROUTINES: &[&str] = &[
 /// Runtime routines that need the string runtime, even in a program where no expression is a
 /// `str`, such as one that only prints `args()`.
 const STRING_ROUTINES: &[&str] = &[
-    "stone.parse_int",
-    "stone.parse_float",
     "stone.parse_int_result",
     "stone.parse_float_result",
     "stone.str_strip",
@@ -208,13 +206,11 @@ pub fn module_routine(name: &str) -> Option<&'static str> {
 /// Runtime routines that can stop the program with a runtime error of their own, so a call to one
 /// first records where it is, for the error to point at.
 ///
-/// For example, `int("x")` calls `stone.parse_int`, which fails with
-/// `invalid literal for int() with base 10: 'x'` at the call. `stone.fail` itself is called
-/// with a message built at runtime, as a failed `unwrap` of an `err` does.
+/// For example, `s[9]` of `s = "ab"` calls `stone.str_at`, which fails with
+/// `string index out of range (index 9, length 2)` at the call. `stone.fail` itself is called with a message built
+/// at runtime, as a failed `unwrap` of an `err` does.
 pub const FALLIBLE_ROUTINES: &[&str] = &[
     "stone.fail",
-    "stone.parse_int",
-    "stone.parse_float",
     "stone.str_split",
     "stone.str_at",
     "stone.str_slice_of",

@@ -50,9 +50,10 @@ Everything read is a `str`, so a few builtins turn text into other values and ba
 - `line.strip()` removes spaces, tabs, and line breaks from both ends.
 - `line.split()` breaks a line into words at runs of whitespace, and `line.split(",")` breaks it
   at each comma, keeping empty fields.
-- `int("42")` and `float("2.5")` read numbers, allowing whitespace around them. Text that is not
-  a number, such as `int("4x")`, stops the program with an error naming the text, like
-  `invalid literal for int() with base 10: '4x'`.
+- `int("42")` and `float("2.5")` read numbers, allowing whitespace around them, and give
+  results: `ok(42)` and `ok(2.5)`. Text that is not a number, such as `int("4x")`, gives an
+  `err` naming the text, like `invalid literal for int() with base 10: '4x'`. `.unwrap()` takes
+  the number out, stopping the program on such text, and {doc}`errors` shows how to handle it.
 - `str(value)` goes the other way, giving the text `print` would write, so `"n = " + str(3)` is
   `"n = 3"`.
 
@@ -64,7 +65,7 @@ own name:
 ```stone
 total = 0
 for a in args():
-    total += int(a)
+    total += int(a).unwrap()
 print(total)
 ```
 

@@ -1,0 +1,11 @@
+Fahrenheit(degrees=212.0) 100.0 Celsius(degrees=100.0)
+ok(Celsius(degrees=21.5)) err('below absolute zero: -300.0') err("could not convert string to float: 'warm'")
+Box(items=[3]) ['a']
+3.5 4
+ok(42) err("invalid literal for int() with base 10: 'x'")
+ok([Celsius(degrees=100.0), Celsius(degrees=0.0)]) err('below absolute zero: -500.0')
+ok(2) ok(-2) err('cannot convert float to int (nan or out of range)') err('cannot convert float to int (nan or out of range)')
+ok(42) ok(-7) err("invalid literal for int() with base 10: '4.5'") ok(2.5) ok(inf) err("could not convert string to float: 'x'")
+3.0 5 1.5 [1, 2] Celsius(degrees=100.0) true
+ok(b'hi') err('byte out of range (value 300)') ok(b'')
+11

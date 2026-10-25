@@ -632,10 +632,10 @@ use os
 use math
 use time
 use fs
-xs = [1.5, float(\" 2.5 \")]
+xs = [1.5, float(\" 2.5 \").unwrap()]
 xs.append(xs[0] % 0.5)
 words = input(\"> \").unwrap().strip().split()
-words.append(str(xs[0]) + str(int(\"-7\")) + str(true))
+words.append(str(xs[0]) + str(int(\"-7\").unwrap()) + str(true))
 parts = \"a,b\".split(\",\")
 print(xs, words, parts, eof(), args(), words.len())
 print(os.env(\"HOME\"), os.has_env(\"HOME\"), os.platform(), os.arch(), os.hostname())

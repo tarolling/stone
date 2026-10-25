@@ -278,7 +278,7 @@ fn returning_from_a_list_loop_releases_the_list_and_gives_up_the_local() {
 
 #[test]
 fn functions_read_globals_with_a_check_and_main_without() {
-    let dump = dump("g = int(\"1\")\nfn f() -> int:\n    ret g\nprint(g + f())\n");
+    let dump = dump("g = int(\"1\").unwrap()\nfn f() -> int:\n    ret g\nprint(g + f())\n");
     assert!(dump.contains("v0 = load_global_checked g"), "{dump}");
     assert!(dump.contains("= load_global g"), "{dump}");
 }
@@ -521,7 +521,7 @@ fn io_and_string_builtins_call_the_runtime() {
     let source = "fn f(s: str, n: int, x: float, b: bool) -> list[str]:\n    \
                   ret [input().unwrap(), input(s).unwrap(), str(n), str(x), str(b), str(s), s.strip()]\n\
                   fn g(s: str) -> int:\n    \
-                  ret int(s) + int(float(s)) + args().len() + s.split().len() + s.split(s).len()\n\
+                  ret int(s).unwrap() + int(float(s).unwrap()).unwrap() + args().len() + s.split().len() + s.split(s).len()\n\
                   f(\"a\", 1, 1.5, true)\ng(\"1\")\nprint(eof())\n";
     let text = dump(source);
     for call in [
@@ -531,8 +531,8 @@ fn io_and_string_builtins_call_the_runtime() {
         "call stone.str_float(v2)",
         "call stone.str_bool(v3)",
         "call stone.str_strip(v0)",
-        "call stone.parse_int(v0)",
-        "call stone.parse_float(v0)",
+        "call stone.parse_int_result(v0)",
+        "call stone.parse_float_result(v0)",
         "call stone.args()",
         "call stone.str_split_ws(v0)",
         "call stone.str_split(v0, v0)",

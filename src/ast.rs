@@ -110,12 +110,16 @@ pub struct TypeParam {
 }
 
 /// A trait named in a bound or an `impl` block, maybe through its module, and its span, such as
-/// `Shape` in `fn f[T: Shape](x: T):` or `geo.Shape` in `impl geo.Shape for Circle:`.
+/// `Shape` in `fn f[T: Shape](x: T):` or `geo.Shape` in `impl geo.Shape for Circle:`, with the
+/// type arguments of a generic trait, such as `int` in `impl from[int] for Celsius:`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TraitName {
     /// The name as written, with dots between a module's names and the trait's.
     pub name: Identifier,
+    /// The span of the name alone, without its type arguments.
     pub span: Span,
+    /// The types in brackets after the name, empty for a trait without type parameters.
+    pub args: Vec<TypeExpr>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -713,6 +717,9 @@ pub enum StmtKind {
         name_span: Span,
         /// Whether the definition starts with `pub`, so other modules may use it.
         public: bool,
+        /// The type parameters in brackets after the name, such as `T` in `trait from[T]:`,
+        /// which its methods' signatures may use, empty for a trait without them.
+        type_params: Vec<TypeParam>,
         /// The functions of the trait, each a [`StmtKind::FunctionDef`] whose `body` is empty
         /// when it is written without one.
         methods: Vec<Stmt>,

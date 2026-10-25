@@ -12,7 +12,7 @@ print(2 ** 10, 2.5 ** 2, 2.0 ** -1, -2 ** 2)
 
 // ints and floats never mix, so convert one side
 total = price * float(count)
-print(total, int(total))
+print(total, int(total).unwrap())
 
 // bools, strings, and options, which hold a value or none
 ready = count > 2

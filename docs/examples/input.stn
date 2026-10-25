@@ -8,7 +8,7 @@ while not eof():
     if line == "":
         cont
     fields = line.split()
-    score = float(fields[1])
+    score = float(fields[1]).unwrap()
     total += score
     count += 1
     if count == 1 or score > best:

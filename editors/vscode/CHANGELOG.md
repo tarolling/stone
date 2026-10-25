@@ -20,8 +20,29 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   outline and of completion.
 - Completion and hover for the string methods `splitlines`, `rfind`, `count`, `replace`,
   `lower`, and `upper`.
+- Where a type is written (a parameter's or field's type, after `->`, inside `list[` or `fn(`,
+  a lambda's parameter, or a variant's values), completion offers types: the builtin types,
+  including `socket`, `listener`, `bytes`, and `fn(...)`, the prelude's `option` and `result`,
+  the program's structs and enums, and the type parameters in scope, with `Self` in an `impl`
+  or `trait` block. After `[T: `, it offers traits. Brackets and bars in a string's text, as in
+  `"|"`, do not confuse it.
+- Hover on the `fn` of a function type, as in `fn(int) -> str`, documents it, and go to
+  definition opens its line in the builtins reference.
+- Completion in a `use` offers `net`, and after `use net.` its functions, before the program
+  uses it.
+- Completion after a `.` offers the members of any expression's type, not only a variable's, as
+  after `xs[0].`, `make().`, `p.items.`, and `[1, 2].`, also inside a string's unfinished value.
+- Completion after any value offers `display`, including a struct, a type parameter, a function
+  value, and an enum value.
+- Suggestions pop up inside a string's `{...}` values as they do in code.
 
 ### Fixed
+
+- Hover, completion, and go to definition keep working while a string's `{...}` value is being
+  typed, as in `print("{xs.`, which used to hide every name in the file until the string was
+  finished.
+- A word in a string's text or in a comment, such as `print` in `"print it"`, no longer hovers
+  or leads anywhere as a builtin, and completion offers nothing there.
 
 - Hover and go to definition on a builtin type in a signature, such as `int` in `x: int` or
   `list` in `list[str]`, show the type and lead to its line in the builtins reference, rather

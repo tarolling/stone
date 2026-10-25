@@ -91,13 +91,8 @@ impl Lexer {
     /// Integer literals that do not fit in an `i64` produce a [`LexError`].
     pub fn lex(&mut self) -> Result<Vec<Token>, LexError> {
         let file = self.file;
-        match self.lex_tokens() {
-            Ok(mut tokens) => {
-                for token in &mut tokens {
-                    token.span.file = file;
-                }
-                Ok(tokens)
-            }
+        match self.lex_tokens(None) {
+            Ok(tokens) => Ok(self.in_file(tokens)),
             Err(e) => Err(LexError {
                 span: e.span.in_file(file),
                 ..e
@@ -105,12 +100,51 @@ impl Lexer {
         }
     }
 
+    /// Lexes the entire input like [`Lexer::lex`], but goes on after an error, returning every
+    /// error with the tokens of everything else.
+    ///
+    /// After an error the rest of its line is skipped, so the line ends with its `Newline` and
+    /// the next line lexes as usual. For example, `"print(\"{xs.\ny = 1\n"` gives one
+    /// `unterminated string` error and the tokens `print`, `(`, `StringStart("")`, `xs`, `.`,
+    /// `Newline`, then those of `y = 1`, so an editor still sees the rest of the file while a
+    /// value in a string is being typed.
+    pub fn lex_recovering(&mut self) -> (Vec<Token>, Vec<LexError>) {
+        let mut errors = vec![];
+        let tokens = self
+            .lex_tokens(Some(&mut errors))
+            .expect("recovering never fails");
+        for error in &mut errors {
+            error.span = error.span.in_file(self.file);
+        }
+        (self.in_file(tokens), errors)
+    }
+
+    /// Moves every token's span into `self.file`.
+    fn in_file(&self, mut tokens: Vec<Token>) -> Vec<Token> {
+        for token in &mut tokens {
+            token.span.file = self.file;
+        }
+        tokens
+    }
+
     /// Lexes the entire input with every span in the entry file, which `lex` then moves into
-    /// `self.file`.
-    fn lex_tokens(&mut self) -> Result<Vec<Token>, LexError> {
+    /// `self.file`. With `errors`, each error goes there and lexing goes on at the end of its
+    /// line instead of stopping.
+    fn lex_tokens(
+        &mut self,
+        mut errors: Option<&mut Vec<LexError>>,
+    ) -> Result<Vec<Token>, LexError> {
         let mut tokens: Vec<Token> = vec![];
         loop {
-            let tok = self.next_token()?;
+            let tok = match (self.next_token(), errors.as_deref_mut()) {
+                (Ok(tok), _) => tok,
+                (Err(e), None) => return Err(e),
+                (Err(e), Some(errors)) => {
+                    errors.push(e);
+                    self.skip_line();
+                    continue;
+                }
+            };
             if matches!(tok.r#type, TokenType::Eof) {
                 // newline before EOF if missing; a trailing dedent already follows one
                 if let Some(last) = tokens.last()
@@ -169,6 +203,13 @@ impl Lexer {
                 _ => break,
             }
         }
+    }
+
+    /// Skips what is left of a line that failed to lex, up to but not including its newline,
+    /// and closes any values of strings the line left open.
+    fn skip_line(&mut self) {
+        self.holes.clear();
+        self.skip_comment();
     }
 
     /// Skips a `//` comment up to but not including the newline that ends it.
@@ -1473,6 +1514,95 @@ testing(1, 2, 3)"#;
                 Span::new(Pos::new(2, 1), Pos::new(2, 1)),
             ]
         );
+    }
+
+    /// Lexes `source` with [`Lexer::lex_recovering`], giving the token types and each error's
+    /// message and start.
+    fn recovered(source: &str) -> (Vec<TokenType>, Vec<(String, usize, usize)>) {
+        let (tokens, errors) = Lexer::with_file(source, FileId(2)).lex_recovering();
+        assert!(errors.iter().all(|e| e.span.file == FileId(2)));
+        assert!(tokens.iter().all(|t| t.span.file == FileId(2)));
+        (
+            tokens.into_iter().map(|t| t.r#type).collect(),
+            errors
+                .into_iter()
+                .map(|e| (e.message, e.span.start.line, e.span.start.col))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn recovering_skips_the_rest_of_a_line_with_an_error() {
+        let (types, errors) = recovered("print(\"{xs.\ny = 1\n");
+        assert_eq!(
+            errors,
+            [("unterminated string".to_string(), 1, 7)],
+            "{types:?}"
+        );
+        assert_eq!(
+            types,
+            [
+                name("print"),
+                TokenType::LParen,
+                text(TokenType::StringStart, ""),
+                name("xs"),
+                TokenType::Dot,
+                TokenType::Newline,
+                name("y"),
+                op("="),
+                TokenType::Number(1),
+                TokenType::Newline,
+                TokenType::Eof,
+            ]
+        );
+    }
+
+    #[test]
+    fn recovering_goes_on_after_each_kind_of_error() {
+        for source in [
+            "a = \"{}\" + b\n",
+            "a = \"}\"\n",
+            "a = \"{x:.2f}\"\n",
+            "a = \"\\q\"\n",
+            "a = 99999999999999999999\n",
+            "a = \"never closed\n",
+        ] {
+            let (types, errors) = recovered(&format!("{source}y = 1\n"));
+            assert_eq!(errors.len(), 1, "{source}");
+            let y = types.iter().position(|t| *t == name("y")).expect(source);
+            assert_eq!(types[y - 1], TokenType::Newline, "{source}");
+            assert_eq!(
+                types[y..],
+                [
+                    name("y"),
+                    op("="),
+                    TokenType::Number(1),
+                    TokenType::Newline,
+                    TokenType::Eof
+                ],
+                "{source}"
+            );
+        }
+    }
+
+    #[test]
+    fn recovering_keeps_indentation_and_reports_every_bad_line() {
+        let (types, errors) = recovered("if x:\n    a = \"{\n    b = \"}\"\nc = 1\n");
+        let lines: Vec<usize> = errors.iter().map(|e| e.1).collect();
+        assert_eq!(lines, [2, 3]);
+        let c = types.iter().position(|t| *t == name("c")).unwrap();
+        assert_eq!(types[c - 1], TokenType::Dedent);
+        assert!(types.contains(&TokenType::Indent));
+    }
+
+    #[test]
+    fn recovering_an_error_at_the_end_of_the_file_ends_it() {
+        let (types, errors) = recovered("a = \"{x");
+        assert_eq!(errors.len(), 1);
+        assert_eq!(types.last(), Some(&TokenType::Eof));
+        // a file without errors lexes as `lex` lexes it
+        let source = "fn f(x: int) -> str:\n    ret \"{x}\"\n";
+        assert_eq!(recovered(source), (types_of(source), vec![]));
     }
 
     #[test]

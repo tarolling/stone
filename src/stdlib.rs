@@ -383,7 +383,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 10] = [
 /// `ordering`, and `output` are not here, since the prelude defines them in stone.
 ///
 /// A `signature` is the type as a signature writes it, such as `list[T]` for `list`.
-pub static TYPE_DOCS: [BuiltinDoc; 10] = [
+pub static TYPE_DOCS: [BuiltinDoc; 11] = [
     BuiltinDoc {
         name: "int",
         signature: "int",
@@ -425,6 +425,13 @@ pub static TYPE_DOCS: [BuiltinDoc; 10] = [
         name: "tuple",
         signature: "tuple[T1, T2, ...]",
         description: "Two or more values of fixed types, such as `(1, \"a\")`, which never change.",
+    },
+    BuiltinDoc {
+        name: "fn",
+        signature: "fn(T1, ...) -> R",
+        description: "A function value, such as a function named without parentheses or a \
+                      lambda `|x| x * 2`, called as `f(x)`. `fn(T1, ...)` returns no value. \
+                      Function values are never compared, and print as their type.",
     },
     BuiltinDoc {
         name: "socket",

@@ -54,6 +54,9 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `bytes(xs)` of a `list[int]` (a value outside 0 to 255). Write `int(s)?` to pass the error on,
   or `int(s).unwrap()`, which stops with `cannot unwrap err:` and the old message. `float(n)`
   of an int, `str(x)`, and a type converted to itself give the value as before.
+- An error in lexing a line, such as a string that never ends, no longer stops `stone check`,
+  `run`, and `build` at that line: the rest of the line is skipped and every later syntax error
+  is reported too, as after an error in parsing.
 
 ### Removed
 

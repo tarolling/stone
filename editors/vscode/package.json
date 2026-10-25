@@ -41,7 +41,12 @@
       {
         "language": "stone",
         "scopeName": "source.stone",
-        "path": "./syntaxes/stone.tmLanguage.json"
+        "path": "./syntaxes/stone.tmLanguage.json",
+        "tokenTypes": {
+          "meta.interpolation.stone": "other",
+          "meta.interpolation.stone string": "string",
+          "meta.interpolation.stone comment": "comment"
+        }
       }
     ],
     "configuration": {

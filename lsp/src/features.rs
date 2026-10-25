@@ -17,6 +17,7 @@ use stone::checker::{
     Analysis, ORD, Symbol, SymbolKind as StoneSymbolKind, Type, prints_bare, struct_display,
 };
 use stone::diagnostic::Severity;
+use stone::lexer::Lexer;
 use stone::project::{
     DEFAULT_ENTRY, Import, Linked, MapSources, SourceFile, SourceMap, Sources, Target, link,
     link_in,
@@ -24,10 +25,10 @@ use stone::project::{
 use stone::span::{FileId, Pos, Span};
 use stone::stdlib::{
     BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, MODULES, ORD_METHODS, PRELUDE,
-    PRELUDE_VARIANTS, TYPE_DOCS, builtin_doc, builtins_reference, is_reserved, method_doc,
-    type_doc,
+    PRELUDE_VARIANTS, SOURCE_MODULES, TYPE_DOCS, builtin_doc, builtins_reference, is_reserved,
+    method_doc, source_module, type_doc,
 };
-use stone::token::RESERVED_KEYWORDS;
+use stone::token::{RESERVED_KEYWORDS, Token, TokenType};
 
 use crate::line_index::{Encoding, LineIndex};
 use crate::uri::file_uri;
@@ -50,6 +51,8 @@ pub struct Document {
     pub public: HashSet<String>,
     /// The directory module paths start from.
     pub root: PathBuf,
+    /// The document's tokens, which tell the text of its strings from code.
+    tokens: Vec<Token>,
     encoding: Encoding,
 }
 
@@ -78,7 +81,9 @@ impl Document {
         let analysis = stone::driver::analyze_linked(&linked);
         let text = linked.sources.file(file).source.clone();
         let index = LineIndex::new(&text, encoding);
+        let (tokens, _) = Lexer::with_file(&text, file).lex_recovering();
         Document {
+            tokens,
             text,
             analysis,
             index,
@@ -160,6 +165,38 @@ impl Document {
             .iter()
             .filter(|s| !is_lambda(&s.name))
             .find(|s| s.kind == StoneSymbolKind::Function && s.name == name)
+    }
+
+    /// Returns whether `pos` is in code, rather than in the text of a string or in a comment.
+    ///
+    /// For example, in `x = "a{b}c" // d`, `b` is code, but `a`, `c`, and `d` are not. A position
+    /// right before a string's quote or right before the `}` that ends one of its values is still
+    /// code, so a name being typed there is completed.
+    fn in_code(&self, pos: Pos) -> bool {
+        let in_text = |pos: Pos| {
+            self.tokens.iter().any(|token| {
+                matches!(
+                    token.r#type,
+                    TokenType::String(_)
+                        | TokenType::StringStart(_)
+                        | TokenType::StringMiddle(_)
+                        | TokenType::StringEnd(_)
+                        | TokenType::Bytes(_)
+                ) && token.span.start < pos
+                    && pos < token.span.end
+            })
+        };
+        if in_text(pos) {
+            return false;
+        }
+        // a comment starts at the first `//` outside a string's text
+        let Some(line) = self.text.lines().nth(pos.line - 1) else {
+            return true;
+        };
+        let chars: Vec<char> = line.chars().collect();
+        let comment = (1..chars.len())
+            .find(|&i| chars[i - 1] == '/' && chars[i] == '/' && !in_text(Pos::new(pos.line, i)));
+        comment.is_none_or(|col| pos.col <= col)
     }
 
     /// Returns the builtin module this document binds to `name`, such as `os` for `system` after
@@ -558,13 +595,16 @@ fn builtin_at(doc: &Document, position: Position) -> Option<(&'static BuiltinDoc
 ///
 /// `int`, `str`, `float`, and `bytes` also name conversion functions, so a name followed by a `(`
 /// is left to [`builtin_at`], as `int` is in `int(x)` but not in `x: int` or `list[int]`. A name
-/// right after a `.` is a method, as `bytes` is in `s.bytes()`.
+/// right after a `.` is a method, as `bytes` is in `s.bytes()`. `fn` is the other way around: it
+/// is a function type only followed by a `(`, as in `fn(int) -> str`, and otherwise the keyword
+/// that starts a definition.
 fn builtin_type_at(doc: &Document, position: Position) -> Option<(&'static BuiltinDoc, Span)> {
     if doc.import_at(position).is_some() {
         return None;
     }
     let (word, span) = word_at(doc, doc.index.pos(position))?;
-    if follows_dot(doc, span.start) || next_char(doc, span.end) == Some('(') {
+    let called = next_char(doc, span.end) == Some('(');
+    if follows_dot(doc, span.start) || called != (word == "fn") {
         return None;
     }
     type_doc(&word).map(|d| (d, span))
@@ -659,6 +699,9 @@ fn markdown(code: &str, text: Option<&str>) -> HoverContents {
 /// (see [`doc_comment`]), a builtin's documentation, or the type of the innermost expression there.
 pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
     let pos = doc.index.pos(position);
+    if !doc.in_code(pos) {
+        return expression_hover(doc, pos);
+    }
     if let Some((symbol, span)) = doc.symbol_at(position) {
         let symbol = &doc.analysis.symbols[symbol];
         let text = &doc.sources.file(symbol.span.file).source;
@@ -700,7 +743,12 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
             range: Some(doc.index.range(span)),
         });
     }
-    // only on the text of an expression, not the whitespace around it
+    expression_hover(doc, pos)
+}
+
+/// Shows the type of the innermost expression at `pos`, if `pos` is on its text rather than the
+/// whitespace around it.
+fn expression_hover(doc: &Document, pos: Pos) -> Option<Hover> {
     let on_text = doc
         .text
         .lines()
@@ -852,6 +900,9 @@ pub fn definition(
     position: Position,
     builtins: Option<&Builtins>,
 ) -> Option<Location> {
+    if !doc.in_code(doc.index.pos(position)) {
+        return None;
+    }
     if let Some((symbol, _)) = doc.symbol_at(position) {
         let span = doc.analysis.symbols[symbol].span;
         if span.file == FileId::PRELUDE {
@@ -1138,6 +1189,9 @@ pub fn completion(
     sources: &dyn Sources,
 ) -> Vec<CompletionItem> {
     let pos = doc.index.pos(position);
+    if !doc.in_code(pos) {
+        return vec![];
+    }
     let start = word_at(doc, pos).map_or(pos, |(_, span)| span.start);
     let before: String = doc
         .text
@@ -1150,9 +1204,23 @@ pub fn completion(
     if let Some(path) = before.trim_start().strip_prefix("use ") {
         return use_completion(doc, path.trim_start(), sources);
     }
+    let tokens: Vec<&Token> = doc
+        .tokens
+        .iter()
+        .filter(|t| t.span.start.line == pos.line && t.span.end <= start)
+        .filter(|t| {
+            !matches!(
+                t.r#type,
+                TokenType::Indent | TokenType::Dedent | TokenType::Newline | TokenType::Eof
+            )
+        })
+        .collect();
+    if let Some(slot) = slot(doc, pos.line, &tokens) {
+        return type_completion(doc, pos, slot);
+    }
     // after a `.`, only a module's function or a method can come next, as in `xs.le`
-    if let Some(receiver) = before.strip_suffix('.') {
-        let receiver: String = receiver
+    if let Some(stripped) = before.strip_suffix('.') {
+        let receiver: String = stripped
             .chars()
             .rev()
             .take_while(|c| c.is_alphanumeric() || *c == '_')
@@ -1214,76 +1282,23 @@ pub fn completion(
                 })
                 .collect();
         }
-        // a variable holding a struct offers its fields and methods
+        // a variable offers the members of its type, and so does any other expression, such as
+        // `xs[0]` or `f(x)`, whose type comes from the statement as it would be without the `.`
+        let name = (!receiver.is_empty()
+            && !stripped[..stripped.len() - receiver.len()].ends_with('.'))
+        .then_some(receiver.as_str());
         let mut visible: Vec<&Symbol> = doc.analysis.visible_at(doc.file, pos).collect();
         visible.sort_by_key(|s| s.scope.is_none());
-        let held = visible.iter().find(|s| s.name == receiver).map(|s| &s.ty);
-        if let Some(Type::Param(param)) = held {
-            let methods: Vec<&Symbol> = bound_methods(doc, pos, param).collect();
-            let ordered = methods.iter().any(|m| m.scope.as_deref() == Some(ORD));
-            let mut items: Vec<CompletionItem> = methods
+        let held = name.and_then(|name| {
+            visible
                 .iter()
-                .map(|method| CompletionItem {
-                    label: method.name.clone(),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some(signature(&doc.analysis, method)),
-                    ..CompletionItem::default()
-                })
-                .collect();
-            // an ordered value has the prelude's `min`, `max`, and `clamp` too
-            if ordered {
-                items.extend(ord_methods(&items));
-            }
-            return items;
-        }
-        if let Some(Type::Struct { name, .. }) = held {
-            let fields = struct_fields(&doc.analysis, name).map(|field| CompletionItem {
-                label: field.name.clone(),
-                kind: Some(CompletionItemKind::FIELD),
-                detail: Some(signature(&doc.analysis, field)),
-                ..CompletionItem::default()
-            });
-            let mut own: Vec<&Symbol> = struct_methods(&doc.analysis, name)
-                .filter(|method| has_self(&doc.analysis, method))
-                .collect();
-            // a generic trait's method is offered once, however many impls it has
-            let mut seen = HashSet::new();
-            own.retain(|method| seen.insert(method.name.clone()));
-            // and the defaults of the traits it implements that it does not define again
-            let traits = doc.analysis.implemented.get(name.as_str());
-            let defaults: Vec<&Symbol> = traits
-                .into_iter()
-                .flatten()
-                .flat_map(|trait_| trait_methods(&doc.analysis, trait_))
-                .filter(|method| !own.iter().any(|m| m.name == method.name))
-                .collect();
-            let methods = own
-                .into_iter()
-                .chain(defaults)
-                .map(|method| CompletionItem {
-                    label: method.name.clone(),
-                    kind: Some(CompletionItemKind::METHOD),
-                    detail: Some(signature(&doc.analysis, method)),
-                    ..CompletionItem::default()
-                });
-            let mut items: Vec<CompletionItem> = fields.chain(methods).collect();
-            if traits.is_some_and(|traits| traits.iter().any(|t| t == ORD)) {
-                items.extend(ord_methods(&items));
-            }
-            return items;
-        }
-        // a variable of another type offers the builtin methods of its type, and an unknown
-        // receiver every builtin method
-        return METHODS
-            .iter()
-            .filter(|method| held.is_none_or(|ty| method_applies(method, ty)))
-            .map(|method| CompletionItem {
-                label: method.to_string(),
-                kind: Some(CompletionItemKind::METHOD),
-                detail: method_doc(method).map(|doc| doc.signature.to_string()),
-                ..CompletionItem::default()
-            })
-            .collect();
+                .find(|s| s.name == name)
+                .map(|s| s.ty.clone())
+        });
+        let dot = Pos::new(pos.line, start.col - 1);
+        let end = word_at(doc, pos).map_or(pos, |(_, span)| span.end);
+        let held = held.or_else(|| receiver_type(doc, dot, end, sources));
+        return member_completion(doc, pos, held.as_ref());
     }
     let mut items: Vec<CompletionItem> = vec![];
     // locals come first, so they win over a global with the same name
@@ -1366,6 +1381,368 @@ pub fn completion(
     items
 }
 
+/// Returns the members a value of type `held` has at `pos`: a type parameter's methods from its
+/// bounds, a struct's fields and methods with those of the traits it implements, or the builtin
+/// methods of another type, and every builtin method if the type is unknown. Every value has
+/// `display`.
+fn member_completion(doc: &Document, pos: Pos, held: Option<&Type>) -> Vec<CompletionItem> {
+    let method = |method: &Symbol| CompletionItem {
+        label: method.name.clone(),
+        kind: Some(CompletionItemKind::METHOD),
+        detail: Some(signature(&doc.analysis, method)),
+        ..CompletionItem::default()
+    };
+    let mut items: Vec<CompletionItem> = match held {
+        Some(Type::Param(param)) => {
+            let methods: Vec<&Symbol> = bound_methods(doc, pos, param).collect();
+            let mut items: Vec<CompletionItem> = methods.iter().map(|m| method(m)).collect();
+            // an ordered value has the prelude's `min`, `max`, and `clamp` too
+            if methods.iter().any(|m| m.scope.as_deref() == Some(ORD)) {
+                items.extend(ord_methods(&items));
+            }
+            items
+        }
+        Some(Type::Struct { name, .. }) => {
+            let fields = struct_fields(&doc.analysis, name).map(|field| CompletionItem {
+                label: field.name.clone(),
+                kind: Some(CompletionItemKind::FIELD),
+                detail: Some(signature(&doc.analysis, field)),
+                ..CompletionItem::default()
+            });
+            let mut own: Vec<&Symbol> = struct_methods(&doc.analysis, name)
+                .filter(|method| has_self(&doc.analysis, method))
+                .collect();
+            // a generic trait's method is offered once, however many impls it has
+            let mut seen = HashSet::new();
+            own.retain(|method| seen.insert(method.name.clone()));
+            // and the defaults of the traits it implements that it does not define again
+            let traits = doc.analysis.implemented.get(name.as_str());
+            let defaults: Vec<&Symbol> = traits
+                .into_iter()
+                .flatten()
+                .flat_map(|trait_| trait_methods(&doc.analysis, trait_))
+                .filter(|method| !own.iter().any(|m| m.name == method.name))
+                .collect();
+            let methods = own.into_iter().chain(defaults).map(method);
+            let mut items: Vec<CompletionItem> = fields.chain(methods).collect();
+            if traits.is_some_and(|traits| traits.iter().any(|t| t == ORD)) {
+                items.extend(ord_methods(&items));
+            }
+            items
+        }
+        // another type offers the builtin methods of its type, and an unknown one every
+        // builtin method
+        _ => {
+            return METHODS
+                .iter()
+                .filter(|method| held.is_none_or(|ty| method_applies(method, ty)))
+                .map(|method| builtin_method(method))
+                .collect();
+        }
+    };
+    if !items.iter().any(|item| item.label == "display") {
+        items.push(builtin_method("display"));
+    }
+    items
+}
+
+/// Returns the completion of the builtin method `method`.
+fn builtin_method(method: &str) -> CompletionItem {
+    CompletionItem {
+        label: method.to_string(),
+        kind: Some(CompletionItemKind::METHOD),
+        detail: method_doc(method).map(|doc| doc.signature.to_string()),
+        ..CompletionItem::default()
+    }
+}
+
+/// Returns the type of the expression that ends at `dot`, the `.` before a member being typed
+/// that ends at `end`, as in `xs[0].le`.
+///
+/// While a member is being typed, its statement does not parse, so this checks the program again
+/// with the line as it would be without the `.` and the member, and also with a `}` in their
+/// place, which ends a string's value left open, as in `print("{xs[0].")`.
+fn receiver_type(doc: &Document, dot: Pos, end: Pos, sources: &dyn Sources) -> Option<Type> {
+    let path = doc.sources.file(doc.file).path.clone();
+    for closing in ["", "}"] {
+        let mut text = String::new();
+        for (i, line) in doc.text.split_inclusive('\n').enumerate() {
+            if i + 1 != dot.line {
+                text.push_str(line);
+                continue;
+            }
+            let chars: Vec<char> = line.chars().collect();
+            let (cut, rest) = (dot.col - 1, (end.col - 1).min(chars.len()));
+            text.extend(&chars[..cut.min(chars.len())]);
+            text.push_str(closing);
+            text.extend(&chars[rest..]);
+        }
+        let overlay = Overlay {
+            sources,
+            path: &path,
+            text,
+        };
+        let Some(checked) = Document::in_program(&path, &overlay, doc.encoding) else {
+            continue;
+        };
+        // an error on the line, such as an undefined name, leaves its types unknown
+        let failed = checked.analysis.diagnostics.iter().any(|d| {
+            d.severity == Severity::Error
+                && d.span.file == checked.file
+                && d.span.start.line <= dot.line
+                && dot.line <= d.span.end.line
+        });
+        if failed {
+            continue;
+        }
+        // the receiver is the expression ending there that starts last, as `xs[0]` is in
+        // `n + xs[0]`
+        let found = checked
+            .analysis
+            .types
+            .iter()
+            .filter(|(span, _)| span.file == checked.file && span.end == dot)
+            .max_by_key(|(span, _)| span.start);
+        if let Some((_, ty)) = found {
+            return Some(ty.clone());
+        }
+    }
+    None
+}
+
+/// The files of `sources`, but with `text` as the file at `path`.
+struct Overlay<'a> {
+    sources: &'a dyn Sources,
+    path: &'a Path,
+    text: String,
+}
+
+impl Sources for Overlay<'_> {
+    fn read(&self, path: &Path) -> Option<String> {
+        match path == self.path {
+            true => Some(self.text.clone()),
+            false => self.sources.read(path),
+        }
+    }
+
+    fn is_dir(&self, path: &Path) -> bool {
+        self.sources.is_dir(path)
+    }
+
+    fn entries(&self, dir: &Path) -> Vec<PathBuf> {
+        self.sources.entries(dir)
+    }
+}
+
+/// What is written where completion is asked for, when it is not a value.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum Slot {
+    /// A type, as after `x: ` in a signature.
+    Type,
+    /// A trait that bounds a type parameter, as after `[T: `.
+    Bound,
+}
+
+/// Returns what comes right after `tokens`, the tokens of line `line` up to the word being typed,
+/// if it is a type or a bound rather than a value.
+///
+/// For example, a type comes after `fn f(x: `, `-> `, `list[`, `map[str, `, `fn(`, and a
+/// lambda's `|p: `, after `x: ` on a field's line in a struct, and inside the parentheses of an
+/// enum's variant, and a bound after `fn f[T: ` and `fn f[T: Shape + `. A definition's own type
+/// parameters, as in `fn first[`, and the `:` that ends a definition's line are not types. Being
+/// tokens, the brackets and bars of a string's text, as in `"|"`, count for nothing.
+fn slot(doc: &Document, line: usize, tokens: &[&Token]) -> Option<Slot> {
+    let last = &tokens.last()?.r#type;
+    if *last == TokenType::Arrow {
+        return Some(Slot::Type);
+    }
+    // where each bracket still open is
+    let mut open: Vec<usize> = vec![];
+    let mut bars = 0;
+    for (i, token) in tokens.iter().enumerate() {
+        match token.r#type {
+            TokenType::LParen | TokenType::LBracket => open.push(i),
+            TokenType::RParen | TokenType::RBracket => {
+                open.pop();
+            }
+            TokenType::VBar => bars += 1,
+            _ => {}
+        }
+    }
+    let keyword = |i: usize, word: &str| matches!(tokens.get(i), Some(token) if token.r#type == TokenType::Keyword(word.to_string()));
+    let definition = keyword(0, "fn") || (keyword(0, "pub") && keyword(1, "fn"));
+    let plus = matches!(last, TokenType::Operator(op) if op == "+");
+    match last {
+        // a lambda's parameter
+        TokenType::Colon if bars % 2 == 1 => Some(Slot::Type),
+        // a parameter, or a type parameter's bounds
+        TokenType::Colon | TokenType::Operator(_)
+            if (plus || *last == TokenType::Colon) && definition && open.len() == 1 =>
+        {
+            match tokens[open[0]].r#type {
+                TokenType::LParen => (!plus).then_some(Slot::Type),
+                _ => Some(Slot::Bound),
+            }
+        }
+        // a struct's field
+        TokenType::Colon if open.is_empty() => {
+            let header = headers(doc, line).first().copied();
+            (tokens.len() == 2
+                && matches!(tokens[0].r#type, TokenType::Name(_))
+                && header.is_some_and(|h| starts_with_keyword(h, "struct")))
+            .then_some(Slot::Type)
+        }
+        TokenType::LBracket | TokenType::LParen | TokenType::Comma => {
+            let &bracket = open.last()?;
+            // the word right before the bracket, after any module, as `geo.Pair` in `geo.Pair[`
+            let word = bracket.checked_sub(1)?;
+            let mut prefix = &tokens[..word];
+            while let [rest @ .., module, dot] = prefix
+                && matches!(module.r#type, TokenType::Name(_))
+                && dot.r#type == TokenType::Dot
+            {
+                prefix = rest;
+            }
+            let in_type = || slot(doc, line, prefix) == Some(Slot::Type);
+            let typed = match (&tokens[bracket].r#type, &tokens[word].r#type) {
+                // the arguments of a type, as in `list[`
+                (TokenType::LBracket, TokenType::Name(_)) => in_type(),
+                // the parameters of a function type, as in `fn(`
+                (TokenType::LParen, TokenType::Keyword(fn_)) if fn_ == "fn" => in_type(),
+                // the values of a variant, as in `Circle(`
+                (TokenType::LParen, TokenType::Name(_)) => {
+                    let header = headers(doc, line).first().copied();
+                    prefix.is_empty() && header.is_some_and(|h| starts_with_keyword(h, "enum"))
+                }
+                _ => false,
+            };
+            typed.then_some(Slot::Type)
+        }
+        _ => None,
+    }
+}
+
+/// Returns the lines that open the blocks line `line` is in, trimmed, innermost first, such as
+/// `["impl Point:"]` for the line of one of its functions.
+fn headers(doc: &Document, line: usize) -> Vec<&str> {
+    let lines: Vec<&str> = doc.text.lines().collect();
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let mut current = lines.get(line - 1).map_or(0, |line| indent(line));
+    let mut found = vec![];
+    for above in lines[..(line - 1).min(lines.len())].iter().rev() {
+        let trimmed = above.trim();
+        if trimmed.is_empty() || trimmed.starts_with("//") {
+            continue;
+        }
+        if indent(above) < current {
+            current = indent(above);
+            found.push(trimmed);
+        }
+    }
+    found
+}
+
+/// Returns whether `line`, a trimmed line, starts with `keyword`, after any `pub`, as
+/// `pub struct Point:` starts with `struct`.
+fn starts_with_keyword(line: &str, keyword: &str) -> bool {
+    let line = line.strip_prefix("pub ").unwrap_or(line);
+    line.strip_prefix(keyword)
+        .is_some_and(|rest| rest.starts_with(' '))
+}
+
+/// Returns the types that can be written at `pos` for a [`Slot::Type`]: the builtin types, the
+/// type parameters in scope (and `Self` in an `impl` or `trait` block), and the structs and enums
+/// of the document, its imports, and the prelude, or for a [`Slot::Bound`], those places' traits.
+fn type_completion(doc: &Document, pos: Pos, slot: Slot) -> Vec<CompletionItem> {
+    let analysis = &doc.analysis;
+    let mut items: Vec<CompletionItem> = vec![];
+    let mut offer = |label: &str, kind: CompletionItemKind, detail: String| {
+        if !items.iter().any(|item| item.label == label) {
+            items.push(CompletionItem {
+                label: label.to_string(),
+                kind: Some(kind),
+                detail: Some(detail),
+                ..CompletionItem::default()
+            });
+        }
+    };
+    if slot == Slot::Type {
+        for ty in &TYPE_DOCS {
+            let kind = match ty.name {
+                "fn" => CompletionItemKind::KEYWORD,
+                _ => CompletionItemKind::STRUCT,
+            };
+            offer(ty.name, kind, ty.signature.to_string());
+        }
+        // the function's own, and those of the struct or trait its block is for
+        let function = analysis
+            .functions
+            .iter()
+            .find(|(_, span)| span.file == doc.file && span.contains(pos))
+            .map(|(name, _)| name.as_str());
+        let owner = function
+            .and_then(|f| f.rsplit_once('.'))
+            .map(|(owner, _)| owner);
+        let params = analysis.symbols.iter().filter(|s| {
+            s.kind == StoneSymbolKind::TypeParam
+                && s.scope.is_some()
+                && (s.scope.as_deref() == function || s.scope.as_deref() == owner)
+        });
+        for param in params {
+            offer(
+                &param.name,
+                CompletionItemKind::TYPE_PARAMETER,
+                signature(analysis, param),
+            );
+        }
+        let blocks = headers(doc, pos.line);
+        if blocks
+            .iter()
+            .any(|h| starts_with_keyword(h, "impl") || starts_with_keyword(h, "trait"))
+        {
+            offer(
+                "Self",
+                CompletionItemKind::TYPE_PARAMETER,
+                "(type parameter) Self".to_string(),
+            );
+        }
+    }
+    let wanted = |kind: &StoneSymbolKind| match slot {
+        Slot::Type => matches!(kind, StoneSymbolKind::Struct | StoneSymbolKind::Enum),
+        Slot::Bound => *kind == StoneSymbolKind::Trait,
+    };
+    let types = analysis.symbols.iter().filter(|s| {
+        s.scope.is_none()
+            && wanted(&s.kind)
+            && (s.span.file == doc.file || s.span.file == FileId::PRELUDE)
+    });
+    for symbol in types {
+        let kind = match symbol.kind {
+            StoneSymbolKind::Enum => CompletionItemKind::ENUM,
+            StoneSymbolKind::Struct => CompletionItemKind::STRUCT,
+            _ => CompletionItemKind::INTERFACE,
+        };
+        // only the first line, without the fields, variants, or methods
+        let shown = signature(analysis, symbol);
+        let detail = shown.lines().next().unwrap_or_default().to_string();
+        offer(doc.local_name(symbol), kind, detail);
+    }
+    for import in doc.imports.iter().filter(|i| i.span.file == doc.file) {
+        let (kind, detail) = match (&import.target, slot) {
+            (Target::Struct(name), Slot::Type) => {
+                (CompletionItemKind::STRUCT, format!("struct {name}"))
+            }
+            (Target::Enum(name), Slot::Type) => (CompletionItemKind::ENUM, format!("enum {name}")),
+            (Target::Trait(name), Slot::Bound) => {
+                (CompletionItemKind::INTERFACE, format!("trait {name}"))
+            }
+            _ => continue,
+        };
+        offer(&import.name, kind, detail);
+    }
+    items
+}
+
 /// Returns whether the builtin method `method` can be called on a value of type `ty`, from the
 /// receiver its signature names.
 ///
@@ -1387,6 +1764,10 @@ fn ord_methods(items: &[CompletionItem]) -> Vec<CompletionItem> {
 }
 
 fn method_applies(method: &str, ty: &Type) -> bool {
+    // every value has `display`
+    if method == "display" {
+        return true;
+    }
     let kind = match ty {
         Type::Int => "int",
         Type::Float => "float",
@@ -1406,7 +1787,6 @@ fn method_applies(method: &str, ty: &Type) -> bool {
         "cmp" | "min" | "max" | "clamp" => {
             return matches!(kind, "int" | "float" | "str" | "bytes");
         }
-        "display" => return true,
         _ => {}
     }
     let Some(doc) = method_doc(method) else {
@@ -1520,14 +1900,15 @@ fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<Comp
         });
     }
     if names.is_empty() {
-        for module in &MODULES {
-            if items.iter().any(|i| i.label == module.name) {
+        let modules = MODULES.iter().map(|module| module.name);
+        for module in modules.chain(SOURCE_MODULES.iter().map(|(name, _)| *name)) {
+            if items.iter().any(|i| i.label == module) {
                 continue;
             }
             items.push(CompletionItem {
-                label: module.name.to_string(),
+                label: module.to_string(),
                 kind: Some(CompletionItemKind::MODULE),
-                detail: Some(format!("module {}", module.name)),
+                detail: Some(format!("module {module}")),
                 ..CompletionItem::default()
             });
         }
@@ -1540,6 +1921,17 @@ fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<Comp
         let module = names.join(".");
         if let Some((file, _)) = doc.sources.files().find(|(_, f)| f.module == module) {
             items.extend(module_functions(doc, file));
+        } else if source_module(&module).is_some() {
+            // a module written in stone that the program does not use yet, such as `net`
+            let used = link(
+                Path::new(DEFAULT_ENTRY),
+                &format!("use {module}\n"),
+                &MapSources::default(),
+            );
+            let used = Document::from_linked(used, FileId(0), doc.encoding);
+            if let Some((file, _)) = used.sources.files().find(|(_, f)| f.module == module) {
+                items.extend(module_functions(&used, file));
+            }
         }
     }
     items

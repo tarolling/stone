@@ -579,6 +579,32 @@ ret y
     }
 
     #[test]
+    fn analyze_keeps_what_lexes_around_lexing_errors() {
+        // an unfinished value in a string, as while it is being typed
+        let analysis = analyze("x = [1]\ny = \"{x.\nz = x\nw = \"}\"\nv = \n");
+        let messages: Vec<(&str, usize)> = analysis
+            .diagnostics
+            .iter()
+            .map(|d| (d.message.as_str(), d.span.start.line))
+            .collect();
+        assert_eq!(
+            messages,
+            [
+                ("unterminated string", 2),
+                ("a '}' in a string is written '}}'", 4),
+                ("expected an expression, found end of line", 5),
+            ]
+        );
+        let names: Vec<&str> = analysis
+            .symbols
+            .iter()
+            .filter(|s| s.span.file == FileId(0))
+            .map(|s| s.name.as_str())
+            .collect();
+        assert_eq!(names, ["x", "z"]);
+    }
+
+    #[test]
     fn analyze_hides_type_errors_while_there_are_syntax_errors() {
         // `f` failed to parse, so calling it would otherwise be an undefined function
         let analysis = analyze("fn f(:\n    ret 1\nprint(f())\n");

@@ -247,6 +247,45 @@ fn definition_of_a_builtin_type_opens_its_line_in_the_reference_file() {
     assert_eq!(call.range.start.line, line_of("// str("));
 }
 
+const HANDLES: &str = "\
+use net
+fn f(c: socket, l: listener, data: bytes, g: fn(int) -> str):
+    print(c, l, data, g(1))
+";
+
+#[test]
+fn hover_documents_net_bytes_and_function_types() {
+    let doc = doc(HANDLES);
+    let starts = |pos: Position, code: &str| {
+        let text = hover_text(&doc, pos).unwrap();
+        assert!(
+            text.starts_with(&format!("```stone\n{code}\n```\n")),
+            "{text}"
+        );
+    };
+    starts(at(2, 9), "socket");
+    starts(at(2, 20), "listener");
+    starts(at(2, 36), "bytes");
+    starts(at(2, 46), "fn(T1, ...) -> R");
+    // the `fn` that starts a definition is only the keyword
+    assert_eq!(hover(&doc, at(2, 1)), None);
+    let reference: Uri = "file:///cache/builtins.stn".parse().unwrap();
+    let builtins = Builtins::new(reference.clone());
+    let text = stone::stdlib::builtins_reference();
+    let line = text
+        .lines()
+        .position(|l| l == "// fn(T1, ...) -> R")
+        .unwrap() as u32;
+    let location = definition(&doc, &uri(), at(2, 46), Some(&builtins)).unwrap();
+    assert_eq!(
+        (location.uri, location.range),
+        (
+            reference,
+            Range::new(Position::new(line, 3), Position::new(line, 5))
+        )
+    );
+}
+
 #[test]
 fn hover_shows_the_type_of_other_expressions() {
     // the `+` in `a + b`
@@ -411,6 +450,67 @@ fn names_inside_a_strings_values_work_like_any_other() {
             Position::new(1, 8),
             Position::new(1, 20)
         ]
+    );
+}
+
+#[test]
+fn features_work_while_a_value_in_a_string_is_typed() {
+    let doc = doc("xs = [1]\ncount = 2\nprint(\"{xs.\nprint(\"{count}\")\n");
+    assert_eq!(diagnostics(&doc).len(), 1);
+    let labels = |pos: Position| -> Vec<String> {
+        completion(&doc, pos, &MapSources::default())
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    };
+    // the unfinished value still knows what `xs` is
+    let methods = labels(at(3, 12));
+    assert!(methods.contains(&"append".to_string()), "{methods:?}");
+    assert!(!methods.contains(&"strip".to_string()), "{methods:?}");
+    assert!(labels(at(3, 9)).contains(&"count".to_string()));
+    // and the rest of the file is still checked
+    assert_eq!(
+        hover_text(&doc, at(4, 10)).unwrap(),
+        "```stone\n(global) count: int\n```"
+    );
+}
+
+const TEXT: &str = "\
+x = 1 // print the total
+print(\"print {x} it\")
+s = \"a // b {x}\"
+d = b\"print\"
+";
+
+#[test]
+fn the_text_of_a_string_and_a_comment_are_not_code() {
+    let doc = doc(TEXT);
+    let builtins = Builtins::new("file:///cache/builtins.stn".parse().unwrap());
+    // a word of a string's text is only part of the string
+    assert_eq!(hover_text(&doc, at(2, 9)).unwrap(), "```stone\nstr\n```");
+    assert_eq!(definition(&doc, &uri(), at(2, 9), Some(&builtins)), None);
+    assert_eq!(hover_text(&doc, at(4, 8)).unwrap(), "```stone\nbytes\n```");
+    // and a comment is nothing
+    assert_eq!(hover(&doc, at(1, 11)), None);
+    assert_eq!(definition(&doc, &uri(), at(1, 11), Some(&builtins)), None);
+    let labels = |pos: Position| -> Vec<String> {
+        completion(&doc, pos, &MapSources::default())
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    };
+    assert_eq!(labels(at(2, 10)), Vec::<String>::new());
+    assert_eq!(labels(at(1, 12)), Vec::<String>::new());
+    // a value in a string is code, up to the brace that ends it
+    assert!(labels(at(2, 16)).contains(&"x".to_string()));
+    assert_eq!(
+        hover_text(&doc, at(2, 15)).unwrap(),
+        "```stone\n(global) x: int\n```"
+    );
+    // and a `//` in a string's text starts no comment
+    assert_eq!(
+        hover_text(&doc, at(3, 14)).unwrap(),
+        "```stone\n(global) x: int\n```"
     );
 }
 
@@ -935,6 +1035,8 @@ fn completion_in_a_use_offers_modules_and_directories() {
     for module in &stone::stdlib::MODULES {
         expected.push((module.name.to_string(), Some(CompletionItemKind::MODULE)));
     }
+    // and the modules written in stone
+    expected.push(("net".to_string(), Some(CompletionItemKind::MODULE)));
     expected.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(labels(at(1, 5)), expected);
     assert_eq!(
@@ -1264,7 +1366,8 @@ fn completion_after_a_struct_value_offers_its_fields() {
         labels,
         [
             ("x".to_string(), Some(CompletionItemKind::FIELD)),
-            ("y".to_string(), Some(CompletionItemKind::FIELD))
+            ("y".to_string(), Some(CompletionItemKind::FIELD)),
+            ("display".to_string(), Some(CompletionItemKind::METHOD))
         ]
     );
 }
@@ -1276,7 +1379,7 @@ fn completion_offers_the_fields_of_what_os_run_returns() {
         .into_iter()
         .map(|item| item.label)
         .collect();
-    assert_eq!(labels, ["status", "stdout", "stderr"]);
+    assert_eq!(labels, ["status", "stdout", "stderr", "display"]);
 }
 
 const METHODS_SOURCE: &str = "\
@@ -1363,7 +1466,8 @@ fn completion_after_a_struct_value_offers_its_methods_and_after_the_struct_its_f
         labels(format!("{METHODS_SOURCE}q = p.\n"), at(10, 7)),
         [
             ("x".to_string(), Some(CompletionItemKind::FIELD)),
-            ("shift".to_string(), Some(CompletionItemKind::METHOD))
+            ("shift".to_string(), Some(CompletionItemKind::METHOD)),
+            ("display".to_string(), Some(CompletionItemKind::METHOD))
         ]
     );
     assert_eq!(
@@ -1461,7 +1565,8 @@ fn completion_offers_a_generic_structs_fields() {
         labels,
         [
             ("first", Some("Pair.first: A")),
-            ("second", Some("Pair.second: B"))
+            ("second", Some("Pair.second: B")),
+            ("display", Some("T.display() -> str"))
         ]
     );
 }
@@ -1647,14 +1752,14 @@ fn completion_offers_the_methods_of_a_bound_and_a_traits_defaults() {
     };
     assert_eq!(
         labels(format!("{TRAITS}r = q.\n"), at(16, 7)),
-        ["s", "area", "half"]
+        ["s", "area", "half", "display"]
     );
     assert_eq!(
         labels(
             format!("{TRAITS}fn f[T: Shape](x: T) -> float:\n    y = x.\n    ret 1.0\n"),
             at(17, 11)
         ),
-        ["area", "half"]
+        ["area", "half", "display"]
     );
 }
 
@@ -1669,14 +1774,14 @@ fn completion_offers_min_max_and_clamp_on_ordered_values() {
     let version = "struct V:\n    n: int\nimpl ord for V:\n    fn cmp(self, other: Self) -> ordering:\n        ret self.n.cmp(other.n)\n";
     assert_eq!(
         labels(&format!("{version}v = V(n=1)\nw = v.\n"), at(7, 7)),
-        ["n", "cmp", "min", "max", "clamp"]
+        ["n", "cmp", "min", "max", "clamp", "display"]
     );
     assert_eq!(
         labels(
             &format!("{version}fn f[T: ord](x: T) -> int:\n    y = x.\n    ret 1\n"),
             at(7, 11)
         ),
-        ["cmp", "min", "max", "clamp"]
+        ["cmp", "min", "max", "clamp", "display"]
     );
 }
 
@@ -1839,4 +1944,203 @@ fn hover_shows_a_generic_trait_and_the_method_of_each_impl() {
         .filter(|label| label == "add")
         .collect();
     assert_eq!(labels, ["add"]);
+}
+
+#[test]
+fn completion_in_a_use_of_net_offers_its_functions() {
+    let doc = doc("use net.\n");
+    let labels: Vec<String> = completion(&doc, at(1, 9), &MapSources::default())
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    for name in ["connect", "connect_timeout", "listen", "resolve"] {
+        assert!(labels.contains(&name.to_string()), "{labels:?}");
+    }
+    // only its public functions
+    assert!(!labels.contains(&"max_servers".to_string()), "{labels:?}");
+}
+
+#[test]
+fn completion_after_a_function_value_or_an_enum_offers_display() {
+    let doc = doc("enum E:\n    A\nfn f(g: fn(int) -> int, e: E):\n    g.\n    e.\n");
+    let labels = |pos: Position| -> Vec<String> {
+        completion(&doc, pos, &MapSources::default())
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    };
+    assert_eq!(labels(at(4, 7)), ["display"]);
+    assert_eq!(labels(at(5, 7)), ["display"]);
+}
+
+/// Returns the labels of what completion offers at `pos` in `source`.
+fn offered(source: &str, pos: Position) -> Vec<String> {
+    completion(&doc(source), pos, &MapSources::default())
+        .into_iter()
+        .map(|item| item.label)
+        .collect()
+}
+
+#[test]
+fn completion_where_a_type_is_written_offers_types() {
+    let has = |source: &str, pos: Position, names: &[&str]| {
+        let labels = offered(source, pos);
+        for name in names {
+            assert!(labels.contains(&name.to_string()), "{source:?}: {labels:?}");
+        }
+        // types only
+        for name in ["print", "if", "some"] {
+            assert!(
+                !labels.contains(&name.to_string()),
+                "{source:?}: {labels:?}"
+            );
+        }
+    };
+    let types = [
+        "int", "float", "bool", "str", "bytes", "list", "map", "tuple", "socket", "listener", "fn",
+        "option", "result",
+    ];
+    let point = "struct Point:\n    x: float\n";
+    // a parameter's type, the start of a word or not
+    has(&format!("{point}fn f(c: so"), at(3, 11), &types);
+    has(&format!("{point}fn f(c: "), at(3, 9), &["Point"]);
+    has(&format!("{point}fn f(a: int, c: "), at(3, 17), &["Point"]);
+    // the return type
+    has("fn f(a: int) -> \n", at(1, 17), &types);
+    // inside a type
+    has("fn f(xs: list[", at(1, 15), &["listener"]);
+    has("fn f(m: map[str, ", at(1, 18), &["socket"]);
+    has("fn f(g: fn(int, ", at(1, 17), &["str"]);
+    has("fn f(g: fn(", at(1, 12), &["str"]);
+    has("fn f() -> list[", at(1, 16), &["bytes"]);
+    // a lambda's parameter
+    has("xs = [1]\nys = xs.map(|p: ", at(2, 17), &["int"]);
+    // a struct's field and an enum's variant
+    has("struct Point:\n    x: float\n    y: ", at(3, 8), &["float"]);
+    has("enum Shape:\n    Circle(", at(2, 12), &["float"]);
+    has("enum Shape:\n    Rect(float, ", at(2, 17), &["float"]);
+    // a method's parameter, and `Self` in an `impl` or `trait` block
+    has(
+        "struct P:\n    x: int\nimpl P:\n    fn me(self) -> Self:\n        ret self\n",
+        at(4, 20),
+        &["Self", "P"],
+    );
+    has(
+        "trait Shape:\n    fn area(self, o: ",
+        at(2, 22),
+        &["Self", "int"],
+    );
+    // and the type parameters in scope
+    has(
+        "fn first[T](xs: list[T]) -> T:\n    ret xs[0]\n",
+        at(1, 22),
+        &["T"],
+    );
+    // a generic struct's, in its `impl` block
+    has(
+        "struct Pair[A, B]:\n    a: A\n    b: B\nimpl Pair:\n    fn first(self) -> A:\n        ret self.a\n",
+        at(5, 23),
+        &["A", "B", "Self"],
+    );
+}
+
+#[test]
+fn completion_of_a_bound_offers_traits() {
+    let source = "trait Shape:\n    fn area(self) -> float\nfn f[T: ";
+    let labels = offered(source, at(3, 9));
+    for name in ["Shape", "ord", "eq", "display"] {
+        assert!(labels.contains(&name.to_string()), "{labels:?}");
+    }
+    assert!(!labels.contains(&"int".to_string()), "{labels:?}");
+}
+
+#[test]
+fn completion_where_a_value_is_written_offers_no_builtin_types() {
+    for (source, pos) in [
+        ("x = ", at(1, 5)),
+        ("fn f() -> int:\n    ", at(2, 5)),
+        ("fn f() -> int:", at(1, 15)),
+        ("fn f(a: int, ", at(1, 14)),
+        ("fn first[", at(1, 10)),
+        ("x = [1]\ny = x[", at(2, 7)),
+    ] {
+        let labels = offered(source, pos);
+        assert!(
+            labels.contains(&"print".to_string()),
+            "{source:?}: {labels:?}"
+        );
+        assert!(
+            !labels.contains(&"socket".to_string()),
+            "{source:?}: {labels:?}"
+        );
+    }
+}
+
+#[test]
+fn completion_after_a_struct_or_a_type_parameter_offers_display() {
+    let labels = offered("struct P:\n    x: int\np = P(x=1)\np.\n", at(4, 3));
+    assert_eq!(labels, ["x", "display"]);
+    let labels = offered("fn f[T](x: T):\n    x.\n", at(2, 7));
+    assert_eq!(labels, ["display"]);
+}
+
+const RECEIVERS: &str = "\
+struct P:
+    items: list[int]
+fn make() -> P:
+    ret P(items=[1])
+xs = [\"a\"]
+p = make()
+print(xs[0].)
+print(make().)
+print(p.items.)
+print(\"{xs[0].\")
+y = [1, 2].
+z = xs[0].st
+";
+
+#[test]
+fn completion_after_any_expression_offers_the_methods_of_its_type() {
+    let doc = doc(RECEIVERS);
+    let labels = |pos: Position| -> Vec<String> {
+        completion(&doc, pos, &MapSources::default())
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    };
+    let text_methods = |labels: Vec<String>| {
+        assert!(labels.contains(&"strip".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"append".to_string()), "{labels:?}");
+    };
+    let list_methods = |labels: Vec<String>| {
+        assert!(labels.contains(&"append".to_string()), "{labels:?}");
+        assert!(!labels.contains(&"strip".to_string()), "{labels:?}");
+    };
+    // an element, a call, a field, a list, and a method being typed
+    text_methods(labels(at(7, 13)));
+    assert_eq!(labels(at(8, 14)), ["items", "display"]);
+    list_methods(labels(at(9, 15)));
+    list_methods(labels(at(11, 12)));
+    text_methods(labels(at(12, 13)));
+    // and inside a string's value that is not finished
+    text_methods(labels(at(10, 15)));
+}
+
+#[test]
+fn a_bar_or_a_bracket_in_a_strings_text_is_not_code() {
+    // the `|` in `"|"` would otherwise end the second lambda's parameters
+    let source = "xs = [1]\nys = xs.map(|p: int| \"|\" + str(p)).filter(|q: ";
+    let labels = offered(source, at(2, 47));
+    assert!(labels.contains(&"int".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"print".to_string()), "{labels:?}");
+    // and a `(` in one does not open a variant's values
+    let labels = offered("enum E:\n    A\nx = f(\"(\", ", at(3, 12));
+    assert!(labels.contains(&"print".to_string()), "{labels:?}");
+}
+
+#[test]
+fn completion_after_a_parenthesized_expression_offers_its_types_methods() {
+    let labels = offered("a = \"x\"\nprint((a + a).)\n", at(2, 15));
+    assert!(labels.contains(&"strip".to_string()), "{labels:?}");
+    assert!(!labels.contains(&"append".to_string()), "{labels:?}");
 }

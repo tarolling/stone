@@ -9,6 +9,7 @@
     { "include": "#function-definition" },
     { "include": "#enum-definition" },
     { "include": "#struct-definition" },
+    { "include": "#function-type" },
     { "include": "#type-annotation" },
     { "include": "#keyword" },
     { "include": "#constant" },
@@ -88,6 +89,12 @@
       "captures": {
         "1": { "name": "storage.type.struct.stone" },
         "2": { "name": "entity.name.type.struct.stone" }
+      }
+    },
+    "function-type": {
+      "match": "\\b(fn)(?=\\()",
+      "captures": {
+        "1": { "name": "support.type.stone" }
       }
     },
     "type-annotation": {

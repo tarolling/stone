@@ -30,8 +30,8 @@ use crate::ast::{
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::{
-    HANDLE_METHODS, MAX_ELEMENT_VALUES, METHODS, OUTPUT, STR_METHODS, changes_receiver, is_builtin,
-    is_reserved, prelude_method,
+    HANDLE_METHODS, MAX_ELEMENT_VALUES, METHODS, ORD_METHODS, OUTPUT, PRELUDE_CLAMP, STR_METHODS,
+    changes_receiver, is_builtin, is_reserved, prelude_method,
 };
 
 #[cfg(test)]
@@ -4792,7 +4792,11 @@ impl Inference {
         let count = self.functions[function].type_params.len();
         let type_args = (0..count).map(|_| self.fresh()).collect();
         let (params, ret) = self.instantiate(call.span, function, type_args);
-        if !self.unify(&params[0], receiver_ty) {
+        // the prelude's `min`, `max`, and `clamp` take any value, whose type's bound is checked
+        // with the call's
+        if ORD_METHODS.contains(&name) {
+            self.unify(&params[0], receiver_ty);
+        } else if !self.unify(&params[0], receiver_ty) {
             let message = format!(
                 "'{name}' is a method of lists, but this is {}",
                 self.show(receiver_ty)
@@ -4812,6 +4816,19 @@ impl Inference {
                 implementations: None,
             },
         );
+        self.prelude_result(function, ret)
+    }
+
+    /// Returns the type a call of the prelude method `function` gives, from `ret`, its function's:
+    /// the same, except that the prelude's `clamp` gives first whether its bounds are in order,
+    /// which the call turns into a runtime error, so the call gives only the value.
+    fn prelude_result(&self, function: &str, ret: Ty) -> Ty {
+        if function == PRELUDE_CLAMP
+            && let Ty::Tuple(values) = self.shallow(&ret)
+            && let [_, value] = values.as_slice()
+        {
+            return value.clone();
+        }
         ret
     }
 
@@ -5032,7 +5049,42 @@ impl Inference {
     /// Settles a method called on a value whose type was not known when it was found.
     fn settle_method(&mut self, deferred: DeferredMethod) {
         let name = &deferred.name;
-        let (owner, type_args) = match self.shallow(&deferred.value_ty) {
+        let ty = self.shallow(&deferred.value_ty);
+        // a type without its own `min`, `max`, or `clamp` has the prelude's
+        if ORD_METHODS.contains(&name.as_str())
+            && let Some(function) = prelude_method(name)
+            && !ty_key(&ty).is_some_and(|key| {
+                self.struct_methods
+                    .get(&key)
+                    .is_some_and(|methods| methods.contains_key(name))
+            })
+        {
+            let count = self.functions[function].type_params.len();
+            let type_args = (0..count).map(|_| self.fresh()).collect();
+            let (params, ret) = self.instantiate(deferred.call, function, type_args);
+            self.unify(&params[0], &ty);
+            if deferred.args.len() + 1 != params.len() {
+                let expected = (params.len() - 1).to_string();
+                self.arity_error(deferred.call, name, &expected, deferred.args.len());
+                return;
+            }
+            for ((arg, span), param) in deferred.args.iter().zip(&params[1..]) {
+                self.expect(param, arg, *span);
+            }
+            self.methods.insert(
+                deferred.call,
+                Method {
+                    function: function.to_string(),
+                    receiver: true,
+                    changes: false,
+                    implementations: None,
+                },
+            );
+            let ret = self.prelude_result(function, ret);
+            self.expect(&ret, &deferred.result, deferred.call);
+            return;
+        }
+        let (owner, type_args) = match ty {
             Ty::Struct(owner, args) => (owner, args),
             ty @ Ty::Handle(_) if handle_method(name).is_some() => {
                 let ret = self.check_handle_method(
@@ -6079,6 +6131,14 @@ impl Inference {
                         .struct_methods
                         .get(&owner)
                         .is_some_and(|methods| methods.contains_key(name)) => {}
+            // nor one without its own `min`, `max`, or `clamp`, which the prelude gives
+            Ty::Struct(owner, type_args)
+                if ORD_METHODS.contains(&name)
+                    && !self
+                        .struct_methods
+                        .get(&owner)
+                        .is_some_and(|methods| methods.contains_key(name))
+                    && self.function_field(&owner, &type_args, name).is_none() => {}
             Ty::Struct(owner, type_args) => {
                 return self.infer_struct_method(
                     call,
@@ -6091,6 +6151,14 @@ impl Inference {
             }
             // every value is written as text, whatever its bounds
             Ty::Param(_) if name == DISPLAY => {}
+            // and every ordered value has the prelude's `min`, `max`, and `clamp`, unless a
+            // bound has a method of the same name
+            Ty::Param(param)
+                if ORD_METHODS.contains(&name)
+                    && !self.type_params[param]
+                        .bounds
+                        .iter()
+                        .any(|t| self.traits[t].methods.iter().any(|m| m.name == name)) => {}
             Ty::Param(param) => {
                 let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
                 return self.infer_trait_call(call, func, receiver, param, name, args, &arg_types);
@@ -6107,7 +6175,8 @@ impl Inference {
             Ty::Var(_)
                 if !METHODS.contains(&name)
                     || HANDLE_METHODS.contains(&name)
-                    || STR_METHODS.contains(&name) && self.struct_method_named(name) =>
+                    || (STR_METHODS.contains(&name) || ORD_METHODS.contains(&name))
+                        && self.struct_method_named(name) =>
             {
                 // as a global a function checked before the global's assignment reads, which
                 // makes it a struct, or a str for a method a struct has too

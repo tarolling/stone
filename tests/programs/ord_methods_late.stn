@@ -1,0 +1,20 @@
+// a function may call min, max, or clamp on a global assigned after it, even when a struct has a
+// method of the same name, which only its own values call
+
+struct Pick:
+    n: int
+
+impl Pick:
+    fn min(self) -> str:
+        ret "own min of {self.n}"
+
+fn own() -> str:
+    ret p.min()
+
+fn prelude() -> int:
+    ret g.min(1) + g.clamp(10, 20)
+
+p = Pick(n=3)
+g = 5
+print(own())
+print(prelude())

@@ -12,6 +12,12 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- The methods `a.min(b)`, `a.max(b)`, and `x.clamp(lo, hi)` on every type that implements
+  `ord`: `int`, `float`, `str`, `bytes`, a struct with an `impl ord` block, and a type parameter
+  bounded by `ord`. `min` and `max` keep the receiver of equal values and compare with `<` and
+  `>`, as `math.min` and `math.max` do, and `clamp` stops the program if `lo` is greater than
+  `hi` or either is nan, as Rust's does. A struct's own method of the same name wins.
+
 - Lambdas: a function written where it is used, as `xs.map(|x| x * 2)`,
   `people.sort_by_key(|p| p.age)`, or `|a: int, b| a + b`, its parameters between bars and its
   body one expression on the same line. Its types are inferred from where it is used, and a

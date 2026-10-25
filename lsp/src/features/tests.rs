@@ -194,6 +194,56 @@ fn hover_documents_methods() {
     assert_eq!(text, "```stone\n(global) len: int\n```");
 }
 
+const TYPES: &str = "\
+fn f(x: int, xs: list[int], m: map[str, int]) -> str:
+    ret str(int(2.5))
+";
+
+#[test]
+fn hover_documents_builtin_types_where_they_are_written() {
+    let doc = doc(TYPES);
+    let starts = |pos: Position, code: &str| {
+        let text = hover_text(&doc, pos).unwrap();
+        assert!(
+            text.starts_with(&format!("```stone\n{code}\n```\n")),
+            "{text}"
+        );
+    };
+    starts(at(1, 9), "int");
+    starts(at(1, 18), "list[T]");
+    starts(at(1, 32), "map[K, V]");
+    starts(at(1, 50), "str");
+    // a type name followed by `(` is the conversion
+    starts(at(2, 9), "str(value) -> str");
+    starts(at(2, 13), "int(value: int | float | str) -> int");
+}
+
+#[test]
+fn definition_of_a_builtin_type_opens_its_line_in_the_reference_file() {
+    let reference: Uri = "file:///cache/builtins.stn".parse().unwrap();
+    let builtins = Builtins::new(reference.clone());
+    let doc = doc(TYPES);
+    let text = stone::stdlib::builtins_reference();
+    let line_of = |prefix: &str| text.lines().position(|l| l.starts_with(prefix)).unwrap() as u32;
+
+    let location = definition(&doc, &uri(), at(1, 50), Some(&builtins)).unwrap();
+    assert_eq!(location.uri, reference);
+    let line = text.lines().position(|l| l == "// str").unwrap() as u32;
+    assert_eq!(
+        location.range,
+        Range::new(Position::new(line, 3), Position::new(line, 6))
+    );
+    let list = definition(&doc, &uri(), at(1, 18), Some(&builtins)).unwrap();
+    let line = line_of("// list[T]");
+    assert_eq!(
+        list.range,
+        Range::new(Position::new(line, 3), Position::new(line, 7))
+    );
+    // `str(` still leads to the function
+    let call = definition(&doc, &uri(), at(2, 9), Some(&builtins)).unwrap();
+    assert_eq!(call.range.start.line, line_of("// str("));
+}
+
 #[test]
 fn hover_shows_the_type_of_other_expressions() {
     // the `+` in `a + b`
@@ -504,6 +554,9 @@ fn completion_after_a_dot_offers_methods() {
         "items",
         "eq",
         "cmp",
+        "min",
+        "max",
+        "clamp",
         "display",
         "send",
         "read_line",
@@ -594,6 +647,9 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "contains",
             "eq",
             "cmp",
+            "min",
+            "max",
+            "clamp",
             "display",
             "bytes"
         ]
@@ -609,7 +665,10 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
         ["is_some", "is_none", "unwrap", "unwrap_or", "eq", "display"]
     );
     // a number has the methods of the prelude's traits
-    assert_eq!(labels(at(10, 3)), ["eq", "cmp", "display"]);
+    assert_eq!(
+        labels(at(10, 3)),
+        ["eq", "cmp", "min", "max", "clamp", "display"]
+    );
     assert_eq!(
         labels(at(12, 3)),
         [
@@ -1601,6 +1660,28 @@ fn completion_offers_the_methods_of_a_bound_and_a_traits_defaults() {
 }
 
 #[test]
+fn completion_offers_min_max_and_clamp_on_ordered_values() {
+    let labels = |source: &str, position: Position| -> Vec<String> {
+        completion(&doc(source), position, &MapSources::default())
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    };
+    let version = "struct V:\n    n: int\nimpl ord for V:\n    fn cmp(self, other: Self) -> ordering:\n        ret self.n.cmp(other.n)\n";
+    assert_eq!(
+        labels(&format!("{version}v = V(n=1)\nw = v.\n"), at(7, 7)),
+        ["n", "cmp", "min", "max", "clamp"]
+    );
+    assert_eq!(
+        labels(
+            &format!("{version}fn f[T: ord](x: T) -> int:\n    y = x.\n    ret 1\n"),
+            at(7, 11)
+        ),
+        ["cmp", "min", "max", "clamp"]
+    );
+}
+
+#[test]
 fn completion_after_a_socket_or_listener_offers_their_methods() {
     let doc = doc("use net\nfn f(c: socket, l: listener):\n    c.\n    l.\n");
     let labels = |pos: Position| -> Vec<String> {
@@ -1645,7 +1726,9 @@ fn completion_after_bytes_offers_their_methods() {
     };
     assert_eq!(
         labels(at(2, 10)),
-        ["len", "contains", "eq", "cmp", "display", "text"]
+        [
+            "len", "contains", "eq", "cmp", "min", "max", "clamp", "display", "text"
+        ]
     );
     assert!(labels(at(3, 7)).contains(&"bytes".to_string()));
 }

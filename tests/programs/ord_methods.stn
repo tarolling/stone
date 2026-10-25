@@ -1,0 +1,46 @@
+// min, max, and clamp work on every type that implements ord, keeping the first of equal values
+
+print(5.min(3), 5.max(3), 3.min(3), (-2).clamp(0, 10), 7.clamp(0, 10), 12.clamp(0, 10))
+print(1.5.min(2.5), 1.5.max(2.5), 0.0.min(-0.0), (-0.0).max(0.0), 2.5.clamp(1.0, 2.0))
+nan = float("nan")
+print(nan.min(1.0), 1.0.min(nan), nan.max(1.0), 1.0.max(nan), nan.clamp(0.0, 1.0))
+print("pear".min("apple"), "pear".max("apple"), "m".clamp("a", "f"), b"b".max(b"a"))
+
+// a variable may take its own clamp, as net does with its resolver options
+value = 40
+value = value.clamp(1, 30)
+print(value, value.min(15).max(20))
+
+struct Version:
+    major: int
+    minor: int
+    note: str
+
+impl ord for Version:
+    fn cmp(self, other: Self) -> ordering:
+        print("  cmp {self.note} {other.note}")
+        if self.major != other.major:
+            ret self.major.cmp(other.major)
+        ret self.minor.cmp(other.minor)
+
+a = Version(major=1, minor=2, note="a")
+b = Version(major=1, minor=10, note="b")
+c = Version(major=1, minor=2, note="c")
+print(a.min(b).note)
+print(b.min(a).note)
+print(a.min(c).note, a.max(c).note)
+low = Version(major=0, minor=0, note="low")
+high = Version(major=2, minor=0, note="high")
+print(b.clamp(low, high).note)
+
+fn smallest[T: ord](xs: list[T]) -> T:
+    best = xs[0]
+    for x in xs:
+        best = best.min(x)
+    ret best
+
+fn bounded[T: ord](x: T, lo: T, hi: T) -> T:
+    ret x.clamp(lo, hi)
+
+print(smallest([3, 1, 2]), smallest(["b", "c", "a"]), smallest([2.5, -1.5]))
+print(bounded(99, 0, 9), bounded("z", "a", "m"))

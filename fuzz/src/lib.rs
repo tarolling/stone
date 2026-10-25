@@ -904,15 +904,21 @@ impl Generator {
     }
 
     /// Generates an int-valued call to the `math` module, such as `math.max(g0, 3, l1)` or
-    /// `math.floor(g1)`. Its arguments are primaries, so a call uses little of the input.
+    /// `math.floor(g1)`, or of an ordered value's method, such as `(g0).min(l1)` or
+    /// `(l2).clamp(-3, 5)`. Its arguments are primaries, so a call uses little of the input.
     fn int_math(&mut self, u: &mut Unstructured, scope: &Scope, nesting: usize) -> Result<String> {
+        let choice = u.int_in_range(0..=4)?;
+        if choice == 4 {
+            let value = self.primary(u, scope, nesting)?;
+            return self.ord_method(u, value, false);
+        }
         self.uses_math = true;
         let name = if u.arbitrary()? {
             "math.min"
         } else {
             "math.max"
         };
-        match u.int_in_range(0..=3)? {
+        match choice {
             0 => Ok(format!("math.abs({})", self.primary(u, scope, nesting)?)),
             1 if !scope.lists.is_empty() => Ok(format!("{name}({})", u.choose(&scope.lists)?)),
             // fails for nan and huge floats, which the differential check skips
@@ -928,16 +934,21 @@ impl Generator {
         }
     }
 
-    /// Generates a float-valued call to the `math` module, such as `math.sqrt(g1)`.
+    /// Generates a float-valued call to the `math` module, such as `math.sqrt(g1)`, or of an
+    /// ordered value's method, such as `(g1).max(0.5)`.
     fn float_math(
         &mut self,
         u: &mut Unstructured,
         scope: &Scope,
         nesting: usize,
     ) -> Result<String> {
-        self.uses_math = true;
         let inner = self.float_primary(u, scope, nesting)?;
-        match u.int_in_range(0..=2)? {
+        let choice = u.int_in_range(0..=3)?;
+        if choice == 3 {
+            return self.ord_method(u, inner, true);
+        }
+        self.uses_math = true;
+        match choice {
             // fails for a negative number, which the differential check skips
             0 => Ok(format!("math.sqrt({inner})")),
             1 => Ok(format!("math.abs({inner})")),
@@ -949,6 +960,28 @@ impl Generator {
                 };
                 let other = self.float_primary(u, scope, nesting)?;
                 Ok(format!("{name}({inner}, {other})"))
+            }
+        }
+    }
+
+    /// Generates `(value).min(other)`, `(value).max(other)`, or `(value).clamp(lo, hi)`, the
+    /// methods of every ordered value, with literal arguments of the value's type, ints from -20
+    /// to 20 or, for a `float` value, tenths such as `-2.5`. The bounds of `clamp` are in order,
+    /// so it never fails.
+    fn ord_method(&mut self, u: &mut Unstructured, value: String, float: bool) -> Result<String> {
+        let write = |n: i64| match float {
+            true => format!("{:.1}", n as f64 / 10.0),
+            false => n.to_string(),
+        };
+        let range = if float { -200..=200 } else { -20..=20 };
+        let first = u.int_in_range(range.clone())?;
+        match u.int_in_range(0..=2)? {
+            0 => Ok(format!("({value}).min({})", write(first))),
+            1 => Ok(format!("({value}).max({})", write(first))),
+            _ => {
+                let second = u.int_in_range(range)?;
+                let (lo, hi) = (first.min(second), first.max(second));
+                Ok(format!("({value}).clamp({}, {})", write(lo), write(hi)))
             }
         }
     }
@@ -1228,6 +1261,10 @@ mod tests {
             count >= 25,
             "only {count} of 500 programs use an augmented assignment"
         );
+        for method in [").min(", ").max(", ").clamp("] {
+            let count = sources.iter().filter(|s| s.contains(method)).count();
+            assert!(count >= 25, "only {count} of 500 programs use {method:?}");
+        }
     }
 
     /// Changing a list, slicing it, and arithmetic on it need a list to exist first, which short
@@ -1294,7 +1331,9 @@ mod tests {
     /// Enums, structs and their methods, maps, options, and `==` on them all appear.
     #[test]
     fn generated_programs_use_compound_types() {
-        let sources = compound_sources(500);
+        // rare forms sit near the threshold, so any change to what the generator draws can tip
+        // one under it with fewer programs
+        let sources = compound_sources(1000);
         for feature in [
             "enum ",
             "struct ",
@@ -1328,7 +1367,7 @@ mod tests {
             "print(\"text",
         ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
-            assert!(count >= 5, "only {count} of 500 programs use {feature:?}");
+            assert!(count >= 5, "only {count} of 1000 programs use {feature:?}");
         }
         // a method is called on a value, such as `v3.m1(2)`
         let called = |source: &&String| {
@@ -1338,7 +1377,7 @@ mod tests {
             })
         };
         let count = sources.iter().filter(called).count();
-        assert!(count >= 5, "only {count} of 500 programs call a method");
+        assert!(count >= 5, "only {count} of 1000 programs call a method");
     }
 
     /// Generic functions are defined, call each other, and are called at several types.

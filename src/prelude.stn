@@ -190,3 +190,29 @@ fn max_by_key[T, K: ord](xs: list[T], key: fn(T) -> K) -> option[T]:
             best = i
             best_key = k
     ret some(xs[best])
+
+// The lesser of `a` and `b`, for `a.min(b)`: `b` only if it is less than `a`, so of equal values
+// it is `a`, as `math.min` keeps the first.
+fn min[T: ord](a: T, b: T) -> T:
+    if b < a:
+        ret b
+    ret a
+
+// The greater of `a` and `b`, for `a.max(b)`: `b` only if it is greater than `a`, so of equal
+// values it is `a`, as `math.max` keeps the first.
+fn max[T: ord](a: T, b: T) -> T:
+    if b > a:
+        ret b
+    ret a
+
+// Whether `lo` is at most `hi` (never for a nan bound), then `x` brought into the range from `lo`
+// to `hi`, for `x.clamp(lo, hi)`, which turns bounds out of order into a runtime error. A tuple
+// rather than an option, so a call allocates nothing.
+fn clamp[T: ord](x: T, lo: T, hi: T) -> tuple[bool, T]:
+    if not (lo <= hi):
+        ret (false, x)
+    if x < lo:
+        ret (true, lo)
+    if x > hi:
+        ret (true, hi)
+    ret (true, x)

@@ -2568,7 +2568,18 @@ impl<'out> Interpreter<'out> {
             if let Some((_, names)) = movable {
                 self.move_arguments(args, &names, function, None);
             }
-            return Ok(self.invoke(function, values, false)?.0);
+            let value = self.invoke(function, values, false)?.0;
+            // the prelude's `clamp` gives first whether its bounds are in order
+            if function == stdlib::PRELUDE_CLAMP
+                && let Value::Tuple(values) = &value
+                && let [Value::Bool(in_order), value] = &values[..]
+            {
+                return match in_order {
+                    true => Ok(value.clone()),
+                    false => Err(stdlib::CLAMP_RANGE.into()),
+                };
+            }
+            return Ok(value);
         }
         let (root, steps) = self.eval_place(receiver)?;
         let mut values = Vec::with_capacity(args.len() + 1);

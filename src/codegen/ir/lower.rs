@@ -49,9 +49,10 @@ use crate::codegen::context::{function_label, module_routine};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::Span;
 use crate::stdlib::{
-    BYTE_RANGE, BYTES_INDEX_RANGE, COMPARE_DEPTH, END_OF_INPUT, INDEX_RANGE, LENGTHS_DIFFER,
-    MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO,
-    STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE, UNWRAP_OK, math, random,
+    BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, END_OF_INPUT, INDEX_RANGE,
+    LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRELUDE_CLAMP, PRELUDE_SORT,
+    PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE, UNWRAP_OK, math,
+    random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -5740,6 +5741,14 @@ impl<'a> Lowerer<'a> {
             let mut all = Vec::with_capacity(args.len() + 1);
             all.push(receiver.clone());
             all.extend(args.iter().cloned());
+            // the prelude's `clamp` gives first whether its bounds are in order
+            if function == PRELUDE_CLAMP {
+                let mut counted = vec![None];
+                counted.extend(&kinds);
+                let values = self.user_call(function, call.span, &all, None, &counted)?;
+                self.fail_unless(Cond::Ne, values[0], Operand::Imm(0), CLAMP_RANGE);
+                return Ok(values[1..].to_vec());
+            }
             return self.user_call(function, call.span, &all, into, &kinds);
         }
         self.changing_call((function, call.span), receiver, args, into, &kinds)

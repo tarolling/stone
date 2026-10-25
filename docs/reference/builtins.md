@@ -842,6 +842,47 @@ block. Floats are in the order `sort` uses, so unlike `<`, `cmp` puts `-0.0` bef
 print(1.cmp(2), "b".cmp("a"), (-0.0).cmp(0.0))   // less greater less
 ```
 
+### `min`
+
+```text
+T.min(other: T) -> T
+```
+
+Returns the lesser of the value and `other`, for any type that implements `ord`, keeping the
+value itself when they are equal. It compares with `<`, as `math.min` does, so `0.0.min(-0.0)`
+is `0.0` and a `nan` receiver stays `nan`.
+
+```stone
+print(5.min(3), "pear".min("apple"))   // 3 apple
+```
+
+### `max`
+
+```text
+T.max(other: T) -> T
+```
+
+Returns the greater of the value and `other`, for any type that implements `ord`, keeping the
+value itself when they are equal. It compares with `>`, as `math.max` does.
+
+```stone
+print(5.max(3), 1.5.max(2.5))   // 5 2.5
+```
+
+### `clamp`
+
+```text
+T.clamp(lo: T, hi: T) -> T
+```
+
+Returns `lo` if the value is less than `lo`, `hi` if it is greater than `hi`, and the value
+itself otherwise, for any type that implements `ord`. It stops the program if `lo` is greater
+than `hi`, or if either is `nan`, as Rust's `clamp` does.
+
+```stone
+print(12.clamp(0, 10), (-3).clamp(0, 10), 0.5.clamp(0.0, 1.0))   // 10 0 0.5
+```
+
 ### `display`
 
 ```text

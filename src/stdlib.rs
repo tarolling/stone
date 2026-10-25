@@ -127,10 +127,11 @@ pub const OUTPUT: &str = "output";
 /// strings.
 pub const PRELUDE_SORT: &str = "prelude.sort";
 
-/// The methods of lists that take a function, each with the linked name of the prelude's function
-/// that gives it, which takes the list first: `xs.map(f)` is `prelude.map(xs, f)`.
-/// `sort_by_key` changes the list, to what its function returns.
-pub static PRELUDE_METHODS: [(&str, &str); 7] = [
+/// The methods the prelude's functions give, each with the linked name of its function, which
+/// takes the receiver first: `xs.map(f)` is `prelude.map(xs, f)`, and `a.min(b)` is
+/// `prelude.min(a, b)`. The list methods take a function, and `sort_by_key` changes the list, to
+/// what its function returns; [`ORD_METHODS`] are methods of every type that implements `ord`.
+pub static PRELUDE_METHODS: [(&str, &str); 10] = [
     ("map", "prelude.map"),
     ("filter", "prelude.filter"),
     ("any", "prelude.any"),
@@ -138,10 +139,28 @@ pub static PRELUDE_METHODS: [(&str, &str); 7] = [
     ("sort_by_key", "prelude.sort_by_key"),
     ("min_by_key", "prelude.min_by_key"),
     ("max_by_key", "prelude.max_by_key"),
+    ("min", "prelude.min"),
+    ("max", "prelude.max"),
+    ("clamp", "prelude.clamp"),
 ];
 
-/// Returns the linked name of the prelude's function that gives the list method `name`, if it is
-/// one of [`PRELUDE_METHODS`].
+/// The methods of every type that implements `ord`, which [`PRELUDE_METHODS`] lists too. A
+/// struct, or a trait bounding a type parameter, may have methods of the same names, which win.
+pub const ORD_METHODS: [&str; 3] = ["min", "max", "clamp"];
+
+/// The linked name of the prelude's `clamp`, which gives first whether its bounds are in order,
+/// so that both backends turn bounds out of order into the runtime error [`CLAMP_RANGE`] at the
+/// call.
+pub const PRELUDE_CLAMP: &str = "prelude.clamp";
+
+/// What `x.clamp(lo, hi)` stops the program with when `lo` is not at most `hi`.
+///
+/// For example, `5.clamp(10, 0)` and `0.5.clamp(nan, 1.0)` both stop with it.
+pub const CLAMP_RANGE: &str =
+    "clamp's lower bound is greater than its upper bound, or one of them is nan";
+
+/// Returns the linked name of the prelude's function that gives the method `name`, if it is one of
+/// [`PRELUDE_METHODS`].
 ///
 /// For example, `prelude_method("map")` is `Some("prelude.map")`, and `prelude_method("len")` is
 /// `None`.
@@ -174,7 +193,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 58] = [
+pub static METHODS: [&str; 61] = [
     "len",
     "append",
     "pop",
@@ -218,6 +237,9 @@ pub static METHODS: [&str; 58] = [
     "items",
     "eq",
     "cmp",
+    "min",
+    "max",
+    "clamp",
     "display",
     "send",
     "read_line",
@@ -357,7 +379,70 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 10] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 58] = [
+/// The types built into the language, which signatures write by name. `option`, `result`,
+/// `ordering`, and `output` are not here, since the prelude defines them in stone.
+///
+/// A `signature` is the type as a signature writes it, such as `list[T]` for `list`.
+pub static TYPE_DOCS: [BuiltinDoc; 10] = [
+    BuiltinDoc {
+        name: "int",
+        signature: "int",
+        description: "A 64-bit signed integer. `+`, `-`, `*`, and `**` wrap around on overflow.",
+    },
+    BuiltinDoc {
+        name: "float",
+        signature: "float",
+        description: "An IEEE 754 double, including `inf`, `-inf`, and `nan`.",
+    },
+    BuiltinDoc {
+        name: "bool",
+        signature: "bool",
+        description: "`true` or `false`, the only values a condition takes.",
+    },
+    BuiltinDoc {
+        name: "str",
+        signature: "str",
+        description: "An immutable string of UTF-8 text, indexed and ordered byte by byte.",
+    },
+    BuiltinDoc {
+        name: "bytes",
+        signature: "bytes",
+        description: "An immutable sequence of any bytes, such as `b\"\\x00\\xff\"`, for data that \
+                      is not text.",
+    },
+    BuiltinDoc {
+        name: "list",
+        signature: "list[T]",
+        description: "A growable list of `T`, which is a value: assigning or passing one copies it.",
+    },
+    BuiltinDoc {
+        name: "map",
+        signature: "map[K, V]",
+        description: "A map from keys of type `K`, which is `int`, `str`, or `bool`, to values of \
+                      type `V`, kept in insertion order. Like a list, it is a value.",
+    },
+    BuiltinDoc {
+        name: "tuple",
+        signature: "tuple[T1, T2, ...]",
+        description: "Two or more values of fixed types, such as `(1, \"a\")`, which never change.",
+    },
+    BuiltinDoc {
+        name: "socket",
+        signature: "socket",
+        description: "A TCP connection from the `net` module. It is a handle, so a copy refers to \
+                      the same connection, which closes right after the last statement that uses \
+                      it.",
+    },
+    BuiltinDoc {
+        name: "listener",
+        signature: "listener",
+        description: "A port waiting for TCP connections, from `net.listen`. It is a handle, so a \
+                      copy refers to the same port, which closes right after the last statement \
+                      that uses it.",
+    },
+];
+
+pub static METHOD_DOCS: [BuiltinDoc; 61] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | bytes | list[T] | map[K, V]).len() -> int",
@@ -659,6 +744,29 @@ pub static METHOD_DOCS: [BuiltinDoc; 58] = [
                       float.",
     },
     BuiltinDoc {
+        name: "min",
+        signature: "T.min(other: T) -> T",
+        description: "Returns the lesser of the value and `other`, for any type that implements \
+                      `ord`, keeping the value itself when they are equal, so `5.min(3)` is 3 and \
+                      `\"pear\".min(\"apple\")` is `\"apple\"`. It compares with `<`, as \
+                      `math.min` does, so `0.0.min(-0.0)` is 0.0.",
+    },
+    BuiltinDoc {
+        name: "max",
+        signature: "T.max(other: T) -> T",
+        description: "Returns the greater of the value and `other`, for any type that \
+                      implements `ord`, keeping the value itself when they are equal, so \
+                      `5.max(3)` is 5. It compares with `>`, as `math.max` does.",
+    },
+    BuiltinDoc {
+        name: "clamp",
+        signature: "T.clamp(lo: T, hi: T) -> T",
+        description: "Returns `lo` if the value is less than `lo`, `hi` if it is greater than \
+                      `hi`, and the value itself otherwise, for any type that implements `ord`, \
+                      so `12.clamp(0, 10)` is 10. It stops the program if `lo` is greater than \
+                      `hi` or either is nan.",
+    },
+    BuiltinDoc {
         name: "display",
         signature: "T.display() -> str",
         description: "Returns the text `print` writes for the value, as `str` does, for any \
@@ -786,6 +894,14 @@ pub fn builtin_doc(name: &str) -> Option<&'static BuiltinDoc> {
         .or_else(|| module_function(name))
 }
 
+/// Returns the documentation for the builtin type named `name`.
+///
+/// For example, `type_doc("list")` has the signature `list[T]`, and `type_doc("option")` is
+/// `None`, since the prelude defines `option`.
+pub fn type_doc(name: &str) -> Option<&'static BuiltinDoc> {
+    TYPE_DOCS.iter().find(|doc| doc.name == name)
+}
+
 /// Returns the documentation for the builtin method named `name`.
 ///
 /// For example, `method_doc("len")` has the signature `(str | list[T]).len() -> int`.
@@ -797,9 +913,9 @@ pub fn method_doc(name: &str) -> Option<&'static BuiltinDoc> {
 /// builtin is defined.
 ///
 /// Builtins are part of the interpreter and the compiler rather than written in stone, so the
-/// file is only comments, which keeps it valid stone. Each builtin function, then each builtin
-/// method, then each function of each builtin module, gets a line holding `// ` and its
-/// signature, followed by its description.
+/// file is only comments, which keeps it valid stone. Each builtin type, then each builtin
+/// function, then each builtin method, then each function of each builtin module, gets a line
+/// holding `// ` and its signature, followed by its description.
 pub fn builtins_reference() -> String {
     let mut text = String::from(
         "// stone's builtin functions and methods\n\
@@ -808,6 +924,11 @@ pub fn builtins_reference() -> String {
          // this file only documents them. stone-lsp generates it, and editing it changes\n\
          // nothing.\n",
     );
+    text += "\n// Types, written in signatures as in `fn f(x: int) -> list[str]`\n";
+    for doc in &TYPE_DOCS {
+        text += &format!("\n// {}\n//     {}\n", doc.signature, doc.description);
+    }
+    text += "\n// Functions\n";
     for doc in &BUILTIN_DOCS {
         text += &format!("\n// {}\n//     {}\n", doc.signature, doc.description);
     }
@@ -1538,10 +1659,13 @@ mod tests {
                 "all",
                 "sort_by_key",
                 "min_by_key",
-                "max_by_key"
+                "max_by_key",
+                "min",
+                "max",
+                "clamp"
             ]
         );
-        // each list method that takes a function is a prelude function of the same name
+        // each method the prelude gives is a prelude function of the same name
         for (method, function) in PRELUDE_METHODS {
             assert_eq!(function, format!("prelude.{method}"));
             assert!(functions.iter().any(|f| f == method));
@@ -1758,6 +1882,15 @@ mod tests {
     }
 
     #[test]
+    fn type_docs_name_their_types() {
+        assert_eq!(type_doc("list").unwrap().signature, "list[T]");
+        assert!(type_doc("option").is_none());
+        for doc in &TYPE_DOCS {
+            assert!(doc.signature.starts_with(doc.name), "{}", doc.name);
+        }
+    }
+
+    #[test]
     fn the_reference_is_valid_stone() {
         assert_eq!(crate::driver::check(&builtins_reference()), []);
     }
@@ -1766,7 +1899,8 @@ mod tests {
     fn the_reference_has_a_line_for_each_builtin() {
         let reference = builtins_reference();
         let functions = MODULES.iter().flat_map(|module| module.functions);
-        for doc in BUILTIN_DOCS.iter().chain(&METHOD_DOCS).chain(functions) {
+        let docs = TYPE_DOCS.iter().chain(&BUILTIN_DOCS).chain(&METHOD_DOCS);
+        for doc in docs.chain(functions) {
             let line = format!("// {}", doc.signature);
             assert_eq!(
                 reference.lines().filter(|l| *l == line).count(),

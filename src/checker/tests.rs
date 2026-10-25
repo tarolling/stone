@@ -1026,6 +1026,64 @@ fn list_helpers_take_functions_of_the_elements() {
 }
 
 #[test]
+fn ordered_values_have_min_max_and_clamp() {
+    let cases = [
+        ("a = 5.min(3)\n", "int"),
+        ("a = 1.5.max(2.5)\n", "float"),
+        ("a = \"b\".clamp(\"a\", \"c\")\n", "str"),
+        ("a = b\"x\".min(b\"y\")\n", "bytes"),
+    ];
+    for (source, ty) in cases {
+        assert_eq!(linked_type(source, "a"), ty, "{source}");
+    }
+    let version = "struct V:\n    n: int\nimpl ord for V:\n    fn cmp(self, other: Self) -> ordering:\n        ret self.n.cmp(other.n)\nv = V(n=1)\n";
+    assert_eq!(linked_type(&format!("{version}a = v.max(v)\n"), "a"), "V");
+    assert_eq!(
+        linked_type(&format!("{version}a = v.clamp(v, v)\n"), "a"),
+        "V"
+    );
+    let generic = "fn least[T: ord](a: T, b: T) -> T:\n    ret a.min(b)\nx = least(2, 1)\n";
+    assert_eq!(linked_errors(generic), []);
+    // a struct's own method of the same name wins
+    let own = "struct P:\n    n: int\nimpl P:\n    fn min(self) -> str:\n        ret \"own\"\np = P(n=1)\na = p.min()\n";
+    assert_eq!(linked_type(own, "a"), "str");
+    let cases = [
+        (
+            "a = [1].min([2])\n",
+            "'list[int]' does not implement 'ord', which 'min' needs for 'T'",
+            1,
+            5,
+        ),
+        (
+            "struct P:\n    n: int\np = P(n=1)\na = p.max(p)\n",
+            "'P' does not implement 'ord', which 'max' needs for 'T'",
+            4,
+            5,
+        ),
+        ("a = 1.min(2.0)\n", "expected int, found float", 1, 11),
+        (
+            "a = 1.clamp(0)\n",
+            "'clamp' takes 2 arguments, but 1 was given",
+            1,
+            5,
+        ),
+        (
+            "fn f[T](a: T) -> T:\n    ret a.min(a)\n",
+            "'T' does not implement 'ord', which 'min' needs for 'T'",
+            2,
+            9,
+        ),
+    ];
+    for (source, message, line, col) in cases {
+        assert_eq!(
+            linked_errors(source),
+            [(message.to_string(), line, col)],
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn builtins_are_not_values_yet() {
     assert_error(
         "x = print\n",
@@ -1136,7 +1194,12 @@ fn a_local_assigned_anywhere_in_the_function_is_local_everywhere() {
 #[test]
 fn every_use_of_a_symbol_is_a_reference() {
     let analysis = analyze_source("fn f(a: int) -> int:\n    b = a\n    ret a + b\nf(1)\n");
-    let param = analysis.symbols.iter().position(|s| s.name == "a").unwrap();
+    // the prelude's functions have parameters too
+    let param = analysis
+        .symbols
+        .iter()
+        .position(|s| s.name == "a" && s.scope.as_deref() == Some("f"))
+        .unwrap();
     let uses: Vec<Pos> = analysis
         .references
         .iter()

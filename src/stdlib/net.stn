@@ -113,7 +113,7 @@ fn addresses(host: str) -> result[list[list[int]], str]:
     literal = parse_address(host)
     if literal.is_some():
         ret ok([literal.unwrap()])
-    name = lower(host)
+    name = host.lower()
     if name.endswith("."):
         name = name[:-1]
     if not valid_name(name):
@@ -146,17 +146,6 @@ fn valid_name(name: str) -> bool:
                 ret false
     ret true
 
-// Returns `text` with ASCII capital letters made small.
-fn lower(text: str) -> str:
-    out = ""
-    for c in text:
-        i = "ABCDEFGHIJKLMNOPQRSTUVWXYZ".find(c)
-        if i.is_some():
-            out += "abcdefghijklmnopqrstuvwxyz"[i.unwrap()]
-        else:
-            out += c
-    ret out
-
 // Returns every address `/etc/hosts` (or `STONE_HOSTS`) gives `name`, IPv4 first, or none if
 // the file is missing or does not name it.
 fn hosts_lookup(name: str) -> list[list[int]]:
@@ -170,7 +159,7 @@ fn hosts_lookup(name: str) -> list[list[int]]:
         if address.is_none():
             cont
         for alias in fields[1:]:
-            if lower(alias) == name:
+            if alias.lower() == name:
                 found.append(address.unwrap())
                 break
     ret ipv4_first(found)
@@ -369,9 +358,9 @@ fn read_resolver() -> Resolver:
             if server.is_some() and settings.servers.len() < max_servers():
                 settings.servers.append(server.unwrap())
         elif key == "domain":
-            settings.search = [lower(fields[1])]
+            settings.search = [fields[1].lower()]
         elif key == "search":
-            settings.search = fields[1:].map(lower)
+            settings.search = fields[1:].map(|field| field.lower())
         elif key == "options":
             for option in fields[1:]:
                 parts = option.split(":")
@@ -381,11 +370,11 @@ fn read_resolver() -> Resolver:
                 if value < 0:
                     cont
                 if parts[0] == "ndots":
-                    settings.ndots = min(value, 15)
+                    settings.ndots = value.min(15)
                 elif parts[0] == "timeout":
-                    settings.timeout = max(min(value, 30), 1)
+                    settings.timeout = value.clamp(1, 30)
                 elif parts[0] == "attempts":
-                    settings.attempts = max(min(value, 5), 1)
+                    settings.attempts = value.clamp(1, 5)
     if settings.servers.len() == 0:
         settings.servers.append(([127, 0, 0, 1], dns_port()))
     ret settings
@@ -406,16 +395,6 @@ fn parse_server(text: str) -> option[tuple[list[int], int]]:
             ret none
         ret some((parse_ipv4(parts[0])?, port))
     ret some((parse_address(text)?, dns_port()))
-
-fn min(a: int, b: int) -> int:
-    if a < b:
-        ret a
-    ret b
-
-fn max(a: int, b: int) -> int:
-    if a > b:
-        ret a
-    ret b
 
 // Asks the DNS servers for the addresses of `name` (as `host` was written), trying it in each
 // search domain as the C library's `res_search` does: as it is first if it has at least `ndots`
@@ -573,6 +552,6 @@ fn read_name(reply: list[int], at: int) -> option[tuple[str, int]]:
             if b < 32 or b > 126:
                 ret none
             label += printable()[b - 32]
-        labels.append(lower(label))
+        labels.append(label.lower())
         at += 1 + length
     ret some((".".join(labels), end))

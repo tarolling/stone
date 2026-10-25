@@ -403,7 +403,8 @@ assign the result where 'add' is called
 | `None`, `Optional[T]` | `none`, `option[T]` |
 | `pass` | restructure so every block has a real statement |
 | `del`, `global`, `nonlocal`, `is`, `with`, `yield` | not available |
-| `len(x)`, `abs`, `min`, `max` | `x.len()`, `math.abs`, `math.min`, `math.max` |
+| `len(x)`, `abs`, `min(a, b)`, `max(a, b)`, `min(xs)` | `x.len()`, `math.abs`, `a.min(b)`, `a.max(b)`, `math.min(xs)` |
+| `max(lo, min(x, hi))` | `x.clamp(lo, hi)` |
 | `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `ys = xs` then `ys.sort()` or `ys.sort_by_key(f)`, both stable; reverse with `ys[::-1]` |
 | `"ab" * 3` | a loop of `+=`; only the string methods below exist |
 | `s.lower()`, `s.upper()` | the same, but only ASCII letters change case |
@@ -430,7 +431,8 @@ Methods: `len` (str, bytes, list, map); lists: `append`, `pop()` (option) and `p
 and `rfind` (options), `count`, `replace(old, new)` and `replace(old, new, n)`, `lower`, `upper`
 (ASCII letters only), `startswith`, `endswith`, `bytes`; bytes: `text` (a result), `contains`; options: `is_some`, `is_none`, `unwrap`, `unwrap_or`; maps:
 `contains`, `get` (option), `pop(key)` (option), `keys`, `values`, `items`; any comparable
-value: `eq`, `cmp`.
+value: `eq`; any ordered value (int, float, str, bytes, a struct with `impl ord`, a `T: ord`):
+`cmp`, `a.min(b)`, `a.max(b)`, `x.clamp(lo, hi)` (stops the program if `lo > hi`).
 
 Builtin modules, imported with `use math` (or `use math.sqrt`):
 

@@ -18,6 +18,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Completion and hover for the string methods `splitlines`, `rfind`, `count`, `replace`,
   `lower`, and `upper`.
 
+### Fixed
+
+- Hover and go to definition on a builtin type in a signature, such as `int` in `x: int` or
+  `list` in `list[str]`, show the type and lead to its line in the builtins reference, rather
+  than the conversion function `int(...)`; a name followed by `(` is still the conversion.
+
 ## [0.3.4] - 2026-10-24
 
 ### Added

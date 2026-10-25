@@ -14,7 +14,7 @@ use lsp_types::{
 };
 use stone::ast::is_lambda;
 use stone::checker::{
-    Analysis, Symbol, SymbolKind as StoneSymbolKind, Type, prints_bare, struct_display,
+    Analysis, ORD, Symbol, SymbolKind as StoneSymbolKind, Type, prints_bare, struct_display,
 };
 use stone::diagnostic::Severity;
 use stone::project::{
@@ -23,8 +23,9 @@ use stone::project::{
 };
 use stone::span::{FileId, Pos, Span};
 use stone::stdlib::{
-    BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, MODULES, PRELUDE, PRELUDE_VARIANTS,
-    builtin_doc, builtins_reference, is_reserved, method_doc,
+    BUILTIN_DOCS, BUILTINS, BuiltinDoc, METHOD_DOCS, METHODS, MODULES, ORD_METHODS, PRELUDE,
+    PRELUDE_VARIANTS, TYPE_DOCS, builtin_doc, builtins_reference, is_reserved, method_doc,
+    type_doc,
 };
 use stone::token::RESERVED_KEYWORDS;
 
@@ -552,6 +553,31 @@ fn builtin_at(doc: &Document, position: Position) -> Option<(&'static BuiltinDoc
     builtin_doc(imported.unwrap_or(&word)).map(|d| (d, false, span))
 }
 
+/// Returns the documentation of the builtin type named at `position` and the span of its name.
+///
+/// `int`, `str`, `float`, and `bytes` also name conversion functions, so a name followed by a `(`
+/// is left to [`builtin_at`], as `int` is in `int(x)` but not in `x: int` or `list[int]`. A name
+/// right after a `.` is a method, as `bytes` is in `s.bytes()`.
+fn builtin_type_at(doc: &Document, position: Position) -> Option<(&'static BuiltinDoc, Span)> {
+    if doc.import_at(position).is_some() {
+        return None;
+    }
+    let (word, span) = word_at(doc, doc.index.pos(position))?;
+    if follows_dot(doc, span.start) || next_char(doc, span.end) == Some('(') {
+        return None;
+    }
+    type_doc(&word).map(|d| (d, span))
+}
+
+/// Returns the first character at or after `pos` on its line that is not whitespace, such as the
+/// `(` in `int (x)` from the end of `int`.
+fn next_char(doc: &Document, pos: Pos) -> Option<char> {
+    let line = doc.text.lines().nth(pos.line - 1)?;
+    line.chars()
+        .skip(pos.col - 1)
+        .find(|ch| !ch.is_whitespace())
+}
+
 /// Returns the identifier the position is on or just after, and its span.
 fn word_at(doc: &Document, pos: Pos) -> Option<(String, Span)> {
     let line: Vec<char> = doc.text.lines().nth(pos.line - 1)?.chars().collect();
@@ -661,6 +687,12 @@ pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
             range: Some(doc.index.range(span)),
         });
     }
+    if let Some((ty, span)) = builtin_type_at(doc, position) {
+        return Some(Hover {
+            contents: markdown(ty.signature, Some(ty.description)),
+            range: Some(doc.index.range(span)),
+        });
+    }
     if let Some((builtin, _, span)) = builtin_at(doc, position) {
         return Some(Hover {
             contents: markdown(builtin.signature, Some(builtin.description)),
@@ -703,6 +735,8 @@ pub struct Builtins {
     /// The line and column of each builtin module's name in the heading of its functions, such as
     /// `os` in `// The os module, imported with ...`.
     modules: HashMap<&'static str, (u32, u32)>,
+    /// The same for each builtin type, such as `list` in `// list[T]`.
+    types: HashMap<&'static str, (u32, u32)>,
 }
 
 impl Builtins {
@@ -732,6 +766,14 @@ impl Builtins {
                 Some((module.name, (line as u32, "// The ".len() as u32)))
             })
             .collect();
+        let types = TYPE_DOCS
+            .iter()
+            .filter_map(|doc| {
+                let signature = format!("// {}", doc.signature);
+                let line = text.lines().position(|line| line == signature)?;
+                Some((doc.name, (line as u32, "// ".len() as u32)))
+            })
+            .collect();
         let prelude = uri
             .as_str()
             .rsplit_once('/')
@@ -742,6 +784,7 @@ impl Builtins {
             functions,
             methods,
             modules,
+            types,
         }
     }
 
@@ -767,10 +810,13 @@ impl Builtins {
 
     /// Returns the location of the builtin module `name` in the heading of its functions.
     fn module_location(&self, name: &str) -> Option<Location> {
-        let &(line, start) = self.modules.get(name)?;
-        let end = start + name.chars().count() as u32;
-        let range = Range::new(Position::new(line, start), Position::new(line, end));
-        Some(Location::new(self.uri.clone(), range))
+        self.name_location(&self.modules, name)
+    }
+
+    /// Returns the location of the builtin type `name` in its line, such as `list` in
+    /// `// list[T]`.
+    fn type_location(&self, name: &str) -> Option<Location> {
+        self.name_location(&self.types, name)
     }
 
     /// Returns the location of the builtin function, or with `method` the builtin method, named
@@ -781,6 +827,15 @@ impl Builtins {
         } else {
             &self.functions
         };
+        self.name_location(names, name)
+    }
+
+    /// Returns the range of `name` in the reference, starting where `names` says it does.
+    fn name_location(
+        &self,
+        names: &HashMap<&'static str, (u32, u32)>,
+        name: &str,
+    ) -> Option<Location> {
         let &(line, start) = names.get(name)?;
         let end = start + name.chars().count() as u32;
         let range = Range::new(Position::new(line, start), Position::new(line, end));
@@ -829,6 +884,9 @@ pub fn definition(
     }
     if let Some((module, _)) = builtin_module_at(doc, position) {
         return builtins?.module_location(&module);
+    }
+    if let Some((ty, _)) = builtin_type_at(doc, position) {
+        return builtins?.type_location(ty.name);
     }
     let (builtin, method, _) = builtin_at(doc, position)?;
     builtins?.location(builtin.name, method)
@@ -1152,7 +1210,10 @@ pub fn completion(
         visible.sort_by_key(|s| s.scope.is_none());
         let held = visible.iter().find(|s| s.name == receiver).map(|s| &s.ty);
         if let Some(Type::Param(param)) = held {
-            return bound_methods(doc, pos, param)
+            let methods: Vec<&Symbol> = bound_methods(doc, pos, param).collect();
+            let ordered = methods.iter().any(|m| m.scope.as_deref() == Some(ORD));
+            let mut items: Vec<CompletionItem> = methods
+                .iter()
                 .map(|method| CompletionItem {
                     label: method.name.clone(),
                     kind: Some(CompletionItemKind::METHOD),
@@ -1160,6 +1221,11 @@ pub fn completion(
                     ..CompletionItem::default()
                 })
                 .collect();
+            // an ordered value has the prelude's `min`, `max`, and `clamp` too
+            if ordered {
+                items.extend(ord_methods(&items));
+            }
+            return items;
         }
         if let Some(Type::Struct { name, .. }) = held {
             let fields = struct_fields(&doc.analysis, name).map(|field| CompletionItem {
@@ -1188,7 +1254,11 @@ pub fn completion(
                     detail: Some(signature(&doc.analysis, method)),
                     ..CompletionItem::default()
                 });
-            return fields.chain(methods).collect();
+            let mut items: Vec<CompletionItem> = fields.chain(methods).collect();
+            if traits.is_some_and(|traits| traits.iter().any(|t| t == ORD)) {
+                items.extend(ord_methods(&items));
+            }
+            return items;
         }
         // a variable of another type offers the builtin methods of its type, and an unknown
         // receiver every builtin method
@@ -1289,6 +1359,21 @@ pub fn completion(
 ///
 /// For example, `len` (`(str | list[T] | map[K, V]).len() -> int`) applies to a `str`, a list,
 /// and a map, and `append` (`list[T].append(item: T)`) only to a list.
+/// Returns the completions of the methods every ordered value has, `min`, `max`, and `clamp`,
+/// leaving out any that `items` already offers, as a struct's own `min` would be.
+fn ord_methods(items: &[CompletionItem]) -> Vec<CompletionItem> {
+    ORD_METHODS
+        .iter()
+        .filter(|method| !items.iter().any(|item| item.label == **method))
+        .map(|method| CompletionItem {
+            label: method.to_string(),
+            kind: Some(CompletionItemKind::METHOD),
+            detail: method_doc(method).map(|doc| doc.signature.to_string()),
+            ..CompletionItem::default()
+        })
+        .collect()
+}
+
 fn method_applies(method: &str, ty: &Type) -> bool {
     let kind = match ty {
         Type::Int => "int",
@@ -1306,7 +1391,9 @@ fn method_applies(method: &str, ty: &Type) -> bool {
     // the methods of the prelude's traits are on every type that implements them
     match method {
         "eq" => return !matches!(kind, "list" | "map" | "socket" | "listener"),
-        "cmp" => return matches!(kind, "int" | "float" | "str" | "bytes"),
+        "cmp" | "min" | "max" | "clamp" => {
+            return matches!(kind, "int" | "float" | "str" | "bytes");
+        }
         "display" => return true,
         _ => {}
     }

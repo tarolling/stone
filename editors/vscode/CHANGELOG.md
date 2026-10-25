@@ -12,6 +12,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- Lambdas such as `|x| x * 2` are highlighted, hover with their type, and offer their
+  parameters in completion inside them; the functions linking makes of them are left out of the
+  outline and of completion.
 - Completion and hover for the string methods `splitlines`, `rfind`, `count`, `replace`,
   `lower`, and `upper`.
 

@@ -503,6 +503,14 @@ mod tests {
     }
 
     #[test]
+    fn a_lambda_keeps_its_body_when_a_later_one_takes_its_place() {
+        // dropping the first `h` moves the last entry's lambda to the line `g`'s had
+        let input = "fn h() -> int:\n    ret 1\n\ng = |x: int| x + 1\nfn h() -> int: ret 2\n\
+                     y = 0\nf = |s: str| s + \"!\"\nprint(g(1), f(\"a\"))\n";
+        assert_eq!(session(input), ("2 a!\n".into(), "".into()));
+    }
+
+    #[test]
     fn a_function_can_be_redefined() {
         let (out, err) = session("fn f() -> int: ret 1\nf()\nfn f() -> int: ret 2\nf()\n");
         assert_eq!((out.as_str(), err.as_str()), ("1\n2\n", ""));

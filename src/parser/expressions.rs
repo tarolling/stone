@@ -1536,14 +1536,93 @@ impl Parser {
         Ok(conj)
     }
 
-    /// Parses a single expression, such as `x + 1 or y`.
+    /// Parses a single expression, such as `x + 1 or y` or `|x| x * 2`.
     ///
     /// ```text
     /// expression:
     ///     | disjunction
+    ///     | lambdef
     /// ```
     pub(super) fn parse_expression(&mut self) -> ParseExprResult {
+        if self.peek().r#type == TokenType::VBar {
+            return self.nested(Self::parse_lambdef);
+        }
+        self.hint_python_lambda();
         self.nested(Self::parse_disjunction)
+    }
+
+    /// Parses a lambda, such as `|x| x * 2`, `|a, b: int| a + b`, or `|| 1`, whose body is one
+    /// expression on the same line.
+    ///
+    /// ```text
+    /// lambdef:
+    ///     | '|' [parameters] '|' expression
+    /// ```
+    pub(super) fn parse_lambdef(&mut self) -> ParseExprResult {
+        let start = self.pos;
+        let fail = |this: &mut Self| {
+            this.pos = start;
+            Err(ParserError {
+                method: "parse_lambdef".to_string(),
+                token: this.peek().r#type.clone(),
+                span: this.peek().span,
+            })
+        };
+        if self.expect(TokenType::VBar).is_none() {
+            return fail(self);
+        }
+        let args = match self.peek().r#type {
+            TokenType::VBar => crate::ast::Arguments { args: vec![] },
+            _ => match self.parse_parameters() {
+                Ok(args) => args,
+                Err(_) => return fail(self),
+            },
+        };
+        if self.expect(TokenType::VBar).is_none() {
+            return fail(self);
+        }
+        match self.peek().r#type {
+            TokenType::Newline | TokenType::Eof => {
+                let span = self.peek().span;
+                self.hint(
+                    span,
+                    "a lambda's body is one expression on the same line, as in '|x| x * 2'",
+                );
+            }
+            TokenType::Colon => {
+                let span = self.peek().span;
+                self.hint(
+                    span,
+                    "a lambda needs no ':' before its body; write '|x| x * 2'",
+                );
+            }
+            _ => {}
+        }
+        let Ok(body) = self.parse_expression() else {
+            return fail(self);
+        };
+        Ok(Box::new(Expr::new(
+            ExprKind::Lambda { args, body },
+            self.span_from(start),
+        )))
+    }
+
+    /// Notes a hint at Python's `lambda x: ...`, where `lambda` is only a name, so the name or
+    /// `:` after it is where parsing stops.
+    fn hint_python_lambda(&mut self) {
+        let mark = self.pos;
+        let tok = self.peek().clone();
+        if tok.r#type != TokenType::Name("lambda".to_string()) {
+            return;
+        }
+        self.pos += 1;
+        if matches!(self.peek().r#type, TokenType::Name(_) | TokenType::Colon) {
+            self.hint(
+                tok.span,
+                "lambdas are written with bars around their parameters, as in '|x| x * 2'",
+            );
+        }
+        self.pos = mark;
     }
 
     /// Parses the expression of a statement, such as `x + 1` in `x = x + 1`.

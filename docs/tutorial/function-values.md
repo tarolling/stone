@@ -48,4 +48,32 @@ When `stone build` compiles a call that passes a function by name, as `players.m
 it makes a copy of `map` that calls `name` directly, so the helpers cost no more than the loop
 they stand for.
 
+## Lambdas
+
+A function that is only needed in one place can be written there, as a lambda: its parameters
+between bars, then one expression, which is what it returns.
+
+```{literalinclude} ../examples/lambdas.stn
+:language: stone
+```
+
+prints
+
+```{literalinclude} ../examples/lambdas.out
+:language: text
+```
+
+A lambda's types come from where it is used, so `|p| p.name` passed to a `list[Player]`'s `map`
+takes a `Player` and gives a `str`. A parameter may still be given a type, as in
+`|a: int, b: int| a + b`, which a lambda kept in a variable needs when nothing else says what it
+takes. `||` starts a lambda that takes nothing, and a lambda's body may hold another lambda, as
+`grid.map` does above. Its body is one expression on the line it starts on; anything longer is a
+named function.
+
+A lambda is a function value like any other, so it can be passed, kept, called, and printed, and
+`stone build` calls it directly, as it does a function passed by name. Unlike a function, it may
+use no variable but its own parameters, not a global and not one of the function it is written
+in, since lambdas do not capture values yet: `|x| x * k` is an error when `k` is a variable. A
+lambda may call functions, make structs and variants, and use modules as any code does.
+
 Next, {doc}`input`.

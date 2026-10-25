@@ -1,0 +1,15 @@
+struct Player:
+    name: str
+    score: int
+
+players = [Player(name="ada", score=7), Player(name="bo", score=12), Player(name="cy", score=3)]
+
+print(players.map(|p| p.name))
+print(players.filter(|p| p.score > 5).map(|p| p.score * 10))
+players.sort_by_key(|p| p.score)
+print(players.max_by_key(|p| p.score).unwrap().name)
+
+add = |a: int, b: int| a + b
+print(add(2, 3), add)
+grid = [[1, 2], [3]]
+print(grid.map(|row| row.map(|x| x * x)))

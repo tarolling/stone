@@ -289,32 +289,26 @@ struct City:
     name: str
     people: int
 
-fn people(c: City) -> int:
-    ret c.people
-
-fn name(c: City) -> str:
-    ret c.name
-
 fn big(c: City) -> bool:
     ret c.people > 500
 
 fn apply(f: fn(int) -> int, x: int) -> int:
     ret f(x)
 
-fn double(x: int) -> int:
-    ret x * 2
-
 cities = [City(name="Oslo", people=700), City(name="Bern", people=130)]
-print(cities.filter(big).map(name), cities.any(big), cities.all(big))
-print(cities.max_by_key(people).unwrap().name)
-cities.sort_by_key(people)
-print(cities.map(name), apply(double, 4))
+print(cities.filter(big).map(|c| c.name), cities.any(big), cities.all(big))
+print(cities.max_by_key(|c| c.people).unwrap().name)
+cities.sort_by_key(|c| c.people)
+print(cities.map(|c| c.name), apply(|x| x * 2, 4))
 ```
 
 A top-level function's name without parentheses is a value of type `fn(params) -> ret`, which
 can be passed, returned, stored in lists and structs, and called: `f(x)`, `fs[0](x)`, or
-`p.run(x)` for a struct field `run` that holds one. There are no lambdas or closures, so write a
-named `fn` for each one, and pass it by name. Builtins (`print`, `str`), methods, and variants
+`p.run(x)` for a struct field `run` that holds one. A lambda writes one in place: `|x| x * 2`,
+`|p| p.name`, `|a: int, b| a + b`, or `|| 1`, its body one expression on the same line, its types
+inferred from where it is used (give a parameter a type when nothing else says it). A lambda may
+use no variable but its own parameters, so `|x| x * k` with a variable `k` is an error (there are
+no closures yet); write a named `fn` taking `k` instead. Builtins (`print`, `str`), methods, and variants
 are not values; wrap them in a function. Lists' helpers take functions: `map`, `filter`, `any`,
 `all`, `sort_by_key` (in place, stable, the key computed once per element), and `min_by_key` and
 `max_by_key` (options: the first least and the last greatest). Functions cannot be compared, and
@@ -401,7 +395,7 @@ assign the result where 'add' is called
 | `del d[k]` | `d.pop(k)` as a statement |
 | `set()` | `map[K, bool]` |
 | `def f(x, n=1)`, `f(n=2)` | every argument, positionally (only structs take names) |
-| `lambda` | a named `fn`, passed by its name, of type `fn(A) -> B`; no closures |
+| `lambda x: x * 2` | `\|x\| x * 2`, which may use only its own parameters (no closures yet) |
 | `map(f, xs)`, `filter(f, xs)`, `any`/`all` with a generator | `xs.map(f)`, `xs.filter(f)`, `xs.any(f)`, `xs.all(f)` |
 | `min(xs, key=f)`, `max(xs, key=f)` | `xs.min_by_key(f)`, `xs.max_by_key(f)`, options (the max is the last of equal ones) |
 | `try`/`except`, `raise` | return a `result` and pass errors on with `?`; `s.parse_int()` instead of `int(s)` |

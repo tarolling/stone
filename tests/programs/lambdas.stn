@@ -1,0 +1,59 @@
+struct Person:
+    name: str
+    age: int
+
+struct Op:
+    name: str
+    run: fn(int) -> int
+
+limit = 3
+
+fn small(x: int) -> bool:
+    ret x < limit
+
+fn apply[T](f: fn(T) -> int, x: T) -> int:
+    ret f(x)
+
+fn twice(f: fn(int) -> int, x: int) -> int:
+    ret f(f(x))
+
+xs = [3, 1, 4, 1, 5]
+print(xs.map(|x| x * 2))
+print(xs.filter(|x| x > 2))
+print(xs.any(|x| x == 4), xs.all(|x| x > 0))
+print(xs.filter(|x| small(x)))
+
+people = [Person(name="ann", age=31), Person(name="bo", age=22), Person(name="cy", age=45)]
+people.sort_by_key(|p| p.age)
+print(people.map(|p| p.name))
+print(people.min_by_key(|p| p.age).unwrap().name)
+print(people.max_by_key(|p: Person| p.name.len()))
+
+add = |a: int, b| a + b
+print(add(2, 3))
+print(add)
+print(apply(|s| s.len(), "four"))
+print(twice(|x| x * x, 3))
+
+fns = [|x: int| x + 1, |x| x * 10]
+print(fns[1](fns[0](4)))
+ops = [Op(name="neg", run=|x| -x), Op(name="sq", run=|x| x * x)]
+for op in ops:
+    print(op.name, op.run(7))
+
+grid = [[1, 2], [3]]
+print(grid.map(|row| row.map(|x| x * 10)))
+words = ["b", "", "ab"]
+print(words.filter(|w| w != "").map(|w| "<{w}>"))
+print(xs.map(|x| some(x)).filter(|o| o.unwrap() > 3))
+pick = || "nothing"
+print(pick())
+
+fn scaled(xs: list[float], k: float) -> list[float]:
+    ret xs.map(|x| x * 2.0) * k
+
+print(scaled([1.5, 2.0], 2.0))
+
+// '?' passes an err on from the lambda itself
+print(["21", "x"].map(|s| ok(s.parse_int()? * 2)))
+print([{"a": 1}, {}].map(|m| some(m.get("a")? + 1)))

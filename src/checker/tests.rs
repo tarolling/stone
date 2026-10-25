@@ -5268,3 +5268,156 @@ fn byte_reads_and_timeouts_have_types() {
         [("expected bytes, found str".to_string(), 2, 25)]
     );
 }
+
+const CAPTURE: &str = "a lambda cannot use 'k', a variable from outside it, since lambdas capture \
+                       nothing yet; write a function that takes 'k' as a parameter instead";
+
+#[test]
+fn a_lambda_takes_its_types_from_where_it_is_passed() {
+    let source = "ys = [1, 2].map(|x| x * 2)\nzs = [\"a\"].filter(|s| s.len() > 0)\n";
+    assert_eq!(type_of_symbol(source, "ys"), "list[int]");
+    assert_eq!(type_of_symbol(source, "zs"), "list[str]");
+}
+
+#[test]
+fn a_lambda_reads_the_fields_of_what_it_is_given() {
+    let source = "struct P:\n    name: str\n    age: int\n\
+                  ps = [P(name=\"a\", age=3)]\nps.sort_by_key(|p| p.age)\nnames = ps.map(|p| p.name)\n\
+                  oldest = ps.max_by_key(|p| p.age)\n";
+    assert_eq!(type_of_symbol(source, "names"), "list[str]");
+    assert_eq!(type_of_symbol(source, "oldest"), "option[P]");
+}
+
+#[test]
+fn a_lambda_s_types_may_come_from_later_arguments() {
+    let source = "fn apply[T](f: fn(T) -> int, x: T) -> int:\n    ret f(x)\n\
+                  n = apply(|s| s.len(), \"abc\")\n";
+    assert_eq!(type_of_symbol(source, "n"), "int");
+}
+
+#[test]
+fn a_lambda_in_a_variable_takes_its_types_from_its_calls() {
+    let source = "f = |a: int, b| a + b\nx = f(1, 2)\n";
+    assert_eq!(type_of_symbol(source, "f"), "fn(int, int) -> int");
+    assert_eq!(type_of_symbol(source, "x"), "int");
+}
+
+#[test]
+fn a_lambda_may_call_functions_and_hold_lambdas() {
+    let source = "fn double(x: int) -> int:\n    ret x * 2\n\
+                  grid = [[1], [2]].map(|row| row.map(|x| double(x)))\n";
+    assert_eq!(type_of_symbol(source, "grid"), "list[list[int]]");
+}
+
+#[test]
+fn a_lambda_cannot_use_a_global() {
+    assert_error("k = 2\nys = [1].map(|x| x * k)\n", CAPTURE, 2, 22);
+}
+
+#[test]
+fn a_lambda_cannot_use_its_function_s_variables() {
+    assert_error(
+        "fn f(xs: list[int], k: int) -> list[int]:\n    ret xs.map(|x| x * k)\n",
+        CAPTURE,
+        2,
+        24,
+    );
+    assert_error(
+        "fn f(xs: list[int]) -> list[int]:\n    k = 2\n    ret xs.map(|x| x * k)\n",
+        CAPTURE,
+        3,
+        24,
+    );
+}
+
+#[test]
+fn a_local_shadowing_a_function_cannot_be_used_from_a_lambda() {
+    assert_error(
+        "fn g(x: int) -> int:\n    ret x\nfn f(k: fn(int) -> int) -> list[int]:\n    \
+         ret [1].map(|x| k(x))\n",
+        CAPTURE,
+        4,
+        21,
+    );
+}
+
+#[test]
+fn a_lambda_cannot_use_self() {
+    let message = "a lambda cannot use 'self', a variable from outside it, since lambdas capture \
+                   nothing yet; write a function that takes 'self' as a parameter instead";
+    assert_error(
+        "struct S:\n    k: int\nimpl S:\n    fn f(self, xs: list[int]) -> list[int]:\n        \
+         ret xs.map(|x| x * self.k)\n",
+        message,
+        5,
+        28,
+    );
+}
+
+#[test]
+fn a_lambda_cannot_use_an_outer_lambda_s_parameter() {
+    let message = "a lambda cannot use 'x', a variable from outside it, since lambdas capture \
+                   nothing yet; write a function that takes 'x' as a parameter instead";
+    assert_error("f = |x: int| |y: int| x + y\n", message, 1, 23);
+}
+
+#[test]
+fn a_lambda_s_parameter_may_share_a_global_s_name() {
+    let source = "k = 2\nys = [1].map(|k| k * 3)\n";
+    assert_eq!(type_of_symbol(source, "ys"), "list[int]");
+}
+
+#[test]
+fn a_lambda_cannot_depend_on_a_type_parameter_yet() {
+    assert_error(
+        "fn g[T](xs: list[T]) -> list[T]:\n    ret xs.map(|x| x)\n",
+        "this lambda would be a value of type fn(T) -> T, which depends on the type parameter \
+         'T'; a lambda cannot have such a type yet, so take the function as a parameter instead",
+        2,
+        16,
+    );
+}
+
+#[test]
+fn a_lambda_needs_no_types() {
+    assert_eq!(errors("ys = [1].map(|x| x + 1)\n"), []);
+}
+
+#[test]
+fn a_question_mark_in_a_lambda_returns_from_the_lambda() {
+    let source = "ys = [\"1\", \"x\"].map(|s| ok(s.parse_int()? * 2))\n";
+    assert_eq!(type_of_symbol(source, "ys"), "list[result[int, str]]");
+}
+
+#[test]
+fn errors_name_a_lambda_as_this_lambda() {
+    assert_error(
+        "fn apply(f: fn(int) -> int, x: int) -> int:\n    ret f(x)\nprint(apply(|x| \"s\", 1))\n",
+        "this lambda returns int, but this is str",
+        3,
+        17,
+    );
+    assert_error(
+        "print([[1]].map(|ys| ys.pop()))\n",
+        "changes to 'ys' are lost when this lambda returns, since parameters are copies",
+        1,
+        22,
+    );
+    assert_error(
+        "fn apply(f: fn(str) -> int, s: str) -> int:\n    ret f(s)\nprint(apply(|s| s.parse_int()?, \"1\"))\n",
+        "'?' returns from this lambda, which returns int, not a result or an option",
+        3,
+        17,
+    );
+}
+
+#[test]
+fn an_unknown_lambda_parameter_suggests_its_type() {
+    assert_error(
+        "struct P:\n    x: int\nf = |p| p.x\n",
+        "the type of this value must be known before its field 'x' is read; give the lambda's \
+         parameter its type, as in '|p: Point| p.x'",
+        3,
+        9,
+    );
+}

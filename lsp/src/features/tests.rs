@@ -1677,3 +1677,40 @@ fn the_net_modules_names_lead_to_its_file_and_cannot_be_renamed() {
         "'connect' is a builtin"
     );
 }
+
+const LAMBDAS: &str = "\
+xs = [1, 2]
+ys = xs.map(|x| x * 2)
+";
+
+#[test]
+fn a_lambda_is_not_outlined_or_offered() {
+    let doc = doc(LAMBDAS);
+    let names: Vec<String> = document_symbols(&doc).into_iter().map(|s| s.name).collect();
+    assert_eq!(names, ["xs", "ys"]);
+    let labels: Vec<String> = completion(&doc, at(3, 1), &MapSources::default())
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(labels.contains(&"ys".to_string()));
+    assert!(!labels.iter().any(|label| label.starts_with("lambda")));
+    // inside the lambda, its parameter is in scope
+    let inside: Vec<String> = completion(&doc, at(2, 17), &MapSources::default())
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(inside.contains(&"x".to_string()));
+}
+
+#[test]
+fn a_lambda_hovers_with_its_type_and_its_parameters_with_theirs() {
+    let doc = doc(LAMBDAS);
+    assert_eq!(
+        hover_text(&doc, at(2, 13)).unwrap(),
+        "```stone\nfn(int) -> int\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(2, 17)).unwrap(),
+        "```stone\n(parameter) x: int\n```"
+    );
+}

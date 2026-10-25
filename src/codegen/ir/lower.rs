@@ -3477,6 +3477,9 @@ impl<'a> Lowerer<'a> {
             return Ok(self.finish(value, into));
         }
         match &expr.kind {
+            ExprKind::Lambda { .. } => {
+                Err("a lambda must be linked before it is lowered".to_string())
+            }
             ExprKind::Try { value } => {
                 let values = self.try_values(value)?;
                 Ok(self.finish(values[0], into))
@@ -7570,6 +7573,7 @@ fn bin_op(op: Operator) -> BinOp {
 /// For example, `i + 1` and `a[i]` make no calls, but `f(i)` and `xs.len()` do.
 fn has_call(expr: &Expr) -> bool {
     match &expr.kind {
+        ExprKind::Lambda { .. } => false,
         // a struct among a string's values may be written by its own `display`
         ExprKind::Call { .. } | ExprKind::JoinedStr { .. } => true,
         ExprKind::Constant { .. } | ExprKind::Name { .. } => false,

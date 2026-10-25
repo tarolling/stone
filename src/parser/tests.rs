@@ -60,17 +60,7 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
             name_span: Span::default(),
             public,
             type_params: type_params.into_iter().map(strip_type_param).collect(),
-            args: Arguments {
-                args: args
-                    .args
-                    .into_iter()
-                    .map(|a| Arg {
-                        arg: a.arg,
-                        span: Span::default(),
-                        annotation: a.annotation.map(strip_type),
-                    })
-                    .collect(),
-            },
+            args: strip_args(args),
             returns: returns.map(strip_type),
             body: strip_all(body),
         },
@@ -319,9 +309,27 @@ fn strip_expr(expr: Expr) -> Expr {
             upper: upper.map(strip_box),
             step: step.map(strip_box),
         },
+        ExprKind::Lambda { args, body } => ExprKind::Lambda {
+            args: strip_args(args),
+            body: strip_box(body),
+        },
         kind @ (ExprKind::Constant { .. } | ExprKind::Name { .. }) => kind,
     };
     kind.into()
+}
+
+fn strip_args(args: Arguments) -> Arguments {
+    Arguments {
+        args: args
+            .args
+            .into_iter()
+            .map(|a| Arg {
+                arg: a.arg,
+                span: Span::default(),
+                annotation: a.annotation.map(strip_type),
+            })
+            .collect(),
+    }
 }
 
 /// Checks that this program parses into assignments and a return:
@@ -3136,4 +3144,128 @@ fn a_string_and_a_bytes_literal_do_not_join() {
         .to_string();
     assert_eq!(error_of("x = \"a\" b\"b\"\n"), (message.clone(), 1, 9));
     assert_eq!(error_of("x = b\"a\" \"b\"\n"), (message, 1, 10));
+}
+
+/// Returns a lambda with the parameters `params`, each a name and maybe a type, and `body`.
+fn lambda(params: &[(&str, Option<TypeExprKind>)], body: Box<Expr>) -> Expr {
+    ExprKind::Lambda {
+        args: Arguments {
+            args: params
+                .iter()
+                .map(|(name, kind)| Arg {
+                    arg: name.to_string(),
+                    span: Span::default(),
+                    annotation: kind.clone().map(|kind| TypeExpr {
+                        kind,
+                        span: Span::default(),
+                    }),
+                })
+                .collect(),
+        },
+        body,
+    }
+    .into()
+}
+
+#[test]
+fn a_lambda_takes_names_between_bars() {
+    assert_eq!(
+        expr_of("|x| x * 2\n"),
+        lambda(&[("x", None)], binop(name("x"), Operator::Multiply, int(2)))
+    );
+}
+
+#[test]
+fn a_lambda_parameter_may_have_a_type() {
+    assert_eq!(
+        expr_of("|a, b: int| a + b\n"),
+        lambda(
+            &[("a", None), ("b", Some(TypeExprKind::Int))],
+            binop(name("a"), Operator::Add, name("b"))
+        )
+    );
+}
+
+#[test]
+fn a_lambda_may_take_nothing() {
+    assert_eq!(expr_of("|| 1\n"), lambda(&[], int(1)));
+}
+
+#[test]
+fn a_lambda_argument_ends_at_its_call() {
+    let call = |func: Box<Expr>, args: Vec<Expr>| -> Box<Expr> {
+        Box::new(
+            ExprKind::Call {
+                func,
+                args,
+                keywords: vec![],
+            }
+            .into(),
+        )
+    };
+    let attr = |value: Box<Expr>, attr: &str| -> Box<Expr> {
+        Box::new(
+            ExprKind::Attribute {
+                value,
+                attr: attr.to_string(),
+                ctx: ExprContext::Load,
+            }
+            .into(),
+        )
+    };
+    let map = call(
+        attr(name("xs"), "map"),
+        vec![lambda(
+            &[("x", None)],
+            binop(name("x"), Operator::Add, int(1)),
+        )],
+    );
+    assert_eq!(
+        expr_of("xs.map(|x| x + 1).len()\n"),
+        *call(attr(map, "len"), vec![])
+    );
+}
+
+#[test]
+fn a_lambda_body_may_be_a_lambda() {
+    assert_eq!(
+        expr_of("|x| |y| y\n"),
+        lambda(&[("x", None)], Box::new(lambda(&[("y", None)], name("y"))))
+    );
+}
+
+#[test]
+fn a_lambda_body_is_on_its_line() {
+    assert_eq!(
+        error_of("f = |x|\n"),
+        (
+            "a lambda's body is one expression on the same line, as in '|x| x * 2'".to_string(),
+            1,
+            8
+        )
+    );
+}
+
+#[test]
+fn a_lambda_body_needs_no_colon() {
+    assert_eq!(
+        error_of("f = |x|: x\n"),
+        (
+            "a lambda needs no ':' before its body; write '|x| x * 2'".to_string(),
+            1,
+            8
+        )
+    );
+}
+
+#[test]
+fn python_lambdas_are_written_with_bars() {
+    assert_eq!(
+        error_of("f = lambda x: x\n"),
+        (
+            "lambdas are written with bars around their parameters, as in '|x| x * 2'".to_string(),
+            1,
+            5
+        )
+    );
 }

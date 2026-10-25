@@ -679,8 +679,14 @@ field that holds one, as `p.run(x)`. A generic function used as a value takes it
 where it is used. Builtins, methods, and variants are not values yet. A function value is never
 compared or used as a map key, and `print` writes it as its type, as `fn(int) -> int`. For
 now, a function named as a value inside a generic function cannot have a type that depends on
-the type parameters, such as `id` at `T`; take it as a parameter instead. Closures, functions
-written inside an expression that capture values around them, are not supported yet.
+the type parameters, such as `id` at `T`; take it as a parameter instead.
+
+A lambda is a function written where it is used: its parameters between bars, then one
+expression on the same line, as `|x| x * 2`, `|a: int, b| a + b`, or `|| 1`. Its types come from
+where it is used, so `[1, 2].map(|x| x * 2)` is a `list[int]`, and a parameter may be given a type
+when nothing says it. A lambda is a function value like a named one, but it may use no variable
+other than its own parameters, so `|x| x * k` is an error when `k` is a variable, global or
+local. Closures, which would capture such values, are not supported yet.
 
 A function never changes, so passing one copies nothing. The methods `map`, `filter`, `any`,
 `all`, `sort_by_key`, `min_by_key`, and `max_by_key` of lists take a function; see

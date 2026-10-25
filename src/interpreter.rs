@@ -4,7 +4,7 @@
 
 use crate::ast::{
     Arg, BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Pattern, PatternKind, Stmt,
-    StmtKind, UnaryOp, target_names,
+    StmtKind, UnaryOp, is_lambda, target_names,
 };
 use crate::checker::{
     Calls, FunctionValue, Handle, Method, Step, collect_assigned, may_name_enum, place,
@@ -86,6 +86,21 @@ struct Function {
     resolved: Rc<Calls>,
 }
 
+/// A function as a value: its linked name and printed type, and, for a lambda, the body it had
+/// when the value was made, since in an interactive session a later entry's lambda can take the
+/// same name.
+#[derive(Clone)]
+pub struct FunctionRef {
+    value: Arc<FunctionValue>,
+    body: Option<Rc<Function>>,
+}
+
+impl std::fmt::Debug for FunctionRef {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.value.fmt(f)
+    }
+}
+
 /// A value a running program works with.
 ///
 /// Lists are values: after `b = a`, appending to `b` leaves `a` unchanged. They share their
@@ -114,7 +129,7 @@ pub enum Value {
     Map(Rc<MapValue>),
     /// A function named as a value, such as `double` in `xs.map(double)`, which prints as its
     /// type.
-    Function(Arc<FunctionValue>),
+    Function(FunctionRef),
     /// A TCP connection, which copies share and which closes once nothing holds it.
     Socket(Rc<RefCell<net::Socket>>),
     /// A TCP port waiting for connections, which copies share and which closes once nothing
@@ -500,7 +515,7 @@ impl Value {
             Value::Str(s) => out.push_str(s),
             Value::Bytes(b) => out.push_str(&stdlib::repr_bytes(b)),
             Value::Unit => {}
-            Value::Function(function) => out.push_str(&function.text),
+            Value::Function(function) => out.push_str(&function.value.text),
             // a handle prints as its type, as a function does
             Value::Socket(_) => out.push_str(Handle::Socket.name()),
             Value::Listener(_) => out.push_str(Handle::Listener.name()),
@@ -1833,6 +1848,7 @@ impl<'out> Interpreter<'out> {
 
     fn eval_expr_unguarded(&mut self, expr: &Expr) -> EvalResult<Value> {
         match &expr.kind {
+            ExprKind::Lambda { .. } => Err("a lambda must be linked before it runs".into()),
             ExprKind::Try { value } => {
                 let value = self.eval_expr(value)?;
                 let Value::Enum(variant) = &value else {
@@ -2109,7 +2125,14 @@ impl<'out> Interpreter<'out> {
                 Ok(items[position].clone())
             }
             ExprKind::Name { id, ctx: _ } => match self.resolved.function_values.get(&expr.span) {
-                Some(function) => Ok(Value::Function(function.clone())),
+                Some(function) => {
+                    let body = match is_lambda(&function.function) {
+                        true => self.functions.get(&function.function).cloned(),
+                        false => None,
+                    };
+                    let value = function.clone();
+                    Ok(Value::Function(FunctionRef { value, body }))
+                }
                 None => self.get_var(id),
             },
             ExprKind::List { elts, ctx: _ } => {
@@ -2496,10 +2519,15 @@ impl<'out> Interpreter<'out> {
         for arg in args {
             values.push(self.eval_expr(arg)?);
         }
+        let name = &function.value.function;
         if let Some((_, names)) = movable {
-            self.move_arguments(args, &names, &function.function, None);
+            self.move_arguments(args, &names, name, None);
         }
-        Ok(self.invoke(&function.function, values, false)?.0)
+        let result = match &function.body {
+            Some(body) => self.invoke_body(name, body.clone(), values, false)?,
+            None => self.invoke(name, values, false)?,
+        };
+        Ok(result.0)
     }
 
     /// Calls a function of an `impl` block as `method` resolved the call at `span`: an associated
@@ -2904,6 +2932,17 @@ impl<'out> Interpreter<'out> {
         let Some(function) = self.functions.get(name).cloned() else {
             return Err(format!("Function '{name}' not found").into());
         };
+        self.invoke_body(name, function, args, keep_self)
+    }
+
+    /// Calls `function`, named `name`, as [`Interpreter::invoke`] does.
+    fn invoke_body(
+        &mut self,
+        name: &str,
+        function: Rc<Function>,
+        args: Vec<Value>,
+        keep_self: bool,
+    ) -> EvalResult<(Value, Option<Value>)> {
         if function.params.len() != args.len() {
             let expected = function.params.len();
             return Err(format!("Function {name} expects {expected} args").into());

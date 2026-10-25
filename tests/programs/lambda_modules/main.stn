@@ -1,0 +1,9 @@
+// lambdas in a library are its own functions, and may call its private ones
+use stats
+use stats.Score
+
+scores = [Score(who="a", points=3), Score(who="b", points=9)]
+print(stats.boosted(scores))
+print(scores.map(|s| s.label()))
+print(scores.filter(|s| stats.boosted([s])[0] > 10).map(|s| s.who))
+print(stats.best(scores))

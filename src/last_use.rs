@@ -394,6 +394,7 @@ fn kill_targets(target: &Expr, live: &mut HashSet<String>) {
 /// Collects every name `expr` mentions, including the names of called functions and methods.
 fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
     match &expr.kind {
+        ExprKind::Lambda { .. } => {}
         ExprKind::Name { .. } if expr.is_unwritten() => {}
         ExprKind::Name { id, .. } => {
             out.names.push(id);

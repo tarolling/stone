@@ -161,6 +161,10 @@
           "match": "="
         },
         {
+          "name": "punctuation.definition.parameters.lambda.stone",
+          "match": "\\|"
+        },
+        {
           "name": "keyword.operator.arithmetic.stone",
           "match": "\\*\\*|\\+|-|\\*|/|%|\\?"
         }

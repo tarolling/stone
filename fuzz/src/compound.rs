@@ -25,7 +25,7 @@
 //!   `<`, picked from the path rather than drawn, so programs without them are unchanged. Results,
 //!   options, and `?` appear there too, in `measured` and `looked_up`, read the same way, and so
 //!   do function values: `plus_one` passed to `through` or held in an `F`, and `grown`, which owns
-//!   its parameter, passed to `each_grown`.
+//!   its parameter, passed to `each_grown`, and lambdas passed or held the same way.
 
 use crate::{Generator, MAX_BLOCK_LEN, MAX_NESTING, Scope};
 use arbitrary::{Result, Unstructured};
@@ -1020,14 +1020,16 @@ impl Generator {
                     _ => format!("looked_up({g}, {}).unwrap_or(0)", (i / 6) % 2),
                 }
             }
-            // a length may also go through function values, held by a parameter, a field, and a
-            // list, once the program declares them, picked by the path as above
+            // a length may also go through function values and lambdas, held by a parameter, a
+            // field, and a list, once the program declares them, picked by the path as above
             Source::Len(i) if self.generic_types => {
                 let path = fill(u, &paths[i].text)?;
                 match (i + path.len()) % 6 {
                     0 => format!("through(plus_one, {path}.len())"),
                     1 => format!("F(f=plus_one).f({path}.len())"),
                     2 => format!("each_grown(grown, [{path}.len(), 1])[-1]"),
+                    3 => format!("through(|x| x * 2, {path}.len())"),
+                    4 => format!("F(f=|x| plus_one(x)).f({path}.len())"),
                     _ => format!("{path}.len()"),
                 }
             }

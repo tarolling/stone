@@ -259,6 +259,12 @@ expressions:
 
 expression:
     | disjunction
+    | lambdef
+
+# a function written where it is used, whose body is one expression on the same line; it may
+# use only its own parameters, whose types may be left out
+lambdef:
+    | '|' [parameters] '|' expression
 
 named_expressions:
     | ','.expression+ [','] 

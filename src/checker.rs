@@ -25,7 +25,7 @@ use std::sync::Arc;
 use crate::ast::{
     Arguments, CompOp, Constant, Expr, ExprKind, Field, Keyword, MatchCase, Mod, Operator, Pattern,
     PatternKind, Stmt, StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Variant,
-    constant_int, target_names,
+    constant_int, is_lambda, target_names,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
@@ -489,6 +489,18 @@ pub fn type_text(ty: &Type) -> String {
             _ => format!("fn({}) -> {}", all(params), type_text(ret)),
         },
         other => other.to_string(),
+    }
+}
+
+/// Returns how an error names the function `name`: quoted, or as `this lambda` for a lambda's,
+/// whose name is not written anywhere.
+///
+/// For example, `function_text("f")` is `'f'`, and `function_text("lambda.2.5")` is
+/// `this lambda`.
+fn function_text(name: &str) -> String {
+    match is_lambda(name) {
+        true => "this lambda".to_string(),
+        false => format!("'{name}'"),
     }
 }
 
@@ -1072,6 +1084,8 @@ struct FunctionScope {
     locals: HashMap<String, usize>,
     ret: Ty,
     ret_written: bool,
+    /// Whether this is a lambda's, which may use no variable but its own parameters.
+    lambda: bool,
 }
 
 /// State for one run of type inference over a module.
@@ -1092,6 +1106,15 @@ struct Inference {
     function_values: Vec<(Span, String, String, Ty)>,
     /// The span of every call of a function value, for [`Analysis::indirect_calls`].
     indirect_calls: HashSet<Span>,
+    /// The parameters and body of each lambda's function not checked yet, with the span of its
+    /// definition, by name. A lambda's body is checked where it is used, once that has given
+    /// its parameters their types.
+    lambdas: HashMap<String, (Arguments, Vec<Stmt>, Span)>,
+    /// The lambdas named so far whose bodies are not checked yet, in order.
+    pending_lambdas: Vec<String>,
+    /// The scope of the code around each lambda being checked, innermost last, whose variables
+    /// the lambda may not use.
+    lambda_outer: Vec<Option<FunctionScope>>,
     diagnostics: Vec<Diagnostic>,
     constraints: Vec<Constraint>,
     /// The type each `==` and `!=` compares (or `in` or `contains` compares a list's elements
@@ -1321,10 +1344,7 @@ impl Inference {
             scope,
         });
         self.symbol_types.push(ty);
-        self.references.push(Reference {
-            span,
-            symbol: self.symbols.len() - 1,
-        });
+        self.add_reference(span, self.symbols.len() - 1);
         self.symbols.len() - 1
     }
 
@@ -1877,11 +1897,16 @@ impl Inference {
                 type_params,
                 args,
                 returns,
+                body,
                 ..
             } = &stmt.kind
             {
                 self.declare_function(name, *name_span, type_params, args, returns.as_ref());
                 self.function_spans.entry(name.clone()).or_insert(stmt.span);
+                if is_lambda(name) {
+                    let lambda = (args.clone(), body.clone(), *name_span);
+                    self.lambdas.insert(name.clone(), lambda);
+                }
             }
         }
         let mut assigned = vec![];
@@ -1902,6 +1927,11 @@ impl Inference {
         for stmt in body {
             self.check_stmt(stmt);
         }
+        // one in code that was not checked, such as a nested function's, is checked alone
+        let mut unchecked: Vec<String> = self.lambdas.keys().cloned().collect();
+        unchecked.sort();
+        self.pending_lambdas.extend(unchecked);
+        self.check_lambdas_from(0);
 
         // top-level code must assign globals before reading them
         let globals = self.globals.keys().cloned().collect();
@@ -1961,7 +1991,14 @@ impl Inference {
         }
         self.scope_params.clear();
         let type_params = self.declare_type_params(name, type_params, true);
-        let (params, ret) = self.signature(args, returns, None);
+        let untyped = self.untyped_params.len();
+        let (params, mut ret) = self.signature(args, returns, None);
+        let lambda = is_lambda(name);
+        if lambda {
+            // a lambda's types are inferred where it is used
+            self.untyped_params.truncate(untyped);
+            ret = self.fresh();
+        }
         self.scope_params.clear();
         // the symbol's type is rebuilt from `params` and `ret` in `finish`
         let symbol = self.add_symbol(name, SymbolKind::Function, name_span, Ty::Unit);
@@ -1972,7 +2009,7 @@ impl Inference {
                 type_params,
                 params,
                 ret,
-                ret_written: returns.is_some(),
+                ret_written: returns.is_some() || lambda,
             },
         );
     }
@@ -3552,7 +3589,10 @@ impl Inference {
     fn check_stmt(&mut self, stmt: &Stmt) {
         let outer = std::mem::take(&mut self.changing_calls);
         let deferred = self.deferred_methods.len();
+        let lambdas = self.pending_lambdas.len();
         self.check_stmt_kind(stmt);
+        // what the statement gives a lambda's parameters is known by its end
+        self.check_lambdas_from(lambdas);
         // the statements of a nested block checked their own calls
         let calls = std::mem::replace(&mut self.changing_calls, outer);
         let mut mentions = vec![];
@@ -3590,6 +3630,10 @@ impl Inference {
                 body,
                 ..
             } => {
+                // checked where it is used
+                if is_lambda(name) {
+                    return;
+                }
                 if self.function.is_some() || self.loop_depth > 0 {
                     self.error(*name_span, "functions can only be defined at the top level");
                     return;
@@ -3614,7 +3658,8 @@ impl Inference {
                             self.error(span, message);
                         } else if ret_written {
                             let message = format!(
-                                "'{name}' returns {}, but this is {}",
+                                "{} returns {}, but this is {}",
+                                function_text(&name),
                                 self.show(&ret),
                                 self.show(&found)
                             );
@@ -3892,6 +3937,7 @@ impl Inference {
             locals: HashMap::new(),
             ret: ret.clone(),
             ret_written,
+            lambda: is_lambda(name),
         });
         for (arg, ty) in args.args.iter().zip(params) {
             if self.local(&arg.arg).is_some() {
@@ -3923,13 +3969,17 @@ impl Inference {
         for arg in args.args.iter().filter(|arg| arg.arg != "self") {
             if let Some(span) = lost_change(body, &arg.arg, &self.methods) {
                 let param = &arg.arg;
-                self.diagnostics.push(Diagnostic::warning(
-                    span,
-                    format!(
+                let message = match is_lambda(name) {
+                    true => format!(
+                        "changes to '{param}' are lost when this lambda returns, since parameters \
+                         are copies"
+                    ),
+                    false => format!(
                         "changes to '{param}' are lost when '{name}' returns, since parameters \
                          are copies; return it and assign the result where '{name}' is called"
                     ),
-                ));
+                };
+                self.diagnostics.push(Diagnostic::warning(span, message));
             }
         }
 
@@ -4381,10 +4431,17 @@ impl Inference {
                 result
             }
             Ty::Var(_) => {
+                let hint = match &base.kind {
+                    ExprKind::Name { id, .. } if self.is_lambda_parameter(id) => format!(
+                        "; give the lambda's parameter its type, as in '|{id}: Point| {id}.{attr}'"
+                    ),
+                    _ => String::new(),
+                };
                 self.error(
                     base.span,
                     format!(
-                        "the type of this value must be known before its field '{attr}' is read"
+                        "the type of this value must be known before its field '{attr}' is \
+                         read{hint}"
                     ),
                 );
                 self.fresh()
@@ -5115,11 +5172,24 @@ impl Inference {
             self.error(expr.span, message.to_string());
             return inner;
         };
-        let (name, ret) = (function.name.clone(), self.shallow(&function.ret));
+        let (lambda, mut ret) = (function.lambda, self.shallow(&function.ret));
+        let name = function_text(&function.name);
         let found_enum = match self.shallow(&found) {
             Ty::Enum(enum_name, _) => Some(enum_name),
             _ => None,
         };
+        // a lambda whose return type nothing gave yet returns what `?` passes on
+        if lambda && matches!(ret, Ty::Var(_)) {
+            let args = match found_enum.as_deref() {
+                Some(RESULT) => vec![self.fresh(), self.fresh()],
+                Some(OPTION) => vec![self.fresh()],
+                _ => vec![],
+            };
+            if let Some(enum_name) = found_enum.as_ref().filter(|_| !args.is_empty()) {
+                self.unify(&ret, &Ty::Enum(enum_name.clone(), args));
+                ret = self.shallow(&ret);
+            }
+        }
         match &ret {
             Ty::Enum(enum_name, args) if enum_name == RESULT => {
                 let error = self.fresh();
@@ -5127,7 +5197,7 @@ impl Inference {
                 if !self.unify(&result, &found) {
                     let message = match found_enum.as_deref() {
                         Some(OPTION) => format!(
-                            "'?' on an option needs '{name}' to return an option, but it returns {}",
+                            "'?' on an option needs {name} to return an option, but it returns {}",
                             self.show(&ret)
                         ),
                         _ => format!("'?' needs a result, found {}", self.show(&found)),
@@ -5137,7 +5207,7 @@ impl Inference {
                     && !self.unify(returned, &error)
                 {
                     let message = format!(
-                        "'{name}' returns {}, so '?' needs an error of type {}, found {}",
+                        "{name} returns {}, so '?' needs an error of type {}, found {}",
                         self.show(&ret),
                         self.show(returned),
                         self.show(&error)
@@ -5150,7 +5220,7 @@ impl Inference {
                 if !self.unify(&option, &found) {
                     let message = match found_enum.as_deref() {
                         Some(RESULT) => format!(
-                            "'?' on a result needs '{name}' to return a result, but it returns {}; \
+                            "'?' on a result needs {name} to return a result, but it returns {}; \
                              add '.ok()' before '?' to drop the error",
                             self.show(&ret)
                         ),
@@ -5165,7 +5235,7 @@ impl Inference {
                     _ => self.show(&ret),
                 };
                 let message = format!(
-                    "'?' returns from '{name}', which returns {returns}, not a result or an option"
+                    "'?' returns from {name}, which returns {returns}, not a result or an option"
                 );
                 self.error(expr.span, message);
             }
@@ -5175,6 +5245,11 @@ impl Inference {
 
     fn infer_kind(&mut self, expr: &Expr) -> Ty {
         match &expr.kind {
+            // linking turns every lambda into a function named as a value
+            ExprKind::Lambda { .. } => {
+                self.error(expr.span, "a lambda must be linked before it is checked");
+                self.fresh()
+            }
             ExprKind::Try { value } => self.infer_try(expr, value),
             // any value is written as text, as `print` writes it
             ExprKind::JoinedStr { values } => {
@@ -5193,6 +5268,8 @@ impl Inference {
                 _ => Ty::Int,
             },
             ExprKind::Name { id, .. } => match self.resolve_name(id) {
+                // reported, with the variable's type so nothing else is
+                _ if let Some(ty) = self.captured(expr.span, id) => ty,
                 Resolved::Variable(symbol) => {
                     self.add_reference(expr.span, symbol);
                     self.symbol_types[symbol].clone()
@@ -5343,7 +5420,13 @@ impl Inference {
                 func,
                 args,
                 keywords,
-            } => self.infer_call(expr, func, args, keywords),
+            } => {
+                let lambdas = self.pending_lambdas.len();
+                let ty = self.infer_call(expr, func, args, keywords);
+                // the call has given its lambdas' parameters their types
+                self.check_lambdas_from(lambdas);
+                ty
+            }
             ExprKind::Attribute { value, attr, .. } => {
                 if let Some(name) = self.enum_named(value) {
                     return self.infer_variant(expr, expr, &name, attr, None);
@@ -5607,6 +5690,12 @@ impl Inference {
             }
             return self.infer_method(call, func, value, attr, args);
         }
+        if let ExprKind::Name { id, .. } = &func.kind
+            && let Some(func_ty) = self.captured(func.span, id)
+        {
+            let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+            return self.infer_value_call(call, func, Some(id), &func_ty, args, &arg_types);
+        }
         let ExprKind::Name { id, .. } = &func.kind else {
             // any other value of a function type, as in `fs[0](x)`
             let func_ty = self.infer(func);
@@ -5673,11 +5762,76 @@ impl Inference {
         };
         let type_args = (0..count).map(|_| self.fresh()).collect();
         let (params, ret) = self.instantiate(span, name, type_args);
-        self.add_reference(span, symbol);
+        if is_lambda(name) {
+            self.pending_lambdas.push(name.to_string());
+        } else {
+            self.add_reference(span, symbol);
+        }
         let ty = Ty::Fn(params, Box::new(ret));
         self.function_values
             .push((span, id.to_string(), name.to_string(), ty.clone()));
         ty
+    }
+
+    /// Checks the body of every lambda named since the first `mark` of
+    /// [`Inference::pending_lambdas`], in order, with nothing of the code around it in scope.
+    fn check_lambdas_from(&mut self, mark: usize) {
+        while self.pending_lambdas.len() > mark {
+            let name = self.pending_lambdas.remove(mark);
+            let Some((args, body, span)) = self.lambdas.remove(&name) else {
+                continue;
+            };
+            let outer = self.function.take();
+            let statement_call = self.statement_call.take();
+            let assigned_call = self.assigned_call.take();
+            let changing_calls = std::mem::take(&mut self.changing_calls);
+            self.lambda_outer.push(outer);
+            self.check_function(&name, span, &args, &body);
+            self.function = self.lambda_outer.pop().flatten();
+            self.statement_call = statement_call;
+            self.assigned_call = assigned_call;
+            self.changing_calls = changing_calls;
+        }
+    }
+
+    /// Returns whether `id` is a parameter of the lambda whose body is being checked.
+    fn is_lambda_parameter(&self, id: &str) -> bool {
+        self.function.as_ref().is_some_and(|scope| {
+            scope.lambda
+                && scope
+                    .locals
+                    .get(id)
+                    .is_some_and(|&symbol| self.symbols[symbol].kind == SymbolKind::Parameter)
+        })
+    }
+
+    /// Reports `id`, used at `span`, if it is a variable from outside the lambda whose body is
+    /// being checked, and returns the variable's type if it is.
+    ///
+    /// For example, in `k = 2` then `xs.map(|x| x * k)`, `k` is the global's, which no lambda can
+    /// use yet.
+    fn captured(&mut self, span: Span, id: &str) -> Option<Ty> {
+        let scope = self.function.as_ref()?;
+        if !scope.lambda || scope.locals.contains_key(id) {
+            return None;
+        }
+        // the nearest scope's, as the name would mean there
+        let symbol = self
+            .lambda_outer
+            .iter()
+            .rev()
+            .flatten()
+            .find_map(|outer| outer.locals.get(id))
+            .or_else(|| self.globals.get(id))
+            .copied()?;
+        self.error(
+            span,
+            format!(
+                "a lambda cannot use '{id}', a variable from outside it, since lambdas capture \
+                 nothing yet; write a function that takes '{id}' as a parameter instead"
+            ),
+        );
+        Some(self.symbol_types[symbol].clone())
     }
 
     /// Checks the call `call` of `func`, a value of type `func_ty` rather than a function by
@@ -7145,11 +7299,15 @@ impl Inference {
             let mut found = vec![];
             self.params_in(ty, &mut found);
             if let Some(&p) = found.first() {
+                let (what, it, function) = match is_lambda(id) {
+                    true => ("this lambda".to_string(), "the function", "a lambda"),
+                    false => (format!("'{id}'"), "it", "a function value"),
+                };
                 errors.push((
                     *span,
                     format!(
-                        "'{id}' would be a value of type {}, which depends on the type parameter \
-                         '{}'; a function value cannot have such a type yet, so take it as a \
+                        "{what} would be a value of type {}, which depends on the type parameter \
+                         '{}'; {function} cannot have such a type yet, so take {it} as a \
                          parameter instead",
                         self.show(ty),
                         self.type_params[p].name
@@ -7807,6 +7965,7 @@ impl<'a> AssignmentCheck<'a> {
     /// Reports every tracked variable `expr` reads that is not assigned yet.
     fn reads(&mut self, expr: &Expr, assigned: &HashSet<String>) {
         match &expr.kind {
+            ExprKind::Lambda { .. } => {}
             ExprKind::Name { .. } if expr.is_unwritten() => {}
             ExprKind::Name { id, .. } => {
                 if self.tracked.contains(id)
@@ -8342,6 +8501,7 @@ impl ParameterUse<'_> {
             return;
         }
         match &expr.kind {
+            ExprKind::Lambda { .. } => {}
             ExprKind::Name { id, .. } => self.read |= id == self.name && !expr.is_unwritten(),
             ExprKind::BoolOp { values, .. } | ExprKind::JoinedStr { values } => {
                 values.iter().for_each(|value| self.expr(value))

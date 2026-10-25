@@ -1,0 +1,16 @@
+pub struct Score:
+    who: str
+    points: int
+
+fn bonus(points: int) -> int:
+    ret points + 5
+
+pub fn boosted(scores: list[Score]) -> list[int]:
+    ret scores.map(|s| bonus(s.points))
+
+pub fn best(scores: list[Score]) -> str:
+    ret scores.max_by_key(|s| s.points).unwrap().who
+
+impl Score:
+    fn label(self) -> str:
+        ret "{self.who}={self.points}"

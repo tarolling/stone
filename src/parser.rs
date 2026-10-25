@@ -416,6 +416,7 @@ fn describe_found(r#type: &TokenType) -> String {
         TokenType::Colon => "':'".to_string(),
         TokenType::Dot => "'.'".to_string(),
         TokenType::Arrow => "'->'".to_string(),
+        TokenType::VBar => "'|'".to_string(),
     }
 }
 

@@ -51,6 +51,9 @@ module stone
          -- can appear only in Subscript
          | Slice(expr? lower, expr? upper, expr? step)
 
+         -- linking turns each into a FunctionDef named as a value
+         | Lambda(arguments args, expr body)
+
     expr_context = Load | Store
 
     boolop = And | Or

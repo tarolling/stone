@@ -12,6 +12,7 @@ use lsp_types::{
     HoverContents, Location, MarkupContent, MarkupKind, Position, PrepareRenameResponse, Range,
     SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
+use stone::ast::is_lambda;
 use stone::checker::{
     Analysis, Symbol, SymbolKind as StoneSymbolKind, Type, prints_bare, struct_display,
 };
@@ -150,11 +151,13 @@ impl Document {
         })
     }
 
-    /// Returns the symbol of the function with this linked name, such as `util.twice`.
+    /// Returns the symbol of the function with this linked name, such as `util.twice`, which a
+    /// lambda's function has none of, since it is only an expression.
     fn function(&self, name: &str) -> Option<&Symbol> {
         self.analysis
             .symbols
             .iter()
+            .filter(|s| !is_lambda(&s.name))
             .find(|s| s.kind == StoneSymbolKind::Function && s.name == name)
     }
 
@@ -965,7 +968,7 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
     let mut outline: Vec<DocumentSymbol> = analysis
         .symbols
         .iter()
-        .filter(|s| s.scope.is_none() && s.span.file == doc.file)
+        .filter(|s| s.scope.is_none() && s.span.file == doc.file && !is_lambda(&s.name))
         .map(|symbol| {
             if symbol.kind == StoneSymbolKind::Enum {
                 let mut outline = document_symbol(doc, symbol, symbol.span);
@@ -1204,7 +1207,7 @@ pub fn completion(
     // locals come first, so they win over a global with the same name
     let mut visible: Vec<&Symbol> = doc.analysis.visible_at(doc.file, pos).collect();
     visible.sort_by_key(|s| s.scope.is_none());
-    for symbol in visible {
+    for symbol in visible.into_iter().filter(|s| !is_lambda(&s.name)) {
         let label = doc.local_name(symbol);
         if items.iter().any(|item| item.label == label) {
             continue;

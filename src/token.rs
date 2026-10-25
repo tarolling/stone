@@ -34,6 +34,8 @@ pub enum TokenType {
     Dot,
     /// The `->` before a function's return type, as in `fn f() -> int:`.
     Arrow,
+    /// A `|` around a lambda's parameters, as in `|x| x * 2`.
+    VBar,
 }
 
 /// A token and the span of source text it was lexed from.

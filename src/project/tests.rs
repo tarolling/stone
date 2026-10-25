@@ -1456,3 +1456,84 @@ fn only_stones_own_modules_can_use_net_sys() {
         5,
     );
 }
+
+/// Returns the name of every function the linked module defines from `files`, outside the
+/// prelude, in order.
+fn defined_functions(files: &[(&str, &str)]) -> Vec<String> {
+    let (entry, source) = files[0];
+    let linked = link(Path::new(entry), source, &sources_of(&files[1..]));
+    assert_eq!(linked.diagnostics, []);
+    let Mod::Module { body } = &linked.module;
+    body.iter()
+        .filter(|stmt| stmt.span.file != FileId::PRELUDE)
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::FunctionDef { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_lambda_becomes_a_function_before_its_statement() {
+    let (_, result) = driver::load(
+        Path::new("main.stn"),
+        "x = 1\nys = [1].map(|x| x + 1)\n",
+        &MapSources::default(),
+    );
+    let checked = result.unwrap();
+    let Mod::Module { body } = &checked.module;
+    let user: Vec<&Stmt> = body
+        .iter()
+        .filter(|stmt| stmt.span.file != FileId::PRELUDE)
+        .collect();
+    let StmtKind::FunctionDef { name, body, .. } = &user[1].kind else {
+        panic!(
+            "expected the lambda's function second, got {:?}",
+            user[1].kind
+        );
+    };
+    assert_eq!(name, "lambda.2.14");
+    assert!(matches!(body[0].kind, StmtKind::Return { value: Some(_) }));
+    let StmtKind::Assign { value, .. } = &user[2].kind else {
+        panic!("expected the assignment last");
+    };
+    let ExprKind::Call { args, .. } = &value.kind else {
+        panic!("expected a call");
+    };
+    assert!(matches!(&args[0].kind, ExprKind::Name { id, .. } if id == "lambda.2.14"));
+}
+
+#[test]
+fn lambdas_inside_lambdas_and_functions_are_lifted_too() {
+    assert_eq!(
+        defined_functions(&[(
+            "main.stn",
+            "fn f(xs: list[list[int]]) -> list[list[int]]:\n    ret xs.map(|row| row.map(|x| x * 2))\n"
+        )]),
+        ["lambda.2.30", "lambda.2.16", "f"]
+    );
+}
+
+#[test]
+fn a_library_lambda_is_named_by_its_module() {
+    assert_eq!(
+        output(&[
+            ("main.stn", "use util\nprint(util.doubled([1, 2]))\n"),
+            (
+                "util.stn",
+                "pub fn doubled(xs: list[int]) -> list[int]:\n    ret xs.map(|x| x * 2)\n"
+            ),
+        ]),
+        "[2, 4]\n"
+    );
+    assert!(
+        defined_functions(&[
+            ("main.stn", "use util\nprint(util.doubled([1, 2]))\n"),
+            (
+                "util.stn",
+                "pub fn doubled(xs: list[int]) -> list[int]:\n    ret xs.map(|x| x * 2)\n"
+            ),
+        ])
+        .contains(&"util.lambda.2.16".to_string())
+    );
+}

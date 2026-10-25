@@ -217,8 +217,11 @@ several types would need its values boxed with a table of their methods.
 A function value is the address of its function, so a call through one is an indirect call,
 but a call that passes a function by its name, as `xs.map(double)` does, compiles to a copy of
 the callee that calls that function directly, as a copy of a generic function does its bound's
-methods, so the list helpers cost no more than the loops they stand for. Closures are future
-work; with value semantics they capture copies, so no closure ever shares a variable.
+methods, so the list helpers cost no more than the loops they stand for. A lambda, such as
+`|x| x * 2`, is a function of its own that linking names, so it costs what a named function
+does, and `xs.map(|x| x * 2)` calls it directly. Lambdas capture nothing yet, using only their
+own parameters; closures are future work, and with value semantics they will capture copies,
+so no closure ever shares a variable, and a lambda that compiles today will mean the same then.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.

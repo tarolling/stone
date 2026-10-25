@@ -1136,6 +1136,7 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
 /// Adds the name of every builtin that `expr` calls to `calls`.
 fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
     match &expr.kind {
+        ExprKind::Lambda { .. } => {}
         ExprKind::Call {
             func,
             args,

@@ -10,8 +10,8 @@ since stone copies values.
 ## Process
 
 1. **Inventory before writing.** Read the whole Python program and list what it uses that stone
-   lacks (see "Not in stone" in the stone guide): classes with inheritance, exceptions, lambdas
-   and closures (a function passed as a value must be a named `fn`), comprehensions, format specs in f-strings, default and keyword arguments,
+   lacks (see "Not in stone" in the stone guide): classes with inheritance, exceptions, closures
+   (a lambda may use only its own parameters), comprehensions, format specs in f-strings, default and keyword arguments,
    sets, and values whose type varies (a variable that is
    sometimes `None`, a name reused for an int and then a float, or a list that mixes types). Find
    arithmetic that could pass 64 bits, such as products in hashes and random number generators,
@@ -132,9 +132,9 @@ print(total)
 | --- | --- |
 | `def f(x, n=10):` | `fn f(x: T, n: int)`, and every call passes `n` |
 | `f(*args)`, `**kwargs` | a `list` parameter, or a struct of options |
-| `lambda` | a named `fn` at the top level, passed by its name |
+| `lambda x: x * 2` | `\|x\| x * 2`, using only its parameters; otherwise a named `fn` |
 | a function argument | a parameter of type `fn(A, B) -> R`, called as `f(a, b)` |
-| a closure that reads a local | pass the value as another argument, since a function value captures nothing |
+| a closure, or a lambda that reads a variable | pass the value as another argument, since neither functions nor lambdas capture anything |
 | `return a, b` | `ret (a, b)`, with `-> tuple[A, B]` |
 | returning `None` on failure | `-> option[T]`, returning `none` or `some(x)` |
 | `raise` | return a `result[T, str]` with `err("message")` and let the caller decide; `os.exit(1)` after printing a message for a fatal error |
@@ -306,19 +306,6 @@ struct Item:
     qty: int
     price: float
 
-fn in_stock(item: Item) -> bool:
-    ret item.qty > 0
-
-fn name(item: Item) -> str:
-    ret item.name
-
-fn price(item: Item) -> float:
-    ret item.price
-
-// the key that puts the highest count first
-fn by_count(entry: tuple[str, int]) -> int:
-    ret -entry[1]
-
 // returns the changed list, and whether the item was found
 fn restock(items: list[Item], name: str, amount: int) -> tuple[list[Item], bool]:
     for i in range(items.len()):
@@ -348,11 +335,12 @@ items, found = restock(items, "pear", 4)
 items, found = restock(items, "kiwi", 1)
 if not found:
     print("no kiwi")
-print("in stock: {", ".join(items.filter(in_stock).map(name))}")
+print("in stock: {", ".join(items.filter(|i| i.qty > 0).map(|i| i.name))}")
 print("total value: {total_value(items)}")
-print("cheapest:", items.min_by_key(price).unwrap())
+print("cheapest:", items.min_by_key(|i| i.price).unwrap())
 ranked = word_counts("the cat and the hat and the bat").items()
-ranked.sort_by_key(by_count)
+// negated, so the highest count comes first
+ranked.sort_by_key(|entry| -entry[1])
 for word, n in ranked:
     print(word, n)
 ```
@@ -365,8 +353,8 @@ The decisions:
   loops over indexes.
 - `qty * price` mixed an int and a float; stone needs `float(item.qty)`.
 - The generator expression became a loop, since there is no `sum`. The comprehension became
-  `filter` and `map`, and `min(key=...)` became `min_by_key`, each with a named function in
-  place of the lambda or the expression; the f-strings kept their braces and lost their `f`.
+  `filter` and `map`, and `min(key=...)` became `min_by_key`, each with a lambda in place of the
+  Python lambda or expression; the f-strings kept their braces and lost their `f`.
 - `counts.get(word, 0) + 1` became a `contains` check, since `counts[word] += 1` needs the key.
 - `sorted(..., key=..., reverse=True)` became `sort_by_key` on the list of `items()`, with a key
   that negates the count, so the highest comes first. Like Python's, the sort is stable, so ties

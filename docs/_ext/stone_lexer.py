@@ -186,7 +186,7 @@ class StoneLexer(RegexLexer):
             (r"\d+\.\d*([eE][+-]?\d+)?|\d+[eE][+-]?\d+", Number.Float),
             (r"\d+", Number.Integer),
             (r"\*\*=|[-+*/%]=|==|!=|<=|>=|\*\*|[-+*/%<>=?]", Operator),
-            (r"[()\[\]{},:.]", Punctuation),
+            (r"[()\[\]{},:.|]", Punctuation),
             (r"[A-Za-z_]\w*", Name),
             (r".", Text),
         ],

@@ -1,0 +1,21 @@
+[6, 2, 8, 2, 10]
+[3, 4, 5]
+true true
+[1, 1]
+['bo', 'ann', 'cy']
+bo
+some(Person(name='ann', age=31))
+5
+fn(int, int) -> int
+4
+81
+50
+neg -7
+sq 49
+[[10, 20], [30]]
+['<b>', '<ab>']
+[some(4), some(5)]
+nothing
+[6.0, 8.0]
+[ok(42), err("invalid literal for int() with base 10: 'x'")]
+[some(2), none]

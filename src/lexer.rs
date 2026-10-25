@@ -595,6 +595,10 @@ impl Lexer {
                 self.advance();
                 TokenType::Dot
             }
+            Some('|') => {
+                self.advance();
+                TokenType::VBar
+            }
             Some(':') if self.holes.last().is_some_and(|hole| hole.depth == 0) => {
                 self.advance();
                 return Err(LexError {
@@ -1076,6 +1080,22 @@ testing(1, 2, 3)"#;
                 TokenType::Colon,
                 TokenType::Number(2),
                 TokenType::RBrace,
+                TokenType::Newline,
+                TokenType::Eof
+            ]
+        );
+    }
+
+    #[test]
+    fn bars_are_tokens() {
+        assert_eq!(
+            types_of("|x| ||\n"),
+            [
+                TokenType::VBar,
+                name("x"),
+                TokenType::VBar,
+                TokenType::VBar,
+                TokenType::VBar,
                 TokenType::Newline,
                 TokenType::Eof
             ]

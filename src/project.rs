@@ -347,10 +347,12 @@ impl Loader<'_> {
     /// Parses a file and adds it to the program, recording its syntax errors.
     fn add(&mut self, path: PathBuf, module: String, source: String) -> FileId {
         let id = FileId(self.files.len() as u32);
-        let (parsed, errors) = match Lexer::with_file(&source, id).lex() {
+        let (mut parsed, errors) = match Lexer::with_file(&source, id).lex() {
             Ok(tokens) => Parser::new(&tokens).parse_recovering(),
             Err(e) => (Mod::Module { body: vec![] }, vec![e.into()]),
         };
+        let Mod::Module { body } = &mut parsed;
+        crate::ast::lift_lambdas(body);
         self.diagnostics.extend(errors);
         self.files.push(SourceFile {
             path,
@@ -1412,6 +1414,8 @@ impl Rewriter<'_> {
             return;
         }
         match &mut expr.kind {
+            // lifted before rewriting, by `lift_lambdas`
+            ExprKind::Lambda { .. } => {}
             ExprKind::Call {
                 func,
                 args,

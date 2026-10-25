@@ -12,6 +12,15 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Lambdas: a function written where it is used, as `xs.map(|x| x * 2)`,
+  `people.sort_by_key(|p| p.age)`, or `|a: int, b| a + b`, its parameters between bars and its
+  body one expression on the same line. Its types are inferred from where it is used, and a
+  parameter may still be given one. A lambda is a function value like a named function, which
+  `stone build` calls directly when it is passed to `map` and the other list helpers, but it may
+  use only its own parameters: a variable from outside it, global or local, is an error, since
+  lambdas capture nothing yet. A lambda inside a generic function cannot have a type that depends
+  on the function's type parameters yet.
+
 - The string methods `replace(old, new)` and `replace(old, new, count)`, `count`, `rfind`
   (an option, as `find` is), `splitlines` (at `\n`, `\r\n`, or `\r`, without the endings), and
   `lower` and `upper`, as Python has them, except that `lower` and `upper` change only ASCII

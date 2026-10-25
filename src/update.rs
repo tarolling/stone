@@ -4,8 +4,8 @@
 //! the release's `stone-<machine>.tar.gz.sha256` (plus the digest GitHub publishes for each asset)
 //! before installing it.
 
-use self_update::ReleaseAsset;
 use self_update::backends::github::Update;
+use self_update::{ReleaseAsset, UpdateStrategy};
 use std::error::Error;
 use std::path::Path;
 use std::process::Command;
@@ -43,29 +43,7 @@ fn pick_asset(assets: &[ReleaseAsset], target: &str) -> Option<ReleaseAsset> {
 /// is older. With `check`, it only reports whether a newer release exists.
 pub fn run(check: bool, tag: Option<&str>) -> Result<(), Box<dyn Error>> {
     let current = env!("CARGO_PKG_VERSION");
-    // the machine this binary was built for, which is the one to download
-    let target = machine();
-    let mut builder = Update::configure();
-    builder
-        .repo_owner("tarolling")
-        .repo_name("stone")
-        .tag_prefix("v")
-        .bin_name("stone")
-        .target(&target)
-        .current_version(current)
-        .asset_matcher({
-            let target = target.clone();
-            move |assets| pick_asset(assets, &target)
-        })
-        .checksum_from_asset(format!("{}.sha256", asset_name(&target)))
-        .verify_binary(check_binary)
-        .show_download_progress(true)
-        .show_output(false)
-        .no_confirm(true);
-    if let Some(tag) = tag {
-        builder.release_tag(tag);
-    }
-    let updater = builder.build()?;
+    let updater = updater(current, tag)?;
 
     if check {
         match updater.is_update_available()? {
@@ -84,6 +62,36 @@ pub fn run(check: bool, tag: Option<&str>) -> Result<(), Box<dyn Error>> {
         println!("stone {current} is up to date");
     }
     Ok(())
+}
+
+/// Configures the updater that replaces stone `current` with the newest release, or with `tag`.
+fn updater(current: &str, tag: Option<&str>) -> self_update::Result<Update> {
+    // the machine this binary was built for, which is the one to download
+    let target = machine();
+    let mut builder = Update::configure();
+    builder
+        .repo_owner("tarolling")
+        .repo_name("stone")
+        .tag_prefix("v")
+        .bin_name("stone")
+        .target(&target)
+        .current_version(current)
+        // the default prefers the newest semver-compatible release, and for 0.x every minor
+        // version is a breaking one, so it would stop at the last patch of the current minor
+        .update_strategy(UpdateStrategy::Latest)
+        .asset_matcher({
+            let target = target.clone();
+            move |assets| pick_asset(assets, &target)
+        })
+        .checksum_from_asset(format!("{}.sha256", asset_name(&target)))
+        .verify_binary(check_binary)
+        .show_download_progress(true)
+        .show_output(false)
+        .no_confirm(true);
+    if let Some(tag) = tag {
+        builder.release_tag(tag);
+    }
+    builder.build()
 }
 
 /// Runs the downloaded `stone --version` before it replaces this one, so a binary that cannot
@@ -105,6 +113,7 @@ fn check_binary(exe: &Path) -> self_update::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use self_update::UpdateConfig;
 
     fn asset(name: &str) -> ReleaseAsset {
         ReleaseAsset::new(name, format!("https://example.com/{name}"))
@@ -136,6 +145,16 @@ mod tests {
         ];
         let picked = pick_asset(&assets, target).unwrap();
         assert_eq!(picked.name(), "stone-x86_64-linux.tar.gz");
+    }
+
+    #[test]
+    fn updates_to_the_newest_release_across_minor_versions() {
+        // semver calls 0.2 -> 0.3 incompatible, which once took 0.2.6 only to 0.2.7 (issue #5)
+        let updater = updater("0.2.6", None).unwrap();
+        assert_eq!(
+            UpdateConfig::update_strategy(&updater),
+            UpdateStrategy::Latest
+        );
     }
 
     #[test]

@@ -65,6 +65,12 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `cannot unwrap err: invalid literal for int() with base 10: 'x'`, written as `print` writes it,
   and a failed `unwrap_err()` of an `ok` shows the value, as in `cannot unwrap_err ok: 12`.
 
+### Fixed
+
+- `stone update` installs the newest release. It used to stop at the newest patch of the
+  installed minor version, so 0.2.6 updated only to 0.2.7 while 0.3.1 was out, though
+  `stone update --check` named 0.3.1.
+
 ## [0.3.3] - 2026-10-21
 
 ### Added

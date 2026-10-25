@@ -12,10 +12,12 @@
 
 use super::BuiltinDoc;
 use super::fs::{INVALID_TEXT, io_message, is_text, message};
+use std::ffi::{c_int, c_short};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket,
 };
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 /// The name a program imports the module by, as in `use net`.
@@ -60,6 +62,9 @@ pub const INVALID_ADDRESS: &str = "invalid address";
 /// The reason an error gives for an exchange no reply came back to in time.
 pub const TIMED_OUT: &str = "timed out";
 
+/// The error `read_exact` gives when the connection closes before the bytes it waits for arrive.
+pub const CLOSED_EARLY: &str = "connection closed early";
+
 /// The error a socket's methods give once it is closed.
 pub const SOCKET_CLOSED: &str = "socket is closed";
 
@@ -101,6 +106,84 @@ fn address_of(address: &[i64], port: i64, name: &str) -> Result<SocketAddr, Stri
     socket_address(address, port).ok_or_else(|| message(INVALID_ADDRESS, name))
 }
 
+/// Returns `seconds` in whole milliseconds, rounded up and at most 2^31 - 1, or -1 for zero, a
+/// negative number, or nan, which wait forever, as `set_timeout` and `net.stn`'s
+/// `milliseconds` count them.
+///
+/// For example, `timeout_ms(0.0015)` is 2 and `timeout_ms(-1.0)` is -1.
+pub fn timeout_ms(seconds: f64) -> i64 {
+    // written as `not (seconds > 0.0)`, so nan waits forever too
+    if seconds.partial_cmp(&0.0) != Some(std::cmp::Ordering::Greater) {
+        return -1;
+    }
+    let ms = seconds * 1000.0;
+    if ms >= 2147483647.0 {
+        return 2147483647;
+    }
+    let whole = ms as i64;
+    match (whole as f64) < ms {
+        true => whole + 1,
+        false => whole,
+    }
+}
+
+/// The `poll` events of a descriptor ready to read and ready to write.
+const POLLIN: c_short = 1;
+const POLLOUT: c_short = 4;
+
+/// The `struct pollfd` libc's `poll` takes.
+#[repr(C)]
+struct PollFd {
+    fd: c_int,
+    events: c_short,
+    revents: c_short,
+}
+
+/// `poll`'s count of descriptors, which is `nfds_t`: an `unsigned long` on Linux, and an
+/// `unsigned int` on macOS.
+#[cfg(target_os = "macos")]
+type NfdsT = std::ffi::c_uint;
+#[cfg(not(target_os = "macos"))]
+type NfdsT = std::ffi::c_ulong;
+
+unsafe extern "C" {
+    fn poll(fds: *mut PollFd, nfds: NfdsT, timeout: c_int) -> c_int;
+}
+
+/// Waits until the descriptor `fd` is ready for `events`, for at most `timeout` milliseconds in
+/// all, or forever if it is -1, failing with [`TIMED_OUT`] when the time runs out, as compiled
+/// code's `.Lnet_wait` does: a signal that cuts the wait short starts it again with the time
+/// left.
+fn wait(fd: c_int, events: c_short, timeout: i64) -> Result<(), String> {
+    if timeout < 0 {
+        return Ok(());
+    }
+    let deadline = Instant::now() + Duration::from_millis(timeout as u64);
+    loop {
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            return Err(TIMED_OUT.to_string());
+        }
+        let ms = left.as_nanos().div_ceil(1_000_000) as c_int;
+        let mut pollfd = PollFd {
+            fd,
+            events,
+            revents: 0,
+        };
+        // SAFETY: pollfd is one valid, writable `struct pollfd` for the whole call
+        let ready = unsafe { poll(&mut pollfd, 1, ms) };
+        if ready > 0 {
+            return Ok(());
+        }
+        if ready < 0 {
+            let error = std::io::Error::last_os_error();
+            if error.kind() != ErrorKind::Interrupted {
+                return Err(reason(&error));
+            }
+        }
+    }
+}
+
 /// Returns the reason alone for an I/O error on a connection, such as `broken pipe`.
 fn reason(error: &std::io::Error) -> String {
     let full = io_message(error, "");
@@ -116,6 +199,8 @@ pub struct Socket {
     buffer: Vec<u8>,
     /// Whether the other end has closed the connection, so nothing more will arrive.
     ended: bool,
+    /// How many milliseconds each wait may take, or -1 to wait forever.
+    timeout: i64,
 }
 
 impl Socket {
@@ -124,7 +209,13 @@ impl Socket {
             stream: Some(stream),
             buffer: vec![],
             ended: false,
+            timeout: -1,
         }
+    }
+
+    /// Makes each later wait give up after `seconds`, counted by [`timeout_ms`].
+    pub fn set_timeout(&mut self, seconds: f64) {
+        self.timeout = timeout_ms(seconds);
     }
 
     fn stream(&mut self) -> Result<&mut TcpStream, String> {
@@ -135,9 +226,35 @@ impl Socket {
 
     /// Sends all of `text`, returning the number of bytes sent.
     pub fn send(&mut self, text: &str) -> Result<i64, String> {
+        self.send_bytes(text.as_bytes())
+    }
+
+    /// Sends all of `data`, returning the number of bytes sent. With a timeout, the socket sends
+    /// without blocking, waiting for room before each part.
+    pub fn send_bytes(&mut self, data: &[u8]) -> Result<i64, String> {
+        let timeout = self.timeout;
         let stream = self.stream()?;
-        stream.write_all(text.as_bytes()).map_err(|e| reason(&e))?;
-        Ok(text.len() as i64)
+        if timeout < 0 {
+            stream.write_all(data).map_err(|e| reason(&e))?;
+            return Ok(data.len() as i64);
+        }
+        stream.set_nonblocking(true).map_err(|e| reason(&e))?;
+        let mut sent = 0;
+        let outcome = loop {
+            if sent == data.len() {
+                break Ok(sent as i64);
+            }
+            if let Err(e) = wait(stream.as_raw_fd(), POLLOUT, timeout) {
+                break Err(e);
+            }
+            match stream.write(&data[sent..]) {
+                Ok(n) => sent += n,
+                Err(e) if matches!(e.kind(), ErrorKind::WouldBlock | ErrorKind::Interrupted) => {}
+                Err(e) => break Err(reason(&e)),
+            }
+        };
+        stream.set_nonblocking(false).map_err(|e| reason(&e))?;
+        outcome
     }
 
     /// Waits for more data, adding it to the buffer, and returns whether any came: none comes
@@ -147,7 +264,9 @@ impl Socket {
             return Ok(false);
         }
         let mut chunk = vec![0; READ_SIZE];
+        let timeout = self.timeout;
         let stream = self.stream()?;
+        wait(stream.as_raw_fd(), POLLIN, timeout)?;
         let n = loop {
             match stream.read(&mut chunk) {
                 Ok(n) => break n,
@@ -220,6 +339,40 @@ impl Socket {
         self.take(n)
     }
 
+    /// Returns what has arrived, up to `max` bytes, waiting for something if nothing has, or
+    /// nothing once the other end has closed the connection or for a `max` of 0 or less.
+    pub fn read_bytes(&mut self, max: i64) -> Result<Vec<u8>, String> {
+        self.stream()?;
+        if max <= 0 {
+            return Ok(vec![]);
+        }
+        if self.buffer.is_empty() {
+            self.receive()?;
+        }
+        let n = self.buffer.len().min(max as usize);
+        Ok(self.buffer.drain(..n).collect())
+    }
+
+    /// Returns exactly the next `n` bytes, waiting for them, or fails with [`CLOSED_EARLY`] if
+    /// the other end closes the connection first, leaving what did arrive to read.
+    pub fn read_exact(&mut self, n: i64) -> Result<Vec<u8>, String> {
+        self.stream()?;
+        let n = n.max(0) as usize;
+        while self.buffer.len() < n {
+            if !self.receive()? {
+                return Err(CLOSED_EARLY.to_string());
+            }
+        }
+        Ok(self.buffer.drain(..n).collect())
+    }
+
+    /// Reads until the other end closes the connection, returning every byte that arrived.
+    pub fn read_all_bytes(&mut self) -> Result<Vec<u8>, String> {
+        self.stream()?;
+        while self.receive()? {}
+        Ok(std::mem::take(&mut self.buffer))
+    }
+
     /// Closes the connection, so its methods fail from now on.
     pub fn close(&mut self) {
         if let Some(stream) = self.stream.take() {
@@ -261,6 +414,8 @@ pub struct Listener {
     listener: Option<TcpListener>,
     /// The port it listens on, which stays known after `close`.
     port: i64,
+    /// How many milliseconds `accept` may wait, or -1 to wait forever.
+    timeout: i64,
 }
 
 impl Listener {
@@ -270,6 +425,7 @@ impl Listener {
             .listener
             .as_ref()
             .ok_or_else(|| LISTENER_CLOSED.to_string())?;
+        wait(listener.as_raw_fd(), POLLIN, self.timeout)?;
         loop {
             match listener.accept() {
                 Ok((stream, _)) => return Ok(Socket::new(stream)),
@@ -277,6 +433,11 @@ impl Listener {
                 Err(e) => return Err(reason(&e)),
             }
         }
+    }
+
+    /// Makes each later `accept` give up after `seconds`, counted by [`timeout_ms`].
+    pub fn set_timeout(&mut self, seconds: f64) {
+        self.timeout = timeout_ms(seconds);
     }
 
     /// Returns the port it listens on.
@@ -290,10 +451,18 @@ impl Listener {
     }
 }
 
-/// Connects to `port` at `address`.
-pub fn connect(address: &[i64], port: i64, name: &str) -> Result<Socket, String> {
+/// Connects to `port` at `address`, waiting at most `timeout` milliseconds, or as long as the
+/// system waits if it is -1.
+pub fn connect(address: &[i64], port: i64, name: &str, timeout: i64) -> Result<Socket, String> {
     let to = address_of(address, port, name)?;
-    let stream = TcpStream::connect(to).map_err(|e| io_message(&e, name))?;
+    let connected = match timeout {
+        ..0 => TcpStream::connect(to),
+        ms => TcpStream::connect_timeout(&to, Duration::from_millis(ms as u64)),
+    };
+    let stream = connected.map_err(|e| match e.kind() {
+        ErrorKind::TimedOut if e.raw_os_error().is_none() => message(TIMED_OUT, name),
+        _ => io_message(&e, name),
+    })?;
     Ok(Socket::new(stream))
 }
 
@@ -308,6 +477,7 @@ pub fn listen(address: &[i64], port: i64, name: &str) -> Result<Listener, String
     Ok(Listener {
         listener: Some(listener),
         port: port as i64,
+        timeout: -1,
     })
 }
 
@@ -391,6 +561,35 @@ mod tests {
     }
 
     #[test]
+    fn timeouts_round_up_to_milliseconds() {
+        assert_eq!(timeout_ms(0.0015), 2);
+        assert_eq!(timeout_ms(2.5), 2500);
+        assert_eq!(timeout_ms(1e-9), 1);
+        assert_eq!(timeout_ms(0.0), -1);
+        assert_eq!(timeout_ms(-3.0), -1);
+        assert_eq!(timeout_ms(f64::NAN), -1);
+        assert_eq!(timeout_ms(1e300), 2147483647);
+        assert_eq!(timeout_ms(f64::INFINITY), 2147483647);
+    }
+
+    #[test]
+    fn a_socket_waits_no_longer_than_its_timeout() {
+        let mut listener = listen(&[127, 0, 0, 1], 0, "").unwrap();
+        listener.set_timeout(0.01);
+        assert_eq!(listener.accept().err(), Some(TIMED_OUT.to_string()));
+        let mut client = connect(&[127, 0, 0, 1], listener.port(), "", 1000).unwrap();
+        let mut server = listener.accept().unwrap();
+        server.set_timeout(0.01);
+        assert_eq!(server.read_bytes(4), Err(TIMED_OUT.to_string()));
+        client.send_bytes(b"\x00\xffab").unwrap();
+        assert_eq!(server.read_exact(2), Ok(vec![0, 255]));
+        assert_eq!(server.read_bytes(9), Ok(b"ab".to_vec()));
+        client.close();
+        assert_eq!(server.read_exact(1), Err(CLOSED_EARLY.to_string()));
+        assert_eq!(server.read_all_bytes(), Ok(vec![]));
+    }
+
+    #[test]
     fn a_read_holds_back_an_unfinished_character() {
         assert_eq!(complete_prefix(b"ab"), 2);
         assert_eq!(complete_prefix(b"ab\xc3"), 2);
@@ -407,7 +606,7 @@ mod tests {
     fn a_socket_reads_lines_and_text_over_loopback() {
         let mut listener = listen(&[127, 0, 0, 1], 0, "127.0.0.1:0").unwrap();
         assert!(listener.port() > 0);
-        let mut client = connect(&[127, 0, 0, 1], listener.port(), "here").unwrap();
+        let mut client = connect(&[127, 0, 0, 1], listener.port(), "here", -1).unwrap();
         let mut server = listener.accept().unwrap();
         assert_eq!(client.send("one\r\ntwo\nthree"), Ok(14));
         client.close();
@@ -427,11 +626,11 @@ mod tests {
         // a port the system gave out and took back, so nothing listens there
         let port = listen(&[127, 0, 0, 1], 0, "").unwrap().port();
         assert_eq!(
-            connect(&[127, 0, 0, 1], port, "localhost:1").err(),
+            connect(&[127, 0, 0, 1], port, "localhost:1", -1).err(),
             Some("connection refused: 'localhost:1'".to_string())
         );
         assert_eq!(
-            connect(&[1, 2, 3], 80, "bad:80").err(),
+            connect(&[1, 2, 3], 80, "bad:80", -1).err(),
             Some("invalid address: 'bad:80'".to_string())
         );
     }

@@ -150,7 +150,8 @@ impl RcKind {
     /// is `None`.
     pub fn of(ty: &Type) -> Option<RcKind> {
         match ty {
-            Type::Str => Some(RcKind::Str),
+            // bytes are laid out as strings are
+            Type::Str | Type::Bytes => Some(RcKind::Str),
             // a map is a list of its entries
             Type::List(_) | Type::Map(..) => Some(RcKind::List),
             // a handle is laid out as an enum value whose tag says what it is
@@ -319,6 +320,8 @@ pub enum Inst {
     StoreGlobal { name: String, src: Operand },
     /// The address of a string literal.
     StrAddr { dst: VReg, text: String },
+    /// The address of a bytes literal, laid out as a string is.
+    BytesAddr { dst: VReg, bytes: Vec<u8> },
     /// The length of a list.
     ListLen { dst: VReg, list: Operand },
     /// `dst = list[index]`, counting a negative index from the end and failing when out of range.
@@ -482,6 +485,7 @@ impl Inst {
             | Inst::Compare { dst, .. }
             | Inst::LoadGlobal { dst, .. }
             | Inst::StrAddr { dst, .. }
+            | Inst::BytesAddr { dst, .. }
             | Inst::ListLen { dst, .. }
             | Inst::ListLoad { dst, .. }
             | Inst::ListGet { dst, .. }
@@ -531,7 +535,7 @@ impl Inst {
             Inst::Binary { lhs, rhs, .. }
             | Inst::FloatBinary { lhs, rhs, .. }
             | Inst::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
-            Inst::LoadGlobal { .. } | Inst::StrAddr { .. } => vec![],
+            Inst::LoadGlobal { .. } | Inst::StrAddr { .. } | Inst::BytesAddr { .. } => vec![],
             Inst::ListLen { list, .. } | Inst::ListData { list, .. } => vec![*list],
             Inst::Packed {
                 kernel, out, len, ..
@@ -781,6 +785,9 @@ impl fmt::Display for Inst {
             }
             Inst::StoreGlobal { name, src } => write!(f, "store_global {name}, {src}"),
             Inst::StrAddr { dst, text } => write!(f, "{dst} = str {text:?}"),
+            Inst::BytesAddr { dst, bytes } => {
+                write!(f, "{dst} = {}", crate::stdlib::repr_bytes(bytes))
+            }
             Inst::ListLen { dst, list } => write!(f, "{dst} = len {list}"),
             Inst::ListLoad { dst, list, index } => {
                 write!(f, "{dst} = list_load {list}, {index}")

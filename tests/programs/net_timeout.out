@@ -1,0 +1,6 @@
+err('timed out')
+err('timed out') err('timed out') err('timed out')
+ok(some('hi'))
+ok(some('again'))
+done
+true

@@ -110,6 +110,20 @@ print("x = " + str(1.5) + ", done = " + str(true))   // x = 1.5, done = true
 print(str([1, 2]) + str(some("a")))                  // [1, 2]some('a')
 ```
 
+## `bytes`
+
+```text
+bytes(values: list[int]) -> bytes
+```
+
+Returns the bytes whose values are `values`, each from 0 to 255. A value outside that range
+stops the program with `byte out of range (value 300)`, pointing at the call. See
+[Bytes](types.md#bytes) for the type itself.
+
+```stone
+print(bytes([104, 105, 0]))   // b'hi\x00'
+```
+
 ## `input`
 
 ```text
@@ -173,10 +187,10 @@ own is an error. Method names are not reserved, so they also work as ordinary na
 ### `len`
 
 ```text
-(str | list[T] | map[K, V]).len() -> int
+(str | bytes | list[T] | map[K, V]).len() -> int
 ```
 
-Returns the number of bytes in a string, elements in a list, or entries in a map.
+Returns the number of bytes in a string or bytes, elements in a list, or entries in a map.
 
 ```stone
 print("stone".len(), [1, 2, 3].len(), {"a": 1}.len())   // 5 3 1
@@ -501,6 +515,31 @@ would stop with.
 print("2.5".parse_float(), "x".parse_float())   // ok(2.5) err("could not convert string to float: 'x'")
 ```
 
+### `bytes`
+
+```text
+str.bytes() -> bytes
+```
+
+Returns the string's UTF-8 bytes. It copies nothing, since a string's bytes never change.
+
+```stone
+print("café".bytes())   // b'caf\xc3\xa9'
+```
+
+### `text`
+
+```text
+bytes.text() -> result[str, str]
+```
+
+Returns `ok` of the bytes as a string if they are UTF-8 text with no 0 byte, which a string
+cannot hold, or `err("not valid UTF-8 text")`.
+
+```stone
+print(b"caf\xc3\xa9".text(), b"\xff".text())   // ok('café') err('not valid UTF-8 text')
+```
+
 ### `is_some`
 
 ```text
@@ -607,10 +646,11 @@ print(r.ok(), r.err())   // some(7) none
 ### `contains`
 
 ```text
-str.contains(text: str) -> bool | list[T].contains(value: T) -> bool | map[K, V].contains(key: K) -> bool
+str.contains(text: str) -> bool | bytes.contains(part: bytes) -> bool | list[T].contains(value: T) -> bool | map[K, V].contains(key: K) -> bool
 ```
 
-Returns whether the string has `text` in it (the empty string is in every string), the list an
+Returns whether the string has `text` in it (the empty string is in every string), the bytes
+`part` in them, the list an
 element equal to `value`, or the map an entry for `key`. A list compares its elements with `value`
 in order, as `value == element` does, and stops at the first that is equal, so its elements must
 be values `==` can compare, and a struct with its own `eq` compares by it. The operators `in` and
@@ -802,6 +842,71 @@ Closes the connection, or stops listening, now. A socket or listener also closes
 right after the last statement that uses it, so `close` is only needed to close one sooner, as
 when the other end reads until the connection closes. Once closed, a socket's methods return
 `err("socket is closed")`, and `accept` returns `err("listener is closed")`.
+
+### `set_timeout`
+
+```text
+(socket | listener).set_timeout(seconds: float)
+```
+
+Makes each later wait on the socket or listener give up after `seconds` with `err("timed out")`:
+waiting for data to read, for room to send, or for a connection to accept. The time is per wait,
+so `read_all` keeps going for as long as data keeps arriving. It counts in whole milliseconds,
+rounded up, and zero, a negative number, or nan waits forever, as a new socket or listener does.
+
+```stone
+use net
+
+l = net.listen("127.0.0.1", 0).unwrap()
+l.set_timeout(0.1)
+print(l.accept())   // err('timed out'), since nothing connects
+```
+
+### `send_bytes`
+
+```text
+socket.send_bytes(data: bytes) -> result[int, str]
+```
+
+Sends all of `data` over the connection, as `send` sends text, and returns `ok` of the number
+of bytes sent.
+
+### `read_bytes`
+
+```text
+socket.read_bytes(max: int) -> result[bytes, str]
+```
+
+Waits for data from the connection and returns `ok` of what has arrived, at most `max` bytes,
+or `ok(b"")` once the other end has closed it, or at once for a `max` of 0 or less. Text and
+byte reads take from the same data, so a protocol can read a line of headers with `read_line`
+and then a body with `read_exact`.
+
+### `read_exact`
+
+```text
+socket.read_exact(n: int) -> result[bytes, str]
+```
+
+Waits for exactly `n` bytes and returns `ok` of them, or `err("connection closed early")` if the
+other end closes the connection first, leaving the bytes that did arrive to read.
+
+```stone
+use net
+
+fn body(c: socket) -> result[bytes, str]:
+    length = c.read_line()?.unwrap_or("0").parse_int()?
+    ret c.read_exact(length)
+```
+
+### `read_all_bytes`
+
+```text
+socket.read_all_bytes() -> result[bytes, str]
+```
+
+Reads from the connection until the other end closes it, and returns `ok` of every byte that
+arrived.
 
 ## The `os` module
 
@@ -1295,6 +1400,39 @@ for i in range(3):
 print(fs.read_lines("log.txt"))   // ok(['line 0', 'line 1', 'line 2'])
 ```
 
+### `fs.read_bytes`
+
+```text
+fs.read_bytes(path: str) -> result[bytes, str]
+```
+
+Returns `ok` of every byte of the file at `path`, text or not, or `err` of a message.
+
+### `fs.write_bytes`
+
+```text
+fs.write_bytes(path: str, data: bytes) -> result[int, str]
+```
+
+Writes `data` to the file at `path`, as `fs.write` writes text, and returns `ok` of the number of
+bytes written, or `err` of a message.
+
+### `fs.append_bytes`
+
+```text
+fs.append_bytes(path: str, data: bytes) -> result[int, str]
+```
+
+Writes `data` to the end of the file at `path`, as `fs.append` appends text.
+
+```stone
+use fs
+
+fs.write_bytes("data.bin", b"\x00\x01").unwrap()
+fs.append_bytes("data.bin", bytes([255])).unwrap()
+print(fs.read_bytes("data.bin"))   // ok(b'\x00\x01\xff')
+```
+
 ### `fs.list_dir`
 
 ```text
@@ -1422,6 +1560,16 @@ net.connect(host: str, port: int) -> result[socket, str]
 Connects to `port` on `host`, trying each of the host's addresses in the order
 [Finding addresses](#finding-addresses) gives them until one connects, and returns `ok` of the
 socket, or `err` of the last address's error.
+
+### `net.connect_timeout`
+
+```text
+net.connect_timeout(host: str, port: int, seconds: float) -> result[socket, str]
+```
+
+Connects as `net.connect` does, but gives each address at most `seconds`, counted as
+`set_timeout` counts them, after which it is `err("timed out: 'host:port'")`.
+The socket it returns waits forever until its own `set_timeout`.
 
 ### `net.listen`
 

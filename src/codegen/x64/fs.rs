@@ -8,12 +8,14 @@
 
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{
-    DIR_BUFFER, FILE_BUFFER, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE,
-    NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags, SOCKET_CLOSED_CODE, TIMED_OUT_CODE,
-    immortal_string,
+    CLOSED_EARLY_CODE, DIR_BUFFER, FILE_BUFFER, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE,
+    LISTENER_CLOSED_CODE, NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags, SOCKET_CLOSED_CODE,
+    TIMED_OUT_CODE, immortal_string,
 };
 use crate::stdlib::fs::{INVALID_TEXT, NULL_IN_PATH, errors};
-use crate::stdlib::net::{INVALID_ADDRESS, LISTENER_CLOSED, SOCKET_CLOSED, TIMED_OUT};
+use crate::stdlib::net::{
+    CLOSED_EARLY, INVALID_ADDRESS, LISTENER_CLOSED, SOCKET_CLOSED, TIMED_OUT,
+};
 use crate::stdlib::os::NULL_IN_COMMAND;
 
 /// `openat`'s directory for a path relative to the working directory.
@@ -54,8 +56,8 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         errors_and_results(r#gen, !net.is_empty());
     }
     path_check(r#gen);
-    // os.run and the net routines check text as fs.read does
-    let checks_text = uses("stone.os_run") || !net.is_empty();
+    // os.run, the net routines, and bytes' text() check text as fs.read does
+    let checks_text = uses("stone.os_run") || uses("stone.bytes_text") || !net.is_empty();
     if checks_text {
         utf8_check(r#gen);
     }
@@ -77,14 +79,20 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }) {
         open(r#gen);
     }
-    if uses("stone.fs_read") || uses("stone.fs_read_lines") {
+    if uses("stone.fs_read") || uses("stone.fs_read_lines") || uses("stone.fs_read_bytes") {
         read_all(r#gen, flags.read);
         if !checks_text {
             utf8_check(r#gen);
         }
     }
     if uses("stone.fs_read") {
-        read(r#gen);
+        read(r#gen, "stone.fs_read", true);
+    }
+    if uses("stone.fs_read_bytes") {
+        read(r#gen, "stone.fs_read_bytes", false);
+    }
+    if uses("stone.bytes_text") {
+        bytes_text(r#gen);
     }
     if uses("stone.fs_read_lines") {
         read_lines(r#gen);
@@ -155,6 +163,7 @@ fn errors_and_results(r#gen: &mut dyn AssemblyGenerator, net: bool) {
             (TIMED_OUT_CODE, TIMED_OUT),
             (SOCKET_CLOSED_CODE, SOCKET_CLOSED),
             (LISTENER_CLOSED_CODE, LISTENER_CLOSED),
+            (CLOSED_EARLY_CODE, CLOSED_EARLY),
         ]);
     }
     r#gen.emit("\t.data");
@@ -463,10 +472,9 @@ fn fail_with_errno(r#gen: &mut dyn AssemblyGenerator, label: &str) {
     r#gen.emit(&format!("\tjmp\t{label}_err"));
 }
 
-/// Emits `stone.fs_read`: the file's bytes from `.Lfs_read_all`, checked to be text, copied into
-/// a new string.
-fn read(r#gen: &mut dyn AssemblyGenerator) {
-    let label = "stone.fs_read";
+/// Emits `stone.fs_read`, or `label`: the file's bytes from `.Lfs_read_all`, checked to be text
+/// if `text`, copied into a new string, or bytes, which are laid out the same.
+fn read(r#gen: &mut dyn AssemblyGenerator, label: &str, text: bool) {
     // r12 holds the buffer and r13 its length, then r14 the string
     routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\trdi, rbx");
@@ -477,12 +485,14 @@ fn read(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(&format!("{label}_read:"));
     r#gen.emit("\tmov\tr12, rax");
     r#gen.emit("\tmov\tr13, rdx");
-    r#gen.emit("\tmov\trdi, rax");
-    r#gen.emit("\tmov\trsi, rdx");
-    r#gen.emit("\tcall\t.Lfs_utf8");
-    r#gen.emit("\tmov\tr14, rax");
-    r#gen.emit("\ttest\trax, rax");
-    r#gen.emit(&format!("\tjz\t{label}_free"));
+    if text {
+        r#gen.emit("\tmov\trdi, rax");
+        r#gen.emit("\tmov\trsi, rdx");
+        r#gen.emit("\tcall\t.Lfs_utf8");
+        r#gen.emit("\tmov\tr14, rax");
+        r#gen.emit("\ttest\trax, rax");
+        r#gen.emit(&format!("\tjz\t{label}_free"));
+    }
     r#gen.emit("\tmov\trdi, r12");
     r#gen.emit("\tmov\trsi, r13");
     r#gen.emit("\tcall\tstone.str_slice");
@@ -498,6 +508,31 @@ fn read(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcall\t.Lfs_ok");
     r#gen.emit(&format!("\tjmp\t{label}_done"));
     routine_end(r#gen, label);
+}
+
+/// Emits `stone.bytes_text`, which returns `ok` of the bytes in `rdi` as a string, the same
+/// object with one more reference, since bytes are laid out as strings are, if they are UTF-8
+/// text without a null byte, else `err` of [`INVALID_TEXT`] alone.
+fn bytes_text(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("stone.bytes_text:");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rdi - 16]");
+    r#gen.emit("\tcall\t.Lfs_utf8");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lbytes_text_invalid");
+    r#gen.emit("\tinc\tQWORD PTR [rbx - 8]");
+    r#gen.emit("\tmov\trdi, rbx");
+    r#gen.emit("\tmov\tesi, 1"); // a string slot
+    r#gen.emit("\tcall\t.Lfs_ok");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tret");
+    r#gen.emit(".Lbytes_text_invalid:");
+    r#gen.emit(&format!("\tmov\trdi, {INVALID_TEXT_CODE}"));
+    r#gen.emit("\txor\tesi, esi");
+    r#gen.emit("\tcall\t.Lfs_err");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tret");
 }
 
 /// Emits `stone.fs_read_lines`: the file's bytes from `.Lfs_read_all`, checked to be text, split

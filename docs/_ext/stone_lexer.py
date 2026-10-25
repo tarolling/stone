@@ -103,6 +103,13 @@ METHODS = (
     "accept",
     "port",
     "close",
+    "bytes",
+    "text",
+    "set_timeout",
+    "send_bytes",
+    "read_bytes",
+    "read_exact",
+    "read_all_bytes",
 )
 
 
@@ -125,6 +132,13 @@ class StoneLexer(RegexLexer):
             # a string that never closes ends at the line break
             (r"\n", Whitespace, "#pop"),
         ],
+        # a bytes literal, which has escapes but no values
+        "bytes": [
+            (r'"', String.Double, "#pop"),
+            (r"\\(x[0-9a-fA-F]{2}|.)", String.Escape),
+            (r'[^"\\\n]+', String.Double),
+            (r"\n", Whitespace, "#pop"),
+        ],
         "value": [
             (r"\}", String.Interpol, "#pop"),
             (r"\{", Punctuation, "braces"),
@@ -141,6 +155,7 @@ class StoneLexer(RegexLexer):
         "root": [
             (r"\s+", Whitespace),
             (r"//.*$", Comment.Single),
+            (r'\bb"', String.Double, "bytes"),
             (r'"', String.Double, "string"),
             (r"(fn)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),
             (
@@ -154,7 +169,7 @@ class StoneLexer(RegexLexer):
             (
                 # a type name, maybe inside list[, map[, tuple[, option[, or result[, then closing
                 # brackets or more types
-                r"(->|:)(\s*)((?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str|socket|listener)(?:\]|,\s*(?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str|socket|listener))*)(?![\w(])",
+                r"(->|:)(\s*)((?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str|bytes|socket|listener)(?:\]|,\s*(?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str|bytes|socket|listener))*)(?![\w(])",
                 bygroups(Punctuation, Whitespace, Keyword.Type),
             ),
             (r"\b(self|Self)\b", Name.Builtin.Pseudo),

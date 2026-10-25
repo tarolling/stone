@@ -194,6 +194,10 @@ The error is the message `int(s)` would stop with, such as
 | `input=` to a subprocess | not available: the program's stdin is empty |
 | `os.environ.get("X", "d")` | `os.env("X").unwrap_or("d")`, after `use os` |
 | `random.randint`, `time.time()` | `random.randint`, `time.now()`, after `use random` and `use time` |
+| `b"..."`, `bytes([...])`, `data[i]`, `s.encode()`, `data.decode()` | the same `b"..."` and `bytes([...])`, `data[i]` is an int, `s.bytes()`, `data.text()` (a result: `err` for bytes that are not UTF-8) |
+| `open(p, "rb").read()`, `open(p, "wb").write(data)` | `fs.read_bytes(p)`, `fs.write_bytes(p, data)`, after `use fs` |
+| `socket.create_connection((host, port), timeout=t)`, `sock.settimeout(t)` | `net.connect_timeout(host, port, t)`, `c.set_timeout(t)`, after `use net`; a timeout is `err("timed out")` |
+| `sock.sendall(data)`, `sock.recv(n)`, a `makefile()` line | `c.send_bytes(data)` or `c.send(text)`, `c.read_bytes(n)`, `c.read_line()` (`ok(none)` at the end) |
 
 ## Traps that change output without an error
 

@@ -31,6 +31,36 @@ sent until it is read. Then `client.read_all()` returns once the server's end cl
 in `answer` calls `close()`: a socket closes by itself right after the last statement that uses
 it, here the loop, so its end is closed by the time `answer` returns.
 
+## Bytes and timeouts
+
+Protocols often mix text and binary data, such as a header line followed by a body of a given
+length. A string can only hold text, so binary data is `bytes`, written `b"..."`, whose indexes
+are ints. `send_bytes` sends them, and `read_bytes(max)`, `read_exact(n)`, and
+`read_all_bytes()` read them, from the same data `read_line` reads, so the two mix freely:
+
+```stone
+use net
+
+fn read_message(c: socket) -> result[bytes, str]:
+    // a line with the body's length, then the body
+    length = c.read_line()?.unwrap_or("0").parse_int()?
+    ret c.read_exact(length)
+```
+
+By default a read waits as long as it takes. `set_timeout(seconds)` makes each later wait on a
+socket or listener give up after that long with `err("timed out")`, and
+`net.connect_timeout(host, port, seconds)` connects the same way:
+
+```stone
+use net
+
+fn ask(host: str, question: str) -> result[str, str]:
+    c = net.connect_timeout(host, 7777, 2.0)?
+    c.set_timeout(5.0)
+    c.send("{question}\n")?
+    ret ok(c.read_line()?.unwrap_or(""))
+```
+
 ## Hosts and addresses
 
 A host is a name, such as `example.com` or `localhost`, or an address, such as `127.0.0.1` or

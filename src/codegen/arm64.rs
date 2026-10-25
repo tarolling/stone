@@ -13,6 +13,7 @@
 //! stays 16-byte aligned at every instruction, as AArch64 requires, so frames are saved in pairs.
 
 pub mod builtins;
+pub mod bytes;
 mod emit;
 pub mod floats;
 pub mod fs;
@@ -22,8 +23,8 @@ pub mod sort;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
-    Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, STRING_METHOD_ROUTINES, escape,
-    global_label, immortal_string, variant_statics,
+    BYTES_ROUTINES, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, STRING_METHOD_ROUTINES,
+    escape, global_label, immortal_bytes, immortal_string, variant_statics,
 };
 use crate::codegen::{AssemblyGenerator, Os, Target};
 use crate::project::SourceMap;
@@ -84,6 +85,9 @@ impl AssemblyGenerator for Arm64Generator {
             let strings = self.ctx.needs_strings();
             let eprints = self.ctx.uses(&["stone.text_eprint"]);
             builtins::print(self, strings, eprints);
+            if self.ctx.needs_bytes() {
+                bytes::print_bytes(self);
+            }
         }
 
         // stone functions first, then main, which the lowering puts last
@@ -398,6 +402,9 @@ impl Arm64Generator {
                 .into_iter()
                 .filter(|label| self.ctx.uses(&[label])),
         );
+        if self.ctx.uses(&["stone.bytes_text"]) {
+            fs.push("stone.bytes_text");
+        }
         if !fs.is_empty() {
             fs::fs_runtime(self, &fs);
         }
@@ -452,6 +459,14 @@ impl Arm64Generator {
             };
             builtins::string_methods(self, &methods, &empty_separator, &cut_character);
         }
+        let bytes: Vec<&str> = BYTES_ROUTINES
+            .iter()
+            .copied()
+            .filter(|label| self.ctx.uses(&[label]))
+            .collect();
+        if !bytes.is_empty() {
+            bytes::bytes_runtime(self, &bytes);
+        }
     }
 
     /// Emits the list runtime and every list printer `print` asked for, if the program uses lists.
@@ -481,8 +496,9 @@ impl Arm64Generator {
     /// `.data`, since retaining and releasing a string writes its count.
     fn emit_string_literals(&mut self) {
         let literals = self.ctx.string_literals();
+        let bytes = self.ctx.bytes_literals();
         let statics = std::mem::take(&mut self.ctx.variant_statics);
-        if literals.is_empty() && statics.is_empty() {
+        if literals.is_empty() && bytes.is_empty() && statics.is_empty() {
             return;
         }
 
@@ -490,6 +506,9 @@ impl Arm64Generator {
         self.emit("\t.data");
         for (label, text) in literals {
             immortal_string(self, &label, &text);
+        }
+        for (label, bytes) in bytes {
+            immortal_bytes(self, &label, &bytes);
         }
         variant_statics(self, &statics);
         self.emit("");

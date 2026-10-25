@@ -1,0 +1,26 @@
+// Bytes over a connection: a header line read as text, then a body read as bytes, from one
+// buffer, and the limits of each byte read.
+use net
+
+fn talk() -> result[int, str]:
+    l = net.listen("127.0.0.1", 0)?
+    c = net.connect("127.0.0.1", l.port())?
+    s = l.accept()?
+    c.send("length 6\r\n")?
+    c.send_bytes(b"\x00\xff\x01ab\n")?
+    c.send_bytes(b"rest\xfe")?
+    header = s.read_line()?.unwrap()
+    print(header)
+    print(s.read_exact(6)?)
+    print(s.read_bytes(2)?, s.read_bytes(0)?)
+    c.close()
+    print(s.read_all_bytes()?, s.read_bytes(5)?, s.read_exact(0)?)
+    print(s.read_exact(1))
+    print(c.send_bytes(b"x"))
+    ret ok(0)
+
+match talk():
+    case ok(_):
+        print("done")
+    case err(e):
+        print("failed:", e)

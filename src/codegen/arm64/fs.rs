@@ -8,13 +8,15 @@
 use super::builtins::{Sys, system_call};
 use super::{address, pop_frame, push_frame};
 use crate::codegen::context::{
-    DIR_BUFFER, FILE_BUFFER, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE,
-    NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags, SOCKET_CLOSED_CODE, TIMED_OUT_CODE,
-    immortal_string,
+    CLOSED_EARLY_CODE, DIR_BUFFER, FILE_BUFFER, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE,
+    LISTENER_CLOSED_CODE, NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags, SOCKET_CLOSED_CODE,
+    TIMED_OUT_CODE, immortal_string,
 };
 use crate::codegen::{AssemblyGenerator, Os};
 use crate::stdlib::fs::{INVALID_TEXT, NULL_IN_PATH, errors};
-use crate::stdlib::net::{INVALID_ADDRESS, LISTENER_CLOSED, SOCKET_CLOSED, TIMED_OUT};
+use crate::stdlib::net::{
+    CLOSED_EARLY, INVALID_ADDRESS, LISTENER_CLOSED, SOCKET_CLOSED, TIMED_OUT,
+};
 use crate::stdlib::os::NULL_IN_COMMAND;
 
 /// `openat`'s directory for a path relative to the working directory, which macOS's shims drop.
@@ -56,6 +58,7 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         || uses("stone.fs_read_lines")
         || uses("stone.fs_list_dir")
         || uses("stone.os_run")
+        || uses("stone.bytes_text")
         || !net.is_empty()
     {
         utf8_check(r#gen);
@@ -66,11 +69,17 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if !net.is_empty() {
         super::net::net_runtime(r#gen, &net);
     }
-    if uses("stone.fs_read") || uses("stone.fs_read_lines") {
+    if uses("stone.fs_read") || uses("stone.fs_read_lines") || uses("stone.fs_read_bytes") {
         read_all(r#gen, flags.read);
     }
     if uses("stone.fs_read") {
-        read(r#gen);
+        read(r#gen, "stone.fs_read", true);
+    }
+    if uses("stone.fs_read_bytes") {
+        read(r#gen, "stone.fs_read_bytes", false);
+    }
+    if uses("stone.bytes_text") {
+        bytes_text(r#gen);
     }
     if uses("stone.fs_read_lines") {
         read_lines(r#gen);
@@ -142,6 +151,7 @@ fn errors_and_results(r#gen: &mut dyn AssemblyGenerator, net: bool) {
             (TIMED_OUT_CODE, TIMED_OUT),
             (SOCKET_CLOSED_CODE, SOCKET_CLOSED),
             (LISTENER_CLOSED_CODE, LISTENER_CLOSED),
+            (CLOSED_EARLY_CODE, CLOSED_EARLY),
         ]);
     }
     r#gen.emit("\t.data");
@@ -425,8 +435,7 @@ fn fail_with_errno(r#gen: &mut dyn AssemblyGenerator, label: &str) {
 }
 
 /// Emits `stone.fs_read`, as `x64::fs` does.
-fn read(r#gen: &mut dyn AssemblyGenerator) {
-    let label = "stone.fs_read";
+fn read(r#gen: &mut dyn AssemblyGenerator, label: &str, text: bool) {
     // x20 holds the buffer and x21 its length, then x22 the string
     routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\tx0, x19");
@@ -436,9 +445,11 @@ fn read(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(&format!("{label}_read:"));
     r#gen.emit("\tmov\tx20, x0");
     r#gen.emit("\tmov\tx21, x1");
-    r#gen.emit("\tbl\t.Lfs_utf8");
-    r#gen.emit("\tmov\tx22, x9");
-    r#gen.emit(&format!("\tcbz\tx9, {label}_free"));
+    if text {
+        r#gen.emit("\tbl\t.Lfs_utf8");
+        r#gen.emit("\tmov\tx22, x9");
+        r#gen.emit(&format!("\tcbz\tx9, {label}_free"));
+    }
     r#gen.emit("\tbl\tstone.str_slice");
     r#gen.emit("\tmov\tx22, x0");
     r#gen.emit(&format!("{label}_free:"));
@@ -451,6 +462,28 @@ fn read(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tbl\t.Lfs_ok");
     r#gen.emit(&format!("\tb\t{label}_done"));
     routine_end(r#gen, label);
+}
+
+/// Emits `stone.bytes_text`, as `x64::fs` does.
+fn bytes_text(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("stone.bytes_text:");
+    push_frame(r#gen, &["x19", "x20"]);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tldur\tx1, [x0, #-16]");
+    r#gen.emit("\tbl\t.Lfs_utf8");
+    r#gen.emit("\tcbz\tx9, .Lbytes_text_invalid");
+    r#gen.emit("\tldur\tx9, [x19, #-8]");
+    r#gen.emit("\tadd\tx9, x9, #1");
+    r#gen.emit("\tstur\tx9, [x19, #-8]");
+    r#gen.emit("\tmov\tx0, x19");
+    r#gen.emit("\tmov\tx1, #1"); // a string slot
+    r#gen.emit("\tbl\t.Lfs_ok");
+    pop_frame(r#gen, &["x19", "x20"]);
+    r#gen.emit(".Lbytes_text_invalid:");
+    r#gen.emit(&format!("\tmov\tx0, #{INVALID_TEXT_CODE}"));
+    r#gen.emit("\tmov\tx1, #0");
+    r#gen.emit("\tbl\t.Lfs_err");
+    pop_frame(r#gen, &["x19", "x20"]);
 }
 
 /// Emits `stone.fs_read_lines`, as `x64::fs` does.

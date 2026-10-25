@@ -56,6 +56,18 @@ pub const STRING_METHOD_ROUTINES: &[&str] = &[
     "stone.str_char",
 ];
 
+/// The routines of `bytes` that differ from strings', emitted only when called (see
+/// `x64::bytes::bytes_runtime`).
+pub const BYTES_ROUTINES: &[&str] = &[
+    "stone.bytes_eq",
+    "stone.bytes_cmp",
+    "stone.bytes_find",
+    "stone.bytes_at",
+    "stone.bytes_slice_of",
+    "stone.bytes_check",
+    "stone.bytes_from_list",
+];
+
 /// Runtime routines that need the string runtime, even in a program where no expression is a
 /// `str`, such as one that only prints `args()`.
 const STRING_ROUTINES: &[&str] = &[
@@ -89,6 +101,8 @@ const STRING_ROUTINES: &[&str] = &[
     "stone.fs_exists",
     "stone.fs_remove",
     "stone.fs_make_dir",
+    "stone.fs_read_bytes",
+    "stone.bytes_text",
     "stone.os_run",
     "stone.text_end",
 ];
@@ -98,7 +112,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 26] = [
+pub const MODULE_ROUTINES: [(&str, &str); 29] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -122,6 +136,10 @@ pub const MODULE_ROUTINES: [(&str, &str); 26] = [
     ("fs.exists", "stone.fs_exists"),
     ("fs.remove", "stone.fs_remove"),
     ("fs.make_dir", "stone.fs_make_dir"),
+    ("fs.read_bytes", "stone.fs_read_bytes"),
+    // bytes are laid out as strings are, so writing them is the same
+    ("fs.write_bytes", "stone.fs_write"),
+    ("fs.append_bytes", "stone.fs_append"),
     ("net_sys.connect", "stone.net_connect"),
     ("net_sys.listen", "stone.net_listen"),
     ("net_sys.exchange", "stone.net_exchange"),
@@ -137,6 +155,8 @@ const FS_FAILING: &[&str] = &[
     "stone.fs_list_dir",
     "stone.fs_remove",
     "stone.fs_make_dir",
+    "stone.fs_read_bytes",
+    "stone.bytes_text",
     "stone.os_run",
     "stone.net_connect",
     "stone.net_listen",
@@ -146,11 +166,14 @@ const FS_FAILING: &[&str] = &[
     "stone.net_read_line",
     "stone.net_read",
     "stone.net_read_all",
+    "stone.net_read_bytes",
+    "stone.net_read_exact",
+    "stone.net_read_all_bytes",
 ];
 
 /// The runtime routines of `net_sys` and of the methods of sockets and listeners, which the
 /// `fs` routines' pieces come with (see `x64::net::net_runtime`).
-pub const NET_ROUTINES: [&str; 10] = [
+pub const NET_ROUTINES: [&str; 14] = [
     "stone.net_connect",
     "stone.net_listen",
     "stone.net_exchange",
@@ -161,6 +184,10 @@ pub const NET_ROUTINES: [&str; 10] = [
     "stone.net_read_line",
     "stone.net_read",
     "stone.net_read_all",
+    "stone.net_set_timeout",
+    "stone.net_read_bytes",
+    "stone.net_read_exact",
+    "stone.net_read_all_bytes",
 ];
 
 /// Returns the runtime routine behind the function of a builtin module with the linked name
@@ -301,8 +328,13 @@ pub const NULL_IN_COMMAND_CODE: i64 = -3;
 /// The code for an address or port `net_sys` cannot use (`stdlib::net::INVALID_ADDRESS`).
 pub const INVALID_ADDRESS_CODE: i64 = -4;
 
-/// The code for a DNS question no reply came back to in time (`stdlib::net::TIMED_OUT`).
-pub const TIMED_OUT_CODE: i64 = -5;
+/// The code for a wait that ran out of time (`stdlib::net::TIMED_OUT`), as a DNS question with no
+/// reply or a read past a socket's timeout. It is positive and above every error number the
+/// systems use, so a routine can return its negative as it returns a system call's error.
+pub const TIMED_OUT_CODE: i64 = 4000;
+
+/// The code for `read_exact` on a connection that closed first (`stdlib::net::CLOSED_EARLY`).
+pub const CLOSED_EARLY_CODE: i64 = -8;
 
 /// The code for a method of a closed socket (`stdlib::net::SOCKET_CLOSED`), which is written
 /// alone.
@@ -401,6 +433,19 @@ pub fn immortal_string(r#gen: &mut dyn AssemblyGenerator, label: &str, text: &st
     r#gen.emit(&format!("\t.string \"{}\"", escape(text)));
 }
 
+/// Emits the bytes `bytes` as an immortal object laid out as [`immortal_string`] lays out a
+/// string, so the string routines that go by its length work on it, whatever bytes it holds.
+///
+/// For example, `immortal_bytes(gen, ".Lbytes_0", b"a\x00")` emits a length of 2 and
+/// `.string "a\000"`.
+pub fn immortal_bytes(r#gen: &mut dyn AssemblyGenerator, label: &str, bytes: &[u8]) {
+    r#gen.emit("\t.balign\t8");
+    r#gen.emit(&format!("\t.quad\t{}", bytes.len()));
+    r#gen.emit(&format!("\t.quad\t{IMMORTAL}"));
+    r#gen.emit(&format!("{label}:"));
+    r#gen.emit(&format!("\t.string \"{}\"", escape_bytes(bytes)));
+}
+
 /// What a backend knows about the program it is compiling, apart from the assembly it writes.
 #[derive(Default)]
 pub struct Context {
@@ -408,6 +453,8 @@ pub struct Context {
     /// The lowered module, produced by [`Context::lower`].
     pub program: Program,
     string_literals: HashMap<String, String>,
+    /// The label of each bytes literal, by its bytes.
+    bytes_literals: HashMap<Vec<u8>, String>,
     /// What the checker learned about the program: the type of every expression, every symbol,
     /// enum, and struct, and how every method call was resolved.
     analysis: Analysis,
@@ -514,6 +561,16 @@ impl Context {
         label
     }
 
+    /// Returns the label of the bytes literal `bytes`, the same one for every use.
+    pub fn intern_bytes(&mut self, bytes: &[u8]) -> String {
+        if let Some(label) = self.bytes_literals.get(bytes) {
+            return label.clone();
+        }
+        let label = self.new_label("bytes");
+        self.bytes_literals.insert(bytes.to_vec(), label.clone());
+        label
+    }
+
     /// Returns a label that stops the program with `message`, the way the interpreter reports the
     /// same runtime error.
     ///
@@ -616,6 +673,8 @@ impl Context {
             Type::Bool => "stone.print_bool".to_string(),
             Type::Str if nested => "stone.print_str_quoted".to_string(),
             Type::Str => "stone.print_str".to_string(),
+            // bytes are always written as their repr, nested or not
+            Type::Bytes => "stone.print_bytes".to_string(),
             Type::List(_) => {
                 if !self.list_printers.contains(ty) {
                     self.list_printers.push(ty.clone());
@@ -691,6 +750,13 @@ impl Context {
                 "stone.fs_list_dir",
                 "stone.net_exchange",
             ])
+    }
+
+    /// Returns whether the program has bytes anywhere, which `print` writes with
+    /// `stone.print_bytes`.
+    pub fn needs_bytes(&self) -> bool {
+        self.types()
+            .any(|ty| mentions_bytes(ty, &self.analysis, &mut HashSet::new()))
     }
 
     /// Returns whether the program can make sockets or listeners, whose descriptors
@@ -771,6 +837,18 @@ impl Context {
         literals.sort();
         literals
     }
+
+    /// Returns every interned bytes literal as `(label, bytes)`, sorted by label, for
+    /// [`immortal_bytes`] to emit.
+    pub fn bytes_literals(&self) -> Vec<(String, Vec<u8>)> {
+        let mut literals: Vec<(String, Vec<u8>)> = self
+            .bytes_literals
+            .iter()
+            .map(|(bytes, label)| (label.clone(), bytes.clone()))
+            .collect();
+        literals.sort();
+        literals
+    }
 }
 
 /// Escapes `content` for a `.string` directive. Other control characters are written as three
@@ -789,6 +867,23 @@ pub fn escape(content: &str) -> String {
             '\r' => escaped.push_str("\\r"),
             '\0'..='\x1f' | '\x7f' => escaped.push_str(&format!("\\{:03o}", ch as u32)),
             _ => escaped.push(ch),
+        }
+    }
+    escaped
+}
+
+/// Escapes `bytes` for a `.string` directive as [`escape`] does, writing every byte outside
+/// printable ASCII in three octal digits.
+///
+/// For example, `b"a\"\x00\xff"` becomes `a\"\000\377`.
+pub fn escape_bytes(bytes: &[u8]) -> String {
+    let mut escaped = String::with_capacity(bytes.len());
+    for &b in bytes {
+        match b {
+            b'\\' => escaped.push_str("\\\\"),
+            b'"' => escaped.push_str("\\\""),
+            0x20..=0x7e => escaped.push(b as char),
+            _ => escaped.push_str(&format!("\\{b:03o}")),
         }
     }
     escaped
@@ -898,6 +993,38 @@ fn contains_enum(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bo
     }
 }
 
+/// Returns whether a value of type `ty` is or holds bytes anywhere, in lists and maps too.
+fn mentions_bytes(ty: &Type, analysis: &Analysis, seen: &mut HashSet<String>) -> bool {
+    match ty {
+        Type::Bytes => true,
+        Type::List(elem) => mentions_bytes(elem, analysis, seen),
+        Type::Map(key, value) => {
+            mentions_bytes(key, analysis, seen) || mentions_bytes(value, analysis, seen)
+        }
+        Type::Tuple(fields) => fields.iter().any(|f| mentions_bytes(f, analysis, seen)),
+        Type::Function { params, ret } => {
+            params.iter().any(|p| mentions_bytes(p, analysis, seen))
+                || mentions_bytes(ret, analysis, seen)
+        }
+        Type::Struct { .. } => {
+            seen.insert(ty.to_string())
+                && ty
+                    .struct_fields(&analysis.structs)
+                    .iter()
+                    .any(|(_, ty)| mentions_bytes(ty, analysis, seen))
+        }
+        Type::Enum { args, .. } => {
+            args.iter().any(|arg| mentions_bytes(arg, analysis, seen))
+                || (seen.insert(ty.to_string())
+                    && variants(&analysis.enums, ty)
+                        .iter()
+                        .flat_map(|(_, values)| values)
+                        .any(|ty| mentions_bytes(ty, analysis, seen)))
+        }
+        _ => false,
+    }
+}
+
 /// Returns whether a value of type `ty` is or holds a string, outside of lists, looking through
 /// tuples, struct fields, and what an enum's variants or an option may hold. `seen` holds the
 /// structs and enums already looked through.
@@ -906,7 +1033,8 @@ fn contains_enum(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bo
 /// `option[str]` alone needs the string runtime, since `==` on two of them calls `stone.str_eq`.
 fn contains_str(ty: &Type, analysis: &Analysis, seen: &mut HashSet<String>) -> bool {
     match ty {
-        Type::Str => true,
+        // bytes are strings to the runtime
+        Type::Str | Type::Bytes => true,
         Type::Tuple(fields) => fields.iter().any(|f| contains_str(f, analysis, seen)),
         Type::Struct { .. } => {
             seen.insert(ty.to_string())

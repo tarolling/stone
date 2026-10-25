@@ -391,6 +391,45 @@ impl Lexer {
         })
     }
 
+    /// Lexes a bytes literal after its opening `b"`, which started at `start`.
+    ///
+    /// For example, `b"a\x00{"` gives `Bytes([97, 0, 123])`: any byte can be written with `\x`,
+    /// and braces are plain bytes, since a bytes literal holds no values. Other characters must
+    /// be ASCII, as in Python.
+    fn lex_bytes(&mut self, start: Pos) -> Result<TokenType, LexError> {
+        let mut bytes = vec![];
+        while let Some(ch) = self.peek() {
+            match ch {
+                '"' => {
+                    self.advance();
+                    return Ok(TokenType::Bytes(bytes));
+                }
+                '\n' => break,
+                '\\' if self.peek_at(1).is_some_and(|next| next != '\n') => {
+                    bytes.push(self.escape(true)?);
+                }
+                _ if !ch.is_ascii() => {
+                    let at = self.pos();
+                    self.advance();
+                    return Err(LexError {
+                        message: "a bytes literal holds only ASCII characters; write others as \
+                                  '\\xhh'"
+                            .to_string(),
+                        span: Span::new(at, self.pos()),
+                    });
+                }
+                _ => {
+                    bytes.push(ch as u8);
+                    self.advance();
+                }
+            }
+        }
+        Err(LexError {
+            message: "unterminated bytes literal".to_string(),
+            span: Span::new(start, self.pos()),
+        })
+    }
+
     /// Notes a bracket opening inside a string's value, which a `}` must close before it can end
     /// the value.
     fn open_bracket(&mut self) {
@@ -412,6 +451,12 @@ impl Lexer {
     /// For example, `\n` returns a newline and `\x41` returns `A`. `\x` only reaches `\x7f`, and
     /// never `\x00`, since compiled strings end at a zero byte.
     fn lex_escape(&mut self) -> Result<char, LexError> {
+        self.escape(false).map(char::from)
+    }
+
+    /// Lexes an escape sequence as [`Lexer::lex_escape`] does, returning the byte it stands for:
+    /// in a bytes literal (`bytes`), `\x` reaches every byte, `\x00` through `\xff`.
+    fn escape(&mut self, bytes: bool) -> Result<u8, LexError> {
         let start = self.pos();
         self.advance();
         let error = |lexer: &Self, message: String| LexError {
@@ -420,10 +465,10 @@ impl Lexer {
         };
         let ch = self.advance().expect("lex_string checked for a character");
         let escaped = match ch {
-            '\\' | '"' | '\'' => ch,
-            'n' => '\n',
-            't' => '\t',
-            'r' => '\r',
+            '\\' | '"' | '\'' => ch as u8,
+            'n' => b'\n',
+            't' => b'\t',
+            'r' => b'\r',
             'x' => {
                 let digits: String = (0..2).filter_map(|i| self.peek_at(i)).collect();
                 if digits.len() != 2 || !digits.chars().all(|c| c.is_ascii_hexdigit()) {
@@ -438,8 +483,9 @@ impl Lexer {
                 self.advance();
                 self.advance();
                 match u8::from_str_radix(&digits, 16).expect("two hex digits") {
+                    byte if bytes => byte,
                     0 => return Err(error(self, "a string cannot hold a null byte".to_string())),
-                    byte @ 1..=0x7f => byte as char,
+                    byte @ 1..=0x7f => byte,
                     _ => {
                         return Err(error(
                             self,
@@ -603,6 +649,11 @@ impl Lexer {
             Some('"') => {
                 self.advance();
                 self.lex_text(start, true)?
+            }
+            Some('b') if self.peek_at(1) == Some('"') => {
+                self.advance();
+                self.advance();
+                self.lex_bytes(start)?
             }
             Some(ch) if ch.is_ascii_digit() => self.lex_number()?,
             Some(ch) if ch.is_alphabetic() || ch == '_' => {
@@ -1167,6 +1218,39 @@ testing(1, 2, 3)"#;
             types_of(r#""a\"b\\c\nd\te\rf\'g\x41\x7f""#)[0],
             TokenType::String("a\"b\\c\nd\te\rf'gA\x7f".to_string())
         );
+    }
+
+    #[test]
+    fn bytes_literals_hold_any_byte() {
+        assert_eq!(
+            types_of(r#"b"a\x00\xff{}\n\"""#)[0],
+            TokenType::Bytes(b"a\x00\xff{}\n\"".to_vec())
+        );
+        assert_eq!(types_of(r#"b"""#)[0], TokenType::Bytes(vec![]));
+        // a name that only starts with b is still a name
+        assert_eq!(types_of("bx")[0], name("bx"));
+        assert_eq!(types_of("b")[0], name("b"));
+    }
+
+    #[test]
+    fn bytes_literals_are_ascii_and_one_line() {
+        for (source, message, cols) in [
+            (
+                "x = b\"caf\u{e9}\"\n",
+                "a bytes literal holds only ASCII characters; write others as '\\xhh'",
+                (10, 11),
+            ),
+            ("x = b\"ab\n", "unterminated bytes literal", (5, 9)),
+            ("x = b\"\\q\"\n", "unknown escape '\\q'", (7, 9)),
+        ] {
+            let err = Lexer::new(source).lex().unwrap_err();
+            assert_eq!(err.message, message, "{source}");
+            assert_eq!(
+                err.span,
+                Span::new(Pos::new(1, cols.0), Pos::new(1, cols.1)),
+                "{source}"
+            );
+        }
     }
 
     #[test]

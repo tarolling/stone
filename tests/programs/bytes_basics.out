@@ -1,0 +1,15 @@
+b'GET /\x00\xff\'"\t\n\\'
+12 71 92 0 255
+b'GET' b'GT/\xff"\n' b'' b'\t\n\\'
+b'ab\x00cd' 1
+false true true true
+true false true true
+258
+[b'', b'\x00', b'ab', b'b']
+(b"it's", 1) some(b'q') {'k': b'v'}
+b'GET' and b'x' b'y'
+b'hi\x00\xff' b'' true
+b'caf\xc3\xa9' 5
+ok('café') err('not valid UTF-8 text') err('not valid UTF-8 text')
+less greater equal
+b'\x7f\x1f quote"' b'both\'"'

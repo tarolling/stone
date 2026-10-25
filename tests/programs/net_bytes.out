@@ -1,0 +1,7 @@
+length 6
+b'\x00\xff\x01ab\n'
+b're' b''
+b'st\xfe' b'' b''
+err('connection closed early')
+err('socket is closed')
+done

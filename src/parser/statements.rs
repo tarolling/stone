@@ -258,6 +258,7 @@ impl Parser {
                 "float" => Some(TypeExprKind::Float),
                 "bool" => Some(TypeExprKind::Bool),
                 "str" => Some(TypeExprKind::Str),
+                "bytes" => Some(TypeExprKind::Bytes),
                 _ => None,
             },
             _ => None,

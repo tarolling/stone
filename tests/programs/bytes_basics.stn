@@ -1,0 +1,23 @@
+// Bytes: literals that hold any byte, indexing to ints, slices, joining, comparing, searching,
+// and how they print, alone and inside other values.
+data = b"GET /\x00\xff'\"\t\n\\"
+print(data)
+print(data.len(), data[0], data[-1], data[5], data[6])
+print(data[:3], data[::2], data[3:1], data[-3:])
+print(b"ab" + b"\x00" + b"cd", (b"a" + b"").len())
+print(b"a\x00b" == b"a\x00c", b"a\x00b" == b"a\x00b", b"a\x00b" < b"a\x00c", b"" < b"\x00")
+print(b"\x00c" in b"a\x00c", b"x" in b"a\x00c", b"" in b"", b"ab".contains(b"b"))
+total = 0
+for b in b"\x01\x02\xff":
+    total += b
+print(total)
+xs = [b"b", b"\x00", b"ab", b""]
+xs.sort()
+print(xs)
+print((b"it's", 1), some(b"q"), {"k": b"v"})
+print("{data[:3]} and {b"x"}", str(b"y"))
+print(bytes([104, 105, 0, 255]), bytes([]), "é".bytes() == b"\xc3\xa9")
+print("café".bytes(), "café".bytes().len())
+print(b"caf\xc3\xa9".text(), b"\xff".text(), b"a\x00".text())
+print(b"x".cmp(b"y"), b"y".cmp(b"x"), b"x".cmp(b"x"))
+print(b"\x7f\x1f quote\"" , b"both'\"")

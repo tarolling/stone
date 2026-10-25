@@ -34,6 +34,16 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `/etc/hosts` and then from the DNS servers in `/etc/resolv.conf`, by stone itself rather than
   the C library, so both backends agree. `net` is the first builtin module written in stone,
   which an editor can open from `use net`. TLS is not supported.
+- `bytes`, a type for data that is not text: literals such as `b"GET\x00\xff"`, which may hold
+  any byte, `b[i]` giving an int, slices, `+`, `==`, `<`, `in`, `for` over its values, and
+  `sort`. `print` writes bytes as Python does, as `b'GET\x00\xff'`. `"text".bytes()`,
+  `data.text()` (a result, since the bytes may not be UTF-8 text), and `bytes([104, 105])`
+  convert. `fs.read_bytes`, `fs.write_bytes`, and `fs.append_bytes` read and write any file.
+- Sockets send and read bytes: `send_bytes`, `read_bytes(max)`, `read_exact(n)`, and
+  `read_all_bytes()`, sharing one buffer with the text reads, so a protocol can read a line of
+  headers and then a body.
+- Timeouts: `set_timeout(seconds)` on a socket or listener makes each later wait give up with
+  `err("timed out")`, and `net.connect_timeout(host, port, seconds)` connects the same way.
 
 ### Changed
 

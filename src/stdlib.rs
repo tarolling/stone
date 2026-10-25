@@ -110,8 +110,8 @@ pub const MAX_ELEMENT_VALUES: usize = 32;
 /// Names of the builtin functions.
 ///
 /// `range` is only valid as the iterable of a `for` loop, such as `for i in range(3):`.
-pub static BUILTINS: [&str; 9] = [
-    "print", "eprint", "range", "int", "float", "str", "input", "eof", "args",
+pub static BUILTINS: [&str; 10] = [
+    "print", "eprint", "range", "int", "float", "str", "bytes", "input", "eof", "args",
 ];
 
 /// The prelude, a stone file linked into every program, which defines `option[T]`, `ordering`,
@@ -174,7 +174,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 45] = [
+pub static METHODS: [&str; 52] = [
     "len",
     "append",
     "pop",
@@ -220,10 +220,17 @@ pub static METHODS: [&str; 45] = [
     "accept",
     "port",
     "close",
+    "bytes",
+    "text",
+    "set_timeout",
+    "send_bytes",
+    "read_bytes",
+    "read_exact",
+    "read_all_bytes",
 ];
 
 /// The builtin methods of a `socket` or `listener`, which [`METHODS`] lists too.
-pub const HANDLE_METHODS: [&str; 7] = [
+pub const HANDLE_METHODS: [&str; 12] = [
     "send",
     "read_line",
     "read",
@@ -231,6 +238,11 @@ pub const HANDLE_METHODS: [&str; 7] = [
     "accept",
     "port",
     "close",
+    "set_timeout",
+    "send_bytes",
+    "read_bytes",
+    "read_exact",
+    "read_all_bytes",
 ];
 
 /// Returns whether the builtin method `name` changes the value it is called on, as `append` does,
@@ -255,7 +267,7 @@ pub struct BuiltinDoc {
     pub description: &'static str,
 }
 
-pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
+pub static BUILTIN_DOCS: [BuiltinDoc; 10] = [
     BuiltinDoc {
         name: "print",
         signature: "print(values...)",
@@ -296,6 +308,12 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
                       is written as its `display` method says.",
     },
     BuiltinDoc {
+        name: "bytes",
+        signature: "bytes(values: list[int]) -> bytes",
+        description: "Returns the bytes whose values are `values`, so `bytes([104, 105])` is \
+                      `b\"hi\"`. A value outside 0 to 255 stops the program with an error.",
+    },
+    BuiltinDoc {
         name: "input",
         signature: "input() | input(prompt: str) -> result[str, str]",
         description: "Writes `prompt`, if given, then reads a line from standard input and \
@@ -316,12 +334,12 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 9] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 45] = [
+pub static METHOD_DOCS: [BuiltinDoc; 52] = [
     BuiltinDoc {
         name: "len",
-        signature: "(str | list[T] | map[K, V]).len() -> int",
-        description: "Returns the number of bytes in a string, elements in a list, or entries \
-                      in a map.",
+        signature: "(str | bytes | list[T] | map[K, V]).len() -> int",
+        description: "Returns the number of bytes in a string or bytes, elements in a list, or \
+                      entries in a map.",
     },
     BuiltinDoc {
         name: "append",
@@ -519,10 +537,11 @@ pub static METHOD_DOCS: [BuiltinDoc; 45] = [
     },
     BuiltinDoc {
         name: "contains",
-        signature: "str.contains(text: str) -> bool | list[T].contains(value: T) -> bool | \
-                    map[K, V].contains(key: K) -> bool",
-        description: "Returns whether the string has `text` in it, the list an element equal to \
-                      `value`, as `==` compares them, or the map an entry for `key`, so \
+        signature: "str.contains(text: str) -> bool | bytes.contains(part: bytes) -> bool | \
+                    list[T].contains(value: T) -> bool | map[K, V].contains(key: K) -> bool",
+        description: "Returns whether the string has `text` in it, the bytes `part`, the list \
+                      an element equal to `value`, as `==` compares them, or the map an entry \
+                      for `key`, so \
                       `\"hello\".contains(\"ell\")` and `[1, 2].contains(2)` are `true`. \
                       `value in c` makes the same test, and `value not in c` the opposite.",
     },
@@ -621,6 +640,49 @@ pub static METHOD_DOCS: [BuiltinDoc; 45] = [
         description: "Closes the connection or stops listening now, rather than once nothing \
                       refers to it any more. Its methods then give the error `socket is \
                       closed` or `listener is closed`.",
+    },
+    BuiltinDoc {
+        name: "bytes",
+        signature: "str.bytes() -> bytes",
+        description: "Returns the string's UTF-8 bytes, so `\"hi\".bytes()` is `b\"hi\"`.",
+    },
+    BuiltinDoc {
+        name: "text",
+        signature: "bytes.text() -> result[str, str]",
+        description: "Returns `ok` of the bytes as a string if they are UTF-8 text without a \
+                      null byte, which a string cannot hold, or `err(\"not valid UTF-8 text\")`.",
+    },
+    BuiltinDoc {
+        name: "set_timeout",
+        signature: "(socket | listener).set_timeout(seconds: float)",
+        description: "Makes each later wait, for data to read, room to send, or a connection \
+                      to accept, give up after `seconds` with the error `timed out`. Zero, a \
+                      negative number, or nan waits forever, as a new socket or listener does.",
+    },
+    BuiltinDoc {
+        name: "send_bytes",
+        signature: "socket.send_bytes(data: bytes) -> result[int, str]",
+        description: "Sends all of `data` over the connection, as `send` sends text, giving the \
+                      number of bytes sent.",
+    },
+    BuiltinDoc {
+        name: "read_bytes",
+        signature: "socket.read_bytes(max: int) -> result[bytes, str]",
+        description: "Waits for data from the connection and gives what has arrived, up to \
+                      `max` bytes, or `b\"\"` once the other end has closed it (or for a `max` \
+                      of 0 or less).",
+    },
+    BuiltinDoc {
+        name: "read_exact",
+        signature: "socket.read_exact(n: int) -> result[bytes, str]",
+        description: "Waits for exactly `n` bytes from the connection, or gives the error \
+                      `connection closed early` if the other end closes it first.",
+    },
+    BuiltinDoc {
+        name: "read_all_bytes",
+        signature: "socket.read_all_bytes() -> result[bytes, str]",
+        description: "Reads from the connection until the other end closes it, giving every \
+                      byte that arrived.",
     },
 ];
 
@@ -921,6 +983,55 @@ pub fn repr_in_list(text: &str) -> String {
     }
     repr.push(quote);
     repr
+}
+
+/// Returns how `print` writes bytes, as Python's `repr` does: `b`, then the bytes in quotes, with
+/// a backslash before a backslash or the quote and `\n`, `\t`, `\r`, or `\xhh` for other bytes
+/// outside printable ASCII. The quote is `'` unless the bytes hold a `'` and no `"`.
+///
+/// For example, `repr_bytes(b"a\x00")` returns `b'a\x00'`, and `repr_bytes(b"it's")` returns
+/// `b"it's"`. Compiled code prints the same through `stone.print_bytes`.
+pub fn repr_bytes(bytes: &[u8]) -> String {
+    let quote = match bytes.contains(&b'\'') && !bytes.contains(&b'"') {
+        true => b'"',
+        false => b'\'',
+    };
+    let mut repr = String::with_capacity(bytes.len() + 3);
+    repr.push('b');
+    repr.push(quote as char);
+    for &b in bytes {
+        match b {
+            b'\\' => repr.push_str("\\\\"),
+            b'\n' => repr.push_str("\\n"),
+            b'\t' => repr.push_str("\\t"),
+            b'\r' => repr.push_str("\\r"),
+            _ if b == quote => {
+                repr.push('\\');
+                repr.push(b as char);
+            }
+            0x20..=0x7e => repr.push(b as char),
+            _ => repr.push_str(&format!("\\x{b:02x}")),
+        }
+    }
+    repr.push(quote as char);
+    repr
+}
+
+/// The runtime error for an index past either end of bytes, as in `b"a"[1]`, with the index and
+/// the length filled in as for [`INDEX_RANGE`].
+pub const BYTES_INDEX_RANGE: &str = "bytes index out of range (index {}, length {})";
+
+/// The runtime error of `bytes(values)` for a value that is not a byte, with the value filled in.
+pub const BYTE_RANGE: &str = "byte out of range (value {})";
+
+/// Returns the `count` bytes of `bytes` a slice takes, from position `start` in steps of `step`,
+/// as [`slice_indices`] gives them; unlike a string's, any bytes can be picked.
+///
+/// For example, `bytes_slice(b"abcd", 0, 2, 2)` is `b"ac"`.
+pub fn bytes_slice(bytes: &[u8], start: i64, step: i64, count: usize) -> Vec<u8> {
+    (0..count as i64)
+        .map(|k| bytes[(start + k * step) as usize])
+        .collect()
 }
 
 /// Picks the elements a slice such as `xs[start:stop:step]` takes from a list of `len` elements,
@@ -1376,7 +1487,9 @@ mod tests {
         for name in METHODS {
             let doc = method_doc(name).unwrap();
             assert!(doc.signature.contains(&format!(".{name}(")), "{name}");
-            assert!(!BUILTINS.contains(&name), "{name}");
+            // `bytes(values)` makes bytes and `s.bytes()` gives a string's, which hover and the
+            // reference tell apart by the dot
+            assert!(!BUILTINS.contains(&name) || name == "bytes", "{name}");
         }
         assert!(method_doc("print").is_none());
     }

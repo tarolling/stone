@@ -4,6 +4,7 @@
   "scopeName": "source.stone",
   "patterns": [
     { "include": "#comment" },
+    { "include": "#bytes" },
     { "include": "#string" },
     { "include": "#function-definition" },
     { "include": "#enum-definition" },
@@ -33,6 +34,17 @@
         { "name": "invalid.illegal.escape.stone", "match": "\\\\." },
         { "name": "constant.character.escape.stone", "match": "\\{\\{|\\}\\}" },
         { "include": "#interpolation" }
+      ]
+    },
+    "bytes": {
+      "name": "string.quoted.double.bytes.stone",
+      "begin": "\\bb\"",
+      "end": "\"|$",
+      "beginCaptures": { "0": { "name": "punctuation.definition.string.begin.stone" } },
+      "endCaptures": { "0": { "name": "punctuation.definition.string.end.stone" } },
+      "patterns": [
+        { "name": "constant.character.escape.stone", "match": "\\\\(x[0-9a-fA-F]{2}|[\"'\\\\ntr])" },
+        { "name": "invalid.illegal.escape.stone", "match": "\\\\." }
       ]
     },
     "interpolation": {
@@ -79,7 +91,7 @@
       }
     },
     "type-annotation": {
-      "match": "(->|:)\\s*((?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str|socket|listener)(?:\\]|,\\s*(?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str|socket|listener))*)(?![A-Za-z0-9_(])",
+      "match": "(->|:)\\s*((?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str|bytes|socket|listener)(?:\\]|,\\s*(?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str|bytes|socket|listener))*)(?![A-Za-z0-9_(])",
       "captures": {
         "1": { "name": "punctuation.separator.annotation.stone" },
         "2": { "name": "support.type.stone" }

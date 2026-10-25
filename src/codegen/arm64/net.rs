@@ -13,8 +13,8 @@ use super::builtins::{Sys, system_call};
 use super::fs::{EINTR, close, load};
 use super::{pop_frame, push_frame};
 use crate::codegen::context::{
-    INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE, SOCKET_CLOSED_CODE,
-    TIMED_OUT_CODE,
+    CLOSED_EARLY_CODE, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE,
+    SOCKET_CLOSED_CODE, TIMED_OUT_CODE,
 };
 use crate::codegen::x64::net::{LISTENER_TAG, SOCKET_TAG};
 use crate::codegen::{AssemblyGenerator, Os};
@@ -29,7 +29,7 @@ const SAVED: [&str; 8] = ["x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26"
 const LOCALS: i64 = 64;
 
 /// The slots of a handle after its tag and kinds.
-const HANDLE_SLOTS: i64 = 6;
+const HANDLE_SLOTS: i64 = 7;
 
 /// The bytes the buffer of a socket starts with, room for two reads.
 const FIRST_BUFFER: usize = 2 * READ_SIZE;
@@ -43,7 +43,14 @@ struct Constants {
     reuse_address: i64,
     /// `MSG_NOSIGNAL`, which macOS lacks.
     no_signal: i64,
+    /// `MSG_DONTWAIT`, which a send with a timeout passes.
+    dont_wait: i64,
     monotonic: i64,
+    /// The error numbers of a send that would wait and of a connection started but not finished.
+    again: i64,
+    in_progress: i64,
+    nonblock: i64,
+    so_error: i64,
 }
 
 impl Constants {
@@ -55,7 +62,12 @@ impl Constants {
                 sol_socket: 1,
                 reuse_address: 2,
                 no_signal: 0x4000,
+                dont_wait: 0x40,
                 monotonic: 1,
+                again: 11,
+                in_progress: 115,
+                nonblock: 0x800,
+                so_error: 4,
             },
             Os::MacOs => Constants {
                 inet6: 30,
@@ -63,7 +75,12 @@ impl Constants {
                 sol_socket: 0xffff,
                 reuse_address: 4,
                 no_signal: 0,
+                dont_wait: 0x80,
                 monotonic: 6,
+                again: 35,
+                in_progress: 36,
+                nonblock: 4,
+                so_error: 0x1007,
             },
         }
     }
@@ -77,12 +94,36 @@ const SO_NOSIGPIPE: i64 = 0x1022;
 pub fn net_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     let uses = |label: &str| used.contains(&label);
     handle(r#gen);
+    wait(r#gen);
     if r#gen.target().os == Os::MacOs {
         prepare(r#gen);
     }
-    if uses("stone.net_read_line") || uses("stone.net_read") || uses("stone.net_read_all") {
+    if used.iter().any(|label| {
+        matches!(
+            *label,
+            "stone.net_read_line"
+                | "stone.net_read"
+                | "stone.net_read_all"
+                | "stone.net_read_bytes"
+                | "stone.net_read_exact"
+                | "stone.net_read_all_bytes"
+        )
+    }) {
         receive(r#gen);
         take(r#gen);
+        take_bytes(r#gen);
+    }
+    if uses("stone.net_set_timeout") {
+        set_timeout(r#gen);
+    }
+    if uses("stone.net_read_bytes") {
+        read_bytes(r#gen);
+    }
+    if uses("stone.net_read_exact") {
+        read_exact(r#gen);
+    }
+    if uses("stone.net_read_all_bytes") {
+        read_all_bytes(r#gen);
     }
     if uses("stone.net_connect") {
         connect(r#gen);
@@ -226,6 +267,8 @@ fn handle(r#gen: &mut dyn AssemblyGenerator) {
     for offset in [24, 32, 40, 48, 56] {
         r#gen.emit(&format!("\tstr\txzr, [x0, #{offset}]"));
     }
+    r#gen.emit("\tmov\tx9, #-1");
+    r#gen.emit("\tstr\tx9, [x0, #64]");
     pop_frame(r#gen, &["x19", "x20"]);
 }
 
@@ -300,26 +343,72 @@ fn closing_failure(r#gen: &mut dyn AssemblyGenerator, label: &str) {
 /// Emits `stone.net_connect`, as `x64::net` does.
 fn connect(r#gen: &mut dyn AssemblyGenerator) {
     let label = "stone.net_connect";
-    // x19 holds the name, x20 the address and then the descriptor, and x21 the port
+    let constants = Constants::of(r#gen.target().os);
+    // x19 holds the name, x20 the address and then the descriptor, x21 the port, x24 the
+    // timeout, and x25 the descriptor's flags
     frame(r#gen, label);
     r#gen.emit("\tmov\tx19, x2");
     r#gen.emit("\tmov\tx20, x0");
     r#gen.emit("\tmov\tx21, x1");
+    r#gen.emit("\tmov\tx24, x3");
     socket_address(r#gen, label);
     open_socket(r#gen, label, 1);
+    r#gen.emit(&format!("\ttbnz\tx24, #63, {label}_connect"));
+    fcntl(r#gen, 3, "mov\tx2, #0"); // F_GETFL
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_close"));
+    r#gen.emit("\tmov\tx25, x0");
+    load(r#gen, "x9", constants.nonblock);
+    r#gen.emit("\torr\tx2, x0, x9");
+    fcntl(r#gen, 4, "mov\tx2, x2"); // F_SETFL
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_close"));
     retried(
         r#gen,
         &format!("{label}_connect"),
         Sys::Connect,
         &["mov\tx0, x20", "mov\tx1, sp", "mov\tx2, x23"],
     );
+    r#gen.emit(&format!("\tcbz\tx0, {label}_blocking"));
+    r#gen.emit(&format!("\tcmn\tx0, #{}", constants.in_progress));
+    r#gen.emit(&format!("\tb.ne\t{label}_close"));
+    r#gen.emit("\tmov\tx0, x20");
+    r#gen.emit("\tmov\tx1, #4"); // POLLOUT
+    r#gen.emit("\tmov\tx2, x24");
+    r#gen.emit("\tbl\t.Lnet_wait");
+    r#gen.emit(&format!("\tcbnz\tx0, {label}_close"));
+    // how the connection went
+    r#gen.emit("\tstr\txzr, [sp, #32]");
+    r#gen.emit("\tmov\tx9, #4");
+    r#gen.emit("\tstr\tx9, [sp, #40]");
+    r#gen.emit("\tmov\tx0, x20");
+    load(r#gen, "x1", constants.sol_socket);
+    load(r#gen, "x2", constants.so_error);
+    r#gen.emit("\tadd\tx3, sp, #32");
+    r#gen.emit("\tadd\tx4, sp, #40");
+    system_call(r#gen, Sys::Getsockopt);
     r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_close"));
+    r#gen.emit("\tldr\tw9, [sp, #32]");
+    r#gen.emit("\tneg\tx0, x9");
+    r#gen.emit(&format!("\tcbnz\tx0, {label}_close"));
+    r#gen.emit(&format!("{label}_blocking:"));
+    r#gen.emit(&format!("\ttbnz\tx24, #63, {label}_connected"));
+    fcntl(r#gen, 4, "mov\tx2, x25"); // F_SETFL
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_close"));
+    r#gen.emit(&format!("{label}_connected:"));
     r#gen.emit("\tmov\tx0, x20");
     r#gen.emit(&format!("\tmov\tx1, #{SOCKET_TAG}"));
     r#gen.emit("\tbl\t.Lnet_handle");
     ok_handle(r#gen, label);
     closing_failure(r#gen, label);
     frame_end(r#gen, label);
+}
+
+/// Emits an `fcntl` call with the command `command` on the descriptor in `x20`, after `third`
+/// puts its argument in `x2`, leaving the result in `x0`.
+fn fcntl(r#gen: &mut dyn AssemblyGenerator, command: i64, third: &str) {
+    r#gen.emit(&format!("\t{third}"));
+    r#gen.emit("\tmov\tx0, x20");
+    r#gen.emit(&format!("\tmov\tx1, #{command}"));
+    system_call(r#gen, Sys::Fcntl);
 }
 
 /// Emits `stone.net_listen`, as `x64::net` does.
@@ -376,10 +465,12 @@ fn accept(r#gen: &mut dyn AssemblyGenerator) {
     let os = r#gen.target().os;
     let constants = Constants::of(os);
     frame(r#gen, label);
+    r#gen.emit("\tmov\tx19, x0");
     r#gen.emit("\tldr\tx20, [x0, #16]");
     r#gen.emit(&format!("\ttbz\tx20, #63, {label}_open"));
     fail_with_code(r#gen, label, LISTENER_CLOSED_CODE);
     r#gen.emit(&format!("{label}_open:"));
+    wait_for(r#gen, label, "x20", 1, &format!("{label}_again"));
     let mut setup = vec![
         "mov\tx0, x20".to_string(),
         "mov\tx1, #0".to_string(),
@@ -452,10 +543,15 @@ fn send(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tldr\tx21, [x19, #16]");
     r#gen.emit("\tldur\tx22, [x20, #-16]");
     r#gen.emit("\tmov\tx23, #0");
+    // with a timeout, a send never waits but in .Lnet_wait; x24 holds the flags
+    load(r#gen, "x24", constants.no_signal);
+    r#gen.emit("\tldr\tx9, [x19, #64]");
+    r#gen.emit(&format!("\ttbnz\tx9, #63, {label}_more"));
+    load(r#gen, "x24", constants.no_signal | constants.dont_wait);
     r#gen.emit(&format!("{label}_more:"));
     r#gen.emit("\tcmp\tx23, x22");
     r#gen.emit(&format!("\tb.hs\t{label}_sent"));
-    let flags = format!("mov\tx3, #{}", constants.no_signal);
+    wait_for(r#gen, label, "x21", 4, &format!("{label}_again"));
     retried(
         r#gen,
         &format!("{label}_again"),
@@ -464,11 +560,13 @@ fn send(r#gen: &mut dyn AssemblyGenerator) {
             "mov\tx0, x21",
             "add\tx1, x20, x23",
             "sub\tx2, x22, x23",
-            &flags,
+            "mov\tx3, x24",
             "mov\tx4, #0",
             "mov\tx5, #0",
         ],
     );
+    r#gen.emit(&format!("\tcmn\tx0, #{}", constants.again));
+    r#gen.emit(&format!("\tb.eq\t{label}_more"));
     r#gen.emit(&format!("\ttbz\tx0, #63, {label}_wrote"));
     fail_with_errno(r#gen, label, None);
     r#gen.emit(&format!("{label}_wrote:"));
@@ -518,7 +616,7 @@ fn receive(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tsub\tx9, x9, x10");
     load(r#gen, "x10", READ_SIZE as i64);
     r#gen.emit("\tcmp\tx9, x10");
-    r#gen.emit("\tb.hs\t.Lnet_receive_again");
+    r#gen.emit("\tb.hs\t.Lnet_receive_wait");
     // doubling makes room, since the bytes kept are at most the old size
     r#gen.emit("\tldr\tx1, [x19, #48]");
     r#gen.emit("\tadd\tx1, x1, x1");
@@ -526,6 +624,13 @@ fn receive(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tldr\tx0, [x19, #24]");
     r#gen.emit("\tbl\tstone.mem_realloc");
     r#gen.emit("\tstr\tx0, [x19, #24]");
+    r#gen.emit(".Lnet_receive_wait:");
+    r#gen.emit("\tldr\tx2, [x19, #64]");
+    r#gen.emit("\ttbnz\tx2, #63, .Lnet_receive_again");
+    r#gen.emit("\tldr\tx0, [x19, #16]");
+    r#gen.emit("\tmov\tx1, #1"); // POLLIN
+    r#gen.emit("\tbl\t.Lnet_wait");
+    r#gen.emit("\tcbnz\tx0, .Lnet_receive_done");
     let size = format!("mov\tx2, #{READ_SIZE}");
     retried(
         r#gen,
@@ -578,6 +683,206 @@ fn take(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tbl\tstone.str_slice");
     r#gen.emit(".Lnet_take_done:");
     pop_frame(r#gen, &["x20", "x21"]);
+}
+
+/// Emits `.Lnet_take_bytes`, as `x64::net` does, taking the first `x0` bytes not read yet from
+/// the socket in `x19` as new bytes, preserving `x19` through `x28`.
+fn take_bytes(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit(".Lnet_take_bytes:");
+    push_frame(r#gen, &[]);
+    r#gen.emit("\tldr\tx9, [x19, #32]");
+    r#gen.emit("\tadd\tx10, x9, x0");
+    r#gen.emit("\tstr\tx10, [x19, #32]");
+    r#gen.emit("\tmov\tx1, x0");
+    r#gen.emit("\tldr\tx0, [x19, #24]");
+    r#gen.emit("\tadd\tx0, x0, x9");
+    r#gen.emit("\tbl\tstone.str_slice");
+    pop_frame(r#gen, &[]);
+}
+
+/// Emits `.Lnet_wait`, as `x64::net` does, waiting until the descriptor `x0` is ready for the
+/// `poll` events `x1`, for at most `x2` milliseconds in all, and returning 0, the negative of
+/// [`TIMED_OUT_CODE`], or a negative error number in `x0`: through `ppoll` with a `timespec` of
+/// the time left on Linux, and `poll` with its milliseconds, rounded up, on macOS.
+fn wait(r#gen: &mut dyn AssemblyGenerator) {
+    let os = r#gen.target().os;
+    let constants = Constants::of(os);
+    // x19 holds the descriptor, x20 the events, and x21 the deadline in nanoseconds; the clock is
+    // read into [sp], the pollfd is at [sp, #16], and the timespec at [sp, #32]
+    let saved = ["x19", "x20", "x21", "x22"];
+    r#gen.emit(".Lnet_wait:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tsub\tsp, sp, #48");
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    r#gen.emit("\tmov\tx21, x2");
+    now(r#gen, constants.monotonic);
+    load(r#gen, "x9", 1_000_000);
+    r#gen.emit("\tmadd\tx21, x21, x9, x0");
+    r#gen.emit(".Lnet_wait_again:");
+    now(r#gen, constants.monotonic);
+    r#gen.emit("\tsubs\tx10, x21, x0");
+    r#gen.emit("\tb.le\t.Lnet_wait_timeout");
+    // struct pollfd { fd, events, revents }
+    r#gen.emit("\tstr\tw19, [sp, #16]");
+    r#gen.emit("\tstr\tw20, [sp, #20]");
+    r#gen.emit("\tadd\tx0, sp, #16");
+    r#gen.emit("\tmov\tx1, #1");
+    match os {
+        Os::Linux => {
+            load(r#gen, "x9", 1_000_000_000);
+            r#gen.emit("\tudiv\tx11, x10, x9");
+            r#gen.emit("\tmsub\tx12, x11, x9, x10");
+            r#gen.emit("\tstp\tx11, x12, [sp, #32]");
+            r#gen.emit("\tadd\tx2, sp, #32");
+            r#gen.emit("\tmov\tx3, #0");
+            r#gen.emit("\tmov\tx4, #0");
+        }
+        Os::MacOs => {
+            load(r#gen, "x9", 999_999);
+            r#gen.emit("\tadd\tx10, x10, x9");
+            load(r#gen, "x9", 1_000_000);
+            r#gen.emit("\tudiv\tx2, x10, x9");
+        }
+    }
+    system_call(r#gen, Sys::Ppoll);
+    r#gen.emit(&format!("\tcmn\tx0, #{EINTR}"));
+    r#gen.emit("\tb.eq\t.Lnet_wait_again");
+    r#gen.emit("\ttbnz\tx0, #63, .Lnet_wait_done");
+    // a poll that ran out may have rounded the time, so the clock decides
+    r#gen.emit("\tcbz\tx0, .Lnet_wait_again");
+    r#gen.emit("\tmov\tx0, #0");
+    r#gen.emit("\tb\t.Lnet_wait_done");
+    r#gen.emit(".Lnet_wait_timeout:");
+    r#gen.emit(&format!("\tmov\tx0, #-{TIMED_OUT_CODE}"));
+    r#gen.emit(".Lnet_wait_done:");
+    pop_frame(r#gen, &saved);
+}
+
+/// Emits code that waits, if the handle in `x19` has a timeout, until the descriptor in `fd` is
+/// ready for the `poll` events `events`, then goes on to `ready`, failing with the reason alone
+/// if the wait runs out or fails.
+fn wait_for(r#gen: &mut dyn AssemblyGenerator, label: &str, fd: &str, events: i64, ready: &str) {
+    r#gen.emit("\tldr\tx2, [x19, #64]");
+    r#gen.emit(&format!("\ttbnz\tx2, #63, {ready}"));
+    r#gen.emit(&format!("\tmov\tx0, {fd}"));
+    r#gen.emit(&format!("\tmov\tx1, #{events}"));
+    r#gen.emit("\tbl\t.Lnet_wait");
+    r#gen.emit(&format!("\tcbz\tx0, {ready}"));
+    fail_with_errno(r#gen, label, None);
+}
+
+/// Emits `stone.net_set_timeout`, as `x64::net` does, for the handle in `x0` and the seconds'
+/// bits in `x1`.
+fn set_timeout(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("stone.net_set_timeout:");
+    r#gen.emit("\tfmov\td0, x1");
+    r#gen.emit("\tmov\tx9, #0");
+    r#gen.emit("\tscvtf\td1, x9");
+    // below, equal, or nan
+    r#gen.emit("\tfcmp\td0, d1");
+    r#gen.emit("\tb.le\t.Lnet_set_timeout_none");
+    r#gen.emit("\tmov\tx9, #1000");
+    r#gen.emit("\tscvtf\td1, x9");
+    r#gen.emit("\tfmul\td0, d0, d1");
+    load(r#gen, "x10", 2147483647);
+    r#gen.emit("\tscvtf\td1, x10");
+    r#gen.emit("\tfcmp\td0, d1");
+    r#gen.emit("\tb.ge\t.Lnet_set_timeout_store");
+    r#gen.emit("\tfcvtzs\tx10, d0");
+    r#gen.emit("\tscvtf\td1, x10");
+    r#gen.emit("\tfcmp\td0, d1");
+    r#gen.emit("\tb.le\t.Lnet_set_timeout_store");
+    r#gen.emit("\tadd\tx10, x10, #1");
+    r#gen.emit("\tb\t.Lnet_set_timeout_store");
+    r#gen.emit(".Lnet_set_timeout_none:");
+    r#gen.emit("\tmov\tx10, #-1");
+    r#gen.emit(".Lnet_set_timeout_store:");
+    r#gen.emit("\tstr\tx10, [x0, #64]");
+    r#gen.emit("\tmov\tx0, #0");
+    r#gen.emit("\tret");
+}
+
+/// Emits the end of a byte reading routine, as `x64::net` does: `<label>_bytes` for the bytes in
+/// `x0`, and `<label>_failed` for the negative error number in `x0`.
+fn bytes_result(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+    r#gen.emit(&format!("{label}_bytes:"));
+    r#gen.emit("\tmov\tx1, #1"); // a string slot, as bytes are
+    r#gen.emit("\tbl\t.Lfs_ok");
+    r#gen.emit(&format!("\tb\t{label}_done"));
+    r#gen.emit(&format!("{label}_failed:"));
+    fail_with_errno(r#gen, label, None);
+}
+
+/// Emits `stone.net_read_bytes`, as `x64::net` does.
+fn read_bytes(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_read_bytes";
+    // x20 holds the most to take
+    frame(r#gen, label);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    check_open(r#gen, label);
+    r#gen.emit("\tmov\tx0, #0");
+    r#gen.emit("\tcmp\tx20, #0");
+    r#gen.emit(&format!("\tb.le\t{label}_take"));
+    r#gen.emit(&format!("{label}_again:"));
+    unread(r#gen);
+    r#gen.emit("\tmov\tx0, x21");
+    r#gen.emit(&format!("\tcbnz\tx21, {label}_some"));
+    r#gen.emit("\tbl\t.Lnet_receive");
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_failed"));
+    r#gen.emit(&format!("\tcbnz\tx0, {label}_again"));
+    // the other end closed the connection
+    r#gen.emit(&format!("\tb\t{label}_take"));
+    r#gen.emit(&format!("{label}_some:"));
+    r#gen.emit("\tcmp\tx0, x20");
+    r#gen.emit("\tcsel\tx0, x20, x0, hi");
+    r#gen.emit(&format!("{label}_take:"));
+    r#gen.emit("\tbl\t.Lnet_take_bytes");
+    bytes_result(r#gen, label);
+    frame_end(r#gen, label);
+}
+
+/// Emits `stone.net_read_exact`, as `x64::net` does.
+fn read_exact(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_read_exact";
+    // x20 holds how many to take
+    frame(r#gen, label);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    check_open(r#gen, label);
+    r#gen.emit(&format!("\ttbz\tx20, #63, {label}_again"));
+    r#gen.emit("\tmov\tx20, #0");
+    r#gen.emit(&format!("{label}_again:"));
+    unread(r#gen);
+    r#gen.emit("\tcmp\tx21, x20");
+    r#gen.emit(&format!("\tb.hs\t{label}_take"));
+    r#gen.emit("\tbl\t.Lnet_receive");
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_failed"));
+    r#gen.emit(&format!("\tcbnz\tx0, {label}_again"));
+    fail_with_code(r#gen, label, CLOSED_EARLY_CODE);
+    r#gen.emit(&format!("{label}_take:"));
+    r#gen.emit("\tmov\tx0, x20");
+    r#gen.emit("\tbl\t.Lnet_take_bytes");
+    bytes_result(r#gen, label);
+    frame_end(r#gen, label);
+}
+
+/// Emits `stone.net_read_all_bytes`, as `x64::net` does.
+fn read_all_bytes(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_read_all_bytes";
+    frame(r#gen, label);
+    r#gen.emit("\tmov\tx19, x0");
+    check_open(r#gen, label);
+    r#gen.emit(&format!("{label}_more:"));
+    r#gen.emit("\tbl\t.Lnet_receive");
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_failed"));
+    r#gen.emit(&format!("\tcbnz\tx0, {label}_more"));
+    unread(r#gen);
+    r#gen.emit("\tmov\tx0, x21");
+    r#gen.emit("\tbl\t.Lnet_take_bytes");
+    bytes_result(r#gen, label);
+    frame_end(r#gen, label);
 }
 
 /// Emits the end of a reading routine, as `x64::net` does: `<label>_text` for the string in

@@ -35,7 +35,7 @@ pub const PAGE: u64 = 0x4000;
 
 /// The `libSystem` functions a program may call, each through `bl` with its C name, such as
 /// `bl write`. Any other undefined symbol is an error.
-pub const SYSTEM_FUNCTIONS: [&str; 36] = [
+pub const SYSTEM_FUNCTIONS: [&str; 37] = [
     "read",
     "write",
     "mmap",
@@ -71,6 +71,7 @@ pub const SYSTEM_FUNCTIONS: [&str; 36] = [
     "setsockopt",
     "sendto",
     "recvfrom",
+    "getsockopt",
     "__error",
 ];
 

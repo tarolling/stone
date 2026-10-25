@@ -12,6 +12,7 @@ runs, reporting every place they conflict.
 | `float` | IEEE 754 doubles, including `inf`, `-inf`, and `nan` |
 | `bool` | `true` and `false` |
 | `str` | immutable byte strings, ordered byte by byte |
+| `bytes` | immutable sequences of any bytes, such as `b"\x00\xff"`, for data that is not text |
 | `list[T]` | growable lists of `T`, which are values: assigning or passing one copies it |
 | `map[K, V]` | maps from keys of type `K`, which are `int`, `str`, or `bool`, to values of type `V`, which are values like lists |
 | `tuple[T1, T2, ...]` | two or more values of fixed types, such as `(1, "a")`, which never change |
@@ -37,7 +38,7 @@ of floats is `list[list[float]]`, a map as `map[K, V]`, so word counts are `map[
 tuple as `tuple[` and the type of each value, so a name and a
 score is `tuple[str, int]`, an option as `option[T]`, a function as `fn` and its parameters'
 types in parentheses, then `->` and the type it returns if it returns one, so a test of an int is
-`fn(int) -> bool`, a connection as `socket` and a server as `listener`, and a struct or an enum by its name, such
+`fn(int) -> bool`, raw data as `bytes`, a connection as `socket` and a server as `listener`, and a struct or an enum by its name, such
 as `Point` or `Shape`, or `shapes.Shape` for one of the module `shapes`. A function without `->` returns no value: a call
 to it can only be a statement of its own, so `x = f()` and `print(f())` are errors, and returning
 a value from it is an error that suggests the `->` to add. A parameter without a type is an error
@@ -314,6 +315,28 @@ is written, like a call's arguments, and a value may hold strings of its own, ev
 them (`"{"{x}!"}"`), as well as indexes, slices, and maps. `{{` and `}}` write a brace, and a
 lone `}`, an empty `{}`, or a value that runs past the end of the line is an error. A `:` after
 a value is kept for format specs such as `{x:.2f}`, which are not supported yet.
+
+## Bytes
+
+`bytes` hold any bytes, 0 and those outside ASCII included, for data that is not text, such as
+a file's contents or what a network protocol sends. A bytes literal is a string literal after a
+`b`, with ASCII characters and escapes, where `\x00` through `\xff` write any byte and braces are
+plain bytes. Bytes index to ints and slice to bytes, with no characters to cut:
+
+```stone
+data = b"GET\x00\xff"
+print(data[0], data[-1], data[:3], data.len())   // 71 255 b'GET' 5
+for b in data[3:]:
+    print(b)   // 0, then 255
+```
+
+`+` joins bytes, `==` and `<` compare them byte by byte, as strings compare, and `part in data`
+tests whether `part` appears in them. `print` writes bytes as Python writes them, with every byte
+outside printable ASCII escaped, as `b'GET\x00\xff'`. Like strings, bytes never change, and
+they cannot be map keys. `"text".bytes()` gives a string's UTF-8 bytes, `data.text()` gives the
+string bytes hold, if they are UTF-8 text, as a result, and `bytes([104, 105])` makes bytes from
+their values; see [Builtins](builtins.md#bytes). `fs.read_bytes` and a socket's `read_bytes` and
+`read_exact` read them, and `fs.write_bytes` and `send_bytes` write them.
 
 ## Tuples
 

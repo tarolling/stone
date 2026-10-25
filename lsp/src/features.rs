@@ -1292,6 +1292,7 @@ fn method_applies(method: &str, ty: &Type) -> bool {
         Type::Float => "float",
         Type::Bool => "bool",
         Type::Str => "str",
+        Type::Bytes => "bytes",
         Type::List(_) => "list",
         Type::Map(..) => "map",
         Type::Enum { name, .. } if name == stone::checker::OPTION => "option",
@@ -1302,7 +1303,7 @@ fn method_applies(method: &str, ty: &Type) -> bool {
     // the methods of the prelude's traits are on every type that implements them
     match method {
         "eq" => return !matches!(kind, "list" | "map" | "socket" | "listener"),
-        "cmp" => return matches!(kind, "int" | "float" | "str"),
+        "cmp" => return matches!(kind, "int" | "float" | "str" | "bytes"),
         "display" => return true,
         _ => {}
     }

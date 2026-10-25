@@ -1103,6 +1103,14 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
+            Inst::BytesAddr { dst, bytes } => {
+                let dst = frame.reg(*dst)?;
+                let label = self.ctx.intern_bytes(bytes);
+                let target = self.target(dst);
+                super::address(self, target, &label);
+                self.store(dst, target);
+            }
+
             Inst::EnumTag { dst, value } => {
                 let (dst, value) = (frame.reg(*dst)?, frame.value(*value)?);
                 let base = self.base(value, "x10");

@@ -186,7 +186,7 @@ fn hover_documents_methods() {
     // the `len` in `"é".len()`
     let text = hover_text(&doc(SOURCE), at(7, 18)).unwrap();
     assert!(
-        text.starts_with("```stone\n(str | list[T] | map[K, V]).len() -> int\n```\n"),
+        text.starts_with("```stone\n(str | bytes | list[T] | map[K, V]).len() -> int\n```\n"),
         "{text}"
     );
     // a variable named like a method is still a variable
@@ -277,15 +277,15 @@ fn definition_of_a_builtin_opens_the_reference_file() {
         Range::new(Position::new(line, 3), Position::new(line, 8))
     );
 
-    // the `len` in the reference's `// (str | list[T] | map[K, V]).len() -> int` line
+    // the `len` in the reference's `// (str | bytes | list[T] | map[K, V]).len() -> int` line
     let len = definition(&doc, &uri(), at(7, 18), Some(&builtins)).unwrap();
     let line = text
         .lines()
-        .position(|l| l.starts_with("// (str | list[T] | map[K, V]).len("))
+        .position(|l| l.starts_with("// (str | bytes | list[T] | map[K, V]).len("))
         .unwrap() as u32;
     assert_eq!(
         len.range,
-        Range::new(Position::new(line, 31), Position::new(line, 34))
+        Range::new(Position::new(line, 39), Position::new(line, 42))
     );
 }
 
@@ -506,6 +506,13 @@ fn completion_after_a_dot_offers_methods() {
         "accept",
         "port",
         "close",
+        "bytes",
+        "text",
+        "set_timeout",
+        "send_bytes",
+        "read_bytes",
+        "read_exact",
+        "read_all_bytes",
     ]
     .iter()
     .map(|name| (name.to_string(), Some(CompletionItemKind::METHOD)))
@@ -575,7 +582,8 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "contains",
             "eq",
             "cmp",
-            "display"
+            "display",
+            "bytes"
         ]
     );
     assert_eq!(
@@ -1591,9 +1599,43 @@ fn completion_after_a_socket_or_listener_offers_their_methods() {
     };
     assert_eq!(
         labels(at(3, 7)),
-        ["display", "send", "read_line", "read", "read_all", "close"]
+        [
+            "display",
+            "send",
+            "read_line",
+            "read",
+            "read_all",
+            "close",
+            "set_timeout",
+            "send_bytes",
+            "read_bytes",
+            "read_exact",
+            "read_all_bytes"
+        ]
     );
-    assert_eq!(labels(at(4, 7)), ["display", "accept", "port", "close"]);
+    assert_eq!(
+        labels(at(4, 7)),
+        ["display", "accept", "port", "close", "set_timeout"]
+    );
+}
+
+#[test]
+fn completion_after_bytes_offers_their_methods() {
+    let doc = doc("fn f(data: bytes, s: str):
+    data.
+    s.
+");
+    let labels = |pos: Position| -> Vec<String> {
+        completion(&doc, pos, &MapSources::default())
+            .into_iter()
+            .map(|item| item.label)
+            .collect()
+    };
+    assert_eq!(
+        labels(at(2, 10)),
+        ["len", "contains", "eq", "cmp", "display", "text"]
+    );
+    assert!(labels(at(3, 7)).contains(&"bytes".to_string()));
 }
 
 #[test]

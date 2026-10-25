@@ -84,6 +84,7 @@ module's name in a `use` or before a `.`.
 | int | `0`, `42`, `9223372036854775807` |
 | float | `1.5`, `2.5e-3`, `1e9`, `1E+9` |
 | string | `"hello"`, `""`, `"x is {x}"` |
+| bytes | `b"GET"`, `b""`, `b"\x00\xff"` |
 | bool | `true`, `false` |
 | option | `none`, `some(1)` |
 | result | `ok(1)`, `err("bad")` |
@@ -122,6 +123,12 @@ another join, as in `"a" "b"`. Inside a string:
 A lone `}`, an empty `{}`, and a value that does not close before the end of the line are
 errors. A `:` after the expression, as in `{x:.2f}`, is kept for format specs, which are not
 supported yet.
+
+A bytes literal is a `b` right before a string literal's opening quote, as in `b"GET\r\n"`. It
+takes the same escapes, except that `\xhh` writes any byte, from `\x00` to `\xff`. Its other
+characters must be ASCII, its braces are plain bytes rather than values, and bytes literals
+written one after another join, as in `b"a" b"b"`, while a string and a bytes literal side by side
+are an error.
 
 ## Statements
 

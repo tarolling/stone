@@ -10,6 +10,7 @@
 //! - `[p + 32]` and `[p + 40]`: where the bytes received but not read yet start and end in it
 //! - `[p + 48]`: the buffer's size
 //! - `[p + 56]`: 1 once the other end has closed the connection
+//! - `[p + 64]`: how many milliseconds each wait may take, or -1 to wait forever
 //!
 //! `stone.free_enum` closes a handle's descriptor and frees its buffer when its count reaches 0.
 //! Errors are made by `.Lfs_err`, as the `fs` routines make theirs: an error number or code
@@ -17,8 +18,8 @@
 
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{
-    INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE, SOCKET_CLOSED_CODE,
-    TIMED_OUT_CODE,
+    CLOSED_EARLY_CODE, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE,
+    SOCKET_CLOSED_CODE, TIMED_OUT_CODE,
 };
 use crate::stdlib::net::{MAX_REPLY, READ_SIZE};
 
@@ -31,7 +32,7 @@ pub const SOCKET_TAG: i64 = -1;
 pub const LISTENER_TAG: i64 = -2;
 
 /// The slots of a handle after its tag and kinds.
-const HANDLE_SLOTS: i64 = 6;
+const HANDLE_SLOTS: i64 = 7;
 
 /// `SOCK_CLOEXEC`, so a program `os.run` starts never inherits a connection.
 const SOCK_CLOEXEC: i64 = 0x80000;
@@ -39,6 +40,18 @@ const SOCK_CLOEXEC: i64 = 0x80000;
 /// `MSG_NOSIGNAL`, so writing to a connection the other end closed fails with `EPIPE` instead
 /// of killing the program with `SIGPIPE`.
 const MSG_NOSIGNAL: i64 = 0x4000;
+
+/// `MSG_DONTWAIT`, which a send with a timeout passes, so it waits only in `.Lnet_wait`.
+const MSG_DONTWAIT: i64 = 0x40;
+
+/// The error number of a send that would have to wait.
+const EAGAIN: i64 = 11;
+
+/// The error number of a connection a non-blocking `connect` started but did not finish.
+const EINPROGRESS: i64 = 115;
+
+/// `O_NONBLOCK`, which a socket connecting with a timeout has until it connects.
+const O_NONBLOCK: i64 = 0x800;
 
 /// The bytes the buffer of a socket starts with, room for two reads.
 const FIRST_BUFFER: usize = 2 * READ_SIZE;
@@ -49,8 +62,13 @@ const FIRST_BUFFER: usize = 2 * READ_SIZE;
 /// - `stone.net_connect`, `stone.net_listen`, and `stone.net_exchange` take an address list
 ///   in `rdi`, a port in `rsi`, and the name errors quote in `rdx`; `stone.net_exchange` also
 ///   takes the query list in `rcx` and the milliseconds to wait in `r8`
-/// - `stone.net_send` takes a socket in `rdi` and a string in `rsi`
-/// - `stone.net_read_line`, `stone.net_read`, and `stone.net_read_all` take a socket in `rdi`
+/// - `stone.net_connect` also takes the milliseconds it may wait in `rcx`, or -1
+/// - `stone.net_send` takes a socket in `rdi` and a string, or bytes, in `rsi`
+/// - `stone.net_read_line`, `stone.net_read`, `stone.net_read_all`, and
+///   `stone.net_read_all_bytes` take a socket in `rdi`, and `stone.net_read_bytes` and
+///   `stone.net_read_exact` a socket in `rdi` and a count in `rsi`
+/// - `stone.net_set_timeout` takes a socket or listener in `rdi` and the seconds, a float's bits,
+///   in `rsi`
 /// - `stone.net_accept` and `stone.net_port` take a listener in `rdi`
 /// - `stone.net_close` takes a socket or listener in `rdi`
 ///
@@ -60,9 +78,33 @@ const FIRST_BUFFER: usize = 2 * READ_SIZE;
 pub fn net_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     let uses = |label: &str| used.contains(&label);
     handle(r#gen);
-    if uses("stone.net_read_line") || uses("stone.net_read") || uses("stone.net_read_all") {
+    wait(r#gen);
+    if used.iter().any(|label| {
+        matches!(
+            *label,
+            "stone.net_read_line"
+                | "stone.net_read"
+                | "stone.net_read_all"
+                | "stone.net_read_bytes"
+                | "stone.net_read_exact"
+                | "stone.net_read_all_bytes"
+        )
+    }) {
         receive(r#gen);
         take(r#gen);
+        take_bytes(r#gen);
+    }
+    if uses("stone.net_set_timeout") {
+        set_timeout(r#gen);
+    }
+    if uses("stone.net_read_bytes") {
+        read_bytes(r#gen);
+    }
+    if uses("stone.net_read_exact") {
+        read_exact(r#gen);
+    }
+    if uses("stone.net_read_all_bytes") {
+        read_all_bytes(r#gen);
     }
     if uses("stone.net_connect") {
         connect(r#gen);
@@ -216,21 +258,34 @@ fn handle(r#gen: &mut dyn AssemblyGenerator) {
     for offset in [24, 32, 40, 48, 56] {
         r#gen.emit(&format!("\tmov\tQWORD PTR [rax + {offset}], rcx"));
     }
+    r#gen.emit("\tmov\tQWORD PTR [rax + 64], -1");
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbx");
     r#gen.emit("\tret");
 }
 
-/// Emits `stone.net_connect`: a socket of the address's family, connected to it.
+/// Emits `stone.net_connect`: a socket of the address's family, connected to it. With a timeout,
+/// the socket connects without blocking, waits in `.Lnet_wait` until it can write, reads how the
+/// connection went with `getsockopt(SO_ERROR)`, and goes back to blocking.
 fn connect(r#gen: &mut dyn AssemblyGenerator) {
     let label = "stone.net_connect";
-    // rbx holds the name, r12 the address and then the descriptor, and r13 the port
+    // rbx holds the name, r12 the address and then the descriptor, and r13 the port; [rbp - 96]
+    // holds the timeout and [rbp - 104] the descriptor's flags
     frame(r#gen, label);
     r#gen.emit("\tmov\trbx, rdx");
     r#gen.emit("\tmov\tr12, rdi");
     r#gen.emit("\tmov\tr13, rsi");
+    r#gen.emit("\tmov\tQWORD PTR [rbp - 96], rcx");
     socket_address(r#gen, label);
     open_socket(r#gen, label, 1);
+    r#gen.emit("\tcmp\tQWORD PTR [rbp - 96], 0");
+    r#gen.emit(&format!("\tjl\t{label}_connect"));
+    fcntl(r#gen, 3, "xor\tedx, edx"); // F_GETFL
+    r#gen.emit(&format!("\tjs\t{label}_close"));
+    r#gen.emit("\tmov\tQWORD PTR [rbp - 104], rax");
+    r#gen.emit(&format!("\tor\trax, {O_NONBLOCK}"));
+    fcntl(r#gen, 4, "mov\trdx, rax"); // F_SETFL
+    r#gen.emit(&format!("\tjs\t{label}_close"));
     syscall(
         r#gen,
         &format!("{label}_connect"),
@@ -238,7 +293,36 @@ fn connect(r#gen: &mut dyn AssemblyGenerator) {
         &["mov\trdi, r12", "lea\trsi, [rbp - 80]", "mov\trdx, r15"],
     );
     r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjz\t{label}_blocking"));
+    r#gen.emit(&format!("\tcmp\trax, -{EINPROGRESS}"));
+    r#gen.emit(&format!("\tjne\t{label}_close"));
+    r#gen.emit("\tmov\trdi, r12");
+    r#gen.emit("\tmov\tesi, 4"); // POLLOUT
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbp - 96]");
+    r#gen.emit("\tcall\t.Lnet_wait");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjnz\t{label}_close"));
+    // how the connection went
+    r#gen.emit("\tmov\tQWORD PTR [rbp - 88], 0");
+    r#gen.emit("\tmov\tQWORD PTR [rbp - 112], 4");
+    r#gen.emit("\tmov\trdi, r12");
+    r#gen.emit("\tmov\tesi, 1"); // SOL_SOCKET
+    r#gen.emit("\tmov\tedx, 4"); // SO_ERROR
+    r#gen.emit("\tlea\tr10, [rbp - 88]");
+    r#gen.emit("\tlea\tr8, [rbp - 112]");
+    r#gen.emit("\tmov\teax, 55"); // sys_getsockopt
+    r#gen.emit("\tsyscall");
+    r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjs\t{label}_close"));
+    r#gen.emit("\tmov\teax, DWORD PTR [rbp - 88]");
+    r#gen.emit("\tneg\trax");
+    r#gen.emit(&format!("\tjnz\t{label}_close"));
+    r#gen.emit(&format!("{label}_blocking:"));
+    r#gen.emit("\tcmp\tQWORD PTR [rbp - 96], 0");
+    r#gen.emit(&format!("\tjl\t{label}_connected"));
+    fcntl(r#gen, 4, "mov\trdx, QWORD PTR [rbp - 104]"); // F_SETFL
+    r#gen.emit(&format!("\tjs\t{label}_close"));
+    r#gen.emit(&format!("{label}_connected:"));
     r#gen.emit("\tmov\trdi, r12");
     r#gen.emit(&format!("\tmov\trsi, {SOCKET_TAG}"));
     r#gen.emit("\tcall\t.Lnet_handle");
@@ -303,6 +387,17 @@ fn listen(r#gen: &mut dyn AssemblyGenerator) {
     frame_end(r#gen, label);
 }
 
+/// Emits an `fcntl` call with the command `command` on the descriptor in `r12`, after `third`
+/// puts its argument in `rdx`, leaving the result in `rax` and the flags set by testing it.
+fn fcntl(r#gen: &mut dyn AssemblyGenerator, command: i64, third: &str) {
+    r#gen.emit(&format!("\t{third}"));
+    r#gen.emit("\tmov\trdi, r12");
+    r#gen.emit(&format!("\tmov\tesi, {command}"));
+    r#gen.emit("\tmov\teax, 72"); // sys_fcntl
+    r#gen.emit("\tsyscall");
+    r#gen.emit("\ttest\trax, rax");
+}
+
 /// Emits code that opens a socket of the family in `r14` and the type `kind` (1 for a stream, 2
 /// for datagrams) into `r12`, or fails with the error about the name in `rbx`, and the jump
 /// target `<label>_invalid` for an address [`socket_address`] rejects.
@@ -347,11 +442,13 @@ fn closing_failure(r#gen: &mut dyn AssemblyGenerator, label: &str) {
 fn accept(r#gen: &mut dyn AssemblyGenerator) {
     let label = "stone.net_accept";
     frame(r#gen, label);
+    r#gen.emit("\tmov\trbx, rdi");
     r#gen.emit("\tmov\tr12, QWORD PTR [rdi + 16]");
     r#gen.emit("\ttest\tr12, r12");
     r#gen.emit(&format!("\tjns\t{label}_open"));
     fail_with_code(r#gen, label, LISTENER_CLOSED_CODE);
     r#gen.emit(&format!("{label}_open:"));
+    wait_for(r#gen, label, "r12", 1, &format!("{label}_again"));
     syscall(
         r#gen,
         &format!("{label}_again"),
@@ -418,9 +515,18 @@ fn send(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tr13, QWORD PTR [rbx + 16]");
     r#gen.emit("\tmov\tr14, QWORD PTR [r12 - 16]");
     r#gen.emit("\txor\tr15, r15");
+    // with a timeout, a send never waits but in .Lnet_wait
+    r#gen.emit(&format!("\tmov\tQWORD PTR [rbp - 88], {MSG_NOSIGNAL}"));
+    r#gen.emit("\tcmp\tQWORD PTR [rbx + 64], 0");
+    r#gen.emit(&format!("\tjl\t{label}_more"));
+    r#gen.emit(&format!(
+        "\tmov\tQWORD PTR [rbp - 88], {}",
+        MSG_NOSIGNAL | MSG_DONTWAIT
+    ));
     r#gen.emit(&format!("{label}_more:"));
     r#gen.emit("\tcmp\tr15, r14");
     r#gen.emit(&format!("\tjae\t{label}_sent"));
+    wait_for(r#gen, label, "r13", 4, &format!("{label}_again"));
     syscall(
         r#gen,
         &format!("{label}_again"),
@@ -430,11 +536,13 @@ fn send(r#gen: &mut dyn AssemblyGenerator) {
             "lea\trsi, [r12 + r15]",
             "mov\trdx, r14",
             "sub\trdx, r15",
-            &format!("mov\tr10, {MSG_NOSIGNAL}"),
+            "mov\tr10, QWORD PTR [rbp - 88]",
             "xor\tr8, r8",
             "xor\tr9, r9",
         ],
     );
+    r#gen.emit(&format!("\tcmp\trax, -{EAGAIN}"));
+    r#gen.emit(&format!("\tje\t{label}_more"));
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjns\t{label}_wrote"));
     fail_with_errno(r#gen, label, None);
@@ -480,7 +588,7 @@ fn receive(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trax, QWORD PTR [rbx + 48]");
     r#gen.emit("\tsub\trax, QWORD PTR [rbx + 40]");
     r#gen.emit(&format!("\tcmp\trax, {READ_SIZE}"));
-    r#gen.emit("\tjae\t.Lnet_receive_again");
+    r#gen.emit("\tjae\t.Lnet_receive_wait");
     // doubling makes room, since the bytes kept are at most the old size
     r#gen.emit("\tmov\trsi, QWORD PTR [rbx + 48]");
     r#gen.emit("\tadd\trsi, rsi");
@@ -488,6 +596,15 @@ fn receive(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 24]");
     r#gen.emit("\tcall\tstone.mem_realloc");
     r#gen.emit("\tmov\tQWORD PTR [rbx + 24], rax");
+    r#gen.emit(".Lnet_receive_wait:");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbx + 64]");
+    r#gen.emit("\ttest\trdx, rdx");
+    r#gen.emit("\tjs\t.Lnet_receive_again");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tmov\tesi, 1"); // POLLIN
+    r#gen.emit("\tcall\t.Lnet_wait");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjnz\t.Lnet_receive_done");
     syscall(
         r#gen,
         ".Lnet_receive_again",
@@ -538,6 +655,230 @@ fn take(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tpop\tr13");
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tret");
+}
+
+/// Emits `.Lnet_take_bytes`, which takes the first `rdi` of the bytes not read yet from the
+/// socket in `rbx` and returns them in `rax` as new bytes. It preserves `rbx` and `r12` through
+/// `r15`.
+fn take_bytes(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit(".Lnet_take_bytes:");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tmov\tr12, QWORD PTR [rbx + 24]");
+    r#gen.emit("\tadd\tr12, QWORD PTR [rbx + 32]");
+    r#gen.emit("\tadd\tQWORD PTR [rbx + 32], rdi");
+    r#gen.emit("\tmov\trsi, rdi");
+    r#gen.emit("\tmov\trdi, r12");
+    r#gen.emit("\tcall\tstone.str_slice");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tret");
+}
+
+/// Emits `.Lnet_wait`, which waits until the descriptor `rdi` is ready for the `poll` events
+/// `rsi`, for at most `rdx` milliseconds in all, returning 0 in `rax` when it is, the negative of
+/// [`TIMED_OUT_CODE`] when the time runs out, or a negative error number. A signal that cuts the
+/// wait short starts it again with the time left, from the monotonic clock, as
+/// `stdlib::net::wait` does. It preserves `rbx` and `r12` through `r15`.
+fn wait(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the descriptor, r12 the events, and r13 the deadline in nanoseconds; the clock
+    // is read into [rsp], and the pollfd is at [rsp + 16]
+    r#gen.emit(".Lnet_wait:");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
+    r#gen.emit("\tsub\trsp, 32");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr12, rsi");
+    r#gen.emit("\tmov\tr13, rdx");
+    wait_now(r#gen);
+    r#gen.emit("\timul\tr13, r13, 1000000");
+    r#gen.emit("\tadd\tr13, rax");
+    r#gen.emit(".Lnet_wait_again:");
+    wait_now(r#gen);
+    r#gen.emit("\tmov\trcx, r13");
+    r#gen.emit("\tsub\trcx, rax");
+    r#gen.emit("\tjle\t.Lnet_wait_timeout");
+    // the milliseconds left, rounded up
+    r#gen.emit("\tlea\trax, [rcx + 999999]");
+    r#gen.emit("\txor\tedx, edx");
+    r#gen.emit("\tmov\trcx, 1000000");
+    r#gen.emit("\tdiv\trcx");
+    r#gen.emit("\tmov\trdx, rax");
+    // struct pollfd { fd, events, revents }
+    r#gen.emit("\tmov\trax, r12");
+    r#gen.emit("\tshl\trax, 32");
+    r#gen.emit("\tadd\trax, rbx");
+    r#gen.emit("\tmov\tQWORD PTR [rsp + 16], rax");
+    r#gen.emit("\tlea\trdi, [rsp + 16]");
+    r#gen.emit("\tmov\tesi, 1");
+    r#gen.emit("\tmov\teax, 7"); // sys_poll
+    r#gen.emit("\tsyscall");
+    r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
+    r#gen.emit("\tje\t.Lnet_wait_again");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjs\t.Lnet_wait_done");
+    // a poll that ran out may have rounded the time, so the clock decides
+    r#gen.emit("\tjz\t.Lnet_wait_again");
+    r#gen.emit("\txor\teax, eax");
+    r#gen.emit("\tjmp\t.Lnet_wait_done");
+    r#gen.emit(".Lnet_wait_timeout:");
+    r#gen.emit(&format!("\tmov\trax, -{TIMED_OUT_CODE}"));
+    r#gen.emit(".Lnet_wait_done:");
+    r#gen.emit("\tadd\trsp, 32");
+    r#gen.emit("\tpop\tr13");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tret");
+}
+
+/// Emits code that leaves the monotonic clock's time in nanoseconds in `rax`, reading it into
+/// `[rsp]`, for `.Lnet_wait`.
+fn wait_now(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\tmov\tedi, 1"); // CLOCK_MONOTONIC
+    r#gen.emit("\tmov\trsi, rsp");
+    r#gen.emit("\tmov\teax, 228"); // sys_clock_gettime
+    r#gen.emit("\tsyscall");
+    r#gen.emit("\tmov\trax, QWORD PTR [rsp]");
+    r#gen.emit("\timul\trax, rax, 1000000000");
+    r#gen.emit("\tadd\trax, QWORD PTR [rsp + 8]");
+}
+
+/// Emits code that waits, if the handle in `rbx` has a timeout, until the descriptor in `fd` is
+/// ready for the `poll` events `events`, then goes on to `ready`, failing with the reason alone
+/// if the wait runs out or fails.
+fn wait_for(r#gen: &mut dyn AssemblyGenerator, label: &str, fd: &str, events: i64, ready: &str) {
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbx + 64]");
+    r#gen.emit("\ttest\trdx, rdx");
+    r#gen.emit(&format!("\tjs\t{ready}"));
+    r#gen.emit(&format!("\tmov\trdi, {fd}"));
+    r#gen.emit(&format!("\tmov\tesi, {events}"));
+    r#gen.emit("\tcall\t.Lnet_wait");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjz\t{ready}"));
+    fail_with_errno(r#gen, label, None);
+}
+
+/// Emits `stone.net_set_timeout`, which sets the handle's timeout to the seconds whose bits are
+/// in `rsi`, counted as `stdlib::net::timeout_ms` counts them: -1 unless they are more than 0,
+/// else the milliseconds rounded up, at most 2^31 - 1.
+fn set_timeout(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("stone.net_set_timeout:");
+    r#gen.emit("\tmovq\txmm0, rsi");
+    r#gen.emit("\txor\teax, eax");
+    r#gen.emit("\tcvtsi2sd\txmm1, rax");
+    // below, equal, or nan
+    r#gen.emit("\tucomisd\txmm0, xmm1");
+    r#gen.emit("\tjbe\t.Lnet_set_timeout_none");
+    r#gen.emit("\tmov\teax, 1000");
+    r#gen.emit("\tcvtsi2sd\txmm1, rax");
+    r#gen.emit("\tmulsd\txmm0, xmm1");
+    r#gen.emit("\tmov\teax, 2147483647");
+    r#gen.emit("\tcvtsi2sd\txmm1, rax");
+    r#gen.emit("\tucomisd\txmm0, xmm1");
+    r#gen.emit("\tjae\t.Lnet_set_timeout_store");
+    r#gen.emit("\tcvttsd2si\trax, xmm0");
+    r#gen.emit("\tcvtsi2sd\txmm1, rax");
+    r#gen.emit("\tucomisd\txmm0, xmm1");
+    r#gen.emit("\tjbe\t.Lnet_set_timeout_store");
+    r#gen.emit("\tinc\trax");
+    r#gen.emit("\tjmp\t.Lnet_set_timeout_store");
+    r#gen.emit(".Lnet_set_timeout_none:");
+    r#gen.emit("\tmov\trax, -1");
+    r#gen.emit(".Lnet_set_timeout_store:");
+    r#gen.emit("\tmov\tQWORD PTR [rdi + 64], rax");
+    r#gen.emit("\txor\teax, eax");
+    r#gen.emit("\tret");
+}
+
+/// Emits the end of a byte reading routine: `<label>_bytes` returns `ok` of the bytes in `rax`,
+/// and `<label>_failed` fails with the negative error number in `rax`.
+fn bytes_result(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+    r#gen.emit(&format!("{label}_bytes:"));
+    r#gen.emit("\tmov\trdi, rax");
+    r#gen.emit("\tmov\tesi, 1"); // a string slot, as bytes are
+    r#gen.emit("\tcall\t.Lfs_ok");
+    r#gen.emit(&format!("\tjmp\t{label}_done"));
+    r#gen.emit(&format!("{label}_failed:"));
+    fail_with_errno(r#gen, label, None);
+}
+
+/// Emits `stone.net_read_bytes`, which returns `ok` of what has arrived, up to `rsi` bytes,
+/// waiting for something if nothing has, or of no bytes at the end or for a count of 0 or less.
+fn read_bytes(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_read_bytes";
+    // r12 holds the most to take
+    frame(r#gen, label);
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr12, rsi");
+    check_open(r#gen, label);
+    r#gen.emit("\txor\tedi, edi");
+    r#gen.emit("\ttest\tr12, r12");
+    r#gen.emit(&format!("\tjle\t{label}_take"));
+    r#gen.emit(&format!("{label}_again:"));
+    unread(r#gen);
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\ttest\tr13, r13");
+    r#gen.emit(&format!("\tjnz\t{label}_some"));
+    r#gen.emit("\tcall\t.Lnet_receive");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjs\t{label}_failed"));
+    r#gen.emit(&format!("\tjnz\t{label}_again"));
+    // the other end closed the connection
+    r#gen.emit("\txor\tedi, edi");
+    r#gen.emit(&format!("\tjmp\t{label}_take"));
+    r#gen.emit(&format!("{label}_some:"));
+    r#gen.emit("\tcmp\trdi, r12");
+    r#gen.emit("\tcmova\trdi, r12");
+    r#gen.emit(&format!("{label}_take:"));
+    r#gen.emit("\tcall\t.Lnet_take_bytes");
+    bytes_result(r#gen, label);
+    frame_end(r#gen, label);
+}
+
+/// Emits `stone.net_read_exact`, which returns `ok` of the next `rsi` bytes, waiting for them,
+/// or fails with `CLOSED_EARLY` if the other end closes the connection first.
+fn read_exact(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_read_exact";
+    // r12 holds how many to take
+    frame(r#gen, label);
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr12, rsi");
+    check_open(r#gen, label);
+    r#gen.emit("\ttest\tr12, r12");
+    r#gen.emit(&format!("\tjns\t{label}_again"));
+    r#gen.emit("\txor\tr12, r12");
+    r#gen.emit(&format!("{label}_again:"));
+    unread(r#gen);
+    r#gen.emit("\tcmp\tr13, r12");
+    r#gen.emit(&format!("\tjae\t{label}_take"));
+    r#gen.emit("\tcall\t.Lnet_receive");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjs\t{label}_failed"));
+    r#gen.emit(&format!("\tjnz\t{label}_again"));
+    fail_with_code(r#gen, label, CLOSED_EARLY_CODE);
+    r#gen.emit(&format!("{label}_take:"));
+    r#gen.emit("\tmov\trdi, r12");
+    r#gen.emit("\tcall\t.Lnet_take_bytes");
+    bytes_result(r#gen, label);
+    frame_end(r#gen, label);
+}
+
+/// Emits `stone.net_read_all_bytes`, which reads until the other end closes the connection and
+/// returns `ok` of every byte that arrived.
+fn read_all_bytes(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_read_all_bytes";
+    frame(r#gen, label);
+    r#gen.emit("\tmov\trbx, rdi");
+    check_open(r#gen, label);
+    r#gen.emit(&format!("{label}_more:"));
+    r#gen.emit("\tcall\t.Lnet_receive");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjs\t{label}_failed"));
+    r#gen.emit(&format!("\tjnz\t{label}_more"));
+    unread(r#gen);
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tcall\t.Lnet_take_bytes");
+    bytes_result(r#gen, label);
+    frame_end(r#gen, label);
 }
 
 /// Emits the end of a reading routine: `<label>_text` returns `ok` of the string in `rax`, or

@@ -3115,3 +3115,25 @@ fn strings_nested_in_values_count_toward_the_depth_limit() {
     let source = format!("x = {}y{}\n", "\"{".repeat(depth), "}\"".repeat(depth));
     assert!(parse_within(source, Duration::from_secs(5)).is_err());
 }
+
+fn bytes_constant(value: &[u8]) -> ExprKind {
+    ExprKind::Constant {
+        value: Box::new(Constant::Bytes(value.to_vec())),
+        kind: None,
+    }
+}
+
+#[test]
+fn bytes_literals_written_together_join() {
+    assert_eq!(only_expr("b\"a\\x00\"\n"), bytes_constant(b"a\x00"));
+    assert_eq!(only_expr("b\"a\" b\"\" b\"c\"\n"), bytes_constant(b"ac"));
+}
+
+#[test]
+fn a_string_and_a_bytes_literal_do_not_join() {
+    let message = "a string and a bytes literal cannot be written together; \
+                   join them with '+' after converting one"
+        .to_string();
+    assert_eq!(error_of("x = \"a\" b\"b\"\n"), (message.clone(), 1, 9));
+    assert_eq!(error_of("x = b\"a\" \"b\"\n"), (message, 1, 10));
+}

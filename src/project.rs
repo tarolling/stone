@@ -1267,7 +1267,11 @@ impl Rewriter<'_> {
                     }
                 }
             }
-            TypeExprKind::Int | TypeExprKind::Float | TypeExprKind::Bool | TypeExprKind::Str => {}
+            TypeExprKind::Int
+            | TypeExprKind::Float
+            | TypeExprKind::Bool
+            | TypeExprKind::Str
+            | TypeExprKind::Bytes => {}
         }
     }
 

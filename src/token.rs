@@ -17,6 +17,8 @@ pub enum TokenType {
     StringMiddle(String),
     /// The text of a string after its last value, as `b"` in `"a{x}b"`.
     StringEnd(String),
+    /// A bytes literal, as `b"a\x00"`, which may hold any byte.
+    Bytes(Vec<u8>),
     Operator(String),
     Newline,
     Indent,

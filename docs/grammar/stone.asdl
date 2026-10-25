@@ -85,7 +85,7 @@ module stone
             -- path names the variant, such as Shape.Circle, some, or none
             | MatchVariant(identifier* path, pattern* fields)
 
-    type = Int | Float | Bool | Str | List(type elem) | Map(type key, type value)
+    type = Int | Float | Bool | Str | Bytes | List(type elem) | Map(type key, type value)
          | Tuple(type* elts)
          -- a struct, such as Point, an enum, such as Shape, option[T], or a type parameter, such as T
          | Named(identifier name, type* args)

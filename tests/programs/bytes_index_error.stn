@@ -1,0 +1,4 @@
+// an index past the end of bytes stops the program
+data = b"ab\x00"
+print(data[-3])
+print(data[3])

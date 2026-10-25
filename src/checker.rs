@@ -44,6 +44,8 @@ pub enum Type {
     Float,
     Bool,
     Str,
+    /// A byte string, which may hold any byte, such as `b"a\x00"`.
+    Bytes,
     /// No value, which is what a function without `->` returns. No variable can hold it.
     Unit,
     List(Box<Type>),
@@ -177,9 +179,13 @@ impl Type {
                 params: each(params),
                 ret: Box::new(ret.substitute(substitution)),
             },
-            Type::Int | Type::Float | Type::Bool | Type::Str | Type::Unit | Type::Handle(_) => {
-                self.clone()
-            }
+            Type::Int
+            | Type::Float
+            | Type::Bool
+            | Type::Str
+            | Type::Bytes
+            | Type::Unit
+            | Type::Handle(_) => self.clone(),
         }
     }
 
@@ -223,6 +229,7 @@ impl Display for Type {
             Type::Float => write!(f, "float"),
             Type::Bool => write!(f, "bool"),
             Type::Str => write!(f, "str"),
+            Type::Bytes => write!(f, "bytes"),
             Type::Unit => write!(f, "no value"),
             Type::List(elem) => write!(f, "list[{elem}]"),
             Type::Map(key, value) => write!(f, "map[{key}, {value}]"),
@@ -683,6 +690,7 @@ enum Ty {
     Float,
     Bool,
     Str,
+    Bytes,
     Unit,
     List(Box<Ty>),
     Map(Box<Ty>, Box<Ty>),
@@ -749,6 +757,10 @@ fn handle_method(name: &str) -> Option<(Option<Handle>, Vec<Ty>, Ty)> {
         ),
         "port" => (Some(Handle::Listener), vec![], Ty::Int),
         "close" => (None, vec![], Ty::Unit),
+        "set_timeout" => (None, vec![Ty::Float], Ty::Unit),
+        "send_bytes" => (Some(Handle::Socket), vec![Ty::Bytes], result(Ty::Int)),
+        "read_bytes" | "read_exact" => (Some(Handle::Socket), vec![Ty::Int], result(Ty::Bytes)),
+        "read_all_bytes" => (Some(Handle::Socket), vec![], result(Ty::Bytes)),
         _ => return None,
     })
 }
@@ -879,6 +891,7 @@ enum Kind {
     Float,
     Bool,
     Str,
+    Bytes,
     Unit,
     List,
     Map,
@@ -898,6 +911,7 @@ impl Kind {
             Ty::Float => Some(Kind::Float),
             Ty::Bool => Some(Kind::Bool),
             Ty::Str => Some(Kind::Str),
+            Ty::Bytes => Some(Kind::Bytes),
             Ty::Unit => Some(Kind::Unit),
             Ty::List(_) => Some(Kind::List),
             Ty::Map(..) => Some(Kind::Map),
@@ -914,15 +928,17 @@ impl Kind {
 
 /// The kinds arithmetic accepts, with `int` the default.
 const NUMBERS: &[Kind] = &[Kind::Int, Kind::Float];
-/// The kinds ordering comparisons accept: numbers, and strings, which compare byte by byte.
-const ORDERED: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
+/// The kinds ordering comparisons accept: numbers, and strings and bytes, which compare byte by
+/// byte.
+const ORDERED: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str, Kind::Bytes];
 /// What `int` and `float` convert from.
 const CONVERTIBLE: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str];
 /// What the `math` functions take.
 const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
 /// The names of the types built into the language, which no enum or struct may take.
 const BUILTIN_TYPES: &[&str] = &[
-    "int", "float", "bool", "str", "list", "tuple", OPTION, RESULT, "Self", "socket", "listener",
+    "int", "float", "bool", "str", "bytes", "list", "tuple", OPTION, RESULT, "Self", "socket",
+    "listener",
 ];
 /// The message for a map key of another kind.
 const MAP_KEY: &str = "a map key must be int, str, or bool, found {}";
@@ -1255,6 +1271,7 @@ struct Conflict {
 enum Indexed {
     List,
     Str,
+    Bytes,
     Tuple,
     Map,
 }
@@ -1453,7 +1470,7 @@ impl Inference {
                     matches!(self.shallow(elem), Ty::Int | Ty::Float | Ty::Var(_))
                 }
             },
-            Ty::Str => bound == Bound::Numeric { strings: true },
+            Ty::Str | Ty::Bytes => bound == Bound::Numeric { strings: true },
             ty => match bound {
                 Bound::NumberOrList(number) => *ty == number.ty(),
                 Bound::Numeric { .. } => NumberTy::of(ty).is_some(),
@@ -1504,6 +1521,7 @@ impl Inference {
             Ty::Float => "float".to_string(),
             Ty::Bool => "bool".to_string(),
             Ty::Str => "str".to_string(),
+            Ty::Bytes => "bytes".to_string(),
             Ty::Unit => "no value".to_string(),
             Ty::List(elem) => format!("list[{}]", self.show(&elem)),
             Ty::Map(key, value) => format!("map[{}, {}]", self.show(&key), self.show(&value)),
@@ -1594,7 +1612,7 @@ impl Inference {
             .find(|t| matches!(t, Ty::Param(_)))
         {
             let message = match symbol {
-                "+" => "'+' needs int, float, or str operands, found {}",
+                "+" => "'+' needs int, float, str, or bytes operands, found {}",
                 "-" => "'-' needs int or float operands, found {}",
                 "*" => "'*' needs int or float operands, found {}",
                 "/" => "'/' needs int or float operands, found {}",
@@ -1608,6 +1626,7 @@ impl Inference {
             matches!(
                 ty,
                 Ty::Str
+                    | Ty::Bytes
                     | Ty::Bool
                     | Ty::Unit
                     | Ty::Tuple(_)
@@ -1691,8 +1710,8 @@ impl Inference {
                 };
                 let (allowed, message): (&'static [Kind], _) = match operator {
                     Operator::Add => (
-                        &[Kind::Int, Kind::Float, Kind::Str],
-                        "'+' needs int, float, or str operands, found {}",
+                        &[Kind::Int, Kind::Float, Kind::Str, Kind::Bytes],
+                        "'+' needs int, float, str, or bytes operands, found {}",
                     ),
                     Operator::Subtract => (NUMBERS, "'-' needs int or float operands, found {}"),
                     Operator::Multiply => (NUMBERS, "'*' needs int or float operands, found {}"),
@@ -3417,6 +3436,7 @@ impl Inference {
             TypeExprKind::Float => Ty::Float,
             TypeExprKind::Bool => Ty::Bool,
             TypeExprKind::Str => Ty::Str,
+            TypeExprKind::Bytes => Ty::Bytes,
             TypeExprKind::List(elem) => Ty::List(Box::new(self.written_type(elem, errors))),
             TypeExprKind::Map(key, value) => {
                 let key_ty = self.written_type(key, errors);
@@ -3684,9 +3704,12 @@ impl Inference {
                     Some(args) => self.check_range(iter, args),
                     None => {
                         let iter_ty = self.infer(iter);
-                        // a string gives its characters, and anything else must be a list
+                        // a string gives its characters, bytes their values, and anything else
+                        // must be a list
                         if self.shallow(&iter_ty) == Ty::Str {
                             Ty::Str
+                        } else if self.shallow(&iter_ty) == Ty::Bytes {
+                            Ty::Int
                         } else if let Ty::Tuple(_) = self.shallow(&iter_ty) {
                             self.error(
                                 iter.span,
@@ -5149,6 +5172,7 @@ impl Inference {
             ExprKind::Constant { value, .. } => match **value {
                 Constant::Bool(_) => Ty::Bool,
                 Constant::Str(_) | Constant::Char(_) => Ty::Str,
+                Constant::Bytes(_) => Ty::Bytes,
                 Constant::Float(_) | Constant::F32(_) | Constant::F64(_) | Constant::Decimal(_) => {
                     Ty::Float
                 }
@@ -5284,16 +5308,16 @@ impl Inference {
                         // tests of membership are the arm above's
                         CompOp::In | CompOp::NotIn => continue,
                         CompOp::LessThan => {
-                            "'<' needs int, float, str, or a type that implements 'ord', found {}"
+                            "'<' needs int, float, str, bytes, or a type that implements 'ord', found {}"
                         }
                         CompOp::LessThanEqual => {
-                            "'<=' needs int, float, str, or a type that implements 'ord', found {}"
+                            "'<=' needs int, float, str, bytes, or a type that implements 'ord', found {}"
                         }
                         CompOp::GreaterThan => {
-                            "'>' needs int, float, str, or a type that implements 'ord', found {}"
+                            "'>' needs int, float, str, bytes, or a type that implements 'ord', found {}"
                         }
                         CompOp::GreaterThanEqual => {
-                            "'>=' needs int, float, str, or a type that implements 'ord', found {}"
+                            "'>=' needs int, float, str, bytes, or a type that implements 'ord', found {}"
                         }
                     };
                     self.require_ordered(ty.clone(), expr.span, message);
@@ -5390,6 +5414,7 @@ impl Inference {
         }
         let (sliced, elem, indexed) = match self.shallow(&value_ty) {
             Ty::Str => (Ty::Str, Ty::Str, Indexed::Str),
+            Ty::Bytes => (Ty::Bytes, Ty::Int, Indexed::Bytes),
             Ty::Tuple(fields) => {
                 return (self.tuple_field(value.span, &fields, slice), Indexed::Tuple);
             }
@@ -5442,6 +5467,7 @@ impl Inference {
         match self.shallow(&test.container_ty) {
             Ty::Map(key, _) => self.expect(&key, &test.needle_ty, test.needle),
             Ty::Str => self.expect(&Ty::Str, &test.needle_ty, test.needle),
+            Ty::Bytes => self.expect(&Ty::Bytes, &test.needle_ty, test.needle),
             Ty::List(elem) => self.compare_elements(*elem, &test),
             Ty::Var(_) => {
                 let elem = self.fresh();
@@ -5451,7 +5477,7 @@ impl Inference {
             }
             other => {
                 let message = format!(
-                    "'{}' needs a str, list, or map, found {}",
+                    "'{}' needs a str, bytes, list, or map, found {}",
                     test.name,
                     self.show(&other)
                 );
@@ -5968,9 +5994,9 @@ impl Inference {
                 }
                 self.require(
                     receiver_ty,
-                    &[Kind::Str, Kind::List, Kind::Map],
+                    &[Kind::Str, Kind::Bytes, Kind::List, Kind::Map],
                     receiver.span,
-                    "'len' needs a str, list, or map, found {}",
+                    "'len' needs a str, bytes, list, or map, found {}",
                 );
                 Ty::Int
             }
@@ -6085,7 +6111,7 @@ impl Inference {
                 self.require_ordered(
                     receiver_ty.clone(),
                     receiver.span,
-                    "'cmp' needs int, float, str, or a type that implements 'ord', found {}",
+                    "'cmp' needs int, float, str, bytes, or a type that implements 'ord', found {}",
                 );
                 Ty::Enum(ORDERING.to_string(), vec![])
             }
@@ -6147,6 +6173,18 @@ impl Inference {
                     "ok" => Ty::Enum(OPTION.to_string(), vec![value]),
                     "err" => Ty::Enum(OPTION.to_string(), vec![error]),
                     _ => value,
+                }
+            }
+            "bytes" | "text" => {
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                if name == "bytes" {
+                    self.expect(&Ty::Str, &receiver_ty, receiver.span);
+                    Ty::Bytes
+                } else {
+                    self.expect(&Ty::Bytes, &receiver_ty, receiver.span);
+                    Ty::Enum(RESULT.to_string(), vec![Ty::Str, Ty::Str])
                 }
             }
             "parse_int" | "parse_float" => {
@@ -6270,7 +6308,11 @@ impl Inference {
                 receiver_ty.clone(),
                 &[Kind::Handle],
                 receiver,
-                "'close' needs a socket or listener, found {}",
+                if name == "close" {
+                    "'close' needs a socket or listener, found {}"
+                } else {
+                    "'set_timeout' needs a socket or listener, found {}"
+                },
             ),
         }
         if args.len() == params.len() {
@@ -6305,6 +6347,15 @@ impl Inference {
                     "float" => Ty::Float,
                     _ => Ty::Str,
                 }
+            }
+            "bytes" => {
+                match args {
+                    [values] => {
+                        self.expect(&Ty::List(Box::new(Ty::Int)), &arg_types[0], values.span)
+                    }
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                Ty::Bytes
             }
             "input" => {
                 match args {
@@ -6362,6 +6413,7 @@ impl Inference {
                     "net_sys.exchange" => {
                         vec![bytes.clone(), Ty::Int, Ty::Str, bytes.clone(), Ty::Int]
                     }
+                    "net_sys.connect" => vec![bytes.clone(), Ty::Int, Ty::Str, Ty::Int],
                     _ => vec![bytes.clone(), Ty::Int, Ty::Str],
                 };
                 if args.len() == params.len() {
@@ -6396,6 +6448,24 @@ impl Inference {
                     "fs.read_lines" | "fs.list_dir" => Ty::List(Box::new(Ty::Str)),
                     "fs.write" | "fs.append" => Ty::Int,
                     _ => Ty::Str,
+                };
+                Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
+            }
+            "fs.read_bytes" | "fs.write_bytes" | "fs.append_bytes" => {
+                let params = match name {
+                    "fs.read_bytes" => vec![Ty::Str],
+                    _ => vec![Ty::Str, Ty::Bytes],
+                };
+                if args.len() == params.len() {
+                    for ((arg, ty), param) in args.iter().zip(arg_types).zip(&params) {
+                        self.expect(param, ty, arg.span);
+                    }
+                } else {
+                    self.arity_error(call.span, name, &params.len().to_string(), args.len());
+                }
+                let value = match name {
+                    "fs.read_bytes" => Ty::Bytes,
+                    _ => Ty::Int,
                 };
                 Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
             }
@@ -6827,7 +6897,7 @@ impl Inference {
                 !matches!(ty, Ty::List(_) | Ty::Map(..) | Ty::Unit)
                     && self.uncomparable(&ty, &mut HashSet::new()).is_none()
             }
-            Ty::Int | Ty::Float | Ty::Str if trait_ == ORD => true,
+            Ty::Int | Ty::Float | Ty::Str | Ty::Bytes if trait_ == ORD => true,
             ty => {
                 ty_key(&ty).is_some_and(|key| self.impls.contains_key(&(trait_.to_string(), key)))
             }
@@ -7074,6 +7144,7 @@ impl Inference {
                     Kind::Float => Ty::Float,
                     Kind::Bool => Ty::Bool,
                     Kind::Str => Ty::Str,
+                    Kind::Bytes => Ty::Bytes,
                     Kind::Unit => Ty::Unit,
                     Kind::List => Ty::List(Box::new(self.fresh())),
                     // no constraint allows a map, tuple, enum, or struct first, and nothing tells
@@ -7271,6 +7342,7 @@ impl Inference {
             Ty::Float => Type::Float,
             Ty::Bool => Type::Bool,
             Ty::Str => Type::Str,
+            Ty::Bytes => Type::Bytes,
             Ty::Unit => Type::Unit,
             Ty::List(elem) => Type::List(Box::new(self.finalize(&elem))),
             Ty::Map(key, value) => Type::Map(
@@ -7824,6 +7896,7 @@ const SLICE_CHANGE: &str = "a slice is a new list, so changing it has no effect"
 const STRING_CHANGE: &str =
     "a string cannot be changed; build a new one, as in 's = s[:i] + c + s[i + 1:]'";
 
+const BYTES_CHANGE: &str = "bytes cannot be changed; build new bytes instead";
 const TUPLE_CHANGE: &str = "a tuple cannot be changed; build a new one, as in 't = (v, t[1])'";
 /// The error for a `for` loop that unpacks a map's elements, which are its keys.
 const MAP_PAIRS: &str = "a map gives its keys; iterate 'm.items()' for its keys and values";
@@ -7836,6 +7909,7 @@ impl Indexed {
         match self {
             Indexed::List => None,
             Indexed::Str => Some(STRING_CHANGE),
+            Indexed::Bytes => Some(BYTES_CHANGE),
             Indexed::Tuple => Some(TUPLE_CHANGE),
             Indexed::Map => None,
         }

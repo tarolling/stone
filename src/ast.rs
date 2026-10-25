@@ -51,6 +51,8 @@ pub enum Constant {
     // strings and characters
     Char(char),
     Str(String),
+    /// A bytes literal, such as `b"a\x00"`.
+    Bytes(Vec<u8>),
 }
 
 impl Constant {
@@ -76,6 +78,7 @@ impl Constant {
             Constant::Bool(_) => "bool",
             Constant::Char(_) => "char",
             Constant::Str(_) => "str",
+            Constant::Bytes(_) => "bytes",
         }
     }
 }
@@ -695,6 +698,7 @@ pub enum TypeExprKind {
     Float,
     Bool,
     Str,
+    Bytes,
     /// A list of the given element type, such as `list[float]`.
     List(Box<TypeExpr>),
     /// A map from the first type to the second, such as `map[str, int]`.
@@ -723,6 +727,7 @@ impl Display for TypeExpr {
             TypeExprKind::Float => write!(f, "float"),
             TypeExprKind::Bool => write!(f, "bool"),
             TypeExprKind::Str => write!(f, "str"),
+            TypeExprKind::Bytes => write!(f, "bytes"),
             TypeExprKind::List(elem) => write!(f, "list[{elem}]"),
             TypeExprKind::Map(key, value) => write!(f, "map[{key}, {value}]"),
             TypeExprKind::Tuple(elts) => {

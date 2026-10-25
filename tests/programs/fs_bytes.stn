@@ -1,0 +1,17 @@
+// Files of any bytes: every byte value written, appended to, and read back, and a file that is
+// not text read as bytes.
+use fs
+
+values = []
+for i in range(256):
+    values.append(i)
+everything = bytes(values)
+print(fs.write_bytes("all.bin", everything))
+print(fs.append_bytes("all.bin", b"\x00end"))
+data = fs.read_bytes("all.bin").unwrap()
+print(data.len(), data[:4], data[-4:], data[:256] == everything)
+print(fs.read("all.bin"))
+fs.write("text.txt", "café\n").unwrap()
+print(fs.read_bytes("text.txt"))
+print(fs.read_bytes("missing.bin"))
+print(fs.write_bytes("no/such/dir.bin", b"x"))

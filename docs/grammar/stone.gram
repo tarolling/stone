@@ -162,8 +162,8 @@ param:
 # Types
 # -----
 
-# a name is int, float, bool, or str, or else a type parameter in scope, a struct, or an enum,
-# which the checker looks up, or 'option' '[' type ']'; 'none' is not a type
+# a name is int, float, bool, str, bytes, socket, or listener, or else a type parameter in scope,
+# a struct, or an enum, which the checker looks up, or 'option' '[' type ']'; 'none' is not a type
 type:
     | 'list' '[' type ']'
     | 'map' '[' type ',' type [','] ']'
@@ -333,6 +333,7 @@ atom:
     | 'false' 
     | 'none' 
     | strings
+    | bytes
     | NUMBER
     | list
     | dict
@@ -357,6 +358,9 @@ strings:
 string[expr]:
     | STRING 
     | STRING_START expression (STRING_MIDDLE expression)* STRING_END
+
+# a bytes literal, BYTES as in `b"a\x00"`, written one after another to join
+bytes: BYTES+
 
 list:
     | '[' [named_expressions] ']' 

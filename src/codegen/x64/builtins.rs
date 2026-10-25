@@ -1863,7 +1863,7 @@ fn list_slice(r#gen: &mut dyn AssemblyGenerator) {
 /// index in `r12`, the step in `r13`, and the count in `r14`. Bit 0 of `r8` says `rsi` is
 /// missing, bit 1 `rdx`, and bit 2 `rcx`, and the step is never 0. It clobbers `rax`, `rcx`,
 /// `rdx`, and `r10`, and `routine` keeps the labels of each routine apart.
-fn slice_bounds(r#gen: &mut dyn AssemblyGenerator, routine: &str) {
+pub(super) fn slice_bounds(r#gen: &mut dyn AssemblyGenerator, routine: &str) {
     let label = |name: &str| format!(".L{routine}_{name}");
     r#gen.emit("\ttest\tr8, 4");
     r#gen.emit(&format!("\tjz\t{}", label("step")));

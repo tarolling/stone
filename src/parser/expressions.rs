@@ -9,6 +9,10 @@ use crate::debug;
 use crate::span::Span;
 use crate::token::TokenType;
 
+/// The error for a string and a bytes literal written side by side, which do not join.
+const MIXED_LITERALS: &str = "a string and a bytes literal cannot be written together; join them \
+                              with '+' after converting one";
+
 impl Parser {
     /// Returns whether the next token can continue a primary target, such as the `[` in `a[0]`.
     ///
@@ -544,7 +548,42 @@ impl Parser {
     }
 
     pub(super) fn parse_strings(&mut self) -> ParseExprResult {
-        self.parse_strings_loop()
+        if matches!(self.peek().r#type, TokenType::Bytes(_)) {
+            return self.parse_bytes();
+        }
+        let strings = self.parse_strings_loop()?;
+        if matches!(self.peek().r#type, TokenType::Bytes(_)) {
+            self.hint(self.peek().span, MIXED_LITERALS);
+        }
+        Ok(strings)
+    }
+
+    /// Parses bytes literals written one after another, which make one, as `b"a" b"b"` makes
+    /// `b"ab"`.
+    ///
+    /// ```text
+    /// bytes: BYTES+
+    /// ```
+    fn parse_bytes(&mut self) -> ParseExprResult {
+        let start = self.pos;
+        let mut joined = vec![];
+        while let TokenType::Bytes(value) = &self.peek().r#type {
+            joined.extend_from_slice(value);
+            self.advance();
+        }
+        if matches!(
+            self.peek().r#type,
+            TokenType::String(_) | TokenType::StringStart(_)
+        ) {
+            self.hint(self.peek().span, MIXED_LITERALS);
+        }
+        Ok(Box::new(Expr::new(
+            ExprKind::Constant {
+                value: Box::new(Constant::Bytes(joined)),
+                kind: None,
+            },
+            self.span_from(start),
+        )))
     }
 
     /// Parses an atom, the smallest unit of an expression, such as `x`, `42`, `true`, or `"hi"`.

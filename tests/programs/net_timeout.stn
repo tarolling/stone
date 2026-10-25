@@ -1,0 +1,34 @@
+// Waiting no longer than a timeout: reads and accepts that nothing answers give up, and one that
+// is answered in time does not.
+use net
+
+fn wait() -> result[int, str]:
+    l = net.listen("127.0.0.1", 0)?
+    l.set_timeout(0.05)
+    print(l.accept())
+    c = net.connect_timeout("127.0.0.1", l.port(), 2.0)?
+    s = l.accept()?
+    s.set_timeout(0.001)
+    print(s.read_line(), s.read_bytes(4), s.read_exact(1))
+    c.send("hi\n")?
+    s.set_timeout(5.0)
+    print(s.read_line())
+    // zero, a negative number, or nan waits forever
+    s.set_timeout(0.0)
+    s.set_timeout(-1.0)
+    s.set_timeout(float("nan"))
+    c.send("again\n")?
+    print(s.read_line())
+    ret ok(0)
+
+match wait():
+    case ok(_):
+        print("done")
+    case err(e):
+        print("failed:", e)
+
+// a port nothing listens on refuses at once, timeout or not
+l = net.listen("127.0.0.1", 0).unwrap()
+port = l.port()
+l.close()
+print(net.connect_timeout("127.0.0.1", port, 1.0).unwrap_err() == "connection refused: '127.0.0.1:{port}'")

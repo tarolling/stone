@@ -1,0 +1,7 @@
+ok(256)
+ok(4)
+260 b'\x00\x01\x02\x03' b'\x00end' true
+err("not valid UTF-8 text: 'all.bin'")
+ok(b'caf\xc3\xa9\n')
+err("no such file or directory: 'missing.bin'")
+err("no such file or directory: 'no/such/dir.bin'")

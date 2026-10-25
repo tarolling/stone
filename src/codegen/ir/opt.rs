@@ -353,6 +353,7 @@ fn is_removable(inst: &Inst) -> bool {
         | Inst::DataGet { .. }
         | Inst::ListData { .. }
         | Inst::StrAddr { .. }
+        | Inst::BytesAddr { .. }
         | Inst::VariantStatic { .. }
         | Inst::FunctionAddress { .. }
         | Inst::EnumTag { .. }

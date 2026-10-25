@@ -20,7 +20,7 @@ pub const MODULE: &str = "fs";
 /// What the module is for, which editors show for `fs`.
 pub const MODULE_DOC: &str = "The builtin module that reads and writes files and directories.";
 
-pub static DOCS: [BuiltinDoc; 8] = [
+pub static DOCS: [BuiltinDoc; 11] = [
     BuiltinDoc {
         name: "fs.read",
         signature: "fs.read(path: str) -> result[str, str]",
@@ -47,6 +47,25 @@ pub static DOCS: [BuiltinDoc; 8] = [
         signature: "fs.append(path: str, text: str) -> result[int, str]",
         description: "Writes `text` to the end of the file at `path`, creating it if there is \
                       none, and returns `ok` of the number of bytes written, or `err` of a \
+                      message.",
+    },
+    BuiltinDoc {
+        name: "fs.read_bytes",
+        signature: "fs.read_bytes(path: str) -> result[bytes, str]",
+        description: "Returns `ok` of every byte of the file at `path`, whatever they are, or \
+                      `err` of a message.",
+    },
+    BuiltinDoc {
+        name: "fs.write_bytes",
+        signature: "fs.write_bytes(path: str, data: bytes) -> result[int, str]",
+        description: "Writes `data` to the file at `path` as `fs.write` writes text, and returns \
+                      `ok` of the number of bytes written, or `err` of a message.",
+    },
+    BuiltinDoc {
+        name: "fs.append_bytes",
+        signature: "fs.append_bytes(path: str, data: bytes) -> result[int, str]",
+        description: "Writes `data` to the end of the file at `path` as `fs.append` appends \
+                      text, and returns `ok` of the number of bytes written, or `err` of a \
                       message.",
     },
     BuiltinDoc {
@@ -237,7 +256,7 @@ pub fn read_lines(path: &str) -> Result<Vec<String>, String> {
 
 /// Writes `text` to the file at `path`, at its end if `append` is set and over what it held
 /// otherwise, returning the number of bytes written.
-fn write_to(path: &str, text: &str, append: bool) -> Result<i64, String> {
+fn write_to(path: &str, text: &[u8], append: bool) -> Result<i64, String> {
     check_path(path)?;
     let mut options = std::fs::OpenOptions::new();
     match append {
@@ -248,19 +267,34 @@ fn write_to(path: &str, text: &str, append: bool) -> Result<i64, String> {
         .create(true)
         .open(path)
         .map_err(|e| io_message(&e, path))?;
-    file.write_all(text.as_bytes())
-        .map_err(|e| io_message(&e, path))?;
+    file.write_all(text).map_err(|e| io_message(&e, path))?;
     Ok(text.len() as i64)
 }
 
 /// Writes `text` to the file at `path`, replacing what it held, and returns the bytes written.
 pub fn write(path: &str, text: &str) -> Result<i64, String> {
-    write_to(path, text, false)
+    write_to(path, text.as_bytes(), false)
+}
+
+/// Writes `data` to the file at `path`, replacing what it held, and returns the bytes written.
+pub fn write_bytes(path: &str, data: &[u8]) -> Result<i64, String> {
+    write_to(path, data, false)
+}
+
+/// Writes `data` to the end of the file at `path` and returns the bytes written.
+pub fn append_bytes(path: &str, data: &[u8]) -> Result<i64, String> {
+    write_to(path, data, true)
+}
+
+/// Returns every byte of the file at `path`.
+pub fn read_bytes(path: &str) -> Result<Vec<u8>, String> {
+    check_path(path)?;
+    std::fs::read(path).map_err(|e| io_message(&e, path))
 }
 
 /// Writes `text` to the end of the file at `path` and returns the bytes written.
 pub fn append(path: &str, text: &str) -> Result<i64, String> {
-    write_to(path, text, true)
+    write_to(path, text.as_bytes(), true)
 }
 
 /// Returns the names in the directory at `path`, sorted by their bytes.

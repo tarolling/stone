@@ -295,6 +295,10 @@ fn rename_inst(
             dst: reg(dst),
             text,
         },
+        Inst::BytesAddr { dst, bytes } => Inst::BytesAddr {
+            dst: reg(dst),
+            bytes,
+        },
         Inst::ListLen { dst, list } => Inst::ListLen {
             dst: reg(dst),
             list: o(list),

@@ -43,16 +43,39 @@ fn printable() -> str:
 // Connects to `port` on `host`, which is a name such as `example.com` or an address such as
 // `127.0.0.1` or `::1`, trying each of the host's addresses in turn until one connects.
 pub fn connect(host: str, port: int) -> result[socket, str]:
+    ret connect_within(host, port, -1)
+
+// Connects as `connect` does, but gives each address at most `seconds` to answer, after which
+// it is the error `timed out`. Zero, a negative number, or nan waits as long as `connect` does.
+pub fn connect_timeout(host: str, port: int, seconds: float) -> result[socket, str]:
+    ret connect_within(host, port, milliseconds(seconds))
+
+// Connects to `port` on `host`, giving each address `timeout` milliseconds, or as long as the
+// system waits if it is -1.
+fn connect_within(host: str, port: int, timeout: int) -> result[socket, str]:
     name = endpoint(host, port)
     check_port(port, name)?
     failure = "no address: '{name}'"
     for address in addresses(host)?:
-        match net_sys.connect(address, port, name):
+        match net_sys.connect(address, port, name, timeout):
             case ok(connection):
                 ret ok(connection)
             case err(e):
                 failure = e
     ret err(failure)
+
+// Returns `seconds` in whole milliseconds, rounded up and at most 2^31 - 1, or -1 for zero, a
+// negative number, or nan, which wait forever, as `set_timeout` counts them.
+fn milliseconds(seconds: float) -> int:
+    if not (seconds > 0.0):
+        ret -1
+    ms = seconds * 1000.0
+    if ms >= 2147483647.0:
+        ret 2147483647
+    whole = int(ms)
+    if float(whole) < ms:
+        ret whole + 1
+    ret whole
 
 // Listens for connections to `port` at the first address of `host`: `127.0.0.1` for this
 // machine alone, `0.0.0.0` for every IPv4 address, or `::` for every address. A port of 0 lets

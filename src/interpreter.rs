@@ -97,6 +97,8 @@ pub enum Value {
     Float(f64),
     Bool(bool),
     Str(Rc<str>),
+    /// Bytes, which may hold any byte and never change.
+    Bytes(Rc<[u8]>),
     /// No value, what a function without `->` returns, which no variable can hold.
     Unit,
     List(Rc<Vec<Value>>),
@@ -496,6 +498,7 @@ impl Value {
             Value::Bool(b) => out.push_str(&b.to_string()),
             Value::Str(s) if nested => out.push_str(&stdlib::repr_in_list(s)),
             Value::Str(s) => out.push_str(s),
+            Value::Bytes(b) => out.push_str(&stdlib::repr_bytes(b)),
             Value::Unit => {}
             Value::Function(function) => out.push_str(&function.text),
             // a handle prints as its type, as a function does
@@ -610,6 +613,7 @@ impl Value {
             (Value::Float(a), Value::Float(b)) => a == b,
             (Value::Bool(a), Value::Bool(b)) => a == b,
             (Value::Str(a), Value::Str(b)) => a == b,
+            (Value::Bytes(a), Value::Bytes(b)) => a == b,
             (Value::Tuple(a), Value::Tuple(b)) => all_equal(a, b, depth)?,
             (Value::Struct(a), Value::Struct(b)) => all_equal(&a.fields, &b.fields, depth)?,
             (Value::Enum(a), Value::Enum(b)) => {
@@ -637,6 +641,7 @@ impl Value {
             (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b)),
             // byte order, which is also the order of the characters' code points
             (Value::Str(a), Value::Str(b)) => Ok(Some(a.as_bytes().cmp(b.as_bytes()))),
+            (Value::Bytes(a), Value::Bytes(b)) => Ok(Some(a.cmp(b))),
             (a, b) => {
                 Err(format!("cannot order {} and {}", a.display(true), b.display(true)).into())
             }
@@ -682,6 +687,7 @@ impl From<&Constant> for Value {
             Constant::Bool(b) => Value::Bool(*b),
             Constant::Str(s) => Value::Str(s.as_str().into()),
             Constant::Char(c) => Value::Str(c.to_string().into()),
+            Constant::Bytes(b) => Value::Bytes(b.as_slice().into()),
             Constant::Int(i) | Constant::I64(i) => Value::Int(*i),
             Constant::Float(x) | Constant::F64(x) => Value::Float(*x),
             // other literal kinds are not lexed yet
@@ -822,6 +828,9 @@ fn binary(op: Operator, lhs: Value, rhs: Value) -> EvalResult<Value> {
             Operator::Modulo => Ok(Value::Float(l % r)),
             Operator::Power => Err("Type mismatch in binary operation".into()),
         },
+        (Value::Bytes(l), Value::Bytes(r)) if matches!(op, Operator::Add) => {
+            Ok(Value::Bytes([&l[..], &r[..]].concat().into()))
+        }
         (Value::Str(l), Value::Str(r)) if matches!(op, Operator::Add) => {
             Ok(Value::Str(format!("{l}{r}").into()))
         }
@@ -898,6 +907,7 @@ fn change_list(items: &mut Vec<Value>, name: &str, args: Vec<Value>) -> EvalResu
                     stdlib::float_key(*a).cmp(&stdlib::float_key(*b))
                 }
                 (Value::Str(a), Value::Str(b)) => a.as_bytes().cmp(b.as_bytes()),
+                (Value::Bytes(a), Value::Bytes(b)) => a.cmp(b),
                 _ => std::cmp::Ordering::Equal,
             });
             Ok(Value::Unit)
@@ -1540,8 +1550,18 @@ impl<'out> Interpreter<'out> {
                     return Ok(ControlFlow::None);
                 }
 
-                // a string gives each character, as a string of the bytes that make it up
+                // a string gives each character, as a string of the bytes that make it up, and
+                // bytes each byte's value
                 let list = self.eval_expr(iter)?;
+                if let Value::Bytes(bytes) = &list {
+                    for &b in bytes.iter() {
+                        self.assign_target(target, &Value::Int(b as i64))?;
+                        if let Some(flow) = self.run_iteration(body)? {
+                            return Ok(flow);
+                        }
+                    }
+                    return Ok(ControlFlow::None);
+                }
                 if let Value::Str(text) = &list {
                     for ch in text.chars() {
                         self.assign_target(target, &Value::Str(ch.to_string().into()))?;
@@ -2050,6 +2070,12 @@ impl<'out> Interpreter<'out> {
                             .transpose()
                     };
                     let (lower, upper, step) = (bound(lower)?, bound(upper)?, bound(step)?);
+                    if let Value::Bytes(bytes) = &list {
+                        let (start, step, count) =
+                            stdlib::slice_indices(bytes.len(), lower, upper, step)?;
+                        let sliced = stdlib::bytes_slice(bytes, start, step, count);
+                        return Ok(Value::Bytes(sliced.into()));
+                    }
                     if let Value::Str(text) = &list {
                         let (start, step, count) =
                             stdlib::slice_indices(text.len(), lower, upper, step)?;
@@ -2069,6 +2095,10 @@ impl<'out> Interpreter<'out> {
                     // the checker allows only a constant index in range
                     let position = list_position(index, fields.len())?;
                     return Ok(fields[position].clone());
+                }
+                if let Value::Bytes(bytes) = &list {
+                    let position = position(index, bytes.len(), stdlib::BYTES_INDEX_RANGE)?;
+                    return Ok(Value::Int(bytes[position] as i64));
                 }
                 if let Value::Str(text) = &list {
                     let position = position(index, text.len(), stdlib::STRING_INDEX_RANGE)?;
@@ -2165,6 +2195,9 @@ impl<'out> Interpreter<'out> {
         match (container, needle) {
             (Value::Map(map), key) => Ok(map.contains(&MapKey::of(key)?)),
             (Value::Str(text), Value::Str(part)) => Ok(text.contains(&**part)),
+            (Value::Bytes(bytes), Value::Bytes(part)) => {
+                Ok(part.is_empty() || bytes.windows(part.len()).any(|w| w == &part[..]))
+            }
             (Value::List(items), _) => {
                 for item in items.iter() {
                     if self.values_equal(needle, item, 0)? {
@@ -2173,7 +2206,7 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(false)
             }
-            _ => Err("'in' needs a str, list, or map".into()),
+            _ => Err("'in' needs a str, bytes, list, or map".into()),
         }
     }
 
@@ -2214,6 +2247,22 @@ impl<'out> Interpreter<'out> {
                         socket.close();
                         Value::Unit
                     }
+                    ("set_timeout", [Value::Float(seconds)]) => {
+                        socket.set_timeout(*seconds);
+                        Value::Unit
+                    }
+                    ("send_bytes", [Value::Bytes(data)]) => {
+                        result(socket.send_bytes(data).map(Value::Int))
+                    }
+                    ("read_bytes", [Value::Int(max)]) => {
+                        result(socket.read_bytes(*max).map(|b| Value::Bytes(b.into())))
+                    }
+                    ("read_exact", [Value::Int(n)]) => {
+                        result(socket.read_exact(*n).map(|b| Value::Bytes(b.into())))
+                    }
+                    ("read_all_bytes", []) => {
+                        result(socket.read_all_bytes().map(|b| Value::Bytes(b.into())))
+                    }
                     _ => return Err(format!("there is no method '{name}' of a socket").into()),
                 })
             }
@@ -2233,6 +2282,12 @@ impl<'out> Interpreter<'out> {
                         listener.close();
                         Value::Unit
                     }
+                    "set_timeout" => {
+                        if let [Value::Float(seconds)] = &args[..] {
+                            listener.set_timeout(*seconds);
+                        }
+                        Value::Unit
+                    }
                     _ => return Err(format!("there is no method '{name}' of a listener").into()),
                 })
             }
@@ -2247,6 +2302,12 @@ impl<'out> Interpreter<'out> {
             )),
             // len counts bytes, like the compiled strlen
             ("len", Value::Str(s), []) => Ok(Value::Int(s.len() as i64)),
+            ("len", Value::Bytes(b), []) => Ok(Value::Int(b.len() as i64)),
+            ("bytes", Value::Str(s), []) => Ok(Value::Bytes(s.as_bytes().into())),
+            ("text", Value::Bytes(b), []) => Ok(result(match fs::is_text(b) {
+                true => Ok(Value::Str(String::from_utf8_lossy(b).into())),
+                false => Err(fs::INVALID_TEXT.to_string()),
+            })),
             ("len", Value::List(items), []) => Ok(Value::Int(items.len() as i64)),
             ("len", Value::Map(map), []) => Ok(Value::Int(map.len() as i64)),
             ("len", _, _) => {
@@ -2622,6 +2683,17 @@ impl<'out> Interpreter<'out> {
             }
             ("int", [Value::Str(s)]) => return Ok(Value::Int(stdlib::parse_int(s)?)),
             ("int", _) => return Err("int() takes one int, float, or str".into()),
+            ("bytes", [Value::List(values)]) => {
+                let bytes = values
+                    .iter()
+                    .map(|value| match value {
+                        Value::Int(n @ 0..=255) => Ok(*n as u8),
+                        Value::Int(n) => Err(stdlib::fill(stdlib::BYTE_RANGE, &[*n])),
+                        _ => Err("bytes() takes a list of ints".to_string()),
+                    })
+                    .collect::<Result<Vec<u8>, String>>()?;
+                return Ok(Value::Bytes(bytes.into()));
+            }
             ("str", [value]) => {
                 let mut text = String::new();
                 self.write_value(&mut text, value, false)?;
@@ -2672,6 +2744,17 @@ impl<'out> Interpreter<'out> {
                 let written = match name {
                     "fs.write" => fs::write(path, text),
                     _ => fs::append(path, text),
+                };
+                return Ok(result(written.map(Value::Int)));
+            }
+            ("fs.read_bytes", [Value::Str(path)]) => {
+                let read = fs::read_bytes(path).map(|data| Value::Bytes(data.into()));
+                return Ok(result(read));
+            }
+            ("fs.write_bytes" | "fs.append_bytes", [Value::Str(path), Value::Bytes(data)]) => {
+                let written = match name {
+                    "fs.write_bytes" => fs::write_bytes(path, data),
+                    _ => fs::append_bytes(path, data),
                 };
                 return Ok(result(written.map(Value::Int)));
             }
@@ -2730,10 +2813,18 @@ impl<'out> Interpreter<'out> {
             }
             ("time.now", []) => return Ok(Value::Float(time::now())),
             ("time.clock", []) => return Ok(Value::Float(time::clock())),
-            ("net_sys.connect", [Value::List(address), Value::Int(port), Value::Str(name)]) => {
+            (
+                "net_sys.connect",
+                [
+                    Value::List(address),
+                    Value::Int(port),
+                    Value::Str(name),
+                    Value::Int(timeout),
+                ],
+            ) => {
                 self.out.flush()?;
                 let address = ints(address);
-                let connected = net::connect(&address, *port, name)
+                let connected = net::connect(&address, *port, name, *timeout)
                     .map(|socket| Value::Socket(Rc::new(RefCell::new(socket))));
                 return Ok(result(connected));
             }

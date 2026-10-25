@@ -67,7 +67,8 @@ pub enum Sys {
     /// for none.
     Ppoll,
     Wait4,
-    /// Changes a descriptor's flags, which only macOS calls, since Linux's `pipe2` takes them.
+    /// Changes a descriptor's flags: on macOS for close-on-exec, which Linux's `pipe2` and
+    /// `SOCK_CLOEXEC` set themselves, and on both for a socket connecting with a timeout.
     Fcntl,
     Socket,
     Connect,
@@ -80,11 +81,12 @@ pub enum Sys {
     Setsockopt,
     Sendto,
     Recvfrom,
+    Getsockopt,
 }
 
 impl Sys {
     /// Every call, in the order their shims are emitted.
-    pub const ALL: [Sys; 38] = [
+    pub const ALL: [Sys; 39] = [
         Sys::Read,
         Sys::Write,
         Sys::Openat,
@@ -123,6 +125,7 @@ impl Sys {
         Sys::Setsockopt,
         Sys::Sendto,
         Sys::Recvfrom,
+        Sys::Getsockopt,
     ];
 
     /// Returns the call's Linux system call number, such as 64 for `write`, or `None` if the
@@ -161,8 +164,10 @@ impl Sys {
             Sys::Sendto => 206,
             Sys::Recvfrom => 207,
             Sys::Setsockopt => 208,
+            Sys::Getsockopt => 209,
+            Sys::Fcntl => 25,
             Sys::Accept => 242, // accept4
-            Sys::Sysctl | Sys::Opendir | Sys::Readdir | Sys::Closedir | Sys::Fcntl => {
+            Sys::Sysctl | Sys::Opendir | Sys::Readdir | Sys::Closedir => {
                 return None;
             }
         })
@@ -207,6 +212,7 @@ impl Sys {
             Sys::Setsockopt => "setsockopt",
             Sys::Sendto => "sendto",
             Sys::Recvfrom => "recvfrom",
+            Sys::Getsockopt => "getsockopt",
             Sys::Mremap | Sys::Uname | Sys::Getdents64 => return None,
         })
     }
@@ -2104,7 +2110,7 @@ fn list_slice(r#gen: &mut dyn AssemblyGenerator) {
 /// in `x20`, the step in `x21`, and the count in `x22`. Bit 0 of `x4` says `x1` is missing, bit 1
 /// `x2`, and bit 2 `x3`, and the step is never 0. It clobbers `x3`, `x10`, `x11`, and `x12`, and
 /// `routine` keeps the labels of each routine apart.
-fn slice_bounds(r#gen: &mut dyn AssemblyGenerator, routine: &str) {
+pub(super) fn slice_bounds(r#gen: &mut dyn AssemblyGenerator, routine: &str) {
     let label = |name: &str| format!(".L{routine}_{name}");
     r#gen.emit(&format!("\ttbz\tx4, #2, {}", label("step")));
     r#gen.emit("\tmov\tx3, #1");

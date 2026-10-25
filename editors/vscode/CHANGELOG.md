@@ -20,6 +20,9 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   `net.connect`, opens the module's stone source, which the server writes beside the prelude,
   and its names cannot be renamed. Completion after a `socket` or `listener` and a `.` offers
   their methods, and `socket` and `listener` are highlighted as types in signatures.
+- `bytes`: bytes literals such as `b"\x00"` and the type `bytes` are highlighted, and completion
+  after bytes and a `.` offers their methods, as it does the new socket methods `send_bytes`,
+  `read_bytes`, `read_exact`, `read_all_bytes`, and `set_timeout`.
 
 ## [0.3.3] - 2026-10-21
 

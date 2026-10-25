@@ -950,7 +950,7 @@ fn check_reports_a_mistake_inside_a_generic_function() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{}:2:9: error: '+' needs int, float, or str operands, found T\n  |\n2 |     ret \
+            "{}:2:9: error: '+' needs int, float, str, or bytes operands, found T\n  |\n2 |     ret \
              xs[0] + xs[1]\n  |         ^^^^^^^^^^^^^\n",
             file.display()
         )
@@ -1262,4 +1262,22 @@ fn both_backends_resolve_names_through_dns_alike() {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
     }
+}
+
+#[test]
+fn both_backends_give_up_connecting_after_a_timeout() {
+    // an address in a private range that nothing answers, so a connection waits until it times
+    // out, unless this network refuses it at once
+    let source = "use net\nprint(net.connect_timeout(\"10.255.255.1\", 80, 0.2))\n";
+    let (_, [run, built]) = run_and_build_in("net_connect_timeout", source);
+    let expected = "err(\"timed out: '10.255.255.1:80'\")\n";
+    if String::from_utf8_lossy(&run.stdout) != expected {
+        eprintln!(
+            "skipping: this network does not leave 10.255.255.1 unanswered ({})",
+            String::from_utf8_lossy(&run.stdout).trim()
+        );
+        return;
+    }
+    assert!(built.status.success(), "{built:?}");
+    assert_eq!(String::from_utf8_lossy(&built.stdout), expected);
 }

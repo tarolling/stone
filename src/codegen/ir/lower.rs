@@ -49,9 +49,9 @@ use crate::codegen::context::{function_label, module_routine};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::Span;
 use crate::stdlib::{
-    COMPARE_DEPTH, END_OF_INPUT, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY,
-    POP_RANGE, PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR,
-    UNWRAP_NONE, UNWRAP_OK, math, random,
+    BYTE_RANGE, BYTES_INDEX_RANGE, COMPARE_DEPTH, END_OF_INPUT, INDEX_RANGE, LENGTHS_DIFFER,
+    MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO,
+    STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE, UNWRAP_OK, math, random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -587,8 +587,9 @@ type Unwrapped = (usize, usize, &'static str, Option<usize>);
 enum Iterable {
     Range(Operand),
     List(Operand),
-    /// A string and its length, which cannot change while the loop holds it.
-    Str(Operand, Operand),
+    /// A string or, if `bytes`, bytes, and its length, which cannot change while the loop holds
+    /// it.
+    Str(Operand, Operand, bool),
 }
 
 /// A loop that `break` and `cont` can leave.
@@ -1261,8 +1262,9 @@ impl<'a> Lowerer<'a> {
                 Compared::Value(leaf) => leaf,
             };
             match leaf {
-                Type::Str => {
-                    let equal = self.runtime_call("stone.str_eq", vec![lhs[k], rhs[k]], None);
+                Type::Str | Type::Bytes => {
+                    let routine = equality_routine(leaf);
+                    let equal = self.runtime_call(routine, vec![lhs[k], rhs[k]], None);
                     self.terminate(Terminator::Branch {
                         cond: equal,
                         then: next,
@@ -3158,7 +3160,8 @@ impl<'a> Lowerer<'a> {
                 Iterable::Range(self.snapshot(end))
             }
             Some(_) => return Err("range() takes 1 or 2 arguments".to_string()),
-            None if self.type_of(iter)? == Type::Str => {
+            None if matches!(self.type_of(iter)?, Type::Str | Type::Bytes) => {
+                let bytes = self.type_of(iter)? == Type::Bytes;
                 let text = self.expr(iter)?;
                 let text = self.snapshot(text);
                 self.take(text, Some(RcKind::Str));
@@ -3167,7 +3170,7 @@ impl<'a> Lowerer<'a> {
                     dst: next,
                     src: Operand::Imm(0),
                 });
-                Iterable::Str(text, len)
+                Iterable::Str(text, len, bytes)
             }
             None => {
                 let list = self.expr(iter)?;
@@ -3185,7 +3188,9 @@ impl<'a> Lowerer<'a> {
         };
         let (held, elem) = match iterable {
             Iterable::List(list) => (Some((list, RcKind::List)), self.element_kind(iter)),
-            Iterable::Str(text, _) => (Some((text, RcKind::Str)), Some(RcKind::Str)),
+            Iterable::Str(text, _, false) => (Some((text, RcKind::Str)), Some(RcKind::Str)),
+            // a byte is an int
+            Iterable::Str(text, _, true) => (Some((text, RcKind::Str)), None),
             Iterable::Range(_) => (None, None),
         };
 
@@ -3203,7 +3208,7 @@ impl<'a> Lowerer<'a> {
                 self.push(Inst::ListLen { dst: len, list });
                 Operand::Reg(len)
             }
-            Iterable::Str(_, len) => len,
+            Iterable::Str(_, len, _) => len,
             Iterable::Range(end) => end,
         };
         self.terminate(Terminator::CmpBranch {
@@ -3260,7 +3265,18 @@ impl<'a> Lowerer<'a> {
             Iterable::Range(_) => Operand::Reg(next),
         };
         let step = match iterable {
-            Iterable::Str(text, _) => {
+            Iterable::Str(text, _, true) => {
+                let Operand::Reg(dst) = value else {
+                    unreachable!("a byte is a register")
+                };
+                self.push(Inst::Call {
+                    dsts: vec![dst],
+                    callee: Callee::Runtime("stone.bytes_at"),
+                    args: vec![text, Operand::Reg(next)],
+                });
+                Operand::Imm(1)
+            }
+            Iterable::Str(text, _, false) => {
                 // the character is a new reference, which the variable takes
                 let Operand::Reg(dst) = value else {
                     unreachable!("a character is a register")
@@ -3369,7 +3385,7 @@ impl<'a> Lowerer<'a> {
             } if !ops.iter().any(crate::ast::CompOp::is_membership)
                 && comparators.iter().all(|c| {
                     self.type_of(c)
-                        .is_ok_and(|ty| ty != Type::Str && !is_compound(&ty))
+                        .is_ok_and(|ty| !matches!(ty, Type::Str | Type::Bytes) && !is_compound(&ty))
                 }) =>
             {
                 // a < b < c means a < b and b < c, with b evaluated once and c skipped once false
@@ -3505,6 +3521,14 @@ impl<'a> Lowerer<'a> {
                         self.push(Inst::StrAddr {
                             dst,
                             text: s.clone(),
+                        });
+                        Operand::Reg(dst)
+                    }
+                    Constant::Bytes(bytes) => {
+                        let dst = self.fresh();
+                        self.push(Inst::BytesAddr {
+                            dst,
+                            bytes: bytes.clone(),
                         });
                         Operand::Reg(dst)
                     }
@@ -3680,13 +3704,18 @@ impl<'a> Lowerer<'a> {
             }
 
             ExprKind::Subscript { value, slice, .. } => {
-                let string = self.type_of(value)? == Type::Str;
+                let indexed = self.type_of(value)?;
+                let string = indexed == Type::Str;
                 if let ExprKind::Slice { lower, upper, step } = &slice.kind {
-                    let label = match string {
-                        true => "stone.str_slice_of",
-                        false => "stone.list_slice",
+                    let label = match indexed {
+                        Type::Str => "stone.str_slice_of",
+                        Type::Bytes => "stone.bytes_slice_of",
+                        _ => "stone.list_slice",
                     };
                     return self.slice(value, [lower, upper, step], label, into, kind);
+                }
+                if indexed == Type::Bytes {
+                    return self.bytes_index(value, slice, into);
                 }
                 if string {
                     return self.string_index(value, slice, into, kind);
@@ -3908,8 +3937,8 @@ impl<'a> Lowerer<'a> {
         let dst = self.dst(into);
         let op = bin_op(op);
         self.push(match ty {
-            // only `+` applies to strings
-            Type::Str => Inst::Call {
+            // only `+` applies to strings and bytes
+            Type::Str | Type::Bytes => Inst::Call {
                 dsts: vec![dst],
                 callee: Callee::Runtime("stone.str_concat"),
                 args: vec![lhs, rhs],
@@ -4113,6 +4142,24 @@ impl<'a> Lowerer<'a> {
         Operand::Reg(position)
     }
 
+    /// Lowers the bytes index `bytes[index]`, as [`Lowerer::string_index`] lowers a string's,
+    /// into a check that the index is in range and a call of `stone.bytes_at`, which gives the
+    /// byte as an int.
+    fn bytes_index(
+        &mut self,
+        bytes: &Expr,
+        index: &Expr,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let bytes = self.list_operand(bytes, &[index])?;
+        let index = self.expr(index)?;
+        let len = self.runtime_call("stone.str_len", vec![bytes], None);
+        let position = self.list_position(index, len, false, BYTES_INDEX_RANGE);
+        let result = self.runtime_call("stone.bytes_at", vec![bytes, position], into);
+        self.release_temp(bytes);
+        Ok(result)
+    }
+
     /// Lowers the string index `text[index]`, evaluating the string and then the index, into a
     /// check that the index is in range followed by a call to `stone.str_at`, which fails if the
     /// byte there is part of a longer character.
@@ -4257,14 +4304,17 @@ impl<'a> Lowerer<'a> {
                 let first = self.map_find(container, needle[0], key, None);
                 return Ok(self.at_least_zero(first, into));
             }
-            Type::Str => {
+            Type::Str | Type::Bytes => {
                 // the routine gives -1 when the text never appears
-                let position =
-                    self.runtime_call("stone.str_position", vec![container, needle[0]], None);
+                let routine = match ty {
+                    Type::Str => "stone.str_position",
+                    _ => "stone.bytes_find",
+                };
+                let position = self.runtime_call(routine, vec![container, needle[0]], None);
                 return Ok(self.at_least_zero(position, into));
             }
             Type::List(elem) => (**elem).clone(),
-            _ => return Err("'in' needs a str, list, or map".to_string()),
+            _ => return Err("'in' needs a str, bytes, list, or map".to_string()),
         };
         let width = self.leaves(&elem).len();
         let count = self.element_count(container, width);
@@ -4429,12 +4479,12 @@ impl<'a> Lowerer<'a> {
                     });
                     self.start(join);
                 }
-                // strings compare by contents
-                Type::Str if cond == Cond::Ne => {
+                // strings and bytes compare by contents
+                ty @ (Type::Str | Type::Bytes) if cond == Cond::Ne => {
                     let equal = self.fresh();
                     self.push(Inst::Call {
                         dsts: vec![equal],
-                        callee: Callee::Runtime("stone.str_eq"),
+                        callee: Callee::Runtime(equality_routine(&ty)),
                         args: vec![lhs, rhs],
                     });
                     self.push(Inst::Not {
@@ -4442,14 +4492,14 @@ impl<'a> Lowerer<'a> {
                         src: Operand::Reg(equal),
                     });
                 }
-                Type::Str if cond == Cond::Eq => self.push(Inst::Call {
+                ty @ (Type::Str | Type::Bytes) if cond == Cond::Eq => self.push(Inst::Call {
                     dsts: vec![result],
-                    callee: Callee::Runtime("stone.str_eq"),
+                    callee: Callee::Runtime(equality_routine(&ty)),
                     args: vec![lhs, rhs],
                 }),
                 // ordered by a call that returns -1, 0, or 1
-                Type::Str => {
-                    let order = self.runtime_call("stone.str_cmp", vec![lhs, rhs], None);
+                ty @ (Type::Str | Type::Bytes) => {
+                    let order = self.runtime_call(order_routine(&ty), vec![lhs, rhs], None);
                     self.push(Inst::Compare {
                         cond,
                         float: false,
@@ -4539,8 +4589,8 @@ impl<'a> Lowerer<'a> {
                 self.start(not_less);
                 branch(self, Cond::Gt, false, lhs, rhs, greater, equal);
             }
-            Type::Str => {
-                let order = self.runtime_call("stone.str_cmp", vec![lhs, rhs], None);
+            Type::Str | Type::Bytes => {
+                let order = self.runtime_call(order_routine(ty), vec![lhs, rhs], None);
                 let not_less = self.new_block();
                 branch(
                     self,
@@ -4804,6 +4854,18 @@ impl<'a> Lowerer<'a> {
                 self.add_element(receiver, name, args)?;
                 Ok(self.finish(Operand::Imm(0), into))
             }
+            // a string's bytes are laid out as bytes are, so they share it
+            "bytes" => {
+                let text = self.expr(receiver)?;
+                Ok(self.finish(text, into))
+            }
+            "text" => {
+                let bytes = self.expr(receiver)?;
+                let result = self.runtime_call("stone.bytes_text", vec![bytes], into);
+                self.release_temp(bytes);
+                self.own(result, kind);
+                Ok(result)
+            }
             "len" => {
                 let text = self.expr(receiver)?;
                 let dst = self.dst(into);
@@ -4995,7 +5057,8 @@ impl<'a> Lowerer<'a> {
                 self.own(result, kind);
                 Ok(result)
             }
-            "send" | "read_line" | "read" | "read_all" | "accept" | "port" | "close" => {
+            "send" | "read_line" | "read" | "read_all" | "accept" | "port" | "close"
+            | "set_timeout" | "send_bytes" | "read_bytes" | "read_exact" | "read_all_bytes" => {
                 let mut values = vec![self.expr(receiver)?];
                 for arg in args {
                     values.push(self.expr(arg)?);
@@ -5007,6 +5070,12 @@ impl<'a> Lowerer<'a> {
                     "read_all" => "stone.net_read_all",
                     "accept" => "stone.net_accept",
                     "port" => "stone.net_port",
+                    "set_timeout" => "stone.net_set_timeout",
+                    // bytes are laid out as strings are, so they are sent the same way
+                    "send_bytes" => "stone.net_send",
+                    "read_bytes" => "stone.net_read_bytes",
+                    "read_exact" => "stone.net_read_exact",
+                    "read_all_bytes" => "stone.net_read_all_bytes",
                     _ => "stone.net_close",
                 };
                 let result = self.runtime_call(label, values.clone(), into);
@@ -5348,6 +5417,37 @@ impl<'a> Lowerer<'a> {
                 }
                 // print returns none
                 Ok(self.finish(Operand::Imm(0), into))
+            }
+            "bytes" => {
+                // the routine gives where the first value that is not a byte is, or -1
+                let values = self.expr(&args[0])?;
+                let bad = self.runtime_call("stone.bytes_check", vec![values], None);
+                let (holds, fails) = (self.new_block(), self.new_block());
+                self.terminate(Terminator::CmpBranch {
+                    cond: Cond::Lt,
+                    float: false,
+                    lhs: bad,
+                    rhs: Operand::Imm(0),
+                    then: holds,
+                    otherwise: fails,
+                });
+                self.start(fails);
+                let value = self.fresh();
+                self.push(Inst::ListGet {
+                    dst: value,
+                    list: values,
+                    index: bad,
+                    offset: 0,
+                });
+                self.terminate(Terminator::Fail(
+                    BYTE_RANGE.to_string(),
+                    vec![Operand::Reg(value)],
+                ));
+                self.start(holds);
+                let result = self.runtime_call("stone.bytes_from_list", vec![values], into);
+                self.release_temp(values);
+                self.own(result, kind);
+                Ok(result)
             }
             "str"
                 if !matches!(
@@ -7174,6 +7274,23 @@ fn holds_flat(ty: &Type) -> bool {
         Type::Tuple(_) | Type::Struct { .. } | Type::Map(..) => true,
         Type::List(elem) => holds_flat(elem),
         _ => false,
+    }
+}
+
+/// Returns the runtime routine that compares two strings, or two bytes, for equality: bytes may
+/// hold a 0 byte, where `stone.str_eq` stops.
+fn equality_routine(ty: &Type) -> &'static str {
+    match ty {
+        Type::Bytes => "stone.bytes_eq",
+        _ => "stone.str_eq",
+    }
+}
+
+/// Returns the runtime routine that orders two strings, or two bytes, giving -1, 0, or 1.
+fn order_routine(ty: &Type) -> &'static str {
+    match ty {
+        Type::Bytes => "stone.bytes_cmp",
+        _ => "stone.str_cmp",
     }
 }
 

@@ -79,6 +79,7 @@ a loop variable you do not need, and `main` is an ordinary function name.
 | `float` | `1.5`, `2e-3` | never mixed with `int`: `float(n)`, `int(x)` |
 | `bool` | `true` | the only type a condition accepts |
 | `str` | `"hi\n"` | immutable UTF-8 bytes; `s[i]`, `s[a:b]`, `+` to join |
+| `bytes` | `b"\x00\xff"` | immutable raw bytes; `b[i]` is an int, slices, `+`, `"s".bytes()`, `b.text()` (a result), `bytes([1, 2])` |
 | `list[T]` | `[1, 2]`, `[]` | all elements one type |
 | `map[K, V]` | `{"a": 1}`, `{}` | keys `int`, `str`, or `bool`; insertion order |
 | `tuple[A, B]` | `(1, "a")` | two or more values, always in parentheses |
@@ -416,7 +417,8 @@ assign the result where 'add' is called
 | `os.listdir`, `os.path.exists`, `os.remove`, `os.mkdir` | `fs.list_dir` (sorted), `fs.exists`, `fs.remove`, `fs.make_dir` |
 | `sys.argv[1:]`, `sys.exit(n)` | `args()`, `os.exit(n)` |
 | `subprocess.run([cmd, *args], capture_output=True, text=True)` | `os.run(cmd, args)`, a `result[output, str]` with `.status`, `.stdout`, `.stderr` |
-| `socket.create_connection((host, port))`, `sock.sendall(b)`, `sock.recv(n)` | `net.connect(host, port)`, `c.send(text)`, `c.read_line()`/`c.read()`/`c.read_all()`, each a `result`; text only |
+| `socket.create_connection((host, port), timeout)`, `sock.sendall(b)`, `sock.recv(n)` | `net.connect(host, port)` or `net.connect_timeout(host, port, seconds)`, `c.send(text)` or `c.send_bytes(data)`, `c.read_line()`/`c.read()`/`c.read_all()` for text and `c.read_bytes(n)`/`c.read_exact(n)`/`c.read_all_bytes()` for bytes, each a `result`; `c.set_timeout(seconds)` |
+| `open(path, "rb").read()`, `open(path, "wb").write(b)` | `fs.read_bytes(path)`, `fs.write_bytes(path, data)`, `fs.append_bytes(path, data)` |
 | `socketserver`, `s.bind(...); s.listen(); s.accept()` | `l = net.listen(host, port)?` then `c = l.accept()?`, one connection at a time |
 
 ## Builtins
@@ -427,10 +429,10 @@ stderr), `range(end)` and `range(start, end)`
 (a `result[str, str]`: `ok` of the line without its newline, or `err("end of input")`),
 `eof()`, `args()`.
 
-Methods: `len` (str, list, map); lists: `append`, `pop()` (option) and `pop(i)`, `insert`,
+Methods: `len` (str, bytes, list, map); lists: `append`, `pop()` (option) and `pop(i)`, `insert`,
 `extend`, `sort`, and taking a function, `sort_by_key`, `map`, `filter`, `any`, `all`,
 `min_by_key`, `max_by_key` (options); strings: `strip`, `split()` and `split(sep)`, `sep.join(xs)`, `find`
-(option), `startswith`, `endswith`; options: `is_some`, `is_none`, `unwrap`, `unwrap_or`; maps:
+(option), `startswith`, `endswith`, `bytes`; bytes: `text` (a result), `contains`; options: `is_some`, `is_none`, `unwrap`, `unwrap_or`; maps:
 `contains`, `get` (option), `pop(key)` (option), `keys`, `values`, `items`; any comparable
 value: `eq`, `cmp`.
 
@@ -446,13 +448,17 @@ Builtin modules, imported with `use math` (or `use math.sqrt`):
   `stdout: str`, and `stderr: str`, even for a nonzero status, or `err` of a message if the
   program cannot start, such as `no such file or directory: 'gti'`
 - `fs`: `read(path)`, `read_lines(path)`, `write(path, text)`, `append(path, text)`,
-  `list_dir(path)` (sorted names), `exists(path)` (bool), `remove(path)`, `make_dir(path)`;
+  `list_dir(path)` (sorted names), `exists(path)` (bool), `remove(path)`, `make_dir(path)`,
+  `read_bytes(path)`, `write_bytes(path, data)`, `append_bytes(path, data)`;
   all but `exists` return a `result` whose error is a message such as
   `no such file or directory: 'data.txt'`
 - `net`: `connect(host, port)` (a `result[socket, str]`), `listen(host, port)` (a
   `result[listener, str]`; port 0 picks a free one), `resolve(host)` (a `result[list[str], str]`
-  of addresses). A `socket` has `send(text)`, `read_line()` (`ok(none)` at the end),
-  `read()`, `read_all()`, and `close()`; a `listener` has `accept()`, `port()`, and `close()`.
+  of addresses), `connect_timeout(host, port, seconds)`. A `socket` has `send(text)`,
+  `send_bytes(data)`, `read_line()` (`ok(none)` at the end), `read()`, `read_all()`,
+  `read_bytes(max)`, `read_exact(n)`, `read_all_bytes()`, `set_timeout(seconds)` (then a wait
+  gives `err("timed out")`), and `close()`; a `listener` has `accept()`, `port()`,
+  `set_timeout(seconds)`, and `close()`.
   Both are types for signatures (`fn serve(l: listener)`), copies share the connection, and each
   closes by itself right after the last statement that uses it. No TLS
 

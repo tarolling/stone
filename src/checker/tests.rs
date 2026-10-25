@@ -386,7 +386,7 @@ fn elementwise_operands_must_agree() {
     // lists still cannot be compared
     assert_error(
         "x = [1] < [2]\n",
-        "'<' needs int, float, str, or a type that implements 'ord', found list[int]",
+        "'<' needs int, float, str, bytes, or a type that implements 'ord', found list[int]",
         1,
         5,
     );
@@ -422,7 +422,7 @@ fn adding_needs_matching_operands() {
 fn adding_needs_ints_floats_or_strs() {
     assert_error(
         "x = true + false\n",
-        "'+' needs int, float, or str operands, found bool",
+        "'+' needs int, float, str, or bytes operands, found bool",
         1,
         5,
     );
@@ -540,7 +540,7 @@ fn comparisons_need_matching_operands() {
     assert_error("x = 1 < 2.5\n", "expected int, found float", 1, 9);
     assert_error(
         "x = true < false\n",
-        "'<' needs int, float, str, or a type that implements 'ord', found bool",
+        "'<' needs int, float, str, bytes, or a type that implements 'ord', found bool",
         1,
         5,
     );
@@ -871,7 +871,7 @@ fn function_values_cannot_be_compared_or_keys() {
     );
     assert_error(
         &format!("{f}x = f + 1\n"),
-        "'+' needs int, float, or str operands, found fn(int) -> int",
+        "'+' needs int, float, str, or bytes operands, found fn(int) -> int",
         4,
         5,
     );
@@ -1035,7 +1035,7 @@ fn parameters_must_be_unique() {
 fn len_needs_a_str() {
     assert_error(
         "x = 5.len()\n",
-        "'len' needs a str, list, or map, found int",
+        "'len' needs a str, bytes, list, or map, found int",
         1,
         5,
     );
@@ -2514,7 +2514,7 @@ fn tuples_cannot_change() {
 fn tuples_are_not_numbers_strings_or_lists() {
     assert_error(
         "t = (1, 2)\nprint(t + 1)\n",
-        "'+' needs int, float, or str operands, found tuple[int, int]",
+        "'+' needs int, float, str, or bytes operands, found tuple[int, int]",
         2,
         7,
     );
@@ -3123,7 +3123,7 @@ fn structs_are_not_numbers_or_strings() {
     let p = format!("{POINT}p = Point(x=1.0, y=2.0)\n");
     assert_error(
         &format!("{p}print(p + 1)\n"),
-        "'+' needs int, float, or str operands, found Point",
+        "'+' needs int, float, str, or bytes operands, found Point",
         5,
         7,
     );
@@ -3801,13 +3801,13 @@ fn a_type_parameter_is_any_type_inside_its_function() {
     assert_error("fn f[T](x: T) -> T:\n    ret -x\n", &message("-"), 2, 10);
     assert_error(
         "fn f[T](x: T, y: T) -> T:\n    ret x + y\n",
-        "'+' needs int, float, or str operands, found T",
+        "'+' needs int, float, str, or bytes operands, found T",
         2,
         9,
     );
     assert_error(
         "fn f[T](x: T, y: T) -> bool:\n    ret x < y\n",
-        "'<' needs int, float, str, or a type that implements 'ord', found T",
+        "'<' needs int, float, str, bytes, or a type that implements 'ord', found T",
         2,
         9,
     );
@@ -4064,7 +4064,7 @@ fn values_of_a_generic_type_agree_on_its_arguments() {
 fn a_generic_types_parameters_are_opaque_in_its_methods() {
     assert_error(
         "struct Box[T]:\n    x: T\nimpl Box:\n    fn bump(self) -> T:\n        ret self.x + 1\n",
-        "'+' needs int, float, or str operands, found T",
+        "'+' needs int, float, str, or bytes operands, found T",
         5,
         13,
     );
@@ -4627,13 +4627,13 @@ fn a_struct_that_implements_ord_is_ordered() {
     assert_eq!(type_of_symbol(&source, "n"), "ordering");
     assert_error(
         "struct P:\n    x: int\nb = P(x=1) < P(x=2)\n",
-        "'<' needs int, float, str, or a type that implements 'ord', found P",
+        "'<' needs int, float, str, bytes, or a type that implements 'ord', found P",
         3,
         5,
     );
     assert_error(
         "b = true.cmp(false)\n",
-        "'cmp' needs int, float, str, or a type that implements 'ord', found bool",
+        "'cmp' needs int, float, str, bytes, or a type that implements 'ord', found bool",
         1,
         5,
     );
@@ -4942,13 +4942,13 @@ fn in_needs_a_value_of_the_containers_kind() {
     assert_error("b = \"a\" in {1: 2}\n", "expected int, found str", 1, 5);
     assert_error(
         "b = 1 in 5\n",
-        "'in' needs a str, list, or map, found int",
+        "'in' needs a str, bytes, list, or map, found int",
         1,
         10,
     );
     assert_error(
         "struct P:\n    x: int\nb = 1 in P(x=1)\n",
-        "'in' needs a str, list, or map, found P",
+        "'in' needs a str, bytes, list, or map, found P",
         3,
         10,
     );
@@ -4979,7 +4979,7 @@ fn in_compares_elements_as_equality_does() {
     // a type parameter is no container
     assert_error(
         "fn has[T](c: T) -> bool:\n    ret 1 in c\n",
-        "'in' needs a str, list, or map, found T",
+        "'in' needs a str, bytes, list, or map, found T",
         2,
         14,
     );
@@ -5019,7 +5019,7 @@ fn a_function_can_test_a_global_assigned_after_it() {
     );
     assert_error(
         "fn f(k: str) -> bool:\n    ret k in table\ntable = 3\nprint(f(\"a\"))\n",
-        "'in' needs a str, list, or map, found int",
+        "'in' needs a str, bytes, list, or map, found int",
         2,
         14,
     );
@@ -5114,5 +5114,89 @@ fn handles_are_never_compared_or_map_keys() {
             3,
             6
         )]
+    );
+}
+
+#[test]
+fn bytes_have_types() {
+    let cases = [
+        ("b\"ab\"", "bytes"),
+        ("b\"ab\"[0]", "int"),
+        ("b\"ab\"[1:]", "bytes"),
+        ("b\"a\" + b\"b\"", "bytes"),
+        ("b\"a\" < b\"b\"", "bool"),
+        ("b\"a\" == b\"b\"", "bool"),
+        ("b\"a\" in b\"ab\"", "bool"),
+        ("b\"ab\".len()", "int"),
+        ("b\"ab\".contains(b\"a\")", "bool"),
+        ("b\"ab\".text()", "result[str, str]"),
+        ("\"ab\".bytes()", "bytes"),
+        ("bytes([1, 2])", "bytes"),
+        ("b\"ab\".cmp(b\"a\")", "ordering"),
+        ("[b\"b\", b\"a\"]", "list[bytes]"),
+    ];
+    for (expr, ty) in cases {
+        assert_eq!(type_of_symbol(&format!("x = {expr}\n"), "x"), ty, "{expr}");
+    }
+    let source = "fn first(data: bytes) -> int:\n    for b in data:\n        ret b\n    ret -1\n\
+                  xs = [b\"b\", b\"a\"]\nxs.sort()\nprint(first(xs[0]))\n";
+    assert_eq!(errors(source), []);
+}
+
+#[test]
+fn bytes_are_not_strings_and_never_change() {
+    assert_error("x = b\"a\" + \"b\"\n", "expected bytes, found str", 1, 12);
+    assert_error(
+        "x = b\"a\"\nx[0] = 1\n",
+        "bytes cannot be changed; build new bytes instead",
+        2,
+        1,
+    );
+    assert_error(
+        "m = {b\"a\": 1}\n",
+        "a map key must be int, str, or bool, found bytes",
+        1,
+        6,
+    );
+    assert_error(
+        "x = bytes([\"a\"])\n",
+        "expected list[int], found list[str]",
+        1,
+        11,
+    );
+    assert_error(
+        "x = b\"a\".strip()\n",
+        "'strip' needs a str, found bytes",
+        1,
+        5,
+    );
+    assert_error("x = 1 in b\"a\"\n", "expected bytes, found int", 1, 5);
+}
+
+#[test]
+fn byte_reads_and_timeouts_have_types() {
+    let cases = [
+        ("c.send_bytes(b\"x\")", "result[int, str]"),
+        ("c.read_bytes(4)", "result[bytes, str]"),
+        ("c.read_exact(4)", "result[bytes, str]"),
+        ("c.read_all_bytes()", "result[bytes, str]"),
+        ("net.connect_timeout(\"\", 1, 0.5)", "result[socket, str]"),
+        ("fs.read_bytes(\"a\")", "result[bytes, str]"),
+        ("fs.write_bytes(\"a\", b\"\")", "result[int, str]"),
+        ("fs.append_bytes(\"a\", b\"\")", "result[int, str]"),
+    ];
+    for (call, ty) in cases {
+        let source = format!(
+            "use net\nuse fs\nc = net.connect(\"\", 1).unwrap()\nc.set_timeout(1.0)\nx = {call}\n"
+        );
+        assert_eq!(linked_type(&source, "x"), ty, "{call}");
+    }
+    assert_eq!(
+        linked_errors("use net\nc = net.connect(\"\", 1).unwrap()\nc.set_timeout(1)\n"),
+        [("expected float, found int".to_string(), 3, 15)]
+    );
+    assert_eq!(
+        linked_errors("use fs\nx = fs.write_bytes(\"a\", \"b\")\n"),
+        [("expected bytes, found str".to_string(), 2, 25)]
     );
 }

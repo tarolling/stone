@@ -174,7 +174,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 52] = [
+pub static METHODS: [&str; 58] = [
     "len",
     "append",
     "pop",
@@ -190,8 +190,14 @@ pub static METHODS: [&str; 52] = [
     "max_by_key",
     "strip",
     "split",
+    "splitlines",
     "join",
     "find",
+    "rfind",
+    "count",
+    "replace",
+    "lower",
+    "upper",
     "startswith",
     "endswith",
     "is_some",
@@ -227,6 +233,23 @@ pub static METHODS: [&str; 52] = [
     "read_bytes",
     "read_exact",
     "read_all_bytes",
+];
+
+/// The builtin methods only a `str` has, other than `parse_int` and `parse_float`, which
+/// [`METHODS`] lists too. A struct may have methods of the same names.
+pub const STR_METHODS: [&str; 12] = [
+    "strip",
+    "split",
+    "splitlines",
+    "join",
+    "find",
+    "rfind",
+    "count",
+    "replace",
+    "lower",
+    "upper",
+    "startswith",
+    "endswith",
 ];
 
 /// The builtin methods of a `socket` or `listener`, which [`METHODS`] lists too.
@@ -334,7 +357,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 10] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 52] = [
+pub static METHOD_DOCS: [BuiltinDoc; 58] = [
     BuiltinDoc {
         name: "len",
         signature: "(str | bytes | list[T] | map[K, V]).len() -> int",
@@ -443,6 +466,14 @@ pub static METHOD_DOCS: [BuiltinDoc; 52] = [
                       `\" a  b \".split()` is `[\"a\", \"b\"]`. An empty separator stops the program.",
     },
     BuiltinDoc {
+        name: "splitlines",
+        signature: "str.splitlines() -> list[str]",
+        description: "Splits the string into lines at each `\\n`, `\\r\\n`, or `\\r`, without \
+                      their endings, so `\"a\\r\\nb\\n\".splitlines()` is `[\"a\", \"b\"]`. A \
+                      final line ending ends the last line rather than starting an empty one, \
+                      and an empty string has no lines.",
+    },
+    BuiltinDoc {
         name: "join",
         signature: "str.join(items: list[str]) -> str",
         description: "Returns the strings in `items` with this string between each pair, so \
@@ -454,6 +485,45 @@ pub static METHOD_DOCS: [BuiltinDoc; 52] = [
         description: "Returns `some` of the byte index where `text` first appears in the \
                       string, or `none` if it never does, so `\"banana\".find(\"na\")` is \
                       `some(2)`. An empty `text` is found at 0.",
+    },
+    BuiltinDoc {
+        name: "rfind",
+        signature: "str.rfind(text: str) -> option[int]",
+        description: "Returns `some` of the byte index where `text` last appears in the \
+                      string, or `none` if it never does, so `\"banana\".rfind(\"na\")` is \
+                      `some(4)`. An empty `text` is found at the end, `s.len()`.",
+    },
+    BuiltinDoc {
+        name: "count",
+        signature: "str.count(text: str) -> int",
+        description: "Returns how many times `text` appears in the string without overlapping, \
+                      counting from the start, so `\"aaaa\".count(\"aa\")` is 2. An empty `text` \
+                      is found between every two characters and at both ends, so \
+                      `\"ab\".count(\"\")` is 3.",
+    },
+    BuiltinDoc {
+        name: "replace",
+        signature: "str.replace(old: str, new: str) | str.replace(old: str, new: str, count: int) \
+                    -> str",
+        description: "Returns the string with each `old` that `count` would count replaced by \
+                      `new`, so `\"a-b-c\".replace(\"-\", \"+\")` is `\"a+b+c\"`. With `count`, \
+                      only the first `count` are replaced, or all of them if `count` is \
+                      negative. An empty `old` matches between every two characters and at \
+                      both ends, so `\"ab\".replace(\"\", \"-\")` is `\"-a-b-\"`.",
+    },
+    BuiltinDoc {
+        name: "lower",
+        signature: "str.lower() -> str",
+        description: "Returns the string with each ASCII letter `A` to `Z` made lowercase, so \
+                      `\"Hello\".lower()` is `\"hello\"`. Unlike Python, letters outside ASCII, \
+                      such as `\"É\"`, stay as they are.",
+    },
+    BuiltinDoc {
+        name: "upper",
+        signature: "str.upper() -> str",
+        description: "Returns the string with each ASCII letter `a` to `z` made uppercase, so \
+                      `\"Hello\".upper()` is `\"HELLO\"`. Unlike Python, letters outside ASCII, \
+                      such as `\"é\"`, stay as they are.",
     },
     BuiltinDoc {
         name: "startswith",
@@ -1138,6 +1208,31 @@ pub fn split<'a>(text: &'a str, separator: &str) -> Result<Vec<&'a str>, String>
     Ok(text.split(separator).collect())
 }
 
+/// Splits `text` into lines at each `\n`, `\r\n`, or `\r`, without their endings, like Python's
+/// `str.splitlines()` for those three endings: a final ending ends the last line rather than
+/// starting an empty one.
+///
+/// For example, `splitlines("a\r\nb\rc\n")` returns `["a", "b", "c"]`, `splitlines("\n")`
+/// returns `[""]`, and `splitlines("")` returns nothing.
+pub fn splitlines(text: &str) -> Vec<&str> {
+    let mut lines = Vec::new();
+    let mut rest = text;
+    while !rest.is_empty() {
+        let Some(end) = rest.find(['\n', '\r']) else {
+            lines.push(rest);
+            break;
+        };
+        lines.push(&rest[..end]);
+        let ending = if rest[end..].starts_with("\r\n") {
+            2
+        } else {
+            1
+        };
+        rest = &rest[end + ending..];
+    }
+    lines
+}
+
 /// Reads a decimal int the way `int` does: whitespace at either end, an optional sign, then one or
 /// more ASCII digits.
 ///
@@ -1650,6 +1745,16 @@ mod tests {
         assert_eq!(split("a::b", "::"), Ok(vec!["a", "b"]));
         assert_eq!(split("aaa", "aa"), Ok(vec!["", "a"]));
         assert_eq!(split("a", ""), Err("empty separator".to_string()));
+    }
+
+    #[test]
+    fn splitlines_breaks_at_each_ending_and_drops_a_final_empty_line() {
+        assert_eq!(splitlines("a\nb\r\nc\rd"), ["a", "b", "c", "d"]);
+        assert_eq!(splitlines("a\r\rb"), ["a", "", "b"]);
+        assert_eq!(splitlines("a\n\n"), ["a", ""]);
+        assert_eq!(splitlines("\n"), [""]);
+        assert!(splitlines("").is_empty());
+        assert_eq!(splitlines("x\r\n"), ["x"]);
     }
 
     #[test]

@@ -1,0 +1,24 @@
+// a struct may have methods named like the string methods, even on a global that a function
+// reads before the code assigning it is checked
+struct Tally:
+    n: int
+
+impl Tally:
+    fn count(self) -> int:
+        ret self.n
+
+    fn replace(self, a: str, b: str) -> str:
+        ret "{a}{self.n}{b}"
+
+    fn lower(self) -> Tally:
+        ret Tally(n=self.n - 1)
+
+fn peek() -> int:
+    ret tally.count() + word.count("o")
+
+fn swap() -> str:
+    ret tally.replace("x", "y") + " " + word.replace("o", "0") + " " + word.upper()
+
+tally = Tally(n=2)
+word = "foo"
+print(peek(), swap(), tally.lower().count(), "Foo".lower().count("o"))

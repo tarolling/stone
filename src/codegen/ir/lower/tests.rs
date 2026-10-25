@@ -591,6 +591,28 @@ fn a_for_loop_over_a_string_steps_by_each_character() {
 }
 
 #[test]
+fn replace_case_lines_rfind_and_count_call_the_runtime() {
+    let source = "fn f(s: str) -> list[str]:\n    \
+                  ret [s.replace(s, s), s.replace(s, s, 2), s.lower(), s.upper(), \
+                  str(s.rfind(s)), str(s.count(s))]\n\
+                  fn g(s: str) -> list[str]:\n    ret s.splitlines()\n\
+                  print(f(\"a\"), g(\"a\"))\n";
+    let text = dump(source);
+    for call in [
+        // without a count, every match is replaced
+        "call stone.str_replace(v0, v0, v0, -1)",
+        "call stone.str_replace(v0, v0, v0, 2)",
+        "call stone.str_lower(v0)",
+        "call stone.str_upper(v0)",
+        "call stone.str_rposition(v0, v0)",
+        "call stone.str_count(v0, v0)",
+        "call stone.str_splitlines(v0)",
+    ] {
+        assert!(text.contains(call), "{call} in\n{text}");
+    }
+}
+
+#[test]
 fn endswith_calls_the_runtime() {
     let text = dump("fn f(s: str) -> bool:\n    ret s.endswith(s)\nprint(f(\"a\"))\n");
     assert!(text.contains("call stone.str_ends(v0, v0)"), "{text}");

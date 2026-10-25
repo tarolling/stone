@@ -50,9 +50,10 @@ See [augmented assignment](../reference/syntax.md#augmented-assignment).
 ## Strings
 
 Strings index and slice like lists, compare in dictionary order with `<` and `>`, can be
-walked one character at a time with `for`, and have methods such as `split`, `join`, `find`,
-`startswith`, and `endswith`. `find` gives an option, `none` if the text never appears, which
-`unwrap` opens when it must be there:
+walked one character at a time with `for`, and have methods such as `split`, `splitlines`,
+`join`, `find`, `rfind`, `count`, `replace`, `lower`, `upper`, `startswith`, and `endswith`.
+`find` gives an option, `none` if the text never appears, which `unwrap` opens when it must be
+there:
 
 ```stone
 line = "name=stone"

@@ -1,0 +1,36 @@
+// replace swaps every match, or only the first count of them
+s = "one fish two fish"
+print(s.replace("fish", "cat"), s.replace("fish", "cat", 1), s.replace("fish", "cat", 0))
+print(s.replace("fish", "cat", -1), s.replace("fish", "cat", 9), s.replace("x", "y"))
+print("aaaa".replace("aa", "b"), "aaa".replace("a", "aa"), "abc".replace("abc", ""))
+print("[" + "".replace("a", "b") + "]", "a.b.c".replace(".", ""), "café".replace("é", "e"))
+// an empty old text matches between every character and at both ends
+print("ab".replace("", "-"), "ab".replace("", "-", 2), "".replace("", "x"), "café".replace("", "|"))
+
+// lower and upper change only ascii letters
+print("Hello, World!".lower(), "Hello, World!".upper(), "".lower() == "")
+print("Crème Brûlée".upper(), "ÀÉ abc".lower(), "a1-Z_".upper())
+
+// splitlines breaks at \n, \r\n, and \r, dropping one final empty line
+print("a\nb\nc".splitlines(), "a\nb\n".splitlines(), "".splitlines(), "\n".splitlines())
+print("a\r\nb\rc".splitlines(), "a\r\rb".splitlines(), "a\n\n".splitlines(), "\n\nx".splitlines())
+print("no breaks".splitlines(), "x\r".splitlines(), "x\r\n".splitlines(), "é\nü".splitlines())
+
+// rfind gives the byte index of the last match, or none
+t = "banana"
+print(t.rfind("na"), t.rfind("a"), t.rfind("b"), t.rfind("x"), t.rfind(""), t.rfind("banana"))
+print("".rfind(""), "".rfind("a"), "café au lait".rfind("a"), t.rfind("bananas"))
+
+// count gives the number of matches that do not overlap
+print(t.count("a"), t.count("na"), t.count("x"), "aaaa".count("aa"), "aaa".count("aa"))
+print(t.count(""), "".count(""), "café".count(""), "café".count("é"), "".count("a"))
+
+// together, with results that are stored and printed later
+lines = "Name: Ada\r\nname: GRACE\n\nNAME: linus\n".splitlines()
+names = []
+for line in lines:
+    if line.lower().startswith("name:"):
+        names.append(line[5:].strip().lower().replace("a", "A", 1))
+print(names, lines.len(), "{names[0].upper()} and {names.len()} more".count("A"))
+csv = "1,2,,3"
+print(csv.count(","), csv.replace(",,", ",").split(","), csv.rfind(",").unwrap())

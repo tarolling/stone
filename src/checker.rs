@@ -30,8 +30,8 @@ use crate::ast::{
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::{
-    HANDLE_METHODS, MAX_ELEMENT_VALUES, METHODS, OUTPUT, changes_receiver, is_builtin, is_reserved,
-    prelude_method,
+    HANDLE_METHODS, MAX_ELEMENT_VALUES, METHODS, OUTPUT, STR_METHODS, changes_receiver, is_builtin,
+    is_reserved, prelude_method,
 };
 
 #[cfg(test)]
@@ -4964,6 +4964,14 @@ impl Inference {
         ret
     }
 
+    /// Returns whether any struct, or builtin type a trait is implemented for, has a method named
+    /// `name`.
+    fn struct_method_named(&self, name: &str) -> bool {
+        self.struct_methods
+            .values()
+            .any(|methods| methods.contains_key(name))
+    }
+
     /// Settles a method called on a value whose type was not known when it was found.
     fn settle_method(&mut self, deferred: DeferredMethod) {
         let name = &deferred.name;
@@ -4986,6 +4994,12 @@ impl Inference {
                     );
                     return;
                 }
+                self.expect(&ret, &deferred.result, deferred.call);
+                return;
+            }
+            Ty::Str if STR_METHODS.contains(&name.as_str()) => {
+                let receiver = (Ty::Str, deferred.receiver.span);
+                let ret = self.check_str_method(deferred.call, receiver, name, &deferred.args);
                 self.expect(&ret, &deferred.result, deferred.call);
                 return;
             }
@@ -5936,9 +5950,13 @@ impl Inference {
                 let key = ty_key(&ty).unwrap_or_default();
                 return self.infer_struct_method(call, func, receiver, (&key, &[]), name, args);
             }
-            Ty::Var(_) if !METHODS.contains(&name) || HANDLE_METHODS.contains(&name) => {
+            Ty::Var(_)
+                if !METHODS.contains(&name)
+                    || HANDLE_METHODS.contains(&name)
+                    || STR_METHODS.contains(&name) && self.struct_method_named(name) =>
+            {
                 // as a global a function checked before the global's assignment reads, which
-                // makes it a struct
+                // makes it a struct, or a str for a method a struct has too
                 let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
                 let result = self.fresh();
                 self.deferred_methods.push(DeferredMethod {
@@ -6230,45 +6248,13 @@ impl Inference {
                     _ => elem,
                 }
             }
-            "strip" | "split" => {
-                let message = match name {
-                    "strip" => "'strip' needs a str, found {}",
-                    _ => "'split' needs a str, found {}",
-                };
-                self.require(receiver_ty, &[Kind::Str], receiver.span, message);
-                match (name, args) {
-                    ("strip", []) | ("split", []) => {}
-                    ("split", [separator]) => self.expect(&Ty::Str, &arg_types[0], separator.span),
-                    ("strip", _) => self.arity_error(call.span, name, "0", args.len()),
-                    _ => self.arity_error(call.span, name, "0 or 1", args.len()),
-                }
-                if name == "strip" {
-                    Ty::Str
-                } else {
-                    Ty::List(Box::new(Ty::Str))
-                }
-            }
-            "join" | "find" | "startswith" | "endswith" => {
-                let (message, arg, result) = match name {
-                    "join" => (
-                        "'join' needs a str, found {}",
-                        Ty::List(Box::new(Ty::Str)),
-                        Ty::Str,
-                    ),
-                    "find" => (
-                        "'find' needs a str, found {}",
-                        Ty::Str,
-                        Ty::Enum(OPTION.to_string(), vec![Ty::Int]),
-                    ),
-                    "startswith" => ("'startswith' needs a str, found {}", Ty::Str, Ty::Bool),
-                    _ => ("'endswith' needs a str, found {}", Ty::Str, Ty::Bool),
-                };
-                self.require(receiver_ty, &[Kind::Str], receiver.span, message);
-                match args {
-                    [only] => self.expect(&arg, &arg_types[0], only.span),
-                    _ => self.arity_error(call.span, name, "1", args.len()),
-                }
-                result
+            _ if STR_METHODS.contains(&name) => {
+                let arg_spans: Vec<(Ty, Span)> = arg_types
+                    .iter()
+                    .cloned()
+                    .zip(args.iter().map(|a| a.span))
+                    .collect();
+                self.check_str_method(call.span, (receiver_ty, receiver.span), name, &arg_spans)
             }
             _ if handle_method(name).is_some() => {
                 let arg_spans: Vec<(Ty, Span)> = arg_types
@@ -6287,6 +6273,83 @@ impl Inference {
                 self.error(Span::new(start, end).in_file(func.span.file), message);
                 self.fresh()
             }
+        }
+    }
+
+    /// Checks a call of the method `name` of a `str`, one of [`STR_METHODS`], given the receiver's
+    /// type and span and each argument's, and returns the call's type.
+    fn check_str_method(
+        &mut self,
+        call: Span,
+        (receiver_ty, receiver): (Ty, Span),
+        name: &str,
+        args: &[(Ty, Span)],
+    ) -> Ty {
+        match name {
+            "strip" | "split" | "splitlines" | "lower" | "upper" => {
+                let message = match name {
+                    "strip" => "'strip' needs a str, found {}",
+                    "split" => "'split' needs a str, found {}",
+                    "splitlines" => "'splitlines' needs a str, found {}",
+                    "lower" => "'lower' needs a str, found {}",
+                    _ => "'upper' needs a str, found {}",
+                };
+                self.require(receiver_ty, &[Kind::Str], receiver, message);
+                match (name, args) {
+                    (_, []) => {}
+                    ("split", [(separator, span)]) => self.expect(&Ty::Str, separator, *span),
+                    ("split", _) => self.arity_error(call, name, "0 or 1", args.len()),
+                    _ => self.arity_error(call, name, "0", args.len()),
+                }
+                match name {
+                    "split" | "splitlines" => Ty::List(Box::new(Ty::Str)),
+                    _ => Ty::Str,
+                }
+            }
+            "replace" => {
+                let message = "'replace' needs a str, found {}";
+                self.require(receiver_ty, &[Kind::Str], receiver, message);
+                match args {
+                    [old, new] | [old, new, _] => {
+                        self.expect(&Ty::Str, &old.0, old.1);
+                        self.expect(&Ty::Str, &new.0, new.1);
+                        if let [_, _, (count, span)] = args {
+                            self.expect(&Ty::Int, count, *span);
+                        }
+                    }
+                    _ => self.arity_error(call, name, "2 or 3", args.len()),
+                }
+                Ty::Str
+            }
+            "join" | "find" | "rfind" | "count" | "startswith" | "endswith" => {
+                let (message, arg, result) = match name {
+                    "join" => (
+                        "'join' needs a str, found {}",
+                        Ty::List(Box::new(Ty::Str)),
+                        Ty::Str,
+                    ),
+                    "find" => (
+                        "'find' needs a str, found {}",
+                        Ty::Str,
+                        Ty::Enum(OPTION.to_string(), vec![Ty::Int]),
+                    ),
+                    "rfind" => (
+                        "'rfind' needs a str, found {}",
+                        Ty::Str,
+                        Ty::Enum(OPTION.to_string(), vec![Ty::Int]),
+                    ),
+                    "count" => ("'count' needs a str, found {}", Ty::Str, Ty::Int),
+                    "startswith" => ("'startswith' needs a str, found {}", Ty::Str, Ty::Bool),
+                    _ => ("'endswith' needs a str, found {}", Ty::Str, Ty::Bool),
+                };
+                self.require(receiver_ty, &[Kind::Str], receiver, message);
+                match args {
+                    [(only, span)] => self.expect(&arg, only, *span),
+                    _ => self.arity_error(call, name, "1", args.len()),
+                }
+                result
+            }
+            _ => self.fresh(),
         }
     }
 

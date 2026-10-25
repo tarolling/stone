@@ -5010,13 +5010,16 @@ impl<'a> Lowerer<'a> {
                 });
                 Ok(self.finish(Operand::Imm(0), into))
             }
-            "strip" | "split" => {
+            "strip" | "split" | "splitlines" | "lower" | "upper" => {
                 let mut values = vec![self.expr(receiver)?];
                 for arg in args {
                     values.push(self.expr(arg)?);
                 }
                 let label = match (name, values.len()) {
                     ("strip", _) => "stone.str_strip",
+                    ("splitlines", _) => "stone.str_splitlines",
+                    ("lower", _) => "stone.str_lower",
+                    ("upper", _) => "stone.str_upper",
                     (_, 1) => "stone.str_split_ws",
                     _ => "stone.str_split",
                 };
@@ -5027,10 +5030,14 @@ impl<'a> Lowerer<'a> {
                 self.own(result, kind);
                 Ok(result)
             }
-            "find" => {
+            "find" | "rfind" => {
                 let text = self.expr(receiver)?;
                 let part = self.expr(&args[0])?;
-                let position = self.runtime_call("stone.str_position", vec![text, part], None);
+                let label = match name {
+                    "find" => "stone.str_position",
+                    _ => "stone.str_rposition",
+                };
+                let position = self.runtime_call(label, vec![text, part], None);
                 self.release_temp(text);
                 self.release_temp(part);
                 // the routine gives -1 when the text never appears
@@ -5040,13 +5047,19 @@ impl<'a> Lowerer<'a> {
                     }),
                 )
             }
-            "join" | "startswith" | "endswith" => {
+            "join" | "count" | "replace" | "startswith" | "endswith" => {
                 let mut values = vec![self.expr(receiver)?];
                 for arg in args {
                     values.push(self.expr(arg)?);
                 }
+                if name == "replace" && args.len() == 2 {
+                    // without a count, every match is replaced
+                    values.push(Operand::Imm(-1));
+                }
                 let label = match name {
                     "join" => "stone.str_join",
+                    "count" => "stone.str_count",
+                    "replace" => "stone.str_replace",
                     "startswith" => "stone.str_starts",
                     _ => "stone.str_ends",
                 };

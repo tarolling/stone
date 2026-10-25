@@ -2759,6 +2759,16 @@ pub fn conversion_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.str_strip` returns the string in `x0` without whitespace at either end
 /// - `stone.str_split_ws` returns a list of the pieces of `x0` between runs of whitespace
 /// - `stone.str_split` returns a list of the pieces of `x0` between each `x1`
+/// - `stone.str_splitlines` returns a list of the lines of `x0`, as `stdlib::splitlines` splits
+///   them
+/// - `stone.str_lower` and `stone.str_upper` return a new string of `x0` with its ASCII letters
+///   made lowercase or uppercase
+/// - `stone.str_rposition` returns the byte index where `x1` last appears in `x0`, or -1
+/// - `stone.str_count` returns how many times `x1` appears in `x0` without overlapping
+/// - `stone.str_replace` returns a new string of `x0` with the first `x3` matches of `x1`
+///   replaced by `x2`, every match if `x3` is negative
+///
+/// The rest port the x86-64 routines of the same names.
 pub fn string_methods(
     r#gen: &mut dyn AssemblyGenerator,
     used: &[&str],
@@ -2825,7 +2835,15 @@ pub fn string_methods(
         r#gen.emit("\tmov\tx0, x20");
         pop_frame(r#gen, &saved);
     }
-    if uses("stone.str_split") || uses("stone.str_position") {
+    if [
+        "stone.str_split",
+        "stone.str_position",
+        "stone.str_count",
+        "stone.str_replace",
+    ]
+    .iter()
+    .any(|label| uses(label))
+    {
         // returns where the string in x1 first appears in the one in x0, or 0, like strstr
         r#gen.emit("stone.str_find:");
         r#gen.emit("\tmov\tx9, #0");
@@ -2984,6 +3002,263 @@ pub fn string_methods(
         r#gen.emit("\tmov\tx0, #0");
         r#gen.emit("\tret");
     }
+    if uses("stone.str_splitlines") {
+        str_splitlines(r#gen);
+    }
+    for (label, first) in [("stone.str_lower", 'A'), ("stone.str_upper", 'a')] {
+        if uses(label) {
+            str_case(r#gen, label, first);
+        }
+    }
+    if uses("stone.str_rposition") {
+        str_rposition(r#gen);
+    }
+    if uses("stone.str_count") {
+        str_count(r#gen);
+    }
+    if uses("stone.str_replace") {
+        str_replace(r#gen);
+    }
+}
+
+/// Emits `stone.str_splitlines` (see [`string_methods`]), which ends a line at each `\n`, `\r\n`,
+/// or `\r` and keeps the last line only if it is not empty, as `stdlib::splitlines` does.
+fn str_splitlines(r#gen: &mut dyn AssemblyGenerator) {
+    // x19 holds the cursor, x20 the list, and x21 where the line started
+    let saved = ["x19", "x20", "x21"];
+    r#gen.emit("stone.str_splitlines:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx21, x0");
+    r#gen.emit("\tmov\tx0, #0");
+    r#gen.emit("\tmov\tx1, #1"); // a list of strings
+    r#gen.emit("\tbl\tstone.list_new");
+    r#gen.emit("\tmov\tx20, x0");
+    r#gen.emit(".Lstr_splitlines_scan:");
+    r#gen.emit("\tldrb\tw10, [x19]");
+    r#gen.emit("\tcbz\tw10, .Lstr_splitlines_end");
+    r#gen.emit("\tcmp\tw10, #10");
+    r#gen.emit("\tb.eq\t.Lstr_splitlines_line");
+    r#gen.emit("\tcmp\tw10, #13");
+    r#gen.emit("\tb.eq\t.Lstr_splitlines_line");
+    r#gen.emit("\tadd\tx19, x19, #1");
+    r#gen.emit("\tb\t.Lstr_splitlines_scan");
+    r#gen.emit(".Lstr_splitlines_line:");
+    str_splitlines_append(r#gen);
+    // \r\n is one ending
+    r#gen.emit("\tldrb\tw10, [x19], #1");
+    r#gen.emit("\tcmp\tw10, #13");
+    r#gen.emit("\tb.ne\t.Lstr_splitlines_next");
+    r#gen.emit("\tldrb\tw10, [x19]");
+    r#gen.emit("\tcmp\tw10, #10");
+    r#gen.emit("\tb.ne\t.Lstr_splitlines_next");
+    r#gen.emit("\tadd\tx19, x19, #1");
+    r#gen.emit(".Lstr_splitlines_next:");
+    r#gen.emit("\tmov\tx21, x19");
+    r#gen.emit("\tb\t.Lstr_splitlines_scan");
+    // a last line without an ending is a line, unless it is empty
+    r#gen.emit(".Lstr_splitlines_end:");
+    r#gen.emit("\tcmp\tx19, x21");
+    r#gen.emit("\tb.eq\t.Lstr_splitlines_done");
+    str_splitlines_append(r#gen);
+    r#gen.emit(".Lstr_splitlines_done:");
+    r#gen.emit("\tmov\tx0, x20");
+    pop_frame(r#gen, &saved);
+}
+
+/// Emits the part of `stone.str_splitlines` that appends the line from `x21` up to `x19` to the
+/// list in `x20`.
+fn str_splitlines_append(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\tmov\tx0, x21");
+    r#gen.emit("\tsub\tx1, x19, x21");
+    r#gen.emit("\tbl\tstone.str_slice");
+    r#gen.emit("\tmov\tx1, x0");
+    r#gen.emit("\tmov\tx0, x20");
+    r#gen.emit("\tbl\tstone.list_append");
+}
+
+/// Emits `label`, `stone.str_lower` or `stone.str_upper` (see [`string_methods`]), which copies
+/// the string, flipping the case bit of each byte from `first`, `'A'` or `'a'`, to 25 past it.
+fn str_case(r#gen: &mut dyn AssemblyGenerator, label: &str, first: char) {
+    let name = label.trim_start_matches("stone.");
+    // x19 holds the string across stone.str_new
+    let saved = ["x19"];
+    r#gen.emit(&format!("{label}:"));
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tldur\tx0, [x0, #-16]");
+    r#gen.emit("\tbl\tstone.str_new");
+    r#gen.emit("\tmov\tx9, #0");
+    r#gen.emit(&format!(".L{name}_loop:"));
+    r#gen.emit("\tldrb\tw10, [x19, x9]");
+    r#gen.emit(&format!("\tcbz\tw10, .L{name}_done"));
+    r#gen.emit(&format!("\tsub\tw11, w10, #{}", first as u32));
+    r#gen.emit("\tcmp\tw11, #25");
+    r#gen.emit(&format!("\tb.hi\t.L{name}_keep"));
+    r#gen.emit("\teor\tw10, w10, #32");
+    r#gen.emit(&format!(".L{name}_keep:"));
+    r#gen.emit("\tstrb\tw10, [x0, x9]");
+    r#gen.emit("\tadd\tx9, x9, #1");
+    r#gen.emit(&format!("\tb\t.L{name}_loop"));
+    r#gen.emit(&format!(".L{name}_done:"));
+    pop_frame(r#gen, &saved);
+}
+
+/// Emits `stone.str_rposition` (see [`string_methods`]), which tries each start from the last one
+/// that leaves room for the text down to the first, so an empty text is found at the end.
+fn str_rposition(r#gen: &mut dyn AssemblyGenerator) {
+    // x12 points at the start being tried and x13 counts the bytes that matched
+    r#gen.emit("stone.str_rposition:");
+    r#gen.emit("\tldur\tx9, [x0, #-16]");
+    r#gen.emit("\tldur\tx10, [x1, #-16]");
+    r#gen.emit("\tcmp\tx9, x10");
+    r#gen.emit("\tb.lo\t.Lstr_rposition_none"); // the text is longer
+    r#gen.emit("\tsub\tx9, x9, x10");
+    r#gen.emit("\tadd\tx12, x0, x9");
+    r#gen.emit(".Lstr_rposition_try:");
+    r#gen.emit("\tmov\tx13, #0");
+    r#gen.emit(".Lstr_rposition_compare:");
+    r#gen.emit("\tldrb\tw10, [x1, x13]");
+    r#gen.emit("\tcbz\tw10, .Lstr_rposition_found");
+    r#gen.emit("\tldrb\tw11, [x12, x13]");
+    r#gen.emit("\tcmp\tw10, w11");
+    r#gen.emit("\tb.ne\t.Lstr_rposition_next");
+    r#gen.emit("\tadd\tx13, x13, #1");
+    r#gen.emit("\tb\t.Lstr_rposition_compare");
+    r#gen.emit(".Lstr_rposition_next:");
+    r#gen.emit("\tcmp\tx12, x0");
+    r#gen.emit("\tb.eq\t.Lstr_rposition_none");
+    r#gen.emit("\tsub\tx12, x12, #1");
+    r#gen.emit("\tb\t.Lstr_rposition_try");
+    r#gen.emit(".Lstr_rposition_found:");
+    r#gen.emit("\tsub\tx0, x12, x0");
+    r#gen.emit("\tret");
+    r#gen.emit(".Lstr_rposition_none:");
+    r#gen.emit("\tmov\tx0, #-1");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.str_count` (see [`string_methods`]), which goes on searching past each match, or,
+/// for an empty text, counts one match before each character and one at the end.
+fn str_count(r#gen: &mut dyn AssemblyGenerator) {
+    // stone.str_find leaves x12 and x13 alone, so they keep the count and the text's length
+    r#gen.emit("stone.str_count:");
+    r#gen.emit("\tldrb\tw9, [x1]");
+    r#gen.emit("\tcbz\tw9, .Lstr_count_empty");
+    push_frame(r#gen, &[]);
+    r#gen.emit("\tmov\tx12, #0");
+    r#gen.emit("\tldur\tx13, [x1, #-16]");
+    r#gen.emit(".Lstr_count_find:");
+    r#gen.emit("\tbl\tstone.str_find");
+    r#gen.emit("\tcbz\tx0, .Lstr_count_done");
+    r#gen.emit("\tadd\tx12, x12, #1");
+    r#gen.emit("\tadd\tx0, x0, x13");
+    r#gen.emit("\tb\t.Lstr_count_find");
+    r#gen.emit(".Lstr_count_done:");
+    r#gen.emit("\tmov\tx0, x12");
+    pop_frame(r#gen, &[]);
+    // every byte but a continuation byte, 10xxxxxx, starts a character
+    r#gen.emit(".Lstr_count_empty:");
+    r#gen.emit("\tmov\tx9, #1");
+    r#gen.emit(".Lstr_count_byte:");
+    r#gen.emit("\tldrb\tw10, [x0], #1");
+    r#gen.emit("\tcbz\tw10, .Lstr_count_end");
+    r#gen.emit("\tand\tw10, w10, #192");
+    r#gen.emit("\tcmp\tw10, #128");
+    r#gen.emit("\tb.eq\t.Lstr_count_byte");
+    r#gen.emit("\tadd\tx9, x9, #1");
+    r#gen.emit("\tb\t.Lstr_count_byte");
+    r#gen.emit(".Lstr_count_end:");
+    r#gen.emit("\tmov\tx0, x9");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.str_replace` (see [`string_methods`]). A first pass counts the matches it will
+/// replace, at most `x3` taken as unsigned so that a negative count never stops it, which gives
+/// the result's length, and a second pass finds them again, copying the bytes between them and
+/// the new text in their place. An empty old text matches before each character and at the end,
+/// as `stone.str_count` counts it.
+fn str_replace(r#gen: &mut dyn AssemblyGenerator) {
+    // x19 holds the string, x20 the old text, x21 the new one, x22 the most matches to replace
+    // and then how many are left to replace, and x23 the old text's length
+    let saved = ["x19", "x20", "x21", "x22", "x23"];
+    r#gen.emit("stone.str_replace:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    r#gen.emit("\tmov\tx21, x2");
+    r#gen.emit("\tmov\tx22, x3");
+    r#gen.emit("\tldur\tx23, [x1, #-16]");
+    // x12 is where the next search starts and x13 counts the matches
+    r#gen.emit("\tmov\tx12, x19");
+    r#gen.emit("\tmov\tx13, #0");
+    r#gen.emit(".Lstr_replace_count:");
+    r#gen.emit("\tcmp\tx13, x22");
+    r#gen.emit("\tb.hs\t.Lstr_replace_counted");
+    r#gen.emit("\tmov\tx0, x12");
+    r#gen.emit("\tbl\t.Lstr_replace_next");
+    r#gen.emit("\tcbz\tx0, .Lstr_replace_counted");
+    r#gen.emit("\tadd\tx13, x13, #1");
+    r#gen.emit("\tadd\tx12, x0, x23");
+    r#gen.emit("\tcbnz\tx23, .Lstr_replace_count");
+    // an empty match is followed by a character, whose end the next search starts from, unless
+    // it is the match at the end
+    r#gen.emit("\tldrb\tw9, [x0]");
+    r#gen.emit("\tcbz\tw9, .Lstr_replace_counted");
+    r#gen.emit("\tadd\tx12, x12, #1");
+    r#gen.emit("\tb\t.Lstr_replace_count");
+    r#gen.emit(".Lstr_replace_counted:");
+    r#gen.emit("\tmov\tx22, x13");
+    r#gen.emit("\tldur\tx9, [x21, #-16]");
+    r#gen.emit("\tsub\tx9, x9, x23");
+    r#gen.emit("\tldur\tx10, [x19, #-16]");
+    r#gen.emit("\tmadd\tx0, x9, x13, x10");
+    r#gen.emit("\tbl\tstone.str_new");
+    // nothing but .Lstr_replace_next is called from here, so x12 to x15 keep what follows: x12
+    // where the bytes not yet copied start, x13 where the next search starts, x14 where the next
+    // byte goes, and x15 the result
+    r#gen.emit("\tmov\tx15, x0");
+    r#gen.emit("\tmov\tx14, x0");
+    r#gen.emit("\tmov\tx12, x19");
+    r#gen.emit("\tmov\tx13, x19");
+    r#gen.emit(".Lstr_replace_copy:");
+    r#gen.emit("\tcbz\tx22, .Lstr_replace_rest");
+    r#gen.emit("\tsub\tx22, x22, #1");
+    r#gen.emit("\tmov\tx0, x13");
+    r#gen.emit("\tbl\t.Lstr_replace_next"); // a match the first pass counted
+    r#gen.emit("\tsub\tx10, x0, x12");
+    copy_bytes(r#gen, "x14", "x12", "x10", ".Lstr_replace_piece");
+    r#gen.emit("\tmov\tx11, x21");
+    r#gen.emit("\tldur\tx10, [x21, #-16]");
+    copy_bytes(r#gen, "x14", "x11", "x10", ".Lstr_replace_new");
+    r#gen.emit("\tadd\tx12, x0, x23");
+    r#gen.emit("\tmov\tx13, x12");
+    r#gen.emit("\tcbnz\tx23, .Lstr_replace_copy");
+    r#gen.emit("\tadd\tx13, x13, #1");
+    r#gen.emit("\tb\t.Lstr_replace_copy");
+    // then whatever follows the last match; stone.str_new wrote the terminator
+    r#gen.emit(".Lstr_replace_rest:");
+    r#gen.emit("\tldur\tx10, [x19, #-16]");
+    r#gen.emit("\tadd\tx10, x10, x19");
+    r#gen.emit("\tsub\tx10, x10, x12");
+    copy_bytes(r#gen, "x14", "x12", "x10", ".Lstr_replace_tail");
+    r#gen.emit("\tmov\tx0, x15");
+    pop_frame(r#gen, &saved);
+    // returns the first match of x20 at or after x0, or 0, changing only x0, x1, and x9 to x11;
+    // an empty text matches at the first byte that starts a character, or the end
+    r#gen.emit(".Lstr_replace_next:");
+    r#gen.emit("\tcbz\tx23, .Lstr_replace_boundary");
+    r#gen.emit("\tmov\tx1, x20");
+    r#gen.emit("\tb\tstone.str_find");
+    r#gen.emit(".Lstr_replace_boundary:");
+    r#gen.emit("\tldrb\tw9, [x0]");
+    r#gen.emit("\tand\tw9, w9, #192");
+    r#gen.emit("\tcmp\tw9, #128");
+    r#gen.emit("\tb.ne\t.Lstr_replace_found");
+    r#gen.emit("\tadd\tx0, x0, #1");
+    r#gen.emit("\tb\t.Lstr_replace_boundary");
+    r#gen.emit(".Lstr_replace_found:");
+    r#gen.emit("\tret");
 }
 
 /// Emits the table of the 128 one-byte strings that `stone.str_at` and `stone.str_char` (see

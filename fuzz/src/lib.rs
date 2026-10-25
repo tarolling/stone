@@ -433,7 +433,9 @@ impl Generator {
                     indent,
                     &format!(
                         "print({a}, ({a}).len(), {a} {op} {b}, ({a}).find({b}), \
-                         ({a}).startswith({b}), ({a}).endswith({b}))"
+                         ({a}).startswith({b}), ({a}).endswith({b}), ({a}).rfind({b}), \
+                         ({a}).count({b}), ({a}).replace({b}, {a}), ({a}).replace({b}, \"-\", 2), \
+                         ({a}).lower(), ({a}).upper(), ({a}).splitlines())"
                     ),
                 );
             }
@@ -1255,6 +1257,12 @@ mod tests {
             ".find(",
             ".startswith(",
             ".endswith(",
+            ".rfind(",
+            ".count(",
+            ".replace(",
+            ".lower()",
+            ".upper()",
+            ".splitlines()",
             ".join(",
             ".split(",
             ".strip()",

@@ -1,0 +1,16 @@
+one cat two cat one cat two fish one fish two fish
+one cat two cat one cat two cat one fish two fish
+bb aaaaaa 
+[] abc cafe
+-a-b- -a-b x |c|a|f|é|
+hello, world! HELLO, WORLD! true
+CRèME BRûLéE ÀÉ abc A1-Z_
+['a', 'b', 'c'] ['a', 'b'] [] ['']
+['a', 'b', 'c'] ['a', '', 'b'] ['a', ''] ['', '', 'x']
+['no breaks'] ['x'] ['x'] ['é', 'ü']
+some(4) some(5) some(0) none some(6) some(0)
+some(0) none some(10) none
+3 2 0 2 1
+7 1 5 1 0
+['Ada', 'grAce', 'linus'] 4 2
+3 ['1', '2', '3'] 4

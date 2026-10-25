@@ -411,7 +411,8 @@ assign the result where 'add' is called
 | `del`, `global`, `nonlocal`, `is`, `with`, `yield` | not available |
 | `len(x)`, `abs`, `min`, `max` | `x.len()`, `math.abs`, `math.min`, `math.max` |
 | `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `ys = xs` then `ys.sort()` or `ys.sort_by_key(f)`, both stable; reverse with `ys[::-1]` |
-| `"ab" * 3`, `s.upper()`, `s.replace(...)` | loops over characters; only the string methods below exist |
+| `"ab" * 3` | a loop of `+=`; only the string methods below exist |
+| `s.lower()`, `s.upper()` | the same, but only ASCII letters change case |
 | `print(x, end="")` | build the line as a string, then `print` it once |
 | `open(path).read()`, `.readlines()`, `f.write(s)` | `fs.read(path)`, `fs.read_lines(path)`, `fs.write(path, s)`, each a `result` |
 | `os.listdir`, `os.path.exists`, `os.remove`, `os.mkdir` | `fs.list_dir` (sorted), `fs.exists`, `fs.remove`, `fs.make_dir` |
@@ -431,8 +432,9 @@ stderr), `range(end)` and `range(start, end)`
 
 Methods: `len` (str, bytes, list, map); lists: `append`, `pop()` (option) and `pop(i)`, `insert`,
 `extend`, `sort`, and taking a function, `sort_by_key`, `map`, `filter`, `any`, `all`,
-`min_by_key`, `max_by_key` (options); strings: `strip`, `split()` and `split(sep)`, `sep.join(xs)`, `find`
-(option), `startswith`, `endswith`, `bytes`; bytes: `text` (a result), `contains`; options: `is_some`, `is_none`, `unwrap`, `unwrap_or`; maps:
+`min_by_key`, `max_by_key` (options); strings: `strip`, `split()` and `split(sep)`, `splitlines`, `sep.join(xs)`, `find`
+and `rfind` (options), `count`, `replace(old, new)` and `replace(old, new, n)`, `lower`, `upper`
+(ASCII letters only), `startswith`, `endswith`, `bytes`; bytes: `text` (a result), `contains`; options: `is_some`, `is_none`, `unwrap`, `unwrap_or`; maps:
 `contains`, `get` (option), `pop(key)` (option), `keys`, `values`, `items`; any comparable
 value: `eq`, `cmp`.
 

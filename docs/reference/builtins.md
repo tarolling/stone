@@ -430,6 +430,22 @@ print("a,,b".split(","), "a::b".split("::"))   // ['a', '', 'b'] ['a', 'b']
 print("  3 4   5 ".split())                    // ['3', '4', '5']
 ```
 
+### `splitlines`
+
+```text
+str.splitlines() -> list[str]
+```
+
+Splits the string into lines at each `\n`, `\r\n`, or `\r`, without their endings. A line ending
+at the very end ends the last line rather than starting an empty one, so a file's text splits into
+its lines whether or not it ends with a newline, and an empty string has no lines. Unlike Python,
+other characters Python counts as line breaks, such as `\x0c`, stay in the line.
+
+```stone
+print("one\r\ntwo\nthree\n".splitlines())   // ['one', 'two', 'three']
+print("a\n\nb".splitlines(), "".splitlines())   // ['a', '', 'b'] []
+```
+
 ### `join`
 
 ```text
@@ -461,6 +477,79 @@ match line.find("="):
     case none:
         print("no =")
 print(line.find("?"))                       // none
+```
+
+### `rfind`
+
+```text
+str.rfind(text: str) -> option[int]
+```
+
+Returns `some` of the byte index where `text` last appears in the string, or `none` if it never
+does. An empty `text` is found at the end, at `s.len()`.
+
+```stone
+path = "src/stdlib/net.stn"
+match path.rfind("/"):
+    case some(at):
+        print(path[:at], path[at + 1:])   // src/stdlib net.stn
+    case none:
+        print(path)
+```
+
+### `count`
+
+```text
+str.count(text: str) -> int
+```
+
+Returns how many times `text` appears in the string, searching from the start and going on after
+the end of each match, so matches never overlap. An empty `text` is found between every two
+characters and at both ends, so it counts one more than the characters.
+
+```stone
+print("banana".count("a"), "aaaa".count("aa"), "café".count(""))   // 3 2 5
+```
+
+### `replace`
+
+```text
+str.replace(old: str, new: str) | str.replace(old: str, new: str, count: int) -> str
+```
+
+Returns the string with each match of `old`, found as `count` finds them, replaced by `new`. With
+`count`, only the first `count` matches are replaced, or every one if `count` is negative. An
+empty `old` matches between every two characters and at both ends, never inside a character.
+
+```stone
+print("a-b-c".replace("-", "+"), "a-b-c".replace("-", "", 1))   // a+b+c ab-c
+print("ab".replace("", "."))                                      // .a.b.
+```
+
+### `lower`
+
+```text
+str.lower() -> str
+```
+
+Returns the string with each ASCII letter `A` to `Z` made lowercase. Unlike Python, letters
+outside ASCII stay as they are, so `"ÉTÉ".lower()` is `"ÉtÉ"`.
+
+```stone
+print("Hello, World!".lower())   // hello, world!
+```
+
+### `upper`
+
+```text
+str.upper() -> str
+```
+
+Returns the string with each ASCII letter `a` to `z` made uppercase. Unlike Python, letters
+outside ASCII stay as they are, so `"été".upper()` is `"éTé"`.
+
+```stone
+print("Hello, World!".upper())   // HELLO, WORLD!
 ```
 
 ### `startswith`

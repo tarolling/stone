@@ -175,7 +175,9 @@ The error is the message `int(s)` would stop with, such as
 | `__str__` | `impl display for T:` with `fn display(self) -> str`, which `print` and `str` use |
 | `print(a, b, sep=", ")`, `end=""` | build one string, then `print` it |
 | `print(msg, file=sys.stderr)`, `sys.stderr.write(msg)` | `eprint(msg)` |
-| `s.lower()`, `s.replace()`, `s.isdigit()` | loops over characters, comparing with `<` and `>` |
+| `s.lower()`, `s.upper()` | the same, but letters outside ASCII keep their case |
+| `s.replace(a, b)`, `s.count(a)`, `s.rfind(a)`, `s.splitlines()` | the same; `rfind` gives an option, as `find` does |
+| `s.isdigit()`, `s.isalpha()` | loops over characters, comparing with `<` and `>` |
 | `s * 3` | a loop of `+=` |
 | `ord(c)`, `chr(n)` | not available; compare characters as strings (`c >= "a" and c <= "z"`) |
 | `input()`, `except EOFError:` | `input()` is a `result[str, str]`: `input().unwrap()` where a line must be there, or `match` it, whose `err` is the end of the input |

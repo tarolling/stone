@@ -2358,6 +2358,34 @@ impl<'out> Interpreter<'out> {
                 .find(&**text)
                 .map_or_else(none, |at| some(Value::Int(at as i64)))),
             ("find", _, _) => Err("find() is called on a str, with a str".into()),
+            ("rfind", Value::Str(s), [Value::Str(text)]) => Ok(s
+                .rfind(&**text)
+                .map_or_else(none, |at| some(Value::Int(at as i64)))),
+            ("rfind", _, _) => Err("rfind() is called on a str, with a str".into()),
+            // rust's matches, like python's count, finds an empty text at every character boundary
+            ("count", Value::Str(s), [Value::Str(text)]) => {
+                Ok(Value::Int(s.matches(&**text).count() as i64))
+            }
+            ("count", _, _) => Err("count() is called on a str, with a str".into()),
+            ("replace", Value::Str(s), [Value::Str(old), Value::Str(new), rest @ ..]) => {
+                let replaced = match rest {
+                    [] | [Value::Int(..0)] => s.replace(&**old, new),
+                    [Value::Int(count)] => s.replacen(&**old, new, *count as usize),
+                    _ => return Err("replace() takes an int count".into()),
+                };
+                Ok(Value::Str(replaced.into()))
+            }
+            ("replace", _, _) => {
+                Err("replace() is called on a str, with two strs and an optional int".into())
+            }
+            ("lower", Value::Str(s), []) => Ok(Value::Str(s.to_ascii_lowercase().into())),
+            ("lower", _, _) => Err("lower() is called on a str, with no arguments".into()),
+            ("upper", Value::Str(s), []) => Ok(Value::Str(s.to_ascii_uppercase().into())),
+            ("upper", _, _) => Err("upper() is called on a str, with no arguments".into()),
+            ("splitlines", Value::Str(s), []) => Ok(str_list(stdlib::splitlines(s))),
+            ("splitlines", _, _) => {
+                Err("splitlines() is called on a str, with no arguments".into())
+            }
             ("startswith", Value::Str(s), [Value::Str(prefix)]) => {
                 Ok(Value::Bool(s.starts_with(&**prefix)))
             }

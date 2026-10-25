@@ -54,6 +54,12 @@ pub const STRING_METHOD_ROUTINES: &[&str] = &[
     "stone.str_starts",
     "stone.str_ends",
     "stone.str_char",
+    "stone.str_splitlines",
+    "stone.str_lower",
+    "stone.str_upper",
+    "stone.str_rposition",
+    "stone.str_count",
+    "stone.str_replace",
 ];
 
 /// The routines of `bytes` that differ from strings', emitted only when called (see

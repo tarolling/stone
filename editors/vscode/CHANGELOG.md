@@ -10,6 +10,11 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Completion and hover for the string methods `splitlines`, `rfind`, `count`, `replace`,
+  `lower`, and `upper`.
+
 ## [0.3.4] - 2026-10-24
 
 ### Added

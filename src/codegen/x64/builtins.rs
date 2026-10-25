@@ -2606,6 +2606,14 @@ pub fn conversion_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// - `stone.str_ends` returns 1 if the string in `rdi` ends with the one in `rsi`, else 0
 /// - `stone.str_char` returns the character that starts at byte `rsi` of the string in `rdi`, a
 ///   string of its 1 to 4 bytes, for a `for` loop over a string
+/// - `stone.str_splitlines` returns a list of the lines of `rdi`, as `stdlib::splitlines` splits
+///   them
+/// - `stone.str_lower` and `stone.str_upper` return a new string of `rdi` with its ASCII letters
+///   made lowercase or uppercase
+/// - `stone.str_rposition` returns the byte index where `rsi` last appears in `rdi`, or -1
+/// - `stone.str_count` returns how many times `rsi` appears in `rdi` without overlapping
+/// - `stone.str_replace` returns a new string of `rdi` with the first `rcx` matches of `rsi`
+///   replaced by `rdx`, every match if `rcx` is negative
 pub fn string_methods(
     r#gen: &mut dyn AssemblyGenerator,
     used: &[&str],
@@ -2694,7 +2702,15 @@ pub fn string_methods(
         r#gen.emit("\tpop\trbp");
         r#gen.emit("\tret");
     }
-    if uses("stone.str_split") || uses("stone.str_position") {
+    if [
+        "stone.str_split",
+        "stone.str_position",
+        "stone.str_count",
+        "stone.str_replace",
+    ]
+    .iter()
+    .any(|label| uses(label))
+    {
         // returns where the string in rsi first appears in the one in rdi, or 0, like strstr
         r#gen.emit("stone.str_find:");
         r#gen.emit("\txor\tecx, ecx");
@@ -2874,6 +2890,306 @@ pub fn string_methods(
         r#gen.emit("\txor\teax, eax");
         r#gen.emit("\tret");
     }
+    if uses("stone.str_splitlines") {
+        str_splitlines(r#gen);
+    }
+    for (label, first) in [("stone.str_lower", 'A'), ("stone.str_upper", 'a')] {
+        if uses(label) {
+            str_case(r#gen, label, first);
+        }
+    }
+    if uses("stone.str_rposition") {
+        str_rposition(r#gen);
+    }
+    if uses("stone.str_count") {
+        str_count(r#gen);
+    }
+    if uses("stone.str_replace") {
+        str_replace(r#gen);
+    }
+}
+
+/// Emits `stone.str_splitlines` (see [`string_methods`]), which ends a line at each `\n`, `\r\n`,
+/// or `\r` and keeps the last line only if it is not empty, as `stdlib::splitlines` does.
+fn str_splitlines(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the cursor, r12 the list, and r13 where the line started
+    r#gen.emit("stone.str_splitlines:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr13, rdi");
+    r#gen.emit("\txor\tedi, edi");
+    r#gen.emit("\tmov\tesi, 1"); // a list of strings
+    r#gen.emit("\tcall\tstone.list_new");
+    r#gen.emit("\tmov\tr12, rax");
+    r#gen.emit(".Lstr_splitlines_scan:");
+    r#gen.emit("\tmovzx\tecx, byte ptr [rbx]");
+    r#gen.emit("\ttest\tecx, ecx");
+    r#gen.emit("\tjz\t.Lstr_splitlines_end");
+    r#gen.emit("\tcmp\tecx, 10");
+    r#gen.emit("\tje\t.Lstr_splitlines_line");
+    r#gen.emit("\tcmp\tecx, 13");
+    r#gen.emit("\tje\t.Lstr_splitlines_line");
+    r#gen.emit("\tinc\trbx");
+    r#gen.emit("\tjmp\t.Lstr_splitlines_scan");
+    r#gen.emit(".Lstr_splitlines_line:");
+    str_splitlines_append(r#gen);
+    // \r\n is one ending
+    r#gen.emit("\tmovzx\tecx, byte ptr [rbx]");
+    r#gen.emit("\tinc\trbx");
+    r#gen.emit("\tcmp\tecx, 13");
+    r#gen.emit("\tjne\t.Lstr_splitlines_next");
+    r#gen.emit("\tcmp\tbyte ptr [rbx], 10");
+    r#gen.emit("\tjne\t.Lstr_splitlines_next");
+    r#gen.emit("\tinc\trbx");
+    r#gen.emit(".Lstr_splitlines_next:");
+    r#gen.emit("\tmov\tr13, rbx");
+    r#gen.emit("\tjmp\t.Lstr_splitlines_scan");
+    // a last line without an ending is a line, unless it is empty
+    r#gen.emit(".Lstr_splitlines_end:");
+    r#gen.emit("\tcmp\trbx, r13");
+    r#gen.emit("\tje\t.Lstr_splitlines_done");
+    str_splitlines_append(r#gen);
+    r#gen.emit(".Lstr_splitlines_done:");
+    r#gen.emit("\tmov\trax, r12");
+    r#gen.emit("\tlea\trsp, [rbp - 24]");
+    r#gen.emit("\tpop\tr13");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
+/// Emits the part of `stone.str_splitlines` that appends the line from `r13` up to `rbx` to the
+/// list in `r12`.
+fn str_splitlines_append(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tmov\trsi, rbx");
+    r#gen.emit("\tsub\trsi, r13");
+    r#gen.emit("\tcall\tstone.str_slice");
+    r#gen.emit("\tmov\trdi, r12");
+    r#gen.emit("\tmov\trsi, rax");
+    r#gen.emit("\tcall\tstone.list_append");
+}
+
+/// Emits `label`, `stone.str_lower` or `stone.str_upper` (see [`string_methods`]), which copies
+/// the string, flipping the case bit of each byte from `first`, `'A'` or `'a'`, to 25 past it.
+fn str_case(r#gen: &mut dyn AssemblyGenerator, label: &str, first: char) {
+    let name = label.trim_start_matches("stone.");
+    // rbx holds the string across stone.str_new
+    r#gen.emit(&format!("{label}:"));
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rdi - 16]");
+    r#gen.emit("\tcall\tstone.str_new");
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit(&format!(".L{name}_loop:"));
+    r#gen.emit("\tmovzx\tedx, byte ptr [rbx + rcx]");
+    r#gen.emit("\ttest\tedx, edx");
+    r#gen.emit(&format!("\tjz\t.L{name}_done"));
+    r#gen.emit("\tmov\tesi, edx");
+    r#gen.emit(&format!("\tsub\tesi, {}", first as u32));
+    r#gen.emit("\tcmp\tesi, 25");
+    r#gen.emit(&format!("\tja\t.L{name}_keep"));
+    r#gen.emit("\txor\tedx, 32");
+    r#gen.emit(&format!(".L{name}_keep:"));
+    r#gen.emit("\tmov\tbyte ptr [rax + rcx], dl");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit(&format!("\tjmp\t.L{name}_loop"));
+    r#gen.emit(&format!(".L{name}_done:"));
+    r#gen.emit("\tlea\trsp, [rbp - 8]");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.str_rposition` (see [`string_methods`]), which tries each start from the last one
+/// that leaves room for the text down to the first, so an empty text is found at the end.
+fn str_rposition(r#gen: &mut dyn AssemblyGenerator) {
+    // r8 points at the start being tried
+    r#gen.emit("stone.str_rposition:");
+    r#gen.emit("\tmov\trax, QWORD PTR [rdi - 16]");
+    r#gen.emit("\tsub\trax, QWORD PTR [rsi - 16]");
+    r#gen.emit("\tjb\t.Lstr_rposition_none"); // the text is longer
+    r#gen.emit("\tlea\tr8, [rdi + rax]");
+    r#gen.emit(".Lstr_rposition_try:");
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit(".Lstr_rposition_compare:");
+    r#gen.emit("\tmovzx\tedx, byte ptr [rsi + rcx]");
+    r#gen.emit("\ttest\tedx, edx");
+    r#gen.emit("\tjz\t.Lstr_rposition_found");
+    r#gen.emit("\tcmp\tdl, byte ptr [r8 + rcx]");
+    r#gen.emit("\tjne\t.Lstr_rposition_next");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit("\tjmp\t.Lstr_rposition_compare");
+    r#gen.emit(".Lstr_rposition_next:");
+    r#gen.emit("\tcmp\tr8, rdi");
+    r#gen.emit("\tje\t.Lstr_rposition_none");
+    r#gen.emit("\tdec\tr8");
+    r#gen.emit("\tjmp\t.Lstr_rposition_try");
+    r#gen.emit(".Lstr_rposition_found:");
+    r#gen.emit("\tmov\trax, r8");
+    r#gen.emit("\tsub\trax, rdi");
+    r#gen.emit("\tret");
+    r#gen.emit(".Lstr_rposition_none:");
+    r#gen.emit("\tmov\trax, -1");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.str_count` (see [`string_methods`]), which goes on searching past each match, or,
+/// for an empty text, counts one match before each character and one at the end.
+fn str_count(r#gen: &mut dyn AssemblyGenerator) {
+    // stone.str_find leaves r8 and r9 alone, so they keep the count and the text's length
+    r#gen.emit("stone.str_count:");
+    r#gen.emit("\tcmp\tbyte ptr [rsi], 0");
+    r#gen.emit("\tje\t.Lstr_count_empty");
+    r#gen.emit("\txor\tr8d, r8d");
+    r#gen.emit("\tmov\tr9, QWORD PTR [rsi - 16]");
+    r#gen.emit(".Lstr_count_find:");
+    r#gen.emit("\tcall\tstone.str_find");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lstr_count_done");
+    r#gen.emit("\tinc\tr8");
+    r#gen.emit("\tlea\trdi, [rax + r9]");
+    r#gen.emit("\tjmp\t.Lstr_count_find");
+    r#gen.emit(".Lstr_count_done:");
+    r#gen.emit("\tmov\trax, r8");
+    r#gen.emit("\tret");
+    // every byte but a continuation byte, 10xxxxxx, starts a character
+    r#gen.emit(".Lstr_count_empty:");
+    r#gen.emit("\tmov\teax, 1");
+    r#gen.emit(".Lstr_count_byte:");
+    r#gen.emit("\tmovzx\tecx, byte ptr [rdi]");
+    r#gen.emit("\ttest\tecx, ecx");
+    r#gen.emit("\tjz\t.Lstr_count_end");
+    r#gen.emit("\tinc\trdi");
+    r#gen.emit("\tand\tecx, 192");
+    r#gen.emit("\tcmp\tecx, 128");
+    r#gen.emit("\tje\t.Lstr_count_byte");
+    r#gen.emit("\tinc\trax");
+    r#gen.emit("\tjmp\t.Lstr_count_byte");
+    r#gen.emit(".Lstr_count_end:");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.str_replace` (see [`string_methods`]). A first pass counts the matches it will
+/// replace, at most `rcx` taken as unsigned so that a negative count never stops it, which gives
+/// the result's length, and a second pass finds them again, copying the bytes between them and
+/// the new text in their place. An empty old text matches before each character and at the end,
+/// as `stone.str_count` counts it.
+fn str_replace(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the string, r12 the old text, r13 the new one, r14 the most matches to replace
+    // and then how many are left to replace, and r15 the old text's length
+    r#gen.emit("stone.str_replace:");
+    r#gen.emit("\tpush\trbp");
+    r#gen.emit("\tmov\trbp, rsp");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
+    r#gen.emit("\tpush\tr14");
+    r#gen.emit("\tpush\tr15");
+    r#gen.emit("\tand\trsp, -16");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr12, rsi");
+    r#gen.emit("\tmov\tr13, rdx");
+    r#gen.emit("\tmov\tr14, rcx");
+    r#gen.emit("\tmov\tr15, QWORD PTR [rsi - 16]");
+    // r8 is where the next search starts and r9 counts the matches
+    r#gen.emit("\tmov\tr8, rbx");
+    r#gen.emit("\txor\tr9d, r9d");
+    r#gen.emit(".Lstr_replace_count:");
+    r#gen.emit("\tcmp\tr9, r14");
+    r#gen.emit("\tjae\t.Lstr_replace_counted");
+    r#gen.emit("\tmov\trdi, r8");
+    r#gen.emit("\tcall\t.Lstr_replace_next");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lstr_replace_counted");
+    r#gen.emit("\tinc\tr9");
+    r#gen.emit("\tlea\tr8, [rax + r15]");
+    r#gen.emit("\ttest\tr15, r15");
+    r#gen.emit("\tjnz\t.Lstr_replace_count");
+    // an empty match is followed by a character, whose end the next search starts from, unless
+    // it is the match at the end
+    r#gen.emit("\tcmp\tbyte ptr [rax], 0");
+    r#gen.emit("\tje\t.Lstr_replace_counted");
+    r#gen.emit("\tinc\tr8");
+    r#gen.emit("\tjmp\t.Lstr_replace_count");
+    r#gen.emit(".Lstr_replace_counted:");
+    r#gen.emit("\tmov\tr14, r9");
+    r#gen.emit("\tmov\trdi, QWORD PTR [r13 - 16]");
+    r#gen.emit("\tsub\trdi, r15");
+    r#gen.emit("\timul\trdi, r9");
+    r#gen.emit("\tadd\trdi, QWORD PTR [rbx - 16]");
+    r#gen.emit("\tcall\tstone.str_new");
+    // nothing but .Lstr_replace_next is called from here, so r8 to r11 keep what follows: r8
+    // where the bytes not yet copied start, r9 where the next search starts, r10 where the next
+    // byte goes, and r11 the result
+    r#gen.emit("\tmov\tr11, rax");
+    r#gen.emit("\tmov\tr10, rax");
+    r#gen.emit("\tmov\tr8, rbx");
+    r#gen.emit("\tmov\tr9, rbx");
+    r#gen.emit(".Lstr_replace_copy:");
+    r#gen.emit("\ttest\tr14, r14");
+    r#gen.emit("\tjz\t.Lstr_replace_rest");
+    r#gen.emit("\tdec\tr14");
+    r#gen.emit("\tmov\trdi, r9");
+    r#gen.emit("\tcall\t.Lstr_replace_next"); // a match the first pass counted
+    r#gen.emit("\tmov\trdi, r10");
+    r#gen.emit("\tmov\trsi, r8");
+    r#gen.emit("\tmov\trcx, rax");
+    r#gen.emit("\tsub\trcx, r8");
+    r#gen.emit("\trep\tmovsb");
+    r#gen.emit("\tmov\trsi, r13");
+    r#gen.emit("\tmov\trcx, QWORD PTR [r13 - 16]");
+    r#gen.emit("\trep\tmovsb");
+    r#gen.emit("\tmov\tr10, rdi");
+    r#gen.emit("\tlea\tr8, [rax + r15]");
+    r#gen.emit("\tmov\tr9, r8");
+    r#gen.emit("\ttest\tr15, r15");
+    r#gen.emit("\tjnz\t.Lstr_replace_copy");
+    r#gen.emit("\tinc\tr9");
+    r#gen.emit("\tjmp\t.Lstr_replace_copy");
+    // then whatever follows the last match; stone.str_new wrote the terminator
+    r#gen.emit(".Lstr_replace_rest:");
+    r#gen.emit("\tmov\trdi, r10");
+    r#gen.emit("\tmov\trsi, r8");
+    r#gen.emit("\tmov\trcx, QWORD PTR [rbx - 16]");
+    r#gen.emit("\tadd\trcx, rbx");
+    r#gen.emit("\tsub\trcx, r8");
+    r#gen.emit("\trep\tmovsb");
+    r#gen.emit("\tmov\trax, r11");
+    r#gen.emit("\tlea\trsp, [rbp - 40]");
+    r#gen.emit("\tpop\tr15");
+    r#gen.emit("\tpop\tr14");
+    r#gen.emit("\tpop\tr13");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+    // returns the first match of r12 at or after rdi, or 0, changing only rax, rcx, rdx, rsi,
+    // and rdi; an empty text matches at the first byte that starts a character, or the end
+    r#gen.emit(".Lstr_replace_next:");
+    r#gen.emit("\ttest\tr15, r15");
+    r#gen.emit("\tjz\t.Lstr_replace_boundary");
+    r#gen.emit("\tmov\trsi, r12");
+    r#gen.emit("\tjmp\tstone.str_find");
+    r#gen.emit(".Lstr_replace_boundary:");
+    r#gen.emit("\tmovzx\tecx, byte ptr [rdi]");
+    r#gen.emit("\tand\tecx, 192");
+    r#gen.emit("\tcmp\tecx, 128");
+    r#gen.emit("\tjne\t.Lstr_replace_found");
+    r#gen.emit("\tinc\trdi");
+    r#gen.emit("\tjmp\t.Lstr_replace_boundary");
+    r#gen.emit(".Lstr_replace_found:");
+    r#gen.emit("\tmov\trax, rdi");
+    r#gen.emit("\tret");
 }
 
 /// Emits the table of the 128 one-byte strings that `stone.str_at` and `stone.str_char` (see

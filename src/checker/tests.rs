@@ -636,6 +636,74 @@ fn join_find_and_startswith_take_strs() {
 }
 
 #[test]
+fn replace_case_lines_rfind_and_count_take_strs() {
+    let source = "a = \"ab\".replace(\"a\", \"b\")\nb = \"ab\".replace(\"a\", \"b\", 1)\n\
+                  c = \"ab\".lower()\nd = \"ab\".upper()\ne = \"a\\nb\".splitlines()\n\
+                  f = \"ab\".rfind(\"b\")\ng = \"ab\".count(\"b\")\n";
+    for (name, ty) in [
+        ("a", "str"),
+        ("b", "str"),
+        ("c", "str"),
+        ("d", "str"),
+        ("e", "list[str]"),
+        ("f", "option[int]"),
+        ("g", "int"),
+    ] {
+        assert_eq!(type_of_symbol(source, name), ty, "{name}");
+    }
+    assert_error(
+        "x = 1.replace(\"a\", \"b\")\n",
+        "'replace' needs a str, found int",
+        1,
+        5,
+    );
+    assert_error(
+        "x = \"a\".replace(\"a\")\n",
+        "'replace' takes 2 or 3 arguments, but 1 was given",
+        1,
+        5,
+    );
+    assert_error(
+        "x = \"a\".replace(\"a\", \"b\", \"c\")\n",
+        "expected int, found str",
+        1,
+        27,
+    );
+    assert_error(
+        "x = \"a\".replace(1, \"b\")\n",
+        "expected str, found int",
+        1,
+        17,
+    );
+    assert_error(
+        "x = [1].lower()\n",
+        "'lower' needs a str, found list[int]",
+        1,
+        5,
+    );
+    assert_error("x = 1.upper()\n", "'upper' needs a str, found int", 1, 5);
+    assert_error(
+        "x = \"a\".splitlines(\"\\n\")\n",
+        "'splitlines' takes 0 arguments, but 1 was given",
+        1,
+        5,
+    );
+    assert_error("x = \"a\".rfind(1)\n", "expected str, found int", 1, 15);
+    assert_error(
+        "x = \"a\".count()\n",
+        "'count' takes 1 argument, but 0 were given",
+        1,
+        5,
+    );
+    assert_error(
+        "x = 1.count(\"a\")\n",
+        "'count' needs a str, found int",
+        1,
+        5,
+    );
+}
+
+#[test]
 fn endswith_takes_a_str() {
     assert_eq!(
         type_of_symbol("b = \"stone\".endswith(\"one\")\n", "b"),

@@ -10,6 +10,14 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The string methods `replace(old, new)` and `replace(old, new, count)`, `count`, `rfind`
+  (an option, as `find` is), `splitlines` (at `\n`, `\r\n`, or `\r`, without the endings), and
+  `lower` and `upper`, as Python has them, except that `lower` and `upper` change only ASCII
+  letters. An empty text matches between every two characters and at both ends, as in Python, so
+  `"ab".replace("", "-")` is `"-a-b-"` and `"ab".count("")` is 3.
+
 ## [0.3.4] - 2026-10-24
 
 ### Added

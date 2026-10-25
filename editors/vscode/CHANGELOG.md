@@ -10,6 +10,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-24
+
 ### Added
 
 - Function values: hover shows a value's function type, such as `fn(int) -> int`, and a function

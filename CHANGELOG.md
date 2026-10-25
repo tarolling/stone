@@ -10,6 +10,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.3.4] - 2026-10-24
+
 ### Added
 
 - Functions are values. A function's name without parentheses, as in `apply(double, 3)`, is a

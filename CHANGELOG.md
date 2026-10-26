@@ -39,7 +39,9 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   no C library: any Linux desktop, XWayland included, and XQuartz on macOS can show them.
 
 - `net.connect_unix(path)` connects to a Unix socket, and `net.ready(s, seconds)` says whether a
-  read of a socket would not wait, waiting at most `seconds` for data to arrive.
+  read of a socket would not wait, waiting at most `seconds` for data to arrive. Connecting to
+  a file that is not a socket is `connection refused` on every system, though macOS calls it
+  `ENOTSOCK`.
 
 - Generic traits: a trait may have type parameters, as `trait add[R]:`, which a type implements
   once for each set of type arguments, as `impl add[int] for V:` and `impl add[V] for V:`. A

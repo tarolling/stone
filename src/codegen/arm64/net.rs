@@ -18,6 +18,7 @@ use crate::codegen::context::{
 };
 use crate::codegen::x64::net::{LISTENER_TAG, SOCKET_TAG};
 use crate::codegen::{AssemblyGenerator, Os};
+use crate::stdlib::fs;
 use crate::stdlib::net::{MAX_REPLY, READ_SIZE};
 
 /// The registers every routine keeps its values in: `x19` holds the name an error quotes, or
@@ -473,6 +474,13 @@ fn connect_unix(r#gen: &mut dyn AssemblyGenerator) {
         Sys::Connect,
         &["mov\tx0, x20", "mov\tx1, sp", "mov\tx2, x23"],
     );
+    if os == Os::MacOs {
+        // a path that is not a socket is ENOTSOCK on macOS but ECONNREFUSED on Linux
+        r#gen.emit(&format!("\tmov\tx9, #-{}", fs::MACOS_ENOTSOCK));
+        r#gen.emit("\tcmp\tx0, x9");
+        r#gen.emit(&format!("\tmov\tx9, #-{}", fs::MACOS_ECONNREFUSED));
+        r#gen.emit("\tcsel\tx0, x9, x0, eq");
+    }
     r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_close"));
     r#gen.emit("\tmov\tx0, x20");
     r#gen.emit(&format!("\tmov\tx1, #{SOCKET_TAG}"));

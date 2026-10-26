@@ -11,7 +11,7 @@
 //! the text an error about it quotes, such as `localhost:8080`.
 
 use super::BuiltinDoc;
-use super::fs::{INVALID_TEXT, io_message, is_text, message};
+use super::fs::{self, INVALID_TEXT, io_message, is_text, message};
 use std::ffi::{c_int, c_short};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{
@@ -786,7 +786,16 @@ pub fn connect_unix(path: &str, name: &str) -> Result<Socket, String> {
     if cfg!(fuzzing) {
         return Err(NET_DISABLED.to_string());
     }
-    let stream = UnixStream::connect(path).map_err(|e| io_message(&e, name))?;
+    let stream = UnixStream::connect(path).map_err(|e| {
+        // a path that is not a socket is ENOTSOCK on macOS but ECONNREFUSED on Linux
+        let e = match e.raw_os_error() {
+            Some(n) if cfg!(target_os = "macos") && i64::from(n) == fs::MACOS_ENOTSOCK => {
+                std::io::Error::from_raw_os_error(fs::MACOS_ECONNREFUSED as i32)
+            }
+            _ => e,
+        };
+        io_message(&e, name)
+    })?;
     Ok(Socket::new(Stream::Unix(stream)))
 }
 

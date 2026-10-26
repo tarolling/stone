@@ -159,6 +159,14 @@ pub const MACOS_ERRORS: [(i64, &str); 16] = [
     (69, "disk quota exceeded"),
 ];
 
+/// macOS's number for "socket operation on non-socket", which its `connect` gives for a Unix
+/// socket path naming a file that is not a socket.
+pub const MACOS_ENOTSOCK: i64 = 38;
+
+/// macOS's number for "connection refused", which Linux's `connect` gives for a Unix socket path
+/// naming a file that is not a socket, so `net.connect_unix` reports `MACOS_ENOTSOCK` as this.
+pub const MACOS_ECONNREFUSED: i64 = 61;
+
 /// The reason an error gives for a file, or a name in a directory, that is not UTF-8 text.
 pub const INVALID_TEXT: &str = "not valid UTF-8 text";
 

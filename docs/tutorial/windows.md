@@ -65,9 +65,11 @@ while w.is_open():
 does something. Pressing the close button closes nothing by itself: the program decides, here
 by calling `close()`.
 
-A window speaks the X11 protocol to the display server itself, so a built program still needs
-no C library. Every Linux desktop runs an X11 server (XWayland under Wayland), and a Mac does
-with XQuartz. `DISPLAY` tells `gui.open` where it is, and without one it returns an error.
+A window speaks the Wayland or X11 protocol to the display server itself, so a built program
+still needs no C library. Every Linux desktop has a Wayland compositor or an X11 server, and a
+Mac has an X11 server with XQuartz. `gui.open` finds it through `WAYLAND_DISPLAY` or `DISPLAY`,
+preferring Wayland, and without either it returns an error. Where a Wayland compositor draws no
+title bars, as on GNOME, `gui` draws its own.
 
 ## Apps
 

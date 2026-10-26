@@ -12,6 +12,16 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- `gui` windows on Wayland, spoken in stone like X11, and used first when `WAYLAND_DISPLAY`
+  names a compositor (`STONE_GUI=x11` or `STONE_GUI=wayland` picks one). Where the compositor
+  draws no frames, as GNOME and WSLg do not, `gui` draws a title bar with a close button, which
+  moves the window when dragged and maximizes it when clicked twice, and edges to resize it by.
+  Keys follow the compositor's XKB keymap, read in stone with a keysym table generated from
+  xorgproto's `keysymdef.h` (`scripts/gen-keysyms.py`), and repeat at its rate.
+
+- X11 windows type the characters of keysyms outside Latin-1 and Unicode, such as Cyrillic and
+  Greek ones, through the same table.
+
 - `gui` windows show images through shared memory when the X server is on the same Linux
   machine and has MIT-SHM 1.2, sending the memory as a descriptor (`memfd_create` and
   `SCM_RIGHTS`) and waiting for the server to finish an image before drawing over it. At

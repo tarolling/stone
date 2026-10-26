@@ -1,0 +1,801 @@
+// Wayland windows for the `gui` module, which only stone's own modules may use: the Wayland
+// protocol spoken over a Unix socket from `net`, with images in memory shared with the
+// compositor, and a frame of our own (a title bar, a close button, and edges to resize by) where
+// the compositor does not draw one.
+
+use gui
+use gui.canvas
+use gui.event
+use gui_keys
+use gui_sys
+use gui_wire.get16
+use gui_wire.get32
+use gui_wire.put16
+use gui_wire.put32
+use net
+use net_sys
+use os
+use time
+
+// A window on a Wayland compositor, which `gui.window` holds when it uses Wayland.
+pub struct link:
+    conn: socket
+    open: bool
+    // the size of the content, which the app draws on
+    extent: tuple[int, int]
+    // events decoded but not given out yet
+    pending: list[event]
+    objs: objects
+    look: frame
+    store: buffers
+    mouse: pointer
+    keys: keyboard
+
+// The protocol's objects: the id the next new one gets, each one's id by its role, and its role
+// by its id.
+struct objects:
+    next: int
+    ids: map[str, int]
+    roles: map[int, str]
+
+// The window's frame and the compositor's last word on it: the title, the size the compositor
+// asked for (0 for none), whether the window is the active one and whether it is maximized,
+// full screen, or tiled, so our frame has no edges to resize by, and when our title bar was
+// last clicked (-1 for never, or since a double click).
+struct frame:
+    title: str
+    want: tuple[int, int]
+    active: bool
+    snug: bool
+    clicked: float
+
+// The memory shared with the compositor, which holds two buffers of the content, two of our
+// frame, and the cursor's: whether each content and frame buffer is busy, from its commit until
+// the compositor releases it (none before the first configure), a row of black pixels as wide as
+// the content, and the width of our frame's edges the buffers were made for.
+struct buffers:
+    busy: list[bool]
+    black: list[int]
+    border: int
+
+// The pointer: the serial of its last enter or button, the surface it is on (`content`,
+// `frame`, or nothing), where on it, the wheel's movement not given out as
+// steps yet, and whether its current frame of events gave steps already.
+struct pointer:
+    serial: int
+    on: str
+    at: tuple[int, int]
+    wheel: int
+    stepped: bool
+
+// The keyboard: its keymap, the modifiers held as a mask of Shift (1), Caps Lock (2), and
+// Control (4), the key held down whose text repeats and when it repeats next, and the
+// compositor's repeats a second and delay in milliseconds.
+struct keyboard:
+    map: gui_keys.keymap
+    state: int
+    held: int
+    due: float
+    rate: int
+    delay: int
+
+// The height of our title bar, and the width of the edges around it to resize by.
+fn title_height() -> int:
+    ret 24
+
+fn edge() -> int:
+    ret 4
+
+// A link on `conn` with no objects but the display, and the keymap `keys`.
+fn new_link(conn: socket, keys: gui_keys.keymap) -> link:
+    no = false
+    zero = (0, 0)
+    o = objects(next=2, ids={"display": 1}, roles={1: "display"})
+    f = frame(title="", want=zero, active=no, snug=no, clicked=-1.0)
+    s = buffers(busy=[], black=[], border=0)
+    m = pointer(serial=0, on="", at=zero, wheel=0, stepped=no)
+    t = keyboard(map=keys, state=0, held=-1, due=0.0, rate=25, delay=600)
+    ret link(conn=conn, open=no, extent=zero, pending=[], objs=o, look=f, store=s, mouse=m, keys=t)
+
+// Opens a window `width` by `height` pixels titled `title`, on the compositor `WAYLAND_DISPLAY`
+// names, and returns once it is on the screen.
+pub fn open(title: str, width: int, height: int) -> result[link, str]:
+    conn = connect()?
+    w = new_link(conn, gui_keys.unused())
+    w.open = true
+    w.extent = (width, height)
+    w.look.title = title
+    w.setup()?
+    ret ok(w)
+
+// Connects to the compositor `WAYLAND_DISPLAY` names: a path, or a name in `XDG_RUNTIME_DIR`.
+fn connect() -> result[socket, str]:
+    name = os.env("WAYLAND_DISPLAY").unwrap_or("")
+    if name == "":
+        ret err("no display: WAYLAND_DISPLAY is not set")
+    if name.startswith("/"):
+        ret net.connect_unix(name)
+    dir = os.env("XDG_RUNTIME_DIR").unwrap_or("")
+    if dir == "":
+        ret err("no display: XDG_RUNTIME_DIR is not set")
+    ret net.connect_unix("{dir}/{name}")
+
+impl link:
+    // Whether the window is open: until `close`, or the connection breaks.
+    fn is_open(self) -> bool:
+        ret self.open
+
+    // The width and height of the window's content, as the last `resize` event gave them.
+    fn size(self) -> tuple[int, int]:
+        ret self.extent
+
+    // The events that have happened since the last call, without waiting for any.
+    fn events(self) -> list[event]:
+        while self.open and net_sys.ready(self.conn, 0):
+            self.step()
+        self.repeat()
+        found = self.pending
+        self.pending = []
+        ret found
+
+    // The events that have happened since the last call, waiting for one if there are none, or
+    // none if the window is closed. A key held down wakes it when it repeats.
+    fn wait(self) -> list[event]:
+        while self.open and self.pending.len() == 0:
+            ms = -1
+            if self.keys.held >= 0 and self.keys.rate > 0:
+                left = (self.keys.due - time.clock()) * 1000.0
+                ms = int(left.max(0.0)).unwrap_or(0) + 1
+            if net_sys.ready(self.conn, ms):
+                self.step()
+            else:
+                self.repeat()
+        found = self.events()
+        ret found
+
+    // Shows `c` as the window's content, its top left pixel at the content's. Where `c` does
+    // not reach, the content is black.
+    fn show(self, c: canvas):
+        if not self.open or not self.configured():
+            ret
+        i = self.free(0)
+        if not self.open:
+            ret
+        width = self.extent[0]
+        height = self.extent[1]
+        offset = i * width * height * 4
+        rows = c.height.min(height)
+        if c.width == width:
+            self.write(offset, gui_sys.pack(c.pixels, 0, width * rows, 0))
+        else:
+            for row in range(rows):
+                shown = c.width.min(width)
+                data = gui_sys.pack(c.pixels, row * c.width, shown, 0)
+                if shown < width:
+                    data = data + gui_sys.pack(self.store.black, 0, width - shown, 0)
+                self.write(offset + row * width * 4, data)
+        for row in range(rows, height):
+            self.write(offset + row * width * 4, gui_sys.pack(self.store.black, 0, width, 0))
+        self.commit_content(i)
+
+    // Sets the title the window's frame shows.
+    fn set_title(self, title: str):
+        self.look.title = title
+        self.send(message(self.id("toplevel"), 2, text_words(title)))
+        if self.ours() and self.configured():
+            self.draw_frame()
+
+    // Closes the window.
+    fn close(self):
+        if self.open:
+            self.conn.close()
+            self.open = false
+
+    // Finds the compositor's globals, binds the ones it needs, and makes the window, returning
+    // once the compositor has configured it and it is on the screen.
+    fn setup(self) -> result[int, str]:
+        registry = self.make("registry")
+        sync = self.make("sync")
+        asks = message(1, 1, [registry])
+        asks.extend(message(1, 0, [sync]))
+        self.conn.send_bytes(bytes(asks).unwrap())?
+        // each global's name and version, by interface, until the sync is done
+        globals = {"": (0, 0)}
+        while true:
+            raw = self.read()?
+            object = get32(raw, 0)
+            if object == registry and get16(raw, 4) == 0:
+                version = get32(raw, 16 + padded(get32(raw, 12)))
+                globals[text_at(raw, 12)] = (get32(raw, 8), version)
+            elif object == sync:
+                break
+            elif object == 1 and get16(raw, 4) == 0:
+                ret err("Wayland error: {text_at(raw, 16)}")
+        for needed in ["wl_compositor", "wl_shm", "xdg_wm_base"]:
+            if not globals.contains(needed):
+                ret err("the Wayland compositor has no {needed}")
+        decorated = globals.contains("zxdg_decoration_manager_v1")
+        ours = not decorated and globals.contains("wl_subcompositor")
+        wanted = [("wl_compositor", "compositor", 4), ("wl_shm", "shm", 1)]
+        wanted.append(("xdg_wm_base", "wm_base", 1))
+        if globals.contains("wl_seat"):
+            wanted.append(("wl_seat", "seat", 7))
+        if ours:
+            wanted.append(("wl_subcompositor", "subcompositor", 1))
+        if decorated:
+            wanted.append(("zxdg_decoration_manager_v1", "decorations", 1))
+        if globals.contains("wp_cursor_shape_manager_v1"):
+            wanted.append(("wp_cursor_shape_manager_v1", "shapes", 1))
+        asks = []
+        for want in wanted:
+            found = globals[want[0]]
+            id = self.make(want[1])
+            words = [found[0]]
+            words.extend(text_words(want[0]))
+            words.extend([found[1].min(want[2]), id])
+            asks.extend(message(registry, 0, words))
+        // the window: a surface that is an xdg toplevel, titled
+        compositor = self.id("compositor")
+        surface = self.make("surface")
+        asks.extend(message(compositor, 0, [surface]))
+        xdg = self.make("xdg")
+        asks.extend(message(self.id("wm_base"), 2, [xdg, surface]))
+        top = self.make("toplevel")
+        asks.extend(message(xdg, 1, [top]))
+        asks.extend(message(top, 2, text_words(self.look.title)))
+        asks.extend(message(top, 3, text_words("stone")))
+        if decorated:
+            // the compositor's own frame
+            decoration = self.make("decoration")
+            asks.extend(message(self.id("decorations"), 1, [decoration, top]))
+            asks.extend(message(decoration, 1, [2]))
+        if ours:
+            // the content goes on a surface of its own above our frame, which shows it as soon
+            // as it is committed
+            content = self.make("content")
+            asks.extend(message(compositor, 0, [content]))
+            sub = self.make("subsurface")
+            asks.extend(message(self.id("subcompositor"), 1, [sub, content, surface]))
+            asks.extend(message(sub, 5, []))
+        else:
+            self.objs.ids["content"] = surface
+        cursor = self.make("cursor")
+        asks.extend(message(compositor, 0, [cursor]))
+        // a commit with no buffer, which the compositor answers with the first configure
+        asks.extend(message(surface, 6, []))
+        self.conn.send_bytes(bytes(asks).unwrap())?
+        while self.open and not self.configured():
+            self.step()
+        if not self.open:
+            ret err(self.failure())
+        ret ok(0)
+
+    // Makes a new object of the role `role`, giving its id.
+    fn make(self, role: str) -> int:
+        id = self.objs.next
+        self.objs.next += 1
+        self.objs.ids[role] = id
+        self.objs.roles[id] = role
+        ret id
+
+    // The id of the object of the role `role`, or 0 if there is none.
+    fn id(self, role: str) -> int:
+        ret self.objs.ids.get(role).unwrap_or(0)
+
+    // Sends `data`, failing the window if it cannot.
+    fn send(self, data: list[int]):
+        if not self.open:
+            ret
+        match self.conn.send_bytes(bytes(data).unwrap()):
+            case ok(_):
+                ret
+            case err(e):
+                self.fail(e)
+
+    // Writes `data` to the shared memory from `offset`, failing the window if it cannot.
+    fn write(self, offset: int, data: bytes):
+        if not self.open:
+            ret
+        match gui_sys.shm_write(self.conn, offset, data):
+            case ok(_):
+                ret
+            case err(e):
+                self.fail(e)
+
+    // Closes the window because of `reason`, giving a `failed` event.
+    fn fail(self, reason: str):
+        if self.open:
+            self.pending.append(event.failed(reason))
+            self.close()
+
+    // The reason the window failed, from its last `failed` event.
+    fn failure(self) -> str:
+        for e in self.pending:
+            match e:
+                case event.failed(reason):
+                    ret reason
+                case _:
+                    cont
+        ret "the Wayland compositor closed the connection"
+
+    // The next message from the compositor.
+    fn read(self) -> result[bytes, str]:
+        head = self.conn.read_exact(8)?
+        size = get16(head, 6)
+        if size < 8:
+            ret err("the Wayland compositor sent a message too short to read")
+        ret ok(head + self.conn.read_exact(size - 8)?)
+
+    // Waits for the next message and decodes it, failing the window if the connection breaks.
+    fn step(self):
+        match self.read():
+            case ok(raw):
+                self.decode(raw)
+            case err(e):
+                self.fail(e)
+
+    // Acts on the message `raw` from the compositor, adding any events it gives.
+    fn decode(self, raw: bytes):
+        object = get32(raw, 0)
+        op = get16(raw, 4)
+        role = self.objs.roles.get(object).unwrap_or("")
+        if role == "display" and op == 0:
+            self.fail("Wayland error: {text_at(raw, 16)}")
+        elif role == "wm_base" and op == 0:
+            // ping
+            self.send(message(object, 3, [get32(raw, 8)]))
+        elif role == "xdg" and op == 0:
+            self.configure(get32(raw, 8))
+        elif role == "toplevel" and op == 0:
+            self.look.want = (signed(get32(raw, 8)), signed(get32(raw, 12)))
+            self.look.active = false
+            self.look.snug = false
+            for i in range(get32(raw, 16) / 4):
+                state = get32(raw, 20 + 4 * i)
+                if state == 4:
+                    self.look.active = true
+                elif state != 3:
+                    self.look.snug = true
+        elif role == "toplevel" and op == 1:
+            self.pending.append(event.close)
+        elif role == "seat" and op == 0:
+            self.capabilities(get32(raw, 8))
+        elif role == "pointer":
+            self.on_pointer(op, raw)
+        elif role == "keyboard":
+            self.on_keyboard(op, raw)
+        elif op == 0 and role.startswith("content") and role.len() == 8:
+            // a content buffer released
+            self.store.busy[int(role[7:]).unwrap_or(0)] = false
+        elif op == 0 and role.startswith("frame") and role.len() == 6:
+            self.store.busy[2 + int(role[5:]).unwrap_or(0)] = false
+
+    // Acts on a configure of the window, `serial` its number: acknowledges it, takes the size
+    // the compositor asked for, makes buffers of it, and draws our frame. The first one also
+    // shows black content, which puts the window on the screen.
+    fn configure(self, serial: int):
+        self.send(message(self.id("xdg"), 4, [serial]))
+        width = self.extent[0]
+        height = self.extent[1]
+        if self.look.want[0] > 0 and self.look.want[1] > 0:
+            width = self.look.want[0]
+            height = self.look.want[1]
+            if self.ours():
+                height = (height - title_height()).max(1)
+        first = not self.configured()
+        sized = (width, height) != self.extent
+        if sized:
+            self.extent = (width, height)
+            if not first:
+                self.pending.append(event.resize(width, height))
+        if first or sized or self.store.border != self.border():
+            self.rebuild()
+        if self.ours():
+            self.draw_frame()
+        if first:
+            // the new memory is all zeros, which is black
+            self.commit_content(0)
+            self.pending.append(event.redraw)
+
+    // Whether the first configure has come, and buffers made for it.
+    fn configured(self) -> bool:
+        ret self.store.busy.len() > 0
+
+    // Whether we draw the window's frame, on a surface below the content's.
+    fn ours(self) -> bool:
+        ret self.id("subsurface") != 0
+
+    // The width of the edges of our frame, which a maximized, full screen, or tiled window has
+    // none of.
+    fn border(self) -> int:
+        if self.ours() and not self.look.snug:
+            ret edge()
+        ret 0
+
+    // The size of the window's surface: the content's, with our frame around it.
+    fn whole(self) -> tuple[int, int]:
+        if not self.ours():
+            ret self.extent
+        b = self.border()
+        ret (self.extent[0] + 2 * b, self.extent[1] + title_height() + 2 * b)
+
+    // Makes new memory to share and new buffers in it for the window's size, in place of the
+    // ones before: two of the content, two of the frame, and the cursor's, drawn at once.
+    fn rebuild(self):
+        for role in ["content0", "content1", "frame0", "frame1", "pointer_image", "pool"]:
+            old = self.id(role)
+            if old != 0:
+                // wl_buffer.destroy, or wl_shm_pool.destroy
+                opcode = 0
+                if role == "pool":
+                    opcode = 1
+                self.send(message(old, opcode, []))
+                self.objs.roles.pop(old)
+        whole = self.whole()
+        width = self.extent[0]
+        height = self.extent[1]
+        content = width * height * 4
+        frame = 0
+        if self.ours():
+            frame = whole[0] * whole[1] * 4
+        size = 2 * content + 2 * frame + cursor_size() * cursor_size() * 4
+        match gui_sys.shm_create(self.conn, size):
+            case ok(_):
+                self.store.busy = [false, false, false, false]
+            case err(e):
+                self.fail(e)
+                ret
+        pool = self.make("pool")
+        match gui_sys.shm_send(self.conn, bytes(message(self.id("shm"), 0, [pool, size])).unwrap()):
+            case ok(_):
+                self.store.border = self.border()
+            case err(e):
+                self.fail(e)
+                ret
+        asks = []
+        for i in range(2):
+            buffer = self.make("content{i}")
+            // XRGB8888
+            asks.extend(message(pool, 0, [buffer, i * content, width, height, width * 4, 1]))
+        if self.ours():
+            for i in range(2):
+                buffer = self.make("frame{i}")
+                at = 2 * content + i * frame
+                // ARGB8888, for its transparent edges
+                asks.extend(message(pool, 0, [buffer, at, whole[0], whole[1], whole[0] * 4, 0]))
+        image = self.make("pointer_image")
+        side = cursor_size()
+        at = 2 * content + 2 * frame
+        asks.extend(message(pool, 0, [image, at, side, side, side * 4, 0]))
+        self.send(asks)
+        self.store.black = []
+        for _ in range(width):
+            self.store.black.append(0)
+        self.write(at, gui_sys.pack(arrow(), 0, side * side, 3))
+        cursor = self.id("cursor")
+        asks = message(cursor, 1, [image, 0, 0])
+        asks.extend(message(cursor, 9, [0, 0, side, side]))
+        asks.extend(message(cursor, 6, []))
+        self.send(asks)
+
+    // The index in `store.busy` of a buffer that is free, of the content's from `base` 0 or the
+    // frame's from 2, waiting until the compositor releases one if it has both.
+    fn free(self, base: int) -> int:
+        while self.open and self.store.busy[base] and self.store.busy[base + 1]:
+            self.step()
+        if self.store.busy[base]:
+            ret base + 1
+        ret base
+
+    // Commits content buffer `i`, written already, to the content's surface.
+    fn commit_content(self, i: int):
+        surface = self.id("content")
+        asks = message(surface, 1, [self.id("content{i}"), 0, 0])
+        asks.extend(message(surface, 9, [0, 0, self.extent[0], self.extent[1]]))
+        asks.extend(message(surface, 6, []))
+        self.send(asks)
+        self.store.busy[i] = true
+
+    // Draws our frame, a title bar with the title and a close button, in a free frame buffer,
+    // around transparent edges, and commits it.
+    fn draw_frame(self):
+        i = self.free(2)
+        if not self.open:
+            ret
+        whole = self.whole()
+        b = self.border()
+        bar = title_height()
+        color = opaque(gui.rgb(70, 70, 78))
+        if self.look.active:
+            color = opaque(gui.rgb(43, 43, 51))
+        light = opaque(gui.rgb(235, 235, 235))
+        // the title bar's rows, the edges at their sides transparent
+        strip = gui.blank(whole[0], bar, 0)
+        strip.rect(b, 0, whole[0] - 2 * b, bar, color)
+        strip.text(b + 8, 8, self.look.title, light)
+        close = whole[0] - b - bar
+        strip.rect(close, 0, bar, bar, color)
+        strip.line(close + 8, 8, close + 15, 15, light)
+        strip.line(close + 15, 8, close + 8, 15, light)
+        content = self.extent[0] * self.extent[1] * 4
+        start = 2 * content + (i - 2) * whole[0] * whole[1] * 4 + b * whole[0] * 4
+        self.write(start, gui_sys.pack(strip.pixels, 0, whole[0] * bar, 3))
+        surface = self.id("surface")
+        geometry = [b, b, whole[0] - 2 * b, whole[1] - 2 * b]
+        asks = message(self.id("xdg"), 3, geometry)
+        asks.extend(message(self.id("subsurface"), 1, [b, b + bar]))
+        asks.extend(message(surface, 1, [self.id("frame{i - 2}"), 0, 0]))
+        asks.extend(message(surface, 9, [0, 0, whole[0], whole[1]]))
+        asks.extend(message(surface, 6, []))
+        self.send(asks)
+        self.store.busy[i] = true
+
+    // Gets the seat's pointer and keyboard, which the capabilities `caps` say it has.
+    fn capabilities(self, caps: int):
+        seat = self.id("seat")
+        if caps % 2 == 1 and self.id("pointer") == 0:
+            mouse = self.make("pointer")
+            self.send(message(seat, 0, [mouse]))
+            shapes = self.id("shapes")
+            if shapes != 0:
+                device = self.make("shape")
+                self.send(message(shapes, 1, [device, mouse]))
+        if caps / 2 % 2 == 1 and self.id("keyboard") == 0:
+            keyboard = self.make("keyboard")
+            self.send(message(seat, 1, [keyboard]))
+
+    // Acts on the pointer's event `op`, `raw`.
+    fn on_pointer(self, op: int, raw: bytes):
+        if op == 0:
+            // enter(serial, surface, x, y)
+            self.mouse.serial = get32(raw, 8)
+            self.mouse.on = "frame"
+            if get32(raw, 12) == self.id("content"):
+                self.mouse.on = "content"
+            self.mouse.at = (fixed(raw, 16), fixed(raw, 20))
+            self.cursor()
+        elif op == 1:
+            self.mouse.on = ""
+        elif op == 2:
+            // motion(time, x, y)
+            self.mouse.at = (fixed(raw, 12), fixed(raw, 16))
+            if self.mouse.on == "content":
+                self.pending.append(event.mouse_move(self.mouse.at[0], self.mouse.at[1]))
+            elif self.mouse.on == "frame":
+                self.cursor()
+        elif op == 3:
+            // button(serial, time, button, state)
+            self.mouse.serial = get32(raw, 8)
+            button = get32(raw, 16) - 272
+            pressed = get32(raw, 20) == 1
+            if self.mouse.on == "content" and button >= 0 and button <= 2:
+                name = ["left", "right", "middle"][button]
+                if pressed:
+                    self.pending.append(event.mouse_down(name, self.mouse.at[0], self.mouse.at[1]))
+                else:
+                    self.pending.append(event.mouse_up(name, self.mouse.at[0], self.mouse.at[1]))
+            elif self.mouse.on == "frame" and pressed and button == 0:
+                self.grab()
+        elif op == 4 and get32(raw, 12) == 0 and not self.mouse.stepped:
+            // axis(time, vertical, value): a step for each 10 of it
+            self.mouse.wheel += signed(get32(raw, 16))
+            while self.mouse.wheel >= 2560:
+                self.mouse.wheel -= 2560
+                self.scrolled(-1)
+            while self.mouse.wheel <= -2560:
+                self.mouse.wheel += 2560
+                self.scrolled(1)
+        elif op == 5:
+            self.mouse.stepped = false
+        elif op == 8 and get32(raw, 8) == 0:
+            // axis_discrete(vertical, steps), toward the user positive
+            self.mouse.stepped = true
+            steps = signed(get32(raw, 12))
+            for _ in range(steps.max(0 - steps)):
+                if steps > 0:
+                    self.scrolled(-1)
+                else:
+                    self.scrolled(1)
+
+    // Gives a `scroll` event of `step` if the pointer is on the content.
+    fn scrolled(self, step: int):
+        if self.mouse.on == "content":
+            self.pending.append(event.scroll(step))
+
+    // Sets the cursor for where the pointer is: a resize shape over our frame's edges where the
+    // compositor has shapes, else the default shape or our own arrow. Over our frame, it is set
+    // again as the pointer moves.
+    fn cursor(self):
+        shape = 1
+        place = 0
+        if self.mouse.on == "frame":
+            place = self.hit()
+        if place > 0:
+            // the shapes of wp_cursor_shape_v1 for top, bottom, left, and right edges, and corners
+            shape = [1, 19, 22, 1, 25, 21, 24, 1, 18, 20, 23][place]
+        device = self.id("shape")
+        if device != 0:
+            self.send(message(device, 1, [self.mouse.serial, shape]))
+        else:
+            self.send(message(self.id("pointer"), 0, [self.mouse.serial, self.id("cursor"), 0, 0]))
+
+    // What of our frame is under the pointer: the edges to resize by as xdg's mask (top 1,
+    // bottom 2, left 4, right 8), the title bar as -1, the close button as -2, or nothing as 0.
+    fn hit(self) -> int:
+        x = self.mouse.at[0]
+        y = self.mouse.at[1]
+        b = self.border()
+        whole = self.whole()
+        edges = 0
+        if y < b:
+            edges += 1
+        elif y >= whole[1] - b:
+            edges += 2
+        if x < b:
+            edges += 4
+        elif x >= whole[0] - b:
+            edges += 8
+        if edges > 0:
+            ret edges
+        if y < b + title_height():
+            if x >= whole[0] - b - title_height():
+                ret -2
+            ret -1
+        ret 0
+
+    // Acts on a press of the left button on our frame: the close button closes, the title bar
+    // moves the window or, clicked twice quickly, maximizes it, and the edges resize it.
+    fn grab(self):
+        place = self.hit()
+        top = self.id("toplevel")
+        seat = self.id("seat")
+        if place == -2:
+            self.pending.append(event.close)
+        elif place == -1:
+            now = time.clock()
+            if self.look.clicked >= 0.0 and now - self.look.clicked < 0.4:
+                self.look.clicked = -1.0
+                if self.look.snug:
+                    self.send(message(top, 10, []))
+                else:
+                    self.send(message(top, 9, []))
+            else:
+                self.look.clicked = now
+                self.send(message(top, 5, [seat, self.mouse.serial]))
+        elif place > 0:
+            self.send(message(top, 6, [seat, self.mouse.serial, place]))
+
+    // Acts on the keyboard's event `op`, `raw`.
+    fn on_keyboard(self, op: int, raw: bytes):
+        if op == 0 and get32(raw, 8) == 1:
+            // keymap(xkb_v1, fd, size): the text, with a 0 after it
+            match gui_sys.take_fd(self.conn, get32(raw, 12)):
+                case ok(data):
+                    if data.len() > 0:
+                        text = data[:data.len() - 1].text().unwrap_or("")
+                        self.keys.map = gui_keys.parse(text)
+                case err(_):
+                    ret
+        elif op == 2:
+            self.keys.held = -1
+        elif op == 3:
+            // key(serial, time, key, state), the key's evdev code 8 less than its XKB keycode
+            code = get32(raw, 16) + 8
+            name = self.keys.map.name(code)
+            if get32(raw, 20) == 1:
+                self.pending.append(event.key_down(name))
+                typed = self.keys.map.text(code, self.keys.state)
+                self.keys.held = -1
+                if typed != "":
+                    self.pending.append(event.text(typed))
+                    self.keys.held = code
+                    self.keys.due = time.clock() + float(self.keys.delay) / 1000.0
+            else:
+                self.pending.append(event.key_up(name))
+                if self.keys.held == code:
+                    self.keys.held = -1
+        elif op == 4:
+            // modifiers(serial, depressed, latched, locked, group)
+            self.keys.state = mask([get32(raw, 12), get32(raw, 16), get32(raw, 20)])
+        elif op == 5:
+            // repeat_info(rate, delay)
+            self.keys.rate = signed(get32(raw, 8))
+            self.keys.delay = signed(get32(raw, 12))
+
+    // Gives the text of the key held down again if it is due to repeat.
+    fn repeat(self):
+        if self.keys.held < 0 or self.keys.rate <= 0:
+            ret
+        now = time.clock()
+        if now >= self.keys.due:
+            typed = self.keys.map.text(self.keys.held, self.keys.state)
+            if typed != "":
+                self.pending.append(event.text(typed))
+            self.keys.due = (self.keys.due + 1.0 / float(self.keys.rate)).max(now)
+
+// The modifiers any of `masks` holds, as Shift (1), Caps Lock (2), and Control (4).
+fn mask(masks: list[int]) -> int:
+    found = 0
+    for bit in [1, 2, 4]:
+        for value in masks:
+            if value / bit % 2 == 1:
+                found += bit
+                break
+    ret found
+
+// A message to the object `object` of the request `opcode`, whose arguments are the 32-bit
+// words `words`.
+fn message(object: int, opcode: int, words: list[int]) -> list[int]:
+    out = put32([], object)
+    out = put16(out, opcode)
+    out = put16(out, 8 + 4 * words.len())
+    for word in words:
+        if word < 0:
+            word += 4294967296
+        out = put32(out, word)
+    ret out
+
+// The words of a string argument holding `text`: its length with a 0 after it, then its bytes
+// and the 0, padded to a multiple of four.
+fn text_words(text: str) -> list[int]:
+    data = text.bytes()
+    words = [data.len() + 1]
+    i = 0
+    while i <= data.len():
+        word = 0
+        place = 1
+        for k in range(4):
+            if i + k < data.len():
+                word += data[i + k] * place
+            place *= 256
+        words.append(word)
+        i += 4
+    ret words
+
+// The text of the string argument at `at` of the message `raw`.
+fn text_at(raw: bytes, at: int) -> str:
+    size = get32(raw, at)
+    if size == 0 or at + 4 + size > raw.len():
+        ret ""
+    ret raw[at + 4:at + 3 + size].text().unwrap_or("")
+
+// How many bytes a string argument of length `size` takes after its length, padded to four.
+fn padded(size: int) -> int:
+    ret (size + 3) / 4 * 4
+
+// The 32-bit word `word` as a signed number.
+fn signed(word: int) -> int:
+    if word >= 2147483648:
+        ret word - 4294967296
+    ret word
+
+// The fixed-point number (24.8) at `at` of the message `raw`, as a whole number.
+fn fixed(raw: bytes, at: int) -> int:
+    value = signed(get32(raw, at))
+    if value < 0:
+        ret 0 - (0 - value + 255) / 256
+    ret value / 256
+
+// `color` with no transparency, for a buffer with an alpha channel.
+fn opaque(color: int) -> int:
+    ret 4278190080 + color
+
+// The cursor's width and height.
+fn cursor_size() -> int:
+    ret 16
+
+// Our cursor, an arrow, its pixels opaque black and white where it is drawn.
+fn arrow() -> list[int]:
+    shape = "X               XX              X.X             X..X            "
+    shape += "X...X           X....X          X.....X         X......X        "
+    shape += "X.......X       X........X      X.....XXXXX     X..X..X         "
+    shape += "X.X X..X        XX  X..X        X    X..X            XXXX       "
+    pixels = []
+    for c in shape:
+        if c == "X":
+            pixels.append(opaque(0))
+        elif c == ".":
+            pixels.append(opaque(16777215))
+        else:
+            pixels.append(0)
+    ret pixels

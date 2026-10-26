@@ -6,14 +6,16 @@
 // draws nothing there, so a shape may hang over an edge.
 //
 // A window shows a canvas on the screen. `gui` speaks the X11 protocol to the display server
-// itself, over a socket from `net`, so it needs no C library: on Linux any desktop runs an X11
-// server (XWayland under Wayland), and on macOS XQuartz does. `DISPLAY` says where it is.
+// itself (in `gui_x11`), over a socket from `net`, so it needs no C library: on Linux any desktop
+// runs an X11 server (XWayland under Wayland), and on macOS XQuartz does. `DISPLAY` says where
+// it is.
 //
-// It reaches the system through `gui_sys`, which only stone's own modules may use.
+// It reaches the system through `gui_sys`, which only stone's own modules may use, as `gui_x11`,
+// `gui_keys`, and `gui_wire` are.
 
-use fs
 use gui_sys
-use net
+use gui_wayland
+use gui_x11
 use os
 use time
 
@@ -195,7 +197,6 @@ impl canvas:
     fn ppm(self) -> bytes:
         pixels = gui_sys.pack(self.pixels, 0, self.pixels.len(), 2)
         ret "P6\n{self.width} {self.height}\n255\n".bytes() + pixels
-
 ////////////////////////////////////////////////////////////////
 // windows
 ////////////////////////////////////////////////////////////////
@@ -230,572 +231,87 @@ pub enum event:
 // A window on the screen, which shows a canvas. It is a handle, like a socket: a copy of it is
 // the same window, though events one copy takes the other never sees.
 pub struct window:
-    // the connection to the X server, and what the server said about itself
-    conn: socket
-    setup: server
-    // the memory it shares with the server, if it can
-    shm: shared
-    // its width and height
-    extent: tuple[int, int]
-    open: bool
-    // events decoded but not given out yet
-    pending: list[event]
-    // an event read ahead to tell a held key from a new press, or nothing
-    ahead: bytes
+    // whether it is on a Wayland compositor, and the window there or on an X server, each in a
+    // list, which is one value, since a list or a result holds at most 32 values in each
+    // element, and the other list empty
+    wayland: bool
+    x: list[gui_x11.link]
+    wl: list[gui_wayland.link]
 
-// What an X server said about itself when a connection was set up.
-struct server:
-    // the ids of the connection's window and its graphics context
-    id: int
-    gc: int
-    // the root window's id, and the depth of its pixels
-    root: int
-    depth: int
-    // whether the server takes pixels most significant byte first
-    msb: bool
-    // the most bytes one request may hold
-    limit: int
-    keys: keymap
-    // the atoms of `WM_PROTOCOLS`, `WM_DELETE_WINDOW`, `_NET_WM_NAME`, and `UTF8_STRING`
-    atoms: list[int]
-
-// Memory a window shares with a local X server through the MIT-SHM extension, which `show` puts
-// images in, so they do not go through the socket.
-struct shared:
-    // MIT-SHM's major opcode and the code of its one event, the opcode 0 while it cannot be used
-    opcode: int
-    event: int
-    // the segment's id, and its size in bytes, 0 until it is first attached
-    seg: int
-    size: int
-    // whether the server is still showing an image from it, so it cannot be written yet
-    busy: bool
-
-// The keysyms of every key: `per` of them for each keycode from `first` up.
-struct keymap:
-    first: int
-    per: int
-    syms: list[int]
-
-// Opens a window `width` by `height` pixels titled `title`, on the display `DISPLAY` names.
+// Opens a window `width` by `height` pixels titled `title`: on the Wayland compositor
+// `WAYLAND_DISPLAY` names, or if there is none or it fails, on the X server `DISPLAY` names.
+// `STONE_GUI` set to `wayland` or `x11` asks for one alone.
 pub fn open(title: str, width: int, height: int) -> result[window, str]:
     if width < 1 or height < 1 or width > 32767 or height > 32767:
         ret err("invalid window size: {width}x{height}")
-    found = connect_display()?
-    conn = found[0]
-    w = handshake(conn, found[1], width, height)?
-    w.create(title, found[2])?
-    ret ok(w)
-
-// Connects to the X server `DISPLAY` names, giving the socket, the display's number, and whether
-// the server is on this machine: `:0` is the Unix socket `/tmp/.X11-unix/X0`, a path such as
-// XQuartz's `/tmp/launch-x/org.xquartz:0` is that socket (with or without its `:0`), and
-// `host:0` is TCP port 6000 of `host`.
-fn connect_display() -> result[tuple[socket, str, bool], str]:
-    name = os.env("DISPLAY").unwrap_or("")
-    if name == "":
-        ret err("no display: DISPLAY is not set")
-    at = name.rfind(":").unwrap_or(-1)
-    if at < 0:
-        ret err("invalid display: '{name}'")
-    host = name[:at]
-    number = name[at + 1:]
-    dot = number.find(".")
-    if dot.is_some():
-        number = number[:dot.unwrap()]
-    display = 0
-    match int(number):
-        case ok(n):
-            display = n
-        case err(_):
-            ret err("invalid display: '{name}'")
-    if display < 0:
-        ret err("invalid display: '{name}'")
-    if host.startswith("/"):
-        match net.connect_unix(name):
-            case ok(s):
-                ret ok((s, number, true))
-            case err(_):
-                s = net.connect_unix(host)?
-                ret ok((s, number, true))
-    if host == "" or host == "unix":
-        s = net.connect_unix("/tmp/.X11-unix/X{display}")?
-        ret ok((s, number, true))
-    s = net.connect(host, 6000 + display)?
-    ret ok((s, number, false))
-
-// The `MIT-MAGIC-COOKIE-1` that `XAUTHORITY`, or `~/.Xauthority`, holds for display `number`,
-// or nothing if there is none.
-fn cookie(number: str) -> bytes:
-    path = os.env("XAUTHORITY").unwrap_or("")
-    if path == "":
-        home = os.env("HOME").unwrap_or("")
-        if home == "":
-            ret b""
-        path = "{home}/.Xauthority"
-    data = b""
-    match fs.read_bytes(path):
-        case ok(d):
-            data = d
-        case err(_):
-            ret b""
-    // each entry is a family, then an address, a display number, a name, and data, each of
-    // those a length of two bytes, most significant first, and that many bytes
-    at = 0
-    while at + 2 <= data.len():
-        at += 2
-        fields = []
-        for _ in range(4):
-            if at + 2 > data.len():
-                ret b""
-            size = data[at] * 256 + data[at + 1]
-            at += 2
-            if at + size > data.len():
-                ret b""
-            fields.append(data[at:at + size])
-            at += size
-        if fields[1] == number.bytes() and fields[2] == b"MIT-MAGIC-COOKIE-1":
-            ret fields[3]
-    ret b""
-
-// Sets up the connection on `conn`, returning a window that is not created yet, or the reason
-// the server refused.
-fn handshake(conn: socket, number: str, width: int, height: int) -> result[window, str]:
-    secret = cookie(number)
-    name = b""
-    if secret.len() > 0:
-        name = b"MIT-MAGIC-COOKIE-1"
-    // little-endian, protocol 11.0
-    setup = [108, 0, 11, 0, 0, 0]
-    setup = put16(setup, name.len())
-    setup = put16(setup, secret.len())
-    setup = put16(setup, 0)
-    setup = put_bytes(setup, name)
-    setup = put_bytes(setup, secret)
-    conn.send_bytes(bytes(setup).unwrap())?
-    head = conn.read_exact(8)?
-    rest = conn.read_exact(get16(head, 6) * 4)?
-    if head[0] != 1:
-        reason = rest
-        if head[0] == 0:
-            reason = rest[:head[1]]
-        ret err("the X server refused the connection: {reason.text().unwrap_or("")}")
-    reply = head + rest
-    if reply.len() < 40:
-        ret err(bad_setup())
-    base = get32(reply, 12)
-    mask = get32(reply, 16)
-    vendor = get16(reply, 24)
-    formats = reply[29]
-    at = 40 + vendor + pad(vendor)
-    // the pixmap formats, then the first screen
-    bits = 0
-    screen = at + 8 * formats
-    if reply.len() < screen + 40:
-        ret err(bad_setup())
-    root = get32(reply, screen)
-    depth = reply[screen + 38]
-    for i in range(formats):
-        if reply[at + 8 * i] == depth:
-            bits = reply[at + 8 * i + 1]
-    visual = get32(reply, screen + 32)
-    if bits != 32 or not true_color(reply, screen, visual):
-        ret err("unsupported display format: depth {depth}, {bits} bits per pixel")
-    // ids are the base plus multiples of the mask's lowest bit
-    step = 1
-    while mask > 0 and mask / step % 2 == 0:
-        step *= 2
-    id = base + step
-    gc = id + step
-    keys = keymap(first=reply[34], per=0, syms=[])
-    msb = reply[30] == 1
-    most = get16(reply, 26) * 4
-    found = server(id=id, gc=gc, root=root, depth=depth, msb=msb, limit=most, keys=keys, atoms=[])
-    shm = shared(opcode=0, event=0, seg=gc + step, size=0, busy=false)
-    size = (width, height)
-    w = window(conn=conn, setup=found, shm=shm, extent=size, open=true, pending=[], ahead=b"")
-    ret ok(w)
-
-// The error for a setup reply too short for what it says it holds.
-fn bad_setup() -> str:
-    ret "the X server sent a setup reply that is cut short"
-
-// Whether the visual `visual` of the screen at `screen` in the setup reply is TrueColor with
-// red, green, and blue in that order of significance, eight bits each.
-fn true_color(reply: bytes, screen: int, visual: int) -> bool:
-    depths = reply[screen + 39]
-    at = screen + 40
-    for _ in range(depths):
-        if at + 8 > reply.len():
-            ret false
-        visuals = get16(reply, at + 2)
-        at += 8
-        for _ in range(visuals):
-            if at + 24 > reply.len():
-                ret false
-            if get32(reply, at) == visual:
-                rgb = get32(reply, at + 8) == 16711680 and get32(reply, at + 12) == 65280
-                ret reply[at + 4] == 4 and rgb and get32(reply, at + 16) == 255
-            at += 24
-    ret false
+    choice = os.env("STONE_GUI").unwrap_or("")
+    if choice != "" and choice != "wayland" and choice != "x11":
+        ret err("STONE_GUI is '{choice}', but can only be 'wayland' or 'x11'")
+    on_wayland = os.env("WAYLAND_DISPLAY").unwrap_or("") != ""
+    on_x11 = os.env("DISPLAY").unwrap_or("") != ""
+    if choice == "" and not on_wayland and not on_x11:
+        ret err("no display: neither WAYLAND_DISPLAY nor DISPLAY is set")
+    if choice == "wayland" or choice == "" and on_wayland:
+        match gui_wayland.open(title, width, height):
+            case ok(wl):
+                ret ok(window(wayland=true, x=[], wl=[wl]))
+            case err(reason):
+                if choice == "wayland" or not on_x11:
+                    ret err(reason)
+    x = gui_x11.open(title, width, height)?
+    ret ok(window(wayland=false, x=[x], wl=[]))
 
 impl window:
     // Whether the window is open: until `close`, or the connection breaks.
     fn is_open(self) -> bool:
-        ret self.open
+        if self.wayland:
+            ret self.wl[0].is_open()
+        ret self.x[0].is_open()
 
     // The window's width and height in pixels, as the last `resize` event gave them.
     fn size(self) -> tuple[int, int]:
-        ret self.extent
+        if self.wayland:
+            ret self.wl[0].size()
+        ret self.x[0].size()
 
     // The events that have happened since the last call, without waiting for any.
     fn events(self) -> list[event]:
-        while self.open and (self.ahead.len() > 0 or net.ready(self.conn, 0.0)):
-            self.step()
-        found = self.pending
-        self.pending = []
-        ret found
+        if self.wayland:
+            found = self.wl[0].events()
+            ret found
+        es = self.x[0].events()
+        ret es
 
     // The events that have happened since the last call, waiting for one if there are none, or
     // none if the window is closed.
     fn wait(self) -> list[event]:
-        while self.open and self.pending.len() == 0:
-            self.step()
-        ret self.events()
+        if self.wayland:
+            found = self.wl[0].wait()
+            ret found
+        es = self.x[0].wait()
+        ret es
 
     // Shows `c` in the window, its top left pixel at the window's. What the window has outside
-    // `c` stays as it was.
+    // `c` stays as it was on X11, and is black on Wayland.
     fn show(self, c: canvas):
-        if not self.open or c.width == 0 or c.width > 32767:
-            ret
-        rows = c.height.min(32767)
-        format = 0
-        if self.setup.msb:
-            format = 1
-        if self.shm.opcode > 0:
-            shared = self.share(c, rows, format)
-            if shared:
-                ret
-        per = ((self.setup.limit - 24) / (c.width * 4)).max(1)
-        y = 0
-        while y < rows:
-            n = per.min(rows - y)
-            // PutImage of ZPixmap pixels, with no left padding
-            head = put16([72, 2], 6 + n * c.width)
-            head = put32(head, self.setup.id)
-            head = put32(head, self.setup.gc)
-            head = put16(head, c.width)
-            head = put16(head, n)
-            head = put16(head, 0)
-            head = put16(head, y)
-            head.extend([0, self.setup.depth, 0, 0])
-            pixels = gui_sys.pack(c.pixels, y * c.width, n * c.width, format)
-            match self.conn.send_bytes(bytes(head).unwrap() + pixels):
-                case ok(_):
-                    y += n
-                case err(e):
-                    self.fail(e)
-                    ret
-
-    // Shows the first `rows` rows of `c` through shared memory, its pixels laid out as `format`
-    // says, and says whether it could. Once it cannot, it never tries again.
-    fn share(self, c: canvas, rows: int, format: int) -> bool:
-        // the server may still be reading the last image
-        while self.open and self.shm.busy:
-            self.step()
-        if not self.open:
-            ret true
-        need = c.width * rows * 4
-        if need > self.shm.size:
-            took = self.attach(need)
-            if not took:
-                self.shm.opcode = 0
-                ret not self.open
-        pixels = gui_sys.pack(c.pixels, 0, c.width * rows, format)
-        match gui_sys.shm_write(self.conn, 0, pixels):
-            case ok(_):
-                self.shm.busy = true
-            case err(_):
-                self.shm.opcode = 0
-                ret false
-        // ShmPutImage of the whole image, at the window's top left, with a completion event
-        body = put32(put32([], self.setup.id), self.setup.gc)
-        body = put16(put16(body, c.width), rows)
-        body = put16(put16(body, 0), 0)
-        body = put16(put16(body, c.width), rows)
-        body = put16(put16(body, 0), 0)
-        body.extend([self.setup.depth, 2, 1, 0])
-        body = put32(put32(body, self.shm.seg), 0)
-        self.send(request(self.shm.opcode, 3, body))
-        ret true
-
-    // Shares `size` bytes with the server as the segment, in place of any before, and says
-    // whether the server took them.
-    fn attach(self, size: int) -> bool:
-        if gui_sys.shm_create(self.conn, size).is_err():
-            ret false
-        asks = []
-        if self.shm.size > 0:
-            asks = request(self.shm.opcode, 2, put32([], self.shm.seg))
-        // ShmAttachFd, read-only, then a request with a reply, which comes after any error
-        attach = put32([], self.shm.seg)
-        attach.extend([1, 0, 0, 0])
-        asks.extend(request(self.shm.opcode, 6, attach))
-        asks.extend(request(43, 0, []))
-        match gui_sys.shm_send(self.conn, bytes(asks).unwrap()):
-            case ok(_):
-                self.shm.size = 0
-            case err(e):
-                self.fail(e)
-                ret false
-        took = true
-        while self.open:
-            match self.raw():
-                case ok(raw):
-                    if raw[0] == 1:
-                        if took:
-                            self.shm.size = size
-                        ret took
-                    if raw[0] == 0 and raw[10] == self.shm.opcode:
-                        took = false
-                    else:
-                        self.decode(raw)
-                case err(e):
-                    self.fail(e)
-        ret false
+        if self.wayland:
+            self.wl[0].show(c)
+        else:
+            self.x[0].show(c)
 
     // Sets the title the window's frame shows.
     fn set_title(self, title: str):
-        self.send(self.titled(title))
+        if self.wayland:
+            self.wl[0].set_title(title)
+        else:
+            self.x[0].set_title(title)
 
     // Closes the window.
     fn close(self):
-        if self.open:
-            self.conn.close()
-            self.open = false
-
-    // Creates the window on the server, titled `title`, and waits until it is on the screen. A
-    // `local` server is asked for MIT-SHM, which only a server on this machine can use.
-    fn create(self, title: str, local: bool) -> result[int, str]:
-        // the atoms it needs, asked for together, then the symbols of every key
-        names = ["WM_PROTOCOLS", "WM_DELETE_WINDOW", "_NET_WM_NAME", "UTF8_STRING"]
-        asks = []
-        for name in names:
-            body = put16(put16([], name.len()), 0)
-            asks.extend(request(16, 0, put_bytes(body, name.bytes())))
-        asks.extend(request(101, 0, [self.setup.keys.first, 256 - self.setup.keys.first, 0, 0]))
-        if local:
-            body = put16(put16([], 7), 0)
-            asks.extend(request(98, 0, put_bytes(body, b"MIT-SHM")))
-        self.conn.send_bytes(bytes(asks).unwrap())?
-        atoms = []
-        for _ in names:
-            reply = self.reply()?
-            atoms.append(get32(reply, 8))
-        self.setup.atoms = atoms
-        keys = self.reply()?
-        self.setup.keys.per = keys[1]
-        for i in range(get32(keys, 4)):
-            self.setup.keys.syms.append(get32(keys, 32 + 4 * i))
-        if local:
-            self.extend()?
-        // CreateWindow with the root's depth and visual, a black background, and the events it
-        // listens for: keys, buttons, motion, exposure, and changes of its size
-        body = put32(put32([], self.setup.id), self.setup.root)
-        body = put16(put16(body, 0), 0)
-        body = put16(put16(body, self.extent[0]), self.extent[1])
-        body = put16(put16(body, 0), 1)
-        body = put32(put32(body, 0), 2050)
-        body = put32(put32(body, 0), 163919)
-        made = request(1, 0, body)
-        made.extend(self.titled(title))
-        made.extend(self.property(self.setup.atoms[0], 4, 32, put32([], self.setup.atoms[1])))
-        // WM_CLASS, the instance and class names, each ended by a 0
-        made.extend(self.property(67, 31, 8, byte_list(b"stone\x00stone\x00")))
-        made.extend(request(55, 0, put32(put32(put32([], self.setup.gc), self.setup.id), 0)))
-        made.extend(request(8, 0, put32([], self.setup.id)))
-        self.conn.send_bytes(bytes(made).unwrap())?
-        // the window can be drawn on once it is first exposed
-        while self.open:
-            raw = self.raw()?
-            self.decode(raw)
-            if raw[0] % 128 == 12:
-                ret ok(0)
-        ret err(self.failure())
-
-    // Reads the reply about MIT-SHM, which `create` asked for, and makes it the way to show
-    // images if the server has a version that takes memory as a descriptor (1.2 or later).
-    fn extend(self) -> result[int, str]:
-        found = self.reply()?
-        if found[8] == 0:
-            ret ok(0)
-        // ShmQueryVersion
-        self.conn.send_bytes(bytes(request(found[9], 0, [])).unwrap())?
-        version = self.reply()?
-        major = get16(version, 8)
-        if major > 1 or major == 1 and get16(version, 10) >= 2:
-            self.shm.opcode = found[9]
-            self.shm.event = found[10]
-        ret ok(0)
-
-    // The reason the window failed, from its last `failed` event.
-    fn failure(self) -> str:
-        for e in self.pending:
-            match e:
-                case event.failed(reason):
-                    ret reason
-                case _:
-                    cont
-        ret "the X server closed the connection"
-
-    // The requests that set the window's title.
-    fn titled(self, title: str) -> list[int]:
-        text = byte_list(title.bytes())
-        named = self.property(39, 31, 8, text)
-        named.extend(self.property(self.setup.atoms[2], self.setup.atoms[3], 8, text))
-        ret named
-
-    // A ChangeProperty request that replaces the window's property `name` with `data`, values
-    // of the type `kind`, each `format` bits.
-    fn property(self, name: int, kind: int, format: int, data: list[int]) -> list[int]:
-        body = put32(put32(put32([], self.setup.id), name), kind)
-        body.extend([format, 0, 0, 0])
-        body = put32(body, data.len() * 8 / format)
-        body.extend(data)
-        ret request(18, 0, body)
-
-    // Sends `data`, failing the window if it cannot.
-    fn send(self, data: list[int]):
-        if not self.open:
-            ret
-        match self.conn.send_bytes(bytes(data).unwrap()):
-            case ok(_):
-                ret
-            case err(e):
-                self.fail(e)
-
-    // Closes the window because of `reason`, giving a `failed` event.
-    fn fail(self, reason: str):
-        if self.open:
-            self.pending.append(event.failed(reason))
-            self.close()
-
-    // The next reply, or the error the server sent instead.
-    fn reply(self) -> result[bytes, str]:
-        head = self.conn.read_exact(32)?
-        if head[0] == 0:
-            ret err(x11_error(head))
-        if head[0] != 1:
-            ret err("unexpected X11 event {head[0]} before a reply")
-        ret ok(head + self.conn.read_exact(get32(head, 4) * 4)?)
-
-    // The next event, the one read ahead if there is one.
-    fn raw(self) -> result[bytes, str]:
-        if self.ahead.len() > 0:
-            found = self.ahead
-            self.ahead = b""
-            ret ok(found)
-        ret self.conn.read_exact(32)
-
-    // Waits for the next event and decodes it, failing the window if the connection breaks.
-    fn step(self):
-        match self.raw():
-            case ok(raw):
-                self.decode(raw)
-            case err(e):
-                self.fail(e)
-
-    // Adds the events the X11 event `raw` stands for to the pending ones.
-    fn decode(self, raw: bytes):
-        code = raw[0] % 128
-        if code == 0:
-            self.fail(x11_error(raw))
-        elif code == 2:
-            self.pending.append(event.key_down(key_name(self.keysym(raw[1], 0))))
-            self.typed(raw)
-        elif code == 3:
-            if self.repeated(raw):
-                self.typed(self.raw().unwrap())
-            else:
-                self.pending.append(event.key_up(key_name(self.keysym(raw[1], 0))))
-        elif code == 4 or code == 5:
-            self.button(raw)
-        elif code == 6:
-            self.pending.append(event.mouse_move(get16s(raw, 24), get16s(raw, 26)))
-        elif code == 12:
-            if get16(raw, 16) == 0:
-                self.pending.append(event.redraw)
-        elif code == 22:
-            width = get16(raw, 20)
-            height = get16(raw, 22)
-            if (width, height) != self.extent:
-                self.extent = (width, height)
-                self.pending.append(event.resize(width, height))
-        elif code == 33:
-            if get32(raw, 8) == self.setup.atoms[0] and get32(raw, 12) == self.setup.atoms[1]:
-                self.pending.append(event.close)
-        elif self.shm.event > 0 and code == self.shm.event:
-            // ShmCompletion
-            self.shm.busy = false
-
-    // Adds the event of the button press or release `raw`.
-    fn button(self, raw: bytes):
-        x = get16s(raw, 24)
-        y = get16s(raw, 26)
-        button = raw[1]
-        pressed = raw[0] % 128 == 4
-        if button >= 1 and button <= 3:
-            name = ["left", "middle", "right"][button - 1]
-            if pressed:
-                self.pending.append(event.mouse_down(name, x, y))
-            else:
-                self.pending.append(event.mouse_up(name, x, y))
-        elif pressed and button == 4:
-            self.pending.append(event.scroll(1))
-        elif pressed and button == 5:
-            self.pending.append(event.scroll(-1))
-
-    // Whether the key release `raw` is half of a repeat, which the server sends as a release and
-    // a press at the same moment while the key is held: the press is read ahead and kept.
-    fn repeated(self, raw: bytes) -> bool:
-        if self.ahead.len() == 0 and net.ready(self.conn, 0.0):
-            match self.conn.read_exact(32):
-                case ok(next):
-                    self.ahead = next
-                case err(e):
-                    self.fail(e)
-                    ret false
-        next = self.ahead
-        if next.len() != 32 or next[0] % 128 != 2:
-            ret false
-        ret next[1] == raw[1] and next[4:8] == raw[4:8]
-
-    // Adds a `text` event for what the key press `raw` types, if anything: nothing with Control
-    // held.
-    fn typed(self, raw: bytes):
-        state = get16(raw, 28)
-        if state / 4 % 2 == 1:
-            ret
-        plain = self.keysym(raw[1], 0)
-        shifted = state % 2 == 1
-        // Caps Lock shifts letters alone
-        if state / 2 % 2 == 1 and plain >= 97 and plain <= 122:
-            shifted = not shifted
-        sym = plain
-        if shifted and self.keysym(raw[1], 1) != 0:
-            sym = self.keysym(raw[1], 1)
-        typed = keysym_text(sym)
-        if typed != "":
-            self.pending.append(event.text(typed))
-
-    // The keysym in column `column` of the key `keycode`, or 0 if it has none.
-    fn keysym(self, keycode: int, column: int) -> int:
-        if keycode < self.setup.keys.first or column >= self.setup.keys.per:
-            ret 0
-        at = (keycode - self.setup.keys.first) * self.setup.keys.per + column
-        if at >= self.setup.keys.syms.len():
-            ret 0
-        ret self.setup.keys.syms[at]
+        if self.wayland:
+            self.wl[0].close()
+        else:
+            self.x[0].close()
 
 ////////////////////////////////////////////////////////////////
 // apps
@@ -849,113 +365,6 @@ pub fn run[A: app](title: str, width: int, height: int, state: A) -> result[A, s
         if rest > 0.0:
             time.sleep(rest)
     ret ok(state)
-
-// The message for the X11 error `raw`.
-fn x11_error(raw: bytes) -> str:
-    ret "X11 error {raw[1]} (request {raw[10]})"
-
-// The name of the key whose unshifted keysym is `sym`: the character it types for one that
-// types one (in lowercase for a letter), or `space`, `enter`, `escape`, `backspace`, `tab`,
-// `delete`, `insert`, `home`, `end`, `page_up`, `page_down`, `left`, `up`, `right`, `down`,
-// `f1` to `f12`, `shift`, `control`, `alt`, `super`, `caps_lock`, or else `unknown`.
-fn key_name(sym: int) -> str:
-    if sym == 32:
-        ret "space"
-    typed = keysym_text(sym)
-    if typed != "":
-        ret typed
-    if sym >= 65470 and sym <= 65481:
-        ret "f{sym - 65469}"
-    if sym >= 65456 and sym <= 65465:
-        ret "{sym - 65456}"
-    syms = [65288, 65289, 65293, 65421, 65307, 65535, 65439, 65379, 65438, 65360, 65429]
-    names = ["backspace", "tab", "enter", "enter", "escape", "delete", "delete", "insert"]
-    names.extend(["insert", "home", "home"])
-    syms.extend([65367, 65436, 65365, 65434, 65366, 65435, 65361, 65430, 65362, 65431])
-    names.extend(["end", "end", "page_up", "page_up", "page_down", "page_down", "left", "left"])
-    names.extend(["up", "up"])
-    syms.extend([65363, 65432, 65364, 65433, 65505, 65506, 65507, 65508])
-    names.extend(["right", "right", "down", "down", "shift", "shift", "control", "control"])
-    syms.extend([65511, 65512, 65513, 65514, 65027, 65515, 65516, 65509])
-    names.extend(["alt", "alt", "alt", "alt", "alt", "super", "super", "caps_lock"])
-    for i in range(syms.len()):
-        if syms[i] == sym:
-            ret names[i]
-    ret "unknown"
-
-// The text the keysym `sym` types: a Latin-1 character's, or a Unicode one's, whose keysyms are
-// its code plus 0x1000000, or nothing.
-fn keysym_text(sym: int) -> str:
-    code = -1
-    if sym >= 32 and sym <= 126 or sym >= 160 and sym <= 255:
-        code = sym
-    elif sym >= 16777216 + 160 and sym <= 16777216 + 1114111:
-        code = sym - 16777216
-    if code < 0:
-        ret ""
-    // the code's UTF-8 bytes
-    units = [code]
-    if code >= 65536:
-        units = [240 + code / 262144, 128 + code / 4096 % 64, 128 + code / 64 % 64, 128 + code % 64]
-    elif code >= 2048:
-        units = [224 + code / 4096, 128 + code / 64 % 64, 128 + code % 64]
-    elif code >= 128:
-        units = [192 + code / 64, 128 + code % 64]
-    ret bytes(units).unwrap().text().unwrap_or("")
-
-// A request with the major opcode `opcode` and the byte `data` after it, whose `body` is padded
-// to a multiple of four bytes.
-fn request(opcode: int, data: int, body: list[int]) -> list[int]:
-    for _ in range(pad(body.len())):
-        body.append(0)
-    out = put16([opcode, data], 1 + body.len() / 4)
-    out.extend(body)
-    ret out
-
-// `xs` with `value`'s two bytes after it, least significant first.
-fn put16(xs: list[int], value: int) -> list[int]:
-    xs.append(value % 256)
-    xs.append(value / 256 % 256)
-    ret xs
-
-// `xs` with `value`'s four bytes after it, least significant first.
-fn put32(xs: list[int], value: int) -> list[int]:
-    xs = put16(xs, value % 65536)
-    ret put16(xs, value / 65536 % 65536)
-
-// The values of `data`'s bytes.
-fn byte_list(data: bytes) -> list[int]:
-    values = []
-    for b in data:
-        values.append(b)
-    ret values
-
-// `xs` with `data` after it, padded with zeros to a multiple of four bytes.
-fn put_bytes(xs: list[int], data: bytes) -> list[int]:
-    for b in data:
-        xs.append(b)
-    for _ in range(pad(data.len())):
-        xs.append(0)
-    ret xs
-
-// The bytes that pad `n` bytes to a multiple of four.
-fn pad(n: int) -> int:
-    ret (4 - n % 4) % 4
-
-// The two bytes at `at` of `data`, least significant first.
-fn get16(data: bytes, at: int) -> int:
-    ret data[at] + data[at + 1] * 256
-
-// The two bytes at `at` of `data` as a signed number.
-fn get16s(data: bytes, at: int) -> int:
-    value = get16(data, at)
-    if value >= 32768:
-        ret value - 65536
-    ret value
-
-// The four bytes at `at` of `data`, least significant first.
-fn get32(data: bytes, at: int) -> int:
-    ret get16(data, at) + get16(data, at + 2) * 65536
 
 // How many pixels wide and high each character of the font is.
 fn glyph_size() -> int:

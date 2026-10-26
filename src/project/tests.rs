@@ -1457,6 +1457,24 @@ fn only_stones_own_modules_can_use_net_sys() {
     );
 }
 
+#[test]
+fn only_stones_own_modules_can_use_its_internal_modules_written_in_stone() {
+    for module in ["gui_x11", "gui_wire"] {
+        assert_error(
+            &[("main.stn", &format!("use {module}\n"))],
+            "main.stn",
+            &format!("no module named '{module}'"),
+            1,
+            5,
+        );
+    }
+    // gui uses them itself
+    assert_eq!(
+        output(&[("main.stn", "use gui\nprint(gui.rgb(1, 2, 3))\n")]),
+        "66051\n"
+    );
+}
+
 /// Returns the name of every function the linked module defines from `files`, outside the
 /// prelude, in order.
 fn defined_functions(files: &[(&str, &str)]) -> Vec<String> {

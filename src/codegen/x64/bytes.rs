@@ -165,7 +165,8 @@ pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
 }
 
 /// Emits `stone.gui_pack`, which writes each color's bytes one at a time: blue, green, red, and
-/// 0 for format 0, the same backward for format 1, and red, green, and blue for any other.
+/// 0 for format 0, the same backward for format 1, blue, green, red, and bits 24 to 31 for
+/// format 3, and red, green, and blue for any other.
 fn pack(r#gen: &mut dyn AssemblyGenerator) {
     // rbx holds the list, r12 the first position, r13 the count, r14 the format, and r9 the new
     // bytes; rsi points at the colors, rdi where the next color's bytes go, and rcx counts
@@ -200,6 +201,8 @@ fn pack(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tshl\trdi, 2");
     r#gen.emit("\tcmp\tr14, 1");
     r#gen.emit("\tjbe\t.Lgui_pack_sized");
+    r#gen.emit("\tcmp\tr14, 3");
+    r#gen.emit("\tje\t.Lgui_pack_sized");
     r#gen.emit("\tsub\trdi, r13");
     r#gen.emit(".Lgui_pack_sized:");
     r#gen.emit("\tcall\tstone.str_new");
@@ -216,6 +219,8 @@ fn pack(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcmp\tr14, 1");
     r#gen.emit("\tje\t.Lgui_pack_xrgb");
     r#gen.emit("\tjb\t.Lgui_pack_bgrx");
+    r#gen.emit("\tcmp\tr14, 3");
+    r#gen.emit("\tje\t.Lgui_pack_bgra");
     for (offset, last) in [(2, false), (1, false), (0, true)] {
         pack_byte(r#gen, offset, last);
     }
@@ -227,6 +232,12 @@ fn pack(r#gen: &mut dyn AssemblyGenerator) {
     }
     r#gen.emit("\txor\teax, eax");
     r#gen.emit("\tmov\tbyte ptr [rdi + 3], al");
+    r#gen.emit("\tadd\trdi, 4");
+    r#gen.emit("\tjmp\t.Lgui_pack_next");
+    r#gen.emit(".Lgui_pack_bgra:");
+    for (offset, last) in [(0, false), (1, false), (2, false), (3, true)] {
+        pack_byte(r#gen, offset, last);
+    }
     r#gen.emit("\tadd\trdi, 4");
     r#gen.emit("\tjmp\t.Lgui_pack_next");
     r#gen.emit(".Lgui_pack_xrgb:");

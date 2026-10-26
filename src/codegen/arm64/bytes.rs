@@ -171,6 +171,8 @@ fn pack(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tlsl\tx0, x21, #2");
     r#gen.emit("\tcmp\tx22, #1");
     r#gen.emit("\tb.ls\t.Lgui_pack_sized");
+    r#gen.emit("\tcmp\tx22, #3");
+    r#gen.emit("\tb.eq\t.Lgui_pack_sized");
     r#gen.emit("\tsub\tx0, x0, x21");
     r#gen.emit(".Lgui_pack_sized:");
     r#gen.emit("\tbl\tstone.str_new");
@@ -188,6 +190,8 @@ fn pack(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcmp\tx22, #1");
     r#gen.emit("\tb.eq\t.Lgui_pack_xrgb");
     r#gen.emit("\tb.lo\t.Lgui_pack_bgrx");
+    r#gen.emit("\tcmp\tx22, #3");
+    r#gen.emit("\tb.eq\t.Lgui_pack_bgra");
     r#gen.emit("\tstrb\tw14, [x10]");
     r#gen.emit("\tstrb\tw13, [x10, #1]");
     r#gen.emit("\tstrb\tw12, [x10, #2]");
@@ -198,6 +202,14 @@ fn pack(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tstrb\tw13, [x10, #1]");
     r#gen.emit("\tstrb\tw14, [x10, #2]");
     r#gen.emit("\tstrb\twzr, [x10, #3]");
+    r#gen.emit("\tadd\tx10, x10, #4");
+    r#gen.emit("\tb\t.Lgui_pack_next");
+    r#gen.emit(".Lgui_pack_bgra:");
+    r#gen.emit("\tstrb\tw12, [x10]");
+    r#gen.emit("\tstrb\tw13, [x10, #1]");
+    r#gen.emit("\tstrb\tw14, [x10, #2]");
+    r#gen.emit("\tlsr\tx15, x12, #24");
+    r#gen.emit("\tstrb\tw15, [x10, #3]");
     r#gen.emit("\tadd\tx10, x10, #4");
     r#gen.emit("\tb\t.Lgui_pack_next");
     r#gen.emit(".Lgui_pack_xrgb:");

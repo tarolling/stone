@@ -117,7 +117,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 35] = [
+pub const MODULE_ROUTINES: [(&str, &str); 36] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -155,6 +155,7 @@ pub const MODULE_ROUTINES: [(&str, &str); 35] = [
     ("gui_sys.shm_create", "stone.net_shm_create"),
     ("gui_sys.shm_write", "stone.net_shm_write"),
     ("gui_sys.shm_send", "stone.net_shm_send"),
+    ("gui_sys.take_fd", "stone.net_take_fd"),
 ];
 
 /// The routines of the `fs` module that can return an error, which needs the routines that
@@ -177,6 +178,7 @@ const FS_FAILING: &[&str] = &[
     "stone.net_shm_create",
     "stone.net_shm_write",
     "stone.net_shm_send",
+    "stone.net_take_fd",
     "stone.net_accept",
     "stone.net_send",
     "stone.net_read_line",
@@ -189,13 +191,14 @@ const FS_FAILING: &[&str] = &[
 
 /// The runtime routines of `net_sys` and of the methods of sockets and listeners, which the
 /// `fs` routines' pieces come with (see `x64::net::net_runtime`).
-pub const NET_ROUTINES: [&str; 19] = [
+pub const NET_ROUTINES: [&str; 20] = [
     "stone.net_connect",
     "stone.net_connect_unix",
     "stone.net_ready",
     "stone.net_shm_create",
     "stone.net_shm_write",
     "stone.net_shm_send",
+    "stone.net_take_fd",
     "stone.net_listen",
     "stone.net_exchange",
     "stone.net_accept",
@@ -365,6 +368,9 @@ pub const LISTENER_CLOSED_CODE: i64 = -7;
 /// The code for writing or sending a socket's shared memory before `gui_sys.shm_create` made it
 /// (`stdlib::net::SHM_MISSING`).
 pub const SHM_MISSING_CODE: i64 = -9;
+
+/// The code for `gui_sys.take_fd` with no descriptor received (`stdlib::net::FD_MISSING`).
+pub const FD_MISSING_CODE: i64 = -10;
 
 /// The kinds of the slots of the `ok` that `os.run` returns, an `output`'s status, stdout, and
 /// stderr, as `RcKind::codes` writes them.

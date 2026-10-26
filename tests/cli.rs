@@ -1519,7 +1519,8 @@ const FAKE_ATOMS: [(&str, u32); 4] = [
 ];
 
 /// The fake keyboard's keysyms, two per keycode from 8: `a` on 38, `1` on 10, Escape on 9,
-/// Shift on 50, and the Greek alpha, a Unicode keysym, on 60.
+/// Shift on 50, the Greek alpha, a Unicode keysym, on 60, and the Cyrillic ef, a keysym of its
+/// own (Cyrillic_ef and Cyrillic_EF), on 61.
 fn fake_keysyms() -> Vec<u32> {
     let mut syms = vec![0; 248 * 2];
     let mut set = |keycode: usize, plain: u32, shifted: u32| {
@@ -1531,6 +1532,7 @@ fn fake_keysyms() -> Vec<u32> {
     set(9, 0xff1b, 0);
     set(50, 0xffe1, 0);
     set(60, 0x0100_03b1, 0x0100_0391);
+    set(61, 0x6c6, 0x6e6);
     syms
 }
 
@@ -1584,6 +1586,9 @@ fn fake_events(window: u32) -> Vec<u8> {
         x11_input(2, 38, 44, 2, 0, 0),
         x11_input(2, 50, 45, 0, 0, 0),
         x11_input(2, 60, 46, 0, 0, 0),
+        // a legacy keysym, alone and with Caps Lock
+        x11_input(2, 61, 47, 0, 0, 0),
+        x11_input(2, 61, 48, 2, 0, 0),
         x11_input(4, 1, 50, 0, 10, 20),
         x11_input(5, 3, 51, 0, 11, -2),
         x11_input(4, 4, 52, 0, 0, 0),
@@ -1884,6 +1889,10 @@ fn both_backends_drive_an_x11_window_alike() {
                     event.key_down('shift')\n\
                     event.key_down('\u{3b1}')\n\
                     event.text('\u{3b1}')\n\
+                    event.key_down('\u{444}')\n\
+                    event.text('\u{444}')\n\
+                    event.key_down('\u{444}')\n\
+                    event.text('\u{424}')\n\
                     event.mouse_down('left', 10, 20)\n\
                     event.mouse_up('right', 11, -2)\n\
                     event.scroll(1)\n\
@@ -1925,7 +1934,11 @@ fn both_backends_drive_an_x11_window_alike() {
                 }
                 std::fs::write(dir.join("Xauthority"), file).unwrap();
             },
-            &[("DISPLAY", &socket), ("XAUTHORITY", "Xauthority")],
+            &[
+                ("DISPLAY", &socket),
+                ("WAYLAND_DISPLAY", ""),
+                ("XAUTHORITY", "Xauthority"),
+            ],
         );
         for output in [&run, &built] {
             assert!(output.status.success(), "{output:?}");
@@ -1999,7 +2012,7 @@ fn both_backends_say_why_a_window_cannot_open() {
             "gui_no_display",
             String::new(),
             None,
-            "no display: DISPLAY is not set".to_string(),
+            "no display: neither WAYLAND_DISPLAY nor DISPLAY is set".to_string(),
         ),
         (
             "gui_bad_display",
@@ -2047,7 +2060,11 @@ fn both_backends_say_why_a_window_cannot_open() {
                     fake_x_server(&dir.join("X0"), server);
                 }
             },
-            &[("DISPLAY", &display), ("XAUTHORITY", "missing")],
+            &[
+                ("DISPLAY", &display),
+                ("WAYLAND_DISPLAY", ""),
+                ("XAUTHORITY", "missing"),
+            ],
         );
         let expected =
             format!("{first}\ninvalid window size: 0x10\ninvalid window size: 40000x1\n");
@@ -2127,7 +2144,11 @@ fn both_backends_run_an_app_alike() {
             |dir| {
                 fake_x_server(&dir.join("X0"), display);
             },
-            &[("DISPLAY", &socket), ("XAUTHORITY", "missing")],
+            &[
+                ("DISPLAY", &socket),
+                ("WAYLAND_DISPLAY", ""),
+                ("XAUTHORITY", "missing"),
+            ],
         );
         for output in [run, built] {
             assert!(output.status.success(), "{output:?}");
@@ -2203,7 +2224,11 @@ match gui.open("real", 64, 48):
         "gui_xvfb",
         source,
         |_| {},
-        &[("DISPLAY", &display), ("XAUTHORITY", "missing")],
+        &[
+            ("DISPLAY", &display),
+            ("STONE_GUI", "x11"),
+            ("XAUTHORITY", "missing"),
+        ],
     );
     let _ = server.kill();
     let _ = server.wait();
@@ -2255,7 +2280,11 @@ match gui.open("shm", 40, 30):
             name,
             source,
             |dir| connections = Some(fake_x_server(&dir.join("X0"), display)),
-            &[("DISPLAY", &socket), ("XAUTHORITY", "missing")],
+            &[
+                ("DISPLAY", &socket),
+                ("WAYLAND_DISPLAY", ""),
+                ("XAUTHORITY", "missing"),
+            ],
         );
         for output in [&run, &built] {
             assert!(output.status.success(), "{output:?}");
@@ -2301,5 +2330,870 @@ match gui.open("shm", 40, 30):
                 assert!(images.is_empty());
             }
         }
+    }
+}
+
+/// How a fake Wayland compositor of [`fake_wayland_server`] behaves.
+#[derive(Clone, Copy)]
+struct FakeCompositor {
+    /// Whether it offers `zxdg_decoration_manager_v1`, and so draws windows' frames itself.
+    decorations: bool,
+    /// What it sends after the app's first frame.
+    script: WaylandScript,
+    /// The keymap in `tests/keymaps` it sends the keyboard, and its repeats a second.
+    keymap: &'static str,
+    rate: u32,
+}
+
+/// What a fake compositor sends after the app's first frame.
+#[derive(Clone, Copy, PartialEq)]
+enum WaylandScript {
+    /// A ping and a new size, then the close button after a frame of that size.
+    Resize,
+    /// Keys, the pointer on the content, then presses on our frame's edge, title, and close
+    /// button.
+    Input,
+    /// A key held down.
+    Hold,
+}
+
+/// Sends `data` on `stream` with the descriptor of `file`, as a compositor sends a keymap.
+fn send_with_fd(
+    stream: &std::os::unix::net::UnixStream,
+    data: &[u8],
+    file: &std::fs::File,
+) -> std::io::Result<()> {
+    use std::os::fd::AsRawFd;
+    unsafe extern "C" {
+        fn sendmsg(fd: i32, msg: *const MsgHdr, flags: i32) -> isize;
+    }
+    // a cmsghdr of 20 bytes, SOL_SOCKET, and SCM_RIGHTS, then the descriptor
+    let mut control = [20u64, 1 | 1 << 32, file.as_raw_fd() as u64];
+    let mut iov = IoVec {
+        base: data.as_ptr().cast_mut(),
+        len: data.len(),
+    };
+    let msg = MsgHdr {
+        name: std::ptr::null_mut(),
+        namelen: 0,
+        iov: &mut iov,
+        iovlen: 1,
+        control: control.as_mut_ptr().cast(),
+        controllen: 24,
+        flags: 0,
+    };
+    // SAFETY: msg points at one iovec over `data` and 24 bytes of control, which outlive it
+    match unsafe { sendmsg(stream.as_raw_fd(), &msg, 0) } {
+        n if n as usize == data.len() => Ok(()),
+        _ => Err(std::io::Error::last_os_error()),
+    }
+}
+
+/// The 32-bit word of the fixed-point (24.8) number `value`.
+fn fixed(value: f64) -> u32 {
+    (value * 256.0) as i32 as u32
+}
+
+/// What the fake compositor saw on one connection: every request, as its bytes, and every
+/// buffer committed, by the role of its surface (`frame`, `content`, or `cursor`), with its
+/// width, height, and pixels (4 bytes each by row).
+#[derive(Default, Debug)]
+struct WaylandConnection {
+    requests: Vec<Vec<u8>>,
+    commits: Vec<(String, u32, u32, Vec<u8>)>,
+    /// Whether the client has closed the connection.
+    closed: bool,
+}
+
+/// The globals the fake compositor offers: name, interface, and version.
+fn fake_globals(compositor: FakeCompositor) -> Vec<(u32, &'static str, u32)> {
+    let mut globals = vec![
+        (1, "wl_compositor", 5),
+        (2, "wl_subcompositor", 1),
+        (3, "wl_shm", 1),
+        (4, "xdg_wm_base", 2),
+        (5, "wl_seat", 8),
+        (6, "wl_output", 3),
+    ];
+    if compositor.decorations {
+        globals.push((7, "zxdg_decoration_manager_v1", 1));
+    }
+    globals
+}
+
+/// A Wayland message to `object` of `opcode` with the 32-bit arguments `args`.
+fn wayland_message(object: u32, opcode: u16, args: &[u32]) -> Vec<u8> {
+    let mut out = object.to_le_bytes().to_vec();
+    out.extend((((8 + 4 * args.len()) as u32) << 16 | opcode as u32).to_le_bytes());
+    for arg in args {
+        out.extend(arg.to_le_bytes());
+    }
+    out
+}
+
+/// The 32-bit words of a Wayland string argument holding `text`: its length with a 0 after it,
+/// then its bytes, padded to a multiple of four.
+fn wayland_string(text: &str) -> Vec<u32> {
+    let mut bytes = text.as_bytes().to_vec();
+    bytes.push(0);
+    let mut words = vec![bytes.len() as u32];
+    bytes.resize(bytes.len().div_ceil(4) * 4, 0);
+    words.extend(
+        bytes
+            .chunks(4)
+            .map(|c| u32::from_le_bytes(c.try_into().unwrap())),
+    );
+    words
+}
+
+/// What the fake compositor knows of one connection's objects.
+#[derive(Default)]
+struct FakeObjects {
+    /// The interface of each object, by id.
+    kinds: std::collections::HashMap<u32, String>,
+    /// Each pool's file, by id, and each buffer's pool, offset, width, height, and stride.
+    pools: std::collections::HashMap<u32, std::fs::File>,
+    buffers: std::collections::HashMap<u32, (u32, u32, u32, u32, u32)>,
+    /// The role of each surface, the buffer attached to it, and the one it last committed.
+    roles: std::collections::HashMap<u32, String>,
+    attached: std::collections::HashMap<u32, u32>,
+    shown: std::collections::HashMap<u32, u32>,
+    toplevel: u32,
+    xdg_surface: u32,
+    decoration: u32,
+    pointer: u32,
+    keyboard: u32,
+    /// How many content buffers were committed, and how far the script has gone.
+    content_commits: usize,
+    stage: usize,
+}
+
+/// Answers one request of a fake compositor, `message` to `object` of `opcode`, recording what
+/// it shows in `seen`.
+fn fake_wayland_request(
+    stream: &mut std::os::unix::net::UnixStream,
+    compositor: FakeCompositor,
+    message: &[u8],
+    fds: &mut Vec<std::fs::File>,
+    objects: &mut FakeObjects,
+    seen: &std::sync::Mutex<WaylandConnection>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::FileExt;
+    let object = u32::from_le_bytes(message[0..4].try_into().unwrap());
+    let opcode = u16::from_le_bytes([message[4], message[5]]);
+    let arg = |i: usize| u32::from_le_bytes(message[8 + 4 * i..12 + 4 * i].try_into().unwrap());
+    let kind = objects.kinds.get(&object).cloned().unwrap_or_default();
+    let new = |objects: &mut FakeObjects, id: u32, kind: &str| {
+        objects.kinds.insert(id, kind.to_string());
+    };
+    match (kind.as_str(), opcode) {
+        ("wl_display", 0) => {
+            // sync: done at once
+            stream.write_all(&wayland_message(arg(0), 0, &[1]))?;
+            stream.write_all(&wayland_message(1, 1, &[arg(0)]))?;
+        }
+        ("wl_display", 1) => {
+            new(objects, arg(0), "wl_registry");
+            for (name, interface, version) in fake_globals(compositor) {
+                let mut args = vec![name];
+                args.extend(wayland_string(interface));
+                args.push(version);
+                stream.write_all(&wayland_message(arg(0), 0, &args))?;
+            }
+        }
+        ("wl_registry", 0) => {
+            // bind(name, interface, version, id)
+            let len = arg(1) as usize;
+            let interface = std::str::from_utf8(&message[16..16 + len - 1])
+                .unwrap()
+                .to_string();
+            let after = 3 + len.div_ceil(4);
+            let id = arg(after);
+            new(objects, id, &interface);
+            if interface == "wl_seat" {
+                // a pointer and a keyboard
+                stream.write_all(&wayland_message(id, 0, &[3]))?;
+            }
+        }
+        ("wl_compositor", 0) => new(objects, arg(0), "wl_surface"),
+        ("wl_subcompositor", 1) => {
+            new(objects, arg(0), "wl_subsurface");
+            objects.roles.insert(arg(1), "content".to_string());
+        }
+        ("wl_shm", 0) => {
+            new(objects, arg(0), "wl_shm_pool");
+            objects.pools.insert(arg(0), fds.remove(0));
+        }
+        ("wl_shm_pool", 0) => {
+            new(objects, arg(0), "wl_buffer");
+            objects
+                .buffers
+                .insert(arg(0), (object, arg(1), arg(2), arg(3), arg(4)));
+        }
+        ("xdg_wm_base", 2) => {
+            new(objects, arg(0), "xdg_surface");
+            objects.xdg_surface = arg(0);
+            objects
+                .roles
+                .entry(arg(1))
+                .or_insert_with(|| "frame".to_string());
+        }
+        ("xdg_surface", 1) => {
+            new(objects, arg(0), "xdg_toplevel");
+            objects.toplevel = arg(0);
+        }
+        ("zxdg_decoration_manager_v1", 1) => {
+            new(objects, arg(0), "zxdg_toplevel_decoration_v1");
+            objects.decoration = arg(0);
+        }
+        ("wl_seat", 0) => {
+            new(objects, arg(0), "wl_pointer");
+            objects.pointer = arg(0);
+        }
+        ("wl_seat", 1) => {
+            new(objects, arg(0), "wl_keyboard");
+            objects.keyboard = arg(0);
+            // the keymap, with a 0 after it as xkbcommon writes it, and the repeat rate
+            let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/keymaps");
+            let mut text = std::fs::read(path.join(compositor.keymap))?;
+            text.push(0);
+            let file = std::env::temp_dir().join(format!(
+                "stone-keymap-{}-{}",
+                std::process::id(),
+                arg(0)
+            ));
+            std::fs::write(&file, &text)?;
+            let opened = std::fs::File::open(&file)?;
+            std::fs::remove_file(&file)?;
+            send_with_fd(
+                stream,
+                &wayland_message(arg(0), 0, &[1, text.len() as u32]),
+                &opened,
+            )?;
+            stream.write_all(&wayland_message(arg(0), 5, &[compositor.rate, 100]))?;
+        }
+        ("wl_pointer", 0) => {
+            objects.roles.insert(arg(1), "cursor".to_string());
+        }
+        ("wl_surface", 1) => {
+            objects.attached.insert(object, arg(0));
+        }
+        ("wl_surface", 6) => {
+            let role = objects.roles.get(&object).cloned().unwrap_or_default();
+            match objects.attached.remove(&object) {
+                Some(buffer) if buffer != 0 => {
+                    let (pool, offset, width, height, stride) = objects.buffers[&buffer];
+                    let mut pixels = vec![];
+                    for row in 0..height {
+                        let mut line = vec![0; width as usize * 4];
+                        let at = (offset + row * stride) as u64;
+                        objects.pools[&pool].read_exact_at(&mut line, at)?;
+                        pixels.extend(line);
+                    }
+                    seen.lock()
+                        .unwrap()
+                        .commits
+                        .push((role.clone(), width, height, pixels));
+                    let old = objects.shown.insert(object, buffer);
+                    if let Some(old) = old.filter(|old| *old != buffer) {
+                        stream.write_all(&wayland_message(old, 0, &[]))?;
+                    }
+                    if role == "content" || (role == "frame" && compositor.decorations) {
+                        objects.content_commits += 1;
+                        match compositor.script {
+                            WaylandScript::Resize => fake_wayland_script(stream, objects, width)?,
+                            script if objects.content_commits == 2 => {
+                                stream.write_all(&fake_input(objects, script))?;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+                _ if role == "frame" && objects.stage == 0 => {
+                    // the first commit, with no buffer: the first configure
+                    objects.stage = 1;
+                    if objects.decoration != 0 {
+                        // server_side
+                        stream.write_all(&wayland_message(objects.decoration, 0, &[2]))?;
+                    }
+                    // no size, and the activated state (an array of 4 bytes)
+                    stream.write_all(&wayland_message(objects.toplevel, 0, &[0, 0, 4, 4]))?;
+                    stream.write_all(&wayland_message(objects.xdg_surface, 0, &[10]))?;
+                }
+                _ => {}
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Moves the fake compositor's script on after a content buffer `width` pixels wide was
+/// committed: after the app's first frame (the second, after the one `open` shows), a ping and a
+/// new size of 300 by 200; after a frame of that width, the close button.
+fn fake_wayland_script(
+    stream: &mut std::os::unix::net::UnixStream,
+    objects: &mut FakeObjects,
+    width: u32,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    if objects.stage == 1 && objects.content_commits == 2 {
+        objects.stage = 2;
+        let mut out = wayland_message(objects.xdg_wm_base_id(), 0, &[77]);
+        out.extend(wayland_message(objects.toplevel, 0, &[300, 200, 4, 4]));
+        out.extend(wayland_message(objects.xdg_surface, 0, &[11]));
+        stream.write_all(&out)?;
+    } else if objects.stage == 2 && width == 300 {
+        objects.stage = 3;
+        stream.write_all(&wayland_message(objects.toplevel, 1, &[]))?;
+    }
+    Ok(())
+}
+
+/// The events of the script `script` (`Input` or `Hold`) for the window `objects` knows, its
+/// content 40 by 30 in our frame.
+fn fake_input(objects: &FakeObjects, script: WaylandScript) -> Vec<u8> {
+    let (keyboard, pointer) = (objects.keyboard, objects.pointer);
+    let surface_of = |role: &str| {
+        objects
+            .roles
+            .iter()
+            .find(|(_, r)| *r == role)
+            .map_or(0, |(id, _)| *id)
+    };
+    let (content, frame) = (surface_of("content"), surface_of("frame"));
+    let key = |code: u32, down: bool| wayland_message(keyboard, 3, &[9, 0, code, down as u32]);
+    let mods =
+        |depressed: u32, locked: u32| wayland_message(keyboard, 4, &[9, depressed, 0, locked, 0]);
+    let mut out = wayland_message(keyboard, 1, &[9, frame, 0]);
+    if script == WaylandScript::Hold {
+        // `a` held down
+        out.extend(key(30, true));
+        return out;
+    }
+    // evdev codes: 30 a, 42 left Shift, 39 the key right of l, 44 the key right of left Shift,
+    // and 1 Escape
+    for part in [
+        mods(0, 0),
+        key(30, true),
+        key(30, false),
+        key(42, true),
+        mods(1, 0),
+        key(30, true),
+        key(30, false),
+        mods(0, 0),
+        key(42, false),
+        mods(0, 2),
+        key(39, true),
+        key(44, true),
+        mods(0, 0),
+        key(1, true),
+        mods(4, 0),
+        key(30, true),
+        mods(0, 0),
+    ] {
+        out.extend(part);
+    }
+    // the pointer on the content: a move, a press and a release, a wheel step with its value,
+    // and two steps' worth of a value alone
+    for part in [
+        wayland_message(pointer, 0, &[10, content, fixed(5.0), fixed(6.0)]),
+        wayland_message(pointer, 2, &[0, fixed(10.5), fixed(20.25)]),
+        wayland_message(pointer, 3, &[11, 0, 272, 1]),
+        wayland_message(pointer, 3, &[12, 0, 273, 0]),
+        wayland_message(pointer, 8, &[0, 1]),
+        wayland_message(pointer, 4, &[0, 0, fixed(10.0)]),
+        wayland_message(pointer, 5, &[]),
+        wayland_message(pointer, 4, &[0, 0, fixed(-20.0)]),
+        wayland_message(pointer, 5, &[]),
+        wayland_message(pointer, 1, &[13, content]),
+    ] {
+        out.extend(part);
+    }
+    // our frame, 48 by 62: a press on its top left corner, then on the title bar, then on the
+    // close button
+    for (x, y, serial) in [(1.0, 1.0, 21), (10.0, 10.0, 22), (40.0, 10.0, 23)] {
+        out.extend(wayland_message(
+            pointer,
+            0,
+            &[serial, frame, fixed(x), fixed(y)],
+        ));
+        out.extend(wayland_message(pointer, 3, &[serial, 0, 272, 1]));
+        out.extend(wayland_message(pointer, 3, &[serial, 0, 272, 0]));
+        out.extend(wayland_message(pointer, 1, &[serial, frame]));
+    }
+    out
+}
+
+impl FakeObjects {
+    /// The id the client bound `xdg_wm_base` to.
+    fn xdg_wm_base_id(&self) -> u32 {
+        self.kinds
+            .iter()
+            .find(|(_, kind)| *kind == "xdg_wm_base")
+            .map_or(0, |(id, _)| *id)
+    }
+}
+
+/// Starts a fake Wayland compositor behaving as `compositor`, listening on the Unix socket
+/// `path`, and returns what it sees on each connection, in order.
+fn fake_wayland_server(
+    path: &Path,
+    compositor: FakeCompositor,
+) -> std::sync::Arc<std::sync::Mutex<Vec<std::sync::Arc<std::sync::Mutex<WaylandConnection>>>>> {
+    use std::sync::{Arc, Mutex};
+    let _ = std::fs::remove_file(path);
+    let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+    let connections: Arc<Mutex<Vec<Arc<Mutex<WaylandConnection>>>>> = Arc::default();
+    let all = connections.clone();
+    std::thread::spawn(move || {
+        for mut stream in listener.incoming().flatten() {
+            let seen = Arc::new(Mutex::new(WaylandConnection::default()));
+            all.lock().unwrap().push(seen.clone());
+            std::thread::spawn(move || {
+                let mut objects = FakeObjects::default();
+                objects.kinds.insert(1, "wl_display".to_string());
+                let mut fds = vec![];
+                loop {
+                    let mut head = [0; 8];
+                    if receive(&mut stream, &mut head, &mut fds).is_err() {
+                        break;
+                    }
+                    let size = u16::from_le_bytes([head[6], head[7]]) as usize;
+                    let mut message = head.to_vec();
+                    message.resize(size.max(8), 0);
+                    if receive(&mut stream, &mut message[8..], &mut fds).is_err() {
+                        break;
+                    }
+                    seen.lock().unwrap().requests.push(message.clone());
+                    let answered = fake_wayland_request(
+                        &mut stream,
+                        compositor,
+                        &message,
+                        &mut fds,
+                        &mut objects,
+                        &seen,
+                    );
+                    if answered.is_err() {
+                        break;
+                    }
+                }
+                seen.lock().unwrap().closed = true;
+            });
+        }
+    });
+    connections
+}
+
+/// Waits until the client of each connection the fake compositor has seen has closed it, and
+/// returns them.
+fn closed_wayland_connections(
+    connections: &std::sync::Mutex<Vec<std::sync::Arc<std::sync::Mutex<WaylandConnection>>>>,
+) -> Vec<WaylandConnection> {
+    for _ in 0..500 {
+        let all = connections.lock().unwrap();
+        if all.iter().all(|c| c.lock().unwrap().closed) {
+            return all
+                .iter()
+                .map(|c| std::mem::take(&mut *c.lock().unwrap()))
+                .collect();
+        }
+        drop(all);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("a client never closed its connection");
+}
+
+const WAYLAND_PROGRAM: &str = r#"use gui
+
+match gui.open("way", 40, 30):
+    case ok(w):
+        print(w.size())
+        c = gui.blank(40, 30, gui.rgb(1, 2, 3))
+        done = false
+        while not done:
+            es = w.wait()
+            for e in es:
+                print(e)
+                match e:
+                    case gui.event.redraw:
+                        w.show(c)
+                    case gui.event.resize(width, height):
+                        c = gui.blank(width, height, gui.rgb(4, 5, 6))
+                        w.show(c)
+                    case gui.event.close:
+                        done = true
+                    case _:
+                        cont
+        w.close()
+    case err(reason):
+        print(reason)
+"#;
+
+#[test]
+#[cfg(target_os = "linux")]
+fn both_backends_drive_a_wayland_window_alike() {
+    for decorations in [false, true] {
+        let name = match decorations {
+            false => "gui_wayland_ours",
+            true => "gui_wayland_server",
+        };
+        let compositor = FakeCompositor {
+            decorations,
+            script: WaylandScript::Resize,
+            keymap: "us.xkb",
+            rate: 0,
+        };
+        let mut connections = None;
+        let (_, [run, built]) = run_and_build_env(
+            name,
+            WAYLAND_PROGRAM,
+            |dir| connections = Some(fake_wayland_server(&dir.join("wayland-9"), compositor)),
+            &[
+                ("WAYLAND_DISPLAY", "wayland-9"),
+                ("XDG_RUNTIME_DIR", "."),
+                ("DISPLAY", ""),
+            ],
+        );
+        // with our own frame, the title bar is part of the 300 by 200 the compositor asked for
+        let height = if decorations { 200 } else { 176 };
+        let expected =
+            format!("(40, 30)\nevent.redraw\nevent.resize(300, {height})\nevent.close\n");
+        for output in [&run, &built] {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "{name}");
+        }
+        let seen = closed_wayland_connections(&connections.unwrap());
+        let [interpreted, compiled] = &seen[..] else {
+            panic!("expected two connections, not {}", seen.len());
+        };
+        assert_eq!(interpreted.requests, compiled.requests, "{name}");
+        assert_eq!(interpreted.commits, compiled.commits, "{name}");
+        let content: Vec<_> = interpreted
+            .commits
+            .iter()
+            .filter(|(role, ..)| *role == if decorations { "frame" } else { "content" })
+            .collect();
+        // black when it opens, then the app's two frames
+        let sizes: Vec<_> = content.iter().map(|(_, w, h, _)| (*w, *h)).collect();
+        assert_eq!(sizes, [(40, 30), (40, 30), (300, height)], "{name}");
+        assert_eq!(content[0].3, [0, 0, 0, 0].repeat(40 * 30));
+        assert_eq!(content[1].3, [3, 2, 1, 0].repeat(40 * 30));
+        assert_eq!(content[2].3, [6, 5, 4, 0].repeat(300 * height as usize));
+        let frames: Vec<_> = interpreted
+            .commits
+            .iter()
+            .filter(|(role, ..)| *role == "frame")
+            .collect();
+        if !decorations {
+            // our frame: a transparent border of 4 around a title bar of 24 and the content
+            let (_, width, height, pixels) = frames.last().unwrap();
+            assert_eq!((*width, *height), (308, 208));
+            let pixel = |x: u32, y: u32| pixels[((y * width + x) * 4) as usize..][..4].to_vec();
+            assert_eq!(pixel(0, 0)[3], 0);
+            assert_eq!(pixel(10, 10)[3], 255);
+        }
+    }
+}
+
+#[test]
+fn both_backends_choose_a_display_alike() {
+    let program = "use gui\n\
+                   match gui.open(\"x\", 10, 10):\n    \
+                   case ok(w):\n        \
+                   print(\"opened\", w.size())\n    \
+                   case err(reason):\n        \
+                   print(reason)\n";
+    let base = env!("CARGO_TARGET_TMPDIR");
+    let x_server = format!("{base}/gui_choice_fallback/X0:0");
+    // each case's name, its environment, and what it prints
+    type Case<'a> = (&'a str, Vec<(&'a str, &'a str)>, &'a str);
+    let cases: [Case; 7] = [
+        (
+            "gui_choice_none",
+            vec![("DISPLAY", ""), ("WAYLAND_DISPLAY", ""), ("STONE_GUI", "")],
+            "no display: neither WAYLAND_DISPLAY nor DISPLAY is set",
+        ),
+        (
+            "gui_choice_bad",
+            vec![("STONE_GUI", "metal")],
+            "STONE_GUI is 'metal', but can only be 'wayland' or 'x11'",
+        ),
+        (
+            "gui_choice_wayland",
+            vec![("STONE_GUI", "wayland"), ("WAYLAND_DISPLAY", "")],
+            "no display: WAYLAND_DISPLAY is not set",
+        ),
+        (
+            "gui_choice_x11",
+            vec![("STONE_GUI", "x11"), ("DISPLAY", "")],
+            "no display: DISPLAY is not set",
+        ),
+        (
+            "gui_choice_no_runtime",
+            vec![
+                ("STONE_GUI", ""),
+                ("WAYLAND_DISPLAY", "wayland-9"),
+                ("XDG_RUNTIME_DIR", ""),
+                ("DISPLAY", ""),
+            ],
+            "no display: XDG_RUNTIME_DIR is not set",
+        ),
+        (
+            "gui_choice_no_socket",
+            vec![
+                ("STONE_GUI", ""),
+                ("WAYLAND_DISPLAY", "wayland-9"),
+                ("XDG_RUNTIME_DIR", "."),
+                ("DISPLAY", ""),
+            ],
+            "no such file or directory: './wayland-9'",
+        ),
+        // a compositor that is not there, then the X server
+        (
+            "gui_choice_fallback",
+            vec![
+                ("STONE_GUI", ""),
+                ("WAYLAND_DISPLAY", "wayland-9"),
+                ("XDG_RUNTIME_DIR", "."),
+                ("DISPLAY", &x_server),
+                ("XAUTHORITY", "missing"),
+            ],
+            "opened (10, 10)",
+        ),
+    ];
+    for (name, env, expected) in cases {
+        let display = FakeDisplay {
+            msb: false,
+            depth: 24,
+            bits: 32,
+            max_request: 65535,
+            refuse: None,
+            script: FakeScript::Expose,
+            short: false,
+            shm: FakeShm::Absent,
+        };
+        let (_, [run, built]) = run_and_build_env(
+            name,
+            program,
+            |dir| {
+                fake_x_server(&dir.join("X0"), display);
+            },
+            &env,
+        );
+        for output in [run, built] {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                format!("{expected}\n"),
+                "{name}"
+            );
+        }
+    }
+}
+
+const INPUT_PROGRAM: &str = r#"use gui
+
+match gui.open("keys", 40, 30):
+    case ok(w):
+        done = false
+        typed = 0
+        while not done:
+            es = w.wait()
+            for e in es:
+                print(e)
+                match e:
+                    case gui.event.redraw:
+                        w.show(gui.blank(40, 30, gui.rgb(1, 2, 3)))
+                    case gui.event.text(_):
+                        typed += 1
+                        done = HOLD and typed == 4
+                    case gui.event.close:
+                        done = true
+                    case _:
+                        cont
+        w.close()
+    case err(reason):
+        print(reason)
+"#;
+
+#[test]
+#[cfg(target_os = "linux")]
+fn both_backends_take_wayland_input_alike() {
+    let expected = "event.redraw\n\
+                    event.key_down('a')\n\
+                    event.text('a')\n\
+                    event.key_up('a')\n\
+                    event.key_down('shift')\n\
+                    event.key_down('a')\n\
+                    event.text('A')\n\
+                    event.key_up('a')\n\
+                    event.key_up('shift')\n\
+                    event.key_down('\u{f6}')\n\
+                    event.text('\u{d6}')\n\
+                    event.key_down('y')\n\
+                    event.text('Y')\n\
+                    event.key_down('escape')\n\
+                    event.key_down('a')\n\
+                    event.mouse_move(10, 20)\n\
+                    event.mouse_down('left', 10, 20)\n\
+                    event.mouse_up('right', 10, 20)\n\
+                    event.scroll(-1)\n\
+                    event.scroll(1)\n\
+                    event.scroll(1)\n\
+                    event.close\n";
+    let compositor = FakeCompositor {
+        decorations: false,
+        script: WaylandScript::Input,
+        keymap: "de.xkb",
+        rate: 0,
+    };
+    let mut connections = None;
+    let (_, [run, built]) = run_and_build_env(
+        "gui_wayland_input",
+        &INPUT_PROGRAM.replace("HOLD", "false"),
+        |dir| connections = Some(fake_wayland_server(&dir.join("wayland-9"), compositor)),
+        &[
+            ("WAYLAND_DISPLAY", "wayland-9"),
+            ("XDG_RUNTIME_DIR", "."),
+            ("STONE_GUI", ""),
+        ],
+    );
+    for output in [&run, &built] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    }
+    let seen = closed_wayland_connections(&connections.unwrap());
+    let [interpreted, compiled] = &seen[..] else {
+        panic!("expected two connections, not {}", seen.len());
+    };
+    assert_eq!(interpreted.requests, compiled.requests);
+    // xdg_toplevel's resize from the top left corner (5) and move, each with its press's serial
+    let toplevel_requests: Vec<_> = interpreted
+        .requests
+        .iter()
+        .filter(|r| r.len() >= 16 && (r[4] == 5 || r[4] == 6) && r[6] as usize == r.len())
+        .map(|r| {
+            r[8..]
+                .chunks(4)
+                .map(|w| u32::from_le_bytes(w.try_into().unwrap()))
+                .collect::<Vec<_>>()
+        })
+        .filter(|args: &Vec<u32>| args.len() >= 2 && (args[1] == 21 || args[1] == 22))
+        .collect();
+    assert_eq!(toplevel_requests.len(), 2, "{toplevel_requests:?}");
+    assert_eq!(toplevel_requests[0][1..], [21, 5]);
+    assert_eq!(toplevel_requests[1][1..], [22]);
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn a_key_held_down_on_wayland_repeats_in_both_backends() {
+    let compositor = FakeCompositor {
+        decorations: false,
+        script: WaylandScript::Hold,
+        keymap: "us.xkb",
+        rate: 50,
+    };
+    let (_, [run, built]) = run_and_build_env(
+        "gui_wayland_hold",
+        &INPUT_PROGRAM.replace("HOLD", "true"),
+        |dir| {
+            fake_wayland_server(&dir.join("wayland-9"), compositor);
+        },
+        &[
+            ("WAYLAND_DISPLAY", "wayland-9"),
+            ("XDG_RUNTIME_DIR", "."),
+            ("STONE_GUI", ""),
+        ],
+    );
+    let expected = "event.redraw\nevent.key_down('a')\nevent.text('a')\nevent.text('a')\n\
+                    event.text('a')\nevent.text('a')\n";
+    for output in [run, built] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    }
+}
+
+/// Starts a headless Weston, if `weston` is on PATH, in a runtime directory of its own, returning
+/// it, the directory, and its socket's name.
+fn start_weston(name: &str) -> Option<(std::process::Child, PathBuf, String)> {
+    use std::os::unix::fs::PermissionsExt;
+    let runtime = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("{name}-runtime"));
+    let _ = std::fs::remove_dir_all(&runtime);
+    std::fs::create_dir_all(&runtime).ok()?;
+    std::fs::set_permissions(&runtime, std::fs::Permissions::from_mode(0o700)).ok()?;
+    let socket = "stone-test".to_string();
+    let mut server = Command::new("weston")
+        .args(["--backend=headless", "--renderer=pixman", "--shell=kiosk"])
+        .arg(format!("--socket={socket}"))
+        .env("XDG_RUNTIME_DIR", &runtime)
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    for _ in 0..100 {
+        if runtime.join(&socket).exists() {
+            return Some((server, runtime, socket));
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+    let _ = server.kill();
+    None
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn both_backends_draw_on_a_real_wayland_compositor() {
+    let Some((mut server, runtime, socket)) = start_weston("gui_weston") else {
+        eprintln!("skipping: weston is not on PATH");
+        return;
+    };
+    let source = r#"use gui
+use time
+
+match gui.open("real", 64, 48):
+    case ok(w):
+        c = gui.blank(64, 48, gui.rgb(10, 20, 30))
+        c.text(2, 2, "hi", gui.rgb(255, 255, 255))
+        w.show(c)
+        w.set_title("still real")
+        time.sleep(0.3)
+        failures = 0
+        for _ in range(3):
+            es = w.events()
+            for e in es:
+                match e:
+                    case gui.event.failed(reason):
+                        print(reason)
+                        failures += 1
+                    case gui.event.resize(width, height):
+                        c = gui.blank(width, height, gui.rgb(10, 20, 30))
+                    case _:
+                        cont
+            w.show(c)
+            time.sleep(0.1)
+        print(w.is_open(), failures)
+        w.close()
+    case err(reason):
+        print(reason)
+"#;
+    let runtime = runtime.to_string_lossy().to_string();
+    let (_, [run, built]) = run_and_build_env(
+        "gui_weston",
+        source,
+        |_| {},
+        &[
+            ("STONE_GUI", "wayland"),
+            ("WAYLAND_DISPLAY", &socket),
+            ("XDG_RUNTIME_DIR", &runtime),
+        ],
+    );
+    let _ = server.kill();
+    let _ = server.wait();
+    for output in [run, built] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "true 0\n");
     }
 }

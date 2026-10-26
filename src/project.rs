@@ -461,10 +461,7 @@ impl Loader<'_> {
                 ),
             ));
         }
-        let internal = crate::stdlib::INTERNAL_MODULES
-            .iter()
-            .any(|module| module.name == names[0]);
-        if internal && !self.own.contains(&file) {
+        if crate::stdlib::is_internal_module(&names[0]) && !self.own.contains(&file) {
             return Err(Diagnostic::error(
                 span,
                 format!("no module named '{}'", names.join(".")),

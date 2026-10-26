@@ -1,1 +1,1 @@
-no display: DISPLAY is not set
+no display: neither WAYLAND_DISPLAY nor DISPLAY is set

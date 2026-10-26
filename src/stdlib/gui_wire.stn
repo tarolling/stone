@@ -1,0 +1,47 @@
+// Numbers as bytes, least significant first, as the display protocols of the `gui` module write
+// them, which only stone's own modules may use.
+
+// `xs` with `value`'s two bytes after it, least significant first.
+pub fn put16(xs: list[int], value: int) -> list[int]:
+    xs.append(value % 256)
+    xs.append(value / 256 % 256)
+    ret xs
+
+// `xs` with `value`'s four bytes after it, least significant first.
+pub fn put32(xs: list[int], value: int) -> list[int]:
+    xs = put16(xs, value % 65536)
+    ret put16(xs, value / 65536 % 65536)
+
+// The values of `data`'s bytes.
+pub fn byte_list(data: bytes) -> list[int]:
+    values = []
+    for b in data:
+        values.append(b)
+    ret values
+
+// `xs` with `data` after it, padded with zeros to a multiple of four bytes.
+pub fn put_bytes(xs: list[int], data: bytes) -> list[int]:
+    for b in data:
+        xs.append(b)
+    for _ in range(pad(data.len())):
+        xs.append(0)
+    ret xs
+
+// The bytes that pad `n` bytes to a multiple of four.
+pub fn pad(n: int) -> int:
+    ret (4 - n % 4) % 4
+
+// The two bytes at `at` of `data`, least significant first.
+pub fn get16(data: bytes, at: int) -> int:
+    ret data[at] + data[at + 1] * 256
+
+// The two bytes at `at` of `data` as a signed number.
+pub fn get16s(data: bytes, at: int) -> int:
+    value = get16(data, at)
+    if value >= 32768:
+        ret value - 65536
+    ret value
+
+// The four bytes at `at` of `data`, least significant first.
+pub fn get32(data: bytes, at: int) -> int:
+    ret get16(data, at) + get16(data, at + 2) * 65536

@@ -1,0 +1,238 @@
+// Keys for the `gui` module, which only stone's own modules may use: keymaps, which tell what
+// each key is, read from a display server, the names of keys, and the text they type.
+
+use gui_keysyms
+
+// The keysyms of every key: `per` of them for each keycode from `first` up, and the character
+// each keysym types that is neither Latin-1 nor a Unicode keysym, as `codes` from the table.
+pub struct keymap:
+    first: int
+    per: int
+    syms: list[int]
+    codes: map[int, int]
+
+// A keymap with keycodes from `first`, `per` keysyms each, but none yet.
+pub fn empty(first: int, per: int) -> keymap:
+    ret keymap(first=first, per=per, syms=[], codes=legacy_codes())
+
+// A keymap of no keys, for a window that never reads one.
+pub fn unused() -> keymap:
+    ret keymap(first=8, per=0, syms=[], codes={0: 0})
+
+impl keymap:
+    // The keysym in column `column` of the key `keycode`, or 0 if it has none.
+    fn keysym(self, keycode: int, column: int) -> int:
+        if keycode < self.first or column >= self.per:
+            ret 0
+        at = (keycode - self.first) * self.per + column
+        if at >= self.syms.len():
+            ret 0
+        ret self.syms[at]
+
+    // The name of the key `keycode`: the character its first keysym types, if it types one (in
+    // lowercase for a letter), or `space`, `enter`, `escape`, `backspace`, `tab`, `delete`,
+    // `insert`, `home`, `end`, `page_up`, `page_down`, `left`, `up`, `right`, `down`, `f1` to
+    // `f12`, `shift`, `control`, `alt`, `super`, `caps_lock`, or else `unknown`.
+    fn name(self, keycode: int) -> str:
+        sym = self.keysym(keycode, 0)
+        if sym == 32:
+            ret "space"
+        typed = self.text_of(sym)
+        if typed != "":
+            ret typed
+        ret special_name(sym)
+
+    // The text the key `keycode` types with the modifiers `state`, a mask whose bit 0 is Shift,
+    // 1 Caps Lock, and 2 Control: nothing with Control.
+    fn text(self, keycode: int, state: int) -> str:
+        if state / 4 % 2 == 1:
+            ret ""
+        plain = self.keysym(keycode, 0)
+        upper = self.keysym(keycode, 1)
+        shifted = state % 2 == 1
+        if state / 2 % 2 == 1 and self.locks(plain, upper):
+            shifted = not shifted
+        if shifted and upper != 0:
+            ret self.text_of(upper)
+        ret self.text_of(plain)
+
+    // Whether Caps Lock shifts a key of the keysyms `plain` and `upper`: one whose first is a
+    // lowercase ASCII letter, or whose two type different characters outside ASCII, as letters
+    // with a case do.
+    fn locks(self, plain: int, upper: int) -> bool:
+        a = self.code(plain)
+        b = self.code(upper)
+        if a >= 97 and a <= 122:
+            ret true
+        ret a >= 192 and b >= 192 and a != b
+
+    // The Unicode character the keysym `sym` types, or 0 if it types none.
+    fn code(self, sym: int) -> int:
+        if sym >= 32 and sym <= 126 or sym >= 160 and sym <= 255:
+            ret sym
+        if sym >= 16777216 + 32 and sym <= 16777216 + 1114111:
+            ret sym - 16777216
+        ret self.codes.get(sym).unwrap_or(0)
+
+    // The text the keysym `sym` types, or nothing.
+    fn text_of(self, sym: int) -> str:
+        ret utf8(self.code(sym))
+
+// Reads the XKB keymap `text`, as xkbcommon writes one out for a Wayland compositor: the numbers
+// of the keys' names from its `xkb_keycodes` section, and from its `xkb_symbols` section the
+// first two keysyms of each key's first group. What it does not understand it leaves out.
+pub fn parse(text: str) -> keymap:
+    table = gui_keysyms.table()
+    by_name = {"NoSymbol": 0}
+    for i in range(table[0].len()):
+        by_name[table[0][i]] = table[1][i]
+    found = keycodes(section(text, "xkb_keycodes"))
+    numbers = found[0]
+    keys = empty(8, 2)
+    for _ in range((found[1] - keys.first + 1) * 2):
+        keys.syms.append(0)
+    // each piece after the first starts with a key's name
+    pieces = section(text, "xkb_symbols").split("key <")
+    for i in range(1, pieces.len()):
+        piece = pieces[i]
+        close = piece.find(">").unwrap_or(0)
+        code = numbers.get(piece[:close]).unwrap_or(-1)
+        brace = find_from(piece, "{{", close)
+        end = find_from(piece, "}}", brace)
+        if code >= keys.first and brace >= 0 and end >= 0:
+            levels = first_group(piece[brace:end])
+            for level in range(levels.len().min(2)):
+                at = (code - keys.first) * 2 + level
+                if at < keys.syms.len():
+                    keys.syms[at] = keysym_named(levels[level].strip(), by_name)
+    ret keys
+
+// Where `needle` first appears in `text` from `start` on, or -1 if it does not.
+fn find_from(text: str, needle: str, start: int) -> int:
+    match text[start:].find(needle):
+        case some(at):
+            ret start + at
+        case none:
+            ret -1
+
+// The text of the section `name` of the keymap `text`, from its name to the line that closes
+// it, or nothing if it has none.
+fn section(text: str, name: str) -> str:
+    start = text.find(name).unwrap_or(-1)
+    if start < 0:
+        ret ""
+    rest = text[start:]
+    ret rest[:rest.find("\n}};").unwrap_or(rest.len())]
+
+// The keycode of each key name the `xkb_keycodes` section `text` gives, aliases included, and
+// the section's highest keycode (255 if it does not say).
+fn keycodes(text: str) -> tuple[map[str, int], int]:
+    numbers = {"": -1}
+    highest = 255
+    aliases = []
+    for whole in text.split("\n"):
+        line = whole.strip()
+        if line.startswith("maximum"):
+            highest = number(line)
+        elif line.startswith("<"):
+            numbers[line[1:line.find(">").unwrap_or(1)]] = number(line)
+        elif line.startswith("alias <"):
+            aliases.append(line)
+    for line in aliases:
+        name = line[7:line.find(">").unwrap_or(7)]
+        real = line[line.rfind("<").unwrap_or(0) + 1:line.rfind(">").unwrap_or(0)]
+        numbers[name] = numbers.get(real).unwrap_or(-1)
+    ret (numbers, highest)
+
+// The decimal number after the `=` of the line `line`, up to its `;`, or -1 if it has none.
+fn number(line: str) -> int:
+    equals = line.find("=").unwrap_or(-1)
+    semicolon = line.find(";").unwrap_or(line.len())
+    if equals < 0:
+        ret -1
+    ret int(line[equals + 1:semicolon].strip()).unwrap_or(-1)
+
+// The keysym names of the first group of the key whose block is `block`: the list after
+// `symbols[Group1]=` if it has one, or else its first list.
+fn first_group(block: str) -> list[str]:
+    at = block.find("symbols[").unwrap_or(-1)
+    if at < 0:
+        at = 0
+    else:
+        at = find_from(block, "]", at) + 1
+    open = find_from(block, "[", at)
+    if open < 0:
+        ret []
+    close = find_from(block, "]", open)
+    if close < 0:
+        ret []
+    ret block[open + 1:close].split(",")
+
+// The keysym named `name`: one of the table's, `U` and the hexadecimal Unicode code of a
+// character, `0x` and its hexadecimal value, or else 0.
+fn keysym_named(name: str, by_name: map[str, int]) -> int:
+    found = by_name.get(name)
+    if found.is_some():
+        ret found.unwrap()
+    if name.startswith("0x"):
+        ret hexadecimal(name[2:])
+    if name.startswith("U") and name.len() > 1:
+        value = hexadecimal(name[1:])
+        if value >= 0:
+            ret 16777216 + value
+    ret 0
+
+// The value of the hexadecimal digits `digits`, or -1 if one is not a digit.
+fn hexadecimal(digits: str) -> int:
+    value = 0
+    for digit in digits.lower():
+        place = "0123456789abcdef".find(digit).unwrap_or(-1)
+        if place < 0:
+            ret -1
+        value = value * 16 + place
+    ret value
+
+// The character each keysym of the table types, for those that are neither Latin-1 nor Unicode
+// keysyms.
+fn legacy_codes() -> map[int, int]:
+    table = gui_keysyms.table()
+    codes = {0: 0}
+    for i in range(table[1].len()):
+        value = table[1][i]
+        if table[2][i] > 0 and value > 255 and value < 16777216:
+            codes[value] = table[2][i]
+    ret codes
+
+// The name of a key whose keysym `sym` types nothing, or `unknown`.
+fn special_name(sym: int) -> str:
+    if sym >= 65470 and sym <= 65481:
+        ret "f{sym - 65469}"
+    if sym >= 65456 and sym <= 65465:
+        ret "{sym - 65456}"
+    syms = [65288, 65289, 65293, 65421, 65307, 65535, 65439, 65379, 65438, 65360, 65429]
+    names = ["backspace", "tab", "enter", "enter", "escape", "delete", "delete", "insert"]
+    names.extend(["insert", "home", "home"])
+    syms.extend([65367, 65436, 65365, 65434, 65366, 65435, 65361, 65430, 65362, 65431])
+    names.extend(["end", "end", "page_up", "page_up", "page_down", "page_down", "left", "left"])
+    names.extend(["up", "up"])
+    syms.extend([65363, 65432, 65364, 65433, 65505, 65506, 65507, 65508])
+    names.extend(["right", "right", "down", "down", "shift", "shift", "control", "control"])
+    syms.extend([65511, 65512, 65513, 65514, 65027, 65515, 65516, 65509])
+    names.extend(["alt", "alt", "alt", "alt", "alt", "super", "super", "caps_lock"])
+    for i in range(syms.len()):
+        if syms[i] == sym:
+            ret names[i]
+    ret "unknown"
+
+// The UTF-8 text of the Unicode character `code`, or nothing for 0.
+fn utf8(code: int) -> str:
+    if code <= 0:
+        ret ""
+    units = [code]
+    if code >= 65536:
+        units = [240 + code / 262144, 128 + code / 4096 % 64, 128 + code / 64 % 64, 128 + code % 64]
+    elif code >= 2048:
+        units = [224 + code / 4096, 128 + code / 64 % 64, 128 + code % 64]
+    elif code >= 128:
+        units = [192 + code / 64, 128 + code % 64]
+    ret bytes(units).unwrap().text().unwrap_or("")

@@ -77,6 +77,9 @@ pub const TIMED_OUT: &str = "timed out";
 /// The error `read_exact` gives when the connection closes before the bytes it waits for arrive.
 pub const CLOSED_EARLY: &str = "connection closed early";
 
+/// The error `take_fd` gives when no descriptor has arrived since the last.
+pub const FD_MISSING: &str = "no descriptor";
+
 /// The error writing a socket's shared memory gives before `shm_create` made it.
 pub const SHM_MISSING: &str = "no shared memory";
 
@@ -190,6 +193,7 @@ struct MsgHdr {
 unsafe extern "C" {
     fn memfd_create(name: *const std::ffi::c_char, flags: std::ffi::c_uint) -> c_int;
     fn sendmsg(fd: c_int, msg: *const MsgHdr, flags: c_int) -> isize;
+    fn recvmsg(fd: c_int, msg: *mut MsgHdr, flags: c_int) -> isize;
 }
 
 /// Waits until the descriptor `fd` is ready for `events`, for at most `timeout` milliseconds in
@@ -299,6 +303,8 @@ pub struct Socket {
     timeout: i64,
     /// Memory to share with the other end, which `shm_create` makes and `close` drops.
     shared: Option<std::fs::File>,
+    /// The newest descriptor the other end sent, until `take_fd` takes it.
+    received: Option<std::fs::File>,
 }
 
 impl Socket {
@@ -309,6 +315,7 @@ impl Socket {
             ended: false,
             timeout: -1,
             shared: None,
+            received: None,
         }
     }
 
@@ -366,13 +373,23 @@ impl Socket {
         let timeout = self.timeout;
         let stream = self.stream()?;
         wait(stream.as_raw_fd(), POLLIN, timeout)?;
-        let n = loop {
-            match stream.read(&mut chunk) {
-                Ok(n) => break n,
+        let (n, fd) = loop {
+            let read = match stream {
+                // a Unix socket may bring a descriptor along, which only Linux's runtime takes
+                Stream::Unix(unix) if cfg!(target_os = "linux") => {
+                    read_with_fd(unix.as_raw_fd(), &mut chunk)
+                }
+                _ => stream.read(&mut chunk).map(|n| (n, None)),
+            };
+            match read {
+                Ok(read) => break read,
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(reason(&e)),
             }
         };
+        if fd.is_some() {
+            self.received = fd;
+        }
         self.buffer.extend_from_slice(&chunk[..n]);
         self.ended = n == 0;
         Ok(n > 0)
@@ -478,6 +495,27 @@ impl Socket {
             let _ = stream.shutdown();
         }
         self.shared = None;
+        self.received = None;
+    }
+
+    /// Returns at most `size` bytes from the start of the file whose descriptor the other end
+    /// sent most recently, as a Wayland compositor sends its keymap, and closes it.
+    pub fn take_fd(&mut self, size: i64) -> Result<Vec<u8>, String> {
+        use std::os::unix::fs::FileExt;
+        self.stream()?;
+        let file = self.received.take().ok_or_else(|| FD_MISSING.to_string())?;
+        let mut data = vec![0; size.max(0) as usize];
+        let mut filled = 0;
+        while filled < data.len() {
+            match file.read_at(&mut data[filled..], filled as u64) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(reason(&e)),
+            }
+        }
+        data.truncate(filled);
+        Ok(data)
     }
 
     /// Makes `size` bytes of zeros to share with the other end of a Unix socket, in place of any
@@ -612,6 +650,45 @@ fn send_with_fd(fd: RawFd, data: &[u8], shared: RawFd) -> Result<usize, String> 
             return Err(reason(&error));
         }
     }
+}
+
+/// Reads what the socket `fd` has into `buf`, with a descriptor sent along, if one was,
+/// close-on-exec.
+#[cfg(target_os = "linux")]
+fn read_with_fd(fd: RawFd, buf: &mut [u8]) -> std::io::Result<(usize, Option<std::fs::File>)> {
+    use std::os::fd::FromRawFd;
+    let mut control = [0u64; 3];
+    let iov = IoVec {
+        base: buf.as_mut_ptr().cast(),
+        len: buf.len(),
+    };
+    let mut msg = MsgHdr {
+        name: std::ptr::null_mut(),
+        namelen: 0,
+        iov: &iov,
+        iovlen: 1,
+        control: control.as_mut_ptr().cast(),
+        controllen: 24,
+        flags: 0,
+    };
+    // SAFETY: msg points at one iovec over `buf` and 24 bytes of control, which outlive the
+    // call; MSG_CMSG_CLOEXEC
+    let n = unsafe { recvmsg(fd, &mut msg, 0x4000_0000) };
+    if n < 0 {
+        return Err(std::io::Error::last_os_error());
+    }
+    // a cmsghdr of SOL_SOCKET and SCM_RIGHTS holds the descriptor
+    let fd = match msg.controllen >= 20 && control[1] == 1 | 1 << 32 {
+        // SAFETY: the kernel made the descriptor for this process, and nothing else owns it
+        true => Some(unsafe { std::fs::File::from_raw_fd(control[2] as u32 as RawFd) }),
+        false => None,
+    };
+    Ok((n as usize, fd))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn read_with_fd(_: RawFd, _: &mut [u8]) -> std::io::Result<(usize, Option<std::fs::File>)> {
+    Err(ErrorKind::Unsupported.into())
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -955,6 +1032,36 @@ mod tests {
         socket.close();
         assert_eq!(socket.shm_create(8), Err(SOCKET_CLOSED.to_string()));
         assert_eq!(socket.shm_write(0, b"x"), Err(SOCKET_CLOSED.to_string()));
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_unix_socket_keeps_the_newest_descriptor_it_receives() {
+        let (near, far) = UnixStream::pair().unwrap();
+        let mut socket = Socket::new(Stream::Unix(near));
+        assert_eq!(socket.take_fd(10), Err(FD_MISSING.to_string()));
+        let dir = std::env::temp_dir().join(format!("stone-fd-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let old = dir.join("old");
+        let new = dir.join("new");
+        std::fs::write(&old, "old keymap").unwrap();
+        std::fs::write(&new, "xkb_keymap {}").unwrap();
+        for (path, data) in [(&old, &b"one"[..]), (&new, &b"two"[..])] {
+            let file = std::fs::File::open(path).unwrap();
+            assert_eq!(send_with_fd(far.as_raw_fd(), data, file.as_raw_fd()), Ok(3));
+        }
+        assert_eq!(socket.read_exact(6), Ok(b"onetwo".to_vec()));
+        // the first descriptor was closed when the second came
+        assert_eq!(socket.take_fd(100), Ok(b"xkb_keymap {}".to_vec()));
+        assert_eq!(socket.take_fd(100), Err(FD_MISSING.to_string()));
+        // a size cuts the text short
+        let file = std::fs::File::open(&new).unwrap();
+        send_with_fd(far.as_raw_fd(), b"!", file.as_raw_fd()).unwrap();
+        assert_eq!(socket.read_exact(1), Ok(b"!".to_vec()));
+        assert_eq!(socket.take_fd(3), Ok(b"xkb".to_vec()));
+        socket.close();
+        assert_eq!(socket.take_fd(3), Err(SOCKET_CLOSED.to_string()));
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

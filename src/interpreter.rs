@@ -3002,6 +3002,10 @@ impl<'out> Interpreter<'out> {
                 let written = socket.borrow_mut().shm_write(*offset, data);
                 return Ok(result(written.map(Value::Int)));
             }
+            ("gui_sys.take_fd", [Value::Socket(socket), Value::Int(size)]) => {
+                let taken = socket.borrow_mut().take_fd(*size);
+                return Ok(result(taken.map(|data| Value::Bytes(data.into()))));
+            }
             ("gui_sys.shm_send", [Value::Socket(socket), Value::Bytes(data)]) => {
                 return Ok(result(socket.borrow_mut().shm_send(data).map(Value::Int)));
             }

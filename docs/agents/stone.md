@@ -571,7 +571,7 @@ print(echo())   // ok('you said hello\n')
 ```
 
 `gui` draws on canvases (`gui.blank(w, h, color)`, colors from `gui.rgb(r, g, b)`) and shows
-them in windows over X11. A canvas is a value with `width`, `height`, and `pixels`, and its
+them in windows over Wayland or X11. A canvas is a value with `width`, `height`, and `pixels`, and its
 methods draw on it in place:
 
 ```stone

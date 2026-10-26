@@ -72,6 +72,10 @@ pub static INTERNAL_MODULES: [BuiltinModule; 2] = [
 pub static SOURCE_MODULES: [(&str, &str); 2] =
     [(net::MODULE, net::SOURCE), (gui::MODULE, gui::SOURCE)];
 
+/// The modules written in stone that only stone's own modules may use, as they may use
+/// [`INTERNAL_MODULES`], by name with their source.
+pub static INTERNAL_SOURCE_MODULES: [(&str, &str); 5] = gui::INTERNAL_SOURCES;
+
 /// Returns the builtin module named `name`, internal ones included.
 ///
 /// For example, `module("os")` is the `os` module, and `module("util")` is `None`.
@@ -82,14 +86,25 @@ pub fn module(name: &str) -> Option<&'static BuiltinModule> {
         .find(|module| module.name == name)
 }
 
-/// Returns the source of the module written in stone named `name`, if there is one.
+/// Returns the source of the module written in stone named `name`, internal ones included, if
+/// there is one.
 ///
 /// For example, `source_module("net")` is the text of `net.stn`.
 pub fn source_module(name: &str) -> Option<&'static str> {
     SOURCE_MODULES
         .iter()
+        .chain(&INTERNAL_SOURCE_MODULES)
         .find(|(module, _)| *module == name)
         .map(|(_, source)| *source)
+}
+
+/// Returns whether only stone's own modules may use the module named `name`, as `net_sys` or
+/// `gui_x11`.
+pub fn is_internal_module(name: &str) -> bool {
+    INTERNAL_MODULES.iter().any(|module| module.name == name)
+        || INTERNAL_SOURCE_MODULES
+            .iter()
+            .any(|(module, _)| *module == name)
 }
 
 /// Returns the documentation for the function of a builtin module with the linked name `name`.

@@ -18,8 +18,8 @@
 
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{
-    CLOSED_EARLY_CODE, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE,
-    SHM_MISSING_CODE, SOCKET_CLOSED_CODE, TIMED_OUT_CODE, immortal_string,
+    CLOSED_EARLY_CODE, FD_MISSING_CODE, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE,
+    LISTENER_CLOSED_CODE, SHM_MISSING_CODE, SOCKET_CLOSED_CODE, TIMED_OUT_CODE, immortal_string,
 };
 use crate::stdlib::net::{MAX_REPLY, READ_SIZE};
 
@@ -32,7 +32,7 @@ pub const SOCKET_TAG: i64 = -1;
 pub const LISTENER_TAG: i64 = -2;
 
 /// The slots of a handle after its tag and kinds.
-const HANDLE_SLOTS: i64 = 9;
+const HANDLE_SLOTS: i64 = 10;
 
 /// `SOCK_CLOEXEC`, so a program `os.run` starts never inherits a connection.
 const SOCK_CLOEXEC: i64 = 0x80000;
@@ -65,6 +65,7 @@ const FIRST_BUFFER: usize = 2 * READ_SIZE;
 /// - `stone.net_connect` also takes the milliseconds it may wait in `rcx`, or -1
 /// - `stone.net_connect_unix` takes a path in `rdi` and the name errors quote in `rsi`
 /// - `stone.net_ready` takes a socket in `rdi` and the milliseconds it may wait in `rsi`, or -1
+/// - `stone.net_take_fd` takes a socket in `rdi` and a size in `rsi`, for `gui_sys`
 /// - `stone.net_shm_create` takes a socket in `rdi` and a size in `rsi`, `stone.net_shm_write` a
 ///   socket, an offset in `rsi`, and bytes in `rdx`, and `stone.net_shm_send` a socket and bytes
 ///   in `rsi`, for `gui_sys`
@@ -131,6 +132,9 @@ pub fn net_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
     if uses("stone.net_shm_send") {
         shm_send(r#gen);
+    }
+    if uses("stone.net_take_fd") {
+        take_fd(r#gen);
     }
     if uses("stone.net_exchange") {
         exchange(r#gen);
@@ -282,6 +286,8 @@ fn handle(r#gen: &mut dyn AssemblyGenerator) {
     // no shared memory yet
     r#gen.emit("\tmov\tQWORD PTR [rax + 72], -1");
     r#gen.emit("\tmov\tQWORD PTR [rax + 80], rcx");
+    // and no descriptor received
+    r#gen.emit("\tmov\tQWORD PTR [rax + 88], -1");
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbx");
     r#gen.emit("\tret");
@@ -637,6 +643,84 @@ fn shm_send(r#gen: &mut dyn AssemblyGenerator) {
 /// The error number of a write that does not fit, `ENOSPC`, the same on Linux and macOS.
 const ENOSPC: i64 = 28;
 
+/// The `recvmsg` flag that makes each descriptor received close-on-exec.
+const MSG_CMSG_CLOEXEC: i64 = 0x4000_0000;
+
+/// Emits code that closes the descriptor the socket in `rbx` received last, unless there is none,
+/// leaving none.
+fn close_received(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 88]");
+    r#gen.emit("\ttest\trdi, rdi");
+    r#gen.emit(&format!("\tjs\t{label}_unreceived"));
+    r#gen.emit("\tmov\teax, 3"); // sys_close
+    r#gen.emit("\tsyscall");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 88], -1");
+    r#gen.emit(&format!("{label}_unreceived:"));
+}
+
+/// Emits `stone.net_take_fd`: at most the size's bytes of the file whose descriptor the socket
+/// received last, read with `pread64` from its start, then the descriptor closed, as
+/// `stdlib::net::Socket::take_fd` does.
+fn take_fd(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_take_fd";
+    // rbx holds the socket, r12 how many bytes are read, r13 the descriptor, r14 the size, and
+    // r15 the new bytes
+    frame(r#gen, label);
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr12, rsi");
+    check_open(r#gen, label);
+    r#gen.emit("\tcmp\tQWORD PTR [rbx + 88], 0");
+    r#gen.emit(&format!("\tjge\t{label}_received"));
+    fail_with_code(r#gen, label, FD_MISSING_CODE);
+    r#gen.emit(&format!("{label}_received:"));
+    r#gen.emit("\tmov\tr13, QWORD PTR [rbx + 88]");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 88], -1");
+    r#gen.emit("\txor\tr14, r14");
+    r#gen.emit("\ttest\tr12, r12");
+    r#gen.emit("\tcmovns\tr14, r12");
+    r#gen.emit("\tmov\trdi, r14");
+    r#gen.emit("\tcall\tstone.str_new");
+    r#gen.emit("\tmov\tr15, rax");
+    r#gen.emit("\txor\tr12, r12");
+    r#gen.emit(&format!("{label}_next:"));
+    r#gen.emit("\tcmp\tr12, r14");
+    r#gen.emit(&format!("\tjae\t{label}_read"));
+    syscall(
+        r#gen,
+        &format!("{label}_again"),
+        17, // sys_pread64
+        &[
+            "mov\trdi, r13",
+            "lea\trsi, [r15 + r12]",
+            "mov\trdx, r14",
+            "sub\trdx, r12",
+            "mov\tr10, r12",
+        ],
+    );
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjs\t{label}_failed"));
+    r#gen.emit(&format!("\tjz\t{label}_read"));
+    r#gen.emit("\tadd\tr12, rax");
+    r#gen.emit(&format!("\tjmp\t{label}_next"));
+    // the file may be shorter than the size, so the bytes end where it did
+    r#gen.emit(&format!("{label}_read:"));
+    r#gen.emit("\tmov\tQWORD PTR [r15 - 16], r12");
+    r#gen.emit("\tmov\tbyte ptr [r15 + r12], 0");
+    close(r#gen, "r13");
+    r#gen.emit("\tmov\trdi, r15");
+    r#gen.emit("\tmov\tesi, 1"); // a string slot, as bytes are
+    r#gen.emit("\tcall\t.Lfs_ok");
+    r#gen.emit(&format!("\tjmp\t{label}_done"));
+    r#gen.emit(&format!("{label}_failed:"));
+    r#gen.emit("\tmov\tr12, rax");
+    r#gen.emit("\tmov\trax, r15");
+    r#gen.emit("\tcall\tstone.free_str");
+    close(r#gen, "r13");
+    r#gen.emit("\tmov\trax, r12");
+    fail_with_errno(r#gen, label, None);
+    frame_end(r#gen, label);
+}
+
 /// Emits `stone.net_listen`: a socket of the address's family, bound to it with `SO_REUSEADDR`,
 /// as Rust's `TcpListener::bind` does, listening, with the port it got in slot 1.
 fn listen(r#gen: &mut dyn AssemblyGenerator) {
@@ -790,6 +874,7 @@ fn close_handle(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tsyscall");
     r#gen.emit("\tmov\tQWORD PTR [rbx + 16], -1");
     close_shared(r#gen, ".Lnet_close");
+    close_received(r#gen, ".Lnet_close");
     r#gen.emit(&format!("\tcmp\tQWORD PTR [rbx], {SOCKET_TAG}"));
     r#gen.emit("\tjne\t.Lnet_close_done");
     r#gen.emit("\tmov\trax, QWORD PTR [rbx + 24]");
@@ -912,20 +997,55 @@ fn receive(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcall\t.Lnet_wait");
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit("\tjnz\t.Lnet_receive_done");
+    // recvmsg, which also takes a descriptor sent along: the iovec at [rsp], the msghdr from
+    // [rsp + 16], and room for one SCM_RIGHTS control message from [rsp + 72]
+    r#gen.emit(".Lnet_receive_again:");
+    r#gen.emit("\tsub\trsp, 96");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 24]");
+    r#gen.emit("\tadd\trax, QWORD PTR [rbx + 40]");
+    r#gen.emit("\tmov\tQWORD PTR [rsp], rax");
+    r#gen.emit(&format!("\tmov\tQWORD PTR [rsp + 8], {READ_SIZE}"));
+    r#gen.emit("\txor\teax, eax");
+    for offset in [16, 24, 64, 72, 80, 88] {
+        r#gen.emit(&format!("\tmov\tQWORD PTR [rsp + {offset}], rax"));
+    }
+    r#gen.emit("\tmov\tQWORD PTR [rsp + 32], rsp");
+    r#gen.emit("\tmov\tQWORD PTR [rsp + 40], 1");
+    r#gen.emit("\tlea\trax, [rsp + 72]");
+    r#gen.emit("\tmov\tQWORD PTR [rsp + 48], rax");
+    r#gen.emit("\tmov\tQWORD PTR [rsp + 56], 24");
     syscall(
         r#gen,
-        ".Lnet_receive_again",
-        45, // sys_recvfrom
+        ".Lnet_receive_message",
+        47, // sys_recvmsg
         &[
             "mov\trdi, QWORD PTR [rbx + 16]",
-            "mov\trsi, QWORD PTR [rbx + 24]",
-            "add\trsi, QWORD PTR [rbx + 40]",
-            &format!("mov\trdx, {READ_SIZE}"),
-            "xor\tr10, r10",
-            "xor\tr8, r8",
-            "xor\tr9, r9",
+            "lea\trsi, [rsp + 16]",
+            &format!("mov\tedx, {MSG_CMSG_CLOEXEC}"),
         ],
     );
+    // a cmsghdr of SOL_SOCKET and SCM_RIGHTS holds a descriptor, which replaces any before
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjs\t.Lnet_receive_unmessaged");
+    r#gen.emit("\tcmp\tQWORD PTR [rsp + 56], 20");
+    r#gen.emit("\tjb\t.Lnet_receive_unmessaged");
+    r#gen.emit("\tmov\trcx, 1");
+    r#gen.emit("\tshl\trcx, 32");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit("\tcmp\tQWORD PTR [rsp + 80], rcx");
+    r#gen.emit("\tjne\t.Lnet_receive_unmessaged");
+    r#gen.emit("\tmov\tr8, rax");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 88]");
+    r#gen.emit("\ttest\trdi, rdi");
+    r#gen.emit("\tjs\t.Lnet_receive_kept");
+    r#gen.emit("\tmov\teax, 3"); // sys_close
+    r#gen.emit("\tsyscall");
+    r#gen.emit(".Lnet_receive_kept:");
+    r#gen.emit("\tmov\teax, DWORD PTR [rsp + 88]");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 88], rax");
+    r#gen.emit("\tmov\trax, r8");
+    r#gen.emit(".Lnet_receive_unmessaged:");
+    r#gen.emit("\tadd\trsp, 96");
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit("\tjs\t.Lnet_receive_done");
     r#gen.emit("\tjnz\t.Lnet_receive_got");
@@ -1584,13 +1704,16 @@ pub fn free_handle(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\teax, 3"); // sys_close
     r#gen.emit("\tsyscall");
     r#gen.emit("\tmov\trax, QWORD PTR [rsp + 16]");
-    // and its shared memory, if it has any
-    r#gen.emit("\tmov\trdi, QWORD PTR [rax + 72]");
-    r#gen.emit("\ttest\trdi, rdi");
-    r#gen.emit("\tjs\t.Lfree_handle_closed");
-    r#gen.emit("\tmov\teax, 3"); // sys_close
-    r#gen.emit("\tsyscall");
-    r#gen.emit("\tmov\trax, QWORD PTR [rsp + 16]");
+    // and its shared memory and the descriptor it received last, if it has them
+    for slot in [72, 88] {
+        r#gen.emit(&format!("\tmov\trdi, QWORD PTR [rax + {slot}]"));
+        r#gen.emit("\ttest\trdi, rdi");
+        r#gen.emit(&format!("\tjs\t.Lfree_handle_{slot}"));
+        r#gen.emit("\tmov\teax, 3"); // sys_close
+        r#gen.emit("\tsyscall");
+        r#gen.emit("\tmov\trax, QWORD PTR [rsp + 16]");
+        r#gen.emit(&format!(".Lfree_handle_{slot}:"));
+    }
     r#gen.emit(".Lfree_handle_closed:");
     r#gen.emit(&format!("\tcmp\tQWORD PTR [rax], {SOCKET_TAG}"));
     r#gen.emit("\tjne\t.Lfree_handle_done");

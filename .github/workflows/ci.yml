@@ -23,9 +23,10 @@ jobs:
     - name: Build
       run: cargo build --verbose
     # the golden programs are also built for aarch64 and run under qemu-user, the built-in
-    # assembler is compared with GNU as for both processors, and gui windows open on Xvfb
-    - name: Install qemu, the aarch64 binutils, and Xvfb
-      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-aarch64-linux-gnu xvfb
+    # assembler is compared with GNU as for both processors, and gui windows open on Xvfb and
+    # a headless Weston
+    - name: Install qemu, the aarch64 binutils, Xvfb, and Weston
+      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-aarch64-linux-gnu xvfb weston
     - name: Run tests
       run: cargo test --verbose
     - name: Run self-update tests
@@ -54,9 +55,9 @@ jobs:
         export PATH="$HOME/.cargo/bin:$PATH"
         cargo build --verbose
     # the golden programs are also built for x86-64 and run under qemu-user, and gui windows open
-    # on Xvfb
-    - name: Install qemu, the x86-64 binutils, and Xvfb
-      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-x86-64-linux-gnu xvfb
+    # on Xvfb and a headless Weston
+    - name: Install qemu, the x86-64 binutils, Xvfb, and Weston
+      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-x86-64-linux-gnu xvfb weston
     - name: Run tests
       run: |
         export PATH="$HOME/.cargo/bin:$PATH"

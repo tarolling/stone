@@ -7757,10 +7757,10 @@ impl Inference {
                 };
                 Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
             }
-            "gui_sys.shm_create" | "gui_sys.shm_write" | "gui_sys.shm_send" => {
+            "gui_sys.shm_create" | "gui_sys.shm_write" | "gui_sys.shm_send" | "gui_sys.take_fd" => {
                 let socket = Ty::Handle(Handle::Socket);
                 let params = match name {
-                    "gui_sys.shm_create" => vec![socket, Ty::Int],
+                    "gui_sys.shm_create" | "gui_sys.take_fd" => vec![socket, Ty::Int],
                     "gui_sys.shm_write" => vec![socket, Ty::Int, Ty::Bytes],
                     _ => vec![socket, Ty::Bytes],
                 };
@@ -7771,7 +7771,11 @@ impl Inference {
                 } else {
                     self.arity_error(call.span, name, &params.len().to_string(), args.len());
                 }
-                Ty::Enum(RESULT.to_string(), vec![Ty::Int, Ty::Str])
+                let value = match name {
+                    "gui_sys.take_fd" => Ty::Bytes,
+                    _ => Ty::Int,
+                };
+                Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
             }
             "gui_sys.pack" => {
                 let params = [Ty::List(Box::new(Ty::Int)), Ty::Int, Ty::Int, Ty::Int];

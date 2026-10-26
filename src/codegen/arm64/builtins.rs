@@ -90,11 +90,15 @@ pub enum Sys {
     Pwrite,
     /// Sends a message with a descriptor, which only Linux's runtime does.
     Sendmsg,
+    /// Receives a message with any descriptor sent along, which only Linux's runtime does.
+    Recvmsg,
+    /// Reads at a position of a file, which only Linux's runtime does.
+    Pread,
 }
 
 impl Sys {
     /// Every call, in the order their shims are emitted.
-    pub const ALL: [Sys; 43] = [
+    pub const ALL: [Sys; 45] = [
         Sys::Read,
         Sys::Write,
         Sys::Openat,
@@ -138,6 +142,8 @@ impl Sys {
         Sys::Ftruncate,
         Sys::Pwrite,
         Sys::Sendmsg,
+        Sys::Recvmsg,
+        Sys::Pread,
     ];
 
     /// Returns the call's Linux system call number, such as 64 for `write`, or `None` if the
@@ -183,6 +189,8 @@ impl Sys {
             Sys::Ftruncate => 46,
             Sys::Pwrite => 68, // pwrite64
             Sys::Sendmsg => 211,
+            Sys::Recvmsg => 212,
+            Sys::Pread => 67, // pread64
             Sys::Sysctl | Sys::Opendir | Sys::Readdir | Sys::Closedir => {
                 return None;
             }
@@ -231,6 +239,7 @@ impl Sys {
             Sys::Getsockopt => "getsockopt",
             Sys::Mremap | Sys::Uname | Sys::Getdents64 => return None,
             Sys::MemfdCreate | Sys::Ftruncate | Sys::Pwrite | Sys::Sendmsg => return None,
+            Sys::Recvmsg | Sys::Pread => return None,
         })
     }
 

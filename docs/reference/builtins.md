@@ -1827,10 +1827,21 @@ Every method but `get` and `ppm` changes the canvas it is called on, as `append`
 
 ### Windows
 
-A window speaks the X11 protocol to the display server itself, over a socket from
-[`net`](#the-net-module), so a built program still needs no C library. Every Linux desktop runs
-an X11 server, XWayland under Wayland, and on macOS XQuartz does. The `DISPLAY` environment
-variable says where it is: `:0` is the Unix socket `/tmp/.X11-unix/X0`, a path such as
+A window speaks the Wayland or the X11 protocol to the display server itself, over a socket
+from [`net`](#the-net-module), so a built program still needs no C library. `gui.open` uses the
+Wayland compositor `WAYLAND_DISPLAY` names, a path or a name in `XDG_RUNTIME_DIR` (`wayland-0`
+on most desktops), and if there is none or it fails, the X server `DISPLAY` names. Setting
+`STONE_GUI` to `wayland` or `x11` asks for one of them alone. Every Linux desktop has one or the
+other, and on macOS XQuartz runs an X server.
+
+On Wayland, a compositor that draws windows' frames itself (`zxdg_decoration_manager_v1`, as KDE,
+Sway, and Hyprland have) draws the window's; for one that does not, as GNOME's and WSLg's do not,
+`gui` draws its own: a title bar with the title and a close button, which moves the window when
+dragged and maximizes it when clicked twice, and edges to resize it by. Keys are named and type
+text as the compositor's keymap says, whatever the layout, and a key held down repeats at the
+compositor's rate. Images go through memory the program shares with the compositor.
+
+On X11, the `DISPLAY` environment variable says where the server is: `:0` is the Unix socket `/tmp/.X11-unix/X0`, a path such as
 `/tmp/launch-x/org.xquartz:0` is that socket, and `host:0` is TCP port 6000 on `host`. A server
 that asks for one gets the `MIT-MAGIC-COOKIE-1` that `XAUTHORITY`, or `~/.Xauthority`, holds
 for the display. The display must take 24-bit color, as every current one does. On Linux, a
@@ -1847,7 +1858,8 @@ right after the last statement that uses it, or sooner with `close`. Its methods
 - `w.events() -> list[event]` returns the events since the last call, without waiting.
 - `w.wait() -> list[event]` returns the events since the last call, waiting for one if there are
   none, or `[]` once the window is closed.
-- `w.show(c: canvas)` shows the canvas in the window, its top left pixel at the window's.
+- `w.show(c: canvas)` shows the canvas in the window, its top left pixel at the window's. Where
+  the canvas does not reach, the window keeps what it showed on X11, and is black on Wayland.
 - `w.size() -> tuple[int, int]` returns the window's width and height, as the last `resize`
   event gave them.
 - `w.set_title(title: str)` sets the title on the window's frame.
@@ -1863,8 +1875,11 @@ gui.open(title: str, width: int, height: int) -> result[window, str]
 ```
 
 Opens a window titled `title`, `width` by `height` pixels (each from 1 to 32767), on the display
-`DISPLAY` names, and returns it once it is on the screen. Without a display it is
-`err("no display: DISPLAY is not set")`, a server that turns the program away gives its reason,
+[Windows](#windows) describes, and returns it once it is on the screen. Without a display it is
+`err("no display: neither WAYLAND_DISPLAY nor DISPLAY is set")`, a compositor that lacks what a
+window needs gives `err("the Wayland compositor has no xdg_wm_base")`, a protocol error gives
+`err("Wayland error: ...")` with the compositor's message, an X server that turns the program
+away gives its reason,
 as in `err("the X server refused the connection: No protocol specified")`, and one whose pixels
 are not 24-bit color is `err("unsupported display format: depth 16, 16 bits per pixel")`.
 

@@ -13,8 +13,8 @@ use super::builtins::{Sys, system_call};
 use super::fs::{EINTR, close, load};
 use super::{address, pop_frame, push_frame};
 use crate::codegen::context::{
-    CLOSED_EARLY_CODE, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE,
-    SHM_MISSING_CODE, SOCKET_CLOSED_CODE, TIMED_OUT_CODE, immortal_string,
+    CLOSED_EARLY_CODE, FD_MISSING_CODE, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE,
+    LISTENER_CLOSED_CODE, SHM_MISSING_CODE, SOCKET_CLOSED_CODE, TIMED_OUT_CODE, immortal_string,
 };
 use crate::codegen::x64::net::{LISTENER_TAG, SOCKET_TAG};
 use crate::codegen::{AssemblyGenerator, Os};
@@ -29,7 +29,7 @@ const SAVED: [&str; 8] = ["x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26"
 const LOCALS: i64 = 64;
 
 /// The slots of a handle after its tag and kinds.
-const HANDLE_SLOTS: i64 = 9;
+const HANDLE_SLOTS: i64 = 10;
 
 /// The bytes the buffer of a socket starts with, room for two reads.
 const FIRST_BUFFER: usize = 2 * READ_SIZE;
@@ -145,6 +145,9 @@ pub fn net_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
     if uses("stone.net_shm_send") {
         shm_send(r#gen);
+    }
+    if uses("stone.net_take_fd") {
+        take_fd(r#gen);
     }
     if uses("stone.net_exchange") {
         exchange(r#gen);
@@ -284,9 +287,10 @@ fn handle(r#gen: &mut dyn AssemblyGenerator) {
     }
     r#gen.emit("\tmov\tx9, #-1");
     r#gen.emit("\tstr\tx9, [x0, #64]");
-    // no shared memory yet
+    // no shared memory yet, and no descriptor received
     r#gen.emit("\tstr\tx9, [x0, #72]");
     r#gen.emit("\tstr\txzr, [x0, #80]");
+    r#gen.emit("\tstr\tx9, [x0, #88]");
     pop_frame(r#gen, &["x19", "x20"]);
 }
 
@@ -854,6 +858,7 @@ fn close_handle(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx9, #-1");
     r#gen.emit("\tstr\tx9, [x19, #16]");
     close_shared(r#gen, ".Lnet_close");
+    close_received(r#gen, ".Lnet_close");
     r#gen.emit("\tldr\tx9, [x19]");
     r#gen.emit(&format!("\tcmn\tx9, #{}", -SOCKET_TAG));
     r#gen.emit("\tb.ne\t.Lnet_close_done");
@@ -974,22 +979,27 @@ fn receive(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx1, #1"); // POLLIN
     r#gen.emit("\tbl\t.Lnet_wait");
     r#gen.emit("\tcbnz\tx0, .Lnet_receive_done");
-    let size = format!("mov\tx2, #{READ_SIZE}");
-    retried(
-        r#gen,
-        ".Lnet_receive_again",
-        Sys::Recvfrom,
-        &[
-            "ldr\tx0, [x19, #16]",
-            "ldr\tx1, [x19, #24]",
-            "ldr\tx9, [x19, #40]",
-            "add\tx1, x1, x9",
-            &size,
-            "mov\tx3, #0",
-            "mov\tx4, #0",
-            "mov\tx5, #0",
-        ],
-    );
+    match r#gen.target().os {
+        Os::Linux => receive_message(r#gen),
+        Os::MacOs => {
+            let size = format!("mov\tx2, #{READ_SIZE}");
+            retried(
+                r#gen,
+                ".Lnet_receive_again",
+                Sys::Recvfrom,
+                &[
+                    "ldr\tx0, [x19, #16]",
+                    "ldr\tx1, [x19, #24]",
+                    "ldr\tx9, [x19, #40]",
+                    "add\tx1, x1, x9",
+                    &size,
+                    "mov\tx3, #0",
+                    "mov\tx4, #0",
+                    "mov\tx5, #0",
+                ],
+            );
+        }
+    }
     r#gen.emit("\ttbnz\tx0, #63, .Lnet_receive_done");
     r#gen.emit("\tcbnz\tx0, .Lnet_receive_got");
     r#gen.emit("\tmov\tx9, #1");
@@ -1003,6 +1013,137 @@ fn receive(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lnet_receive_ended:");
     r#gen.emit("\tmov\tx0, #0");
     pop_frame(r#gen, &[]);
+}
+
+/// Emits the read of `.Lnet_receive` on Linux, as `x64::net` makes it: `recvmsg`, with room for
+/// one descriptor sent along, which replaces the one the socket in `x19` received before. The
+/// iovec is at [sp], the msghdr from [sp, #16], and the control message from [sp, #72].
+fn receive_message(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit(".Lnet_receive_again:");
+    r#gen.emit("\tsub\tsp, sp, #96");
+    r#gen.emit("\tldr\tx9, [x19, #24]");
+    r#gen.emit("\tldr\tx10, [x19, #40]");
+    r#gen.emit("\tadd\tx9, x9, x10");
+    load(r#gen, "x10", READ_SIZE as i64);
+    r#gen.emit("\tstp\tx9, x10, [sp]");
+    r#gen.emit("\tstp\txzr, xzr, [sp, #16]");
+    r#gen.emit("\tmov\tx9, sp");
+    r#gen.emit("\tmov\tx10, #1");
+    r#gen.emit("\tstp\tx9, x10, [sp, #32]");
+    r#gen.emit("\tadd\tx9, sp, #72");
+    r#gen.emit("\tmov\tx10, #24");
+    r#gen.emit("\tstp\tx9, x10, [sp, #48]");
+    r#gen.emit("\tstr\txzr, [sp, #64]");
+    r#gen.emit("\tstp\txzr, xzr, [sp, #72]");
+    r#gen.emit("\tstr\txzr, [sp, #88]");
+    retried(
+        r#gen,
+        ".Lnet_receive_message",
+        Sys::Recvmsg,
+        &[
+            "ldr\tx0, [x19, #16]",
+            "add\tx1, sp, #16",
+            &format!("mov\tx2, #{MSG_CMSG_CLOEXEC}"),
+        ],
+    );
+    r#gen.emit("\ttbnz\tx0, #63, .Lnet_receive_unmessaged");
+    r#gen.emit("\tldr\tx9, [sp, #56]");
+    r#gen.emit("\tcmp\tx9, #20");
+    r#gen.emit("\tb.lo\t.Lnet_receive_unmessaged");
+    // SOL_SOCKET and SCM_RIGHTS
+    r#gen.emit("\tldr\tx9, [sp, #80]");
+    r#gen.emit("\tmov\tx10, #1");
+    r#gen.emit("\tmovk\tx10, #1, lsl #32");
+    r#gen.emit("\tcmp\tx9, x10");
+    r#gen.emit("\tb.ne\t.Lnet_receive_unmessaged");
+    r#gen.emit("\tmov\tx11, x0");
+    r#gen.emit("\tldr\tx0, [x19, #88]");
+    r#gen.emit("\ttbnz\tx0, #63, .Lnet_receive_kept");
+    system_call(r#gen, Sys::Close);
+    r#gen.emit(".Lnet_receive_kept:");
+    r#gen.emit("\tldr\tw9, [sp, #88]");
+    r#gen.emit("\tstr\tx9, [x19, #88]");
+    r#gen.emit("\tmov\tx0, x11");
+    r#gen.emit(".Lnet_receive_unmessaged:");
+    r#gen.emit("\tadd\tsp, sp, #96");
+}
+
+/// The `recvmsg` flag that makes each descriptor received close-on-exec.
+const MSG_CMSG_CLOEXEC: i64 = 0x4000_0000;
+
+/// Emits code that closes the descriptor the socket in `x19` received last, unless there is none,
+/// leaving none.
+fn close_received(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+    r#gen.emit("\tldr\tx0, [x19, #88]");
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_unreceived"));
+    system_call(r#gen, Sys::Close);
+    r#gen.emit("\tmov\tx9, #-1");
+    r#gen.emit("\tstr\tx9, [x19, #88]");
+    r#gen.emit(&format!("{label}_unreceived:"));
+}
+
+/// Emits `stone.net_take_fd`, as `x64::net` does, for the socket in `x0` and the size in `x1`. A
+/// macOS socket never receives a descriptor, so there it only fails.
+fn take_fd(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_take_fd";
+    // x19 holds the socket, x20 the size asked for, x21 the descriptor, x22 the size, x23 the new
+    // bytes, and x24 how many are read
+    frame(r#gen, label);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    check_open(r#gen, label);
+    if r#gen.target().os == Os::MacOs {
+        fail_with_code(r#gen, label, FD_MISSING_CODE);
+        frame_end(r#gen, label);
+        return;
+    }
+    r#gen.emit("\tldr\tx21, [x19, #88]");
+    r#gen.emit(&format!("\ttbz\tx21, #63, {label}_received"));
+    fail_with_code(r#gen, label, FD_MISSING_CODE);
+    r#gen.emit(&format!("{label}_received:"));
+    r#gen.emit("\tmov\tx9, #-1");
+    r#gen.emit("\tstr\tx9, [x19, #88]");
+    r#gen.emit("\tcmp\tx20, #0");
+    r#gen.emit("\tcsel\tx22, xzr, x20, lt");
+    r#gen.emit("\tmov\tx0, x22");
+    r#gen.emit("\tbl\tstone.str_new");
+    r#gen.emit("\tmov\tx23, x0");
+    r#gen.emit("\tmov\tx24, #0");
+    r#gen.emit(&format!("{label}_next:"));
+    r#gen.emit("\tcmp\tx24, x22");
+    r#gen.emit(&format!("\tb.hs\t{label}_read"));
+    retried(
+        r#gen,
+        &format!("{label}_again"),
+        Sys::Pread,
+        &[
+            "mov\tx0, x21",
+            "add\tx1, x23, x24",
+            "sub\tx2, x22, x24",
+            "mov\tx3, x24",
+        ],
+    );
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_failed"));
+    r#gen.emit(&format!("\tcbz\tx0, {label}_read"));
+    r#gen.emit("\tadd\tx24, x24, x0");
+    r#gen.emit(&format!("\tb\t{label}_next"));
+    // the file may be shorter than the size, so the bytes end where it did
+    r#gen.emit(&format!("{label}_read:"));
+    r#gen.emit("\tstur\tx24, [x23, #-16]");
+    r#gen.emit("\tstrb\twzr, [x23, x24]");
+    close(r#gen, "x21");
+    r#gen.emit("\tmov\tx0, x23");
+    r#gen.emit("\tmov\tx1, #1"); // a string slot, as bytes are
+    r#gen.emit("\tbl\t.Lfs_ok");
+    r#gen.emit(&format!("\tb\t{label}_done"));
+    r#gen.emit(&format!("{label}_failed:"));
+    r#gen.emit("\tmov\tx24, x0");
+    r#gen.emit("\tmov\tx9, x23");
+    r#gen.emit("\tbl\tstone.free_str");
+    close(r#gen, "x21");
+    r#gen.emit("\tmov\tx0, x24");
+    fail_with_errno(r#gen, label, None);
+    frame_end(r#gen, label);
 }
 
 /// Emits `.Lnet_take`, as `x64::net` does, taking the first `x0` bytes not read yet from the
@@ -1604,11 +1745,14 @@ pub fn free_handle(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tldr\tx0, [x9, #16]");
     r#gen.emit("\ttbnz\tx0, #63, .Lfree_handle_closed");
     system_call(r#gen, Sys::Close);
-    // and its shared memory, if it has any
-    r#gen.emit("\tldr\tx9, [sp, #24]");
-    r#gen.emit("\tldr\tx0, [x9, #72]");
-    r#gen.emit("\ttbnz\tx0, #63, .Lfree_handle_closed");
-    system_call(r#gen, Sys::Close);
+    // and its shared memory and the descriptor it received last, if it has them
+    for slot in [72, 88] {
+        r#gen.emit("\tldr\tx9, [sp, #24]");
+        r#gen.emit(&format!("\tldr\tx0, [x9, #{slot}]"));
+        r#gen.emit(&format!("\ttbnz\tx0, #63, .Lfree_handle_{slot}"));
+        system_call(r#gen, Sys::Close);
+        r#gen.emit(&format!(".Lfree_handle_{slot}:"));
+    }
     r#gen.emit(".Lfree_handle_closed:");
     r#gen.emit("\tldr\tx9, [sp, #24]");
     r#gen.emit("\tldr\tx10, [x9]");

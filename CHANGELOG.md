@@ -10,6 +10,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-10-26
+
 ### Added
 
 - `gui` windows on Wayland, spoken in stone like X11, and used first when `WAYLAND_DISPLAY`

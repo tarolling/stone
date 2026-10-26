@@ -10,6 +10,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-10-26
+
 ### Added
 
 - Hover shows a generic trait with its type parameters, as `trait add[R]`, and a generic trait's

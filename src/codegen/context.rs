@@ -15,6 +15,7 @@ use crate::diagnostic::Severity;
 use crate::project::SourceMap;
 use crate::span::{FileId, Span};
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::rc::Rc;
 
 /// Runtime routines for list methods and slices, which `builtins::list_methods` emits in each
 /// backend for the ones a program calls.
@@ -486,7 +487,9 @@ pub struct Context {
     bytes_literals: HashMap<Vec<u8>, String>,
     /// What the checker learned about the program: the type of every expression, every symbol,
     /// enum, and struct, and how every method call was resolved.
-    analysis: Analysis,
+    analysis: Rc<Analysis>,
+    /// Whether the driver gave [`Context::analysis`], so [`Context::check`] need not check again.
+    checked: bool,
     /// The tag of every variant without values that the code uses, each of which gets a static
     /// value.
     pub variant_statics: BTreeSet<usize>,
@@ -516,6 +519,9 @@ impl Context {
     ///
     /// For example, checking `x = 1 + "a"` fails with `1:9: error: expected int, found str`.
     pub fn check(&mut self, module: &Mod) -> Result<(), String> {
+        if self.checked {
+            return Ok(());
+        }
         // code generation depends on the checker's types, so it only accepts valid programs
         let analysis = TypeChecker::new().analyze(module);
         if let Some(error) = analysis
@@ -525,7 +531,7 @@ impl Context {
         {
             return Err(error.to_string());
         }
-        self.analysis = analysis;
+        self.analysis = Rc::new(analysis);
         Ok(())
     }
 
@@ -659,6 +665,13 @@ impl Context {
     /// Gives the program's files, so runtime errors point at their place in them.
     pub fn set_sources(&mut self, sources: SourceMap) {
         self.sources = Some(sources);
+    }
+
+    /// Gives what the checker found in the module about to be compiled, a module with no
+    /// errors, so [`Context::check`] uses it rather than checking the module again.
+    pub fn set_analysis(&mut self, analysis: Rc<Analysis>) {
+        self.analysis = analysis;
+        self.checked = true;
     }
 
     /// Returns the label of the site record for `span`, the same one for every use, or `None`
@@ -952,8 +965,11 @@ pub fn variant_statics(r#gen: &mut dyn AssemblyGenerator, tags: &BTreeSet<usize>
 /// The prefix keeps stone functions from colliding with `main` or with C library functions, so
 /// `function_label("exit")` is `fn.exit`.
 pub fn function_label(name: &str) -> String {
-    format!("fn.{name}")
+    format!("{FUNCTION_PREFIX}{name}")
 }
+
+/// The prefix [`function_label`] puts before a stone function's name.
+pub const FUNCTION_PREFIX: &str = "fn.";
 
 /// Returns whether the fields of the struct `name`, from `structs`, include one for which `has`
 /// returns true, unless `seen` shows the struct was already looked through.

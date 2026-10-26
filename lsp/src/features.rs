@@ -1569,9 +1569,9 @@ fn slot(doc: &Document, line: usize, tokens: &[&Token]) -> Option<Slot> {
             _ => {}
         }
     }
-    let keyword = |i: usize, word: &str| matches!(tokens.get(i), Some(token) if token.r#type == TokenType::Keyword(word.to_string()));
+    let keyword = |i: usize, word: &'static str| matches!(tokens.get(i), Some(token) if token.r#type == TokenType::Keyword(word));
     let definition = keyword(0, "fn") || (keyword(0, "pub") && keyword(1, "fn"));
-    let plus = matches!(last, TokenType::Operator(op) if op == "+");
+    let plus = matches!(last, TokenType::Operator(op) if *op == "+");
     match last {
         // a lambda's parameter
         TokenType::Colon if bars % 2 == 1 => Some(Slot::Type),
@@ -1608,7 +1608,7 @@ fn slot(doc: &Document, line: usize, tokens: &[&Token]) -> Option<Slot> {
                 // the arguments of a type, as in `list[`
                 (TokenType::LBracket, TokenType::Name(_)) => in_type(),
                 // the parameters of a function type, as in `fn(`
-                (TokenType::LParen, TokenType::Keyword(fn_)) if fn_ == "fn" => in_type(),
+                (TokenType::LParen, TokenType::Keyword(fn_)) if *fn_ == "fn" => in_type(),
                 // the values of a variant, as in `Circle(`
                 (TokenType::LParen, TokenType::Name(_)) => {
                     let header = headers(doc, line).first().copied();

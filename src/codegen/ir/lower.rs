@@ -46,9 +46,9 @@ use crate::checker::{
     may_name_struct, place, place_root, place_spans, range_args, struct_display, type_text,
     variant_display, variants,
 };
-use crate::codegen::context::{function_label, module_routine};
+use crate::codegen::context::{FUNCTION_PREFIX, function_label, module_routine};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
-use crate::span::Span;
+use crate::span::{FileId, Span};
 use crate::stdlib::{
     BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, END_OF_INPUT, INDEX_RANGE,
     LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRELUDE_CLAMP, PRELUDE_SORT,
@@ -163,6 +163,9 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
     // function again for each function value a call binds a parameter of it to
     let mut generic = HashMap::new();
     let mut bodies = HashMap::new();
+    // a function of another file (the prelude, a library, or a module of the standard library
+    // written in stone) is lowered only once lowered code calls it or takes its address
+    let mut deferred = HashSet::new();
     for stmt in body {
         match &stmt.kind {
             StmtKind::FunctionDef {
@@ -178,6 +181,10 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
                 name, args, body, ..
             } => {
                 bodies.insert(name.clone(), (&args.args, body));
+                if stmt.span.file != FileId::ENTRY {
+                    deferred.insert(name.clone());
+                    continue;
+                }
                 let lowerer = Lowerer::new(&context, Some(name.clone()));
                 functions.push(lowerer.function(&args.args, body)?);
             }
@@ -197,6 +204,10 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
                             continue;
                         }
                         bodies.insert(function.clone(), (&args.args, body));
+                        if stmt.span.file != FileId::ENTRY {
+                            deferred.insert(function);
+                            continue;
+                        }
                         let lowerer = Lowerer::new(&context, Some(function));
                         functions.push(lowerer.function(&args.args, body)?);
                     }
@@ -223,8 +234,26 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
     functions.push(Lowerer::new(&context, None).function(&[], &top_level)?);
     // an instance can call other instances, and both instances and helpers can ask for the
     // helpers of the enums and structs their values hold, so this runs until none is left
-    let (mut made, mut instanced) = (0, 0);
+    let (mut made, mut instanced, mut scanned) = (0, 0, 0);
     loop {
+        let reached: Vec<String> = functions[scanned..]
+            .iter()
+            .flat_map(referenced_functions)
+            .filter(|name| deferred.contains(*name))
+            .map(str::to_string)
+            .collect();
+        scanned = functions.len();
+        if !reached.is_empty() {
+            for name in reached {
+                if !deferred.remove(&name) {
+                    continue;
+                }
+                let (args, body) = bodies[&name];
+                let lowerer = Lowerer::new(&context, Some(name));
+                functions.push(lowerer.function(args, body)?);
+            }
+            continue;
+        }
         let next = context.requested.borrow().get(instanced).cloned();
         if let Some(copy) = next {
             instanced += 1;
@@ -263,6 +292,25 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
     }
 
     Ok(Program { functions, globals })
+}
+
+/// Returns the stone functions `function` calls directly or takes the address of, by their stone
+/// names.
+///
+/// For example, a function with `v1 = call f(v0)` and `v2 = fn_addr fn.g` names `f` and `g`.
+fn referenced_functions(function: &Function) -> impl Iterator<Item = &str> {
+    function
+        .blocks
+        .iter()
+        .flat_map(|block| &block.insts)
+        .filter_map(|inst| match inst {
+            Inst::Call {
+                callee: Callee::User(name),
+                ..
+            } => Some(name.as_str()),
+            Inst::FunctionAddress { label, .. } => label.strip_prefix(FUNCTION_PREFIX),
+            _ => None,
+        })
 }
 
 /// Returns the globals of the top-level code `body` that read as the same int, float, or bool

@@ -544,10 +544,10 @@ impl Lexer {
     /// `=` follows it directly.
     ///
     /// For example, `+` followed by `=` becomes `+=`, and `**` followed by `=` becomes `**=`.
-    fn augmented(&mut self, mut op: String) -> TokenType {
+    fn augmented(&mut self, op: &'static str, assign: &'static str) -> TokenType {
         if self.peek() == Some('=') {
             self.advance();
-            op.push('=');
+            return TokenType::Operator(assign);
         }
         TokenType::Operator(op)
     }
@@ -653,12 +653,12 @@ impl Lexer {
             }
             Some('*') => {
                 self.advance();
-                let mut op = "*".to_string();
                 if self.peek() == Some('*') {
                     self.advance();
-                    op.push('*');
+                    self.augmented("**", "**=")
+                } else {
+                    self.augmented("*", "*=")
                 }
-                self.augmented(op)
             }
             Some('-') => {
                 self.advance();
@@ -666,30 +666,47 @@ impl Lexer {
                     self.advance();
                     TokenType::Arrow
                 } else {
-                    self.augmented("-".to_string())
+                    self.augmented("-", "-=")
                 }
             }
-            Some('+') | Some('/') | Some('%') => {
-                let op = self.advance().unwrap().to_string();
-                self.augmented(op)
+            Some('+') => {
+                self.advance();
+                self.augmented("+", "+=")
+            }
+            Some('/') => {
+                self.advance();
+                self.augmented("/", "/=")
+            }
+            Some('%') => {
+                self.advance();
+                self.augmented("%", "%=")
             }
             Some(first @ ('=' | '<' | '>' | '!')) => {
                 self.advance();
                 if self.peek() == Some('=') {
                     self.advance();
-                    TokenType::Operator(format!("{first}="))
+                    TokenType::Operator(match first {
+                        '=' => "==",
+                        '<' => "<=",
+                        '>' => ">=",
+                        _ => "!=",
+                    })
                 } else if first == '!' {
                     return Err(LexError {
                         message: "unexpected character '!'".to_string(),
                         span: Span::new(start, self.pos()),
                     });
                 } else {
-                    TokenType::Operator(first.to_string())
+                    TokenType::Operator(match first {
+                        '=' => "=",
+                        '<' => "<",
+                        _ => ">",
+                    })
                 }
             }
             Some('?') => {
                 self.advance();
-                TokenType::Operator("?".to_string())
+                TokenType::Operator("?")
             }
             Some('"') => {
                 self.advance();
@@ -703,10 +720,9 @@ impl Lexer {
             Some(ch) if ch.is_ascii_digit() => self.lex_number()?,
             Some(ch) if ch.is_alphabetic() || ch == '_' => {
                 let ident = self.lex_name();
-                if RESERVED_KEYWORDS.contains(&ident.as_str()) {
-                    TokenType::Keyword(ident)
-                } else {
-                    TokenType::Name(ident)
+                match RESERVED_KEYWORDS.iter().find(|word| **word == ident) {
+                    Some(word) => TokenType::Keyword(word),
+                    None => TokenType::Name(ident),
                 }
             }
             Some(ch) => {
@@ -753,34 +769,22 @@ ret y
             start_of(&tokens[0]),
             tok(TokenType::Name("x".to_string()), 1, 1)
         );
-        assert_eq!(
-            start_of(&tokens[1]),
-            tok(TokenType::Operator("=".to_string()), 1, 3)
-        );
+        assert_eq!(start_of(&tokens[1]), tok(TokenType::Operator("="), 1, 3));
         assert_eq!(start_of(&tokens[2]), tok(TokenType::Number(42), 1, 5));
         assert_eq!(start_of(&tokens[3]), tok(TokenType::Newline, 1, 7));
         assert_eq!(
             start_of(&tokens[4]),
             tok(TokenType::Name("y".to_string()), 2, 1)
         );
-        assert_eq!(
-            start_of(&tokens[5]),
-            tok(TokenType::Operator("=".to_string()), 2, 3)
-        );
+        assert_eq!(start_of(&tokens[5]), tok(TokenType::Operator("="), 2, 3));
         assert_eq!(
             start_of(&tokens[6]),
             tok(TokenType::Name("x".to_string()), 2, 5)
         );
-        assert_eq!(
-            start_of(&tokens[7]),
-            tok(TokenType::Operator("+".to_string()), 2, 7)
-        );
+        assert_eq!(start_of(&tokens[7]), tok(TokenType::Operator("+"), 2, 7));
         assert_eq!(start_of(&tokens[8]), tok(TokenType::Number(8), 2, 9));
         assert_eq!(start_of(&tokens[9]), tok(TokenType::Newline, 2, 10));
-        assert_eq!(
-            start_of(&tokens[10]),
-            tok(TokenType::Keyword("ret".to_string()), 3, 1)
-        );
+        assert_eq!(start_of(&tokens[10]), tok(TokenType::Keyword("ret"), 3, 1));
         assert_eq!(
             start_of(&tokens[11]),
             tok(TokenType::Name("y".to_string()), 3, 5)
@@ -803,34 +807,22 @@ ret y
             start_of(&tokens[0]),
             tok(TokenType::Name("x".to_string()), 2, 1)
         );
-        assert_eq!(
-            start_of(&tokens[1]),
-            tok(TokenType::Operator("=".to_string()), 2, 3)
-        );
+        assert_eq!(start_of(&tokens[1]), tok(TokenType::Operator("="), 2, 3));
         assert_eq!(start_of(&tokens[2]), tok(TokenType::Number(42), 2, 5));
         assert_eq!(start_of(&tokens[3]), tok(TokenType::Newline, 2, 7));
         assert_eq!(
             start_of(&tokens[4]),
             tok(TokenType::Name("y".to_string()), 3, 1)
         );
-        assert_eq!(
-            start_of(&tokens[5]),
-            tok(TokenType::Operator("=".to_string()), 3, 3)
-        );
+        assert_eq!(start_of(&tokens[5]), tok(TokenType::Operator("="), 3, 3));
         assert_eq!(
             start_of(&tokens[6]),
             tok(TokenType::Name("x".to_string()), 3, 5)
         );
-        assert_eq!(
-            start_of(&tokens[7]),
-            tok(TokenType::Operator("+".to_string()), 3, 7)
-        );
+        assert_eq!(start_of(&tokens[7]), tok(TokenType::Operator("+"), 3, 7));
         assert_eq!(start_of(&tokens[8]), tok(TokenType::Number(8), 3, 9));
         assert_eq!(start_of(&tokens[9]), tok(TokenType::Newline, 3, 10));
-        assert_eq!(
-            start_of(&tokens[10]),
-            tok(TokenType::Keyword("ret".to_string()), 4, 1)
-        );
+        assert_eq!(start_of(&tokens[10]), tok(TokenType::Keyword("ret"), 4, 1));
         assert_eq!(
             start_of(&tokens[11]),
             tok(TokenType::Name("y".to_string()), 4, 5)
@@ -849,10 +841,7 @@ testing()
         let mut lexer = Lexer::new(source);
         let tokens = lexer.lex().unwrap();
         assert_eq!(tokens.len(), 16);
-        assert_eq!(
-            start_of(&tokens[0]),
-            tok(TokenType::Keyword("fn".to_string()), 1, 1)
-        );
+        assert_eq!(start_of(&tokens[0]), tok(TokenType::Keyword("fn"), 1, 1));
         assert_eq!(
             start_of(&tokens[1]),
             tok(TokenType::Name("testing".to_string()), 1, 4)
@@ -862,10 +851,7 @@ testing()
         assert_eq!(start_of(&tokens[4]), tok(TokenType::Colon, 1, 13));
         assert_eq!(start_of(&tokens[5]), tok(TokenType::Newline, 1, 14));
         assert_eq!(start_of(&tokens[6]), tok(TokenType::Indent, 2, 1));
-        assert_eq!(
-            start_of(&tokens[7]),
-            tok(TokenType::Keyword("ret".to_string()), 2, 5)
-        );
+        assert_eq!(start_of(&tokens[7]), tok(TokenType::Keyword("ret"), 2, 5));
         assert_eq!(start_of(&tokens[8]), tok(TokenType::Number(52), 2, 9));
         assert_eq!(start_of(&tokens[9]), tok(TokenType::Newline, 2, 11));
         assert_eq!(start_of(&tokens[10]), tok(TokenType::Dedent, 3, 1));
@@ -897,7 +883,7 @@ testing(1, 2, 3)"#;
         assert_eq!(
             tokens.iter().map(start_of).collect::<Vec<_>>(),
             vec![
-                tok(TokenType::Keyword("fn".to_string()), 1, 1),
+                tok(TokenType::Keyword("fn"), 1, 1),
                 tok(TokenType::Name("testing".to_string()), 1, 4),
                 tok(TokenType::LParen, 1, 11),
                 tok(TokenType::Name("a".to_string()), 1, 12),
@@ -909,7 +895,7 @@ testing(1, 2, 3)"#;
                 tok(TokenType::Colon, 1, 20),
                 tok(TokenType::Newline, 1, 21),
                 tok(TokenType::Indent, 2, 1),
-                tok(TokenType::Keyword("ret".to_string()), 2, 5),
+                tok(TokenType::Keyword("ret"), 2, 5),
                 tok(TokenType::Name("b".to_string()), 2, 9),
                 tok(TokenType::Newline, 2, 10),
                 tok(TokenType::Dedent, 3, 1),
@@ -1026,8 +1012,8 @@ testing(1, 2, 3)"#;
         TokenType::Name(id.to_string())
     }
 
-    fn op(op: &str) -> TokenType {
-        TokenType::Operator(op.to_string())
+    fn op(op: &'static str) -> TokenType {
+        TokenType::Operator(op)
     }
 
     #[test]
@@ -1050,7 +1036,7 @@ testing(1, 2, 3)"#;
         assert_eq!(
             types_of(source),
             [
-                TokenType::Keyword("if".to_string()),
+                TokenType::Keyword("if"),
                 TokenType::Number(1),
                 TokenType::Colon,
                 TokenType::Newline,
@@ -1170,10 +1156,7 @@ testing(1, 2, 3)"#;
         // a minus before a separate `>` is still subtraction
         assert_eq!(
             types_of("a - > b\n")[1..3],
-            [
-                TokenType::Operator("-".to_string()),
-                TokenType::Operator(">".to_string())
-            ]
+            [TokenType::Operator("-"), TokenType::Operator(">")]
         );
     }
 
@@ -1227,9 +1210,9 @@ testing(1, 2, 3)"#;
         assert_eq!(
             types_of("for i in x:\n")[..4],
             [
-                TokenType::Keyword("for".to_string()),
+                TokenType::Keyword("for"),
                 name("i"),
-                TokenType::Keyword("in".to_string()),
+                TokenType::Keyword("in"),
                 name("x"),
             ]
         );
@@ -1608,7 +1591,7 @@ testing(1, 2, 3)"#;
     #[test]
     fn while_and_not_are_keywords() {
         let tokens = Lexer::new("while not x:\n").lex().unwrap();
-        assert_eq!(tokens[0].r#type, TokenType::Keyword("while".to_string()));
-        assert_eq!(tokens[1].r#type, TokenType::Keyword("not".to_string()));
+        assert_eq!(tokens[0].r#type, TokenType::Keyword("while"));
+        assert_eq!(tokens[1].r#type, TokenType::Keyword("not"));
     }
 }

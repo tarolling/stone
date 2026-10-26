@@ -53,6 +53,14 @@ pub struct Parser {
     /// Specific explanations for common mistakes, such as `x = 1, 2`, each shown instead of the
     /// usual message when parsing fails at the token it was noted at.
     hints: Vec<Hint>,
+    /// Whether to try every alternative of a statement, rather than only those its first tokens
+    /// allow. Skipping the others gives the same tree, but fewer expectations and hints, so a
+    /// statement that fails is parsed again exhaustively for its error message.
+    exhaustive: bool,
+    /// How many statements failed with shortcuts but parsed exhaustively, which would mean a
+    /// shortcut skipped an alternative that matches.
+    #[cfg(test)]
+    rescued: usize,
 }
 
 /// An explanation of a mistake a rule recognized at token `index`, such as a tuple without
@@ -68,10 +76,30 @@ struct Hint {
 /// Quiet expectations, like an operator that could continue an expression, are only shown when
 /// nothing else was expected at the same token. So `print(1` reports `expected ')'` rather than
 /// listing every operator that could follow `1`.
+///
+/// Rules record expectations whenever they fail, which a backtracking parser does constantly, so
+/// the text is only built by [`Parser::syntax_error`].
 #[derive(PartialEq)]
 struct Expected {
-    what: String,
+    what: Wanted,
     quiet: bool,
+}
+
+/// What an [`Expected`] wanted: a token, described as `describe_expected` does, or a text such as
+/// `an expression`.
+#[derive(PartialEq)]
+enum Wanted {
+    Token(TokenType),
+    Text(&'static str),
+}
+
+impl Wanted {
+    fn describe(&self) -> std::borrow::Cow<'static, str> {
+        match self {
+            Wanted::Token(r#type) => describe_expected(r#type).into(),
+            Wanted::Text(text) => (*text).into(),
+        }
+    }
 }
 
 impl Parser {
@@ -85,6 +113,9 @@ impl Parser {
             too_deep: None,
             recovered: vec![],
             hints: vec![],
+            exhaustive: false,
+            #[cfg(test)]
+            rescued: 0,
         }
     }
 
@@ -106,28 +137,25 @@ impl Parser {
 
     fn expect(&mut self, target: TokenType) -> Option<Token> {
         debug!("Expecting {:?} at pos {:?}...", target, self.pos);
-        let tok = self.peek().clone();
-        if target != tok.r#type {
+        if target != self.peek().r#type {
             debug!("Failed.");
-            self.record_expected(describe_expected(&target), is_quiet(&target));
+            let quiet = is_quiet(&target);
+            self.record_wanted(Wanted::Token(target), quiet);
             return None;
         }
         debug!("Success! Advancing position...");
-        self.pos += 1;
-        Some(tok)
+        Some(self.advance())
     }
 
     /// Expects `target` as [`Parser::expect`] does, but quietly whatever the token, as for the
     /// `in` of `x in xs`, which is one of many ways an expression may go on, unlike the `in` a
     /// `for` loop requires.
     fn expect_quietly(&mut self, target: TokenType) -> Option<Token> {
-        let tok = self.peek().clone();
-        if target != tok.r#type {
-            self.record_expected(describe_expected(&target), true);
+        if target != self.peek().r#type {
+            self.record_wanted(Wanted::Token(target), true);
             return None;
         }
-        self.pos += 1;
-        Some(tok)
+        Some(self.advance())
     }
 
     /// Expects the `:` that opens a block, as after `if x` or `fn f()`.
@@ -138,7 +166,7 @@ impl Parser {
         if self.peek().r#type == TokenType::Colon {
             return Some(self.advance());
         }
-        self.record_expected(describe_expected(&TokenType::Colon), false);
+        self.record_wanted(Wanted::Token(TokenType::Colon), false);
         None
     }
 
@@ -171,14 +199,23 @@ impl Parser {
     /// Consumes a name token and returns it with its span, or notes that `what` was expected here.
     ///
     /// For example, `self.expect_name("a parameter name", false)` reads `a` in `fn f(a: int):`.
-    fn expect_name(&mut self, what: &str, quiet: bool) -> Option<(String, Span)> {
-        let tok = self.peek().clone();
-        if let TokenType::Name(name) = tok.r#type {
+    fn expect_name(&mut self, what: &'static str, quiet: bool) -> Option<(String, Span)> {
+        let tok = self.peek();
+        if let TokenType::Name(name) = &tok.r#type {
+            let found = (name.clone(), tok.span);
             self.pos += 1;
-            return Some((name, tok.span));
+            return Some(found);
         }
-        self.record_expected(what.to_string(), quiet);
+        self.record_expected(what, quiet);
         None
+    }
+
+    /// Returns the error of the rule `method` failing at the current token.
+    fn error_here(&self, method: &'static str) -> ParserError {
+        ParserError {
+            method,
+            span: self.peek().span,
+        }
     }
 
     /// Runs a rule one nesting level deeper, failing once nesting exceeds [`MAX_DEPTH`].
@@ -190,11 +227,7 @@ impl Parser {
     ) -> Result<T, ParserError> {
         if self.depth >= MAX_DEPTH {
             self.too_deep.get_or_insert(self.peek().span);
-            return Err(ParserError {
-                method: "nested".to_string(),
-                token: self.peek().r#type.clone(),
-                span: self.peek().span,
-            });
+            return Err(self.error_here("nested"));
         }
         self.depth += 1;
         let result = rule(self);
@@ -205,15 +238,23 @@ impl Parser {
     /// Notes that a rule expected `what` at the current token, keeping only the expectations at
     /// the furthest token reached so far.
     ///
-    /// For example, `self.record_expected("a name".to_string(), false)` after failing to find a
-    /// parameter name.
-    fn record_expected(&mut self, what: String, quiet: bool) {
+    /// For example, `self.record_expected("a name", false)` after failing to find a parameter
+    /// name.
+    fn record_expected(&mut self, what: &'static str, quiet: bool) {
+        self.record_wanted(Wanted::Text(what), quiet);
+    }
+
+    /// Notes that a rule wanted `what` at the current token, as [`Parser::record_expected`] does.
+    fn record_wanted(&mut self, what: Wanted, quiet: bool) {
+        if self.pos < self.furthest {
+            return;
+        }
         if self.pos > self.furthest {
             self.furthest = self.pos;
             self.expected.clear();
         }
         let expected = Expected { what, quiet };
-        if self.pos == self.furthest && !self.expected.contains(&expected) {
+        if !self.expected.contains(&expected) {
             self.expected.push(expected);
         }
     }
@@ -256,17 +297,22 @@ impl Parser {
         if found.r#type == TokenType::Indent {
             return Diagnostic::error(found.span, "unexpected indent");
         }
-        let loud: Vec<&str> = self
-            .expected
+        // different expectations can read alike, such as a name token and `a name`
+        let mut loud: Vec<std::borrow::Cow<str>> = vec![];
+        let mut all: Vec<std::borrow::Cow<str>> = vec![];
+        for expected in &self.expected {
+            let text = expected.what.describe();
+            if !expected.quiet && !loud.contains(&text) {
+                loud.push(text.clone());
+            }
+            if !all.contains(&text) {
+                all.push(text);
+            }
+        }
+        let wanted: Vec<&str> = if loud.is_empty() { &all } else { &loud }
             .iter()
-            .filter(|e| !e.quiet)
-            .map(|e| e.what.as_str())
+            .map(|text| text.as_ref())
             .collect();
-        let wanted = if loud.is_empty() {
-            self.expected.iter().map(|e| e.what.as_str()).collect()
-        } else {
-            loud
-        };
         let found_text = describe_found(&found.r#type);
         let message = match wanted.split_last() {
             None => format!("unexpected {found_text}"),
@@ -335,7 +381,23 @@ impl Parser {
         self.hints.clear();
         self.too_deep = None;
 
-        match self.parse_statement() {
+        let mut result = self.parse_statement();
+        if result.is_err() && !self.exhaustive {
+            // the error message needs what every alternative expected, so try them all
+            self.pos = start;
+            self.furthest = start;
+            self.expected.clear();
+            self.hints.clear();
+            self.too_deep = None;
+            self.exhaustive = true;
+            result = self.parse_statement();
+            self.exhaustive = false;
+            #[cfg(test)]
+            if result.is_ok() {
+                self.rescued += 1;
+            }
+        }
+        match result {
             Ok(stmts) => Some(stmts),
             Err(_) => {
                 let error = self.syntax_error();
@@ -427,7 +489,7 @@ fn describe_found(r#type: &TokenType) -> String {
 /// which a `for` loop always requires, and `case`, which starts every line of a `match`.
 fn is_quiet(r#type: &TokenType) -> bool {
     if let TokenType::Keyword(word) = r#type {
-        return word != "in" && word != "case";
+        return *word != "in" && *word != "case";
     }
     matches!(
         r#type,

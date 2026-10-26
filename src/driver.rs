@@ -15,6 +15,7 @@ use crate::repl;
 use std::error::Error;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
+use std::rc::Rc;
 
 /// Lexes and parses source code into a module.
 ///
@@ -62,6 +63,8 @@ pub struct Checked {
     /// How every call of a function of an `impl` block was resolved, and every function value
     /// and call of one, which the interpreter needs.
     pub calls: Calls,
+    /// Everything the checker learned about the module, which compiling it reuses.
+    pub analysis: Rc<Analysis>,
 }
 
 /// Loads, links, and checks the program whose entry file is at `entry` and holds `source`,
@@ -91,7 +94,8 @@ pub fn load(
     let checked = Checked {
         module,
         calls: analysis.calls(),
-        warnings: analysis.diagnostics,
+        warnings: analysis.diagnostics.clone(),
+        analysis: Rc::new(analysis),
     };
     (sources, Ok(checked))
 }
@@ -282,7 +286,7 @@ pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
 /// arm64 assembly to `build/out.s` and links it into an arm64 Linux `build/out`.
 pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
     let (sources, loaded) = load(Path::new(DEFAULT_ENTRY), source, &MapSources::default());
-    compile_module(&loaded?.module, &sources, output, target)
+    compile_module(&loaded?, &sources, output, target)
 }
 
 /// Compiles a checked module, such as one from [`load`], to a native executable for `target` at
@@ -291,14 +295,15 @@ pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Bo
 /// For example, compiling for [`Target::ARM64_MACOS`] on an x86-64 Linux machine writes an arm64
 /// macOS executable, with no cross toolchain installed.
 pub fn compile_module(
-    ast: &Mod,
+    checked: &Checked,
     sources: &SourceMap,
     output: &Path,
     target: Target,
 ) -> Result<(), Box<dyn Error>> {
     let mut generator = target.generator();
     generator.set_sources(sources.clone());
-    generator.compile(ast, output)?;
+    generator.set_analysis(Rc::clone(&checked.analysis));
+    generator.compile(&checked.module, output)?;
     Ok(())
 }
 

@@ -20,9 +20,9 @@ impl Parser {
         let mark = self.pos;
 
         // 'for' star_targets 'in' ~ expressions ':' block
-        if self.expect(TokenType::Keyword("for".to_string())).is_some()
+        if self.expect(TokenType::Keyword("for")).is_some()
             && let Ok(target) = self.parse_star_targets()
-            && self.expect(TokenType::Keyword("in".to_string())).is_some()
+            && self.expect(TokenType::Keyword("in")).is_some()
             && let Ok(iter) = self.parse_expressions()
             && self.expect_block_start().is_some()
             && let Ok(body) = self.nested(Self::parse_block)
@@ -34,11 +34,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_for_stmt".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_for_stmt"))
     }
 
     ////////////////////////////////////////////////////////////////
@@ -55,9 +51,7 @@ impl Parser {
         let mark = self.pos;
 
         // 'while' expression ':' block
-        if self
-            .expect(TokenType::Keyword("while".to_string()))
-            .is_some()
+        if self.expect(TokenType::Keyword("while")).is_some()
             && let Ok(test) = self.parse_expression()
             && self.expect_block_start().is_some()
             && let Ok(body) = self.parse_block()
@@ -67,11 +61,7 @@ impl Parser {
                 self.span_from(mark),
             )));
         }
-        Err(ParserError {
-            method: "parse_while_stmt".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_while_stmt"))
     }
 
     ////////////////////////////////////////////////////////////////
@@ -88,9 +78,7 @@ impl Parser {
         let mark = self.pos;
 
         // 'else' ':' block
-        if self
-            .expect(TokenType::Keyword("else".to_string()))
-            .is_some()
+        if self.expect(TokenType::Keyword("else")).is_some()
             && self.expect_block_start().is_some()
             && let Ok(block) = self.parse_block()
         {
@@ -98,11 +86,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_else_block".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_else_block"))
     }
 
     /// Parses an `elif` branch and any branches after it, such as `elif x: print(x)`.
@@ -116,9 +100,7 @@ impl Parser {
         let mark = self.pos;
 
         // both alternatives share this prefix, so parse it once instead of backtracking
-        if self
-            .expect(TokenType::Keyword("elif".to_string()))
-            .is_some()
+        if self.expect(TokenType::Keyword("elif")).is_some()
             && let Ok(test) = self.parse_expression()
             && self.expect_block_start().is_some()
             && let Ok(body) = self.parse_block()
@@ -150,11 +132,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_elif_stmt".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_elif_stmt"))
     }
 
     /// Parses an `if` statement with its `elif` and `else` branches, such as `if x: print(x)`.
@@ -168,7 +146,7 @@ impl Parser {
         let mark = self.pos;
 
         // both alternatives share this prefix, so parse it once instead of backtracking
-        if self.expect(TokenType::Keyword("if".to_string())).is_some()
+        if self.expect(TokenType::Keyword("if")).is_some()
             && let Ok(test) = self.parse_expression()
             && self.expect_block_start().is_some()
             && let Ok(body) = self.parse_block()
@@ -200,11 +178,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_if_stmt".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_if_stmt"))
     }
 
     /// Parses one function parameter, such as `a: int` in `fn f(a: int, b: int):`.
@@ -233,11 +207,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_param".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_param"))
     }
 
     /// Parses a type in a function's signature, such as `int`, `list[list[float]]`,
@@ -273,7 +243,7 @@ impl Parser {
             }));
         }
 
-        if self.peek().r#type == TokenType::Keyword("none".to_string()) {
+        if self.peek().r#type == TokenType::Keyword("none") {
             let span = self.peek().span;
             self.hint(
                 span,
@@ -331,7 +301,7 @@ impl Parser {
                     }));
                 }
             }
-        } else if self.peek().r#type == TokenType::Keyword("fn".to_string()) {
+        } else if self.peek().r#type == TokenType::Keyword("fn") {
             // 'fn' '(' [','.type+ [',']] ')' ['->' type]
             self.pos += 1;
             if self.expect(TokenType::LParen).is_some() {
@@ -385,11 +355,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_type".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_type"))
     }
 
     /// Parses one or more types separated by commas, allowing a trailing comma, such as
@@ -422,10 +388,8 @@ impl Parser {
         let mark = self.pos;
 
         // ['pub'] 'enum' NAME [type_params] ':' NEWLINE INDENT variant+ DEDENT
-        let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
-        if self
-            .expect(TokenType::Keyword("enum".to_string()))
-            .is_some()
+        let public = self.expect(TokenType::Keyword("pub")).is_some();
+        if self.expect(TokenType::Keyword("enum")).is_some()
             && let Some((name, name_span)) = self.expect_name("an enum name", false)
             && let Ok(type_params) = self.parse_type_params("an enum's", "enum Tree[T]:")
             && self.expect_block_start().is_some()
@@ -447,11 +411,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_enum_def".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_enum_def"))
     }
 
     /// Parses a struct definition, such as `struct Point:` followed by an indented line for each
@@ -465,10 +425,8 @@ impl Parser {
         let mark = self.pos;
 
         // ['pub'] 'struct' NAME [type_params] ':' NEWLINE INDENT field+ DEDENT
-        let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
-        if self
-            .expect(TokenType::Keyword("struct".to_string()))
-            .is_some()
+        let public = self.expect(TokenType::Keyword("pub")).is_some();
+        if self.expect(TokenType::Keyword("struct")).is_some()
             && let Some((name, name_span)) = self.expect_name("a struct name", false)
             && let Ok(type_params) = self.parse_type_params("a struct's", "struct Pair[A, B]:")
             && self.expect_block_start().is_some()
@@ -490,11 +448,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_struct_def".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_struct_def"))
     }
 
     /// Parses an `impl` block, such as `impl Point:` followed by an indented function for each
@@ -509,9 +463,7 @@ impl Parser {
         let mark = self.pos;
 
         // 'impl' [trait_name 'for'] NAME ':' NEWLINE INDENT function_def+ DEDENT
-        if self
-            .expect(TokenType::Keyword("impl".to_string()))
-            .is_some()
+        if self.expect(TokenType::Keyword("impl")).is_some()
             && let Some(first) = self.parse_trait_name("a struct name")
             && let Some((trait_name, (name, name_span))) = self.parse_impl_target(first)
             && self.expect_block_start().is_some()
@@ -532,11 +484,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_impl_def".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_impl_def"))
     }
 
     /// Parses what follows the first name of an `impl` block: nothing for `impl Point:`, whose
@@ -547,16 +495,16 @@ impl Parser {
         &mut self,
         first: TraitName,
     ) -> Option<(Option<TraitName>, (String, Span))> {
-        if self.expect(TokenType::Keyword("for".to_string())).is_some() {
+        if self.expect(TokenType::Keyword("for")).is_some() {
             let target = self.expect_name("a type name", false)?;
             return Some((Some(first), target));
         }
         if first.name.contains('.') {
-            self.record_expected("'for'".to_string(), false);
+            self.record_expected("'for'", false);
             return None;
         }
         // `for` is optional here, so it is only expected if nothing else is
-        self.record_expected("'for'".to_string(), true);
+        self.record_expected("'for'", true);
         Some((None, (first.name, first.span)))
     }
 
@@ -567,7 +515,7 @@ impl Parser {
     /// trait_name:
     ///     | '.'.NAME+ ['[' ','.type+ [','] ']']
     /// ```
-    fn parse_trait_name(&mut self, what: &str) -> Option<TraitName> {
+    fn parse_trait_name(&mut self, what: &'static str) -> Option<TraitName> {
         let (mut name, mut span) = self.expect_name(what, false)?;
         while self.peek().r#type == TokenType::Dot {
             let mark = self.pos;
@@ -598,10 +546,8 @@ impl Parser {
         let mark = self.pos;
 
         // ['pub'] 'trait' NAME [type_params] ':' NEWLINE INDENT trait_method+ DEDENT
-        let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
-        if self
-            .expect(TokenType::Keyword("trait".to_string()))
-            .is_some()
+        let public = self.expect(TokenType::Keyword("pub")).is_some();
+        if self.expect(TokenType::Keyword("trait")).is_some()
             && let Some((name, name_span)) = self.expect_name("a trait name", false)
             && let Ok(type_params) = self.parse_type_params("a trait's", "trait from[T]:")
             && self.expect_block_start().is_some()
@@ -623,11 +569,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_trait_def".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_trait_def"))
     }
 
     /// Parses the functions of an `impl` block, or of a trait if `in_trait`, where a function
@@ -644,7 +586,7 @@ impl Parser {
         let mut methods = vec![];
         loop {
             let token = self.peek().clone();
-            if token.r#type == TokenType::Keyword("pub".to_string()) {
+            if token.r#type == TokenType::Keyword("pub") {
                 let message = if in_trait {
                     "a trait's method needs no 'pub', since it is visible wherever the trait is"
                 } else {
@@ -653,8 +595,8 @@ impl Parser {
                 self.hint(token.span, message);
                 break;
             }
-            if token.r#type != TokenType::Keyword("fn".to_string()) {
-                self.record_expected("'fn'".to_string(), false);
+            if token.r#type != TokenType::Keyword("fn") {
+                self.record_expected("'fn'", false);
                 break;
             }
             let Ok(method) = self.parse_function_def_in(in_trait) else {
@@ -666,11 +608,7 @@ impl Parser {
             }
         }
 
-        Err(ParserError {
-            method: "parse_methods".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_methods"))
     }
 
     /// Parses the fields of a struct, one per line, up to the `Dedent` that ends them.
@@ -702,11 +640,7 @@ impl Parser {
             }
         }
 
-        Err(ParserError {
-            method: "parse_fields".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_fields"))
     }
 
     /// Parses the variants of an enum, one per line, up to the `Dedent` that ends them.
@@ -720,7 +654,7 @@ impl Parser {
         loop {
             let mark = self.pos;
             // only the prelude names a variant `none`, which is a keyword everywhere else
-            let none = TokenType::Keyword("none".to_string());
+            let none = TokenType::Keyword("none");
             let named = if self.peek().span.file == FileId::PRELUDE && self.peek().r#type == none {
                 let token = self.advance();
                 Some(("none".to_string(), token.span))
@@ -762,11 +696,7 @@ impl Parser {
             }
         }
 
-        Err(ParserError {
-            method: "parse_variants".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_variants"))
     }
 
     /// Parses a `match` statement, such as `match s:` followed by an indented `case` for each
@@ -782,9 +712,7 @@ impl Parser {
         let mark = self.pos;
 
         // 'match' expression ':' NEWLINE INDENT case_block+ DEDENT
-        if self
-            .expect(TokenType::Keyword("match".to_string()))
-            .is_some()
+        if self.expect(TokenType::Keyword("match")).is_some()
             && let Ok(subject) = self.parse_expression()
             && self.expect_block_start().is_some()
             && self.expect(TokenType::Newline).is_some()
@@ -799,11 +727,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_match_stmt".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_match_stmt"))
     }
 
     /// Parses the cases of a `match`, up to the `Dedent` that ends them.
@@ -811,9 +735,7 @@ impl Parser {
         let mut cases = vec![];
         loop {
             let mark = self.pos;
-            if self
-                .expect(TokenType::Keyword("case".to_string()))
-                .is_some()
+            if self.expect(TokenType::Keyword("case")).is_some()
                 && let Ok(pattern) = self.parse_pattern()
                 && self.expect_block_start().is_some()
                 && let Ok(body) = self.nested(Self::parse_block)
@@ -828,11 +750,7 @@ impl Parser {
             break;
         }
 
-        Err(ParserError {
-            method: "parse_cases".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_cases"))
     }
 
     /// Parses a pattern after `case`, such as `Shape.Rect(w, _)`, `some(x)`, `none`, a name, or
@@ -847,7 +765,7 @@ impl Parser {
         let mark = self.pos;
 
         // 'none'
-        if let Some(token) = self.expect(TokenType::Keyword("none".to_string())) {
+        if let Some(token) = self.expect(TokenType::Keyword("none")) {
             return Ok(Pattern {
                 kind: PatternKind::Variant {
                     path: vec![("none".to_string(), token.span)],
@@ -894,8 +812,8 @@ impl Parser {
         } else if matches!(
             self.peek().r#type,
             TokenType::Number(_) | TokenType::Float(_) | TokenType::String(_)
-        ) || matches!(&self.peek().r#type, TokenType::Keyword(word) if word == "true" || word == "false")
-            || matches!(&self.peek().r#type, TokenType::Operator(op) if op == "-")
+        ) || matches!(&self.peek().r#type, TokenType::Keyword(word) if *word == "true" || *word == "false")
+            || matches!(&self.peek().r#type, TokenType::Operator(op) if *op == "-")
         {
             let span = self.peek().span;
             self.hint(
@@ -905,11 +823,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_pattern".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_pattern"))
     }
 
     /// Parses one or more patterns separated by commas, allowing a trailing comma, such as
@@ -1028,11 +942,7 @@ impl Parser {
                 return Ok(params);
             }
         }
-        Err(ParserError {
-            method: "parse_type_params".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_type_params"))
     }
 
     /// Parses one type parameter and its bounds, such as `T` or `T: Shape + geo.Named`.
@@ -1041,7 +951,7 @@ impl Parser {
         let mut bounds = vec![];
         if self.expect(TokenType::Colon).is_some() {
             bounds.push(self.parse_trait_name("a trait name")?);
-            while self.expect(TokenType::Operator("+".to_string())).is_some() {
+            while self.expect(TokenType::Operator("+")).is_some() {
                 bounds.push(self.parse_trait_name("a trait name")?);
             }
         }
@@ -1065,8 +975,8 @@ impl Parser {
         let mark = self.pos;
 
         // ['pub'] 'fn' NAME [type_params] '(' [params] ')' ['->' type] ':' block
-        let public = self.expect(TokenType::Keyword("pub".to_string())).is_some();
-        if self.expect(TokenType::Keyword("fn".to_string())).is_some()
+        let public = self.expect(TokenType::Keyword("pub")).is_some();
+        if self.expect(TokenType::Keyword("fn")).is_some()
             && let Some((name, name_span)) = self.expect_name("a function name", false)
             && let Ok(type_params) =
                 self.parse_type_params("a function's", "fn first[T](xs: list[T]) -> T")
@@ -1091,11 +1001,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_function_def".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_function_def"))
     }
 
     /// Parses a function's `':' block`, or in a trait (`in_trait`) the newline of a signature
@@ -1109,15 +1015,6 @@ impl Parser {
             return Err(self.error_here("parse_function_def"));
         }
         self.parse_block()
-    }
-
-    /// Returns the error of the rule `method` failing at the current token.
-    fn error_here(&self, method: &str) -> ParserError {
-        ParserError {
-            method: method.to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        }
     }
 
     /// Parses the body of a compound statement, either as an indented block or on the same line.
@@ -1158,7 +1055,7 @@ impl Parser {
         let mark = self.pos;
 
         // 'ret' [expressions]
-        if self.expect(TokenType::Keyword("ret".to_string())).is_some()
+        if self.expect(TokenType::Keyword("ret")).is_some()
             && let value = self.parse_return_stmt_optional()
         {
             return Ok(Box::new(Stmt::new(
@@ -1167,11 +1064,7 @@ impl Parser {
             )));
         }
 
-        Err(ParserError {
-            method: "parse_return_stmt".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_return_stmt"))
     }
 
     /// Parses the chain of targets in an assignment, such as `a = b =` in `a = b = 1`.
@@ -1184,7 +1077,7 @@ impl Parser {
         loop {
             let mark = self.pos;
             if let Ok(res) = self.parse_star_targets()
-                && self.expect(TokenType::Operator("=".to_string())).is_some()
+                && self.expect(TokenType::Operator("=")).is_some()
             {
                 results.push(*res);
             } else {
@@ -1194,11 +1087,7 @@ impl Parser {
         }
 
         if results.is_empty() {
-            Err(ParserError {
-                method: "parse_assignment_loop".to_string(),
-                token: self.peek().r#type.clone(),
-                span: self.peek().span,
-            })
+            Err(self.error_here("parse_assignment_loop"))
         } else {
             Ok(results)
         }
@@ -1216,7 +1105,7 @@ impl Parser {
         debug!("parse_assignment: trying to parse star_targets");
         if let Ok(targets) = self.parse_assignment_loop()
             && let Ok(value) = self.parse_expressions()
-            && self.expect(TokenType::Operator("=".to_string())).is_none()
+            && self.expect(TokenType::Operator("=")).is_none()
         {
             let res = Box::new(Stmt::new(
                 StmtKind::Assign { targets, value },
@@ -1227,11 +1116,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_assignment".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_assignment"))
     }
 
     /// Parses an augmented assignment, such as `x += 1` or `grid[i][j] *= 2`.
@@ -1255,11 +1140,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_aug_assignment".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_aug_assignment"))
     }
 
     /// Parses the operator of an augmented assignment, such as `+=`, returning the arithmetic
@@ -1272,7 +1153,7 @@ impl Parser {
         let TokenType::Operator(text) = &self.peek().r#type else {
             return None;
         };
-        let op = match text.as_str() {
+        let op = match *text {
             "+=" => Operator::Add,
             "-=" => Operator::Subtract,
             "*=" => Operator::Multiply,
@@ -1294,7 +1175,7 @@ impl Parser {
         let mark = self.pos;
 
         // 'use' NAME ('.' NAME)* ['as' NAME]
-        if self.expect(TokenType::Keyword("use".to_string())).is_some()
+        if self.expect(TokenType::Keyword("use")).is_some()
             && let Some(first) = self.expect_name("a module name", false)
             && let Some(path) = self.parse_use_stmt_loop(first)
             && let Some(alias) = self.parse_use_stmt_alias()
@@ -1306,11 +1187,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_use_stmt".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_use_stmt"))
     }
 
     /// Parses the rest of a `use` path after its first name, failing on a dot with no name after.
@@ -1332,7 +1209,7 @@ impl Parser {
     /// ['as' NAME]
     /// ```
     fn parse_use_stmt_alias(&mut self) -> Option<Option<(String, Span)>> {
-        if self.expect(TokenType::Keyword("as".to_string())).is_none() {
+        if self.expect(TokenType::Keyword("as")).is_none() {
             return Some(None);
         }
         self.expect_name("a name", false).map(Some)
@@ -1353,6 +1230,24 @@ impl Parser {
     /// ```
     pub(super) fn parse_compound_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
+
+        if !self.exhaustive {
+            // each alternative fails at once unless it starts with its own keyword
+            let rule: fn(&mut Self) -> Result<Box<Stmt>, ParserError> =
+                match self.compound_keyword() {
+                    Some("fn") => Self::parse_function_def,
+                    Some("enum") => Self::parse_enum_def,
+                    Some("struct") => Self::parse_struct_def,
+                    Some("impl") => Self::parse_impl_def,
+                    Some("trait") => Self::parse_trait_def,
+                    Some("match") => Self::parse_match_stmt,
+                    Some("if") => Self::parse_if_stmt,
+                    Some("for") => Self::parse_for_stmt,
+                    Some("while") => Self::parse_while_stmt,
+                    _ => return Err(self.error_here("parse_compound_stmt")),
+                };
+            return rule(self).inspect_err(|_| self.pos = mark);
+        }
 
         // function_def
         if let Ok(stmt) = self.parse_function_def() {
@@ -1408,11 +1303,52 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_compound_stmt".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_compound_stmt"))
+    }
+
+    /// Returns the keyword a compound statement starting here would start with, after any `pub`,
+    /// such as `fn` for `pub fn f():`.
+    fn compound_keyword(&self) -> Option<&'static str> {
+        let mut index = self.pos;
+        let keyword = |index: usize| match self.tokens.get(index).map(|t| &t.r#type) {
+            Some(TokenType::Keyword(word)) => Some(*word),
+            _ => None,
+        };
+        if keyword(index) == Some("pub") {
+            index += 1;
+        }
+        keyword(index)
+    }
+
+    /// Returns whether the line starting here could be an assignment and whether it could be an
+    /// augmented assignment, by whether an `=` or an operator such as `+=` appears outside any
+    /// brackets or string values before the line ends. A target is balanced, so the `=` after it
+    /// always does.
+    ///
+    /// For example, `p.x = f(a=1)` could be an assignment, and `f(a=1)` could be neither.
+    fn assignment_shapes(&self) -> (bool, bool) {
+        let (mut assign, mut augmented) = (false, false);
+        let mut depth = 0isize;
+        for token in self.tokens.get(self.pos..).unwrap_or_default() {
+            match &token.r#type {
+                TokenType::Newline | TokenType::Eof => break,
+                TokenType::LParen
+                | TokenType::LBracket
+                | TokenType::LBrace
+                | TokenType::StringStart(_) => depth += 1,
+                TokenType::RParen
+                | TokenType::RBracket
+                | TokenType::RBrace
+                | TokenType::StringEnd(_) => depth -= 1,
+                TokenType::Operator(op) if depth == 0 => match *op {
+                    "=" => assign = true,
+                    "+=" | "-=" | "*=" | "/=" | "%=" | "**=" => augmented = true,
+                    _ => {}
+                },
+                _ => {}
+            }
+        }
+        (assign, augmented)
     }
 
     /// Parses a statement without a block, such as `x = 1`, `x += 1`, `print(x)`, or `ret x`.
@@ -1430,23 +1366,38 @@ impl Parser {
     pub(super) fn parse_simple_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
 
+        // no expression starts with these keywords, which only their own statements take
+        let statement_keyword = matches!(
+            self.peek().r#type,
+            TokenType::Keyword("ret" | "use" | "break" | "cont")
+        );
+        let (assign, augmented) = if self.exhaustive {
+            (true, true)
+        } else if statement_keyword {
+            (false, false)
+        } else {
+            self.assignment_shapes()
+        };
+
         // assignment
         debug!("parse_simple_stmt: trying to parse assignment");
-        if let Ok(stmt) = self.parse_assignment() {
+        if assign && let Ok(stmt) = self.parse_assignment() {
             debug!("parse_simple_stmt: successfully parsed assignment");
             return Ok(stmt);
         }
         self.pos = mark;
 
         // aug_assignment
-        if let Ok(stmt) = self.parse_aug_assignment() {
+        if augmented && let Ok(stmt) = self.parse_aug_assignment() {
             return Ok(stmt);
         }
         self.pos = mark;
 
         // expressions
         debug!("parse_simple_stmt: trying to parse expressions");
-        if let Ok(expr) = self.parse_expressions() {
+        if (self.exhaustive || !statement_keyword)
+            && let Ok(expr) = self.parse_expressions()
+        {
             debug!("parse_simple_stmt: successfully parsed expressions");
             return Ok(Box::new(Stmt::new(
                 StmtKind::Expr { value: expr },
@@ -1470,20 +1421,14 @@ impl Parser {
         self.pos = mark;
 
         // 'break'
-        if self
-            .expect(TokenType::Keyword("break".to_string()))
-            .is_some()
-        {
+        if self.expect(TokenType::Keyword("break")).is_some() {
             debug!("parse_simple_stmt: successfully parsed 'break'");
             return Ok(Box::new(Stmt::new(StmtKind::Break, self.span_from(mark))));
         }
         self.pos = mark;
 
         // 'cont'
-        if self
-            .expect(TokenType::Keyword("cont".to_string()))
-            .is_some()
-        {
+        if self.expect(TokenType::Keyword("cont")).is_some() {
             debug!("parse_simple_stmt: successfully parsed 'cont'");
             return Ok(Box::new(Stmt::new(
                 StmtKind::Continue,
@@ -1492,11 +1437,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_simple_stmt".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_simple_stmt"))
     }
 
     /// Parses a simple statement followed by a newline, such as `x = 1`.
@@ -1517,11 +1458,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_simple_stmts".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_simple_stmts"))
     }
 
     /// Parses one statement of either kind, such as `x = 1` or `if x: print(x)`.
@@ -1548,11 +1485,7 @@ impl Parser {
         }
         self.pos = mark;
 
-        Err(ParserError {
-            method: "parse_statement".to_string(),
-            token: self.peek().r#type.clone(),
-            span: self.peek().span,
-        })
+        Err(self.error_here("parse_statement"))
     }
 
     /// Parses the statements of an indented block, up to the `Dedent` that ends it.

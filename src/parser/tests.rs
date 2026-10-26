@@ -352,16 +352,16 @@ ret y
 
     let tokens = vec![
         tok(TokenType::Name("x".to_string()), 1, 1),
-        tok(TokenType::Operator("=".to_string()), 1, 3),
+        tok(TokenType::Operator("="), 1, 3),
         tok(TokenType::Number(42), 1, 5),
         tok(TokenType::Newline, 1, 7),
         tok(TokenType::Name("y".to_string()), 2, 1),
-        tok(TokenType::Operator("=".to_string()), 2, 3),
+        tok(TokenType::Operator("="), 2, 3),
         tok(TokenType::Name("x".to_string()), 2, 5),
-        tok(TokenType::Operator("+".to_string()), 2, 7),
+        tok(TokenType::Operator("+"), 2, 7),
         tok(TokenType::Number(8), 2, 9),
         tok(TokenType::Newline, 2, 10),
-        tok(TokenType::Keyword("ret".to_string()), 3, 1),
+        tok(TokenType::Keyword("ret"), 3, 1),
         tok(TokenType::Name("y".to_string()), 3, 5),
         tok(TokenType::Newline, 3, 6),
         tok(TokenType::Eof, 4, 1),
@@ -445,14 +445,14 @@ ret y
 #[test]
 fn simple_function_no_args() {
     let tokens = vec![
-        tok(TokenType::Keyword("fn".to_string()), 1, 1),
+        tok(TokenType::Keyword("fn"), 1, 1),
         tok(TokenType::Name("testing".to_string()), 1, 5),
         tok(TokenType::LParen, 1, 12),
         tok(TokenType::RParen, 1, 13),
         tok(TokenType::Colon, 1, 14),
         tok(TokenType::Newline, 1, 15),
         tok(TokenType::Indent, 2, 1),
-        tok(TokenType::Keyword("ret".to_string()), 2, 5),
+        tok(TokenType::Keyword("ret"), 2, 5),
         tok(TokenType::Number(52), 2, 9),
         tok(TokenType::Newline, 2, 11),
         tok(TokenType::Dedent, 3, 1),
@@ -522,7 +522,7 @@ fn simple_function_no_args() {
 #[test]
 fn simple_function_one_arg() {
     let tokens = vec![
-        tok(TokenType::Keyword("fn".to_string()), 1, 1),
+        tok(TokenType::Keyword("fn"), 1, 1),
         tok(TokenType::Name("testing".to_string()), 1, 5),
         tok(TokenType::LParen, 1, 12),
         tok(TokenType::Name("a".to_string()), 1, 13),
@@ -530,9 +530,9 @@ fn simple_function_one_arg() {
         tok(TokenType::Colon, 1, 15),
         tok(TokenType::Newline, 1, 16),
         tok(TokenType::Indent, 2, 1),
-        tok(TokenType::Keyword("ret".to_string()), 2, 5),
+        tok(TokenType::Keyword("ret"), 2, 5),
         tok(TokenType::Name("a".to_string()), 2, 9),
-        tok(TokenType::Operator("+".to_string()), 2, 11),
+        tok(TokenType::Operator("+"), 2, 11),
         tok(TokenType::Number(2), 2, 13),
         tok(TokenType::Newline, 2, 14),
         tok(TokenType::Dedent, 3, 1),
@@ -628,7 +628,7 @@ fn simple_function_one_arg() {
 #[test]
 fn simple_function_multiple_args() {
     let tokens = vec![
-        tok(TokenType::Keyword("fn".to_string()), 1, 1),
+        tok(TokenType::Keyword("fn"), 1, 1),
         tok(TokenType::Name("testing".to_string()), 1, 5),
         tok(TokenType::LParen, 1, 12),
         tok(TokenType::Name("a".to_string()), 1, 13),
@@ -640,7 +640,7 @@ fn simple_function_multiple_args() {
         tok(TokenType::Colon, 1, 21),
         tok(TokenType::Newline, 1, 22),
         tok(TokenType::Indent, 2, 1),
-        tok(TokenType::Keyword("ret".to_string()), 2, 5),
+        tok(TokenType::Keyword("ret"), 2, 5),
         tok(TokenType::Name("b".to_string()), 2, 9),
         tok(TokenType::Newline, 2, 10),
         tok(TokenType::Dedent, 3, 1),
@@ -3352,4 +3352,127 @@ fn python_lambdas_are_written_with_bars() {
             5
         )
     );
+}
+
+/// Parses `source` with and without the shortcuts that skip alternatives a statement's tokens
+/// rule out, and requires the same tree and the same errors.
+fn assert_shortcuts_agree(source: &str, file: crate::span::FileId, name: &str) {
+    let (tokens, _) = Lexer::with_file(source, file).lex_recovering();
+    let mut fast_parser = Parser::new(&tokens);
+    let fast = fast_parser.parse_recovering();
+    assert_eq!(
+        fast_parser.rescued, 0,
+        "{name}: a shortcut skipped a statement's alternative"
+    );
+    let mut parser = Parser::new(&tokens);
+    parser.exhaustive = true;
+    let exhaustive = parser.parse_recovering();
+    assert_eq!(fast, exhaustive, "{name} parses differently with shortcuts");
+}
+
+/// Collects every `.stn` file under `dir`, in subdirectories too.
+fn stone_files(dir: &std::path::Path, found: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            stone_files(&path, found);
+        } else if path.extension().is_some_and(|ext| ext == "stn") {
+            found.push(path);
+        }
+    }
+}
+
+#[test]
+fn shortcuts_parse_every_program_alike() {
+    let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+    let mut files = vec![];
+    for dir in [
+        "examples",
+        "tests/programs",
+        "docs/examples",
+        "src/stdlib",
+        "bench/programs",
+    ] {
+        stone_files(&root.join(dir), &mut files);
+    }
+    assert!(files.len() > 100, "found only {} programs", files.len());
+    for path in &files {
+        let source = std::fs::read_to_string(path).unwrap();
+        assert_shortcuts_agree(&source, crate::span::FileId(1), &path.display().to_string());
+    }
+    assert_shortcuts_agree(
+        crate::stdlib::PRELUDE,
+        crate::span::FileId::PRELUDE,
+        "prelude",
+    );
+}
+
+#[test]
+fn shortcuts_report_errors_alike() {
+    let broken = [
+        "x = 1, 2\n",
+        "x =\n",
+        "x += \n",
+        "x[0 = 1\n",
+        "a.b(c = 1\n",
+        "f(x\n",
+        "ret 1, 2\n",
+        "ret\nret )\n",
+        "use\n",
+        "use a.\n",
+        "break 1\n",
+        "cont x\n",
+        "fn f(x: int\n    ret x\n",
+        "pub x = 1\n",
+        "pub fn\n",
+        "fn f() -> int:\n    x = \n    ret 1\n",
+        "if x\n    y = 1\n",
+        "if x:\n    y = = 1\nelse:\n    z = 2\n",
+        "for x in:\n    print(x)\n",
+        "for x xs:\n    print(x)\n",
+        "while :\n    cont\n",
+        "match x:\n    case 1:\n        y = 2\n",
+        "match x:\n    some(y):\n        y\n",
+        "enum E:\n    A(\n",
+        "struct P:\n    x\n",
+        "impl P\n",
+        "trait T:\n    fn f(self) -> int:\n",
+        "x = [1, 2\ny = 3\n",
+        "x.y.z = \n",
+        "(a, b) = 1\n",
+        "a, = t\n",
+        "x = ()\n",
+        "x = (1,)\n",
+        "xs[1:2] += 3\n",
+        "x = |a: int| \n",
+        "x = |a|\n    a\n",
+        "print(\"{x\")\n",
+        "x = b\"a\" \"b\"\n",
+        "f(a=1, 2)\n",
+        "Circle()\n",
+        "x ** = 2\n",
+        "x == 1 = 2\n",
+        "x = 1 if y\n",
+        "lambda x: x\n",
+        "x = y?\n",
+        "  x = 1\n",
+        "if x:\ny = 1\n",
+        ")\n",
+        "= 1\n",
+        "+= 1\n",
+        "x y\n",
+        "x = not\n",
+        "x = 1 +\n",
+        "x = {1: \n",
+        "f()[0].g(1)(2) = 3\n",
+        "f().x += 1\n",
+        "fn f[T: ](x: T):\n    ret\n",
+    ];
+    for source in broken {
+        assert_shortcuts_agree(source, crate::span::FileId(1), source);
+        assert_shortcuts_agree(source, crate::span::FileId::ENTRY, source);
+    }
 }

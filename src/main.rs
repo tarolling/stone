@@ -228,7 +228,6 @@ fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCod
     let mut status = ExitCode::SUCCESS;
     for file in files {
         let code = with_program(file, |checked, sources| {
-            let module = &checked.module;
             let targets = if unique.is_empty() {
                 vec![Target::host()?]
             } else {
@@ -243,7 +242,7 @@ fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCod
                         driver::output_path(entry, target)
                     }
                 };
-                driver::compile_module(module, sources, &path, target)?;
+                driver::compile_module(checked, sources, &path, target)?;
                 println!("Compiled {}", path.display());
             }
             Ok(())

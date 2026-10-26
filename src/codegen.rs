@@ -17,7 +17,9 @@ use std::path::Path;
 use std::str::FromStr;
 
 use crate::ast::Mod;
+use crate::checker::Analysis;
 use crate::project::SourceMap;
+use std::rc::Rc;
 
 /// A processor that `stone build` can compile for.
 ///
@@ -368,6 +370,9 @@ pub trait AssemblyGenerator {
     /// place in them as the interpreter's do. Without them, a runtime error prints only its
     /// message.
     fn set_sources(&mut self, sources: SourceMap);
+    /// Gives what the checker found in the module, which must have no errors, so compiling it
+    /// does not check it again.
+    fn set_analysis(&mut self, analysis: Rc<Analysis>);
 }
 
 /// Returns the magic multiplier and shift that divide by the constant `divisor` with a

@@ -7,7 +7,8 @@ use crate::span::Span;
 pub enum TokenType {
     Eof,
     Name(String),
-    Keyword(String),
+    /// A reserved word, one of [`RESERVED_KEYWORDS`], such as `fn`.
+    Keyword(&'static str),
     Number(i64),
     Float(f64),
     String(String),
@@ -19,7 +20,8 @@ pub enum TokenType {
     StringEnd(String),
     /// A bytes literal, as `b"a\x00"`, which may hold any byte.
     Bytes(Vec<u8>),
-    Operator(String),
+    /// An operator such as `+` or `+=`, held as static text so that matching one allocates nothing.
+    Operator(&'static str),
     Newline,
     Indent,
     Dedent,

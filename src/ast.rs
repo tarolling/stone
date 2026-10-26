@@ -13,7 +13,6 @@
 use std::{error::Error, fmt::Display};
 
 use crate::span::Span;
-use crate::token::TokenType;
 
 type Identifier = String;
 // `String` is built in
@@ -839,10 +838,13 @@ pub enum PrimaryOp {
     Try(Span),
 }
 
+/// A parser rule that failed, such as `parse_assignment`, and the token it failed at.
+///
+/// Rules fail all the time while the parser backtracks, so this holds nothing that costs an
+/// allocation; the syntax error a user sees is built separately, by `Parser::syntax_error`.
 #[derive(Debug, PartialEq)]
 pub struct ParserError {
-    pub method: String,
-    pub token: TokenType,
+    pub method: &'static str,
     pub span: Span,
 }
 
@@ -850,8 +852,8 @@ impl Display for ParserError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{}: {:?} on line {}, col {}",
-            self.method, self.token, self.span.start.line, self.span.start.col
+            "{} failed on line {}, col {}",
+            self.method, self.span.start.line, self.span.start.col
         )
     }
 }

@@ -649,15 +649,49 @@ fn a_row_read_for_indexing_is_borrowed_unless_a_call_could_replace_it() {
 
 /// Links, checks, and lowers `source` like [`dump`], so that it can `use os`.
 fn dump_linked(source: &str) -> String {
-    let (_, module) = crate::driver::load(
-        std::path::Path::new("main.stn"),
-        source,
-        &crate::project::MapSources::default(),
-    );
+    dump_linked_with(source, &[])
+}
+
+/// Links, checks, and lowers `source` as `main.stn` beside the library files `files`, each a
+/// path and its source.
+fn dump_linked_with(source: &str, files: &[(&str, &str)]) -> String {
+    let mut sources = crate::project::MapSources::default();
+    for (path, text) in files {
+        sources.insert(*path, *text);
+    }
+    let (_, module) = crate::driver::load(std::path::Path::new("main.stn"), source, &sources);
     let module = module.unwrap().module;
     let analysis = TypeChecker::new().analyze(&module);
     let program = lower(&module, &analysis).unwrap();
     program.functions.iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn library_functions_are_lowered_only_when_reached() {
+    let geo = "pub struct Point:\n    x: int\n\n\
+               impl display for Point:\n    fn display(self) -> str:\n        ret \"P\"\n\n\
+               fn helper(x: int) -> int:\n    ret x + 1\n\n\
+               pub fn called(x: int) -> int:\n    ret helper(x)\n\n\
+               pub fn as_value(x: int) -> int:\n    ret x * 2\n\n\
+               pub fn unused(x: int) -> int:\n    ret x - 1\n";
+    let source = "use geo\n\
+                  fn apply(f: fn(int) -> int, x: int) -> int:\n    ret f(x)\n\n\
+                  fn idle() -> int:\n    ret 0\n\n\
+                  f = geo.as_value\n\
+                  print(geo.called(1), apply(f, 2), geo.Point(x=1))\n";
+    let text = dump_linked_with(source, &[("geo.stn", geo)]);
+    for reached in [
+        "fn geo.called(",
+        "fn geo.helper(",
+        "fn geo.as_value(",
+        "fn geo.Point.display(",
+        "fn idle(",
+    ] {
+        assert!(text.contains(reached), "{reached} in\n{text}");
+    }
+    assert!(!text.contains("fn geo.unused("), "{text}");
+    // the prelude's functions are left out unless a call needs them
+    assert!(!text.contains("fn prelude."), "{text}");
 }
 
 #[test]

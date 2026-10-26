@@ -33,3 +33,7 @@ unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 [features]
 # `stone self-update`, which downloads releases over HTTPS. release.yml turns it on
 self-update = ["dep:self_update"]
+
+# `cargo run -- build` is about 6x slower unoptimized; level 1 keeps debug info and assertions
+[profile.dev]
+opt-level = 1

@@ -140,6 +140,10 @@ impl AssemblyGenerator for X64Generator {
     fn set_sources(&mut self, sources: SourceMap) {
         self.ctx.set_sources(sources);
     }
+
+    fn set_analysis(&mut self, analysis: std::rc::Rc<crate::checker::Analysis>) {
+        self.ctx.set_analysis(analysis);
+    }
 }
 
 impl X64Generator {

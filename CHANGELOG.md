@@ -78,6 +78,16 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Changed
 
+- `stone build` compiles only the library functions a program reaches, not all of `gui`,
+  `net`, the prelude, and imported modules, and checks the program once rather than twice:
+  `tests/programs/gui_canvas.stn` builds in 57 ms rather than 140 ms. Debug builds of stone
+  are optimized (`opt-level = 1`), so `cargo run -- build` is about 10 times faster.
+
+- The parser is about five times faster and allocates about 20 times less: it no longer
+  allocates while trying a rule that fails, and it tries only the statements a line's first
+  tokens and its `=` allow, parsing a failed statement again with every alternative so syntax
+  errors read as before. `tests/programs/gui_canvas.stn` now builds in 39 ms.
+
 - **Breaking:** every conversion that can fail returns a `result[T, str]` instead of stopping
   the program: `int(x)` of a float (nan or out of range) or a `str`, `float(s)` of a `str`, and
   `bytes(xs)` of a `list[int]` (a value outside 0 to 255). Write `int(s)?` to pass the error on,

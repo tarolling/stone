@@ -1,0 +1,10 @@
+// Connecting to Unix sockets that are not there, or are not sockets.
+use net
+
+print(net.connect_unix("missing.sock"))
+print(net.connect_unix("plain.txt"))
+print(net.connect_unix(""))
+long = ""
+for _ in range(120):
+    long += "a"
+print(net.connect_unix(long))

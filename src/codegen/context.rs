@@ -72,6 +72,7 @@ pub const BYTES_ROUTINES: &[&str] = &[
     "stone.bytes_slice_of",
     "stone.bytes_check",
     "stone.bytes_from_list",
+    "stone.gui_pack",
 ];
 
 /// Runtime routines that need the string runtime, even in a program where no expression is a
@@ -116,7 +117,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 29] = [
+pub const MODULE_ROUTINES: [(&str, &str); 32] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -147,6 +148,9 @@ pub const MODULE_ROUTINES: [(&str, &str); 29] = [
     ("net_sys.connect", "stone.net_connect"),
     ("net_sys.listen", "stone.net_listen"),
     ("net_sys.exchange", "stone.net_exchange"),
+    ("net_sys.connect_unix", "stone.net_connect_unix"),
+    ("net_sys.ready", "stone.net_ready"),
+    ("gui_sys.pack", "stone.gui_pack"),
 ];
 
 /// The routines of the `fs` module that can return an error, which needs the routines that
@@ -165,6 +169,7 @@ const FS_FAILING: &[&str] = &[
     "stone.net_connect",
     "stone.net_listen",
     "stone.net_exchange",
+    "stone.net_connect_unix",
     "stone.net_accept",
     "stone.net_send",
     "stone.net_read_line",
@@ -177,8 +182,10 @@ const FS_FAILING: &[&str] = &[
 
 /// The runtime routines of `net_sys` and of the methods of sockets and listeners, which the
 /// `fs` routines' pieces come with (see `x64::net::net_runtime`).
-pub const NET_ROUTINES: [&str; 14] = [
+pub const NET_ROUTINES: [&str; 16] = [
     "stone.net_connect",
+    "stone.net_connect_unix",
+    "stone.net_ready",
     "stone.net_listen",
     "stone.net_exchange",
     "stone.net_accept",

@@ -5742,3 +5742,24 @@ fn a_bounded_type_parameter_converts_through_its_bounds() {
         11,
     );
 }
+
+#[test]
+fn a_type_of_the_entry_file_is_no_type_in_the_prelude() {
+    // the prelude's `sort_by_key` has locals named `keys` and `order`
+    let source = "struct keys:\n    a: int\n\nenum order:\n    First\n\n\
+                  xs = [3, 1, 2]\nxs.sort_by_key(|x: int| x)\nprint(xs)\n";
+    assert_eq!(errors(source), []);
+}
+
+#[test]
+fn every_type_the_prelude_defines_is_visible_everywhere() {
+    let Mod::Module { body } = parse_program("print(1)\n").unwrap();
+    for stmt in body.iter().filter(|s| s.span.file == FileId::PRELUDE) {
+        if let StmtKind::EnumDef { name, .. }
+        | StmtKind::StructDef { name, .. }
+        | StmtKind::TraitDef { name, .. } = &stmt.kind
+        {
+            assert!(visible_type(name, FileId::PRELUDE), "{name}");
+        }
+    }
+}

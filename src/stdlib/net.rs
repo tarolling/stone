@@ -17,7 +17,8 @@ use std::io::{ErrorKind, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket,
 };
-use std::os::fd::AsRawFd;
+use std::os::fd::{AsRawFd, RawFd};
+use std::os::unix::net::UnixStream;
 use std::time::{Duration, Instant};
 
 /// The name a program imports the module by, as in `use net`.
@@ -32,7 +33,7 @@ pub const SYS_MODULE: &str = "net_sys";
 /// What the internal module is for.
 pub const SYS_MODULE_DOC: &str = "The system calls behind the builtin `net` module.";
 
-pub static SYS_DOCS: [BuiltinDoc; 3] = [
+pub static SYS_DOCS: [BuiltinDoc; 5] = [
     BuiltinDoc {
         name: "net_sys.connect",
         signature: "net_sys.connect(address: list[int], port: int, name: str) -> \
@@ -52,6 +53,17 @@ pub static SYS_DOCS: [BuiltinDoc; 3] = [
         description: "Sends `query` in one UDP packet to `port` at `address`, with a random \
                       ID in its first two bytes, and returns the first packet back with the \
                       same ID, waiting at most `timeout_ms` milliseconds.",
+    },
+    BuiltinDoc {
+        name: "net_sys.connect_unix",
+        signature: "net_sys.connect_unix(path: str, name: str) -> result[socket, str]",
+        description: "Connects to the Unix socket at `path`.",
+    },
+    BuiltinDoc {
+        name: "net_sys.ready",
+        signature: "net_sys.ready(s: socket, timeout_ms: int) -> bool",
+        description: "Returns whether a read of `s` would not wait, checking for at most \
+                      `timeout_ms` milliseconds, or forever if it is -1.",
     },
 ];
 
@@ -190,11 +202,65 @@ fn reason(error: &std::io::Error) -> String {
     full.strip_suffix(": ''").unwrap_or(&full).to_string()
 }
 
-/// A TCP connection, with what has arrived on it but not been read yet.
+/// The connection under a socket: TCP, or a Unix socket on this machine.
+#[derive(Debug)]
+enum Stream {
+    Tcp(TcpStream),
+    Unix(UnixStream),
+}
+
+impl Stream {
+    fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
+        match self {
+            Stream::Tcp(stream) => stream.set_nonblocking(nonblocking),
+            Stream::Unix(stream) => stream.set_nonblocking(nonblocking),
+        }
+    }
+
+    fn shutdown(&self) -> std::io::Result<()> {
+        match self {
+            Stream::Tcp(stream) => stream.shutdown(Shutdown::Both),
+            Stream::Unix(stream) => stream.shutdown(Shutdown::Both),
+        }
+    }
+}
+
+impl AsRawFd for Stream {
+    fn as_raw_fd(&self) -> RawFd {
+        match self {
+            Stream::Tcp(stream) => stream.as_raw_fd(),
+            Stream::Unix(stream) => stream.as_raw_fd(),
+        }
+    }
+}
+
+impl Read for Stream {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        match self {
+            Stream::Tcp(stream) => stream.read(buf),
+            Stream::Unix(stream) => stream.read(buf),
+        }
+    }
+}
+
+impl Write for Stream {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        match self {
+            Stream::Tcp(stream) => stream.write(buf),
+            Stream::Unix(stream) => stream.write(buf),
+        }
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+/// A connection, with what has arrived on it but not been read yet.
 #[derive(Debug)]
 pub struct Socket {
     /// The connection, until `close` drops it.
-    stream: Option<TcpStream>,
+    stream: Option<Stream>,
     /// Bytes received but not read yet.
     buffer: Vec<u8>,
     /// Whether the other end has closed the connection, so nothing more will arrive.
@@ -204,7 +270,7 @@ pub struct Socket {
 }
 
 impl Socket {
-    fn new(stream: TcpStream) -> Socket {
+    fn new(stream: Stream) -> Socket {
         Socket {
             stream: Some(stream),
             buffer: vec![],
@@ -218,7 +284,7 @@ impl Socket {
         self.timeout = timeout_ms(seconds);
     }
 
-    fn stream(&mut self) -> Result<&mut TcpStream, String> {
+    fn stream(&mut self) -> Result<&mut Stream, String> {
         self.stream
             .as_mut()
             .ok_or_else(|| SOCKET_CLOSED.to_string())
@@ -376,7 +442,34 @@ impl Socket {
     /// Closes the connection, so its methods fail from now on.
     pub fn close(&mut self) {
         if let Some(stream) = self.stream.take() {
-            let _ = stream.shutdown(Shutdown::Both);
+            let _ = stream.shutdown();
+        }
+    }
+
+    /// Returns whether a read would not wait, checking for at most `timeout` milliseconds, or
+    /// forever if it is -1: when bytes not read yet are in the buffer, the other end has closed
+    /// the connection or something has arrived, an error waits, or the socket is closed (so a
+    /// read fails at once). A signal that cuts the wait short starts it again with all of
+    /// `timeout`, as compiled code's `stone.net_ready` does.
+    pub fn ready(&mut self, timeout: i64) -> bool {
+        let Some(stream) = self.stream.as_ref() else {
+            return true;
+        };
+        if !self.buffer.is_empty() || self.ended {
+            return true;
+        }
+        let ms = timeout.clamp(-1, c_int::MAX as i64) as c_int;
+        loop {
+            let mut pollfd = PollFd {
+                fd: stream.as_raw_fd(),
+                events: POLLIN,
+                revents: 0,
+            };
+            // SAFETY: pollfd is one valid, writable `struct pollfd` for the whole call
+            let ready = unsafe { poll(&mut pollfd, 1, ms) };
+            if ready >= 0 || std::io::Error::last_os_error().kind() != ErrorKind::Interrupted {
+                return ready != 0;
+            }
         }
     }
 }
@@ -428,7 +521,7 @@ impl Listener {
         wait(listener.as_raw_fd(), POLLIN, self.timeout)?;
         loop {
             match listener.accept() {
-                Ok((stream, _)) => return Ok(Socket::new(stream)),
+                Ok((stream, _)) => return Ok(Socket::new(Stream::Tcp(stream))),
                 Err(e) if e.kind() == ErrorKind::Interrupted => continue,
                 Err(e) => return Err(reason(&e)),
             }
@@ -463,7 +556,16 @@ pub fn connect(address: &[i64], port: i64, name: &str, timeout: i64) -> Result<S
         ErrorKind::TimedOut if e.raw_os_error().is_none() => message(TIMED_OUT, name),
         _ => io_message(&e, name),
     })?;
-    Ok(Socket::new(stream))
+    Ok(Socket::new(Stream::Tcp(stream)))
+}
+
+/// Connects to the Unix socket at `path`, which `name` quotes in errors.
+pub fn connect_unix(path: &str, name: &str) -> Result<Socket, String> {
+    if cfg!(fuzzing) {
+        return Err(NET_DISABLED.to_string());
+    }
+    let stream = UnixStream::connect(path).map_err(|e| io_message(&e, name))?;
+    Ok(Socket::new(Stream::Unix(stream)))
 }
 
 /// Listens for connections to `port` at `address`, which may be 0 for the system to pick one.
@@ -619,6 +721,36 @@ mod tests {
         assert_eq!(server.read_all(), Ok(String::new()));
         listener.close();
         assert_eq!(listener.accept().err(), Some(LISTENER_CLOSED.to_string()));
+    }
+
+    #[test]
+    fn a_unix_socket_says_when_something_has_arrived() {
+        let dir = std::env::temp_dir().join(format!("stone-unix-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("ready.sock");
+        let _ = std::fs::remove_file(&path);
+        let server = std::os::unix::net::UnixListener::bind(&path).unwrap();
+        let name = path.to_str().unwrap();
+        let mut client = connect_unix(name, "here").unwrap();
+        let (mut other, _) = server.accept().unwrap();
+        assert!(!client.ready(0));
+        assert!(!client.ready(10));
+        other.write_all(b"ab").unwrap();
+        assert!(client.ready(-1));
+        assert_eq!(client.read_bytes(1), Ok(b"a".to_vec()));
+        // the other byte is in the buffer already
+        assert!(client.ready(0));
+        assert_eq!(client.read_bytes(1), Ok(b"b".to_vec()));
+        drop(other);
+        assert!(client.ready(-1));
+        client.close();
+        assert!(client.ready(-1));
+        let missing = dir.join("missing.sock");
+        assert_eq!(
+            connect_unix(missing.to_str().unwrap(), "there").err(),
+            Some("no such file or directory: 'there'".to_string())
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

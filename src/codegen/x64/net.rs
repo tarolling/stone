@@ -63,6 +63,8 @@ const FIRST_BUFFER: usize = 2 * READ_SIZE;
 ///   in `rdi`, a port in `rsi`, and the name errors quote in `rdx`; `stone.net_exchange` also
 ///   takes the query list in `rcx` and the milliseconds to wait in `r8`
 /// - `stone.net_connect` also takes the milliseconds it may wait in `rcx`, or -1
+/// - `stone.net_connect_unix` takes a path in `rdi` and the name errors quote in `rsi`
+/// - `stone.net_ready` takes a socket in `rdi` and the milliseconds it may wait in `rsi`, or -1
 /// - `stone.net_send` takes a socket in `rdi` and a string, or bytes, in `rsi`
 /// - `stone.net_read_line`, `stone.net_read`, `stone.net_read_all`, and
 ///   `stone.net_read_all_bytes` take a socket in `rdi`, and `stone.net_read_bytes` and
@@ -111,6 +113,12 @@ pub fn net_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
     if uses("stone.net_listen") {
         listen(r#gen);
+    }
+    if uses("stone.net_connect_unix") {
+        connect_unix(r#gen);
+    }
+    if uses("stone.net_ready") {
+        ready(r#gen);
     }
     if uses("stone.net_exchange") {
         exchange(r#gen);
@@ -329,6 +337,91 @@ fn connect(r#gen: &mut dyn AssemblyGenerator) {
     ok_handle(r#gen, label);
     closing_failure(r#gen, label);
     frame_end(r#gen, label);
+}
+
+/// The longest path a `sockaddr_un` holds with its null byte, on Linux.
+const UNIX_PATH_MAX: i64 = 107;
+
+/// Emits `stone.net_connect_unix`: a stream socket connected to the Unix socket at the path, as
+/// Rust's `UnixStream::connect` makes it, with an address as long as the path and its null byte.
+fn connect_unix(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_connect_unix";
+    // rbx holds the name, r12 the path and then the descriptor, r13 the path's length, and the
+    // `sockaddr_un` is at [rsp]
+    frame(r#gen, label);
+    r#gen.emit("	sub	rsp, 112");
+    r#gen.emit("	mov	rbx, rsi");
+    r#gen.emit("	mov	r12, rdi");
+    r#gen.emit("	call	stone.str_len");
+    r#gen.emit("	mov	r13, rax");
+    r#gen.emit(&format!("	cmp	r13, {UNIX_PATH_MAX}"));
+    r#gen.emit(&format!("	ja	{label}_invalid"));
+    r#gen.emit("	mov	rdi, rsp");
+    r#gen.emit("	mov	ecx, 112");
+    r#gen.emit("	xor	eax, eax");
+    r#gen.emit("	rep	stosb");
+    r#gen.emit("	mov	eax, 1"); // AF_UNIX
+    r#gen.emit("	mov	byte ptr [rsp], al");
+    r#gen.emit("	lea	rdi, [rsp + 2]");
+    r#gen.emit("	mov	rsi, r12");
+    r#gen.emit("	mov	rcx, r13");
+    r#gen.emit("	rep	movsb");
+    r#gen.emit("	lea	r15, [r13 + 3]");
+    r#gen.emit("	mov	r14, 1");
+    open_socket(r#gen, label, 1);
+    syscall(
+        r#gen,
+        &format!("{label}_connect"),
+        42, // sys_connect
+        &["mov	rdi, r12", "mov	rsi, rsp", "mov	rdx, r15"],
+    );
+    r#gen.emit("	test	rax, rax");
+    r#gen.emit(&format!("	js	{label}_close"));
+    r#gen.emit("	mov	rdi, r12");
+    r#gen.emit(&format!("	mov	rsi, {SOCKET_TAG}"));
+    r#gen.emit("	call	.Lnet_handle");
+    ok_handle(r#gen, label);
+    closing_failure(r#gen, label);
+    frame_end(r#gen, label);
+}
+
+/// Emits `stone.net_ready`, which returns 1 in `rax` if a read of the socket would not wait, as
+/// `stdlib::net::Socket::ready` decides, and 0 if `poll` finds nothing within the milliseconds,
+/// a signal starting the wait again with all of them.
+fn ready(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("stone.net_ready:");
+    r#gen.emit("	mov	rcx, QWORD PTR [rdi + 16]");
+    r#gen.emit("	test	rcx, rcx");
+    r#gen.emit("	js	.Lnet_ready_yes");
+    r#gen.emit("	mov	rax, QWORD PTR [rdi + 40]");
+    r#gen.emit("	cmp	rax, QWORD PTR [rdi + 32]");
+    r#gen.emit("	jne	.Lnet_ready_yes");
+    r#gen.emit("	cmp	QWORD PTR [rdi + 56], 0");
+    r#gen.emit("	jne	.Lnet_ready_yes");
+    r#gen.emit("	mov	rdx, rsi");
+    r#gen.emit("	mov	eax, 2147483647");
+    r#gen.emit("	cmp	rdx, rax");
+    r#gen.emit("	cmovg	rdx, rax");
+    // struct pollfd { fd, events, revents }
+    r#gen.emit("	sub	rsp, 24");
+    r#gen.emit("	mov	rax, 1"); // POLLIN
+    r#gen.emit("	shl	rax, 32");
+    r#gen.emit("	add	rax, rcx");
+    r#gen.emit("	mov	QWORD PTR [rsp], rax");
+    r#gen.emit(".Lnet_ready_again:");
+    r#gen.emit("	mov	rdi, rsp");
+    r#gen.emit("	mov	esi, 1");
+    r#gen.emit("	mov	eax, 7"); // sys_poll
+    r#gen.emit("	syscall");
+    r#gen.emit(&format!("	cmp	rax, -{EINTR}"));
+    r#gen.emit("	je	.Lnet_ready_again");
+    r#gen.emit("	add	rsp, 24");
+    r#gen.emit("	test	rax, rax");
+    r#gen.emit("	jnz	.Lnet_ready_yes");
+    r#gen.emit("	ret");
+    r#gen.emit(".Lnet_ready_yes:");
+    r#gen.emit("	mov	eax, 1");
+    r#gen.emit("	ret");
 }
 
 /// Emits `stone.net_listen`: a socket of the address's family, bound to it with `SO_REUSEADDR`,

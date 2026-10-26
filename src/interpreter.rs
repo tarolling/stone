@@ -8,13 +8,13 @@ use crate::ast::{
 };
 use crate::checker::{
     Calls, Conversion, Converter, FunctionValue, Handle, Method, Step, Type, collect_assigned,
-    may_name_enum, place, place_spans, prints_bare, range_args, struct_display,
+    may_name_enum, may_name_struct, place, place_spans, prints_bare, range_args, struct_display,
 };
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
 use crate::span::Span;
 use crate::stdlib::random::Rng;
-use crate::stdlib::{self, MAX_CALL_DEPTH, OUTPUT, fs, math, net, os, time};
+use crate::stdlib::{self, MAX_CALL_DEPTH, OUTPUT, fs, gui, math, net, os, time};
 use std::cell::RefCell;
 use std::cmp::Ordering;
 use std::collections::{HashMap, HashSet};
@@ -1981,6 +1981,7 @@ impl<'out> Interpreter<'out> {
                     return self.call_value(expr.span, func, args);
                 }
                 if let ExprKind::Name { id, .. } = &func.kind
+                    && may_name_struct(func)
                     && let Some(def) = self.structs.get(id).cloned()
                 {
                     // the values in the order they are written, each into its field
@@ -2972,6 +2973,28 @@ impl<'out> Interpreter<'out> {
                 let connected = net::connect(&address, *port, name, *timeout)
                     .map(|socket| Value::Socket(Rc::new(RefCell::new(socket))));
                 return Ok(result(connected));
+            }
+            (
+                "gui_sys.pack",
+                [
+                    Value::List(pixels),
+                    Value::Int(start),
+                    Value::Int(count),
+                    Value::Int(format),
+                ],
+            ) => {
+                let packed = gui::pack(&ints(pixels), *start, *count, *format);
+                return Ok(Value::Bytes(packed.into()));
+            }
+            ("net_sys.connect_unix", [Value::Str(path), Value::Str(name)]) => {
+                self.out.flush()?;
+                let connected = net::connect_unix(path, name)
+                    .map(|socket| Value::Socket(Rc::new(RefCell::new(socket))));
+                return Ok(result(connected));
+            }
+            ("net_sys.ready", [Value::Socket(socket), Value::Int(timeout)]) => {
+                self.out.flush()?;
+                return Ok(Value::Bool(socket.borrow_mut().ready(*timeout)));
             }
             ("net_sys.listen", [Value::List(address), Value::Int(port), Value::Str(name)]) => {
                 let address = ints(address);

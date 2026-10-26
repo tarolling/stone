@@ -26,6 +26,9 @@ impl Pos {
 pub struct FileId(pub u32);
 
 impl FileId {
+    /// The entry file, the one a program is run from, whose directory is the program's root.
+    pub const ENTRY: FileId = FileId(0);
+
     /// The prelude, [`crate::stdlib::PRELUDE`], which every program is linked with. It is not
     /// one of the program's files, so it has an id no program reaches.
     pub const PRELUDE: FileId = FileId(u32::MAX);

@@ -142,6 +142,73 @@ pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit(".Lbytes_from_list_done:");
         pop_frame(r#gen, &["x19", "x20"]);
     }
+    if uses("stone.gui_pack") {
+        pack(r#gen);
+    }
+}
+
+/// Emits `stone.gui_pack`, as `x64::bytes` does, for the list in `x0`, the first position in
+/// `x1`, the count in `x2`, and the format in `x3`.
+fn pack(r#gen: &mut dyn AssemblyGenerator) {
+    let saved = ["x19", "x20", "x21", "x22"];
+    // x19 holds the list, x20 the first position, x21 the count, and x22 the format; x9 points
+    // at the colors, x10 where the next color's bytes go, and x11 counts
+    r#gen.emit("stone.gui_pack:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx22, x3");
+    r#gen.emit("\tldr\tx9, [x19]");
+    // the range is cut to the list
+    r#gen.emit("\tcmp\tx1, #0");
+    r#gen.emit("\tcsel\tx1, xzr, x1, lt");
+    r#gen.emit("\tcmp\tx1, x9");
+    r#gen.emit("\tcsel\tx20, x9, x1, gt");
+    r#gen.emit("\tsub\tx9, x9, x20");
+    r#gen.emit("\tcmp\tx2, #0");
+    r#gen.emit("\tcsel\tx2, xzr, x2, lt");
+    r#gen.emit("\tcmp\tx2, x9");
+    r#gen.emit("\tcsel\tx21, x9, x2, gt");
+    r#gen.emit("\tlsl\tx0, x21, #2");
+    r#gen.emit("\tcmp\tx22, #1");
+    r#gen.emit("\tb.ls\t.Lgui_pack_sized");
+    r#gen.emit("\tsub\tx0, x0, x21");
+    r#gen.emit(".Lgui_pack_sized:");
+    r#gen.emit("\tbl\tstone.str_new");
+    r#gen.emit("\tldr\tx9, [x19, #16]");
+    r#gen.emit("\tadd\tx9, x9, x20, lsl #3");
+    r#gen.emit("\tmov\tx10, x0");
+    r#gen.emit("\tmov\tx11, #0");
+    r#gen.emit(".Lgui_pack_next:");
+    r#gen.emit("\tcmp\tx11, x21");
+    r#gen.emit("\tb.hs\t.Lgui_pack_done");
+    r#gen.emit("\tldr\tx12, [x9, x11, lsl #3]");
+    r#gen.emit("\tadd\tx11, x11, #1");
+    r#gen.emit("\tlsr\tx13, x12, #8");
+    r#gen.emit("\tlsr\tx14, x12, #16");
+    r#gen.emit("\tcmp\tx22, #1");
+    r#gen.emit("\tb.eq\t.Lgui_pack_xrgb");
+    r#gen.emit("\tb.lo\t.Lgui_pack_bgrx");
+    r#gen.emit("\tstrb\tw14, [x10]");
+    r#gen.emit("\tstrb\tw13, [x10, #1]");
+    r#gen.emit("\tstrb\tw12, [x10, #2]");
+    r#gen.emit("\tadd\tx10, x10, #3");
+    r#gen.emit("\tb\t.Lgui_pack_next");
+    r#gen.emit(".Lgui_pack_bgrx:");
+    r#gen.emit("\tstrb\tw12, [x10]");
+    r#gen.emit("\tstrb\tw13, [x10, #1]");
+    r#gen.emit("\tstrb\tw14, [x10, #2]");
+    r#gen.emit("\tstrb\twzr, [x10, #3]");
+    r#gen.emit("\tadd\tx10, x10, #4");
+    r#gen.emit("\tb\t.Lgui_pack_next");
+    r#gen.emit(".Lgui_pack_xrgb:");
+    r#gen.emit("\tstrb\twzr, [x10]");
+    r#gen.emit("\tstrb\tw14, [x10, #1]");
+    r#gen.emit("\tstrb\tw13, [x10, #2]");
+    r#gen.emit("\tstrb\tw12, [x10, #3]");
+    r#gen.emit("\tadd\tx10, x10, #4");
+    r#gen.emit("\tb\t.Lgui_pack_next");
+    r#gen.emit(".Lgui_pack_done:");
+    pop_frame(r#gen, &saved);
 }
 
 /// Emits `stone.bytes_slice_of`, as `x64::bytes` does.

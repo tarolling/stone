@@ -78,6 +78,29 @@ fn milliseconds(seconds: float) -> int:
         ret whole + 1
     ret whole
 
+// Whether a read of `s` would not wait, waiting at most `seconds` for something to arrive: true
+// once bytes have arrived that no read has taken yet, once the other end has closed the
+// connection, or once `s` is closed, since a read then fails at once. Zero, a negative number,
+// or nan does not wait.
+pub fn ready(s: socket, seconds: float) -> bool:
+    ms = milliseconds(seconds)
+    if ms < 0:
+        ms = 0
+    ret net_sys.ready(s, ms)
+
+// Connects to the Unix socket at `path`, through which a server on this machine, such as a
+// display server or `/var/run/docker.sock`, takes connections.
+pub fn connect_unix(path: str) -> result[socket, str]:
+    if path == "":
+        ret err("no such file or directory: ''")
+    // what fits in a `sockaddr_un` with its null byte
+    longest = 107
+    if os.platform() == "macos":
+        longest = 103
+    if path.len() > longest:
+        ret err("file name too long: '{path}'")
+    ret net_sys.connect_unix(path, path)
+
 // Listens for connections to `port` at the first address of `host`: `127.0.0.1` for this
 // machine alone, `0.0.0.0` for every IPv4 address, or `::` for every address. A port of 0 lets
 // the system pick a free one, which the listener's `port()` gives.

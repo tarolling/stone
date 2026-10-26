@@ -1036,7 +1036,9 @@ fn completion_in_a_use_offers_modules_and_directories() {
         expected.push((module.name.to_string(), Some(CompletionItemKind::MODULE)));
     }
     // and the modules written in stone
-    expected.push(("net".to_string(), Some(CompletionItemKind::MODULE)));
+    for (module, _) in &stone::stdlib::SOURCE_MODULES {
+        expected.push((module.to_string(), Some(CompletionItemKind::MODULE)));
+    }
     expected.sort_by(|a, b| a.0.cmp(&b.0));
     assert_eq!(labels(at(1, 5)), expected);
     assert_eq!(

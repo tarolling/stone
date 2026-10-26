@@ -1,0 +1,64 @@
+// Draws on a canvas without a display and prints it, one character per pixel.
+use gui
+
+// Prints `c` as text, a character per pixel chosen by its color.
+fn show(c: gui.canvas):
+    for y in range(c.height):
+        row = ""
+        for x in range(c.width):
+            color = c.get(x, y).unwrap()
+            if color == gui.rgb(0, 0, 0):
+                row += "."
+            elif color == gui.rgb(255, 0, 0):
+                row += "r"
+            elif color == gui.rgb(0, 255, 0):
+                row += "g"
+            elif color == gui.rgb(0, 0, 255):
+                row += "b"
+            elif color == gui.rgb(255, 255, 255):
+                row += "#"
+            else:
+                row += "?"
+        print(row)
+    print("")
+
+black = gui.rgb(0, 0, 0)
+print(gui.rgb(255, 128, 0))
+print(gui.rgb(300, -5, 1))
+
+c = gui.blank(24, 10, black)
+print("{c.width}x{c.height}, {c.pixels.len()} pixels")
+c.rect(1, 1, 5, 3, gui.rgb(255, 0, 0))
+c.rect(20, 8, 10, 10, gui.rgb(0, 255, 0))
+c.outline(8, 1, 6, 4, gui.rgb(0, 0, 255))
+c.line(0, 9, 9, 5, gui.rgb(255, 255, 255))
+c.set(23, 0, gui.rgb(255, 255, 255))
+c.set(24, 0, gui.rgb(255, 0, 0))
+c.set(-1, -1, gui.rgb(255, 0, 0))
+show(c)
+print(c.get(24, 0))
+print(c.get(23, 0))
+
+d = gui.blank(16, 9, black)
+d.disc(7, 4, 3, gui.rgb(255, 0, 0))
+d.circle(7, 4, 4, gui.rgb(0, 0, 255))
+show(d)
+
+t = gui.blank(26, 8, black)
+t.text(0, 0, "Hi!", gui.rgb(255, 255, 255))
+t.text(-4, 0, "", gui.rgb(255, 0, 0))
+show(t)
+print(gui.text_width("Hi!"))
+print(gui.text_width("é?"))
+
+s = gui.blank(16, 16, black)
+s.text_scaled(0, 0, "o", gui.rgb(0, 255, 0), 2)
+show(s)
+
+e = gui.blank(6, 4, gui.rgb(0, 0, 255))
+e.fill(gui.rgb(255, 0, 0))
+e.blit(d, 2, 1)
+show(e)
+
+p = gui.blank(2, 1, gui.rgb(1, 2, 3)).ppm()
+print(p)

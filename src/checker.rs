@@ -308,9 +308,37 @@ pub fn prints_bare(name: &str) -> bool {
 /// `result.ok(1)`, but a written `result` in `result.append(x)` is a variable.
 pub fn may_name_enum(value: &Expr) -> bool {
     match &value.kind {
-        ExprKind::Name { id, .. } => !prints_bare(id) || value.is_unwritten(),
+        ExprKind::Name { id, .. } if prints_bare(id) => value.is_unwritten(),
+        ExprKind::Name { id, .. } => visible_type(id, value.span.file),
         _ => false,
     }
+}
+
+/// Returns whether `func`, the function of a call, may name a struct rather than a value: any
+/// name of a type the code it is written in can see ([`visible_type`]).
+///
+/// For example, `Point` in `Point(x=1)` may, but in a library, `Point` in `Point(1)` is a
+/// function value when `Point` is a struct of the entry file.
+pub fn may_name_struct(func: &Expr) -> bool {
+    match &func.kind {
+        ExprKind::Name { id, .. } => visible_type(id, func.span.file),
+        _ => false,
+    }
+}
+
+/// Returns whether code in `file` can name the enum, struct, or trait `name`, a linked name: every
+/// one but the entry file's, which only the entry file's own code can, since a library or the
+/// prelude cannot see the entry file's names. Linking names a library's types and traits
+/// `<module>.<Name>` everywhere, and the prelude's keep their names, which every file sees.
+///
+/// For example, with `struct keys:` in the entry file, the local `keys` in the prelude's
+/// `sort_by_key` is a variable, since `visible_type("keys", FileId::PRELUDE)` is false, while
+/// `visible_type("geo.Point", FileId::PRELUDE)` and `visible_type("option", FileId(1))` are true.
+pub fn visible_type(name: &str, file: FileId) -> bool {
+    file == FileId::ENTRY
+        || name.contains('.')
+        || prints_bare(name)
+        || [OUTPUT, EQ, ORD, DISPLAY, FROM, TRY_FROM].contains(&name)
 }
 
 /// Maps each of `params`, a generic type's or function's type parameters, to the type at the
@@ -1244,6 +1272,8 @@ struct FunctionScope {
     ret_written: bool,
     /// Whether this is a lambda's, which may use no variable but its own parameters.
     lambda: bool,
+    /// The file the function is written in, which decides the types it can name.
+    file: FileId,
 }
 
 /// State for one run of type inference over a module.
@@ -2249,8 +2279,8 @@ impl Inference {
             if param.span.file != FileId::PRELUDE
                 && (BUILTIN_TYPES.contains(&name.as_str())
                     || name == "map"
-                    || self.enums.contains_key(name)
-                    || self.structs.contains_key(name))
+                    || ((self.enums.contains_key(name) || self.structs.contains_key(name))
+                        && visible_type(name, param.span.file)))
             {
                 self.error(param.span, format!("'{name}' is already a type"));
                 continue;
@@ -2295,7 +2325,8 @@ impl Inference {
                 );
                 continue;
             }
-            match self.traits.get(name) {
+            let visible = visible_type(name, bound.span.file);
+            match self.traits.get(name).filter(|_| visible) {
                 Some(info) => {
                     self.add_reference(bound.span, info.symbol);
                     let Some(args) = self.trait_args(bound) else {
@@ -2309,10 +2340,10 @@ impl Inference {
                         traits.push(bound);
                     }
                 }
-                None if self.structs.contains_key(name) => {
+                None if visible && self.structs.contains_key(name) => {
                     self.error(bound.span, format!("'{short}' is a struct, not a trait"));
                 }
-                None if self.enums.contains_key(name) => {
+                None if visible && self.enums.contains_key(name) => {
                     self.error(bound.span, format!("'{short}' is an enum, not a trait"));
                 }
                 None => self.error(bound.span, format!("there is no trait '{short}'")),
@@ -2653,11 +2684,12 @@ impl Inference {
         trait_name: &TraitName,
     ) -> Option<(String, Vec<Ty>)> {
         let name = &trait_name.name;
-        let Some(info) = self.traits.get(name) else {
+        let visible = visible_type(name, trait_name.span.file);
+        let Some(info) = self.traits.get(name).filter(|_| visible) else {
             let short = struct_display(name);
-            let message = if self.structs.contains_key(name) {
+            let message = if visible && self.structs.contains_key(name) {
                 format!("'{short}' is a struct, not a trait")
-            } else if self.enums.contains_key(name) {
+            } else if visible && self.enums.contains_key(name) {
                 format!("'{short}' is an enum, not a trait")
             } else {
                 format!("there is no trait '{short}'")
@@ -4055,7 +4087,9 @@ impl Inference {
                     }
                     return Ty::Handle(handle);
                 }
-                if let Some(info) = self.traits.get(name) {
+                if let Some(info) = self.traits.get(name)
+                    && visible_type(name, annotation.span.file)
+                {
                     let symbol = info.symbol;
                     self.add_reference(annotation.span, symbol);
                     let short = struct_display(name);
@@ -4068,7 +4102,9 @@ impl Inference {
                     ));
                     return self.fresh();
                 }
-                let found = if let Some(info) = self.enums.get(name) {
+                let found = if !visible_type(name, annotation.span.file) {
+                    None
+                } else if let Some(info) = self.enums.get(name) {
                     Some((Some(info.symbol), info.type_params.len(), false))
                 } else {
                     self.structs
@@ -4464,6 +4500,7 @@ impl Inference {
             ret: ret.clone(),
             ret_written,
             lambda: is_lambda(name),
+            file: name_span.file,
         });
         for (arg, ty) in args.args.iter().zip(params) {
             if self.local(&arg.arg).is_some() {
@@ -4521,6 +4558,18 @@ impl Inference {
 
     fn local(&self, name: &str) -> Option<usize> {
         self.function.as_ref()?.locals.get(name).copied()
+    }
+
+    /// Returns the file of the code being checked: the function's, or the entry file's for
+    /// top-level code, which only it has.
+    fn current_file(&self) -> FileId {
+        self.function.as_ref().map_or(FileId::ENTRY, |f| f.file)
+    }
+
+    /// Returns whether the code being checked can name the enum or struct `name`
+    /// ([`visible_type`]).
+    fn sees_type(&self, name: &str) -> bool {
+        visible_type(name, self.current_file())
     }
 
     fn set_local(&mut self, name: &str, symbol: usize) {
@@ -4765,10 +4814,10 @@ impl Inference {
         if self.functions.contains_key(name) {
             return Resolved::Function(name.to_string());
         }
-        if self.enums.contains_key(name) {
+        if self.enums.contains_key(name) && self.sees_type(name) {
             return Resolved::Enum(name.to_string());
         }
-        if self.structs.contains_key(name) {
+        if self.structs.contains_key(name) && self.sees_type(name) {
             return Resolved::Struct(name.to_string());
         }
         // a prelude variant is only ever read as `option.some`, but no variable may take its name
@@ -5340,7 +5389,7 @@ impl Inference {
     /// Returns whether `name` is an enum whose name no variable may take: any but the prelude's,
     /// whose variants are written alone, so that a value may be named `result`.
     fn value_enum(&self, name: &str) -> bool {
-        self.enums.contains_key(name) && !prints_bare(name)
+        self.enums.contains_key(name) && !prints_bare(name) && self.sees_type(name)
     }
 
     /// Returns whether `name` is a struct whose name no variable may take: any but the prelude's,
@@ -5350,6 +5399,7 @@ impl Inference {
         self.structs
             .get(name)
             .is_some_and(|info| self.symbols[info.symbol].span.file != FileId::PRELUDE)
+            && self.sees_type(name)
     }
 
     /// Returns the name of the enum `value` names, if it is one, as in `Shape` in `Shape.Circle`.
@@ -7706,6 +7756,37 @@ impl Inference {
                     _ => bytes,
                 };
                 Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
+            }
+            "gui_sys.pack" => {
+                let params = [Ty::List(Box::new(Ty::Int)), Ty::Int, Ty::Int, Ty::Int];
+                if args.len() == params.len() {
+                    for ((arg, ty), param) in args.iter().zip(arg_types).zip(&params) {
+                        self.expect(param, ty, arg.span);
+                    }
+                } else {
+                    self.arity_error(call.span, name, &params.len().to_string(), args.len());
+                }
+                Ty::Bytes
+            }
+            "net_sys.connect_unix" | "net_sys.ready" => {
+                let params = match name {
+                    "net_sys.ready" => vec![Ty::Handle(Handle::Socket), Ty::Int],
+                    _ => vec![Ty::Str, Ty::Str],
+                };
+                if args.len() == params.len() {
+                    for ((arg, ty), param) in args.iter().zip(arg_types).zip(&params) {
+                        self.expect(param, ty, arg.span);
+                    }
+                } else {
+                    self.arity_error(call.span, name, &params.len().to_string(), args.len());
+                }
+                match name {
+                    "net_sys.ready" => Ty::Bool,
+                    _ => Ty::Enum(
+                        RESULT.to_string(),
+                        vec![Ty::Handle(Handle::Socket), Ty::Str],
+                    ),
+                }
             }
             "fs.read" | "fs.read_lines" | "fs.list_dir" | "fs.exists" | "fs.remove"
             | "fs.make_dir" | "fs.write" | "fs.append" => {

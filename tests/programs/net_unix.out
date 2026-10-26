@@ -1,0 +1,4 @@
+err("no such file or directory: 'missing.sock'")
+err("connection refused: 'plain.txt'")
+err("no such file or directory: ''")
+err("file name too long: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'")

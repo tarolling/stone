@@ -22,10 +22,10 @@ jobs:
       run: cargo clippy --all-targets --features self-update -- -D warnings
     - name: Build
       run: cargo build --verbose
-    # the golden programs are also built for aarch64 and run under qemu-user, and the built-in
-    # assembler is compared with GNU as for both processors
-    - name: Install qemu and the aarch64 binutils
-      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-aarch64-linux-gnu
+    # the golden programs are also built for aarch64 and run under qemu-user, the built-in
+    # assembler is compared with GNU as for both processors, and gui windows open on Xvfb
+    - name: Install qemu, the aarch64 binutils, and Xvfb
+      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-aarch64-linux-gnu xvfb
     - name: Run tests
       run: cargo test --verbose
     - name: Run self-update tests
@@ -53,9 +53,10 @@ jobs:
       run: |
         export PATH="$HOME/.cargo/bin:$PATH"
         cargo build --verbose
-    # the golden programs are also built for x86-64 and run under qemu-user
-    - name: Install qemu and the x86-64 binutils
-      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-x86-64-linux-gnu
+    # the golden programs are also built for x86-64 and run under qemu-user, and gui windows open
+    # on Xvfb
+    - name: Install qemu, the x86-64 binutils, and Xvfb
+      run: sudo apt-get update && sudo apt-get install -y qemu-user binutils-x86-64-linux-gnu xvfb
     - name: Run tests
       run: |
         export PATH="$HOME/.cargo/bin:$PATH"

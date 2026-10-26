@@ -21,6 +21,8 @@ use crate::codegen::AssemblyGenerator;
 ///   byte is, or -1
 /// - `stone.bytes_from_list` returns new bytes of the values of the list `rdi`, which
 ///   `stone.bytes_check` found are all bytes
+/// - `stone.gui_pack` returns new bytes of the `rdx` colors of the list `rdi` from `rsi`, laid
+///   out as `rcx` says, as `stdlib::gui::pack` does
 pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     let uses = |label: &str| used.contains(&label);
     if uses("stone.bytes_eq") {
@@ -156,6 +158,103 @@ pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tmov\trax, r8");
         r#gen.emit("\tpop\trbx");
         r#gen.emit("\tret");
+    }
+    if uses("stone.gui_pack") {
+        pack(r#gen);
+    }
+}
+
+/// Emits `stone.gui_pack`, which writes each color's bytes one at a time: blue, green, red, and
+/// 0 for format 0, the same backward for format 1, and red, green, and blue for any other.
+fn pack(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the list, r12 the first position, r13 the count, r14 the format, and r9 the new
+    // bytes; rsi points at the colors, rdi where the next color's bytes go, and rcx counts
+    r#gen.emit("stone.gui_pack:");
+    for reg in ["rbx", "r12", "r13", "r14"] {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr14, rcx");
+    r#gen.emit("\tmov\tr8, QWORD PTR [rbx]");
+    // the range is cut to the list
+    r#gen.emit("\ttest\trsi, rsi");
+    r#gen.emit("\tjns\t.Lgui_pack_start");
+    r#gen.emit("\txor\tesi, esi");
+    r#gen.emit(".Lgui_pack_start:");
+    r#gen.emit("\tcmp\trsi, r8");
+    r#gen.emit("\tjle\t.Lgui_pack_started");
+    r#gen.emit("\tmov\trsi, r8");
+    r#gen.emit(".Lgui_pack_started:");
+    r#gen.emit("\tmov\tr12, rsi");
+    r#gen.emit("\tsub\tr8, rsi");
+    r#gen.emit("\ttest\trdx, rdx");
+    r#gen.emit("\tjns\t.Lgui_pack_count");
+    r#gen.emit("\txor\tedx, edx");
+    r#gen.emit(".Lgui_pack_count:");
+    r#gen.emit("\tcmp\trdx, r8");
+    r#gen.emit("\tjle\t.Lgui_pack_counted");
+    r#gen.emit("\tmov\trdx, r8");
+    r#gen.emit(".Lgui_pack_counted:");
+    r#gen.emit("\tmov\tr13, rdx");
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tshl\trdi, 2");
+    r#gen.emit("\tcmp\tr14, 1");
+    r#gen.emit("\tjbe\t.Lgui_pack_sized");
+    r#gen.emit("\tsub\trdi, r13");
+    r#gen.emit(".Lgui_pack_sized:");
+    r#gen.emit("\tcall\tstone.str_new");
+    r#gen.emit("\tmov\tr9, rax");
+    r#gen.emit("\tmov\trdi, rax");
+    r#gen.emit("\tmov\trsi, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tlea\trsi, [rsi + r12 * 8]");
+    r#gen.emit("\txor\tecx, ecx");
+    r#gen.emit(".Lgui_pack_next:");
+    r#gen.emit("\tcmp\trcx, r13");
+    r#gen.emit("\tjae\t.Lgui_pack_done");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rsi + rcx * 8]");
+    r#gen.emit("\tinc\trcx");
+    r#gen.emit("\tcmp\tr14, 1");
+    r#gen.emit("\tje\t.Lgui_pack_xrgb");
+    r#gen.emit("\tjb\t.Lgui_pack_bgrx");
+    for (offset, last) in [(2, false), (1, false), (0, true)] {
+        pack_byte(r#gen, offset, last);
+    }
+    r#gen.emit("\tadd\trdi, 3");
+    r#gen.emit("\tjmp\t.Lgui_pack_next");
+    r#gen.emit(".Lgui_pack_bgrx:");
+    for (offset, last) in [(0, false), (1, false), (2, true)] {
+        pack_byte(r#gen, offset, last);
+    }
+    r#gen.emit("\txor\teax, eax");
+    r#gen.emit("\tmov\tbyte ptr [rdi + 3], al");
+    r#gen.emit("\tadd\trdi, 4");
+    r#gen.emit("\tjmp\t.Lgui_pack_next");
+    r#gen.emit(".Lgui_pack_xrgb:");
+    for (offset, last) in [(3, false), (2, false), (1, true)] {
+        pack_byte(r#gen, offset, last);
+    }
+    r#gen.emit("\txor\teax, eax");
+    r#gen.emit("\tmov\tbyte ptr [rdi], al");
+    r#gen.emit("\tadd\trdi, 4");
+    r#gen.emit("\tjmp\t.Lgui_pack_next");
+    r#gen.emit(".Lgui_pack_done:");
+    r#gen.emit("\tmov\trax, r9");
+    for reg in ["r14", "r13", "r12", "rbx"] {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
+    r#gen.emit("\tret");
+}
+
+/// Emits code that stores the lowest byte of `rdx` at `[rdi + offset]` and, unless it is the
+/// `last`, shifts the next byte down into its place.
+fn pack_byte(r#gen: &mut dyn AssemblyGenerator, offset: i64, last: bool) {
+    r#gen.emit("\tmov\trax, rdx");
+    match offset {
+        0 => r#gen.emit("\tmov\tbyte ptr [rdi], al"),
+        _ => r#gen.emit(&format!("\tmov\tbyte ptr [rdi + {offset}], al")),
+    }
+    if !last {
+        r#gen.emit("\tshr\trdx, 8");
     }
 }
 

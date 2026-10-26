@@ -131,6 +131,12 @@ pub fn net_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if uses("stone.net_listen") {
         listen(r#gen);
     }
+    if uses("stone.net_connect_unix") {
+        connect_unix(r#gen);
+    }
+    if uses("stone.net_ready") {
+        ready(r#gen);
+    }
     if uses("stone.net_exchange") {
         exchange(r#gen);
     }
@@ -400,6 +406,122 @@ fn connect(r#gen: &mut dyn AssemblyGenerator) {
     ok_handle(r#gen, label);
     closing_failure(r#gen, label);
     frame_end(r#gen, label);
+}
+
+/// Emits `stone.net_connect_unix`, as `x64::net` does, for the path in `x0` and the name in `x1`.
+/// A macOS `sockaddr_un` holds 104 bytes of path where Linux's holds 108, and starts with its
+/// length.
+fn connect_unix(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_connect_unix";
+    let os = r#gen.target().os;
+    let longest = match os {
+        Os::Linux => 107,
+        Os::MacOs => 103,
+    };
+    // x19 holds the name, x20 the path and then the descriptor, x21 the path's length, x22 the
+    // family, x23 the address's length, and the `sockaddr_un` is at [sp]
+    frame(r#gen, label);
+    r#gen.emit("	sub	sp, sp, #112");
+    r#gen.emit("	mov	x19, x1");
+    r#gen.emit("	mov	x20, x0");
+    r#gen.emit("	bl	stone.str_len");
+    r#gen.emit("	mov	x21, x0");
+    r#gen.emit(&format!("	cmp	x21, #{longest}"));
+    r#gen.emit(&format!("	b.hi	{label}_invalid"));
+    for offset in (0..112).step_by(16) {
+        r#gen.emit(&format!("	stp	xzr, xzr, [sp, #{offset}]"));
+    }
+    r#gen.emit("	mov	x22, #1"); // AF_UNIX
+    r#gen.emit("	add	x23, x21, #3");
+    match os {
+        Os::Linux => r#gen.emit("	strb	w22, [sp]"),
+        Os::MacOs => {
+            r#gen.emit("	strb	w23, [sp]");
+            r#gen.emit("	strb	w22, [sp, #1]");
+        }
+    }
+    r#gen.emit("	mov	x10, #0");
+    r#gen.emit(&format!("{label}_copy:"));
+    r#gen.emit("	cmp	x10, x21");
+    r#gen.emit(&format!("	b.hs	{label}_copied"));
+    r#gen.emit("	ldrb	w9, [x20, x10]");
+    r#gen.emit("	add	x11, sp, x10");
+    r#gen.emit("	strb	w9, [x11, #2]");
+    r#gen.emit("	add	x10, x10, #1");
+    r#gen.emit(&format!("	b	{label}_copy"));
+    r#gen.emit(&format!("{label}_copied:"));
+    open_socket(r#gen, label, 1);
+    retried(
+        r#gen,
+        &format!("{label}_connect"),
+        Sys::Connect,
+        &["mov	x0, x20", "mov	x1, sp", "mov	x2, x23"],
+    );
+    r#gen.emit(&format!("	tbnz	x0, #63, {label}_close"));
+    r#gen.emit("	mov	x0, x20");
+    r#gen.emit(&format!("	mov	x1, #{SOCKET_TAG}"));
+    r#gen.emit("	bl	.Lnet_handle");
+    ok_handle(r#gen, label);
+    closing_failure(r#gen, label);
+    frame_end(r#gen, label);
+}
+
+/// Emits `stone.net_ready`, as `x64::net` does, for the socket in `x0` and the milliseconds in
+/// `x1`: through `ppoll` with a `timespec` of them, or none for -1, on Linux, and `poll` on
+/// macOS.
+fn ready(r#gen: &mut dyn AssemblyGenerator) {
+    let os = r#gen.target().os;
+    let saved = ["x19", "x20"];
+    // x19 holds the descriptor and x20 the milliseconds; the pollfd is at [sp, #16], and the
+    // timespec at [sp]
+    r#gen.emit("stone.net_ready:");
+    r#gen.emit("	ldr	x9, [x0, #16]");
+    r#gen.emit("	tbnz	x9, #63, .Lnet_ready_yes");
+    r#gen.emit("	ldr	x10, [x0, #40]");
+    r#gen.emit("	ldr	x11, [x0, #32]");
+    r#gen.emit("	cmp	x10, x11");
+    r#gen.emit("	b.ne	.Lnet_ready_yes");
+    r#gen.emit("	ldr	x10, [x0, #56]");
+    r#gen.emit("	cbnz	x10, .Lnet_ready_yes");
+    push_frame(r#gen, &saved);
+    r#gen.emit("	sub	sp, sp, #32");
+    r#gen.emit("	mov	x19, x9");
+    load(r#gen, "x10", 2147483647);
+    r#gen.emit("	cmp	x1, x10");
+    r#gen.emit("	csel	x20, x10, x1, gt");
+    r#gen.emit(".Lnet_ready_again:");
+    // struct pollfd { fd, events, revents }
+    r#gen.emit("	str	w19, [sp, #16]");
+    r#gen.emit("	mov	w9, #1"); // POLLIN
+    r#gen.emit("	str	w9, [sp, #20]");
+    r#gen.emit("	add	x0, sp, #16");
+    r#gen.emit("	mov	x1, #1");
+    match os {
+        Os::Linux => {
+            r#gen.emit("	mov	x2, #0");
+            r#gen.emit("	tbnz	x20, #63, .Lnet_ready_poll");
+            r#gen.emit("	mov	x9, #1000");
+            r#gen.emit("	udiv	x10, x20, x9");
+            r#gen.emit("	msub	x11, x10, x9, x20");
+            load(r#gen, "x9", 1_000_000);
+            r#gen.emit("	mul	x11, x11, x9");
+            r#gen.emit("	stp	x10, x11, [sp]");
+            r#gen.emit("	mov	x2, sp");
+            r#gen.emit(".Lnet_ready_poll:");
+            r#gen.emit("	mov	x3, #0");
+            r#gen.emit("	mov	x4, #0");
+        }
+        Os::MacOs => r#gen.emit("	mov	x2, x20"),
+    }
+    system_call(r#gen, Sys::Ppoll);
+    r#gen.emit(&format!("	cmn	x0, #{EINTR}"));
+    r#gen.emit("	b.eq	.Lnet_ready_again");
+    r#gen.emit("	cmp	x0, #0");
+    r#gen.emit("	cset	x0, ne");
+    pop_frame(r#gen, &saved);
+    r#gen.emit(".Lnet_ready_yes:");
+    r#gen.emit("	mov	x0, #1");
+    r#gen.emit("	ret");
 }
 
 /// Emits an `fcntl` call with the command `command` on the descriptor in `x20`, after `third`

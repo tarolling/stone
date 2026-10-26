@@ -1,0 +1,920 @@
+// The builtin `gui` module, which a program that says `use gui` is linked with: canvases to
+// draw on, and windows that show them.
+//
+// A canvas is a value like a list: its pixels are a list of colors, one int per pixel in rows
+// from the top left, each color written 0xRRGGBB as `rgb` makes it. Drawing outside a canvas
+// draws nothing there, so a shape may hang over an edge.
+//
+// A window shows a canvas on the screen. `gui` speaks the X11 protocol to the display server
+// itself, over a socket from `net`, so it needs no C library: on Linux any desktop runs an X11
+// server (XWayland under Wayland), and on macOS XQuartz does. `DISPLAY` says where it is.
+//
+// It reaches the system through `gui_sys`, which only stone's own modules may use.
+
+use fs
+use gui_sys
+use net
+use os
+use time
+
+////////////////////////////////////////////////////////////////
+// canvases
+////////////////////////////////////////////////////////////////
+
+// An image to draw on, `width` pixels wide and `height` high.
+pub struct canvas:
+    width: int
+    height: int
+    pixels: list[int]
+
+// The color with red, green, and blue `r`, `g`, and `b`, each from 0 to 255 (a value outside is
+// taken as the nearest end), as 0xRRGGBB.
+pub fn rgb(r: int, g: int, b: int) -> int:
+    ret r.clamp(0, 255) * 65536 + g.clamp(0, 255) * 256 + b.clamp(0, 255)
+
+// A canvas `width` pixels wide and `height` high, every pixel `color`. A negative size is 0.
+pub fn blank(width: int, height: int, color: int) -> canvas:
+    w = width.max(0)
+    h = height.max(0)
+    pixels = []
+    for _ in range(w * h):
+        pixels.append(color)
+    ret canvas(width=w, height=h, pixels=pixels)
+
+// How many pixels wide `text` is when drawn, each character taking `glyph_size()`.
+pub fn text_width(text: str) -> int:
+    ret characters(text) * glyph_size()
+
+impl canvas:
+    // Whether the pixel at `x`, `y` is on the canvas.
+    fn has(self, x: int, y: int) -> bool:
+        ret x >= 0 and y >= 0 and x < self.width and y < self.height
+
+    // The color of the pixel at `x`, `y`, or none if it is not on the canvas.
+    fn get(self, x: int, y: int) -> option[int]:
+        if not self.has(x, y):
+            ret none
+        ret some(self.pixels[y * self.width + x])
+
+    // Makes the pixel at `x`, `y` `color`.
+    fn set(self, x: int, y: int, color: int):
+        if self.has(x, y):
+            self.pixels[y * self.width + x] = color
+
+    // Makes every pixel `color`.
+    fn fill(self, color: int):
+        self.pixels = self.pixels * 0 + color
+
+    // Fills the rectangle `width` by `height` whose top left pixel is at `x`, `y`.
+    fn rect(self, x: int, y: int, width: int, height: int, color: int):
+        left = x.max(0)
+        right = (x + width).min(self.width)
+        top = y.max(0)
+        bottom = (y + height).min(self.height)
+        for row in range(top, bottom):
+            start = row * self.width
+            for column in range(left, right):
+                self.pixels[start + column] = color
+
+    // Draws the edge, one pixel wide, of the rectangle `rect` would fill.
+    fn outline(self, x: int, y: int, width: int, height: int, color: int):
+        if width <= 0 or height <= 0:
+            ret
+        self.rect(x, y, width, 1, color)
+        self.rect(x, y + height - 1, width, 1, color)
+        self.rect(x, y + 1, 1, height - 2, color)
+        self.rect(x + width - 1, y + 1, 1, height - 2, color)
+
+    // Draws a line one pixel wide from `x0`, `y0` to `x1`, `y1`, both ends included.
+    fn line(self, x0: int, y0: int, x1: int, y1: int, color: int):
+        dx = (x1 - x0).max(x0 - x1)
+        dy = -(y1 - y0).max(y0 - y1)
+        sx = 1
+        if x1 < x0:
+            sx = -1
+        sy = 1
+        if y1 < y0:
+            sy = -1
+        error = dx + dy
+        x = x0
+        y = y0
+        while true:
+            self.set(x, y, color)
+            if x == x1 and y == y1:
+                break
+            twice = 2 * error
+            if twice >= dy:
+                error += dy
+                x += sx
+            if twice <= dx:
+                error += dx
+                y += sy
+
+    // Draws the edge, one pixel wide, of the circle of radius `radius` around `x`, `y`.
+    fn circle(self, x: int, y: int, radius: int, color: int):
+        if radius < 0:
+            ret
+        dx = radius
+        dy = 0
+        error = 1 - radius
+        while dy <= dx:
+            self.set(x + dx, y + dy, color)
+            self.set(x - dx, y + dy, color)
+            self.set(x + dx, y - dy, color)
+            self.set(x - dx, y - dy, color)
+            self.set(x + dy, y + dx, color)
+            self.set(x - dy, y + dx, color)
+            self.set(x + dy, y - dx, color)
+            self.set(x - dy, y - dx, color)
+            dy += 1
+            if error < 0:
+                error += 2 * dy + 1
+            else:
+                dx -= 1
+                error += 2 * (dy - dx) + 1
+
+    // Fills the circle of radius `radius` around `x`, `y`.
+    fn disc(self, x: int, y: int, radius: int, color: int):
+        if radius < 0:
+            ret
+        dx = radius
+        for dy in range(radius + 1):
+            while dx * dx + dy * dy > radius * radius + radius:
+                dx -= 1
+            self.rect(x - dx, y - dy, 2 * dx + 1, 1, color)
+            if dy > 0:
+                self.rect(x - dx, y + dy, 2 * dx + 1, 1, color)
+
+    // Draws `source` with its top left pixel at `x`, `y`.
+    fn blit(self, source: canvas, x: int, y: int):
+        left = x.max(0)
+        right = (x + source.width).min(self.width)
+        top = y.max(0)
+        bottom = (y + source.height).min(self.height)
+        for row in range(top, bottom):
+            start = row * self.width
+            from = (row - y) * source.width - x
+            for column in range(left, right):
+                self.pixels[start + column] = source.pixels[from + column]
+
+    // Draws `text` with the top left of its first character at `x`, `y`, in letters
+    // `glyph_size()` pixels square. A newline starts a line below, and a character outside ASCII
+    // draws as a box.
+    fn text(self, x: int, y: int, text: str, color: int):
+        self.text_scaled(x, y, text, color, 1)
+
+    // Draws `text` as `text` does, with each pixel of a letter `scale` pixels square.
+    fn text_scaled(self, x: int, y: int, text: str, color: int, scale: int):
+        if scale <= 0:
+            ret
+        size = glyph_size() * scale
+        letters = font()
+        left = x
+        top = y
+        for code in text.bytes():
+            if code == 10:
+                left = x
+                top += size
+            elif code < 128 or code >= 192:
+                self.glyph(letters, left, top, glyph_index(code), color, scale)
+                left += size
+
+    // Draws glyph `index` of `letters`, the font, at `x`, `y`, each of its pixels `scale` pixels
+    // square.
+    fn glyph(self, letters: bytes, x: int, y: int, index: int, color: int, scale: int):
+        for row in range(glyph_size()):
+            bits = letters[index * glyph_size() + row]
+            column = 0
+            while bits > 0:
+                if bits % 2 == 1:
+                    self.rect(x + column * scale, y + row * scale, scale, scale, color)
+                bits = bits / 2
+                column += 1
+
+    // The canvas as a binary PPM image (P6), which image viewers and converters read.
+    fn ppm(self) -> bytes:
+        pixels = gui_sys.pack(self.pixels, 0, self.pixels.len(), 2)
+        ret "P6\n{self.width} {self.height}\n255\n".bytes() + pixels
+
+////////////////////////////////////////////////////////////////
+// windows
+////////////////////////////////////////////////////////////////
+
+// Something that happened to a window, which `events` and `wait` give.
+pub enum event:
+    // the window's close button was pressed, which closes nothing until `close`
+    close
+    // the window is now this many pixels wide and high
+    resize(int, int)
+    // what the window showed is gone, so it should be shown again
+    redraw
+    // a key went down, named as `key_name` names it; holding it down sends no more
+    key_down(str)
+    // a key came up
+    key_up(str)
+    // a key typed this text, again for each repeat while it is held
+    text(str)
+    // the mouse moved to this point of the window
+    mouse_move(int, int)
+    // a mouse button, `left`, `middle`, or `right`, went down at this point
+    mouse_down(str, int, int)
+    // a mouse button came up at this point
+    mouse_up(str, int, int)
+    // the wheel turned one step away from the user (1) or toward them (-1)
+    scroll(int)
+    // this many seconds passed since the last tick, which only `run` gives
+    tick(float)
+    // the connection to the display broke for this reason, and the window is closed
+    failed(str)
+
+// A window on the screen, which shows a canvas. It is a handle, like a socket: a copy of it is
+// the same window, though events one copy takes the other never sees.
+pub struct window:
+    // the connection to the X server, and what the server said about itself
+    conn: socket
+    setup: server
+    width: int
+    height: int
+    open: bool
+    // events decoded but not given out yet
+    pending: list[event]
+    // an event read ahead to tell a held key from a new press, or nothing
+    ahead: bytes
+
+// What an X server said about itself when a connection was set up.
+struct server:
+    // the ids of the connection's window and its graphics context
+    id: int
+    gc: int
+    // the root window's id, and the depth of its pixels
+    root: int
+    depth: int
+    // whether the server takes pixels most significant byte first
+    msb: bool
+    // the most bytes one request may hold
+    limit: int
+    keys: keymap
+    // the atoms of `WM_PROTOCOLS`, `WM_DELETE_WINDOW`, `_NET_WM_NAME`, and `UTF8_STRING`
+    atoms: list[int]
+
+// The keysyms of every key: `per` of them for each keycode from `first` up.
+struct keymap:
+    first: int
+    per: int
+    syms: list[int]
+
+// Opens a window `width` by `height` pixels titled `title`, on the display `DISPLAY` names.
+pub fn open(title: str, width: int, height: int) -> result[window, str]:
+    if width < 1 or height < 1 or width > 32767 or height > 32767:
+        ret err("invalid window size: {width}x{height}")
+    found = connect_display()?
+    conn = found[0]
+    w = handshake(conn, found[1], width, height)?
+    w.create(title)?
+    ret ok(w)
+
+// Connects to the X server `DISPLAY` names, giving the socket and the display's number: `:0`
+// is the Unix socket `/tmp/.X11-unix/X0`, a path such as XQuartz's `/tmp/launch-x/org.xquartz:0`
+// is that socket (with or without its `:0`), and `host:0` is TCP port 6000 of `host`.
+fn connect_display() -> result[tuple[socket, str], str]:
+    name = os.env("DISPLAY").unwrap_or("")
+    if name == "":
+        ret err("no display: DISPLAY is not set")
+    at = name.rfind(":").unwrap_or(-1)
+    if at < 0:
+        ret err("invalid display: '{name}'")
+    host = name[:at]
+    number = name[at + 1:]
+    dot = number.find(".")
+    if dot.is_some():
+        number = number[:dot.unwrap()]
+    display = 0
+    match int(number):
+        case ok(n):
+            display = n
+        case err(_):
+            ret err("invalid display: '{name}'")
+    if display < 0:
+        ret err("invalid display: '{name}'")
+    if host.startswith("/"):
+        match net.connect_unix(name):
+            case ok(s):
+                ret ok((s, number))
+            case err(_):
+                s = net.connect_unix(host)?
+                ret ok((s, number))
+    if host == "" or host == "unix":
+        s = net.connect_unix("/tmp/.X11-unix/X{display}")?
+        ret ok((s, number))
+    s = net.connect(host, 6000 + display)?
+    ret ok((s, number))
+
+// The `MIT-MAGIC-COOKIE-1` that `XAUTHORITY`, or `~/.Xauthority`, holds for display `number`,
+// or nothing if there is none.
+fn cookie(number: str) -> bytes:
+    path = os.env("XAUTHORITY").unwrap_or("")
+    if path == "":
+        home = os.env("HOME").unwrap_or("")
+        if home == "":
+            ret b""
+        path = "{home}/.Xauthority"
+    data = b""
+    match fs.read_bytes(path):
+        case ok(d):
+            data = d
+        case err(_):
+            ret b""
+    // each entry is a family, then an address, a display number, a name, and data, each of
+    // those a length of two bytes, most significant first, and that many bytes
+    at = 0
+    while at + 2 <= data.len():
+        at += 2
+        fields = []
+        for _ in range(4):
+            if at + 2 > data.len():
+                ret b""
+            size = data[at] * 256 + data[at + 1]
+            at += 2
+            if at + size > data.len():
+                ret b""
+            fields.append(data[at:at + size])
+            at += size
+        if fields[1] == number.bytes() and fields[2] == b"MIT-MAGIC-COOKIE-1":
+            ret fields[3]
+    ret b""
+
+// Sets up the connection on `conn`, returning a window that is not created yet, or the reason
+// the server refused.
+fn handshake(conn: socket, number: str, width: int, height: int) -> result[window, str]:
+    secret = cookie(number)
+    name = b""
+    if secret.len() > 0:
+        name = b"MIT-MAGIC-COOKIE-1"
+    // little-endian, protocol 11.0
+    setup = [108, 0, 11, 0, 0, 0]
+    setup = put16(setup, name.len())
+    setup = put16(setup, secret.len())
+    setup = put16(setup, 0)
+    setup = put_bytes(setup, name)
+    setup = put_bytes(setup, secret)
+    conn.send_bytes(bytes(setup).unwrap())?
+    head = conn.read_exact(8)?
+    rest = conn.read_exact(get16(head, 6) * 4)?
+    if head[0] != 1:
+        reason = rest
+        if head[0] == 0:
+            reason = rest[:head[1]]
+        ret err("the X server refused the connection: {reason.text().unwrap_or("")}")
+    reply = head + rest
+    if reply.len() < 40:
+        ret err(bad_setup())
+    base = get32(reply, 12)
+    mask = get32(reply, 16)
+    vendor = get16(reply, 24)
+    formats = reply[29]
+    at = 40 + vendor + pad(vendor)
+    // the pixmap formats, then the first screen
+    bits = 0
+    screen = at + 8 * formats
+    if reply.len() < screen + 40:
+        ret err(bad_setup())
+    root = get32(reply, screen)
+    depth = reply[screen + 38]
+    for i in range(formats):
+        if reply[at + 8 * i] == depth:
+            bits = reply[at + 8 * i + 1]
+    visual = get32(reply, screen + 32)
+    if bits != 32 or not true_color(reply, screen, visual):
+        ret err("unsupported display format: depth {depth}, {bits} bits per pixel")
+    // ids are the base plus multiples of the mask's lowest bit
+    step = 1
+    while mask > 0 and mask / step % 2 == 0:
+        step *= 2
+    id = base + step
+    gc = id + step
+    keys = keymap(first=reply[34], per=0, syms=[])
+    msb = reply[30] == 1
+    most = get16(reply, 26) * 4
+    found = server(id=id, gc=gc, root=root, depth=depth, msb=msb, limit=most, keys=keys, atoms=[])
+    w = window(conn=conn, setup=found, width=width, height=height, open=true, pending=[], ahead=b"")
+    ret ok(w)
+
+// The error for a setup reply too short for what it says it holds.
+fn bad_setup() -> str:
+    ret "the X server sent a setup reply that is cut short"
+
+// Whether the visual `visual` of the screen at `screen` in the setup reply is TrueColor with
+// red, green, and blue in that order of significance, eight bits each.
+fn true_color(reply: bytes, screen: int, visual: int) -> bool:
+    depths = reply[screen + 39]
+    at = screen + 40
+    for _ in range(depths):
+        if at + 8 > reply.len():
+            ret false
+        visuals = get16(reply, at + 2)
+        at += 8
+        for _ in range(visuals):
+            if at + 24 > reply.len():
+                ret false
+            if get32(reply, at) == visual:
+                rgb = get32(reply, at + 8) == 16711680 and get32(reply, at + 12) == 65280
+                ret reply[at + 4] == 4 and rgb and get32(reply, at + 16) == 255
+            at += 24
+    ret false
+
+impl window:
+    // Whether the window is open: until `close`, or the connection breaks.
+    fn is_open(self) -> bool:
+        ret self.open
+
+    // The window's width and height in pixels, as the last `resize` event gave them.
+    fn size(self) -> tuple[int, int]:
+        ret (self.width, self.height)
+
+    // The events that have happened since the last call, without waiting for any.
+    fn events(self) -> list[event]:
+        while self.open and (self.ahead.len() > 0 or net.ready(self.conn, 0.0)):
+            self.step()
+        found = self.pending
+        self.pending = []
+        ret found
+
+    // The events that have happened since the last call, waiting for one if there are none, or
+    // none if the window is closed.
+    fn wait(self) -> list[event]:
+        while self.open and self.pending.len() == 0:
+            self.step()
+        ret self.events()
+
+    // Shows `c` in the window, its top left pixel at the window's. What the window has outside
+    // `c` stays as it was.
+    fn show(self, c: canvas):
+        if not self.open or c.width == 0 or c.width > 32767:
+            ret
+        rows = c.height.min(32767)
+        per = ((self.setup.limit - 24) / (c.width * 4)).max(1)
+        format = 0
+        if self.setup.msb:
+            format = 1
+        y = 0
+        while y < rows:
+            n = per.min(rows - y)
+            // PutImage of ZPixmap pixels, with no left padding
+            head = put16([72, 2], 6 + n * c.width)
+            head = put32(head, self.setup.id)
+            head = put32(head, self.setup.gc)
+            head = put16(head, c.width)
+            head = put16(head, n)
+            head = put16(head, 0)
+            head = put16(head, y)
+            head.extend([0, self.setup.depth, 0, 0])
+            pixels = gui_sys.pack(c.pixels, y * c.width, n * c.width, format)
+            match self.conn.send_bytes(bytes(head).unwrap() + pixels):
+                case ok(_):
+                    y += n
+                case err(e):
+                    self.fail(e)
+                    ret
+
+    // Sets the title the window's frame shows.
+    fn set_title(self, title: str):
+        self.send(self.titled(title))
+
+    // Closes the window.
+    fn close(self):
+        if self.open:
+            self.conn.close()
+            self.open = false
+
+    // Creates the window on the server, titled `title`, and waits until it is on the screen.
+    fn create(self, title: str) -> result[int, str]:
+        // the atoms it needs, asked for together, then the symbols of every key
+        names = ["WM_PROTOCOLS", "WM_DELETE_WINDOW", "_NET_WM_NAME", "UTF8_STRING"]
+        asks = []
+        for name in names:
+            body = put16(put16([], name.len()), 0)
+            asks.extend(request(16, 0, put_bytes(body, name.bytes())))
+        asks.extend(request(101, 0, [self.setup.keys.first, 256 - self.setup.keys.first, 0, 0]))
+        self.conn.send_bytes(bytes(asks).unwrap())?
+        atoms = []
+        for _ in names:
+            reply = self.reply()?
+            atoms.append(get32(reply, 8))
+        self.setup.atoms = atoms
+        keys = self.reply()?
+        self.setup.keys.per = keys[1]
+        for i in range(get32(keys, 4)):
+            self.setup.keys.syms.append(get32(keys, 32 + 4 * i))
+        // CreateWindow with the root's depth and visual, a black background, and the events it
+        // listens for: keys, buttons, motion, exposure, and changes of its size
+        body = put32(put32([], self.setup.id), self.setup.root)
+        body = put16(put16(body, 0), 0)
+        body = put16(put16(body, self.width), self.height)
+        body = put16(put16(body, 0), 1)
+        body = put32(put32(body, 0), 2050)
+        body = put32(put32(body, 0), 163919)
+        made = request(1, 0, body)
+        made.extend(self.titled(title))
+        made.extend(self.property(self.setup.atoms[0], 4, 32, put32([], self.setup.atoms[1])))
+        // WM_CLASS, the instance and class names, each ended by a 0
+        made.extend(self.property(67, 31, 8, byte_list(b"stone\x00stone\x00")))
+        made.extend(request(55, 0, put32(put32(put32([], self.setup.gc), self.setup.id), 0)))
+        made.extend(request(8, 0, put32([], self.setup.id)))
+        self.conn.send_bytes(bytes(made).unwrap())?
+        // the window can be drawn on once it is first exposed
+        while self.open:
+            raw = self.raw()?
+            self.decode(raw)
+            if raw[0] % 128 == 12:
+                ret ok(0)
+        ret err(self.failure())
+
+    // The reason the window failed, from its last `failed` event.
+    fn failure(self) -> str:
+        for e in self.pending:
+            match e:
+                case event.failed(reason):
+                    ret reason
+                case _:
+                    cont
+        ret "the X server closed the connection"
+
+    // The requests that set the window's title.
+    fn titled(self, title: str) -> list[int]:
+        text = byte_list(title.bytes())
+        named = self.property(39, 31, 8, text)
+        named.extend(self.property(self.setup.atoms[2], self.setup.atoms[3], 8, text))
+        ret named
+
+    // A ChangeProperty request that replaces the window's property `name` with `data`, values
+    // of the type `kind`, each `format` bits.
+    fn property(self, name: int, kind: int, format: int, data: list[int]) -> list[int]:
+        body = put32(put32(put32([], self.setup.id), name), kind)
+        body.extend([format, 0, 0, 0])
+        body = put32(body, data.len() * 8 / format)
+        body.extend(data)
+        ret request(18, 0, body)
+
+    // Sends `data`, failing the window if it cannot.
+    fn send(self, data: list[int]):
+        if not self.open:
+            ret
+        match self.conn.send_bytes(bytes(data).unwrap()):
+            case ok(_):
+                ret
+            case err(e):
+                self.fail(e)
+
+    // Closes the window because of `reason`, giving a `failed` event.
+    fn fail(self, reason: str):
+        if self.open:
+            self.pending.append(event.failed(reason))
+            self.close()
+
+    // The next reply, or the error the server sent instead.
+    fn reply(self) -> result[bytes, str]:
+        head = self.conn.read_exact(32)?
+        if head[0] == 0:
+            ret err(x11_error(head))
+        if head[0] != 1:
+            ret err("unexpected X11 event {head[0]} before a reply")
+        ret ok(head + self.conn.read_exact(get32(head, 4) * 4)?)
+
+    // The next event, the one read ahead if there is one.
+    fn raw(self) -> result[bytes, str]:
+        if self.ahead.len() > 0:
+            found = self.ahead
+            self.ahead = b""
+            ret ok(found)
+        ret self.conn.read_exact(32)
+
+    // Waits for the next event and decodes it, failing the window if the connection breaks.
+    fn step(self):
+        match self.raw():
+            case ok(raw):
+                self.decode(raw)
+            case err(e):
+                self.fail(e)
+
+    // Adds the events the X11 event `raw` stands for to the pending ones.
+    fn decode(self, raw: bytes):
+        code = raw[0] % 128
+        if code == 0:
+            self.fail(x11_error(raw))
+        elif code == 2:
+            self.pending.append(event.key_down(key_name(self.keysym(raw[1], 0))))
+            self.typed(raw)
+        elif code == 3:
+            if self.repeated(raw):
+                self.typed(self.raw().unwrap())
+            else:
+                self.pending.append(event.key_up(key_name(self.keysym(raw[1], 0))))
+        elif code == 4 or code == 5:
+            self.button(raw)
+        elif code == 6:
+            self.pending.append(event.mouse_move(get16s(raw, 24), get16s(raw, 26)))
+        elif code == 12:
+            if get16(raw, 16) == 0:
+                self.pending.append(event.redraw)
+        elif code == 22:
+            width = get16(raw, 20)
+            height = get16(raw, 22)
+            if width != self.width or height != self.height:
+                self.width = width
+                self.height = height
+                self.pending.append(event.resize(width, height))
+        elif code == 33:
+            if get32(raw, 8) == self.setup.atoms[0] and get32(raw, 12) == self.setup.atoms[1]:
+                self.pending.append(event.close)
+
+    // Adds the event of the button press or release `raw`.
+    fn button(self, raw: bytes):
+        x = get16s(raw, 24)
+        y = get16s(raw, 26)
+        button = raw[1]
+        pressed = raw[0] % 128 == 4
+        if button >= 1 and button <= 3:
+            name = ["left", "middle", "right"][button - 1]
+            if pressed:
+                self.pending.append(event.mouse_down(name, x, y))
+            else:
+                self.pending.append(event.mouse_up(name, x, y))
+        elif pressed and button == 4:
+            self.pending.append(event.scroll(1))
+        elif pressed and button == 5:
+            self.pending.append(event.scroll(-1))
+
+    // Whether the key release `raw` is half of a repeat, which the server sends as a release and
+    // a press at the same moment while the key is held: the press is read ahead and kept.
+    fn repeated(self, raw: bytes) -> bool:
+        if self.ahead.len() == 0 and net.ready(self.conn, 0.0):
+            match self.conn.read_exact(32):
+                case ok(next):
+                    self.ahead = next
+                case err(e):
+                    self.fail(e)
+                    ret false
+        next = self.ahead
+        if next.len() != 32 or next[0] % 128 != 2:
+            ret false
+        ret next[1] == raw[1] and next[4:8] == raw[4:8]
+
+    // Adds a `text` event for what the key press `raw` types, if anything: nothing with Control
+    // held.
+    fn typed(self, raw: bytes):
+        state = get16(raw, 28)
+        if state / 4 % 2 == 1:
+            ret
+        plain = self.keysym(raw[1], 0)
+        shifted = state % 2 == 1
+        // Caps Lock shifts letters alone
+        if state / 2 % 2 == 1 and plain >= 97 and plain <= 122:
+            shifted = not shifted
+        sym = plain
+        if shifted and self.keysym(raw[1], 1) != 0:
+            sym = self.keysym(raw[1], 1)
+        typed = keysym_text(sym)
+        if typed != "":
+            self.pending.append(event.text(typed))
+
+    // The keysym in column `column` of the key `keycode`, or 0 if it has none.
+    fn keysym(self, keycode: int, column: int) -> int:
+        if keycode < self.setup.keys.first or column >= self.setup.keys.per:
+            ret 0
+        at = (keycode - self.setup.keys.first) * self.setup.keys.per + column
+        if at >= self.setup.keys.syms.len():
+            ret 0
+        ret self.setup.keys.syms[at]
+
+////////////////////////////////////////////////////////////////
+// apps
+////////////////////////////////////////////////////////////////
+
+// A program with a window, which `run` runs: its state is a value of a type that implements
+// this, which `update` changes at each event, `draw` shows, and `done` ends.
+pub trait app:
+    // Changes the state for the event `e`. By default nothing changes.
+    fn update(self, e: event):
+        // an assignment to `self`, so that implementations may change it
+        self = self
+
+    // Draws the state on `c`, a canvas as big as the window, and returns it.
+    fn draw(self, c: canvas) -> canvas
+
+    // Whether the program is done, which ends `run`. By default it is not.
+    fn done(self) -> bool:
+        ret false
+
+// Opens a window titled `title`, `width` by `height` pixels, and runs the app `state` in it. It
+// draws the state, then about 60 times a second gives `update` every event since the last turn
+// and a `tick` of the seconds the turn took, and draws the state again. It ends once `update`
+// has seen the `close` event or `done` says so after an event, and returns the last state, or
+// `err` if the window does not open or its connection breaks.
+pub fn run[A: app](title: str, width: int, height: int, state: A) -> result[A, str]:
+    w = open(title, width, height)?
+    c = state.draw(blank(width, height, 0))
+    w.show(c)
+    last = time.clock()
+    while true:
+        turn = time.clock()
+        es = w.events()
+        es.append(event.tick(turn - last))
+        last = turn
+        for e in es:
+            match e:
+                case event.failed(reason):
+                    ret err(reason)
+                case event.resize(across, down):
+                    c = blank(across, down, 0)
+                    state.update(e)
+                case _:
+                    state.update(e)
+            if e == event.close or state.done():
+                w.close()
+                ret ok(state)
+        c = state.draw(c)
+        w.show(c)
+        rest = 1.0 / 60.0 - (time.clock() - turn)
+        if rest > 0.0:
+            time.sleep(rest)
+    ret ok(state)
+
+// The message for the X11 error `raw`.
+fn x11_error(raw: bytes) -> str:
+    ret "X11 error {raw[1]} (request {raw[10]})"
+
+// The name of the key whose unshifted keysym is `sym`: the character it types for one that
+// types one (in lowercase for a letter), or `space`, `enter`, `escape`, `backspace`, `tab`,
+// `delete`, `insert`, `home`, `end`, `page_up`, `page_down`, `left`, `up`, `right`, `down`,
+// `f1` to `f12`, `shift`, `control`, `alt`, `super`, `caps_lock`, or else `unknown`.
+fn key_name(sym: int) -> str:
+    if sym == 32:
+        ret "space"
+    typed = keysym_text(sym)
+    if typed != "":
+        ret typed
+    if sym >= 65470 and sym <= 65481:
+        ret "f{sym - 65469}"
+    if sym >= 65456 and sym <= 65465:
+        ret "{sym - 65456}"
+    syms = [65288, 65289, 65293, 65421, 65307, 65535, 65439, 65379, 65438, 65360, 65429]
+    names = ["backspace", "tab", "enter", "enter", "escape", "delete", "delete", "insert"]
+    names.extend(["insert", "home", "home"])
+    syms.extend([65367, 65436, 65365, 65434, 65366, 65435, 65361, 65430, 65362, 65431])
+    names.extend(["end", "end", "page_up", "page_up", "page_down", "page_down", "left", "left"])
+    names.extend(["up", "up"])
+    syms.extend([65363, 65432, 65364, 65433, 65505, 65506, 65507, 65508])
+    names.extend(["right", "right", "down", "down", "shift", "shift", "control", "control"])
+    syms.extend([65511, 65512, 65513, 65514, 65027, 65515, 65516, 65509])
+    names.extend(["alt", "alt", "alt", "alt", "alt", "super", "super", "caps_lock"])
+    for i in range(syms.len()):
+        if syms[i] == sym:
+            ret names[i]
+    ret "unknown"
+
+// The text the keysym `sym` types: a Latin-1 character's, or a Unicode one's, whose keysyms are
+// its code plus 0x1000000, or nothing.
+fn keysym_text(sym: int) -> str:
+    code = -1
+    if sym >= 32 and sym <= 126 or sym >= 160 and sym <= 255:
+        code = sym
+    elif sym >= 16777216 + 160 and sym <= 16777216 + 1114111:
+        code = sym - 16777216
+    if code < 0:
+        ret ""
+    // the code's UTF-8 bytes
+    units = [code]
+    if code >= 65536:
+        units = [240 + code / 262144, 128 + code / 4096 % 64, 128 + code / 64 % 64, 128 + code % 64]
+    elif code >= 2048:
+        units = [224 + code / 4096, 128 + code / 64 % 64, 128 + code % 64]
+    elif code >= 128:
+        units = [192 + code / 64, 128 + code % 64]
+    ret bytes(units).unwrap().text().unwrap_or("")
+
+// A request with the major opcode `opcode` and the byte `data` after it, whose `body` is padded
+// to a multiple of four bytes.
+fn request(opcode: int, data: int, body: list[int]) -> list[int]:
+    for _ in range(pad(body.len())):
+        body.append(0)
+    out = put16([opcode, data], 1 + body.len() / 4)
+    out.extend(body)
+    ret out
+
+// `xs` with `value`'s two bytes after it, least significant first.
+fn put16(xs: list[int], value: int) -> list[int]:
+    xs.append(value % 256)
+    xs.append(value / 256 % 256)
+    ret xs
+
+// `xs` with `value`'s four bytes after it, least significant first.
+fn put32(xs: list[int], value: int) -> list[int]:
+    xs = put16(xs, value % 65536)
+    ret put16(xs, value / 65536 % 65536)
+
+// The values of `data`'s bytes.
+fn byte_list(data: bytes) -> list[int]:
+    values = []
+    for b in data:
+        values.append(b)
+    ret values
+
+// `xs` with `data` after it, padded with zeros to a multiple of four bytes.
+fn put_bytes(xs: list[int], data: bytes) -> list[int]:
+    for b in data:
+        xs.append(b)
+    for _ in range(pad(data.len())):
+        xs.append(0)
+    ret xs
+
+// The bytes that pad `n` bytes to a multiple of four.
+fn pad(n: int) -> int:
+    ret (4 - n % 4) % 4
+
+// The two bytes at `at` of `data`, least significant first.
+fn get16(data: bytes, at: int) -> int:
+    ret data[at] + data[at + 1] * 256
+
+// The two bytes at `at` of `data` as a signed number.
+fn get16s(data: bytes, at: int) -> int:
+    value = get16(data, at)
+    if value >= 32768:
+        ret value - 65536
+    ret value
+
+// The four bytes at `at` of `data`, least significant first.
+fn get32(data: bytes, at: int) -> int:
+    ret get16(data, at) + get16(data, at + 2) * 65536
+
+// How many pixels wide and high each character of the font is.
+fn glyph_size() -> int:
+    ret 8
+
+// How many characters `text` has, a newline included.
+fn characters(text: str) -> int:
+    count = 0
+    for code in text.bytes():
+        if code < 128 or code >= 192:
+            count += 1
+    ret count
+
+// The index in `font()` of the glyph for the character whose first byte is `code`: a printable
+// ASCII character's own, else the box after `~`.
+fn glyph_index(code: int) -> int:
+    if code >= 32 and code <= 126:
+        ret code - 32
+    ret 95
+
+// The font: 8 bytes per character for each printable ASCII character from 32 (space) to 126
+// (`~`), then a box, one byte per row from the top, the lowest bit the leftmost pixel. It is
+// font8x8_basic by Daniel Hepper, which is in the public domain.
+fn font() -> bytes:
+    letters = b"\x00\x00\x00\x00\x00\x00\x00\x00\x18\x3c\x3c\x18\x18\x00\x18\x00"
+    letters += b"\x36\x36\x00\x00\x00\x00\x00\x00\x36\x36\x7f\x36\x7f\x36\x36\x00"
+    letters += b"\x0c\x3e\x03\x1e\x30\x1f\x0c\x00\x00\x63\x33\x18\x0c\x66\x63\x00"
+    letters += b"\x1c\x36\x1c\x6e\x3b\x33\x6e\x00\x06\x06\x03\x00\x00\x00\x00\x00"
+    letters += b"\x18\x0c\x06\x06\x06\x0c\x18\x00\x06\x0c\x18\x18\x18\x0c\x06\x00"
+    letters += b"\x00\x66\x3c\xff\x3c\x66\x00\x00\x00\x0c\x0c\x3f\x0c\x0c\x00\x00"
+    letters += b"\x00\x00\x00\x00\x00\x0c\x0c\x06\x00\x00\x00\x3f\x00\x00\x00\x00"
+    letters += b"\x00\x00\x00\x00\x00\x0c\x0c\x00\x60\x30\x18\x0c\x06\x03\x01\x00"
+    letters += b"\x3e\x63\x73\x7b\x6f\x67\x3e\x00\x0c\x0e\x0c\x0c\x0c\x0c\x3f\x00"
+    letters += b"\x1e\x33\x30\x1c\x06\x33\x3f\x00\x1e\x33\x30\x1c\x30\x33\x1e\x00"
+    letters += b"\x38\x3c\x36\x33\x7f\x30\x78\x00\x3f\x03\x1f\x30\x30\x33\x1e\x00"
+    letters += b"\x1c\x06\x03\x1f\x33\x33\x1e\x00\x3f\x33\x30\x18\x0c\x0c\x0c\x00"
+    letters += b"\x1e\x33\x33\x1e\x33\x33\x1e\x00\x1e\x33\x33\x3e\x30\x18\x0e\x00"
+    letters += b"\x00\x0c\x0c\x00\x00\x0c\x0c\x00\x00\x0c\x0c\x00\x00\x0c\x0c\x06"
+    letters += b"\x18\x0c\x06\x03\x06\x0c\x18\x00\x00\x00\x3f\x00\x00\x3f\x00\x00"
+    letters += b"\x06\x0c\x18\x30\x18\x0c\x06\x00\x1e\x33\x30\x18\x0c\x00\x0c\x00"
+    letters += b"\x3e\x63\x7b\x7b\x7b\x03\x1e\x00\x0c\x1e\x33\x33\x3f\x33\x33\x00"
+    letters += b"\x3f\x66\x66\x3e\x66\x66\x3f\x00\x3c\x66\x03\x03\x03\x66\x3c\x00"
+    letters += b"\x1f\x36\x66\x66\x66\x36\x1f\x00\x7f\x46\x16\x1e\x16\x46\x7f\x00"
+    letters += b"\x7f\x46\x16\x1e\x16\x06\x0f\x00\x3c\x66\x03\x03\x73\x66\x7c\x00"
+    letters += b"\x33\x33\x33\x3f\x33\x33\x33\x00\x1e\x0c\x0c\x0c\x0c\x0c\x1e\x00"
+    letters += b"\x78\x30\x30\x30\x33\x33\x1e\x00\x67\x66\x36\x1e\x36\x66\x67\x00"
+    letters += b"\x0f\x06\x06\x06\x46\x66\x7f\x00\x63\x77\x7f\x7f\x6b\x63\x63\x00"
+    letters += b"\x63\x67\x6f\x7b\x73\x63\x63\x00\x1c\x36\x63\x63\x63\x36\x1c\x00"
+    letters += b"\x3f\x66\x66\x3e\x06\x06\x0f\x00\x1e\x33\x33\x33\x3b\x1e\x38\x00"
+    letters += b"\x3f\x66\x66\x3e\x36\x66\x67\x00\x1e\x33\x07\x0e\x38\x33\x1e\x00"
+    letters += b"\x3f\x2d\x0c\x0c\x0c\x0c\x1e\x00\x33\x33\x33\x33\x33\x33\x3f\x00"
+    letters += b"\x33\x33\x33\x33\x33\x1e\x0c\x00\x63\x63\x63\x6b\x7f\x77\x63\x00"
+    letters += b"\x63\x63\x36\x1c\x1c\x36\x63\x00\x33\x33\x33\x1e\x0c\x0c\x1e\x00"
+    letters += b"\x7f\x63\x31\x18\x4c\x66\x7f\x00\x1e\x06\x06\x06\x06\x06\x1e\x00"
+    letters += b"\x03\x06\x0c\x18\x30\x60\x40\x00\x1e\x18\x18\x18\x18\x18\x1e\x00"
+    letters += b"\x08\x1c\x36\x63\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\x00\xff"
+    letters += b"\x0c\x0c\x18\x00\x00\x00\x00\x00\x00\x00\x1e\x30\x3e\x33\x6e\x00"
+    letters += b"\x07\x06\x06\x3e\x66\x66\x3b\x00\x00\x00\x1e\x33\x03\x33\x1e\x00"
+    letters += b"\x38\x30\x30\x3e\x33\x33\x6e\x00\x00\x00\x1e\x33\x3f\x03\x1e\x00"
+    letters += b"\x1c\x36\x06\x0f\x06\x06\x0f\x00\x00\x00\x6e\x33\x33\x3e\x30\x1f"
+    letters += b"\x07\x06\x36\x6e\x66\x66\x67\x00\x0c\x00\x0e\x0c\x0c\x0c\x1e\x00"
+    letters += b"\x30\x00\x30\x30\x30\x33\x33\x1e\x07\x06\x66\x36\x1e\x36\x67\x00"
+    letters += b"\x0e\x0c\x0c\x0c\x0c\x0c\x1e\x00\x00\x00\x33\x7f\x7f\x6b\x63\x00"
+    letters += b"\x00\x00\x1f\x33\x33\x33\x33\x00\x00\x00\x1e\x33\x33\x33\x1e\x00"
+    letters += b"\x00\x00\x3b\x66\x66\x3e\x06\x0f\x00\x00\x6e\x33\x33\x3e\x30\x78"
+    letters += b"\x00\x00\x3b\x6e\x66\x06\x0f\x00\x00\x00\x3e\x03\x1e\x30\x1f\x00"
+    letters += b"\x08\x0c\x3e\x0c\x0c\x2c\x18\x00\x00\x00\x33\x33\x33\x33\x6e\x00"
+    letters += b"\x00\x00\x33\x33\x33\x1e\x0c\x00\x00\x00\x63\x6b\x7f\x7f\x36\x00"
+    letters += b"\x00\x00\x63\x36\x1c\x36\x63\x00\x00\x00\x33\x33\x33\x3e\x30\x1f"
+    letters += b"\x00\x00\x3f\x19\x0c\x26\x3f\x00\x38\x0c\x0c\x07\x0c\x0c\x38\x00"
+    letters += b"\x18\x18\x18\x00\x18\x18\x18\x00\x07\x0c\x0c\x38\x0c\x0c\x07\x00"
+    letters += b"\x6e\x3b\x00\x00\x00\x00\x00\x00\x00\x7e\x42\x42\x42\x42\x7e\x00"
+    ret letters

@@ -1,0 +1,26 @@
+// Drawing on a canvas: a disc, text, and a line, printed with a character for each pixel, then
+// saved as an image file.
+use fs
+use gui
+
+// Prints `c` with a character for each pixel: `#` for white, `o` for gold, and `.` for the rest.
+fn show(c: gui.canvas):
+    for y in range(c.height):
+        row = ""
+        for x in range(c.width):
+            color = c.get(x, y).unwrap()
+            if color == gui.rgb(255, 255, 255):
+                row += "#"
+            elif color == gui.rgb(241, 194, 50):
+                row += "o"
+            else:
+                row += "."
+        print(row)
+
+c = gui.blank(30, 11, gui.rgb(20, 24, 40))
+c.disc(23, 5, 4, gui.rgb(241, 194, 50))
+c.text(1, 1, "hi", gui.rgb(255, 255, 255))
+c.line(0, 10, 29, 10, gui.rgb(255, 255, 255))
+show(c)
+
+print(fs.write_bytes("picture.ppm", c.ppm()))

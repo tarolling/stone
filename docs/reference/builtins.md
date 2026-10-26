@@ -3,8 +3,8 @@
 These functions are part of the language and available everywhere. Their names cannot be
 assigned to. The builtin [methods](#methods) are called on a value instead, as in `xs.len()`.
 The builtin modules, [`os`](#the-os-module), [`math`](#the-math-module),
-[`random`](#the-random-module), [`time`](#the-time-module), [`fs`](#the-fs-module), and
-[`net`](#the-net-module), are imported like module files, as in `use math`. The same descriptions appear on hover in the
+[`random`](#the-random-module), [`time`](#the-time-module), [`fs`](#the-fs-module),
+[`net`](#the-net-module), and [`gui`](#the-gui-module), are imported like module files, as in `use math`. The same descriptions appear on hover in the
 editor.
 
 ## `print`
@@ -1683,6 +1683,31 @@ Connects as `net.connect` does, but gives each address at most `seconds`, counte
 `set_timeout` counts them, after which it is `err("timed out: 'host:port'")`.
 The socket it returns waits forever until its own `set_timeout`.
 
+### `net.connect_unix`
+
+```text
+net.connect_unix(path: str) -> result[socket, str]
+```
+
+Connects to the Unix socket at `path`, a file through which a server on this machine takes
+connections, such as a display server or `/var/run/docker.sock`, and returns `ok` of the socket,
+which works as one from `net.connect` does. A path that does not exist is
+`err("no such file or directory: 'path'")`, a file that is not a socket
+`err("connection refused: 'path'")`, and a path longer than an address holds (107 bytes, or 103
+on macOS) `err("file name too long: 'path'")`.
+
+### `net.ready`
+
+```text
+net.ready(s: socket, seconds: float) -> bool
+```
+
+Returns whether a read of `s` would not wait, waiting at most `seconds` for something to arrive:
+`true` once bytes have arrived that no read has taken yet, once the other end has closed the
+connection, or once `s` is closed, since a read then fails at once. Zero, a negative number, or
+nan does not wait, so `net.ready(s, 0.0)` checks without waiting. Waits are counted as
+[`set_timeout`](#set_timeout) counts them.
+
 ### `net.listen`
 
 ```text
@@ -1721,3 +1746,169 @@ use net
 print(net.resolve("localhost"))   // ok(['127.0.0.1', '::1'])
 print(net.resolve("::FFFF:1.2.3.4"))   // ok(['::ffff:1.2.3.4'])
 ```
+
+## The `gui` module
+
+`gui` draws pictures and shows them in windows: a `gui.canvas` is an image whose pixels a
+program sets, draws shapes and text on, and saves, and a `gui.window` shows one on the screen
+and reports the keyboard and mouse. Import it with `use gui`. Like `net`, it is written in
+stone, and a program that uses it is linked with its source, so it draws the same pixels and
+sends the display the same requests under `stone run` and in a built program, and an editor
+can show its code. A file named `gui.stn` next to the entry file cannot be imported. The
+{doc}`tutorial <../tutorial/windows>` shows each part at work.
+
+A color is an int, `0xRRGGBB`, as [`gui.rgb`](#guirgb) makes it. A canvas is a struct of its
+`width`, its `height`, and its `pixels`, a list of colors in rows from the top left, so the
+pixel at `x`, `y` is `pixels[y * width + x]`. It is a value like a list: a copy of a canvas is
+a canvas of its own. Drawing outside a canvas draws nothing there, so a shape may hang over an
+edge.
+
+```stone
+use fs
+use gui
+
+c = gui.blank(64, 48, gui.rgb(255, 255, 255))
+c.disc(32, 24, 16, gui.rgb(240, 190, 50))
+c.text(4, 4, "hi", gui.rgb(0, 0, 0))
+fs.write_bytes("picture.ppm", c.ppm()).unwrap()
+```
+
+### `gui.rgb`
+
+```text
+gui.rgb(r: int, g: int, b: int) -> int
+```
+
+Returns the color with red `r`, green `g`, and blue `b`, each from 0 to 255, as `0xRRGGBB`. A
+value outside that range is taken as the nearest end, so `gui.rgb(300, -5, 1)` is `gui.rgb(255,
+0, 1)`.
+
+### `gui.blank`
+
+```text
+gui.blank(width: int, height: int, color: int) -> canvas
+```
+
+Returns a canvas `width` pixels wide and `height` high with every pixel `color`. A negative size
+is taken as 0.
+
+### `gui.text_width`
+
+```text
+gui.text_width(text: str) -> int
+```
+
+Returns how many pixels wide `text` is when [`text`](#canvas-methods) draws it: 8 for each
+character.
+
+### Canvas methods
+
+Every method but `get` and `ppm` changes the canvas it is called on, as `append` changes a list.
+
+- `c.get(x: int, y: int) -> option[int]` returns the color of the pixel at `x`, `y`, or `none`
+  if it is not on the canvas.
+- `c.set(x: int, y: int, color: int)` makes the pixel at `x`, `y` `color`.
+- `c.fill(color: int)` makes every pixel `color`.
+- `c.rect(x: int, y: int, width: int, height: int, color: int)` fills the rectangle `width` by
+  `height` whose top left pixel is at `x`, `y`, and `c.outline(...)`, with the same parameters,
+  draws its edge, one pixel wide.
+- `c.line(x0: int, y0: int, x1: int, y1: int, color: int)` draws a line one pixel wide from
+  `x0`, `y0` to `x1`, `y1`, both ends included.
+- `c.circle(x: int, y: int, radius: int, color: int)` draws the edge of the circle of `radius`
+  around `x`, `y`, and `c.disc(...)`, with the same parameters, fills it.
+- `c.blit(source: canvas, x: int, y: int)` draws `source` with its top left pixel at `x`, `y`.
+- `c.text(x: int, y: int, text: str, color: int)` draws `text` with the top left of its first
+  character at `x`, `y`, in letters 8 pixels square from the public-domain font8x8 font. A
+  newline starts a line 8 pixels below, and a character outside ASCII draws as a box.
+  `c.text_scaled(x, y, text, color, scale: int)` draws each pixel of a letter `scale` pixels
+  square.
+- `c.ppm() -> bytes` returns the canvas as a binary PPM image (`P6`), which most image viewers
+  and converters read, for [`fs.write_bytes`](#fswrite_bytes).
+
+### Windows
+
+A window speaks the X11 protocol to the display server itself, over a socket from
+[`net`](#the-net-module), so a built program still needs no C library. Every Linux desktop runs
+an X11 server, XWayland under Wayland, and on macOS XQuartz does. The `DISPLAY` environment
+variable says where it is: `:0` is the Unix socket `/tmp/.X11-unix/X0`, a path such as
+`/tmp/launch-x/org.xquartz:0` is that socket, and `host:0` is TCP port 6000 on `host`. A server
+that asks for one gets the `MIT-MAGIC-COOKIE-1` that `XAUTHORITY`, or `~/.Xauthority`, holds
+for the display. The display must take 24-bit color, as every current one does.
+
+A window is a handle, like a socket: a copy of it is the same window, and it closes by itself
+right after the last statement that uses it, or sooner with `close`. Its methods:
+
+- `w.is_open() -> bool` says whether the window is open: until `close`, or until its connection
+  breaks.
+- `w.events() -> list[event]` returns the events since the last call, without waiting.
+- `w.wait() -> list[event]` returns the events since the last call, waiting for one if there are
+  none, or `[]` once the window is closed.
+- `w.show(c: canvas)` shows the canvas in the window, its top left pixel at the window's.
+- `w.size() -> tuple[int, int]` returns the window's width and height, as the last `resize`
+  event gave them.
+- `w.set_title(title: str)` sets the title on the window's frame.
+- `w.close()` closes the window.
+
+`events`, `wait`, `show`, `set_title`, and `close` change the window, so each is a statement or
+the whole value of an assignment, as in `es = w.events()`.
+
+### `gui.open`
+
+```text
+gui.open(title: str, width: int, height: int) -> result[window, str]
+```
+
+Opens a window titled `title`, `width` by `height` pixels (each from 1 to 32767), on the display
+`DISPLAY` names, and returns it once it is on the screen. Without a display it is
+`err("no display: DISPLAY is not set")`, a server that turns the program away gives its reason,
+as in `err("the X server refused the connection: No protocol specified")`, and one whose pixels
+are not 24-bit color is `err("unsupported display format: depth 16, 16 bits per pixel")`.
+
+### Events
+
+`events` and `wait` give a list of `gui.event` values, an enum matched as
+`case gui.event.key_down(key):`:
+
+- `close`: the close button was pressed. The window stays open until `close` is called.
+- `resize(width: int, height: int)`: the window is now this big.
+- `redraw`: the window lost what it showed, so it should be shown again.
+- `key_down(name: str)` and `key_up(name: str)`: a key went down or came up. A key that types a
+  character is named by it, in lowercase for a letter (`"a"`, `"1"`, `"/"`); the others are
+  `"space"`, `"enter"`, `"escape"`, `"backspace"`, `"tab"`, `"delete"`, `"insert"`, `"home"`,
+  `"end"`, `"page_up"`, `"page_down"`, `"left"`, `"up"`, `"right"`, `"down"`, `"f1"` to `"f12"`,
+  `"shift"`, `"control"`, `"alt"`, `"super"`, `"caps_lock"`, or else `"unknown"`. Holding a key
+  down gives one `key_down`.
+- `text(text: str)`: a key typed this text, with Shift and Caps Lock applied, again for each
+  repeat while it is held. Keys pressed with Control type nothing.
+- `mouse_move(x: int, y: int)`: the mouse moved to this point of the window.
+- `mouse_down(button: str, x: int, y: int)` and `mouse_up(button: str, x: int, y: int)`: the
+  `"left"`, `"middle"`, or `"right"` button went down or came up at this point.
+- `scroll(steps: int)`: the wheel turned a step away from the user (1) or toward them (-1).
+- `tick(seconds: float)`: the seconds since the last tick, which only `gui.run` gives.
+- `failed(reason: str)`: the connection to the display broke, and the window is closed.
+
+### `gui.run`
+
+```text
+gui.run[A: app](title: str, width: int, height: int, state: A) -> result[A, str]
+```
+
+Opens a window as `gui.open` does and runs the app `state` in it: it draws the state, then about
+60 times a second gives `update` every event since the last turn followed by a `tick`, and draws
+the state again with a canvas as big as the window. It ends once `update` has seen the `close`
+event, or once `done` returns `true` after an event, and returns `ok` of the last state, or the
+error that opening the window, or a broken connection, gives.
+
+An app is a value of any type that implements the trait `gui.app`:
+
+```stone
+trait app:
+    // changes the state for the event; by default nothing changes
+    fn update(self, e: event)
+    // draws the state on the canvas and returns it
+    fn draw(self, c: canvas) -> canvas
+    // whether the app is done; by default it is not
+    fn done(self) -> bool
+```
+
+`update` may change `self`, and `draw` and `done` only read it.

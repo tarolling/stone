@@ -12,6 +12,19 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- The `gui` module, written in stone: canvases to draw on and windows that show them. A
+  `gui.canvas` from `gui.blank(width, height, color)` draws rectangles, lines, circles, other
+  canvases, and text in an 8 by 8 font, reads pixels back with `get`, and saves itself as a PPM
+  image with `ppm()`. `gui.open(title, width, height)` opens a window that `show`s a canvas and
+  reports the keyboard, mouse, resizing, and the close button as `gui.event` values through
+  `events()` (without waiting) or `wait()`. `gui.run(title, width, height, state)` runs a value
+  whose type implements the trait `gui.app` (`update`, `draw`, and `done`) about 60 times a
+  second. Windows speak the X11 protocol themselves over a socket, so built programs still need
+  no C library: any Linux desktop, XWayland included, and XQuartz on macOS can show them.
+
+- `net.connect_unix(path)` connects to a Unix socket, and `net.ready(s, seconds)` says whether a
+  read of a socket would not wait, waiting at most `seconds` for data to arrive.
+
 - Generic traits: a trait may have type parameters, as `trait add[R]:`, which a type implements
   once for each set of type arguments, as `impl add[int] for V:` and `impl add[V] for V:`. A
   call such as `v.add(2)` calls the impl its arguments fit, and a bound gives the trait its
@@ -62,6 +75,15 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 - **Breaking:** the string methods `parse_int` and `parse_float`; `int(s)` and `float(s)` return
   the same results.
+
+### Fixed
+
+- A struct, enum, or trait of the entry file no longer reaches into modules and the prelude,
+  which cannot see the entry file's names. Defining `struct keys:` used to make every program fail to
+  check, since the prelude's `sort_by_key` has a variable `keys`, and a type named like a
+  variable of `net`, `gui`, or a library of the program broke that module the same way. A
+  module that names such a type or trait, in a signature, a bound, or an `impl` block, is told
+  there is no type or trait of that name.
 
 ## [0.3.4] - 2026-10-24
 

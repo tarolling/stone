@@ -1,0 +1,52 @@
+// Types of the entry file are named like variables of a library, the prelude, and gui, which
+// cannot see them, so each name means its own thing in each file.
+use gui
+use shades
+
+// the prelude's `sort_by_key` has locals `keys` and `order`, and `sort` has `width` and `out`
+struct keys:
+    name: str
+    size: int
+
+enum order:
+    First
+    Second(int)
+
+struct width:
+    n: int
+
+enum out:
+    Done
+
+// gui's `blank` has locals `w` and `pixels`
+struct pixels:
+    count: int
+
+enum w:
+    Wide
+
+// shades has locals `color` and `point`
+enum color:
+    Red
+    Green(int)
+
+struct point:
+    x: int
+    y: int
+
+impl ord for keys:
+    fn cmp(self, other: Self) -> ordering:
+        ret self.size.cmp(other.size)
+
+ks = [keys(name="c", size=1), keys(name="a", size=3), keys(name="b", size=2)]
+ks.sort_by_key(|k: keys| k.name)
+print(ks)
+ks.sort()
+print(ks)
+print(order.Second(2), width(n=1), out.Done)
+
+c = gui.blank(2, 1, gui.rgb(1, 2, 3))
+print(c.pixels, pixels(count=c.pixels.len()), w.Wide)
+
+print(shades.sum(4), shades.mix([3, 1, 2]))
+print(color.Green(1), point(x=1, y=2))

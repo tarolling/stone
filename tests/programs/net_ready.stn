@@ -1,0 +1,23 @@
+// Asking whether a read would wait, over a connection to this machine.
+use net
+
+fn check() -> result[int, str]:
+    l = net.listen("127.0.0.1", 0)?
+    c = net.connect("127.0.0.1", l.port())?
+    s = l.accept()?
+    print(net.ready(c, 0.0), net.ready(c, 0.05), net.ready(c, -1.0))
+    s.send("ab\ncd")?
+    print(net.ready(c, 5.0))
+    print(c.read_line()?)
+    // the rest arrived with the line, so it waits in the buffer
+    print(net.ready(c, 0.0))
+    print(c.read_bytes(10)?)
+    print(net.ready(c, 0.0))
+    s.close()
+    print(net.ready(c, 5.0), c.read_bytes(10)?)
+    print(net.ready(c, 0.0))
+    c.close()
+    print(net.ready(c, 0.0), net.ready(s, 0.0))
+    ret ok(0)
+
+print(check())

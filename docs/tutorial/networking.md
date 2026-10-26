@@ -74,6 +74,6 @@ use net
 print(net.resolve("localhost"))   // ok(['127.0.0.1', '::1'])
 ```
 
-That is the whole tutorial. The {doc}`../reference/syntax` and {doc}`../reference/builtins`
-pages cover the details, including every method of a [socket](../reference/builtins.md#send)
-and the [`net` module](../reference/builtins.md#the-net-module).
+Every method of a [socket](../reference/builtins.md#send) and the
+[`net` module](../reference/builtins.md#the-net-module) are in the reference. {doc}`windows`
+draws pictures and shows them on the screen.

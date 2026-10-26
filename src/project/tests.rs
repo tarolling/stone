@@ -1654,3 +1654,113 @@ fn an_impl_of_another_files_trait_for_a_builtin_type_may_go_beside_a_struct_it_n
         21,
     );
 }
+
+const SHADES: (&str, &str) = (
+    "shades.stn",
+    "struct pair:\n    a: int\n\npub fn sum(n: int) -> int:\n    color = pair(a=n)\n    \
+     point = |x: int| x + 1\n    ret point(color.a)\n",
+);
+
+#[test]
+fn a_library_can_name_a_variable_like_a_type_of_the_entry_file() {
+    let main = (
+        "main.stn",
+        "use shades\n\nenum color:\n    Red\n\nstruct point:\n    x: int\n\n\
+         print(shades.sum(2), color.Red, point(x=1))\n",
+    );
+    assert_eq!(output(&[main, SHADES]), "3 color.Red point(x=1)\n");
+}
+
+#[test]
+fn a_library_cannot_name_a_type_of_the_entry_file() {
+    let main = (
+        "main.stn",
+        "use shapes\n\nstruct point:\n    x: int\n\nprint(1)\n",
+    );
+    let shapes = ("shapes.stn", "pub fn f(p: point) -> int:\n    ret 1\n");
+    assert_error(
+        &[main, shapes],
+        "shapes.stn",
+        "there is no type 'point'",
+        1,
+        13,
+    );
+}
+
+#[test]
+fn a_library_can_name_a_type_parameter_like_a_type_of_the_entry_file() {
+    let main = (
+        "main.stn",
+        "use shapes\n\nstruct point:\n    x: int\n\nprint(shapes.first([1, 2]))\n",
+    );
+    let shapes = (
+        "shapes.stn",
+        "pub fn first[point](xs: list[point]) -> point:\n    ret xs[0]\n",
+    );
+    assert_eq!(output(&[main, shapes]), "1\n");
+}
+
+#[test]
+fn a_type_of_the_entry_file_is_no_type_in_a_builtin_module() {
+    let main = (
+        "main.stn",
+        "use net\n\nstruct address:\n    x: int\n\nprint(net.resolve(\"localhost\").is_ok())\n",
+    );
+    let (_, result) = driver::load(Path::new(main.0), main.1, &sources_of(&[]));
+    assert!(result.is_ok());
+}
+
+const ENTRY_TRAIT: (&str, &str) = (
+    "main.stn",
+    "use shapes\n\ntrait show:\n    fn show(self) -> str\n\nstruct point:\n    x: int\n\nprint(1)\n",
+);
+
+#[test]
+fn a_library_cannot_bound_by_a_trait_of_the_entry_file() {
+    let shapes = ("shapes.stn", "pub fn f[T: show](x: T) -> int:\n    ret 1\n");
+    assert_error(
+        &[ENTRY_TRAIT, shapes],
+        "shapes.stn",
+        "there is no trait 'show'",
+        1,
+        13,
+    );
+    let shapes = (
+        "shapes.stn",
+        "pub fn f[T: point](x: T) -> int:\n    ret 1\n",
+    );
+    assert_error(
+        &[ENTRY_TRAIT, shapes],
+        "shapes.stn",
+        "there is no trait 'point'",
+        1,
+        13,
+    );
+}
+
+#[test]
+fn a_library_cannot_implement_a_trait_of_the_entry_file() {
+    let shapes = (
+        "shapes.stn",
+        "struct pair:\n    a: int\n\nimpl show for pair:\n    fn show(self) -> str:\n        ret \"\"\n",
+    );
+    assert_error(
+        &[ENTRY_TRAIT, shapes],
+        "shapes.stn",
+        "there is no trait 'show'",
+        4,
+        6,
+    );
+}
+
+#[test]
+fn a_library_cannot_name_a_trait_of_the_entry_file_as_a_type() {
+    let shapes = ("shapes.stn", "pub fn f(x: show) -> int:\n    ret 1\n");
+    assert_error(
+        &[ENTRY_TRAIT, shapes],
+        "shapes.stn",
+        "there is no type 'show'",
+        1,
+        13,
+    );
+}

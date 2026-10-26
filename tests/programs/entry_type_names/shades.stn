@@ -1,0 +1,23 @@
+// Names variables like the entry file's types, which a module cannot see.
+
+struct pair:
+    a: int
+
+enum tone:
+    Dark(int)
+    Light
+
+pub fn sum(n: int) -> int:
+    color = pair(a=n)
+    point = |x: int| x + 1
+    ret point(color.a)
+
+pub fn mix(xs: list[int]) -> str:
+    keys = xs
+    keys.sort()
+    color = tone.Dark(keys[0])
+    match color:
+        case tone.Dark(order):
+            ret "{keys} {order}"
+        case tone.Light:
+            ret "light"

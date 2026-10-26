@@ -1,0 +1,10 @@
+false false false
+true
+some('ab')
+true
+b'cd'
+false
+true b''
+true
+true true
+ok(0)

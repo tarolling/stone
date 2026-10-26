@@ -1265,6 +1265,39 @@ fn both_backends_resolve_names_through_dns_alike() {
 }
 
 #[test]
+fn both_backends_talk_over_a_unix_socket_alike() {
+    let source = "use net\n\
+                  s = net.connect_unix(\"echo.sock\").unwrap()\n\
+                  s.send(\"ping\\n\").unwrap()\n\
+                  print(s.read_line())\n\
+                  s.send_bytes(b\"\\x00\\xff\\n\").unwrap()\n\
+                  print(s.read_exact(3))\n";
+    let (_, [run, built]) = run_and_build_env(
+        "net_unix_echo",
+        source,
+        |dir| {
+            let path = dir.join("echo.sock");
+            let _ = std::fs::remove_file(&path);
+            let server = std::os::unix::net::UnixListener::bind(&path).unwrap();
+            std::thread::spawn(move || {
+                for mut client in server.incoming().flatten() {
+                    std::thread::spawn(move || {
+                        let mut copy = client.try_clone().unwrap();
+                        let _ = std::io::copy(&mut client, &mut copy);
+                    });
+                }
+            });
+        },
+        &[],
+    );
+    let expected = "ok(some('ping'))\nok(b'\\x00\\xff\\n')\n";
+    for output in [run, built] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    }
+}
+
+#[test]
 fn both_backends_give_up_connecting_after_a_timeout() {
     // an address in a private range that nothing answers, so a connection waits until it times
     // out, unless this network refuses it at once
@@ -1280,4 +1313,702 @@ fn both_backends_give_up_connecting_after_a_timeout() {
     }
     assert!(built.status.success(), "{built:?}");
     assert_eq!(String::from_utf8_lossy(&built.stdout), expected);
+}
+
+/// How the fake X server of [`fake_x_server`] describes itself.
+#[derive(Clone, Copy)]
+struct FakeDisplay {
+    /// Whether it takes pixels most significant byte first.
+    msb: bool,
+    /// The depth of the root window, and the bits per pixel of its pixmap format.
+    depth: u8,
+    bits: u8,
+    /// The most 4-byte units one request may hold.
+    max_request: u16,
+    /// The reason it refuses connections, if it does.
+    refuse: Option<&'static str>,
+    /// Whether it sends [`paced_events`] a part after each frame, rather than [`fake_events`]
+    /// all at once.
+    paced: bool,
+    /// Whether its setup reply is cut short after 20 bytes, its length saying so.
+    short: bool,
+}
+
+/// What the fake X server saw on one connection: the authorization's name and data, and every
+/// request after the setup.
+#[derive(Default, Debug)]
+struct FakeConnection {
+    auth: (Vec<u8>, Vec<u8>),
+    requests: Vec<Vec<u8>>,
+    /// Whether the client has closed the connection.
+    closed: bool,
+}
+
+/// The atoms the fake X server gives out, by name.
+const FAKE_ATOMS: [(&str, u32); 4] = [
+    ("WM_PROTOCOLS", 301),
+    ("WM_DELETE_WINDOW", 302),
+    ("_NET_WM_NAME", 303),
+    ("UTF8_STRING", 304),
+];
+
+/// The fake keyboard's keysyms, two per keycode from 8: `a` on 38, `1` on 10, Escape on 9,
+/// Shift on 50, and the Greek alpha, a Unicode keysym, on 60.
+fn fake_keysyms() -> Vec<u32> {
+    let mut syms = vec![0; 248 * 2];
+    let mut set = |keycode: usize, plain: u32, shifted: u32| {
+        syms[(keycode - 8) * 2] = plain;
+        syms[(keycode - 8) * 2 + 1] = shifted;
+    };
+    set(38, 0x61, 0x41);
+    set(10, 0x31, 0x21);
+    set(9, 0xff1b, 0);
+    set(50, 0xffe1, 0);
+    set(60, 0x0100_03b1, 0x0100_0391);
+    syms
+}
+
+/// A 32-byte X11 event: `code`, `detail`, a sequence number of 0, then `fields`, each written at
+/// its offset as two or four bytes, least significant first.
+fn x11_event(code: u8, detail: u8, fields: &[(usize, u32, usize)]) -> [u8; 32] {
+    let mut event = [0; 32];
+    event[0] = code;
+    event[1] = detail;
+    for &(at, value, size) in fields {
+        event[at..at + size].copy_from_slice(&value.to_le_bytes()[..size]);
+    }
+    event
+}
+
+/// A key or button event of `code` for `detail` at `time`, with the modifier `state`, at the
+/// point `x`, `y` of the window.
+fn x11_input(code: u8, detail: u8, time: u32, state: u32, x: i16, y: i16) -> [u8; 32] {
+    x11_event(
+        code,
+        detail,
+        &[
+            (4, time, 4),
+            (24, x as u16 as u32, 2),
+            (26, y as u16 as u32, 2),
+            (28, state, 2),
+        ],
+    )
+}
+
+/// The events the fake X server sends once the window `window` is mapped.
+fn fake_events(window: u32) -> Vec<u8> {
+    let expose = |count| x11_event(12, 0, &[(4, window, 4), (16, count, 2)]);
+    let events = [
+        expose(0),
+        x11_event(
+            22,
+            0,
+            &[(4, window, 4), (8, window, 4), (20, 400, 2), (22, 300, 2)],
+        ),
+        x11_input(2, 38, 10, 0, 0, 0),
+        // a held key repeats as a release and a press at the same time
+        x11_input(3, 38, 20, 0, 0, 0),
+        x11_input(2, 38, 20, 0, 0, 0),
+        x11_input(3, 38, 30, 0, 0, 0),
+        // Shift, Escape, Control, Caps Lock on a digit and a letter, Shift itself, and alpha
+        x11_input(2, 38, 40, 1, 0, 0),
+        x11_input(2, 9, 41, 0, 0, 0),
+        x11_input(2, 38, 42, 4, 0, 0),
+        x11_input(2, 10, 43, 2, 0, 0),
+        x11_input(2, 38, 44, 2, 0, 0),
+        x11_input(2, 50, 45, 0, 0, 0),
+        x11_input(2, 60, 46, 0, 0, 0),
+        x11_input(4, 1, 50, 0, 10, 20),
+        x11_input(5, 3, 51, 0, 11, -2),
+        x11_input(4, 4, 52, 0, 0, 0),
+        x11_input(5, 4, 53, 0, 0, 0),
+        x11_input(4, 5, 54, 0, 0, 0),
+        x11_input(6, 0, 55, 0, 5, 6),
+        // a size that did not change, then an exposure in two parts
+        x11_event(
+            22,
+            0,
+            &[(4, window, 4), (8, window, 4), (20, 400, 2), (22, 300, 2)],
+        ),
+        expose(1),
+        expose(0),
+        // a client message of another protocol, then the close button
+        x11_event(33, 32, &[(4, window, 4), (8, 301, 4), (12, 999, 4)]),
+        x11_event(33, 32, &[(4, window, 4), (8, 301, 4), (12, 302, 4)]),
+    ];
+    events.concat()
+}
+
+/// The part of its events a paced fake X server sends at stage `stage` for the window `window`:
+/// an exposure once it is mapped (0), a new size and `a` after the first frame (1), `A` after
+/// the first frame of the new size (2), and the close button after the next (3).
+fn paced_events(window: u32, stage: usize) -> Vec<u8> {
+    let events = match stage {
+        0 => vec![x11_event(12, 0, &[(4, window, 4)])],
+        1 => vec![
+            x11_event(
+                22,
+                0,
+                &[(4, window, 4), (8, window, 4), (20, 400, 2), (22, 300, 2)],
+            ),
+            x11_input(2, 38, 1, 0, 0, 0),
+        ],
+        2 => vec![x11_input(2, 38, 2, 1, 0, 0)],
+        3 => vec![x11_event(
+            33,
+            32,
+            &[(4, window, 4), (8, 301, 4), (12, 302, 4)],
+        )],
+        _ => vec![],
+    };
+    events.concat()
+}
+
+/// The setup reply of the fake X server described by `display`, or its refusal.
+fn fake_setup(display: FakeDisplay) -> Vec<u8> {
+    if let Some(reason) = display.refuse {
+        let mut padded = reason.as_bytes().to_vec();
+        padded.resize(reason.len().div_ceil(4) * 4, 0);
+        let mut reply = vec![0, reason.len() as u8, 11, 0, 0, 0];
+        reply.extend((padded.len() as u16 / 4).to_le_bytes());
+        reply.extend(padded);
+        return reply;
+    }
+    let mut more = vec![];
+    more.extend(1u32.to_le_bytes()); // release
+    more.extend(0x0020_0000u32.to_le_bytes()); // resource id base
+    more.extend(0x001f_ffffu32.to_le_bytes()); // resource id mask
+    more.extend(0u32.to_le_bytes()); // motion buffer
+    more.extend(8u16.to_le_bytes()); // vendor length
+    more.extend(display.max_request.to_le_bytes());
+    more.extend([1, 1, display.msb as u8, 0, 32, 32, 8, 255, 0, 0, 0, 0]);
+    more.extend(b"fakestn!");
+    more.extend([display.depth, display.bits, 32, 0, 0, 0, 0, 0]);
+    // the screen
+    more.extend(0x100u32.to_le_bytes());
+    more.extend(0x20u32.to_le_bytes());
+    more.extend(0xff_ffffu32.to_le_bytes());
+    more.extend(0u32.to_le_bytes());
+    more.extend(0u32.to_le_bytes());
+    for value in [1920u16, 1080, 500, 300, 1, 1] {
+        more.extend(value.to_le_bytes());
+    }
+    more.extend(0x21u32.to_le_bytes());
+    more.extend([0, 0, display.depth, 1]);
+    // its one depth, with one TrueColor visual
+    more.extend([display.depth, 0, 1, 0, 0, 0, 0, 0]);
+    more.extend(0x21u32.to_le_bytes());
+    more.extend([4, 8, 0, 1]);
+    let masks = match display.depth {
+        16 => [0xf800u32, 0x7e0, 0x1f],
+        _ => [0xff_0000, 0xff00, 0xff],
+    };
+    for mask in masks {
+        more.extend(mask.to_le_bytes());
+    }
+    more.extend([0; 4]);
+    if display.short {
+        more.truncate(20);
+    }
+    let mut reply = vec![1, 0, 11, 0, 0, 0];
+    reply.extend((more.len() as u16 / 4).to_le_bytes());
+    reply.extend(more);
+    reply
+}
+
+/// Serves one client of the fake X server on `stream`, recording what it sends in `seen`.
+fn fake_x_client(
+    mut stream: std::os::unix::net::UnixStream,
+    display: FakeDisplay,
+    seen: &std::sync::Mutex<FakeConnection>,
+) -> std::io::Result<()> {
+    use std::io::{Read, Write};
+    let mut setup = [0; 12];
+    stream.read_exact(&mut setup)?;
+    let name_len = u16::from_le_bytes([setup[6], setup[7]]) as usize;
+    let data_len = u16::from_le_bytes([setup[8], setup[9]]) as usize;
+    let mut name = vec![0; name_len.div_ceil(4) * 4];
+    let mut data = vec![0; data_len.div_ceil(4) * 4];
+    stream.read_exact(&mut name)?;
+    stream.read_exact(&mut data)?;
+    name.truncate(name_len);
+    data.truncate(data_len);
+    seen.lock().unwrap().auth = (name, data);
+    stream.write_all(&fake_setup(display))?;
+    let mut window = 0;
+    let mut stage = 0;
+    loop {
+        let mut head = [0; 4];
+        if stream.read_exact(&mut head).is_err() {
+            seen.lock().unwrap().closed = true;
+            return Ok(());
+        }
+        let units = u16::from_le_bytes([head[2], head[3]]) as usize;
+        let mut request = head.to_vec();
+        request.resize(units * 4, 0);
+        stream.read_exact(&mut request[4..])?;
+        let word = |at: usize| u32::from_le_bytes(request[at..at + 4].try_into().unwrap());
+        match request[0] {
+            1 => window = word(4),
+            8 if display.paced => stream.write_all(&paced_events(window, 0))?,
+            8 => stream.write_all(&fake_events(window))?,
+            // a frame starts with the strip at the top, and after the first, only one as wide
+            // as the new size moves the script on
+            72 if display.paced && request[18..20] == [0, 0] => {
+                if stage == 0 || request[12..14] == 400u16.to_le_bytes() {
+                    stage += 1;
+                    stream.write_all(&paced_events(window, stage))?;
+                }
+            }
+            16 => {
+                let len = u16::from_le_bytes([request[4], request[5]]) as usize;
+                let name = std::str::from_utf8(&request[8..8 + len]).unwrap();
+                let atom = FAKE_ATOMS.iter().find(|(n, _)| *n == name).unwrap().1;
+                let mut reply = vec![1, 0, 0, 0, 0, 0, 0, 0];
+                reply.extend(atom.to_le_bytes());
+                reply.resize(32, 0);
+                stream.write_all(&reply)?;
+            }
+            101 => {
+                let (first, count) = (request[4] as usize, request[5] as usize);
+                let syms = fake_keysyms();
+                let mut reply = vec![1, 2, 0, 0];
+                reply.extend(((count * 2) as u32).to_le_bytes());
+                reply.resize(32, 0);
+                for sym in &syms[(first - 8) * 2..(first - 8 + count) * 2] {
+                    reply.extend(sym.to_le_bytes());
+                }
+                stream.write_all(&reply)?;
+            }
+            _ => {}
+        }
+        seen.lock().unwrap().requests.push(request);
+    }
+}
+
+/// Starts a fake X server described by `display`, listening on the Unix socket `path`, and
+/// returns what it sees on each connection, in order.
+fn fake_x_server(
+    path: &Path,
+    display: FakeDisplay,
+) -> std::sync::Arc<std::sync::Mutex<Vec<std::sync::Arc<std::sync::Mutex<FakeConnection>>>>> {
+    use std::sync::{Arc, Mutex};
+    let _ = std::fs::remove_file(path);
+    let listener = std::os::unix::net::UnixListener::bind(path).unwrap();
+    let connections: Arc<Mutex<Vec<Arc<Mutex<FakeConnection>>>>> = Arc::default();
+    let all = connections.clone();
+    std::thread::spawn(move || {
+        for stream in listener.incoming().flatten() {
+            let seen = Arc::new(Mutex::new(FakeConnection::default()));
+            all.lock().unwrap().push(seen.clone());
+            std::thread::spawn(move || fake_x_client(stream, display, &seen));
+        }
+    });
+    connections
+}
+
+/// The pixels of every PutImage among `requests`, as 4 bytes each by row, `width` wide.
+fn put_images(requests: &[Vec<u8>], width: usize) -> Vec<u8> {
+    let mut image = vec![];
+    for request in requests.iter().filter(|r| r[0] == 72) {
+        assert_eq!(request[1], 2, "ZPixmap");
+        assert_eq!(
+            u16::from_le_bytes([request[12], request[13]]) as usize,
+            width
+        );
+        let rows = u16::from_le_bytes([request[14], request[15]]) as usize;
+        let y = u16::from_le_bytes([request[18], request[19]]) as usize;
+        assert_eq!(image.len(), y * width * 4, "strips in order");
+        image.extend(&request[24..24 + rows * width * 4]);
+    }
+    image
+}
+
+const WINDOW_PROGRAM: &str = r#"use gui
+
+match gui.open("fake", 40, 30):
+    case ok(w):
+        print(w.size())
+        done = false
+        while not done:
+            es = w.wait()
+            for e in es:
+                print(e)
+                if e == gui.event.close:
+                    done = true
+        print(w.size())
+        c = gui.blank(40, 30, gui.rgb(1, 2, 3))
+        c.rect(5, 5, 10, 10, gui.rgb(250, 128, 7))
+        w.show(c)
+        w.set_title("done")
+        w.close()
+        es = w.events()
+        print(w.is_open(), es)
+    case err(reason):
+        print(reason)
+"#;
+
+/// Waits until the client of each connection the fake X server has seen has closed it, and
+/// returns them.
+fn closed_connections(
+    connections: &std::sync::Mutex<Vec<std::sync::Arc<std::sync::Mutex<FakeConnection>>>>,
+) -> Vec<FakeConnection> {
+    for _ in 0..500 {
+        let all = connections.lock().unwrap();
+        if all.iter().all(|c| c.lock().unwrap().closed) {
+            return all
+                .iter()
+                .map(|c| std::mem::take(&mut *c.lock().unwrap()))
+                .collect();
+        }
+        drop(all);
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    }
+    panic!("a client never closed its connection");
+}
+
+#[test]
+fn both_backends_drive_an_x11_window_alike() {
+    let expected = "(40, 30)\n\
+                    event.redraw\n\
+                    event.resize(400, 300)\n\
+                    event.key_down('a')\n\
+                    event.text('a')\n\
+                    event.text('a')\n\
+                    event.key_up('a')\n\
+                    event.key_down('a')\n\
+                    event.text('A')\n\
+                    event.key_down('escape')\n\
+                    event.key_down('a')\n\
+                    event.key_down('1')\n\
+                    event.text('1')\n\
+                    event.key_down('a')\n\
+                    event.text('A')\n\
+                    event.key_down('shift')\n\
+                    event.key_down('\u{3b1}')\n\
+                    event.text('\u{3b1}')\n\
+                    event.mouse_down('left', 10, 20)\n\
+                    event.mouse_up('right', 11, -2)\n\
+                    event.scroll(1)\n\
+                    event.scroll(-1)\n\
+                    event.mouse_move(5, 6)\n\
+                    event.redraw\n\
+                    event.close\n\
+                    (400, 300)\n\
+                    false []\n";
+    for msb in [false, true] {
+        let name = format!("gui_x11_{}", if msb { "msb" } else { "lsb" });
+        let display = FakeDisplay {
+            msb,
+            depth: 24,
+            bits: 32,
+            // small, so the image goes in strips of a row each
+            max_request: 64,
+            refuse: None,
+            paced: false,
+            short: false,
+        };
+        let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
+        let mut connections = None;
+        let (_, [run, built]) = run_and_build_env(
+            &name,
+            WINDOW_PROGRAM,
+            |dir| {
+                connections = Some(fake_x_server(&dir.join("X0"), display));
+                // an authority file with a cookie for another display, then one for this one
+                let mut file = vec![];
+                for (number, cookie) in [("1", &b"wrong"[..]), ("0", &b"secret_cookie"[..])] {
+                    file.extend([1, 0, 0, 4]);
+                    file.extend(b"host");
+                    for field in [number.as_bytes(), b"MIT-MAGIC-COOKIE-1", cookie] {
+                        file.extend((field.len() as u16).to_be_bytes());
+                        file.extend(field);
+                    }
+                }
+                std::fs::write(dir.join("Xauthority"), file).unwrap();
+            },
+            &[("DISPLAY", &socket), ("XAUTHORITY", "Xauthority")],
+        );
+        for output in [&run, &built] {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+        }
+        let seen = closed_connections(&connections.unwrap());
+        let [interpreted, compiled] = &seen[..] else {
+            panic!("expected two connections, not {}", seen.len());
+        };
+        assert_eq!(interpreted.requests, compiled.requests);
+        assert_eq!(
+            interpreted.auth,
+            (b"MIT-MAGIC-COOKIE-1".to_vec(), b"secret_cookie".to_vec())
+        );
+        // one strip of a row per request, and the colors in the server's byte order
+        let requests = &interpreted.requests;
+        assert_eq!(requests.iter().filter(|r| r[0] == 72).count(), 30);
+        let image = put_images(requests, 40);
+        assert_eq!(image.len(), 40 * 30 * 4);
+        let pixel = |x: usize, y: usize| &image[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4];
+        let (background, square): (&[u8], &[u8]) = match msb {
+            false => (&[3, 2, 1, 0], &[7, 128, 250, 0]),
+            true => (&[0, 1, 2, 3], &[0, 250, 128, 7]),
+        };
+        assert_eq!(pixel(0, 0), background);
+        assert_eq!(pixel(5, 5), square);
+        assert_eq!(pixel(15, 15), background);
+        // the last title, WM_NAME, holds the text alone
+        let title = requests
+            .iter()
+            .rfind(|r| r[0] == 18 && r[8..12] == 39u32.to_le_bytes())
+            .unwrap();
+        assert_eq!(u32::from_le_bytes(title[20..24].try_into().unwrap()), 4);
+        assert_eq!(&title[24..28], b"done");
+    }
+}
+
+#[test]
+fn both_backends_say_why_a_window_cannot_open() {
+    let program = "use gui\n\
+                   for size in [(10, 10), (0, 10), (40000, 1)]:\n    \
+                   match gui.open(\"x\", size[0], size[1]):\n        \
+                   case ok(_):\n            \
+                   print(\"opened\")\n        \
+                   case err(reason):\n            \
+                   print(reason)\n";
+    let refusing = FakeDisplay {
+        msb: false,
+        depth: 24,
+        bits: 32,
+        max_request: 65535,
+        refuse: Some("No protocol specified"),
+        paced: false,
+        short: false,
+    };
+    let shallow = FakeDisplay {
+        depth: 16,
+        bits: 16,
+        refuse: None,
+        ..refusing
+    };
+    let short = FakeDisplay {
+        refuse: None,
+        short: true,
+        ..refusing
+    };
+    let base = env!("CARGO_TARGET_TMPDIR");
+    let cases = [
+        (
+            "gui_no_display",
+            String::new(),
+            None,
+            "no display: DISPLAY is not set".to_string(),
+        ),
+        (
+            "gui_bad_display",
+            "nowhere".to_string(),
+            None,
+            "invalid display: 'nowhere'".to_string(),
+        ),
+        (
+            "gui_bad_number",
+            ":x".to_string(),
+            None,
+            "invalid display: ':x'".to_string(),
+        ),
+        (
+            "gui_no_socket",
+            format!("{base}/gui_no_socket/X0:0"),
+            None,
+            format!("no such file or directory: '{base}/gui_no_socket/X0'"),
+        ),
+        (
+            "gui_refused",
+            format!("{base}/gui_refused/X0:0"),
+            Some(refusing),
+            "the X server refused the connection: No protocol specified".to_string(),
+        ),
+        (
+            "gui_shallow",
+            format!("{base}/gui_shallow/X0:0"),
+            Some(shallow),
+            "unsupported display format: depth 16, 16 bits per pixel".to_string(),
+        ),
+        (
+            "gui_short",
+            format!("{base}/gui_short/X0:0"),
+            Some(short),
+            "the X server sent a setup reply that is cut short".to_string(),
+        ),
+    ];
+    for (name, display, server, first) in cases {
+        let (_, [run, built]) = run_and_build_env(
+            name,
+            program,
+            |dir| {
+                if let Some(server) = server {
+                    fake_x_server(&dir.join("X0"), server);
+                }
+            },
+            &[("DISPLAY", &display), ("XAUTHORITY", "missing")],
+        );
+        let expected =
+            format!("{first}\ninvalid window size: 0x10\ninvalid window size: 40000x1\n");
+        for output in [run, built] {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "{name}");
+        }
+    }
+}
+
+const APP_PROGRAM: &str = r#"use gui
+
+struct typist:
+    typed: str
+    ticks: int
+    size: tuple[int, int]
+
+impl gui.app for typist:
+    fn update(self, e: gui.event):
+        match e:
+            case gui.event.text(t):
+                self.typed += t
+            case gui.event.tick(seconds):
+                if seconds >= 0.0:
+                    self.ticks += 1
+            case gui.event.resize(width, height):
+                self.size = (width, height)
+            case gui.event.close:
+                print("close")
+            case _:
+                self.ticks += 0
+
+    fn draw(self, c: gui.canvas) -> gui.canvas:
+        c.fill(gui.rgb(1, 2, 3))
+        c.text(0, 0, self.typed, gui.rgb(255, 255, 255))
+        ret c
+
+    // ten seconds of turns at most, so a broken run fails rather than waits forever
+    fn done(self) -> bool:
+        ret DONE or self.ticks > 600
+
+match gui.run("app", 40, 30, typist(typed="", ticks=0, size=(40, 30))):
+    case ok(state):
+        print(state.typed, state.ticks > 0, state.size)
+    case err(reason):
+        print(reason)
+"#;
+
+#[test]
+fn both_backends_run_an_app_alike() {
+    // the server sends a new size and `a` after the first frame, `A` after the first of the new
+    // size, so after `draw` has a canvas of that size, and the close button after the next
+    let cases = [
+        // done once `A` is typed, before the frame that would show it
+        (
+            "gui_app_done",
+            "self.typed.endswith(\"A\")",
+            "aA true (400, 300)\n",
+        ),
+        ("gui_app_closed", "false", "close\naA true (400, 300)\n"),
+    ];
+    for (name, done, expected) in cases {
+        let display = FakeDisplay {
+            msb: false,
+            depth: 24,
+            bits: 32,
+            max_request: 65535,
+            refuse: None,
+            paced: true,
+            short: false,
+        };
+        let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
+        let (_, [run, built]) = run_and_build_env(
+            name,
+            &APP_PROGRAM.replace("DONE", done),
+            |dir| {
+                fake_x_server(&dir.join("X0"), display);
+            },
+            &[("DISPLAY", &socket), ("XAUTHORITY", "missing")],
+        );
+        for output in [run, built] {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "{name}");
+        }
+    }
+}
+
+/// Starts `Xvfb` on a free display, if it is on PATH, returning it and the display's number.
+fn start_xvfb() -> Option<(std::process::Child, String)> {
+    use std::io::BufRead;
+    let mut server = Command::new("Xvfb")
+        .args([
+            "-displayfd",
+            "1",
+            "-nolisten",
+            "tcp",
+            "-screen",
+            "0",
+            "320x240x24",
+        ])
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .ok()?;
+    // it writes the display's number once it is ready
+    let mut number = String::new();
+    std::io::BufReader::new(server.stdout.take()?)
+        .read_line(&mut number)
+        .ok()?;
+    match number.trim() {
+        "" => {
+            let _ = server.kill();
+            None
+        }
+        n => Some((server, n.to_string())),
+    }
+}
+
+#[test]
+fn both_backends_draw_on_a_real_x_server() {
+    let Some((mut server, number)) = start_xvfb() else {
+        eprintln!("skipping: Xvfb is not on PATH");
+        return;
+    };
+    let source = r#"use gui
+use time
+
+match gui.open("real", 64, 48):
+    case ok(w):
+        c = gui.blank(64, 48, gui.rgb(10, 20, 30))
+        c.text(2, 2, "hi", gui.rgb(255, 255, 255))
+        w.show(c)
+        w.set_title("still real")
+        // errors come back on their own time
+        time.sleep(0.3)
+        es = w.events()
+        failures = 0
+        for e in es:
+            match e:
+                case gui.event.failed(reason):
+                    print(reason)
+                    failures += 1
+                case _:
+                    cont
+        print(w.is_open(), failures)
+        w.close()
+    case err(reason):
+        print(reason)
+"#;
+    let display = format!(":{number}");
+    let (_, [run, built]) = run_and_build_env(
+        "gui_xvfb",
+        source,
+        |_| {},
+        &[("DISPLAY", &display), ("XAUTHORITY", "missing")],
+    );
+    let _ = server.kill();
+    let _ = server.wait();
+    for output in [run, built] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), "true 0\n");
+    }
 }

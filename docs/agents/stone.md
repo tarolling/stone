@@ -570,6 +570,30 @@ fn echo() -> result[str, str]:
 print(echo())   // ok('you said hello\n')
 ```
 
+`gui` draws on canvases (`gui.blank(w, h, color)`, colors from `gui.rgb(r, g, b)`) and shows
+them in windows over X11. A canvas is a value with `width`, `height`, and `pixels`, and its
+methods draw on it in place:
+
+```stone
+use gui
+
+c = gui.blank(8, 4, gui.rgb(0, 0, 0))
+c.rect(1, 1, 3, 2, gui.rgb(255, 0, 0))
+c.line(0, 3, 7, 3, gui.rgb(255, 255, 255))
+print(c.get(2, 2))           // some(16711680)
+print(c.get(9, 0))           // none
+print(c.ppm().len())         // 107, a PPM image for fs.write_bytes
+```
+
+A window is `gui.open(title, w, h)?`, then a loop of `es = w.events()` (non-blocking; `w.wait()`
+blocks), `w.show(c)`, and `w.close()` on `gui.event.close`. Or implement the trait `gui.app`
+(`fn update(self, e: gui.event)` changing `self`, `fn draw(self, c: gui.canvas) -> gui.canvas`,
+optional `fn done(self) -> bool`) and call `gui.run(title, w, h, state)`, which returns the last
+state. Events are lowercase variants: `key_down(name)`, `key_up(name)`, `text(t)`,
+`mouse_move(x, y)`, `mouse_down(button, x, y)`, `mouse_up(button, x, y)`, `scroll(steps)`,
+`resize(w, h)`, `redraw`, `close`, `tick(seconds)`, `failed(reason)`. A `case _:` that does
+nothing in a function without a value is `ret`.
+
 ## Modules
 
 A program is an entry file plus the `.stn` files it uses, named by path from the entry file's

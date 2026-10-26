@@ -43,8 +43,8 @@ use crate::ast::{
 use crate::checker::{
     Analysis, Conversion, Converter, DISPLAY, EQ, Enums, Instance, Method, Methods, OPTION, ORD,
     RESULT, Step, Structs, SymbolKind, Type, collect_assigned, collect_changed, may_name_enum,
-    place, place_root, place_spans, range_args, struct_display, type_text, variant_display,
-    variants,
+    may_name_struct, place, place_root, place_spans, range_args, struct_display, type_text,
+    variant_display, variants,
 };
 use crate::codegen::context::{function_label, module_routine};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
@@ -6293,7 +6293,9 @@ impl<'a> Lowerer<'a> {
             }
             // a struct's values, in the order of its fields
             ExprKind::Call { func, keywords, .. } => match &func.kind {
-                ExprKind::Name { id, .. } if self.context.structs.contains_key(id) => {
+                ExprKind::Name { id, .. }
+                    if self.context.structs.contains_key(id) && may_name_struct(func) =>
+                {
                     self.context.structs[id]
                         .fields
                         .iter()
@@ -6389,7 +6391,9 @@ impl<'a> Lowerer<'a> {
                     let kinds = self.leaf_kinds(expr)?;
                     self.value_call(func, expr.span, args, None, &kinds)
                 }
-                ExprKind::Name { id, .. } if self.context.structs.contains_key(id) => {
+                ExprKind::Name { id, .. }
+                    if self.context.structs.contains_key(id) && may_name_struct(func) =>
+                {
                     self.construct(id, keywords)
                 }
                 ExprKind::Name { id, .. } if id == "random.choice" => self.choose_element(&args[0]),

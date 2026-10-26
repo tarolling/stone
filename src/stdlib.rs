@@ -1,6 +1,7 @@
 //! The builtin functions shared by the interpreter and the compiler, and the limits both enforce.
 
 pub mod fs;
+pub mod gui;
 pub mod math;
 pub mod net;
 pub mod os;
@@ -53,15 +54,23 @@ pub static MODULES: [BuiltinModule; 5] = [
 
 /// The builtin modules that only stone's own modules written in stone, such as `net`, may use,
 /// which editors and the reference do not list.
-pub static INTERNAL_MODULES: [BuiltinModule; 1] = [BuiltinModule {
-    name: net::SYS_MODULE,
-    doc: net::SYS_MODULE_DOC,
-    functions: &net::SYS_DOCS,
-}];
+pub static INTERNAL_MODULES: [BuiltinModule; 2] = [
+    BuiltinModule {
+        name: net::SYS_MODULE,
+        doc: net::SYS_MODULE_DOC,
+        functions: &net::SYS_DOCS,
+    },
+    BuiltinModule {
+        name: gui::SYS_MODULE,
+        doc: gui::SYS_MODULE_DOC,
+        functions: &gui::SYS_DOCS,
+    },
+];
 
 /// The modules that are part of stone but written in stone, by name with their source, which a
 /// program that uses one is linked with like a module file of its own.
-pub static SOURCE_MODULES: [(&str, &str); 1] = [(net::MODULE, net::SOURCE)];
+pub static SOURCE_MODULES: [(&str, &str); 2] =
+    [(net::MODULE, net::SOURCE), (gui::MODULE, gui::SOURCE)];
 
 /// Returns the builtin module named `name`, internal ones included.
 ///

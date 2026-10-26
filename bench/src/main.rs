@@ -5,7 +5,8 @@
 //! that all of them and `python3 fib.py` print `fib.out`, then prints a table of their median
 //! times over three runs. Every version runs with the arguments in the benchmark's `.args` file,
 //! such as `fib.args`, if it has one. A benchmark with a numpy version, such as `vector.np.py`,
-//! also runs it with the `--numpy` interpreter when that can import numpy.
+//! also runs it with the `--numpy` interpreter when that can import numpy, and `--interpreter`
+//! also times each `.stn` under `stone run`.
 
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
@@ -16,12 +17,14 @@ use stone_bench::{Implementation, Program, Row, discover, format_table, median, 
 
 const USAGE: &str = "\
 usage: stone-bench [--runs N] [--filter NAME] [--stone PATH] [--numpy PYTHON] [--min]
+                   [--interpreter]
 
   --runs N         timed runs of each implementation, after one untimed check (default 5)
   --filter NAME    only run benchmarks whose name contains NAME
   --stone PATH     use this stone binary instead of building target/release/stone
   --numpy PYTHON   run numpy versions with this Python, such as a virtualenv's (default python3)
-  --min            report the fastest run instead of the median";
+  --min            report the fastest run instead of the median
+  --interpreter    also time each program under `stone run`, the interpreter";
 
 /// A timing this short usually means gcc optimized the benchmark's work away.
 const SUSPICIOUSLY_FAST: Duration = Duration::from_millis(10);
@@ -33,6 +36,7 @@ struct Options {
     stone: Option<PathBuf>,
     numpy: OsString,
     use_min: bool,
+    interpreter: bool,
 }
 
 /// Parses the arguments after the program name.
@@ -45,6 +49,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
         stone: None,
         numpy: "python3".into(),
         use_min: false,
+        interpreter: false,
     };
     while let Some(arg) = args.next() {
         let mut value = || args.next().ok_or(format!("{arg} needs a value"));
@@ -60,6 +65,7 @@ fn parse_args(mut args: impl Iterator<Item = String>) -> Result<Options, String>
             "--stone" => options.stone = Some(PathBuf::from(value()?)),
             "--numpy" => options.numpy = value()?.into(),
             "--min" => options.use_min = true,
+            "--interpreter" => options.interpreter = true,
             "-h" | "--help" => return Err(USAGE.into()),
             _ => return Err(format!("unknown argument {arg}\n{USAGE}")),
         }
@@ -257,10 +263,30 @@ fn run() -> Result<(), String> {
             }
             false => None,
         };
+        let interpreter = match options.interpreter {
+            true => {
+                let what = format!("{} under stone run", program.name);
+                eprintln!("running {what}");
+                let mut argv = vec![
+                    stone.clone().into(),
+                    "run".into(),
+                    program.file("stn").into(),
+                ];
+                argv.extend(args.iter().map(OsString::from));
+                let samples = measure(&argv, options.runs, &expected, &what)?;
+                Some(if options.use_min {
+                    min(&samples)
+                } else {
+                    median(&samples)
+                })
+            }
+            false => None,
+        };
         rows.push(Row {
             name: program.name.clone(),
             times,
             numpy,
+            interpreter,
         });
     }
 

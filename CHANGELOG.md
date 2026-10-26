@@ -98,6 +98,9 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - An error in lexing a line, such as a string that never ends, no longer stops `stone check`,
   `run`, and `build` at that line: the rest of the line is skipped and every later syntax error
   is reported too, as after an error in parsing.
+- `stone run` is 2 to 2.7 times faster: each function's variables live in slots rather than a
+  table of names, and every call is resolved once, when its function is defined, rather than
+  each time it runs. Recursive `fib(30)` takes 0.61 s instead of 1.31 s.
 
 ### Removed
 

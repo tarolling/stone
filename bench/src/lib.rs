@@ -155,6 +155,8 @@ pub struct Row {
     pub times: [Duration; 4],
     /// The summarized time of the numpy version, if the benchmark has one and numpy ran.
     pub numpy: Option<Duration>,
+    /// The summarized time of the stone version under `stone run`, the interpreter, if it ran.
+    pub interpreter: Option<Duration>,
 }
 
 impl Row {
@@ -171,12 +173,14 @@ impl Row {
 /// Formats `rows` as a Markdown table of times in milliseconds, with the ratios of stone to
 /// C -O2 and of Python to stone, and a final row holding the geometric mean of each ratio. If any
 /// row has a numpy time, the table also has its time and the ratio of numpy to stone, left blank
-/// for the rows without one.
+/// for the rows without one. If any row has an interpreter time, the table ends with it and the
+/// ratio of the interpreter to Python, how many times slower `stone run` is.
 ///
 /// For example, a `fib` row of 10, 30, 50, and 400 ms gives
 /// `| fib | 10.0 | 30.0 | 50.0 | 400.0 | 5.0x | 8.0x |`.
 pub fn format_table(rows: &[Row]) -> String {
     let with_numpy = rows.iter().any(|row| row.numpy.is_some());
+    let with_interpreter = rows.iter().any(|row| row.interpreter.is_some());
     let mut table = String::from("| program |");
     for implementation in Implementation::ALL {
         table.push_str(&format!(" {} (ms) |", implementation.label()));
@@ -188,7 +192,11 @@ pub fn format_table(rows: &[Row]) -> String {
     if with_numpy {
         table.push_str(" numpy / stone |");
     }
-    let columns = Implementation::ALL.len() + 2 + 2 * with_numpy as usize;
+    if with_interpreter {
+        table.push_str(" stone run (ms) | stone run / Python |");
+    }
+    let columns =
+        Implementation::ALL.len() + 2 + 2 * with_numpy as usize + 2 * with_interpreter as usize;
     table.push_str("\n|---|");
     table.push_str(&"---:|".repeat(columns));
     table.push('\n');
@@ -197,6 +205,7 @@ pub fn format_table(rows: &[Row]) -> String {
     let mut stone_vs_c = Vec::new();
     let mut python_vs_stone = Vec::new();
     let mut numpy_vs_stone = Vec::new();
+    let mut interpreter_vs_python = Vec::new();
     for row in rows {
         table.push_str(&format!("| {} |", row.name));
         for time in row.times {
@@ -219,8 +228,19 @@ pub fn format_table(rows: &[Row]) -> String {
                 None => table.push_str(" |"),
             }
         }
+        let python_time = row.time(Implementation::Python).as_secs_f64();
+        let interpreter = row.interpreter.map(|time| time.as_secs_f64() / python_time);
+        if with_interpreter {
+            match (row.interpreter, interpreter) {
+                (Some(time), Some(ratio)) => {
+                    table.push_str(&format!(" {} | {ratio:.1}x |", ms(time)))
+                }
+                _ => table.push_str(" | |"),
+            }
+        }
         table.push('\n');
         stone_vs_c.push(c);
+        interpreter_vs_python.extend(interpreter);
         python_vs_stone.push(python);
         numpy_vs_stone.extend(numpy);
     }
@@ -233,6 +253,12 @@ pub fn format_table(rows: &[Row]) -> String {
     ));
     if with_numpy {
         table.push_str(&format!(" {:.1}x |", geometric_mean(&numpy_vs_stone)));
+    }
+    if with_interpreter {
+        table.push_str(&format!(
+            " | {:.1}x |",
+            geometric_mean(&interpreter_vs_python)
+        ));
     }
     table.push('\n');
     table
@@ -322,11 +348,13 @@ mod tests {
                 name: "fib".into(),
                 times: [ms(10), ms(30), ms(50), ms(400)],
                 numpy: None,
+                interpreter: None,
             },
             Row {
                 name: "sieve".into(),
                 times: [ms(20), ms(40), ms(400), ms(1_600)],
                 numpy: None,
+                interpreter: None,
             },
         ];
         let expected = "\
@@ -346,11 +374,13 @@ mod tests {
                 name: "fib".into(),
                 times: [ms(10), ms(30), ms(50), ms(400)],
                 numpy: None,
+                interpreter: None,
             },
             Row {
                 name: "vector".into(),
                 times: [ms(20), ms(40), ms(25), ms(1_600)],
                 numpy: Some(ms(50)),
+                interpreter: None,
             },
         ];
         let expected = "\
@@ -359,6 +389,23 @@ mod tests {
 | fib | 10.0 | 30.0 | 50.0 | 400.0 | | 5.0x | 8.0x | |
 | vector | 20.0 | 40.0 | 25.0 | 1600.0 | 50.0 | 1.2x | 64.0x | 2.0x |
 | geometric mean | | | | | | 2.5x | 22.6x | 2.0x |
+";
+        assert_eq!(format_table(&rows), expected);
+    }
+
+    #[test]
+    fn table_adds_interpreter_columns_when_the_interpreter_ran() {
+        let rows = [Row {
+            name: "fib".into(),
+            times: [ms(10), ms(30), ms(50), ms(400)],
+            numpy: None,
+            interpreter: Some(ms(2_000)),
+        }];
+        let expected = "\
+| program | C -O2 (ms) | C -O0 (ms) | stone (ms) | Python (ms) | stone / C -O2 | Python / stone | stone run (ms) | stone run / Python |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| fib | 10.0 | 30.0 | 50.0 | 400.0 | 5.0x | 8.0x | 2000.0 | 5.0x |
+| geometric mean | | | | | 5.0x | 8.0x | | 5.0x |
 ";
         assert_eq!(format_table(&rows), expected);
     }

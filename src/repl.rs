@@ -517,6 +517,26 @@ mod tests {
     }
 
     #[test]
+    fn an_earlier_function_calls_the_newest_definition() {
+        let input =
+            "fn f() -> int: ret 1\nfn g() -> int: ret f() * 10\ng()\nfn f() -> int: ret 2\ng()\n";
+        assert_eq!(session(input), ("10\n20\n".into(), "".into()));
+    }
+
+    #[test]
+    fn an_earlier_function_reads_globals_as_they_are_now() {
+        let input = "k = 1\nfn get() -> int: ret k\nget()\nk = 5\nget()\n";
+        assert_eq!(session(input), ("1\n5\n".into(), "".into()));
+    }
+
+    #[test]
+    fn an_earlier_function_prints_with_a_later_display() {
+        let input = "struct P:\n    x: int\n\nfn show(p: P) -> str: ret str(p)\nshow(P(x=1))\n\
+                     impl display for P:\n    fn display(self) -> str:\n        ret \"p\"\n\nshow(P(x=1))\n";
+        assert_eq!(session(input), ("'P(x=1)'\n'p'\n".into(), "".into()));
+    }
+
+    #[test]
     fn a_redefinition_that_breaks_earlier_entries_is_rejected() {
         let (out, err) =
             session("fn f() -> int: ret 1\nx = f() + 1\nfn f() -> str: ret \"a\"\nf()\n");

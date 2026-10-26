@@ -1,12 +1,14 @@
 # stone benchmarks
 
-This crate times stone's compiled output (`stone build`) against the same programs written in C and Python. The interpreter is not benchmarked.
+This crate times stone's compiled output (`stone build`) against the same programs written in C and Python, and with `--interpreter`, the interpreter (`stone run`) too.
 
 ```sh
-cargo run --release --manifest-path bench/Cargo.toml -- [--runs 5] [--filter NAME] [--stone PATH] [--numpy PYTHON] [--min]
+cargo run --release --manifest-path bench/Cargo.toml -- [--runs 5] [--filter NAME] [--stone PATH] [--numpy PYTHON] [--min] [--interpreter]
 ```
 
 For each benchmark, the runner builds stone in release mode, compiles the `.stn` with `stone build` and the `.c` with `gcc -O2 -fwrapv -ffp-contract=off` and `gcc -O0 -fwrapv -ffp-contract=off` (linking `-lm`), and runs the `.py` with `python3`. Every version runs with the arguments in the benchmark's `.args` file, one per line, as the golden tests' `.args` files are. The runner runs each implementation once untimed and requires its stdout to match the `.out` file exactly. It then times `--runs` more runs, checking the output of each, and prints a Markdown table of the median wall times, or the fastest with `--min`. Progress and warnings go to stderr, so `> results.md` captures only the table. It needs `gcc` and `python3` on `PATH`.
+
+With `--interpreter`, the runner also times each `.stn` under `stone run`, checked against the `.out` file like the others, and adds `stone run (ms)` and `stone run / Python` columns: how many times slower than CPython the interpreter is, lower being better. The workloads are sized for compiled code, so the interpreter takes several seconds on most of them; `--filter` and `--runs 1` keep a run short.
 
 A benchmark of arithmetic on lists can also have a numpy version, `name.np.py`, which runs under the Python that `--numpy` names (`python3` by default), such as a virtualenv's `bin/python`, and adds `numpy (ms)` and `numpy / stone` columns. If that Python cannot import numpy, the runner warns and leaves numpy out.
 

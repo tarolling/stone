@@ -2,13 +2,12 @@
 //!
 //! For example, running `x = 42` followed by `print(x)` prints `42`.
 
-use crate::ast::{
-    Arg, BoolOp, CompOp, Constant, Expr, ExprKind, Mod, Operator, Pattern, PatternKind, Stmt,
-    StmtKind, UnaryOp, is_lambda, target_names,
-};
+mod code;
+
+use crate::ast::{Arg, BoolOp, CompOp, Constant, Expr, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::checker::{
     Calls, Conversion, Converter, FunctionValue, Handle, Method, Step, Type, collect_assigned,
-    may_name_enum, may_name_struct, place, place_spans, prints_bare, range_args, struct_display,
+    place, prints_bare, struct_display,
 };
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
@@ -72,14 +71,71 @@ impl LastUses {
     }
 }
 
+/// Where each local variable of a function lives in its [`Frame`]: the parameters first, in
+/// order, then every other name the body assigns, in the order of their first assignments.
+///
+/// For example, `fn f(a: int) -> int:` with the body `b = a * 2` followed by `ret b` puts `a` in
+/// slot 0 and `b` in slot 1.
+#[derive(Debug, Default)]
+struct Layout {
+    names: Vec<String>,
+    index: HashMap<String, usize>,
+}
+
+impl Layout {
+    /// Lays out the locals of a function with the parameters `params` and the body `body`.
+    fn new(params: &[Arg], body: &[Stmt]) -> Self {
+        let mut layout = Layout::default();
+        for param in params {
+            layout.add(&param.arg);
+        }
+        let mut assigned = vec![];
+        collect_assigned(body, &mut assigned);
+        for (name, _) in &assigned {
+            layout.add(name);
+        }
+        layout
+    }
+
+    fn add(&mut self, name: &str) {
+        if !self.index.contains_key(name) {
+            self.index.insert(name.to_string(), self.names.len());
+            self.names.push(name.to_string());
+        }
+    }
+
+    /// Returns the slot of the local `name`, or `None` if `name` is not one of the function's
+    /// locals, so it names a global.
+    fn slot(&self, name: &str) -> Option<usize> {
+        self.index.get(name).copied()
+    }
+}
+
+/// The local variables of a running call, one slot per name of its function's [`Layout`], empty
+/// until the variable is assigned and again once it is dropped at its last use.
+struct Frame {
+    slots: Vec<Option<Value>>,
+    layout: Rc<Layout>,
+}
+
+impl Frame {
+    /// Takes the value out of the local `name`, leaving it empty.
+    fn take(&mut self, name: &str) -> Option<Value> {
+        self.slots.get_mut(self.layout.slot(name)?)?.take()
+    }
+}
+
 /// A user-defined function.
 ///
-/// For example, `fn add(a: int, b: int) -> int: ret a + b` has the parameters `["a", "b"]`.
+/// For example, `fn add(a: int, b: int) -> int: ret a + b` takes 2 parameters, `a` and `b`, in
+/// the first two slots of its [`Layout`].
 struct Function {
-    params: Vec<String>,
-    body: Vec<Stmt>,
-    /// The variables each statement of the body uses for the last time.
-    last_uses: Rc<LastUses>,
+    /// The function's linked name, such as `geo.area`.
+    name: Rc<str>,
+    params: usize,
+    layout: Rc<Layout>,
+    /// The body, resolved when the function was defined.
+    body: Vec<code::Stmt>,
     /// How the method calls of the check that saw this body were resolved, and its function
     /// values and calls of them, since in an interactive session a later entry's check can
     /// place the same code at other lines.
@@ -92,6 +148,8 @@ struct Function {
 #[derive(Clone)]
 pub struct FunctionRef {
     value: Arc<FunctionValue>,
+    /// The function's id among the interpreter's functions.
+    id: usize,
     body: Option<Rc<Function>>,
     /// The type arguments of a generic function, from where the value was made.
     types: Option<Types>,
@@ -280,6 +338,45 @@ pub struct StructDef {
     /// The struct's linked name, such as `geo.Point`, which calls through a bound look up.
     pub linked: Rc<str>,
     pub fields: Vec<String>,
+    /// The ids of the functions `<linked>.display`, `<linked>.eq`, and `<linked>.cmp`, which an
+    /// `impl` block may define, before or after the struct, so `print`, `==`, and `<` look for
+    /// them by id when they run.
+    display: usize,
+    eq: usize,
+    cmp: usize,
+}
+
+/// An enum's definition, as the interpreter needs it: its linked name, and how each variant
+/// prints, in the order of their tags.
+struct EnumInfo {
+    name: String,
+    variants: Vec<(String, Rc<str>)>,
+}
+
+/// Names given ids in the order they are first seen, so code resolved before a name is defined
+/// can still refer to it, by an id whose entry a definition fills in later.
+///
+/// For example, `fn f() -> int: ret g()` gives `g` an id before `g` is defined.
+#[derive(Default)]
+struct Interner {
+    ids: HashMap<String, usize>,
+    names: Vec<String>,
+}
+
+impl Interner {
+    /// Returns the id of `name`, giving it the next one if it has none yet.
+    fn id(&mut self, name: &str) -> usize {
+        if let Some(&id) = self.ids.get(name) {
+            return id;
+        }
+        self.ids.insert(name.to_string(), self.names.len());
+        self.names.push(name.to_string());
+        self.names.len() - 1
+    }
+
+    fn get(&self, name: &str) -> Option<usize> {
+        self.ids.get(name).copied()
+    }
 }
 
 /// The values of a struct's fields, in the order its definition writes them.
@@ -1013,21 +1110,21 @@ impl Limits {
 }
 
 pub struct Interpreter<'out> {
-    // global variables
-    globals: HashMap<String, Value>,
-    /// Stack of local scopes, with the innermost scope last.
-    scopes: Vec<HashMap<String, Value>>,
-    /// User-defined functions by name.
-    functions: HashMap<String, Rc<Function>>,
-    /// The enums the program defines, by linked name, each with how its variants print, in the
-    /// order of their tags.
-    enums: HashMap<String, Vec<(String, Rc<str>)>>,
-    /// The structs the program defines, by linked name.
-    structs: HashMap<String, Rc<StructDef>>,
-    /// The variables each statement of the running body uses for the last time, innermost call
-    /// last. A variable is dropped after its last use, so a list that nothing else holds can be
-    /// changed in place.
-    last_uses: Vec<Rc<LastUses>>,
+    /// The global variables, by id, empty until assigned and again once dropped at their last
+    /// use.
+    globals: Vec<Option<Value>>,
+    global_names: Interner,
+    /// The local variables of each active call, the innermost call last.
+    frames: Vec<Frame>,
+    /// User-defined functions, by id, empty for a name code calls that is not defined yet.
+    functions: Vec<Option<Rc<Function>>>,
+    function_names: Interner,
+    /// The enums the program defines, by id, and their ids by linked name.
+    enums: Vec<EnumInfo>,
+    enum_ids: HashMap<String, usize>,
+    /// The structs the program defines, by id, and their ids by linked name.
+    structs: Vec<Rc<StructDef>>,
+    struct_ids: HashMap<String, usize>,
     /// For each function, the globals it may read, which must not move into a call to it.
     global_reads: GlobalReads,
     /// How each method call of the running body was resolved, and its function values and calls
@@ -1041,9 +1138,8 @@ pub struct Interpreter<'out> {
     /// Whether globals can move at their last use, which is never in an interactive session,
     /// since a later entry may read them.
     moves_globals: bool,
-    /// The call a statement makes as its value, by span, and the variables it may take its
-    /// arguments from, since nothing reads them after it.
-    top_call: Option<(Span, Vec<String>)>,
+    /// An empty set of type arguments, which every call outside a generic function runs with.
+    no_types: Types,
     /// Where `print` writes, which is stdout unless a caller captures it.
     out: Box<dyn Write + 'out>,
     /// Where `eprint` writes, which is stderr unless a caller captures it.
@@ -1097,18 +1193,21 @@ impl<'out> Interpreter<'out> {
     /// `Vec<u8>` named `buffer`.
     pub fn with_output(out: impl Write + 'out, limits: Limits) -> Self {
         Self {
-            globals: HashMap::new(),
-            scopes: vec![],
-            functions: HashMap::new(),
-            enums: HashMap::new(),
-            structs: HashMap::new(),
-            last_uses: vec![],
+            globals: vec![],
+            global_names: Interner::default(),
+            frames: vec![],
+            functions: vec![],
+            function_names: Interner::default(),
+            enums: vec![],
+            enum_ids: HashMap::new(),
+            structs: vec![],
+            struct_ids: HashMap::new(),
             global_reads: GlobalReads::default(),
             resolved: Rc::default(),
             types: Rc::default(),
             next_types: None,
             moves_globals: false,
-            top_call: None,
+            no_types: Rc::default(),
             out: Box::new(out),
             errors: default_errors(),
             input: Box::new(std::io::empty()),
@@ -1206,7 +1305,7 @@ impl<'out> Interpreter<'out> {
     ///
     /// For example, the body of `if x: ret 1` yields `ControlFlow::Return(Int(1))` when `x` is
     /// true, which the enclosing function then returns.
-    fn eval_block(&mut self, body: &[Stmt]) -> Result<ControlFlow, Box<dyn std::error::Error>> {
+    fn eval_block(&mut self, body: &[code::Stmt]) -> EvalResult<ControlFlow> {
         for stmt in body {
             let flow = self.eval_stmt(stmt)?;
             if !matches!(flow, ControlFlow::None) {
@@ -1214,6 +1313,30 @@ impl<'out> Interpreter<'out> {
             }
         }
         Ok(ControlFlow::None)
+    }
+
+    /// Runs the definitions in `body`, a program's or an interactive entry's, enums and structs
+    /// first, so the functions resolved after them know every type they name, then resolves the
+    /// rest of `body`, whose statements use variables for the last time as `last_uses` says.
+    fn define_all(&mut self, body: &[Stmt], last_uses: &LastUses) -> Vec<code::Stmt> {
+        let is_type = |stmt: &Stmt| {
+            matches!(
+                stmt.kind,
+                StmtKind::EnumDef { .. } | StmtKind::StructDef { .. }
+            )
+        };
+        // functions, enums, and structs can be used before their definition
+        for stmt in body.iter().filter(|stmt| is_type(stmt)) {
+            self.define_stmt(stmt);
+        }
+        for stmt in body
+            .iter()
+            .filter(|stmt| is_definition(stmt) && !is_type(stmt))
+        {
+            self.define_stmt(stmt);
+        }
+        let calls = self.resolved.clone();
+        code::Resolver::new(self, &calls, None, last_uses).body(body)
     }
 
     pub fn evaluate(&mut self, module: &Mod) -> Result<(), Box<dyn std::error::Error>> {
@@ -1224,18 +1347,9 @@ impl<'out> Interpreter<'out> {
                 let globals = assigned.into_iter().map(|(name, _)| name).collect();
                 self.global_reads = global_reads(body, &globals);
                 self.moves_globals = true;
-                self.last_uses = vec![Rc::new(LastUses::new(
-                    body,
-                    &self.global_reads,
-                    &HashSet::new(),
-                ))];
-                // functions, enums, and structs can be used before their definition
-                for stmt in body {
-                    if is_definition(stmt) {
-                        self.eval_stmt(stmt)?;
-                    }
-                }
-                for stmt in body {
+                let last_uses = LastUses::new(body, &self.global_reads, &HashSet::new());
+                let program = self.define_all(body, &last_uses);
+                for stmt in &program {
                     if let ControlFlow::Return(_) = self.eval_stmt(stmt)? {
                         break; // top-level return
                     }
@@ -1255,17 +1369,10 @@ impl<'out> Interpreter<'out> {
         // a later entry may read any global, so none moves
         self.moves_globals = false;
         self.resolved = Rc::new(calls);
-        self.last_uses = vec![Rc::default()];
-        // functions, enums, and structs can be used before their definition
-        for stmt in body {
-            if is_definition(stmt) {
-                self.eval_stmt(stmt)?;
-            }
-        }
-        for stmt in body {
+        let entry = self.define_all(body, &LastUses::default());
+        for stmt in &entry {
             match &stmt.kind {
-                _ if is_definition(stmt) => {}
-                StmtKind::Expr { value } => {
+                code::StmtKind::Expr(value) => {
                     let value = self.eval_expr(value)?;
                     if !matches!(value, Value::Unit) {
                         let mut text = String::new();
@@ -1294,19 +1401,9 @@ impl<'out> Interpreter<'out> {
         &mut *self.out
     }
 
-    /// Executes one statement and reports whether it breaks, continues, or returns.
-    ///
-    /// ```text
-    /// stmt = FunctionDef(identifier name, arguments args, stmt* body, expr? returns)
-    ///      | Return(expr? value)
-    ///      | Assign(expr* targets, expr value)
-    ///      | For(expr target, expr iter, stmt* body, stmt* orelse)
-    ///      | While(expr test, stmt* body, stmt* orelse)
-    ///      | If(expr test, stmt* body, stmt* orelse)
-    ///      | Expr(expr value)
-    ///      | Break | Continue
-    /// ```
-    fn eval_stmt(&mut self, stmt: &Stmt) -> Result<ControlFlow, Box<dyn std::error::Error>> {
+    /// Executes one statement and reports whether it breaks, continues, or returns, then drops
+    /// the variables it used for the last time.
+    fn eval_stmt(&mut self, stmt: &code::Stmt) -> EvalResult<ControlFlow> {
         self.nested(|this| {
             let flow = match this.eval_stmt_unguarded(stmt) {
                 Ok(flow) => flow,
@@ -1318,131 +1415,188 @@ impl<'out> Interpreter<'out> {
                     };
                 }
             };
-            // returning drops the whole scope anyway
-            if !matches!(stmt.kind, StmtKind::Return { .. }) {
-                this.drop_last_uses(stmt.span);
+            // returning drops the whole frame anyway
+            if !matches!(stmt.kind, code::StmtKind::Return(_)) {
+                for &var in &stmt.last_uses {
+                    this.drop_var(var, None);
+                }
             }
             Ok(flow)
         })
     }
 
-    /// Defines the function `name` with the parameters `args` and the body `body`.
-    fn define(&mut self, name: String, args: &[Arg], body: &[Stmt]) {
-        let function = Function {
-            params: args.iter().map(|arg| arg.arg.clone()).collect(),
-            last_uses: Rc::new(LastUses::new(body, &self.global_reads, &kept_at_exit(args))),
-            body: body.to_vec(),
-            resolved: self.resolved.clone(),
-        };
-        self.functions.insert(name, Rc::new(function));
+    /// Returns the id of the function `name`, giving it one if it has none yet.
+    fn function_id(&mut self, name: &str) -> usize {
+        let id = self.function_names.id(name);
+        if self.functions.len() <= id {
+            self.functions.resize(id + 1, None);
+        }
+        id
     }
 
-    /// Notes `value`, the value of the statement at `span`, if it calls a stone function, with
-    /// the variables the call may take its arguments from: those the statement uses for the last
-    /// time, and `targets`, the names and fields it assigns, such as `b.items`.
-    ///
-    /// For example, `xs = add(xs, 1)` may take `xs`, since the assignment replaces it.
-    fn note_top_call(&mut self, span: Span, value: &Expr, targets: &[Expr]) {
-        let ExprKind::Call { func, .. } = &value.without_try().kind else {
-            return;
-        };
-        let stone = match &func.kind {
-            _ if self.resolved.indirect_calls.contains(&value.span) => true,
-            ExprKind::Name { id, .. } => self.functions.contains_key(id),
-            _ => self.resolved.methods.contains_key(&value.span),
-        };
-        if !stone {
-            return;
+    /// Returns the id of the global `name`, giving it one if it has none yet.
+    fn global_id(&mut self, name: &str) -> usize {
+        let id = self.global_names.id(name);
+        if self.globals.len() <= id {
+            self.globals.resize(id + 1, None);
         }
-        let mut names = self
-            .last_uses
-            .last()
-            .and_then(|uses| uses.get(span))
-            .cloned()
-            .unwrap_or_default();
-        for target in targets {
-            if let Some(path) = field_path(target) {
-                names.push(path);
-            }
-            let mut assigned = Vec::new();
-            target_names(target, &mut assigned);
-            for name in assigned {
-                if let ExprKind::Name { id, .. } = &name.kind {
-                    names.push(id.clone());
+        id
+    }
+
+    /// Returns whether a function named `name` is defined.
+    fn has_function(&self, name: &str) -> bool {
+        self.function_names
+            .get(name)
+            .is_some_and(|id| self.functions[id].is_some())
+    }
+
+    /// Runs the definition `stmt`: of a function, the functions of an `impl` block or a trait,
+    /// an enum, or a struct, replacing any earlier one of the same name.
+    fn define_stmt(&mut self, stmt: &Stmt) {
+        match &stmt.kind {
+            StmtKind::FunctionDef {
+                name, args, body, ..
+            } => self.define(name, &args.args, body),
+            // a trait's default methods are functions like any others, named by the trait, and
+            // its methods without a body are only the types'
+            StmtKind::ImplDef { name, methods, .. } | StmtKind::TraitDef { name, methods, .. } => {
+                for method in methods {
+                    if let StmtKind::FunctionDef {
+                        name: method,
+                        args,
+                        body,
+                        ..
+                    } = &method.kind
+                        && !body.is_empty()
+                    {
+                        self.define(&format!("{name}.{method}"), &args.args, body);
+                    }
                 }
             }
-        }
-        // a call claims only its own entry, by span, so an unclaimed one can stay
-        self.top_call = Some((value.span, names));
-    }
-
-    /// Drops the variables the statement at `span` used for the last time, so the values they
-    /// held are no longer shared.
-    fn drop_last_uses(&mut self, span: Span) {
-        // most statements use nothing for the last time, so only a hit is cloned
-        let Some(names) = self
-            .last_uses
-            .last()
-            .and_then(|uses| uses.get(span))
-            .cloned()
-        else {
-            return;
-        };
-        for name in &names {
-            self.drop_variable(name, None);
-        }
-    }
-
-    /// Drops the variable `name` of the running body if it holds a list, the only value a
-    /// change can copy, directly or in a tuple, or a handle (see [`Value::drops_early`]): a local of the running function, or a global at the top level, unless
-    /// globals cannot move or the function `callee` may read it.
-    fn drop_variable(&mut self, name: &str, callee: Option<&str>) {
-        let holds_list =
-            |scope: &HashMap<String, Value>| scope.get(name).is_some_and(Value::drops_early);
-        match self.scopes.last_mut() {
-            Some(scope) => {
-                if holds_list(scope) {
-                    scope.remove(name);
+            StmtKind::EnumDef { name, variants, .. } => {
+                let short = name.rsplit('.').next().unwrap_or(name);
+                let variants = variants
+                    .iter()
+                    .map(|v| {
+                        let shown = if prints_bare(name) {
+                            v.name.clone()
+                        } else {
+                            format!("{short}.{}", v.name)
+                        };
+                        (v.name.clone(), shown.into())
+                    })
+                    .collect();
+                let info = EnumInfo {
+                    name: name.clone(),
+                    variants,
+                };
+                match self.enum_ids.get(name) {
+                    Some(&id) => self.enums[id] = info,
+                    None => {
+                        self.enum_ids.insert(name.clone(), self.enums.len());
+                        self.enums.push(info);
+                    }
                 }
             }
-            None if self.moves_globals
-                && holds_list(&self.globals)
-                && callee.is_none_or(|callee| {
-                    self.global_reads
-                        .get(callee)
-                        .is_none_or(|reads| !reads.contains(name))
-                }) =>
-            {
-                self.globals.remove(name);
+            StmtKind::StructDef { name, fields, .. } => {
+                let def = Rc::new(StructDef {
+                    name: struct_display(name).into(),
+                    linked: name.as_str().into(),
+                    fields: fields.iter().map(|f| f.name.clone()).collect(),
+                    display: self.function_id(&format!("{name}.display")),
+                    eq: self.function_id(&format!("{name}.eq")),
+                    cmp: self.function_id(&format!("{name}.cmp")),
+                });
+                match self.struct_ids.get(name) {
+                    Some(&id) => self.structs[id] = def,
+                    None => {
+                        self.struct_ids.insert(name.clone(), self.structs.len());
+                        self.structs.push(def);
+                    }
+                }
             }
-            None => {}
+            _ => {}
+        }
+    }
+
+    /// Defines the function `name` with the parameters `args` and the body `body`, resolving the
+    /// body against the definitions so far and the check that saw it.
+    fn define(&mut self, name: &str, args: &[Arg], body: &[Stmt]) {
+        let layout = Layout::new(args, body);
+        let last_uses = LastUses::new(body, &self.global_reads, &kept_at_exit(args));
+        let resolved = self.resolved.clone();
+        let body = code::Resolver::new(self, &resolved, Some(&layout), &last_uses).block(body);
+        let id = self.function_id(name);
+        self.functions[id] = Some(Rc::new(Function {
+            name: name.into(),
+            params: args.len(),
+            layout: Rc::new(layout),
+            body,
+            resolved,
+        }));
+    }
+
+    /// Returns the name of the variable `var`, for errors.
+    fn var_name(&self, var: code::Var) -> &str {
+        match var {
+            code::Var::Local(slot) => self
+                .frames
+                .last()
+                .and_then(|frame| frame.layout.names.get(slot))
+                .map_or("?", String::as_str),
+            code::Var::Global(id) => &self.global_names.names[id],
+        }
+    }
+
+    /// Drops the variable `var` of the running body if it holds a list, the only value a
+    /// change can copy, directly or in a tuple, or a handle (see [`Value::drops_early`]): a
+    /// local of the running function, or a global at the top level, unless globals cannot move
+    /// or the function `callee` may read it.
+    fn drop_var(&mut self, var: code::Var, callee: Option<&str>) {
+        match (var, self.frames.last_mut()) {
+            (code::Var::Local(slot), Some(frame)) => {
+                if let Some(value) = frame.slots.get_mut(slot)
+                    && value.as_ref().is_some_and(Value::drops_early)
+                {
+                    *value = None;
+                }
+            }
+            (code::Var::Global(id), None) if self.moves_globals => {
+                let name = &self.global_names.names[id];
+                if self.globals[id].as_ref().is_some_and(Value::drops_early)
+                    && callee.is_none_or(|callee| {
+                        self.global_reads
+                            .get(callee)
+                            .is_none_or(|reads| !reads.contains(name))
+                    })
+                {
+                    self.globals[id] = None;
+                }
+            }
+            _ => {}
         }
     }
 
     /// Takes the value of `field`, a field of a variable such as `b.items`, out of the variable
     /// if it may hold a list, leaving no value in its place, so that the call to `callee` it is
-    /// passed to holds the only reference, as [`Interpreter::drop_variable`] does for a whole
+    /// passed to holds the only reference, as [`Interpreter::drop_var`] does for a whole
     /// variable.
-    fn take_field(&mut self, field: &Expr, callee: &str) {
-        let Some((root, steps)) = place(field) else {
-            return;
-        };
-        let global = self.scopes.is_empty();
+    fn take_field(&mut self, field: &code::Place, callee: &str) {
+        let global = self.frames.is_empty();
         if global
             && (!self.moves_globals
                 || self
                     .global_reads
                     .get(callee)
-                    .is_some_and(|reads| reads.contains(root)))
+                    .is_some_and(|reads| reads.contains(self.var_name(field.root))))
         {
             return;
         }
-        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
-        let Some(mut value) = scope.get_mut(root) else {
+        let Some(mut value) = self.variable_mut(field.root) else {
             return;
         };
-        for step in steps {
-            let (Step::Field(name), Value::Struct(inner)) = (step, value) else {
+        for step in &field.steps {
+            let (code::PlaceStep::Field(name), Value::Struct(inner)) = (step, value) else {
                 return;
             };
             let inner = Rc::make_mut(inner);
@@ -1456,128 +1610,105 @@ impl<'out> Interpreter<'out> {
         }
     }
 
-    fn eval_stmt_unguarded(
-        &mut self,
-        stmt: &Stmt,
-    ) -> Result<ControlFlow, Box<dyn std::error::Error>> {
-        match &stmt.kind {
-            StmtKind::FunctionDef {
-                name, args, body, ..
-            } => {
-                self.define(name.clone(), &args.args, body);
-                Ok(ControlFlow::None)
+    /// Takes what `moves` names out of the caller for its call of `callee`, since nothing reads
+    /// it after the call.
+    fn apply_moves(&mut self, moves: &[code::Move], callee: &str) {
+        for step in moves {
+            match step {
+                code::Move::Variable(var) => self.drop_var(*var, Some(callee)),
+                code::Move::Field(place) => self.take_field(place, callee),
             }
-            // a trait's default methods are functions like any others, named by the trait, and
-            // its methods without a body are only the types'
-            StmtKind::ImplDef { name, methods, .. } | StmtKind::TraitDef { name, methods, .. } => {
-                for method in methods {
-                    if let StmtKind::FunctionDef {
-                        name: method,
-                        args,
-                        body,
-                        ..
-                    } = &method.kind
-                        && !body.is_empty()
-                    {
-                        self.define(format!("{name}.{method}"), &args.args, body);
-                    }
-                }
-                Ok(ControlFlow::None)
-            }
-            StmtKind::Return { value } => {
-                let val = if let Some(expr) = value {
-                    self.note_top_call(stmt.span, expr, &[]);
-                    self.eval_expr(expr)?
-                } else {
-                    Value::Unit
-                };
-                Ok(ControlFlow::Return(val))
-            }
-            StmtKind::Assign { targets, value } => {
-                // a target's indexes are read after the call
-                if targets.iter().all(|target| {
-                    matches!(target.kind, ExprKind::Name { .. } | ExprKind::Tuple { .. })
-                        || field_path(target).is_some()
-                }) {
-                    self.note_top_call(stmt.span, value, targets);
-                }
-                let rhs = self.eval_expr(value)?;
+        }
+    }
 
+    fn eval_stmt_unguarded(&mut self, stmt: &code::Stmt) -> EvalResult<ControlFlow> {
+        use code::StmtKind as S;
+        match &stmt.kind {
+            S::Return(value) => {
+                let value = match value {
+                    Some(expr) => self.eval_expr(expr)?,
+                    None => Value::Unit,
+                };
+                Ok(ControlFlow::Return(value))
+            }
+            S::Assign { targets, value } => {
+                let rhs = self.eval_expr(value)?;
                 for target in targets {
-                    match &target.kind {
-                        ExprKind::Name { .. } | ExprKind::Tuple { .. } => {
-                            self.assign_target(target, &rhs)?;
+                    match target {
+                        code::Target::Unpack(unpack) => self.assign_target(unpack, &rhs)?,
+                        code::Target::Element { list, index, span } => {
+                            let (root, indexes, spans) = self.eval_place(list)?;
+                            let index = self.eval_expr(index)?;
+                            self.store_at(root, &indexes, spans, index, *span, &rhs)?;
                         }
-                        ExprKind::Subscript { value, slice, .. } => {
-                            let (root, indexes) = self.eval_place(value)?;
-                            let index = self.eval_expr(slice)?;
-                            let spans = place_spans(value);
-                            self.store_at(root, &indexes, &spans, index, target.span, &rhs)?;
-                        }
-                        ExprKind::Attribute { .. } => {
-                            let (root, steps) = self.eval_place(target)?;
-                            let field = self.place_value(root, &steps, &place_spans(target))?;
+                        code::Target::Field(place) => {
+                            let (root, steps, spans) = self.eval_place(place)?;
+                            let field = self.place_value(root, &steps, spans)?;
                             *field = rhs.clone();
                         }
-                        _ => return Err("Invalid assignment target".into()),
+                        code::Target::Invalid => return Err("Invalid assignment target".into()),
                     }
                 }
                 Ok(ControlFlow::None)
             }
-            StmtKind::AugAssign { target, op, value } => {
-                match &target.kind {
-                    ExprKind::Name { id, .. } => {
-                        let old = self.eval_expr(target)?;
+            S::AugAssign { target, op, value } => {
+                match target {
+                    code::AugTarget::Var { var, span } => {
+                        let old = self.read_var(*var).map_err(|e| located(e, *span))?;
                         let new = self.augmented(*op, old, value, stmt.span)?;
-                        self.set_var(id, &new)?;
+                        self.set_var(*var, new);
                     }
-                    ExprKind::Subscript {
-                        value: list, slice, ..
+                    code::AugTarget::Element {
+                        list,
+                        index,
+                        spans: target_spans,
+                        span,
                     } => {
                         // the indexes once, then the old element, then the value
-                        let (root, indexes) = self.eval_place(list)?;
-                        let index = self.eval_expr(slice)?;
-                        let spans = place_spans(list);
+                        let (root, indexes, spans) = self.eval_place(list)?;
+                        let index = self.eval_expr(index)?;
                         let mut steps = indexes.clone();
                         steps.push(PlaceStep::Index(index.clone()));
-                        let old = self.read_place(root, &steps, &place_spans(target))?;
+                        let old = self.read_place(root, &steps, target_spans)?;
                         let new = self.augmented(*op, old, value, stmt.span)?;
                         // the value cannot change the list or map, which only this statement can
-                        self.store_at(root, &indexes, &spans, index, target.span, &new)?;
+                        self.store_at(root, &indexes, spans, index, *span, &new)?;
                     }
-                    ExprKind::Attribute { .. } => {
+                    code::AugTarget::Field(place) => {
                         // the indexes once, then the old field, then the value
-                        let (root, steps) = self.eval_place(target)?;
-                        let spans = place_spans(target);
-                        let old = self.read_place(root, &steps, &spans)?;
+                        let (root, steps, spans) = self.eval_place(place)?;
+                        let old = self.read_place(root, &steps, spans)?;
                         let new = self.augmented(*op, old, value, stmt.span)?;
-                        *self.place_value(root, &steps, &spans)? = new;
+                        *self.place_value(root, &steps, spans)? = new;
                     }
-                    _ => return Err("Invalid assignment target".into()),
+                    code::AugTarget::Invalid => return Err("Invalid assignment target".into()),
                 }
                 Ok(ControlFlow::None)
             }
-            StmtKind::For { target, iter, body } => {
-                if let Some(args) = range_args(iter) {
-                    // the bounds are evaluated once, left to right
-                    let mut bounds = Vec::with_capacity(args.len());
-                    for arg in args {
-                        bounds.push(self.eval_expr(arg)?.as_int()?);
-                    }
-                    let (start, end) = match bounds[..] {
-                        [end] => (0, end),
-                        [start, end] => (start, end),
-                        _ => return Err("range() takes 1 or 2 arguments".into()),
-                    };
-                    for i in start..end {
-                        self.assign_target(target, &Value::Int(i))?;
-                        if let Some(flow) = self.run_iteration(body)? {
-                            return Ok(flow);
-                        }
-                    }
-                    return Ok(ControlFlow::None);
+            S::ForRange {
+                target,
+                bounds,
+                body,
+            } => {
+                // the bounds are evaluated once, left to right
+                let mut values = Vec::with_capacity(bounds.len());
+                for bound in bounds {
+                    values.push(self.eval_expr(bound)?.as_int()?);
                 }
-
+                let (start, end) = match values[..] {
+                    [end] => (0, end),
+                    [start, end] => (start, end),
+                    _ => return Err("range() takes 1 or 2 arguments".into()),
+                };
+                for i in start..end {
+                    self.assign_target(target, &Value::Int(i))?;
+                    if let Some(flow) = self.run_iteration(body)? {
+                        return Ok(flow);
+                    }
+                }
+                Ok(ControlFlow::None)
+            }
+            S::For { target, iter, body } => {
                 // a string gives each character, as a string of the bytes that make it up, and
                 // bytes each byte's value
                 let list = self.eval_expr(iter)?;
@@ -1620,7 +1751,7 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(ControlFlow::None)
             }
-            StmtKind::While { test, body } => {
+            S::While { test, body } => {
                 loop {
                     if !self.eval_expr(test)?.is_true() {
                         break;
@@ -1631,59 +1762,33 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(ControlFlow::None)
             }
-            StmtKind::If { test, body, orelse } => {
+            S::If { test, body, orelse } => {
                 if self.eval_expr(test)?.is_true() {
                     self.eval_block(body)
                 } else {
                     self.eval_block(orelse)
                 }
             }
-            StmtKind::Expr { value } => {
-                self.note_top_call(stmt.span, value, &[]);
+            S::Expr(value) => {
                 self.eval_expr(value)?;
                 Ok(ControlFlow::None)
             }
-            StmtKind::EnumDef { name, variants, .. } => {
-                let short = name.rsplit('.').next().unwrap_or(name);
-                let variants = variants
-                    .iter()
-                    .map(|v| {
-                        let shown = if prints_bare(name) {
-                            v.name.clone()
-                        } else {
-                            format!("{short}.{}", v.name)
-                        };
-                        (v.name.clone(), shown.into())
-                    })
-                    .collect();
-                self.enums.insert(name.clone(), variants);
-                Ok(ControlFlow::None)
-            }
-            StmtKind::StructDef { name, fields, .. } => {
-                let def = StructDef {
-                    name: struct_display(name).into(),
-                    linked: name.as_str().into(),
-                    fields: fields.iter().map(|f| f.name.clone()).collect(),
-                };
-                self.structs.insert(name.clone(), Rc::new(def));
-                Ok(ControlFlow::None)
-            }
-            StmtKind::Match { subject, cases } => {
+            S::Match { subject, cases } => {
                 let value = self.eval_expr(subject)?;
-                for case in cases {
+                for (pattern, body) in cases {
                     let mut bindings = vec![];
-                    if self.pattern_matches(&case.pattern, &value, &mut bindings) {
-                        for (name, value) in bindings {
-                            self.set_var(name, &value)?;
+                    if self.pattern_matches(pattern, &value, &mut bindings) {
+                        for (var, value) in bindings {
+                            self.set_var(var, value);
                         }
-                        return self.eval_block(&case.body);
+                        return self.eval_block(body);
                     }
                 }
                 Err("no case of the match fits the value".into())
             }
-            StmtKind::Break => Ok(ControlFlow::Break),
-            StmtKind::Continue => Ok(ControlFlow::Continue),
-            StmtKind::Use { .. } => Err("use is only allowed at the top level of a file".into()),
+            S::Break => Ok(ControlFlow::Break),
+            S::Continue => Ok(ControlFlow::Continue),
+            S::Fail(message) => Err(message.clone().into()),
         }
     }
 
@@ -1691,32 +1796,25 @@ impl<'out> Interpreter<'out> {
     /// `bindings`.
     ///
     /// For example, `some(x)` matches `some(3)` and binds `x` to 3, but does not match `none`.
-    fn pattern_matches<'p>(
+    fn pattern_matches(
         &self,
-        pattern: &'p Pattern,
+        pattern: &code::Pattern,
         value: &Value,
-        bindings: &mut Vec<(&'p str, Value)>,
+        bindings: &mut Vec<(code::Var, Value)>,
     ) -> bool {
-        match &pattern.kind {
-            PatternKind::Wildcard => true,
-            PatternKind::Name(name) => {
-                bindings.push((name, value.clone()));
+        match pattern {
+            code::Pattern::Wildcard => true,
+            code::Pattern::Bind(var) => {
+                bindings.push((*var, value.clone()));
                 true
             }
-            PatternKind::Variant { path, fields } => {
+            code::Pattern::Variant { id, name, fields } => {
                 let Value::Enum(found) = value else {
                     return false;
                 };
-                let tag = match path.as_slice() {
-                    [(enum_name, _), (variant, _)] => {
-                        match self.enums.get(enum_name).and_then(|variants| {
-                            variants.iter().position(|(name, _)| name == variant)
-                        }) {
-                            Some(tag) => tag,
-                            None => return false,
-                        }
-                    }
-                    _ => return false,
+                let variants = &self.enums[*id].variants;
+                let Some(tag) = variants.iter().position(|(variant, _)| variant == name) else {
+                    return false;
                 };
                 found.tag == tag
                     && found.fields.len() == fields.len()
@@ -1725,44 +1823,31 @@ impl<'out> Interpreter<'out> {
                         .zip(&found.fields)
                         .all(|(field, value)| self.pattern_matches(field, value, bindings))
             }
+            code::Pattern::Never => false,
         }
     }
 
-    /// Makes the variant `variant` of the enum `enum_name` holding `fields`.
-    fn variant(&self, enum_name: &str, variant: &str, fields: Vec<Value>) -> EvalResult<Value> {
-        let variants = self
-            .enums
-            .get(enum_name)
-            .ok_or_else(|| format!("'{enum_name}' is not an enum"))?;
-        let tag = variants
+    /// Makes the variant `variant` of the enum with the id `id` holding `fields`.
+    fn variant(&self, id: usize, variant: &str, fields: Vec<Value>) -> EvalResult<Value> {
+        let info = &self.enums[id];
+        let tag = info
+            .variants
             .iter()
             .position(|(name, _)| name == variant)
-            .ok_or_else(|| format!("'{enum_name}' has no variant '{variant}'"))?;
+            .ok_or_else(|| format!("'{}' has no variant '{variant}'", info.name))?;
         Ok(Value::Enum(Rc::new(EnumValue {
-            name: variants[tag].1.clone(),
+            name: info.variants[tag].1.clone(),
             tag,
             fields,
         })))
     }
 
-    /// Evaluates one expression to a constant, so `1 + 2` evaluates to `Int(3)`.
-    ///
-    /// ```text
-    /// expr = BoolOp(boolop op, expr* values)
-    ///      | BinOp(expr left, operator op, expr right)
-    ///      | UnaryOp(unaryop op, expr operand)
-    ///      | Compare(expr left, cmpop* ops, expr* comparators)
-    ///      | Call(expr func, expr* args)
-    ///      | Constant(constant value, string? kind)
-    ///      | Name(identifier id, expr_context ctx)
-    ///      | List(expr* elts, expr_context ctx)
-    /// ```
     /// Runs one iteration of a loop body, spending fuel, and returns how the loop should end, or
     /// `None` to keep looping.
     ///
     /// For example, a `break` ends the loop normally with `ControlFlow::None`, while a `ret`
     /// passes its `ControlFlow::Return` on to the enclosing function.
-    fn run_iteration(&mut self, body: &[Stmt]) -> EvalResult<Option<ControlFlow>> {
+    fn run_iteration(&mut self, body: &[code::Stmt]) -> EvalResult<Option<ControlFlow>> {
         self.burn_fuel()?;
         Ok(match self.eval_block(body)? {
             ControlFlow::Break => Some(ControlFlow::None),
@@ -1777,27 +1862,26 @@ impl<'out> Interpreter<'out> {
     ///
     /// For example, `a * (2 + 3)` for a list `a` evaluates `a`, then `2 + 3`, and returns a
     /// multiplication of `a` by 5 for each element.
-    fn arithmetic(&mut self, expr: &Expr) -> EvalResult<Lazy> {
+    fn arithmetic(&mut self, expr: &code::Expr) -> EvalResult<Lazy> {
         self.arithmetic_unlocated(expr)
             .map_err(|e| located(e, expr.span))
     }
 
-    fn arithmetic_unlocated(&mut self, expr: &Expr) -> EvalResult<Lazy> {
+    fn arithmetic_unlocated(&mut self, expr: &code::Expr) -> EvalResult<Lazy> {
         self.nested(|this| match &expr.kind {
-            ExprKind::BinOp { op, left, right } => {
+            code::ExprKind::Binary(op, left, right) => {
                 let left = this.arithmetic(left)?;
                 let right = this.arithmetic(right)?;
                 combine(*op, left, right)
             }
-            ExprKind::UnaryOp {
-                op: op @ (UnaryOp::UnaryAdd | UnaryOp::UnarySub),
-                operand,
-            } => match this.arithmetic(operand)? {
-                Lazy::Value(value) if !matches!(value, Value::List(_)) => {
-                    Ok(Lazy::Value(unary(*op, value)?))
+            code::ExprKind::Unary(op @ (UnaryOp::UnaryAdd | UnaryOp::UnarySub), operand) => {
+                match this.arithmetic(operand)? {
+                    Lazy::Value(value) if !matches!(value, Value::List(_)) => {
+                        Ok(Lazy::Value(unary(*op, value)?))
+                    }
+                    operand => Ok(Lazy::Unary(*op, Box::new(operand))),
                 }
-                operand => Ok(Lazy::Unary(*op, Box::new(operand))),
-            },
+            }
             _ => Ok(Lazy::Value(this.eval_expr(expr)?)),
         })
     }
@@ -1809,7 +1893,7 @@ impl<'out> Interpreter<'out> {
         &mut self,
         op: Operator,
         old: Value,
-        value: &Expr,
+        value: &code::Expr,
         span: Span,
     ) -> EvalResult<Value> {
         let right = self.arithmetic(value)?;
@@ -1824,10 +1908,15 @@ impl<'out> Interpreter<'out> {
     /// Reads the value that `root` leads to through `steps`, as [`Interpreter::place_value`]
     /// walks it, failing at the same `spans`, but without changing anything.
     ///
-    /// For example, `grid[1][0] += 3` reads `grid[1][0]` with `root` `"grid"` and the indexes 1
+    /// For example, `grid[1][0] += 3` reads `grid[1][0]` with the root `grid` and the indexes 1
     /// and 0.
-    fn read_place(&self, root: &str, steps: &[PlaceStep], spans: &[Span]) -> EvalResult<Value> {
-        let mut current = self.get_var(root)?;
+    fn read_place(
+        &self,
+        root: code::Var,
+        steps: &[PlaceStep],
+        spans: &[Span],
+    ) -> EvalResult<Value> {
+        let mut current = self.read_var(root)?;
         for (step, &span) in steps.iter().zip(spans) {
             let next = match step {
                 PlaceStep::Index(index) => match &current {
@@ -1852,17 +1941,27 @@ impl<'out> Interpreter<'out> {
         Ok(current)
     }
 
-    /// Evaluates `expr`, giving an error raised by it, rather than by an expression inside it,
-    /// the position of `expr`.
-    fn eval_expr(&mut self, expr: &Expr) -> EvalResult<Value> {
+    /// Evaluates one expression to a value, so `1 + 2` evaluates to `Int(3)`, giving an error
+    /// the position of the innermost expression that raised it.
+    fn eval_expr(&mut self, expr: &code::Expr) -> EvalResult<Value> {
         self.nested(|this| this.eval_expr_unguarded(expr))
             .map_err(|e| located(e, expr.span))
     }
 
-    fn eval_expr_unguarded(&mut self, expr: &Expr) -> EvalResult<Value> {
+    /// Evaluates `exprs` left to right, as a call's arguments are.
+    fn eval_exprs(&mut self, exprs: &[code::Expr]) -> EvalResult<Vec<Value>> {
+        let mut values = Vec::with_capacity(exprs.len());
+        for expr in exprs {
+            values.push(self.eval_expr(expr)?);
+        }
+        Ok(values)
+    }
+
+    fn eval_expr_unguarded(&mut self, expr: &code::Expr) -> EvalResult<Value> {
+        use code::ExprKind as E;
         match &expr.kind {
-            ExprKind::Lambda { .. } => Err("a lambda must be linked before it runs".into()),
-            ExprKind::Try { value } => {
+            E::Fail(message) => Err(message.clone().into()),
+            E::Try(value) => {
                 let value = self.eval_expr(value)?;
                 let Value::Enum(variant) = &value else {
                     return Err("'?' needs a result or an option".into());
@@ -1874,27 +1973,24 @@ impl<'out> Interpreter<'out> {
                 }
             }
             // every value is evaluated before any is written, like a call's arguments
-            ExprKind::JoinedStr { values } => {
-                let values = values
-                    .iter()
-                    .map(|value| self.eval_expr(value))
-                    .collect::<EvalResult<Vec<Value>>>()?;
+            E::JoinedStr(values) => {
+                let values = self.eval_exprs(values)?;
                 let mut text = String::new();
                 for value in &values {
                     self.write_value(&mut text, value, false)?;
                 }
                 Ok(Value::Str(text.into()))
             }
-            ExprKind::Dict { keys, values } => {
+            E::Dict(entries) => {
                 let mut map = MapValue::default();
-                for (key, value) in keys.iter().zip(values) {
+                for (key, value) in entries {
                     let key = MapKey::of(&self.eval_expr(key)?)?;
                     map.insert(key, self.eval_expr(value)?);
                 }
                 Ok(Value::Map(Rc::new(map)))
             }
             // short-circuiting
-            ExprKind::BoolOp { op, values } => {
+            E::BoolOp(op, values) => {
                 let mut result = self.eval_expr(&values[0])?;
                 for value in &values[1..] {
                     let done = match op {
@@ -1908,39 +2004,26 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(result)
             }
-            ExprKind::BinOp { .. }
-            | ExprKind::UnaryOp {
-                op: UnaryOp::UnaryAdd | UnaryOp::UnarySub,
-                ..
-            } => match self.arithmetic(expr)? {
-                Lazy::Value(value) => Ok(value),
-                lazy => elementwise(&lazy),
-            },
-            ExprKind::UnaryOp { op, operand } => {
+            E::Binary(..) | E::Unary(UnaryOp::UnaryAdd | UnaryOp::UnarySub, _) => {
+                match self.arithmetic(expr)? {
+                    Lazy::Value(value) => Ok(value),
+                    lazy => elementwise(&lazy),
+                }
+            }
+            E::Unary(op, operand) => {
                 let val = self.eval_expr(operand)?;
                 unary(*op, val)
             }
-            ExprKind::Compare {
-                left,
-                ops,
-                comparators,
-            } if ops.iter().any(CompOp::is_membership) => {
-                let [op] = &ops[..] else {
-                    return Err("'in' cannot be chained with other comparisons".into());
-                };
+            E::Membership(op, needle, container) => {
                 // the value looked for, then where
-                let needle = self.eval_expr(left)?;
-                let container = self.eval_expr(&comparators[0])?;
+                let needle = self.eval_expr(needle)?;
+                let container = self.eval_expr(container)?;
                 let found = self.contains(&container, &needle)?;
                 Ok(Value::Bool(found == (*op == CompOp::In)))
             }
-            ExprKind::Compare {
-                left,
-                ops,
-                comparators,
-            } => {
+            E::Compare(left, comparisons) => {
                 let mut current = self.eval_expr(left)?;
-                for (op, comparator) in ops.iter().zip(comparators) {
+                for (op, comparator) in comparisons {
                     let next = self.eval_expr(comparator)?;
                     let holds = match op {
                         CompOp::Equal => self.values_equal(&current, &next, 0)?,
@@ -1968,165 +2051,24 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(Value::Bool(true))
             }
-            ExprKind::Call {
-                func,
-                args,
-                keywords,
-            } => {
-                if let Some(conversion) = self.resolved.conversions.get(&expr.span).cloned() {
-                    return self.eval_conversion(expr.span, &conversion, &args[0]);
-                }
-                // a function value, as `f(x)`, `fs[0](x)`, or `p.run(x)` with a field `run` call
-                if self.resolved.indirect_calls.contains(&expr.span) {
-                    return self.call_value(expr.span, func, args);
-                }
-                if let ExprKind::Name { id, .. } = &func.kind
-                    && may_name_struct(func)
-                    && let Some(def) = self.structs.get(id).cloned()
-                {
-                    // the values in the order they are written, each into its field
-                    let mut fields = vec![Value::Unit; def.fields.len()];
-                    for keyword in keywords {
-                        let value = self.eval_expr(&keyword.value)?;
-                        let position = def
-                            .fields
-                            .iter()
-                            .position(|field| *field == keyword.arg)
-                            .ok_or_else(|| format!("'{id}' has no field '{}'", keyword.arg))?;
-                        fields[position] = value;
-                    }
-                    return Ok(Value::Struct(Rc::new(StructValue { def, fields })));
-                }
-                if let ExprKind::Attribute { value, attr, .. } = &func.kind
-                    && let ExprKind::Name { id, .. } = &value.kind
-                    && self.enums.contains_key(id)
-                    && may_name_enum(value)
-                {
-                    let mut values = Vec::with_capacity(args.len());
-                    for arg in args {
-                        values.push(self.eval_expr(arg)?);
-                    }
-                    return self.variant(id, attr, values);
-                }
-                if let ExprKind::Attribute { value, .. } = &func.kind
-                    && let Some(method) = self.resolved.methods.get(&expr.span).cloned()
-                {
-                    return self.call_method_of_struct(expr.span, &method, value, args);
-                }
-                if let ExprKind::Attribute { value, attr, .. } = &func.kind
-                    && stdlib::changes_receiver(attr)
-                {
-                    // the receiver's indexes, then the arguments, then the change
-                    let (root, steps) = self.eval_place(value)?;
-                    let mut values = Vec::with_capacity(args.len());
-                    for arg in args {
-                        values.push(self.eval_expr(arg)?);
-                    }
-                    let spans = place_spans(value);
-                    if let Value::Map(map) = self.place_value(root, &steps, &spans)? {
-                        let shared = Rc::strong_count(map) > 1;
-                        let result = change_map(Rc::make_mut(map), attr, &values);
-                        self.copies += shared as u64;
-                        return result;
-                    }
-                    let items = self.place_list(root, &steps, &spans)?;
-                    // sorted by the prelude's function, which gives the list back sorted
-                    if let Some(function) = stdlib::prelude_method(attr) {
-                        let list = Value::List(Rc::new(items.clone()));
-                        let mut args = vec![list];
-                        args.extend(values);
-                        let (sorted, _) = self.invoke(function, args, false)?;
-                        let sorted = sorted.as_list()?.to_vec();
-                        *self.place_list(root, &steps, &spans)? = sorted;
-                        return Ok(Value::Unit);
-                    }
-                    // values of other types sort by their `cmp`, in the prelude's sort
-                    if attr == "sort"
-                        && items.first().is_some_and(|v| matches!(v, Value::Struct(_)))
-                    {
-                        let list = Value::List(Rc::new(items.clone()));
-                        let (sorted, _) = self.invoke(stdlib::PRELUDE_SORT, vec![list], false)?;
-                        let sorted = sorted.as_list()?.to_vec();
-                        *self.place_list(root, &steps, &spans)? = sorted;
-                        return Ok(Value::Unit);
-                    }
-                    return change_list(items, attr, values);
-                }
-                if let ExprKind::Attribute { value, attr, .. } = &func.kind {
-                    // the receiver is evaluated before the arguments
-                    let receiver = self.eval_expr(value)?;
-                    let mut values = Vec::with_capacity(args.len());
-                    for arg in args {
-                        values.push(self.eval_expr(arg)?);
-                    }
-                    return self.call_method(attr, receiver, values);
-                }
-                let ExprKind::Name { id, .. } = &func.kind else {
-                    return Err("only a function or a function value can be called".into());
-                };
-                // claimed first, since a call among the arguments runs statements of its own
-                let movable = self.top_call.take_if(|(span, _)| *span == expr.span);
-                // arguments are evaluated left to right in the caller's scope
-                let mut values = Vec::with_capacity(args.len());
-                for arg in args {
-                    values.push(self.eval_expr(arg)?);
-                }
-                if let Some((_, names)) = movable {
-                    self.move_arguments(args, &names, id, None);
-                }
-                self.next_types = self.instance_types(expr.span);
-                let result = self.call(id, values);
-                self.next_types = None;
-                result
+            E::Call(call) => self.eval_call(expr.span, call),
+            E::Variant { id, name, args } => {
+                let values = self.eval_exprs(args)?;
+                self.variant(*id, name, values)
             }
-            ExprKind::Attribute { value, attr, .. } => match &value.kind {
-                ExprKind::Name { id, .. }
-                    if self.enums.contains_key(id) && may_name_enum(value) =>
-                {
-                    self.variant(id, attr, vec![])
-                }
-                _ => {
-                    let value = self.eval_expr(value)?;
-                    let value = value.as_struct()?;
-                    Ok(value.fields[value.field(attr)?].clone())
-                }
-            },
-            ExprKind::Constant { value, kind: _ } => Ok(Value::from(&**value)),
-            ExprKind::Subscript { value, slice, .. } => {
+            E::Field(value, attr) => {
+                let value = self.eval_expr(value)?;
+                let value = value.as_struct()?;
+                Ok(value.fields[value.field(attr)?].clone())
+            }
+            E::Constant(value) => Ok(value.clone()),
+            E::Index(value, index) => {
                 let list = self.eval_expr(value)?;
                 if let Value::Map(map) = &list {
-                    let key = MapKey::of(&self.eval_expr(slice)?)?;
+                    let key = MapKey::of(&self.eval_expr(index)?)?;
                     return Ok(map.get(&key)?.clone());
                 }
-                if let ExprKind::Slice { lower, upper, step } = &slice.kind {
-                    let mut bound = |bound: &Option<Box<Expr>>| -> EvalResult<Option<i64>> {
-                        bound
-                            .as_ref()
-                            .map(|bound| self.eval_expr(bound)?.as_int())
-                            .transpose()
-                    };
-                    let (lower, upper, step) = (bound(lower)?, bound(upper)?, bound(step)?);
-                    if let Value::Bytes(bytes) = &list {
-                        let (start, step, count) =
-                            stdlib::slice_indices(bytes.len(), lower, upper, step)?;
-                        let sliced = stdlib::bytes_slice(bytes, start, step, count);
-                        return Ok(Value::Bytes(sliced.into()));
-                    }
-                    if let Value::Str(text) = &list {
-                        let (start, step, count) =
-                            stdlib::slice_indices(text.len(), lower, upper, step)?;
-                        let sliced = stdlib::str_slice(text, start, step, count)?;
-                        return Ok(Value::Str(sliced.into()));
-                    }
-                    let items = list.as_list()?;
-                    let (start, step, count) =
-                        stdlib::slice_indices(items.len(), lower, upper, step)?;
-                    let picked = (0..count as i64)
-                        .map(|k| items[(start + k * step) as usize].clone())
-                        .collect();
-                    return Ok(Value::list(picked));
-                }
-                let index = self.eval_expr(slice)?.as_int()?;
+                let index = self.eval_expr(index)?.as_int()?;
                 if let Value::Tuple(fields) = &list {
                     // the checker allows only a constant index in range
                     let position = list_position(index, fields.len())?;
@@ -2144,33 +2086,167 @@ impl<'out> Interpreter<'out> {
                 let position = list_position(index, items.len())?;
                 Ok(items[position].clone())
             }
-            ExprKind::Name { id, ctx: _ } => match self.resolved.function_values.get(&expr.span) {
-                Some(function) => {
-                    let body = match is_lambda(&function.function) {
-                        true => self.functions.get(&function.function).cloned(),
-                        false => None,
-                    };
-                    let value = function.clone();
-                    let types = self.instance_types(expr.span);
-                    Ok(Value::Function(FunctionRef { value, body, types }))
+            E::Slice {
+                value,
+                lower,
+                upper,
+                step,
+            } => {
+                let list = self.eval_expr(value)?;
+                let mut bound = |bound: &Option<Box<code::Expr>>| -> EvalResult<Option<i64>> {
+                    bound
+                        .as_ref()
+                        .map(|bound| self.eval_expr(bound)?.as_int())
+                        .transpose()
+                };
+                let (lower, upper, step) = (bound(lower)?, bound(upper)?, bound(step)?);
+                if let Value::Bytes(bytes) = &list {
+                    let (start, step, count) =
+                        stdlib::slice_indices(bytes.len(), lower, upper, step)?;
+                    let sliced = stdlib::bytes_slice(bytes, start, step, count);
+                    return Ok(Value::Bytes(sliced.into()));
                 }
-                None => self.get_var(id),
-            },
-            ExprKind::List { elts, ctx: _ } => {
-                let mut items = Vec::with_capacity(elts.len());
-                for elt in elts {
-                    items.push(self.eval_expr(elt)?);
+                if let Value::Str(text) = &list {
+                    let (start, step, count) =
+                        stdlib::slice_indices(text.len(), lower, upper, step)?;
+                    let sliced = stdlib::str_slice(text, start, step, count)?;
+                    return Ok(Value::Str(sliced.into()));
                 }
-                Ok(Value::list(items))
+                let items = list.as_list()?;
+                let (start, step, count) = stdlib::slice_indices(items.len(), lower, upper, step)?;
+                let picked = (0..count as i64)
+                    .map(|k| items[(start + k * step) as usize].clone())
+                    .collect();
+                Ok(Value::list(picked))
             }
-            ExprKind::Tuple { elts, ctx: _ } => {
-                let mut fields = Vec::with_capacity(elts.len());
-                for elt in elts {
-                    fields.push(self.eval_expr(elt)?);
-                }
-                Ok(Value::Tuple(fields.into()))
+            E::Var(var) => self.read_var(*var),
+            E::Function {
+                value,
+                id,
+                lambda,
+                types,
+            } => {
+                let body = match lambda {
+                    true => self.functions[*id].clone(),
+                    false => None,
+                };
+                Ok(Value::Function(FunctionRef {
+                    value: value.clone(),
+                    id: *id,
+                    body,
+                    types: self.instance_types(types),
+                }))
             }
-            ExprKind::Slice { .. } => Err("a slice can only appear in brackets".into()),
+            E::List(elts) => Ok(Value::list(self.eval_exprs(elts)?)),
+            E::Tuple(elts) => Ok(Value::Tuple(self.eval_exprs(elts)?.into())),
+        }
+    }
+
+    /// Evaluates the call at `span`, as resolved into `call`.
+    fn eval_call(&mut self, span: Span, call: &code::Call) -> EvalResult<Value> {
+        match call {
+            code::Call::Conversion {
+                conversion,
+                arg,
+                types,
+            } => self.eval_conversion(conversion, arg, types),
+            code::Call::Value { func, args, moves } => self.call_value(func, args, moves),
+            code::Call::Struct { id, name, fields } => {
+                let def = self.structs[*id].clone();
+                // the values in the order they are written, each into its field
+                let mut values = vec![Value::Unit; def.fields.len()];
+                for (field, value) in fields {
+                    let value = self.eval_expr(value)?;
+                    let position = def
+                        .fields
+                        .iter()
+                        .position(|name| name == field)
+                        .ok_or_else(|| format!("'{name}' has no field '{field}'"))?;
+                    values[position] = value;
+                }
+                Ok(Value::Struct(Rc::new(StructValue {
+                    def,
+                    fields: values,
+                })))
+            }
+            code::Call::Method {
+                method,
+                function,
+                receiver,
+                place,
+                args,
+                moves,
+                types,
+            } => self.call_method_of_struct(
+                span,
+                method,
+                *function,
+                receiver.as_ref(),
+                place.as_ref(),
+                args,
+                moves,
+                types,
+            ),
+            code::Call::Change { place, attr, args } => {
+                // the receiver's indexes, then the arguments, then the change
+                let (root, steps, spans) = self.eval_place(place)?;
+                let values = self.eval_exprs(args)?;
+                if let Value::Map(map) = self.place_value(root, &steps, spans)? {
+                    let shared = Rc::strong_count(map) > 1;
+                    let result = change_map(Rc::make_mut(map), attr, &values);
+                    self.copies += shared as u64;
+                    return result;
+                }
+                let items = self.place_list(root, &steps, spans)?;
+                // sorted by the prelude's function, which gives the list back sorted
+                if let Some(function) = stdlib::prelude_method(attr) {
+                    let list = Value::List(Rc::new(items.clone()));
+                    let mut args = vec![list];
+                    args.extend(values);
+                    let (sorted, _) = self.invoke(function, args, false)?;
+                    let sorted = sorted.as_list()?.to_vec();
+                    *self.place_list(root, &steps, spans)? = sorted;
+                    return Ok(Value::Unit);
+                }
+                // values of other types sort by their `cmp`, in the prelude's sort
+                if attr == "sort" && items.first().is_some_and(|v| matches!(v, Value::Struct(_))) {
+                    let list = Value::List(Rc::new(items.clone()));
+                    let (sorted, _) = self.invoke(stdlib::PRELUDE_SORT, vec![list], false)?;
+                    let sorted = sorted.as_list()?.to_vec();
+                    *self.place_list(root, &steps, spans)? = sorted;
+                    return Ok(Value::Unit);
+                }
+                change_list(items, attr, values)
+            }
+            code::Call::BuiltinMethod {
+                receiver,
+                attr,
+                args,
+            } => {
+                // the receiver is evaluated before the arguments
+                let receiver = self.eval_expr(receiver)?;
+                let values = self.eval_exprs(args)?;
+                self.call_method(attr, receiver, values)
+            }
+            code::Call::Builtin { name, args } => {
+                let values = self.eval_exprs(args)?;
+                self.call(name, values)
+            }
+            code::Call::User {
+                function,
+                name,
+                args,
+                moves,
+                types,
+            } => {
+                // arguments are evaluated left to right in the caller's frame
+                let values = self.eval_exprs(args)?;
+                self.apply_moves(moves, name);
+                self.next_types = self.instance_types(types);
+                let result = self.invoke_id(*function, values, false);
+                self.next_types = None;
+                Ok(result?.0)
+            }
         }
     }
 
@@ -2183,11 +2259,11 @@ impl<'out> Interpreter<'out> {
             let Value::Struct(s) = value else {
                 return Ok(false);
             };
-            let function = format!("{}.display", s.def.linked);
-            if !self.functions.contains_key(&function) {
+            let function = s.def.display;
+            if self.functions[function].is_none() {
                 return Ok(false);
             }
-            if let (Value::Str(text), _) = self.invoke(&function, vec![value.clone()], false)? {
+            if let (Value::Str(text), _) = self.invoke_id(function, vec![value.clone()], false)? {
                 out.push_str(&text);
             }
             Ok(true)
@@ -2212,9 +2288,10 @@ impl<'out> Interpreter<'out> {
         match (a, b) {
             (Value::Tuple(x), Value::Tuple(y)) => all_equal(self, x, y, depth),
             (Value::Struct(x), Value::Struct(y)) => {
-                let function = format!("{}.eq", x.def.linked);
-                if self.functions.contains_key(&function) {
-                    let (result, _) = self.invoke(&function, vec![a.clone(), b.clone()], false)?;
+                let function = x.def.eq;
+                if self.functions[function].is_some() {
+                    let (result, _) =
+                        self.invoke_id(function, vec![a.clone(), b.clone()], false)?;
                     return Ok(matches!(result, Value::Bool(true)));
                 }
                 all_equal(self, &x.fields, &y.fields, depth)
@@ -2260,8 +2337,7 @@ impl<'out> Interpreter<'out> {
         let Value::Struct(x) = a else {
             return a.compare(b);
         };
-        let function = format!("{}.cmp", x.def.linked);
-        let (result, _) = self.invoke(&function, vec![a.clone(), b.clone()], false)?;
+        let (result, _) = self.invoke_id(x.def.cmp, vec![a.clone(), b.clone()], false)?;
         Ok(Some(ordering_of(&result)?))
     }
 
@@ -2495,102 +2571,71 @@ impl<'out> Interpreter<'out> {
         self.rng.get_or_insert_with(Rng::from_entropy)
     }
 
-    /// Calls the builtin or user-defined function named `name` with already evaluated arguments.
-    /// Moves each argument in `args` that is a variable or a field of one in `names`, which
-    /// nothing reads after the statement's call to `callee`, into the call, except one that starts
-    /// from `keep`, the variable a method changes.
-    fn move_arguments(
+    /// Calls the function value `func` evaluates to with `args`. The value is evaluated first,
+    /// then the arguments, which may move into the call as `moves` says, as they do into a call
+    /// of a function by its name.
+    fn call_value(
         &mut self,
-        args: &[Expr],
-        names: &[String],
-        callee: &str,
-        keep: Option<&str>,
-    ) {
-        for arg in args {
-            if let ExprKind::Name { id: name, .. } = &arg.kind
-                && names.contains(name)
-                && keep != Some(name.as_str())
-            {
-                self.drop_variable(name, Some(callee));
-            }
-            if let Some(path) = field_path(arg)
-                && let Some((root, _)) = path.split_once('.')
-                && keep != Some(root)
-                && (names.contains(&path) || names.iter().any(|name| name == root))
-            {
-                self.take_field(arg, callee);
-            }
-        }
-    }
-
-    /// Calls the function value `func` evaluates to with `args`, for the call at `span`. The
-    /// value is evaluated first, then the arguments, which may move into the call as they do
-    /// into a call of a function by its name.
-    fn call_value(&mut self, span: Span, func: &Expr, args: &[Expr]) -> EvalResult<Value> {
-        // claimed first, since a call among the arguments runs statements of its own
-        let movable = self.top_call.take_if(|(call, _)| *call == span);
+        func: &code::Expr,
+        args: &[code::Expr],
+        moves: &[code::Move],
+    ) -> EvalResult<Value> {
         let Value::Function(function) = self.eval_expr(func)? else {
             return Err("only a function can be called".into());
         };
-        let mut values = Vec::with_capacity(args.len());
-        for arg in args {
-            values.push(self.eval_expr(arg)?);
-        }
-        let name = &function.value.function;
-        if let Some((_, names)) = movable {
-            self.move_arguments(args, &names, name, None);
-        }
+        let values = self.eval_exprs(args)?;
+        self.apply_moves(moves, &function.value.function);
         self.next_types = function.types.clone();
         let result = match &function.body {
-            Some(body) => self.invoke_body(name, body.clone(), values, false)?,
-            None => self.invoke(name, values, false)?,
+            Some(body) => self.invoke_body(body.clone(), values, false)?,
+            None => self.invoke_id(function.id, values, false)?,
         };
         Ok(result.0)
     }
 
     /// Calls a function of an `impl` block as `method` resolved the call at `span`: an associated
     /// function with `args`, or a method with the value of `receiver` as `self` and then `args`.
+    /// `function` is the id of `method.function`.
     ///
-    /// A method that changes `self` changes the receiver: its indexes are evaluated, then the
-    /// arguments, then the receiver moves into the call, unless the method may read the global it
-    /// is in, and what the method leaves in `self` replaces it.
+    /// A method that changes `self` changes the receiver at `place`: its indexes are evaluated,
+    /// then the arguments, then the receiver moves into the call, unless the method may read the
+    /// global it is in, and what the method leaves in `self` replaces it.
+    #[allow(clippy::too_many_arguments)]
     fn call_method_of_struct(
         &mut self,
         span: Span,
         method: &Method,
-        receiver: &Expr,
-        args: &[Expr],
+        function: usize,
+        receiver: Option<&code::Expr>,
+        place: Option<&code::PlaceOr>,
+        args: &[code::Expr],
+        moves: &[code::Move],
+        types: &Option<Rc<code::InstanceTypes>>,
     ) -> EvalResult<Value> {
-        let function = method.function.as_str();
-        // claimed first, since a call among the arguments runs statements of its own
-        let movable = self.top_call.take_if(|(call, _)| *call == span);
         if method.implementations.is_some() {
-            return self.call_through_bound(span, method, receiver, args, movable);
+            return self.call_through_bound(span, method, receiver, place, args, moves);
         }
+        let name = method.function.as_str();
         if !method.receiver {
-            let mut values = Vec::with_capacity(args.len());
-            for arg in args {
-                values.push(self.eval_expr(arg)?);
-            }
-            if let Some((_, names)) = movable {
-                self.move_arguments(args, &names, function, None);
-            }
-            self.next_types = self.instance_types(span);
-            return Ok(self.invoke(function, values, false)?.0);
+            let values = self.eval_exprs(args)?;
+            self.apply_moves(moves, name);
+            self.next_types = self.instance_types(types);
+            return Ok(self.invoke_id(function, values, false)?.0);
         }
         if !method.changes {
+            let Some(receiver) = receiver else {
+                return Err("a method needs a receiver".into());
+            };
             let mut values = Vec::with_capacity(args.len() + 1);
             values.push(self.eval_expr(receiver)?);
             for arg in args {
                 values.push(self.eval_expr(arg)?);
             }
-            if let Some((_, names)) = movable {
-                self.move_arguments(args, &names, function, None);
-            }
-            self.next_types = self.instance_types(span);
-            let value = self.invoke(function, values, false)?.0;
+            self.apply_moves(moves, name);
+            self.next_types = self.instance_types(types);
+            let value = self.invoke_id(function, values, false)?.0;
             // the prelude's `clamp` gives first whether its bounds are in order
-            if function == stdlib::PRELUDE_CLAMP
+            if name == stdlib::PRELUDE_CLAMP
                 && let Value::Tuple(values) = &value
                 && let [Value::Bool(in_order), value] = &values[..]
             {
@@ -2601,34 +2646,41 @@ impl<'out> Interpreter<'out> {
             }
             return Ok(value);
         }
-        let (root, steps) = self.eval_place(receiver)?;
+        let Some(place) = place else {
+            return Err("a method that changes its receiver needs a place".into());
+        };
+        let (root, steps, spans) = self.eval_place(place)?;
         let mut values = Vec::with_capacity(args.len() + 1);
         values.push(Value::Unit);
         for arg in args {
             values.push(self.eval_expr(arg)?);
         }
-        if let Some((_, names)) = movable {
-            self.move_arguments(args, &names, function, Some(root));
-        }
+        self.apply_moves(moves, name);
         // a global the method may read stays, and a failed call in a session leaves it as it was
-        let keep = self.scopes.is_empty()
-            && (!self.moves_globals
-                || self
-                    .global_reads
-                    .get(function)
-                    .is_some_and(|reads| reads.contains(root)));
-        let spans = place_spans(receiver);
-        let place = self.place_value(root, &steps, &spans)?;
+        let keep = self.keeps_receiver(root, name);
+        let place = self.place_value(root, &steps, spans)?;
         values[0] = match keep {
             true => place.clone(),
             false => std::mem::replace(place, Value::Unit),
         };
-        self.next_types = self.instance_types(span);
-        let (result, changed) = self.invoke(function, values, true)?;
+        self.next_types = self.instance_types(types);
+        let (result, changed) = self.invoke_id(function, values, true)?;
         if let Some(changed) = changed {
-            *self.place_value(root, &steps, &spans)? = changed;
+            *self.place_value(root, &steps, spans)? = changed;
         }
         Ok(result)
+    }
+
+    /// Returns whether a method `callee` that changes the variable `root` must leave it as it
+    /// is until the call returns: a global the method may read, or any global in a session,
+    /// where a failed call leaves it as it was.
+    fn keeps_receiver(&self, root: code::Var, callee: &str) -> bool {
+        self.frames.is_empty()
+            && (!self.moves_globals
+                || self
+                    .global_reads
+                    .get(callee)
+                    .is_some_and(|reads| reads.contains(self.var_name(root))))
     }
 
     /// Calls a method through a bound, as `x.area()` with `x` of type `T` in
@@ -2638,82 +2690,66 @@ impl<'out> Interpreter<'out> {
         &mut self,
         span: Span,
         method: &Method,
-        receiver: &Expr,
-        args: &[Expr],
-        movable: Option<(Span, Vec<String>)>,
+        receiver: Option<&code::Expr>,
+        place: Option<&code::PlaceOr>,
+        args: &[code::Expr],
+        moves: &[code::Move],
     ) -> EvalResult<Value> {
-        // a type that compares part by part, or a number or a string, has the builtin method
-        if matches!(method.function.as_str(), "eq.eq" | "ord.cmp") {
-            let receiver_value = self.eval_expr(receiver)?;
-            if self.implementation(span, method, &receiver_value).is_err() {
-                let mut values = Vec::with_capacity(args.len());
-                for arg in args {
-                    values.push(self.eval_expr(arg)?);
-                }
-                let name = method.function.rsplit('.').next().unwrap_or_default();
-                return self.call_method(name, receiver_value, values);
-            }
-            let function = self.implementation(span, method, &receiver_value)?;
-            let mut values = vec![receiver_value];
-            for arg in args {
-                values.push(self.eval_expr(arg)?);
-            }
-            if let Some((_, names)) = movable {
-                self.move_arguments(args, &names, &function, None);
-            }
-            return Ok(self.invoke(&function, values, false)?.0);
-        }
         if !method.changes {
+            let Some(receiver) = receiver else {
+                return Err("a method needs a receiver".into());
+            };
             let receiver = self.eval_expr(receiver)?;
+            // a type that compares part by part, or a number or a string, has the builtin method
+            if matches!(method.function.as_str(), "eq.eq" | "ord.cmp")
+                && self.implementation(span, method, &receiver).is_err()
+            {
+                let values = self.eval_exprs(args)?;
+                let name = method.function.rsplit('.').next().unwrap_or_default();
+                return self.call_method(name, receiver, values);
+            }
             let function = self.implementation(span, method, &receiver)?;
             let mut values = Vec::with_capacity(args.len() + 1);
             values.push(receiver);
             for arg in args {
                 values.push(self.eval_expr(arg)?);
             }
-            if let Some((_, names)) = movable {
-                self.move_arguments(args, &names, &function, None);
-            }
+            self.apply_moves(moves, &function);
             return Ok(self.invoke(&function, values, false)?.0);
         }
-        let (root, steps) = self.eval_place(receiver)?;
+        let Some(place) = place else {
+            return Err("a method that changes its receiver needs a place".into());
+        };
+        let (root, steps, spans) = self.eval_place(place)?;
         let mut values = Vec::with_capacity(args.len() + 1);
         values.push(Value::Unit);
         for arg in args {
             values.push(self.eval_expr(arg)?);
         }
-        let spans = place_spans(receiver);
-        let value = self.place_value(root, &steps, &spans)?.clone();
+        let value = self.place_value(root, &steps, spans)?.clone();
         let function = self.implementation(span, method, &value)?;
-        if let Some((_, names)) = movable {
-            self.move_arguments(args, &names, &function, Some(root));
-        }
-        let keep = self.scopes.is_empty()
-            && (!self.moves_globals
-                || self
-                    .global_reads
-                    .get(&function)
-                    .is_some_and(|reads| reads.contains(root)));
-        let place = self.place_value(root, &steps, &spans)?;
+        self.apply_moves(moves, &function);
+        let keep = self.keeps_receiver(root, &function);
+        let place = self.place_value(root, &steps, spans)?;
         values[0] = match keep {
             true => place.clone(),
             false => std::mem::replace(place, Value::Unit),
         };
         let (result, changed) = self.invoke(&function, values, true)?;
         if let Some(changed) = changed {
-            *self.place_value(root, &steps, &spans)? = changed;
+            *self.place_value(root, &steps, spans)? = changed;
         }
         Ok(result)
     }
 
-    /// Evaluates the conversion `Type(arg)` at `span`, with a builtin conversion or the function
-    /// of an impl of `from` or `try_from`, which the running copy's types pick for a type
-    /// parameter.
+    /// Evaluates the conversion `Type(arg)`, with a builtin conversion or the function of an
+    /// impl of `from` or `try_from`, called with `types`, which the running copy's types pick
+    /// for a type parameter.
     fn eval_conversion(
         &mut self,
-        span: Span,
         conversion: &Conversion,
-        arg: &Expr,
+        arg: &code::Expr,
+        types: &Option<Rc<code::InstanceTypes>>,
     ) -> EvalResult<Value> {
         let value = self.eval_expr(arg)?;
         let target = conversion.target.substitute(&self.types);
@@ -2722,7 +2758,7 @@ impl<'out> Interpreter<'out> {
             Some(Converter::Builtin) => self.convert(&target, value),
             Some(Converter::Function(function, copy)) => {
                 self.next_types = match conversion.function {
-                    Some(_) => self.instance_types(span),
+                    Some(_) => self.instance_types(types),
                     None => self
                         .resolved
                         .type_params
@@ -2816,15 +2852,16 @@ impl<'out> Interpreter<'out> {
         // method is its own function if it has one, and the default otherwise
         let name = method.function.rsplit('.').next().unwrap_or_default();
         let own = format!("{key}.{name}");
-        if self.functions.contains_key(&own) {
+        if self.has_function(&own) {
             return Ok(own);
         }
-        match self.functions.contains_key(&method.function) {
+        match self.has_function(&method.function) {
             true => Ok(method.function.clone()),
             false => Err(format!("'{key}' does not implement '{}'", method.function).into()),
         }
     }
 
+    /// Calls the builtin or user-defined function named `name` with already evaluated arguments.
     fn call(&mut self, name: &str, args: Vec<Value>) -> EvalResult<Value> {
         match (name, &args[..]) {
             ("print" | "eprint", _) => {
@@ -2921,7 +2958,7 @@ impl<'out> Interpreter<'out> {
                     })
                     .collect();
                 let ran = os::run(cmd, &args).map(|(status, stdout, stderr)| {
-                    let def = self.structs[OUTPUT].clone();
+                    let def = self.structs[self.struct_ids[OUTPUT]].clone();
                     let fields = vec![
                         Value::Int(status),
                         Value::Str(stdout.into()),
@@ -3064,18 +3101,34 @@ impl<'out> Interpreter<'out> {
         args: Vec<Value>,
         keep_self: bool,
     ) -> EvalResult<(Value, Option<Value>)> {
-        let Some(function) = self.functions.get(name).cloned() else {
-            return Err(format!("Function '{name}' not found").into());
-        };
-        self.invoke_body(name, function, args, keep_self)
+        match self.function_names.get(name) {
+            Some(id) => self.invoke_id(id, args, keep_self),
+            None => Err(format!("Function '{name}' not found").into()),
+        }
     }
 
-    /// Returns the type arguments of the call of a generic function at `span`, with those of
-    /// the running copy filled in, or `None` if it calls no generic function.
-    fn instance_types(&self, span: Span) -> Option<Types> {
-        let instance = self.resolved.instances.get(&span)?;
-        let params = self.resolved.type_params.get(&instance.function)?;
-        Some(self.types_of(params, &instance.args))
+    /// Calls the stone function with the id `id`, as [`Interpreter::invoke`] does.
+    fn invoke_id(
+        &mut self,
+        id: usize,
+        args: Vec<Value>,
+        keep_self: bool,
+    ) -> EvalResult<(Value, Option<Value>)> {
+        let Some(function) = self.functions[id].clone() else {
+            let name = &self.function_names.names[id];
+            return Err(format!("Function '{name}' not found").into());
+        };
+        self.invoke_body(function, args, keep_self)
+    }
+
+    /// Returns the type arguments of a call of a generic function, `instance`, with those of the
+    /// running copy filled in, or `None` if it calls no generic function.
+    fn instance_types(&self, instance: &Option<Rc<code::InstanceTypes>>) -> Option<Types> {
+        let instance = instance.as_ref()?;
+        Some(match &instance.constant {
+            Some(types) => types.clone(),
+            None => self.types_of(&instance.params, &instance.args),
+        })
     }
 
     /// Returns the type each of `params` stands for, the type at its position in `args` with
@@ -3090,16 +3143,15 @@ impl<'out> Interpreter<'out> {
         )
     }
 
-    /// Calls `function`, named `name`, as [`Interpreter::invoke`] does.
+    /// Calls `function` as [`Interpreter::invoke`] does.
     fn invoke_body(
         &mut self,
-        name: &str,
         function: Rc<Function>,
         args: Vec<Value>,
         keep_self: bool,
     ) -> EvalResult<(Value, Option<Value>)> {
-        if function.params.len() != args.len() {
-            let expected = function.params.len();
+        if function.params != args.len() {
+            let (name, expected) = (&function.name, function.params);
             return Err(format!("Function {name} expects {expected} args").into());
         }
 
@@ -3112,28 +3164,28 @@ impl<'out> Interpreter<'out> {
             .into());
         }
 
-        // bind parameters directly so they shadow globals of the same name
         self.calls += 1;
-        self.last_uses.push(function.last_uses.clone());
         let resolved = std::mem::replace(&mut self.resolved, function.resolved.clone());
-        let types = std::mem::replace(&mut self.types, self.next_types.take().unwrap_or_default());
-        self.enter_scope();
-        let scope = self.scopes.last_mut().expect("scope was just entered");
-        for (param, value) in function.params.iter().zip(args) {
-            scope.insert(param.clone(), value);
-        }
+        let types = match self.next_types.take() {
+            Some(types) => std::mem::replace(&mut self.types, types),
+            None => std::mem::replace(&mut self.types, self.no_types.clone()),
+        };
+        // parameters fill the first slots, so they shadow globals of the same name
+        let mut slots = Vec::with_capacity(function.layout.names.len());
+        slots.extend(args.into_iter().map(Some));
+        slots.resize(function.layout.names.len(), None);
+        self.frames.push(Frame {
+            slots,
+            layout: function.layout.clone(),
+        });
         let flow = self.eval_block(&function.body);
+        let frame = self.frames.pop();
         let this = match keep_self {
-            true => self
-                .scopes
-                .last_mut()
-                .and_then(|scope| scope.remove("self")),
+            true => frame.and_then(|mut frame| frame.take("self")),
             false => None,
         };
-        self.exit_scope();
         self.resolved = resolved;
         self.types = types;
-        self.last_uses.pop();
         self.calls -= 1;
 
         let value = match flow? {
@@ -3143,32 +3195,19 @@ impl<'out> Interpreter<'out> {
         Ok((value, this))
     }
 
-    fn enter_scope(&mut self) {
-        self.scopes.push(HashMap::new());
-    }
-
-    fn exit_scope(&mut self) {
-        self.scopes.pop();
-    }
-
-    /// Assigns a variable, which is local inside a function and global otherwise, like Python.
-    ///
-    /// For example, `x = 2` inside a function leaves a global `x` unchanged.
-    /// Assigns `value` to `target`, a name, or a tuple target whose names take the value's fields
-    /// in order, at any depth.
+    /// Assigns `value` to `target`, a variable, or names that take the fields of a tuple in
+    /// order, at any depth.
     ///
     /// For example, `a, (b, c)` takes `(1, (2, 3))` as `a = 1`, `b = 2`, and `c = 3`.
-    fn assign_target(&mut self, target: &Expr, value: &Value) -> EvalResult<()> {
-        match (&target.kind, value) {
-            (ExprKind::Name { id, .. }, _) => {
-                self.set_var(id, value)?;
-            }
-            (ExprKind::Tuple { elts, .. }, Value::Tuple(fields)) if elts.len() == fields.len() => {
+    fn assign_target(&mut self, target: &code::Unpack, value: &Value) -> EvalResult<()> {
+        match (target, value) {
+            (code::Unpack::Var(var), _) => self.set_var(*var, value.clone()),
+            (code::Unpack::Tuple(elts), Value::Tuple(fields)) if elts.len() == fields.len() => {
                 for (elt, field) in elts.iter().zip(fields.iter()) {
                     self.assign_target(elt, field)?;
                 }
             }
-            (ExprKind::Tuple { elts, .. }, other) => {
+            (code::Unpack::Tuple(elts), other) => {
                 return Err(format!(
                     "cannot unpack {} into {} names",
                     other.display(true),
@@ -3176,51 +3215,81 @@ impl<'out> Interpreter<'out> {
                 )
                 .into());
             }
-            _ => return Err("Invalid assignment target".into()),
+            (code::Unpack::Invalid, _) => return Err("Invalid assignment target".into()),
         }
         Ok(())
     }
 
-    fn set_var(&mut self, name: &str, value: &Value) -> EvalResult<Value> {
-        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
-        scope.insert(name.to_string(), value.clone());
-        Ok(value.clone())
+    /// Assigns a variable: a local of the running function, or a global, like Python.
+    ///
+    /// For example, `x = 2` inside a function leaves a global `x` unchanged, since `x` is one of
+    /// the function's locals.
+    fn set_var(&mut self, var: code::Var, value: Value) {
+        let slot = match var {
+            code::Var::Local(slot) => self
+                .frames
+                .last_mut()
+                .and_then(|frame| frame.slots.get_mut(slot)),
+            code::Var::Global(id) => self.globals.get_mut(id),
+        };
+        if let Some(slot) = slot {
+            *slot = Some(value);
+        }
     }
 
-    /// Reads a variable from the current function's scope, then from the globals.
+    /// Reads a variable: a local of the running function, or a global.
     ///
     /// A function never sees its caller's locals, so scoping is lexical.
-    fn get_var(&self, name: &str) -> EvalResult<Value> {
-        self.scopes
-            .last()
-            .and_then(|scope| scope.get(name))
-            .or_else(|| self.globals.get(name))
-            .cloned()
-            .ok_or_else(|| format!("'{name}' is used before it is assigned").into())
+    fn read_var(&self, var: code::Var) -> EvalResult<Value> {
+        let value = match var {
+            code::Var::Local(slot) => self
+                .frames
+                .last()
+                .and_then(|frame| frame.slots.get(slot))
+                .and_then(Option::as_ref),
+            code::Var::Global(id) => self.globals.get(id).and_then(Option::as_ref),
+        };
+        match value {
+            Some(value) => Ok(value.clone()),
+            None => {
+                let name = self.var_name(var);
+                Err(format!("'{name}' is used before it is assigned").into())
+            }
+        }
+    }
+
+    /// Returns the variable `var` of the running body for changing: a local of the running
+    /// function, or a global at the top level.
+    fn variable_mut(&mut self, var: code::Var) -> Option<&mut Value> {
+        variable_in(&mut self.frames, &mut self.globals, var)
     }
 
     /// Evaluates the indexes of `place`, a variable or a value inside one that a statement is
-    /// about to change, and returns the variable's name with the steps to the value, outermost
-    /// first.
+    /// about to change, and returns the variable with the steps to the value, outermost first,
+    /// and the span each step fails at.
     ///
-    /// For example, `grid[i][j]` gives `"grid"` and the values of `i` and `j`, and `ps[i].x`
-    /// gives `"ps"`, the value of `i`, and the field `x`. Nothing is checked against the values
+    /// For example, `grid[i][j]` gives `grid` and the values of `i` and `j`, and `ps[i].x`
+    /// gives `ps`, the value of `i`, and the field `x`. Nothing is checked against the values
     /// yet: [`Interpreter::place_value`] does that once the change is ready.
-    fn eval_place<'e>(
+    fn eval_place<'p>(
         &mut self,
-        place_expr: &'e Expr,
-    ) -> EvalResult<(&'e str, Vec<PlaceStep<'e>>)> {
-        let Some((root, exprs)) = place(place_expr) else {
-            return Err("only a value in a variable can be changed".into());
-        };
-        let mut steps = Vec::with_capacity(exprs.len());
-        for step in exprs {
+        place: &'p code::PlaceOr,
+    ) -> EvalResult<(code::Var, Vec<PlaceStep<'p>>, &'p [Span])> {
+        let place = place.as_ref().map_err(|message| message.clone())?;
+        let mut steps = Vec::with_capacity(place.steps.len());
+        for step in &place.steps {
             steps.push(match step {
-                Step::Index(index) => PlaceStep::Index(self.eval_expr(index)?),
-                Step::Field(name) => PlaceStep::Field(name),
+                code::PlaceStep::Index(index) => PlaceStep::Index(self.eval_expr(index)?),
+                code::PlaceStep::Field(name) => PlaceStep::Field(name),
             });
         }
-        Ok((root, steps))
+        Ok((place.root, steps, &place.spans))
+    }
+
+    /// Returns the error for changing `root` before it is assigned.
+    fn unassigned(&self, root: code::Var) -> Box<dyn std::error::Error> {
+        let name = self.var_name(root);
+        format!("'{name}' is used before it is assigned").into()
     }
 
     /// Walks from the variable `root` through `steps` to the value a statement changes, and
@@ -3228,18 +3297,19 @@ impl<'out> Interpreter<'out> {
     ///
     /// Every list and struct on the way that another value still shares is copied first, so the
     /// change shows through no other variable. The checker allows a function to change only its
-    /// own variables, so `root` is in the function's scope, or in the globals at the top level.
+    /// own variables, so `root` is in the function's frame, or in the globals at the top level.
     /// An index out of range fails at its subscript in `spans`, from [`place_spans`].
     fn place_value(
         &mut self,
-        root: &str,
+        root: code::Var,
         steps: &[PlaceStep],
         spans: &[Span],
     ) -> EvalResult<&mut Value> {
-        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
-        let value = scope
-            .get_mut(root)
-            .ok_or_else(|| format!("'{root}' is used before it is assigned"))?;
+        if self.variable_mut(root).is_none() {
+            return Err(self.unassigned(root));
+        }
+        let value = variable_in(&mut self.frames, &mut self.globals, root)
+            .ok_or("a variable went missing")?;
         walk_place(value, steps, spans, &mut self.copies)
     }
 
@@ -3247,14 +3317,15 @@ impl<'out> Interpreter<'out> {
     /// its elements for changing, copying them first if another value still shares them.
     fn place_list(
         &mut self,
-        root: &str,
+        root: code::Var,
         steps: &[PlaceStep],
         spans: &[Span],
     ) -> EvalResult<&mut Vec<Value>> {
-        let scope = self.scopes.last_mut().unwrap_or(&mut self.globals);
-        let value = scope
-            .get_mut(root)
-            .ok_or_else(|| format!("'{root}' is used before it is assigned"))?;
+        if self.variable_mut(root).is_none() {
+            return Err(self.unassigned(root));
+        }
+        let value = variable_in(&mut self.frames, &mut self.globals, root)
+            .ok_or("a variable went missing")?;
         let value = walk_place(value, steps, spans, &mut self.copies)?;
         self.copies += value.is_shared() as u64;
         value.as_list_mut()
@@ -3265,7 +3336,7 @@ impl<'out> Interpreter<'out> {
     /// `index`, which is added at the end if the map has none.
     fn store_at(
         &mut self,
-        root: &str,
+        root: code::Var,
         steps: &[PlaceStep],
         spans: &[Span],
         index: Value,
@@ -3282,6 +3353,21 @@ impl<'out> Interpreter<'out> {
         let position = list_position(index.as_int()?, items.len()).map_err(|e| located(e, span))?;
         items[position] = value.clone();
         Ok(())
+    }
+}
+
+/// Returns the variable `var` of the running body for changing, as
+/// [`Interpreter::variable_mut`] does, borrowing only the variables: a local of the running
+/// function, or a global at the top level, since a function cannot change a global.
+fn variable_in<'v>(
+    frames: &'v mut [Frame],
+    globals: &'v mut [Option<Value>],
+    var: code::Var,
+) -> Option<&'v mut Value> {
+    match var {
+        code::Var::Local(slot) => frames.last_mut()?.slots.get_mut(slot)?.as_mut(),
+        code::Var::Global(id) if frames.is_empty() => globals.get_mut(id)?.as_mut(),
+        code::Var::Global(_) => None,
     }
 }
 
@@ -3600,6 +3686,36 @@ mod tests {
             .evaluate(&module)
             .unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn a_function_builds_a_struct_defined_after_it() {
+        let source = "fn make() -> P:\n    ret P(x=2)\nstruct P:\n    x: int\nprint(make())\n";
+        assert_eq!(run(source).0, "P(x=2)\n");
+    }
+
+    #[test]
+    fn a_local_shadows_a_global_and_a_function_reads_the_global_otherwise() {
+        let source = "x = 1\nfn f() -> int:\n    x = 5\n    ret x\nfn g() -> int:\n    ret x\n\
+                      print(f(), g(), x)\n";
+        assert_eq!(run(source).0, "5 1 1\n");
+    }
+
+    #[test]
+    fn locals_are_fresh_in_every_call() {
+        let source = "fn f(n: int) -> int:\n    if n == 0:\n        ret 0\n    t = n\n    \
+                      r = f(n - 1)\n    ret t + r\nprint(f(4))\n";
+        assert_eq!(run(source).0, "10\n");
+    }
+
+    #[test]
+    fn a_method_changes_a_receiver_in_a_list_element() {
+        let source = format!(
+            "{STACK}fn fill() -> list[Stack]:\n    ss = [Stack.new(), Stack.new()]\n    \
+             ss[1].push(7)\n    ss[1].push(8)\n    ret ss\nss = fill()\n\
+             print(ss[0].size(), ss[1].size(), ss[1].pop_top())\n"
+        );
+        assert_eq!(run(&source).0, "0 2 8\n");
     }
 
     #[test]

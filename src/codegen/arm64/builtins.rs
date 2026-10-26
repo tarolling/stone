@@ -82,11 +82,19 @@ pub enum Sys {
     Sendto,
     Recvfrom,
     Getsockopt,
+    /// Makes a file in memory, which only Linux has.
+    MemfdCreate,
+    /// Sets a file's size, which only Linux's runtime does.
+    Ftruncate,
+    /// Writes at a position of a file, which only Linux's runtime does.
+    Pwrite,
+    /// Sends a message with a descriptor, which only Linux's runtime does.
+    Sendmsg,
 }
 
 impl Sys {
     /// Every call, in the order their shims are emitted.
-    pub const ALL: [Sys; 39] = [
+    pub const ALL: [Sys; 43] = [
         Sys::Read,
         Sys::Write,
         Sys::Openat,
@@ -126,6 +134,10 @@ impl Sys {
         Sys::Sendto,
         Sys::Recvfrom,
         Sys::Getsockopt,
+        Sys::MemfdCreate,
+        Sys::Ftruncate,
+        Sys::Pwrite,
+        Sys::Sendmsg,
     ];
 
     /// Returns the call's Linux system call number, such as 64 for `write`, or `None` if the
@@ -167,6 +179,10 @@ impl Sys {
             Sys::Getsockopt => 209,
             Sys::Fcntl => 25,
             Sys::Accept => 242, // accept4
+            Sys::MemfdCreate => 279,
+            Sys::Ftruncate => 46,
+            Sys::Pwrite => 68, // pwrite64
+            Sys::Sendmsg => 211,
             Sys::Sysctl | Sys::Opendir | Sys::Readdir | Sys::Closedir => {
                 return None;
             }
@@ -214,6 +230,7 @@ impl Sys {
             Sys::Recvfrom => "recvfrom",
             Sys::Getsockopt => "getsockopt",
             Sys::Mremap | Sys::Uname | Sys::Getdents64 => return None,
+            Sys::MemfdCreate | Sys::Ftruncate | Sys::Pwrite | Sys::Sendmsg => return None,
         })
     }
 

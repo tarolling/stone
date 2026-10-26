@@ -1833,7 +1833,11 @@ an X11 server, XWayland under Wayland, and on macOS XQuartz does. The `DISPLAY` 
 variable says where it is: `:0` is the Unix socket `/tmp/.X11-unix/X0`, a path such as
 `/tmp/launch-x/org.xquartz:0` is that socket, and `host:0` is TCP port 6000 on `host`. A server
 that asks for one gets the `MIT-MAGIC-COOKIE-1` that `XAUTHORITY`, or `~/.Xauthority`, holds
-for the display. The display must take 24-bit color, as every current one does.
+for the display. The display must take 24-bit color, as every current one does. On Linux, a
+server on the same machine that has the MIT-SHM extension (version 1.2 or later, as Xorg, Xvfb,
+and XWayland have) gets each image through memory the two share rather than through the socket,
+which is several times faster for a big window; any other server, or one that turns the memory
+down, gets the image through the socket, with the same result on the screen.
 
 A window is a handle, like a socket: a copy of it is the same window, and it closes by itself
 right after the last statement that uses it, or sooner with `close`. Its methods:

@@ -1,0 +1,9 @@
+// Opening a window with no display to open it on, which links every routine windows use.
+use gui
+
+match gui.open("nowhere", 10, 10):
+    case ok(w):
+        w.show(gui.blank(10, 10, 0))
+        print(w.size())
+    case err(reason):
+        print(reason)

@@ -296,8 +296,10 @@ one primitive that sends a UDP packet and waits for its reply, so both backends 
 addresses the same way. On macOS that skips the system's own resolver, which also knows names
 from mDNS and per-network DNS settings. Windows from the `gui` module are drawn the same way: the module,
 written in stone, speaks the X11 protocol to the display server over a Unix socket, with no
-Xlib, so a built program that opens windows is still a static executable, and its only native
-help is a routine that packs pixels into bytes. A socket's timeout is a `poll` before each read, send, or accept, in both
+Xlib, so a built program that opens windows is still a static executable. Its only native help
+is a routine that packs pixels into bytes and three that share memory with a local server, for
+MIT-SHM: `memfd_create`, `pwrite`, and `sendmsg` with the memory's descriptor, which the
+interpreter calls through the C library and compiled code makes as system calls. A socket's timeout is a `poll` before each read, send, or accept, in both
 backends, so a wait runs out at the same point under `stone run` and in a built program. `stone build` writes either executable itself, with its own assembler and linkers,
 including the Mach-O file's imports and its code signature, so it needs no assembler, linker,
 or C compiler installed, and builds for every target from any machine. Windows is not supported

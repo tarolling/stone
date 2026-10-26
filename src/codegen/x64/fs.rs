@@ -9,12 +9,12 @@
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{
     CLOSED_EARLY_CODE, DIR_BUFFER, FILE_BUFFER, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE,
-    LISTENER_CLOSED_CODE, NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags, SOCKET_CLOSED_CODE,
-    TIMED_OUT_CODE, immortal_string,
+    LISTENER_CLOSED_CODE, NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags, SHM_MISSING_CODE,
+    SOCKET_CLOSED_CODE, TIMED_OUT_CODE, immortal_string,
 };
 use crate::stdlib::fs::{INVALID_TEXT, NULL_IN_PATH, errors};
 use crate::stdlib::net::{
-    CLOSED_EARLY, INVALID_ADDRESS, LISTENER_CLOSED, SOCKET_CLOSED, TIMED_OUT,
+    CLOSED_EARLY, INVALID_ADDRESS, LISTENER_CLOSED, SHM_MISSING, SOCKET_CLOSED, TIMED_OUT,
 };
 use crate::stdlib::os::NULL_IN_COMMAND;
 
@@ -164,6 +164,7 @@ fn errors_and_results(r#gen: &mut dyn AssemblyGenerator, net: bool) {
             (SOCKET_CLOSED_CODE, SOCKET_CLOSED),
             (LISTENER_CLOSED_CODE, LISTENER_CLOSED),
             (CLOSED_EARLY_CODE, CLOSED_EARLY),
+            (SHM_MISSING_CODE, SHM_MISSING),
         ]);
     }
     r#gen.emit("\t.data");

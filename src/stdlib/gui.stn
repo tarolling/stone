@@ -233,8 +233,10 @@ pub struct window:
     // the connection to the X server, and what the server said about itself
     conn: socket
     setup: server
-    width: int
-    height: int
+    // the memory it shares with the server, if it can
+    shm: shared
+    // its width and height
+    extent: tuple[int, int]
     open: bool
     // events decoded but not given out yet
     pending: list[event]
@@ -257,6 +259,18 @@ struct server:
     // the atoms of `WM_PROTOCOLS`, `WM_DELETE_WINDOW`, `_NET_WM_NAME`, and `UTF8_STRING`
     atoms: list[int]
 
+// Memory a window shares with a local X server through the MIT-SHM extension, which `show` puts
+// images in, so they do not go through the socket.
+struct shared:
+    // MIT-SHM's major opcode and the code of its one event, the opcode 0 while it cannot be used
+    opcode: int
+    event: int
+    // the segment's id, and its size in bytes, 0 until it is first attached
+    seg: int
+    size: int
+    // whether the server is still showing an image from it, so it cannot be written yet
+    busy: bool
+
 // The keysyms of every key: `per` of them for each keycode from `first` up.
 struct keymap:
     first: int
@@ -270,13 +284,14 @@ pub fn open(title: str, width: int, height: int) -> result[window, str]:
     found = connect_display()?
     conn = found[0]
     w = handshake(conn, found[1], width, height)?
-    w.create(title)?
+    w.create(title, found[2])?
     ret ok(w)
 
-// Connects to the X server `DISPLAY` names, giving the socket and the display's number: `:0`
-// is the Unix socket `/tmp/.X11-unix/X0`, a path such as XQuartz's `/tmp/launch-x/org.xquartz:0`
-// is that socket (with or without its `:0`), and `host:0` is TCP port 6000 of `host`.
-fn connect_display() -> result[tuple[socket, str], str]:
+// Connects to the X server `DISPLAY` names, giving the socket, the display's number, and whether
+// the server is on this machine: `:0` is the Unix socket `/tmp/.X11-unix/X0`, a path such as
+// XQuartz's `/tmp/launch-x/org.xquartz:0` is that socket (with or without its `:0`), and
+// `host:0` is TCP port 6000 of `host`.
+fn connect_display() -> result[tuple[socket, str, bool], str]:
     name = os.env("DISPLAY").unwrap_or("")
     if name == "":
         ret err("no display: DISPLAY is not set")
@@ -299,15 +314,15 @@ fn connect_display() -> result[tuple[socket, str], str]:
     if host.startswith("/"):
         match net.connect_unix(name):
             case ok(s):
-                ret ok((s, number))
+                ret ok((s, number, true))
             case err(_):
                 s = net.connect_unix(host)?
-                ret ok((s, number))
+                ret ok((s, number, true))
     if host == "" or host == "unix":
         s = net.connect_unix("/tmp/.X11-unix/X{display}")?
-        ret ok((s, number))
+        ret ok((s, number, true))
     s = net.connect(host, 6000 + display)?
-    ret ok((s, number))
+    ret ok((s, number, false))
 
 // The `MIT-MAGIC-COOKIE-1` that `XAUTHORITY`, or `~/.Xauthority`, holds for display `number`,
 // or nothing if there is none.
@@ -396,7 +411,9 @@ fn handshake(conn: socket, number: str, width: int, height: int) -> result[windo
     msb = reply[30] == 1
     most = get16(reply, 26) * 4
     found = server(id=id, gc=gc, root=root, depth=depth, msb=msb, limit=most, keys=keys, atoms=[])
-    w = window(conn=conn, setup=found, width=width, height=height, open=true, pending=[], ahead=b"")
+    shm = shared(opcode=0, event=0, seg=gc + step, size=0, busy=false)
+    size = (width, height)
+    w = window(conn=conn, setup=found, shm=shm, extent=size, open=true, pending=[], ahead=b"")
     ret ok(w)
 
 // The error for a setup reply too short for what it says it holds.
@@ -429,7 +446,7 @@ impl window:
 
     // The window's width and height in pixels, as the last `resize` event gave them.
     fn size(self) -> tuple[int, int]:
-        ret (self.width, self.height)
+        ret self.extent
 
     // The events that have happened since the last call, without waiting for any.
     fn events(self) -> list[event]:
@@ -452,10 +469,14 @@ impl window:
         if not self.open or c.width == 0 or c.width > 32767:
             ret
         rows = c.height.min(32767)
-        per = ((self.setup.limit - 24) / (c.width * 4)).max(1)
         format = 0
         if self.setup.msb:
             format = 1
+        if self.shm.opcode > 0:
+            shared = self.share(c, rows, format)
+            if shared:
+                ret
+        per = ((self.setup.limit - 24) / (c.width * 4)).max(1)
         y = 0
         while y < rows:
             n = per.min(rows - y)
@@ -476,6 +497,73 @@ impl window:
                     self.fail(e)
                     ret
 
+    // Shows the first `rows` rows of `c` through shared memory, its pixels laid out as `format`
+    // says, and says whether it could. Once it cannot, it never tries again.
+    fn share(self, c: canvas, rows: int, format: int) -> bool:
+        // the server may still be reading the last image
+        while self.open and self.shm.busy:
+            self.step()
+        if not self.open:
+            ret true
+        need = c.width * rows * 4
+        if need > self.shm.size:
+            took = self.attach(need)
+            if not took:
+                self.shm.opcode = 0
+                ret not self.open
+        pixels = gui_sys.pack(c.pixels, 0, c.width * rows, format)
+        match gui_sys.shm_write(self.conn, 0, pixels):
+            case ok(_):
+                self.shm.busy = true
+            case err(_):
+                self.shm.opcode = 0
+                ret false
+        // ShmPutImage of the whole image, at the window's top left, with a completion event
+        body = put32(put32([], self.setup.id), self.setup.gc)
+        body = put16(put16(body, c.width), rows)
+        body = put16(put16(body, 0), 0)
+        body = put16(put16(body, c.width), rows)
+        body = put16(put16(body, 0), 0)
+        body.extend([self.setup.depth, 2, 1, 0])
+        body = put32(put32(body, self.shm.seg), 0)
+        self.send(request(self.shm.opcode, 3, body))
+        ret true
+
+    // Shares `size` bytes with the server as the segment, in place of any before, and says
+    // whether the server took them.
+    fn attach(self, size: int) -> bool:
+        if gui_sys.shm_create(self.conn, size).is_err():
+            ret false
+        asks = []
+        if self.shm.size > 0:
+            asks = request(self.shm.opcode, 2, put32([], self.shm.seg))
+        // ShmAttachFd, read-only, then a request with a reply, which comes after any error
+        attach = put32([], self.shm.seg)
+        attach.extend([1, 0, 0, 0])
+        asks.extend(request(self.shm.opcode, 6, attach))
+        asks.extend(request(43, 0, []))
+        match gui_sys.shm_send(self.conn, bytes(asks).unwrap()):
+            case ok(_):
+                self.shm.size = 0
+            case err(e):
+                self.fail(e)
+                ret false
+        took = true
+        while self.open:
+            match self.raw():
+                case ok(raw):
+                    if raw[0] == 1:
+                        if took:
+                            self.shm.size = size
+                        ret took
+                    if raw[0] == 0 and raw[10] == self.shm.opcode:
+                        took = false
+                    else:
+                        self.decode(raw)
+                case err(e):
+                    self.fail(e)
+        ret false
+
     // Sets the title the window's frame shows.
     fn set_title(self, title: str):
         self.send(self.titled(title))
@@ -486,8 +574,9 @@ impl window:
             self.conn.close()
             self.open = false
 
-    // Creates the window on the server, titled `title`, and waits until it is on the screen.
-    fn create(self, title: str) -> result[int, str]:
+    // Creates the window on the server, titled `title`, and waits until it is on the screen. A
+    // `local` server is asked for MIT-SHM, which only a server on this machine can use.
+    fn create(self, title: str, local: bool) -> result[int, str]:
         // the atoms it needs, asked for together, then the symbols of every key
         names = ["WM_PROTOCOLS", "WM_DELETE_WINDOW", "_NET_WM_NAME", "UTF8_STRING"]
         asks = []
@@ -495,6 +584,9 @@ impl window:
             body = put16(put16([], name.len()), 0)
             asks.extend(request(16, 0, put_bytes(body, name.bytes())))
         asks.extend(request(101, 0, [self.setup.keys.first, 256 - self.setup.keys.first, 0, 0]))
+        if local:
+            body = put16(put16([], 7), 0)
+            asks.extend(request(98, 0, put_bytes(body, b"MIT-SHM")))
         self.conn.send_bytes(bytes(asks).unwrap())?
         atoms = []
         for _ in names:
@@ -505,11 +597,13 @@ impl window:
         self.setup.keys.per = keys[1]
         for i in range(get32(keys, 4)):
             self.setup.keys.syms.append(get32(keys, 32 + 4 * i))
+        if local:
+            self.extend()?
         // CreateWindow with the root's depth and visual, a black background, and the events it
         // listens for: keys, buttons, motion, exposure, and changes of its size
         body = put32(put32([], self.setup.id), self.setup.root)
         body = put16(put16(body, 0), 0)
-        body = put16(put16(body, self.width), self.height)
+        body = put16(put16(body, self.extent[0]), self.extent[1])
         body = put16(put16(body, 0), 1)
         body = put32(put32(body, 0), 2050)
         body = put32(put32(body, 0), 163919)
@@ -528,6 +622,21 @@ impl window:
             if raw[0] % 128 == 12:
                 ret ok(0)
         ret err(self.failure())
+
+    // Reads the reply about MIT-SHM, which `create` asked for, and makes it the way to show
+    // images if the server has a version that takes memory as a descriptor (1.2 or later).
+    fn extend(self) -> result[int, str]:
+        found = self.reply()?
+        if found[8] == 0:
+            ret ok(0)
+        // ShmQueryVersion
+        self.conn.send_bytes(bytes(request(found[9], 0, [])).unwrap())?
+        version = self.reply()?
+        major = get16(version, 8)
+        if major > 1 or major == 1 and get16(version, 10) >= 2:
+            self.shm.opcode = found[9]
+            self.shm.event = found[10]
+        ret ok(0)
 
     // The reason the window failed, from its last `failed` event.
     fn failure(self) -> str:
@@ -619,13 +728,15 @@ impl window:
         elif code == 22:
             width = get16(raw, 20)
             height = get16(raw, 22)
-            if width != self.width or height != self.height:
-                self.width = width
-                self.height = height
+            if (width, height) != self.extent:
+                self.extent = (width, height)
                 self.pending.append(event.resize(width, height))
         elif code == 33:
             if get32(raw, 8) == self.setup.atoms[0] and get32(raw, 12) == self.setup.atoms[1]:
                 self.pending.append(event.close)
+        elif self.shm.event > 0 and code == self.shm.event:
+            // ShmCompletion
+            self.shm.busy = false
 
     // Adds the event of the button press or release `raw`.
     fn button(self, raw: bytes):

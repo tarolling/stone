@@ -7757,6 +7757,22 @@ impl Inference {
                 };
                 Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
             }
+            "gui_sys.shm_create" | "gui_sys.shm_write" | "gui_sys.shm_send" => {
+                let socket = Ty::Handle(Handle::Socket);
+                let params = match name {
+                    "gui_sys.shm_create" => vec![socket, Ty::Int],
+                    "gui_sys.shm_write" => vec![socket, Ty::Int, Ty::Bytes],
+                    _ => vec![socket, Ty::Bytes],
+                };
+                if args.len() == params.len() {
+                    for ((arg, ty), param) in args.iter().zip(arg_types).zip(&params) {
+                        self.expect(param, ty, arg.span);
+                    }
+                } else {
+                    self.arity_error(call.span, name, &params.len().to_string(), args.len());
+                }
+                Ty::Enum(RESULT.to_string(), vec![Ty::Int, Ty::Str])
+            }
             "gui_sys.pack" => {
                 let params = [Ty::List(Box::new(Ty::Int)), Ty::Int, Ty::Int, Ty::Int];
                 if args.len() == params.len() {

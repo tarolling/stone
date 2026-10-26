@@ -1327,12 +1327,38 @@ struct FakeDisplay {
     max_request: u16,
     /// The reason it refuses connections, if it does.
     refuse: Option<&'static str>,
-    /// Whether it sends [`paced_events`] a part after each frame, rather than [`fake_events`]
-    /// all at once.
-    paced: bool,
+    /// The events it sends once the window is mapped.
+    script: FakeScript,
     /// Whether its setup reply is cut short after 20 bytes, its length saying so.
     short: bool,
+    /// What it does with MIT-SHM.
+    shm: FakeShm,
 }
+
+/// The events a fake X server sends once the window is mapped.
+#[derive(Clone, Copy, PartialEq)]
+enum FakeScript {
+    /// [`fake_events`], all at once.
+    All,
+    /// [`paced_events`], a part after each frame.
+    Paced,
+    /// An exposure alone.
+    Expose,
+}
+
+/// What a fake X server does with the MIT-SHM extension.
+#[derive(Clone, Copy, PartialEq)]
+enum FakeShm {
+    /// It does not have it.
+    Absent,
+    /// It shows images from the memory it is sent.
+    Working,
+    /// It has it, but answers every attachment with an error.
+    Refusing,
+}
+
+/// The major opcode and first event code the fake X server gives MIT-SHM.
+const FAKE_SHM: (u8, u8) = (130, 70);
 
 /// What the fake X server saw on one connection: the authorization's name and data, and every
 /// request after the setup.
@@ -1342,6 +1368,146 @@ struct FakeConnection {
     requests: Vec<Vec<u8>>,
     /// Whether the client has closed the connection.
     closed: bool,
+    /// The pixels of each ShmPutImage, as 4 bytes each by row.
+    shm_images: Vec<Vec<u8>>,
+}
+
+/// C's `struct iovec`, for [`receive`].
+#[repr(C)]
+struct IoVec {
+    base: *mut u8,
+    len: usize,
+}
+
+/// Linux's `struct msghdr`, for [`receive`].
+#[repr(C)]
+struct MsgHdr {
+    name: *mut u8,
+    namelen: u32,
+    iov: *mut IoVec,
+    iovlen: usize,
+    control: *mut u8,
+    controllen: usize,
+    flags: i32,
+}
+
+unsafe extern "C" {
+    fn recvmsg(fd: i32, msg: *mut MsgHdr, flags: i32) -> isize;
+}
+
+/// Reads from `stream` until `buf` is full, as an X server does, adding any descriptor that
+/// comes with the bytes to `fds`. On macOS, where clients never send one, it reads plainly.
+fn receive(
+    stream: &mut std::os::unix::net::UnixStream,
+    buf: &mut [u8],
+    fds: &mut Vec<std::fs::File>,
+) -> std::io::Result<()> {
+    use std::io::Read;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    if !cfg!(target_os = "linux") {
+        return stream.read_exact(buf);
+    }
+    let mut filled = 0;
+    while filled < buf.len() {
+        let mut control = [0u64; 3];
+        let mut iov = IoVec {
+            base: buf[filled..].as_mut_ptr(),
+            len: buf.len() - filled,
+        };
+        let mut msg = MsgHdr {
+            name: std::ptr::null_mut(),
+            namelen: 0,
+            iov: &mut iov,
+            iovlen: 1,
+            control: control.as_mut_ptr().cast(),
+            controllen: 24,
+            flags: 0,
+        };
+        // SAFETY: msg points at one iovec over the rest of `buf` and 24 bytes of control
+        let n = unsafe { recvmsg(stream.as_raw_fd(), &mut msg, 0) };
+        if n <= 0 {
+            return Err(std::io::ErrorKind::UnexpectedEof.into());
+        }
+        if msg.controllen >= 20 && control[1] == 1 | 1 << 32 {
+            // SAFETY: SCM_RIGHTS gave this process the descriptor, which nothing else owns
+            fds.push(unsafe { std::fs::File::from_raw_fd(control[2] as u32 as i32) });
+        }
+        filled += n as usize;
+    }
+    Ok(())
+}
+
+/// Answers the MIT-SHM request `request` as a fake X server whose extension does `shm`, with
+/// the descriptors the client sent in `fds`, the segments it attached in `segments`, and what
+/// it shows recorded in `seen`.
+fn fake_shm_request(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &[u8],
+    shm: FakeShm,
+    fds: &mut Vec<std::fs::File>,
+    segments: &mut std::collections::HashMap<u32, std::fs::File>,
+    seen: &std::sync::Mutex<FakeConnection>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::FileExt;
+    let word = |at: usize| u32::from_le_bytes(request[at..at + 4].try_into().unwrap());
+    let half = |at: usize| u16::from_le_bytes([request[at], request[at + 1]]) as usize;
+    match request[1] {
+        // ShmQueryVersion: 1.2, which has ShmAttachFd
+        0 => {
+            let mut reply = vec![1, 0, 0, 0, 0, 0, 0, 0, 1, 0, 2, 0];
+            reply.resize(32, 0);
+            stream.write_all(&reply)?;
+        }
+        // ShmDetach
+        2 => {
+            segments.remove(&word(4));
+        }
+        // ShmPutImage of the whole image, from its segment
+        3 => {
+            let (width, height) = (half(12), half(14));
+            assert_eq!(
+                (half(16), half(18), half(20), half(22)),
+                (0, 0, width, height)
+            );
+            let mut pixels = vec![0; width * height * 4];
+            segments[&word(32)].read_exact_at(&mut pixels, word(36) as u64)?;
+            seen.lock().unwrap().shm_images.push(pixels);
+            if request[30] == 1 {
+                let completion = x11_event(
+                    FAKE_SHM.1,
+                    0,
+                    &[
+                        (4, word(4), 4),
+                        (8, 3, 2),
+                        (10, FAKE_SHM.0 as u32, 1),
+                        (12, word(32), 4),
+                    ],
+                );
+                stream.write_all(&completion)?;
+            }
+        }
+        // ShmAttachFd, with the descriptor that came with it
+        6 => {
+            let fd = fds.remove(0);
+            match shm {
+                FakeShm::Refusing => {
+                    // BadAccess
+                    let error = x11_event(
+                        0,
+                        10,
+                        &[(4, word(4), 4), (8, 6, 2), (10, FAKE_SHM.0 as u32, 1)],
+                    );
+                    stream.write_all(&error)?;
+                }
+                _ => {
+                    segments.insert(word(4), fd);
+                }
+            }
+        }
+        minor => panic!("unexpected MIT-SHM request {minor}"),
+    }
+    Ok(())
 }
 
 /// The atoms the fake X server gives out, by name.
@@ -1537,24 +1703,31 @@ fn fake_x_client(
     stream.write_all(&fake_setup(display))?;
     let mut window = 0;
     let mut stage = 0;
+    let mut fds = vec![];
+    let mut segments = std::collections::HashMap::new();
     loop {
         let mut head = [0; 4];
-        if stream.read_exact(&mut head).is_err() {
+        if receive(&mut stream, &mut head, &mut fds).is_err() {
             seen.lock().unwrap().closed = true;
             return Ok(());
         }
         let units = u16::from_le_bytes([head[2], head[3]]) as usize;
         let mut request = head.to_vec();
         request.resize(units * 4, 0);
-        stream.read_exact(&mut request[4..])?;
+        receive(&mut stream, &mut request[4..], &mut fds)?;
+        // recorded first, since answering it fails once the client has closed
+        seen.lock().unwrap().requests.push(request.clone());
         let word = |at: usize| u32::from_le_bytes(request[at..at + 4].try_into().unwrap());
         match request[0] {
             1 => window = word(4),
-            8 if display.paced => stream.write_all(&paced_events(window, 0))?,
-            8 => stream.write_all(&fake_events(window))?,
+            8 => match display.script {
+                FakeScript::All => stream.write_all(&fake_events(window))?,
+                FakeScript::Paced => stream.write_all(&paced_events(window, 0))?,
+                FakeScript::Expose => stream.write_all(&x11_event(12, 0, &[(4, window, 4)]))?,
+            },
             // a frame starts with the strip at the top, and after the first, only one as wide
             // as the new size moves the script on
-            72 if display.paced && request[18..20] == [0, 0] => {
+            72 if display.script == FakeScript::Paced && request[18..20] == [0, 0] => {
                 if stage == 0 || request[12..14] == 400u16.to_le_bytes() {
                     stage += 1;
                     stream.write_all(&paced_events(window, stage))?;
@@ -1569,6 +1742,27 @@ fn fake_x_client(
                 reply.resize(32, 0);
                 stream.write_all(&reply)?;
             }
+            // QueryExtension, which knows MIT-SHM alone
+            98 => {
+                let len = u16::from_le_bytes([request[4], request[5]]) as usize;
+                let present = &request[8..8 + len] == b"MIT-SHM" && display.shm != FakeShm::Absent;
+                let mut reply = vec![1, 0, 0, 0, 0, 0, 0, 0];
+                if present {
+                    reply.extend([1, FAKE_SHM.0, FAKE_SHM.1, 150]);
+                }
+                reply.resize(32, 0);
+                stream.write_all(&reply)?;
+            }
+            // GetInputFocus, which clients ask to wait for what they sent before it
+            43 => stream.write_all(&[[1].as_slice(), &[0; 31]].concat())?,
+            op if op == FAKE_SHM.0 => fake_shm_request(
+                &mut stream,
+                &request,
+                display.shm,
+                &mut fds,
+                &mut segments,
+                seen,
+            )?,
             101 => {
                 let (first, count) = (request[4] as usize, request[5] as usize);
                 let syms = fake_keysyms();
@@ -1582,7 +1776,6 @@ fn fake_x_client(
             }
             _ => {}
         }
-        seen.lock().unwrap().requests.push(request);
     }
 }
 
@@ -1601,7 +1794,11 @@ fn fake_x_server(
         for stream in listener.incoming().flatten() {
             let seen = Arc::new(Mutex::new(FakeConnection::default()));
             all.lock().unwrap().push(seen.clone());
-            std::thread::spawn(move || fake_x_client(stream, display, &seen));
+            std::thread::spawn(move || {
+                // a client that closed before reading everything sent ends it with an error
+                let _ = fake_x_client(stream, display, &seen);
+                seen.lock().unwrap().closed = true;
+            });
         }
     });
     connections
@@ -1705,8 +1902,9 @@ fn both_backends_drive_an_x11_window_alike() {
             // small, so the image goes in strips of a row each
             max_request: 64,
             refuse: None,
-            paced: false,
+            script: FakeScript::All,
             short: false,
+            shm: FakeShm::Absent,
         };
         let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
         let mut connections = None;
@@ -1780,8 +1978,9 @@ fn both_backends_say_why_a_window_cannot_open() {
         bits: 32,
         max_request: 65535,
         refuse: Some("No protocol specified"),
-        paced: false,
+        script: FakeScript::All,
         short: false,
+        shm: FakeShm::Absent,
     };
     let shallow = FakeDisplay {
         depth: 16,
@@ -1917,8 +2116,9 @@ fn both_backends_run_an_app_alike() {
             bits: 32,
             max_request: 65535,
             refuse: None,
-            paced: true,
+            script: FakeScript::Paced,
             short: false,
+            shm: FakeShm::Absent,
         };
         let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
         let (_, [run, built]) = run_and_build_env(
@@ -2010,5 +2210,96 @@ match gui.open("real", 64, 48):
     for output in [run, built] {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(String::from_utf8_lossy(&output.stdout), "true 0\n");
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn both_backends_show_images_through_shared_memory_alike() {
+    let source = r#"use gui
+
+match gui.open("shm", 40, 30):
+    case ok(w):
+        c = gui.blank(40, 30, gui.rgb(1, 2, 3))
+        c.rect(5, 5, 10, 10, gui.rgb(250, 128, 7))
+        w.show(c)
+        // drawn while the server may still be showing the first
+        c.rect(0, 0, 2, 2, gui.rgb(255, 255, 255))
+        w.show(c)
+        // bigger than the memory shared so far
+        w.show(gui.blank(60, 50, gui.rgb(9, 9, 9)))
+        es = w.events()
+        print(es)
+        w.close()
+    case err(reason):
+        print(reason)
+"#;
+    for shm in [FakeShm::Working, FakeShm::Refusing] {
+        let name = match shm {
+            FakeShm::Working => "gui_shm",
+            _ => "gui_shm_refused",
+        };
+        let display = FakeDisplay {
+            msb: false,
+            depth: 24,
+            bits: 32,
+            max_request: 65535,
+            refuse: None,
+            script: FakeScript::Expose,
+            short: false,
+            shm,
+        };
+        let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
+        let mut connections = None;
+        let (_, [run, built]) = run_and_build_env(
+            name,
+            source,
+            |dir| connections = Some(fake_x_server(&dir.join("X0"), display)),
+            &[("DISPLAY", &socket), ("XAUTHORITY", "missing")],
+        );
+        for output in [&run, &built] {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(
+                String::from_utf8_lossy(&output.stdout),
+                "[event.redraw]\n",
+                "{name}"
+            );
+        }
+        let seen = closed_connections(&connections.unwrap());
+        let [interpreted, compiled] = &seen[..] else {
+            panic!("expected two connections, not {}", seen.len());
+        };
+        assert_eq!(interpreted.requests, compiled.requests, "{name}");
+        assert_eq!(interpreted.shm_images, compiled.shm_images, "{name}");
+        let count = |op: u8, minor: u8| {
+            let requests = &interpreted.requests;
+            requests
+                .iter()
+                .filter(|r| r[0] == op && r[1] == minor)
+                .count()
+        };
+        let put_images = interpreted.requests.iter().filter(|r| r[0] == 72).count();
+        let images = &interpreted.shm_images;
+        match shm {
+            FakeShm::Working => {
+                // attached for the first image, then again, bigger, for the last
+                assert_eq!((count(130, 6), count(130, 2), count(130, 3)), (2, 1, 3));
+                assert_eq!(put_images, 0);
+                let pixel = |image: &[u8], x: usize, y: usize| {
+                    image[(y * 40 + x) * 4..(y * 40 + x) * 4 + 4].to_vec()
+                };
+                assert_eq!(images.len(), 3);
+                assert_eq!(pixel(&images[0], 0, 0), [3, 2, 1, 0]);
+                assert_eq!(pixel(&images[0], 5, 5), [7, 128, 250, 0]);
+                assert_eq!(pixel(&images[1], 0, 0), [255, 255, 255, 0]);
+                assert_eq!(images[2], [9, 9, 9, 0].repeat(60 * 50));
+            }
+            _ => {
+                // the first attachment fails, and every image goes the plain way
+                assert_eq!((count(130, 6), count(130, 3)), (1, 0));
+                assert_eq!(put_images, 3);
+                assert!(images.is_empty());
+            }
+        }
     }
 }

@@ -11,10 +11,10 @@
 
 use super::builtins::{Sys, system_call};
 use super::fs::{EINTR, close, load};
-use super::{pop_frame, push_frame};
+use super::{address, pop_frame, push_frame};
 use crate::codegen::context::{
     CLOSED_EARLY_CODE, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE, LISTENER_CLOSED_CODE,
-    SOCKET_CLOSED_CODE, TIMED_OUT_CODE,
+    SHM_MISSING_CODE, SOCKET_CLOSED_CODE, TIMED_OUT_CODE, immortal_string,
 };
 use crate::codegen::x64::net::{LISTENER_TAG, SOCKET_TAG};
 use crate::codegen::{AssemblyGenerator, Os};
@@ -29,7 +29,7 @@ const SAVED: [&str; 8] = ["x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26"
 const LOCALS: i64 = 64;
 
 /// The slots of a handle after its tag and kinds.
-const HANDLE_SLOTS: i64 = 7;
+const HANDLE_SLOTS: i64 = 9;
 
 /// The bytes the buffer of a socket starts with, room for two reads.
 const FIRST_BUFFER: usize = 2 * READ_SIZE;
@@ -136,6 +136,15 @@ pub fn net_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
     if uses("stone.net_ready") {
         ready(r#gen);
+    }
+    if uses("stone.net_shm_create") {
+        shm_create(r#gen);
+    }
+    if uses("stone.net_shm_write") {
+        shm_write(r#gen);
+    }
+    if uses("stone.net_shm_send") {
+        shm_send(r#gen);
     }
     if uses("stone.net_exchange") {
         exchange(r#gen);
@@ -275,6 +284,9 @@ fn handle(r#gen: &mut dyn AssemblyGenerator) {
     }
     r#gen.emit("\tmov\tx9, #-1");
     r#gen.emit("\tstr\tx9, [x0, #64]");
+    // no shared memory yet
+    r#gen.emit("\tstr\tx9, [x0, #72]");
+    r#gen.emit("\tstr\txzr, [x0, #80]");
     pop_frame(r#gen, &["x19", "x20"]);
 }
 
@@ -421,46 +433,46 @@ fn connect_unix(r#gen: &mut dyn AssemblyGenerator) {
     // x19 holds the name, x20 the path and then the descriptor, x21 the path's length, x22 the
     // family, x23 the address's length, and the `sockaddr_un` is at [sp]
     frame(r#gen, label);
-    r#gen.emit("	sub	sp, sp, #112");
-    r#gen.emit("	mov	x19, x1");
-    r#gen.emit("	mov	x20, x0");
-    r#gen.emit("	bl	stone.str_len");
-    r#gen.emit("	mov	x21, x0");
-    r#gen.emit(&format!("	cmp	x21, #{longest}"));
-    r#gen.emit(&format!("	b.hi	{label}_invalid"));
+    r#gen.emit("\tsub\tsp, sp, #112");
+    r#gen.emit("\tmov\tx19, x1");
+    r#gen.emit("\tmov\tx20, x0");
+    r#gen.emit("\tbl\tstone.str_len");
+    r#gen.emit("\tmov\tx21, x0");
+    r#gen.emit(&format!("\tcmp\tx21, #{longest}"));
+    r#gen.emit(&format!("\tb.hi\t{label}_invalid"));
     for offset in (0..112).step_by(16) {
-        r#gen.emit(&format!("	stp	xzr, xzr, [sp, #{offset}]"));
+        r#gen.emit(&format!("\tstp\txzr, xzr, [sp, #{offset}]"));
     }
-    r#gen.emit("	mov	x22, #1"); // AF_UNIX
-    r#gen.emit("	add	x23, x21, #3");
+    r#gen.emit("\tmov\tx22, #1"); // AF_UNIX
+    r#gen.emit("\tadd\tx23, x21, #3");
     match os {
-        Os::Linux => r#gen.emit("	strb	w22, [sp]"),
+        Os::Linux => r#gen.emit("\tstrb\tw22, [sp]"),
         Os::MacOs => {
-            r#gen.emit("	strb	w23, [sp]");
-            r#gen.emit("	strb	w22, [sp, #1]");
+            r#gen.emit("\tstrb\tw23, [sp]");
+            r#gen.emit("\tstrb\tw22, [sp, #1]");
         }
     }
-    r#gen.emit("	mov	x10, #0");
+    r#gen.emit("\tmov\tx10, #0");
     r#gen.emit(&format!("{label}_copy:"));
-    r#gen.emit("	cmp	x10, x21");
-    r#gen.emit(&format!("	b.hs	{label}_copied"));
-    r#gen.emit("	ldrb	w9, [x20, x10]");
-    r#gen.emit("	add	x11, sp, x10");
-    r#gen.emit("	strb	w9, [x11, #2]");
-    r#gen.emit("	add	x10, x10, #1");
-    r#gen.emit(&format!("	b	{label}_copy"));
+    r#gen.emit("\tcmp\tx10, x21");
+    r#gen.emit(&format!("\tb.hs\t{label}_copied"));
+    r#gen.emit("\tldrb\tw9, [x20, x10]");
+    r#gen.emit("\tadd\tx11, sp, x10");
+    r#gen.emit("\tstrb\tw9, [x11, #2]");
+    r#gen.emit("\tadd\tx10, x10, #1");
+    r#gen.emit(&format!("\tb\t{label}_copy"));
     r#gen.emit(&format!("{label}_copied:"));
     open_socket(r#gen, label, 1);
     retried(
         r#gen,
         &format!("{label}_connect"),
         Sys::Connect,
-        &["mov	x0, x20", "mov	x1, sp", "mov	x2, x23"],
+        &["mov\tx0, x20", "mov\tx1, sp", "mov\tx2, x23"],
     );
-    r#gen.emit(&format!("	tbnz	x0, #63, {label}_close"));
-    r#gen.emit("	mov	x0, x20");
-    r#gen.emit(&format!("	mov	x1, #{SOCKET_TAG}"));
-    r#gen.emit("	bl	.Lnet_handle");
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_close"));
+    r#gen.emit("\tmov\tx0, x20");
+    r#gen.emit(&format!("\tmov\tx1, #{SOCKET_TAG}"));
+    r#gen.emit("\tbl\t.Lnet_handle");
     ok_handle(r#gen, label);
     closing_failure(r#gen, label);
     frame_end(r#gen, label);
@@ -475,53 +487,261 @@ fn ready(r#gen: &mut dyn AssemblyGenerator) {
     // x19 holds the descriptor and x20 the milliseconds; the pollfd is at [sp, #16], and the
     // timespec at [sp]
     r#gen.emit("stone.net_ready:");
-    r#gen.emit("	ldr	x9, [x0, #16]");
-    r#gen.emit("	tbnz	x9, #63, .Lnet_ready_yes");
-    r#gen.emit("	ldr	x10, [x0, #40]");
-    r#gen.emit("	ldr	x11, [x0, #32]");
-    r#gen.emit("	cmp	x10, x11");
-    r#gen.emit("	b.ne	.Lnet_ready_yes");
-    r#gen.emit("	ldr	x10, [x0, #56]");
-    r#gen.emit("	cbnz	x10, .Lnet_ready_yes");
+    r#gen.emit("\tldr\tx9, [x0, #16]");
+    r#gen.emit("\ttbnz\tx9, #63, .Lnet_ready_yes");
+    r#gen.emit("\tldr\tx10, [x0, #40]");
+    r#gen.emit("\tldr\tx11, [x0, #32]");
+    r#gen.emit("\tcmp\tx10, x11");
+    r#gen.emit("\tb.ne\t.Lnet_ready_yes");
+    r#gen.emit("\tldr\tx10, [x0, #56]");
+    r#gen.emit("\tcbnz\tx10, .Lnet_ready_yes");
     push_frame(r#gen, &saved);
-    r#gen.emit("	sub	sp, sp, #32");
-    r#gen.emit("	mov	x19, x9");
+    r#gen.emit("\tsub\tsp, sp, #32");
+    r#gen.emit("\tmov\tx19, x9");
     load(r#gen, "x10", 2147483647);
-    r#gen.emit("	cmp	x1, x10");
-    r#gen.emit("	csel	x20, x10, x1, gt");
+    r#gen.emit("\tcmp\tx1, x10");
+    r#gen.emit("\tcsel\tx20, x10, x1, gt");
     r#gen.emit(".Lnet_ready_again:");
     // struct pollfd { fd, events, revents }
-    r#gen.emit("	str	w19, [sp, #16]");
-    r#gen.emit("	mov	w9, #1"); // POLLIN
-    r#gen.emit("	str	w9, [sp, #20]");
-    r#gen.emit("	add	x0, sp, #16");
-    r#gen.emit("	mov	x1, #1");
+    r#gen.emit("\tstr\tw19, [sp, #16]");
+    r#gen.emit("\tmov\tw9, #1"); // POLLIN
+    r#gen.emit("\tstr\tw9, [sp, #20]");
+    r#gen.emit("\tadd\tx0, sp, #16");
+    r#gen.emit("\tmov\tx1, #1");
     match os {
         Os::Linux => {
-            r#gen.emit("	mov	x2, #0");
-            r#gen.emit("	tbnz	x20, #63, .Lnet_ready_poll");
-            r#gen.emit("	mov	x9, #1000");
-            r#gen.emit("	udiv	x10, x20, x9");
-            r#gen.emit("	msub	x11, x10, x9, x20");
+            r#gen.emit("\tmov\tx2, #0");
+            r#gen.emit("\ttbnz\tx20, #63, .Lnet_ready_poll");
+            r#gen.emit("\tmov\tx9, #1000");
+            r#gen.emit("\tudiv\tx10, x20, x9");
+            r#gen.emit("\tmsub\tx11, x10, x9, x20");
             load(r#gen, "x9", 1_000_000);
-            r#gen.emit("	mul	x11, x11, x9");
-            r#gen.emit("	stp	x10, x11, [sp]");
-            r#gen.emit("	mov	x2, sp");
+            r#gen.emit("\tmul\tx11, x11, x9");
+            r#gen.emit("\tstp\tx10, x11, [sp]");
+            r#gen.emit("\tmov\tx2, sp");
             r#gen.emit(".Lnet_ready_poll:");
-            r#gen.emit("	mov	x3, #0");
-            r#gen.emit("	mov	x4, #0");
+            r#gen.emit("\tmov\tx3, #0");
+            r#gen.emit("\tmov\tx4, #0");
         }
-        Os::MacOs => r#gen.emit("	mov	x2, x20"),
+        Os::MacOs => r#gen.emit("\tmov\tx2, x20"),
     }
     system_call(r#gen, Sys::Ppoll);
-    r#gen.emit(&format!("	cmn	x0, #{EINTR}"));
-    r#gen.emit("	b.eq	.Lnet_ready_again");
-    r#gen.emit("	cmp	x0, #0");
-    r#gen.emit("	cset	x0, ne");
+    r#gen.emit(&format!("\tcmn\tx0, #{EINTR}"));
+    r#gen.emit("\tb.eq\t.Lnet_ready_again");
+    r#gen.emit("\tcmp\tx0, #0");
+    r#gen.emit("\tcset\tx0, ne");
     pop_frame(r#gen, &saved);
     r#gen.emit(".Lnet_ready_yes:");
-    r#gen.emit("	mov	x0, #1");
-    r#gen.emit("	ret");
+    r#gen.emit("\tmov\tx0, #1");
+    r#gen.emit("\tret");
+}
+
+/// Emits code that closes a socket's shared memory, the descriptor in `[x19, #72]`, unless it has
+/// none, leaving it with none.
+fn close_shared(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+    r#gen.emit("\tldr\tx0, [x19, #72]");
+    r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_unshared"));
+    system_call(r#gen, Sys::Close);
+    r#gen.emit("\tmov\tx9, #-1");
+    r#gen.emit("\tstr\tx9, [x19, #72]");
+    r#gen.emit("\tstr\txzr, [x19, #80]");
+    r#gen.emit(&format!("{label}_unshared:"));
+}
+
+/// Emits code that fails with [`SHM_MISSING_CODE`] unless the open socket in `x19` has shared
+/// memory.
+fn check_shared(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+    r#gen.emit("\tldr\tx9, [x19, #72]");
+    r#gen.emit(&format!("\ttbz\tx9, #63, {label}_shared"));
+    fail_with_code(r#gen, label, SHM_MISSING_CODE);
+    r#gen.emit(&format!("{label}_shared:"));
+}
+
+/// The error number of a write that does not fit, `ENOSPC`, the same on Linux and macOS.
+const ENOSPC: i64 = 28;
+
+/// macOS's number for a system call that does not exist, `ENOSYS`, which `memfd_create` is there.
+const MACOS_ENOSYS: i64 = 78;
+
+/// Emits `stone.net_shm_create`, as `x64::net` does, for the socket in `x0` and the size in `x1`.
+/// macOS has no `memfd_create`, so there it fails as a missing system call does, once the socket
+/// is known to be open.
+fn shm_create(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_shm_create";
+    let os = r#gen.target().os;
+    // x19 holds the socket, x20 the size, x21 the new descriptor, and x22 the size it gets
+    if os == Os::Linux {
+        r#gen.emit("\t.data");
+        immortal_string(r#gen, ".Lnet_shm_name", "stone");
+        r#gen.emit("\t.text");
+    }
+    frame(r#gen, label);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    check_open(r#gen, label);
+    close_shared(r#gen, label);
+    if os == Os::MacOs {
+        r#gen.emit(&format!("\tmov\tx0, #-{MACOS_ENOSYS}"));
+        fail_with_errno(r#gen, label, None);
+        frame_end(r#gen, label);
+        return;
+    }
+    address(r#gen, "x0", ".Lnet_shm_name");
+    r#gen.emit("\tmov\tx1, #1"); // MFD_CLOEXEC
+    system_call(r#gen, Sys::MemfdCreate);
+    r#gen.emit(&format!("\ttbz\tx0, #63, {label}_made"));
+    fail_with_errno(r#gen, label, None);
+    r#gen.emit(&format!("{label}_made:"));
+    r#gen.emit("\tmov\tx21, x0");
+    r#gen.emit("\tcmp\tx20, #0");
+    r#gen.emit("\tcsel\tx22, xzr, x20, lt");
+    retried(
+        r#gen,
+        &format!("{label}_size"),
+        Sys::Ftruncate,
+        &["mov\tx0, x21", "mov\tx1, x22"],
+    );
+    r#gen.emit(&format!("\ttbz\tx0, #63, {label}_sized"));
+    r#gen.emit("\tmov\tx23, x0");
+    close(r#gen, "x21");
+    r#gen.emit("\tmov\tx0, x23");
+    fail_with_errno(r#gen, label, None);
+    r#gen.emit(&format!("{label}_sized:"));
+    r#gen.emit("\tstr\tx21, [x19, #72]");
+    r#gen.emit("\tstr\tx22, [x19, #80]");
+    r#gen.emit("\tmov\tx0, x20");
+    r#gen.emit("\tmov\tx1, #0");
+    r#gen.emit("\tbl\t.Lfs_ok");
+    r#gen.emit(&format!("\tb\t{label}_done"));
+    frame_end(r#gen, label);
+}
+
+/// Emits `stone.net_shm_write`, as `x64::net` does, for the socket in `x0`, the offset in `x1`,
+/// and the bytes in `x2`. A macOS socket never has shared memory, so there it only fails.
+fn shm_write(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_shm_write";
+    // x19 holds the socket, x20 the offset, x21 the bytes, x22 their length, and x23 how many
+    // are written
+    frame(r#gen, label);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    r#gen.emit("\tmov\tx21, x2");
+    check_open(r#gen, label);
+    if r#gen.target().os == Os::MacOs {
+        fail_with_code(r#gen, label, SHM_MISSING_CODE);
+    } else {
+        check_shared(r#gen, label);
+        r#gen.emit("\tldur\tx22, [x21, #-16]");
+        r#gen.emit(&format!("\ttbnz\tx20, #63, {label}_full"));
+        r#gen.emit("\tadd\tx9, x20, x22");
+        r#gen.emit("\tldr\tx10, [x19, #80]");
+        r#gen.emit("\tcmp\tx9, x10");
+        r#gen.emit(&format!("\tb.hi\t{label}_full"));
+        r#gen.emit("\tmov\tx23, #0");
+        r#gen.emit(&format!("{label}_next:"));
+        r#gen.emit("\tcmp\tx23, x22");
+        r#gen.emit(&format!("\tb.hs\t{label}_written"));
+        retried(
+            r#gen,
+            &format!("{label}_again"),
+            Sys::Pwrite,
+            &[
+                "ldr\tx0, [x19, #72]",
+                "add\tx1, x21, x23",
+                "sub\tx2, x22, x23",
+                "add\tx3, x20, x23",
+            ],
+        );
+        r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_failed"));
+        r#gen.emit("\tadd\tx23, x23, x0");
+        r#gen.emit(&format!("\tb\t{label}_next"));
+        r#gen.emit(&format!("{label}_written:"));
+        r#gen.emit("\tmov\tx0, x22");
+        r#gen.emit("\tmov\tx1, #0");
+        r#gen.emit("\tbl\t.Lfs_ok");
+        r#gen.emit(&format!("\tb\t{label}_done"));
+        r#gen.emit(&format!("{label}_full:"));
+        r#gen.emit(&format!("\tmov\tx0, #-{ENOSPC}"));
+        r#gen.emit(&format!("{label}_failed:"));
+        fail_with_errno(r#gen, label, None);
+    }
+    frame_end(r#gen, label);
+}
+
+/// Emits `stone.net_shm_send`, as `x64::net` does, for the socket in `x0` and the bytes in `x1`.
+/// A macOS socket never has shared memory, so there it only fails.
+fn shm_send(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_shm_send";
+    let constants = Constants::of(r#gen.target().os);
+    // x19 holds the socket, x20 the bytes, x21 their length, and x22 how many are sent; at
+    // [sp, #64] are the iovec, then the msghdr from [sp, #80], then the control message from
+    // [sp, #136]
+    frame(r#gen, label);
+    r#gen.emit("\tsub\tsp, sp, #96");
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    check_open(r#gen, label);
+    if r#gen.target().os == Os::MacOs {
+        fail_with_code(r#gen, label, SHM_MISSING_CODE);
+    } else {
+        check_shared(r#gen, label);
+        r#gen.emit("\tldur\tx21, [x20, #-16]");
+        r#gen.emit("\tstp\tx20, x21, [sp, #64]");
+        r#gen.emit("\tstp\txzr, xzr, [sp, #80]");
+        r#gen.emit("\tadd\tx9, sp, #64");
+        r#gen.emit("\tmov\tx10, #1");
+        r#gen.emit("\tstp\tx9, x10, [sp, #96]");
+        r#gen.emit("\tadd\tx9, sp, #136");
+        r#gen.emit("\tmov\tx10, #24");
+        r#gen.emit("\tstp\tx9, x10, [sp, #112]");
+        r#gen.emit("\tstr\txzr, [sp, #128]");
+        // a cmsghdr of 20 bytes, SOL_SOCKET, and SCM_RIGHTS, then the descriptor
+        r#gen.emit("\tmov\tx9, #20");
+        r#gen.emit("\tmov\tx10, #1");
+        r#gen.emit("\tmovk\tx10, #1, lsl #32");
+        r#gen.emit("\tstp\tx9, x10, [sp, #136]");
+        r#gen.emit("\tldr\tx9, [x19, #72]");
+        r#gen.emit("\tstr\tx9, [sp, #152]");
+        retried(
+            r#gen,
+            &format!("{label}_message"),
+            Sys::Sendmsg,
+            &[
+                "ldr\tx0, [x19, #16]",
+                "add\tx1, sp, #80",
+                &format!("mov\tx2, #{}", constants.no_signal),
+            ],
+        );
+        r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_failed"));
+        r#gen.emit("\tmov\tx22, x0");
+        r#gen.emit(&format!("{label}_next:"));
+        r#gen.emit("\tcmp\tx22, x21");
+        r#gen.emit(&format!("\tb.hs\t{label}_sent"));
+        retried(
+            r#gen,
+            &format!("{label}_again"),
+            Sys::Sendto,
+            &[
+                "ldr\tx0, [x19, #16]",
+                "add\tx1, x20, x22",
+                "sub\tx2, x21, x22",
+                &format!("mov\tx3, #{}", constants.no_signal),
+                "mov\tx4, #0",
+                "mov\tx5, #0",
+            ],
+        );
+        r#gen.emit(&format!("\ttbnz\tx0, #63, {label}_failed"));
+        r#gen.emit("\tadd\tx22, x22, x0");
+        r#gen.emit(&format!("\tb\t{label}_next"));
+        r#gen.emit(&format!("{label}_sent:"));
+        r#gen.emit("\tmov\tx0, x21");
+        r#gen.emit("\tmov\tx1, #0");
+        r#gen.emit("\tbl\t.Lfs_ok");
+        r#gen.emit(&format!("\tb\t{label}_done"));
+        r#gen.emit(&format!("{label}_failed:"));
+        fail_with_errno(r#gen, label, None);
+    }
+    frame_end(r#gen, label);
 }
 
 /// Emits an `fcntl` call with the command `command` on the descriptor in `x20`, after `third`
@@ -633,6 +853,7 @@ fn close_handle(r#gen: &mut dyn AssemblyGenerator) {
     system_call(r#gen, Sys::Close);
     r#gen.emit("\tmov\tx9, #-1");
     r#gen.emit("\tstr\tx9, [x19, #16]");
+    close_shared(r#gen, ".Lnet_close");
     r#gen.emit("\tldr\tx9, [x19]");
     r#gen.emit(&format!("\tcmn\tx9, #{}", -SOCKET_TAG));
     r#gen.emit("\tb.ne\t.Lnet_close_done");
@@ -1381,6 +1602,11 @@ pub fn free_handle(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tstp\tx0, x9, [sp, #-16]!");
     r#gen.emit("\tstr\tx30, [sp, #-16]!");
     r#gen.emit("\tldr\tx0, [x9, #16]");
+    r#gen.emit("\ttbnz\tx0, #63, .Lfree_handle_closed");
+    system_call(r#gen, Sys::Close);
+    // and its shared memory, if it has any
+    r#gen.emit("\tldr\tx9, [sp, #24]");
+    r#gen.emit("\tldr\tx0, [x9, #72]");
     r#gen.emit("\ttbnz\tx0, #63, .Lfree_handle_closed");
     system_call(r#gen, Sys::Close);
     r#gen.emit(".Lfree_handle_closed:");

@@ -77,6 +77,9 @@ pub const TIMED_OUT: &str = "timed out";
 /// The error `read_exact` gives when the connection closes before the bytes it waits for arrive.
 pub const CLOSED_EARLY: &str = "connection closed early";
 
+/// The error writing a socket's shared memory gives before `shm_create` made it.
+pub const SHM_MISSING: &str = "no shared memory";
+
 /// The error a socket's methods give once it is closed.
 pub const SOCKET_CLOSED: &str = "socket is closed";
 
@@ -160,6 +163,33 @@ type NfdsT = std::ffi::c_ulong;
 
 unsafe extern "C" {
     fn poll(fds: *mut PollFd, nfds: NfdsT, timeout: c_int) -> c_int;
+}
+
+/// One buffer of a [`MsgHdr`], C's `struct iovec`.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct IoVec {
+    base: *mut std::ffi::c_void,
+    len: usize,
+}
+
+/// Linux's `struct msghdr`, which `sendmsg` sends a descriptor with.
+#[cfg(target_os = "linux")]
+#[repr(C)]
+struct MsgHdr {
+    name: *mut std::ffi::c_void,
+    namelen: u32,
+    iov: *const IoVec,
+    iovlen: usize,
+    control: *mut std::ffi::c_void,
+    controllen: usize,
+    flags: c_int,
+}
+
+#[cfg(target_os = "linux")]
+unsafe extern "C" {
+    fn memfd_create(name: *const std::ffi::c_char, flags: std::ffi::c_uint) -> c_int;
+    fn sendmsg(fd: c_int, msg: *const MsgHdr, flags: c_int) -> isize;
 }
 
 /// Waits until the descriptor `fd` is ready for `events`, for at most `timeout` milliseconds in
@@ -267,6 +297,8 @@ pub struct Socket {
     ended: bool,
     /// How many milliseconds each wait may take, or -1 to wait forever.
     timeout: i64,
+    /// Memory to share with the other end, which `shm_create` makes and `close` drops.
+    shared: Option<std::fs::File>,
 }
 
 impl Socket {
@@ -276,6 +308,7 @@ impl Socket {
             buffer: vec![],
             ended: false,
             timeout: -1,
+            shared: None,
         }
     }
 
@@ -444,6 +477,54 @@ impl Socket {
         if let Some(stream) = self.stream.take() {
             let _ = stream.shutdown();
         }
+        self.shared = None;
+    }
+
+    /// Makes `size` bytes of zeros to share with the other end of a Unix socket, in place of any
+    /// made before, returning `size`: a `memfd_create` file, which `shm_send` sends. Only Linux
+    /// has one, so elsewhere it fails as a system call that does not exist does.
+    pub fn shm_create(&mut self, size: i64) -> Result<i64, String> {
+        self.stream()?;
+        self.shared = None;
+        let file = memory_file()?;
+        file.set_len(size.max(0) as u64).map_err(|e| reason(&e))?;
+        self.shared = Some(file);
+        Ok(size)
+    }
+
+    /// Writes `data` to the shared memory from `offset`, returning its length. A write past the
+    /// memory's end fails, rather than growing it.
+    pub fn shm_write(&mut self, offset: i64, data: &[u8]) -> Result<i64, String> {
+        use std::os::unix::fs::FileExt;
+        self.stream()?;
+        let file = self
+            .shared
+            .as_ref()
+            .ok_or_else(|| SHM_MISSING.to_string())?;
+        let size = file.metadata().map_err(|e| reason(&e))?.len();
+        if offset < 0 || offset as u64 + data.len() as u64 > size {
+            return Err(reason(&std::io::Error::from_raw_os_error(ENOSPC)));
+        }
+        file.write_all_at(data, offset as u64)
+            .map_err(|e| reason(&e))?;
+        Ok(data.len() as i64)
+    }
+
+    /// Sends `data` with the shared memory's descriptor, which a Unix socket passes to the other
+    /// end, returning its length.
+    pub fn shm_send(&mut self, data: &[u8]) -> Result<i64, String> {
+        let stream = self
+            .stream
+            .as_mut()
+            .ok_or_else(|| SOCKET_CLOSED.to_string())?;
+        let file = self
+            .shared
+            .as_ref()
+            .ok_or_else(|| SHM_MISSING.to_string())?;
+        let sent = send_with_fd(stream.as_raw_fd(), data, file.as_raw_fd())?;
+        // the descriptor went with the first part, and the rest is sent plainly
+        stream.write_all(&data[sent..]).map_err(|e| reason(&e))?;
+        Ok(data.len() as i64)
     }
 
     /// Returns whether a read would not wait, checking for at most `timeout` milliseconds, or
@@ -472,6 +553,70 @@ impl Socket {
             }
         }
     }
+}
+
+/// The error number of a write that does not fit, `ENOSPC`.
+const ENOSPC: i32 = 28;
+
+/// Returns a new, empty file in memory, closed when the program runs another.
+#[cfg(target_os = "linux")]
+fn memory_file() -> Result<std::fs::File, String> {
+    use std::os::fd::FromRawFd;
+    if cfg!(fuzzing) {
+        return Err(NET_DISABLED.to_string());
+    }
+    // MFD_CLOEXEC
+    // SAFETY: the name is a valid C string, and the call returns a descriptor or -1
+    let fd = unsafe { memfd_create(c"stone".as_ptr(), 1) };
+    if fd < 0 {
+        return Err(reason(&std::io::Error::last_os_error()));
+    }
+    // SAFETY: the descriptor is new, and nothing else owns it
+    Ok(unsafe { std::fs::File::from_raw_fd(fd) })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn memory_file() -> Result<std::fs::File, String> {
+    // ENOSYS, as macOS numbers it
+    Err(reason(&std::io::Error::from_raw_os_error(78)))
+}
+
+/// Sends `data` on the socket `fd` with the descriptor `shared`, made again while a signal
+/// interrupts it, returning how much of `data` went.
+#[cfg(target_os = "linux")]
+fn send_with_fd(fd: RawFd, data: &[u8], shared: RawFd) -> Result<usize, String> {
+    // a cmsghdr of 20 bytes, its length, SOL_SOCKET, and SCM_RIGHTS, then the descriptor
+    let mut control = [20u64, 1 | 1 << 32, shared as u32 as u64];
+    let iov = IoVec {
+        base: data.as_ptr().cast_mut().cast(),
+        len: data.len(),
+    };
+    let msg = MsgHdr {
+        name: std::ptr::null_mut(),
+        namelen: 0,
+        iov: &iov,
+        iovlen: 1,
+        control: control.as_mut_ptr().cast(),
+        controllen: 24,
+        flags: 0,
+    };
+    loop {
+        // SAFETY: msg points at one iovec over `data` and 24 bytes of control, all of which
+        // outlive the call; MSG_NOSIGNAL
+        let sent = unsafe { sendmsg(fd, &msg, 0x4000) };
+        if sent >= 0 {
+            return Ok(sent as usize);
+        }
+        let error = std::io::Error::last_os_error();
+        if error.kind() != ErrorKind::Interrupted {
+            return Err(reason(&error));
+        }
+    }
+}
+
+#[cfg(not(target_os = "linux"))]
+fn send_with_fd(_: RawFd, _: &[u8], _: RawFd) -> Result<usize, String> {
+    Err(reason(&std::io::Error::from_raw_os_error(78)))
 }
 
 /// Returns how many bytes at the start of `bytes` end on a character boundary: all of them,
@@ -751,6 +896,65 @@ mod tests {
             Some("no such file or directory: 'there'".to_string())
         );
         std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    /// Reads what `stream` sends until `buf` is full, returning the descriptor that came with it,
+    /// as an X server receives one.
+    #[cfg(target_os = "linux")]
+    fn receive_with_fd(stream: &UnixStream, buf: &mut [u8]) -> RawFd {
+        unsafe extern "C" {
+            fn recvmsg(fd: c_int, msg: *mut MsgHdr, flags: c_int) -> isize;
+        }
+        let mut control = [0u64; 3];
+        let iov = IoVec {
+            base: buf.as_mut_ptr().cast(),
+            len: buf.len(),
+        };
+        let mut msg = MsgHdr {
+            name: std::ptr::null_mut(),
+            namelen: 0,
+            iov: &iov,
+            iovlen: 1,
+            control: control.as_mut_ptr().cast(),
+            controllen: 24,
+            flags: 0,
+        };
+        // SAFETY: msg points at one iovec over `buf` and 24 bytes of control space
+        let n = unsafe { recvmsg(stream.as_raw_fd(), &mut msg, 0) };
+        assert_eq!(n as usize, buf.len());
+        // the cmsghdr's length, level, and type, then the descriptor
+        assert_eq!(control[0], 20);
+        (control[2] & 0xffff_ffff) as RawFd
+    }
+
+    #[test]
+    #[cfg(target_os = "linux")]
+    fn a_socket_shares_memory_through_a_descriptor_it_sends() {
+        use std::os::fd::FromRawFd;
+        use std::os::unix::fs::FileExt;
+        let (near, far) = UnixStream::pair().unwrap();
+        let mut socket = Socket::new(Stream::Unix(near));
+        assert_eq!(socket.shm_write(0, b"x"), Err(SHM_MISSING.to_string()));
+        assert_eq!(socket.shm_create(16), Ok(16));
+        assert_eq!(socket.shm_write(4, b"abcd"), Ok(4));
+        assert_eq!(socket.shm_send(b"head"), Ok(4));
+        let mut head = [0; 4];
+        let fd = receive_with_fd(&far, &mut head);
+        assert_eq!(&head, b"head");
+        // SAFETY: the descriptor came with the message and nothing else owns it
+        let file = unsafe { std::fs::File::from_raw_fd(fd) };
+        let mut seen = [0; 16];
+        file.read_exact_at(&mut seen, 0).unwrap();
+        assert_eq!(&seen[..8], b"\0\0\0\0abcd");
+        // a write the other end makes after the descriptor went is seen through it too
+        assert_eq!(socket.shm_write(0, b"zz"), Ok(2));
+        file.read_exact_at(&mut seen[..2], 0).unwrap();
+        assert_eq!(&seen[..2], b"zz");
+        // a write past the end fails, and a closed socket has none
+        assert!(socket.shm_write(15, b"ab").is_err());
+        socket.close();
+        assert_eq!(socket.shm_create(8), Err(SOCKET_CLOSED.to_string()));
+        assert_eq!(socket.shm_write(0, b"x"), Err(SOCKET_CLOSED.to_string()));
     }
 
     #[test]

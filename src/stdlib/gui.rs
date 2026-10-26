@@ -20,13 +20,32 @@ pub const SYS_MODULE: &str = "gui_sys";
 /// What the internal module is for.
 pub const SYS_MODULE_DOC: &str = "The native routines behind the builtin `gui` module.";
 
-pub static SYS_DOCS: [BuiltinDoc; 1] = [BuiltinDoc {
-    name: "gui_sys.pack",
-    signature: "gui_sys.pack(pixels: list[int], start: int, count: int, format: int) -> bytes",
-    description: "Returns the bytes of `count` colors of `pixels` from `start`, as `format` \
-                  lays them out: 0 for blue, green, red, and a 0 byte, 1 for a 0 byte, red, \
-                  green, and blue, or 2 for red, green, and blue.",
-}];
+pub static SYS_DOCS: [BuiltinDoc; 4] = [
+    BuiltinDoc {
+        name: "gui_sys.pack",
+        signature: "gui_sys.pack(pixels: list[int], start: int, count: int, format: int) -> \
+                    bytes",
+        description: "Returns the bytes of `count` colors of `pixels` from `start`, as \
+                      `format` lays them out: 0 for blue, green, red, and a 0 byte, 1 for a 0 \
+                      byte, red, green, and blue, or 2 for red, green, and blue.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.shm_create",
+        signature: "gui_sys.shm_create(s: socket, size: int) -> result[int, str]",
+        description: "Makes `size` bytes of memory to share through `s`, in place of any \
+                      before.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.shm_write",
+        signature: "gui_sys.shm_write(s: socket, offset: int, data: bytes) -> result[int, str]",
+        description: "Writes `data` to the memory `s` shares, from `offset`.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.shm_send",
+        signature: "gui_sys.shm_send(s: socket, data: bytes) -> result[int, str]",
+        description: "Sends `data` on `s` with the descriptor of the memory it shares.",
+    },
+];
 
 /// Returns the bytes of the colors `0xRRGGBB` of `pixels` from `start` for `count` of them, as
 /// `format` lays each out: 0 as blue, green, red, and 0 (a 32-bit pixel whose least significant

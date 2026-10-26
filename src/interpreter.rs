@@ -2986,6 +2986,25 @@ impl<'out> Interpreter<'out> {
                 let packed = gui::pack(&ints(pixels), *start, *count, *format);
                 return Ok(Value::Bytes(packed.into()));
             }
+            ("gui_sys.shm_create", [Value::Socket(socket), Value::Int(size)]) => {
+                return Ok(result(
+                    socket.borrow_mut().shm_create(*size).map(Value::Int),
+                ));
+            }
+            (
+                "gui_sys.shm_write",
+                [
+                    Value::Socket(socket),
+                    Value::Int(offset),
+                    Value::Bytes(data),
+                ],
+            ) => {
+                let written = socket.borrow_mut().shm_write(*offset, data);
+                return Ok(result(written.map(Value::Int)));
+            }
+            ("gui_sys.shm_send", [Value::Socket(socket), Value::Bytes(data)]) => {
+                return Ok(result(socket.borrow_mut().shm_send(data).map(Value::Int)));
+            }
             ("net_sys.connect_unix", [Value::Str(path), Value::Str(name)]) => {
                 self.out.flush()?;
                 let connected = net::connect_unix(path, name)

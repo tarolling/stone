@@ -10,6 +10,10 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Format Document, and format on save, rewrite a file as `stone fmt` does.
+
 ## [0.3.5] - 2026-10-26
 
 ### Added

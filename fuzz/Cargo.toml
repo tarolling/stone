@@ -31,6 +31,13 @@ doc = false
 bench = false
 
 [[bin]]
+name = "format"
+path = "fuzz_targets/format.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
 name = "interpret"
 path = "fuzz_targets/interpret.rs"
 test = false

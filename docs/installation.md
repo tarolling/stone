@@ -65,7 +65,7 @@ cargo install --git https://github.com/tarolling/stone stone
 
 | command | needs |
 | --- | --- |
-| `stone run`, `stone check` | any platform stone builds on |
+| `stone run`, `stone check`, `stone fmt` | any platform stone builds on |
 | `stone build` | any platform stone builds on; the executables it writes run on x86-64 or arm64 Linux, or arm64 macOS |
 
 `stone build` assembles and links programs itself, so it needs no assembler, linker, or C

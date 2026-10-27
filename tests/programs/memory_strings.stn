@@ -39,7 +39,6 @@ fn make(text: str) -> str:
 print(make("a") == make("a") == make("a"), make("a") == make("b") == make("c"))
 print("a" != make("a"), make("x") == "x")
 
-
 // a string read through a global from a function
 greeting = "hello" + " world"
 fn greet() -> str:

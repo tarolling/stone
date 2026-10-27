@@ -20,4 +20,4 @@ print(bytes([104, 105, 0, 255]).unwrap(), bytes([]).unwrap(), "é".bytes() == b"
 print("café".bytes(), "café".bytes().len())
 print(b"caf\xc3\xa9".text(), b"\xff".text(), b"a\x00".text())
 print(b"x".cmp(b"y"), b"y".cmp(b"x"), b"x".cmp(b"x"))
-print(b"\x7f\x1f quote\"" , b"both'\"")
+print(b"\x7f\x1f quote\"", b"both'\"")

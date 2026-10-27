@@ -95,7 +95,8 @@ Status: every string writes the values of the expressions in braces inside it, a
 f-strings do, but with no `f` to remember, since a string that should hold braces writes `{{`
 and `}}`. `str` and `print` write any value, through the prelude's trait `display`, which a
 struct can implement to say how it is written everywhere it appears. Format specs such as
-`{x:.2f}` are not supported yet.
+`{x:.2f}` are not supported yet. The one obvious way extends to layout: `stone fmt` (and the
+editor's Format Document) writes every file in one standard style, changing only whitespace.
 
 ## Memory safety and value semantics
 

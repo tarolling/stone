@@ -10,6 +10,13 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `stone fmt [PATH...] [--check]` rewrites files in one standard layout: four-space blocks,
+  spaces around operators and after commas, comments kept and indented with their block, and
+  runs of blank lines collapsed. It only ever changes whitespace, leaves a file that does not
+  parse alone, and with `--check` lists the files that need formatting instead.
+
 ## [0.3.5] - 2026-10-26
 
 ### Added

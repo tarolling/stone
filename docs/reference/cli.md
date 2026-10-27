@@ -117,6 +117,43 @@ there are any. Warnings alone print but leave the status at 0.
 stone check examples/basics.stn
 ```
 
+## `stone fmt [PATH...] [--check]`
+
+Rewrites files in stone's one standard layout. A `PATH` is a file, or a directory, in which
+every `.stn` file below it is formatted, skipping hidden directories and build directories
+that `stone build` made; with no `PATH`, it formats the current directory. `-` formats
+standard input and writes the result to standard output.
+
+Formatting only changes whitespace, never the code itself:
+
+- Each block is indented by four spaces, and tabs become spaces.
+- Operators take a space on each side (`a + b`, `x = 1`, `a == b and c`), and commas a space
+  after them; brackets take none inside them (`f(a, b)`, `[1, 2]`, `xs[0]`).
+- A `-` before a value takes no space (`-x`, `xs[:-1]`), and neither does a field's value in a
+  struct (`Point(x=1.0, y=-2.0)`), the `:` of a slice (`xs[1:n]`), or a `?` (`f()?`).
+- A `:` takes a space after it everywhere else (`n: int`, `{"a": 1}`, `fn f[T: ord]`), and
+  `->` one on each side.
+- Values inside a string are spaced like code (`"{x + 1}"`), while the string's text, and every
+  literal's spelling (`1e3`, `"\x41"`), stays as written.
+- Comments stay, a comment after code following it by one space. A comment on a line of its own
+  is indented like the block it sits in.
+- Runs of blank lines become one, and a blank line right after a line that opens a block, or at
+  the start or end of the file, is removed. Trailing whitespace goes, and the file ends with
+  one newline.
+
+Since every statement is one line, stone never moves code from one line to another.
+
+A file that does not parse is left alone: stone prints its errors, formats the other files,
+and exits with status 1. Types are not checked, so a file with type errors is formatted. With
+`--check`, nothing is written; stone lists each file that is not formatted and exits with
+status 1 if there is one, which suits continuous integration.
+
+```sh
+stone fmt                    # formats every .stn file under the current directory
+stone fmt examples/basics.stn
+stone fmt --check src
+```
+
 ## `stone`
 
 With no file, stone starts an interactive session. Each entry runs as soon as it is complete,

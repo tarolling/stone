@@ -16,6 +16,7 @@ arguments, speaking LSP over stdin and stdout, for files ending in `.stn`.
   that documents every builtin.
 - **Outline** of functions and variables, with each function's parameters and locals.
 - **Completion** of names visible at the cursor, builtins, and keywords.
+- **Formatting**: Format Document (and format on save) rewrites the file as `stone fmt` does.
 
 The VS Code extension also provides syntax highlighting, comment toggling, bracket matching, and
 indentation after a line ending in `:`.

@@ -239,6 +239,23 @@ fn definition_of_a_builtin_opens_its_documentation() {
 }
 
 #[test]
+fn formatting_rewrites_the_document() {
+    let (mut session, capabilities) = Session::start(None);
+    assert_eq!(capabilities["documentFormattingProvider"], true);
+    session.open("x=1\n");
+    session.diagnostics();
+    let edits = session.request(
+        "textDocument/formatting",
+        json!({
+            "textDocument": { "uri": URI },
+            "options": { "tabSize": 4, "insertSpaces": true }
+        }),
+    );
+    assert_eq!(edits[0]["newText"], "x = 1\n");
+    session.shut_down();
+}
+
+#[test]
 fn rename_errors_are_reported_to_the_client() {
     let (mut session, _) = Session::start(None);
     session.open("x = 1\n");

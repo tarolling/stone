@@ -401,6 +401,34 @@ pub fn clean(dir: &Path) -> std::io::Result<bool> {
     Ok(true)
 }
 
+/// Returns every `.stn` file in `dir` and the directories under it, sorted, skipping hidden
+/// directories (such as `.git`) and build directories that stone made (those with the
+/// [`MARKER`]), which is what `stone fmt` formats when given a directory.
+///
+/// For example, a directory holding `main.stn`, `geo/shapes.stn`, and `build/` after a build
+/// gives `main.stn` and `geo/shapes.stn`.
+pub fn stone_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
+    let mut files = vec![];
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(dir) = pending.pop() {
+        for entry in std::fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let hidden = path
+                .file_name()
+                .is_some_and(|name| name.to_string_lossy().starts_with('.'));
+            if path.is_dir() {
+                if !hidden && !path.join(MARKER).is_file() {
+                    pending.push(path);
+                }
+            } else if path.extension().is_some_and(|ext| ext == "stn") {
+                files.push(path);
+            }
+        }
+    }
+    files.sort();
+    Ok(files)
+}
+
 /// Runs an interactive session that reads entries from `input`, prints program output and
 /// expression values to `out`, and prints errors, plus prompts if `prompts` is set, to `err`.
 /// Modules named by `use` are read from `sources`. See [`crate::repl`].
@@ -809,6 +837,40 @@ ret y
             output_path(Path::new("p.stn"), leveled),
             Path::new("build/x86_64v3-linux/p")
         );
+    }
+
+    #[test]
+    fn stone_files_skips_hidden_and_build_directories() {
+        let dir = scratch("stone-files");
+        for file in [
+            "b.stn",
+            "a.stn",
+            "notes.txt",
+            "lib/c.stn",
+            ".git/d.stn",
+            "build/e.stn",
+        ] {
+            let path = dir.join(file);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        let names = |files: Vec<PathBuf>| -> Vec<String> {
+            files
+                .iter()
+                .map(|f| f.strip_prefix(&dir).unwrap().display().to_string())
+                .collect()
+        };
+        // a build directory is skipped only once stone has marked it as its own
+        assert_eq!(
+            names(stone_files(&dir).unwrap()),
+            ["a.stn", "b.stn", "build/e.stn", "lib/c.stn"]
+        );
+        prepare_build_dir(&dir.join("build")).unwrap();
+        assert_eq!(
+            names(stone_files(&dir).unwrap()),
+            ["a.stn", "b.stn", "lib/c.stn"]
+        );
+        assert!(stone_files(&dir.join("missing")).is_err());
     }
 
     #[test]

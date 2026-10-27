@@ -1183,6 +1183,21 @@ mod tests {
     }
 
     #[test]
+    fn generated_programs_format_stably() {
+        for seed in 0..2_000 {
+            let data = bytes(seed, 512);
+            let source = generate(&mut Unstructured::new(&data)).unwrap();
+            let formatted = stone::format::format(&source)
+                .unwrap_or_else(|e| panic!("generated program failed to format ({e}):\n{source}"));
+            assert_eq!(
+                stone::format::format(&formatted).as_ref(),
+                Ok(&formatted),
+                "formatting again changed:\n{formatted}"
+            );
+        }
+    }
+
+    #[test]
     fn generated_programs_type_check() {
         for seed in 0..2_000 {
             let data = bytes(seed, 512);

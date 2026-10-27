@@ -2146,3 +2146,19 @@ fn completion_after_a_parenthesized_expression_offers_its_types_methods() {
     assert!(labels.contains(&"strip".to_string()), "{labels:?}");
     assert!(!labels.contains(&"append".to_string()), "{labels:?}");
 }
+
+#[test]
+fn formatting_replaces_the_whole_document() {
+    let messy = doc("x=1\nif x==1:\n  print( \"é\" )\n");
+    let edits = formatting(&messy).unwrap();
+    assert_eq!(edits.len(), 1);
+    assert_eq!(edits[0].range, Range::new(at(1, 1), at(4, 1)));
+    assert_eq!(edits[0].new_text, "x = 1\nif x == 1:\n    print(\"é\")\n");
+
+    // nothing to do for formatted code or code that does not parse
+    assert_eq!(formatting(&doc("x = 1\n")), None);
+    assert_eq!(formatting(&doc("x = \n")), None);
+    // a last line without a newline ends the range
+    let edits = formatting(&doc("x=1\ny=\"é\"")).unwrap();
+    assert_eq!(edits[0].range, Range::new(at(1, 1), at(2, 6)));
+}

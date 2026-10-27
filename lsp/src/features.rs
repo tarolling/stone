@@ -1071,6 +1071,24 @@ fn document_symbol(doc: &Document, symbol: &Symbol, range: Span) -> DocumentSymb
     }
 }
 
+/// Formats the document as `stone fmt` would, as one edit replacing its whole text, or `None`
+/// if it is formatted already or does not parse.
+///
+/// For example, `x=1` gives an edit from line 0, character 0 to the end that writes `x = 1`.
+pub fn formatting(doc: &Document) -> Option<Vec<TextEdit>> {
+    let formatted = stone::format::format(&doc.text).ok()?;
+    if formatted == doc.text {
+        return None;
+    }
+    let lines = doc.text.split('\n').count();
+    let last = doc.text.rsplit('\n').next().unwrap_or_default();
+    let end = Pos::new(lines, last.trim_end_matches('\r').chars().count() + 1);
+    Some(vec![TextEdit {
+        range: Range::new(Position::new(0, 0), doc.index.position(end)),
+        new_text: formatted,
+    }])
+}
+
 /// Returns an outline of the document: its globals and functions, with each function's parameters
 /// and locals inside it.
 pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {

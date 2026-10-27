@@ -10,4 +10,3 @@ print(y)
 fn pair(a: int, b: int) -> int:
     ret a - b
 print(pair(say(8), say(7)))
-

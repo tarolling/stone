@@ -21,6 +21,7 @@ Install with `curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/
 | `stone check app.stn` | type checks without running; run it after every edit |
 | `stone run app.stn [args...]` | interprets the program; heavy loops can run slower than in Python |
 | `stone build app.stn` | compiles a standalone executable to `build/app` next to the file; use it for large inputs and timing |
+| `stone fmt app.stn` | rewrites the file in the standard layout (only whitespace changes); run it before finishing |
 | `stone` | starts a REPL |
 
 Errors print as `app.stn:3:7: error: message`, with the source line and a caret under the

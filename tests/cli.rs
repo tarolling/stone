@@ -56,6 +56,100 @@ fn check_suggests_parentheses_for_a_tuple() {
 }
 
 #[test]
+fn fmt_rewrites_a_file_and_check_reports_it() {
+    let (output, file) = stone(
+        &["fmt", "--check"],
+        "fmt_messy",
+        "x=1\nif x==1:\n  print( x )\n",
+    );
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!("{}\n", file.display())
+    );
+    // --check writes nothing
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "x=1\nif x==1:\n  print( x )\n"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("fmt")
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+    assert_eq!(
+        std::fs::read_to_string(&file).unwrap(),
+        "x = 1\nif x == 1:\n    print(x)\n"
+    );
+
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["fmt", "--check"])
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "");
+}
+
+#[test]
+fn fmt_reports_a_syntax_error_and_formats_the_rest() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("fmt_dir");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(dir.join("build")).unwrap();
+    std::fs::write(dir.join("bad.stn"), "x = \n").unwrap();
+    std::fs::write(dir.join("good.stn"), "y=2\n").unwrap();
+    // a build directory stone made is skipped
+    std::fs::write(dir.join("build/.stone"), "").unwrap();
+    std::fs::write(dir.join("build/skipped.stn"), "z=3\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("fmt")
+        .arg(&dir)
+        .output()
+        .unwrap();
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.starts_with(&format!("{}:1:5: error: ", dir.join("bad.stn").display())),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("bad.stn")).unwrap(),
+        "x = \n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("good.stn")).unwrap(),
+        "y = 2\n"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("build/skipped.stn")).unwrap(),
+        "z=3\n"
+    );
+}
+
+#[test]
+fn fmt_formats_standard_input_to_standard_output() {
+    use std::io::Write;
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["fmt", "-"])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    child
+        .stdin
+        .take()
+        .unwrap()
+        .write_all(b"print( 1+2 )\n")
+        .unwrap();
+    let output = child.wait_with_output().unwrap();
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "print(1 + 2)\n");
+}
+
+#[test]
 fn run_reports_a_syntax_error_without_running() {
     let (output, file) = stone(&["run"], "run_bad", "print(1)\nprint(2\n");
     assert!(!output.status.success());

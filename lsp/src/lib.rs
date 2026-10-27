@@ -16,8 +16,8 @@ use lsp_types::notification::{
     Notification as LspNotification, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, GotoDefinition, HoverRequest, PrepareRenameRequest,
-    References, Rename, Request as LspRequest,
+    Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
+    PrepareRenameRequest, References, Rename, Request as LspRequest,
 };
 use lsp_types::{
     CompletionOptions, CompletionResponse, DocumentSymbolResponse, GotoDefinitionResponse,
@@ -139,6 +139,7 @@ fn capabilities(encoding: Encoding) -> ServerCapabilities {
             work_done_progress_options: WorkDoneProgressOptions::default(),
         })),
         document_symbol_provider: Some(OneOf::Left(true)),
+        document_formatting_provider: Some(OneOf::Left(true)),
         // a `.` asks for completion, so a value's fields and methods show as it is typed
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_string()]),
@@ -202,6 +203,9 @@ impl Server {
                         features::document_symbols(doc),
                     )))
                 })
+            }
+            Formatting::METHOD => {
+                self.answer::<Formatting>(request, |doc, _| Ok(features::formatting(doc)))
             }
             Completion::METHOD => self.answer::<Completion>(request, |doc, params| {
                 let position = params.text_document_position.position;
@@ -396,6 +400,12 @@ impl DocumentParams for lsp_types::ReferenceParams {
 }
 
 impl DocumentParams for lsp_types::TextDocumentPositionParams {
+    fn uri(&self) -> &Uri {
+        &self.text_document.uri
+    }
+}
+
+impl DocumentParams for lsp_types::DocumentFormattingParams {
     fn uri(&self) -> &Uri {
         &self.text_document.uri
     }

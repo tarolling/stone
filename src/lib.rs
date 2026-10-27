@@ -8,6 +8,7 @@ pub mod checker;
 pub mod codegen;
 pub mod diagnostic;
 pub mod driver;
+pub mod format;
 pub mod interpreter;
 pub mod last_use;
 pub mod lexer;

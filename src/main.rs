@@ -1,11 +1,12 @@
 use clap::{Parser as ClapParser, Subcommand};
 use std::error::Error;
-use std::io::IsTerminal;
+use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use stone::codegen::Target;
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver::{self, Checked};
+use stone::format;
 use stone::interpreter::{Exit, Limits};
 use stone::project::{FsSources, SourceMap};
 
@@ -67,6 +68,15 @@ enum Command {
         /// The file to check.
         file: String,
     },
+    /// Rewrites files in the standard layout.
+    Fmt {
+        /// The files to format, directories to format every `.stn` file under, or `-` to format
+        /// standard input to standard output. Defaults to the current directory.
+        paths: Vec<PathBuf>,
+        /// Change nothing, but list each file that is not formatted, and fail if there is one.
+        #[arg(long)]
+        check: bool,
+    },
     /// Updates stone to the newest release.
     Update {
         /// Only report whether a newer release exists.
@@ -94,6 +104,10 @@ enum ExecutionMode {
     },
     Check(String),
     Clean(Option<PathBuf>),
+    Fmt {
+        paths: Vec<PathBuf>,
+        check: bool,
+    },
     Repl,
     Run {
         file: String,
@@ -124,6 +138,7 @@ fn main() -> ExitCode {
         },
         Some(Command::Check { file }) => ExecutionMode::Check(file),
         Some(Command::Clean { path }) => ExecutionMode::Clean(path),
+        Some(Command::Fmt { paths, check }) => ExecutionMode::Fmt { paths, check },
         Some(Command::Update { check, version }) => ExecutionMode::Update {
             check,
             tag: version,
@@ -163,6 +178,7 @@ fn main() -> ExitCode {
             }
         }
         ExecutionMode::Clean(path) => clean(path.as_deref()),
+        ExecutionMode::Fmt { paths, check } => fmt(&paths, check),
         ExecutionMode::Repl => {
             // prompts only make sense for a person typing, so piped input runs quietly
             let prompts = std::io::stdin().is_terminal();
@@ -275,6 +291,101 @@ fn clean(path: Option<&Path>) -> ExitCode {
         }
     }
     ExitCode::SUCCESS
+}
+
+/// Runs `stone fmt`, rewriting each file of `paths` (every `.stn` file under a directory, and
+/// the current directory if there are none) that is not in the standard layout, or with `check`
+/// only listing them. `-` formats standard input to standard output. A file that cannot be read
+/// or does not parse prints its errors and is left alone, and the exit code is then a failure.
+///
+/// For example, `stone fmt examples` rewrites `examples/basics.stn` if it needs it, and
+/// `stone fmt --check examples` prints `examples/basics.stn` and fails instead.
+fn fmt(paths: &[PathBuf], check: bool) -> ExitCode {
+    let mut status = ExitCode::SUCCESS;
+    let mut files = vec![];
+    for path in paths {
+        if path == Path::new("-") {
+            if !fmt_stdin(check) {
+                status = ExitCode::FAILURE;
+            }
+        } else if path.is_dir() {
+            match driver::stone_files(path) {
+                Ok(found) => files.extend(found),
+                Err(e) => {
+                    eprintln!("{}: error: {e}", path.display());
+                    status = ExitCode::FAILURE;
+                }
+            }
+        } else {
+            files.push(path.clone());
+        }
+    }
+    if paths.is_empty() {
+        match driver::stone_files(Path::new(".")) {
+            Ok(found) => files.extend(
+                found
+                    .iter()
+                    .map(|f| f.strip_prefix(".").unwrap_or(f).into()),
+            ),
+            Err(e) => {
+                eprintln!("error: {e}");
+                status = ExitCode::FAILURE;
+            }
+        }
+    }
+    for file in files {
+        let name = file.display().to_string();
+        let Some(source) = read(&name) else {
+            status = ExitCode::FAILURE;
+            continue;
+        };
+        let formatted = match format::format(&source) {
+            Ok(formatted) if formatted == source => continue,
+            Ok(formatted) => formatted,
+            Err(Diagnostics(diagnostics)) => {
+                let rendered: String = diagnostics
+                    .iter()
+                    .map(|d| d.render(&name, &source))
+                    .collect();
+                eprint!("{rendered}");
+                status = ExitCode::FAILURE;
+                continue;
+            }
+        };
+        if check {
+            println!("{name}");
+            status = ExitCode::FAILURE;
+        } else if let Err(e) = std::fs::write(&file, formatted) {
+            eprintln!("{name}: error: {e}");
+            status = ExitCode::FAILURE;
+        }
+    }
+    status
+}
+
+/// Formats standard input to standard output for `stone fmt -`, or with `check` writes nothing,
+/// returning whether it succeeded (and, with `check`, was already formatted).
+fn fmt_stdin(check: bool) -> bool {
+    let mut source = String::new();
+    if let Err(e) = std::io::stdin().read_to_string(&mut source) {
+        eprintln!("<stdin>: error: {e}");
+        return false;
+    }
+    match format::format(&source) {
+        Ok(formatted) if check => formatted == source,
+        Ok(formatted) => {
+            print!("{formatted}");
+            true
+        }
+        Err(Diagnostics(diagnostics)) => {
+            let rendered: String = diagnostics
+                .iter()
+                .map(|d| d.render("<stdin>", &source))
+                .collect();
+            eprint!("{rendered}");
+            false
+        }
+    }
 }
 
 /// Runs `stone update`, printing any error to stderr and returning the exit code.

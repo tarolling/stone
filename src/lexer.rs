@@ -51,6 +51,8 @@ pub struct Lexer {
     file: FileId,
     /// The `{value}`s of strings being lexed, innermost last.
     holes: Vec<Hole>,
+    /// Every `//` comment lexed so far with its span, or `None` when comments are dropped.
+    comments: Option<Vec<(Span, String)>>,
 }
 
 /// A `{value}` in a string whose value is being lexed.
@@ -82,7 +84,24 @@ impl Lexer {
             at_line_start: true,
             pending_dedents: vec![],
             holes: vec![],
+            comments: None,
         }
+    }
+
+    /// Returns this lexer set to record every `//` comment, which [`Lexer::comments`] then gives.
+    /// The tokens are the same either way.
+    ///
+    /// For example, lexing `x = 1  // one\n` this way records `// one` at line 1, col 8.
+    pub fn keeping_comments(mut self) -> Self {
+        self.comments = Some(vec![]);
+        self
+    }
+
+    /// Returns the comments lexed so far in order, each with its span and its text from `//` to
+    /// the end of its line, less trailing whitespace. Empty unless [`Lexer::keeping_comments`]
+    /// was asked for.
+    pub fn comments(&self) -> &[(Span, String)] {
+        self.comments.as_deref().unwrap_or_default()
     }
 
     /// Lexes the entire input and returns its tokens, ending with `Eof`.
@@ -209,11 +228,24 @@ impl Lexer {
     /// and closes any values of strings the line left open.
     fn skip_line(&mut self) {
         self.holes.clear();
-        self.skip_comment();
+        self.skip_to_newline();
     }
 
-    /// Skips a `//` comment up to but not including the newline that ends it.
+    /// Skips a `//` comment up to but not including the newline that ends it, recording it if
+    /// comments are kept.
     fn skip_comment(&mut self) {
+        let (start, from) = (self.pos(), self.pos);
+        self.skip_to_newline();
+        if let Some(comments) = &mut self.comments {
+            let text: String = self.input[from..self.pos].iter().collect();
+            let text = text.trim_end().to_string();
+            let end = Pos::new(start.line, start.col + text.chars().count());
+            comments.push((Span::new(start, end).in_file(self.file), text));
+        }
+    }
+
+    /// Skips the rest of the line, up to but not including its newline.
+    fn skip_to_newline(&mut self) {
         while let Some(ch) = self.peek() {
             if ch == '\n' {
                 break;
@@ -753,6 +785,28 @@ mod tests {
     /// Builds the expected [`start_of`] result for a token of type `r#type` at `line` and `col`.
     fn tok(r#type: TokenType, line: usize, col: usize) -> (TokenType, usize, usize) {
         (r#type, line, col)
+    }
+
+    #[test]
+    fn comments_are_kept_only_when_asked_for() {
+        let source = "// top\nif x:  // why\n    // inside\n    y = 1\t \n";
+        let mut lexer = Lexer::new(source).keeping_comments();
+        let tokens = lexer.lex().unwrap();
+        let comments: Vec<(usize, usize, &str)> = lexer
+            .comments()
+            .iter()
+            .map(|(span, text)| (span.start.line, span.start.col, text.as_str()))
+            .collect();
+        assert_eq!(
+            comments,
+            [(1, 1, "// top"), (2, 8, "// why"), (3, 5, "// inside")]
+        );
+        // the tokens are the same as without comments
+        assert_eq!(tokens, Lexer::new(source).lex().unwrap());
+
+        let mut plain = Lexer::new(source);
+        plain.lex().unwrap();
+        assert!(plain.comments().is_empty());
     }
 
     #[test]

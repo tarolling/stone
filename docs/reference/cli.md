@@ -113,6 +113,22 @@ stone clean                      # removes ./build
 Reports every syntax and type error without running the program, and exits with status 1 if
 there are any. Warnings alone print but leave the status at 0.
 
+`check` also warns about everything the program defines but never uses: variables that are
+assigned but never read, parameters, functions, methods, structs, enums, traits, and imports.
+`stone run` and `stone build` leave these out, so a program you are still writing runs quietly.
+A name that starts with `_` is never reported, which is how to keep one on purpose, as in
+`for _ in range(3):` or `fn handle(_event: str):`. Some things are never reported:
+
+- `pub` definitions and the methods of a `pub struct`, which other modules may use.
+- The functions of a trait and of an `impl Trait for T` block, and their parameters, whose
+  signatures the trait fixes.
+- A function that only calls itself is reported, but a function that only an unused function
+  calls is reported only once that caller is gone.
+
+```text
+main.stn:3:17: warning: parameter 'h' is never used; remove it or name it '_h'
+```
+
 ```sh
 stone check examples/basics.stn
 ```

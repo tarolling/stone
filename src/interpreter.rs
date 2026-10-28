@@ -144,7 +144,7 @@ struct Function {
 
 /// A function as a value: its linked name and printed type, and, for a lambda, the body it had
 /// when the value was made, since in an interactive session a later entry's lambda can take the
-/// same name.
+/// same name, and the copies a closure holds, which its lambda takes before its arguments.
 #[derive(Clone)]
 pub struct FunctionRef {
     value: Arc<FunctionValue>,
@@ -153,6 +153,8 @@ pub struct FunctionRef {
     body: Option<Rc<Function>>,
     /// The type arguments of a generic function, from where the value was made.
     types: Option<Types>,
+    /// The copies of variables a closure holds, empty for any other function value.
+    captures: Rc<[Value]>,
 }
 
 /// The type each type parameter of the running copy of a generic function stands for, by name,
@@ -2125,6 +2127,7 @@ impl<'out> Interpreter<'out> {
                 id,
                 lambda,
                 types,
+                captures,
             } => {
                 let body = match lambda {
                     true => self.functions[*id].clone(),
@@ -2135,6 +2138,7 @@ impl<'out> Interpreter<'out> {
                     id: *id,
                     body,
                     types: self.instance_types(types),
+                    captures: self.eval_exprs(captures)?.into(),
                 }))
             }
             E::List(elts) => Ok(Value::list(self.eval_exprs(elts)?)),
@@ -2583,7 +2587,9 @@ impl<'out> Interpreter<'out> {
         let Value::Function(function) = self.eval_expr(func)? else {
             return Err("only a function can be called".into());
         };
-        let values = self.eval_exprs(args)?;
+        // a closure's lambda takes its copies first
+        let mut values = function.captures.to_vec();
+        values.extend(self.eval_exprs(args)?);
         self.apply_moves(moves, &function.value.function);
         self.next_types = function.types.clone();
         let result = match &function.body {

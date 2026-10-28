@@ -493,6 +493,9 @@ pub struct Context {
     /// The tag of every variant without values that the code uses, each of which gets a static
     /// value.
     pub variant_statics: BTreeSet<usize>,
+    /// The code of every function value [`Inst::FunctionStatic`] makes, by its label, whose
+    /// static values the backend emits.
+    pub function_statics: BTreeSet<String>,
     /// List types that `print` needs a printer for, emitted after the code that uses them.
     list_printers: Vec<Type>,
     /// Whether `print` needs `stone.print_float`, emitted after the code that uses it.
@@ -557,6 +560,9 @@ impl Context {
                 }
                 Inst::VariantStatic { tag, .. } => {
                     self.variant_statics.insert(*tag);
+                }
+                Inst::FunctionStatic { label, .. } => {
+                    self.function_statics.insert(label.clone());
                 }
                 _ => {}
             }
@@ -960,6 +966,29 @@ pub fn variant_statics(r#gen: &mut dyn AssemblyGenerator, tags: &BTreeSet<usize>
     }
 }
 
+/// Returns the label of the immortal function value of the code at `label`, which
+/// [`Inst::FunctionStatic`] gives.
+///
+/// For example, `function_static("stone.fn_value.double")` is
+/// `stone.fn_value.double.static`.
+pub fn function_static(label: &str) -> String {
+    format!("{label}.static")
+}
+
+/// Emits the immortal function value of each code label in `labels`, laid out as an enum value
+/// that holds nothing behind an immortal count, like [`variant_statics`], with its tag, the
+/// code's address, left 0 for [`Inst::FunctionStatic`] to write. The caller picks the section,
+/// which must be writable.
+pub fn function_statics(r#gen: &mut dyn AssemblyGenerator, labels: &BTreeSet<String>) {
+    for label in labels {
+        r#gen.emit("\t.balign\t8");
+        r#gen.emit(&format!("\t.quad\t{IMMORTAL}"));
+        r#gen.emit(&format!("{}:", function_static(label)));
+        r#gen.emit("\t.quad\t0");
+        r#gen.emit("\t.quad\t0");
+    }
+}
+
 /// Returns the assembly symbol for a user-defined function.
 ///
 /// The prefix keeps stone functions from colliding with `main` or with C library functions, so
@@ -1024,16 +1053,12 @@ fn contains_list(ty: &Type, analysis: &Analysis, seen: &mut HashSet<String>) -> 
 /// needed. `seen` holds the structs already looked through.
 fn contains_enum(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bool {
     match ty {
-        // a handle is laid out as an enum value
-        Type::Enum { .. } | Type::Handle(_) => true,
+        // a handle and a function value are laid out as enum values
+        Type::Enum { .. } | Type::Handle(_) | Type::Function { .. } => true,
         Type::List(elem) => contains_enum(elem, structs, seen),
         Type::Map(_, value) => contains_enum(value, structs, seen),
         Type::Tuple(fields) => fields.iter().any(|f| contains_enum(f, structs, seen)),
         Type::Struct { .. } => struct_has(ty, structs, seen, contains_enum),
-        Type::Function { params, ret } => {
-            params.iter().any(|p| contains_enum(p, structs, seen))
-                || contains_enum(ret, structs, seen)
-        }
         _ => false,
     }
 }
@@ -1175,7 +1200,7 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
 /// Adds the name of every builtin that `expr` calls to `calls`.
 fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
     match &expr.kind {
-        ExprKind::Lambda { .. } => {}
+        ExprKind::Lambda { .. } | ExprKind::Closure { .. } => {}
         ExprKind::Call {
             func,
             args,

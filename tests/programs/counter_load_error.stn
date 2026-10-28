@@ -1,0 +1,9 @@
+// a range counter never counts from the end, so it is checked against the length alone
+fn sum(xs: list[int], n: int) -> int:
+    total = 0
+    for i in range(n):
+        total += xs[i]
+        print(total)
+    ret total
+
+print(sum([10, 20, 30], 5))

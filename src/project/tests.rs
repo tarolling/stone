@@ -536,6 +536,39 @@ fn links_record_imports_and_public_functions() {
 }
 
 #[test]
+fn links_record_which_imports_are_used() {
+    let linked = link(
+        Path::new("main.stn"),
+        "use util\nuse util.twice as double\nuse math\nuse geo.Point\nuse geo.Shape\n\
+         use geo\nprint(util.twice(1))\np = Point(x=1)\nfn area[T: Shape](s: T) -> int:\n    \
+         ret 1\n",
+        &sources_of(&[
+            UTIL,
+            (
+                "geo.stn",
+                "pub struct Point:\n    x: int\npub trait Shape:\n    fn area(self) -> int\n",
+            ),
+        ]),
+    );
+    let used: Vec<(&str, bool, usize)> = linked
+        .imports
+        .iter()
+        .map(|i| (i.name.as_str(), i.used, i.name_span.start.line))
+        .collect();
+    assert_eq!(
+        used,
+        [
+            ("util", true, 1),
+            ("double", false, 2),
+            ("math", false, 3),
+            ("Point", true, 4),
+            ("Shape", true, 5),
+            ("geo", false, 6),
+        ]
+    );
+}
+
+#[test]
 fn map_sources_list_directories() {
     let sources = sources_of(&[
         ("p/main.stn", ""),

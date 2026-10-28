@@ -869,7 +869,7 @@ impl Parser {
             break;
         }
 
-        Ok(Arguments { args })
+        Ok(Arguments { args, captures: 0 })
     }
 
     /// Parses function parameters if there are any, returning an empty list for `fn f():`.
@@ -881,7 +881,10 @@ impl Parser {
         let mark = self.pos;
         self.parse_parameters().unwrap_or_else(|_| {
             self.pos = mark;
-            Arguments { args: vec![] }
+            Arguments {
+                args: vec![],
+                captures: 0,
+            }
         })
     }
 

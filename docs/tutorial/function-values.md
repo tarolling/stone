@@ -71,9 +71,34 @@ takes. `||` starts a lambda that takes nothing, and a lambda's body may hold ano
 named function.
 
 A lambda is a function value like any other, so it can be passed, kept, called, and printed, and
-`stone build` calls it directly, as it does a function passed by name. Unlike a function, it may
-use no variable but its own parameters, not a global and not one of the function it is written
-in, since lambdas do not capture values yet: `|x| x * k` is an error when `k` is a variable. A
-lambda may call functions, make structs and variants, and use modules as any code does.
+`stone build` calls it directly, as it does a function passed by name. A lambda may call
+functions, make structs and variants, and use modules as any code does.
+
+## Closures
+
+A lambda may also use the variables around it: the parameters and variables of the function it
+is written in, the parameters of a lambda it is inside, and globals. Such a lambda is a closure,
+which holds a copy of each variable it uses, taken where the lambda is written, as `over` and
+`adder` do here:
+
+```{literalinclude} ../examples/closures.stn
+:language: stone
+```
+
+prints
+
+```{literalinclude} ../examples/closures.out
+:language: text
+```
+
+Since values are copies, nothing is shared: changing `k` after `f` is made leaves `f`'s copy as
+it was, and `adder(3)` and `adder(10)` each hold their own `n`. A closure cannot change its
+copies either, so `|x| ys.pop()` is an error; write a function that takes `ys` and returns it
+changed. A closure passed straight to a function, as `xs.filter(|x| x > limit)` passes one, costs
+no more than a named function, since `stone build` passes its copies along with the other
+arguments instead of making a closure.
+
+For now, a closure cannot capture a socket or a listener, nor, inside a generic function, a value
+whose type depends on a type parameter; pass those as parameters instead.
 
 Next, {doc}`input`.

@@ -5335,9 +5335,6 @@ fn byte_reads_and_timeouts_have_types() {
     );
 }
 
-const CAPTURE: &str = "a lambda cannot use 'k', a variable from outside it, since lambdas capture \
-                       nothing yet; write a function that takes 'k' as a parameter instead";
-
 #[test]
 fn a_lambda_takes_its_types_from_where_it_is_passed() {
     let source = "ys = [1, 2].map(|x| x * 2)\nzs = [\"a\"].filter(|s| s.len() > 0)\n";
@@ -5376,55 +5373,118 @@ fn a_lambda_may_call_functions_and_hold_lambdas() {
 }
 
 #[test]
-fn a_lambda_cannot_use_a_global() {
-    assert_error("k = 2\nys = [1].map(|x| x * k)\n", CAPTURE, 2, 22);
+fn a_lambda_captures_a_global() {
+    let source = "k = 2\nys = [1].map(|x| x * k)\n";
+    assert_eq!(type_of_symbol(source, "ys"), "list[int]");
 }
 
 #[test]
-fn a_lambda_cannot_use_its_function_s_variables() {
-    assert_error(
-        "fn f(xs: list[int], k: int) -> list[int]:\n    ret xs.map(|x| x * k)\n",
-        CAPTURE,
-        2,
-        24,
+fn a_lambda_captures_its_function_s_variables() {
+    assert_eq!(
+        errors("fn f(xs: list[int], k: int) -> list[int]:\n    ret xs.map(|x| x * k)\n"),
+        []
     );
+    assert_eq!(
+        errors(
+            "fn f(xs: list[int]) -> list[float]:\n    k = 2.0\n    ret xs.map(|x| float(x) * k)\n"
+        ),
+        []
+    );
+}
+
+#[test]
+fn a_captured_function_value_can_be_called() {
+    assert_eq!(
+        errors(
+            "fn g(x: int) -> int:\n    ret x\nfn f(k: fn(int) -> int) -> list[int]:\n    \
+             ret [1].map(|x| k(x))\n"
+        ),
+        []
+    );
+}
+
+#[test]
+fn a_lambda_captures_self() {
+    assert_eq!(
+        errors(
+            "struct S:\n    k: int\nimpl S:\n    fn f(self, xs: list[int]) -> list[int]:\n        \
+             ret xs.map(|x| x * self.k)\n"
+        ),
+        []
+    );
+}
+
+#[test]
+fn a_lambda_captures_an_outer_lambda_s_parameter() {
+    let source = "f = |x: int| |y: int| x + y\ng = f(1)\n";
+    assert_eq!(type_of_symbol(source, "g"), "fn(int) -> int");
+}
+
+#[test]
+fn a_closure_s_type_leaves_out_what_it_captures() {
+    let source = "k = \"a\"\nf = |x: int| k.len() + x\n";
+    assert_eq!(type_of_symbol(source, "f"), "fn(int) -> int");
+}
+
+#[test]
+fn a_closure_reads_what_it_captures_where_it_is_made() {
     assert_error(
-        "fn f(xs: list[int]) -> list[int]:\n    k = 2\n    ret xs.map(|x| x * k)\n",
-        CAPTURE,
+        "fn f(xs: list[int]) -> list[int]:\n    ys = xs.map(|x| x * k)\n    k = 2\n    ret ys\n",
+        "'k' might be used before it is assigned",
+        2,
+        25,
+    );
+}
+
+#[test]
+fn a_lambda_cannot_change_what_it_captures() {
+    assert_error(
+        "fn f(xs: list[int], ys: list[int]) -> list[int]:\n    ret xs.map(|x| ys.pop().unwrap_or(x))\n",
+        "a lambda cannot change 'ys', since it holds a copy of the variable from outside it; \
+         write a function that takes 'ys' and returns the changed value",
+        2,
+        20,
+    );
+}
+
+#[test]
+fn a_lambda_cannot_capture_a_value_of_a_type_parameter_yet() {
+    assert_error(
+        "fn has[T: eq](xs: list[T], x: T) -> bool:\n    ret xs.any(|y| y == x)\n",
+        "a lambda cannot capture 'x' yet, since its type depends on the type parameter T; write \
+         a function that takes 'x' as a parameter instead",
+        2,
+        25,
+    );
+}
+
+#[test]
+fn a_lambda_cannot_capture_a_connection() {
+    assert_error(
+        "use net\nfn f(s: listener, xs: list[int]) -> list[int]:\n    ret xs.map(|x| x + s.port())\n",
+        "a lambda cannot capture 's', since it holds a connection, which closes after the last \
+         statement that uses it; pass it as a parameter instead",
         3,
         24,
     );
 }
 
 #[test]
-fn a_local_shadowing_a_function_cannot_be_used_from_a_lambda() {
-    assert_error(
-        "fn g(x: int) -> int:\n    ret x\nfn f(k: fn(int) -> int) -> list[int]:\n    \
-         ret [1].map(|x| k(x))\n",
-        CAPTURE,
-        4,
-        21,
+fn a_lambda_captures_at_most_thirty_two_values() {
+    let fields: Vec<String> = (0..33).map(|i| format!("    f{i}: int\n")).collect();
+    let values: Vec<String> = (0..33).map(|i| format!("f{i}=0")).collect();
+    let source = format!(
+        "struct Big:\n{}b = Big({})\nf = |x: int| b.f0 + x\n",
+        fields.concat(),
+        values.join(", ")
     );
-}
-
-#[test]
-fn a_lambda_cannot_use_self() {
-    let message = "a lambda cannot use 'self', a variable from outside it, since lambdas capture \
-                   nothing yet; write a function that takes 'self' as a parameter instead";
     assert_error(
-        "struct S:\n    k: int\nimpl S:\n    fn f(self, xs: list[int]) -> list[int]:\n        \
-         ret xs.map(|x| x * self.k)\n",
-        message,
+        &source,
+        "a lambda can capture at most 32 values, but this one captures 33; pass some as \
+         parameters instead",
+        36,
         5,
-        28,
     );
-}
-
-#[test]
-fn a_lambda_cannot_use_an_outer_lambda_s_parameter() {
-    let message = "a lambda cannot use 'x', a variable from outside it, since lambdas capture \
-                   nothing yet; write a function that takes 'x' as a parameter instead";
-    assert_error("f = |x: int| |y: int| x + y\n", message, 1, 23);
 }
 
 #[test]

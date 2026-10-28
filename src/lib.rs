@@ -12,12 +12,14 @@ pub mod format;
 pub mod interpreter;
 pub mod last_use;
 pub mod lexer;
+pub mod lift;
 pub mod parser;
 pub mod project;
 pub mod repl;
 pub mod span;
 pub mod stdlib;
 pub mod token;
+pub mod unused;
 
 /// Prints to stderr in debug builds when the `STONE_DEBUG` environment variable is set, so that
 /// program output and diagnostics stay clean by default.

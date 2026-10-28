@@ -10,12 +10,48 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-10-27
+
 ### Added
 
 - `stone fmt [PATH...] [--check]` rewrites files in one standard layout: four-space blocks,
   spaces around operators and after commas, comments kept and indented with their block, and
   runs of blank lines collapsed. It only ever changes whitespace, leaves a file that does not
   parse alone, and with `--check` lists the files that need formatting instead.
+- `stone check` warns about unused variables, parameters, functions, methods, structs, enums,
+  traits, and imports. A name starting with `_` is never reported, nor are `pub` definitions or
+  functions a trait fixes. `stone run` and `stone build` do not print these warnings.
+- Closures: a lambda may use the variables around it, the parameters and variables of its
+  function, an enclosing lambda's parameters, and globals, and captures a copy of each where it
+  is written, so `xs.filter(|x| x > limit)` works and later changes to `limit` do not reach the
+  lambda. A closure passed straight to a function is called directly, its copies passed as
+  arguments, so it allocates nothing; one kept as a value is a counted object. A closure cannot
+  change its copies, nor capture a socket, a listener, or a value of a type parameter yet.
+
+### Changed
+
+- Built programs are faster, on x86-64 and arm64 alike. Against 0.3.5, `bench/programs/`
+  takes 60 ms rather than 100 ms for `fib`, 183 ms rather than 330 ms for `wordcount` (now
+  faster than `gcc -O2`'s 233 ms), 85 ms rather than 103 ms for `collatz`, and about 13% less
+  for `strings`, 5 to 10% less for `nbody`, `vector`, and `matmul`. In detail:
+  - A function whose first step tests its parameters and returns one of them, as `fib`'s base
+    case does, returns before setting up its frame.
+  - The counter of a `for` loop over `range` is known never to be negative, so indexing a list
+    with it checks only the length, and it stays in its own register.
+  - `x % 2**k == 0` (or `!= 0`) tests the low bits with one instruction, multiplying by a power
+    of two is a shift (by one more than a power of two, a shift and an add), and comparing
+    with 0 needs no constant.
+  - `xs.append(v)` stores in place without a call when the list has room.
+  - `s.len()` reads the length inline, and comparing two characters of strings in a condition,
+    as `s[i] == s[j]` or `s[i] == "a"`, compares their bytes without making strings.
+  - `==`, `startswith`, and `endswith` on strings compare their lengths first and then eight
+    bytes at a time, and printing an int or converting one with `str` writes its digits
+    without dividing.
+  - `m.get(k).unwrap_or(d)` and `m.get(k).unwrap()` make no option. Map keys hash eight bytes
+    at a time, and the index keeps part of each key's hash, so a lookup compares almost only
+    the key it is after.
+  - The most recently freed block over 64 KiB stays mapped and is used again by the next
+    allocation that fits it.
 
 ## [0.3.5] - 2026-10-26
 

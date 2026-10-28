@@ -12,16 +12,19 @@
 //! makes, so `sp` never moves in the body and every slot is addressed from it.
 
 use super::{ARG_REGS, Arm64Generator, pop_frame, push_frame};
-use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label, variant_label};
+use crate::codegen::context::{
+    FALLIBLE_ROUTINES, function_label, function_static, global_label, variant_label,
+};
 use crate::codegen::ir::liveness::analyze;
+use crate::codegen::ir::opt::never_negative;
 use crate::codegen::ir::{
-    BinOp, BlockId, Callee, Cond, FIELDS_OFFSET, Function, Inst, Kernel, Operand, RcKind,
-    Terminator, VReg, variable_of,
+    BinOp, BlockId, Callee, Cond, EarlyReturn, FIELDS_OFFSET, Function, Inst, Kernel, Operand,
+    RcKind, Terminator, VReg, variable_of,
 };
 use crate::codegen::regalloc::{Location, float_vregs, hints, linear_scan, parallel_moves};
 use crate::codegen::{AssemblyGenerator, magic_signed};
 use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Registers that calls preserve, which are the only ones that can hold a value across a call.
 const CALLEE_SAVED: [&str; 10] = [
@@ -150,6 +153,8 @@ struct Frame {
     /// How many parameters arrive on the stack, above which the caller has room for the results
     /// past [`RESULT_REGS`].
     stack_params: usize,
+    /// The vregs that never hold an index counted from the end (see [`never_negative`]).
+    natural: HashSet<VReg>,
 }
 
 impl Frame {
@@ -167,6 +172,14 @@ impl Frame {
 
     fn reg(&self, reg: VReg) -> Result<Value, String> {
         self.value(Operand::Reg(reg))
+    }
+
+    /// Returns whether `index` is never an index counted from the end.
+    fn natural(&self, index: Operand) -> bool {
+        match index {
+            Operand::Imm(n) => n >= 0,
+            Operand::Reg(reg) => self.natural.contains(&reg),
+        }
     }
 }
 
@@ -223,6 +236,7 @@ impl Arm64Generator {
             blocks,
             epilogue: self.ctx.new_label("return"),
             stack_params: function.params.len().saturating_sub(ARG_REGS.len()),
+            natural: never_negative(function),
         };
         let is_main = function.name.is_none();
 
@@ -233,6 +247,9 @@ impl Arm64Generator {
                 self.emit("\t.globl\tmain");
                 self.emit("main:");
             }
+        }
+        if let Some(early) = function.early_return() {
+            self.early_return(function, &early);
         }
         push_frame(self, &allocation.used_callee_saved);
         if locals > 0 {
@@ -694,6 +711,17 @@ impl Arm64Generator {
                     }
                 }
             },
+            Terminator::TestBranch {
+                value,
+                mask,
+                then,
+                otherwise,
+            } => {
+                // a run of ones from bit 0 is always a logical immediate
+                let reg = self.operand(frame.value(*value)?, "x10");
+                self.emit(&format!("\ttst\t{reg}, #{mask}"));
+                self.branch(frame, ("ne", "eq"), *then, *otherwise, next);
+            }
             Terminator::CmpBranch {
                 cond,
                 float,
@@ -703,7 +731,28 @@ impl Arm64Generator {
                 otherwise,
             } => {
                 let (lhs, rhs) = (frame.value(*lhs)?, frame.value(*rhs)?);
-                if *float {
+                let zero_test = matches!(cond, Cond::Eq | Cond::Ne) && !*float;
+                let tested = match (lhs, rhs) {
+                    (Value::Imm(_), Value::Imm(_)) => None,
+                    (value, Value::Imm(0)) | (Value::Imm(0), value) if zero_test => Some(value),
+                    _ => None,
+                };
+                if let Some(value) = tested {
+                    // cbz and cbnz compare with zero and branch in one
+                    let reg = self.operand(value, "x10");
+                    let (zero, nonzero) = match cond {
+                        Cond::Eq => (then, otherwise),
+                        _ => (otherwise, then),
+                    };
+                    if *nonzero == next {
+                        self.emit(&format!("\tcbz\t{reg}, {}", frame.blocks[zero.0]));
+                    } else {
+                        self.emit(&format!("\tcbnz\t{reg}, {}", frame.blocks[nonzero.0]));
+                        if *zero != next {
+                            self.emit(&format!("\tb\t{}", frame.blocks[zero.0]));
+                        }
+                    }
+                } else if *float {
                     self.compare_floats(lhs, rhs);
                     self.branch(frame, float_cc(*cond), *then, *otherwise, next);
                 } else {
@@ -810,9 +859,10 @@ impl Arm64Generator {
                 index,
                 width,
             } => {
+                let natural = frame.natural(*index);
                 let (dst, list, index) =
                     (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
-                self.element_slot(list, index, *width as i64);
+                self.element_slot(list, index, *width as i64, natural);
                 self.store(dst, "x11");
             }
 
@@ -924,6 +974,15 @@ impl Arm64Generator {
                 match (op, rhs) {
                     (BinOp::Add | BinOp::Sub, Value::Imm(n)) if fits_arith(n) => {
                         self.emit(&format!("\t{name}\t{target}, {left}, #{n}"));
+                    }
+                    // a shift, or a shifted add for one more than a power of two, as in `3 * n`
+                    (BinOp::Mul, Value::Imm(n)) if n > 1 && n & (n - 1) == 0 => {
+                        let shift = n.trailing_zeros();
+                        self.emit(&format!("\tlsl\t{target}, {left}, #{shift}"));
+                    }
+                    (BinOp::Mul, Value::Imm(n)) if n > 2 && (n - 1) & (n - 2) == 0 => {
+                        let shift = (n - 1).trailing_zeros();
+                        self.emit(&format!("\tadd\t{target}, {left}, {left}, lsl #{shift}"));
                     }
                     (BinOp::Add | BinOp::Sub, Value::Imm(n)) if n != i64::MIN && fits_arith(-n) => {
                         let flipped = if *op == BinOp::Add { "sub" } else { "add" };
@@ -1150,6 +1209,15 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
+            Inst::FunctionStatic { dst, label } => {
+                let dst = frame.reg(*dst)?;
+                let target = self.target(dst);
+                super::address(self, "x16", label);
+                super::address(self, target, &function_static(label));
+                self.emit(&format!("\tstr\tx16, [{target}]"));
+                self.store(dst, target);
+            }
+
             Inst::ListLen { dst, list } => {
                 let (dst, list) = (frame.reg(*dst)?, frame.value(*list)?);
                 let base = self.base(list, "x10");
@@ -1158,10 +1226,34 @@ impl Arm64Generator {
                 self.store(dst, target);
             }
 
+            Inst::StrByte { dst, text, index } => {
+                let (dst, text, index) =
+                    (frame.reg(*dst)?, frame.value(*text)?, frame.value(*index)?);
+                let base = self.base(text, "x10");
+                let byte = match index {
+                    Value::Imm(n) if (0..4096).contains(&n) => format!("[{base}, #{n}]"),
+                    _ => format!("[{base}, {}]", self.base(index, "x11")),
+                };
+                let target = self.target(dst);
+                // a byte load into the low half clears the rest
+                self.emit(&format!("\tldrb\tw{}, {byte}", &target[1..]));
+                self.store(dst, target);
+            }
+
+            Inst::StrLen { dst, text } => {
+                let (dst, text) = (frame.reg(*dst)?, frame.value(*text)?);
+                let base = self.base(text, "x10");
+                let target = self.target(dst);
+                // a string's length is in its header, before its count
+                self.emit(&format!("\tldur\t{target}, [{base}, #-16]"));
+                self.store(dst, target);
+            }
+
             Inst::ListLoad { dst, list, index } => {
+                let natural = frame.natural(*index);
                 let (dst, list, index) =
                     (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
-                let slot = self.list_slot(list, index, true);
+                let slot = self.list_slot(list, index, Some(natural));
                 let target = self.target(dst);
                 self.emit(&format!("\tldr\t{target}, {slot}"));
                 self.store(dst, target);
@@ -1190,12 +1282,13 @@ impl Arm64Generator {
                 index,
                 value,
             } => {
+                let natural = frame.natural(*index);
                 let (list, index, value) = (
                     frame.value(*list)?,
                     frame.value(*index)?,
                     frame.value(*value)?,
                 );
-                let slot = self.list_slot(list, index, true);
+                let slot = self.list_slot(list, index, Some(natural));
                 // `old` may share a register with `value`, so the old element waits in x9
                 if old.is_some() {
                     self.emit(&format!("\tldr\tx9, {slot}"));
@@ -1228,7 +1321,7 @@ impl Arm64Generator {
 
             Inst::ListInit { list, index, value } => {
                 let (list, value) = (frame.value(*list)?, frame.value(*value)?);
-                let slot = self.list_slot(list, Value::Imm(*index as i64), false);
+                let slot = self.list_slot(list, Value::Imm(*index as i64), None);
                 let reg = self.operand(value, "x16");
                 self.emit(&format!("\tstr\t{reg}, {slot}"));
             }
@@ -1361,6 +1454,9 @@ impl Arm64Generator {
                 }
                 match callee {
                     Callee::Value(_) => self.emit(&format!("\tblr\t{label}")),
+                    Callee::Runtime("stone.list_append") if dsts.is_empty() => {
+                        self.append_inline();
+                    }
                     _ => self.emit(&format!("\tbl\t{label}")),
                 }
                 match dsts[..] {
@@ -1392,21 +1488,29 @@ impl Arm64Generator {
 
     /// Returns the memory operand for element `index` of `list`.
     ///
-    /// When `checked`, a negative index counts from the end, and an index still out of range
-    /// exits with an error. A list is a pointer to a `{len, cap, data, kinds, width}` header (see
-    /// [`super::builtins::list_runtime`]), so for example `xs[-1]` with `xs` of length 3 checks
+    /// When `check` is `Some`, a negative index counts from the end, and an index still out of
+    /// range exits with an error; `Some(true)` says the index is never counted from the end (see
+    /// [`never_negative`]), so it is compared with the length alone. A list is a pointer to a
+    /// `{len, cap, data, kinds, width}` header (see [`super::builtins::list_runtime`]), so for
+    /// example `xs[-1]` with `xs` of length 3 checks
     /// that `-1 + 3` is below 3 and returns `[x17, x11, lsl #3]` with `x17` holding `data` and
     /// `x11` holding 2. This uses `x10`, `x11`, `x16`, and `x17`.
-    fn list_slot(&mut self, list: Value, index: Value, checked: bool) -> String {
+    fn list_slot(&mut self, list: Value, index: Value, check: Option<bool>) -> String {
         let base = self.base(list, "x10");
         let constant = match index {
             Value::Imm(n) if (0..4096).contains(&n) => Some(n),
             _ => None,
         };
-        if checked {
+        // a natural index needs no adjusting, so it can stay in its own register
+        let held = match (check, index) {
+            (Some(true), Value::Reg(reg)) => reg,
+            _ => "x11",
+        };
+        if let Some(natural) = check {
             // the error reports the index as written and the length, in FAIL_VALUES
             let mut setup = match constant {
                 Some(n) => vec![format!("\tmov\tx10, #{n}")],
+                None if natural => vec![format!("\tmov\tx10, {held}")],
                 None => vec![
                     // a negative index was counted from the end, and only a negative one is
                     // still negative after that, so the length comes off again
@@ -1425,15 +1529,17 @@ impl Arm64Generator {
                     self.emit(&format!("\tb.le\t{out_of_range}"));
                 }
                 None => {
-                    let check = self.ctx.new_label("index_check");
-                    self.load("x11", index);
-                    self.emit("\tcmp\tx11, #0");
-                    self.emit(&format!("\tb.ge\t{check}"));
-                    // negative indexes count from the end
-                    self.emit("\tadd\tx11, x11, x16");
-                    self.emit(&format!("{check}:"));
+                    self.load(held, index);
+                    if !natural {
+                        let check = self.ctx.new_label("index_check");
+                        self.emit("\tcmp\tx11, #0");
+                        self.emit(&format!("\tb.ge\t{check}"));
+                        // negative indexes count from the end
+                        self.emit("\tadd\tx11, x11, x16");
+                        self.emit(&format!("{check}:"));
+                    }
                     // unsigned, so an index still negative after adjusting is out of range too
-                    self.emit("\tcmp\tx11, x16");
+                    self.emit(&format!("\tcmp\t{held}, x16"));
                     self.emit(&format!("\tb.hs\t{out_of_range}"));
                 }
             }
@@ -1443,8 +1549,70 @@ impl Arm64Generator {
         self.emit(&format!("\tldr\tx17, [{base}, #16]"));
         match constant {
             Some(n) => format!("[x17, #{}]", 8 * n),
-            None => "[x17, x11, lsl #3]".to_string(),
+            None => format!("[x17, {held}, lsl #3]"),
         }
+    }
+
+    /// Emits the test and the return of `early` (see [`Function::early_return`]) on the argument
+    /// registers as they arrive, before the frame is made, branching past them to make it the
+    /// other way. The call is not counted, which only matters to the calls a function makes.
+    ///
+    /// For example, `fib` starts `cmp x0, #2`, `b.ge` to its frame, then `ret`, since `n` is
+    /// already in `x0`.
+    fn early_return(&mut self, function: &Function, early: &EarlyReturn) {
+        let arg = |operand: Operand| match operand {
+            Operand::Imm(n) => Some(Value::Imm(n)),
+            Operand::Reg(reg) => {
+                let position = function.params.iter().position(|&param| param == reg)?;
+                ARG_REGS.get(position).map(|&reg| Value::Reg(reg))
+            }
+        };
+        let (Some(lhs), Some(rhs)) = (arg(early.lhs), arg(early.rhs)) else {
+            return;
+        };
+        let Some(values) = early
+            .values
+            .iter()
+            .map(|&value| arg(value))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
+        if values.len() > RESULT_REGS.len() || matches!((lhs, rhs), (Value::Imm(_), Value::Imm(_)))
+        {
+            return;
+        }
+        let frame = self.ctx.new_label("frame");
+        let cond = self.compare_ints(early.cond, lhs, rhs);
+        self.emit(&format!("\tb.{}\t{frame}", cc(cond.negate())));
+        let moves: Vec<(Value, Value)> = RESULT_REGS
+            .iter()
+            .zip(values)
+            .map(|(&reg, value)| (Value::Reg(reg), value))
+            .collect();
+        for (to, from) in parallel_moves(&moves, Value::Reg("x9")) {
+            self.mov(to, from);
+        }
+        self.emit("\tret");
+        self.emit(&format!("{frame}:"));
+    }
+
+    /// Appends the slot in `x1` to the list in `x0` without a call when it has room, and calls
+    /// `stone.list_append` to grow it otherwise. This uses `x9` and `x10`.
+    fn append_inline(&mut self) {
+        let grow = self.ctx.new_label("append_grow");
+        let done = self.ctx.new_label("appended");
+        self.emit("\tldp\tx9, x10, [x0]"); // length and capacity
+        self.emit("\tcmp\tx9, x10");
+        self.emit(&format!("\tb.ge\t{grow}"));
+        self.emit("\tldr\tx10, [x0, #16]");
+        self.emit("\tstr\tx1, [x10, x9, lsl #3]");
+        self.emit("\tadd\tx9, x9, #1");
+        self.emit("\tstr\tx9, [x0]");
+        self.emit(&format!("\tb\t{done}"));
+        self.emit(&format!("{grow}:"));
+        self.emit("\tbl\tstone.list_append");
+        self.emit(&format!("{done}:"));
     }
 
     /// Branches to the `recursion is too deep` failure if a call made here would nest more calls
@@ -1468,8 +1636,8 @@ impl Arm64Generator {
     /// cannot overflow, and then the slot it starts at is. A negative one must not be below minus
     /// the slot count, and then the slot count plus the index times the width must not be
     /// negative. For example, with 7 slots per element and 14 slots, index 1 starts at slot 7 and
-    /// index -3 fails.
-    fn element_slot(&mut self, list: Value, index: Value, width: i64) {
+    /// index -3 fails. A `natural` index (see [`never_negative`]) skips the negative case.
+    fn element_slot(&mut self, list: Value, index: Value, width: i64, natural: bool) {
         let base = self.base(list, "x10");
         // the error reports the index as written, kept in x17, and the number of elements, from
         // the slot count in x16, in FAIL_VALUES
@@ -1484,7 +1652,7 @@ impl Arm64Generator {
         let done = self.ctx.new_label("slot_done");
         self.load("x17", index);
         self.emit(&format!("\tldr\tx16, [{base}]"));
-        if !matches!(index, Value::Imm(n) if n >= 0) {
+        if !natural {
             let from_start = self.ctx.new_label("slot_from_start");
             self.emit("\tcmp\tx17, #0");
             self.emit(&format!("\tb.ge\t{from_start}"));
@@ -1500,8 +1668,9 @@ impl Arm64Generator {
             self.emit(&format!("\tb\t{done}"));
             self.emit(&format!("{from_start}:"));
         }
+        // unsigned, so a natural index that wrapped past the maximum is out of range too
         self.emit("\tcmp\tx17, x16");
-        self.emit(&format!("\tb.ge\t{out_of_range}"));
+        self.emit(&format!("\tb.hs\t{out_of_range}"));
         if width > 1 {
             self.emit(&format!("\tmov\tx9, #{width}"));
             self.emit("\tmul\tx11, x17, x9");

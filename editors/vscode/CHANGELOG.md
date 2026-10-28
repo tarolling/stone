@@ -10,9 +10,15 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.3.6] - 2026-10-27
+
 ### Added
 
 - Format Document, and format on save, rewrite a file as `stone fmt` does.
+- Unused variables, parameters, functions, methods, types, and imports are underlined with a
+  warning and shown faded, as `stone check` reports them. Start a name with `_` to keep it.
+- A variable a lambda captures hovers, renames, and goes to its definition as the variable
+  itself, from inside the lambda too, and counts as used there.
 
 ## [0.3.5] - 2026-10-26
 

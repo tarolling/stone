@@ -18,6 +18,7 @@
 //! functions are rewritten to their linked names too, such as `os.env`, which the checker and
 //! both backends treat as builtins.
 
+use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -220,7 +221,11 @@ pub struct Import {
     pub name: String,
     /// The span of the last name in the `use` path, such as `dot` in `use geometry.vec.dot`.
     pub span: Span,
+    /// The span of the name it binds, which is the name after `as` if there is one.
+    pub name_span: Span,
     pub target: Target,
+    /// Whether the file names it anywhere, which `stone check` warns about when it does not.
+    pub used: bool,
 }
 
 /// A program linked into one module.
@@ -359,7 +364,7 @@ impl Loader<'_> {
         );
         errors.sort_by_key(|d| (d.span.start.line, d.span.start.col));
         let Mod::Module { body } = &mut parsed;
-        crate::ast::lift_lambdas(body);
+        crate::lift::lift_lambdas(body);
         self.diagnostics.extend(errors);
         self.files.push(SourceFile {
             path,
@@ -625,6 +630,7 @@ impl Loader<'_> {
                 defined.extend(globals.into_iter().map(|(name, _)| name));
             }
             let mut bindings = HashMap::new();
+            let first_import = imports.len();
             for u in &self.uses[i] {
                 let error = if is_reserved(&u.name) {
                     Some(format!("'{}' is a builtin, so rename it with 'as'", u.name))
@@ -645,7 +651,9 @@ impl Loader<'_> {
                         imports.push(Import {
                             name: u.name.clone(),
                             span: u.last_span,
+                            name_span: u.name_span,
                             target: target.clone(),
+                            used: false,
                         });
                         match target {
                             Target::Module(id) => Binding::Module(*id),
@@ -676,6 +684,7 @@ impl Loader<'_> {
                 own: &functions[i],
                 own_types: &types[i],
                 bindings: &bindings,
+                used: RefCell::new(HashSet::new()),
                 functions: &functions,
                 types: &types,
                 module_names: &module_names,
@@ -871,6 +880,10 @@ impl Loader<'_> {
                     entry_body.push(stmt);
                 }
             }
+            let used = rewriter.used.into_inner();
+            for import in &mut imports[first_import..] {
+                import.used = used.contains(&import.name);
+            }
         }
 
         report_method_collisions(&library_body, &entry_body, &mut self.diagnostics);
@@ -925,6 +938,7 @@ fn prelude(diagnostics: &mut Vec<Diagnostic>) -> Vec<Stmt> {
                 own: &none,
                 own_types: &none,
                 bindings: &HashMap::new(),
+                used: RefCell::new(HashSet::new()),
                 functions: &[],
                 types: &[],
                 module_names: &[],
@@ -1169,6 +1183,8 @@ struct Rewriter<'a> {
     /// functions.
     own_types: &'a HashMap<String, bool>,
     bindings: &'a HashMap<String, Binding>,
+    /// The names of `bindings` the file has looked up, so far, which are the imports it uses.
+    used: RefCell<HashSet<String>>,
     /// Every file's functions, mapped to whether they are `pub`.
     functions: &'a [HashMap<String, bool>],
     /// Every file's enums and structs, mapped to whether they are `pub`.
@@ -1185,7 +1201,19 @@ struct Rewriter<'a> {
     diagnostics: &'a mut Vec<Diagnostic>,
 }
 
-impl Rewriter<'_> {
+impl<'a> Rewriter<'a> {
+    /// Returns what `name` is bound to by a `use`, if anything, noting that the file uses it.
+    ///
+    /// For example, with `use util` in the file, `binding("util")` gives the module and marks
+    /// that import used.
+    fn binding(&self, name: &str) -> Option<&'a Binding> {
+        let binding = self.bindings.get(name);
+        if binding.is_some() {
+            self.used.borrow_mut().insert(name.to_string());
+        }
+        binding
+    }
+
     /// Rewrites a function definition's signature and body, with its parameters and assigned
     /// names as locals, leaving its name alone.
     fn function(&mut self, stmt: &mut Stmt, outer: &[TypeParam]) {
@@ -1284,7 +1312,7 @@ impl Rewriter<'_> {
         if self.own_types.contains_key(name) {
             return Err(enum_error);
         }
-        if let Some(Binding::Type(linked)) = self.bindings.get(name)
+        if let Some(Binding::Type(linked)) = self.binding(name)
             && let Some((module, short)) = linked.rsplit_once('.')
             && let Some(file) = module_names.iter().position(|m| m == module)
         {
@@ -1397,7 +1425,7 @@ impl Rewriter<'_> {
     /// Returns the linked name of the enum or struct this file calls `name`, if it is one it
     /// imports or, in a library, one it defines.
     fn enum_name(&self, name: &str) -> Option<String> {
-        match self.bindings.get(name) {
+        match self.binding(name) {
             Some(Binding::Type(linked)) => Some(linked.clone()),
             _ if self.library && self.own_types.contains_key(name) => {
                 Some(format!("{}.{name}", self.module))
@@ -1416,7 +1444,7 @@ impl Rewriter<'_> {
         span: Span,
         what: &str,
     ) -> Option<String> {
-        let Some(Binding::Module(target)) = self.bindings.get(module) else {
+        let Some(Binding::Module(target)) = self.binding(module) else {
             return None;
         };
         let module = &self.module_names[target.0 as usize];
@@ -1457,7 +1485,7 @@ impl Rewriter<'_> {
         let ExprKind::Name { id, .. } = &module.kind else {
             return false;
         };
-        if self.locals.contains(id) || !matches!(self.bindings.get(id), Some(Binding::Module(_))) {
+        if self.locals.contains(id) || !matches!(self.binding(id), Some(Binding::Module(_))) {
             return false;
         }
         let span = value.span;
@@ -1533,6 +1561,10 @@ impl Rewriter<'_> {
         match &mut expr.kind {
             // lifted before rewriting, by `lift_lambdas`
             ExprKind::Lambda { .. } => {}
+            ExprKind::Closure { function, captures } => {
+                self.name(function, expr.span, false);
+                captures.iter_mut().for_each(|c| self.expr(c));
+            }
             ExprKind::Call {
                 func,
                 args,
@@ -1644,7 +1676,7 @@ impl Rewriter<'_> {
         if self.locals.contains(id) {
             return false;
         }
-        let target = match self.bindings.get(id) {
+        let target = match self.binding(id) {
             Some(Binding::Module(target)) => target,
             Some(Binding::BuiltinModule(module)) => {
                 let attr_span = self.attr_span(func.span, attr);
@@ -1721,7 +1753,7 @@ impl Rewriter<'_> {
         if self.locals.contains(id) {
             return;
         }
-        match self.bindings.get(id) {
+        match self.binding(id) {
             Some(Binding::Function(name) | Binding::Type(name)) => *id = name.clone(),
             Some(Binding::Module(_) | Binding::BuiltinModule(_)) => self.diagnostics.push(
                 Diagnostic::error(span, format!("'{id}' is a module, not a value")),

@@ -1,0 +1,6 @@
+// a closure copies a global where it is made, which fails if nothing assigned it yet
+fn make() -> fn(int) -> int:
+    ret |x: int| x + base
+
+print(make()(1))
+base = 2

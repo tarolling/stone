@@ -28,7 +28,7 @@ grammar is
 | `[1, 2] + [3]` joins, `[0] * 3` repeats | `+ - * / % **` on lists work element by element, as in numpy; join with `xs.extend(ys)` |
 | `xs.insert(9, x)` clamps the index | an index past either end is an error |
 | `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `xs.sort()`, on a list of `int`, `float`, `str`, or an `ord` type, and `xs.sort_by_key(f)`; `-0.0` sorts before `0.0`, and `nan` last |
-| `lambda x: x * 2` | `\|x\| x * 2`, which may use only its own parameters; closures are not supported yet |
+| `lambda x: x * 2` | `\|x\| x * 2`, which may use the variables around it as copies taken where it is written |
 | `map(f, xs)`, `filter(f, xs)`, `any(...)`, `min(xs, key=f)` | `xs.map(f)`, `xs.filter(f)`, `xs.any(f)`, `xs.min_by_key(f)`, each a new list or value |
 | `t = 1, 2`, `return a, b` | `t = (1, 2)`, `ret (a, b)`; a tuple's values always need parentheses |
 | `()`, `(x,)` | no empty or one-value tuples; a tuple has two or more values |

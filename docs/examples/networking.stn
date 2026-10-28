@@ -5,7 +5,7 @@ use net
 // Answers each of the `n` lines a client sends with its length.
 fn answer(l: listener, n: int) -> result[int, str]:
     c = l.accept()?
-    for i in range(n):
+    for _ in range(n):
         word = c.read_line()?.unwrap_or("")
         c.send("{word} has {word.len()} letters\n")?
     ret ok(n)

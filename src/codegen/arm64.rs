@@ -24,7 +24,7 @@ pub mod sort;
 use crate::ast::Mod;
 use crate::codegen::context::{
     BYTES_ROUTINES, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, STRING_METHOD_ROUTINES,
-    escape, global_label, immortal_bytes, immortal_string, variant_statics,
+    escape, function_statics, global_label, immortal_bytes, immortal_string, variant_statics,
 };
 use crate::codegen::{AssemblyGenerator, Os, Target};
 use crate::project::SourceMap;
@@ -498,7 +498,8 @@ impl Arm64Generator {
         let literals = self.ctx.string_literals();
         let bytes = self.ctx.bytes_literals();
         let statics = std::mem::take(&mut self.ctx.variant_statics);
-        if literals.is_empty() && bytes.is_empty() && statics.is_empty() {
+        let functions = std::mem::take(&mut self.ctx.function_statics);
+        if literals.is_empty() && bytes.is_empty() && statics.is_empty() && functions.is_empty() {
             return;
         }
 
@@ -511,6 +512,7 @@ impl Arm64Generator {
             immortal_bytes(self, &label, &bytes);
         }
         variant_statics(self, &statics);
+        function_statics(self, &functions);
         self.emit("");
     }
 
@@ -650,6 +652,27 @@ mod tests {
 
     const FIB: &str = "fn fib(n: int) -> int:\n    if n < 2:\n        ret n\n    \
                        ret fib(n - 1) + fib(n - 2)\nprint(fib(10))\n";
+
+    #[test]
+    fn a_base_case_returns_before_the_frame_is_made() {
+        let fib = function_text(&assemble(FIB).unwrap(), "fib");
+        let lines: Vec<&str> = fib.lines().collect();
+        // the test on n and the return of n come first, from the argument register
+        assert_eq!(lines[1], "\tcmp\tx0, #2", "{fib}");
+        assert!(lines[2].starts_with("\tb.ge\t.Lframe_"), "{fib}");
+        assert_eq!(lines[3], "\tret", "{fib}");
+        assert!(lines[4].starts_with(".Lframe_"), "{fib}");
+    }
+
+    #[test]
+    fn an_append_with_room_stores_without_a_call() {
+        let fill = function_text(&assemble("fn fill(n: int) -> list[int]:\n    xs = []\n    for i in range(n):\n        xs.append(i)\n    ret xs\nprint(fill(3))\n").unwrap(), "fill");
+        // the call only grows the list, after the store is skipped
+        let store = fill.find("\tstr\tx1, [x10, x9, lsl #3]").expect(&fill);
+        let call = fill.find("\tbl\tstone.list_append").expect(&fill);
+        assert!(fill[..store].contains("\tb.ge\t.Lappend_grow"), "{fill}");
+        assert!(store < call, "{fill}");
+    }
 
     #[test]
     fn assemble_returns_assembly_text() {

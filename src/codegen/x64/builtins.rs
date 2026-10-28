@@ -31,7 +31,9 @@ pub fn start_runtime(r#gen: &mut dyn AssemblyGenerator) {
 /// the header. Freed blocks go on a list per class for the next allocation of that class, and
 /// new ones are cut from regions of [`HEAP_REGION`] bytes, which are never unmapped. A block
 /// too large for any class is a mapping of its own, whose header holds its length instead,
-/// which is always more than any class.
+/// which is always more than any class. The large block freed last stays mapped, and the next
+/// one that fits in it and needs at least half of it takes it, so that a program making the same
+/// big list over and over does not map fresh pages, and fault them in, every time.
 ///
 /// - `stone.mem_alloc` returns at least `rdi` bytes, aligned to 8
 /// - `stone.mem_free` frees the bytes at `rax`
@@ -54,6 +56,9 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     // the first free block of each class, linked through the 8 bytes after each header
     r#gen.emit("stone.free_blocks:");
     r#gen.emit(&format!("\t.zero\t{}", 8 * (LARGEST_CLASS + 1)));
+    // the large block freed last, kept mapped for the next one that fits
+    r#gen.emit("stone.large_free:");
+    r#gen.emit("\t.zero\t8");
     r#gen.emit("\t.text");
 
     r#gen.emit("stone.mem_alloc:");
@@ -102,6 +107,22 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tpush\trdi");
     r#gen.emit("\tadd\trdi, 8 + 4095"); // whole pages
     r#gen.emit("\tand\trdi, -4096");
+    // the block freed last, if it holds these pages and is at most twice as big, whose pages
+    // are already there
+    r#gen.emit("\tmov\trax, QWORD PTR [rip + stone.large_free]");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lmem_alloc_map");
+    r#gen.emit("\tmov\trcx, QWORD PTR [rax]");
+    r#gen.emit("\tcmp\trcx, rdi");
+    r#gen.emit("\tjb\t.Lmem_alloc_map");
+    r#gen.emit("\tshr\trcx, 1");
+    r#gen.emit("\tcmp\trcx, rdi");
+    r#gen.emit("\tja\t.Lmem_alloc_map");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.large_free], 0");
+    r#gen.emit("\tpop\trdi");
+    r#gen.emit("\tadd\trax, 8");
+    r#gen.emit("\tret");
+    r#gen.emit(".Lmem_alloc_map:");
     r#gen.emit("\tcall\tstone.mem_map");
     r#gen.emit("\tmov\tQWORD PTR [rax], rdi");
     r#gen.emit("\tpop\trdi");
@@ -119,8 +140,15 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tQWORD PTR [rax + 8], rcx");
     r#gen.emit("\tmov\tQWORD PTR [rdx], rax");
     r#gen.emit("\tret");
-    // syscalls clobber rcx and r11
+    // the block is kept for the next large one, and the one kept before is unmapped, with
+    // syscalls clobbering rcx and r11
     r#gen.emit(".Lmem_free_large:");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rip + stone.large_free]");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.large_free], rax");
+    r#gen.emit("\ttest\trdx, rdx");
+    r#gen.emit("\tjz\t.Lmem_free_kept");
+    r#gen.emit("\tmov\trax, rdx");
+    r#gen.emit("\tmov\trcx, QWORD PTR [rdx]");
     r#gen.emit("\tpush\trdi");
     r#gen.emit("\tpush\trsi");
     r#gen.emit("\tpush\tr11");
@@ -131,6 +159,7 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tpop\tr11");
     r#gen.emit("\tpop\trsi");
     r#gen.emit("\tpop\trdi");
+    r#gen.emit(".Lmem_free_kept:");
     r#gen.emit("\tret");
 
     r#gen.emit("stone.mem_realloc:");
@@ -626,16 +655,7 @@ pub fn print(r#gen: &mut dyn AssemblyGenerator, strings: bool, eprints: bool) {
     r#gen.emit("\tneg\trax");
     r#gen.emit("\tmov\tr8, 1");
     r#gen.emit(".Lprint_int_digits:");
-    r#gen.emit("\tmov\trcx, 10");
-    r#gen.emit(".Lprint_int_loop:");
-    // at least one digit, so zero prints as 0
-    r#gen.emit("\txor\trdx, rdx");
-    r#gen.emit("\tdiv\trcx");
-    r#gen.emit("\tadd\tdl, 48"); // '0'
-    r#gen.emit("\tdec\trsi");
-    r#gen.emit("\tmov\tbyte ptr [rsi], dl");
-    r#gen.emit("\ttest\trax, rax");
-    r#gen.emit("\tjnz\t.Lprint_int_loop");
+    decimal_digits(r#gen, ".Lprint_int_loop");
     r#gen.emit("\ttest\tr8, r8");
     r#gen.emit("\tjz\t.Lprint_int_write");
     r#gen.emit("\tdec\trsi");
@@ -961,7 +981,8 @@ pub fn str_float_runtime(r#gen: &mut dyn AssemblyGenerator) {
 ///   changes only `rax`
 /// - `stone.cstr_len` returns the length of the null-terminated bytes at `rdi`, such as a
 ///   program argument or a pointer into a string, by scanning them, and changes only `rax`
-/// - `stone.str_eq` returns 1 if the strings in `rdi` and `rsi` hold the same bytes, else 0
+/// - `stone.str_eq` returns 1 if the strings in `rdi` and `rsi` hold the same bytes, else 0,
+///   changing only `rax`, `rdx`, `rdi`, and `rsi`
 /// - `stone.str_concat` returns a new string holding `rdi` followed by `rsi`
 /// - `stone.str_slice` returns a new string holding the `rsi` bytes at `rdi`
 pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
@@ -984,15 +1005,35 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trax, QWORD PTR [rdi - 16]");
     r#gen.emit("\tcmp\trax, QWORD PTR [rsi - 16]");
     r#gen.emit("\tjne\t.Lstr_eq_differ");
-    r#gen.emit(".Lstr_eq_loop:");
-    r#gen.emit("\tmov\tal, byte ptr [rdi]");
-    r#gen.emit("\tcmp\tal, byte ptr [rsi]");
+    r#gen.emit("\tcmp\trdi, rsi");
+    r#gen.emit("\tje\t.Lstr_eq_same");
+    // whether the rax bytes at rdi and rsi are the same, for the string methods too
+    r#gen.emit(".Lstr_eq_bytes:");
+    r#gen.emit("\tcmp\trax, 8");
+    r#gen.emit("\tjb\t.Lstr_eq_short");
+    // the last eight bytes, then eight at a time from the start up to them, never reading past
+    // the end, since a literal may end its section
+    r#gen.emit("\tmov\trdx, QWORD PTR [rdi + rax - 8]");
+    r#gen.emit("\tcmp\trdx, QWORD PTR [rsi + rax - 8]");
     r#gen.emit("\tjne\t.Lstr_eq_differ");
-    r#gen.emit("\ttest\tal, al");
-    r#gen.emit("\tjz\t.Lstr_eq_same"); // both ended together
-    r#gen.emit("\tinc\trdi");
-    r#gen.emit("\tinc\trsi");
-    r#gen.emit("\tjmp\t.Lstr_eq_loop");
+    r#gen.emit(".Lstr_eq_words:");
+    r#gen.emit("\tsub\trax, 8");
+    r#gen.emit("\tjbe\t.Lstr_eq_same");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rdi]");
+    r#gen.emit("\tcmp\trdx, QWORD PTR [rsi]");
+    r#gen.emit("\tjne\t.Lstr_eq_differ");
+    r#gen.emit("\tadd\trdi, 8");
+    r#gen.emit("\tadd\trsi, 8");
+    r#gen.emit("\tjmp\t.Lstr_eq_words");
+    r#gen.emit(".Lstr_eq_short:");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lstr_eq_same");
+    r#gen.emit(".Lstr_eq_byte:");
+    r#gen.emit("\tmov\tdl, byte ptr [rdi + rax - 1]");
+    r#gen.emit("\tcmp\tdl, byte ptr [rsi + rax - 1]");
+    r#gen.emit("\tjne\t.Lstr_eq_differ");
+    r#gen.emit("\tdec\trax");
+    r#gen.emit("\tjnz\t.Lstr_eq_byte");
     r#gen.emit(".Lstr_eq_same:");
     r#gen.emit("\tmov\trax, 1");
     r#gen.emit("\tret");
@@ -1245,10 +1286,12 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator, maps_shrink: bool) {
 /// `map[str, tuple[int, int]]` has a `width` of 3. Its `index` is 0 until the first lookup, and
 /// then points to a hash table: its capacity, a power of two from 8, how many entries were
 /// removed, whether the keys are strings, and then that many slots, each 0 if empty, -1 if its
-/// entry was removed, or else 1 more than the first slot of an entry. The table stays at most
-/// half full, counting removed entries. A copy of a map (`stone.list_copy`) has no index, and
-/// builds one when it is first used. Keys are ints, bools, or strings, which `rdx` says by being
-/// 1. Strings are equal if their bytes are, which needs the string runtime only if `strings`.
+/// entry was removed, or else 1 more than the first slot of an entry in its low 32 bits and 31
+/// bits of its key's hash above them, so that a probe passes most other keys without reading
+/// them. The table stays at most half full, counting removed entries. A copy of a map
+/// (`stone.list_copy`) has no index, and builds one when it is first used. Keys are ints, bools,
+/// or strings, which `rdx` says by being 1. Strings are equal if their bytes are, which needs the
+/// string runtime only if `strings`.
 ///
 /// Removing an entry leaves it where it is, with its counted values zeroed by the caller, so that
 /// no later entry moves, and the entries close up (`stone.map_compact`) once removed ones are more
@@ -1294,8 +1337,8 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tcall\t.Lmap_rebuild");
     r#gen.emit(".Lmap_find_indexed:");
     r#gen.emit("\tcall\t.Lmap_probe");
-    // an empty slot holds 0, which becomes -1
-    r#gen.emit("\tmov\trax, QWORD PTR [rax]");
+    // an empty slot holds 0, which becomes -1, and the tag above is left off
+    r#gen.emit("\tmov\teax, DWORD PTR [rax]");
     r#gen.emit("\tdec\trax");
     leave(r#gen);
 
@@ -1333,8 +1376,9 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tinc\tQWORD PTR [r12 - 8]");
     r#gen.emit(".Lmap_add_key:");
     r#gen.emit("\tcall\t.Lmap_probe");
-    r#gen.emit("\tlea\trcx, [r14 + 1]");
-    r#gen.emit("\tmov\tQWORD PTR [rax], rcx");
+    r#gen.emit("\tlea\trdx, [r14 + 1]");
+    r#gen.emit("\tor\trdx, rcx"); // the key's tag
+    r#gen.emit("\tmov\tQWORD PTR [rax], rdx");
     r#gen.emit("\tmov\trax, r14");
     leave(r#gen);
 
@@ -1345,7 +1389,7 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tcall\t.Lmap_rebuild");
     r#gen.emit(".Lmap_take_indexed:");
     r#gen.emit("\tcall\t.Lmap_probe");
-    r#gen.emit("\tmov\trcx, QWORD PTR [rax]");
+    r#gen.emit("\tmov\tecx, DWORD PTR [rax]");
     r#gen.emit("\ttest\trcx, rcx");
     r#gen.emit("\tjz\t.Lmap_take_missing");
     r#gen.emit("\tmov\tQWORD PTR [rax], -1");
@@ -1429,7 +1473,7 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     // an entry is kept if its key still finds it
     r#gen.emit("\tcall\t.Lmap_probe");
     r#gen.emit("\tlea\trcx, [r14 + 1]");
-    r#gen.emit("\tcmp\trcx, QWORD PTR [rax]");
+    r#gen.emit("\tcmp\tecx, DWORD PTR [rax]");
     r#gen.emit("\tjne\t.Lmap_squeeze_skip");
     r#gen.emit("\tmov\trax, QWORD PTR [rbx + 16]");
     r#gen.emit("\tlea\trsi, [rax + r14 * 8]");
@@ -1496,8 +1540,9 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tmov\tr12, QWORD PTR [rax + r14 * 8]");
     // the keys differ, so this finds an empty slot
     r#gen.emit("\tcall\t.Lmap_probe");
-    r#gen.emit("\tlea\trcx, [r14 + 1]");
-    r#gen.emit("\tmov\tQWORD PTR [rax], rcx");
+    r#gen.emit("\tlea\trdx, [r14 + 1]");
+    r#gen.emit("\tor\trdx, rcx"); // the key's tag
+    r#gen.emit("\tmov\tQWORD PTR [rax], rdx");
     r#gen.emit("\tadd\tr14, QWORD PTR [rbx + 32]");
     r#gen.emit("\tjmp\t.Lmap_rebuild_next");
     r#gen.emit(".Lmap_rebuild_done:");
@@ -1507,33 +1552,61 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tret");
 
     // returns in rax the address of the slot of map rbx's index that holds key r12's entry, or
-    // of the empty slot where it would go, probing one slot after another and passing removed
-    // entries' slots: r8 is the index, r9 the mask of a slot number, r10 the slot's address, and
-    // r11 what it holds
+    // of the empty slot where it would go, and in rcx the key's tag, probing one slot after
+    // another and passing removed entries' slots and other keys' tags: r8 is the index, r9 the
+    // mask of a slot number, r10 the slot's address, and r11 what it holds
     r#gen.emit(".Lmap_probe:");
-    // the hash, FNV-1a over a string's bytes, then mixed by Fibonacci hashing
     r#gen.emit("\tmov\trax, r12");
     if strings {
+        // a string's hash starts from its length and takes in eight bytes at a time, the last
+        // eight overlapping the ones before, and a string shorter than eight is read as the word
+        // that ends at its last byte, whose first bytes are the count's, shifted out
         r#gen.emit("\ttest\tr13, r13");
         r#gen.emit("\tjz\t.Lmap_probe_mix");
-        r#gen.emit("\tmovabs\trax, 0xcbf29ce484222325");
-        r#gen.emit("\tmovabs\trcx, 0x100000001b3");
+        r#gen.emit("\tmov\trcx, QWORD PTR [r12 - 16]");
+        r#gen.emit("\tmovabs\tr9, 0x9e3779b97f4a7c15");
+        r#gen.emit("\tmov\trax, rcx");
+        r#gen.emit("\timul\trax, r9");
         r#gen.emit("\tmov\trdx, r12");
-        r#gen.emit(".Lmap_probe_byte:");
-        r#gen.emit("\tmovzx\tr8d, byte ptr [rdx]");
-        r#gen.emit("\ttest\tr8d, r8d");
+        r#gen.emit("\tcmp\trcx, 8");
+        r#gen.emit("\tjae\t.Lmap_probe_words");
+        r#gen.emit("\ttest\trcx, rcx");
         r#gen.emit("\tjz\t.Lmap_probe_mix");
+        r#gen.emit("\tmov\tr8, QWORD PTR [rdx + rcx - 8]");
+        r#gen.emit("\tshl\tecx, 3");
+        r#gen.emit("\tneg\tecx"); // 64 - 8 * length, as a shift reads it
+        r#gen.emit("\tshr\tr8, cl");
+        r#gen.emit("\tjmp\t.Lmap_probe_last");
+        r#gen.emit(".Lmap_probe_words:");
+        r#gen.emit("\tcmp\trcx, 8");
+        r#gen.emit("\tjbe\t.Lmap_probe_tail");
+        r#gen.emit("\txor\trax, QWORD PTR [rdx]");
+        r#gen.emit("\timul\trax, r9");
+        r#gen.emit("\tmov\tr8, rax");
+        r#gen.emit("\tshr\tr8, 29");
         r#gen.emit("\txor\trax, r8");
-        r#gen.emit("\timul\trax, rcx");
-        r#gen.emit("\tinc\trdx");
-        r#gen.emit("\tjmp\t.Lmap_probe_byte");
+        r#gen.emit("\tadd\trdx, 8");
+        r#gen.emit("\tsub\trcx, 8");
+        r#gen.emit("\tjmp\t.Lmap_probe_words");
+        r#gen.emit(".Lmap_probe_tail:");
+        r#gen.emit("\tmov\tr8, QWORD PTR [rdx + rcx - 8]");
+        r#gen.emit(".Lmap_probe_last:");
+        r#gen.emit("\txor\trax, r8");
+        r#gen.emit("\timul\trax, r9");
+        r#gen.emit("\tmov\tr8, rax");
+        r#gen.emit("\tshr\tr8, 29");
+        r#gen.emit("\txor\trax, r8");
     }
+    // mixed by Fibonacci hashing, whose high bits are the tag kept above each slot's entry
     r#gen.emit(".Lmap_probe_mix:");
     r#gen.emit("\tmovabs\trcx, 0x9e3779b97f4a7c15");
     r#gen.emit("\timul\trax, rcx");
     r#gen.emit("\tmov\trcx, rax");
     r#gen.emit("\tshr\trcx, 32");
     r#gen.emit("\txor\trax, rcx");
+    r#gen.emit("\tmov\trcx, rax");
+    r#gen.emit("\tshr\trcx, 33");
+    r#gen.emit("\tshl\trcx, 32");
     r#gen.emit("\tmov\tr8, QWORD PTR [rbx + 40]");
     r#gen.emit("\tmov\tr9, QWORD PTR [r8]");
     r#gen.emit("\tdec\tr9");
@@ -1545,6 +1618,11 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit("\tjz\t.Lmap_probe_done");
     r#gen.emit("\tcmp\tr11, -1");
     r#gen.emit("\tje\t.Lmap_probe_next"); // a removed entry's
+    r#gen.emit("\tmov\trdx, r11");
+    r#gen.emit("\txor\trdx, rcx");
+    r#gen.emit("\tshr\trdx, 32");
+    r#gen.emit("\tjnz\t.Lmap_probe_next"); // another key's tag
+    r#gen.emit("\tmov\tr11d, r11d");
     r#gen.emit("\tmov\trdx, QWORD PTR [rbx + 16]");
     r#gen.emit("\tmov\trsi, QWORD PTR [rdx + r11 * 8 - 8]");
     r#gen.emit("\tcmp\trsi, r12");
@@ -1552,12 +1630,12 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     if strings {
         r#gen.emit("\ttest\tr13, r13");
         r#gen.emit("\tjz\t.Lmap_probe_next");
-        // stone.str_eq changes only rax, rdi, and rsi
-        r#gen.emit("\tmov\trcx, rax");
+        // stone.str_eq changes only rax, rdx, rdi, and rsi, and rdx is loaded again
+        r#gen.emit("\tmov\tr11, rax");
         r#gen.emit("\tmov\trdi, r12");
         r#gen.emit("\tcall\tstone.str_eq");
         r#gen.emit("\ttest\trax, rax");
-        r#gen.emit("\tmov\trax, rcx");
+        r#gen.emit("\tmov\trax, r11");
         r#gen.emit("\tjnz\t.Lmap_probe_done");
     }
     r#gen.emit(".Lmap_probe_next:");
@@ -1937,6 +2015,30 @@ fn clamp_slice_bound(r#gen: &mut dyn AssemblyGenerator, prefix: &str) {
     r#gen.emit(&format!("\tjl\t{prefix}_done"));
     r#gen.emit("\tlea\trax, [r9 + r10]");
     r#gen.emit(&format!("{prefix}_done:"));
+}
+
+/// Emits a loop at `label` that writes the decimal digits of the unsigned `rax` backward from
+/// `rsi`, leaving `rsi` at the first, with at least one digit so that zero writes `0`. This uses
+/// `rcx`, `rdx`, and `r9`.
+///
+/// Each step divides by 10 as a multiplication by `0xcccccccccccccccd`, whose high half shifted
+/// right by 3 is the quotient for every unsigned 64-bit value, rather than with `div`, which takes
+/// several times as long. For example, 1234 writes `4`, `3`, `2`, then `1`.
+fn decimal_digits(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+    r#gen.emit("\tmov\tr9, -3689348814741910323"); // 0xcccccccccccccccd
+    r#gen.emit(&format!("{label}:"));
+    r#gen.emit("\tmov\trcx, rax");
+    r#gen.emit("\tmul\tr9");
+    r#gen.emit("\tshr\trdx, 3"); // the quotient
+    r#gen.emit("\tlea\trax, [rdx + rdx * 4]");
+    r#gen.emit("\tadd\trax, rax");
+    r#gen.emit("\tsub\trcx, rax"); // the digit
+    r#gen.emit("\tadd\tcl, 48"); // '0'
+    r#gen.emit("\tdec\trsi");
+    r#gen.emit("\tmov\tbyte ptr [rsi], cl");
+    r#gen.emit("\tmov\trax, rdx");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjnz\t{label}"));
 }
 
 /// Emits `label`, a routine that prints the list in `rdi` as `[a, b]`, calling `element` for each
@@ -2531,15 +2633,7 @@ pub fn conversion_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tneg\trax");
     r#gen.emit("\tmov\tr8, 1");
     r#gen.emit(".Lstr_int_digits:");
-    r#gen.emit("\tmov\trcx, 10");
-    r#gen.emit(".Lstr_int_loop:");
-    r#gen.emit("\txor\trdx, rdx");
-    r#gen.emit("\tdiv\trcx");
-    r#gen.emit("\tadd\tdl, 48"); // '0'
-    r#gen.emit("\tdec\trsi");
-    r#gen.emit("\tmov\tbyte ptr [rsi], dl");
-    r#gen.emit("\ttest\trax, rax");
-    r#gen.emit("\tjnz\t.Lstr_int_loop");
+    decimal_digits(r#gen, ".Lstr_int_loop");
     r#gen.emit("\ttest\tr8, r8");
     r#gen.emit("\tjz\t.Lstr_int_copy");
     r#gen.emit("\tdec\trsi");
@@ -2854,28 +2948,20 @@ pub fn string_methods(
     if uses("stone.str_ends") {
         // the suffix must start where the string has exactly its length left
         r#gen.emit("stone.str_ends:");
-        r#gen.emit("\tmov\trax, QWORD PTR [rdi - 16]");
-        r#gen.emit("\tsub\trax, QWORD PTR [rsi - 16]");
-        r#gen.emit("\tjb\t.Lstr_starts_no"); // the suffix is longer
-        r#gen.emit("\tadd\trdi, rax");
-        r#gen.emit("\tjmp\tstone.str_starts");
+        r#gen.emit("\tmov\trax, QWORD PTR [rsi - 16]");
+        r#gen.emit("\tmov\trdx, QWORD PTR [rdi - 16]");
+        r#gen.emit("\tsub\trdx, rax");
+        r#gen.emit("\tjb\t.Lstr_eq_differ"); // the suffix is longer
+        r#gen.emit("\tadd\trdi, rdx");
+        r#gen.emit("\tjmp\t.Lstr_eq_bytes");
     }
-    if uses("stone.str_starts") || uses("stone.str_ends") {
+    if uses("stone.str_starts") {
+        // the prefix's bytes, if the string is as long
         r#gen.emit("stone.str_starts:");
-        r#gen.emit("\tmovzx\teax, byte ptr [rsi]");
-        r#gen.emit("\ttest\teax, eax");
-        r#gen.emit("\tjz\t.Lstr_starts_yes");
-        r#gen.emit("\tcmp\tal, byte ptr [rdi]");
-        r#gen.emit("\tjne\t.Lstr_starts_no");
-        r#gen.emit("\tinc\trdi");
-        r#gen.emit("\tinc\trsi");
-        r#gen.emit("\tjmp\tstone.str_starts");
-        r#gen.emit(".Lstr_starts_yes:");
-        r#gen.emit("\tmov\teax, 1");
-        r#gen.emit("\tret");
-        r#gen.emit(".Lstr_starts_no:");
-        r#gen.emit("\txor\teax, eax");
-        r#gen.emit("\tret");
+        r#gen.emit("\tmov\trax, QWORD PTR [rsi - 16]");
+        r#gen.emit("\tcmp\trax, QWORD PTR [rdi - 16]");
+        r#gen.emit("\tja\t.Lstr_eq_differ");
+        r#gen.emit("\tjmp\t.Lstr_eq_bytes");
     }
     if uses("stone.str_splitlines") {
         str_splitlines(r#gen);

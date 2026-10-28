@@ -339,7 +339,7 @@ fn methods_lower_to_list_and_string_operations() {
     assert_eq!(
         dump(source).split("fn main").next().unwrap(),
         "fn f(v0, v1):\n\
-         b0:\n  v2 = call stone.str_len(v1)\n  v0 = list_unique v0\n  \
+         b0:\n  v2 = str_len v1\n  v0 = list_unique v0\n  \
          call stone.list_append(v0, v2)\n  v3 = len v0\n  release_list v0\n  ret v3\n"
     );
 }
@@ -548,7 +548,7 @@ fn string_indexes_check_the_length_then_call_the_runtime() {
     let text = dump(source);
     let f = text.split("fn main").next().unwrap();
     for line in [
-        "v2 = call stone.str_len(v0)",
+        "v2 = str_len v0",
         "br_lt v3, 0",
         "v3 = add v3, v2",
         // the error reports the index as written and the length
@@ -584,7 +584,7 @@ fn a_for_loop_over_a_string_steps_by_each_character() {
     let text = dump(source);
     let f = text.split("fn main").next().unwrap();
     // the length once, then a character and its length each time around
-    assert_eq!(f.matches("call stone.str_len").count(), 2, "{f}");
+    assert_eq!(f.matches("str_len").count(), 2, "{f}");
     for line in ["call stone.str_char(", "release_str"] {
         assert!(f.contains(line), "{line} in\n{f}");
     }
@@ -1549,6 +1549,94 @@ fn a_function_value_passed_to_a_function_is_called_directly_in_its_copy() {
     assert!(apply.contains("call double("), "{apply}");
     // a call through a value that nothing binds stays one
     let ir = dump("fn double(x: int) -> int:\n    ret x * 2\nfs = [double]\nprint(fs[0](1))\n");
-    assert!(ir.contains("fn_addr fn.double"), "{ir}");
+    assert!(ir.contains("fn_static stone.fn_value.double"), "{ir}");
     assert!(ir.contains("call value "), "{ir}");
+}
+
+#[test]
+fn a_closure_holds_its_copies_and_its_code_finds_them() {
+    let source = "fn above(limit: int) -> fn(int) -> bool:\n    ret |x: int| x > limit\n\
+                  f = above(2)\nprint(f(3))\n";
+    let ir = dump(source);
+    // the closure is laid out as an enum value whose tag is its code
+    assert!(ir.contains("= fn_addr stone.fn_value.lambda.2.9\n"), "{ir}");
+    assert!(ir.contains("call stone.enum_new(v"), "{ir}");
+    assert!(ir.contains("field_init "), "{ir}");
+    // its code takes the closure first and reads its copy from it
+    assert!(ir.contains("fn stone.fn_value.lambda.2.9(v0, v1):"), "{ir}");
+    assert!(ir.contains("field_get v0, 0"), "{ir}");
+    // a call through a value calls its tag, passing the value first
+    assert!(ir.contains("= enum_tag "), "{ir}");
+    assert!(ir.contains("call value "), "{ir}");
+}
+
+#[test]
+fn a_closure_passed_to_a_function_is_called_directly_with_its_copies() {
+    let source = "fn above(xs: list[int], limit: int) -> list[int]:\n    \
+                  ret xs.filter(|x| x > limit)\nprint(above([1, 5], 2))\n";
+    let program = lower_source(source);
+    let function = |label: &str| {
+        program
+            .functions
+            .iter()
+            .find(|f| f.name.as_deref() == Some(label))
+            .unwrap_or_else(|| panic!("no function {label}"))
+            .to_string()
+    };
+    // no closure is made: the copy of `filter` takes `limit` in the closure's place
+    let above = function("above");
+    assert!(!above.contains("enum_new"), "{above}");
+    assert!(
+        above.contains("call prelude.filter..int..fn1.lambda.2.19(v0, v1)"),
+        "{above}"
+    );
+    let filter = function("prelude.filter..int..fn1.lambda.2.19");
+    assert!(
+        filter.starts_with("fn prelude.filter..int..fn1.lambda.2.19(v0, v"),
+        "{filter}"
+    );
+    assert!(filter.contains("call lambda.2.19(v"), "{filter}");
+    assert!(!filter.contains("call value"), "{filter}");
+}
+
+#[test]
+fn a_string_length_is_read_from_its_header() {
+    let f = dump("fn f(s: str, b: bytes) -> int:\n    ret s.len() + b.len()\n");
+    assert!(f.contains("= str_len v0"), "{f}");
+    assert!(f.contains("= str_len v1"), "{f}");
+    assert!(!f.contains("call stone.str_len"), "{f}");
+}
+
+#[test]
+fn characters_compared_in_a_condition_are_compared_as_bytes() {
+    let f = dump(
+        "fn f(w: str) -> int:\n    if w[0] == w[-1]:\n        ret 1\n    if w[1] != \"x\":\n        \
+         ret 2\n    ret 0\n",
+    );
+    assert_eq!(f.matches("= str_byte v0, ").count(), 3, "{f}");
+    // a byte past ascii is part of a longer character, which a one-byte string cannot hold
+    assert_eq!(
+        f.matches("fail \"cannot cut a string inside a character\"")
+            .count(),
+        3,
+        "{f}"
+    );
+    assert!(f.contains(", 120 -> "), "{f}");
+    for call in ["stone.str_at", "stone.str_eq", "release_str"] {
+        assert!(!f.contains(call), "{call} in\n{f}");
+    }
+}
+
+#[test]
+fn a_map_get_unwrapped_at_once_makes_no_option() {
+    for method in ["unwrap_or(0)", "unwrap()"] {
+        let f = dump(&format!(
+            "fn f(m: map[str, int], k: str) -> int:\n    ret m.get(k).{method}\n"
+        ));
+        let f = f.split("fn main").next().unwrap();
+        assert!(f.contains("call stone.map_find"), "{f}");
+        for absent in ["stone.enum_new", "enum_tag", "variant 0", "release_enum"] {
+            assert!(!f.contains(absent), "{absent} in\n{f}");
+        }
+    }
 }

@@ -148,12 +148,14 @@ pub(super) struct Expr {
 pub(super) enum ExprKind {
     Constant(Value),
     Var(Var),
-    /// A function named as a value.
+    /// A function named as a value, or a closure, which holds a copy of the value of each of
+    /// `captures`, taken where it is made.
     Function {
         value: Arc<FunctionValue>,
         id: usize,
         lambda: bool,
         types: Option<Rc<InstanceTypes>>,
+        captures: Vec<Expr>,
     },
     Try(Box<Expr>),
     JoinedStr(Vec<Expr>),
@@ -650,9 +652,22 @@ impl<'r, 'out> Resolver<'r, 'out> {
                     id: self.interpreter.function_id(&function.function),
                     lambda: is_lambda(&function.function),
                     types: self.instance(expr.span),
+                    captures: vec![],
                 },
                 None => ExprKind::Var(self.var(id)),
             },
+            ast::ExprKind::Closure { captures, .. } => {
+                match self.calls.function_values.get(&expr.span) {
+                    Some(function) => ExprKind::Function {
+                        value: function.clone(),
+                        id: self.interpreter.function_id(&function.function),
+                        lambda: true,
+                        types: self.instance(expr.span),
+                        captures: self.exprs(captures),
+                    },
+                    None => ExprKind::Fail("a closure must be checked before it runs".into()),
+                }
+            }
             ast::ExprKind::List { elts, .. } => ExprKind::List(self.exprs(elts)),
             ast::ExprKind::Tuple { elts, .. } => ExprKind::Tuple(self.exprs(elts)),
             ast::ExprKind::Slice { .. } => {

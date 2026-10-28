@@ -1,0 +1,22 @@
+// strings of every length up to 20 equal a copy and differ from one changed at any position
+letters = "abcdefghijklmnopqrstuvwxyz"
+same = 0
+differ = 0
+for n in range(21):
+    s = letters[:n]
+    copy = ""
+    for c in s:
+        copy += c
+    if s == copy and copy == s:
+        same += 1
+    for i in range(n):
+        changed = s[:i] + "#" + s[i + 1:]
+        if s != changed and changed != s:
+            differ += 1
+        if s == changed:
+            print("wrong at {n} {i}")
+print(same)
+print(differ)
+print("abcdefghijklmnop" == "abcdefghijklmnop")
+print("abcdefghijklmnopq" == "abcdefghijklmnopz")
+print("" == letters[:0])

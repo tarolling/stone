@@ -1474,7 +1474,10 @@ impl Parser {
             return fail(self);
         }
         let args = match self.peek().r#type {
-            TokenType::VBar => crate::ast::Arguments { args: vec![] },
+            TokenType::VBar => crate::ast::Arguments {
+                args: vec![],
+                captures: 0,
+            },
             _ => match self.parse_parameters() {
                 Ok(args) => args,
                 Err(_) => return fail(self),

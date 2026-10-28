@@ -15,7 +15,7 @@ print(swap((1, "one")))
 // T can be held in lists, tuples, and options, and moved around
 fn repeat[T](x: T, n: int) -> list[T]:
     out = []
-    for i in range(n):
+    for _ in range(n):
         out.append(x)
     ret out
 

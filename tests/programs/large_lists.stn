@@ -1,0 +1,23 @@
+// lists past the largest block class, made and dropped in turn, keep their own values
+fn filled(n: int, start: int) -> list[int]:
+    xs = []
+    for i in range(n):
+        xs.append(start + i)
+    ret xs
+
+fn total(xs: list[int]) -> int:
+    t = 0
+    for x in xs:
+        t += x
+    ret t
+
+sums = []
+for round in range(6):
+    a = filled(20000 + round * 7000, round)
+    b = filled(9000, -round)
+    c = a * 2
+    sums.append(total(a) + total(b) + total(c) + c.len())
+    big = filled(60000, 1)
+    small = filled(9000, 2)
+    sums.append(total(small) - total(big) + big[59999] + small[0])
+print(sums)

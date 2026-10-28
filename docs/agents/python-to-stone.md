@@ -11,7 +11,7 @@ since stone copies values.
 
 1. **Inventory before writing.** Read the whole Python program and list what it uses that stone
    lacks (see "Not in stone" in the stone guide): classes with inheritance, exceptions, closures
-   (a lambda may use only its own parameters), comprehensions, format specs in f-strings, default and keyword arguments,
+   that change what they capture (a lambda copies the variables it reads), comprehensions, format specs in f-strings, default and keyword arguments,
    sets, and values whose type varies (a variable that is
    sometimes `None`, a name reused for an int and then a float, or a list that mixes types). Find
    arithmetic that could pass 64 bits, such as products in hashes and random number generators,
@@ -133,9 +133,9 @@ print(total)
 | --- | --- |
 | `def f(x, n=10):` | `fn f(x: T, n: int)`, and every call passes `n` |
 | `f(*args)`, `**kwargs` | a `list` parameter, or a struct of options |
-| `lambda x: x * 2` | `\|x\| x * 2`, using only its parameters; otherwise a named `fn` |
+| `lambda x: x * 2` | `\|x\| x * 2`, which may read the variables around it |
 | a function argument | a parameter of type `fn(A, B) -> R`, called as `f(a, b)` |
-| a closure, or a lambda that reads a variable | pass the value as another argument, since neither functions nor lambdas capture anything |
+| a closure, or a lambda that reads a variable | a lambda reading it, which captures a copy where it is written; a closure that changes what it captured (`nonlocal`) becomes a function that takes and returns it |
 | `return a, b` | `ret (a, b)`, with `-> tuple[A, B]` |
 | returning `None` on failure | `-> option[T]`, returning `none` or `some(x)` |
 | `raise` | return a `result[T, str]` with `err("message")` and let the caller decide; `os.exit(1)` after printing a message for a fatal error |

@@ -8,16 +8,19 @@
 //! `mov r13, rbx` then `add r13, r12`.
 
 use super::{ARG_REGS, X64Generator};
-use crate::codegen::context::{FALLIBLE_ROUTINES, function_label, global_label, variant_label};
+use crate::codegen::context::{
+    FALLIBLE_ROUTINES, function_label, function_static, global_label, variant_label,
+};
 use crate::codegen::ir::liveness::analyze;
+use crate::codegen::ir::opt::never_negative;
 use crate::codegen::ir::{
-    BinOp, BlockId, Callee, Cond, FIELDS_OFFSET, Function, Inst, Kernel, Operand, RcKind,
-    Terminator, VReg, variable_of,
+    BinOp, BlockId, Callee, Cond, EarlyReturn, FIELDS_OFFSET, Function, Inst, Kernel, Operand,
+    RcKind, Terminator, VReg, variable_of,
 };
 use crate::codegen::regalloc::{Location, float_vregs, hints, linear_scan, parallel_moves};
 use crate::codegen::{AssemblyGenerator, magic_signed};
 use crate::stdlib::{INDEX_RANGE, MAX_CALL_DEPTH};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 
 /// Registers that calls preserve, which are the only ones that can hold a value across a call.
@@ -149,6 +152,8 @@ struct Frame {
     /// How many parameters arrive on the stack, above which the caller reserves room for the
     /// results past [`RESULT_REGS`].
     stack_params: usize,
+    /// The vregs that never hold an index counted from the end (see [`never_negative`]).
+    natural: HashSet<VReg>,
 }
 
 impl Frame {
@@ -166,6 +171,14 @@ impl Frame {
 
     fn reg(&self, reg: VReg) -> Result<Value, String> {
         self.value(Operand::Reg(reg))
+    }
+
+    /// Returns whether `index` is never an index counted from the end.
+    fn natural(&self, index: Operand) -> bool {
+        match index {
+            Operand::Imm(n) => n >= 0,
+            Operand::Reg(reg) => self.natural.contains(&reg),
+        }
     }
 }
 
@@ -200,6 +213,7 @@ impl X64Generator {
             epilogue: self.ctx.new_label("return"),
             is_main: function.name.is_none(),
             stack_params: function.params.len().saturating_sub(ARG_REGS.len()),
+            natural: never_negative(function),
         };
 
         match &function.name {
@@ -209,6 +223,9 @@ impl X64Generator {
                 self.emit("\t.globl\tmain");
                 self.emit("main:");
             }
+        }
+        if let Some(early) = function.early_return() {
+            self.early_return(function, &early);
         }
         self.emit("\tpush\trbp");
         self.emit("\tmov\trbp, rsp");
@@ -515,6 +532,8 @@ impl X64Generator {
         match value {
             Value::Xmm(from) if from == xmm => {}
             Value::Xmm(from) => self.emit(&format!("\tmovapd\t{xmm}, {from}")),
+            // 0.0 is all zero bits
+            Value::Imm(0) => self.emit(&format!("\txorpd\t{xmm}, {xmm}")),
             Value::Imm(_) => {
                 self.load("rax", value);
                 self.emit(&format!("\tmovq\t{xmm}, rax"));
@@ -547,6 +566,11 @@ impl X64Generator {
     /// Emits `cmp lhs, rhs` for an int comparison, loading `lhs` into `rax` when `cmp` cannot
     /// take it as its first operand.
     fn compare_ints(&mut self, lhs: Value, rhs: Value) {
+        if let (Value::Reg(reg), Value::Imm(0)) = (lhs, rhs) {
+            // the same flags as `cmp reg, 0`, in fewer bytes
+            self.emit(&format!("\ttest\t{reg}, {reg}"));
+            return;
+        }
         let lhs = match (lhs, rhs) {
             (Value::Imm(_) | Value::Xmm(_), _) | (Value::Stack(_), Value::Stack(_)) => {
                 self.load("rax", lhs);
@@ -627,6 +651,23 @@ impl X64Generator {
                     self.branch(frame, ("ne", "e"), *then, *otherwise, next);
                 }
             },
+            Terminator::TestBranch {
+                value,
+                mask,
+                then,
+                otherwise,
+            } => {
+                let value = match frame.value(*value)? {
+                    value @ (Value::Reg(_) | Value::Stack(_)) => value,
+                    value => {
+                        self.load("rax", value);
+                        Value::Reg("rax")
+                    }
+                };
+                let mask = self.source(Value::Imm(*mask), "rcx");
+                self.emit(&format!("\ttest\t{value}, {mask}"));
+                self.branch(frame, ("ne", "e"), *then, *otherwise, next);
+            }
             Terminator::CmpBranch {
                 cond,
                 float,
@@ -744,9 +785,10 @@ impl X64Generator {
                 index,
                 width,
             } => {
+                let natural = frame.natural(*index);
                 let (dst, list, index) =
                     (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
-                self.element_slot(list, index, *width as i64);
+                self.element_slot(list, index, *width as i64, natural);
                 self.store(dst, "rcx");
             }
 
@@ -848,8 +890,16 @@ impl X64Generator {
                     std::mem::swap(&mut lhs, &mut rhs);
                 }
                 let target = self.target(dst, Some(rhs));
+                if self.three_address(*op, target, lhs, rhs) {
+                    self.store(dst, target);
+                    return Ok(());
+                }
                 self.load(target, lhs);
                 match (op, rhs) {
+                    (BinOp::Mul, Value::Imm(n)) if n > 1 && n & (n - 1) == 0 => {
+                        let shift = n.trailing_zeros();
+                        self.emit(&format!("\tshl\t{target}, {shift}"))
+                    }
                     (BinOp::Mul, Value::Imm(n)) if fits_i32(n) => {
                         self.emit(&format!("\timul\t{target}, {target}, {n}"))
                     }
@@ -1150,6 +1200,16 @@ impl X64Generator {
                 self.store(dst, target);
             }
 
+            Inst::FunctionStatic { dst, label } => {
+                let dst = frame.reg(*dst)?;
+                let target = self.target(dst, None);
+                let value = function_static(label);
+                self.emit(&format!("\tlea\trax, [rip + {label}]"));
+                self.emit(&format!("\tmov\tQWORD PTR [rip + {value}], rax"));
+                self.emit(&format!("\tlea\t{target}, [rip + {value}]"));
+                self.store(dst, target);
+            }
+
             Inst::ListLen { dst, list } => {
                 let (dst, list) = (frame.reg(*dst)?, frame.value(*list)?);
                 let base = self.base(list, "rax");
@@ -1158,10 +1218,37 @@ impl X64Generator {
                 self.store(dst, target);
             }
 
+            Inst::StrByte { dst, text, index } => {
+                let (dst, text, index) =
+                    (frame.reg(*dst)?, frame.value(*text)?, frame.value(*index)?);
+                let base = self.base(text, "rax");
+                let byte = match index {
+                    Value::Imm(n) if fits_i32(n) => format!("[{base} + {n}]"),
+                    Value::Reg(reg) => format!("[{base} + {reg}]"),
+                    _ => {
+                        self.load("rcx", index);
+                        format!("[{base} + rcx]")
+                    }
+                };
+                let target = self.target(dst, None);
+                self.emit(&format!("\tmovzx\t{target}, byte ptr {byte}"));
+                self.store(dst, target);
+            }
+
+            Inst::StrLen { dst, text } => {
+                let (dst, text) = (frame.reg(*dst)?, frame.value(*text)?);
+                let base = self.base(text, "rax");
+                let target = self.target(dst, None);
+                // a string's length is in its header, before its count
+                self.emit(&format!("\tmov\t{target}, QWORD PTR [{base} - 16]"));
+                self.store(dst, target);
+            }
+
             Inst::ListLoad { dst, list, index } => {
+                let natural = frame.natural(*index);
                 let (dst, list, index) =
                     (frame.reg(*dst)?, frame.value(*list)?, frame.value(*index)?);
-                let slot = self.list_slot(list, index, true);
+                let slot = self.list_slot(list, index, Some(natural));
                 let target = self.target(dst, None);
                 self.emit(&format!("\tmov\t{target}, QWORD PTR {slot}"));
                 self.store(dst, target);
@@ -1192,12 +1279,13 @@ impl X64Generator {
                 index,
                 value,
             } => {
+                let natural = frame.natural(*index);
                 let (list, index, value) = (
                     frame.value(*list)?,
                     frame.value(*index)?,
                     frame.value(*value)?,
                 );
-                let slot = self.list_slot(list, index, true);
+                let slot = self.list_slot(list, index, Some(natural));
                 // the slot needs rax and rcx and the value may need rdx, so the old element waits
                 // in xmm0, since `old` may share a register with `value`
                 if old.is_some() {
@@ -1284,7 +1372,7 @@ impl X64Generator {
 
             Inst::ListInit { list, index, value } => {
                 let (list, value) = (frame.value(*list)?, frame.value(*value)?);
-                let slot = self.list_slot(list, Value::Imm(*index as i64), false);
+                let slot = self.list_slot(list, Value::Imm(*index as i64), None);
                 self.store_qword(&slot, value);
             }
 
@@ -1376,7 +1464,12 @@ impl X64Generator {
                 {
                     self.record_site(&site);
                 }
-                self.emit(&format!("\tcall\t{label}"));
+                match callee {
+                    Callee::Runtime("stone.list_append") if dsts.is_empty() => {
+                        self.append_inline();
+                    }
+                    _ => self.emit(&format!("\tcall\t{label}")),
+                }
                 if extra > 0 {
                     self.emit(&format!("\tadd\trsp, {}", 8 * extra));
                 }
@@ -1396,6 +1489,74 @@ impl X64Generator {
         Ok(())
     }
 
+    /// Emits the test and the return of `early` (see [`Function::early_return`]) on the argument
+    /// registers as they arrive, before the frame is made, jumping past them to make it the
+    /// other way. The call is not counted, which only matters to the calls a function makes.
+    ///
+    /// For example, `fib` starts `cmp rdi, 2`, `jge` to its frame, `mov rax, rdi`, and `ret`.
+    fn early_return(&mut self, function: &Function, early: &EarlyReturn) {
+        let arg = |operand: Operand| match operand {
+            Operand::Imm(n) => Some(Value::Imm(n)),
+            Operand::Reg(reg) => {
+                let position = function.params.iter().position(|&param| param == reg)?;
+                ARG_REGS.get(position).map(|&reg| Value::Reg(reg))
+            }
+        };
+        let (Some(lhs), Some(rhs)) = (arg(early.lhs), arg(early.rhs)) else {
+            return;
+        };
+        let Some(values) = early
+            .values
+            .iter()
+            .map(|&value| arg(value))
+            .collect::<Option<Vec<_>>>()
+        else {
+            return;
+        };
+        let (cond, lhs, rhs) = match (lhs, rhs) {
+            (Value::Imm(_), Value::Reg(_)) => (early.cond.swap(), rhs, lhs),
+            _ => (early.cond, lhs, rhs),
+        };
+        // compared in place, since a wide immediate would need rcx, an argument register
+        let in_place = match rhs {
+            Value::Imm(n) => fits_i32(n),
+            _ => true,
+        };
+        if values.len() > RESULT_REGS.len() || !matches!(lhs, Value::Reg(_)) || !in_place {
+            return;
+        }
+        let frame = self.ctx.new_label("frame");
+        self.compare_ints(lhs, rhs);
+        self.emit(&format!("\tj{}\t{frame}", cc(cond.negate())));
+        let moves: Vec<(Value, Value)> = RESULT_REGS
+            .iter()
+            .zip(values)
+            .map(|(&reg, value)| (Value::Reg(reg), value))
+            .collect();
+        for (to, from) in parallel_moves(&moves, Value::Reg("r11")) {
+            self.mov(to, from);
+        }
+        self.emit("\tret");
+        self.emit(&format!("{frame}:"));
+    }
+
+    /// Appends the slot in `rsi` to the list in `rdi` without a call when it has room, and calls
+    /// `stone.list_append` to grow it otherwise. This uses `rax` and `rcx`.
+    fn append_inline(&mut self) {
+        let grow = self.ctx.new_label("append_grow");
+        let done = self.ctx.new_label("appended");
+        self.emit("\tmov\trax, QWORD PTR [rdi]");
+        self.emit("\tcmp\trax, QWORD PTR [rdi + 8]"); // the capacity
+        self.emit(&format!("\tjge\t{grow}"));
+        self.emit("\tmov\trcx, QWORD PTR [rdi + 16]");
+        self.emit("\tmov\tQWORD PTR [rcx + rax * 8], rsi");
+        self.emit("\tinc\tQWORD PTR [rdi]");
+        self.emit(&format!("\tjmp\t{done}"));
+        self.emit(&format!("{grow}:"));
+        self.emit("\tcall\tstone.list_append");
+        self.emit(&format!("{done}:"));
+    }
+
     /// Writes `value` to the memory operand `slot`, through `rdx` if it is in memory itself or
     /// too wide an immediate.
     fn store_qword(&mut self, slot: &str, value: Value) {
@@ -1410,24 +1571,66 @@ impl X64Generator {
         }
     }
 
+    /// Emits `target = lhs op rhs` as one `lea` or three-operand `imul` when `lhs` is not already in
+    /// `target`, which saves copying it there first, and returns whether it did. Neither sets the
+    /// flags, which nothing reads after arithmetic.
+    ///
+    /// For example, `rdi = r8 + 1` becomes `lea rdi, [r8 + 1]`, and `r8 = rdi * 3` becomes
+    /// `lea r8, [rdi + rdi * 2]`.
+    fn three_address(&mut self, op: BinOp, target: &str, lhs: Value, rhs: Value) -> bool {
+        let line = match (op, lhs, rhs) {
+            (_, Value::Reg(reg), _) if reg == target => return false,
+            (BinOp::Add, Value::Reg(reg), Value::Imm(n)) if n > 0 && fits_i32(n) => {
+                format!("lea\t{target}, [{reg} + {n}]")
+            }
+            (BinOp::Add, Value::Reg(reg), Value::Imm(n)) if n < 0 && fits_i32(n) => {
+                format!("lea\t{target}, [{reg} - {}]", -n)
+            }
+            (BinOp::Sub, Value::Reg(reg), Value::Imm(n)) if n > 0 && fits_i32(n) => {
+                format!("lea\t{target}, [{reg} - {n}]")
+            }
+            (BinOp::Add, Value::Reg(reg), Value::Reg(other)) if other != target => {
+                format!("lea\t{target}, [{reg} + {other}]")
+            }
+            (BinOp::Mul, Value::Reg(reg), Value::Imm(n @ (3 | 5 | 9))) => {
+                format!("lea\t{target}, [{reg} + {reg} * {}]", n - 1)
+            }
+            (BinOp::Mul, Value::Reg(_) | Value::Stack(_), Value::Imm(n))
+                if fits_i32(n) && !(n > 1 && n & (n - 1) == 0) =>
+            {
+                format!("imul\t{target}, {lhs}, {n}")
+            }
+            _ => return false,
+        };
+        self.emit(&format!("\t{line}"));
+        true
+    }
+
     /// Returns the memory operand for element `index` of `list`, without its size prefix.
     ///
-    /// When `checked`, a negative index counts from the end, and an index still out of range
-    /// exits with an error. A list is a pointer to a `{len, cap, data, kinds, width}` header (see
-    /// [`super::builtins::list_runtime`]), so for example `xs[-1]` with `xs` of length 3 checks
-    /// that `-1 + 3` is below 3 and returns `[rax + rcx * 8]` with `rax` holding `data` and `rcx`
-    /// holding 2. This uses `rax` and `rcx`.
-    fn list_slot(&mut self, list: Value, index: Value, checked: bool) -> String {
+    /// When `check` is `Some`, a negative index counts from the end, and an index still out of
+    /// range exits with an error; `Some(true)` says the index is never counted from the end (see
+    /// [`never_negative`]), so it is compared with the length alone. A list is a pointer to a
+    /// `{len, cap, data, kinds, width}` header (see [`super::builtins::list_runtime`]), so for
+    /// example `xs[-1]` with `xs` of length 3 checks that `-1 + 3` is below 3 and returns
+    /// `[rax + rcx * 8]` with `rax` holding `data` and `rcx` holding 2. This uses `rax` and `rcx`.
+    fn list_slot(&mut self, list: Value, index: Value, check: Option<bool>) -> String {
         let base = self.base(list, "rax");
         let constant = match index {
             Value::Imm(n) if (0..1 << 28).contains(&n) => Some(n),
             _ => None,
         };
-        if checked {
+        // a natural index needs no adjusting, so it can stay in its own register
+        let held = match (check, index) {
+            (Some(true), Value::Reg(reg)) => reg,
+            _ => "rcx",
+        };
+        if let Some(natural) = check {
             // the error reports the index as written and the length, in FAIL_VALUES
             let mut setup = vec![format!("\tmov\trdx, QWORD PTR [{base}]")];
             match constant {
                 Some(n) => setup.push(format!("\tmov\trcx, {n}")),
+                None if natural => setup.push(format!("\tmov\trcx, {held}")),
                 None => {
                     // a negative index was counted from the end, and only a negative one is
                     // still negative after that, so the length comes off again
@@ -1445,15 +1648,17 @@ impl X64Generator {
                     self.emit(&format!("\tjle\t{out_of_range}"));
                 }
                 None => {
-                    let check = self.ctx.new_label("index_check");
-                    self.load("rcx", index);
-                    self.emit("\ttest\trcx, rcx");
-                    self.emit(&format!("\tjns\t{check}"));
-                    // negative indexes count from the end
-                    self.emit(&format!("\tadd\trcx, QWORD PTR [{base}]"));
-                    self.emit(&format!("{check}:"));
+                    self.load(held, index);
+                    if !natural {
+                        let check = self.ctx.new_label("index_check");
+                        self.emit("\ttest\trcx, rcx");
+                        self.emit(&format!("\tjns\t{check}"));
+                        // negative indexes count from the end
+                        self.emit(&format!("\tadd\trcx, QWORD PTR [{base}]"));
+                        self.emit(&format!("{check}:"));
+                    }
                     // unsigned, so an index still negative after adjusting is out of range too
-                    self.emit(&format!("\tcmp\trcx, QWORD PTR [{base}]"));
+                    self.emit(&format!("\tcmp\t{held}, QWORD PTR [{base}]"));
                     self.emit(&format!("\tjae\t{out_of_range}"));
                 }
             }
@@ -1463,7 +1668,7 @@ impl X64Generator {
         self.emit(&format!("\tmov\trax, QWORD PTR [{base} + 16]"));
         match constant {
             Some(n) => format!("[rax + {}]", 8 * n),
-            None => "[rax + rcx * 8]".to_string(),
+            None => format!("[rax + {held} * 8]"),
         }
     }
 
@@ -1488,8 +1693,8 @@ impl X64Generator {
     /// cannot overflow, and then the slot it starts at is. A negative one must not be below minus
     /// the slot count, and then the slot count plus the index times the width must not be
     /// negative. For example, with 7 slots per element and 14 slots, index 1 starts at slot 7 and
-    /// index -3 fails.
-    fn element_slot(&mut self, list: Value, index: Value, width: i64) {
+    /// index -3 fails. A `natural` index (see [`never_negative`]) skips the negative case.
+    fn element_slot(&mut self, list: Value, index: Value, width: i64, natural: bool) {
         let base = self.base(list, "rax");
         // the error reports the index as written and the number of elements, in FAIL_VALUES, and
         // stone.fail never returns, so its setup may use any register
@@ -1505,7 +1710,7 @@ impl X64Generator {
         let done = self.ctx.new_label("slot_done");
         self.load("rcx", index);
         self.emit(&format!("\tmov\trdx, QWORD PTR [{base}]"));
-        if !matches!(index, Value::Imm(n) if n >= 0) {
+        if !natural {
             let from_start = self.ctx.new_label("slot_from_start");
             self.emit("\ttest\trcx, rcx");
             self.emit(&format!("\tjns\t{from_start}"));
@@ -1521,8 +1726,9 @@ impl X64Generator {
             self.emit(&format!("\tjmp\t{done}"));
             self.emit(&format!("{from_start}:"));
         }
+        // unsigned, so a natural index that wrapped past the maximum is out of range too
         self.emit("\tcmp\trcx, rdx");
-        self.emit(&format!("\tjge\t{out_of_range}"));
+        self.emit(&format!("\tjae\t{out_of_range}"));
         if width > 1 {
             self.emit(&format!("\timul\trcx, rcx, {width}"));
             self.emit("\tcmp\trcx, rdx");

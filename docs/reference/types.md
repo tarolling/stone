@@ -753,9 +753,14 @@ the type parameters, such as `id` at `T`; take it as a parameter instead.
 A lambda is a function written where it is used: its parameters between bars, then one
 expression on the same line, as `|x| x * 2`, `|a: int, b| a + b`, or `|| 1`. Its types come from
 where it is used, so `[1, 2].map(|x| x * 2)` is a `list[int]`, and a parameter may be given a type
-when nothing says it. A lambda is a function value like a named one, but it may use no variable
-other than its own parameters, so `|x| x * k` is an error when `k` is a variable, global or
-local. Closures, which would capture such values, are not supported yet.
+when nothing says it. A lambda is a function value like a named one.
+
+A lambda that uses variables from outside it, global or local, or the parameters of a lambda
+around it, is a closure: it holds a copy of each, taken where the lambda is written, so
+`|x| x * k` keeps the value `k` had then, whatever `k` holds later. A closure cannot change its
+copies, and cannot capture a socket or listener, or, in a generic function, a value whose type
+depends on a type parameter. Its type leaves out what it captures: `|x| x > limit` is a
+`fn(int) -> bool`.
 
 A function never changes, so passing one copies nothing. The methods `map`, `filter`, `any`,
 `all`, `sort_by_key`, `min_by_key`, and `max_by_key` of lists take a function; see

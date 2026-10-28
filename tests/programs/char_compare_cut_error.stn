@@ -1,0 +1,8 @@
+// comparing a byte inside a longer character fails as indexing does
+fn check(w: str) -> bool:
+    if w[0] == w[1]:
+        ret true
+    ret false
+
+print(check("aa"))
+print(check("añ"))

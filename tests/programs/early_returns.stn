@@ -1,0 +1,34 @@
+// functions whose first test returns parameters or constants before anything else
+fn fib(n: int) -> int:
+    if n < 2:
+        ret n
+    ret fib(n - 1) + fib(n - 2)
+
+fn pick(flag: bool, a: int, b: int) -> int:
+    if flag:
+        ret b
+    ret a + b
+
+fn swap(a: int, b: int, c: int) -> tuple[int, int, int]:
+    if 0 < a:
+        ret (c, b, a)
+    ret (a, b, c)
+
+fn last(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int:
+    if a == 0:
+        ret g
+    ret a + last(a - 1, b, c, d, e, f, g)
+
+fn depth(n: int) -> int:
+    if n == 0:
+        ret 0
+    ret 1 + depth(n - 1)
+
+print(fib(20))
+print(pick(true, 1, 2))
+print(pick(false, 1, 2))
+print(swap(1, 2, 3))
+print(swap(-1, 2, 3))
+print(last(3, 0, 0, 0, 0, 0, 7))
+print(depth(999))
+print(depth(1000))

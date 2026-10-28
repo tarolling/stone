@@ -1,0 +1,14 @@
+// prefixes and suffixes by length: empty, whole, longer, and across eight-byte words
+text = "abcdefghijklmnopqrstu"
+for n in [0, 1, 7, 8, 9, 15, 16, 17, 21]:
+    head = text[:n]
+    tail = text[21 - n:]
+    print("{n} {text.startswith(head)} {text.endswith(tail)} {head.startswith(text)} {tail.endswith(text)}")
+print(text.startswith("abcdefghX"))
+print(text.endswith("Xopqrstu"))
+print(text.startswith("abcdefgh" + "ijklmnopq"))
+print("".startswith(""))
+print("".endswith("a"))
+print("héllo wörld".startswith("hé"))
+print("héllo wörld".endswith("wörld"))
+print("héllo wörld".endswith("world"))

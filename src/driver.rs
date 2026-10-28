@@ -141,7 +141,8 @@ pub fn check(source: &str) -> Vec<Diagnostic> {
 }
 
 /// Checks the program whose entry file is at `entry` and holds `source` without running it,
-/// returning its files and every problem found in any of them.
+/// returning its files and every problem found in any of them, including a warning for each
+/// thing it defines and never uses ([`crate::unused`]).
 ///
 /// For example, checking a `main.stn` that uses a `util.stn` with a syntax error returns that error,
 /// whose span is in `util.stn`.
@@ -151,7 +152,11 @@ pub fn check_program(
     sources: &dyn Sources,
 ) -> (SourceMap, Vec<Diagnostic>) {
     let linked = project::link(entry, source, sources);
-    let diagnostics = analyze_linked(&linked).diagnostics;
+    let analysis = analyze_linked(&linked);
+    let mut diagnostics = crate::unused::find(&linked, &analysis);
+    diagnostics.extend(analysis.diagnostics);
+    // stable, so a warning stays before an error at the same place
+    diagnostics.sort_by_key(|d| (d.span.file, d.span.start));
     (linked.sources, diagnostics)
 }
 

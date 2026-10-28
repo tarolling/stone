@@ -178,7 +178,7 @@ fn splice(function: &mut Function, b: usize, i: usize, callee: &Function) {
 }
 
 /// Returns `term` with its targets passed through `block` and its operands through `operand`.
-fn retarget(
+pub(super) fn retarget(
     term: &Terminator,
     block: impl Fn(BlockId) -> BlockId,
     operand: impl Fn(Operand) -> Operand,
@@ -209,6 +209,17 @@ fn retarget(
             then: block(*then),
             otherwise: block(*otherwise),
         },
+        Terminator::TestBranch {
+            value,
+            mask,
+            then,
+            otherwise,
+        } => Terminator::TestBranch {
+            value: operand(*value),
+            mask: *mask,
+            then: block(*then),
+            otherwise: block(*otherwise),
+        },
         Terminator::Return(values) => {
             Terminator::Return(values.iter().map(|value| operand(*value)).collect())
         }
@@ -220,7 +231,7 @@ fn retarget(
 }
 
 /// Returns `inst` with every vreg it writes renamed by `reg` and every operand by `operand`.
-fn rename_inst(
+pub(super) fn rename_inst(
     inst: &Inst,
     reg: &impl Fn(VReg) -> VReg,
     operand: &impl Fn(Operand) -> Operand,
@@ -302,6 +313,15 @@ fn rename_inst(
         Inst::ListLen { dst, list } => Inst::ListLen {
             dst: reg(dst),
             list: o(list),
+        },
+        Inst::StrLen { dst, text } => Inst::StrLen {
+            dst: reg(dst),
+            text: o(text),
+        },
+        Inst::StrByte { dst, text, index } => Inst::StrByte {
+            dst: reg(dst),
+            text: o(text),
+            index: o(index),
         },
         Inst::ListLoad { dst, list, index } => Inst::ListLoad {
             dst: reg(dst),
@@ -431,6 +451,10 @@ fn rename_inst(
         Inst::Retain { src } => Inst::Retain { src: o(src) },
         Inst::Release { src, kind } => Inst::Release { src: o(src), kind },
         Inst::FunctionAddress { dst, label } => Inst::FunctionAddress {
+            dst: reg(dst),
+            label,
+        },
+        Inst::FunctionStatic { dst, label } => Inst::FunctionStatic {
             dst: reg(dst),
             label,
         },

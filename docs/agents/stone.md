@@ -29,7 +29,9 @@ problem, and exit with status 1. Warnings use the same format with `warning:`. T
 written to be acted on: they usually say what to write instead, so read them before guessing.
 Runtime errors (an index out of range, `unwrap` of `none`, division by zero) print the same way
 under both `run` and `build`. Fix warnings too: each one points at a likely bug, such as a change
-that is lost or `[0] * n` meaning something other than in Python.
+that is lost or `[0] * n` meaning something other than in Python. `stone check` also warns about
+unused variables, parameters, functions, types, and imports; remove them, or start the name with
+`_` to keep one on purpose (`for _ in range(3):`).
 
 ## The syntax, in one program
 
@@ -346,8 +348,9 @@ can be passed, returned, stored in lists and structs, and called: `f(x)`, `fs[0]
 `p.run(x)` for a struct field `run` that holds one. A lambda writes one in place: `|x| x * 2`,
 `|p| p.name`, `|a: int, b| a + b`, or `|| 1`, its body one expression on the same line, its types
 inferred from where it is used (give a parameter a type when nothing else says it). A lambda may
-use no variable but its own parameters, so `|x| x * k` with a variable `k` is an error (there are
-no closures yet); write a named `fn` taking `k` instead. Builtins (`print`, `str`), methods, and variants
+use the variables around it (a closure): `xs.filter(|x| x > limit)` copies `limit` where the lambda
+is written, so later changes to `limit` do not reach it, and the lambda cannot change its copy. A
+closure cannot capture a socket, a listener, or a value of a type parameter. Builtins (`print`, `str`), methods, and variants
 are not values; wrap them in a function. Lists' helpers take functions: `map`, `filter`, `any`,
 `all`, `sort_by_key` (in place, stable, the key computed once per element), and `min_by_key` and
 `max_by_key` (options: the first least and the last greatest). Functions cannot be compared, and
@@ -434,7 +437,7 @@ assign the result where 'add' is called
 | `del d[k]` | `d.pop(k)` as a statement |
 | `set()` | `map[K, bool]` |
 | `def f(x, n=1)`, `f(n=2)` | every argument, positionally (only structs take names) |
-| `lambda x: x * 2` | `\|x\| x * 2`, which may use only its own parameters (no closures yet) |
+| `lambda x: x * 2` | `\|x\| x * 2`; a lambda may read variables around it, as copies taken where it is written |
 | `map(f, xs)`, `filter(f, xs)`, `any`/`all` with a generator | `xs.map(f)`, `xs.filter(f)`, `xs.any(f)`, `xs.all(f)` |
 | `min(xs, key=f)`, `max(xs, key=f)` | `xs.min_by_key(f)`, `xs.max_by_key(f)`, options (the max is the last of equal ones) |
 | `try`/`except`, `raise` | return a `result` and pass errors on with `?`, as in `int(s)?` |

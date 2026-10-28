@@ -1504,6 +1504,7 @@ mod tests {
             "through(plus_one, ",
             "F(f=plus_one).f(",
             "each_grown(grown, ",
+            "through(|x| x + ",
         ] {
             let count = uses(feature);
             assert!(count >= 5, "only {count} of 500 programs use {feature:?}");

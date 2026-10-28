@@ -588,6 +588,34 @@ fn run_and_build_print_warnings_and_still_succeed() {
 }
 
 #[test]
+fn check_warns_about_unused_names_but_run_does_not() {
+    let source = "use math\n\nfn area(w: int, h: int) -> int:\n    ret w * 2\n\nx = area(1, 2)\n";
+    let dir = project("unused_names", &[("main.stn", source)]);
+    let stone = |command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_stone"))
+            .args([command, "main.stn"])
+            .current_dir(&dir)
+            .output()
+            .expect("stone should run")
+    };
+    let check = stone("check");
+    assert!(check.status.success(), "{check:?}");
+    let stderr = String::from_utf8_lossy(&check.stderr);
+    let warnings: Vec<&str> = stderr.lines().filter(|l| l.contains("warning")).collect();
+    assert_eq!(
+        warnings,
+        [
+            "main.stn:1:5: warning: 'math' is imported but never used",
+            "main.stn:3:17: warning: parameter 'h' is never used; remove it or name it '_h'",
+            "main.stn:6:1: warning: variable 'x' is never used; remove it or name it '_x'",
+        ]
+    );
+    let run = stone("run");
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(String::from_utf8_lossy(&run.stderr), "");
+}
+
+#[test]
 fn exit_ends_the_program_with_its_status() {
     let source =
         "use os\n\nfn stop(xs: list[str]):\n    os.exit(3)\n\nprint(1)\nstop([\"a\"])\nprint(2)\n";
@@ -1057,7 +1085,7 @@ fn check_reports_a_method_a_trait_needs() {
         &["check"],
         "trait_missing",
         "trait Shape:\n    fn area(self) -> float\nstruct Sq:\n    s: float\n\
-         impl Shape for Sq:\n    fn side(self) -> float:\n        ret self.s\n",
+         impl Shape for Sq:\n    fn side(self) -> float:\n        ret self.s\nprint(Sq(s=1.0))\n",
     );
     assert_eq!(output.status.code(), Some(1));
     let file = file.display();

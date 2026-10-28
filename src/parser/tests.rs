@@ -316,6 +316,10 @@ fn strip_expr(expr: Expr) -> Expr {
             args: strip_args(args),
             body: strip_box(body),
         },
+        ExprKind::Closure { function, captures } => ExprKind::Closure {
+            function,
+            captures: strip_all(captures),
+        },
         kind @ (ExprKind::Constant { .. } | ExprKind::Name { .. }) => kind,
     };
     kind.into()
@@ -332,6 +336,7 @@ fn strip_args(args: Arguments) -> Arguments {
                 annotation: a.annotation.map(strip_type),
             })
             .collect(),
+        captures: args.captures,
     }
 }
 
@@ -474,7 +479,10 @@ fn simple_function_no_args() {
                     name_span: Span::default(),
                     public: false,
                     type_params: vec![],
-                    args: Arguments { args: vec![] },
+                    args: Arguments {
+                        args: vec![],
+                        captures: 0
+                    },
                     returns: None,
                     body: vec![
                         StmtKind::Return {
@@ -560,7 +568,8 @@ fn simple_function_one_arg() {
                             arg: "a".to_string(),
                             span: Span::default(),
                             annotation: None,
-                        }]
+                        }],
+                        captures: 0,
                     },
                     returns: None,
                     body: vec![
@@ -684,7 +693,8 @@ fn simple_function_multiple_args() {
                                 span: Span::default(),
                                 annotation: None,
                             }
-                        ]
+                        ],
+                        captures: 0,
                     },
                     returns: None,
                     body: vec![
@@ -2605,6 +2615,7 @@ fn an_impl_block_holds_its_methods() {
                         annotation: None,
                     })
                     .collect(),
+                captures: 0,
             },
             returns: None,
             body,
@@ -2853,6 +2864,7 @@ fn method_def(name: &str, args: &[&str], returns: Option<TypeExpr>, body: Vec<St
                     annotation: None,
                 })
                 .collect(),
+            captures: 0,
         },
         returns,
         body,
@@ -3245,6 +3257,7 @@ fn lambda(params: &[(&str, Option<TypeExprKind>)], body: Box<Expr>) -> Expr {
                     }),
                 })
                 .collect(),
+            captures: 0,
         },
         body,
     }

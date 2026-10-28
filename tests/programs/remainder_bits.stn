@@ -1,0 +1,32 @@
+// a remainder by a power of two compared with 0 tests the low bits, negative dividends too
+fn parity(x: int) -> str:
+    if x % 2 == 0:
+        ret "even"
+    ret "odd"
+
+fn kinds(x: int) -> str:
+    text = ""
+    if x % 4 == 0:
+        text += "4"
+    if x % -8 != 0:
+        text += "!8"
+    if x % 2 == 1:
+        text += "+1"
+    if x % 4611686018427387904 == 0:
+        text += "big"
+    ret text
+
+fn count_even(n: int) -> int:
+    count = 0
+    for i in range(-n, n):
+        if i % 2 == 0:
+            count += 1
+    ret count
+
+for x in [-9, -8, -4, -3, -1, 0, 1, 3, 4, 8, 9]:
+    print("{x} {parity(x)} {kinds(x)}")
+low = -9223372036854775807 - 1
+print(kinds(low))
+print(kinds(4611686018427387904))
+print(low % low == 0)
+print(count_even(1001))

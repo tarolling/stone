@@ -36,7 +36,7 @@ fn hover_text(doc: &Document, pos: Position) -> Option<String> {
 
 #[test]
 fn diagnostics_have_ranges_and_messages() {
-    let doc = doc("x = 1\nx = \"s\"\n");
+    let doc = doc("x = 1\nx = \"s\"\nprint(x)\n");
     let diagnostics = diagnostics(&doc);
     assert_eq!(diagnostics.len(), 1);
     assert_eq!(
@@ -49,6 +49,47 @@ fn diagnostics_have_ranges_and_messages() {
         "cannot assign str to 'x', which is int"
     );
     assert_eq!(diagnostics[0].source.as_deref(), Some("stone"));
+}
+
+#[test]
+fn unused_names_are_warnings_marked_unnecessary() {
+    let doc = doc("fn f(a: int) -> int:\n    ret 1\n\ny = f(1) + \"s\"\n");
+    let diagnostics = diagnostics(&doc);
+    let found: Vec<(u32, Option<DiagnosticSeverity>, &str, bool)> = diagnostics
+        .iter()
+        .map(|d| {
+            let unnecessary = d.tags == Some(vec![lsp_types::DiagnosticTag::UNNECESSARY]);
+            (
+                d.range.start.line,
+                d.severity,
+                d.message.as_str(),
+                unnecessary,
+            )
+        })
+        .collect();
+    assert_eq!(
+        found,
+        [
+            (
+                0,
+                Some(DiagnosticSeverity::WARNING),
+                "parameter 'a' is never used; remove it or name it '_a'",
+                true
+            ),
+            (
+                3,
+                Some(DiagnosticSeverity::WARNING),
+                "variable 'y' is never used; remove it or name it '_y'",
+                true
+            ),
+            (
+                3,
+                Some(DiagnosticSeverity::ERROR),
+                "expected int, found str",
+                false
+            ),
+        ]
+    );
 }
 
 #[test]
@@ -1682,6 +1723,7 @@ fn total[T: Shape](xs: list[T]) -> float:
         t += x.area()
     ret t
 q = Sq(s=1.0)
+print(total([q]))
 ";
 
 #[test]
@@ -1753,13 +1795,13 @@ fn completion_offers_the_methods_of_a_bound_and_a_traits_defaults() {
             .collect()
     };
     assert_eq!(
-        labels(format!("{TRAITS}r = q.\n"), at(16, 7)),
+        labels(format!("{TRAITS}r = q.\n"), at(17, 7)),
         ["s", "area", "half", "display"]
     );
     assert_eq!(
         labels(
             format!("{TRAITS}fn f[T: Shape](x: T) -> float:\n    y = x.\n    ret 1.0\n"),
-            at(17, 11)
+            at(18, 11)
         ),
         ["area", "half", "display"]
     );
@@ -1904,6 +1946,34 @@ fn a_lambda_hovers_with_its_type_and_its_parameters_with_theirs() {
     );
 }
 
+const CLOSURES: &str = "\
+fn above(xs: list[int], limit: int) -> list[int]:
+    ret xs.filter(|x| x > limit)
+print(above([1, 5], 2))
+";
+
+#[test]
+fn a_captured_name_is_the_variable_it_copies() {
+    let doc = doc(CLOSURES);
+    // no warning that `limit` is unused, though only the lambda reads it
+    assert_eq!(diagnostics(&doc), []);
+    assert_eq!(
+        hover_text(&doc, at(2, 27)).unwrap(),
+        "```stone\n(parameter) limit: int\n```"
+    );
+    // the lambda is a function of one parameter, though it holds a copy of `limit`
+    assert_eq!(
+        hover_text(&doc, at(2, 19)).unwrap(),
+        "```stone\nfn(int) -> bool\n```"
+    );
+    let location = definition(&doc, &uri(), at(2, 27), None).unwrap();
+    assert_eq!(location.range.start, Position::new(0, 24));
+    let edit = rename(&doc, &uri(), at(1, 25), "low").unwrap();
+    let edits = &edit.changes.unwrap()[&uri()];
+    let starts: Vec<Position> = edits.iter().map(|e| e.range.start).collect();
+    assert_eq!(starts, [Position::new(0, 24), Position::new(1, 26)]);
+}
+
 const GENERIC_TRAITS: &str = "\
 struct V:
     x: int
@@ -1917,6 +1987,7 @@ impl add[V] for V:
         ret V(x=self.x + other.x)
 v = V(x=1).add(2)
 w = v.add(3)
+print(w)
 ";
 
 #[test]

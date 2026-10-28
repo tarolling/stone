@@ -395,6 +395,12 @@ fn kill_targets(target: &Expr, live: &mut HashSet<String>) {
 fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
     match &expr.kind {
         ExprKind::Lambda { .. } => {}
+        // a closure names its function as a value and reads what it captures where it is made
+        ExprKind::Closure { function, captures } => {
+            out.names.push(function);
+            out.values.push(function);
+            captures.iter().for_each(|capture| expr_names(capture, out));
+        }
         ExprKind::Name { .. } if expr.is_unwritten() => {}
         ExprKind::Name { id, .. } => {
             out.names.push(id);
@@ -709,8 +715,8 @@ mod tests {
     /// Parses `source` and returns, for each top-level statement in order, the variables live
     /// after it, sorted, with the statements nested in the first `fn`, if there is one, first.
     fn live(source: &str) -> Vec<Vec<String>> {
-        let module = parse(source).unwrap();
-        let crate::ast::Mod::Module { body } = &module;
+        let body = lifted(source);
+        let body = &body;
         let mut statements: Vec<&Stmt> = Vec::new();
         for stmt in body {
             collect(stmt, &mut statements);
@@ -743,6 +749,13 @@ mod tests {
             .collect()
     }
 
+    /// Parses `source` and returns its statements with its lambdas lifted, as linking does.
+    fn lifted(source: &str) -> Vec<Stmt> {
+        let crate::ast::Mod::Module { mut body } = parse(source).unwrap();
+        crate::lift::lift_lambdas(&mut body);
+        body
+    }
+
     /// Collects `stmt` and every statement nested in it, in source order.
     fn collect<'a>(stmt: &'a Stmt, out: &mut Vec<&'a Stmt>) {
         if !matches!(stmt.kind, StmtKind::FunctionDef { .. }) {
@@ -764,6 +777,25 @@ mod tests {
 
     fn names(names: &[&str]) -> Vec<String> {
         names.iter().map(|name| name.to_string()).collect()
+    }
+
+    #[test]
+    fn a_closure_reads_what_it_captures_where_it_is_made() {
+        // the lambda's own function, lifted before the statement, has nothing live after it
+        assert_eq!(
+            live("k = [1]\nf = |x: int| x + k.len()\nprint(f(1))\n"),
+            [names(&["k"]), names(&[]), names(&["f"]), names(&[])]
+        );
+    }
+
+    #[test]
+    fn a_function_making_a_closure_reads_the_globals_it_captures() {
+        let body = lifted(
+            "g = [1]\nfn make() -> fn(int) -> int:\n    ret |x: int| x + g.len()\nprint(make()(1))\n",
+        );
+        let reads = global_reads(&body, &HashSet::from(["g".to_string()]));
+        assert_eq!(reads["make"], HashSet::from(["g".to_string()]));
+        assert_eq!(reads["lambda.3.9"], HashSet::new());
     }
 
     #[test]

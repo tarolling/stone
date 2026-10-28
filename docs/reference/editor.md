@@ -8,6 +8,8 @@ arguments, speaking LSP over stdin and stdout, for files ending in `.stn`.
 
 - **Diagnostics as you type**, from the same checker `stone check` uses. A syntax error only
   affects the statement it is in, so the rest of the file keeps working while you type.
+  Unused variables, parameters, functions, methods, types, and imports get a warning and are
+  shown faded, as `stone check` reports them.
 - **Hover** shows a variable's or expression's inferred type, a function's signature such as
   `fn add(a: int, b: int) -> int`, or a builtin's documentation. A function or variable also
   shows the `//` comment lines directly above its definition.

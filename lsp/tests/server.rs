@@ -136,7 +136,7 @@ fn falls_back_to_utf16_positions() {
 fn publishes_diagnostics_as_the_document_changes() {
     let (session, _) = Session::start(None);
 
-    session.open("x = 1\nx = \"s\"\n");
+    session.open("x = 1\nx = \"s\"\nprint(x)\n");
     let diagnostics = session.diagnostics();
     assert_eq!(
         diagnostics,
@@ -155,7 +155,7 @@ fn publishes_diagnostics_as_the_document_changes() {
         "textDocument/didChange",
         json!({
             "textDocument": { "uri": URI, "version": 2 },
-            "contentChanges": [{ "text": "x = 1\nx = 2\n" }]
+            "contentChanges": [{ "text": "x = 1\nx = 2\nprint(x)\n" }]
         }),
     );
     assert_eq!(session.diagnostics(), json!([]));

@@ -1223,6 +1223,9 @@ struct FunctionInfo {
     ret: Ty,
     /// Whether the definition writes its return type, rather than returning no value by default.
     ret_written: bool,
+    /// How many of the first `params` take copies of the variables a lambda captured, which its
+    /// value takes no argument for.
+    captures: usize,
 }
 
 /// How a value is held inside another, for counting the values it takes up.
@@ -1270,8 +1273,11 @@ struct FunctionScope {
     locals: HashMap<String, usize>,
     ret: Ty,
     ret_written: bool,
-    /// Whether this is a lambda's, which may use no variable but its own parameters.
+    /// Whether this is a lambda's.
     lambda: bool,
+    /// The names of the parameters that take copies of the variables a lambda captured, which
+    /// it cannot change.
+    captures: HashSet<String>,
     /// The file the function is written in, which decides the types it can name.
     file: FileId,
 }
@@ -1300,9 +1306,15 @@ struct Inference {
     lambdas: HashMap<String, (Arguments, Vec<Stmt>, Span)>,
     /// The lambdas named so far whose bodies are not checked yet, in order.
     pending_lambdas: Vec<String>,
-    /// The scope of the code around each lambda being checked, innermost last, whose variables
-    /// the lambda may not use.
+    /// The scope of the code around each lambda being checked, innermost last, which is checked
+    /// on once the lambda's body is.
     lambda_outer: Vec<Option<FunctionScope>>,
+    /// The variable each copy a closure holds is of, by the lambda's function, in the order its
+    /// parameters take them, so that its body's reads of them are that variable's.
+    closure_captures: HashMap<String, Vec<Option<usize>>>,
+    /// Every closure's span and the copies it holds, each with the span where its lambda reads
+    /// it, its name, and its type, which `finish` checks a closure can hold.
+    closure_values: Vec<(Span, Vec<Captured>)>,
     diagnostics: Vec<Diagnostic>,
     constraints: Vec<Constraint>,
     /// The type each `==` and `!=` compares (or `in` or `contains` compares a list's elements
@@ -1486,11 +1498,25 @@ struct DeferredOverload {
     result: Ty,
 }
 
+/// A copy a closure holds: the span where its lambda reads it, the variable's name, and its type.
+type Captured = (Span, String, Ty);
+
+/// Which variable from outside the function being checked a change would change, which is an
+/// error.
+#[derive(Clone, Copy, PartialEq)]
+enum Outside {
+    Nothing,
+    /// A global, which no function can change.
+    Global,
+    /// A copy a lambda captured, which it cannot change.
+    Capture,
+}
+
 struct DeferredMethod {
     call: Span,
     receiver: Expr,
-    /// Whether changing the receiver would change a global from inside a function.
-    global: bool,
+    /// Whether changing the receiver would change a variable from outside the function.
+    outside: Outside,
     /// Whether the call is a statement of its own, or the whole value of an assignment, where a
     /// method that changes its receiver may be called.
     statement: bool,
@@ -2255,6 +2281,7 @@ impl Inference {
                 params,
                 ret,
                 ret_written: returns.is_some() || lambda,
+                captures: args.captures,
             },
         );
     }
@@ -2474,6 +2501,8 @@ impl Inference {
                     }
                     this.clone()
                 }
+                // a lambda's copy of a method's `self`
+                (None, _) if i < args.captures => self.fresh(),
                 (annotation, _) if arg.arg == "self" => {
                     self.error(
                         arg.span,
@@ -2979,6 +3008,7 @@ impl Inference {
                 params,
                 ret,
                 ret_written: returns.is_some(),
+                captures: 0,
             },
         );
         self.function_spans.insert(function.clone(), method.span);
@@ -3180,6 +3210,7 @@ impl Inference {
                         params,
                         ret,
                         ret_written: returns.is_some(),
+                        captures: 0,
                     },
                 );
                 if !body.is_empty() {
@@ -4493,6 +4524,7 @@ impl Inference {
         }
         let (params, ret) = (info.params.clone(), info.ret.clone());
         let ret_written = info.ret_written;
+        let captures = &args.args[..args.captures.min(args.args.len())];
 
         self.function = Some(FunctionScope {
             name: name.to_string(),
@@ -4500,9 +4532,16 @@ impl Inference {
             ret: ret.clone(),
             ret_written,
             lambda: is_lambda(name),
+            captures: captures.iter().map(|arg| arg.arg.clone()).collect(),
             file: name_span.file,
         });
-        for (arg, ty) in args.args.iter().zip(params) {
+        // a lambda's copy of a variable is that variable for editors, as written
+        let outer = self.closure_captures.get(name).cloned().unwrap_or_default();
+        for (k, (arg, ty)) in args.args.iter().zip(params).enumerate() {
+            if let Some(&Some(symbol)) = outer.get(k).filter(|_| k < captures.len()) {
+                self.set_local(&arg.arg, symbol);
+                continue;
+            }
             if self.local(&arg.arg).is_some() {
                 self.error(arg.span, format!("duplicate parameter '{}'", arg.arg));
                 continue;
@@ -4528,8 +4567,9 @@ impl Inference {
         self.check_block(body);
         self.loop_depth = saved_loops;
 
-        // a method's changes to `self` are its receiver's
-        for arg in args.args.iter().filter(|arg| arg.arg != "self") {
+        // a method's changes to `self` are its receiver's, and a lambda cannot change its copies
+        let own = &args.args[captures.len()..];
+        for arg in own.iter().filter(|arg| arg.arg != "self") {
             if let Some(span) = lost_change(body, &arg.arg, &self.methods) {
                 let param = &arg.arg;
                 let message = match is_lambda(name) {
@@ -4743,23 +4783,31 @@ impl Inference {
     /// Checks a change like [`Inference::check_change`] does, to a struct if `is_struct`, which
     /// errors call a value rather than a list.
     fn check_change_of(&mut self, list: &Expr, is_struct: bool) {
-        let global = self.changes_global(list);
-        self.check_change_with(list, is_struct, global);
+        let outside = self.changes_outside(list);
+        self.check_change_with(list, is_struct, outside);
     }
 
-    /// Returns whether a change to `list` would change a global from inside a function.
-    fn changes_global(&self, list: &Expr) -> bool {
-        match &place_root(list).kind {
-            ExprKind::Name { id, .. } => {
-                self.function.is_some() && self.local(id).is_none() && self.globals.contains_key(id)
-            }
-            _ => false,
+    /// Returns whether a change to `list` would change a variable from outside the function
+    /// being checked: a global, or a copy the lambda being checked captured.
+    fn changes_outside(&self, list: &Expr) -> Outside {
+        let ExprKind::Name { id, .. } = &place_root(list).kind else {
+            return Outside::Nothing;
+        };
+        let Some(function) = &self.function else {
+            return Outside::Nothing;
+        };
+        if function.captures.contains(id) {
+            return Outside::Capture;
+        }
+        match self.local(id).is_none() && self.globals.contains_key(id) {
+            true => Outside::Global,
+            false => Outside::Nothing,
         }
     }
 
     /// Checks a change like [`Inference::check_change_of`] does, given whether it changes a
-    /// global from inside a function, `global`, which `finish` cannot find out itself.
-    fn check_change_with(&mut self, list: &Expr, is_struct: bool, global: bool) {
+    /// variable from outside the function, `outside`, which `finish` cannot find out itself.
+    fn check_change_with(&mut self, list: &Expr, is_struct: bool, outside: Outside) {
         if has_slice(list) {
             self.error(list.span, SLICE_CHANGE);
             return;
@@ -4792,14 +4840,22 @@ impl Inference {
             self.error(root.span, message);
             return;
         };
-        if global {
-            self.error(
+        match outside {
+            Outside::Nothing => {}
+            Outside::Global => self.error(
                 root.span,
                 format!(
                     "a function cannot change the global '{id}'; pass it as an argument and \
                      return the changed value"
                 ),
-            );
+            ),
+            Outside::Capture => self.error(
+                root.span,
+                format!(
+                    "a lambda cannot change '{id}', since it holds a copy of the variable from \
+                     outside it; write a function that takes '{id}' and returns the changed value"
+                ),
+            ),
         }
     }
 
@@ -6263,7 +6319,7 @@ impl Inference {
             {
                 self.error(conflict.span, conflict_message(name, conflict));
             }
-            self.check_change_with(&deferred.receiver, true, deferred.global);
+            self.check_change_with(&deferred.receiver, true, deferred.outside);
         } else if ret == Ty::Unit && !deferred.statement {
             self.error(
                 deferred.call,
@@ -6386,6 +6442,9 @@ impl Inference {
                 self.fresh()
             }
             ExprKind::Try { value } => self.infer_try(expr, value),
+            ExprKind::Closure { function, captures } => {
+                self.infer_closure(expr.span, function, captures)
+            }
             // any value is written as text, as `print` writes it
             ExprKind::JoinedStr { values } => {
                 for value in values {
@@ -6403,8 +6462,6 @@ impl Inference {
                 _ => Ty::Int,
             },
             ExprKind::Name { id, .. } => match self.resolve_name(id) {
-                // reported, with the variable's type so nothing else is
-                _ if let Some(ty) = self.captured(expr.span, id) => ty,
                 Resolved::Variable(symbol) => {
                     self.add_reference(expr.span, symbol);
                     self.symbol_types[symbol].clone()
@@ -6831,12 +6888,6 @@ impl Inference {
             }
             return self.infer_method(call, func, value, attr, args);
         }
-        if let ExprKind::Name { id, .. } = &func.kind
-            && let Some(func_ty) = self.captured(func.span, id)
-        {
-            let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
-            return self.infer_value_call(call, func, Some(id), &func_ty, args, &arg_types);
-        }
         let ExprKind::Name { id, .. } = &func.kind else {
             // any other value of a function type, as in `fs[0](x)`
             let func_ty = self.infer(func);
@@ -6902,7 +6953,9 @@ impl Inference {
             (info.symbol, info.type_params.len())
         };
         let type_args = (0..count).map(|_| self.fresh()).collect();
-        let (params, ret) = self.instantiate(span, name, type_args);
+        let (mut params, ret) = self.instantiate(span, name, type_args);
+        // a closure holds the copies its lambda takes first
+        params.drain(..self.functions[name].captures.min(params.len()));
         if is_lambda(name) {
             self.pending_lambdas.push(name.to_string());
         } else {
@@ -6946,33 +6999,40 @@ impl Inference {
         })
     }
 
-    /// Reports `id`, used at `span`, if it is a variable from outside the lambda whose body is
-    /// being checked, and returns the variable's type if it is.
+    /// Gives the type of the closure at `span` of the lambda's function `function`, which holds a
+    /// copy of each of `captures`, names read where it is made: the function's type without the
+    /// parameters that take them.
     ///
-    /// For example, in `k = 2` then `xs.map(|x| x * k)`, `k` is the global's, which no lambda can
-    /// use yet.
-    fn captured(&mut self, span: Span, id: &str) -> Option<Ty> {
-        let scope = self.function.as_ref()?;
-        if !scope.lambda || scope.locals.contains_key(id) {
-            return None;
+    /// For example, `|x| x > limit` with `limit` an `int` is a `fn(int) -> bool`. The copies take
+    /// no reference here, since each is written where the lambda's body reads it, which records
+    /// one on the same variable.
+    fn infer_closure(&mut self, span: Span, function: &str, captures: &[Expr]) -> Ty {
+        let Some(params) = self.functions.get(function).map(|info| info.params.clone()) else {
+            self.error(span, "a lambda must be linked before it is checked");
+            return self.fresh();
+        };
+        let (mut symbols, mut values) = (vec![], vec![]);
+        for (capture, param) in captures.iter().zip(&params) {
+            let ExprKind::Name { id, .. } = &capture.kind else {
+                continue;
+            };
+            let ty = match self.resolve_name(id) {
+                Resolved::Variable(symbol) => {
+                    symbols.push(Some(symbol));
+                    self.symbol_types[symbol].clone()
+                }
+                _ => {
+                    symbols.push(None);
+                    self.infer(capture)
+                }
+            };
+            self.expr_types.push((capture.span, ty.clone()));
+            self.unify(param, &ty);
+            values.push((capture.span, id.clone(), ty));
         }
-        // the nearest scope's, as the name would mean there
-        let symbol = self
-            .lambda_outer
-            .iter()
-            .rev()
-            .flatten()
-            .find_map(|outer| outer.locals.get(id))
-            .or_else(|| self.globals.get(id))
-            .copied()?;
-        self.error(
-            span,
-            format!(
-                "a lambda cannot use '{id}', a variable from outside it, since lambdas capture \
-                 nothing yet; write a function that takes '{id}' as a parameter instead"
-            ),
-        );
-        Some(self.symbol_types[symbol].clone())
+        self.closure_values.push((span, values));
+        self.closure_captures.insert(function.to_string(), symbols);
+        self.function_value(span, function, function)
     }
 
     /// Checks the call `call` of `func`, a value of type `func_ty` rather than a function by
@@ -7262,7 +7322,7 @@ impl Inference {
                 self.deferred_methods.push(DeferredMethod {
                     call: call.span,
                     receiver: receiver.clone(),
-                    global: self.changes_global(receiver),
+                    outside: self.changes_outside(receiver),
                     statement: self.statement_call == Some(call.span),
                     assigned: self.assigned_call == Some(call.span),
                     value_ty: receiver_ty,
@@ -8517,12 +8577,105 @@ impl Inference {
         }
     }
 
+    /// Reports what a closure cannot hold: a copy whose type depends on a type parameter, since
+    /// a lambda is not copied for each type a generic function is called with, a socket or a
+    /// listener, which closes after the last statement that uses it, and more values than one
+    /// object holds.
+    ///
+    /// For example, `|y| y == x` in `fn has[T: eq](xs: list[T], x: T)` cannot capture `x`.
+    fn check_closures(&mut self) {
+        let mut errors = vec![];
+        for (span, values) in &self.closure_values {
+            for (at, name, ty) in values {
+                let mut found = vec![];
+                self.params_in(ty, &mut found);
+                if let Some(&p) = found.first() {
+                    let param = &self.type_params[p].name;
+                    errors.push((
+                        *at,
+                        format!(
+                            "a lambda cannot capture '{name}' yet, since its type depends on the \
+                             type parameter {param}; write a function that takes '{name}' as a \
+                             parameter instead"
+                        ),
+                    ));
+                } else if self.holds_handle(ty, &mut HashSet::new()) {
+                    errors.push((
+                        *at,
+                        format!(
+                            "a lambda cannot capture '{name}', since it holds a connection, which \
+                             closes after the last statement that uses it; pass it as a parameter \
+                             instead"
+                        ),
+                    ));
+                }
+            }
+            let count: usize = values.iter().map(|(_, _, ty)| self.values(ty)).sum();
+            if count > MAX_ELEMENT_VALUES {
+                errors.push((
+                    *span,
+                    format!(
+                        "a lambda can capture at most {MAX_ELEMENT_VALUES} values, but this one \
+                         captures {count}; pass some as parameters instead"
+                    ),
+                ));
+            }
+        }
+        for (span, message) in errors {
+            self.error(span, message);
+        }
+    }
+
+    /// Returns whether a value of type `ty` is or holds a socket or listener anywhere, unless
+    /// `seen` shows its struct or enum was already looked through.
+    fn holds_handle(&self, ty: &Ty, seen: &mut HashSet<String>) -> bool {
+        match self.shallow(ty) {
+            Ty::Handle(_) => true,
+            Ty::List(elem) => self.holds_handle(&elem, seen),
+            Ty::Map(_, value) => self.holds_handle(&value, seen),
+            Ty::Tuple(fields) => fields.iter().any(|f| self.holds_handle(f, seen)),
+            Ty::Struct(name, args) => {
+                seen.insert(self.show(&Ty::Struct(name.clone(), args.clone())))
+                    && self
+                        .field_types(&name, &args)
+                        .iter()
+                        .any(|f| self.holds_handle(f, seen))
+            }
+            ty @ Ty::Enum(..) => {
+                seen.insert(self.show(&ty))
+                    && self
+                        .ty_variants(&ty)
+                        .unwrap_or_default()
+                        .iter()
+                        .flat_map(|(_, fields)| fields)
+                        .any(|f| self.holds_handle(f, seen))
+            }
+            _ => false,
+        }
+    }
+
     /// Reports a function named as a value whose type depends on a type parameter, as `id` does
     /// in `f = id` inside `fn wrap[T](x: T)`. The interpreter makes no copy of a generic
     /// function, so it could not tell which type such a value has, which printing it writes.
     fn check_function_values(&mut self) {
+        // a closure that captures such a value is reported for that, in `check_closures`
+        let closures: HashSet<Span> = self
+            .closure_values
+            .iter()
+            .filter(|(_, values)| {
+                values.iter().any(|(_, _, ty)| {
+                    let mut found = vec![];
+                    self.params_in(ty, &mut found);
+                    !found.is_empty()
+                })
+            })
+            .map(|(span, _)| *span)
+            .collect();
         let mut errors = vec![];
         for (span, id, _, ty) in &self.function_values {
+            if closures.contains(span) {
+                continue;
+            }
             let mut found = vec![];
             self.params_in(ty, &mut found);
             if let Some(&p) = found.first() {
@@ -8627,6 +8780,7 @@ impl Inference {
         self.check_variant_widths();
         self.check_captured_params();
         self.check_function_values();
+        self.check_closures();
         for pending in std::mem::take(&mut self.matches) {
             self.check_cases(pending);
         }
@@ -8666,8 +8820,10 @@ impl Inference {
                         }
                         _ => &self.functions[&symbol.name],
                     };
+                    // a closure holds the copies its lambda takes first
+                    let params = &info.params[info.captures.min(info.params.len())..];
                     Type::Function {
-                        params: info.params.iter().map(|p| self.finalize(p)).collect(),
+                        params: params.iter().map(|p| self.finalize(p)).collect(),
                         ret: Box::new(self.finalize(&info.ret)),
                     }
                 }
@@ -9232,7 +9388,12 @@ impl<'a> AssignmentCheck<'a> {
                     ));
                 }
             }
-            ExprKind::BoolOp { values, .. } | ExprKind::JoinedStr { values } => {
+            // a closure reads each variable it captures where it is made
+            ExprKind::BoolOp { values, .. }
+            | ExprKind::JoinedStr { values }
+            | ExprKind::Closure {
+                captures: values, ..
+            } => {
                 for value in values {
                     self.reads(value, assigned);
                 }
@@ -9757,9 +9918,11 @@ impl ParameterUse<'_> {
         match &expr.kind {
             ExprKind::Lambda { .. } => {}
             ExprKind::Name { id, .. } => self.read |= id == self.name && !expr.is_unwritten(),
-            ExprKind::BoolOp { values, .. } | ExprKind::JoinedStr { values } => {
-                values.iter().for_each(|value| self.expr(value))
-            }
+            ExprKind::BoolOp { values, .. }
+            | ExprKind::JoinedStr { values }
+            | ExprKind::Closure {
+                captures: values, ..
+            } => values.iter().for_each(|value| self.expr(value)),
             ExprKind::BinOp { left, right, .. } => {
                 self.expr(left);
                 self.expr(right);

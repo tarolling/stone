@@ -1,0 +1,22 @@
+// one character compared with another, or with a one-byte literal, in conditions
+fn ends_match(w: str) -> bool:
+    if w[0] == w[-1]:
+        ret true
+    ret false
+
+fn first_is(w: str, c: str) -> bool:
+    if w[0] == c:
+        ret true
+    ret false
+
+for w in ["abba", "abc", "x", "noon", "Zz"]:
+    print("{w} {ends_match(w)}")
+    if w[0] != "a" and w[-1] != "a":
+        print("  no a at either end")
+print(first_is("hello", "h"))
+print(first_is("hello", "x"))
+text = "héllo"
+if text[0] == "h":
+    print("starts with h")
+if text[-1] == text[4]:
+    print("same last")

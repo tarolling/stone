@@ -16,7 +16,7 @@ pub mod sort;
 use crate::ast::Mod;
 use crate::codegen::context::{
     BYTES_ROUTINES, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, STRING_METHOD_ROUTINES,
-    escape, global_label, immortal_bytes, immortal_string, variant_statics,
+    escape, function_statics, global_label, immortal_bytes, immortal_string, variant_statics,
 };
 use crate::codegen::x64::builtins::print;
 use crate::codegen::{AssemblyGenerator, Target};
@@ -471,7 +471,8 @@ impl X64Generator {
         let literals = self.ctx.string_literals();
         let bytes = self.ctx.bytes_literals();
         let statics = std::mem::take(&mut self.ctx.variant_statics);
-        if literals.is_empty() && bytes.is_empty() && statics.is_empty() {
+        let functions = std::mem::take(&mut self.ctx.function_statics);
+        if literals.is_empty() && bytes.is_empty() && statics.is_empty() && functions.is_empty() {
             return;
         }
 
@@ -484,6 +485,7 @@ impl X64Generator {
             immortal_bytes(self, &label, &bytes);
         }
         variant_statics(self, &statics);
+        function_statics(self, &functions);
         self.emit("");
     }
 
@@ -554,6 +556,30 @@ mod tests {
     fn assemble(source: &str) -> Result<String, String> {
         let module = parse_program(source).map_err(|e| e.to_string())?;
         X64Generator::new().assemble(&module)
+    }
+
+    #[test]
+    fn a_base_case_returns_before_the_frame_is_made() {
+        let fib = function_text(&assemble(FIB).unwrap(), "fib");
+        let lines: Vec<&str> = fib.lines().collect();
+        // the test on n and the return of n come first, from the argument register
+        assert_eq!(lines[1], "\tcmp\trdi, 2", "{fib}");
+        assert!(lines[2].starts_with("\tjge\t.Lframe_"), "{fib}");
+        assert_eq!(&lines[3..5], ["\tmov\trax, rdi", "\tret"], "{fib}");
+        assert!(lines[5].starts_with(".Lframe_"), "{fib}");
+        assert_eq!(lines[6], "\tpush\trbp", "{fib}");
+    }
+
+    #[test]
+    fn an_append_with_room_stores_without_a_call() {
+        let fill = function_text(&assemble("fn fill(n: int) -> list[int]:\n    xs = []\n    for i in range(n):\n        xs.append(i)\n    ret xs\nprint(fill(3))\n").unwrap(), "fill");
+        // the call only grows the list, after the store is skipped
+        let store = fill
+            .find("\tmov\tQWORD PTR [rcx + rax * 8], rsi")
+            .expect(&fill);
+        let call = fill.find("\tcall\tstone.list_append").expect(&fill);
+        assert!(fill[..store].contains("\tjge\t.Lappend_grow"), "{fill}");
+        assert!(store < call, "{fill}");
     }
 
     #[test]
@@ -804,8 +830,16 @@ mod tests {
             .filter(|line| !line.contains("stone.call_depth") && !line.starts_with("\tjge\t.Lfail"))
             .map(|line| format!("{line}\n"))
             .collect();
-        assert!(fib.contains("\tsub\trdi, 1\n\tcall\tfn.fib"), "{fib}");
-        assert!(fib.contains("\tsub\trdi, 2\n\tcall\tfn.fib"), "{fib}");
+        // `n - 1` is a three-operand lea into the argument register, with no copy first
+        let lines: Vec<&str> = fib.lines().collect();
+        for k in [1, 2] {
+            let computed = lines.windows(2).any(|pair| {
+                pair[0].starts_with("\tlea\trdi, [")
+                    && pair[0].ends_with(&format!(" - {k}]"))
+                    && pair[1] == "\tcall\tfn.fib"
+            });
+            assert!(computed, "{fib}");
+        }
     }
 
     #[test]

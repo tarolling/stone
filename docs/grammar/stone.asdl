@@ -55,6 +55,10 @@ module stone
          -- linking turns each into a FunctionDef named as a value
          | Lambda(arguments args, expr body)
 
+         -- linking makes one of a Lambda that uses variables from outside it: a value of the
+         -- FunctionDef `function`, whose first parameters take copies of `captures`
+         | Closure(identifier function, expr* captures)
+
     expr_context = Load | Store
 
     boolop = And | Or
@@ -65,7 +69,8 @@ module stone
 
     cmpop = Eq | NotEq | Lt | LtE | Gt | GtE | In | NotIn
 
-    arguments = (arg* args)
+    -- the first `captures` args of a lambda's FunctionDef take a closure's copies
+    arguments = (arg* args, int captures)
 
     arg = (identifier arg, type? annotation)
 

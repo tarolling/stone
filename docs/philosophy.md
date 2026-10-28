@@ -226,9 +226,12 @@ but a call that passes a function by its name, as `xs.map(double)` does, compile
 the callee that calls that function directly, as a copy of a generic function does its bound's
 methods, so the list helpers cost no more than the loops they stand for. A lambda, such as
 `|x| x * 2`, is a function of its own that linking names, so it costs what a named function
-does, and `xs.map(|x| x * 2)` calls it directly. Lambdas capture nothing yet, using only their
-own parameters; closures are future work, and with value semantics they will capture copies,
-so no closure ever shares a variable, and a lambda that compiles today will mean the same then.
+does, and `xs.map(|x| x * 2)` calls it directly. A lambda that uses variables from outside it is
+a closure, which with value semantics captures copies of them where it is written, so no closure
+ever shares a variable; one passed straight to a function, as `xs.filter(|x| x > limit)`, is
+still called directly, its copies passed with the other arguments. A closure kept as a value is
+one object holding its code's address and its copies, counted like any other. Closures cannot
+yet capture connections or, in a generic function, values of a type parameter.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.

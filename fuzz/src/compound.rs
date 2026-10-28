@@ -25,7 +25,8 @@
 //!   `<`, picked from the path rather than drawn, so programs without them are unchanged. Results,
 //!   options, and `?` appear there too, in `measured` and `looked_up`, read the same way, and so
 //!   do function values: `plus_one` passed to `through` or held in an `F`, and `grown`, which owns
-//!   its parameter, passed to `each_grown`, and lambdas passed or held the same way.
+//!   its parameter, passed to `each_grown`, and lambdas passed or held the same way, one of them
+//!   a closure that captures the variable a path starts from.
 
 use crate::{Generator, MAX_BLOCK_LEN, MAX_NESTING, Scope};
 use arbitrary::{Result, Unstructured};
@@ -1030,7 +1031,8 @@ impl Generator {
                     2 => format!("each_grown(grown, [{path}.len(), 1])[-1]"),
                     3 => format!("through(|x| x * 2, {path}.len())"),
                     4 => format!("F(f=|x| plus_one(x)).f({path}.len())"),
-                    _ => format!("{path}.len()"),
+                    // a closure, holding a copy of the variable the path starts from
+                    _ => format!("through(|x| x + {path}.len(), 1)"),
                 }
             }
             Source::Len(i) => format!("{}.len()", fill(u, &paths[i].text)?),

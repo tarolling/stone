@@ -1,0 +1,6 @@
+// an element of several values is found through one checked slot
+fn names(pairs: list[tuple[int, str]], n: int):
+    for i in range(n):
+        print(pairs[i][1])
+
+names([(1, "a"), (2, "b")], 3)

@@ -8,9 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DocumentSymbol, Hover,
-    HoverContents, Location, MarkupContent, MarkupKind, Position, PrepareRenameResponse, Range,
-    SymbolKind, TextEdit, Uri, WorkspaceEdit,
+    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DiagnosticTag,
+    DocumentSymbol, Hover, HoverContents, Location, MarkupContent, MarkupKind, Position,
+    PrepareRenameResponse, Range, SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
 use stone::ast::is_lambda;
 use stone::checker::{
@@ -40,6 +40,9 @@ mod tests;
 pub struct Document {
     pub text: String,
     pub analysis: Analysis,
+    /// A warning for each thing the program defines and never uses, which `stone check` reports
+    /// too.
+    pub unused: Vec<stone::diagnostic::Diagnostic>,
     pub index: LineIndex,
     /// The document's file in its program.
     pub file: FileId,
@@ -79,6 +82,7 @@ impl Document {
 
     fn from_linked(linked: Linked, file: FileId, encoding: Encoding) -> Self {
         let analysis = stone::driver::analyze_linked(&linked);
+        let unused = stone::unused::find(&linked, &analysis);
         let text = linked.sources.file(file).source.clone();
         let index = LineIndex::new(&text, encoding);
         let (tokens, _) = Lexer::with_file(&text, file).lex_recovering();
@@ -86,6 +90,7 @@ impl Document {
             tokens,
             text,
             analysis,
+            unused,
             index,
             file,
             sources: linked.sources,
@@ -238,11 +243,17 @@ fn program_of(path: &Path, text: &str, sources: &dyn Sources) -> Linked {
 
 /// Returns the document's problems as LSP diagnostics.
 pub fn diagnostics(doc: &Document) -> Vec<Diagnostic> {
-    doc.analysis
-        .diagnostics
-        .iter()
-        .filter(|d| d.span.file == doc.file)
-        .map(|d| Diagnostic {
+    let found = doc.analysis.diagnostics.iter().map(|d| (d, false));
+    // an editor fades what is unused as well as underlining it
+    let unused = doc.unused.iter().map(|d| (d, true));
+    let mut diagnostics: Vec<_> = found
+        .chain(unused)
+        .filter(|(d, _)| d.span.file == doc.file)
+        .collect();
+    diagnostics.sort_by_key(|(d, _)| d.span.start);
+    diagnostics
+        .into_iter()
+        .map(|(d, unused)| Diagnostic {
             range: doc.index.range(d.span),
             severity: Some(match d.severity {
                 Severity::Error => DiagnosticSeverity::ERROR,
@@ -250,6 +261,7 @@ pub fn diagnostics(doc: &Document) -> Vec<Diagnostic> {
             }),
             source: Some("stone".to_string()),
             message: d.message.clone(),
+            tags: unused.then(|| vec![DiagnosticTag::UNNECESSARY]),
             ..Diagnostic::default()
         })
         .collect()

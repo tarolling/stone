@@ -121,9 +121,15 @@ pub struct TraitName {
     pub args: Vec<TypeExpr>,
 }
 
+/// The parameters of a function or lambda.
+///
+/// For a function linking made of a lambda that uses variables from outside it, the first
+/// `captures` parameters take copies of those variables, as `limit` in the function made of
+/// `|x| x > limit`; the parser always gives 0.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Arguments {
     pub args: Vec<Arg>,
+    pub captures: usize,
 }
 
 /// A comparison operator, such as `<` in `a < b`.
@@ -286,18 +292,22 @@ impl Expr {
                 .map(|b| &**b)
                 .collect(),
             ExprKind::Lambda { body, .. } => vec![body],
+            ExprKind::Closure { captures, .. } => captures.iter().collect(),
         }
     }
 
     /// Returns the expressions directly inside this one, left to right, as
     /// [`Expr::children`] does, but changeable, and with every name, written or not.
-    fn children_mut(&mut self) -> Vec<&mut Expr> {
+    pub(crate) fn children_mut(&mut self) -> Vec<&mut Expr> {
         match &mut self.kind {
             ExprKind::Name { .. } | ExprKind::Constant { .. } => vec![],
             ExprKind::BoolOp { values, .. }
             | ExprKind::JoinedStr { values }
             | ExprKind::List { elts: values, .. }
-            | ExprKind::Tuple { elts: values, .. } => values.iter_mut().collect(),
+            | ExprKind::Tuple { elts: values, .. }
+            | ExprKind::Closure {
+                captures: values, ..
+            } => values.iter_mut().collect(),
             ExprKind::BinOp { left, right, .. } => vec![left, right],
             ExprKind::UnaryOp { operand, .. }
             | ExprKind::Try { value: operand }
@@ -344,116 +354,6 @@ pub fn is_lambda(name: &str) -> bool {
     let mut parts = name.rsplit('.');
     let number = |part: Option<&str>| part.is_some_and(|p| p.parse::<usize>().is_ok());
     number(parts.next()) && number(parts.next()) && parts.next() == Some("lambda")
-}
-
-/// Turns every lambda in `body` into a function of its own, named by [`lambda_name`], which goes
-/// just before the top-level statement holding it, and the lambda into that function's name, so
-/// that everything after linking sees a function named as a value.
-///
-/// For example, `ys = xs.map(|x| x + 1)` on line 2 becomes `fn lambda.2.12(x): ret x + 1`
-/// followed by `ys = xs.map(lambda.2.12)`. A lambda inside another goes first.
-pub fn lift_lambdas(body: &mut Vec<Stmt>) {
-    let mut lifted = Vec::with_capacity(body.len());
-    for mut stmt in std::mem::take(body) {
-        let mut functions = vec![];
-        lift_in_stmt(&mut stmt, &mut functions);
-        lifted.extend(functions);
-        lifted.push(stmt);
-    }
-    *body = lifted;
-}
-
-/// Lifts the lambdas of `stmt` and of the blocks it holds into `functions`.
-fn lift_in_stmt(stmt: &mut Stmt, functions: &mut Vec<Stmt>) {
-    let blocks: Vec<&mut Vec<Stmt>> = match &mut stmt.kind {
-        StmtKind::FunctionDef { body, .. } => vec![body],
-        StmtKind::For {
-            target, iter, body, ..
-        } => {
-            lift_in_expr(target, functions);
-            lift_in_expr(iter, functions);
-            vec![body]
-        }
-        StmtKind::While { test, body } => {
-            lift_in_expr(test, functions);
-            vec![body]
-        }
-        StmtKind::If { test, body, orelse } => {
-            lift_in_expr(test, functions);
-            vec![body, orelse]
-        }
-        StmtKind::ImplDef { methods, .. } | StmtKind::TraitDef { methods, .. } => vec![methods],
-        StmtKind::Match { subject, cases } => {
-            lift_in_expr(subject, functions);
-            cases.iter_mut().map(|case| &mut case.body).collect()
-        }
-        StmtKind::Return { value } => {
-            if let Some(value) = value {
-                lift_in_expr(value, functions);
-            }
-            vec![]
-        }
-        StmtKind::Assign { targets, value } => {
-            targets
-                .iter_mut()
-                .for_each(|target| lift_in_expr(target, functions));
-            lift_in_expr(value, functions);
-            vec![]
-        }
-        StmtKind::AugAssign { target, value, .. } => {
-            lift_in_expr(target, functions);
-            lift_in_expr(value, functions);
-            vec![]
-        }
-        StmtKind::Expr { value } => {
-            lift_in_expr(value, functions);
-            vec![]
-        }
-        StmtKind::Use { .. }
-        | StmtKind::EnumDef { .. }
-        | StmtKind::StructDef { .. }
-        | StmtKind::Break
-        | StmtKind::Continue => vec![],
-    };
-    for block in blocks {
-        for stmt in block {
-            lift_in_stmt(stmt, functions);
-        }
-    }
-}
-
-/// Lifts the lambdas of `expr` into `functions`, inner ones first.
-fn lift_in_expr(expr: &mut Expr, functions: &mut Vec<Stmt>) {
-    for child in expr.children_mut() {
-        lift_in_expr(child, functions);
-    }
-    if !matches!(expr.kind, ExprKind::Lambda { .. }) {
-        return;
-    }
-    let span = expr.span;
-    let name = lambda_name(span);
-    let named = ExprKind::Name {
-        id: name.clone(),
-        ctx: ExprContext::Load,
-    };
-    let ExprKind::Lambda { args, body } = std::mem::replace(&mut expr.kind, named) else {
-        return;
-    };
-    let ret = Stmt::new(StmtKind::Return { value: Some(body) }, span);
-    let function = StmtKind::FunctionDef {
-        name,
-        // no name is written, so nothing refers to the function where it is defined
-        name_span: Span {
-            end: span.start,
-            ..span
-        },
-        public: false,
-        type_params: vec![],
-        args,
-        returns: None,
-        body: vec![ret],
-    };
-    functions.push(Stmt::new(function, span));
 }
 
 /// The kind of an [`Expr`], such as a call or a binary operation.
@@ -526,8 +426,16 @@ pub enum ExprKind {
     },
     /// A lambda, such as `|x| x * 2` or `|p: Point| p.x`, a function written where it is used,
     /// which may use only its own parameters. Linking turns each into a function of its own
-    /// ([`lift_lambdas`]), so only code that parses without linking ever sees one.
+    /// ([`crate::lift::lift_lambdas`]), so only code that parses without linking ever sees one.
     Lambda { args: Arguments, body: Box<Expr> },
+    /// A lambda that uses variables from outside it, which linking turns into a value of the
+    /// function `function` it makes of the lambda ([`crate::lift::lift_lambdas`]) holding a copy
+    /// of each variable in `captures`, each a name read where the lambda is written. For example,
+    /// `|x| x > limit` becomes the value of `lambda.2.12` holding `limit`.
+    Closure {
+        function: Identifier,
+        captures: Vec<Expr>,
+    },
 }
 
 /// A named value in a call, such as `x=1.0` in `Point(x=1.0, y=2.0)`.

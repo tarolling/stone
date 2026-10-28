@@ -1,0 +1,86 @@
+// lambdas that use variables from outside them capture copies of their values
+struct Player:
+    name: str
+    score: int
+
+struct Rule:
+    label: str
+    check: fn(int) -> bool
+
+impl Player:
+    fn beats(self, players: list[Player]) -> list[str]:
+        ret players.filter(|p| p.score < self.score).map(|p| p.name)
+
+fn above(xs: list[int], limit: int) -> list[int]:
+    ret xs.filter(|x| x > limit)
+
+fn adder(n: int) -> fn(int) -> int:
+    ret |x: int| x + n
+
+fn compose(f: fn(int) -> int, g: fn(int) -> int) -> fn(int) -> int:
+    ret |x: int| g(f(x))
+
+fn apply_all(xs: list[int], f: fn(int) -> int) -> list[int]:
+    ret xs.map(f)
+
+fn kept(f: fn(int) -> int) -> list[fn(int) -> int]:
+    ret [f, f]
+
+fn twice(f: fn(int) -> int, x: int) -> int:
+    ret f(f(x))
+
+fn scaled(grid: list[list[int]], k: int) -> list[list[int]]:
+    ret grid.map(|row| row.map(|x| x * k + row.len()))
+
+print(above([1, 5, 3, 8], 2))
+
+// a copy is taken where the lambda is written
+k = 1
+f = |x: int| x + k
+k = 2
+print(f(0), k)
+print(f)
+
+add3 = adder(3)
+add10 = adder(10)
+print(add3(1), add10(1), compose(add3, add10)(0))
+print(scaled([[1, 2], [3]], 2))
+
+// strings, lists, maps, options, and structs are copied too
+prefix = "item "
+names = [1, 2].map(|n| "{prefix}{n}")
+words = ["a", "b"]
+counts = {"a": 3, "b": 4}
+best = some(7)
+origin = Player(name="origin", score=0)
+print(names)
+print([0, 1].map(|i| words[i] + str(counts[words[i]]) + str(best.unwrap_or(0)) + origin.name))
+count = |n: int| words.len() + n
+words.append("c")
+print(words, count(0), [0].map(|i| words.len()))
+
+// closures in a list and in a struct's field
+steps = [1, 2, 3].map(|s| |x: int| x * s)
+print(steps.map(|step| step(10)))
+limit = 40
+rules = [Rule(label="small", check=|x| x < limit), Rule(label="even", check=|x| x % 2 == 0)]
+for n in [12, 45]:
+    print(n, rules.filter(|r| r.check(n)).map(|r| r.label))
+
+// each turn of a loop makes its own closure
+fs = []
+for i in range(3):
+    fs.append(|x: int| x + i)
+print(fs.map(|g| g(100)))
+
+players = [Player(name="ana", score=3), Player(name="bo", score=9), Player(name="cy", score=5)]
+print(players[2].beats(players))
+target = 5
+players.sort_by_key(|p| (p.score - target) * (p.score - target))
+print(players.map(|p| p.name))
+print(players.min_by_key(|p| p.score + target))
+
+// a closure passed straight to a function is called directly, even when passed on or kept
+offset = 100
+print(apply_all([1, 2], |x| x + offset), twice(|x| x * offset, 2))
+print(kept(|x| x - offset).map(|g| g(1)))

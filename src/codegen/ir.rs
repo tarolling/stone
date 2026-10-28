@@ -155,7 +155,8 @@ impl RcKind {
             // a map is a list of its entries
             Type::List(_) | Type::Map(..) => Some(RcKind::List),
             // a handle is laid out as an enum value whose tag says what it is
-            Type::Enum { .. } | Type::Handle(_) => Some(RcKind::Enum),
+            // a function value is laid out as an enum value whose tag is its code's address
+            Type::Enum { .. } | Type::Handle(_) | Type::Function { .. } => Some(RcKind::Enum),
             _ => None,
         }
     }
@@ -214,8 +215,8 @@ pub enum Callee {
     /// A function lowering made for the program, such as the one that prints an enum, by its
     /// assembly label. Calling one is not counted as a call of a stone function.
     Helper(String),
-    /// The function whose address the operand holds, a function value from
-    /// [`Inst::FunctionAddress`], which borrows every argument.
+    /// The code whose address the operand holds, the tag of a function value (see
+    /// [`Inst::FunctionStatic`]), which takes the value itself first and borrows every argument.
     Value(Operand),
 }
 
@@ -324,6 +325,15 @@ pub enum Inst {
     BytesAddr { dst: VReg, bytes: Vec<u8> },
     /// The length of a list.
     ListLen { dst: VReg, list: Operand },
+    /// The length in bytes of a string or bytes value, from its header, as in `v1 = str_len v0`.
+    StrLen { dst: VReg, text: Operand },
+    /// The byte at `index` of a string, which must be in range, as an int from 0 to 255, as in
+    /// `v2 = str_byte v0, v1`.
+    StrByte {
+        dst: VReg,
+        text: Operand,
+        index: Operand,
+    },
     /// `dst = list[index]`, counting a negative index from the end and failing when out of range.
     ListLoad {
         dst: VReg,
@@ -445,6 +455,11 @@ pub enum Inst {
     /// Writes the address of the function at the assembly label `label` to `dst`, which makes a
     /// function value, as in `v1 = fn_addr fn.double`.
     FunctionAddress { dst: VReg, label: String },
+    /// Writes to `dst` the immortal function value of the code at the assembly label `label`,
+    /// one of a function that captures nothing, after writing the code's address into it, which
+    /// no linker needs to place: `function_static(label)`, laid out as an enum value whose tag is
+    /// the code's address and which holds nothing, as in `v1 = fn_static stone.fn_value.double`.
+    FunctionStatic { dst: VReg, label: String },
     /// Stops the program with `recursion is too deep` if a call made here would nest one call
     /// too many, as the check before every call of a stone function does. It stands for a call
     /// the optimizer inlined, which calls nothing itself, so the limit stays the interpreter's.
@@ -487,6 +502,8 @@ impl Inst {
             | Inst::StrAddr { dst, .. }
             | Inst::BytesAddr { dst, .. }
             | Inst::ListLen { dst, .. }
+            | Inst::StrLen { dst, .. }
+            | Inst::StrByte { dst, .. }
             | Inst::ListLoad { dst, .. }
             | Inst::ListGet { dst, .. }
             | Inst::ListData { dst, .. }
@@ -499,6 +516,7 @@ impl Inst {
             | Inst::EnumTag { dst, .. }
             | Inst::FieldGet { dst, .. }
             | Inst::FunctionAddress { dst, .. }
+            | Inst::FunctionStatic { dst, .. }
             | Inst::VariantStatic { dst, .. } => Some(*dst),
             Inst::Call { dsts, .. } => dsts.first().copied(),
             Inst::ListStore { old: dst, .. } => *dst,
@@ -531,12 +549,17 @@ impl Inst {
             | Inst::ListUnique { src, .. } => vec![*src],
             Inst::EnumTag { value, .. } | Inst::FieldGet { value, .. } => vec![*value],
             Inst::FieldInit { value, src, .. } => vec![*value, *src],
-            Inst::VariantStatic { .. } | Inst::FunctionAddress { .. } | Inst::DepthCheck => vec![],
+            Inst::VariantStatic { .. }
+            | Inst::FunctionAddress { .. }
+            | Inst::FunctionStatic { .. }
+            | Inst::DepthCheck => vec![],
             Inst::Binary { lhs, rhs, .. }
             | Inst::FloatBinary { lhs, rhs, .. }
             | Inst::Compare { lhs, rhs, .. } => vec![*lhs, *rhs],
             Inst::LoadGlobal { .. } | Inst::StrAddr { .. } | Inst::BytesAddr { .. } => vec![],
             Inst::ListLen { list, .. } | Inst::ListData { list, .. } => vec![*list],
+            Inst::StrLen { text, .. } => vec![*text],
+            Inst::StrByte { text, index, .. } => vec![*text, *index],
             Inst::Packed {
                 kernel, out, len, ..
             } => {
@@ -606,6 +629,14 @@ pub enum Terminator {
         then: BlockId,
         otherwise: BlockId,
     },
+    /// Goes to `then` if any bit of `mask` is set in the int `value`, else to `otherwise`, as in
+    /// `br_test v1, 7 -> b2, b3`, which `x % 8 == 0` becomes with the ways swapped.
+    TestBranch {
+        value: Operand,
+        mask: i64,
+        then: BlockId,
+        otherwise: BlockId,
+    },
     /// Returns from the function with its values: one, or one for each value of a tuple, as in
     /// `ret v0, v1`.
     Return(Vec<Operand>),
@@ -621,6 +652,7 @@ impl Terminator {
         match self {
             Terminator::Jump(_) => vec![],
             Terminator::Branch { cond, .. } => vec![*cond],
+            Terminator::TestBranch { value, .. } => vec![*value],
             Terminator::CmpBranch { lhs, rhs, .. } => vec![*lhs, *rhs],
             Terminator::Return(values) | Terminator::Fail(_, values) => values.clone(),
         }
@@ -641,6 +673,9 @@ impl Terminator {
                 then, otherwise, ..
             }
             | Terminator::CmpBranch {
+                then, otherwise, ..
+            }
+            | Terminator::TestBranch {
                 then, otherwise, ..
             } => vec![*then, *otherwise],
             Terminator::Return(_) | Terminator::Fail(..) => vec![],
@@ -676,6 +711,80 @@ pub struct Function {
     /// `name` is its assembly label and calling it does not count toward the limit on nested
     /// calls.
     pub helper: bool,
+}
+
+/// A return a function can take before making its frame, which [`Function::early_return`]
+/// finds: when `lhs` and `rhs`, each a parameter or a constant, compare as `cond`, the function
+/// returns `values`, each a parameter or a constant too.
+#[derive(Clone, Debug, PartialEq)]
+pub struct EarlyReturn {
+    pub cond: Cond,
+    pub lhs: Operand,
+    pub rhs: Operand,
+    pub values: Vec<Operand>,
+}
+
+impl Function {
+    /// Returns the return the function takes at once when its first block only tests its
+    /// parameters and goes to a block that only returns parameters or constants, so that the
+    /// backends can take it before saving registers, counting the call, or making a frame, none
+    /// of which that way needs. `main` and helpers have none.
+    ///
+    /// For example, `fn fib(n: int) -> int` starting `if n < 2: ret n` has `n < 2` returning `n`.
+    pub fn early_return(&self) -> Option<EarlyReturn> {
+        if self.name.is_none() || self.helper {
+            return None;
+        }
+        let entry = self.blocks.first()?;
+        if !entry.insts.is_empty() {
+            return None;
+        }
+        let (cond, lhs, rhs, then, otherwise) = match entry.term {
+            Terminator::CmpBranch {
+                cond,
+                float: false,
+                lhs,
+                rhs,
+                then,
+                otherwise,
+            } => (cond, lhs, rhs, then, otherwise),
+            Terminator::Branch {
+                cond,
+                then,
+                otherwise,
+            } => (Cond::Ne, cond, Operand::Imm(0), then, otherwise),
+            _ => return None,
+        };
+        let known = |operand: &Operand| match operand {
+            Operand::Imm(_) => true,
+            Operand::Reg(reg) => self.params.contains(reg),
+        };
+        let returns = |block: BlockId| {
+            let block = &self.blocks[block.0];
+            match &block.term {
+                Terminator::Return(values)
+                    if block.insts.is_empty() && values.iter().all(known) =>
+                {
+                    Some(values.clone())
+                }
+                _ => None,
+            }
+        };
+        if !known(&lhs) || !known(&rhs) {
+            return None;
+        }
+        let (cond, values) = match (returns(then), returns(otherwise)) {
+            (Some(values), _) => (cond, values),
+            (None, Some(values)) => (cond.negate(), values),
+            (None, None) => return None,
+        };
+        Some(EarlyReturn {
+            cond,
+            lhs,
+            rhs,
+            values,
+        })
+    }
 }
 
 /// The lowered module: every function, then `main`, plus the names of every global.
@@ -789,6 +898,8 @@ impl fmt::Display for Inst {
                 write!(f, "{dst} = {}", crate::stdlib::repr_bytes(bytes))
             }
             Inst::ListLen { dst, list } => write!(f, "{dst} = len {list}"),
+            Inst::StrLen { dst, text } => write!(f, "{dst} = str_len {text}"),
+            Inst::StrByte { dst, text, index } => write!(f, "{dst} = str_byte {text}, {index}"),
             Inst::ListLoad { dst, list, index } => {
                 write!(f, "{dst} = list_load {list}, {index}")
             }
@@ -864,6 +975,7 @@ impl fmt::Display for Inst {
             }
             Inst::VariantStatic { dst, tag } => write!(f, "{dst} = variant {tag}"),
             Inst::FunctionAddress { dst, label } => write!(f, "{dst} = fn_addr {label}"),
+            Inst::FunctionStatic { dst, label } => write!(f, "{dst} = fn_static {label}"),
             Inst::DepthCheck => write!(f, "depth_check"),
             Inst::Retain { src } => write!(f, "retain {src}"),
             Inst::Release { src, kind } => match kind {
@@ -906,6 +1018,12 @@ impl fmt::Display for Terminator {
                     cond.name()
                 )
             }
+            Terminator::TestBranch {
+                value,
+                mask,
+                then,
+                otherwise,
+            } => write!(f, "br_test {value}, {mask} -> {then}, {otherwise}"),
             Terminator::Return(values) if values.is_empty() => write!(f, "ret"),
             Terminator::Return(values) => write!(f, "ret {}", list(values)),
             Terminator::Fail(message, values) if values.is_empty() => write!(f, "fail {message:?}"),

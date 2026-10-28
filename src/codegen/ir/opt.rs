@@ -27,12 +27,15 @@
 //!
 //! The IR is not SSA, so every fact is about vregs and dies when any vreg it names is written.
 
-use super::{BinOp, Block, BlockId, Function, Inst, Operand, Program, Terminator, VReg};
+use super::inline::{rename_inst, retarget};
+use super::{BinOp, Block, BlockId, Cond, Function, Inst, Operand, Program, Terminator, VReg};
 use std::collections::{HashMap, HashSet};
 
 /// Runs every optimization over each function of `program`.
 pub fn optimize(program: &mut Program) {
     for function in &mut program.functions {
+        while forward_copies(function) {}
+        test_remainders(function);
         while hoist_unique(function) {}
         while hoist_checks(function) {}
         eliminate(function);
@@ -349,6 +352,8 @@ fn is_removable(inst: &Inst) -> bool {
         | Inst::Compare { .. }
         | Inst::IntToFloat { .. }
         | Inst::ListLen { .. }
+        | Inst::StrLen { .. }
+        | Inst::StrByte { .. }
         | Inst::ListGet { .. }
         | Inst::DataGet { .. }
         | Inst::ListData { .. }
@@ -356,6 +361,7 @@ fn is_removable(inst: &Inst) -> bool {
         | Inst::BytesAddr { .. }
         | Inst::VariantStatic { .. }
         | Inst::FunctionAddress { .. }
+        | Inst::FunctionStatic { .. }
         | Inst::EnumTag { .. }
         | Inst::FieldGet { .. }
         | Inst::LoadGlobal { checked: false, .. } => true,
@@ -611,6 +617,9 @@ fn rotate_loops(function: &mut Function) {
             }
             | Terminator::CmpBranch {
                 then, otherwise, ..
+            }
+            | Terminator::TestBranch {
+                then, otherwise, ..
             } => l.body[then.0] != l.body[otherwise.0],
             _ => false,
         };
@@ -739,25 +748,252 @@ fn hoist_data(function: &mut Function) {
             term_span: span,
             loop_depth: depth,
         });
-        let retarget = |b: &mut BlockId| {
-            if *b == entry {
-                *b = way_in;
+        let term = &function.blocks[before].term;
+        let moved = |b: BlockId| if b == entry { way_in } else { b };
+        function.blocks[before].term = retarget(term, moved, |operand| operand);
+    }
+}
+
+/// A place in a function: a block and the index of an instruction in it, where the block's
+/// terminator comes after every instruction.
+type Point = (usize, usize);
+
+/// Reads `src` in place of each copy of it that holds the same value wherever it is read, and
+/// returns whether it did, removing the copies.
+///
+/// A copy `c = copy v` qualifies when nothing else writes `c`, `v` is a parameter nothing writes
+/// or is written only once, before the copy on every way to it, and every read of `c` comes after
+/// the copy on every way to it. Then `v` cannot change between the copy and any read of `c`, since
+/// a way from a later write of `v` to that read would make a way from the entry to the read that
+/// misses the copy. This is what a `for` loop's bound is, in `for i in range(n):` when nothing
+/// assigns `n`, so the loop compares with `n` itself, and nested loops over `range(n)` keep one
+/// register for it rather than one each.
+fn forward_copies(function: &mut Function) -> bool {
+    let preds = predecessors(function);
+    let idom = dominators(function, &preds);
+    // whether block a dominates block b, which an unreachable b never is
+    let dominates = |a: usize, mut b: usize| loop {
+        if a == b {
+            return true;
+        }
+        match idom[b] {
+            Some(up) if up != b => b = up,
+            _ => return false,
+        }
+    };
+    let before = |(ab, ai): Point, (bb, bi): Point| {
+        if ab == bb { ai < bi } else { dominates(ab, bb) }
+    };
+    let mut writes: HashMap<VReg, Vec<Point>> = HashMap::new();
+    let mut reads: HashMap<VReg, Vec<Point>> = HashMap::new();
+    for (b, block) in function.blocks.iter().enumerate() {
+        for (i, inst) in block.insts.iter().enumerate() {
+            for def in inst.defs() {
+                writes.entry(def).or_default().push((b, i));
             }
+            for reg in inst.uses() {
+                reads.entry(reg).or_default().push((b, i));
+            }
+        }
+        for reg in block.term.uses() {
+            reads.entry(reg).or_default().push((b, block.insts.len()));
+        }
+    }
+    let mut forwarded: HashMap<VReg, VReg> = HashMap::new();
+    for (b, block) in function.blocks.iter().enumerate() {
+        if idom[b].is_none() {
+            continue;
+        }
+        for (i, inst) in block.insts.iter().enumerate() {
+            let Inst::Copy {
+                dst,
+                src: Operand::Reg(src),
+            } = *inst
+            else {
+                continue;
+            };
+            let copy = (b, i);
+            let written_once = |reg: VReg| writes.get(&reg).map_or(&[][..], Vec::as_slice);
+            let source_fixed = match written_once(src) {
+                [] => function.params.contains(&src),
+                [write] => !function.params.contains(&src) && before(*write, copy),
+                _ => false,
+            };
+            let qualifies = dst != src
+                && source_fixed
+                && !function.params.contains(&dst)
+                && written_once(dst) == [copy]
+                && reads
+                    .get(&dst)
+                    .is_none_or(|points| points.iter().all(|&read| before(copy, read)));
+            if qualifies {
+                forwarded.insert(dst, src);
+                // one copy at a time, since forwarding changes what the others read
+                break;
+            }
+        }
+        if !forwarded.is_empty() {
+            break;
+        }
+    }
+    if forwarded.is_empty() {
+        return false;
+    }
+    let rename = |operand: Operand| match operand {
+        Operand::Reg(reg) => Operand::Reg(forwarded.get(&reg).copied().unwrap_or(reg)),
+        imm => imm,
+    };
+    for block in &mut function.blocks {
+        let (insts, spans) = (
+            std::mem::take(&mut block.insts),
+            std::mem::take(&mut block.spans),
+        );
+        for (inst, span) in insts.into_iter().zip(spans) {
+            if matches!(inst, Inst::Copy { dst, .. } if forwarded.contains_key(&dst)) {
+                continue;
+            }
+            block.insts.push(rename_inst(&inst, &|reg| reg, &rename));
+            block.spans.push(span);
+        }
+        block.term = retarget(&block.term, |b| b, rename);
+    }
+    true
+}
+
+/// Turns a remainder by a power of two that is only compared with 0 into a test of the
+/// dividend's low bits.
+///
+/// `%` gives the dividend's sign, so `x % 8` is 0 exactly when the low three bits of `x` are, for
+/// a negative `x` too, and `v1 = rem v0, 8` followed by `br_eq v1, 0 -> b1, b2` becomes
+/// `br_test v0, 7 -> b2, b1` when nothing else reads `v1`. A remainder by a constant other than 0
+/// never fails, so dropping it changes nothing else. `x % 2 == 1` stays, since `-3 % 2` is -1.
+fn test_remainders(function: &mut Function) {
+    let mut reads: HashMap<VReg, usize> = HashMap::new();
+    for block in &function.blocks {
+        let insts = block.insts.iter().flat_map(Inst::uses);
+        for reg in insts.chain(block.term.uses()) {
+            *reads.entry(reg).or_default() += 1;
+        }
+    }
+    for block in &mut function.blocks {
+        let Terminator::CmpBranch {
+            cond: cond @ (Cond::Eq | Cond::Ne),
+            float: false,
+            lhs,
+            rhs,
+            then,
+            otherwise,
+        } = block.term
+        else {
+            continue;
         };
-        match &mut function.blocks[before].term {
-            Terminator::Jump(target) => retarget(target),
-            Terminator::Branch {
-                then, otherwise, ..
-            }
-            | Terminator::CmpBranch {
-                then, otherwise, ..
-            } => {
-                retarget(then);
-                retarget(otherwise);
-            }
-            Terminator::Return(_) | Terminator::Fail(..) => {
-                unreachable!("the way in goes to the loop")
-            }
+        let tested = match (lhs, rhs) {
+            (Operand::Reg(reg), Operand::Imm(0)) | (Operand::Imm(0), Operand::Reg(reg)) => reg,
+            _ => continue,
+        };
+        if reads.get(&tested) != Some(&1) {
+            continue;
+        }
+        let Some(at) = block
+            .insts
+            .iter()
+            .rposition(|inst| inst.defs().contains(&tested))
+        else {
+            continue;
+        };
+        let Inst::Binary {
+            op: BinOp::Rem,
+            lhs: Operand::Reg(dividend),
+            rhs: Operand::Imm(divisor),
+            ..
+        } = block.insts[at]
+        else {
+            continue;
+        };
+        let magnitude = divisor.unsigned_abs();
+        // the dividend is read at the end of the block now, so it must not change before then
+        let changed = block.insts[at + 1..]
+            .iter()
+            .any(|inst| inst.defs().contains(&dividend));
+        if !magnitude.is_power_of_two() || magnitude == 1 || changed {
+            continue;
+        }
+        block.insts.remove(at);
+        block.spans.remove(at);
+        // a set bit means the remainder is not 0
+        let (then, otherwise) = match cond {
+            Cond::Eq => (otherwise, then),
+            _ => (then, otherwise),
+        };
+        block.term = Terminator::TestBranch {
+            value: Operand::Reg(dividend),
+            mask: (magnitude - 1) as i64,
+            then,
+            otherwise,
+        };
+    }
+}
+
+/// The largest constant an index may grow by and still count as never negative, so that wrapping
+/// past `i64::MAX` would take at least 2^59 additions.
+const NATURAL_STEP: i64 = 16;
+
+/// Returns the vregs that never hold an index a list would count from its end, so that both
+/// backends can check them against the length alone.
+///
+/// A vreg qualifies when it is not a parameter and every write of it is a constant from 0, a list's
+/// length or a string's, a copy of a qualifying vreg, or a qualifying vreg plus a constant from 0 to
+/// [`NATURAL_STEP`], which takes in every counter of a `for` loop over `range` with a start from 0
+/// and a small step. Such a value is never negative unless an addition wrapped past `i64::MAX`,
+/// which lands it near `i64::MIN`, where it stays out of range even counted from the end, so
+/// skipping that step changes nothing. For example, `i` in `for i in range(n): t += xs[i]`
+/// qualifies, while `i - 1` and a parameter do not.
+pub fn never_negative(function: &Function) -> HashSet<VReg> {
+    let mut writes: HashMap<VReg, Vec<&Inst>> = HashMap::new();
+    for inst in function.blocks.iter().flat_map(|block| &block.insts) {
+        for def in inst.defs() {
+            writes.entry(def).or_default().push(inst);
+        }
+    }
+    let mut natural: HashSet<VReg> = writes
+        .keys()
+        .copied()
+        .filter(|reg| !function.params.contains(reg))
+        .collect();
+    // the largest set every write keeps, found by dropping vregs until none needs dropping
+    loop {
+        let dropped: Vec<VReg> = natural
+            .iter()
+            .copied()
+            .filter(|reg| {
+                let from = |operand: &Operand| match operand {
+                    Operand::Imm(n) => *n >= 0,
+                    Operand::Reg(src) => natural.contains(src),
+                };
+                !writes[reg].iter().all(|inst| match inst {
+                    Inst::Copy { src, .. } => from(src),
+                    Inst::ListLen { .. } | Inst::StrLen { .. } | Inst::StrByte { .. } => true,
+                    Inst::Binary {
+                        op: BinOp::Add,
+                        lhs,
+                        rhs,
+                        ..
+                    } => match (lhs, rhs) {
+                        (Operand::Reg(reg), Operand::Imm(n))
+                        | (Operand::Imm(n), Operand::Reg(reg)) => {
+                            (0..=NATURAL_STEP).contains(n) && natural.contains(reg)
+                        }
+                        _ => false,
+                    },
+                    _ => false,
+                })
+            })
+            .collect();
+        if dropped.is_empty() {
+            return natural;
+        }
+        for reg in dropped {
+            natural.remove(&reg);
         }
     }
 }
@@ -835,6 +1071,9 @@ fn hoist_checks(function: &mut Function) -> bool {
                 then, otherwise, ..
             }
             | Terminator::CmpBranch {
+                then, otherwise, ..
+            }
+            | Terminator::TestBranch {
                 then, otherwise, ..
             } => match (l.body[then.0], l.body[otherwise.0]) {
                 (true, false) => (then.0, header.term.clone()),
@@ -929,34 +1168,8 @@ fn hoist_checks(function: &mut Function) -> bool {
             loop_depth: before.loop_depth,
         });
         // the first turn's test, which goes to the checks rather than into the loop
-        let retarget = |b: BlockId| if b.0 == entry { BlockId(guard) } else { b };
-        let test = match test {
-            Terminator::Branch {
-                cond,
-                then,
-                otherwise,
-            } => Terminator::Branch {
-                cond,
-                then: retarget(then),
-                otherwise: retarget(otherwise),
-            },
-            Terminator::CmpBranch {
-                cond,
-                float,
-                lhs,
-                rhs,
-                then,
-                otherwise,
-            } => Terminator::CmpBranch {
-                cond,
-                float,
-                lhs,
-                rhs,
-                then: retarget(then),
-                otherwise: retarget(otherwise),
-            },
-            _ => unreachable!("the test branches"),
-        };
+        let guarded = |b: BlockId| if b.0 == entry { BlockId(guard) } else { b };
+        let test = retarget(&test, guarded, |operand| operand);
         let (header_insts, header_spans, header_span) = {
             let header = &function.blocks[l.header];
             (header.insts.clone(), header.spans.clone(), header.term_span)
@@ -1165,6 +1378,142 @@ mod tests {
         let get = |inst: &Inst| matches!(inst, Inst::ListGet { .. } | Inst::ListSet { .. });
         assert_eq!(count(&f, data), (0, 1), "{f}");
         assert_eq!(count(&f, get).0, 0, "{f}");
+    }
+
+    #[test]
+    fn a_loop_bound_that_never_changes_is_not_copied() {
+        let f = optimized(
+            "fn f(n: int) -> int:\n    t = 0\n    for i in range(n):\n        \
+             for j in range(n):\n            t += i * j\n    ret t\n",
+            "f",
+        );
+        let n = f.params[0];
+        let copies =
+            |inst: &Inst| matches!(inst, Inst::Copy { src, .. } if *src == Operand::Reg(n));
+        assert_eq!(count(&f, copies), (0, 0), "{f}");
+    }
+
+    #[test]
+    fn a_copy_of_a_variable_assigned_again_stays() {
+        let f = optimized(
+            "fn f(n: int) -> int:\n    t = 0\n    for i in range(n):\n        n -= 1\n        \
+             t += i\n    ret t\n",
+            "f",
+        );
+        let n = f.params[0];
+        let copies =
+            |inst: &Inst| matches!(inst, Inst::Copy { src, .. } if *src == Operand::Reg(n));
+        assert_eq!(count(&f, copies), (0, 1), "{f}");
+    }
+
+    /// Returns the index of every `list_load` in `function`, in layout order.
+    fn load_indexes(function: &Function) -> Vec<Operand> {
+        let blocks = function.blocks.iter();
+        let insts = blocks.flat_map(|block| &block.insts);
+        insts
+            .filter_map(|inst| match inst {
+                Inst::ListLoad { index, .. } => Some(*index),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_range_counter_is_never_negative() {
+        let f = optimized(
+            "fn f(xs: list[int], n: int) -> int:\n    t = 0\n    for i in range(n):\n        \
+             t += xs[i]\n    for j in range(2, n):\n        t += xs[j]\n    ret t\n",
+            "f",
+        );
+        let natural = never_negative(&f);
+        let indexes = load_indexes(&f);
+        assert_eq!(indexes.len(), 2, "{f}");
+        for index in indexes {
+            assert!(
+                matches!(index, Operand::Reg(v) if natural.contains(&v)),
+                "{f}"
+            );
+        }
+    }
+
+    #[test]
+    fn an_index_that_may_be_negative_is_not() {
+        let f = optimized(
+            "fn f(xs: list[int], n: int, k: int) -> int:\n    t = xs[k]\n    \
+             for i in range(n):\n        j = i - 1\n        t += xs[j]\n    m = 0\n    \
+             while m < n:\n        t += xs[m]\n        m += 1000\n    ret t\n",
+            "f",
+        );
+        let natural = never_negative(&f);
+        let indexes = load_indexes(&f);
+        assert_eq!(indexes.len(), 3, "{f}");
+        for index in indexes {
+            assert!(
+                !matches!(index, Operand::Reg(v) if natural.contains(&v)),
+                "{f}"
+            );
+        }
+    }
+
+    fn is_remainder(inst: &Inst) -> bool {
+        matches!(inst, Inst::Binary { op: BinOp::Rem, .. })
+    }
+
+    /// Returns the terminators of `function` that test bits, as `(mask, then, otherwise)`.
+    fn bit_tests(function: &Function) -> Vec<(i64, BlockId, BlockId)> {
+        let terms = function.blocks.iter().map(|block| &block.term);
+        terms
+            .filter_map(|term| match term {
+                Terminator::TestBranch {
+                    mask,
+                    then,
+                    otherwise,
+                    ..
+                } => Some((*mask, *then, *otherwise)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_remainder_by_a_power_of_two_compared_with_zero_tests_bits() {
+        let f = optimized(
+            "fn f(n: int) -> int:\n    if n % 8 == 0:\n        ret 1\n    \
+             if n % -2 != 0:\n        ret 2\n    ret 3\n",
+            "f",
+        );
+        assert_eq!(count(&f, is_remainder), (0, 0), "{f}");
+        let tests = bit_tests(&f);
+        assert_eq!(tests.len(), 2, "{f}");
+        // == 0 goes on when no bit is set, != 0 when one is
+        let (mask, then, otherwise) = tests[0];
+        assert_eq!(mask, 7, "{f}");
+        assert!(
+            matches!(f.blocks[otherwise.0].term, Terminator::Return(_)),
+            "{f}"
+        );
+        assert!(
+            !matches!(f.blocks[then.0].term, Terminator::Return(_)),
+            "{f}"
+        );
+        let (mask, then, _) = tests[1];
+        assert_eq!(mask, 1, "{f}");
+        assert!(
+            matches!(f.blocks[then.0].term, Terminator::Return(_)),
+            "{f}"
+        );
+    }
+
+    #[test]
+    fn other_remainders_stay() {
+        let f = optimized(
+            "fn f(n: int) -> int:\n    if n % 2 == 1:\n        ret 1\n    \
+             if n % 6 == 0:\n        ret 2\n    r = n % 4\n    if r == 0:\n        ret r\n    \
+             ret 3\n",
+            "f",
+        );
+        assert_eq!(count(&f, is_remainder), (0, 3), "{f}");
+        assert!(bit_tests(&f).is_empty(), "{f}");
     }
 
     #[test]

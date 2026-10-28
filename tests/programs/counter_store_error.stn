@@ -1,0 +1,8 @@
+// storing past the end with a range counter reports the index as written
+fn fill(xs: list[int], n: int) -> list[int]:
+    for i in range(1, n):
+        xs[i] = i
+        print(xs)
+    ret xs
+
+print(fill([0, 0], 4))

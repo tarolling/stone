@@ -1,0 +1,8 @@
+// the right-hand character is checked after the left one
+fn check(w: str, i: int) -> bool:
+    if w[0] == w[i]:
+        ret true
+    ret false
+
+print(check("abc", 2))
+print(check("abc", -4))

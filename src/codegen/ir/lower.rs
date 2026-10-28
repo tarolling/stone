@@ -32,6 +32,7 @@
 #[cfg(test)]
 mod tests;
 
+use super::inline::retarget;
 use super::{
     BinOp, Block, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, Program, RcKind,
     Terminator, VReg, leaf_name, variable_of,
@@ -46,14 +47,14 @@ use crate::checker::{
     may_name_struct, place, place_root, place_spans, range_args, struct_display, type_text,
     variant_display, variants,
 };
-use crate::codegen::context::{FUNCTION_PREFIX, function_label, module_routine};
+use crate::codegen::context::{FUNCTION_PREFIX, module_routine};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::{FileId, Span};
 use crate::stdlib::{
-    BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, END_OF_INPUT, INDEX_RANGE,
-    LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRELUDE_CLAMP, PRELUDE_SORT,
-    PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE, UNWRAP_OK, math,
-    random,
+    BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, CUT_CHARACTER, END_OF_INPUT,
+    INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRELUDE_CLAMP,
+    PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE,
+    UNWRAP_OK, math, random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -110,6 +111,16 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
             )
         })
         .collect();
+    // a lambda's copies of variables are its own, though their symbols are those variables'
+    for stmt in body {
+        if let StmtKind::FunctionDef { name, args, .. } = &stmt.kind {
+            for arg in &args.args[..args.captures.min(args.args.len())] {
+                if let Some(ty) = types.get(&arg.span) {
+                    variables.insert((Some(name.clone()), arg.arg.clone()), ty.clone());
+                }
+            }
+        }
+    }
     // each value of a tuple or struct is a variable of its own, so neither is ever stored as one
     let tuples: Vec<_> = variables
         .iter()
@@ -284,10 +295,11 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
             Helper::Equal(ty) => lowerer.enum_comparer(&ty)?,
             Helper::FunctionValue {
                 function,
+                captures,
                 owned,
                 params,
                 ret,
-            } => lowerer.function_value_thunk(&function, &owned, &params, &ret)?,
+            } => lowerer.function_value_thunk(&function, &captures, &owned, &params, &ret)?,
         });
     }
 
@@ -464,12 +476,14 @@ enum Helper {
     Print(Type),
     /// Compares two values of an enum type with `==`.
     Equal(Type),
-    /// Calls the stone function `function` (the label of its copy, for a generic one), whose
-    /// parameters of types `params` it owns where `owned` says so, for a function value of it:
-    /// a call through a value borrows every argument, so this gives each owned one a reference
-    /// first.
+    /// The code of a function value of the stone function `function` (the label of its copy,
+    /// for a generic one), which takes the value first and then arguments of types `params`, and
+    /// calls the function with the copies of types `captures` the value holds, if it is a
+    /// closure, and then the arguments, giving each the function owns, as `owned` says from
+    /// the copies on, a reference first, since a call through a value borrows them all.
     FunctionValue {
         function: String,
+        captures: Vec<Type>,
         owned: Vec<bool>,
         params: Vec<Type>,
         ret: Type,
@@ -617,13 +631,16 @@ impl Request {
 }
 
 /// The function a parameter of a copy holds, which every call of the parameter calls directly:
-/// its stone name, for what it owns and reads, and the label of its copy.
+/// its stone name, for what it owns and reads, the label of its copy, and, for a closure's
+/// lambda, the types of the copies it takes first, which the copy takes in the parameter's place.
 ///
-/// For example, `first` used for `list[int]` is `first` with the label `first..list_int`.
+/// For example, `first` used for `list[int]` is `first` with the label `first..list_int`, and
+/// `|x| x > limit` is `lambda.2.12` taking an `int` first.
 #[derive(Clone, Debug, PartialEq)]
 struct BoundFunction {
     base: String,
     label: String,
+    captures: Vec<Type>,
 }
 
 /// A name a `match` case binds, the values it takes, one for each value of a tuple, and how each
@@ -682,6 +699,9 @@ struct Lowerer<'a> {
     /// The function each parameter bound in this copy holds, by the parameter's name, which
     /// the copy takes no argument for.
     constants: HashMap<String, BoundFunction>,
+    /// The values of the copies a closure's lambda takes, which this copy takes in place of each
+    /// parameter bound to one, by the parameter's name.
+    bound_captures: HashMap<String, Vec<Operand>>,
     /// Each local's vreg. Empty in `main`, where assigned names are globals.
     locals: HashMap<String, VReg>,
     /// The locals that own a reference, which are released when the function returns.
@@ -744,6 +764,7 @@ impl<'a> Lowerer<'a> {
             instance_variables: HashMap::new(),
             dispatched: None,
             constants: HashMap::new(),
+            bound_captures: HashMap::new(),
             locals: HashMap::new(),
             counted_locals: Vec::new(),
             owned: HashMap::new(),
@@ -877,21 +898,35 @@ impl<'a> Lowerer<'a> {
         let owned = self.context.owned_params.get(name);
         let mut constants = vec![];
         for (i, arg) in args.iter().enumerate() {
-            let ExprKind::Name { id, .. } = &arg.kind else {
-                continue;
-            };
             if through_bound || owned.and_then(|owned| owned.get(first + i)) != Some(&false) {
                 continue;
             }
-            let constant = match self.context.function_values.get(&arg.span) {
-                Some(base) => BoundFunction {
+            let constant = match (&arg.kind, self.context.function_values.get(&arg.span)) {
+                (ExprKind::Name { .. }, Some(base)) => BoundFunction {
                     base: base.clone(),
                     label: self.callee_label(base, arg.span),
+                    captures: vec![],
                 },
-                None => match self.constants.get(id) {
+                // a closure's copies are passed in its place
+                (ExprKind::Closure { captures, .. }, Some(base)) => {
+                    let Some(types) = captures
+                        .iter()
+                        .map(|capture| self.span_type(capture.span))
+                        .collect::<Option<Vec<Type>>>()
+                    else {
+                        continue;
+                    };
+                    BoundFunction {
+                        base: base.clone(),
+                        label: self.callee_label(base, arg.span),
+                        captures: types,
+                    }
+                }
+                (ExprKind::Name { id, .. }, None) => match self.constants.get(id) {
                     Some(constant) => constant.clone(),
                     None => continue,
                 },
+                _ => continue,
             };
             constants.push((first + i, constant));
         }
@@ -931,6 +966,18 @@ impl<'a> Lowerer<'a> {
                     if !self.constants.contains_key(&arg.arg) {
                         params.push(reg);
                     }
+                }
+                // but the copies of a closure bound to it, if any
+                if let Some(bound) = self.constants.get(&arg.arg).cloned() {
+                    let mut taken = vec![];
+                    for ty in &bound.captures {
+                        for _ in self.leaves(ty) {
+                            let reg = self.fresh();
+                            params.push(reg);
+                            taken.push(Operand::Reg(reg));
+                        }
+                    }
+                    self.bound_captures.insert(arg.arg.clone(), taken);
                 }
             }
             collect_assigned(body, &mut assigned);
@@ -1776,37 +1823,10 @@ impl<'a> Lowerer<'a> {
             .iter()
             .map(|id| {
                 let block = pending[id.0].take().expect("each block is placed once");
-                let term = match block
+                let term = block
                     .term
-                    .unwrap_or(Terminator::Return(vec![Operand::Imm(0)]))
-                {
-                    Terminator::Jump(target) => Terminator::Jump(renumber(target)),
-                    Terminator::Branch {
-                        cond,
-                        then,
-                        otherwise,
-                    } => Terminator::Branch {
-                        cond,
-                        then: renumber(then),
-                        otherwise: renumber(otherwise),
-                    },
-                    Terminator::CmpBranch {
-                        cond,
-                        float,
-                        lhs,
-                        rhs,
-                        then,
-                        otherwise,
-                    } => Terminator::CmpBranch {
-                        cond,
-                        float,
-                        lhs,
-                        rhs,
-                        then: renumber(then),
-                        otherwise: renumber(otherwise),
-                    },
-                    term @ (Terminator::Return(_) | Terminator::Fail(..)) => term,
-                };
+                    .unwrap_or(Terminator::Return(vec![Operand::Imm(0)]));
+                let term = retarget(&term, renumber, |operand| operand);
                 Block {
                     insts: block.insts,
                     spans: block.spans,
@@ -2282,11 +2302,23 @@ impl<'a> Lowerer<'a> {
         values: Vec<Operand>,
         kinds: &[Option<RcKind>],
     ) {
+        self.new_object(dst, Operand::Imm(tag as i64), values, kinds);
+    }
+
+    /// Makes a new object laid out as an enum value in `dst`, with the tag `tag` and holding
+    /// `values`, as [`Lowerer::new_variant`] does.
+    fn new_object(
+        &mut self,
+        dst: VReg,
+        tag: Operand,
+        values: Vec<Operand>,
+        kinds: &[Option<RcKind>],
+    ) {
         self.push(Inst::Call {
             dsts: vec![dst],
             callee: Callee::Runtime("stone.enum_new"),
             args: vec![
-                Operand::Imm(tag as i64),
+                tag,
                 Operand::Imm(RcKind::codes(kinds)),
                 Operand::Imm(kinds.len() as i64),
             ],
@@ -2383,6 +2415,9 @@ impl<'a> Lowerer<'a> {
         };
         let held = args.get(position).cloned().unwrap_or(Type::Int);
         let kinds: Vec<Option<RcKind>> = self.leaves(&held).iter().map(RcKind::of).collect();
+        if let Some((map, key)) = self.map_get(receiver) {
+            return self.map_get_value(receiver, (map, key), default, &kinds);
+        }
         let option = self.expr(receiver)?;
         let defaults = match default {
             Some(default) => {
@@ -2466,6 +2501,101 @@ impl<'a> Lowerer<'a> {
         self.release_temp(option);
         let results: Vec<Operand> = results.into_iter().map(Operand::Reg).collect();
         for (&result, &kind) in results.iter().zip(&kinds) {
+            self.own(result, kind);
+        }
+        Ok(results)
+    }
+
+    /// Returns the map and the key of `receiver` if it is `m.get(k)` of a map, which
+    /// [`Lowerer::map_get_value`] unwraps without making the option.
+    fn map_get<'e>(&self, receiver: &'e Expr) -> Option<(&'e Expr, &'e Expr)> {
+        let ExprKind::Call { func, args, .. } = &receiver.kind else {
+            return None;
+        };
+        let ExprKind::Attribute { value, attr, .. } = &func.kind else {
+            return None;
+        };
+        (attr.as_str() == "get" && args.len() == 1 && self.map_key(value).is_some())
+            .then(|| (&**value, &args[0]))
+    }
+
+    /// Lowers `map.get(key).unwrap_or(default)`, or `.unwrap()` without a default, to the values
+    /// of `key`'s entry or the default, as [`Lowerer::option_value`] would, but branching on where
+    /// the key was found rather than making an option and reading it back. The map, the key, and
+    /// then the default are evaluated, as before.
+    ///
+    /// For example, `m.get(k).unwrap_or(0)` finds `k` and copies its value, or 0 when it is
+    /// missing, with no `stone.enum_new`.
+    fn map_get_value(
+        &mut self,
+        receiver: &Expr,
+        (map, key): (&Expr, &Expr),
+        default: Option<&Expr>,
+        kinds: &[Option<RcKind>],
+    ) -> Result<Vec<Operand>, String> {
+        let key_ty = self.map_key(map).ok_or("only a map has 'get'")?;
+        let entry_kinds = self.element_kinds(map);
+        let outer = std::mem::replace(&mut self.span, receiver.span);
+        let list = self.list_operand(map, &[key])?;
+        let key = self.expr(key)?;
+        let first = self.map_find(list, key, &key_ty, None);
+        self.release_temp(key);
+        self.span = outer;
+        let defaults = match default {
+            Some(default) => {
+                let values = self.expr_flat(default)?;
+                // the default carries a reference, which a found value gives up
+                for (&value, &kind) in values.iter().zip(kinds) {
+                    self.take(value, kind);
+                }
+                Some(values)
+            }
+            None => None,
+        };
+        let results: Vec<VReg> = kinds.iter().map(|_| self.fresh()).collect();
+        let (found, missing, end) = (self.new_block(), self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Ge,
+            float: false,
+            lhs: first,
+            rhs: Operand::Imm(0),
+            then: found,
+            otherwise: missing,
+        });
+        self.start(found);
+        // the key is slot 0 of an entry, and reading a value retains it
+        let values = self.load_slots(list, first, 1, 1..entry_kinds.len(), &entry_kinds);
+        for (&result, value) in results.iter().zip(values) {
+            self.push(Inst::Copy {
+                dst: result,
+                src: value,
+            });
+        }
+        if let Some(defaults) = &defaults {
+            for (&value, &kind) in defaults.iter().zip(kinds) {
+                if let Some(kind) = kind {
+                    self.push(Inst::Release { src: value, kind });
+                }
+            }
+        }
+        self.jump(end);
+        self.start(missing);
+        match &defaults {
+            Some(defaults) => {
+                for (&result, &value) in results.iter().zip(defaults) {
+                    self.push(Inst::Copy {
+                        dst: result,
+                        src: value,
+                    });
+                }
+                self.jump(end);
+            }
+            None => self.terminate(Terminator::Fail(UNWRAP_NONE.to_string(), vec![])),
+        }
+        self.start(end);
+        self.release_temp(list);
+        let results: Vec<Operand> = results.into_iter().map(Operand::Reg).collect();
+        for (&result, &kind) in results.iter().zip(kinds) {
             self.own(result, kind);
         }
         Ok(results)
@@ -3219,7 +3349,7 @@ impl<'a> Lowerer<'a> {
                 let text = self.expr(iter)?;
                 let text = self.snapshot(text);
                 self.take(text, Some(RcKind::Str));
-                let len = self.runtime_call("stone.str_len", vec![text], None);
+                let len = self.str_len(text, None);
                 self.push(Inst::Copy {
                     dst: next,
                     src: Operand::Imm(0),
@@ -3340,7 +3470,7 @@ impl<'a> Lowerer<'a> {
                     callee: Callee::Runtime("stone.str_char"),
                     args: vec![text, Operand::Reg(next)],
                 });
-                self.runtime_call("stone.str_len", vec![value], None)
+                self.str_len(value, None)
             }
             _ => Operand::Imm(1),
         };
@@ -3428,6 +3558,34 @@ impl<'a> Lowerer<'a> {
                     }
                     self.jump(target);
                 }
+            }
+
+            // one character against another, or against a one-byte literal, compares bytes
+            ExprKind::Compare {
+                left,
+                ops,
+                comparators,
+            } if ops.len() == 1
+                && matches!(
+                    ops[0],
+                    crate::ast::CompOp::Equal | crate::ast::CompOp::NotEqual
+                )
+                && self.char_kind(left).is_some()
+                && self.char_kind(&comparators[0]).is_some()
+                && (self.char_kind(left) == Some(true)
+                    || self.char_kind(&comparators[0]) == Some(true)) =>
+            {
+                let lhs = self.char_byte(left)?;
+                let rhs = self.char_byte(&comparators[0])?;
+                let cond = Cond::of(&ops[0]).ok_or("== is a comparison of two values")?;
+                self.terminate(Terminator::CmpBranch {
+                    cond,
+                    float: false,
+                    lhs,
+                    rhs,
+                    then,
+                    otherwise,
+                });
             }
 
             // strings are compared by a call, which compare handles with their references, and
@@ -3534,6 +3692,9 @@ impl<'a> Lowerer<'a> {
             ExprKind::Lambda { .. } => {
                 Err("a lambda must be linked before it is lowered".to_string())
             }
+            ExprKind::Closure { function, captures } => {
+                self.closure(function, captures, expr.span, into)
+            }
             ExprKind::Try { value } => {
                 let values = self.try_values(value)?;
                 Ok(self.finish(values[0], into))
@@ -3597,11 +3758,17 @@ impl<'a> Lowerer<'a> {
             ExprKind::Name { id, .. } => {
                 if let Some(function) = self.context.function_values.get(&expr.span) {
                     let copy = self.callee_label(function, expr.span);
-                    return Ok(self.function_value(function, &copy, expr.span, into));
+                    return self.function_value(function, &copy, expr.span, into);
                 }
                 // a parameter this copy binds holds its function
                 if let Some(bound) = self.constants.get(id).cloned() {
-                    return Ok(self.function_value(&bound.base, &bound.label, expr.span, into));
+                    if let Some(values) = self.bound_captures.get(id).cloned()
+                        && !bound.captures.is_empty()
+                    {
+                        let (base, label, types) = (&bound.base, &bound.label, bound.captures);
+                        return self.closure_of(base, label, expr.span, types, values, into);
+                    }
+                    return self.function_value(&bound.base, &bound.label, expr.span, into);
                 }
                 if let Some(&local) = self.locals.get(id) {
                     return Ok(self.finish(Operand::Reg(local), into));
@@ -4163,6 +4330,31 @@ impl<'a> Lowerer<'a> {
     /// For example, `xs.insert(-1, x)` puts `x` at position `len - 1`, and `xs.insert(len, x)` at
     /// the end, but `xs.pop(len)` fails.
     fn list_position(&mut self, index: Operand, len: Operand, end: bool, message: &str) -> Operand {
+        let values = match message.contains("{}") {
+            true => vec![index, len],
+            false => Vec::new(),
+        };
+        let below = if end { Cond::Le } else { Cond::Lt };
+        // a constant index needs only the check on its own side of 0
+        match index {
+            Operand::Imm(n) if n >= 0 => {
+                self.fail_unless_with(below, index, len, message, values);
+                return index;
+            }
+            Operand::Imm(_) => {
+                let position = self.fresh();
+                self.push(Inst::Binary {
+                    op: BinOp::Add,
+                    dst: position,
+                    lhs: len,
+                    rhs: index,
+                });
+                let position = Operand::Reg(position);
+                self.fail_unless_with(Cond::Ge, position, Operand::Imm(0), message, values);
+                return position;
+            }
+            Operand::Reg(_) => {}
+        }
         let position = self.fresh();
         self.push(Inst::Copy {
             dst: position,
@@ -4185,10 +4377,6 @@ impl<'a> Lowerer<'a> {
             rhs: len,
         });
         self.start(check);
-        let values = match message.contains("{}") {
-            true => vec![index, len],
-            false => Vec::new(),
-        };
         let start = Operand::Imm(0);
         self.fail_unless_with(
             Cond::Ge,
@@ -4197,7 +4385,6 @@ impl<'a> Lowerer<'a> {
             message,
             values.clone(),
         );
-        let below = if end { Cond::Le } else { Cond::Lt };
         self.fail_unless_with(below, Operand::Reg(position), len, message, values);
         Operand::Reg(position)
     }
@@ -4213,11 +4400,72 @@ impl<'a> Lowerer<'a> {
     ) -> Result<Operand, String> {
         let bytes = self.list_operand(bytes, &[index])?;
         let index = self.expr(index)?;
-        let len = self.runtime_call("stone.str_len", vec![bytes], None);
+        let len = self.str_len(bytes, None);
         let position = self.list_position(index, len, false, BYTES_INDEX_RANGE);
         let result = self.runtime_call("stone.bytes_at", vec![bytes, position], into);
         self.release_temp(bytes);
         Ok(result)
+    }
+
+    /// Returns `Some(true)` if `expr` is one character of a string, `s[i]`, `Some(false)` if it is
+    /// a string literal of one ASCII byte, and `None` otherwise: the operands [`Lowerer::char_byte`]
+    /// lowers to a byte, so that comparing two needs no string.
+    fn char_kind(&self, expr: &Expr) -> Option<bool> {
+        match &expr.kind {
+            ExprKind::Subscript { value, slice, .. }
+                if !matches!(slice.kind, ExprKind::Slice { .. })
+                    && self.type_of(value).is_ok_and(|ty| ty == Type::Str) =>
+            {
+                Some(true)
+            }
+            ExprKind::Constant { value, .. }
+                if let Constant::Str(text) = &**value
+                    && text.len() == 1
+                    && text.is_ascii() =>
+            {
+                Some(false)
+            }
+            _ => None,
+        }
+    }
+
+    /// Lowers an operand [`Lowerer::char_kind`] accepts to its byte: a literal's as an immediate,
+    /// and `s[i]` as the checks of [`Lowerer::string_index`], a `str_byte`, and the failure
+    /// `stone.str_at` gives for a byte past ASCII, which is part of a longer character.
+    ///
+    /// For example, `w[0]` becomes `v2 = str_byte v0, 0` after checking 0 against the length,
+    /// then `br_lt v2, 128` to the rest or to `fail "cannot cut a string inside a character"`.
+    fn char_byte(&mut self, expr: &Expr) -> Result<Operand, String> {
+        let ExprKind::Subscript { value, slice, .. } = &expr.kind else {
+            let ExprKind::Constant { value, .. } = &expr.kind else {
+                return Err("not a character".to_string());
+            };
+            let Constant::Str(text) = &**value else {
+                return Err("not a character".to_string());
+            };
+            return Ok(Operand::Imm(i64::from(text.as_bytes()[0])));
+        };
+        let outer = std::mem::replace(&mut self.span, expr.span);
+        let text = self.list_operand(value, &[slice])?;
+        let index = self.expr(slice)?;
+        let len = self.str_len(text, None);
+        let position = self.list_position(index, len, false, STRING_INDEX_RANGE);
+        let byte = self.fresh();
+        self.push(Inst::StrByte {
+            dst: byte,
+            text,
+            index: position,
+        });
+        self.release_temp(text);
+        self.fail_unless_with(
+            Cond::Lt,
+            Operand::Reg(byte),
+            Operand::Imm(128),
+            CUT_CHARACTER,
+            Vec::new(),
+        );
+        self.span = outer;
+        Ok(Operand::Reg(byte))
     }
 
     /// Lowers the string index `text[index]`, evaluating the string and then the index, into a
@@ -4235,7 +4483,7 @@ impl<'a> Lowerer<'a> {
     ) -> Result<Operand, String> {
         let text = self.list_operand(text, &[index])?;
         let index = self.expr(index)?;
-        let len = self.runtime_call("stone.str_len", vec![text], None);
+        let len = self.str_len(text, None);
         let position = self.list_position(index, len, false, STRING_INDEX_RANGE);
         let result = self.runtime_call("stone.str_at", vec![text, position], into);
         self.release_temp(text);
@@ -4921,14 +5169,9 @@ impl<'a> Lowerer<'a> {
             }
             "len" => {
                 let text = self.expr(receiver)?;
-                let dst = self.dst(into);
-                self.push(Inst::Call {
-                    dsts: vec![dst],
-                    callee: Callee::Runtime("stone.str_len"),
-                    args: vec![text],
-                });
+                let len = self.str_len(text, into);
                 self.release_temp(text);
-                Ok(Operand::Reg(dst))
+                Ok(len)
             }
             "append" => {
                 // the receiver's indexes, then the arguments, then the change
@@ -5428,6 +5671,14 @@ impl<'a> Lowerer<'a> {
     }
 
     /// Calls the runtime routine `label` with `args`, returning its result.
+    /// Reads the length in bytes of the string or bytes value `text` from its header, as
+    /// `v1 = str_len v0`.
+    fn str_len(&mut self, text: Operand, into: Option<VReg>) -> Operand {
+        let dst = self.dst(into);
+        self.push(Inst::StrLen { dst, text });
+        Operand::Reg(dst)
+    }
+
     fn runtime_call(
         &mut self,
         label: &'static str,
@@ -5772,7 +6023,7 @@ impl<'a> Lowerer<'a> {
         let mut values = Vec::new();
         for (i, arg) in args.iter().enumerate() {
             match bound.contains(&i) {
-                true => values.push(vec![]),
+                true => values.push(self.bound_values(arg)?),
                 false => values.push(self.expr_flat(arg)?),
             }
         }
@@ -5821,55 +6072,168 @@ impl<'a> Lowerer<'a> {
         Ok(results)
     }
 
-    /// Makes a function value of the stone function `name`, of the type at `span`: the address
-    /// of its copy `copy`, or of a function that gives each parameter it owns a reference first,
-    /// since a call through a value borrows them all.
+    /// Makes a function value of the stone function `name`, of the type at `span`, which calls
+    /// its copy `copy`: the immortal value of the code [`Helper::FunctionValue`] describes,
+    /// borrowed, as a literal is.
     ///
-    /// For example, `double` is `v1 = fn_addr fn.double`.
+    /// For example, `double` is `v1 = fn_static stone.fn_value.double`.
     fn function_value(
         &mut self,
         name: &str,
         copy: &str,
         span: Span,
         into: Option<VReg>,
-    ) -> Operand {
-        let copy = copy.to_string();
+    ) -> Result<Operand, String> {
+        let label = self.function_code(name, copy, span, vec![])?;
+        let dst = self.dst(into);
+        self.push(Inst::FunctionStatic { dst, label });
+        Ok(Operand::Reg(dst))
+    }
+
+    /// Returns the values a call passes for `arg`, given to a parameter its callee's copy binds:
+    /// none for a function, and the copies a closure holds, which the copy takes in its place,
+    /// whether `arg` makes the closure or names a parameter this copy binds to one.
+    fn bound_values(&mut self, arg: &Expr) -> Result<Vec<Operand>, String> {
+        match &arg.kind {
+            ExprKind::Closure { captures, .. } => {
+                let mut values = Vec::new();
+                for capture in captures {
+                    values.extend(self.expr_flat(capture)?);
+                }
+                Ok(values)
+            }
+            ExprKind::Name { id, .. } => {
+                Ok(self.bound_captures.get(id).cloned().unwrap_or_default())
+            }
+            _ => Ok(vec![]),
+        }
+    }
+
+    /// Returns the label of the code of a function value of type at `span` that calls `copy`,
+    /// the copy of the stone function `name`, holding copies of types `captures` (see
+    /// [`Helper::FunctionValue`]).
+    fn function_code(
+        &mut self,
+        name: &str,
+        copy: &str,
+        span: Span,
+        captures: Vec<Type>,
+    ) -> Result<String, String> {
+        let Some(Type::Function { params, ret }) = self.span_type(span) else {
+            return Err(format!("'{name}' has no function type here"));
+        };
         let owned = self
             .context
             .owned_params
             .get(name)
             .cloned()
             .unwrap_or_default();
-        let label = match (owned.contains(&true), self.span_type(span)) {
-            (true, Some(Type::Function { params, ret })) => self.helper(Helper::FunctionValue {
-                function: copy,
-                owned,
-                params,
-                ret: *ret,
-            }),
-            _ => function_label(&copy),
-        };
-        let dst = self.dst(into);
-        self.push(Inst::FunctionAddress { dst, label });
-        Operand::Reg(dst)
+        Ok(self.helper(Helper::FunctionValue {
+            function: copy.to_string(),
+            captures,
+            owned,
+            params,
+            ret: *ret,
+        }))
     }
 
-    /// Makes the function [`Helper::FunctionValue`] describes, which calls `function` with its
-    /// own arguments, retaining the counted values of each parameter `owned` says the function
-    /// owns, and returns what it returns.
+    /// Makes the closure at `span` of the lambda's function `function`, which holds copies of
+    /// `captures`, read in turn: a new value with a count of 1, laid out as an enum value whose
+    /// tag is the address of its code and whose slots are the copies.
+    ///
+    /// For example, `|x| x > limit` is `v2 = fn_addr stone.fn_value.lambda.2.12`,
+    /// `v3 = call stone.enum_new(v2, 0, 1)`, and `field_init v3[0], v1`.
+    fn closure(
+        &mut self,
+        function: &str,
+        captures: &[Expr],
+        span: Span,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let mut types = vec![];
+        for capture in captures {
+            let ty = self
+                .span_type(capture.span)
+                .ok_or_else(|| "a captured value has no type".to_string())?;
+            types.push(ty);
+        }
+        let copy = self.callee_label(function, span);
+        let mut values = Vec::new();
+        for capture in captures {
+            values.extend(self.expr_flat(capture)?);
+        }
+        self.closure_of(function, &copy, span, types, values, into)
+    }
+
+    /// Makes the closure at `span` of the lambda's function `function`, whose copy is `copy`,
+    /// holding `values`, the values of copies of types `types`, as [`Lowerer::closure`] does.
+    fn closure_of(
+        &mut self,
+        function: &str,
+        copy: &str,
+        span: Span,
+        types: Vec<Type>,
+        values: Vec<Operand>,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let kinds: Vec<Option<RcKind>> = types
+            .iter()
+            .flat_map(|ty| self.leaves(ty))
+            .map(|leaf| RcKind::of(&leaf))
+            .collect();
+        let label = self.function_code(function, copy, span, types)?;
+        // the closure keeps a reference to what it holds
+        for (&value, &kind) in values.iter().zip(&kinds) {
+            self.take(value, kind);
+        }
+        let code = self.fresh();
+        self.push(Inst::FunctionAddress { dst: code, label });
+        let dst = self.fresh();
+        self.new_object(dst, Operand::Reg(code), values, &kinds);
+        self.own(Operand::Reg(dst), Some(RcKind::Enum));
+        Ok(self.finish(Operand::Reg(dst), into))
+    }
+
+    /// Makes the function [`Helper::FunctionValue`] describes, which takes the function value
+    /// and then its own arguments, and calls `function` with the copies of types `captures` the
+    /// value holds and then those arguments, retaining the counted values of each parameter
+    /// `owned` says the function owns, and returns what it returns.
     fn function_value_thunk(
         mut self,
         function: &str,
+        captures: &[Type],
         owned: &[bool],
         params: &[Type],
         ret: &Type,
     ) -> Result<Function, String> {
         let entry = self.new_block();
         self.start(entry);
-        let mut args = Vec::new();
-        for (param, &owns) in params.iter().zip(owned) {
+        let value = self.fresh();
+        let mut taken = vec![value];
+        for param in params {
+            for _ in self.leaves(param) {
+                taken.push(self.fresh());
+            }
+        }
+        let (mut args, mut slot, mut given) = (Vec::new(), 0, taken[1..].iter());
+        for (k, param) in captures.iter().chain(params).enumerate() {
+            let owns = owned.get(k).copied().unwrap_or(false);
             for leaf in self.leaves(param) {
-                let reg = self.fresh();
+                let reg = match k < captures.len() {
+                    true => {
+                        let reg = self.fresh();
+                        self.push(Inst::FieldGet {
+                            dst: reg,
+                            value: Operand::Reg(value),
+                            slot,
+                        });
+                        slot += 1;
+                        reg
+                    }
+                    false => *given
+                        .next()
+                        .ok_or("a function value takes too few values")?,
+                };
                 if owns && RcKind::of(&leaf).is_some() {
                     self.push(Inst::Retain {
                         src: Operand::Reg(reg),
@@ -5889,7 +6253,7 @@ impl<'a> Lowerer<'a> {
         ));
         Ok(Function {
             name: self.name.clone(),
-            params: args,
+            params: taken,
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: true,
@@ -5912,20 +6276,27 @@ impl<'a> Lowerer<'a> {
             && let Some(bound) = self.constants.get(id).cloned()
         {
             self.dispatched = Some((call, bound.label));
-            return self.user_call(&bound.base, call, args, into, kinds);
+            let leading = self.bound_captures.get(id).cloned().unwrap_or_default();
+            return self.user_call_after(&bound.base, call, leading, args, into, kinds);
         }
         // nothing moves into a call that borrows, nor into a call among the arguments
         self.movable.clear();
         let function = self.expr(func)?;
-        let mut values = Vec::new();
+        let mut values = vec![vec![function]];
         for arg in args {
             values.push(self.expr_flat(arg)?);
         }
+        // the code takes the value itself first, where a closure finds its copies
+        let code = self.fresh();
+        self.push(Inst::EnumTag {
+            dst: code,
+            value: function,
+        });
         let mut dsts = vec![self.dst(into)];
         dsts.extend((1..kinds.len()).map(|_| self.fresh()));
         self.push(Inst::Call {
             dsts: dsts.clone(),
-            callee: Callee::Value(function),
+            callee: Callee::Value(Operand::Reg(code)),
             args: values.concat(),
         });
         for value in values.into_iter().flatten() {
@@ -6148,24 +6519,39 @@ impl<'a> Lowerer<'a> {
         into: Option<VReg>,
         kinds: &[Option<RcKind>],
     ) -> Result<Vec<Operand>, String> {
+        self.user_call_after(name, call, vec![], args, into, kinds)
+    }
+
+    /// Calls the stone function `name` as [`Lowerer::user_call`] does, passing the borrowed
+    /// values `leading` before `args`, as a closure's lambda takes its copies.
+    fn user_call_after(
+        &mut self,
+        name: &str,
+        call: Span,
+        leading: Vec<Operand>,
+        args: &[Expr],
+        into: Option<VReg>,
+        kinds: &[Option<RcKind>],
+    ) -> Result<Vec<Operand>, String> {
         // taken first, so that no call among the arguments moves what a later one reads
         let movable = std::mem::take(&mut self.movable);
-        let (label, bound) = self.specialized_label(name, call, args, 0);
+        let first = leading.len();
+        let (label, bound) = self.specialized_label(name, call, args, first);
         let mut values = Vec::new();
         for (i, arg) in args.iter().enumerate() {
-            // the copy holds a function it is given, so it is no argument
+            // the copy holds a function it is given, so it is no argument, but a closure's copies
             match bound.contains(&i) {
-                true => values.push(vec![]),
+                true => values.push(self.bound_values(arg)?),
                 false => values.push(self.expr_flat(arg)?),
             }
         }
-        let given = self.give_references(name, args, &values, &movable, 0)?;
+        let given = self.give_references(name, args, &values, &movable, first)?;
         let mut dsts = vec![self.dst(into)];
         dsts.extend((1..kinds.len()).map(|_| self.fresh()));
         self.push(Inst::Call {
             dsts: dsts.clone(),
             callee: Callee::User(label),
-            args: values.concat(),
+            args: [leading, values.concat()].concat(),
         });
         for (value, given) in values
             .into_iter()
@@ -7767,7 +8153,8 @@ fn bin_op(op: Operator) -> BinOp {
 /// For example, `i + 1` and `a[i]` make no calls, but `f(i)` and `xs.len()` do.
 fn has_call(expr: &Expr) -> bool {
     match &expr.kind {
-        ExprKind::Lambda { .. } => false,
+        // making a closure changes no list
+        ExprKind::Lambda { .. } | ExprKind::Closure { .. } => false,
         // a struct among a string's values may be written by its own `display`
         ExprKind::Call { .. } | ExprKind::JoinedStr { .. } => true,
         ExprKind::Constant { .. } | ExprKind::Name { .. } => false,

@@ -1,0 +1,6 @@
+{
+    "[stone]": {
+        "editor.defaultFormatter": "tarolling.stone-lang",
+        "editor.formatOnSave": true
+    }
+}

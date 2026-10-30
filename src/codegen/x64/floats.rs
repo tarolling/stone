@@ -7,7 +7,10 @@
 
 use super::builtins::jump_if_space;
 use crate::codegen::AssemblyGenerator;
-use crate::codegen::context::{BIG_LIMBS, EXPONENT_LIMIT, MAX_DIGITS};
+use crate::codegen::context::{
+    BIG_LIMBS, EXPONENT_LIMIT, FUNCTION_PREFIX, MAX_DIGITS, REDUCE_PIO2,
+};
+use crate::stdlib::math::trig::REDUCE_LARGE;
 
 /// The bignums the float routines work in. Formatting uses all of them, and reading a number
 /// uses `stone.big_mant` for its dividend and `stone.big_scale` for its divisor.
@@ -944,5 +947,33 @@ pub fn decimal_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcall\tstone.big_mul_add");
     r#gen.emit("\txor\tr15d, r15d");
     r#gen.emit("\tmov\tQWORD PTR [rbp - 48], 0");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.reduce_pio2`, behind [`crate::codegen::ir::Inst::ReducePio2`]: it reduces the
+/// float whose bits are in `rax` by pi/2 with the prelude's `rem_pio2_large`, and leaves the
+/// three floats it returns in `rax`, `rdx`, and `rcx`. A stone function may change any register
+/// that a call does not preserve, so this saves every one a vreg can be in, `rsi`, `rdi`, and
+/// `r8`-`r11` and `xmm3`-`xmm15`, around the call, which is why the instruction is not a call.
+pub fn reduce_pio2_runtime(r#gen: &mut dyn AssemblyGenerator) {
+    const SAVED: [&str; 6] = ["rsi", "rdi", "r8", "r9", "r10", "r11"];
+    let vectors = 3..16;
+    r#gen.emit(&format!("{REDUCE_PIO2}:"));
+    for reg in SAVED {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit(&format!("\tsub\trsp, {}", 8 * vectors.len()));
+    for (slot, xmm) in vectors.clone().enumerate() {
+        r#gen.emit(&format!("\tmovq\tQWORD PTR [rsp + {}], xmm{xmm}", 8 * slot));
+    }
+    r#gen.emit("\tmov\trdi, rax");
+    r#gen.emit(&format!("\tcall\t{FUNCTION_PREFIX}{REDUCE_LARGE}"));
+    for (slot, xmm) in vectors.clone().enumerate() {
+        r#gen.emit(&format!("\tmovq\txmm{xmm}, QWORD PTR [rsp + {}]", 8 * slot));
+    }
+    r#gen.emit(&format!("\tadd\trsp, {}", 8 * vectors.len()));
+    for reg in SAVED.iter().rev() {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
     r#gen.emit("\tret");
 }

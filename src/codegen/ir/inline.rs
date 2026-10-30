@@ -54,12 +54,13 @@ fn is_inlinable(function: &Function) -> bool {
             .iter()
             .flat_map(|block| &block.insts)
             .any(|inst| {
+                // reduce_pio2 calls the prelude, and its depth check must stay a call deeper
                 matches!(
                     inst,
                     Inst::Call {
                         callee: Callee::User(_) | Callee::Value(_),
                         ..
-                    }
+                    } | Inst::ReducePio2 { .. }
                 )
             })
 }
@@ -275,8 +276,28 @@ pub(super) fn rename_inst(
             dst: reg(dst),
             src: o(src),
         },
+        Inst::FloatAbs { dst, src } => Inst::FloatAbs {
+            dst: reg(dst),
+            src: o(src),
+        },
         Inst::FloatSqrt { dst, src } => Inst::FloatSqrt {
             dst: reg(dst),
+            src: o(src),
+        },
+        Inst::Trig { func, dst, args } => Inst::Trig {
+            func,
+            dst: reg(dst),
+            args: args.into_iter().map(o).collect(),
+        },
+        Inst::SinCos { sin, cos, src } => Inst::SinCos {
+            sin: reg(sin),
+            cos: reg(cos),
+            src: o(src),
+        },
+        Inst::ReducePio2 { n, hi, lo, src } => Inst::ReducePio2 {
+            n: reg(n),
+            hi: reg(hi),
+            lo: reg(lo),
             src: o(src),
         },
         Inst::Not { dst, src } => Inst::Not {
@@ -429,9 +450,10 @@ pub(super) fn rename_inst(
             dst: reg(dst),
             src: o(src),
         },
-        Inst::FloatToInt { dst, src } => Inst::FloatToInt {
+        Inst::FloatToInt { dst, src, checked } => Inst::FloatToInt {
             dst: reg(dst),
             src: o(src),
+            checked,
         },
         Inst::EnumTag { dst, value } => Inst::EnumTag {
             dst: reg(dst),

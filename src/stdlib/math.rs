@@ -1,11 +1,14 @@
 //! The builtin `math` module: absolute values, the least and greatest of several numbers, square
-//! roots, and rounding down.
+//! roots, rounding down, the trigonometric functions (in [`trig`]), and the constants pi, tau,
+//! and e.
 //!
 //! A program imports it like any builtin module (see [`super::BuiltinModule`]), with `use math`
 //! then `math.sqrt(2)`, or with `use math.sqrt` then `sqrt(2)`.
 //!
 //! The functions here are what the interpreter runs. Compiled code lowers each call to IR that
 //! does the same operations in the same order, so both backends agree to the bit.
+
+pub mod trig;
 
 use super::BuiltinDoc;
 
@@ -15,7 +18,7 @@ pub const MODULE: &str = "math";
 /// What the module is for, which editors show for `math`.
 pub const MODULE_DOC: &str = "The builtin module of math on ints and floats.";
 
-pub static DOCS: [BuiltinDoc; 5] = [
+pub static DOCS: [BuiltinDoc; 15] = [
     BuiltinDoc {
         name: "math.abs",
         signature: "math.abs(x: int | float) -> int | float",
@@ -49,7 +52,87 @@ pub static DOCS: [BuiltinDoc; 5] = [
         description: "Returns the greatest int that is at most `x`, so `math.floor(-2.5)` is -3. \
                       It stops the program if `x` is nan or does not fit in an int.",
     },
+    BuiltinDoc {
+        name: "math.sin",
+        signature: "math.sin(x: int | float) -> float",
+        description: "Returns the sine of `x` radians, so `math.sin(math.pi / 2.0)` is 1.0. It is \
+                      within one ulp of the exact value for every `x`, however large. It stops \
+                      the program if `x` is infinite.",
+    },
+    BuiltinDoc {
+        name: "math.cos",
+        signature: "math.cos(x: int | float) -> float",
+        description: "Returns the cosine of `x` radians, so `math.cos(0)` is 1.0. It is within \
+                      one ulp of the exact value for every `x`, however large. It stops the \
+                      program if `x` is infinite.",
+    },
+    BuiltinDoc {
+        name: "math.tan",
+        signature: "math.tan(x: int | float) -> float",
+        description: "Returns the tangent of `x` radians, within one ulp, so \
+                      `math.tan(math.pi / 4.0)` is 0.9999999999999999. It stops the program if \
+                      `x` is infinite.",
+    },
+    BuiltinDoc {
+        name: "math.asin",
+        signature: "math.asin(x: int | float) -> float",
+        description: "Returns the arcsine of `x` in radians, from -pi/2 to pi/2, so \
+                      `math.asin(1)` is 1.5707963267948966. It stops the program if `x` is \
+                      greater than 1 or less than -1.",
+    },
+    BuiltinDoc {
+        name: "math.acos",
+        signature: "math.acos(x: int | float) -> float",
+        description: "Returns the arccosine of `x` in radians, from 0 to pi, so `math.acos(-1)` \
+                      is pi. It stops the program if `x` is greater than 1 or less than -1.",
+    },
+    BuiltinDoc {
+        name: "math.atan",
+        signature: "math.atan(x: int | float) -> float",
+        description: "Returns the arctangent of `x` in radians, from -pi/2 to pi/2, within one \
+                      ulp, so `math.atan(1)` is 0.7853981633974483.",
+    },
+    BuiltinDoc {
+        name: "math.atan2",
+        signature: "math.atan2(y: int | float, x: int | float) -> float",
+        description: "Returns the angle in radians, from -pi to pi, between the positive x axis \
+                      and the point (`x`, `y`), so `math.atan2(1, -1)` is 2.356194490192345. \
+                      Unlike `math.atan(y / x)`, it knows which quadrant the point is in and \
+                      is within one ulp, and it never fails: `math.atan2(0, 0)` is 0.0.",
+    },
+    BuiltinDoc {
+        name: "math.pi",
+        signature: "math.pi: float",
+        description: "The ratio of a circle's circumference to its diameter, \
+                      3.141592653589793.",
+    },
+    BuiltinDoc {
+        name: "math.tau",
+        signature: "math.tau: float",
+        description: "The ratio of a circle's circumference to its radius, 2 * pi, \
+                      6.283185307179586.",
+    },
+    BuiltinDoc {
+        name: "math.e",
+        signature: "math.e: float",
+        description: "The base of the natural logarithm, 2.718281828459045.",
+    },
 ];
+
+/// Returns the value of the module's constant with the linked name `name`, or `None` if `name`
+/// is not a constant.
+///
+/// For example, `constant("math.pi")` is `Some(std::f64::consts::PI)`, and `constant("math.sin")`
+/// is `None`.
+pub fn constant(name: &str) -> Option<f64> {
+    use std::f64::consts::{E, PI, TAU};
+    match name {
+        "math.pi" => Some(PI),
+        "math.tau" => Some(TAU),
+        "math.e" => Some(E),
+        _ => None,
+    }
+}
 
 /// The runtime error of `math.abs` of the smallest int.
 pub const ABS_OVERFLOW: &str = "integer overflow in abs";

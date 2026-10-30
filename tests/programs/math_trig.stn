@@ -1,0 +1,48 @@
+// trigonometry in the math module, whose results must match to the bit between backends
+use math
+use math.pi
+use math.atan2 as angle
+
+print(math.pi, math.tau, math.e, pi, -math.pi, math.pi / 2.0)
+
+// below pi/4, then reduced inline by pi/2, then near multiples of pi/2, where reduction cancels
+print(math.sin(0), math.sin(-0.0), math.sin(1e-10), math.sin(0.5), math.sin(-0.75))
+print(math.cos(0), math.cos(-0.0), math.cos(1e-10), math.cos(0.5), math.cos(-0.75))
+print(math.tan(0), math.tan(-0.0), math.tan(1e-10), math.tan(0.5), math.tan(-0.75))
+for x in [1.0, 2.0, -3.0, 4.5, 10.0, 100.0, -1000.0, 123456.789]:
+    print(x, math.sin(x), math.cos(x), math.tan(x))
+for k in [1, 2, 3, 4, 100, 1000000]:
+    x = pi / 2.0 * float(k)
+    print(k, math.sin(x), math.cos(x), math.tan(x))
+
+// past 2^20 * pi/2, which the prelude's rem_pio2_large reduces
+for x in [1647099.0, 1e7, -1e15, 1e22, 1e100, -1e300, 1.7976931348623157e308]:
+    print(x, math.sin(x), math.cos(x), math.tan(x))
+
+inf = 1e308 * 10.0
+nan = inf - inf
+print(math.sin(nan), math.cos(nan), math.tan(nan))
+
+print(math.asin(0), math.asin(-0.0), math.asin(0.3), math.asin(-0.7), math.asin(0.99), math.asin(1))
+print(math.acos(0), math.acos(-0.0), math.acos(0.3), math.acos(-0.7), math.acos(0.99), math.acos(-1))
+print(math.asin(1e-20), math.acos(1e-20), math.asin(nan), math.acos(nan))
+print(math.atan(0), math.atan(-0.0), math.atan(0.3), math.atan(-0.6), math.atan(1), math.atan(2))
+print(math.atan(-10.0), math.atan(1e20), math.atan(inf), math.atan(-inf), math.atan(nan))
+
+print(angle(1, 1), angle(1, -1), angle(-1, -1), angle(-1, 1), angle(3.0, 4.0))
+print(angle(0.0, 0.0), angle(-0.0, 0.0), angle(0.0, -0.0), angle(-0.0, -0.0), angle(0, -5))
+print(angle(5, 0), angle(-5, -0.0), angle(inf, inf), angle(inf, -inf), angle(-inf, inf))
+print(angle(1, inf), angle(-1, -inf), angle(inf, 1), angle(1e300, 1e-300), angle(1e-300, -1e300))
+print(angle(2.0, 1), angle(nan, 1.0), angle(1.0, nan))
+// a reduction that needs musl's second round but not its third, and a quotient whose rounding
+// atan2 corrects
+print(math.tan(343777.13817706803), angle(1.4936900270856092e18, 2.389266883217223e19))
+// atan2's magnitudes scaled down and up before the correction
+print(angle(3e300, 7e299), angle(-3e-300, 7e-301), angle(5e-320, 1e-310))
+
+// a round trip, and the values in a loop with other floats live around them
+total = 0.0
+for i in range(1000):
+    t = float(i) * 0.01
+    total += math.sin(t) * math.cos(t) + math.atan2(math.sin(t), math.cos(t)) - math.asin(0.5)
+print(total)

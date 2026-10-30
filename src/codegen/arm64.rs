@@ -23,8 +23,9 @@ pub mod sort;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
-    BYTES_ROUTINES, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, STRING_METHOD_ROUTINES,
-    escape, function_statics, global_label, immortal_bytes, immortal_string, variant_statics,
+    BYTES_ROUTINES, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, REDUCE_PIO2,
+    STRING_METHOD_ROUTINES, escape, function_statics, global_label, immortal_bytes,
+    immortal_string, variant_statics,
 };
 use crate::codegen::{AssemblyGenerator, Os, Target};
 use crate::project::SourceMap;
@@ -113,6 +114,9 @@ impl AssemblyGenerator for Arm64Generator {
         if self.ctx.uses(&["stone.str_float"]) {
             builtins::str_float_runtime(self);
         }
+        if self.ctx.uses(&[REDUCE_PIO2]) {
+            floats::reduce_pio2_runtime(self);
+        }
         if self.uses_fmod {
             floats::fmod_runtime(self);
         }
@@ -141,6 +145,10 @@ impl AssemblyGenerator for Arm64Generator {
 
         self.emit_string_literals();
         self.emit_globals();
+        // last, once all code has asked for its constants
+        let ctx = std::mem::take(&mut self.ctx);
+        ctx.emit_constants(self);
+        self.ctx = ctx;
 
         if self.os == Os::Linux {
             // suppress the linker's executable stack warning
@@ -749,6 +757,24 @@ mod tests {
         }
         // even a literal float divisor is checked, unlike an int one
         assert!(assembly.contains("division by zero"));
+    }
+
+    #[test]
+    fn float_constants_load_from_rodata_unless_fmov_encodes_them() {
+        let source = "fn f(x: float) -> float:\n    ret x * 0.1 + x * 0.5 - 0.1\nprint(f(2.0))\n";
+        let assembly = assemble(source).unwrap();
+        let f = function_text(&assembly, "f");
+        // 0.1 needs every bit, so it is read once from the pool for each use
+        let label = ".Lf64_3fb999999999999a";
+        assert_eq!(
+            f.matches(&format!("[x16, :lo12:{label}]")).count(),
+            2,
+            "{f}"
+        );
+        assert!(assembly.contains(&format!("{label}:\n\t.quad\t4591870180066957722")));
+        assert!(f.contains("\tfmov\td"), "{f}");
+        assert!(f.contains(", #0.5\n"), "{f}");
+        assert!(!f.contains("\tmovk\t"), "{f}");
     }
 
     #[test]

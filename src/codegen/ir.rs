@@ -19,6 +19,7 @@ pub mod inline;
 pub mod liveness;
 pub mod lower;
 pub mod opt;
+pub mod trig;
 
 use crate::ast::CompOp;
 use crate::checker::Type;
@@ -59,6 +60,61 @@ pub enum BinOp {
     Rem,
     /// `lhs` raised to the int `rhs`, by squaring and multiplying.
     Pow,
+    /// A float division with no check of its divisor, which gives IEEE 754's infinity or nan for
+    /// zero where `Div` stops the program. Only code the compiler writes itself uses it, as the
+    /// polynomials of `math.asin` do, and only [`Inst::FloatBinary`] has it.
+    DivUnchecked,
+}
+
+/// A trigonometric function of the `math` module, as in [`Inst::Trig`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum TrigFunc {
+    Sin,
+    Cos,
+    Tan,
+    Asin,
+    Acos,
+    Atan,
+    /// Of two arguments, `y` then `x`.
+    Atan2,
+}
+
+impl TrigFunc {
+    /// Returns the function a call of the `math` function with the linked name `name` computes.
+    ///
+    /// For example, `TrigFunc::of("math.atan2")` is `Some(TrigFunc::Atan2)`, and
+    /// `TrigFunc::of("math.sqrt")` is `None`.
+    pub fn of(name: &str) -> Option<TrigFunc> {
+        Some(match name {
+            "math.sin" => TrigFunc::Sin,
+            "math.cos" => TrigFunc::Cos,
+            "math.tan" => TrigFunc::Tan,
+            "math.asin" => TrigFunc::Asin,
+            "math.acos" => TrigFunc::Acos,
+            "math.atan" => TrigFunc::Atan,
+            "math.atan2" => TrigFunc::Atan2,
+            _ => return None,
+        })
+    }
+
+    /// Returns the function's name without its module, as IR dumps write it.
+    pub fn name(self) -> &'static str {
+        match self {
+            TrigFunc::Sin => "sin",
+            TrigFunc::Cos => "cos",
+            TrigFunc::Tan => "tan",
+            TrigFunc::Asin => "asin",
+            TrigFunc::Acos => "acos",
+            TrigFunc::Atan => "atan",
+            TrigFunc::Atan2 => "atan2",
+        }
+    }
+
+    /// Returns whether the function may reduce its argument with the prelude's
+    /// `rem_pio2_large`, through [`Inst::ReducePio2`], once it is expanded.
+    pub fn reduces(self) -> bool {
+        matches!(self, TrigFunc::Sin | TrigFunc::Cos | TrigFunc::Tan)
+    }
 }
 
 /// A comparison, as in [`Inst::Compare`] and [`Terminator::CmpBranch`].
@@ -298,8 +354,35 @@ pub enum Inst {
     Neg { dst: VReg, src: Operand },
     /// Float negation, which flips the sign bit.
     FloatNeg { dst: VReg, src: Operand },
+    /// The absolute value of a float, which clears the sign bit, so it is 0.0 for -0.0 and
+    /// leaves nan a nan.
+    FloatAbs { dst: VReg, src: Operand },
     /// The correctly rounded square root of a float, which is nan for a negative one.
     FloatSqrt { dst: VReg, src: Operand },
+    /// A call of a trigonometric function of `math` on floats, as `v3 = sin v2` or
+    /// `v5 = atan2 v1, v2`, which only lowering writes: [`trig::share`] computes each value once,
+    /// and [`trig::expand`] then replaces each with inline code before inlining, so nothing
+    /// after sees one.
+    Trig {
+        func: TrigFunc,
+        dst: VReg,
+        args: Vec<Operand>,
+    },
+    /// The sine and the cosine of `src` together, as `v4, v6 = sincos v2`, which
+    /// [`trig::share`] makes of a `sin` and a `cos` of the same value, reducing it once.
+    SinCos { sin: VReg, cos: VReg, src: Operand },
+    /// Reduces `src`, a positive finite float of at least `math::trig::MEDIUM`, by pi/2 with the
+    /// prelude's `rem_pio2_large`, writing the quarter turns in it modulo 8 to `n`, as a float,
+    /// and the rest, `hi + lo`, as in `v4, v5, v6 = reduce_pio2 v3`. A [`Inst::DepthCheck`]
+    /// comes before it, since it calls a stone function. It does so through `stone.reduce_pio2`,
+    /// which preserves every register a vreg can be in, so like [`Inst::Release`] it is not a
+    /// call, and the floats around a `math.sin` keep their registers.
+    ReducePio2 {
+        n: VReg,
+        hi: VReg,
+        lo: VReg,
+        src: Operand,
+    },
     /// 1 if `src` is zero, else 0.
     Not { dst: VReg, src: Operand },
     /// 1 if the comparison holds, else 0. Ints compare signed, and floats compare with every
@@ -426,8 +509,14 @@ pub enum Inst {
     },
     /// Converts an int to the bits of the nearest float.
     IntToFloat { dst: VReg, src: Operand },
-    /// Converts a float's bits to an int, dropping the fraction and failing on nan or overflow.
-    FloatToInt { dst: VReg, src: Operand },
+    /// Converts a float's bits to an int, dropping the fraction. When `checked`, it fails on nan
+    /// or overflow (`v2 = float_to_int v1`); otherwise the float is known to fit, as when `int`
+    /// has compared it with the bounds first (`v2 = float_trunc v1`).
+    FloatToInt {
+        dst: VReg,
+        src: Operand,
+        checked: bool,
+    },
     /// The tag of the enum value `value`, which says which of its enum's variants it is, numbered
     /// from 0 in the order the enum lists them.
     EnumTag { dst: VReg, value: Operand },
@@ -479,10 +568,12 @@ impl Inst {
     ///
     /// For example, `v2 = add v0, v1` defines `v2`, and `v2, v3 = call f()` defines both.
     pub fn defs(&self) -> Vec<VReg> {
-        if let Inst::Call { dsts, .. } = self {
-            return dsts.clone();
+        match self {
+            Inst::Call { dsts, .. } => dsts.clone(),
+            Inst::ReducePio2 { n, hi, lo, .. } => vec![*n, *hi, *lo],
+            Inst::SinCos { sin, cos, .. } => vec![*sin, *cos],
+            _ => self.def().into_iter().collect(),
         }
-        self.def().into_iter().collect()
     }
 
     /// Returns the one vreg this instruction writes, if any, or the first a call writes.
@@ -495,6 +586,7 @@ impl Inst {
             | Inst::FloatBinary { dst, .. }
             | Inst::Neg { dst, .. }
             | Inst::FloatNeg { dst, .. }
+            | Inst::FloatAbs { dst, .. }
             | Inst::FloatSqrt { dst, .. }
             | Inst::Not { dst, .. }
             | Inst::Compare { dst, .. }
@@ -519,6 +611,9 @@ impl Inst {
             | Inst::FunctionStatic { dst, .. }
             | Inst::VariantStatic { dst, .. } => Some(*dst),
             Inst::Call { dsts, .. } => dsts.first().copied(),
+            Inst::ReducePio2 { n, .. } => Some(*n),
+            Inst::Trig { dst, .. } => Some(*dst),
+            Inst::SinCos { sin, .. } => Some(*sin),
             Inst::ListStore { old: dst, .. } => *dst,
             Inst::StoreGlobal { .. }
             | Inst::ListInit { .. }
@@ -539,7 +634,10 @@ impl Inst {
             Inst::Copy { src, .. }
             | Inst::Neg { src, .. }
             | Inst::FloatNeg { src, .. }
+            | Inst::FloatAbs { src, .. }
             | Inst::FloatSqrt { src, .. }
+            | Inst::ReducePio2 { src, .. }
+            | Inst::SinCos { src, .. }
             | Inst::Not { src, .. }
             | Inst::IntToFloat { src, .. }
             | Inst::FloatToInt { src, .. }
@@ -587,6 +685,7 @@ impl Inst {
                 ..
             } => vec![*list, *index, *value],
             Inst::ListInit { list, value, .. } => vec![*list, *value],
+            Inst::Trig { args, .. } => args.clone(),
             // the function a value calls is read after the arguments
             Inst::Call { args, callee, .. } => {
                 let mut operands = args.clone();
@@ -845,6 +944,7 @@ fn bin_name(op: BinOp) -> &'static str {
         BinOp::Div => "div",
         BinOp::Rem => "rem",
         BinOp::Pow => "pow",
+        BinOp::DivUnchecked => "div_unchecked",
     }
 }
 
@@ -876,7 +976,13 @@ impl fmt::Display for Inst {
             }
             Inst::Neg { dst, src } => write!(f, "{dst} = neg {src}"),
             Inst::FloatNeg { dst, src } => write!(f, "{dst} = fneg {src}"),
+            Inst::FloatAbs { dst, src } => write!(f, "{dst} = fabs {src}"),
             Inst::FloatSqrt { dst, src } => write!(f, "{dst} = fsqrt {src}"),
+            Inst::ReducePio2 { n, hi, lo, src } => write!(f, "{n}, {hi}, {lo} = reduce_pio2 {src}"),
+            Inst::Trig { func, dst, args } => {
+                write!(f, "{dst} = {} {}", func.name(), list(args))
+            }
+            Inst::SinCos { sin, cos, src } => write!(f, "{sin}, {cos} = sincos {src}"),
             Inst::Not { dst, src } => write!(f, "{dst} = not {src}"),
             Inst::Compare {
                 cond,
@@ -967,7 +1073,10 @@ impl fmt::Display for Inst {
                 write!(f, "list_init {list}[{index}], {value}")
             }
             Inst::IntToFloat { dst, src } => write!(f, "{dst} = int_to_float {src}"),
-            Inst::FloatToInt { dst, src } => write!(f, "{dst} = float_to_int {src}"),
+            Inst::FloatToInt { dst, src, checked } => match checked {
+                true => write!(f, "{dst} = float_to_int {src}"),
+                false => write!(f, "{dst} = float_trunc {src}"),
+            },
             Inst::EnumTag { dst, value } => write!(f, "{dst} = enum_tag {value}"),
             Inst::FieldGet { dst, value, slot } => write!(f, "{dst} = field_get {value}, {slot}"),
             Inst::FieldInit { value, slot, src } => {

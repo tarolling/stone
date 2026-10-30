@@ -35,7 +35,7 @@ mod tests;
 use super::inline::retarget;
 use super::{
     BinOp, Block, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, Program, RcKind,
-    Terminator, VReg, leaf_name, variable_of,
+    Terminator, TrigFunc, VReg, leaf_name, variable_of,
 };
 use crate::ast::{
     Arg, BoolOp, Constant, Expr, ExprKind, Keyword, MatchCase, Mod, Operator, Pattern, PatternKind,
@@ -54,7 +54,7 @@ use crate::stdlib::{
     BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, CUT_CHARACTER, END_OF_INPUT,
     INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRELUDE_CLAMP,
     PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE,
-    UNWRAP_OK, math, random,
+    UNWRAP_OK, math, module_constant, random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
@@ -321,6 +321,9 @@ fn referenced_functions(function: &Function) -> impl Iterator<Item = &str> {
                 ..
             } => Some(name.as_str()),
             Inst::FunctionAddress { label, .. } => label.strip_prefix(FUNCTION_PREFIX),
+            // expanded later, when one may reduce through the prelude
+            Inst::Trig { func, .. } if func.reduces() => Some(math::trig::REDUCE_LARGE),
+            Inst::SinCos { .. } | Inst::ReducePio2 { .. } => Some(math::trig::REDUCE_LARGE),
             _ => None,
         })
 }
@@ -358,6 +361,8 @@ fn constant_globals(body: &[Stmt], reads: &GlobalReads) -> HashMap<String, i64> 
                 Constant::Bool(b) => Some(b as i64),
                 _ => constant_int(value),
             },
+            // a module's constant, as `math.pi`
+            ExprKind::Name { id, .. } => module_constant(id).map(|x| x.to_bits() as i64),
             ExprKind::UnaryOp {
                 op: UnaryOp::UnarySub,
                 operand,
@@ -368,6 +373,7 @@ fn constant_globals(body: &[Stmt], reads: &GlobalReads) -> HashMap<String, i64> 
                     Constant::Float(x) => Some((-x).to_bits() as i64),
                     _ => constant_int(value),
                 },
+                ExprKind::Name { id, .. } => module_constant(id).map(|x| (-x).to_bits() as i64),
                 _ => None,
             },
             _ => None,
@@ -3773,6 +3779,9 @@ impl<'a> Lowerer<'a> {
                 if let Some(&local) = self.locals.get(id) {
                     return Ok(self.finish(Operand::Reg(local), into));
                 }
+                if let Some(value) = module_constant(id) {
+                    return Ok(self.finish(Operand::Imm(value.to_bits() as i64), into));
+                }
                 if let Some(&literal) = self.context.constant_globals.get(id) {
                     return Ok(self.finish(Operand::Imm(literal), into));
                 }
@@ -5398,6 +5407,52 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Lowers a call of `math.sin`, `math.cos`, `math.tan`, `math.asin`, `math.acos`,
+    /// `math.atan`, or `math.atan2` to one [`Inst::Trig`] of floats, converting int arguments
+    /// first, which `ir::trig` shares with other calls and expands.
+    ///
+    /// For example, `math.sin(x)` of a float variable in `v1` is `v4 = sin v1`, and `math.sin(2)`
+    /// is `v3 = int_to_float 2` then `v4 = sin v3`.
+    fn trig(
+        &mut self,
+        func: TrigFunc,
+        args: &[Expr],
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let mut values = Vec::new();
+        for arg in args {
+            let value = self.expr(arg)?;
+            let int = self.type_of(arg)? == Type::Int;
+            let value = match value {
+                // a variable's own vreg, so that calls of the same variable share their work
+                Operand::Reg(_) if !int => value,
+                // an immediate in a vreg of its own, so that no comparison is of two
+                _ => {
+                    let float = self.fresh();
+                    self.push(match int {
+                        true => Inst::IntToFloat {
+                            dst: float,
+                            src: value,
+                        },
+                        false => Inst::Copy {
+                            dst: float,
+                            src: value,
+                        },
+                    });
+                    Operand::Reg(float)
+                }
+            };
+            values.push(value);
+        }
+        let dst = self.fresh();
+        self.push(Inst::Trig {
+            func,
+            dst,
+            args: values,
+        });
+        Ok(self.finish(Operand::Reg(dst), into))
+    }
+
     /// Lowers a call to a function of the `math` module, which never calls the runtime: each
     /// becomes compares and branches that do what `stdlib::math` does, in the same order.
     ///
@@ -5405,6 +5460,9 @@ impl<'a> Lowerer<'a> {
     /// it is negative, and `math.max(xs)` loops over the list, keeping an element only when it is
     /// greater than the one kept so far.
     fn math(&mut self, name: &str, args: &[Expr], into: Option<VReg>) -> Result<Operand, String> {
+        if let Some(func) = TrigFunc::of(name) {
+            return self.trig(func, args, into);
+        }
         let float = match args {
             [arg] => match self.type_of(arg)? {
                 Type::List(elem) => *elem == Type::Float,
@@ -5553,6 +5611,7 @@ impl<'a> Lowerer<'a> {
                 self.push(Inst::FloatToInt {
                     dst: truncated,
                     src: x,
+                    checked: true,
                 });
                 let back = self.fresh();
                 self.push(Inst::IntToFloat {
@@ -6430,7 +6489,12 @@ impl<'a> Lowerer<'a> {
         });
         self.start(fits);
         let whole = self.fresh();
-        self.push(Inst::FloatToInt { dst: whole, src: x });
+        // the comparisons above leave only floats that fit
+        self.push(Inst::FloatToInt {
+            dst: whole,
+            src: x,
+            checked: false,
+        });
         self.new_variant(dst, ok, vec![Operand::Reg(whole)], &[None]);
         self.jump(end);
         self.start(fails);
@@ -8086,7 +8150,7 @@ impl Fused {
                 let packs = match op {
                     BinOp::Add | BinOp::Sub => true,
                     BinOp::Mul | BinOp::Div => float,
-                    BinOp::Rem | BinOp::Pow => false,
+                    BinOp::Rem | BinOp::Pow | BinOp::DivUnchecked => false,
                 };
                 packs && *node == float && lhs.packable(float) && rhs.packable(float)
             }

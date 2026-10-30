@@ -10,6 +10,30 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Trigonometry in the `math` module: `math.sin`, `math.cos`, `math.tan`, `math.asin`,
+  `math.acos`, `math.atan`, and `math.atan2(y, x)`, plus the constants `math.pi`, `math.tau`,
+  and `math.e`, which are read without parentheses (`use math.pi` binds `pi` alone). Every
+  function is within one ulp of the exact value for any argument, `math.sin(1e22)` included,
+  whose reduction by pi/2 uses the exact bits of 2/pi it needs, and gives the same bits under
+  `stone run` and in built programs on every target, since neither calls the system's math
+  library. As in Python, `sin`, `cos`, and `tan` of an infinity and `asin` and `acos` outside
+  [-1, 1] stop the program with `math domain error`, and `atan2` never fails.
+- Built programs compute these functions inline, keeping the values around them in registers,
+  and compute each value once: a repeated `math.sin(x)` reuses the first, and a `math.sin(x)`
+  and a `math.cos(x)` of the same `x` reduce it once between them, as C's `sincos` does. The new
+  `bench/programs/trig` runs in 170 ms, against 204 ms for `gcc -O2` with glibc and 1089 ms for
+  Python.
+
+### Changed
+
+- Built float code on x86-64 reads its constants from memory rather than building each in a
+  general register first, takes a float's absolute value or negation with one instruction, and
+  converts with `int` without checking the range twice. On arm64, a float constant that `fmov`
+  can hold is one instruction, and any other is read from memory with two, rather than built
+  with up to five.
+
 ## [0.3.6] - 2026-10-27
 
 ### Added

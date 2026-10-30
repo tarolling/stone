@@ -654,7 +654,10 @@ impl<'r, 'out> Resolver<'r, 'out> {
                     types: self.instance(expr.span),
                     captures: vec![],
                 },
-                None => ExprKind::Var(self.var(id)),
+                None => match stdlib::module_constant(id) {
+                    Some(value) => ExprKind::Constant(Value::Float(value)),
+                    None => ExprKind::Var(self.var(id)),
+                },
             },
             ast::ExprKind::Closure { captures, .. } => {
                 match self.calls.function_values.get(&expr.span) {

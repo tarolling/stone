@@ -1358,7 +1358,7 @@ pub fn completion(
                 Some(format!("module {}", doc.sources.file(*file).module)),
             ),
             Target::Function(name) => (
-                CompletionItemKind::FUNCTION,
+                builtin_kind(name),
                 doc.function(name)
                     .map(|s| signature(&doc.analysis, s))
                     .or_else(|| builtin_doc(name).map(|d| d.signature.to_string())),
@@ -1877,6 +1877,15 @@ fn module_functions(doc: &Document, file: FileId) -> Vec<CompletionItem> {
 
 /// Returns the functions of the builtin module `module`, by their own names, such as `env` for
 /// `os.env`.
+/// Returns how completion shows the function or builtin module member with the linked name
+/// `name`: a constant such as `math.pi`, or a function.
+fn builtin_kind(name: &str) -> CompletionItemKind {
+    match stone::stdlib::module_constant(name) {
+        Some(_) => CompletionItemKind::CONSTANT,
+        None => CompletionItemKind::FUNCTION,
+    }
+}
+
 fn builtin_module_functions(module: &str) -> Vec<CompletionItem> {
     let Some(module) = stone::stdlib::module(module) else {
         return vec![];
@@ -1888,7 +1897,7 @@ fn builtin_module_functions(module: &str) -> Vec<CompletionItem> {
             let name = doc.name.strip_prefix(module.name)?.strip_prefix('.')?;
             Some(CompletionItem {
                 label: name.to_string(),
-                kind: Some(CompletionItemKind::FUNCTION),
+                kind: Some(builtin_kind(doc.name)),
                 detail: Some(doc.signature.to_string()),
                 ..CompletionItem::default()
             })

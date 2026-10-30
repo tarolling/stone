@@ -9,7 +9,7 @@
 
 use super::{ARG_REGS, X64Generator};
 use crate::codegen::context::{
-    FALLIBLE_ROUTINES, function_label, function_static, global_label, variant_label,
+    FALLIBLE_ROUTINES, REDUCE_PIO2, function_label, function_static, global_label, variant_label,
 };
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::opt::never_negative;
@@ -474,9 +474,10 @@ impl X64Generator {
         match (dst, src) {
             (Value::Xmm(to), Value::Xmm(from)) => self.emit(&format!("\tmovapd\t{to}, {from}")),
             (Value::Xmm(to), Value::Imm(0)) => self.emit(&format!("\txorpd\t{to}, {to}")),
+            // a float constant, read from .rodata
             (Value::Xmm(to), Value::Imm(n)) => {
-                self.emit(&format!("\tmov\trax, {n}"));
-                self.emit(&format!("\tmovq\t{to}, rax"));
+                let constant = self.ctx.float_constant(n);
+                self.emit(&format!("\tmovsd\t{to}, QWORD PTR [rip + {constant}]"));
             }
             (Value::Xmm(to), _) => self.emit(&format!("\tmovq\t{to}, {src}")),
             (_, Value::Xmm(from)) => self.emit(&format!("\tmovq\t{dst}, {from}")),
@@ -532,11 +533,11 @@ impl X64Generator {
         match value {
             Value::Xmm(from) if from == xmm => {}
             Value::Xmm(from) => self.emit(&format!("\tmovapd\t{xmm}, {from}")),
-            // 0.0 is all zero bits
+            // 0.0 is all zero bits, and any other constant is read from .rodata
             Value::Imm(0) => self.emit(&format!("\txorpd\t{xmm}, {xmm}")),
-            Value::Imm(_) => {
-                self.load("rax", value);
-                self.emit(&format!("\tmovq\t{xmm}, rax"));
+            Value::Imm(bits) => {
+                let constant = self.ctx.float_constant(bits);
+                self.emit(&format!("\tmovsd\t{xmm}, QWORD PTR [rip + {constant}]"));
             }
             _ => self.emit(&format!("\tmovq\t{xmm}, {value}")),
         }
@@ -556,6 +557,10 @@ impl X64Generator {
     fn float_source(&mut self, value: Value, scratch: &'static str) -> String {
         match value {
             Value::Xmm(_) | Value::Stack(_) => value.to_string(),
+            // a constant other than 0.0 is read from .rodata
+            Value::Imm(bits) if bits != 0 => {
+                format!("QWORD PTR [rip + {}]", self.ctx.float_constant(bits))
+            }
             _ => {
                 self.load_xmm(scratch, value);
                 scratch.to_string()
@@ -582,16 +587,32 @@ impl X64Generator {
         self.emit(&format!("\tcmp\t{lhs}, {rhs}"));
     }
 
-    /// Compares the floats in `xmm0` and `xmm1` with `ucomisd`, ordered so that `jcc` with the
-    /// returned `(true, false)` suffixes jumps when the comparison does or does not hold.
+    /// Compares the floats `lhs` and `rhs` with `ucomisd`, ordered so that `jcc` with the
+    /// returned `(true, false)` suffixes jumps when the comparison does or does not hold. It
+    /// uses `xmm0` and `xmm1`.
     ///
     /// `ucomisd` sets ZF, PF, and CF when either side is nan, so `a < b` is computed as `b > a`
     /// with `ja`, which is false for nan. `==` and `!=` also need PF, which the caller checks.
-    fn compare_floats(&mut self, cond: Cond) -> (&'static str, &'static str) {
-        match cond {
-            Cond::Lt | Cond::Le => self.emit("\tucomisd\txmm1, xmm0"),
-            _ => self.emit("\tucomisd\txmm0, xmm1"),
-        }
+    fn compare_floats(
+        &mut self,
+        cond: Cond,
+        lhs: Value,
+        rhs: Value,
+    ) -> (&'static str, &'static str) {
+        let (first, second) = match cond {
+            Cond::Lt | Cond::Le => (rhs, lhs),
+            _ => (lhs, rhs),
+        };
+        // the first operand must be a register, and the second may be memory
+        let first = match first {
+            Value::Xmm(reg) => reg,
+            _ => {
+                self.load_xmm("xmm0", first);
+                "xmm0"
+            }
+        };
+        let second = self.float_source(second, "xmm1");
+        self.emit(&format!("\tucomisd\t{first}, {second}"));
         match cond {
             Cond::Lt | Cond::Gt => ("a", "be"),
             Cond::Le | Cond::Ge => ("ae", "b"),
@@ -678,9 +699,7 @@ impl X64Generator {
             } => {
                 let (lhs, rhs) = (frame.value(*lhs)?, frame.value(*rhs)?);
                 if *float {
-                    self.load_xmm("xmm0", lhs);
-                    self.load_xmm("xmm1", rhs);
-                    let flags = self.compare_floats(*cond);
+                    let flags = self.compare_floats(*cond, lhs, rhs);
                     // a nan operand sets PF, which makes == false and != true
                     match cond {
                         Cond::Eq => self.emit(&format!("\tjp\t{}", frame.blocks[otherwise.0])),
@@ -743,6 +762,9 @@ impl X64Generator {
 
     fn emit_inst(&mut self, frame: &Frame, inst: &Inst) -> Result<(), String> {
         match inst {
+            Inst::Trig { .. } | Inst::SinCos { .. } => {
+                return Err(format!("'{inst}' should have been expanded"));
+            }
             Inst::DataGet {
                 dst,
                 data,
@@ -908,6 +930,9 @@ impl X64Generator {
                             BinOp::Add => "add",
                             BinOp::Sub => "sub",
                             BinOp::Mul => "imul",
+                            BinOp::DivUnchecked => {
+                                return Err("int division is always checked".to_string());
+                            }
                             BinOp::Div | BinOp::Rem | BinOp::Pow => {
                                 return Err(format!("{op:?} is emitted separately"));
                             }
@@ -1007,11 +1032,20 @@ impl X64Generator {
                     BinOp::Add => "addsd",
                     BinOp::Sub => "subsd",
                     BinOp::Mul => "mulsd",
-                    BinOp::Div => "divsd",
+                    BinOp::Div | BinOp::DivUnchecked => "divsd",
                     BinOp::Rem | BinOp::Pow => {
                         return Err(format!("float {op:?} is emitted separately"));
                     }
                 };
+                // + and * give the same bits either way round (any nan prints as nan), so the
+                // operands swap to compute in dst's register or to read a constant from memory
+                let swap = match (lhs, rhs) {
+                    _ if !matches!(op, BinOp::Add | BinOp::Mul) => false,
+                    _ if rhs == dst => lhs != dst,
+                    (Value::Imm(bits), _) => bits != 0 && !matches!(rhs, Value::Imm(_)),
+                    _ => false,
+                };
+                let (lhs, rhs) = if swap { (rhs, lhs) } else { (lhs, rhs) };
                 // computed in dst's own register when it has one that the divisor is not in
                 let result = match dst {
                     Value::Xmm(reg) if lhs == dst || rhs != dst => reg,
@@ -1037,27 +1071,35 @@ impl X64Generator {
                 self.store_xmm(dst, result);
             }
 
-            Inst::FloatNeg { dst, src } if matches!(frame.reg(*dst)?, Value::Xmm(_)) => {
+            Inst::FloatNeg { dst, src } | Inst::FloatAbs { dst, src }
+                if matches!(frame.reg(*dst)?, Value::Xmm(_)) =>
+            {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 let Value::Xmm(reg) = dst else {
                     unreachable!("the destination is a vector register")
                 };
-                // flip the sign bit, which also negates 0.0 and nan like the interpreter
+                // flip or clear the sign bit, which also changes 0.0 and nan like the
+                // interpreter, with a mask from .rodata
                 self.load_xmm(reg, src);
-                self.emit(&format!("\tmov\trax, {}", i64::MIN));
-                self.emit("\tmovq\txmm0, rax");
-                self.emit(&format!("\txorpd\t{reg}, xmm0"));
+                let (instruction, mask) = match inst {
+                    Inst::FloatNeg { .. } => ("xorpd", i64::MIN),
+                    _ => ("andpd", i64::MAX),
+                };
+                let mask = self.ctx.vector_constant(mask);
+                self.emit(&format!(
+                    "\t{instruction}\t{reg}, XMMWORD PTR [rip + {mask}]"
+                ));
             }
 
-            Inst::Neg { dst, src } | Inst::FloatNeg { dst, src } => {
+            Inst::Neg { dst, src } | Inst::FloatNeg { dst, src } | Inst::FloatAbs { dst, src } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 let target = self.target(dst, None);
                 self.load(target, src);
-                if matches!(inst, Inst::Neg { .. }) {
-                    self.emit(&format!("\tneg\t{target}"));
-                } else {
+                match inst {
+                    Inst::Neg { .. } => self.emit(&format!("\tneg\t{target}")),
                     // flip the sign bit, which also negates 0.0 and nan like the interpreter
-                    self.emit(&format!("\tbtc\t{target}, 63"));
+                    Inst::FloatNeg { .. } => self.emit(&format!("\tbtc\t{target}, 63")),
+                    _ => self.emit(&format!("\tbtr\t{target}, 63")),
                 }
                 self.store(dst, target);
             }
@@ -1071,6 +1113,16 @@ impl X64Generator {
                 let src = self.float_source(src, "xmm1");
                 self.emit(&format!("\tsqrtsd\t{result}, {src}"));
                 self.store_xmm(dst, result);
+            }
+
+            Inst::ReducePio2 { n, hi, lo, src } => {
+                let src = frame.value(*src)?;
+                self.load("rax", src);
+                self.emit(&format!("\tcall\t{REDUCE_PIO2}"));
+                for (dst, reg) in [(n, "rax"), (hi, "rdx"), (lo, "rcx")] {
+                    let dst = frame.reg(*dst)?;
+                    self.store(dst, reg);
+                }
             }
 
             Inst::Not { dst, src } => {
@@ -1091,9 +1143,7 @@ impl X64Generator {
             } => {
                 let (dst, lhs, rhs) = (frame.reg(*dst)?, frame.value(*lhs)?, frame.value(*rhs)?);
                 if *float {
-                    self.load_xmm("xmm0", lhs);
-                    self.load_xmm("xmm1", rhs);
-                    let (yes, _) = self.compare_floats(*cond);
+                    let (yes, _) = self.compare_floats(*cond, lhs, rhs);
                     self.emit(&format!("\tset{yes}\tal"));
                     match cond {
                         Cond::Eq => {
@@ -1399,11 +1449,23 @@ impl X64Generator {
                 }
             }
 
-            Inst::FloatToInt { dst, src } => {
+            Inst::FloatToInt {
+                dst,
+                src,
+                checked: true,
+            } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 self.load("rax", src);
                 self.gen_float_to_int();
                 self.store(dst, "rax");
+            }
+
+            Inst::FloatToInt { dst, src, .. } => {
+                let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
+                let src = self.float_source(src, "xmm0");
+                let target = self.target(dst, None);
+                self.emit(&format!("\tcvttsd2si\t{target}, {src}"));
+                self.store(dst, target);
             }
 
             Inst::Call { dsts, callee, args } => {

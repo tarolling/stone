@@ -6467,6 +6467,7 @@ impl Inference {
                     self.symbol_types[symbol].clone()
                 }
                 Resolved::Function(name) => self.function_value(expr.span, id, &name),
+                Resolved::Builtin if crate::stdlib::module_constant(id).is_some() => Ty::Float,
                 Resolved::Builtin => {
                     self.error(
                         expr.span,
@@ -7989,6 +7990,31 @@ impl Inference {
                     "math.floor" => Ty::Int,
                     _ => arg_types[0].clone(),
                 }
+            }
+            "math.sin" | "math.cos" | "math.tan" | "math.asin" | "math.acos" | "math.atan"
+            | "math.atan2" => {
+                let params = if name == "math.atan2" { 2 } else { 1 };
+                if args.len() != params {
+                    self.arity_error(call.span, name, &params.to_string(), args.len());
+                    return Ty::Float;
+                }
+                let message = match name {
+                    "math.sin" => "'math.sin' needs an int or float, found {}",
+                    "math.cos" => "'math.cos' needs an int or float, found {}",
+                    "math.tan" => "'math.tan' needs an int or float, found {}",
+                    "math.asin" => "'math.asin' needs an int or float, found {}",
+                    "math.acos" => "'math.acos' needs an int or float, found {}",
+                    "math.atan" => "'math.atan' needs an int or float, found {}",
+                    _ => "'math.atan2' needs ints or floats, found {}",
+                };
+                for (arg, ty) in args.iter().zip(arg_types) {
+                    self.require(ty.clone(), NUMERIC, arg.span, message);
+                }
+                Ty::Float
+            }
+            "math.pi" | "math.tau" | "math.e" => {
+                self.error(call.span, format!("'{name}' is a constant, not a function"));
+                Ty::Float
             }
             "math.min" | "math.max" => match args {
                 [] => {

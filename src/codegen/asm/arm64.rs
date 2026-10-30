@@ -243,7 +243,7 @@ fn bitmask(value: u64, width: u32) -> Option<u32> {
 /// Encodes an `fmov` immediate, which holds a sign, a 3-bit exponent, and a 4-bit fraction.
 ///
 /// For example, `1.0` is `0x70` and `-2.0` is `0x80`.
-fn float_imm(value: f64) -> Option<u32> {
+pub(crate) fn float_imm(value: f64) -> Option<u32> {
     let bits = value.to_bits();
     let sign = (bits >> 63) as u32;
     let exponent = (bits >> 52 & 0x7ff) as u32;
@@ -1108,13 +1108,13 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
                 _ => Err("bad operands for 'fmov'".to_string()),
             }
         }
-        "fsqrt" | "fneg" => {
+        "fsqrt" | "fneg" | "fabs" => {
             count(2)?;
             let (rd, rn) = (dreg(operands[0])?, dreg(operands[1])?);
-            let base = if mnemonic == "fsqrt" {
-                0x1e61c000
-            } else {
-                0x1e614000
+            let base = match mnemonic {
+                "fsqrt" => 0x1e61c000,
+                "fneg" => 0x1e614000,
+                _ => 0x1e60c000,
             };
             Ok((base | rn.num << 5 | rd.num, None))
         }
@@ -1392,6 +1392,9 @@ mod tests {
             ("addp d17, v17.2d", "5ef1ba31"),
             ("fmov x16, d17", "9e660230"),
             ("fneg d3, d17", "1e614223"),
+            ("fabs d3, d16", "1e60c203"),
+            ("fabs d0, d1", "1e60c020"),
+            ("and x9, x10, #0x7fffffffffffffff", "9240f949"),
             ("fmov d5, xzr", "9e6703e5"),
             ("ldr d4, [x17, x20, lsl #3]", "fc747a24"),
             ("str d20, [x17, x11, lsl #3]", "fc2b7a34"),
@@ -1406,6 +1409,9 @@ mod tests {
             ("fmov x0, d1", "9e660020"),
             ("fmov d0, xzr", "9e6703e0"),
             ("fmov d0, #1.0", "1e6e1000"),
+            ("fmov d17, #-2.0", "1e701011"),
+            ("fmov d3, #0.125", "1e681003"),
+            ("fmov d4, #31.0", "1e67f004"),
             ("fadd d0, d1, d2", "1e622820"),
             ("fsub d0, d1, d2", "1e623820"),
             ("fmul d0, d1, d2", "1e620820"),
@@ -1446,6 +1452,16 @@ mod tests {
             (
                 "ldr x0, [x16, :lo12:.L1]",
                 "f9400200",
+                FixupKind::Arm64LdStLo12(3),
+            ),
+            (
+                "ldr d3, [x16, :lo12:.L1]",
+                "fd400203",
+                FixupKind::Arm64LdStLo12(3),
+            ),
+            (
+                "ldr d31, [x16, :lo12:.L1]",
+                "fd40021f",
                 FixupKind::Arm64LdStLo12(3),
             ),
             (

@@ -119,6 +119,15 @@ pub fn module_function(name: &str) -> Option<&'static BuiltinDoc> {
         .find(|doc| doc.name == name)
 }
 
+/// Returns the value of the constant of a builtin module with the linked name `name`, which
+/// [`module_function`] documents as it does the module's functions.
+///
+/// For example, `module_constant("math.pi")` is `Some(std::f64::consts::PI)`, and
+/// `module_constant("math.sqrt")` is `None`.
+pub fn module_constant(name: &str) -> Option<f64> {
+    math::constant(name)
+}
+
 /// The most function calls that can be active at once, in both backends.
 ///
 /// For example, a recursive function can call itself 999 times from a top-level call, but a
@@ -1680,7 +1689,8 @@ mod tests {
                 "max_by_key",
                 "min",
                 "max",
-                "clamp"
+                "clamp",
+                "rem_pio2_large"
             ]
         );
         // each method the prelude gives is a prelude function of the same name
@@ -1738,7 +1748,10 @@ mod tests {
             for doc in module.functions {
                 let prefix = format!("{}.", module.name);
                 assert!(doc.name.starts_with(&prefix), "{}", doc.name);
-                assert!(doc.signature.starts_with(&format!("{}(", doc.name)));
+                // a function, or a constant, which has a value
+                let constant = module_constant(doc.name).is_some();
+                let shape = if constant { ": " } else { "(" };
+                assert!(doc.signature.starts_with(&format!("{}{shape}", doc.name)));
                 assert_eq!(module_function(doc.name).unwrap().name, doc.name);
                 assert_eq!(builtin_doc(doc.name).unwrap().name, doc.name);
                 assert!(is_builtin(doc.name), "{}", doc.name);

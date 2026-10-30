@@ -781,6 +781,59 @@ fn compiled_floats_print_and_parse_like_the_interpreter() {
     assert_eq!(actual.lines().count(), expected.lines().count());
 }
 
+#[test]
+fn compiled_trig_matches_the_interpreter() {
+    let mut state = 0x9e37_79b9_7f4a_7c15;
+    let mut source = String::from("use math\n");
+    // values live in every register across a sin that calls the prelude, which must keep them
+    source.push_str(
+        "fn spread(x: float, k: int) -> float:\n    \
+         a = x * 1.5\n    b = x + 2.0\n    c = x - 3.0\n    d = x * x\n    e = a + b\n    \
+         f = c * d\n    g = e - f\n    h = a * 0.25\n    i = b * c\n    j = d + 1.0\n    \
+         m = k * 3\n    n = k + 7\n    o = k - 2\n    \
+         s = math.sin(x * 1e300) + math.cos(x * 1e30)\n    \
+         ret a + b + c + d + e + f + g + h + i + j + float(m + n + o) + s\n",
+    );
+    let pick = |state: &mut u64| {
+        let random = xorshift(state);
+        let unit = (random >> 11) as f64 / (1u64 << 53) as f64;
+        let sign = if random & 1 == 0 { 1.0 } else { -1.0 };
+        sign * match random % 6 {
+            0 => f64::from_bits(random >> 2) % 1e300,
+            1 => unit,
+            2 => unit * 2000.0,
+            3 => (unit * 1e6).round() * std::f64::consts::FRAC_PI_2 * (1.0 + 1e-15 * unit),
+            4 => 2f64.powf(20.0 + 1000.0 * unit),
+            _ => 2f64.powf(-60.0 * unit),
+        }
+    };
+    // the arguments go in lists for one loop, since every call site is a copy of the code, and
+    // calls of the same value share one, a sine and a cosine reducing it once
+    source.push_str("xs = []\nys = []\n");
+    for _ in 0..4000 {
+        let (x, y) = (pick(&mut state), pick(&mut state));
+        if x.is_finite() && y.is_finite() {
+            source.push_str(&format!("xs.append({x:e})\nys.append({y:e})\n"));
+        }
+    }
+    source.push_str(
+        "for i in range(xs.len()):\n    x = xs[i]\n    y = ys[i]\n    u = x % 1.0\n    \
+         print(math.sin(x), math.cos(x), math.tan(x), math.atan(x), math.atan2(y, x))\n    \
+         print(math.asin(u), math.acos(u), math.atan2(x, u))\n    \
+         print(math.cos(y) - math.sin(y) * math.cos(y), math.tan(y) + math.sin(y))\n    \
+         if i % 100 == 0:\n        print(spread(u, i))\n",
+    );
+    let (_, [run, built]) = run_and_build_in("trig_differential", &source);
+    assert!(run.status.success(), "{run:?}");
+    assert!(built.status.success(), "{built:?}");
+    let expected = String::from_utf8_lossy(&run.stdout);
+    let actual = String::from_utf8_lossy(&built.stdout);
+    for (line, (want, got)) in expected.lines().zip(actual.lines()).enumerate() {
+        assert_eq!(got, want, "line {}", line + 1);
+    }
+    assert_eq!(actual.lines().count(), expected.lines().count());
+}
+
 /// Returns the type of every program header of the ELF executable `bytes`, such as 3 for
 /// `PT_INTERP`, which names the dynamic loader a program needs.
 fn program_header_types(bytes: &[u8]) -> Vec<u32> {

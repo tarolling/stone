@@ -479,7 +479,10 @@ value: `eq`; any ordered value (int, float, str, bytes, a struct with `impl ord`
 
 Builtin modules, imported with `use math` (or `use math.sqrt`):
 
-- `math`: `abs`, `min`, `max` (two or more numbers, or a list), `sqrt`, `floor`
+- `math`: `abs`, `min`, `max` (two or more numbers, or a list), `sqrt`, `floor`, `sin`, `cos`,
+  `tan`, `asin`, `acos`, `atan`, `atan2(y, x)` (radians; `sin`/`cos`/`tan` of an infinity and
+  `asin`/`acos` outside [-1, 1] stop the program), and the constants `math.pi`, `math.tau`, and
+  `math.e`, read without parentheses
 - `random`: `seed`, `random`, `randint(low, high)`, `choice(xs)`
 - `time`: `now`, `clock`, `sleep(seconds)`
 - `os`: `env(name)` (option), `has_env`, `platform`, `arch`, `hostname`, `cpu_count`, `pid`,

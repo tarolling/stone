@@ -1,0 +1,5 @@
+use math
+print("before")
+x = 1.0 + 1e-15
+print(math.asin(0.5), math.acos(x))
+print("after")

@@ -1640,3 +1640,30 @@ fn a_map_get_unwrapped_at_once_makes_no_option() {
         }
     }
 }
+
+#[test]
+fn trig_calls_lower_to_one_instruction_each() {
+    // a float variable is read in place, and an int is converted first
+    let source = "use math\nfn f(x: float, n: int) -> float:\n    ret math.sin(x) + math.atan2(n, x)\nprint(f(1.0, 2))\n";
+    assert_eq!(
+        first_function(source),
+        "fn f(v0, v1):\n\
+         b0:\n  v2 = sin v0\n  v3 = int_to_float v1\n  v4 = atan2 v3, v0\n  \
+         v5 = fadd v2, v4\n  ret v5\n"
+    );
+}
+
+#[test]
+fn math_constants_are_immediates() {
+    let source =
+        "use math\nfn f(x: float) -> float:\n    ret math.pi * x - math.tau\nprint(f(1.0))\n";
+    assert_eq!(
+        first_function(source),
+        format!(
+            "fn f(v0):\n\
+             b0:\n  v1 = fmul {}, v0\n  v2 = fsub v1, {}\n  ret v2\n",
+            std::f64::consts::PI.to_bits(),
+            std::f64::consts::TAU.to_bits()
+        )
+    );
+}

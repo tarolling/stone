@@ -1190,9 +1190,10 @@ fn word_count(path: str) -> result[int, str]:
 a program can still name its own variables `min`, `max`, or `abs`. A file named `math.stn` next
 to the entry file cannot be imported.
 
-Each function takes ints or floats, but never a mix of the two in one call: convert with
-`float()` or `int()` first, as for arithmetic. Both `stone run` and a built program compute
-every result to the same bit.
+Each function takes ints or floats. `math.min` and `math.max` never take a mix of the two in
+one call: convert with `float()` or `int()` first, as for arithmetic. The others convert an int
+argument to a float. Both `stone run` and a built program compute every result to the same bit,
+on every machine, since neither calls the system's math library.
 
 ### `math.abs`
 
@@ -1282,6 +1283,147 @@ comes back unchanged. A float that is nan or does not fit in an int stops the pr
 use math
 
 print(math.floor(7.0 / 2.0), math.floor(-0.5))   // 3 -1
+```
+
+### `math.sin`
+
+```text
+math.sin(x: int | float) -> float
+```
+
+Returns the sine of `x` radians, so `math.sin(math.pi / 6.0)` is `0.49999999999999994`, as in
+Python, since `math.pi` is not exactly pi. The result is within one ulp (one step between
+floats) of the exact sine for every `x`, however large: `math.sin(1e22)` is
+`-0.8522008497671888`. The sine of an infinity stops the program with `math domain error`, as
+in Python, and the sine of nan is nan.
+
+Compiled code computes the sine inline, with no call, so the values around it stay in
+registers, and computes each value once: a second `math.sin(x)` of the same `x` reuses the
+first, and a `math.sin(x)` and a `math.cos(x)` reduce `x` once between them, as C's `sincos`
+does. Only an `x` of at least 2^20 * pi/2 (about 1.6 million) takes a slower path, which
+reduces it by pi/2 with the exact bits of 2/pi it needs (Payne and Hanek's method).
+
+```stone
+use math
+
+print(math.sin(0), math.sin(math.pi / 2.0))   // 0.0 1.0
+```
+
+### `math.cos`
+
+```text
+math.cos(x: int | float) -> float
+```
+
+Returns the cosine of `x` radians, with the same accuracy and errors as `math.sin`.
+
+```stone
+use math
+
+print(math.cos(0), math.cos(math.pi))   // 1.0 -1.0
+```
+
+### `math.tan`
+
+```text
+math.tan(x: int | float) -> float
+```
+
+Returns the tangent of `x` radians, with the same accuracy and errors as `math.sin`. Since
+`math.pi / 2.0` is a little less than pi/2, its tangent is large rather than infinite:
+`math.tan(math.pi / 2.0)` is `1.633123935319537e+16`.
+
+```stone
+use math
+
+print(math.tan(math.pi / 4.0))   // 0.9999999999999999
+```
+
+### `math.asin`
+
+```text
+math.asin(x: int | float) -> float
+```
+
+Returns the arcsine of `x` in radians, from -pi/2 to pi/2, within one ulp. An `x` greater than
+1 or less than -1 stops the program with `math domain error`, and the arcsine of nan is nan.
+
+```stone
+use math
+
+print(math.asin(0.5), math.asin(-1))   // 0.5235987755982989 -1.5707963267948966
+```
+
+### `math.acos`
+
+```text
+math.acos(x: int | float) -> float
+```
+
+Returns the arccosine of `x` in radians, from 0 to pi, with the same accuracy and errors as
+`math.asin`.
+
+```stone
+use math
+
+print(math.acos(0.5), math.acos(1))   // 1.0471975511965979 0.0
+```
+
+### `math.atan`
+
+```text
+math.atan(x: int | float) -> float
+```
+
+Returns the arctangent of `x` in radians, from -pi/2 to pi/2, within one ulp. It never fails:
+the arctangent of an infinity is pi/2 or -pi/2, and of nan is nan.
+
+```stone
+use math
+
+print(math.atan(1), math.atan(-1e300))   // 0.7853981633974483 -1.5707963267948966
+```
+
+### `math.atan2`
+
+```text
+math.atan2(y: int | float, x: int | float) -> float
+```
+
+Returns the angle in radians, from -pi to pi, between the positive x axis and the point
+(`x`, `y`): note that `y` comes first, as in Python and C. Unlike `math.atan(y / x)`, it knows
+which quadrant the point is in, so `x` may be 0, and it is within one ulp, as the others are,
+since it corrects for the rounding of the quotient `y / x` that `math.atan(y / x)` would keep.
+It never fails, and follows C for zeros and infinities: `math.atan2(0, 0)` is `0.0`,
+`math.atan2(0.0, -0.0)` is pi, and `math.atan2(-0.0, -1.0)` is -pi.
+
+```stone
+use math
+
+fn degrees(radians: float) -> float:
+    ret radians * 180.0 / math.pi
+
+print(math.atan2(1, -1), degrees(math.atan2(3.0, 3.0)))   // 2.356194490192345 45.0
+```
+
+### `math.pi`, `math.tau`, and `math.e`
+
+```text
+math.pi: float
+math.tau: float
+math.e: float
+```
+
+The constants pi (`3.141592653589793`), tau, 2 * pi (`6.283185307179586`), and e, the base of
+the natural logarithm (`2.718281828459045`), each the float nearest the exact value. They are
+read without parentheses, and `use math.pi` makes `pi` alone name it. A constant cannot be
+called or assigned. Compiled code reads each as an immediate, as it does a literal.
+
+```stone
+use math
+use math.pi
+
+print(math.tau == 2.0 * pi, math.e)   // true 2.718281828459045
 ```
 
 ## The `random` module

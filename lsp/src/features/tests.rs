@@ -1243,6 +1243,26 @@ fn every_builtin_module_has_hover_completion_and_a_definition() {
     }
 }
 
+#[test]
+fn math_constants_complete_and_hover_as_constants() {
+    let doc = doc("use math\nuse math.tau\nx = math.pi + tau\nmath.\n");
+    let items = completion(&doc, at(4, 6), &MapSources::default());
+    let pi = items.iter().find(|i| i.label == "pi").unwrap();
+    assert_eq!(pi.kind, Some(CompletionItemKind::CONSTANT));
+    assert_eq!(pi.detail.as_deref(), Some("math.pi: float"));
+    let sin = items.iter().find(|i| i.label == "sin").unwrap();
+    assert_eq!(sin.kind, Some(CompletionItemKind::FUNCTION));
+    // a constant imported by name
+    let items = completion(&doc, at(4, 1), &MapSources::default());
+    let tau = items.iter().find(|i| i.label == "tau").unwrap();
+    assert_eq!(tau.kind, Some(CompletionItemKind::CONSTANT));
+    let hover = hover_text(&doc, at(3, 11)).unwrap();
+    assert!(
+        hover.starts_with("```stone\nmath.pi: float\n```"),
+        "{hover}"
+    );
+}
+
 const ENUMS: &str = "\
 enum Shape:
     Circle(float)

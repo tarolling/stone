@@ -1,0 +1,11 @@
+use math
+
+// a sine and a cosine of a huge argument call the prelude once in compiled code, and twice in
+// the interpreter, which is one call deeper either way, so both fail at the same depth
+fn deep(n: int) -> float:
+    if n == 0:
+        ret math.sin(1e22) + math.cos(1e22)
+    ret deep(n - 1)
+
+print(deep(998))
+print(deep(999))

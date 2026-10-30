@@ -9,6 +9,7 @@ use crate::checker::{Analysis, Structs, Type, TypeChecker, variants};
 use crate::codegen::ir::inline::inline;
 use crate::codegen::ir::lower::lower;
 use crate::codegen::ir::opt::optimize;
+use crate::codegen::ir::trig;
 use crate::codegen::ir::{Callee, Inst, Program};
 use crate::codegen::{Architecture, AssemblyGenerator, Os, Target};
 use crate::diagnostic::Severity;
@@ -480,6 +481,10 @@ pub fn immortal_bytes(r#gen: &mut dyn AssemblyGenerator, label: &str, bytes: &[u
 #[derive(Default)]
 pub struct Context {
     label_count: usize,
+    /// The bits of every float constant that code reads from memory, by [`Context::float_constant`].
+    float_constants: BTreeSet<i64>,
+    /// The bits of every 16-byte constant, by [`Context::vector_constant`].
+    vector_constants: BTreeSet<i64>,
     /// The lowered module, produced by [`Context::lower`].
     pub program: Program,
     string_literals: HashMap<String, String>,
@@ -542,6 +547,10 @@ impl Context {
     /// counts references.
     pub fn lower(&mut self, module: &Mod) -> Result<(), String> {
         self.program = lower(module, &self.analysis)?;
+        for function in &mut self.program.functions {
+            trig::share(function);
+            trig::expand(function);
+        }
         inline(&mut self.program);
         optimize(&mut self.program);
         let insts = self
@@ -563,6 +572,9 @@ impl Context {
                 }
                 Inst::FunctionStatic { label, .. } => {
                     self.function_statics.insert(label.clone());
+                }
+                Inst::ReducePio2 { .. } => {
+                    self.runtime.insert(REDUCE_PIO2);
                 }
                 _ => {}
             }
@@ -600,6 +612,48 @@ impl Context {
         self.string_literals
             .insert(content.to_string(), label.clone());
         label
+    }
+
+    /// Returns the label of the float constant whose bits are `bits` in `.rodata`, which an
+    /// instruction can read as a memory operand rather than building the float in a register.
+    ///
+    /// For example, `float_constant(0x3ff0000000000000)`, 1.0, is `.Lf64_3ff0000000000000`.
+    pub fn float_constant(&mut self, bits: i64) -> String {
+        self.float_constants.insert(bits);
+        float_label(bits)
+    }
+
+    /// Returns the label of 16 bytes holding `bits` twice in `.rodata`, aligned to 16 bytes, for
+    /// the packed instructions that take a mask from memory, such as `andpd` of a float's
+    /// magnitude.
+    ///
+    /// For example, `vector_constant(i64::MAX)` is `.Lv128_7fffffffffffffff`.
+    pub fn vector_constant(&mut self, bits: i64) -> String {
+        self.vector_constants.insert(bits);
+        vector_label(bits)
+    }
+
+    /// Emits every constant [`Context::float_constant`] and [`Context::vector_constant`] gave a
+    /// label, in `.rodata`, once all code has asked for its constants.
+    pub fn emit_constants(&self, r#gen: &mut dyn AssemblyGenerator) {
+        if self.float_constants.is_empty() && self.vector_constants.is_empty() {
+            return;
+        }
+        r#gen.emit("\t.section\t.rodata");
+        if !self.vector_constants.is_empty() {
+            r#gen.emit("\t.p2align\t4");
+            for &bits in &self.vector_constants {
+                r#gen.emit(&format!("{}:", vector_label(bits)));
+                r#gen.emit(&format!("\t.quad\t{bits}"));
+                r#gen.emit(&format!("\t.quad\t{bits}"));
+            }
+        }
+        r#gen.emit("\t.p2align\t3");
+        for &bits in &self.float_constants {
+            r#gen.emit(&format!("{}:", float_label(bits)));
+            r#gen.emit(&format!("\t.quad\t{bits}"));
+        }
+        r#gen.emit("\t.text");
     }
 
     /// Returns the label of the bytes literal `bytes`, the same one for every use.
@@ -797,6 +851,8 @@ impl Context {
                 "stone.fs_read_lines",
                 "stone.fs_list_dir",
                 "stone.net_exchange",
+                // the prelude's rem_pio2_large, whose types are the prelude's
+                REDUCE_PIO2,
             ])
     }
 
@@ -975,6 +1031,16 @@ pub fn function_static(label: &str) -> String {
     format!("{label}.static")
 }
 
+/// Returns the label of the float constant whose bits are `bits`, from which it can be told.
+fn float_label(bits: i64) -> String {
+    format!(".Lf64_{:016x}", bits as u64)
+}
+
+/// Returns the label of the 16-byte constant holding `bits` twice.
+fn vector_label(bits: i64) -> String {
+    format!(".Lv128_{:016x}", bits as u64)
+}
+
 /// Emits the immortal function value of each code label in `labels`, laid out as an enum value
 /// that holds nothing behind an immortal count, like [`variant_statics`], with its tag, the
 /// code's address, left 0 for [`Inst::FunctionStatic`] to write. The caller picks the section,
@@ -999,6 +1065,10 @@ pub fn function_label(name: &str) -> String {
 
 /// The prefix [`function_label`] puts before a stone function's name.
 pub const FUNCTION_PREFIX: &str = "fn.";
+
+/// The runtime routine behind [`Inst::ReducePio2`], which calls the prelude's `rem_pio2_large`
+/// while preserving every register a vreg can be in.
+pub const REDUCE_PIO2: &str = "stone.reduce_pio2";
 
 /// Returns whether the fields of the struct `name`, from `structs`, include one for which `has`
 /// returns true, unless `seen` shows the struct was already looked through.

@@ -1,0 +1,10 @@
+use math
+
+// a huge argument calls the prelude to reduce it, one call deeper, in both backends
+fn deep(n: int) -> float:
+    if n == 0:
+        ret math.sin(1e22)
+    ret deep(n - 1)
+
+print(deep(998))
+print(deep(999))

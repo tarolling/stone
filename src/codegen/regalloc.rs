@@ -92,6 +92,10 @@ pub fn hints<R: Copy>(function: &Function, arg_regs: &[R]) -> HashMap<VReg, Vec<
             | Inst::FloatNeg {
                 dst,
                 src: Operand::Reg(src),
+            }
+            | Inst::FloatAbs {
+                dst,
+                src: Operand::Reg(src),
             } => {
                 add(*dst, Hint::Like(*src));
             }
@@ -161,15 +165,23 @@ pub fn float_vregs(function: &Function) -> HashSet<VReg> {
                         rhs,
                     );
                 }
-                Inst::FloatNeg { dst, src } | Inst::FloatSqrt { dst, src } => {
+                Inst::FloatNeg { dst, src }
+                | Inst::FloatAbs { dst, src }
+                | Inst::FloatSqrt { dst, src } => {
                     float[dst.0 as usize] = true;
+                    mark(&mut float, src);
+                }
+                Inst::ReducePio2 { n, hi, lo, src } => {
+                    for dst in [n, hi, lo] {
+                        float[dst.0 as usize] = true;
+                    }
                     mark(&mut float, src);
                 }
                 Inst::IntToFloat { dst, src } => {
                     float[dst.0 as usize] = true;
                     mark(&mut int, src);
                 }
-                Inst::FloatToInt { dst, src } => {
+                Inst::FloatToInt { dst, src, .. } => {
                     int[dst.0 as usize] = true;
                     mark(&mut float, src);
                 }

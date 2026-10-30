@@ -554,7 +554,7 @@ const UNARY: [(&str, u8, u8, u8); 8] = [
 
 /// SSE instructions written `op xmm, xmm/mem`, with their prefix and opcode: scalar doubles, then
 /// packed doubles and quadwords.
-const SSE: [(&str, u8, u8); 16] = [
+const SSE: [(&str, u8, u8); 18] = [
     ("addsd", 0xf2, 0x58),
     ("mulsd", 0xf2, 0x59),
     ("subsd", 0xf2, 0x5c),
@@ -562,6 +562,9 @@ const SSE: [(&str, u8, u8); 16] = [
     ("sqrtsd", 0xf2, 0x51),
     ("ucomisd", 0x66, 0x2e),
     ("xorpd", 0x66, 0x57),
+    ("andpd", 0x66, 0x54),
+    // the load form, which is the only one the backends emit
+    ("movsd", 0xf2, 0x10),
     ("movapd", 0x66, 0x28),
     ("addpd", 0x66, 0x58),
     ("mulpd", 0x66, 0x59),
@@ -1351,6 +1354,12 @@ mod tests {
             ("movq xmm3, r10", "66 49 0f 6e da"),
             ("movapd xmm4, xmm13", "66 41 0f 28 e5"),
             ("xorpd xmm3, xmm14", "66 41 0f 57 de"),
+            ("andpd xmm3, xmm14", "66 41 0f 54 de"),
+            ("andpd xmm0, XMMWORD PTR [rdi + 16]", "66 0f 54 47 10"),
+            ("movsd xmm3, QWORD PTR [rbp - 8]", "f2 0f 10 5d f8"),
+            ("movsd xmm12, xmm1", "f2 44 0f 10 e1"),
+            ("btr r9, 63", "49 0f ba f1 3f"),
+            ("cvttsd2si r10, xmm7", "f2 4c 0f 2c d7"),
         ]);
     }
 

@@ -228,3 +228,200 @@ fn clamp[T: ord](x: T, lo: T, hi: T) -> tuple[bool, T]:
     if x > hi:
         ret (true, hi)
     ret (true, x)
+
+// Reduces `x`, a finite float of at least 2^20 * pi/2, by pi/2 for `math.sin`, `math.cos`, and
+// `math.tan`, which reduce smaller ones themselves: the number of quarter turns in `x` modulo 8,
+// then the rest as two floats whose sum it is, at most about pi/4 from 0. It is musl's
+// `__rem_pio2_large` (Payne and Hanek's method, from fdlibm), which multiplies `x` by just the
+// bits of 2/pi that matter, 24 at a time. Every float holds a whole number below 2^53 until the
+// end, so every step is exact, and `v - v % 1.0` cuts off a fraction, so nothing is allocated.
+fn rem_pio2_large(x: float) -> tuple[float, float, float]:
+    // 2/pi, 24 bits at a time, and pi/2 the same way
+    ipio2 = [10680707.0, 7228996.0, 1387004.0, 2578385.0, 16069853.0, 12639074.0, 9804092.0]
+    ipio2.extend([4427841.0, 16666979.0, 11263675.0, 12935607.0, 2387514.0, 4345298.0, 14681673.0])
+    ipio2.extend([3074569.0, 13734428.0, 16653803.0, 1880361.0, 10960616.0, 8533493.0, 3062596.0])
+    ipio2.extend([8710556.0, 7349940.0, 6258241.0, 3772886.0, 3769171.0, 3798172.0, 8675211.0])
+    ipio2.extend([12450088.0, 3874808.0, 9961438.0, 366607.0, 15675153.0, 9132554.0, 7151469.0])
+    ipio2.extend([3571407.0, 2607881.0, 12013382.0, 4155038.0, 6285869.0, 7677882.0, 13102053.0])
+    ipio2.extend([15825725.0, 473591.0, 9065106.0, 15363067.0, 6271263.0, 9264392.0, 5636912.0])
+    ipio2.extend([4652155.0, 7056368.0, 13614112.0, 10155062.0, 1944035.0, 9527646.0, 15080200.0])
+    ipio2.extend([6658437.0, 6231200.0, 6832269.0, 16767104.0, 5075751.0, 3212806.0, 1398474.0])
+    ipio2.extend([7579849.0, 6349435.0, 12618859.0])
+    pio2 = [1.570796251296997, 7.549789415861596e-08, 5.390302529957765e-15]
+    pio2.extend([3.282003415807913e-22, 1.270655753080676e-29, 1.2293330898111133e-36])
+    pio2.extend([2.7337005381646456e-44, 2.1674168387780482e-51])
+    two24 = 16777216.0
+    // x = z * 2^e0 with z in [2^23, 2^24)
+    z = x
+    e0 = 0
+    while z >= 4.722366482869645e21:
+        z *= 2.3283064365386963e-10
+        e0 += 32
+    while z >= two24:
+        z *= 0.5
+        e0 += 1
+    while z < 8388608.0:
+        z *= 2.0
+        e0 -= 1
+    // x's 53 bits as three whole numbers of 24 bits, the last ones dropped if zero
+    tx = []
+    for i in range(2):
+        t = z - z % 1.0
+        tx.append(t)
+        z = (z - t) * two24
+    tx.append(z)
+    nx = 3
+    while tx[nx - 1] == 0.0:
+        nx -= 1
+
+    jk = 4
+    jx = nx - 1
+    jv = (e0 - 3) / 24
+    if jv < 0:
+        jv = 0
+    q0 = e0 - 24 * (jv + 1)
+    f = []
+    q = []
+    fq = []
+    iq = []
+    for i in range(20):
+        f.append(0.0)
+        q.append(0.0)
+        fq.append(0.0)
+        iq.append(0.0)
+    j = jv - jx
+    for i in range(jx + jk + 1):
+        if j >= 0:
+            f[i] = ipio2[j]
+        j += 1
+    for i in range(jk + 1):
+        fw = 0.0
+        for j in range(jx + 1):
+            fw += tx[j] * f[jx + i - j]
+        q[i] = fw
+
+    jz = jk
+    n = 0.0
+    ih = 0
+    done = false
+    while not done:
+        // distill q into iq, last first
+        z = q[jz]
+        i = 0
+        j = jz
+        while j > 0:
+            fw = z / two24
+            fw -= fw % 1.0
+            v = z - two24 * fw
+            iq[i] = v - v % 1.0
+            z = q[j - 1] + fw
+            i += 1
+            j -= 1
+        // the whole quarter turns, modulo 8, and what is left over
+        z *= 2.0 ** q0
+        v = z * 0.125
+        z -= 8.0 * (v - v % 1.0)
+        n = z - z % 1.0
+        z -= n
+        ih = 0
+        if q0 > 0:
+            v = iq[jz - 1] / 2.0 ** (24 - q0)
+            v -= v % 1.0
+            n += v
+            iq[jz - 1] -= v * 2.0 ** (24 - q0)
+            v = iq[jz - 1] / 2.0 ** (23 - q0)
+            if v >= 1.0:
+                ih = 1
+        elif q0 == 0:
+            if iq[jz - 1] >= 8388608.0:
+                ih = 1
+        elif z >= 0.5:
+            ih = 2
+        if ih > 0:
+            // more than half a quarter turn is left, so take the next turn and keep 1 - q
+            n += 1.0
+            carry = false
+            for i in range(jz):
+                if carry:
+                    iq[i] = 16777215.0 - iq[i]
+                elif iq[i] != 0.0:
+                    carry = true
+                    iq[i] = 16777216.0 - iq[i]
+            if q0 == 1:
+                iq[jz - 1] = iq[jz - 1] % 8388608.0
+            elif q0 == 2:
+                iq[jz - 1] = iq[jz - 1] % 4194304.0
+            if ih == 2:
+                z = 1.0 - z
+                if carry:
+                    z -= 2.0 ** q0
+        // a rest that cancelled to zero needs more bits of 2/pi
+        done = true
+        if z == 0.0:
+            zero = true
+            for i in range(jk, jz):
+                if iq[i] != 0.0:
+                    zero = false
+            if zero:
+                k = 1
+                while iq[jk - k] == 0.0:
+                    k += 1
+                for i in range(jz + 1, jz + k + 1):
+                    f[jx + i] = ipio2[jv + i]
+                    fw = 0.0
+                    for j in range(jx + 1):
+                        fw += tx[j] * f[jx + i - j]
+                    q[i] = fw
+                jz += k
+                done = false
+
+    // drop the zero chunks at the end, or split what is left into chunks
+    if z == 0.0:
+        jz -= 1
+        q0 -= 24
+        while iq[jz] == 0.0:
+            jz -= 1
+            q0 -= 24
+    else:
+        z *= 2.0 ** -q0
+        if z >= two24:
+            fw = z / two24
+            fw -= fw % 1.0
+            v = z - two24 * fw
+            iq[jz] = v - v % 1.0
+            jz += 1
+            q0 += 24
+            iq[jz] = fw
+        else:
+            iq[jz] = z - z % 1.0
+    // the chunks as floats, times pi/2
+    fw = 2.0 ** q0
+    i = jz
+    while i >= 0:
+        q[i] = fw * iq[i]
+        fw *= 5.960464477539063e-08
+        i -= 1
+    i = jz
+    while i >= 0:
+        fw = 0.0
+        k = 0
+        while k <= jk and k <= jz - i:
+            fw += pio2[k] * q[i + k]
+            k += 1
+        fq[jz - i] = fw
+        i -= 1
+    // the sum, then what the sum lost
+    fw = 0.0
+    i = jz
+    while i >= 0:
+        fw += fq[i]
+        i -= 1
+    y0 = fw
+    fw = fq[0] - fw
+    for i in range(1, jz + 1):
+        fw += fq[i]
+    y1 = fw
+    if ih != 0:
+        y0 = -y0
+        y1 = -y1
+    ret (n % 8.0, y0, y1)

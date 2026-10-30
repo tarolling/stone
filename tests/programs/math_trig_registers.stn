@@ -1,0 +1,29 @@
+use math
+
+// many floats and ints live across a sin of a huge argument, which calls the prelude through a
+// routine that must keep every register a value can be in
+fn spread(x: float, k: int) -> float:
+    a = x * 1.5
+    b = x + 2.0
+    c = x - 3.0
+    d = x * x
+    e = a + b
+    f = c * d
+    g = e - f
+    h = a * 0.25
+    i = b * c
+    j = d + 1.0
+    l = e * h
+    m = k * 3
+    n = k + 7
+    o = k - 2
+    p = m * n
+    s = math.sin(x * 1e300) + math.cos(x * 1e30) + math.tan(x * 1e10)
+    ret a + b + c + d + e + f + g + h + i + j + l + float(m + n + o + p) + s
+
+total = 0.0
+for k in range(50):
+    t = float(k) * 0.37 - 9.0
+    total += spread(t, k)
+    print(k, spread(t, k))
+print(total)

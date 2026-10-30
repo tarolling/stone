@@ -775,6 +775,16 @@ impl Value {
         }
     }
 
+    /// Returns an int or float as a float, as a function of the `math` module that takes either
+    /// converts it.
+    fn as_number(&self) -> EvalResult<f64> {
+        match self {
+            Value::Int(x) => Ok(*x as f64),
+            Value::Float(x) => Ok(*x),
+            other => Err(format!("expected a number, found {}", other.display(true)).into()),
+        }
+    }
+
     fn as_list(&self) -> EvalResult<&Rc<Vec<Value>>> {
         match self {
             Value::List(items) => Ok(items),
@@ -2988,6 +2998,17 @@ impl<'out> Interpreter<'out> {
             ("math.sqrt", [Value::Float(x)]) => return Ok(Value::Float(math::sqrt(*x)?)),
             ("math.floor", [Value::Int(x)]) => return Ok(Value::Int(*x)),
             ("math.floor", [Value::Float(x)]) => return Ok(Value::Int(math::floor(*x)?)),
+            (
+                "math.sin" | "math.cos" | "math.tan" | "math.asin" | "math.acos" | "math.atan",
+                [x],
+            ) => {
+                let x = x.as_number()?;
+                return Ok(Value::Float(self.trig(name, x)?));
+            }
+            ("math.atan2", [y, x]) => {
+                let (y, x) = (y.as_number()?, x.as_number()?);
+                return Ok(Value::Float(math::trig::atan2(y, x)));
+            }
             ("random.seed", [Value::Int(seed)]) => {
                 self.rng = Some(Rng::seeded(*seed));
                 return Ok(Value::Unit);
@@ -3097,6 +3118,36 @@ impl<'out> Interpreter<'out> {
         }
 
         Ok(self.invoke(name, args, false)?.0)
+    }
+
+    /// Computes the trigonometric function of the `math` module with the linked name `name` at
+    /// `x`, reducing an argument too large for `math::trig` to reduce itself with the prelude's
+    /// function, as compiled code does.
+    ///
+    /// For example, `trig("math.sin", 1e22)` calls `prelude.rem_pio2_large` and gives
+    /// `-0.8522008497671888`.
+    fn trig(&mut self, name: &str, x: f64) -> EvalResult<f64> {
+        use math::trig;
+        let mut large = |x: f64| -> EvalResult<(i64, f64, f64)> {
+            let (value, _) = self.invoke(trig::REDUCE_LARGE, vec![Value::Float(x)], false)?;
+            match value {
+                Value::Tuple(parts) => match &parts[..] {
+                    [Value::Float(n), Value::Float(y0), Value::Float(y1)] => {
+                        Ok((*n as i64, *y0, *y1))
+                    }
+                    _ => Err("rem_pio2_large returned the wrong values".into()),
+                },
+                _ => Err("rem_pio2_large returned the wrong values".into()),
+            }
+        };
+        Ok(match name {
+            "math.sin" => trig::sin(x, &mut large)?,
+            "math.cos" => trig::cos(x, &mut large)?,
+            "math.tan" => trig::tan(x, &mut large)?,
+            "math.asin" => trig::asin(x)?,
+            "math.acos" => trig::acos(x)?,
+            _ => trig::atan(x),
+        })
     }
 
     /// Calls the stone function `name` with `args`, returning its value and, if `keep_self`,

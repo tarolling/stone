@@ -15,8 +15,9 @@ pub mod sort;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
-    BYTES_ROUTINES, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, STRING_METHOD_ROUTINES,
-    escape, function_statics, global_label, immortal_bytes, immortal_string, variant_statics,
+    BYTES_ROUTINES, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, REDUCE_PIO2,
+    STRING_METHOD_ROUTINES, escape, function_statics, global_label, immortal_bytes,
+    immortal_string, variant_statics,
 };
 use crate::codegen::x64::builtins::print;
 use crate::codegen::{AssemblyGenerator, Target};
@@ -101,6 +102,9 @@ impl AssemblyGenerator for X64Generator {
         if self.ctx.uses(&["stone.str_float"]) {
             builtins::str_float_runtime(self);
         }
+        if self.ctx.uses(&[REDUCE_PIO2]) {
+            floats::reduce_pio2_runtime(self);
+        }
         if self.ctx.needs_strings() {
             builtins::string_runtime(self);
         }
@@ -121,6 +125,10 @@ impl AssemblyGenerator for X64Generator {
 
         self.emit_string_literals();
         self.emit_globals();
+        // last, once all code has asked for its constants
+        let ctx = std::mem::take(&mut self.ctx);
+        ctx.emit_constants(self);
+        self.ctx = ctx;
 
         // suppress the linker's executable stack warning
         self.emit("\t.section\t.note.GNU-stack,\"\",@progbits");
@@ -706,8 +714,9 @@ mod tests {
 
     #[test]
     fn converting_a_float_to_an_int_is_checked() {
+        // int compares with the bounds first, so the conversion itself needs no check
         let assembly = assemble("print(int(2.5), float(2))\n").unwrap();
-        assert!(assembly.contains("\tcvttsd2si\trax, xmm0"));
+        assert!(assembly.contains("\tcvttsd2si\t"));
         assert!(assembly.contains("\tcvtsi2sd\txmm0, rax"));
         assert!(assembly.contains("cannot convert float to int"));
     }

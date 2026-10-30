@@ -1,0 +1,6 @@
+use math
+print("before")
+inf = 1e308 * 10.0
+// the cosine fails first, where compiled code computes the sine with it
+print(math.cos(inf) * 2.0 + math.sin(inf))
+print("after")

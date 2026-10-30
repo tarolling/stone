@@ -12,8 +12,9 @@
 //! makes, so `sp` never moves in the body and every slot is addressed from it.
 
 use super::{ARG_REGS, Arm64Generator, pop_frame, push_frame};
+use crate::codegen::asm::arm64::float_imm;
 use crate::codegen::context::{
-    FALLIBLE_ROUTINES, function_label, function_static, global_label, variant_label,
+    FALLIBLE_ROUTINES, REDUCE_PIO2, function_label, function_static, global_label, variant_label,
 };
 use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::opt::never_negative;
@@ -566,7 +567,10 @@ impl Arm64Generator {
         }
     }
 
-    /// Moves a float's bits from `value` into the `d` register `float`.
+    /// Moves a float's bits from `value` into the `d` register `float`. A constant that `fmov`
+    /// encodes is one instruction (`fmov d3, #0.5`), and any other but zero is read from the
+    /// `.rodata` pool through `x16` (`adrp`, then `ldr d3, [x16, :lo12:.Lf64_..]`) rather than
+    /// built in a general register first.
     fn load_float(&mut self, float: &str, value: Value) {
         match value {
             Value::Freg(from) if from == float => {}
@@ -574,6 +578,17 @@ impl Arm64Generator {
             Value::Stack(offset) => {
                 let slot = self.slot(offset);
                 self.emit(&format!("\tldr\t{float}, {slot}"));
+            }
+            Value::Imm(bits) if bits != 0 => {
+                let value = f64::from_bits(bits as u64);
+                if float_imm(value).is_some() {
+                    // the shortest text that reads back as the value, which fmov's always is
+                    self.emit(&format!("\tfmov\t{float}, #{value:?}"));
+                } else {
+                    let constant = self.ctx.float_constant(bits);
+                    self.emit(&format!("\tadrp\tx16, {constant}"));
+                    self.emit(&format!("\tldr\t{float}, [x16, :lo12:{constant}]"));
+                }
             }
             _ => {
                 let reg = self.operand(value, "x16");
@@ -815,6 +830,9 @@ impl Arm64Generator {
 
     fn emit_inst(&mut self, frame: &Frame, inst: &Inst) -> Result<(), String> {
         match inst {
+            Inst::Trig { .. } | Inst::SinCos { .. } => {
+                return Err(format!("'{inst}' should have been expanded"));
+            }
             Inst::DataGet {
                 dst,
                 data,
@@ -967,6 +985,7 @@ impl Arm64Generator {
                     BinOp::Add => "add",
                     BinOp::Sub => "sub",
                     BinOp::Mul => "mul",
+                    BinOp::DivUnchecked => return Err("int division is always checked".to_string()),
                     BinOp::Div | BinOp::Rem | BinOp::Pow => {
                         return Err(format!("{op:?} is emitted separately"));
                     }
@@ -1040,7 +1059,7 @@ impl Arm64Generator {
             }
 
             Inst::FloatBinary {
-                op: op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div),
+                op: op @ (BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::DivUnchecked),
                 dst,
                 lhs,
                 rhs,
@@ -1052,6 +1071,7 @@ impl Arm64Generator {
                     BinOp::Add => "fadd",
                     BinOp::Sub => "fsub",
                     BinOp::Mul => "fmul",
+                    BinOp::DivUnchecked => "fdiv",
                     _ => {
                         self.fail_on_float_zero(right);
                         "fdiv"
@@ -1078,23 +1098,32 @@ impl Arm64Generator {
                 self.store_float(dst, "d0");
             }
 
-            Inst::FloatNeg { dst, src } if matches!(frame.reg(*dst)?, Value::Freg(_)) => {
+            Inst::FloatNeg { dst, src } | Inst::FloatAbs { dst, src }
+                if matches!(frame.reg(*dst)?, Value::Freg(_)) =>
+            {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
-                // flips the sign bit, which also negates 0.0 and nan like the interpreter
+                // flips or clears the sign bit, which also changes 0.0 and nan like the
+                // interpreter
                 let src = self.float_operand(src, "d0");
                 let target = Self::float_target(dst);
-                self.emit(&format!("\tfneg\t{target}, {src}"));
+                let name = match inst {
+                    Inst::FloatNeg { .. } => "fneg",
+                    _ => "fabs",
+                };
+                self.emit(&format!("\t{name}\t{target}, {src}"));
             }
 
-            Inst::Neg { dst, src } | Inst::FloatNeg { dst, src } => {
+            Inst::Neg { dst, src } | Inst::FloatNeg { dst, src } | Inst::FloatAbs { dst, src } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 let target = self.target(dst);
                 let src = self.operand(src, "x10");
-                if matches!(inst, Inst::Neg { .. }) {
-                    self.emit(&format!("\tneg\t{target}, {src}"));
-                } else {
+                match inst {
+                    Inst::Neg { .. } => self.emit(&format!("\tneg\t{target}, {src}")),
                     // flip the sign bit, which also negates 0.0 and nan like the interpreter
-                    self.emit(&format!("\teor\t{target}, {src}, #0x8000000000000000"));
+                    Inst::FloatNeg { .. } => {
+                        self.emit(&format!("\teor\t{target}, {src}, #0x8000000000000000"))
+                    }
+                    _ => self.emit(&format!("\tand\t{target}, {src}, #0x7fffffffffffffff")),
                 }
                 self.store(dst, target);
             }
@@ -1393,6 +1422,16 @@ impl Arm64Generator {
                 self.store_float(dst, target);
             }
 
+            Inst::ReducePio2 { n, hi, lo, src } => {
+                let src = frame.value(*src)?;
+                self.load("x9", src);
+                self.emit(&format!("\tbl\t{REDUCE_PIO2}"));
+                for (dst, reg) in [(n, "x9"), (hi, "x10"), (lo, "x11")] {
+                    let dst = frame.reg(*dst)?;
+                    self.store(dst, reg);
+                }
+            }
+
             Inst::IntToFloat { dst, src } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 let src = self.operand(src, "x10");
@@ -1401,12 +1440,18 @@ impl Arm64Generator {
                 self.store_float(dst, target);
             }
 
-            Inst::FloatToInt { dst, src } => {
+            Inst::FloatToInt { dst, src, checked } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
-                self.load_float("d0", src);
-                self.float_to_int();
+                let src = match checked {
+                    true => {
+                        self.load_float("d0", src);
+                        self.float_to_int();
+                        "d0"
+                    }
+                    false => self.float_operand(src, "d0"),
+                };
                 let target = self.target(dst);
-                self.emit(&format!("\tfcvtzs\t{target}, d0"));
+                self.emit(&format!("\tfcvtzs\t{target}, {src}"));
                 self.store(dst, target);
             }
 

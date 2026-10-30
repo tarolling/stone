@@ -1,0 +1,5 @@
+use math
+print("before")
+inf = 1e308 * 10.0
+print(math.cos(0.5) + math.sin(inf))
+print("after")

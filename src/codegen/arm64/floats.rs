@@ -5,7 +5,10 @@
 use super::builtins::{copy_bytes, jump_if_space};
 use super::{address, pop_frame, push_frame};
 use crate::codegen::AssemblyGenerator;
-use crate::codegen::context::{BIG_LIMBS, EXPONENT_LIMIT, MAX_DIGITS};
+use crate::codegen::context::{
+    BIG_LIMBS, EXPONENT_LIMIT, FUNCTION_PREFIX, MAX_DIGITS, REDUCE_PIO2,
+};
+use crate::stdlib::math::trig::REDUCE_LARGE;
 
 /// The bignums the float routines work in, as in `x64/floats.rs`.
 const BIGS: [&str; 8] = [
@@ -969,4 +972,47 @@ pub fn fmod_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tfmul\td2, d0, d1");
     r#gen.emit("\tfdiv\td0, d2, d2");
     r#gen.emit("\tret");
+}
+
+/// Emits `stone.reduce_pio2`, behind [`crate::codegen::ir::Inst::ReducePio2`]: it reduces the
+/// float whose bits are in `x9` by pi/2 with the prelude's `rem_pio2_large`, and leaves the
+/// three floats it returns in `x9`, `x10`, and `x11`. A stone function may change any register
+/// that a call does not preserve, so this saves every one a vreg can be in, `x0`-`x7`,
+/// `x12`-`x15`, `d3`-`d7`, and `d16`-`d31`, around the call, which is why the instruction is not
+/// a call.
+pub fn reduce_pio2_runtime(r#gen: &mut dyn AssemblyGenerator) {
+    let mut saved: Vec<String> = (0..8).chain(12..16).map(|i| format!("x{i}")).collect();
+    saved.extend((3..8).chain(16..32).map(|i| format!("d{i}")));
+    // whole pairs, then a last register alone, with sp kept 16-byte aligned
+    let size = (8 * saved.len()).div_ceil(16) * 16;
+    r#gen.emit(&format!("{REDUCE_PIO2}:"));
+    r#gen.emit("\tstp\tx29, x30, [sp, #-16]!");
+    r#gen.emit(&format!("\tsub\tsp, sp, #{size}"));
+    save_slots(r#gen, &saved, "stp", "str");
+    r#gen.emit("\tmov\tx0, x9");
+    r#gen.emit(&format!("\tbl\t{FUNCTION_PREFIX}{REDUCE_LARGE}"));
+    r#gen.emit("\tmov\tx9, x0");
+    r#gen.emit("\tmov\tx10, x1");
+    r#gen.emit("\tmov\tx11, x2");
+    save_slots(r#gen, &saved, "ldp", "ldr");
+    r#gen.emit(&format!("\tadd\tsp, sp, #{size}"));
+    r#gen.emit("\tldp\tx29, x30, [sp], #16");
+    r#gen.emit("\tret");
+}
+
+/// Stores (`stp`, `str`) or loads (`ldp`, `ldr`) `regs` in turn at `[sp]` up, two at a time
+/// while two of the same kind come next.
+fn save_slots(r#gen: &mut dyn AssemblyGenerator, regs: &[String], pair: &str, single: &str) {
+    let mut i = 0;
+    while i < regs.len() {
+        let offset = 8 * i;
+        if i + 1 < regs.len() && regs[i][..1] == regs[i + 1][..1] {
+            let (a, b) = (&regs[i], &regs[i + 1]);
+            r#gen.emit(&format!("\t{pair}\t{a}, {b}, [sp, #{offset}]"));
+            i += 2;
+        } else {
+            r#gen.emit(&format!("\t{single}\t{}, [sp, #{offset}]", regs[i]));
+            i += 1;
+        }
+    }
 }

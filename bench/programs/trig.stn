@@ -1,0 +1,18 @@
+// Steps a point around a wobbling circle, using sin, cos, atan2, and asin each step, so the
+// time goes into the trigonometric functions. The total is printed scaled and truncated, so
+// the last bit of a function, where libms differ, never shows.
+use math
+
+fn walk(steps: int) -> float:
+    x = 1.0
+    y = 0.0
+    total = 0.0
+    for i in range(steps):
+        t = float(i) * 0.001
+        r = 1.0 + 0.5 * math.sin(t * 3.0)
+        x = r * math.cos(t)
+        y = r * math.sin(t)
+        total += math.atan2(y, x) + math.asin(math.sin(t) * 0.5)
+    ret total
+
+print(int(walk(int(args()[0]).unwrap()) * 1000.0).unwrap())

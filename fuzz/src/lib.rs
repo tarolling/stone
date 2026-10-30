@@ -161,6 +161,10 @@ struct Generator {
     next_name: usize,
     /// Whether the program calls the `math` module, so it needs `use math` first.
     uses_math: bool,
+    /// How many one-argument `math` calls [`Generator::float_math`] has written, which picks the
+    /// next function without drawing from the input, so programs from earlier inputs stay as
+    /// they were.
+    math_calls: usize,
     /// Whether the program calls the `os` module, so it needs `use os` first.
     uses_os: bool,
     /// Structs and enums declared so far, as `S<n>` or `E<n>` for the `n`th.
@@ -951,7 +955,21 @@ impl Generator {
         match choice {
             // fails for a negative number, which the differential check skips
             0 => Ok(format!("math.sqrt({inner})")),
-            1 => Ok(format!("math.abs({inner})")),
+            1 => {
+                // sin, cos, and tan fail on infinities, which the differential check skips too,
+                // and asin and acos get an argument in their domain
+                self.math_calls += 1;
+                Ok(match self.math_calls % 8 {
+                    0 => format!("math.abs({inner})"),
+                    1 => format!("math.sin({inner})"),
+                    2 => format!("math.cos({inner})"),
+                    3 => format!("math.atan({inner})"),
+                    4 => format!("math.asin(({inner}).clamp(-1.0, 1.0))"),
+                    5 => format!("math.acos(({inner}).clamp(-1.0, 1.0))"),
+                    6 => format!("math.tan({inner})"),
+                    _ => format!("math.atan2({inner}, -0.5)"),
+                })
+            }
             _ => {
                 let name = if u.arbitrary()? {
                     "math.min"

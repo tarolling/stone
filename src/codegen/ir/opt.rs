@@ -183,7 +183,7 @@ fn checked_slot(facts: &HashSet<Fact>, list: VReg, index: Operand, width: usize)
 }
 
 /// Returns the blocks that can come right before each block.
-fn predecessors(function: &Function) -> Vec<Vec<usize>> {
+pub(super) fn predecessors(function: &Function) -> Vec<Vec<usize>> {
     let mut preds = vec![Vec::new(); function.blocks.len()];
     for (i, block) in function.blocks.iter().enumerate() {
         for BlockId(succ) in block.term.successors() {
@@ -342,12 +342,18 @@ fn fold_offsets(function: &mut Function) {
 /// out, or changes memory or a count.
 fn is_removable(inst: &Inst) -> bool {
     match inst {
-        Inst::Binary { op, .. } | Inst::FloatBinary { op, .. } => {
-            matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+        Inst::Binary { op, .. } => matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul),
+        Inst::FloatBinary { op, .. } => {
+            matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::DivUnchecked
+            )
         }
         Inst::Copy { .. }
         | Inst::Neg { .. }
         | Inst::FloatNeg { .. }
+        | Inst::FloatAbs { .. }
+        | Inst::FloatToInt { checked: false, .. }
         | Inst::Not { .. }
         | Inst::Compare { .. }
         | Inst::IntToFloat { .. }
@@ -800,6 +806,7 @@ fn forward_copies(function: &mut Function) -> bool {
         }
     }
     let mut forwarded: HashMap<VReg, VReg> = HashMap::new();
+    let mut touched: HashSet<VReg> = HashSet::new();
     for (b, block) in function.blocks.iter().enumerate() {
         if idom[b].is_none() {
             continue;
@@ -826,14 +833,12 @@ fn forward_copies(function: &mut Function) -> bool {
                 && reads
                     .get(&dst)
                     .is_none_or(|points| points.iter().all(|&read| before(copy, read)));
-            if qualifies {
+            // copies that share no vreg, since forwarding one changes what reads the other's
+            // source and destination, but not those of a copy of other vregs
+            if qualifies && !touched.contains(&dst) && !touched.contains(&src) {
                 forwarded.insert(dst, src);
-                // one copy at a time, since forwarding changes what the others read
-                break;
+                touched.extend([dst, src]);
             }
-        }
-        if !forwarded.is_empty() {
-            break;
         }
     }
     if forwarded.is_empty() {
@@ -1014,12 +1019,13 @@ fn may_fail(inst: &Inst) -> bool {
             op: BinOp::Div | BinOp::Rem | BinOp::Pow,
             ..
         }
-        | Inst::FloatToInt { .. }
+        | Inst::FloatToInt { checked: true, .. }
         | Inst::ListLoad { .. }
         | Inst::ListStore { .. }
         | Inst::ElementSlot { .. }
         | Inst::LoadGlobal { checked: true, .. }
         | Inst::DepthCheck
+        | Inst::ReducePio2 { .. }
         | Inst::Call { .. } => true,
         _ => false,
     }

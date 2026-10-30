@@ -212,6 +212,10 @@ returns them as separate values, and a list of tuples stores each element's valu
 like a Rust `Vec<(i64, String)>`, which is a first step toward choosing where every value lives.
 Structs are compiled the same way, so a `list[Point]` is a flat array of coordinates whose fields
 are read at fixed offsets, so the `nbody` benchmark runs within about 1.5 times of C.
+The trigonometric functions of `math` are expanded inline at each call, from the same code the
+interpreter runs, so both give the same bits, and the compiler computes each value once, a sine
+and a cosine of the same value with one reduction, so the `trig` benchmark runs about 20% faster
+than C calling glibc.
 A generic function, or a method of a generic struct, is compiled once for each set of types it is
 used with, so its copies are as fast as functions written for each type, and a generic struct is
 flattened like any other. A call through a trait's bound is a direct call in each copy, and a

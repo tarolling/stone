@@ -32,7 +32,9 @@ pub struct link:
     keys: keyboard
 
 // The protocol's objects: the id the next new one gets, each one's id by its role, and its role
-// by its id.
+// by its id, which is empty for an id the compositor has freed for reuse. A compositor keeps an
+// entry for every id a client has used, so ids are reused, as the frame callback's is at each
+// frame.
 struct objects:
     next: int
     ids: map[str, int]
@@ -153,6 +155,32 @@ impl link:
         found = self.events()
         ret found
 
+    // Whether a frame callback is outstanding: the compositor has not yet shown the last image.
+    fn awaiting(self) -> bool:
+        ret self.objs.ids.contains("callback")
+
+    // Waits until the compositor has shown the last image, if one is outstanding, or else until
+    // `until`, by `time.clock`, at the latest, and returns the events meanwhile. A key held down
+    // repeats meanwhile.
+    fn pace(self, until: float) -> list[event]:
+        // from now on, each image asks to be told when it is on the screen; `ids` marks it, as
+        // the link holds as many values as it may
+        self.objs.ids["paced"] = 0
+        awaited = self.awaiting()
+        while self.open and (not awaited or self.awaiting()):
+            left = until - time.clock()
+            if left <= 0.0:
+                break
+            if self.keys.held >= 0 and self.keys.rate > 0:
+                left = left.min(self.keys.due - time.clock())
+            ms = int(left.max(0.0) * 1000.0).unwrap_or(0) + 1
+            if net_sys.ready(self.conn, ms):
+                self.step()
+            else:
+                self.repeat()
+        found = self.events()
+        ret found
+
     // Shows `c` as the window's content, its top left pixel at the content's. Where `c` does
     // not reach, the content is black.
     fn show(self, c: canvas):
@@ -208,6 +236,9 @@ impl link:
                 version = get32(raw, 16 + padded(get32(raw, 12)))
                 globals[text_at(raw, 12)] = (get32(raw, 8), version)
             elif object == sync:
+                // done, so its id may be used again once the compositor frees it
+                self.objs.ids.pop("sync")
+                self.objs.roles.pop(sync)
                 break
             elif object == 1 and get16(raw, 4) == 0:
                 ret err("Wayland error: {text_at(raw, 16)}")
@@ -270,10 +301,17 @@ impl link:
             ret err(self.failure())
         ret ok(0)
 
-    // Makes a new object of the role `role`, giving its id.
+    // Makes a new object of the role `role`, giving its id: one the compositor has freed, if
+    // there is one, or else a new one.
     fn make(self, role: str) -> int:
-        id = self.objs.next
-        self.objs.next += 1
+        id = 0
+        for old, was in self.objs.roles.items():
+            if was == "":
+                id = old
+                break
+        if id == 0:
+            id = self.objs.next
+            self.objs.next += 1
         self.objs.ids[role] = id
         self.objs.roles[id] = role
         ret id
@@ -341,6 +379,15 @@ impl link:
         role = self.objs.roles.get(object).unwrap_or("")
         if role == "display" and op == 0:
             self.fail("Wayland error: {text_at(raw, 16)}")
+        elif role == "display" and op == 1:
+            // delete_id: the id may be used again
+            freed = get32(raw, 8)
+            if self.objs.roles.get(freed).unwrap_or("") == "":
+                self.objs.roles[freed] = ""
+        elif role == "callback" and op == 0:
+            // done: the content committed last is on the screen
+            self.objs.ids.pop("callback")
+            self.objs.roles.pop(object)
         elif role == "wm_base" and op == 0:
             // ping
             self.send(message(object, 3, [get32(raw, 8)]))
@@ -487,10 +534,15 @@ impl link:
             ret base + 1
         ret base
 
-    // Commits content buffer `i`, written already, to the content's surface.
+    // Commits content buffer `i`, written already, to the content's surface. Once `pace` has
+    // paced the window, it asks to hear when the image is on the screen, unless an earlier
+    // commit's answer is still outstanding.
     fn commit_content(self, i: int):
         surface = self.id("content")
-        asks = message(surface, 1, [self.id("content{i}"), 0, 0])
+        asks = []
+        if self.objs.ids.contains("paced") and not self.awaiting():
+            asks = message(surface, 3, [self.make("callback")])
+        asks.extend(message(surface, 1, [self.id("content{i}"), 0, 0]))
         asks.extend(message(surface, 9, [0, 0, self.extent[0], self.extent[1]]))
         asks.extend(message(surface, 6, []))
         self.send(asks)

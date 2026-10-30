@@ -33,18 +33,18 @@ so a shape may hang over an edge.
 `gui.event` values: `key_down` and `key_up` with the key's name (`"a"`, `"enter"`, `"left"`),
 `text` with what a key typed, `mouse_move`, `mouse_down`, and `mouse_up` with the point (and
 the button's name), `scroll`, `resize` with the new size, `redraw` when the window lost what
-it showed, and `close` when its close button is pressed. A loop that draws, shows, and reads
-events makes an animation:
+it showed, and `close` when its close button is pressed. `next_frame()` returns the same
+events, after waiting until the screen has shown the last image, so a loop that reads events
+with it, draws, and shows makes an animation at the screen's own rate, with no tearing:
 
 ```stone
 use gui
-use time
 
 w = gui.open("bounce", 320, 240).unwrap()
 c = gui.blank(320, 240, 0)
 x = 0
 while w.is_open():
-    es = w.events()
+    es = w.next_frame()
     for e in es:
         match e:
             case gui.event.key_down(key):
@@ -58,7 +58,6 @@ while w.is_open():
     c.disc(x, 120, 20, gui.rgb(241, 194, 50))
     w.show(c)
     x = (x + 4) % 320
-    time.sleep(1.0 / 60.0)
 ```
 
 `wait()` waits for at least one event instead, for a program that changes only when the user
@@ -75,8 +74,8 @@ title bars, as on GNOME, `gui` draws its own.
 
 Most programs with a window keep some state, change it at each event, and draw it. The
 `gui.app` trait names those three steps, and `gui.run(title, width, height, state)` runs them:
-it gives `update` every event, plus a `tick` with the seconds since the last one about 60 times
-a second, then calls `draw` with a canvas as big as the window and shows what it returns, until
+at each frame, as `next_frame` paces them, it gives `update` every event, plus a `tick` with
+the seconds since the last one, then calls `draw` with a canvas as big as the window and shows what it returns, until
 the close button is pressed or `done` returns `true`:
 
 ```stone

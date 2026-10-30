@@ -593,7 +593,8 @@ print(c.ppm().len())         // 107, a PPM image for fs.write_bytes
 ```
 
 A window is `gui.open(title, w, h)?`, then a loop of `es = w.events()` (non-blocking; `w.wait()`
-blocks), `w.show(c)`, and `w.close()` on `gui.event.close`. Or implement the trait `gui.app`
+blocks; `w.next_frame()` waits for the screen's next frame, for animation), `w.show(c)`, and
+`w.close()` on `gui.event.close`. Or implement the trait `gui.app`
 (`fn update(self, e: gui.event)` changing `self`, `fn draw(self, c: gui.canvas) -> gui.canvas`,
 optional `fn done(self) -> bool`) and call `gui.run(title, w, h, state)`, which returns the last
 state. Events are lowercase variants: `key_down(name)`, `key_up(name)`, `text(t)`,

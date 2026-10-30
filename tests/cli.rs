@@ -1508,6 +1508,8 @@ struct FakeDisplay {
     short: bool,
     /// What it does with MIT-SHM.
     shm: FakeShm,
+    /// Whether it has the Present extension, which shows pixmaps at the next vblank.
+    present: bool,
 }
 
 /// The events a fake X server sends once the window is mapped.
@@ -1534,6 +1536,56 @@ enum FakeShm {
 
 /// The major opcode and first event code the fake X server gives MIT-SHM.
 const FAKE_SHM: (u8, u8) = (130, 70);
+
+/// The major opcode the fake X server gives the Present extension, whose events are generic.
+const FAKE_PRESENT: u8 = 140;
+
+/// Answers the Present request `request` as a fake X server that shows every pixmap at once: a
+/// PresentPixmap completes and leaves its pixmap idle right away, as a copy does.
+fn fake_present_request(
+    stream: &mut std::os::unix::net::UnixStream,
+    request: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let word = |at: usize| u32::from_le_bytes(request[at..at + 4].try_into().unwrap());
+    match request[1] {
+        // PresentQueryVersion: 1.0
+        0 => {
+            let mut reply = vec![1, 0, 0, 0, 0, 0, 0, 0];
+            reply.extend(1u32.to_le_bytes());
+            reply.extend(0u32.to_le_bytes());
+            reply.resize(32, 0);
+            stream.write_all(&reply)?;
+        }
+        // PresentSelectInput, which the test checks from the requests
+        3 => {}
+        // PresentPixmap(window, pixmap, serial, ...): CompleteNotify, then IdleNotify
+        1 => {
+            let (window, pixmap, serial) = (word(4), word(8), word(12));
+            let mut complete = generic_event(1, 2);
+            complete[16..20].copy_from_slice(&window.to_le_bytes());
+            complete[20..24].copy_from_slice(&serial.to_le_bytes());
+            // the msc, which only grows
+            complete[32..36].copy_from_slice(&serial.to_le_bytes());
+            let mut idle = generic_event(2, 0);
+            idle[16..20].copy_from_slice(&window.to_le_bytes());
+            idle[20..24].copy_from_slice(&serial.to_le_bytes());
+            idle[24..28].copy_from_slice(&pixmap.to_le_bytes());
+            stream.write_all(&[complete, idle].concat())?;
+        }
+        minor => panic!("unexpected Present request {minor}"),
+    }
+    Ok(())
+}
+
+/// A Present event of type `evtype`, a GenericEvent of 32 bytes and `extra` more 4-byte units.
+fn generic_event(evtype: u16, extra: u32) -> Vec<u8> {
+    let mut event = vec![35, FAKE_PRESENT, 0, 0];
+    event.extend(extra.to_le_bytes());
+    event.extend(evtype.to_le_bytes());
+    event.resize(32 + 4 * extra as usize, 0);
+    event
+}
 
 /// What the fake X server saw on one connection: the authorization's name and data, and every
 /// request after the setup.
@@ -1895,67 +1947,74 @@ fn fake_x_client(
         let mut request = head.to_vec();
         request.resize(units * 4, 0);
         receive(&mut stream, &mut request[4..], &mut fds)?;
-        // recorded first, since answering it fails once the client has closed
         seen.lock().unwrap().requests.push(request.clone());
+        // a client that closed may have sent more already, which is still read and recorded
         let word = |at: usize| u32::from_le_bytes(request[at..at + 4].try_into().unwrap());
-        match request[0] {
-            1 => window = word(4),
-            8 => match display.script {
-                FakeScript::All => stream.write_all(&fake_events(window))?,
-                FakeScript::Paced => stream.write_all(&paced_events(window, 0))?,
-                FakeScript::Expose => stream.write_all(&x11_event(12, 0, &[(4, window, 4)]))?,
-            },
-            // a frame starts with the strip at the top, and after the first, only one as wide
-            // as the new size moves the script on
-            72 if display.script == FakeScript::Paced && request[18..20] == [0, 0] => {
-                if stage == 0 || request[12..14] == 400u16.to_le_bytes() {
-                    stage += 1;
-                    stream.write_all(&paced_events(window, stage))?;
+        let mut answer = || -> std::io::Result<()> {
+            match request[0] {
+                1 => window = word(4),
+                8 => match display.script {
+                    FakeScript::All => stream.write_all(&fake_events(window))?,
+                    FakeScript::Paced => stream.write_all(&paced_events(window, 0))?,
+                    FakeScript::Expose => stream.write_all(&x11_event(12, 0, &[(4, window, 4)]))?,
+                },
+                // a frame starts with the strip at the top, and after the first, only one as wide
+                // as the new size moves the script on
+                72 if display.script == FakeScript::Paced && request[18..20] == [0, 0] => {
+                    if stage == 0 || request[12..14] == 400u16.to_le_bytes() {
+                        stage += 1;
+                        stream.write_all(&paced_events(window, stage))?;
+                    }
                 }
-            }
-            16 => {
-                let len = u16::from_le_bytes([request[4], request[5]]) as usize;
-                let name = std::str::from_utf8(&request[8..8 + len]).unwrap();
-                let atom = FAKE_ATOMS.iter().find(|(n, _)| *n == name).unwrap().1;
-                let mut reply = vec![1, 0, 0, 0, 0, 0, 0, 0];
-                reply.extend(atom.to_le_bytes());
-                reply.resize(32, 0);
-                stream.write_all(&reply)?;
-            }
-            // QueryExtension, which knows MIT-SHM alone
-            98 => {
-                let len = u16::from_le_bytes([request[4], request[5]]) as usize;
-                let present = &request[8..8 + len] == b"MIT-SHM" && display.shm != FakeShm::Absent;
-                let mut reply = vec![1, 0, 0, 0, 0, 0, 0, 0];
-                if present {
-                    reply.extend([1, FAKE_SHM.0, FAKE_SHM.1, 150]);
+                16 => {
+                    let len = u16::from_le_bytes([request[4], request[5]]) as usize;
+                    let name = std::str::from_utf8(&request[8..8 + len]).unwrap();
+                    let atom = FAKE_ATOMS.iter().find(|(n, _)| *n == name).unwrap().1;
+                    let mut reply = vec![1, 0, 0, 0, 0, 0, 0, 0];
+                    reply.extend(atom.to_le_bytes());
+                    reply.resize(32, 0);
+                    stream.write_all(&reply)?;
                 }
-                reply.resize(32, 0);
-                stream.write_all(&reply)?;
-            }
-            // GetInputFocus, which clients ask to wait for what they sent before it
-            43 => stream.write_all(&[[1].as_slice(), &[0; 31]].concat())?,
-            op if op == FAKE_SHM.0 => fake_shm_request(
-                &mut stream,
-                &request,
-                display.shm,
-                &mut fds,
-                &mut segments,
-                seen,
-            )?,
-            101 => {
-                let (first, count) = (request[4] as usize, request[5] as usize);
-                let syms = fake_keysyms();
-                let mut reply = vec![1, 2, 0, 0];
-                reply.extend(((count * 2) as u32).to_le_bytes());
-                reply.resize(32, 0);
-                for sym in &syms[(first - 8) * 2..(first - 8 + count) * 2] {
-                    reply.extend(sym.to_le_bytes());
+                // QueryExtension, which knows MIT-SHM and Present
+                98 => {
+                    let len = u16::from_le_bytes([request[4], request[5]]) as usize;
+                    let name = &request[8..8 + len];
+                    let mut reply = vec![1, 0, 0, 0, 0, 0, 0, 0];
+                    if name == b"MIT-SHM" && display.shm != FakeShm::Absent {
+                        reply.extend([1, FAKE_SHM.0, FAKE_SHM.1, 150]);
+                    } else if name == b"Present" && display.present {
+                        reply.extend([1, FAKE_PRESENT, 0, 0]);
+                    }
+                    reply.resize(32, 0);
+                    stream.write_all(&reply)?;
                 }
-                stream.write_all(&reply)?;
+                // GetInputFocus, which clients ask to wait for what they sent before it
+                43 => stream.write_all(&[[1].as_slice(), &[0; 31]].concat())?,
+                op if op == FAKE_PRESENT => fake_present_request(&mut stream, &request)?,
+                op if op == FAKE_SHM.0 => fake_shm_request(
+                    &mut stream,
+                    &request,
+                    display.shm,
+                    &mut fds,
+                    &mut segments,
+                    seen,
+                )?,
+                101 => {
+                    let (first, count) = (request[4] as usize, request[5] as usize);
+                    let syms = fake_keysyms();
+                    let mut reply = vec![1, 2, 0, 0];
+                    reply.extend(((count * 2) as u32).to_le_bytes());
+                    reply.resize(32, 0);
+                    for sym in &syms[(first - 8) * 2..(first - 8 + count) * 2] {
+                        reply.extend(sym.to_le_bytes());
+                    }
+                    stream.write_all(&reply)?;
+                }
+                _ => {}
             }
-            _ => {}
-        }
+            Ok(())
+        };
+        let _ = answer();
     }
 }
 
@@ -2089,6 +2148,7 @@ fn both_backends_drive_an_x11_window_alike() {
             script: FakeScript::All,
             short: false,
             shm: FakeShm::Absent,
+            present: false,
         };
         let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
         let mut connections = None;
@@ -2169,6 +2229,7 @@ fn both_backends_say_why_a_window_cannot_open() {
         script: FakeScript::All,
         short: false,
         shm: FakeShm::Absent,
+        present: false,
     };
     let shallow = FakeDisplay {
         depth: 16,
@@ -2311,6 +2372,7 @@ fn both_backends_run_an_app_alike() {
             script: FakeScript::Paced,
             short: false,
             shm: FakeShm::Absent,
+            present: false,
         };
         let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
         let (_, [run, built]) = run_and_build_env(
@@ -2330,6 +2392,99 @@ fn both_backends_run_an_app_alike() {
             assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "{name}");
         }
     }
+}
+
+#[test]
+fn both_backends_present_frames_alike() {
+    let display = FakeDisplay {
+        msb: false,
+        depth: 24,
+        bits: 32,
+        max_request: 65535,
+        refuse: None,
+        script: FakeScript::Paced,
+        short: false,
+        shm: FakeShm::Absent,
+        present: true,
+    };
+    let name = "gui_present";
+    let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
+    let mut connections = None;
+    let (_, [run, built]) = run_and_build_env(
+        name,
+        &APP_PROGRAM.replace("DONE", "false"),
+        |dir| connections = Some(fake_x_server(&dir.join("X0"), display)),
+        &[
+            ("DISPLAY", &socket),
+            ("WAYLAND_DISPLAY", ""),
+            ("XAUTHORITY", "missing"),
+        ],
+    );
+    for output in [&run, &built] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "close\naA true (400, 300)\n"
+        );
+    }
+    let seen = closed_connections(&connections.unwrap());
+    let [interpreted, compiled] = &seen[..] else {
+        panic!("expected two connections, not {}", seen.len());
+    };
+    assert_eq!(interpreted.requests, compiled.requests);
+    let requests = &interpreted.requests;
+    let word = |r: &[u8], at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+    let half = |r: &[u8], at: usize| u16::from_le_bytes([r[at], r[at + 1]]);
+    let window = requests
+        .iter()
+        .find(|r| r[0] == 1)
+        .map(|r| word(r, 4))
+        .unwrap();
+    // completion and idleness asked for once, on the window
+    let selects: Vec<_> = requests
+        .iter()
+        .filter(|r| r[0] == FAKE_PRESENT && r[1] == 3)
+        .collect();
+    assert_eq!(selects.len(), 1);
+    assert_eq!((word(selects[0], 8), word(selects[0], 12)), (window, 6));
+    // two pixmaps of the first size, then two of the new size in place of them
+    let created: Vec<_> = requests
+        .iter()
+        .filter(|r| r[0] == 53)
+        .map(|r| (word(r, 4), half(r, 12), half(r, 14)))
+        .collect();
+    let sizes: Vec<_> = created.iter().map(|&(_, w, h)| (w, h)).collect();
+    assert_eq!(sizes, [(40, 30), (40, 30), (400, 300), (400, 300)]);
+    assert_eq!(requests.iter().filter(|r| r[0] == 54).count(), 2);
+    let pixmaps: Vec<u32> = created.iter().map(|&(id, ..)| id).collect();
+    // every image goes into a pixmap, which is presented next with the next serial
+    let mut drawn = None;
+    let mut serials = vec![];
+    for request in requests {
+        if request[0] == 72 {
+            assert!(
+                pixmaps.contains(&word(request, 4)),
+                "PutImage into a pixmap"
+            );
+            drawn = Some(word(request, 4));
+        } else if request[0] == FAKE_PRESENT && request[1] == 1 {
+            assert_eq!(request.len(), 72);
+            assert_eq!(word(request, 4), window);
+            assert_eq!(
+                Some(word(request, 8)),
+                drawn.take(),
+                "the pixmap just drawn"
+            );
+            serials.push(word(request, 12));
+            // the next vblank: target_msc 0, divisor 1, remainder 0
+            assert_eq!(
+                &request[48..72],
+                &[[0; 8], [1, 0, 0, 0, 0, 0, 0, 0], [0; 8]].concat()
+            );
+        }
+    }
+    assert!(serials.len() >= 3, "{serials:?}");
+    assert_eq!(serials, (1..=serials.len() as u32).collect::<Vec<_>>());
 }
 
 /// Starts `Xvfb` on a free display, if it is on PATH, returning it and the display's number.
@@ -2378,9 +2533,16 @@ match gui.open("real", 64, 48):
         c.text(2, 2, "hi", gui.rgb(255, 255, 255))
         w.show(c)
         w.set_title("still real")
+        // frames paced by the server, through Present where it has it
+        es = []
+        for _ in range(5):
+            found = w.next_frame()
+            es.extend(found)
+            w.show(c)
         // errors come back on their own time
         time.sleep(0.3)
-        es = w.events()
+        found = w.events()
+        es.extend(found)
         failures = 0
         for e in es:
             match e:
@@ -2434,9 +2596,14 @@ match gui.open("shm", 40, 30):
     case err(reason):
         print(reason)
 "#;
-    for shm in [FakeShm::Working, FakeShm::Refusing] {
-        let name = match shm {
-            FakeShm::Working => "gui_shm",
+    for (shm, present) in [
+        (FakeShm::Working, false),
+        (FakeShm::Refusing, false),
+        (FakeShm::Working, true),
+    ] {
+        let name = match (shm, present) {
+            (FakeShm::Working, false) => "gui_shm",
+            (FakeShm::Working, true) => "gui_shm_present",
             _ => "gui_shm_refused",
         };
         let display = FakeDisplay {
@@ -2448,6 +2615,7 @@ match gui.open("shm", 40, 30):
             script: FakeScript::Expose,
             short: false,
             shm,
+            present,
         };
         let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
         let mut connections = None;
@@ -2473,7 +2641,7 @@ match gui.open("shm", 40, 30):
         let [interpreted, compiled] = &seen[..] else {
             panic!("expected two connections, not {}", seen.len());
         };
-        assert_eq!(interpreted.requests, compiled.requests, "{name}");
+        assert_same_requests(&interpreted.requests, &compiled.requests, name);
         assert_eq!(interpreted.shm_images, compiled.shm_images, "{name}");
         let count = |op: u8, minor: u8| {
             let requests = &interpreted.requests;
@@ -2497,6 +2665,21 @@ match gui.open("shm", 40, 30):
                 assert_eq!(pixel(&images[0], 5, 5), [7, 128, 250, 0]);
                 assert_eq!(pixel(&images[1], 0, 0), [255, 255, 255, 0]);
                 assert_eq!(images[2], [9, 9, 9, 0].repeat(60 * 50));
+                // with Present, each image goes into a pixmap that is then presented
+                let window =
+                    interpreted.requests.iter().find(|r| r[0] == 1).unwrap()[4..8].to_vec();
+                let drawables: Vec<_> = interpreted
+                    .requests
+                    .iter()
+                    .filter(|r| r[0] == 130 && r[1] == 3)
+                    .map(|r| r[4..8].to_vec())
+                    .collect();
+                assert_eq!(
+                    drawables.iter().filter(|d| **d == window).count(),
+                    if present { 0 } else { 3 }
+                );
+                assert_eq!(count(FAKE_PRESENT, 1), if present { 3 } else { 0 });
+                assert_eq!(count(53, 24), if present { 4 } else { 0 });
             }
             _ => {
                 // the first attachment fails, and every image goes the plain way
@@ -2518,6 +2701,8 @@ struct FakeCompositor {
     /// The keymap in `tests/keymaps` it sends the keyboard, and its repeats a second.
     keymap: &'static str,
     rate: u32,
+    /// Whether it answers frame callbacks, as it does for a window on the screen.
+    frames: bool,
 }
 
 /// What a fake compositor sends after the app's first frame.
@@ -2638,6 +2823,8 @@ struct FakeObjects {
     decoration: u32,
     pointer: u32,
     keyboard: u32,
+    /// The frame callbacks each surface asked for since its last commit.
+    callbacks: std::collections::HashMap<u32, Vec<u32>>,
     /// How many content buffers were committed, and how far the script has gone.
     content_commits: usize,
     stage: usize,
@@ -2654,7 +2841,6 @@ fn fake_wayland_request(
     seen: &std::sync::Mutex<WaylandConnection>,
 ) -> std::io::Result<()> {
     use std::io::Write;
-    use std::os::unix::fs::FileExt;
     let object = u32::from_le_bytes(message[0..4].try_into().unwrap());
     let opcode = u16::from_le_bytes([message[4], message[5]]);
     let arg = |i: usize| u32::from_le_bytes(message[8 + 4 * i..12 + 4 * i].try_into().unwrap());
@@ -2754,50 +2940,79 @@ fn fake_wayland_request(
         ("wl_surface", 1) => {
             objects.attached.insert(object, arg(0));
         }
+        ("wl_surface", 3) => {
+            new(objects, arg(0), "wl_callback");
+            objects.callbacks.entry(object).or_default().push(arg(0));
+        }
         ("wl_surface", 6) => {
-            let role = objects.roles.get(&object).cloned().unwrap_or_default();
-            match objects.attached.remove(&object) {
-                Some(buffer) if buffer != 0 => {
-                    let (pool, offset, width, height, stride) = objects.buffers[&buffer];
-                    let mut pixels = vec![];
-                    for row in 0..height {
-                        let mut line = vec![0; width as usize * 4];
-                        let at = (offset + row * stride) as u64;
-                        objects.pools[&pool].read_exact_at(&mut line, at)?;
-                        pixels.extend(line);
-                    }
-                    seen.lock()
-                        .unwrap()
-                        .commits
-                        .push((role.clone(), width, height, pixels));
-                    let old = objects.shown.insert(object, buffer);
-                    if let Some(old) = old.filter(|old| *old != buffer) {
-                        stream.write_all(&wayland_message(old, 0, &[]))?;
-                    }
-                    if role == "content" || (role == "frame" && compositor.decorations) {
-                        objects.content_commits += 1;
-                        match compositor.script {
-                            WaylandScript::Resize => fake_wayland_script(stream, objects, width)?,
-                            script if objects.content_commits == 2 => {
-                                stream.write_all(&fake_input(objects, script))?;
-                            }
-                            _ => {}
-                        }
-                    }
+            fake_commit(stream, compositor, object, objects, seen)?;
+            if compositor.frames {
+                // shown at once, after whatever the commit made the compositor send: each
+                // callback done, then its id free again
+                for callback in objects.callbacks.remove(&object).unwrap_or_default() {
+                    objects.kinds.remove(&callback);
+                    let mut out = wayland_message(callback, 0, &[16]);
+                    out.extend(wayland_message(1, 1, &[callback]));
+                    stream.write_all(&out)?;
                 }
-                _ if role == "frame" && objects.stage == 0 => {
-                    // the first commit, with no buffer: the first configure
-                    objects.stage = 1;
-                    if objects.decoration != 0 {
-                        // server_side
-                        stream.write_all(&wayland_message(objects.decoration, 0, &[2]))?;
-                    }
-                    // no size, and the activated state (an array of 4 bytes)
-                    stream.write_all(&wayland_message(objects.toplevel, 0, &[0, 0, 4, 4]))?;
-                    stream.write_all(&wayland_message(objects.xdg_surface, 0, &[10]))?;
-                }
-                _ => {}
             }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+/// Acts on a commit of the surface `object`, recording what it shows in `seen` and moving the
+/// script on.
+fn fake_commit(
+    stream: &mut std::os::unix::net::UnixStream,
+    compositor: FakeCompositor,
+    object: u32,
+    objects: &mut FakeObjects,
+    seen: &std::sync::Mutex<WaylandConnection>,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    use std::os::unix::fs::FileExt;
+    let role = objects.roles.get(&object).cloned().unwrap_or_default();
+    match objects.attached.remove(&object) {
+        Some(buffer) if buffer != 0 => {
+            let (pool, offset, width, height, stride) = objects.buffers[&buffer];
+            let mut pixels = vec![];
+            for row in 0..height {
+                let mut line = vec![0; width as usize * 4];
+                let at = (offset + row * stride) as u64;
+                objects.pools[&pool].read_exact_at(&mut line, at)?;
+                pixels.extend(line);
+            }
+            seen.lock()
+                .unwrap()
+                .commits
+                .push((role.clone(), width, height, pixels));
+            let old = objects.shown.insert(object, buffer);
+            if let Some(old) = old.filter(|old| *old != buffer) {
+                stream.write_all(&wayland_message(old, 0, &[]))?;
+            }
+            if role == "content" || (role == "frame" && compositor.decorations) {
+                objects.content_commits += 1;
+                match compositor.script {
+                    WaylandScript::Resize => fake_wayland_script(stream, objects, width)?,
+                    script if objects.content_commits == 2 => {
+                        stream.write_all(&fake_input(objects, script))?;
+                    }
+                    _ => {}
+                }
+            }
+        }
+        _ if role == "frame" && objects.stage == 0 => {
+            // the first commit, with no buffer: the first configure
+            objects.stage = 1;
+            if objects.decoration != 0 {
+                // server_side
+                stream.write_all(&wayland_message(objects.decoration, 0, &[2]))?;
+            }
+            // no size, and the activated state (an array of 4 bytes)
+            stream.write_all(&wayland_message(objects.toplevel, 0, &[0, 0, 4, 4]))?;
+            stream.write_all(&wayland_message(objects.xdg_surface, 0, &[10]))?;
         }
         _ => {}
     }
@@ -2942,7 +3157,8 @@ fn fake_wayland_server(
                         break;
                     }
                     seen.lock().unwrap().requests.push(message.clone());
-                    let answered = fake_wayland_request(
+                    // a client that closed may have sent more already, which is still read
+                    let _ = fake_wayland_request(
                         &mut stream,
                         compositor,
                         &message,
@@ -2950,15 +3166,29 @@ fn fake_wayland_server(
                         &mut objects,
                         &seen,
                     );
-                    if answered.is_err() {
-                        break;
-                    }
                 }
                 seen.lock().unwrap().closed = true;
             });
         }
     });
     connections
+}
+
+/// Asserts that two backends sent the same requests, naming the first that differs.
+fn assert_same_requests(interpreted: &[Vec<u8>], compiled: &[Vec<u8>], name: &str) {
+    for (i, (a, b)) in interpreted.iter().zip(compiled).enumerate() {
+        assert_eq!(a, b, "{name}: request {i} differs");
+    }
+    assert_eq!(
+        interpreted.len(),
+        compiled.len(),
+        "{name}: request counts differ, the longer ending {:?}",
+        if interpreted.len() > compiled.len() {
+            interpreted.last()
+        } else {
+            compiled.last()
+        }
+    );
 }
 
 /// Waits until the client of each connection the fake compositor has seen has closed it, and
@@ -3019,6 +3249,7 @@ fn both_backends_drive_a_wayland_window_alike() {
             script: WaylandScript::Resize,
             keymap: "us.xkb",
             rate: 0,
+            frames: true,
         };
         let mut connections = None;
         let (_, [run, built]) = run_and_build_env(
@@ -3043,7 +3274,7 @@ fn both_backends_drive_a_wayland_window_alike() {
         let [interpreted, compiled] = &seen[..] else {
             panic!("expected two connections, not {}", seen.len());
         };
-        assert_eq!(interpreted.requests, compiled.requests, "{name}");
+        assert_same_requests(&interpreted.requests, &compiled.requests, name);
         assert_eq!(interpreted.commits, compiled.commits, "{name}");
         let content: Vec<_> = interpreted
             .commits
@@ -3148,6 +3379,7 @@ fn both_backends_choose_a_display_alike() {
             script: FakeScript::Expose,
             short: false,
             shm: FakeShm::Absent,
+            present: false,
         };
         let (_, [run, built]) = run_and_build_env(
             name,
@@ -3223,6 +3455,7 @@ fn both_backends_take_wayland_input_alike() {
         script: WaylandScript::Input,
         keymap: "de.xkb",
         rate: 0,
+        frames: true,
     };
     let mut connections = None;
     let (_, [run, built]) = run_and_build_env(
@@ -3243,7 +3476,7 @@ fn both_backends_take_wayland_input_alike() {
     let [interpreted, compiled] = &seen[..] else {
         panic!("expected two connections, not {}", seen.len());
     };
-    assert_eq!(interpreted.requests, compiled.requests);
+    assert_same_requests(&interpreted.requests, &compiled.requests, "input");
     // xdg_toplevel's resize from the top left corner (5) and move, each with its press's serial
     let toplevel_requests: Vec<_> = interpreted
         .requests
@@ -3270,6 +3503,7 @@ fn a_key_held_down_on_wayland_repeats_in_both_backends() {
         script: WaylandScript::Hold,
         keymap: "us.xkb",
         rate: 50,
+        frames: true,
     };
     let (_, [run, built]) = run_and_build_env(
         "gui_wayland_hold",
@@ -3288,6 +3522,113 @@ fn a_key_held_down_on_wayland_repeats_in_both_backends() {
     for output in [run, built] {
         assert!(output.status.success(), "{output:?}");
         assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    }
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn both_backends_run_an_app_on_wayland_alike() {
+    let compositor = FakeCompositor {
+        decorations: false,
+        script: WaylandScript::Resize,
+        keymap: "us.xkb",
+        rate: 0,
+        frames: true,
+    };
+    let mut connections = None;
+    let (_, [run, built]) = run_and_build_env(
+        "gui_wayland_app",
+        &APP_PROGRAM.replace("DONE", "false"),
+        |dir| connections = Some(fake_wayland_server(&dir.join("wayland-9"), compositor)),
+        &[
+            ("WAYLAND_DISPLAY", "wayland-9"),
+            ("XDG_RUNTIME_DIR", "."),
+            ("STONE_GUI", ""),
+        ],
+    );
+    for output in [&run, &built] {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "close\n true (300, 176)\n"
+        );
+    }
+    let seen = closed_wayland_connections(&connections.unwrap());
+    let [interpreted, compiled] = &seen[..] else {
+        panic!("expected two connections, not {}", seen.len());
+    };
+    // the frames after the first that `next_frame` paced ask for a frame callback; the requests
+    // themselves differ by when the first frame, paced by time, read the compositor's ping
+    for seen in [interpreted, compiled] {
+        assert!(!frame_callbacks(&seen.requests).is_empty());
+    }
+}
+
+/// The id of each frame callback (`wl_surface.frame`) among `requests`.
+fn frame_callbacks(requests: &[Vec<u8>]) -> Vec<u32> {
+    requests
+        .iter()
+        .filter(|r| r.len() == 12 && r[4] == 3)
+        .map(|r| u32::from_le_bytes(r[8..12].try_into().unwrap()))
+        .collect()
+}
+
+#[test]
+#[cfg(target_os = "linux")]
+fn wayland_frames_follow_frame_callbacks_in_both_backends() {
+    // four frames: the first shown before any pacing, then three that ask for a callback
+    let source = r#"use gui
+use time
+
+match gui.open("frames", 40, 30):
+    case ok(w):
+        c = gui.blank(40, 30, 0)
+        waited = 0.0
+        for _ in range(4):
+            w.show(c)
+            start = time.clock()
+            es = w.next_frame()
+            waited = time.clock() - start
+        print(waited >= 0.9 and waited < 5.0, w.is_open())
+        w.close()
+    case err(reason):
+        print(reason)
+"#;
+    // a compositor that answers callbacks, and one that never does, as for a hidden window,
+    // whose frames come once a second
+    for (frames, expected, callbacks) in [(true, "false true\n", 3), (false, "true true\n", 1)] {
+        let name = format!("gui_wayland_frames_{frames}");
+        let compositor = FakeCompositor {
+            decorations: false,
+            script: WaylandScript::Hold,
+            keymap: "us.xkb",
+            rate: 0,
+            frames,
+        };
+        let mut connections = None;
+        let (_, [run, built]) = run_and_build_env(
+            &name,
+            source,
+            |dir| connections = Some(fake_wayland_server(&dir.join("wayland-9"), compositor)),
+            &[
+                ("WAYLAND_DISPLAY", "wayland-9"),
+                ("XDG_RUNTIME_DIR", "."),
+                ("STONE_GUI", ""),
+            ],
+        );
+        for output in [&run, &built] {
+            assert!(output.status.success(), "{output:?}");
+            assert_eq!(String::from_utf8_lossy(&output.stdout), expected, "{name}");
+        }
+        let seen = closed_wayland_connections(&connections.unwrap());
+        let [interpreted, compiled] = &seen[..] else {
+            panic!("expected two connections, not {}", seen.len());
+        };
+        assert_same_requests(&interpreted.requests, &compiled.requests, &name);
+        // one callback outstanding at a time, its id reused once the compositor frees it
+        let ids = frame_callbacks(&interpreted.requests);
+        assert_eq!(ids.len(), callbacks, "{name}: {ids:?}");
+        assert!(ids.iter().all(|id| *id == ids[0]), "{name}: {ids:?}");
     }
 }
 
@@ -3348,7 +3689,14 @@ match gui.open("real", 64, 48):
                     case _:
                         cont
             w.show(c)
-            time.sleep(0.1)
+            es = w.next_frame()
+            for e in es:
+                match e:
+                    case gui.event.failed(reason):
+                        print(reason)
+                        failures += 1
+                    case _:
+                        cont
         print(w.is_open(), failures)
         w.close()
     case err(reason):

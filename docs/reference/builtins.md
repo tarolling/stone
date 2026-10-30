@@ -1981,7 +1981,8 @@ Sway, and Hyprland have) draws the window's; for one that does not, as GNOME's a
 `gui` draws its own: a title bar with the title and a close button, which moves the window when
 dragged and maximizes it when clicked twice, and edges to resize it by. Keys are named and type
 text as the compositor's keymap says, whatever the layout, and a key held down repeats at the
-compositor's rate. Images go through memory the program shares with the compositor.
+compositor's rate. Images go through memory the program shares with the compositor, and the
+compositor's frame callbacks say when each is on the screen.
 
 On X11, the `DISPLAY` environment variable says where the server is: `:0` is the Unix socket `/tmp/.X11-unix/X0`, a path such as
 `/tmp/launch-x/org.xquartz:0` is that socket, and `host:0` is TCP port 6000 on `host`. A server
@@ -1990,7 +1991,9 @@ for the display. The display must take 24-bit color, as every current one does. 
 server on the same machine that has the MIT-SHM extension (version 1.2 or later, as Xorg, Xvfb,
 and XWayland have) gets each image through memory the two share rather than through the socket,
 which is several times faster for a big window; any other server, or one that turns the memory
-down, gets the image through the socket, with the same result on the screen.
+down, gets the image through the socket, with the same result on the screen. A server with the
+Present extension, as Xorg, Xvfb, and XWayland have, gets each image in a pixmap that it puts on
+the window at its next vblank, so images never tear, and says when it has.
 
 A window is a handle, like a socket: a copy of it is the same window, and it closes by itself
 right after the last statement that uses it, or sooner with `close`. Its methods:
@@ -2000,6 +2003,12 @@ right after the last statement that uses it, or sooner with `close`. Its methods
 - `w.events() -> list[event]` returns the events since the last call, without waiting.
 - `w.wait() -> list[event]` returns the events since the last call, waiting for one if there are
   none, or `[]` once the window is closed.
+- `w.next_frame() -> list[event]` returns the events since the last call, as `events` does,
+  once it is time to draw the next image: when the display has put the last image `show` gave
+  it on the screen, at the screen's own refresh rate, but after a second at most, as for a
+  hidden window, which the display never shows. Where nothing shown is waiting, or the display
+  cannot tell (an X server without Present), it is about 60 times a second. It waits on the
+  display's connection, using no processor time meanwhile.
 - `w.show(c: canvas)` shows the canvas in the window, its top left pixel at the window's. Where
   the canvas does not reach, the window keeps what it showed on X11, and is black on Wayland.
 - `w.size() -> tuple[int, int]` returns the window's width and height, as the last `resize`
@@ -2007,7 +2016,7 @@ right after the last statement that uses it, or sooner with `close`. Its methods
 - `w.set_title(title: str)` sets the title on the window's frame.
 - `w.close()` closes the window.
 
-`events`, `wait`, `show`, `set_title`, and `close` change the window, so each is a statement or
+`events`, `wait`, `next_frame`, `show`, `set_title`, and `close` change the window, so each is a statement or
 the whole value of an assignment, as in `es = w.events()`.
 
 ### `gui.open`
@@ -2054,9 +2063,9 @@ are not 24-bit color is `err("unsupported display format: depth 16, 16 bits per 
 gui.run[A: app](title: str, width: int, height: int, state: A) -> result[A, str]
 ```
 
-Opens a window as `gui.open` does and runs the app `state` in it: it draws the state, then about
-60 times a second gives `update` every event since the last turn followed by a `tick`, and draws
-the state again with a canvas as big as the window. It ends once `update` has seen the `close`
+Opens a window as `gui.open` does and runs the app `state` in it: it draws the state, then at
+each frame, as `w.next_frame()` paces them at the screen's own rate, gives `update` every event
+since the last turn followed by a `tick`, and draws the state again with a canvas as big as the window. It ends once `update` has seen the `close`
 event, or once `done` returns `true` after an event, and returns `ok` of the last state, or the
 error that opening the window, or a broken connection, gives.
 

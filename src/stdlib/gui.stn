@@ -237,6 +237,8 @@ pub struct window:
     wayland: bool
     x: list[gui_x11.link]
     wl: list[gui_wayland.link]
+    // when `next_frame` returns if the display does not say, by `time.clock`
+    due: float
 
 // Opens a window `width` by `height` pixels titled `title`: on the Wayland compositor
 // `WAYLAND_DISPLAY` names, or if there is none or it fails, on the X server `DISPLAY` names.
@@ -254,12 +256,12 @@ pub fn open(title: str, width: int, height: int) -> result[window, str]:
     if choice == "wayland" or choice == "" and on_wayland:
         match gui_wayland.open(title, width, height):
             case ok(wl):
-                ret ok(window(wayland=true, x=[], wl=[wl]))
+                ret ok(window(wayland=true, x=[], wl=[wl], due=time.clock()))
             case err(reason):
                 if choice == "wayland" or not on_x11:
                     ret err(reason)
     x = gui_x11.open(title, width, height)?
-    ret ok(window(wayland=false, x=[x], wl=[]))
+    ret ok(window(wayland=false, x=[x], wl=[], due=time.clock()))
 
 impl window:
     // Whether the window is open: until `close`, or the connection breaks.
@@ -290,6 +292,33 @@ impl window:
             ret found
         es = self.x[0].wait()
         ret es
+
+    // Waits until it is time to draw the next image, and returns the events that have happened
+    // since the last call, as `events` does. That is when the display has put the last image
+    // `show` gave it on the screen, at the screen's own rate (Wayland's frame callbacks, or
+    // X11's Present extension), but at most a second, as for a hidden window, which the display
+    // shows nothing of. With no image waiting, or a display that cannot tell, it is about 60
+    // times a second.
+    fn next_frame(self) -> list[event]:
+        awaiting = false
+        if self.wayland:
+            awaiting = self.wl[0].awaiting()
+        else:
+            awaiting = self.x[0].awaiting()
+        until = self.due
+        if awaiting:
+            until = time.clock() + hidden_wait()
+        found = []
+        if self.wayland:
+            found = self.wl[0].pace(until)
+        else:
+            found = self.x[0].pace(until)
+        now = time.clock()
+        if awaiting:
+            self.due = now + frame_time()
+        else:
+            self.due = (self.due + frame_time()).max(now)
+        ret found
 
     // Shows `c` in the window, its top left pixel at the window's. What the window has outside
     // `c` stays as it was on X11, and is black on Wayland.
@@ -333,18 +362,19 @@ pub trait app:
         ret false
 
 // Opens a window titled `title`, `width` by `height` pixels, and runs the app `state` in it. It
-// draws the state, then about 60 times a second gives `update` every event since the last turn
-// and a `tick` of the seconds the turn took, and draws the state again. It ends once `update`
-// has seen the `close` event or `done` says so after an event, and returns the last state, or
-// `err` if the window does not open or its connection breaks.
+// draws the state, then at each frame, as `next_frame` paces them at the screen's own rate,
+// gives `update` every event since the last turn and a `tick` of the seconds the turn took, and
+// draws the state again. It ends once `update` has seen the `close` event or `done` says so
+// after an event, and returns the last state, or `err` if the window does not open or its
+// connection breaks.
 pub fn run[A: app](title: str, width: int, height: int, state: A) -> result[A, str]:
     w = open(title, width, height)?
     c = state.draw(blank(width, height, 0))
     w.show(c)
     last = time.clock()
     while true:
+        es = w.next_frame()
         turn = time.clock()
-        es = w.events()
         es.append(event.tick(turn - last))
         last = turn
         for e in es:
@@ -361,10 +391,16 @@ pub fn run[A: app](title: str, width: int, height: int, state: A) -> result[A, s
                 ret ok(state)
         c = state.draw(c)
         w.show(c)
-        rest = 1.0 / 60.0 - (time.clock() - turn)
-        if rest > 0.0:
-            time.sleep(rest)
     ret ok(state)
+
+// The seconds between frames when the display does not pace them.
+fn frame_time() -> float:
+    ret 1.0 / 60.0
+
+// The most seconds `next_frame` waits for the display to show an image, which it never does
+// for a hidden window.
+fn hidden_wait() -> float:
+    ret 1.0
 
 // How many pixels wide and high each character of the font is.
 fn glyph_size() -> int:

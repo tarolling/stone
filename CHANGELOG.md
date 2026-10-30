@@ -12,6 +12,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- `w.next_frame()` on a `gui` window waits until the screen has shown the last image and
+  returns the events meanwhile: Wayland's frame callbacks, and on X11 the Present extension,
+  which also puts each image on the window at the vblank, so it never tears. `gui.run` paces
+  itself with it at the screen's own rate rather than sleeping for a 60th of a second. A hidden
+  window still gets a frame each second, and a display that cannot tell gets 60 a second.
 - `examples/spin.stn`, a 3D demo: a torus, a rippled torus, and two torus knots built with
   `math.sin` and `math.cos`, turned, lit, sorted far to near, and filled pixel by pixel in a
   `gui` window, all in stone. Drag to turn, scroll to zoom, `1` to `4` or `tab` to change the

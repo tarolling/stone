@@ -1,5 +1,6 @@
 // X11 windows for the `gui` module, which only stone's own modules may use: the X11 protocol
-// spoken over a socket from `net`, with MIT-SHM for images when the server is on this machine.
+// spoken over a socket from `net`, with MIT-SHM for images when the server is on this machine,
+// and the Present extension, where the server has it, to put them on the screen at its vblank.
 
 use fs
 use gui.canvas
@@ -16,6 +17,7 @@ use gui_wire.put32
 use gui_wire.put_bytes
 use net
 use os
+use time
 
 // A window on an X server, which `gui.window` holds when it uses X11.
 pub struct link:
@@ -24,6 +26,8 @@ pub struct link:
     setup: server
     // the memory it shares with the server, if it can
     shm: shared
+    // the pixmaps it presents images from, if it can
+    present: presenter
     // its width and height
     extent: tuple[int, int]
     open: bool
@@ -59,6 +63,22 @@ struct shared:
     size: int
     // whether the server is still showing an image from it, so it cannot be written yet
     busy: bool
+
+// Images shown through the Present extension: drawn into one of two pixmaps, which the server
+// then copies or flips onto the window at its next vblank, so they never tear, and tells when it
+// has, which paces frames at the screen's own rate.
+struct presenter:
+    // Present's major opcode, 0 while it cannot be used, and the id of the window's events
+    opcode: int
+    eid: int
+    // the two pixmaps' ids, the serial each was last presented with until the server is done
+    // with it (0 once it is), and their width and height ((0, 0) before the first)
+    pixmaps: list[int]
+    busy: list[int]
+    size: tuple[int, int]
+    // the serial of the last image presented, and whether it is still to go on the screen
+    serial: int
+    waiting: bool
 
 // Opens a window `width` by `height` pixels titled `title`, on the display `DISPLAY` names.
 pub fn open(title: str, width: int, height: int) -> result[link, str]:
@@ -193,8 +213,10 @@ fn handshake(conn: socket, number: str, width: int, height: int) -> result[link,
     most = get16(reply, 26) * 4
     found = server(id=id, gc=gc, root=root, depth=depth, msb=msb, limit=most, keys=keys, atoms=[])
     shm = shared(opcode=0, event=0, seg=gc + step, size=0, busy=false)
+    pixmaps = [gc + 3 * step, gc + 4 * step]
+    present = presenter(opcode=0, eid=gc + 2 * step, pixmaps=pixmaps, busy=[0, 0], size=(0, 0), serial=0, waiting=false)
     size = (width, height)
-    w = link(conn=conn, setup=found, shm=shm, extent=size, open=true, pending=[], ahead=b"")
+    w = link(conn=conn, setup=found, shm=shm, present=present, extent=size, open=true, pending=[], ahead=b"")
     ret ok(w)
 
 // The error for a setup reply too short for what it says it holds.
@@ -244,8 +266,26 @@ impl link:
             self.step()
         ret self.events()
 
+    // Whether the server has yet to put the last image presented on the screen.
+    fn awaiting(self) -> bool:
+        ret self.present.waiting
+
+    // Waits until the server has put the last image presented on the screen, if one is
+    // outstanding, or else until `until`, by `time.clock`, at the latest, and returns the
+    // events meanwhile.
+    fn pace(self, until: float) -> list[event]:
+        awaited = self.awaiting()
+        while self.open and (not awaited or self.awaiting()):
+            left = until - time.clock()
+            if left <= 0.0:
+                break
+            if self.ahead.len() > 0 or net.ready(self.conn, left):
+                self.step()
+        ret self.events()
+
     // Shows `c` in the window, its top left pixel at the window's. What the window has outside
-    // `c` stays as it was.
+    // `c` stays as it was. With Present, `c` goes into a pixmap that the server puts on the
+    // window at its next vblank.
     fn show(self, c: canvas):
         if not self.open or c.width == 0 or c.width > 32767:
             ret
@@ -253,9 +293,17 @@ impl link:
         format = 0
         if self.setup.msb:
             format = 1
+        drawable = self.setup.id
+        pixmap = -1
+        if self.present.opcode > 0 and rows > 0:
+            pixmap = self.idle_pixmap(c.width, rows)
+            if not self.open:
+                ret
+            drawable = self.present.pixmaps[pixmap]
         if self.shm.opcode > 0:
-            shared = self.share(c, rows, format)
+            shared = self.share(c, rows, format, drawable)
             if shared:
+                self.present_pixmap(pixmap)
                 ret
         per = ((self.setup.limit - 24) / (c.width * 4)).max(1)
         y = 0
@@ -263,7 +311,7 @@ impl link:
             n = per.min(rows - y)
             // PutImage of ZPixmap pixels, with no left padding
             head = put16([72, 2], 6 + n * c.width)
-            head = put32(head, self.setup.id)
+            head = put32(head, drawable)
             head = put32(head, self.setup.gc)
             head = put16(head, c.width)
             head = put16(head, n)
@@ -277,10 +325,49 @@ impl link:
                 case err(e):
                     self.fail(e)
                     ret
+        self.present_pixmap(pixmap)
+
+    // The index of a pixmap `width` by `height` pixels that the server is done with, making new
+    // ones of that size in place of the old if they are another size, and waiting for the server
+    // to finish with one if it has both.
+    fn idle_pixmap(self, width: int, height: int) -> int:
+        if self.present.size != (width, height):
+            asks = []
+            if self.present.size != (0, 0):
+                for old in self.present.pixmaps:
+                    asks.extend(request(54, 0, put32([], old)))
+            for id in self.present.pixmaps:
+                // CreatePixmap of the window's depth
+                body = put32(put32([], id), self.setup.id)
+                asks.extend(request(53, self.setup.depth, put16(put16(body, width), height)))
+            self.send(asks)
+            self.present.size = (width, height)
+            self.present.busy = [0, 0]
+        while self.open and self.present.busy[0] != 0 and self.present.busy[1] != 0:
+            self.step()
+        if self.present.busy[0] != 0:
+            ret 1
+        ret 0
+
+    // Presents pixmap `index`, drawn already, at the server's next vblank, if `index` is one.
+    fn present_pixmap(self, index: int):
+        if index < 0 or not self.open:
+            ret
+        self.present.serial = self.present.serial % 4294967295 + 1
+        // PresentPixmap with no regions, offsets, crtc, fences, or options, then a target msc of
+        // 0, a divisor of 1, and a remainder of 0, which is the next vblank
+        body = put32(put32([], self.setup.id), self.present.pixmaps[index])
+        body = put32(put32(put32(body, self.present.serial), 0), 0)
+        body = put16(put16(body, 0), 0)
+        for word in [0, 0, 0, 0, 0, 0, 0, 1, 0, 0, 0]:
+            body = put32(body, word)
+        self.send(request(self.present.opcode, 1, body))
+        self.present.busy[index] = self.present.serial
+        self.present.waiting = true
 
     // Shows the first `rows` rows of `c` through shared memory, its pixels laid out as `format`
-    // says, and says whether it could. Once it cannot, it never tries again.
-    fn share(self, c: canvas, rows: int, format: int) -> bool:
+    // says, in `drawable`, and says whether it could. Once it cannot, it never tries again.
+    fn share(self, c: canvas, rows: int, format: int, drawable: int) -> bool:
         // the server may still be reading the last image
         while self.open and self.shm.busy:
             self.step()
@@ -299,8 +386,8 @@ impl link:
             case err(_):
                 self.shm.opcode = 0
                 ret false
-        // ShmPutImage of the whole image, at the window's top left, with a completion event
-        body = put32(put32([], self.setup.id), self.setup.gc)
+        // ShmPutImage of the whole image, at the drawable's top left, with a completion event
+        body = put32(put32([], drawable), self.setup.gc)
         body = put16(put16(body, c.width), rows)
         body = put16(put16(body, 0), 0)
         body = put16(put16(body, c.width), rows)
@@ -368,6 +455,8 @@ impl link:
         if local:
             body = put16(put16([], 7), 0)
             asks.extend(request(98, 0, put_bytes(body, b"MIT-SHM")))
+        body = put16(put16([], 7), 0)
+        asks.extend(request(98, 0, put_bytes(body, b"Present")))
         self.conn.send_bytes(bytes(asks).unwrap())?
         atoms = []
         for _ in names:
@@ -378,8 +467,14 @@ impl link:
         self.setup.keys.per = keys[1]
         for i in range(get32(keys, 4)):
             self.setup.keys.syms.append(get32(keys, 32 + 4 * i))
+        // both answers about extensions come before anything asked after them
+        shm = b""
         if local:
-            self.extend()?
+            shm = self.reply()?
+        present = self.reply()?
+        if local:
+            self.extend(shm)?
+        self.presents(present)?
         // CreateWindow with the root's depth and visual, a black background, and the events it
         // listens for: keys, buttons, motion, exposure, and changes of its size
         body = put32(put32([], self.setup.id), self.setup.root)
@@ -389,6 +484,11 @@ impl link:
         body = put32(put32(body, 0), 2050)
         body = put32(put32(body, 0), 163919)
         made = request(1, 0, body)
+        if self.present.opcode > 0:
+            // PresentSelectInput of the events that say an image is on the screen (2) and that
+            // a pixmap is free again (4)
+            selected = put32(put32(put32([], self.present.eid), self.setup.id), 6)
+            made.extend(request(self.present.opcode, 3, selected))
         made.extend(self.titled(title))
         made.extend(self.property(self.setup.atoms[0], 4, 32, put32([], self.setup.atoms[1])))
         // WM_CLASS, the instance and class names, each ended by a 0
@@ -404,10 +504,9 @@ impl link:
                 ret ok(0)
         ret err(self.failure())
 
-    // Reads the reply about MIT-SHM, which `create` asked for, and makes it the way to show
-    // images if the server has a version that takes memory as a descriptor (1.2 or later).
-    fn extend(self) -> result[int, str]:
-        found = self.reply()?
+    // Makes MIT-SHM, which the QueryExtension reply `found` is about, the way to show images if
+    // the server has a version that takes memory as a descriptor (1.2 or later).
+    fn extend(self, found: bytes) -> result[int, str]:
         if found[8] == 0:
             ret ok(0)
         // ShmQueryVersion
@@ -417,6 +516,17 @@ impl link:
         if major > 1 or major == 1 and get16(version, 10) >= 2:
             self.shm.opcode = found[9]
             self.shm.event = found[10]
+        ret ok(0)
+
+    // Makes Present, which the QueryExtension reply `found` is about, the way to show images if
+    // the server has it.
+    fn presents(self, found: bytes) -> result[int, str]:
+        if found[8] == 0:
+            ret ok(0)
+        // PresentQueryVersion, 1.0, which has all it needs
+        self.conn.send_bytes(bytes(request(found[9], 0, [1, 0, 0, 0, 0, 0, 0, 0])).unwrap())?
+        self.reply()?
+        self.present.opcode = found[9]
         ret ok(0)
 
     // The reason the window failed, from its last `failed` event.
@@ -476,7 +586,15 @@ impl link:
             found = self.ahead
             self.ahead = b""
             ret ok(found)
-        ret self.conn.read_exact(32)
+        ret self.next_event()
+
+    // Reads the next event from the server: 32 bytes, and for a generic event, such as
+    // Present's, the 4-byte units more that it says it has.
+    fn next_event(self) -> result[bytes, str]:
+        head = self.conn.read_exact(32)?
+        if head[0] % 128 != 35 or get32(head, 4) == 0:
+            ret ok(head)
+        ret ok(head + self.conn.read_exact(get32(head, 4) * 4)?)
 
     // Waits for the next event and decodes it, failing the window if the connection breaks.
     fn step(self):
@@ -518,6 +636,21 @@ impl link:
         elif self.shm.event > 0 and code == self.shm.event:
             // ShmCompletion
             self.shm.busy = false
+        elif code == 35 and self.present.opcode > 0 and raw[1] == self.present.opcode:
+            self.presented(raw)
+
+    // Acts on the Present event `raw`: CompleteNotify (1), an image on the screen, or
+    // IdleNotify (2), a pixmap the server is done with. A pixmap's serial must match, since a
+    // pixmap made again takes the id of one the server may not have been done with.
+    fn presented(self, raw: bytes):
+        kind = get16(raw, 8)
+        serial = get32(raw, 20)
+        if kind == 1 and serial == self.present.serial:
+            self.present.waiting = false
+        elif kind == 2:
+            for i in range(2):
+                if self.present.pixmaps[i] == get32(raw, 24) and self.present.busy[i] == serial:
+                    self.present.busy[i] = 0
 
     // Adds the event of the button press or release `raw`.
     fn button(self, raw: bytes):
@@ -540,7 +673,7 @@ impl link:
     // a press at the same moment while the key is held: the press is read ahead and kept.
     fn repeated(self, raw: bytes) -> bool:
         if self.ahead.len() == 0 and net.ready(self.conn, 0.0):
-            match self.conn.read_exact(32):
+            match self.next_event():
                 case ok(next):
                     self.ahead = next
                 case err(e):

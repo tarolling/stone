@@ -1053,6 +1053,18 @@ mod tests {
         key(a).abs_diff(key(b))
     }
 
+    /// Returns how many ulps `name` may be from the system's libm. glibc and musl are within an
+    /// ulp of the exact value, but Apple's `tan` is not: `tan(7.001759109585632e39)` is 1.92 ulp
+    /// off there, and ours 0.08, so on macOS it is a weaker oracle, and Linux, whose CI jobs hold
+    /// every function to one ulp of glibc, checks the accuracy.
+    fn std_slack(name: &str) -> u64 {
+        if cfg!(target_os = "macos") && name == "tan" {
+            3
+        } else {
+            1
+        }
+    }
+
     /// Checks that `ours` is within one ulp of `std`, which is the system's libm, at `count`
     /// arguments that `draw` makes from random floats in [0, 1).
     fn close_to_std(
@@ -1067,7 +1079,7 @@ mod tests {
             let x = draw(rng.random(), rng.random());
             let (got, want) = (ours(x), std(x));
             assert!(
-                ulps(got, want) <= 1,
+                ulps(got, want) <= std_slack(name),
                 "{name}({x:e}) = {got:e}, std says {want:e}"
             );
         }
@@ -1245,14 +1257,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn huge_arguments_match_std_through_the_prelude() {
-        let mut xs = vec![MEDIUM, 1e7, 1e15, 1e22, 1e100, 1e300, f64::MAX];
-        let mut rng = Rng::seeded(5);
-        while xs.len() < 3000 {
-            let x = 2f64.powf(20.0 + 1004.0 * rng.random());
-            xs.push(if rng.random() < 0.5 { -x } else { x });
-        }
+    /// Returns `math.sin`, `math.cos`, and `math.tan` of each of `xs` as the interpreter computes
+    /// them, through the prelude's reduction for huge arguments.
+    fn huge_rows(xs: &[f64]) -> Vec<Vec<f64>> {
         let mut source = String::from("use math\nxs = [");
         source.push_str(
             &xs.iter()
@@ -1265,10 +1272,20 @@ mod tests {
         crate::driver::interpret_with(&source, &mut out, crate::interpreter::Limits::DEFAULT)
             .unwrap();
         let out = String::from_utf8(out).unwrap();
-        let rows: Vec<Vec<f64>> = out
-            .lines()
+        out.lines()
             .map(|line| line.split(' ').map(|x| x.parse().unwrap()).collect())
-            .collect();
+            .collect()
+    }
+
+    #[test]
+    fn huge_arguments_match_std_through_the_prelude() {
+        let mut xs = vec![MEDIUM, 1e7, 1e15, 1e22, 1e100, 1e300, f64::MAX];
+        let mut rng = Rng::seeded(5);
+        while xs.len() < 3000 {
+            let x = 2f64.powf(20.0 + 1004.0 * rng.random());
+            xs.push(if rng.random() < 0.5 { -x } else { x });
+        }
+        let rows = huge_rows(&xs);
         assert_eq!(rows.len(), xs.len());
         assert_eq!(
             rows[3],
@@ -1287,10 +1304,19 @@ mod tests {
                 ("tan", row[2], x.tan()),
             ] {
                 assert!(
-                    ulps(got, want) <= 1,
+                    ulps(got, want) <= std_slack(name),
                     "{name}({x:e}) = {got:e}, std says {want:e}"
                 );
             }
         }
+    }
+
+    #[test]
+    fn tan_is_within_an_ulp_where_apples_libm_is_not() {
+        // 0.46 and 0.08 ulp from the exact values, as glibc rounds them, where Apple's libm
+        // gives 3.8231954777211055 and 0.991242612391881, 1.54 and 1.92 ulp off
+        assert_eq!(tan_of(4.468206133084965e5), Ok(3.8231954777211064));
+        let row = huge_rows(&[7.001759109585632e39]);
+        assert_eq!(row[0][2], 0.9912426123918813);
     }
 }

@@ -108,6 +108,11 @@ print(gui.run("counter", 300, 100, counter(clicks=0)))
 reads it. `run` returns the last state, so the program can go on with it after the window
 closes.
 
+For a bigger program, `examples/spin.stn` in the repository draws spinning 3D shapes: it builds
+meshes with `math.sin` and `math.cos`, turns and lights them, sorts their faces with
+`sort_by_key`, and fills them in on a canvas, all in stone. Built with
+`stone build examples/spin.stn` and run as `examples/build/spin`, it draws 60 frames a second.
+
 That is the whole tutorial. The {doc}`../reference/syntax` and {doc}`../reference/builtins`
 pages cover the details, including every method of a [socket](../reference/builtins.md#send)
 and of a [canvas and a window](../reference/builtins.md#the-gui-module).

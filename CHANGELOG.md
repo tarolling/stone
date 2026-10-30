@@ -12,6 +12,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- `examples/spin.stn`, a 3D demo: a torus, a rippled torus, and two torus knots built with
+  `math.sin` and `math.cos`, turned, lit, sorted far to near, and filled pixel by pixel in a
+  `gui` window, all in stone. Drag to turn, scroll to zoom, `1` to `4` or `tab` to change the
+  shape, `space` to pause. `--snapshot` prints each shape as text instead, identical under
+  `stone run` and in built programs.
 - Trigonometry in the `math` module: `math.sin`, `math.cos`, `math.tan`, `math.asin`,
   `math.acos`, `math.atan`, and `math.atan2(y, x)`, plus the constants `math.pi`, `math.tau`,
   and `math.e`, which are read without parentheses (`use math.pi` binds `pi` alone). Every

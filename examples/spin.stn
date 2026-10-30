@@ -1,0 +1,319 @@
+// A spinning, shaded 3D shape in a window, drawn pixel by pixel in stone: the meshes come from
+// sin and cos, every frame turns them, lights each face, sorts the faces far to near, and fills
+// them in. Drag to turn it, scroll to zoom, 1 to 4 (or tab) to change the shape, space to pause.
+//
+// `stone run spin.stn --snapshot` draws each shape once without a window and prints it as text,
+// which is what the golden test checks: both backends give the same pixels to the bit.
+use gui
+use math
+
+struct vec3:
+    x: float
+    y: float
+    z: float
+
+impl vec3:
+    fn plus(self, o: vec3) -> vec3:
+        ret vec3(x=self.x + o.x, y=self.y + o.y, z=self.z + o.z)
+
+    fn minus(self, o: vec3) -> vec3:
+        ret vec3(x=self.x - o.x, y=self.y - o.y, z=self.z - o.z)
+
+    fn times(self, k: float) -> vec3:
+        ret vec3(x=self.x * k, y=self.y * k, z=self.z * k)
+
+    fn dot(self, o: vec3) -> float:
+        ret self.x * o.x + self.y * o.y + self.z * o.z
+
+    fn cross(self, o: vec3) -> vec3:
+        ret vec3(x=self.y * o.z - self.z * o.y, y=self.z * o.x - self.x * o.z, z=self.x * o.y - self.y * o.x)
+
+    fn unit(self) -> vec3:
+        length = math.sqrt(self.dot(self))
+        if length == 0.0:
+            ret self
+        ret self.times(1.0 / length)
+
+    // the point turned by `t`: about the vertical axis, then about the horizontal one
+    fn turned(self, t: turn) -> vec3:
+        x = self.x * t.cy + self.z * t.sy
+        z = self.z * t.cy - self.x * t.sy
+        ret vec3(x=x, y=self.y * t.cp - z * t.sp, z=self.y * t.sp + z * t.cp)
+
+// The sines and cosines of a turn, worked out once a frame rather than once a point.
+struct turn:
+    sy: float
+    cy: float
+    sp: float
+    cp: float
+
+fn turning(yaw: float, pitch: float) -> turn:
+    ret turn(sy=math.sin(yaw), cy=math.cos(yaw), sp=math.sin(pitch), cp=math.cos(pitch))
+
+// Points, and triangles of them by index, each wound so its front faces outward.
+struct mesh:
+    points: list[vec3]
+    faces: list[tuple[int, int, int]]
+
+// A closed surface: `at(u, v)` for `across` steps of u and `around` steps of v, each a full turn,
+// joined into a grid of quads that wraps both ways, two triangles each.
+fn surface(across: int, around: int, at: fn(float, float) -> vec3) -> mesh:
+    points = []
+    faces = []
+    for i in range(across):
+        u = math.tau * float(i) / float(across)
+        for j in range(around):
+            points.append(at(u, math.tau * float(j) / float(around)))
+            a = i * around + j
+            b = (i + 1) % across * around + j
+            c = (i + 1) % across * around + (j + 1) % around
+            d = i * around + (j + 1) % around
+            faces.append((a, b, c))
+            faces.append((a, c, d))
+    ret mesh(points=points, faces=faces)
+
+fn torus_point(u: float, v: float, tube: float) -> vec3:
+    ring = 1.0 + tube * math.cos(v)
+    ret vec3(x=ring * math.cos(u), y=-tube * math.sin(v), z=ring * math.sin(u))
+
+// The middle of a (p, q) torus knot at `t`: p times around the axis while q times through the hole.
+fn knot_middle(t: float, p: float, q: float) -> vec3:
+    ring = 2.0 + math.cos(q * t)
+    ret vec3(x=ring * math.cos(p * t), y=-math.sin(q * t), z=ring * math.sin(p * t)).times(0.45)
+
+// A point on a tube around the knot, `v` of the way around it at `t` along it.
+fn knot_point(t: float, v: float, p: float, q: float) -> vec3:
+    middle = knot_middle(t, p, q)
+    ahead = knot_middle(t + 0.001, p, q).minus(knot_middle(t - 0.001, p, q)).unit()
+    side = ahead.cross(vec3(x=0.0, y=1.0, z=0.0)).unit()
+    up = side.cross(ahead)
+    ret middle.plus(side.times(0.17 * math.cos(v))).plus(up.times(0.17 * math.sin(v)))
+
+enum shape:
+    torus
+    ripple
+    trefoil
+    cinquefoil
+
+fn title(s: shape) -> str:
+    match s:
+        case shape.torus:
+            ret "torus"
+        case shape.ripple:
+            ret "ripple"
+        case shape.trefoil:
+            ret "trefoil knot"
+        case shape.cinquefoil:
+            ret "cinquefoil knot"
+
+fn following(s: shape) -> shape:
+    match s:
+        case shape.torus:
+            ret shape.ripple
+        case shape.ripple:
+            ret shape.trefoil
+        case shape.trefoil:
+            ret shape.cinquefoil
+        case shape.cinquefoil:
+            ret shape.torus
+
+// The mesh of `s`, with `detail` times the fewest steps that still look like it.
+fn build(s: shape, detail: int) -> mesh:
+    match s:
+        case shape.torus:
+            ret surface(24 * detail, 12 * detail, |u, v| torus_point(u, v, 0.42))
+        case shape.ripple:
+            ret surface(32 * detail, 12 * detail, |u, v| torus_point(u, v, 0.34 + 0.1 * math.sin(5.0 * u)))
+        case shape.trefoil:
+            ret knot(2.0, 3.0, 60 * detail, 8 * detail)
+        case shape.cinquefoil:
+            ret knot(2.0, 5.0, 90 * detail, 8 * detail)
+
+fn knot(p: float, q: float, across: int, around: int) -> mesh:
+    // a closure: the lambda keeps its own copies of p and q
+    ret surface(across, around, |t, v| knot_point(t, v, p, q))
+
+// A face ready to fill: its corners on the screen, its color, and how far away it is.
+struct shaded:
+    depth: float
+    a: tuple[float, float]
+    b: tuple[float, float]
+    c: tuple[float, float]
+    color: int
+
+// Fills the triangle `a`, `b`, `d` on `c`, a row of pixels at a time, taking each pixel whose
+// center is inside, so triangles that share an edge never overlap or leave a gap.
+fn triangle(c: gui.canvas, a: tuple[float, float], b: tuple[float, float], d: tuple[float, float], color: int) -> gui.canvas:
+    // sort the corners from top to bottom
+    if b[1] < a[1]:
+        a, b = (b, a)
+    if d[1] < b[1]:
+        b, d = (d, b)
+    if b[1] < a[1]:
+        a, b = (b, a)
+    x0, y0 = a
+    x1, y1 = b
+    x2, y2 = d
+    if y2 - y0 < 0.0001:
+        ret c
+    w = float(c.width)
+    h = float(c.height)
+    top = math.floor(y0.clamp(-1.0, h) + 0.5)
+    bottom = math.floor(y2.clamp(-1.0, h) + 0.5)
+    for row in range(top.max(0), bottom.min(c.height)):
+        y = float(row) + 0.5
+        long = x0 + (x2 - x0) * (y - y0) / (y2 - y0)
+        short = x1 + (x2 - x1) * (y - y1) / (y2 - y1)
+        if y < y1:
+            short = x0 + (x1 - x0) * (y - y0) / (y1 - y0)
+        left = math.floor(long.min(short).clamp(-1.0, w) + 0.5)
+        right = math.floor(long.max(short).clamp(-1.0, w) + 0.5)
+        c.rect(left, row, right - left, 1, color)
+    ret c
+
+// The sky behind the shape, `width` by `height`, darkening toward the top.
+fn sky(width: int, height: int) -> gui.canvas:
+    c = gui.blank(width, height, 0)
+    for row in range(height):
+        k = 255 * row / height.max(1)
+        c.rect(0, row, width, 1, gui.rgb(10 + 18 * k / 255, 12 + 10 * k / 255, 24 + 20 * k / 255))
+    ret c
+
+fn blend(dark: int, light: int, k: float) -> int:
+    ret math.floor(float(dark) + float(light - dark) * k)
+
+// Draws `m` on `c`, turned by `yaw` and `pitch`, `zoom` times its usual size.
+fn render(c: gui.canvas, m: mesh, yaw: float, pitch: float, zoom: float) -> gui.canvas:
+    w = float(c.width)
+    h = float(c.height)
+    focal = 1.1 * zoom * w.min(h)
+    eye = vec3(x=0.0, y=0.0, z=-4.0)
+    light = vec3(x=-0.5, y=0.8, z=-0.6).unit()
+    t = turning(yaw, pitch)
+    seen = m.points.map(|p| p.turned(t))
+    screen = seen.map(|p| (w / 2.0 + p.x * focal / (p.z + 4.0), h / 2.0 - p.y * focal / (p.z + 4.0)))
+    faces = []
+    for corners in m.faces:
+        i, j, k = corners
+        a = seen[i]
+        middle = a.plus(seen[j]).plus(seen[k]).times(1.0 / 3.0)
+        normal = seen[j].minus(a).cross(seen[k].minus(a)).unit()
+        toward = eye.minus(middle).unit()
+        facing = normal.dot(toward)
+        if facing <= 0.0:
+            cont
+        diffuse = normal.dot(light).max(0.0)
+        // a Blinn highlight, raised to the 32nd power by squaring five times
+        shine = normal.dot(light.plus(toward).unit()).max(0.0)
+        for _ in range(5):
+            shine = shine * shine
+        rim = (1.0 - facing) * (1.0 - facing) * 0.35
+        lit = 0.12 + 0.88 * diffuse
+        red = blend(40, 241, lit) + math.floor(255.0 * shine + 60.0 * rim)
+        green = blend(28, 194, lit) + math.floor(255.0 * shine + 90.0 * rim)
+        blue = blend(70, 50, lit) + math.floor(255.0 * shine + 220.0 * rim)
+        faces.append(shaded(depth=middle.z, a=screen[i], b=screen[j], c=screen[k], color=gui.rgb(red, green, blue)))
+    // the painter's algorithm: the farthest faces first, the nearest drawn over them
+    faces.sort_by_key(|f| -f.depth)
+    for face in faces:
+        c = triangle(c, face.a, face.b, face.c, face.color)
+    ret c
+
+struct demo:
+    form: shape
+    model: mesh
+    yaw: float
+    pitch: float
+    zoom: float
+    clock: float
+    spinning: bool
+    dragging: bool
+    mouse: tuple[int, int]
+    backdrop: gui.canvas
+    frame: float
+
+fn start(width: int, height: int) -> demo:
+    ret demo(form=shape.trefoil, model=build(shape.trefoil, 2), yaw=0.0, pitch=0.35, zoom=1.0, clock=0.0, spinning=true, dragging=false, mouse=(0, 0), backdrop=sky(width, height), frame=1.0 / 60.0)
+
+impl demo:
+    fn change(self, s: shape):
+        self.form = s
+        self.model = build(s, 2)
+
+impl gui.app for demo:
+    fn update(self, e: gui.event):
+        match e:
+            case gui.event.tick(seconds):
+                self.frame = 0.9 * self.frame + 0.1 * seconds
+                if self.spinning:
+                    self.clock += seconds
+                    self.yaw += 0.6 * seconds
+            case gui.event.resize(width, height):
+                self.backdrop = sky(width, height)
+            case gui.event.mouse_down(button, x, y):
+                self.dragging = button == "left"
+                self.mouse = (x, y)
+            case gui.event.mouse_up(_, _, _):
+                self.dragging = false
+            case gui.event.mouse_move(x, y):
+                if self.dragging:
+                    self.yaw += 0.01 * float(x - self.mouse[0])
+                    self.pitch = (self.pitch + 0.01 * float(y - self.mouse[1])).clamp(-1.5, 1.5)
+                    self.mouse = (x, y)
+            case gui.event.scroll(steps):
+                if steps > 0:
+                    self.zoom = (self.zoom * 1.1).min(4.0)
+                else:
+                    self.zoom = (self.zoom / 1.1).max(0.25)
+            case gui.event.key_down(key):
+                if key == "space":
+                    self.spinning = not self.spinning
+                elif key == "tab":
+                    self.change(following(self.form))
+                elif key == "1":
+                    self.change(shape.torus)
+                elif key == "2":
+                    self.change(shape.ripple)
+                elif key == "3":
+                    self.change(shape.trefoil)
+                elif key == "4":
+                    self.change(shape.cinquefoil)
+            case _:
+                ret
+
+    fn draw(self, c: gui.canvas) -> gui.canvas:
+        c = self.backdrop
+        wobble = 0.25 * math.sin(0.8 * self.clock)
+        c = render(c, self.model, self.yaw, self.pitch + wobble, self.zoom)
+        fps = math.floor(1.0 / self.frame.max(0.001) + 0.5)
+        c.text_scaled(16, 16, "{title(self.form)}  {self.model.faces.len()} triangles  {fps} fps", gui.rgb(241, 194, 50), 2)
+        c.text(16, c.height - 24, "drag to turn   scroll to zoom   1-4 or tab: shape   space: pause", gui.rgb(150, 150, 180))
+        ret c
+
+// Prints `c` as text, one character per pixel across and per two pixels down, by brightness.
+fn print_picture(c: gui.canvas):
+    ramp = " .:-=+*#%@"
+    sum = 0
+    for i in range(c.pixels.len()):
+        sum = (sum * 31 + c.pixels[i]) % 1000000007
+    for row in range(c.height / 2):
+        line = ""
+        end = 0
+        for x in range(c.width):
+            color = c.pixels[2 * row * c.width + x]
+            light = (color / 65536 * 299 + color / 256 % 256 * 587 + color % 256 * 114) / 1000
+            line += ramp[light * 10 / 256]
+            if light >= 26:
+                end = x + 1
+        print(line[:end])
+    print("checksum {sum}")
+
+if "--snapshot" in args():
+    for s in [shape.torus, shape.ripple, shape.trefoil, shape.cinquefoil]:
+        m = build(s, 1)
+        print("{title(s)}: {m.points.len()} points, {m.faces.len()} triangles")
+        print_picture(render(sky(80, 48), m, 0.6, 0.5, 1.0))
+else:
+    ended = gui.run("stone: spin", 800, 600, start(800, 600))
+    if ended.is_err():
+        eprint("spin: {ended.unwrap_err()}")

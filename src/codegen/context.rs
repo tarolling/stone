@@ -401,7 +401,8 @@ impl OpenFlags {
     /// and for `O_DIRECTORY` even between Linux's architectures.
     pub fn of(target: Target) -> OpenFlags {
         let (wronly, creat, trunc, append, cloexec) = match target.os {
-            Os::Linux => (1, 0o100, 0o1000, 0o2000, 0o2000000),
+            // Windows' shims read Linux's flags
+            Os::Linux | Os::Windows => (1, 0o100, 0o1000, 0o2000, 0o2000000),
             Os::MacOs => (1, 0x200, 0x400, 0x8, 0x1000000),
         };
         let directory = match target.arch {

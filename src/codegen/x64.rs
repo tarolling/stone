@@ -12,6 +12,8 @@ pub mod fs;
 pub mod net;
 pub mod process;
 pub mod sort;
+pub mod system;
+pub mod windows;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
@@ -20,7 +22,8 @@ use crate::codegen::context::{
     immortal_string, variant_statics,
 };
 use crate::codegen::x64::builtins::print;
-use crate::codegen::{AssemblyGenerator, Target};
+use crate::codegen::x64::system::{Sys, system_call};
+use crate::codegen::{AssemblyGenerator, Os, Target};
 use crate::project::SourceMap;
 use crate::span::Span;
 use crate::stdlib::CUT_CHARACTER;
@@ -41,6 +44,8 @@ pub struct X64Generator {
     output: String,
     /// What the backends share about the program being compiled.
     ctx: Context,
+    /// The system the program runs on, which decides how the runtime calls it.
+    os: Os,
     /// The span of the instruction being emitted, which its runtime errors point at.
     span: Span,
 }
@@ -84,7 +89,14 @@ impl AssemblyGenerator for X64Generator {
             self.emit_function(&function)?;
         }
 
-        builtins::start_runtime(self);
+        match self.os {
+            Os::Windows => {
+                let args = self.ctx.uses(&["stone.args"]);
+                let env = self.ctx.needs_env();
+                windows::start_runtime(self, args, env)
+            }
+            _ => builtins::start_runtime(self),
+        }
         self.emit_io_runtime();
         self.emit_failures();
         self.emit_list_runtime()?;
@@ -122,6 +134,11 @@ impl AssemblyGenerator for X64Generator {
         if self.ctx.needs_env() {
             builtins::env_runtime(self);
         }
+        if self.os == Os::Windows {
+            self.emit("\t.text");
+            let text = self.output.clone();
+            windows::windows_shims(self, &text);
+        }
 
         self.emit_string_literals();
         self.emit_globals();
@@ -130,8 +147,10 @@ impl AssemblyGenerator for X64Generator {
         ctx.emit_constants(self);
         self.ctx = ctx;
 
-        // suppress the linker's executable stack warning
-        self.emit("\t.section\t.note.GNU-stack,\"\",@progbits");
+        if self.os == Os::Linux {
+            // suppress the linker's executable stack warning
+            self.emit("\t.section\t.note.GNU-stack,\"\",@progbits");
+        }
 
         Ok(())
     }
@@ -142,7 +161,12 @@ impl AssemblyGenerator for X64Generator {
     }
 
     fn target(&self) -> Target {
-        Target::X64_LINUX
+        let arch = crate::codegen::Architecture::X64;
+        Target {
+            arch,
+            os: self.os,
+            level: arch.baseline(),
+        }
     }
 
     fn set_sources(&mut self, sources: SourceMap) {
@@ -155,8 +179,17 @@ impl AssemblyGenerator for X64Generator {
 }
 
 impl X64Generator {
+    /// Returns a generator for x86-64 Linux.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Returns a generator for x86-64 running `os`, Linux or Windows.
+    pub fn for_os(os: Os) -> Self {
+        Self {
+            os,
+            ..Self::default()
+        }
     }
 
     /// Emits the code behind every [`Context::fail_label`] and [`Context::fail_at`], plus
@@ -266,9 +299,8 @@ impl X64Generator {
         self.emit("\tmov\trsi, r13");
         self.write_stderr();
         self.emit(&format!("{done}:"));
-        self.emit("\tmov\trax, 231"); // sys_exit_group
         self.emit("\tmov\trdi, 1");
-        self.emit("\tsyscall");
+        system_call(self, Sys::Exit);
 
         if !pieces.is_empty() {
             self.emit("\t.section\t.rodata");
@@ -304,9 +336,8 @@ impl X64Generator {
         self.emit("\tinc\trdx");
         self.emit(&format!("\tjmp\t{length}"));
         self.emit(&format!("{write}:"));
-        self.emit("\tmov\trax, 1"); // sys_write
         self.emit("\tmov\trdi, 2"); // stderr
-        self.emit("\tsyscall");
+        system_call(self, Sys::Write);
     }
 
     /// Writes the int in `rax` to stderr in decimal, as `print` writes it, into the 32 bytes at

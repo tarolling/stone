@@ -32,6 +32,12 @@
 //! as `qemu-aarch64`) on `PATH`, so the pass is skipped with a note when it is missing. Compiled
 //! programs are static and need no libc, so qemu needs nothing else.
 //!
+//! Every program is also built for x86-64 Windows with `--target x86_64-windows` and, where a
+//! Windows program can run, run as one: natively on Windows, through WSL's interop on Linux
+//! under WSL, or under wine when it is on `PATH`. Elsewhere the pass only links each program.
+//! A program that uses what Windows programs cannot yet (`net`, `gui`, and `os.run`) fails to
+//! build with an error saying so, and is skipped there.
+//!
 //! A program can opt out of a backend by being listed in [`SKIPS`] along with the reason.
 
 use std::fmt::Write as _;
@@ -55,6 +61,8 @@ enum Backend {
     Build,
     /// `stone build --target` for an architecture other than the host's, run under qemu-user.
     Cross(Architecture),
+    /// `stone build --target x86_64-windows`, run by the [`WindowsRunner`].
+    Windows(WindowsRunner),
 }
 
 impl Backend {
@@ -64,9 +72,78 @@ impl Backend {
             Backend::Build => "build",
             Backend::Cross(Architecture::X64) => "build-x86_64",
             Backend::Cross(Architecture::Arm64) => "build-aarch64",
+            Backend::Windows(_) => "build-x86_64-windows",
         }
     }
 }
+
+/// How the tests run a Windows program on a machine that is not Windows.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum WindowsRunner {
+    /// Directly, as Linux under WSL runs Windows programs, passing the environment variables a
+    /// program needs through `WSLENV`.
+    Wsl,
+    /// Under wine.
+    Wine,
+}
+
+impl WindowsRunner {
+    /// Returns the way this machine runs Windows programs, if it has one.
+    fn find() -> Option<WindowsRunner> {
+        let binfmt = Path::new("/proc/sys/fs/binfmt_misc");
+        if ["WSLInterop", "WSLInterop-late"]
+            .iter()
+            .any(|name| binfmt.join(name).exists())
+        {
+            Some(WindowsRunner::Wsl)
+        } else if runs("wine") {
+            Some(WindowsRunner::Wine)
+        } else {
+            None
+        }
+    }
+}
+
+impl WindowsRunner {
+    /// Returns why a program cannot run as the runner runs it, if it cannot.
+    fn skip_reason(self, program: &Path) -> Option<&'static str> {
+        match (self, name_of(program)) {
+            (WindowsRunner::Wsl, "os_env") => {
+                Some("WSL hands a Windows program no variable whose value is empty")
+            }
+            _ => None,
+        }
+    }
+
+    /// Returns the directory the runner's programs work in. WSL's share of Linux files to
+    /// Windows refuses to open a file now and then while it is busy with the last close, so
+    /// under WSL they work on Windows' own disk, in its temporary directory.
+    fn work_root(self) -> PathBuf {
+        let target = || Path::new(env!("CARGO_TARGET_TMPDIR")).to_path_buf();
+        if self != WindowsRunner::Wsl {
+            return target();
+        }
+        let temp = Command::new("cmd.exe")
+            .args(["/c", "echo %TEMP%"])
+            .current_dir("/")
+            .output()
+            .ok()
+            .map(|output| String::from_utf8_lossy(&output.stdout).trim().to_string());
+        let unix = temp.and_then(|temp| {
+            let output = Command::new("wslpath").arg("-u").arg(temp).output().ok()?;
+            Some(PathBuf::from(
+                String::from_utf8_lossy(&output.stdout).trim(),
+            ))
+        });
+        match unix {
+            Some(path) if path.is_dir() => path.join("stone-tests"),
+            _ => target(),
+        }
+    }
+}
+
+/// What the error of a program that Windows programs cannot run yet says, which skips it there.
+const UNSUPPORTED: &str = "is not supported on Windows yet";
 
 /// Returns the qemu-user emulator for `arch`.
 ///
@@ -98,6 +175,10 @@ fn programs() -> Vec<PathBuf> {
             let path = entry.unwrap().path();
             if path.extension().is_some_and(|ext| ext == "files") {
                 // a program's fixtures, not a program
+                continue;
+            }
+            if path.join(stone::driver::MARKER).is_file() {
+                // what `stone build` wrote, such as `examples/build`
                 continue;
             }
             if path.is_dir() {
@@ -191,7 +272,11 @@ fn copy_dir(from: &Path, to: &Path) {
 /// For example, `tests/programs/fs_fixture.stn` runs under `stone run` in
 /// `<target tmpdir>/run/fs_fixture.cwd/`, which starts as a copy of `fs_fixture.files/`.
 fn working_dir(program: &Path, backend: Backend) -> PathBuf {
-    let dir = Path::new(env!("CARGO_TARGET_TMPDIR"))
+    let root = match backend {
+        Backend::Windows(runner) => runner.work_root(),
+        _ => Path::new(env!("CARGO_TARGET_TMPDIR")).to_path_buf(),
+    };
+    let dir = root
         .join(backend.name())
         .join(format!("{}.cwd", name_of(program)));
     let _ = std::fs::remove_dir_all(&dir);
@@ -230,14 +315,25 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 .current_dir(&cwd),
             &input,
         ),
-        Backend::Build | Backend::Cross(_) => {
+        Backend::Build | Backend::Cross(_) | Backend::Windows(_) => {
+            let suffix = match backend {
+                Backend::Windows(_) => ".exe",
+                Backend::Build => std::env::consts::EXE_SUFFIX,
+                _ => "",
+            };
             let exe = Path::new(env!("CARGO_TARGET_TMPDIR"))
                 .join(backend.name())
-                .join(name_of(program));
+                .join(format!("{}{suffix}", name_of(program)));
             let mut build = Command::new(stone);
             build.arg("build").arg(program).arg("-o").arg(&exe);
-            if let Backend::Cross(arch) = backend {
-                build.arg("--target").arg(arch.to_string());
+            match backend {
+                Backend::Cross(arch) => {
+                    build.arg("--target").arg(arch.to_string());
+                }
+                Backend::Windows(_) => {
+                    build.arg("--target").arg("x86_64-windows");
+                }
+                _ => {}
             }
             let build = outcome_of(&mut build, &[])?;
             if let Some(stderr) = build.error {
@@ -247,6 +343,26 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 Backend::Cross(arch) => {
                     let mut command = Command::new(emulator(arch));
                     command.arg(&exe);
+                    command
+                }
+                Backend::Windows(WindowsRunner::Wine) => {
+                    let mut command = Command::new("wine");
+                    command.arg(&exe).env("WINEDEBUG", "-all");
+                    command
+                }
+                Backend::Windows(WindowsRunner::Wsl) => {
+                    // WSL hands a Windows program only the variables WSLENV names
+                    let mut names: Vec<&str> = env.iter().map(|(name, _)| name.as_str()).collect();
+                    names.push("STONE_LEAK_CHECK");
+                    let mut shared = std::env::var("WSLENV").unwrap_or_default();
+                    for name in names {
+                        if !shared.is_empty() {
+                            shared.push(':');
+                        }
+                        shared.push_str(name);
+                    }
+                    let mut command = Command::new(&exe);
+                    command.env("WSLENV", shared);
                     command
                 }
                 _ => Command::new(&exe),
@@ -268,7 +384,11 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
 fn check_all(backend: Backend) {
     let mut failures = String::new();
     for program in programs() {
-        if let Some(reason) = skip_reason(&program, backend) {
+        let runner_skip = match backend {
+            Backend::Windows(runner) => runner.skip_reason(&program),
+            _ => None,
+        };
+        if let Some(reason) = skip_reason(&program, backend).or(runner_skip) {
             eprintln!(
                 "skipped {} ({}): {reason}",
                 program.display(),
@@ -287,6 +407,14 @@ fn check_all(backend: Backend) {
         let expected_stderr = std::fs::read_to_string(program.with_extension("stderr")).ok();
 
         let problem = match execute(&program, backend) {
+            Err(e) if e.contains(UNSUPPORTED) && windows(backend) => {
+                eprintln!(
+                    "skipped {} ({}): Windows programs cannot run it yet",
+                    program.display(),
+                    backend.name()
+                );
+                continue;
+            }
             Err(e) => Some(e),
             Ok(outcome) if outcome.stdout != expected => Some(format!(
                 "expected:\n{expected:?}\nactual:\n{:?}",
@@ -329,6 +457,11 @@ fn check_all(backend: Backend) {
     );
 }
 
+/// Returns whether the backend runs programs on Windows.
+fn windows(backend: Backend) -> bool {
+    matches!(backend, Backend::Windows(_)) || cfg!(windows)
+}
+
 #[test]
 fn interpreter_matches_expected() {
     check_all(Backend::Run);
@@ -357,6 +490,38 @@ fn cross_compiler_matches_expected() {
         return;
     }
     check_all(Backend::Cross(arch));
+}
+
+/// Builds every program for x86-64 Windows and runs it as a Windows program where one can run
+/// (see [`WindowsRunner`]), or else only links it, so a change that breaks the PE linker or the
+/// Windows runtime fails everywhere. Windows itself runs every program in
+/// [`compiler_matches_expected`] instead.
+#[test]
+fn windows_compiler_matches_expected() {
+    if cfg!(windows) {
+        return;
+    }
+    if let Some(runner) = WindowsRunner::find() {
+        return check_all(Backend::Windows(runner));
+    }
+    eprintln!("only linking programs built for Windows: no way to run them was found");
+    let dir = Path::new(env!("CARGO_TARGET_TMPDIR")).join("link-x86_64-windows");
+    let mut failures = String::new();
+    for program in programs() {
+        let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+            .arg("build")
+            .arg(&program)
+            .arg("-o")
+            .arg(dir.join(format!("{}.exe", name_of(&program))))
+            .args(["--target", "x86_64-windows"])
+            .output()
+            .expect("stone should run");
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        if !output.status.success() && !stderr.contains(UNSUPPORTED) {
+            failures.push_str(&format!("--- {}\n{stderr}\n", program.display()));
+        }
+    }
+    assert!(failures.is_empty(), "Windows builds failed:\n{failures}");
 }
 
 /// Builds every program for arm64 macOS on a machine that cannot run the result, so a change

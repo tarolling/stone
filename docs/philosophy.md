@@ -312,8 +312,21 @@ and `recvmsg` and `pread` for a descriptor the server sends, which the interpret
 the C library and compiled code makes as system calls. A socket's timeout is a `poll` before each read, send, or accept, in both
 backends, so a wait runs out at the same point under `stone run` and in a built program. `stone build` writes either executable itself, with its own assembler and linkers,
 including the Mach-O file's imports and its code signature, so it needs no assembler, linker,
-or C compiler installed, and builds for every target from any machine. Windows is not supported
-yet.
+or C compiler installed, and builds for every target from any machine.
+
+On x86-64 Windows, a built program is a console executable that imports only from
+`kernel32.dll` (plus `BCryptGenRandom` from `bcrypt.dll`, to seed `random`), which
+`stone build` links itself as it does Mach-O files. The runtime is the Linux one: every system
+call it makes goes through a shim that keeps the call's Linux contract, Linux error numbers
+included, by calling the `kernel32.dll` function that does the same (`ReadFile` and `WriteFile`,
+`VirtualAlloc`, `CreateFileW`, `FindFirstFileW`, and so on), converting paths and names between
+UTF-8 and UTF-16, and writing text to a console with `WriteConsoleW` so that it is never
+garbled by a code page. Windows error codes become the Linux numbers that mean the same, so a
+file error is worded the same on every system, and the interpreter running on Windows maps them
+the same way. `_start` splits the command line into arguments by the rules Rust's standard
+library follows, and the environment's names are found without regard to case, as Windows
+finds them. The `net` and `gui` modules and `os.run` are not supported on Windows yet: the
+checker reports their use when building for Windows, or when running on it.
 
 ## Two backends, one behavior
 

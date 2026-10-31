@@ -32,9 +32,13 @@ the same processor. A macOS executable calls the system only through `libSystem`
 Mac has, and is signed, as macOS requires, so it runs on any Apple silicon Mac with macOS 12 or
 later. Either has a symbol table, so tools such as `gdb`, `lldb`, `perf`, and `objdump` show
 its functions by name, such as `fn.area` for a stone function `area` and `main` for the
-top-level code.
+top-level code. A Windows executable is a console program that imports only from the system's
+own `kernel32.dll` and `bcrypt.dll`, so it runs on any x86-64 Windows 10 or 11 machine; the
+`net` and `gui` modules and `os.run` are not supported there yet, and building a program that
+uses them for Windows is an error.
 
-The executable is for the machine stone runs on: x86-64 or arm64 Linux, or arm64 macOS.
+The executable is for the machine stone runs on: x86-64 or arm64 Linux, arm64 macOS, or x86-64
+Windows.
 `--target` picks one explicitly, and works the same from any machine. Give it more than once to
 build for several targets in one run:
 
@@ -43,10 +47,12 @@ build for several targets in one run:
 | `x86_64-linux` (or `x86_64`, `x64`) | x86-64 Linux |
 | `aarch64-linux` (or `aarch64`, `arm64`) | arm64 Linux |
 | `aarch64-macos` (or `arm64-macos`) | arm64 macOS |
+| `x86_64-windows` (or `x64-windows`) | x86-64 Windows |
 
 A target is named `<arch>[<level>]-<system>`. There is no vendor or C library part, since
 compiled programs use no C library, but Rust's names for the same machines work too, such as
-`x86_64-unknown-linux-musl` and `aarch64-apple-darwin`. A system left out means Linux.
+`x86_64-unknown-linux-musl`, `aarch64-apple-darwin`, and `x86_64-pc-windows-msvc`. A system
+left out means Linux.
 
 The optional level names the processor features the program may assume: `v1` to `v4` for
 x86-64 (the x86-64 psABI levels, so `x86_64v3-linux` assumes AVX2), and `v8`, `v8.1` to `v8.9`,
@@ -61,8 +67,8 @@ stone build examples/basics.stn --target aarch64-linux --target aarch64-macos
 ```
 
 The release archives use the same names for the machines the `stone` binary itself runs on,
-such as `stone-x86_64-linux.tar.gz`, plus `stone-x86_64-macos.tar.gz` for Intel Macs, where stone
-runs programs but cannot build them.
+such as `stone-x86_64-linux.tar.gz` and `stone-x86_64-windows.zip`, plus
+`stone-x86_64-macos.tar.gz` for Intel Macs, where stone runs programs but cannot build them.
 
 The executable reads its own arguments and standard input the same way, so `./build/sum 1 2 3`
 behaves like `stone run sum.stn 1 2 3`.
@@ -84,16 +90,17 @@ examples/
       basics.s
 ```
 
-- An executable is named after its entry file, so `basics.stn` becomes `basics`. A `main.stn` is
-  named after its directory instead, as a program of several files usually is, so
-  `geometry/main.stn` becomes `geometry/build/geometry`.
+- An executable is named after its entry file, so `basics.stn` becomes `basics` (`basics.exe`
+  for Windows). A `main.stn` is named after its directory instead, as a program of several files
+  usually is, so `geometry/main.stn` becomes `geometry/build/geometry`.
 - An executable for the machine stone runs on goes straight into `build/`, and one for any
   other target into `build/TARGET/`, named as `--target` names it (`aarch64-macos`,
   `x86_64v3-linux`). Builds for different targets never overwrite each other.
 - Several files, as in `stone build a.stn b.stn`, each build into their own executable. If one
   has errors, stone prints them, still builds the rest, and exits with status 1.
-- `-o OUTPUT` writes the executable to exactly `OUTPUT` instead, with the assembly at
-  `OUTPUT.s`, so it needs exactly one file and one target.
+- `-o OUTPUT` writes the executable to exactly `OUTPUT` instead, with the assembly beside it
+  with a `.s` extension, so it needs exactly one file and one target. A Windows executable is
+  written to `OUTPUT` as given, so name it `something.exe` to run it by name there.
 
 stone marks each build directory it makes with a `.stone` file, which `stone clean` looks for.
 
@@ -198,8 +205,8 @@ session continues either way. Defining a function again replaces the earlier def
 `use` reads modules relative to the current directory, and `input()` reads the line after the
 entry.
 
-Ctrl+D ends the session. stone does no line editing of its own, so run `rlwrap stone` for
-arrow keys and history. When standard input is not a terminal, stone prints no banner or
+Ctrl+D ends the session (Ctrl+Z then Enter on Windows). stone does no line editing of its own,
+so run `rlwrap stone` for arrow keys and history. When standard input is not a terminal, stone prints no banner or
 prompts, so `printf 'x = 6\nx * 7\n' | stone` prints just `42`.
 
 ## `stone update [--check] [--version TAG]`
@@ -214,7 +221,9 @@ explains how to upgrade instead, unless it was built with `--features self-updat
 Deletes the running `stone` binary. It asks `remove PATH? [y/N]` first, and `--yes` (or `-y`)
 skips the question. Without a terminal on standard input it needs `--yes`. A binary in
 `$CARGO_HOME/bin` (by default `~/.cargo/bin`) was put there by `cargo install`, so stone leaves
-it and tells you to run `cargo uninstall stone`.
+it and tells you to run `cargo uninstall stone`. Windows cannot delete a program while it runs,
+so there stone renames itself to `stone.exe.old` at once, and a hidden `cmd` deletes that file
+once stone has exited.
 
 ## Other options
 

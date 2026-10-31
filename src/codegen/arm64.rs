@@ -187,7 +187,9 @@ impl Arm64Generator {
         Self::default()
     }
 
-    /// Returns a generator for AArch64 running `os`.
+    /// Returns a generator for AArch64 running `os`. stone writes no arm64 Windows programs
+    /// ([`ARM64_WINDOWS`](crate::codegen::ARM64_WINDOWS)), so the runtime treats every system
+    /// but Linux as macOS.
     pub fn for_os(os: Os) -> Self {
         Self {
             os,

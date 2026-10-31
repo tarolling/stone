@@ -5,4 +5,12 @@
 *.out -text
 *.err -text
 *.args -text
+*.env -text
+*.stderr -text
 **/*.files/** -text
+
+# a Windows checkout keeps \n in sources too, which the formatter and the docs tests compare
+*.stn text eol=lf
+*.rs text eol=lf
+*.md text eol=lf
+*.sh text eol=lf

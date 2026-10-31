@@ -21,6 +21,7 @@ print(fs.read("out/a.txt/inner"))
 print(fs.make_dir("missing/inner"))
 print(fs.write("missing/inner.txt", "x"))
 print(fs.read(""))
+print(fs.list_dir(""), fs.make_dir(""), fs.remove(""), fs.exists(""))
 
 // the current directory lists too
 names = fs.list_dir(".").unwrap()

@@ -16,9 +16,15 @@ curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | s
 
 this downloads a prebuilt `stone` for linux or macos (x86-64 or arm64) into `~/.local/bin`. pick another directory or release with `sh -s -- --dir /usr/local/bin --version v0.2.0`, or set `STONE_INSTALL_DIR` and `STONE_VERSION`.
 
+on x86-64 windows, in powershell:
+
+```powershell
+irm https://raw.githubusercontent.com/tarolling/stone/main/install.ps1 | iex
+```
+
 to upgrade later, run `stone update` (or `stone update --check` to see if there is a new release). to remove it, run `stone uninstall`.
 
-`stone run` and `stone check` work everywhere. `stone build` writes executables itself, with no assembler, linker, or C compiler installed: static x86-64 or arm64 linux programs, or arm64 macos programs that need only the system's `libSystem`. it builds for the machine it runs on, and `--target` (`x86_64-linux`, `aarch64-linux`, or `aarch64-macos`) builds for any of them from any machine.
+`stone run` and `stone check` work everywhere. `stone build` writes executables itself, with no assembler, linker, or C compiler installed: static x86-64 or arm64 linux programs, arm64 macos programs that need only the system's `libSystem`, or x86-64 windows programs that need only `kernel32.dll` (without the `net` and `gui` modules or `os.run` for now). it builds for the machine it runs on, and `--target` (`x86_64-linux`, `aarch64-linux`, `aarch64-macos`, or `x86_64-windows`) builds for any of them from any machine.
 
 to build from source instead, with rust installed:
 

@@ -70,7 +70,7 @@ impl Constants {
                 nonblock: 0x800,
                 so_error: 4,
             },
-            Os::MacOs => Constants {
+            Os::MacOs | Os::Windows => Constants {
                 inet6: 30,
                 cloexec: 0,
                 sol_socket: 0xffff,
@@ -265,7 +265,7 @@ fn socket_address(r#gen: &mut dyn AssemblyGenerator, label: &str) {
     match os {
         Os::Linux => r#gen.emit("\tstrb\tw22, [sp]"),
         // the length comes first, then the family
-        Os::MacOs => {
+        Os::MacOs | Os::Windows => {
             r#gen.emit("\tstrb\tw23, [sp]");
             r#gen.emit("\tstrb\tw22, [sp, #1]");
         }
@@ -433,7 +433,7 @@ fn connect_unix(r#gen: &mut dyn AssemblyGenerator) {
     let os = r#gen.target().os;
     let longest = match os {
         Os::Linux => 107,
-        Os::MacOs => 103,
+        Os::MacOs | Os::Windows => 103,
     };
     // x19 holds the name, x20 the path and then the descriptor, x21 the path's length, x22 the
     // family, x23 the address's length, and the `sockaddr_un` is at [sp]
@@ -452,7 +452,7 @@ fn connect_unix(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tadd\tx23, x21, #3");
     match os {
         Os::Linux => r#gen.emit("\tstrb\tw22, [sp]"),
-        Os::MacOs => {
+        Os::MacOs | Os::Windows => {
             r#gen.emit("\tstrb\tw23, [sp]");
             r#gen.emit("\tstrb\tw22, [sp, #1]");
         }
@@ -535,7 +535,7 @@ fn ready(r#gen: &mut dyn AssemblyGenerator) {
             r#gen.emit("\tmov\tx3, #0");
             r#gen.emit("\tmov\tx4, #0");
         }
-        Os::MacOs => r#gen.emit("\tmov\tx2, x20"),
+        Os::MacOs | Os::Windows => r#gen.emit("\tmov\tx2, x20"),
     }
     system_call(r#gen, Sys::Ppoll);
     r#gen.emit(&format!("\tcmn\tx0, #{EINTR}"));
@@ -989,7 +989,7 @@ fn receive(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcbnz\tx0, .Lnet_receive_done");
     match r#gen.target().os {
         Os::Linux => receive_message(r#gen),
-        Os::MacOs => {
+        Os::MacOs | Os::Windows => {
             let size = format!("mov\tx2, #{READ_SIZE}");
             retried(
                 r#gen,
@@ -1230,7 +1230,7 @@ fn wait(r#gen: &mut dyn AssemblyGenerator) {
             r#gen.emit("\tmov\tx3, #0");
             r#gen.emit("\tmov\tx4, #0");
         }
-        Os::MacOs => {
+        Os::MacOs | Os::Windows => {
             load(r#gen, "x9", 999_999);
             r#gen.emit("\tadd\tx10, x10, x9");
             load(r#gen, "x9", 1_000_000);
@@ -1599,7 +1599,7 @@ fn exchange(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx22, x0");
     r#gen.emit(match os {
         Os::Linux => "\tldrb\tw0, [sp]",
-        Os::MacOs => "\tldrb\tw0, [sp, #1]",
+        Os::MacOs | Os::Windows => "\tldrb\tw0, [sp, #1]",
     });
     load(r#gen, "x1", 2 | constants.cloexec); // SOCK_DGRAM
     r#gen.emit("\tmov\tx2, #0");
@@ -1658,7 +1658,7 @@ fn exchange(r#gen: &mut dyn AssemblyGenerator) {
             r#gen.emit("\tmov\tx4, #0");
         }
         // the milliseconds left, rounded up
-        Os::MacOs => {
+        Os::MacOs | Os::Windows => {
             load(r#gen, "x9", 999_999);
             r#gen.emit("\tadd\tx10, x10, x9");
             load(r#gen, "x9", 1_000_000);

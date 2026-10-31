@@ -183,7 +183,11 @@ fn main() -> ExitCode {
             // prompts only make sense for a person typing, so piped input runs quietly
             let prompts = std::io::stdin().is_terminal();
             if prompts {
-                eprintln!("stone {}. Press Ctrl+D to exit.", env!("CARGO_PKG_VERSION"));
+                let exit = match cfg!(windows) {
+                    true => "Ctrl+Z then Enter",
+                    false => "Ctrl+D",
+                };
+                eprintln!("stone {}. Press {exit} to exit.", env!("CARGO_PKG_VERSION"));
             }
             match driver::repl(
                 &mut std::io::BufReader::new(std::io::stdin()),
@@ -202,7 +206,14 @@ fn main() -> ExitCode {
                 },
             }
         }
-        ExecutionMode::Run { file, args } => with_program(&file, |checked, _| {
+        ExecutionMode::Run { file, args } => with_program(&file, |checked, sources| {
+            // the interpreter runs only what the machine it runs on can
+            if let Ok(host) = Target::host() {
+                let unsupported = driver::unsupported(&checked.module, sources, host.os);
+                if !unsupported.is_empty() {
+                    return Err(Box::new(Diagnostics(unsupported)));
+                }
+            }
             driver::run_module(
                 &checked.module,
                 &checked.calls,

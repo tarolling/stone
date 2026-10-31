@@ -1078,7 +1078,7 @@ fn clean_removes_the_build_directory() {
     assert!(output.status.success(), "{output:?}");
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
-        format!("Removed {}\n", Path::new("app/build").display())
+        format!("Removed {}\n", Path::new("app").join("build").display())
     );
     assert!(!dir.join("app/build").exists());
 

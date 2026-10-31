@@ -27,7 +27,13 @@ fn every_stone_file_is_formatted() {
     let mut count = 0;
     for dir in DIRECTORIES {
         for file in stone_files(&root.join(dir)).unwrap() {
-            let name = file.strip_prefix(root).unwrap().display().to_string();
+            // windows writes its own separator
+            let name = file
+                .strip_prefix(root)
+                .unwrap()
+                .display()
+                .to_string()
+                .replace('\\', "/");
             if UNFORMATTED.contains(&name.as_str()) {
                 continue;
             }

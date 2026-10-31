@@ -406,8 +406,17 @@ fn check_all(backend: Backend) {
             .map(|e| e.trim().to_string());
         let expected_stderr = std::fs::read_to_string(program.with_extension("stderr")).ok();
 
-        let problem = match execute(&program, backend) {
-            Err(e) if e.contains(UNSUPPORTED) && windows(backend) => {
+        let outcome = execute(&program, backend);
+        // a build that refuses stops with Err, and stone run on Windows exits with the error
+        let refused = match &outcome {
+            Err(e) => e.contains(UNSUPPORTED),
+            Ok(outcome) => outcome
+                .error
+                .as_ref()
+                .is_some_and(|e| e.contains(UNSUPPORTED)),
+        };
+        let problem = match outcome {
+            _ if refused && windows(backend) => {
                 eprintln!(
                     "skipped {} ({}): Windows programs cannot run it yet",
                     program.display(),

@@ -111,9 +111,9 @@ fn installed_by_cargo(exe: &Path, cargo_home: Option<&Path>) -> bool {
     let Some(home) = cargo_home else {
         return false;
     };
-    // the cargo home may be reached through a symlink, like the canonical `exe`
+    // the cargo home may be reached through a symlink, like the canonical, plain `exe`
     let bin = home.join("bin");
-    let bin = bin.canonicalize().unwrap_or(bin);
+    let bin = bin.canonicalize().map(plain).unwrap_or(bin);
     exe.parent() == Some(bin.as_path())
 }
 
@@ -148,6 +148,19 @@ mod tests {
             Path::new("/nonexistent/ada/.cargo/bin/stone"),
             None
         ));
+    }
+
+    #[test]
+    fn installed_by_cargo_matches_a_canonical_binary_in_cargo_bin() {
+        let home = std::env::temp_dir().join(format!("stone-uninstall-{}", std::process::id()));
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let file = bin.join("stone");
+        std::fs::write(&file, "").unwrap();
+        // run gives the binary's path canonical and plain
+        let exe = plain(file.canonicalize().unwrap());
+        assert!(installed_by_cargo(&exe, Some(&home)));
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[test]

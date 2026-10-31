@@ -406,7 +406,7 @@ fn errors_in_an_imported_file_name_that_file() {
     );
     let expected = format!(
         "{}:2:12: error: expected an expression, found end of line\n  |\n2 |     ret 0 +\n  |            ^\n",
-        dir.join("geometry/vec.stn").display()
+        dir.join("geometry").join("vec.stn").display()
     );
     for command in ["check", "run", "build"] {
         let output = Command::new(env!("CARGO_BIN_EXE_stone"))
@@ -1068,7 +1068,10 @@ fn build_rejects_output_with_several_files_or_targets() {
 fn clean_removes_the_build_directory() {
     let dir = project("clean_project", &[("app/main.stn", "print(1)\n")]);
     assert!(stone_in(&dir, &["build", "app/main.stn"]).status.success());
-    assert!(dir.join("app/build/app").is_file());
+    assert!(
+        dir.join(format!("app/build/app{}", std::env::consts::EXE_SUFFIX))
+            .is_file()
+    );
 
     // a file names its program's directory
     let output = stone_in(&dir, &["clean", "app/main.stn"]);

@@ -24,10 +24,12 @@ $env:STONE_NO_MODIFY_PATH = '1'
 function Invoke-Install([string[]]$Arguments, [string]$ErrorFile) {
     $shell = (Get-Process -Id $PID).Path
     $command = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$root\install.ps1") + $Arguments
+    # the child's output goes to the host, since anything left in the output stream would join
+    # the returned value and make a failure look like success
     if ($ErrorFile) {
-        & $shell @command 2> $ErrorFile
+        & $shell @command 2> $ErrorFile | Out-Host
     } else {
-        & $shell @command
+        & $shell @command | Out-Host
     }
     return $LASTEXITCODE -eq 0
 }

@@ -922,7 +922,10 @@ ret y
         let host = Target::host().unwrap();
         assert_eq!(
             output_path(Path::new("examples/basics.stn"), host),
-            Path::new("examples/build/basics")
+            Path::new(&format!(
+                "examples/build/basics{}",
+                std::env::consts::EXE_SUFFIX
+            ))
         );
         let other = if host == Target::ARM64_MACOS {
             Target::X64_LINUX
@@ -960,7 +963,14 @@ ret y
         let names = |files: Vec<PathBuf>| -> Vec<String> {
             files
                 .iter()
-                .map(|f| f.strip_prefix(&dir).unwrap().display().to_string())
+                // windows writes its own separator
+                .map(|f| {
+                    f.strip_prefix(&dir)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                        .replace('\\', "/")
+                })
                 .collect()
         };
         // a build directory is skipped only once stone has marked it as its own

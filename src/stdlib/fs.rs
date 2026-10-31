@@ -248,17 +248,25 @@ pub fn windows_errno(code: i64, path: Option<&str>) -> i64 {
 }
 
 /// Returns whether `path`, or a part of it up to a `/` or `\\`, names something that is not a
-/// directory, without following a symbolic link at its end, as `GetFileAttributesW` does not.
+/// directory, following symbolic links before its end as Windows does, but not one at its end,
+/// as `GetFileAttributesW` does not.
 ///
-/// For example, with a file `out/a.txt`, `names_through_a_file("out/a.txt/inner")` is true.
+/// For example, with a file `out/a.txt`, `names_through_a_file("out/a.txt/inner")` is true, and
+/// on macOS, where `/var` links to `/private/var`, `names_through_a_file("/var/tmp/x")` is false.
 fn names_through_a_file(path: &str) -> bool {
     let ends = path
         .char_indices()
         .filter(|&(_, c)| c == '/' || c == '\\')
         .map(|(i, _)| i)
         .chain([path.len()]);
-    ends.filter(|&end| end > 0)
-        .any(|end| std::fs::symlink_metadata(&path[..end]).is_ok_and(|metadata| !metadata.is_dir()))
+    ends.filter(|&end| end > 0).any(|end| {
+        let metadata = if end == path.len() {
+            std::fs::symlink_metadata(path)
+        } else {
+            std::fs::metadata(&path[..end])
+        };
+        metadata.is_ok_and(|metadata| !metadata.is_dir())
+    })
 }
 
 /// Returns whether `path` names a directory, without following a symbolic link at its end.
@@ -491,6 +499,16 @@ mod tests {
         assert_eq!(windows_errno(3, Some(file_path)), 20);
         assert_eq!(windows_errno(3, Some(&format!("{dir_path}/missing/x"))), 2);
         assert_eq!(windows_errno(2, Some("")), 2);
+        // a link to a directory before the end is followed, as macOS's /var is
+        #[cfg(unix)]
+        {
+            let real = dir.join("real");
+            std::fs::create_dir(&real).unwrap();
+            let link = dir.join("link");
+            std::os::unix::fs::symlink(&real, &link).unwrap();
+            let link_path = link.to_str().unwrap();
+            assert_eq!(windows_errno(3, Some(&format!("{link_path}/missing/x"))), 2);
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 

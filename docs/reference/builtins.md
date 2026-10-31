@@ -1070,7 +1070,7 @@ if os.has_env("DEBUG"):
 os.platform() -> str
 ```
 
-Returns the operating system the program runs on, such as `"linux"`.
+Returns the operating system the program runs on: `"linux"`, `"macos"`, or `"windows"`.
 
 ### `os.arch`
 

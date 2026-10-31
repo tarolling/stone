@@ -8,8 +8,11 @@
 //! backends agree.
 
 use super::{BuiltinDoc, fs};
+#[cfg(unix)]
 use std::ffi::{c_char, c_int, c_long};
+#[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
+#[cfg(unix)]
 use std::process::{Child, Command, Stdio};
 
 /// The name a program imports the module by, as in `use os`.
@@ -35,7 +38,8 @@ pub static DOCS: [BuiltinDoc; 10] = [
     BuiltinDoc {
         name: "os.platform",
         signature: "os.platform() -> str",
-        description: "Returns the operating system the program runs on, such as `\"linux\"`.",
+        description: "Returns the operating system the program runs on: `\"linux\"`, `\"macos\"`, or \
+                      `\"windows\"`.",
     },
     BuiltinDoc {
         name: "os.arch",
@@ -107,7 +111,7 @@ pub fn has_env(name: &str) -> bool {
     lookup(name).is_some()
 }
 
-/// Returns the operating system, such as `"linux"` or `"macos"`.
+/// Returns the operating system, such as `"linux"`, `"macos"`, or `"windows"`.
 pub fn platform() -> &'static str {
     std::env::consts::OS
 }
@@ -117,21 +121,30 @@ pub fn arch() -> &'static str {
     std::env::consts::ARCH
 }
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn gethostname(name: *mut c_char, len: usize) -> c_int;
     fn sysconf(name: c_int) -> c_long;
 }
 
+#[cfg(windows)]
+#[link(name = "kernel32")]
+unsafe extern "system" {
+    fn GetComputerNameExW(format: i32, buffer: *mut u16, size: *mut u32) -> i32;
+    fn GetActiveProcessorCount(group: u16) -> u32;
+}
+
 /// `sysconf`'s name for the number of processors that are online.
 #[cfg(target_os = "macos")]
 const SC_NPROCESSORS_ONLN: c_int = 58;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 const SC_NPROCESSORS_ONLN: c_int = 84;
 
 /// The size of the buffer `gethostname` fills, which is larger than any Linux host name.
 pub const HOSTNAME_BUFFER: usize = 256;
 
 /// Returns the machine's host name from libc's `gethostname`, or `""` if it fails.
+#[cfg(unix)]
 pub fn hostname() -> String {
     let mut buffer = [0u8; HOSTNAME_BUFFER];
     // SAFETY: the buffer is writable for its whole length, and the last byte stays 0
@@ -143,10 +156,35 @@ pub fn hostname() -> String {
     String::from_utf8_lossy(&buffer[..len]).into_owned()
 }
 
+/// Returns the machine's DNS host name from `GetComputerNameExW`, as compiled code asks for it,
+/// or `""` if it fails.
+#[cfg(windows)]
+pub fn hostname() -> String {
+    let mut buffer = [0u16; HOSTNAME_BUFFER];
+    let mut size = HOSTNAME_BUFFER as u32;
+    // SAFETY: the buffer holds `size` code units, which the call writes at most; 1 is
+    // ComputerNameDnsHostname
+    let ok = unsafe { GetComputerNameExW(1, buffer.as_mut_ptr(), &mut size) };
+    if ok == 0 {
+        return String::new();
+    }
+    String::from_utf16_lossy(&buffer[..size as usize])
+}
+
 /// Returns the number of online processors from libc's `sysconf`, or 1 if it fails.
+#[cfg(unix)]
 pub fn cpu_count() -> i64 {
     // SAFETY: sysconf only reads its argument
     let count = unsafe { sysconf(SC_NPROCESSORS_ONLN) };
+    (count as i64).max(1)
+}
+
+/// Returns the number of processors in every processor group, from `GetActiveProcessorCount`,
+/// as compiled code counts them, or 1 if it fails.
+#[cfg(windows)]
+pub fn cpu_count() -> i64 {
+    // SAFETY: the call only reads its argument; 0xffff is ALL_PROCESSOR_GROUPS
+    let count = unsafe { GetActiveProcessorCount(0xffff) };
     (count as i64).max(1)
 }
 
@@ -178,8 +216,11 @@ pub const RUN_DISABLED: &str = "running programs is disabled while fuzzing";
 pub const DEFAULT_PATH: &str = "/bin:/usr/bin";
 
 /// The error numbers `os.run` treats specially while it looks for a program.
+#[cfg(unix)]
 const ENOENT: i32 = 2;
+#[cfg(unix)]
 const EACCES: i32 = 13;
+#[cfg(unix)]
 const ENOTDIR: i32 = 20;
 
 /// Returns the paths `os.run` tries, in order, for the command `cmd` when `PATH` is `path`.
@@ -217,6 +258,7 @@ pub fn candidates(cmd: &str, path: Option<&str>) -> Vec<String> {
 /// For example, `run("sh", &["-c".into(), "echo hi; exit 2".into()])` returns
 /// `Ok((2, "hi\n", ""))`, and `run("gti", &[])` returns
 /// `Err("no such file or directory: 'gti'")`.
+#[cfg(unix)]
 pub fn run(cmd: &str, args: &[String]) -> Result<(i64, String, String), String> {
     if cmd.contains('\0') || args.iter().any(|arg| arg.contains('\0')) {
         return Err(fs::message(NULL_IN_COMMAND, cmd));
@@ -255,7 +297,18 @@ pub fn run(cmd: &str, args: &[String]) -> Result<(i64, String, String), String> 
     ))
 }
 
+/// Fails, since `os.run` is not supported on Windows yet, where a program that calls it is an
+/// error before it runs (`driver::unsupported`).
+#[cfg(not(unix))]
+pub fn run(cmd: &str, _: &[String]) -> Result<(i64, String, String), String> {
+    Err(fs::message(
+        "os.run is not supported on this system yet",
+        cmd,
+    ))
+}
+
 /// Waits for the program `child` that `cmd` started and returns its status and output.
+#[cfg(unix)]
 fn finish(cmd: &str, child: Child) -> Result<(i64, String, String), String> {
     let output = child
         .wait_with_output()
@@ -307,6 +360,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_captures_status_and_output() {
         let script = "echo out; echo err >&2; exit 3";
         let ran = run("sh", &["-c".into(), script.into()]).unwrap();
@@ -327,6 +381,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_fails_when_the_program_cannot_start() {
         assert_eq!(
             run("stone-surely-missing-command", &[]),
@@ -351,6 +406,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn run_cannot_start_a_file_that_is_not_executable() {
         let dir = std::env::temp_dir().join(format!("stone-os-run-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -368,6 +424,7 @@ mod tests {
         assert!(!arch().is_empty());
         assert!(cpu_count() >= 1);
         assert!(pid() > 0);
-        assert!(cwd().unwrap().starts_with('/'));
+        let cwd = cwd().unwrap();
+        assert!(std::path::Path::new(&cwd).is_absolute(), "{cwd}");
     }
 }

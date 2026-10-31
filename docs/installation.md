@@ -26,6 +26,23 @@ Make sure the directory is on your `PATH`, then check the install:
 stone --version
 ```
 
+On x86-64 Windows, the PowerShell script downloads the latest release into
+`%LOCALAPPDATA%\Programs\stone\bin`, verifies its checksum, and adds that directory to your
+user `PATH`:
+
+```powershell
+irm https://raw.githubusercontent.com/tarolling/stone/main/install.ps1 | iex
+```
+
+Piped into `iex`, it reads its options from the environment, and saved as a file it also takes
+them as parameters:
+
+| parameter | environment variable | default |
+| --- | --- | --- |
+| `-Dir <path>` | `STONE_INSTALL_DIR` | `%LOCALAPPDATA%\Programs\stone\bin` |
+| `-Version <tag>` | `STONE_VERSION` | the latest release |
+| `-NoModifyPath` | `STONE_NO_MODIFY_PATH` | add the directory to `PATH` |
+
 ## Upgrading
 
 A release binary can replace itself with the newest release:
@@ -51,7 +68,8 @@ stone uninstall --yes
 ```
 
 A `stone` installed with `cargo install` refuses and asks you to run `cargo uninstall stone`
-instead, so cargo's records stay correct.
+instead, so cargo's records stay correct. On Windows, which cannot delete a running program, the
+binary is renamed to `stone.exe.old` at once and deleted as soon as stone exits.
 
 ## From source
 
@@ -66,22 +84,25 @@ cargo install --git https://github.com/tarolling/stone stone
 | command | needs |
 | --- | --- |
 | `stone run`, `stone check`, `stone fmt` | any platform stone builds on |
-| `stone build` | any platform stone builds on; the executables it writes run on x86-64 or arm64 Linux, or arm64 macOS |
+| `stone build` | any platform stone builds on; the executables it writes run on x86-64 or arm64 Linux, arm64 macOS, or x86-64 Windows |
 
 `stone build` assembles and links programs itself, so it needs no assembler, linker, or C
 compiler. Its Linux executables are static programs that need no C library, so they run on any
 Linux machine with the same processor. Its macOS executables call the system only through
 `libSystem`, which every Mac has, and are signed, so they run on any Apple silicon Mac with
-macOS 12 or later. Executables are for the machine stone runs on unless `--target` picks
-another (see [the CLI reference](reference/cli.md)), and none needs anything else installed.
-Executables for Intel Macs are not supported. The interpreter runs the same programs
-everywhere.
+macOS 12 or later. Its Windows executables import only from the system's `kernel32.dll` and
+`bcrypt.dll`, so they run on any x86-64 Windows 10 or 11 machine, though programs that use the
+`net` or `gui` module or `os.run` cannot be built for Windows yet, nor run on it. Executables
+are for the machine stone runs on unless `--target` picks another (see
+[the CLI reference](reference/cli.md)), and none needs anything else installed. Executables for
+Intel Macs are not supported. The interpreter runs the same programs everywhere.
 
 ## Editor support
 
 Install "stone" by tarolling from the VS Code Marketplace, or from Open VSX in editors such as
-VSCodium. On Linux and macOS (x86-64 or arm64) the extension bundles the language server. On
-other platforms, install it yourself and make sure `stone-lsp` is on `PATH`:
+VSCodium. On Linux and macOS (x86-64 or arm64) and x86-64 Windows the extension bundles the
+language server. On other platforms, install it yourself and make sure `stone-lsp` is on
+`PATH`:
 
 ```sh
 cargo install --git https://github.com/tarolling/stone stone-lsp

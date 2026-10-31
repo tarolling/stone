@@ -492,6 +492,33 @@ impl Stmt {
         Stmt { kind, span }
     }
 
+    /// Returns the blocks of statements this statement holds, in source order: a function's or
+    /// loop's body, an `if`'s body and `orelse`, each case's body, and an `impl` or `trait`
+    /// block's functions.
+    ///
+    /// For example, `if x: a() else: b()` gives `[a()]` and `[b()]`, and `x = 1` gives none.
+    pub fn blocks(&self) -> Vec<&[Stmt]> {
+        match &self.kind {
+            StmtKind::FunctionDef { body, .. }
+            | StmtKind::For { body, .. }
+            | StmtKind::While { body, .. } => vec![body],
+            StmtKind::If { body, orelse, .. } => vec![body, orelse],
+            StmtKind::Match { cases, .. } => cases.iter().map(|case| &case.body[..]).collect(),
+            StmtKind::ImplDef { methods, .. } | StmtKind::TraitDef { methods, .. } => {
+                vec![methods]
+            }
+            StmtKind::Return { .. }
+            | StmtKind::Assign { .. }
+            | StmtKind::AugAssign { .. }
+            | StmtKind::Expr { .. }
+            | StmtKind::Use { .. }
+            | StmtKind::EnumDef { .. }
+            | StmtKind::StructDef { .. }
+            | StmtKind::Break
+            | StmtKind::Continue => vec![],
+        }
+    }
+
     /// Returns the expressions of this statement itself, in source order, leaving out those in
     /// the blocks it holds.
     ///

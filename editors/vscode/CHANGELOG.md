@@ -10,6 +10,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-30
+
+### Added
+
+- The extension for x86-64 Windows (`win32-x64`) bundles `stone-lsp.exe`, so it no longer needs
+  the language server on `PATH` there.
+
 ## [0.3.6] - 2026-10-27
 
 ### Added

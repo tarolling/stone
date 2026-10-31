@@ -10,7 +10,26 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-10-30
+
 ### Added
+
+- Windows: `stone build --target x86_64-windows` (or `x86_64-pc-windows-msvc`) writes a console
+  `.exe` for x86-64 Windows, from any machine, linked by stone itself and importing only from
+  the system's `kernel32.dll` and `bcrypt.dll`, so it needs no C runtime or Visual Studio. The
+  runtime works as on Linux, through shims that call `kernel32.dll` and return Linux's error
+  numbers, so `fs` errors are worded the same on every system; text written to a console goes
+  through `WriteConsoleW`, so it shows correctly whatever the code page; arguments are split by
+  the rules Rust's standard library follows; and `os.env` finds names without regard to case.
+  The `net` and `gui` modules and `os.run` are not supported on Windows yet: building a program
+  that uses them for Windows, or running or checking it on Windows, is an error at each use.
+- stone itself runs on x86-64 Windows: the interpreter, `stone build` (for the host by
+  default), the REPL (Ctrl+Z then Enter ends it), and `stone-lsp`. Releases include
+  `stone-x86_64-windows.zip`, which `install.ps1`
+  (`irm https://raw.githubusercontent.com/tarolling/stone/main/install.ps1 | iex`) installs
+  into `%LOCALAPPDATA%\Programs\stone\bin` and adds to the user's `PATH`, and which
+  `stone update` downloads. `stone uninstall` renames the running binary aside and deletes it
+  once stone exits, since Windows cannot delete a running program.
 
 - `w.next_frame()` on a `gui` window waits until the screen has shown the last image and
   returns the events meanwhile: Wayland's frame callbacks, and on X11 the Present extension,

@@ -7,12 +7,14 @@
 //! `no such file or directory: 'notes.txt'`.
 
 use crate::codegen::AssemblyGenerator;
+use crate::codegen::Os;
 use crate::codegen::context::{
     CLOSED_EARLY_CODE, DIR_BUFFER, FD_MISSING_CODE, FILE_BUFFER, INVALID_ADDRESS_CODE,
     INVALID_TEXT_CODE, LISTENER_CLOSED_CODE, NULL_IN_COMMAND_CODE, NULL_IN_PATH_CODE, OpenFlags,
     SHM_MISSING_CODE, SOCKET_CLOSED_CODE, TIMED_OUT_CODE, immortal_string,
 };
-use crate::stdlib::fs::{INVALID_TEXT, NULL_IN_PATH, errors};
+use crate::codegen::x64::system::{Sys, system_call};
+use crate::stdlib::fs::{INVALID_TEXT, NULL_IN_PATH, WINDOWS_ERROR_BASE, errors};
 use crate::stdlib::net::{
     CLOSED_EARLY, FD_MISSING, INVALID_ADDRESS, LISTENER_CLOSED, SHM_MISSING, SOCKET_CLOSED,
     TIMED_OUT,
@@ -121,8 +123,7 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tmov\trsi, rdi");
         r#gen.emit(&format!("\tmov\trdi, {AT_FDCWD}"));
         r#gen.emit("\txor\tedx, edx");
-        r#gen.emit("\tmov\teax, 269"); // sys_faccessat
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::Faccessat);
         r#gen.emit("\ttest\trax, rax");
         r#gen.emit("\tjnz\t.Lfs_exists_no");
         r#gen.emit("\tmov\teax, 1");
@@ -131,12 +132,12 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\txor\teax, eax");
         r#gen.emit("\tret");
     }
-    for (label, number, extra) in [
-        ("stone.fs_remove", 263, "\txor\tedx, edx"), // sys_unlinkat, no flags
-        ("stone.fs_make_dir", 258, "\tmov\tedx, 511"), // sys_mkdirat, mode 0o777
+    for (label, call, extra) in [
+        ("stone.fs_remove", Sys::Unlinkat, "\txor\tedx, edx"), // no flags
+        ("stone.fs_make_dir", Sys::Mkdirat, "\tmov\tedx, 511"), // mode 0o777
     ] {
         if uses(label) {
-            path_call(r#gen, label, number, extra);
+            path_call(r#gen, label, call, extra);
         }
     }
 }
@@ -191,7 +192,13 @@ fn errors_and_results(r#gen: &mut dyn AssemblyGenerator, net: bool) {
         r#gen.emit("\tjmp\t.Lfs_err_reason");
         r#gen.emit(&format!("{next}:"));
     }
-    // an error number with no reason is written as one
+    // an error number with no reason is written as one, and a Windows code as itself
+    if os == Os::Windows {
+        r#gen.emit(&format!("\tcmp\trdi, {WINDOWS_ERROR_BASE}"));
+        r#gen.emit("\tjl\t.Lfs_err_numbered");
+        r#gen.emit(&format!("\tsub\trdi, {WINDOWS_ERROR_BASE}"));
+        r#gen.emit(".Lfs_err_numbered:");
+    }
     r#gen.emit("\tcall\tstone.str_int");
     r#gen.emit("\tmov\trbx, rax");
     r#gen.emit("\tlea\trdi, [rip + .Lfs_os_error]");
@@ -355,8 +362,7 @@ fn open(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trsi, rdi");
     r#gen.emit(".Lfs_open_again:");
     r#gen.emit(&format!("\tmov\trdi, {AT_FDCWD}"));
-    r#gen.emit("\tmov\teax, 257"); // sys_openat
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Openat);
     r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
     r#gen.emit("\tje\t.Lfs_open_again");
     r#gen.emit("\tret");
@@ -397,8 +403,7 @@ fn read_all(r#gen: &mut dyn AssemblyGenerator, flags: i64) {
     r#gen.emit("\tlea\trsi, [r12 + r13]");
     r#gen.emit("\tmov\trdx, r14");
     r#gen.emit("\tsub\trdx, r13");
-    r#gen.emit("\txor\teax, eax"); // sys_read
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Read);
     r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
     r#gen.emit("\tje\t.Lfs_read_all_room");
     r#gen.emit("\ttest\trax, rax");
@@ -430,8 +435,7 @@ fn read_all(r#gen: &mut dyn AssemblyGenerator, flags: i64) {
 /// a file is dropped.
 pub(super) fn close(r#gen: &mut dyn AssemblyGenerator, reg: &str) {
     r#gen.emit(&format!("\tmov\trdi, {reg}"));
-    r#gen.emit("\tmov\teax, 3"); // sys_close
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Close);
 }
 
 /// Emits the start of a routine that keeps the path string `rdi` in `rbx` and saves `r12` through
@@ -646,8 +650,7 @@ fn write(r#gen: &mut dyn AssemblyGenerator, flags: OpenFlags, write: bool, appen
     r#gen.emit(&format!("\tjz\t{label}_written"));
     r#gen.emit("\tmov\trdi, r13");
     r#gen.emit("\tlea\trsi, [r12 + r14]");
-    r#gen.emit("\tmov\teax, 1"); // sys_write
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Write);
     r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
     r#gen.emit(&format!("\tje\t{label}_more"));
     r#gen.emit("\ttest\trax, rax");
@@ -695,8 +698,7 @@ fn list_dir(r#gen: &mut dyn AssemblyGenerator, flags: i64) {
     r#gen.emit("\tmov\trdi, r12");
     r#gen.emit("\tmov\trsi, r13");
     r#gen.emit(&format!("\tmov\tedx, {DIR_BUFFER}"));
-    r#gen.emit("\tmov\teax, 217"); // sys_getdents64
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Getdents64);
     r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
     r#gen.emit(&format!("\tje\t{label}_fill"));
     r#gen.emit("\ttest\trax, rax");
@@ -768,16 +770,15 @@ fn dot_check(r#gen: &mut dyn AssemblyGenerator, skip: &str) {
     r#gen.emit(&format!("{named}:"));
 }
 
-/// Emits `label`, a routine that makes the system call `number` on the path string `rdi` relative
+/// Emits `label`, a routine that makes the system call `call` on the path string `rdi` relative
 /// to the working directory, with `extra` setting its third argument, and returns `ok` of the
 /// path or `err` of the call's error.
-fn path_call(r#gen: &mut dyn AssemblyGenerator, label: &str, number: i64, extra: &str) {
+fn path_call(r#gen: &mut dyn AssemblyGenerator, label: &str, call: Sys, extra: &str) {
     routine_start(r#gen, label, NULL_IN_PATH_CODE);
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit(&format!("\tmov\trdi, {AT_FDCWD}"));
     r#gen.emit(extra);
-    r#gen.emit(&format!("\tmov\teax, {number}"));
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, call);
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjns\t{label}_made"));
     fail_with_errno(r#gen, label);

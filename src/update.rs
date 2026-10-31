@@ -1,8 +1,8 @@
 //! `stone update`: replaces the running binary with a release from GitHub.
 //!
-//! It downloads the same `stone-<machine>.tar.gz` that `install.sh` does, and checks it against
-//! the release's `stone-<machine>.tar.gz.sha256` (plus the digest GitHub publishes for each asset)
-//! before installing it.
+//! It downloads the same `stone-<machine>.tar.gz` that `install.sh` does (`stone-<machine>.zip`,
+//! as `install.ps1` does, on Windows), and checks it against the release's `.sha256` of that
+//! archive (plus the digest GitHub publishes for each asset) before installing it.
 
 use self_update::backends::github::Update;
 use self_update::{ReleaseAsset, UpdateStrategy};
@@ -17,6 +17,8 @@ use stone::codegen::Architecture;
 fn machine() -> String {
     let os = if cfg!(target_os = "macos") {
         "macos"
+    } else if cfg!(windows) {
+        "windows"
     } else {
         "linux"
     };
@@ -25,9 +27,15 @@ fn machine() -> String {
 
 /// Returns the release archive for the machine `target`, as `release.yml` names it.
 ///
-/// For example, `asset_name("x86_64-linux")` returns `"stone-x86_64-linux.tar.gz"`.
+/// For example, `asset_name("x86_64-linux")` returns `"stone-x86_64-linux.tar.gz"`, and
+/// `asset_name("x86_64-windows")` returns `"stone-x86_64-windows.zip"`, since Windows opens zip
+/// files itself.
 fn asset_name(target: &str) -> String {
-    format!("stone-{target}.tar.gz")
+    if target.ends_with("-windows") {
+        format!("stone-{target}.zip")
+    } else {
+        format!("stone-{target}.tar.gz")
+    }
 }
 
 /// Picks the archive for `target` out of a release's assets by its exact name.
@@ -122,6 +130,7 @@ mod tests {
     #[test]
     fn asset_name_matches_the_release_archives() {
         assert_eq!(asset_name("aarch64-macos"), "stone-aarch64-macos.tar.gz");
+        assert_eq!(asset_name("x86_64-windows"), "stone-x86_64-windows.zip");
     }
 
     #[test]

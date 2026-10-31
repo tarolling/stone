@@ -2,9 +2,9 @@
 //!
 //! For example, `interpret("print(1)\n")` lexes, parses, checks, and evaluates the source, printing `1`.
 
-use crate::ast::Mod;
+use crate::ast::{Expr, ExprKind, Mod};
 use crate::checker::{Analysis, Calls, TypeChecker};
-use crate::codegen::Target;
+use crate::codegen::{Os, Target};
 use crate::debug;
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
 use crate::interpreter::{Exit, Interpreter, Limits};
@@ -155,6 +155,10 @@ pub fn check_program(
     let analysis = analyze_linked(&linked);
     let mut diagnostics = crate::unused::find(&linked, &analysis);
     diagnostics.extend(analysis.diagnostics);
+    // a program the host cannot run is an error where it runs
+    if let Ok(host) = Target::host() {
+        diagnostics.extend(unsupported(&linked.module, &linked.sources, host.os));
+    }
     // stable, so a warning stays before an error at the same place
     diagnostics.sort_by_key(|d| (d.span.file, d.span.start));
     (linked.sources, diagnostics)
@@ -305,11 +309,67 @@ pub fn compile_module(
     output: &Path,
     target: Target,
 ) -> Result<(), Box<dyn Error>> {
+    let unsupported = unsupported(&checked.module, sources, target.os);
+    if !unsupported.is_empty() {
+        return Err(Box::new(Diagnostics(unsupported)));
+    }
     let mut generator = target.generator();
     generator.set_sources(sources.clone());
     generator.set_analysis(Rc::clone(&checked.analysis));
     generator.compile(&checked.module, output)?;
     Ok(())
+}
+
+/// The builtin modules a Windows program cannot use yet, by the prefix of their linked names,
+/// with the name an error gives each.
+const WINDOWS_UNSUPPORTED: [(&str, &str); 3] = [
+    ("net.", "the net module"),
+    ("gui.", "the gui module"),
+    ("os.run", "os.run"),
+];
+
+/// Returns an error for each place the program's own files name a builtin module or function
+/// that compiled code and the interpreter do not support yet on `os`: on Windows, the `net` and
+/// `gui` modules and `os.run`. The modules' own files are not the program's, so they name
+/// nothing.
+///
+/// For example, `net.connect("example.com", 80)` in a program for Windows is the error
+/// `the net module is not supported on Windows yet` at `net.connect`.
+pub fn unsupported(module: &Mod, sources: &SourceMap, os: Os) -> Vec<Diagnostic> {
+    if os != Os::Windows {
+        return Vec::new();
+    }
+    let mut errors = Vec::new();
+    let mut found = |expr: &Expr| {
+        let ExprKind::Name { id, .. } = &expr.kind else {
+            return;
+        };
+        let Some((_, what)) = WINDOWS_UNSUPPORTED
+            .iter()
+            .find(|(prefix, _)| id.starts_with(prefix) || id == prefix.trim_end_matches('.'))
+        else {
+            return;
+        };
+        errors.push(Diagnostic::error(
+            expr.span,
+            format!("{what} is not supported on Windows yet"),
+        ));
+    };
+    let Mod::Module { body } = module;
+    let mut blocks = vec![&body[..]];
+    while let Some(block) = blocks.pop() {
+        for stmt in block {
+            if sources.file(stmt.span.file).is_builtin() {
+                continue;
+            }
+            for expr in stmt.exprs() {
+                expr.visit(&mut found);
+            }
+            blocks.extend(stmt.blocks());
+        }
+    }
+    errors.sort_by_key(|d| (d.span.file, d.span.start));
+    errors
 }
 
 /// The name of the directory, next to a program's entry file, that `stone build` writes to.
@@ -358,15 +418,20 @@ pub fn program_name(entry: &Path) -> String {
 /// never overwrite each other.
 ///
 /// For example, on an x86-64 Linux machine, `examples/basics.stn` builds to
-/// `examples/build/basics`, and for [`Target::ARM64_MACOS`] to
-/// `examples/build/aarch64-macos/basics`.
+/// `examples/build/basics`, for [`Target::ARM64_MACOS`] to
+/// `examples/build/aarch64-macos/basics`, and for [`Target::X64_WINDOWS`] to
+/// `examples/build/x86_64-windows/basics.exe`, since Windows runs a program by its extension.
 pub fn output_path(entry: &Path, target: Target) -> PathBuf {
     let mut path = build_dir(entry);
     // an Intel Mac has no host target, so everything it builds is for another machine
     if Target::host().ok() != Some(target) {
         path.push(target.to_string());
     }
-    path.push(program_name(entry));
+    let mut name = program_name(entry);
+    if target.os == Os::Windows {
+        name.push_str(".exe");
+    }
+    path.push(name);
     path
 }
 
@@ -473,6 +538,39 @@ mod tests {
     use super::*;
     use crate::checker::Type;
     use crate::span::FileId;
+
+    #[test]
+    fn windows_programs_cannot_use_net_gui_or_os_run_yet() {
+        let source = "\
+use net
+use os
+use gui
+fn f() -> result[output, str]:
+    ret os.run(\"ls\", [])
+print(f().is_ok(), os.pid() > 0)
+s = net.connect(\"localhost\", 80)
+c = gui.canvas(width=1, height=1, pixels=[0])
+";
+        let (sources, checked) = load(Path::new("main.stn"), source, &MapSources::default());
+        let checked = checked.unwrap();
+        assert!(unsupported(&checked.module, &sources, Os::Linux).is_empty());
+        let errors: Vec<String> = unsupported(&checked.module, &sources, Os::Windows)
+            .iter()
+            .map(|d| sources.render(d).lines().next().unwrap().to_string())
+            .collect();
+        assert_eq!(
+            errors,
+            [
+                "main.stn:5:12: error: os.run is not supported on Windows yet",
+                "main.stn:7:9: error: the net module is not supported on Windows yet",
+                "main.stn:8:5: error: the gui module is not supported on Windows yet",
+            ]
+        );
+        let output = std::env::temp_dir().join(format!("stone-net-{}.exe", std::process::id()));
+        let built = compile_module(&checked, &sources, &output, Target::X64_WINDOWS);
+        assert!(built.is_err());
+        assert!(!output.exists());
+    }
 
     #[test]
     fn simple_program() {
@@ -824,7 +922,10 @@ ret y
         let host = Target::host().unwrap();
         assert_eq!(
             output_path(Path::new("examples/basics.stn"), host),
-            Path::new("examples/build/basics")
+            Path::new(&format!(
+                "examples/build/basics{}",
+                std::env::consts::EXE_SUFFIX
+            ))
         );
         let other = if host == Target::ARM64_MACOS {
             Target::X64_LINUX
@@ -862,7 +963,14 @@ ret y
         let names = |files: Vec<PathBuf>| -> Vec<String> {
             files
                 .iter()
-                .map(|f| f.strip_prefix(&dir).unwrap().display().to_string())
+                // windows writes its own separator
+                .map(|f| {
+                    f.strip_prefix(&dir)
+                        .unwrap()
+                        .display()
+                        .to_string()
+                        .replace('\\', "/")
+                })
                 .collect()
         };
         // a build directory is skipped only once stone has marked it as its own

@@ -266,7 +266,7 @@ pub fn system_call(r#gen: &mut dyn AssemblyGenerator, call: Sys) {
             r#gen.emit(&format!("\tmov\tx8, #{number}"));
             r#gen.emit("\tsvc\t#0");
         }
-        Os::MacOs => {
+        Os::MacOs | Os::Windows => {
             r#gen.emit("\tstr\tx30, [sp, #-16]!");
             r#gen.emit(&format!("\tbl\t{}", call.shim()));
             r#gen.emit("\tldr\tx30, [sp], #16");
@@ -630,7 +630,7 @@ fn emit_mem_map(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx2, #3"); // PROT_READ | PROT_WRITE
     let flags = match r#gen.target().os {
         Os::Linux => "0x22",
-        Os::MacOs => "0x1002",
+        Os::MacOs | Os::Windows => "0x1002",
     };
     r#gen.emit(&format!("\tmov\tx3, #{flags}")); // MAP_PRIVATE | MAP_ANONYMOUS
     r#gen.emit("\tmov\tx4, #-1"); // no file

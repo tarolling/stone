@@ -114,6 +114,10 @@ fn agent_prompts_have_valid_programs() {
                     .output()
                     .expect("stone should run");
                 let stderr = String::from_utf8_lossy(&output.stderr);
+                // os.run, net, and gui are refused on Windows
+                if cfg!(windows) && stderr.contains("is not supported on Windows yet") {
+                    break;
+                }
                 assert!(
                     output.status.success() && !stderr.contains("warning"),
                     "stone {command} failed on the block at docs/agents/{name}.md:{line}:\n{stderr}"

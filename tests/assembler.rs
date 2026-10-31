@@ -36,6 +36,10 @@ fn programs() -> Vec<PathBuf> {
             if path.extension().is_some_and(|ext| ext == "files") {
                 continue;
             }
+            if path.join(stone::driver::MARKER).is_file() {
+                // what `stone build` wrote, such as `examples/build`
+                continue;
+            }
             if path.is_dir() {
                 programs.push(path.join("main.stn"));
             } else if path.extension().is_some_and(|ext| ext == "stn") {

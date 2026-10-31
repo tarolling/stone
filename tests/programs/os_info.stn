@@ -2,7 +2,7 @@
 use os
 
 platform = os.platform()
-print(platform == "linux" or platform == "macos")
+print(platform == "linux" or platform == "macos" or platform == "windows")
 arch = os.arch()
 print(arch == "x86_64" or arch == "aarch64")
 print(os.hostname().len() > 0, os.hostname() == os.hostname())

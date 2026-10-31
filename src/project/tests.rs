@@ -49,7 +49,13 @@ fn errors(files: &[(&str, &str)]) -> Vec<(String, String, usize, usize)> {
         .0
         .iter()
         .map(|d| {
-            let path = map.file(d.span.file).path.display().to_string();
+            // the expected paths are written with windows' separator as `/`
+            let path = map
+                .file(d.span.file)
+                .path
+                .display()
+                .to_string()
+                .replace('\\', "/");
             (path, d.message.clone(), d.span.start.line, d.span.start.col)
         })
         .collect()

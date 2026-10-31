@@ -7,6 +7,7 @@ pub mod device;
 pub mod elf;
 pub mod ir;
 pub mod macho;
+pub mod pe;
 pub mod regalloc;
 pub mod sha256;
 pub mod x64;
@@ -116,17 +117,23 @@ impl fmt::Display for Level {
 ///
 /// Linux programs make system calls themselves and are static ELF files. macOS has no stable
 /// system call interface, so macOS programs are Mach-O files that call the system through
-/// `libSystem`, the only interface Apple supports.
+/// `libSystem`, the only interface Apple supports, and Windows programs are PE files that call it
+/// through `kernel32.dll`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Os {
     #[default]
     Linux,
     MacOs,
+    Windows,
 }
 
 /// The error for a target stone cannot build for: macOS on an Intel processor.
 pub const INTEL_MACOS: &str =
     "stone build writes macOS programs only for arm64; pass --target aarch64-macos or x86_64-linux";
+
+/// The error for a target stone cannot build for yet: Windows on an arm64 processor.
+pub const ARM64_WINDOWS: &str = "stone build writes Windows programs only for x86-64 for now; \
+     pass --target x86_64-windows";
 
 /// What `stone build` compiles for: a processor, its [`Level`], and the operating system it
 /// runs, named `<arch>[<level>]-<os>`.
@@ -162,15 +169,27 @@ impl Target {
         os: Os::MacOs,
         level: Architecture::Arm64.baseline(),
     };
+    pub const X64_WINDOWS: Target = Target {
+        arch: Architecture::X64,
+        os: Os::Windows,
+        level: Architecture::X64.baseline(),
+    };
 
     /// Every target, in the order `--target` lists them.
-    pub const ALL: [Target; 3] = [Target::X64_LINUX, Target::ARM64_LINUX, Target::ARM64_MACOS];
+    pub const ALL: [Target; 4] = [
+        Target::X64_LINUX,
+        Target::ARM64_LINUX,
+        Target::ARM64_MACOS,
+        Target::X64_WINDOWS,
+    ];
 
     /// Returns the machine stone itself runs on, which `stone build` targets unless told
     /// otherwise, or [`INTEL_MACOS`] on an Intel Mac.
     pub fn host() -> Result<Target, String> {
         let os = if cfg!(target_os = "macos") {
             Os::MacOs
+        } else if cfg!(windows) {
+            Os::Windows
         } else {
             Os::Linux
         };
@@ -184,13 +203,15 @@ impl Target {
     }
 
     /// Returns this target if `stone build` can write programs for its processor and system,
-    /// at any level, or [`INTEL_MACOS`] otherwise.
+    /// at any level, or [`INTEL_MACOS`] or [`ARM64_WINDOWS`] otherwise.
     fn supported(self) -> Result<Target, String> {
         if Target::ALL
             .iter()
             .any(|target| (target.arch, target.os) == (self.arch, self.os))
         {
             Ok(self)
+        } else if self.os == Os::Windows {
+            Err(ARM64_WINDOWS.to_string())
         } else {
             Err(INTEL_MACOS.to_string())
         }
@@ -199,7 +220,7 @@ impl Target {
     /// Returns a new code generator for this target.
     pub fn generator(self) -> Box<dyn AssemblyGenerator> {
         match self.arch {
-            Architecture::X64 => Box::new(x64::X64Generator::new()),
+            Architecture::X64 => Box::new(x64::X64Generator::for_os(self.os)),
             Architecture::Arm64 => Box::new(arm64::Arm64Generator::for_os(self.os)),
         }
     }
@@ -214,6 +235,7 @@ impl fmt::Display for Target {
         match self.os {
             Os::Linux => f.write_str("-linux"),
             Os::MacOs => f.write_str("-macos"),
+            Os::Windows => f.write_str("-windows"),
         }
     }
 }
@@ -222,9 +244,10 @@ impl FromStr for Target {
     type Err = String;
 
     /// Parses a target name: a processor (`x86_64` or `x64`, `aarch64` or `arm64`), optionally
-    /// followed by a [`Level`] such as `v3` or `v8.2`, then optionally by `-linux` or `-macos`
-    /// (without a system, the target is Linux). Rust's names for the same machines, such as
-    /// `x86_64-unknown-linux-gnu` and `aarch64-apple-darwin`, parse too.
+    /// followed by a [`Level`] such as `v3` or `v8.2`, then optionally by `-linux`, `-macos`, or
+    /// `-windows` (without a system, the target is Linux). Rust's names for the same machines,
+    /// such as `x86_64-unknown-linux-gnu`, `aarch64-apple-darwin`, and `x86_64-pc-windows-msvc`,
+    /// parse too.
     fn from_str(name: &str) -> Result<Self, Self::Err> {
         let unknown = || {
             let names = Target::ALL.map(|target| target.to_string());
@@ -241,6 +264,7 @@ impl FromStr for Target {
                 "linux" | "linux-gnu" | "linux-musl" | "unknown-linux-gnu"
                 | "unknown-linux-musl" => (processor, Os::Linux),
                 "macos" | "apple-darwin" => (processor, Os::MacOs),
+                "windows" | "pc-windows-msvc" | "pc-windows-gnu" => (processor, Os::Windows),
                 _ => return Err(unknown()),
             },
         };
@@ -295,12 +319,14 @@ fn parse_level(text: &str) -> Option<Level> {
 /// in a macOS program's signature.
 ///
 /// For example, a program built for [`Target::ARM64_MACOS`] starts with the Mach-O magic
-/// `cf fa ed fe`, and one built for Linux with `7f 45 4c 46` (`\x7fELF`).
+/// `cf fa ed fe`, one built for Linux with `7f 45 4c 46` (`\x7fELF`), and one built for Windows
+/// with `4d 5a` (`MZ`).
 pub fn executable(assembly: &str, target: Target, name: &str) -> Result<Vec<u8>, String> {
     let object = asm::assemble(assembly, target.arch)?;
     match target.os {
         Os::Linux => elf::link(&object, target.arch),
         Os::MacOs => macho::link(&object, name),
+        Os::Windows => pe::link(&object),
     }
 }
 
@@ -501,24 +527,40 @@ mod tests {
             ("aarch64-macos", Target::ARM64_MACOS),
             ("arm64-macos", Target::ARM64_MACOS),
             ("aarch64-apple-darwin", Target::ARM64_MACOS),
+            ("x86_64-windows", Target::X64_WINDOWS),
+            ("x64-windows", Target::X64_WINDOWS),
+            ("x86_64-pc-windows-msvc", Target::X64_WINDOWS),
+            ("x86_64-pc-windows-gnu", Target::X64_WINDOWS),
         ] {
             assert_eq!(name.parse(), Ok(target), "{name}");
         }
         let names = Target::ALL.map(|target| target.to_string());
-        assert_eq!(names, ["x86_64-linux", "aarch64-linux", "aarch64-macos"]);
+        assert_eq!(
+            names,
+            [
+                "x86_64-linux",
+                "aarch64-linux",
+                "aarch64-macos",
+                "x86_64-windows"
+            ]
+        );
         assert_eq!(
             "sparc".parse::<Target>(),
             Err(
-                "unknown target 'sparc' (expected x86_64-linux, aarch64-linux, or \
-                 aarch64-macos, with an optional level such as x86_64v3-linux)"
+                "unknown target 'sparc' (expected x86_64-linux, aarch64-linux, aarch64-macos, \
+                 or x86_64-windows, with an optional level such as x86_64v3-linux)"
                     .to_string()
             )
         );
         assert_eq!(
-            "x86_64-windows".parse::<Target>(),
+            "x86_64-plan9".parse::<Target>(),
             "sparc"
                 .parse::<Target>()
-                .map_err(|e| e.replace("sparc", "x86_64-windows"))
+                .map_err(|e| e.replace("sparc", "x86_64-plan9"))
+        );
+        assert_eq!(
+            "aarch64-windows".parse::<Target>(),
+            Err(ARM64_WINDOWS.to_string())
         );
         assert_eq!(
             "arm64x".parse::<Target>(),
@@ -627,6 +669,7 @@ mod tests {
             let host = host.unwrap();
             assert_eq!(host.arch, Architecture::host());
             assert_eq!(host.os == Os::MacOs, cfg!(target_os = "macos"));
+            assert_eq!(host.os == Os::Windows, cfg!(windows));
         }
     }
 
@@ -743,10 +786,17 @@ os.exit(0)
                 .lines()
                 .filter_map(|line| line.strip_suffix(':'))
                 .collect();
+            let imported = |symbol: &str| match target.os {
+                Os::Linux => false,
+                Os::MacOs => system.contains(&symbol),
+                Os::Windows => pe::IMPORTS
+                    .iter()
+                    .any(|(_, functions)| functions.contains(&symbol)),
+            };
             let mut missing: Vec<String> = referenced_symbols(&assembly)
                 .into_iter()
                 .filter(|symbol| !defined.contains(symbol.as_str()))
-                .filter(|symbol| target.os == Os::Linux || !system.contains(&symbol.as_str()))
+                .filter(|symbol| !imported(symbol))
                 .collect();
             missing.sort();
             missing.dedup();
@@ -756,7 +806,12 @@ os.exit(0)
             if let Err(e) = asm::assemble(&assembly, target.arch) {
                 needs.push(format!("{target} does not assemble: {e}"));
             }
-            if target.os == Os::MacOs && assembly.contains("\tsvc\t") {
+            let direct = match target.os {
+                Os::Linux => false,
+                Os::MacOs => assembly.contains("\tsvc\t"),
+                Os::Windows => assembly.contains("\tsyscall"),
+            };
+            if direct {
                 needs.push(format!("{target} makes a system call directly"));
             }
         }

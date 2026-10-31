@@ -64,7 +64,15 @@ jobs:
         - target: x86_64-apple-darwin
           vscode: darwin-x64
           runner: macos-latest
+        - target: x86_64-pc-windows-msvc
+          vscode: win32-x64
+          runner: windows-latest
+          exe: .exe
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        # Git Bash on Windows, so every runner runs the same steps
+        shell: bash
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - name: Install Rust if the runner lacks it
@@ -83,7 +91,7 @@ jobs:
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: stone-lsp-${{ matrix.vscode }}
-        path: target/${{ matrix.target }}/release/stone-lsp
+        path: target/${{ matrix.target }}/release/stone-lsp${{ matrix.exe }}
 
   package:
     needs: server
@@ -112,10 +120,10 @@ jobs:
     - name: Package
       run: |
         mkdir -p dist
-        for target in linux-x64 linux-arm64 darwin-arm64 darwin-x64; do
+        for target in linux-x64 linux-arm64 darwin-arm64 darwin-x64 win32-x64; do
           mkdir -p server
-          cp "$GITHUB_WORKSPACE/servers/stone-lsp-$target/stone-lsp" server/
-          chmod 755 server/stone-lsp
+          cp "$GITHUB_WORKSPACE"/servers/stone-lsp-$target/stone-lsp* server/
+          chmod 755 server/stone-lsp*
           npx --yes @vscode/vsce@3 package --target "$target" -o "dist/stone-$target.vsix"
           rm -rf server
         done

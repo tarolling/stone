@@ -13,5 +13,6 @@ err("not a directory: 'out/a.txt/inner'")
 err("no such file or directory: 'missing/inner'")
 err("no such file or directory: 'missing/inner.txt'")
 err("no such file or directory: ''")
+err("no such file or directory: ''") err("no such file or directory: ''") err("no such file or directory: ''") false
 ['out']
 ok([])

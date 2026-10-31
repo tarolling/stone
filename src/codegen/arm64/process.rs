@@ -170,7 +170,7 @@ pub fn run_runtime(r#gen: &mut dyn AssemblyGenerator) {
             }
         }
         // no timeout
-        Os::MacOs => r#gen.emit("\tmov\tx2, #-1"),
+        Os::MacOs | Os::Windows => r#gen.emit("\tmov\tx2, #-1"),
     }
     system_call(r#gen, Sys::Ppoll);
     r#gen.emit(&format!("\tcmn\tx0, #{EINTR}"));

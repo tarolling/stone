@@ -1,4 +1,3 @@
-use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{CPU_ONLINE, PATH_BUFFER, UTSNAME_FIELD, UTSNAME_SIZE};
 use crate::codegen::context::{
     HEAP_REGION, LARGEST_CLASS, LEAK_PREFIX, LEAK_SUFFIX, OUT_OF_MEMORY, OUT_OF_MEMORY_LENGTH,
@@ -6,6 +5,8 @@ use crate::codegen::context::{
 };
 pub use crate::codegen::context::{IMMORTAL, immortal_string};
 use crate::codegen::x64::sort::sort_runtime;
+use crate::codegen::x64::system::{Sys, system_call};
+use crate::codegen::{AssemblyGenerator, Os};
 
 /// Emits `_start`, where the kernel starts the program, with the argument count at `[rsp]`, the
 /// arguments after it, then a null, then the environment. It calls `main` with the count in
@@ -21,8 +22,7 @@ pub fn start_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tand\trsp, -16");
     r#gen.emit("\tcall\tmain");
     r#gen.emit("\tmov\tedi, eax");
-    r#gen.emit("\tmov\teax, 231"); // sys_exit_group
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Exit);
 }
 
 /// Emits the allocator, which takes memory from the system with the `mmap` syscall instead of
@@ -154,8 +154,7 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tpush\tr11");
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, rcx");
-    r#gen.emit("\tmov\teax, 11"); // sys_munmap
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Munmap);
     r#gen.emit("\tpop\tr11");
     r#gen.emit("\tpop\trsi");
     r#gen.emit("\tpop\trdi");
@@ -208,8 +207,7 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trsi, rcx");
     r#gen.emit("\tsub\trdi, 8");
     r#gen.emit("\tmov\tr10d, 1"); // MREMAP_MAYMOVE
-    r#gen.emit("\tmov\teax, 25"); // sys_mremap
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Mremap);
     r#gen.emit("\tcmp\trax, -4096");
     r#gen.emit("\tja\tstone.out_of_memory");
     r#gen.emit("\tmov\tQWORD PTR [rax], rdx");
@@ -232,8 +230,7 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tr10d, 0x22"); // MAP_PRIVATE | MAP_ANONYMOUS
     r#gen.emit("\tmov\tr8, -1"); // no file
     r#gen.emit("\txor\tr9d, r9d");
-    r#gen.emit("\tmov\teax, 9"); // sys_mmap
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Mmap);
     // the kernel returns an error as -4095 through -1
     r#gen.emit("\tcmp\trax, -4096");
     r#gen.emit("\tja\tstone.out_of_memory");
@@ -243,14 +240,12 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tret");
 
     r#gen.emit("stone.out_of_memory:");
-    r#gen.emit("\tmov\teax, 1"); // sys_write
     r#gen.emit("\tmov\tedi, 2"); // stderr
     r#gen.emit("\tlea\trsi, [rip + .Lstone_out_of_memory]");
     r#gen.emit(&format!("\tmov\tedx, {OUT_OF_MEMORY_LENGTH}"));
-    r#gen.emit("\tsyscall");
-    r#gen.emit("\tmov\teax, 231"); // sys_exit_group
+    system_call(r#gen, Sys::Write);
     r#gen.emit("\tmov\tedi, 1");
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Exit);
 }
 
 /// Emits the memory runtime. Every string and list `p` is counted: `[p - 8]` holds how many
@@ -458,13 +453,11 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit("\tjnz\t.Lleak_check_digit");
     r#gen.emit("\tlea\trdx, [rbp - 8]");
     r#gen.emit("\tsub\trdx, rsi");
-    r#gen.emit("\tmov\teax, 1"); // sys_write
     r#gen.emit("\tmov\tedi, 2"); // stderr
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Write);
     write_stderr(r#gen, ".Lstone_leak_suffix", LEAK_SUFFIX.len() + 1);
-    r#gen.emit("\tmov\teax, 231"); // sys_exit_group
     r#gen.emit("\tmov\tedi, 1");
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Exit);
     r#gen.emit(".Lleak_check_done:");
     r#gen.emit("\tmov\trax, QWORD PTR [rbp - 8]");
     r#gen.emit("\tleave");
@@ -581,11 +574,10 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, handles: bool) {
 /// Emits code that writes the `length` bytes at `label` to stderr, clobbering `rax`, `rcx`,
 /// `rdx`, `rsi`, `rdi`, and `r11`.
 fn write_stderr(r#gen: &mut dyn AssemblyGenerator, label: &str, length: usize) {
-    r#gen.emit("\tmov\teax, 1"); // sys_write
     r#gen.emit("\tmov\tedi, 2"); // stderr
     r#gen.emit(&format!("\tlea\trsi, [rip + {label}]"));
     r#gen.emit(&format!("\tmov\tedx, {length}"));
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Write);
 }
 
 /// Emits `stone.getenv`, which returns the value of the environment variable named by the
@@ -593,9 +585,14 @@ fn write_stderr(r#gen: &mut dyn AssemblyGenerator, label: &str, length: usize) {
 /// `main` saved in `stone.envp`, and clobbers `rax`, `rcx`, `rdx`, and `rsi`.
 ///
 /// For example, with `HOME=/root` in the environment, `stone.getenv` of `HOME` returns a
-/// pointer to `/root`, and of `HOM` returns 0.
+/// pointer to `/root`, and of `HOM` returns 0. On Windows, whose variables are named without
+/// regard to case, letters match in either case, so `home` finds `HOME` too.
 pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
+    let windows = r#gen.target().os == Os::Windows;
     r#gen.emit("stone.getenv:");
+    if windows {
+        r#gen.emit("\tpush\tr8");
+    }
     r#gen.emit("\tmov\trdx, QWORD PTR [rip + stone.envp]");
     r#gen.emit(".Lgetenv_entry:");
     r#gen.emit("\tmov\trax, QWORD PTR [rdx]");
@@ -608,7 +605,24 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmovzx\tesi, byte ptr [rdi + rcx]");
     r#gen.emit("\ttest\tesi, esi");
     r#gen.emit("\tjz\t.Lgetenv_name_end");
-    r#gen.emit("\tcmp\tsil, byte ptr [rax + rcx]");
+    if windows {
+        // both bytes in lowercase, the name's in esi and the entry's in r8d
+        r#gen.emit("\tmovzx\tr8d, byte ptr [rax + rcx]");
+        for (reg, label) in [
+            ("esi", ".Lgetenv_name_lower"),
+            ("r8d", ".Lgetenv_entry_lower"),
+        ] {
+            r#gen.emit(&format!("\tcmp\t{reg}, 65")); // 'A'
+            r#gen.emit(&format!("\tjb\t{label}"));
+            r#gen.emit(&format!("\tcmp\t{reg}, 90")); // 'Z'
+            r#gen.emit(&format!("\tja\t{label}"));
+            r#gen.emit(&format!("\tor\t{reg}, 32"));
+            r#gen.emit(&format!("{label}:"));
+        }
+        r#gen.emit("\tcmp\tesi, r8d");
+    } else {
+        r#gen.emit("\tcmp\tsil, byte ptr [rax + rcx]");
+    }
     r#gen.emit("\tjne\t.Lgetenv_entry");
     r#gen.emit("\tinc\trcx");
     r#gen.emit("\tjmp\t.Lgetenv_compare");
@@ -617,6 +631,9 @@ pub fn env_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tjne\t.Lgetenv_entry");
     r#gen.emit("\tlea\trax, [rax + rcx + 1]");
     r#gen.emit(".Lgetenv_done:");
+    if windows {
+        r#gen.emit("\tpop\tr8");
+    }
     r#gen.emit("\tret");
 }
 
@@ -820,8 +837,7 @@ fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool, eprints: bool)
     r#gen.emit(".Lwrite_fd:");
     r#gen.emit("\ttest\trdx, rdx");
     r#gen.emit("\tjz\t.Lwrite_out_done");
-    r#gen.emit("\tmov\teax, 1"); // sys_write
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Write);
     r#gen.emit("\tcmp\trax, -4"); // EINTR
     r#gen.emit("\tje\t.Lwrite_fd");
     r#gen.emit("\ttest\trax, rax");
@@ -2124,11 +2140,10 @@ pub fn io_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     r#gen.emit("\t.text");
 
     r#gen.emit("stone.stdin_fill:");
-    r#gen.emit("\txor\teax, eax"); // sys_read
     r#gen.emit("\txor\tedi, edi"); // stdin
     r#gen.emit("\tlea\trsi, [rip + stone.stdin_buffer]");
     r#gen.emit(&format!("\tmov\tedx, {STDIN_BUFFER}"));
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Read);
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit("\tjg\t.Lstdin_fill_done");
     r#gen.emit("\txor\teax, eax");
@@ -3463,7 +3478,11 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
     let uses = |label: &str| used.contains(&label);
     r#gen.emit("\t.data");
     immortal_string(r#gen, ".Lstone_os_empty", "");
-    immortal_string(r#gen, ".Lstone_os_platform", "linux");
+    let platform = match r#gen.target().os {
+        Os::Windows => "windows",
+        _ => "linux",
+    };
+    immortal_string(r#gen, ".Lstone_os_platform", platform);
     immortal_string(r#gen, ".Lstone_os_arch", "x86_64");
     r#gen.emit("\t.text");
 
@@ -3530,8 +3549,7 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("\tmov\trbp, rsp");
         r#gen.emit(&format!("\tsub\trsp, {UTSNAME_SIZE}"));
         r#gen.emit("\tmov\trdi, rsp");
-        r#gen.emit("\tmov\teax, 63"); // sys_uname
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::Uname);
         r#gen.emit("\tlea\trcx, [rip + .Lstone_os_empty]");
         r#gen.emit("\ttest\trax, rax");
         r#gen.emit("\tjnz\t.Los_hostname_done");
@@ -3564,27 +3582,33 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
             r#gen.emit(&format!("{label}_done:"));
         };
         r#gen.emit("stone.os_cpu_count:");
+        if r#gen.target().os == Os::Windows {
+            // the processors of every group, as `stdlib::os::cpu_count` counts them
+            system_call(r#gen, Sys::CpuCount);
+            r#gen.emit("\tmov\tecx, 1");
+            r#gen.emit("\ttest\trax, rax");
+            r#gen.emit("\tcmovz\trax, rcx");
+            r#gen.emit("\tret");
+            return os_runtime_rest(r#gen, used, cwd_failure);
+        }
         r#gen.emit("\tpush\trbp");
         r#gen.emit("\tmov\trbp, rsp");
         r#gen.emit("\tsub\trsp, 256");
-        r#gen.emit("\tmov\teax, 257"); // sys_openat
         r#gen.emit("\tmov\tedi, -100"); // AT_FDCWD
         r#gen.emit("\tlea\trsi, [rip + .Lstone_cpu_online]");
         r#gen.emit("\txor\tedx, edx"); // O_RDONLY
         r#gen.emit("\txor\tr10d, r10d");
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::Openat);
         r#gen.emit("\ttest\trax, rax");
         r#gen.emit("\tjs\t.Lcpu_count_one");
         r#gen.emit("\tmov\tr8, rax");
         r#gen.emit("\tmov\trdi, rax");
-        r#gen.emit("\txor\teax, eax"); // sys_read
         r#gen.emit("\tmov\trsi, rsp");
         r#gen.emit("\tmov\tedx, 255");
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::Read);
         r#gen.emit("\tmov\tr9, rax");
         r#gen.emit("\tmov\trdi, r8");
-        r#gen.emit("\tmov\teax, 3"); // sys_close
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::Close);
         r#gen.emit("\ttest\tr9, r9");
         r#gen.emit("\tjle\t.Lcpu_count_one");
         r#gen.emit("\tmov\tbyte ptr [rsp + r9], 0");
@@ -3613,10 +3637,15 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit("\tleave");
         r#gen.emit("\tret");
     }
+    os_runtime_rest(r#gen, used, cwd_failure);
+}
+
+/// Emits the routines of [`os_runtime`] after `stone.os_cpu_count`.
+fn os_runtime_rest(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure: &str) {
+    let uses = |label: &str| used.contains(&label);
     if uses("stone.os_pid") {
         r#gen.emit("stone.os_pid:");
-        r#gen.emit("\tmov\teax, 39"); // sys_getpid
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::Getpid);
         r#gen.emit("\tret");
     }
     if uses("stone.os_cwd") {
@@ -3629,12 +3658,13 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
         r#gen.emit(&format!("\tsub\trsp, {PATH_BUFFER}"));
         r#gen.emit("\tmov\trdi, rsp");
         r#gen.emit(&format!("\tmov\tesi, {PATH_BUFFER}"));
-        r#gen.emit("\tmov\teax, 79"); // sys_getcwd
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::Getcwd);
         r#gen.emit("\ttest\trax, rax");
         r#gen.emit(&format!("\tjs\t{cwd_failure}"));
-        r#gen.emit("\tcmp\tbyte ptr [rsp], 47"); // '/'
-        r#gen.emit(&format!("\tjne\t{cwd_failure}"));
+        if r#gen.target().os != Os::Windows {
+            r#gen.emit("\tcmp\tbyte ptr [rsp], 47"); // '/'
+            r#gen.emit(&format!("\tjne\t{cwd_failure}"));
+        }
         r#gen.emit("\tmov\trax, rsp");
         r#gen.emit("\tcall\tstone.os_copy");
         r#gen.emit("\tleave");
@@ -3642,8 +3672,7 @@ pub fn os_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], cwd_failure:
     }
     if uses("stone.os_exit") {
         r#gen.emit("stone.os_exit:");
-        r#gen.emit("\tmov\teax, 231"); // sys_exit_group
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::Exit);
     }
 }
 
@@ -3668,8 +3697,7 @@ pub fn time_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], failures: 
         r#gen.emit("\tsub\trsp, 16");
         r#gen.emit(&format!("\tmov\tedi, {clock}"));
         r#gen.emit("\tmov\trsi, rsp");
-        r#gen.emit("\tmov\teax, 228"); // sys_clock_gettime
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::ClockGettime);
         r#gen.emit("\tcvtsi2sd\txmm0, QWORD PTR [rsp]");
         r#gen.emit("\tcvtsi2sd\txmm1, QWORD PTR [rsp + 8]");
         r#gen.emit("\tmovabs\trax, 0x41cdcd6500000000"); // 1e9
@@ -3708,8 +3736,7 @@ pub fn time_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str], failures: 
         r#gen.emit(".Ltime_sleep_again:");
         r#gen.emit("\tmov\trdi, rsp");
         r#gen.emit("\tlea\trsi, [rsp + 16]");
-        r#gen.emit("\tmov\teax, 35"); // sys_nanosleep
-        r#gen.emit("\tsyscall");
+        system_call(r#gen, Sys::Nanosleep);
         // a signal interrupted it, so sleep for what is left
         r#gen.emit("\tcmp\trax, -4"); // -EINTR
         r#gen.emit("\tjne\t.Ltime_sleep_done");
@@ -3779,8 +3806,7 @@ pub fn random_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     r#gen.emit("\tmov\trdi, rsp");
     r#gen.emit("\tmov\tesi, 8");
     r#gen.emit("\txor\tedx, edx");
-    r#gen.emit("\tmov\teax, 318"); // sys_getrandom
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Getrandom);
     r#gen.emit("\tmov\trdi, QWORD PTR [rsp]");
     r#gen.emit("\tadd\trsp, 16");
     r#gen.emit("\tcall\tstone.random_seed");

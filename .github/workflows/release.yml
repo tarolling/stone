@@ -53,7 +53,17 @@ jobs:
           machine: x86_64-macos
           runner: macos-latest
           smoke: false
+        # packaged as a zip, which Windows opens itself and install.ps1 downloads
+        - target: x86_64-pc-windows-msvc
+          machine: x86_64-windows
+          runner: windows-latest
+          smoke: true
+          exe: .exe
     runs-on: ${{ matrix.runner }}
+    defaults:
+      run:
+        # Git Bash on Windows, so every runner runs the same steps
+        shell: bash
     steps:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - name: Install Rust if the runner lacks it
@@ -83,15 +93,24 @@ jobs:
       if: matrix.smoke
       run: |
         stone=target/${{ matrix.target }}/release/stone
-        $stone build examples/basics.stn -o build/basics
-        ./build/basics | diff - examples/basics.out
+        $stone build examples/basics.stn -o build/basics${{ matrix.exe }}
+        ./build/basics${{ matrix.exe }} | diff - examples/basics.out
     - name: Package
+      if: matrix.exe == ''
       run: |
         archive=stone-${{ matrix.machine }}.tar.gz
         mkdir -p package dist
         cp target/${{ matrix.target }}/release/stone LICENSE README.md package/
         tar -czf dist/$archive -C package stone LICENSE README.md
         (cd dist && shasum -a 256 $archive > $archive.sha256)
+    - name: Package for Windows
+      if: matrix.exe == '.exe'
+      run: |
+        archive=stone-${{ matrix.machine }}.zip
+        mkdir -p package dist
+        cp target/${{ matrix.target }}/release/stone.exe LICENSE README.md package/
+        (cd package && 7z a -tzip ../dist/$archive stone.exe LICENSE README.md)
+        (cd dist && sha256sum $archive > $archive.sha256)
     - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
       with:
         name: stone-${{ matrix.machine }}

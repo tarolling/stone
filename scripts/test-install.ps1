@@ -24,6 +24,9 @@ $env:STONE_NO_MODIFY_PATH = '1'
 function Invoke-Install([string[]]$Arguments, [string]$ErrorFile) {
     $shell = (Get-Process -Id $PID).Path
     $command = @('-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', "$root\install.ps1") + $Arguments
+    # Windows PowerShell turns each line of a native command's redirected stderr into an error,
+    # which Stop would make fatal; this applies only inside the function
+    $ErrorActionPreference = 'Continue'
     # the child's output goes to the host, since anything left in the output stream would join
     # the returned value and make a failure look like success
     if ($ErrorFile) {

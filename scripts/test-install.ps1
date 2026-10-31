@@ -82,3 +82,5 @@ try {
     Start-Sleep -Seconds 3
     Remove-Item -LiteralPath $work -Recurse -Force -ErrorAction SilentlyContinue
 }
+# the last install was meant to fail, and the CI shell exits with its $LASTEXITCODE otherwise
+exit 0

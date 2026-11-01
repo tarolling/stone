@@ -3,8 +3,9 @@
 // and the Present extension, where the server has it, to put them on the screen at its vblank.
 //
 // X11 knows only the screen's pixels, so a window is scaled as the desktop asks through the
-// `Xft.dpi` resource, 96 being 100%: its sizes and points are logical pixels here, and its
-// canvases are scaled up to the screen's as they are shown.
+// `Xft.dpi` resource, 96 being 100%, which it follows as the desktop changes it: its sizes and
+// points are logical pixels here, and its canvases are scaled up to the screen's as they are
+// shown.
 
 use fs
 use gui.canvas
@@ -445,15 +446,21 @@ impl link:
                 self.fail(e)
                 ret false
         took = true
+        // a change of the scale, read once the reply has come, since reading it takes a reply too
+        rescaled = false
         while self.open:
             match self.raw():
                 case ok(raw):
                     if raw[0] == 1:
                         if took:
                             self.shm.size = size
+                        if rescaled:
+                            self.reread()
                         ret took
                     if raw[0] == 0 and raw[10] == self.shm.opcode:
                         took = false
+                    elif self.resources_changed(raw):
+                        rescaled = true
                     else:
                         self.decode(raw)
                 case err(e):
@@ -480,11 +487,9 @@ impl link:
             body = put16(put16([], name.len()), 0)
             asks.extend(request(16, 0, put_bytes(body, name.bytes())))
         asks.extend(request(101, 0, [self.setup.keys.first, 256 - self.setup.keys.first, 0, 0]))
-        if self.setup.scale <= 0.0:
-            // GetProperty of the root's RESOURCE_MANAGER (23), a STRING (31), up to 256 KiB,
-            // for the scale `Xft.dpi` sets
-            body = put32(put32(put32([], self.setup.root), 23), 31)
-            asks.extend(request(20, 0, put32(put32(body, 0), 65536)))
+        follows = self.setup.scale <= 0.0
+        if follows:
+            asks.extend(self.resources_request())
         if local:
             body = put16(put16([], 7), 0)
             asks.extend(request(98, 0, put_bytes(body, b"MIT-SHM")))
@@ -500,12 +505,8 @@ impl link:
         self.setup.keys.per = keys[1]
         for i in range(get32(keys, 4)):
             self.setup.keys.syms.append(get32(keys, 32 + 4 * i))
-        if self.setup.scale <= 0.0:
-            resources = self.reply()?
-            text = resources[32:32 + get32(resources, 16)].text().unwrap_or("")
-            self.setup.scale = gui_wire.resource_scale(text)
-            if self.setup.scale <= 0.0:
-                self.setup.scale = 1.0
+        if follows:
+            self.setup.scale = resources_scale(self.reply()?)
         self.screen = [physical(self.extent[0], self.setup.scale), physical(self.extent[1], self.setup.scale)]
         // both answers about extensions come before anything asked after them
         shm = b""
@@ -534,6 +535,10 @@ impl link:
         // WM_CLASS, the instance and class names, each ended by a 0
         made.extend(self.property(67, 31, 8, byte_list(b"stone\x00stone\x00")))
         made.extend(request(55, 0, put32(put32(put32([], self.setup.gc), self.setup.id), 0)))
+        if follows:
+            // ChangeWindowAttributes of the root's event mask (2048) to PropertyChangeMask, to
+            // hear when the desktop's scale changes, sent once every reply above is read
+            made.extend(request(2, 0, put32(put32(put32([], self.setup.root), 2048), 4194304)))
         made.extend(request(8, 0, put32([], self.setup.id)))
         self.conn.send_bytes(bytes(made).unwrap())?
         // the window can be drawn on once it is first exposed
@@ -568,6 +573,47 @@ impl link:
         self.reply()?
         self.present.opcode = found[9]
         ret ok(0)
+
+    // GetProperty of the root's RESOURCE_MANAGER (23), a STRING (31), up to 256 KiB, for the
+    // scale `Xft.dpi` sets.
+    fn resources_request(self) -> list[int]:
+        body = put32(put32(put32([], self.setup.root), 23), 31)
+        ret request(20, 0, put32(put32(body, 0), 65536))
+
+    // Whether the event `raw` says the root's RESOURCE_MANAGER changed.
+    fn resources_changed(self, raw: bytes) -> bool:
+        ret raw[0] % 128 == 28 and get32(raw, 4) == self.setup.root and get32(raw, 8) == 23
+
+    // Reads the root's RESOURCE_MANAGER again, which has changed, and takes the scale it sets.
+    // Changes before the reply are in it already, so their events are passed over.
+    fn reread(self):
+        self.send(self.resources_request())
+        while self.open:
+            match self.raw():
+                case ok(raw):
+                    if raw[0] == 1:
+                        match self.conn.read_exact(get32(raw, 4) * 4):
+                            case ok(rest):
+                                self.rescale(resources_scale(raw + rest))
+                            case err(e):
+                                self.fail(e)
+                        ret
+                    if not self.resources_changed(raw):
+                        self.decode(raw)
+                case err(e):
+                    self.fail(e)
+
+    // Takes the scale `scale`, keeping the window's size in logical pixels: makes it as big in
+    // the screen's pixels as that is now, and gives a `redraw` event.
+    fn rescale(self, scale: float):
+        if scale == self.setup.scale:
+            ret
+        self.setup.scale = scale
+        self.screen = [physical(self.extent[0], scale), physical(self.extent[1], scale)]
+        // ConfigureWindow of the width (4) and height (8)
+        body = put16(put16(put32([], self.setup.id), 12), 0)
+        self.send(request(12, 0, put32(put32(body, self.screen[0]), self.screen[1])))
+        self.pending.append(event.redraw)
 
     // The reason the window failed, from its last `failed` event.
     fn failure(self) -> str:
@@ -672,6 +718,9 @@ impl link:
             if (width, height) != self.extent:
                 self.extent = (width, height)
                 self.pending.append(event.resize(width, height))
+        elif code == 28:
+            if self.resources_changed(raw):
+                self.reread()
         elif code == 33:
             if get32(raw, 8) == self.setup.atoms[0] and get32(raw, 12) == self.setup.atoms[1]:
                 self.pending.append(event.close)
@@ -731,6 +780,14 @@ impl link:
         typed = self.setup.keys.text(raw[1], get16(raw, 28))
         if typed != "":
             self.pending.append(event.text(typed))
+
+// The scale the GetProperty reply `reply` of RESOURCE_MANAGER sets through `Xft.dpi`, or 1.0.
+fn resources_scale(reply: bytes) -> float:
+    text = reply[32:32 + get32(reply, 16)].text().unwrap_or("")
+    scale = gui_wire.resource_scale(text)
+    if scale <= 0.0:
+        ret 1.0
+    ret scale
 
 // The message for the X11 error `raw`.
 fn x11_error(raw: bytes) -> str:

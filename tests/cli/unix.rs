@@ -202,6 +202,10 @@ enum FakeScript {
     Paced,
     /// An exposure alone.
     Expose,
+    /// An exposure, then after the first frame a change of some other root property and then
+    /// of `RESOURCE_MANAGER`, which becomes this, and the close button after a frame 80 pixels
+    /// wide.
+    Rescale(&'static str),
 }
 
 /// What a fake X server does with the MIT-SHM extension.
@@ -616,6 +620,8 @@ fn fake_x_client(
     stream.write_all(&fake_setup(display))?;
     let mut window = 0;
     let mut stage = 0;
+    // whether RESOURCE_MANAGER has changed
+    let mut changed = false;
     let mut fds = vec![];
     let mut segments = std::collections::HashMap::new();
     loop {
@@ -637,8 +643,32 @@ fn fake_x_client(
                 8 => match display.script {
                     FakeScript::All => stream.write_all(&fake_events(window))?,
                     FakeScript::Paced => stream.write_all(&paced_events(window, 0))?,
-                    FakeScript::Expose => stream.write_all(&x11_event(12, 0, &[(4, window, 4)]))?,
+                    FakeScript::Expose | FakeScript::Rescale(_) => {
+                        stream.write_all(&x11_event(12, 0, &[(4, window, 4)]))?
+                    }
                 },
+                // after the first frame, WM_NAME (39) and then RESOURCE_MANAGER (23) of the root
+                // change, and after a frame of the new scale's width, the close button
+                72 if matches!(display.script, FakeScript::Rescale(_))
+                    && request[18..20] == [0, 0] =>
+                {
+                    let property = |atom| x11_event(28, 0, &[(4, 0x100, 4), (8, atom, 4)]);
+                    if stage == 0 {
+                        stage = 1;
+                        changed = true;
+                        stream.write_all(&[property(39), property(23)].concat())?;
+                    } else if stage == 1 && request[12..14] == 80u16.to_le_bytes() {
+                        stage = 2;
+                        let close = [(4, window, 4), (8, 301, 4), (12, 302, 4)];
+                        stream.write_all(&x11_event(33, 32, &close))?;
+                    }
+                }
+                // ConfigureWindow of a width and height, which the server gives at once
+                12 if request[8..10] == 12u16.to_le_bytes() => {
+                    let size = [(20, word(12), 2), (22, word(16), 2)];
+                    let fields = [(4, word(4), 4), (8, word(4), 4), size[0], size[1]];
+                    stream.write_all(&x11_event(22, 0, &fields))?;
+                }
                 // a frame starts with the strip at the top, and after the first, only one as wide
                 // as the new size moves the script on
                 72 if display.script == FakeScript::Paced && request[18..20] == [0, 0] => {
@@ -671,7 +701,10 @@ fn fake_x_client(
                 }
                 // GetProperty, of RESOURCE_MANAGER alone, a STRING of 8-bit values or nothing
                 20 => {
-                    let value = display.resources.as_bytes();
+                    let value = match display.script {
+                        FakeScript::Rescale(after) if changed => after.as_bytes(),
+                        _ => display.resources.as_bytes(),
+                    };
                     let (format, kind) = if value.is_empty() { (0, 0u32) } else { (8, 31) };
                     let mut reply = vec![1, format, 0, 0];
                     reply.extend((value.len().div_ceil(4) as u32).to_le_bytes());
@@ -1022,6 +1055,9 @@ fn both_backends_scale_an_x11_window_alike() {
         let requests = &interpreted.requests;
         let asked = requests.iter().any(|r| r[0] == 20);
         assert_eq!(asked, forced.is_empty(), "{name}");
+        // and only then listens for changes of the root's properties
+        let watched = requests.iter().any(|r| r[0] == 2);
+        assert_eq!(watched, forced.is_empty(), "{name}");
         // the window is 60 by 45 of the screen's pixels
         let created = requests.iter().find(|r| r[0] == 1).unwrap();
         assert_eq!(created[16..20], [60, 0, 45, 0]);
@@ -1037,6 +1073,98 @@ fn both_backends_scale_an_x11_window_alike() {
             assert_eq!(pixel(x, y), background, "{x}, {y}");
         }
     }
+}
+
+const RESCALED_PROGRAM: &str = r#"use gui
+
+match gui.open("fake", 40, 30):
+    case ok(w):
+        print(w.scale(), w.size())
+        done = false
+        while not done:
+            for e in w.wait():
+                print(e)
+                if e == gui.event.redraw:
+                    print(w.scale(), w.size())
+                    w.show(gui.blank(40, 30, gui.rgb(1, 2, 3)))
+                done = done or e == gui.event.close
+        w.close()
+    case err(reason):
+        print(reason)
+"#;
+
+#[test]
+fn both_backends_follow_an_x11_scale_change() {
+    // Xft.dpi going from 100% to 200% keeps the window's logical size, so it gives a redraw, not
+    // a resize, and the window is made twice as big on the screen
+    let display = FakeDisplay {
+        msb: false,
+        depth: 24,
+        bits: 32,
+        max_request: 65535,
+        refuse: None,
+        script: FakeScript::Rescale("Xft.dpi:\t192\n"),
+        short: false,
+        shm: FakeShm::Absent,
+        present: false,
+        resources: "Xft.dpi:\t96\n",
+    };
+    let name = "gui_x11_rescaled";
+    let socket = format!("{}/{name}/X0:0", env!("CARGO_TARGET_TMPDIR"));
+    let mut connections = None;
+    let env = [
+        ("DISPLAY", socket.as_str()),
+        ("WAYLAND_DISPLAY", ""),
+        ("XAUTHORITY", "none"),
+        ("STONE_GUI_SCALE", ""),
+    ];
+    let (dir, [run, built]) = run_and_build_env(
+        name,
+        RESCALED_PROGRAM,
+        |dir| connections = Some(fake_x_server(&dir.join("X0"), display)),
+        &env,
+    );
+    let crossed = run_crossed(&dir, &env);
+    let expected = "1.0 (40, 30)\n\
+                    event.redraw\n\
+                    1.0 (40, 30)\n\
+                    event.redraw\n\
+                    2.0 (40, 30)\n\
+                    event.close\n";
+    for output in [Some(&run), Some(&built), crossed.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(String::from_utf8_lossy(&output.stdout), expected);
+    }
+    let seen = closed_connections(&connections.unwrap());
+    let [interpreted, others @ ..] = &seen[..] else {
+        panic!("expected a connection");
+    };
+    assert_eq!(others.len(), 1 + crossed.is_some() as usize);
+    for other in others {
+        assert_eq!(interpreted.requests, other.requests);
+    }
+    let requests = &interpreted.requests;
+    // PropertyChangeMask on the root
+    let watch = requests.iter().find(|r| r[0] == 2).unwrap();
+    let word = |r: &[u8], at: usize| u32::from_le_bytes(r[at..at + 4].try_into().unwrap());
+    assert_eq!(
+        (word(watch, 4), word(watch, 8), word(watch, 12)),
+        (0x100, 2048, 0x40_0000)
+    );
+    // RESOURCE_MANAGER read again for the change, but not for the other property
+    assert_eq!(requests.iter().filter(|r| r[0] == 20).count(), 2);
+    // the window made 80 by 60 of the screen's pixels, and the next image as wide
+    let configured = requests.iter().find(|r| r[0] == 12).unwrap();
+    assert_eq!((word(configured, 12), word(configured, 16)), (80, 60));
+    let widths: Vec<_> = requests
+        .iter()
+        .filter(|r| r[0] == 72 && r[18..20] == [0, 0])
+        .map(|r| u16::from_le_bytes([r[12], r[13]]))
+        .collect();
+    assert_eq!(widths, [40, 80]);
 }
 
 #[test]
@@ -1549,6 +1677,13 @@ enum WaylandScale {
     Fractional(u32, u32),
     /// With `wl_surface.preferred_buffer_scale` before the first configure, and no viewports.
     Whole(u32),
+    /// With its one output's `wl_output.scale` when it is bound, entered by the window's
+    /// surface before the first configure, and changed with the script's new size, and no
+    /// viewports or preferred scales.
+    Outputs(u32, u32),
+    /// With two outputs, at 1 and 2, which the `Move` script moves the window between, and no
+    /// viewports or preferred scales.
+    Monitors,
 }
 
 /// What a fake compositor sends after the app's first frame.
@@ -1561,6 +1696,9 @@ enum WaylandScript {
     Input,
     /// A key held down.
     Hold,
+    /// After each content frame, the window's surface on another of the `Monitors` outputs,
+    /// then the close button.
+    Move,
 }
 
 /// Sends `data` on `stream` with the descriptor of `file`, as a compositor sends a keymap.
@@ -1627,6 +1765,9 @@ fn fake_globals(compositor: FakeCompositor) -> Vec<(u32, &'static str, u32)> {
         (5, "wl_seat", 8),
         (6, "wl_output", 3),
     ];
+    if compositor.scale == WaylandScale::Monitors {
+        globals.push((10, "wl_output", 3));
+    }
     if compositor.decorations {
         globals.push((7, "zxdg_decoration_manager_v1", 1));
     }
@@ -1687,6 +1828,9 @@ struct FakeObjects {
     views: std::collections::HashMap<u32, u32>,
     destinations: std::collections::HashMap<u32, (u32, u32)>,
     buffer_scales: std::collections::HashMap<u32, u32>,
+    /// The registry, and each output's id by its global's name.
+    registry: u32,
+    outputs: std::collections::HashMap<u32, u32>,
     /// How many content buffers were committed, and how far the script has gone.
     content_commits: usize,
     stage: usize,
@@ -1718,6 +1862,7 @@ fn fake_wayland_request(
         }
         ("wl_display", 1) => {
             new(objects, arg(0), "wl_registry");
+            objects.registry = arg(0);
             for (name, interface, version) in fake_globals(compositor) {
                 let mut args = vec![name];
                 args.extend(wayland_string(interface));
@@ -1737,6 +1882,20 @@ fn fake_wayland_request(
             if interface == "wl_seat" {
                 // a pointer and a keyboard
                 stream.write_all(&wayland_message(id, 0, &[3]))?;
+            }
+            if interface == "wl_output" {
+                objects.outputs.insert(arg(0), id);
+                let scale = match compositor.scale {
+                    WaylandScale::Outputs(first, _) => Some(first),
+                    WaylandScale::Monitors => Some(if arg(0) == 6 { 1 } else { 2 }),
+                    _ => None,
+                };
+                if let Some(scale) = scale {
+                    // scale, then done
+                    let mut out = wayland_message(id, 3, &[scale]);
+                    out.extend(wayland_message(id, 2, &[]));
+                    stream.write_all(&out)?;
+                }
             }
         }
         ("wl_compositor", 0) => new(objects, arg(0), "wl_surface"),
@@ -1850,7 +2009,12 @@ fn fake_commit(
 ) -> std::io::Result<()> {
     use std::io::Write;
     use std::os::unix::fs::FileExt;
-    let role = objects.roles.get(&object).cloned().unwrap_or_default();
+    // the one surface with no other role is the pointer's
+    let role = objects
+        .roles
+        .get(&object)
+        .cloned()
+        .unwrap_or_else(|| "cursor".to_string());
     match objects.attached.remove(&object) {
         Some(buffer) if buffer != 0 => {
             let (pool, offset, width, height, stride) = objects.buffers[&buffer];
@@ -1881,6 +2045,7 @@ fn fake_commit(
                     WaylandScript::Resize => {
                         fake_wayland_script(stream, compositor, objects, logical)?
                     }
+                    WaylandScript::Move => fake_moves(stream, objects)?,
                     script if objects.content_commits == 2 => {
                         stream.write_all(&fake_input(objects, script))?;
                     }
@@ -1897,6 +2062,10 @@ fn fake_commit(
                 }
                 WaylandScale::Whole(scale) => {
                     stream.write_all(&wayland_message(object, 2, &[scale]))?;
+                }
+                WaylandScale::Outputs(..) => {
+                    // enter
+                    stream.write_all(&wayland_message(object, 0, &[objects.outputs[&6]]))?;
                 }
                 _ => {}
             }
@@ -1929,6 +2098,12 @@ fn fake_wayland_script(
         if let WaylandScale::Fractional(_, second) = compositor.scale {
             out.extend(wayland_message(objects.fraction, 0, &[second]));
         }
+        if let WaylandScale::Outputs(_, second) = compositor.scale {
+            // scale, then done
+            let output = objects.outputs[&6];
+            out.extend(wayland_message(output, 3, &[second]));
+            out.extend(wayland_message(output, 2, &[]));
+        }
         out.extend(wayland_message(objects.toplevel, 0, &[300, 200, 4, 4]));
         out.extend(wayland_message(objects.xdg_surface, 0, &[11]));
         stream.write_all(&out)?;
@@ -1937,6 +2112,33 @@ fn fake_wayland_script(
         stream.write_all(&wayland_message(objects.toplevel, 1, &[]))?;
     }
     Ok(())
+}
+
+/// Moves the `Move` script on after a content buffer was committed: after the app's first frame
+/// (the second, after the one `open` shows), the window's surface enters the output at 1; after
+/// the next, it enters the one at 2 and leaves the one at 1; after the next, the one at 2 is
+/// unplugged and the surface enters the one at 1 again; and after the next, the close button.
+fn fake_moves(
+    stream: &mut std::os::unix::net::UnixStream,
+    objects: &mut FakeObjects,
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let surface = objects
+        .roles
+        .iter()
+        .find(|(_, role)| *role == "frame")
+        .map_or(0, |(id, _)| *id);
+    let (low, high) = (objects.outputs[&6], objects.outputs[&10]);
+    let enter = |output| wayland_message(surface, 0, &[output]);
+    let out = match objects.content_commits {
+        2 => enter(low),
+        3 => [enter(high), wayland_message(surface, 1, &[low])].concat(),
+        // global_remove
+        4 => [wayland_message(objects.registry, 1, &[10]), enter(low)].concat(),
+        5 => wayland_message(objects.toplevel, 1, &[]),
+        _ => vec![],
+    };
+    stream.write_all(&out)
 }
 
 /// The events of the script `script` (`Input` or `Hold`) for the window `objects` knows, its
@@ -2232,15 +2434,21 @@ match gui.open("way", 40, 30):
 #[test]
 #[cfg(target_os = "linux")]
 fn both_backends_scale_a_wayland_window_alike() {
-    // the compositor's scale, whole or fractional and changing with the new size, or
-    // STONE_GUI_SCALE's over it, which is whole without viewports: the scale at first and last
-    for (scale, forced, first, last) in [
+    // the compositor's scale, whole or fractional and changing with the new size, or its
+    // output's, or STONE_GUI_SCALE's over it, which is whole without viewports: the scale at
+    // first and last
+    for (i, (scale, forced, first, last)) in [
         (WaylandScale::Fractional(180, 240), "", 1.5, 2.0),
         (WaylandScale::Whole(2), "", 2.0, 2.0),
         (WaylandScale::Fractional(180, 240), "1.25", 1.25, 1.25),
         (WaylandScale::Unsaid, "1.5", 2.0, 2.0),
-    ] {
-        let name = format!("gui_wayland_scaled_{}_{forced}", first * 100.0);
+        (WaylandScale::Outputs(1, 2), "", 1.0, 2.0),
+        (WaylandScale::Outputs(2, 2), "", 2.0, 2.0),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let name = format!("gui_wayland_scaled_{i}");
         let compositor = FakeCompositor {
             decorations: false,
             script: WaylandScript::Resize,
@@ -2303,6 +2511,17 @@ fn both_backends_scale_a_wayland_window_alike() {
         let mut expected = vec![(w, h), (w, h), (wide, tall), (wide, tall)];
         expected.truncate(shown.len());
         assert_eq!(sizes, expected, "{name}");
+        // our cursor, 16 logical pixels square in the screen's, its tip opaque black and its
+        // bottom right corner transparent
+        let cursors = of("cursor");
+        for (((_, cw, ch, pixels), (_, lw, lh)), scale) in
+            [(cursors[0], first), (cursors[cursors.len() - 1], last)]
+        {
+            let side = physical(16, scale);
+            assert_eq!((*cw, *ch, *lw, *lh), (side, side, 16, 16), "{name}");
+            assert_eq!(pixels[..4], [0, 0, 0, 255], "{name}");
+            assert_eq!(pixels[pixels.len() - 1], 0, "{name}");
+        }
         let frames = of("frame");
         let ((_, fw, fh, _), (_, lw, lh)) = frames[0];
         assert_eq!(
@@ -2352,6 +2571,95 @@ fn both_backends_scale_a_wayland_window_alike() {
             "{name}"
         );
     }
+}
+
+const WAYLAND_OUTPUTS_PROGRAM: &str = r#"use gui
+
+match gui.open("way", 40, 30):
+    case ok(w):
+        print(w.scale())
+        done = false
+        while not done:
+            for e in w.wait():
+                if e == gui.event.redraw:
+                    print(w.scale())
+                    w.show(gui.blank(40, 30, gui.rgb(1, 2, 3)))
+                done = done or e == gui.event.close
+        w.close()
+    case err(reason):
+        print(reason)
+"#;
+
+#[test]
+#[cfg(target_os = "linux")]
+fn both_backends_follow_a_wayland_window_across_outputs() {
+    // with no scale of its own, a compositor's window takes the largest scale of the outputs it
+    // is on, or of all of them before it is on any: 2 at first, 1 on the first output, 2 once
+    // it is on the second too and then on it alone, and 1 when the second is unplugged
+    let compositor = FakeCompositor {
+        decorations: false,
+        script: WaylandScript::Move,
+        keymap: "us.xkb",
+        rate: 0,
+        frames: true,
+        scale: WaylandScale::Monitors,
+    };
+    let name = "gui_wayland_outputs";
+    let env = [
+        ("WAYLAND_DISPLAY", "wayland-9"),
+        ("XDG_RUNTIME_DIR", "."),
+        ("DISPLAY", ""),
+        ("STONE_GUI_SCALE", ""),
+    ];
+    let mut connections = None;
+    let (dir, [run, built]) = run_and_build_env(
+        name,
+        WAYLAND_OUTPUTS_PROGRAM,
+        |dir| connections = Some(fake_wayland_server(&dir.join("wayland-9"), compositor)),
+        &env,
+    );
+    let crossed = run_crossed(&dir, &env);
+    for output in [Some(&run), Some(&built), crossed.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stdout),
+            "2.0\n2.0\n1.0\n2.0\n1.0\n"
+        );
+    }
+    let seen = closed_wayland_connections(&connections.unwrap());
+    let [interpreted, others @ ..] = &seen[..] else {
+        panic!("expected a connection");
+    };
+    assert_eq!(others.len(), 1 + crossed.is_some() as usize);
+    for other in others {
+        assert_same_requests(&interpreted.requests, &other.requests, name);
+        assert_eq!(interpreted.commits, other.commits, "{name}");
+    }
+    // each content buffer in the screen's pixels at the scale of its time
+    let sizes: Vec<_> = interpreted
+        .commits
+        .iter()
+        .filter(|(role, ..)| role == "content")
+        .map(|(_, w, h, _)| (*w, *h))
+        .collect();
+    assert_eq!(sizes, [(80, 60), (80, 60), (40, 30), (80, 60), (40, 30)]);
+    // the unplugged output released: the id the bind of its global (10) gave it, then a
+    // request of opcode 0 to it with no arguments
+    let bound = interpreted
+        .requests
+        .iter()
+        .find(|r| {
+            r.len() > 12
+                && r[8..12] == 10u32.to_le_bytes()
+                && r.windows(9).any(|w| w == b"wl_output")
+        })
+        .unwrap();
+    let id: [u8; 4] = bound[bound.len() - 4..].try_into().unwrap();
+    let released = wayland_message(u32::from_le_bytes(id), 0, &[]);
+    assert!(interpreted.requests.contains(&released), "{name}");
 }
 
 #[test]

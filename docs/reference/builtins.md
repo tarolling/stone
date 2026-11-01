@@ -2023,10 +2023,13 @@ which `gui` shows as `w.scale()` of the screen's pixels each, to the nearest, so
 canvas pixel is one or two of the screen's across. The scale is `STONE_GUI_SCALE`'s, a number
 from 0.5 to 8, if it is set, and otherwise the display's: on Windows the monitor's, which follows
 the window to another monitor; on X11 the `Xft.dpi` resource's (96 is 100%), or 1.0 without
-one; and on Wayland the compositor's preferred scale for the window, which may be fractional
-where the compositor has `wp_fractional_scale_v1` and `wp_viewporter`, and which gives a
-`redraw` event when it changes. A Wayland compositor without `wp_viewporter` takes whole scales
-only, so `STONE_GUI_SCALE` is rounded there.
+one, which follows the desktop's changes to it; and on Wayland the compositor's preferred scale
+for the window, which may be fractional where the compositor has `wp_fractional_scale_v1` and
+`wp_viewporter`, or for a compositor that says none, the largest scale of the monitors the
+window is on. A change of the scale keeps the window's size in logical pixels and gives a
+`redraw` event. A Wayland compositor without `wp_viewporter` takes whole scales only, so
+`STONE_GUI_SCALE` is rounded there. The cursor `gui` draws on Wayland, where the compositor
+cannot draw one, is scaled too.
 
 `events`, `wait`, `next_frame`, `show`, `set_title`, and `close` change the window, so each is a statement or
 the whole value of an assignment, as in `es = w.events()`.

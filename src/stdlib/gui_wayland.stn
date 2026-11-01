@@ -6,8 +6,9 @@
 // Sizes, points, and canvases are in the compositor's logical pixels, as its surfaces are, and
 // buffers in the screen's: the scale is `STONE_GUI_SCALE`'s, else the compositor's preferred
 // fractional scale (with `wp_fractional_scale_v1`, shown through `wp_viewporter`), else its
-// preferred whole scale (`wl_surface` version 6), else 1. Canvases and our frame are scaled up
-// pixel by pixel, to the nearest of the screen's pixels.
+// preferred whole scale (`wl_surface` version 6), else the largest `wl_output.scale` of the
+// outputs the window is on (of every output before it is on any), else 1. Canvases, our frame,
+// and our cursor are scaled up pixel by pixel, to the nearest of the screen's pixels.
 
 use gui
 use gui.canvas
@@ -39,6 +40,7 @@ pub struct link:
     mouse: pointer
     // in a list, so the link holds no more values than a result may
     keys: list[keyboard]
+    outputs: outputs
 
 // The protocol's objects: the id the next new one gets, each one's id by its role, and its role
 // by its id, which is empty for an id the compositor has freed for reuse. A compositor keeps an
@@ -82,6 +84,14 @@ struct pointer:
     wheel: int
     stepped: bool
 
+// The outputs, the compositor's screens: each bound one's scale and the version it was bound
+// at, by id, the ones the window's surface is on, and whether the compositor said a preferred
+// scale for the window, which then wins over theirs.
+struct outputs:
+    found: map[int, tuple[int, int]]
+    on: list[int]
+    said: bool
+
 // The keyboard: its keymap, the modifiers held as a mask of Shift (1), Caps Lock (2), and
 // Control (4), the key held down whose text repeats and when it repeats next, and the
 // compositor's repeats a second and delay in milliseconds.
@@ -109,7 +119,8 @@ fn new_link(conn: socket, keys: gui_keys.keymap) -> link:
     s = buffers(busy=[], black=[], border=0, scale=1.0, fixed=no)
     m = pointer(serial=0, on="", at=zero, wheel=0, stepped=no)
     t = keyboard(map=keys, state=0, held=-1, due=0.0, rate=25, delay=600)
-    ret link(conn=conn, open=no, extent=zero, pending=[], objs=o, look=f, store=s, mouse=m, keys=[t])
+    screens = outputs(found={}, on=[], said=no)
+    ret link(conn=conn, open=no, extent=zero, pending=[], objs=o, look=f, store=s, mouse=m, keys=[t], outputs=screens)
 
 // Opens a window `width` by `height` pixels titled `title`, on the compositor `WAYLAND_DISPLAY`
 // names, and returns once it is on the screen, at the scale `scale`, or the compositor's for 0.0.
@@ -255,14 +266,18 @@ impl link:
         asks = message(1, 1, [registry])
         asks.extend(message(1, 0, [sync]))
         self.conn.send_bytes(bytes(asks).unwrap())?
-        // each global's name and version, by interface, until the sync is done
+        // each global's name and version, by interface, and every output's, until the sync is
+        // done
         globals = {"": (0, 0)}
+        screens = []
         while true:
             raw = self.read()?
             object = get32(raw, 0)
             if object == registry and get16(raw, 4) == 0:
                 version = get32(raw, 16 + padded(get32(raw, 12)))
                 globals[text_at(raw, 12)] = (get32(raw, 8), version)
+                if text_at(raw, 12) == "wl_output":
+                    screens.append((get32(raw, 8), version))
             elif object == sync:
                 // done, so its id may be used again once the compositor frees it
                 self.objs.ids.pop("sync")
@@ -302,6 +317,9 @@ impl link:
             words.extend(text_words(want[0]))
             words.extend([found[1].min(want[2]), id])
             asks.extend(message(registry, 0, words))
+        // the outputs, whose scales come before the first configure
+        for screen in screens:
+            asks.extend(self.bind_output(screen[0], screen[1]))
         // the window: a surface that is an xdg toplevel, titled
         compositor = self.id("compositor")
         surface = self.make("surface")
@@ -338,6 +356,9 @@ impl link:
             asks.extend(message(self.id("viewporter"), 1, [view, self.id("content")]))
         cursor = self.make("cursor")
         asks.extend(message(compositor, 0, [cursor]))
+        if viewed:
+            view = self.make("cursor_view")
+            asks.extend(message(self.id("viewporter"), 1, [view, cursor]))
         // a commit with no buffer, which the compositor answers with the first configure
         asks.extend(message(surface, 6, []))
         self.conn.send_bytes(bytes(asks).unwrap())?
@@ -453,10 +474,24 @@ impl link:
             self.pending.append(event.close)
         elif role == "fraction" and op == 0:
             // preferred_scale, in 120ths
-            self.rescale(float(get32(raw, 8)) / 120.0)
+            self.preferred(float(get32(raw, 8)) / 120.0)
         elif role == "surface" and op == 2 and self.id("fraction") == 0:
             // preferred_buffer_scale
-            self.rescale(float(signed(get32(raw, 8))))
+            self.preferred(float(signed(get32(raw, 8))))
+        elif role == "surface" and op <= 1:
+            // enter(output) or leave(output)
+            self.entered(get32(raw, 8), op == 0)
+        elif role == "registry" and op == 0 and text_at(raw, 12) == "wl_output":
+            // global(name, interface, version), an output plugged in
+            self.send(self.bind_output(get32(raw, 8), get32(raw, 16 + padded(get32(raw, 12)))))
+        elif role == "registry" and op == 1:
+            // global_remove(name)
+            self.unplug(get32(raw, 8))
+        elif role.startswith("output.") and op == 3:
+            // scale(factor)
+            version = self.outputs.found[object][1]
+            self.outputs.found[object] = (signed(get32(raw, 8)), version)
+            self.follow_outputs()
         elif role == "seat" and op == 0:
             self.capabilities(get32(raw, 8))
         elif role == "pointer":
@@ -495,6 +530,64 @@ impl link:
             // the new memory is all zeros, which is black
             self.commit_content(0)
             self.pending.append(event.redraw)
+
+    // The request that binds the output that is the global `name` of version `version`, which
+    // has the scale 1 until it says another.
+    fn bind_output(self, name: int, version: int) -> list[int]:
+        id = self.make("output.{name}")
+        self.outputs.found[id] = (1, version.min(3))
+        words = [name]
+        words.extend(text_words("wl_output"))
+        words.extend([version.min(3), id])
+        ret message(self.id("registry"), 0, words)
+
+    // Acts on the output that is the global `name` going away: forgets it, releases it where
+    // its version can, and takes the scale of the outputs left.
+    fn unplug(self, name: int):
+        role = "output.{name}"
+        output = self.id(role)
+        if output == 0:
+            ret
+        version = self.outputs.found[output][1]
+        self.outputs.found.pop(output)
+        self.outputs.on = self.outputs.on.filter(|o| o != output)
+        self.objs.ids.pop(role)
+        if version >= 3:
+            // release, after which the compositor frees the id
+            self.send(message(output, 0, []))
+            self.objs.roles.pop(output)
+        else:
+            // it cannot be released, so its id is never used again
+            self.objs.roles[output] = "gone"
+        self.follow_outputs()
+
+    // Acts on the window's surface entering the output `output`, if `inside`, or leaving it.
+    fn entered(self, output: int, inside: bool):
+        if not self.outputs.found.contains(output):
+            ret
+        if not inside:
+            self.outputs.on = self.outputs.on.filter(|o| o != output)
+        elif output not in self.outputs.on:
+            self.outputs.on.append(output)
+        self.follow_outputs()
+
+    // Takes the largest scale of the outputs the window is on, or of every output before it is
+    // on any, unless the compositor said a preferred scale.
+    fn follow_outputs(self):
+        if self.outputs.said:
+            ret
+        largest = 0
+        for output, found in self.outputs.found.items():
+            if self.outputs.on.len() == 0 or output in self.outputs.on:
+                largest = largest.max(found[0])
+        if largest > 0:
+            self.rescale(float(largest))
+
+    // Acts on the compositor's preferring the scale `scale` for the window, which then wins over
+    // the outputs'.
+    fn preferred(self, scale: float):
+        self.outputs.said = true
+        self.rescale(scale)
 
     // Acts on the compositor's preferring the scale `scale`: unless `STONE_GUI_SCALE` fixed the
     // scale, takes it, and once the window is on the screen, makes new buffers for it, draws our
@@ -545,8 +638,8 @@ impl link:
         b = self.border()
         ret (self.extent[0] + 2 * b, self.extent[1] + title_height() + 2 * b)
 
-    // Makes new memory to share and new buffers in it for the window's size, in place of the
-    // ones before: two of the content, two of the frame, and the cursor's, drawn at once.
+    // Makes new memory to share and new buffers in it for the window's size and scale, in place
+    // of the ones before: two of the content, two of the frame, and the cursor's, drawn at once.
     fn rebuild(self):
         for role in ["content0", "content1", "frame0", "frame1", "pointer_image", "pool"]:
             old = self.id(role)
@@ -565,7 +658,9 @@ impl link:
         frame = 0
         if self.ours():
             frame = whole[0] * whole[1] * 4
-        size = 2 * content + 2 * frame + cursor_size() * cursor_size() * 4
+        // the cursor's side in the screen's pixels
+        side = physical(cursor_size(), self.store.scale)
+        size = 2 * content + 2 * frame + side * side * 4
         match gui_sys.shm_create(self.conn, size):
             case ok(_):
                 self.store.busy = [false, false, false, false]
@@ -591,16 +686,17 @@ impl link:
                 // ARGB8888, for its transparent edges
                 asks.extend(message(pool, 0, [buffer, at, whole[0], whole[1], whole[0] * 4, 0]))
         image = self.make("pointer_image")
-        side = cursor_size()
         at = 2 * content + 2 * frame
         asks.extend(message(pool, 0, [image, at, side, side, side * 4, 0]))
         self.send(asks)
         self.store.black = []
         for _ in range(width):
             self.store.black.append(0)
-        self.write(at, gui_sys.pack(arrow(), 0, side * side, 3))
+        small = cursor_size()
+        self.write(at, gui_sys.pack_scaled(arrow(), small, small, side, side, 3))
         cursor = self.id("cursor")
-        asks = message(cursor, 1, [image, 0, 0])
+        asks = self.scaled(cursor, self.id("cursor_view"), (small, small))
+        asks.extend(message(cursor, 1, [image, 0, 0]))
         asks.extend(message(cursor, 9, [0, 0, side, side]))
         asks.extend(message(cursor, 6, []))
         self.send(asks)
@@ -925,7 +1021,7 @@ fn fixed(raw: bytes, at: int) -> int:
 fn opaque(color: int) -> int:
     ret 4278190080 + color
 
-// The cursor's width and height.
+// The cursor's width and height, in logical pixels.
 fn cursor_size() -> int:
     ret 16
 

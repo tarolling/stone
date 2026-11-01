@@ -22,9 +22,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   and canvases are in logical pixels, which `gui` shows as one or more of the screen's each (to
   the nearest, so at 150% a canvas pixel is one or two), and the new `w.scale()` gives the
   scale. Windows takes it from the monitor (and follows a window to another monitor), X11 from
-  the `Xft.dpi` resource, and Wayland from the compositor's preferred scale, fractional where
-  it has `wp_fractional_scale_v1` and `wp_viewporter`, whole otherwise, with a `redraw` event
-  when it changes. `STONE_GUI_SCALE` (0.5 to 8) sets the scale instead.
+  the `Xft.dpi` resource (and follows the desktop's changes to it), and Wayland from the
+  compositor's preferred scale, fractional where it has `wp_fractional_scale_v1` and
+  `wp_viewporter`, whole otherwise, or, from a compositor that says none, the largest scale of
+  the monitors the window is on, with a `redraw` event when it changes. The cursor `gui` draws
+  on Wayland is scaled too. `STONE_GUI_SCALE` (0.5 to 8) sets the scale instead.
 - `stone build --windows-gui` builds Windows executables that start with no console, so opening
   one from Explorer shows only its window. What such a program prints goes nowhere unless its
   output is redirected.

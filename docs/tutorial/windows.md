@@ -79,7 +79,9 @@ beside it (see [the CLI reference](../reference/cli.md)).
 Sizes, points, and canvases are in logical pixels, so a window is as big on a screen scaled to
 200% as on one at 100%: there, each pixel of a canvas is two of the screen's across, and at
 150% one or two. `w.scale()` says how many of the screen's pixels a logical one is, as the
-system's display settings make it, and `STONE_GUI_SCALE` (from 0.5 to 8) sets it instead.
+system's display settings make it for the monitor the window is on, and `STONE_GUI_SCALE` (from
+0.5 to 8) sets it instead. When the scale changes, the window keeps its size in logical pixels
+and gets a `redraw` event.
 
 ## Apps
 

@@ -1821,3 +1821,301 @@ fn a_library_cannot_name_a_trait_of_the_entry_file_as_a_type() {
         13,
     );
 }
+
+const GEO_MANIFEST: (&str, &str) = (
+    "../geo/stone.toml",
+    "[package]\nname = \"geo\"\nversion = \"1.2.0\"\n",
+);
+
+const GEO_SHAPES: (&str, &str) = (
+    "../geo/shapes.stn",
+    "pub fn area(x: int) -> int:\n    ret x * x\n\nfn hidden() -> int:\n    ret 0\n",
+);
+
+const USES_GEO: (&str, &str) = (
+    "stone.toml",
+    "[dependencies]\ngeo = { path = \"../geo\" }\n",
+);
+
+#[test]
+fn a_path_dependency_is_used_by_its_name() {
+    assert_eq!(
+        output(&[
+            (
+                "main.stn",
+                "use geo.shapes\nuse geo.shapes.area\nprint(shapes.area(2) + area(3))\n"
+            ),
+            USES_GEO,
+            GEO_MANIFEST,
+            GEO_SHAPES,
+        ]),
+        "13\n"
+    );
+}
+
+#[test]
+fn a_packages_own_name_loads_its_lib() {
+    let lib = ("../geo/lib.stn", "pub fn one() -> int:\n    ret 1\n");
+    assert_eq!(
+        output(&[
+            (
+                "main.stn",
+                "use geo\nuse geo.one\nprint(geo.one() + one())\n"
+            ),
+            USES_GEO,
+            GEO_MANIFEST,
+            lib,
+        ]),
+        "2\n"
+    );
+    assert_error(
+        &[
+            ("main.stn", "use geo\n"),
+            USES_GEO,
+            GEO_MANIFEST,
+            GEO_SHAPES,
+        ],
+        "main.stn",
+        "package 'geo' has no lib.stn, so use one of its modules",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn a_packages_files_use_its_own_modules_and_dependencies() {
+    // the program and the package each have a module `util`, and they do not meet
+    assert_eq!(
+        output(&[
+            (
+                "main.stn",
+                "use util\nuse geo.shapes\nprint(util.n() + shapes.n())\n"
+            ),
+            ("util.stn", "pub fn n() -> int:\n    ret 100\n"),
+            USES_GEO,
+            (
+                "../geo/stone.toml",
+                "[package]\nname = \"geo\"\n\n[dependencies]\nnum = { path = \"../num\" }\n",
+            ),
+            (
+                "../geo/shapes.stn",
+                "use util\nuse num\npub fn n() -> int:\n    ret util.n() + num.n()\n",
+            ),
+            ("../geo/util.stn", "pub fn n() -> int:\n    ret 20\n"),
+            ("../num/stone.toml", "[package]\nname = \"num\"\n"),
+            ("../num/lib.stn", "pub fn n() -> int:\n    ret 3\n"),
+        ]),
+        "123\n"
+    );
+}
+
+#[test]
+fn a_package_cannot_see_the_programs_modules_or_its_dependencies() {
+    assert_error(
+        &[
+            ("main.stn", "use geo.shapes\nprint(shapes.area(1))\n"),
+            ("helper.stn", "pub fn n() -> int:\n    ret 1\n"),
+            USES_GEO,
+            GEO_MANIFEST,
+            (
+                "../geo/shapes.stn",
+                "use helper\npub fn area(x: int) -> int:\n    ret x\n",
+            ),
+        ],
+        "../geo/shapes.stn",
+        "no module named 'helper'",
+        1,
+        5,
+    );
+    // a dependency's own dependencies are its alone
+    assert_error(
+        &[
+            ("main.stn", "use num\n"),
+            USES_GEO,
+            (
+                "../geo/stone.toml",
+                "[package]\nname = \"geo\"\n\n[dependencies]\nnum = { path = \"../num\" }\n",
+            ),
+            ("../num/stone.toml", "[package]\nname = \"num\"\n"),
+            ("../num/lib.stn", "pub fn n() -> int:\n    ret 3\n"),
+        ],
+        "main.stn",
+        "no module named 'num'",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn a_packages_private_functions_stay_private() {
+    assert_error(
+        &[
+            ("main.stn", "use geo.shapes.hidden\n"),
+            USES_GEO,
+            GEO_MANIFEST,
+            GEO_SHAPES,
+        ],
+        "main.stn",
+        "'hidden' is private to module 'geo.shapes'",
+        1,
+        16,
+    );
+}
+
+#[test]
+fn a_missing_package_module_is_named_as_written() {
+    assert_error(
+        &[
+            ("main.stn", "use geo.lines\n"),
+            USES_GEO,
+            GEO_MANIFEST,
+            GEO_SHAPES,
+        ],
+        "main.stn",
+        "no module named 'geo.lines'",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn a_dependency_cannot_share_a_name_with_a_module_of_the_program() {
+    for local in ["geo.stn", "geo/lines.stn"] {
+        assert_error(
+            &[
+                ("main.stn", "print(1)\n"),
+                (local, "pub fn n() -> int:\n    ret 1\n"),
+                USES_GEO,
+                GEO_MANIFEST,
+            ],
+            "stone.toml",
+            "'geo' is both a dependency and a module of this program, so rename one",
+            2,
+            1,
+        );
+    }
+}
+
+#[test]
+fn a_path_dependency_needs_a_manifest() {
+    assert_error(
+        &[("main.stn", "print(1)\n"), USES_GEO, GEO_SHAPES],
+        "stone.toml",
+        "'../geo' has no stone.toml, so it is not a package",
+        2,
+        1,
+    );
+}
+
+#[test]
+fn manifest_errors_point_into_the_manifest() {
+    assert_error(
+        &[
+            ("main.stn", "print(1)\n"),
+            ("stone.toml", "[dependencies]\ngeo = { path = 1 }\n"),
+        ],
+        "stone.toml",
+        "'path' is a string, not an integer",
+        2,
+        16,
+    );
+    assert_error(
+        &[
+            ("main.stn", "print(1)\n"),
+            USES_GEO,
+            ("../geo/stone.toml", "[package]\nnam = \"geo\"\n"),
+        ],
+        "../geo/stone.toml",
+        "unknown key 'nam' in [package], which holds name, version, stone, description, and \
+         license",
+        2,
+        1,
+    );
+}
+
+#[test]
+fn a_dependency_needs_a_name() {
+    assert_error(
+        &[
+            ("main.stn", "print(1)\n"),
+            USES_GEO,
+            ("../geo/stone.toml", "[package]\nversion = \"1.0\"\n"),
+        ],
+        "../geo/stone.toml",
+        "a package that others use has a name, as name = \"geo\" under [package]",
+        1,
+        1,
+    );
+}
+
+#[test]
+fn packages_are_linked_under_their_names_and_compatibility_classes() {
+    let a = |version: &str, n: &str| {
+        [
+            (
+                format!("../a{n}/stone.toml"),
+                format!("[package]\nname = \"a\"\nversion = \"{version}\"\n"),
+            ),
+            (
+                format!("../a{n}/lib.stn"),
+                format!("pub fn make() -> int:\n    ret {n}\n"),
+            ),
+        ]
+    };
+    let mut files: Vec<(String, String)> = vec![
+        (
+            "main.stn".into(),
+            "use one\nuse two\nuse three\nprint(one.make() + two.make() + three.make())\n".into(),
+        ),
+        (
+            "stone.toml".into(),
+            "[dependencies]\none = { path = \"../a1\" }\ntwo = { path = \"../a2\" }\n\
+             three = { path = \"../a3\" }\n"
+                .into(),
+        ),
+    ];
+    files.extend(a("1.4.0", "1"));
+    files.extend(a("2.0.1", "2"));
+    files.extend(a("1.0.0", "3"));
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    assert_eq!(output(&files), "6\n");
+    assert_eq!(
+        defined_functions(&files),
+        ["a.1.make", "a.2.make", "a.1.2.make"]
+    );
+}
+
+#[test]
+fn one_directory_is_one_package_however_it_is_reached() {
+    let files = [
+        (
+            "main.stn",
+            "use geo\nuse other\nprint(geo.one() + other.one())\n",
+        ),
+        (
+            "stone.toml",
+            "[dependencies]\ngeo = { path = \"../geo\" }\nother = { path = \"../x/../geo\" }\n",
+        ),
+        GEO_MANIFEST,
+        (
+            "../geo/lib.stn",
+            "use lib\npub fn one() -> int:\n    ret 1\n",
+        ),
+    ];
+    assert_eq!(output(&files), "2\n");
+    assert_eq!(defined_functions(&files), ["geo.1.one"]);
+}
+
+#[test]
+fn a_dependencys_files_are_never_reported_unused() {
+    let (map, diagnostics) = driver::check_program(
+        Path::new("main.stn"),
+        "use geo.shapes\nprint(shapes.area(2))\n",
+        &sources_of(&[USES_GEO, GEO_MANIFEST, GEO_SHAPES]),
+    );
+    let rendered: Vec<String> = diagnostics.iter().map(|d| map.render(d)).collect();
+    assert_eq!(rendered, Vec::<String>::new());
+}

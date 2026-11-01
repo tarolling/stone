@@ -1,0 +1,9 @@
+# a program whose dependencies are directories beside it, in tests/packages
+[package]
+name = "packages"
+version = "0.1.0"
+
+[dependencies]
+geo = { path = "../../packages/geo" }
+# the same package as geo's num, but a newer major version, so both are linked
+num = { path = "../../packages/num_one" }

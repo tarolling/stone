@@ -30,6 +30,7 @@ use crate::ast::{
 use crate::checker::{DISPLAY, EQ, FROM, OPTION, ORD, RESULT, TRY_FROM, collect_assigned};
 use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
+use crate::package::{LIB, MANIFEST, Manifest, Source, Version, join_normal};
 use crate::parser::Parser;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::{
@@ -117,9 +118,14 @@ pub struct SourceFile {
     /// The path diagnostics show, which is the root joined with the module's path, such as
     /// `app/geometry/shapes.stn`.
     pub path: PathBuf,
-    /// The module's dotted name, such as `geometry.shapes`, or empty for the entry file.
+    /// The module's dotted name, such as `geometry.shapes`, or empty for the entry file and a
+    /// manifest. A module of a dependency is named by its package's linked prefix, as
+    /// `geo.1.shapes` (see [`crate::package`]).
     pub module: String,
     pub source: String,
+    /// The name of the package the file belongs to, if it is a dependency's rather than the
+    /// program's own, such as `geo`.
+    pub package: Option<String>,
 }
 
 impl SourceFile {
@@ -129,6 +135,17 @@ impl SourceFile {
     pub fn is_builtin(&self) -> bool {
         crate::stdlib::source_module(&self.module).is_some()
             && self.path == Path::new(&format!("<{}>", self.module))
+    }
+
+    /// Returns whether the file belongs to a package the program depends on, whose code the
+    /// program's author did not write.
+    pub fn is_dependency(&self) -> bool {
+        self.package.is_some()
+    }
+
+    /// Returns whether the file is a package's `stone.toml` rather than stone source.
+    pub fn is_manifest(&self) -> bool {
+        self.path.file_name() == Some(std::ffi::OsStr::new(MANIFEST))
     }
 }
 
@@ -143,6 +160,7 @@ static PRELUDE_FILE: LazyLock<SourceFile> = LazyLock::new(|| SourceFile {
     path: PathBuf::from("<prelude>"),
     module: String::new(),
     source: PRELUDE.to_string(),
+    package: None,
 });
 
 impl SourceMap {
@@ -278,9 +296,17 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
         by_name: HashMap::new(),
         uses: vec![],
         own: HashSet::new(),
+        packages: vec![Package {
+            root: root.to_path_buf(),
+            prefix: String::new(),
+            name: String::new(),
+            deps: HashMap::new(),
+        }],
+        file_package: vec![],
         diagnostics: vec![],
     };
-    loader.add(entry.to_path_buf(), String::new(), source.to_string());
+    loader.add(entry.to_path_buf(), String::new(), source.to_string(), 0);
+    loader.load_packages();
 
     // each file's uses can add files, which are resolved in turn
     let mut next = 0;
@@ -330,6 +356,20 @@ struct Use {
     target: Option<Target>,
 }
 
+/// A package whose files are part of the program: the program itself, or one it depends on,
+/// directly or not.
+struct Package {
+    /// The directory its module paths start from.
+    root: PathBuf,
+    /// What its modules' linked names start with, as `geo.1` (see [`Loader::load_packages`]),
+    /// or empty for the program, whose modules are named by their paths alone.
+    prefix: String,
+    /// Its name, from its manifest, as `geo`.
+    name: String,
+    /// Each package its files use, by the name they use it under.
+    deps: HashMap<String, usize>,
+}
+
 /// State for loading every file a program uses.
 struct Loader<'a> {
     sources: &'a dyn Sources,
@@ -345,12 +385,17 @@ struct Loader<'a> {
     /// The files that are part of stone, written in stone, such as `net`'s, which alone may use
     /// the internal builtin modules.
     own: HashSet<FileId>,
+    /// The program first, then every package it depends on, directly or not.
+    packages: Vec<Package>,
+    /// Each file's package, by index into `packages`.
+    file_package: Vec<usize>,
     diagnostics: Vec<Diagnostic>,
 }
 
 impl Loader<'_> {
-    /// Parses a file and adds it to the program, recording its syntax errors.
-    fn add(&mut self, path: PathBuf, module: String, source: String) -> FileId {
+    /// Parses a file of the package `package` and adds it to the program, recording its syntax
+    /// errors.
+    fn add(&mut self, path: PathBuf, module: String, source: String, package: usize) -> FileId {
         let id = FileId(self.files.len() as u32);
         let (tokens, lex_errors) = Lexer::with_file(&source, id).lex_recovering();
         let (mut parsed, parse_errors) = Parser::new(&tokens).parse_recovering();
@@ -370,40 +415,207 @@ impl Loader<'_> {
             path,
             module,
             source,
+            package: (package != 0).then(|| self.packages[package].name.clone()),
         });
         self.modules.push(parsed);
         self.uses.push(vec![]);
+        self.file_package.push(package);
         id
     }
 
-    /// Returns the file of the module with these dotted names, loading it if it exists.
+    /// Adds a package's manifest to the program's files, so its errors render like any other,
+    /// with no statements.
+    fn add_manifest(&mut self, path: PathBuf, source: String, package: usize) -> FileId {
+        let id = FileId(self.files.len() as u32);
+        self.files.push(SourceFile {
+            path,
+            module: String::new(),
+            source,
+            package: (package != 0).then(|| self.packages[package].name.clone()),
+        });
+        self.modules.push(Mod::Module { body: vec![] });
+        self.uses.push(vec![]);
+        self.file_package.push(package);
+        id
+    }
+
+    /// Reads the program's `stone.toml`, if it has one, and the manifest of every package it
+    /// depends on, directly or not, adding each package.
+    ///
+    /// A dependency's modules are linked under a prefix of its name and the compatibility class
+    /// of its version, as `geo.1` for `geo` 1.2.0, so `use geo.shapes` in the program and
+    /// `use shapes` in `geo` both load the module `geo.1.shapes`. A module's name never starts
+    /// with a digit, so no prefix is ever a module of the program. Two packages with the same
+    /// name and class, which can only be different directories, are told apart by a number, as
+    /// `geo.1.2`.
+    fn load_packages(&mut self) {
+        let mut next = 0;
+        while next < self.packages.len() {
+            self.load_dependencies(next);
+            next += 1;
+        }
+    }
+
+    /// Reads the manifest of the package `package`, which the program's need not have, adding
+    /// each package it depends on that is not added yet.
+    fn load_dependencies(&mut self, package: usize) {
+        let root = self.packages[package].root.clone();
+        let path = root.join(MANIFEST);
+        let Some(source) = self.sources.read(&path) else {
+            return;
+        };
+        let file = self.add_manifest(path, source.clone(), package);
+        let (manifest, errors) = Manifest::parse(&source, file);
+        self.diagnostics.extend(errors);
+        for dependency in &manifest.dependencies {
+            let names = [dependency.name.clone()];
+            let local = self.sources.read(&root.join(module_path(&names))).is_some()
+                || self.sources.is_dir(&root.join(&dependency.name));
+            if local {
+                self.diagnostics.push(Diagnostic::error(
+                    dependency.span,
+                    format!(
+                        "'{}' is both a dependency and a module of this program, so rename one",
+                        dependency.name
+                    ),
+                ));
+                continue;
+            }
+            let dir = match &dependency.source {
+                Source::Path(dir) => join_normal(&root, dir),
+                source => {
+                    self.diagnostics.push(Diagnostic::error(
+                        dependency.span,
+                        format!("packages from {source} cannot be downloaded yet"),
+                    ));
+                    continue;
+                }
+            };
+            let id = match self.packages.iter().position(|p| p.root == dir) {
+                Some(id) => id,
+                None => match self.add_package(&dir, dependency) {
+                    Some(id) => id,
+                    None => continue,
+                },
+            };
+            self.packages[package]
+                .deps
+                .insert(dependency.name.clone(), id);
+        }
+    }
+
+    /// Adds the package in the directory `dir`, which `dependency` names, reading its name and
+    /// version from its manifest.
+    fn add_package(
+        &mut self,
+        dir: &Path,
+        dependency: &crate::package::Dependency,
+    ) -> Option<usize> {
+        let path = dir.join(MANIFEST);
+        let Some(source) = self.sources.read(&path) else {
+            let written = match &dependency.source {
+                Source::Path(written) => written.as_path(),
+                _ => dir,
+            };
+            self.diagnostics.push(Diagnostic::error(
+                dependency.span,
+                format!(
+                    "'{}' has no {MANIFEST}, so it is not a package",
+                    written.display()
+                ),
+            ));
+            return None;
+        };
+        // the manifest is read again, with its errors, as the package's own
+        let (manifest, _) = Manifest::parse(&source, FileId::ENTRY);
+        let name = match manifest.name {
+            Some((name, _)) => name,
+            None => {
+                let file = self.add_manifest(path, source.clone(), 0);
+                let errors = Manifest::parse(&source, file).1;
+                // a mistake in the manifest may be why it has no name
+                if !errors.is_empty() {
+                    self.diagnostics.extend(errors);
+                    return None;
+                }
+                self.diagnostics.push(Diagnostic::error(
+                    Span::empty(Pos::new(1, 1)).in_file(file),
+                    format!(
+                        "a package that others use has a name, as name = \"{}\" under [package]",
+                        dependency.name
+                    ),
+                ));
+                return None;
+            }
+        };
+        let version = manifest
+            .version
+            .map_or(Version::new(0, 0, 0), |(version, _)| version);
+        let class = format!("{name}.{}", version.class());
+        let mut prefix = class.clone();
+        let mut n = 1;
+        while self.packages.iter().any(|p| p.prefix == prefix) {
+            n += 1;
+            prefix = format!("{class}.{n}");
+        }
+        self.packages.push(Package {
+            root: dir.to_path_buf(),
+            prefix,
+            name,
+            deps: HashMap::new(),
+        });
+        Some(self.packages.len() - 1)
+    }
+
+    /// Returns the linked name of the module of `package` at the path `names` from its root.
+    ///
+    /// For example, in a package with prefix `geo.1`, `["shapes"]` is `geo.1.shapes` and
+    /// `["lib"]` is `geo.1`, while in the program `["shapes"]` is `shapes`.
+    fn linked_module(&self, package: usize, names: &[String]) -> String {
+        let prefix = &self.packages[package].prefix;
+        if package == 0 {
+            names.join(".")
+        } else if names == [LIB] {
+            prefix.clone()
+        } else {
+            format!("{prefix}.{}", names.join("."))
+        }
+    }
+
+    /// Returns the file of the module of `package` with these dotted names, loading it if it
+    /// exists. With `builtin`, a module written in stone, such as `net`, takes its name.
     ///
     /// For example, `["geometry", "shapes"]` loads `<root>/geometry/shapes.stn`.
-    fn module(&mut self, names: &[String]) -> Option<FileId> {
-        if self.is_entry(names) {
-            return None;
-        }
-        let name = names.join(".");
-        if let Some(&id) = self.by_name.get(&name) {
-            return Some(id);
-        }
+    fn module(&mut self, package: usize, names: &[String], builtin: bool) -> Option<FileId> {
         // a module written in stone has no file of the program, and no modules inside it
-        if let Some(source) = crate::stdlib::source_module(&names[0]) {
+        if builtin && let Some(source) = crate::stdlib::source_module(&names[0]) {
             if names.len() != 1 {
                 return None;
+            }
+            let name = names[0].clone();
+            if let Some(&id) = self.by_name.get(&name) {
+                return Some(id);
             }
             let id = self.add(
                 PathBuf::from(format!("<{name}>")),
                 name.clone(),
                 source.to_string(),
+                0,
             );
             self.own.insert(id);
             self.by_name.insert(name, id);
             return Some(id);
         }
-        let path = self.root.join(module_path(names));
+        if package == 0 && self.is_entry(names) {
+            return None;
+        }
+        let name = self.linked_module(package, names);
+        if let Some(&id) = self.by_name.get(&name) {
+            return Some(id);
+        }
+        let path = self.packages[package].root.join(module_path(names));
         let source = self.sources.read(&path)?;
-        let id = self.add(path, name.clone(), source);
+        let id = self.add(path, name.clone(), source, package);
         self.by_name.insert(name, id);
         Some(id)
     }
@@ -449,13 +661,18 @@ impl Loader<'_> {
     }
 
     /// Finds what a `use` path in `file` names: a module file if there is one, otherwise a public
-    /// function of the module the path ends in.
+    /// function of the module the path ends in. A path that starts with the name of a dependency
+    /// of the file's package names a module of that package.
     ///
     /// For example, `use util.pad` is the module `util/pad.stn` if it exists, and otherwise the
     /// function `pad` of `util.stn`.
     fn resolve(&mut self, file: FileId, path: &[(String, Span)]) -> Result<Target, Diagnostic> {
         let names: Vec<String> = path.iter().map(|(name, _)| name.clone()).collect();
         let span = path[0].1.to(path[path.len() - 1].1);
+        let package = self.file_package[file.0 as usize];
+        if let Some(&dependency) = self.packages[package].deps.get(&names[0]) {
+            return self.resolve_in(file, dependency, path, 1);
+        }
         // the prelude's functions are linked as if in this module
         if names == [PRELUDE_MODULE] {
             return Err(Diagnostic::error(
@@ -473,11 +690,31 @@ impl Loader<'_> {
             ));
         }
         if let Some(module) = crate::stdlib::module(&names[0]) {
-            return self.resolve_builtin_module(module, path, span);
+            return self.resolve_builtin_module(package, module, path, span);
         }
         if crate::stdlib::source_module(&names[0]).is_some() {
-            self.check_builtin_name(&names[0], span)?;
+            self.check_builtin_name(package, &names[0], span)?;
         }
+        self.resolve_in(file, package, path, 0)
+    }
+
+    /// Finds what a `use` path in `file` names in `package`, whose module paths are the path's
+    /// names after the first `skip`: the first name is a dependency's when `skip` is 1, and then
+    /// no more names is the package's `lib.stn`.
+    fn resolve_in(
+        &mut self,
+        file: FileId,
+        package: usize,
+        path: &[(String, Span)],
+        skip: usize,
+    ) -> Result<Target, Diagnostic> {
+        let names: Vec<String> = path.iter().map(|(name, _)| name.clone()).collect();
+        let span = path[0].1.to(path[path.len() - 1].1);
+        let builtin = skip == 0;
+        let lib_or = |names: &[String]| match names {
+            [] => vec![LIB.to_string()],
+            names => names.to_vec(),
+        };
         let entry = self.entry_names.join(".");
         let entry_error = || {
             Diagnostic::error(
@@ -486,24 +723,36 @@ impl Loader<'_> {
             )
         };
 
-        if self.is_entry(&names) {
+        let within = &names[skip..];
+        if package == 0 && self.is_entry(within) {
             return Err(entry_error());
         }
-        if let Some(id) = self.module(&names) {
+        if let Some(id) = self.module(package, &lib_or(within), builtin) {
             return Ok(Target::Module(id));
+        }
+        if within.is_empty() {
+            return Err(Diagnostic::error(
+                span,
+                format!(
+                    "package '{}' has no {LIB}.stn, so use one of its modules",
+                    names[0]
+                ),
+            ));
         }
         if let [parent @ .., (function, function_span)] = path
             && !parent.is_empty()
         {
-            let parent_names = &names[..parent.len()];
-            if self.is_entry(parent_names) {
+            let parent_within = &names[skip..parent.len()];
+            if package == 0 && self.is_entry(parent_within) {
                 return Err(entry_error());
             }
-            if let Some(id) = self.module(parent_names) {
-                let module = parent_names.join(".");
+            if let Some(id) = self.module(package, &lib_or(parent_within), builtin) {
+                let linked_module = self.files[id.0 as usize].module.clone();
+                // errors name the module as the file wrote it
+                let module = names[..parent.len()].join(".");
                 let parsed = &self.modules[id.0 as usize];
                 if let Some(&public) = public_types(parsed).get(function) {
-                    let linked = format!("{module}.{function}");
+                    let linked = format!("{linked_module}.{function}");
                     return if !(public || id == file) {
                         Err(Diagnostic::error(
                             *function_span,
@@ -519,7 +768,7 @@ impl Loader<'_> {
                 }
                 return match public_functions(parsed).get(function) {
                     Some(&public) if public || id == file => {
-                        Ok(Target::Function(format!("{module}.{function}")))
+                        Ok(Target::Function(format!("{linked_module}.{function}")))
                     }
                     Some(_) => Err(Diagnostic::error(
                         *function_span,
@@ -534,7 +783,9 @@ impl Loader<'_> {
         }
 
         let dotted = names.join(".");
-        let dir = self.root.join(names.iter().collect::<PathBuf>());
+        let dir = self.packages[package]
+            .root
+            .join(within.iter().collect::<PathBuf>());
         if self.sources.is_dir(&dir) {
             return Err(Diagnostic::error(
                 span,
@@ -554,12 +805,13 @@ impl Loader<'_> {
     /// `os.stn` next to the entry file would be ambiguous, so it is an error to import it.
     fn resolve_builtin_module(
         &self,
+        package: usize,
         module: &'static BuiltinModule,
         path: &[(String, Span)],
         span: Span,
     ) -> Result<Target, Diagnostic> {
         let name = module.name;
-        self.check_builtin_name(name, span)?;
+        self.check_builtin_name(package, name, span)?;
         match path {
             [_] => Ok(Target::BuiltinModule(name.to_string())),
             [_, (function, function_span)] => {
@@ -583,14 +835,14 @@ impl Loader<'_> {
         }
     }
 
-    /// Fails if a file next to the entry file takes the name of the builtin module `name`, which
-    /// would make `use` ambiguous.
-    fn check_builtin_name(&self, name: &str, span: Span) -> Result<(), Diagnostic> {
+    /// Fails if a file at the root of `package` takes the name of the builtin module `name`,
+    /// which would make `use` ambiguous.
+    fn check_builtin_name(&self, package: usize, name: &str, span: Span) -> Result<(), Diagnostic> {
         let names = [name.to_string()];
-        let taken = names != *self.entry_names
+        let taken = (package != 0 || names != *self.entry_names)
             && self
                 .sources
-                .read(&self.root.join(module_path(&names)))
+                .read(&self.packages[package].root.join(module_path(&names)))
                 .is_some();
         match taken {
             true => Err(Diagnostic::error(

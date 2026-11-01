@@ -12,6 +12,12 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Packages, first step: a program can depend on other packages through a `stone.toml` next to
+  its entry file. Each `[dependencies]` entry names a directory for now
+  (`geo = { path = "../geo" }`), and its files use the package by that name: `use geo.shapes`
+  loads the package's `shapes.stn`, and `use geo` loads its `lib.stn`. A package's files see
+  only their own modules and their own dependencies, and two versions of one package with
+  different major versions can both be used. Packages from GitHub and GitLab releases come next.
 - The `gui` module works on Windows, with Win32 windows, under both `stone run` and in built
   programs: the same `gui.window` API, events, and `gui.run` as on Linux and macOS.
   `next_frame` waits for the desktop's next frame, and the window repaints itself from the last

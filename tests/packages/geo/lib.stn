@@ -1,0 +1,15 @@
+use num
+
+pub struct Point:
+    x: int
+    y: int
+
+impl Point:
+    fn shifted(self, dx: int) -> Point:
+        ret Point(x=self.x + dx, y=self.y)
+
+pub fn origin() -> Point:
+    ret Point(x=0, y=0)
+
+pub fn dist2(a: Point, b: Point) -> int:
+    ret num.square(a.x - b.x) + num.square(a.y - b.y)

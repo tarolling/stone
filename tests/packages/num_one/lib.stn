@@ -1,0 +1,5 @@
+pub fn square(x: int) -> int:
+    ret x * x
+
+pub fn cube(x: int) -> int:
+    ret square(x) * x

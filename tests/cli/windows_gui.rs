@@ -121,6 +121,18 @@ while w.is_open():
 print(\"closed\")
 ";
 
+/// Held while a test runs a program with a window, since tests run at once and a window that
+/// opens takes activation from another, which ends Windows' loop of moving that one.
+static WINDOWS: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+/// Waits until no other test runs a program with a window, and returns the turn, which ends
+/// when it is dropped. A test that failed with its turn leaves it to the next.
+fn take_turn() -> std::sync::MutexGuard<'static, ()> {
+    WINDOWS
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
 /// Runs `program` (with its arguments) in `dir`, with `STONE_GUI_SCALE` set to `scale` unless
 /// it is empty, while `windows_gui.ps1` drives the window titled `title` with the arguments
 /// `driving`, and returns what the driver and then the program printed.
@@ -131,6 +143,7 @@ fn drive(
     (title, scale): (&str, &str),
     driving: &[&str],
 ) -> (String, String) {
+    let _turn = take_turn();
     if !scale.is_empty() {
         program.env("STONE_GUI_SCALE", scale);
     }
@@ -328,11 +341,13 @@ fn programs_with_windows_run_without_a_console() {
         host.windows_path(&exe),
         host.windows_path(&dir)
     );
+    let turn = take_turn();
     let ran = Command::new(powershell)
         .args(["-NoProfile", "-Command", &command])
         .current_dir(&dir)
         .output()
         .unwrap();
+    drop(turn);
     assert!(ran.status.success(), "{ran:?}");
     assert_eq!(std::fs::read_to_string(dir.join("ran.txt")).unwrap(), "yes");
 }

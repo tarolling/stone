@@ -18,6 +18,10 @@
 //! modules, under names that start with the package's own name and its versions' compatibility
 //! class (see [`Version::class`]), so two packages never collide.
 
+pub mod edit;
+#[cfg(feature = "fetch")]
+pub mod fetch;
+pub mod json;
 pub mod lock;
 pub mod resolve;
 pub mod store;

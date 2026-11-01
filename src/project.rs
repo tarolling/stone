@@ -310,6 +310,22 @@ pub struct Linked {
     pub missing: Vec<(Source, Version)>,
     /// The program's `stone.lock` and the text to write to it, if it should change.
     pub lock: Option<(PathBuf, String)>,
+    /// The program, then every package it uses, for `stone tree`.
+    pub packages: Vec<PackageInfo>,
+}
+
+/// A package a program is linked with, as `stone tree` shows it.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PackageInfo {
+    /// Its name, which is empty for a program whose manifest names none.
+    pub name: String,
+    /// The version used, if it has one.
+    pub version: Option<Version>,
+    /// Where it comes from, which is `None` for the program.
+    pub source: Option<Source>,
+    /// Each package it uses, by the name it uses it under and its index in
+    /// [`Linked::packages`], sorted by name.
+    pub deps: Vec<(String, usize)>,
 }
 
 /// The entry file's name for programs given as a single source string, such as by
@@ -352,6 +368,8 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
             name: String::new(),
             deps: HashMap::new(),
             unavailable: HashSet::new(),
+            source: None,
+            version: None,
         }],
         file_package: vec![],
         nodes: HashMap::new(),
@@ -426,6 +444,9 @@ struct Package {
     /// The names of its dependencies that could not be read, whose errors are reported where
     /// the manifest names them, so a `use` of one says nothing more.
     unavailable: HashSet<String>,
+    /// Where it comes from and its version, for `stone tree`.
+    source: Option<Source>,
+    version: Option<Version>,
 }
 
 /// A package whose manifest was read while selecting versions.
@@ -435,6 +456,8 @@ struct Node {
     name: String,
     /// The version it was released as, or its manifest's for a directory.
     version: Version,
+    /// The version its manifest gives, if any.
+    written: Option<Version>,
 }
 
 /// State for loading every file a program uses.
@@ -535,6 +558,10 @@ impl Loader<'_> {
         let file = self.add_manifest(path, source.clone(), None);
         let (manifest, errors) = Manifest::parse(&source, file);
         self.diagnostics.extend(errors);
+        if let Some((name, _)) = &manifest.name {
+            self.packages[0].name = name.clone();
+        }
+        self.packages[0].version = manifest.version.as_ref().map(|(v, _)| v.clone());
         let root_requirements = self.requirements(&root, &manifest, false);
         let selection = resolve::select(&root_requirements, |target| self.read_target(target));
 
@@ -551,12 +578,18 @@ impl Loader<'_> {
                 n += 1;
                 prefix = format!("{class}.{n}");
             }
+            let (source, version) = match target {
+                resolve::Target::Path(dir) => (Source::Path(dir.clone()), node.written.clone()),
+                resolve::Target::Remote(source, version) => (source.clone(), Some(version.clone())),
+            };
             self.packages.push(Package {
                 root: node.dir.clone(),
                 prefix,
                 name: node.name.clone(),
                 deps: HashMap::new(),
                 unavailable: HashSet::new(),
+                source: Some(source),
+                version,
             });
             index.insert(target.clone(), self.packages.len() - 1);
         }
@@ -688,6 +721,7 @@ impl Loader<'_> {
         };
         self.files[file.0 as usize].package = Some(name.clone());
         let written_version = manifest.version.as_ref().map(|(v, _)| v.clone());
+        let written = written_version.clone();
         let version = match target {
             resolve::Target::Remote(_, released) => {
                 if let Some((said, span)) = &manifest.version
@@ -707,8 +741,15 @@ impl Loader<'_> {
         };
         let remote = matches!(target, resolve::Target::Remote(..));
         let requirements = self.requirements(&dir, &manifest, remote);
-        self.nodes
-            .insert(target.clone(), Node { dir, name, version });
+        self.nodes.insert(
+            target.clone(),
+            Node {
+                dir,
+                name,
+                version,
+                written,
+            },
+        );
         Some(requirements)
     }
 
@@ -1355,6 +1396,24 @@ impl Loader<'_> {
         }
 
         report_method_collisions(&library_body, &entry_body, &mut self.diagnostics);
+        let packages = self
+            .packages
+            .iter()
+            .map(|package| {
+                let mut deps: Vec<(String, usize)> = package
+                    .deps
+                    .iter()
+                    .map(|(name, &i)| (name.clone(), i))
+                    .collect();
+                deps.sort();
+                PackageInfo {
+                    name: package.name.clone(),
+                    version: package.version.clone(),
+                    source: package.source.clone(),
+                    deps,
+                }
+            })
+            .collect();
         let mut body = prelude(&mut self.diagnostics);
         let public = functions
             .iter()
@@ -1380,6 +1439,7 @@ impl Loader<'_> {
             public,
             missing: self.missing,
             lock: self.lock,
+            packages,
         }
     }
 }

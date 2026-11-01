@@ -1793,7 +1793,10 @@ name = "stone"
 version = "0.4.1"
 dependencies = [
  "clap",
+ "flate2",
  "self_update",
+ "tar",
+ "ureq",
 ]
 
 [[package]]

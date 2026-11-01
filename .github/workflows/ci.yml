@@ -18,8 +18,8 @@ jobs:
       run: cargo fmt --check
     - name: Lint
       run: cargo clippy --all-targets -- -D warnings
-    - name: Lint with self-update
-      run: cargo clippy --all-targets --features self-update -- -D warnings
+    - name: Lint with self-update and fetch
+      run: cargo clippy --all-targets --features self-update,fetch -- -D warnings
     - name: Build
       run: cargo build --verbose
     # the golden programs are also built for aarch64 and run under qemu-user, the built-in
@@ -31,6 +31,8 @@ jobs:
       run: cargo test --verbose
     - name: Run self-update tests
       run: cargo test --verbose --features self-update --bin stone
+    - name: Run package download tests
+      run: cargo test --verbose --features fetch --lib --test cli
     - name: Lint the scripts
       run: shellcheck install.sh scripts/*.sh
     - name: Test the install script
@@ -86,14 +88,16 @@ jobs:
     - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
     - name: Lint
       run: cargo clippy --all-targets -- -D warnings
-    - name: Lint with self-update
-      run: cargo clippy --all-targets --features self-update -- -D warnings
+    - name: Lint with self-update and fetch
+      run: cargo clippy --all-targets --features self-update,fetch -- -D warnings
     - name: Build
       run: cargo build --verbose
     - name: Run tests
       run: cargo test --verbose --no-fail-fast
     - name: Run self-update tests
       run: cargo test --verbose --features self-update --bin stone
+    - name: Run package download tests
+      run: cargo test --verbose --features fetch --lib --test cli
     - name: Test the install script
       shell: pwsh
       run: ./scripts/test-install.ps1

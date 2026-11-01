@@ -1535,8 +1535,9 @@ mod tests {
                 "{start:?}:{stop:?}:{step:?}"
             );
         }
-        assert_eq!(sliced(0, None, None, Some(-1)), []);
-        assert_eq!(sliced(0, Some(3), Some(-3), None), []);
+        // typed, since a dependency's impls can make `[]` ambiguous
+        assert_eq!(sliced(0, None, None, Some(-1)), [0i64; 0]);
+        assert_eq!(sliced(0, Some(3), Some(-3), None), [0i64; 0]);
     }
 
     /// Slices `text` as `text[start:stop:step]` does.

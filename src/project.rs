@@ -30,7 +30,10 @@ use crate::ast::{
 use crate::checker::{DISPLAY, EQ, FROM, OPTION, ORD, RESULT, TRY_FROM, collect_assigned};
 use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
-use crate::package::{LIB, MANIFEST, Manifest, Source, Version, join_normal};
+use crate::package::lock::{Lock, Locked};
+use crate::package::resolve::{self, Requirement};
+use crate::package::store::{content_hash, package_dir};
+use crate::package::{LIB, LOCK, MANIFEST, Manifest, Source, Version, join_normal};
 use crate::parser::Parser;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::{
@@ -50,6 +53,17 @@ pub trait Sources {
     /// Returns the files and directories directly in the directory `dir`, for editors to suggest
     /// modules.
     fn entries(&self, dir: &Path) -> Vec<PathBuf>;
+    /// Returns the directory packages from hosts are downloaded into (see
+    /// [`crate::package::store`]), if there is one.
+    fn store(&self) -> Option<PathBuf> {
+        crate::package::store::default_dir()
+    }
+    /// Writes `text` to the file at `path`, as linking does to keep `stone.lock` current. Sources
+    /// that only read, as an editor's, write nothing.
+    fn write(&self, path: &Path, text: &str) -> Result<(), String> {
+        let _ = (path, text);
+        Ok(())
+    }
 }
 
 /// Reads modules from the filesystem.
@@ -73,6 +87,10 @@ impl Sources for FsSources {
         };
         entries.filter_map(|e| e.ok().map(|e| e.path())).collect()
     }
+
+    fn write(&self, path: &Path, text: &str) -> Result<(), String> {
+        std::fs::write(path, text).map_err(|e| format!("cannot write {}: {e}", path.display()))
+    }
 }
 
 /// Reads modules from a map of paths to sources, where a directory is any path that one of the
@@ -82,11 +100,25 @@ impl Sources for FsSources {
 #[derive(Debug, Default, Clone)]
 pub struct MapSources {
     files: HashMap<PathBuf, String>,
+    /// The package store's directory, which is none unless set.
+    store: Option<PathBuf>,
+    /// Every file written, in order, shared with clones.
+    written: std::sync::Arc<std::sync::Mutex<Vec<(PathBuf, String)>>>,
 }
 
 impl MapSources {
     pub fn insert(&mut self, path: impl Into<PathBuf>, source: impl Into<String>) {
         self.files.insert(path.into(), source.into());
+    }
+
+    /// Makes `dir` the package store, whose packages are files under it like any other.
+    pub fn set_store(&mut self, dir: impl Into<PathBuf>) {
+        self.store = Some(dir.into());
+    }
+
+    /// Returns every file written through [`Sources::write`], in order.
+    pub fn written(&self) -> Vec<(PathBuf, String)> {
+        self.written.lock().expect("not poisoned").clone()
     }
 }
 
@@ -97,6 +129,18 @@ impl Sources for MapSources {
 
     fn is_dir(&self, path: &Path) -> bool {
         self.files.keys().any(|p| p != path && p.starts_with(path))
+    }
+
+    fn store(&self) -> Option<PathBuf> {
+        self.store.clone()
+    }
+
+    fn write(&self, path: &Path, text: &str) -> Result<(), String> {
+        self.written
+            .lock()
+            .expect("not poisoned")
+            .push((path.to_path_buf(), text.to_string()));
+        Ok(())
     }
 
     fn entries(&self, dir: &Path) -> Vec<PathBuf> {
@@ -143,9 +187,11 @@ impl SourceFile {
         self.package.is_some()
     }
 
-    /// Returns whether the file is a package's `stone.toml` rather than stone source.
-    pub fn is_manifest(&self) -> bool {
-        self.path.file_name() == Some(std::ffi::OsStr::new(MANIFEST))
+    /// Returns whether the file is a package's `stone.toml` or `stone.lock` rather than stone
+    /// source.
+    pub fn is_package_file(&self) -> bool {
+        let name = self.path.file_name();
+        name == Some(std::ffi::OsStr::new(MANIFEST)) || name == Some(std::ffi::OsStr::new(LOCK))
     }
 }
 
@@ -260,6 +306,10 @@ pub struct Linked {
     pub imports: Vec<Import>,
     /// The linked name of every `pub` function of a library module, such as `geometry.vec.dot`.
     pub public: HashSet<String>,
+    /// The packages from hosts the program uses that are not downloaded, which are errors too.
+    pub missing: Vec<(Source, Version)>,
+    /// The program's `stone.lock` and the text to write to it, if it should change.
+    pub lock: Option<(PathBuf, String)>,
 }
 
 /// The entry file's name for programs given as a single source string, such as by
@@ -301,8 +351,13 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
             prefix: String::new(),
             name: String::new(),
             deps: HashMap::new(),
+            unavailable: HashSet::new(),
         }],
         file_package: vec![],
+        nodes: HashMap::new(),
+        named: HashMap::new(),
+        missing: vec![],
+        lock: None,
         diagnostics: vec![],
     };
     loader.add(entry.to_path_buf(), String::new(), source.to_string(), 0);
@@ -368,6 +423,18 @@ struct Package {
     name: String,
     /// Each package its files use, by the name they use it under.
     deps: HashMap<String, usize>,
+    /// The names of its dependencies that could not be read, whose errors are reported where
+    /// the manifest names them, so a `use` of one says nothing more.
+    unavailable: HashSet<String>,
+}
+
+/// A package whose manifest was read while selecting versions.
+#[derive(Clone)]
+struct Node {
+    dir: PathBuf,
+    name: String,
+    /// The version it was released as, or its manifest's for a directory.
+    version: Version,
 }
 
 /// State for loading every file a program uses.
@@ -389,6 +456,15 @@ struct Loader<'a> {
     packages: Vec<Package>,
     /// Each file's package, by index into `packages`.
     file_package: Vec<usize>,
+    /// Every package read while selecting versions.
+    nodes: HashMap<resolve::Target, Node>,
+    /// Where each target was first named, by which dependency, and as what: its directory as
+    /// written, or the dependency's name for a package from a host.
+    named: HashMap<resolve::Target, (Span, String, String)>,
+    /// The packages from hosts that are not in the store.
+    missing: Vec<(Source, Version)>,
+    /// The lockfile to write, if it should change.
+    lock: Option<(PathBuf, String)>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -423,24 +499,26 @@ impl Loader<'_> {
         id
     }
 
-    /// Adds a package's manifest to the program's files, so its errors render like any other,
-    /// with no statements.
-    fn add_manifest(&mut self, path: PathBuf, source: String, package: usize) -> FileId {
+    /// Adds a package's `stone.toml` or `stone.lock` to the program's files, so its errors
+    /// render like any other, with no statements. `package` names the dependency it belongs to,
+    /// if it is not the program's.
+    fn add_manifest(&mut self, path: PathBuf, source: String, package: Option<String>) -> FileId {
         let id = FileId(self.files.len() as u32);
         self.files.push(SourceFile {
             path,
             module: String::new(),
             source,
-            package: (package != 0).then(|| self.packages[package].name.clone()),
+            package,
         });
         self.modules.push(Mod::Module { body: vec![] });
         self.uses.push(vec![]);
-        self.file_package.push(package);
+        self.file_package.push(0);
         id
     }
 
-    /// Reads the program's `stone.toml`, if it has one, and the manifest of every package it
-    /// depends on, directly or not, adding each package.
+    /// Reads the program's `stone.toml`, if it has one, selects the version of every package it
+    /// depends on, directly or not (see [`crate::package::resolve`]), and adds each package used.
+    /// A package from a host is read from the store, and checked against `stone.lock`.
     ///
     /// A dependency's modules are linked under a prefix of its name and the compatibility class
     /// of its version, as `geo.1` for `geo` 1.2.0, so `use geo.shapes` in the program and
@@ -449,122 +527,255 @@ impl Loader<'_> {
     /// name and class, which can only be different directories, are told apart by a number, as
     /// `geo.1.2`.
     fn load_packages(&mut self) {
-        let mut next = 0;
-        while next < self.packages.len() {
-            self.load_dependencies(next);
-            next += 1;
-        }
-    }
-
-    /// Reads the manifest of the package `package`, which the program's need not have, adding
-    /// each package it depends on that is not added yet.
-    fn load_dependencies(&mut self, package: usize) {
-        let root = self.packages[package].root.clone();
+        let root = self.packages[0].root.clone();
         let path = root.join(MANIFEST);
         let Some(source) = self.sources.read(&path) else {
             return;
         };
-        let file = self.add_manifest(path, source.clone(), package);
+        let file = self.add_manifest(path, source.clone(), None);
         let (manifest, errors) = Manifest::parse(&source, file);
         self.diagnostics.extend(errors);
+        let root_requirements = self.requirements(&root, &manifest, false);
+        let selection = resolve::select(&root_requirements, |target| self.read_target(target));
+
+        // every package used, in the order first reached
+        let mut index: HashMap<resolve::Target, usize> = HashMap::new();
+        for target in selection.used() {
+            let Some(node) = self.nodes.get(target) else {
+                continue;
+            };
+            let class = format!("{}.{}", node.name, node.version.class());
+            let mut prefix = class.clone();
+            let mut n = 1;
+            while self.packages.iter().any(|p| p.prefix == prefix) {
+                n += 1;
+                prefix = format!("{class}.{n}");
+            }
+            self.packages.push(Package {
+                root: node.dir.clone(),
+                prefix,
+                name: node.name.clone(),
+                deps: HashMap::new(),
+                unavailable: HashSet::new(),
+            });
+            index.insert(target.clone(), self.packages.len() - 1);
+        }
+        let bind = |package: &mut Package, requirements: &[Requirement]| {
+            for r in requirements {
+                match index.get(&selection.resolve(&r.target)) {
+                    Some(&i) => {
+                        package.deps.insert(r.name.clone(), i);
+                    }
+                    None => {
+                        package.unavailable.insert(r.name.clone());
+                    }
+                }
+            }
+        };
+        bind(&mut self.packages[0], &root_requirements);
+        for (target, &i) in &index {
+            if let Some(requirements) = selection.requirements.get(target) {
+                bind(&mut self.packages[i], requirements);
+            }
+        }
+        self.check_lock(&root, &selection);
+    }
+
+    /// Returns the dependencies of the package in `dir` with `manifest` as requirements, which
+    /// for a package from a host (`remote`) cannot be directories.
+    fn requirements(&mut self, dir: &Path, manifest: &Manifest, remote: bool) -> Vec<Requirement> {
+        let mut requirements = vec![];
         for dependency in &manifest.dependencies {
             let names = [dependency.name.clone()];
-            let local = self.sources.read(&root.join(module_path(&names))).is_some()
-                || self.sources.is_dir(&root.join(&dependency.name));
+            let local = self.sources.read(&dir.join(module_path(&names))).is_some()
+                || self.sources.is_dir(&dir.join(&dependency.name));
             if local {
+                let whose = match dir == self.packages[0].root {
+                    true => "program",
+                    false => "package",
+                };
                 self.diagnostics.push(Diagnostic::error(
                     dependency.span,
                     format!(
-                        "'{}' is both a dependency and a module of this program, so rename one",
+                        "'{}' is both a dependency and a module of this {whose}, so rename one",
                         dependency.name
                     ),
                 ));
                 continue;
             }
-            let dir = match &dependency.source {
-                Source::Path(dir) => join_normal(&root, dir),
-                source => {
+            let (target, written) = match (&dependency.source, &dependency.version) {
+                (Source::Path(path), _) if remote => {
                     self.diagnostics.push(Diagnostic::error(
                         dependency.span,
-                        format!("packages from {source} cannot be downloaded yet"),
+                        "a package from a host cannot use a directory, since the directory is \
+                         not part of its release",
                     ));
                     continue;
                 }
+                (Source::Path(path), _) => (
+                    resolve::Target::Path(join_normal(dir, path)),
+                    path.display().to_string(),
+                ),
+                (source, Some((version, _))) => (
+                    resolve::Target::Remote(source.clone(), version.clone()),
+                    dependency.name.clone(),
+                ),
+                // already reported
+                (_, None) => continue,
             };
-            let id = match self.packages.iter().position(|p| p.root == dir) {
-                Some(id) => id,
-                None => match self.add_package(&dir, dependency) {
-                    Some(id) => id,
-                    None => continue,
-                },
-            };
-            self.packages[package]
-                .deps
-                .insert(dependency.name.clone(), id);
+            self.named
+                .entry(target.clone())
+                .or_insert_with(|| (dependency.span, dependency.name.clone(), written));
+            requirements.push(Requirement {
+                name: dependency.name.clone(),
+                span: dependency.span,
+                target,
+            });
         }
+        requirements
     }
 
-    /// Adds the package in the directory `dir`, which `dependency` names, reading its name and
-    /// version from its manifest.
-    fn add_package(
-        &mut self,
-        dir: &Path,
-        dependency: &crate::package::Dependency,
-    ) -> Option<usize> {
-        let path = dir.join(MANIFEST);
-        let Some(source) = self.sources.read(&path) else {
-            let written = match &dependency.source {
-                Source::Path(written) => written.as_path(),
-                _ => dir,
-            };
-            self.diagnostics.push(Diagnostic::error(
-                dependency.span,
-                format!(
-                    "'{}' has no {MANIFEST}, so it is not a package",
-                    written.display()
-                ),
-            ));
-            return None;
-        };
-        // the manifest is read again, with its errors, as the package's own
-        let (manifest, _) = Manifest::parse(&source, FileId::ENTRY);
-        let name = match manifest.name {
-            Some((name, _)) => name,
-            None => {
-                let file = self.add_manifest(path, source.clone(), 0);
-                let errors = Manifest::parse(&source, file).1;
-                // a mistake in the manifest may be why it has no name
-                if !errors.is_empty() {
-                    self.diagnostics.extend(errors);
+    /// Reads the manifest of the package `target` names, from its directory or the store,
+    /// returning its requirements, or `None` with the error if it cannot.
+    fn read_target(&mut self, target: &resolve::Target) -> Option<Vec<Requirement>> {
+        let (span, key, written) = self.named.get(target)?.clone();
+        let dir = match target {
+            resolve::Target::Path(dir) => dir.clone(),
+            resolve::Target::Remote(source, version) => match self.sources.store() {
+                Some(store) => package_dir(&store, source, version),
+                None => {
+                    self.diagnostics.push(Diagnostic::error(
+                        span,
+                        format!(
+                            "{key} {version} ({source}) cannot be downloaded, since there is no \
+                             directory to keep packages in; set STONE_HOME"
+                        ),
+                    ));
                     return None;
                 }
+            },
+        };
+        let path = dir.join(MANIFEST);
+        let Some(source) = self.sources.read(&path) else {
+            let message = match target {
+                resolve::Target::Path(_) => {
+                    format!("'{written}' has no {MANIFEST}, so it is not a package")
+                }
+                resolve::Target::Remote(source, version) => {
+                    self.missing.push((source.clone(), version.clone()));
+                    format!("{key} {version} ({source}) is not downloaded")
+                }
+            };
+            self.diagnostics.push(Diagnostic::error(span, message));
+            return None;
+        };
+        let file = self.add_manifest(path, source.clone(), None);
+        let (manifest, errors) = Manifest::parse(&source, file);
+        let clean = errors.is_empty();
+        self.diagnostics.extend(errors);
+        let Some((name, _)) = manifest.name.clone() else {
+            // a mistake in the manifest may be why it has no name
+            if clean {
                 self.diagnostics.push(Diagnostic::error(
                     Span::empty(Pos::new(1, 1)).in_file(file),
                     format!(
-                        "a package that others use has a name, as name = \"{}\" under [package]",
-                        dependency.name
+                        "a package that others use has a name, as name = \"{key}\" under \
+                         [package]"
                     ),
                 ));
-                return None;
             }
+            return None;
         };
-        let version = manifest
-            .version
-            .map_or(Version::new(0, 0, 0), |(version, _)| version);
-        let class = format!("{name}.{}", version.class());
-        let mut prefix = class.clone();
-        let mut n = 1;
-        while self.packages.iter().any(|p| p.prefix == prefix) {
-            n += 1;
-            prefix = format!("{class}.{n}");
+        self.files[file.0 as usize].package = Some(name.clone());
+        let written_version = manifest.version.as_ref().map(|(v, _)| v.clone());
+        let version = match target {
+            resolve::Target::Remote(_, released) => {
+                if let Some((said, span)) = &manifest.version
+                    && said != released
+                {
+                    self.diagnostics.push(Diagnostic::error(
+                        *span,
+                        format!(
+                            "this package says it is version {said}, but it was released as \
+                             {released}"
+                        ),
+                    ));
+                }
+                released.clone()
+            }
+            resolve::Target::Path(_) => written_version.unwrap_or(Version::new(0, 0, 0)),
+        };
+        let remote = matches!(target, resolve::Target::Remote(..));
+        let requirements = self.requirements(&dir, &manifest, remote);
+        self.nodes
+            .insert(target.clone(), Node { dir, name, version });
+        Some(requirements)
+    }
+
+    /// Checks every package from a host that `selection` uses against the program's
+    /// `stone.lock`, noting the lockfile to write if it lacks one or holds one no longer used.
+    fn check_lock(&mut self, root: &Path, selection: &resolve::Selection) {
+        let path = root.join(LOCK);
+        let existing = self.sources.read(&path);
+        let used: Vec<(Source, Version, Node)> = selection
+            .used()
+            .filter_map(|target| match target {
+                resolve::Target::Remote(source, version) => self
+                    .nodes
+                    .get(target)
+                    .map(|node| (source.clone(), version.clone(), node.clone())),
+                resolve::Target::Path(_) => None,
+            })
+            .collect();
+        if used.is_empty() && existing.is_none() {
+            return;
         }
-        self.packages.push(Package {
-            root: dir.to_path_buf(),
-            prefix,
-            name,
-            deps: HashMap::new(),
-        });
-        Some(self.packages.len() - 1)
+        let lock = match &existing {
+            Some(text) => {
+                let file = self.add_manifest(path.clone(), text.clone(), None);
+                let (lock, errors) = Lock::parse(text, file);
+                if !errors.is_empty() {
+                    self.diagnostics.extend(errors);
+                    return;
+                }
+                lock
+            }
+            None => Lock::default(),
+        };
+        let mut entries = vec![];
+        let mut changed = false;
+        for (source, version, node) in used {
+            let hash = content_hash(self.sources, &node.dir);
+            if let Some(locked) = lock.find(&source, &version)
+                && locked.hash != hash
+            {
+                self.diagnostics.push(Diagnostic::error(
+                    locked.span,
+                    format!(
+                        "{} {version} ({source}) does not hold what it held when it was locked: \
+                         its hash was {}, and is now {hash}; if its release changed on \
+                         purpose, remove its entry from {LOCK}",
+                        node.name, locked.hash
+                    ),
+                ));
+                changed = true;
+                continue;
+            }
+            entries.push(Locked {
+                name: node.name,
+                source,
+                version,
+                hash,
+                span: Span::default(),
+            });
+        }
+        if changed {
+            return;
+        }
+        let text = Lock { entries }.write();
+        if existing.as_deref() != Some(text.as_str()) {
+            self.lock = Some((path, text));
+        }
     }
 
     /// Returns the linked name of the module of `package` at the path `names` from its root.
@@ -643,7 +854,12 @@ impl Loader<'_> {
             let Some(last) = path.last().cloned() else {
                 continue;
             };
+            let unavailable = self.packages[self.file_package[file.0 as usize]]
+                .unavailable
+                .contains(&path[0].0);
             let target = match self.resolve(file, &path) {
+                // the manifest's error says why
+                Err(_) if unavailable => None,
                 Ok(target) => Some(target),
                 Err(e) => {
                     self.diagnostics.push(e);
@@ -1162,6 +1378,8 @@ impl Loader<'_> {
             diagnostics: self.diagnostics,
             imports,
             public,
+            missing: self.missing,
+            lock: self.lock,
         }
     }
 }

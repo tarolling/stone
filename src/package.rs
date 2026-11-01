@@ -18,6 +18,9 @@
 //! modules, under names that start with the package's own name and its versions' compatibility
 //! class (see [`Version::class`]), so two packages never collide.
 
+pub mod lock;
+pub mod resolve;
+pub mod store;
 pub mod toml;
 pub mod version;
 

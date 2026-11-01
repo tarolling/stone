@@ -78,12 +78,15 @@ pub fn load(
     source: &str,
     sources: &dyn Sources,
 ) -> (SourceMap, Result<Checked, Diagnostics>) {
+    let linked = project::link(entry, source, sources);
+    let lock_error = write_lock(&linked, sources);
     let Linked {
         module,
         sources,
-        diagnostics,
+        mut diagnostics,
         ..
-    } = project::link(entry, source, sources);
+    } = linked;
+    diagnostics.extend(lock_error);
     if has_errors(&diagnostics) {
         return (sources, Err(Diagnostics(diagnostics)));
     }
@@ -98,6 +101,20 @@ pub fn load(
         analysis: Rc::new(analysis),
     };
     (sources, Ok(checked))
+}
+
+/// Writes the `stone.lock` that linking found should change, if the program linked without
+/// errors, returning the error if it cannot be written.
+fn write_lock(linked: &Linked, sources: &dyn Sources) -> Option<Diagnostic> {
+    let (path, text) = linked.lock.as_ref()?;
+    if has_errors(&linked.diagnostics) {
+        return None;
+    }
+    let error = sources.write(path, text).err()?;
+    Some(Diagnostic::error(
+        crate::span::Span::empty(crate::span::Pos::new(1, 1)),
+        error,
+    ))
 }
 
 fn has_errors(diagnostics: &[Diagnostic]) -> bool {
@@ -154,6 +171,7 @@ pub fn check_program(
     let linked = project::link(entry, source, sources);
     let analysis = analyze_linked(&linked);
     let mut diagnostics = crate::unused::find(&linked, &analysis);
+    diagnostics.extend(write_lock(&linked, sources));
     diagnostics.extend(analysis.diagnostics);
     // a program the host cannot run is an error where it runs
     if let Ok(host) = Target::host() {

@@ -2119,3 +2119,208 @@ fn a_dependencys_files_are_never_reported_unused() {
     let rendered: Vec<String> = diagnostics.iter().map(|d| map.render(d)).collect();
     assert_eq!(rendered, Vec::<String>::new());
 }
+
+/// Builds in-memory sources from `(path, source)` pairs, with `store` as the package store.
+fn stored_sources(files: &[(&str, &str)]) -> MapSources {
+    let mut sources = sources_of(files);
+    sources.set_store("store");
+    sources
+}
+
+/// The files of `version` of the package `json` from `github:alice/json` in the store, whose
+/// `lib.stn` has `pub fn v() -> str` giving the version, plus `extra` dependencies in its
+/// manifest.
+fn stored_json(version: &str, extra: &str) -> Vec<(String, String)> {
+    let dir = format!("store/github.com/alice/json/{version}");
+    vec![
+        (
+            format!("{dir}/stone.toml"),
+            format!("[package]\nname = \"json\"\nversion = \"{version}\"\n{extra}"),
+        ),
+        (
+            format!("{dir}/lib.stn"),
+            format!("pub fn v() -> str:\n    ret \"{version}\"\n"),
+        ),
+    ]
+}
+
+/// Loads a program whose entry file is the first of `files` from sources with a store, returning
+/// what it prints (or its rendered errors) and every file linking wrote.
+fn stored_run(files: &[(String, String)]) -> (String, Vec<(PathBuf, String)>) {
+    let pairs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
+    let sources = stored_sources(&pairs[1..]);
+    let (map, result) = driver::load(Path::new(pairs[0].0), pairs[0].1, &sources);
+    let printed = match result {
+        Ok(checked) => {
+            let mut out = vec![];
+            driver::run_module(
+                &checked.module,
+                &checked.calls,
+                &mut std::io::empty(),
+                &mut out,
+                &[],
+                Limits::DEFAULT,
+            )
+            .expect("program should run");
+            String::from_utf8(out).unwrap()
+        }
+        Err(errors) => errors.0.iter().map(|d| map.render(d)).collect(),
+    };
+    (printed, sources.written())
+}
+
+fn owned(files: &[(&str, &str)]) -> Vec<(String, String)> {
+    files
+        .iter()
+        .map(|(p, s)| (p.to_string(), s.to_string()))
+        .collect()
+}
+
+const USES_JSON: (&str, &str) = (
+    "stone.toml",
+    "[dependencies]\njson = { github = \"alice/json\", version = \"1.2\" }\n",
+);
+
+#[test]
+fn a_package_from_a_host_is_read_from_the_store_and_locked() {
+    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    files.extend(stored_json("1.2.0", ""));
+    let (printed, written) = stored_run(&files);
+    assert_eq!(printed, "1.2.0\n");
+    let [(path, lock)] = written.as_slice() else {
+        panic!("one file written: {written:?}");
+    };
+    assert_eq!(path, Path::new("stone.lock"));
+    let (lock, errors) = crate::package::lock::Lock::parse(lock, FileId(0));
+    assert_eq!(errors, []);
+    let entry = &lock.entries[0];
+    assert_eq!(
+        (
+            entry.name.as_str(),
+            entry.source.to_string(),
+            entry.version.to_string()
+        ),
+        ("json", "github:alice/json".to_string(), "1.2.0".to_string())
+    );
+
+    // with the lock written, linking again writes nothing
+    let text = written[0].1.clone();
+    files.push(("stone.lock".into(), text));
+    assert_eq!(stored_run(&files), ("1.2.0\n".to_string(), vec![]));
+}
+
+#[test]
+fn the_newest_version_any_package_needs_is_used() {
+    let mut files = owned(&[
+        (
+            "main.stn",
+            "use json\nuse geo\nprint(json.v())\nprint(geo.v())\n",
+        ),
+        (
+            "stone.toml",
+            "[dependencies]\njson = { github = \"alice/json\", version = \"1.2\" }\n\
+             geo = { path = \"../geo\" }\n",
+        ),
+        (
+            "../geo/stone.toml",
+            "[package]\nname = \"geo\"\n\n[dependencies]\n\
+             j = { github = \"alice/json\", version = \"1.3.0\" }\n",
+        ),
+        (
+            "../geo/lib.stn",
+            "use j\npub fn v() -> str:\n    ret j.v()\n",
+        ),
+    ]);
+    files.extend(stored_json("1.2.0", ""));
+    files.extend(stored_json("1.3.0", ""));
+    files.extend(stored_json("1.9.0", ""));
+    assert_eq!(stored_run(&files).0, "1.3.0\n1.3.0\n");
+}
+
+#[test]
+fn a_package_that_is_not_downloaded_is_an_error_where_it_is_named() {
+    let files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    let (printed, written) = stored_run(&files);
+    assert!(
+        printed
+            .starts_with("stone.toml:2:1: error: json 1.2.0 (github:alice/json) is not downloaded"),
+        "{printed}"
+    );
+    assert_eq!(written, []);
+}
+
+#[test]
+fn a_package_whose_files_changed_does_not_match_its_lock() {
+    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    files.extend(stored_json("1.2.0", ""));
+    let wrong = format!("sha256:{}", "0".repeat(64));
+    files.push((
+        "stone.lock".into(),
+        format!(
+            "[[package]]\nname = \"json\"\ngithub = \"alice/json\"\nversion = \"1.2.0\"\n\
+             hash = \"{wrong}\"\n"
+        ),
+    ));
+    let (printed, written) = stored_run(&files);
+    assert!(
+        printed.starts_with(&format!(
+            "stone.lock:5:8: error: json 1.2.0 (github:alice/json) does not hold what it held \
+             when it was locked: its hash was {wrong}, and is now sha256:"
+        )),
+        "{printed}"
+    );
+    assert_eq!(written, []);
+}
+
+#[test]
+fn a_package_from_a_host_must_be_the_version_it_was_released_as() {
+    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    files.push((
+        "store/github.com/alice/json/1.2.0/stone.toml".into(),
+        "[package]\nname = \"json\"\nversion = \"1.1.0\"\n".into(),
+    ));
+    files.push((
+        "store/github.com/alice/json/1.2.0/lib.stn".into(),
+        "pub fn v() -> str:\n    ret \"1.1.0\"\n".into(),
+    ));
+    let (printed, _) = stored_run(&files);
+    assert!(
+        printed.starts_with(
+            "store/github.com/alice/json/1.2.0/stone.toml:3:11: error: this package says it is \
+             version 1.1.0, but it was released as 1.2.0"
+        ),
+        "{printed}"
+    );
+}
+
+#[test]
+fn a_package_from_a_host_cannot_use_a_directory() {
+    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    files.extend(stored_json(
+        "1.2.0",
+        "\n[dependencies]\nnum = { path = \"../num\" }\n",
+    ));
+    let (printed, _) = stored_run(&files);
+    assert!(
+        printed.starts_with(
+            "store/github.com/alice/json/1.2.0/stone.toml:6:1: error: a package from a host \
+             cannot use a directory, since the directory is not part of its release"
+        ),
+        "{printed}"
+    );
+}
+
+#[test]
+fn packages_from_hosts_need_a_store() {
+    assert_error(
+        &[("main.stn", "print(1)\n"), USES_JSON],
+        "stone.toml",
+        "json 1.2.0 (github:alice/json) cannot be downloaded, since there is no directory to \
+         keep packages in; set STONE_HOME",
+        2,
+        1,
+    );
+}

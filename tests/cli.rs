@@ -1415,3 +1415,56 @@ mod unix;
 /// do: on Windows, and under WSL.
 #[path = "cli/windows_gui.rs"]
 mod windows_gui;
+
+#[test]
+fn a_package_from_the_store_runs_and_is_locked() {
+    let dir = project(
+        "package_store",
+        &[
+            ("app/main.stn", "use json\nprint(json.v())\n"),
+            (
+                "app/stone.toml",
+                "[dependencies]\njson = { github = \"alice/json\", version = \"1.2\" }\n",
+            ),
+            (
+                "home/packages/github.com/alice/json/1.2.0/stone.toml",
+                "[package]\nname = \"json\"\nversion = \"1.2.0\"\n",
+            ),
+            (
+                "home/packages/github.com/alice/json/1.2.0/lib.stn",
+                "pub fn v() -> str:\n    ret \"1.2.0\"\n",
+            ),
+        ],
+    );
+    let run = |command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_stone"))
+            .args([command, "app/main.stn"])
+            .current_dir(&dir)
+            .env("STONE_HOME", dir.join("home"))
+            .output()
+            .expect("stone should run")
+    };
+    let output = run("run");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1.2.0\n");
+    let lock = std::fs::read_to_string(dir.join("app/stone.lock")).expect("lock written");
+    assert!(lock.contains("name = \"json\"\ngithub = \"alice/json\"\nversion = \"1.2.0\"\n"));
+
+    // a changed release no longer matches the lock
+    std::fs::write(
+        dir.join("home/packages/github.com/alice/json/1.2.0/lib.stn"),
+        "pub fn v() -> str:\n    ret \"changed\"\n",
+    )
+    .unwrap();
+    let output = run("check");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: json 1.2.0 (github:alice/json) does not hold what it held"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app/stone.lock")).unwrap(),
+        lock
+    );
+}

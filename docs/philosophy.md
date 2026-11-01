@@ -309,7 +309,13 @@ of keysyms generated from X11's), so a built program that opens windows is still
 executable. Its only native help is a routine that packs pixels into bytes and four that share
 memory with a local server: `memfd_create`, `pwrite`, `sendmsg` with the memory's descriptor,
 and `recvmsg` and `pread` for a descriptor the server sends, which the interpreter calls through
-the C library and compiled code makes as system calls. A socket's timeout is a `poll` before each read, send, or accept, in both
+the C library and compiled code makes as system calls. On Windows, which has no display
+protocol over a socket, a window is a Win32 window, kept as thin as the protocols: a native
+layer (the same `user32.dll` and `gdi32.dll` calls under `stone run` and in a built program)
+opens it, records each message to it as 16 bytes, paints the last image shown, and waits for
+the desktop's next frame with `DwmFlush`, while `gui`'s stone code turns the records into
+events. A built program picks its system's half when it is compiled, so one for Windows holds
+none of the X11 and Wayland code, and one for Linux none of the Win32. A socket's timeout is a `poll` before each read, send, or accept, in both
 backends, so a wait runs out at the same point under `stone run` and in a built program. `stone build` writes either executable itself, with its own assembler and linkers,
 including the Mach-O file's imports and its code signature, so it needs no assembler, linker,
 or C compiler installed, and builds for every target from any machine.
@@ -325,8 +331,10 @@ garbled by a code page. Windows error codes become the Linux numbers that mean t
 file error is worded the same on every system, and the interpreter running on Windows maps them
 the same way. `_start` splits the command line into arguments by the rules Rust's standard
 library follows, and the environment's names are found without regard to case, as Windows
-finds them. The `net` and `gui` modules and `os.run` are not supported on Windows yet: the
-checker reports their use when building for Windows, or when running on it.
+finds them. The `gui` module opens Win32 windows there, through `user32.dll`, `gdi32.dll`,
+and `dwmapi.dll`, which a program imports only if it opens one, and `stone build --windows-gui`
+makes a program that starts with no console. The `net` module and `os.run` are not supported on
+Windows yet: the checker reports their use when building for Windows, or when running on it.
 
 ## Two backends, one behavior
 

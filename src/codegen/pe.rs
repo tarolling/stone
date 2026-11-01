@@ -44,7 +44,7 @@ pub const STACK_SIZE: u64 = 8 << 20;
 
 /// The functions a program may call, each through `call` with its name, such as
 /// `call WriteFile`, by the DLL that has them. Any other undefined symbol is an error.
-pub const IMPORTS: [(&str, &[&str]); 2] = [
+pub const IMPORTS: [(&str, &[&str]); 5] = [
     (
         "KERNEL32.dll",
         &[
@@ -65,6 +65,7 @@ pub const IMPORTS: [(&str, &[&str]); 2] = [
             "GetEnvironmentStringsW",
             "GetFileAttributesW",
             "GetLastError",
+            "GetModuleHandleW",
             "GetStdHandle",
             "GetSystemTimePreciseAsFileTime",
             "MultiByteToWideChar",
@@ -80,6 +81,36 @@ pub const IMPORTS: [(&str, &[&str]); 2] = [
         ],
     ),
     ("bcrypt.dll", &["BCryptGenRandom"]),
+    // the gui module's windows
+    (
+        "USER32.dll",
+        &[
+            "AdjustWindowRectEx",
+            "BeginPaint",
+            "CreateWindowExW",
+            "DefWindowProcW",
+            "DestroyWindow",
+            "DispatchMessageW",
+            "EndPaint",
+            "GetDC",
+            "GetWindowLongPtrW",
+            "LoadCursorW",
+            "MapVirtualKeyW",
+            "MsgWaitForMultipleObjects",
+            "PeekMessageW",
+            "RegisterClassExW",
+            "ReleaseCapture",
+            "ReleaseDC",
+            "SetCapture",
+            "SetProcessDpiAwarenessContext",
+            "SetWindowLongPtrW",
+            "SetWindowTextW",
+            "ShowWindow",
+            "TranslateMessage",
+        ],
+    ),
+    ("GDI32.dll", &["GetStockObject", "SetDIBitsToDevice"]),
+    ("dwmapi.dll", &["DwmFlush"]),
 ];
 
 /// The bytes each thunk takes: `jmp QWORD PTR [rip + slot]`, padded to 8.
@@ -105,6 +136,7 @@ const IMAGE_FILE_MACHINE_AMD64: u16 = 0x8664;
 const IMAGE_FILE_EXECUTABLE_IMAGE: u16 = 0x2;
 const IMAGE_FILE_LARGE_ADDRESS_AWARE: u16 = 0x20;
 const IMAGE_SUBSYSTEM_WINDOWS_CUI: u16 = 3;
+const IMAGE_SUBSYSTEM_WINDOWS_GUI: u16 = 2;
 const IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA: u16 = 0x20;
 const IMAGE_DLLCHARACTERISTICS_DYNAMIC_BASE: u16 = 0x40;
 const IMAGE_DLLCHARACTERISTICS_NX_COMPAT: u16 = 0x100;
@@ -131,11 +163,24 @@ struct ImageSection {
     bytes: Vec<u8>,
 }
 
-/// Links `object` into the bytes of a Windows executable, starting at its `_start`.
+/// The kind of program Windows starts an executable as.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum Subsystem {
+    /// A console program, which Windows gives a console of its own if it starts without one,
+    /// as when it is opened from Explorer.
+    #[default]
+    Console,
+    /// A program with windows, which starts with no console, so what it prints goes nowhere
+    /// unless its output is redirected.
+    Gui,
+}
+
+/// Links `object` into the bytes of a Windows executable of `subsystem`, starting at its
+/// `_start`.
 ///
 /// Errors name a missing symbol, or one that is neither defined nor imported, such as
 /// `undefined label 'printf'`.
-pub fn link(object: &Object) -> Result<Vec<u8>, String> {
+pub fn link(object: &Object, subsystem: Subsystem) -> Result<Vec<u8>, String> {
     let mut defined = HashMap::new();
     for symbol in &object.symbols {
         defined.insert(symbol.name.as_str(), (symbol.section, symbol.offset));
@@ -342,7 +387,7 @@ pub fn link(object: &Object) -> Result<Vec<u8>, String> {
         (RELOCATION_DIRECTORY, reloc_rva, RELOCATION_BLOCK),
         (IAT_DIRECTORY, rdata_rva + address, table_size),
     ];
-    let mut file = write(&image, headers, entry, &directories);
+    let mut file = write(&image, headers, entry, &directories, subsystem);
     stamp(&mut file);
     Ok(file)
 }
@@ -393,14 +438,15 @@ fn put64(file: &mut Vec<u8>, value: u64) {
     file.extend_from_slice(&value.to_le_bytes());
 }
 
-/// Writes the headers, which take `headers` bytes, then each section's bytes, for a program
-/// that starts at the address `entry` (relative to [`BASE`]) and has the data directories
-/// `directories`, each an index, an address, and a size.
+/// Writes the headers, which take `headers` bytes, then each section's bytes, for a program of
+/// `subsystem` that starts at the address `entry` (relative to [`BASE`]) and has the data
+/// directories `directories`, each an index, an address, and a size.
 fn write(
     image: &[ImageSection],
     headers: u64,
     entry: u64,
     directories: &[(usize, u64, u64)],
+    subsystem: Subsystem,
 ) -> Vec<u8> {
     let raw_size =
         |section: &ImageSection| (section.bytes.len() as u64).next_multiple_of(FILE_ALIGN);
@@ -459,7 +505,13 @@ fn write(
     put32(&mut file, image_size as u32);
     put32(&mut file, headers as u32);
     put32(&mut file, 0); // the checksum, which `stamp` fills in
-    put16(&mut file, IMAGE_SUBSYSTEM_WINDOWS_CUI);
+    put16(
+        &mut file,
+        match subsystem {
+            Subsystem::Console => IMAGE_SUBSYSTEM_WINDOWS_CUI,
+            Subsystem::Gui => IMAGE_SUBSYSTEM_WINDOWS_GUI,
+        },
+    );
     put16(
         &mut file,
         IMAGE_DLLCHARACTERISTICS_HIGH_ENTROPY_VA

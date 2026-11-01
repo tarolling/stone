@@ -1,0 +1,194 @@
+// Win32 windows for the `gui` module on Windows, which only stone's own modules may use. The
+// window itself is native (`gui_sys.window_open`): its procedure records each message `gui`
+// reports as 16 bytes, the message, `wParam`, `lParam`, and for a key the character it types,
+// each four bytes, least significant first, which `decode` turns into events here.
+
+use gui.canvas
+use gui.event
+use gui_keys
+use gui_sys
+use gui_wire.get16
+use gui_wire.get16s
+use gui_wire.get32
+use time
+
+// A window on Windows, which `gui.window` holds there.
+pub struct link:
+    win: native_window
+    open: bool
+    // its width and height
+    extent: tuple[int, int]
+    // events decoded but not given out yet
+    pending: list[event]
+    // whether an image was shown since the last `pace`, which waits for the desktop to put it on
+    // the screen
+    shown: bool
+    // the first half of a character outside the Basic Multilingual Plane, which comes as two
+    // `WM_CHAR`s, or 0
+    surrogate: int
+    // how far the wheel has turned toward the next step, in Windows' 120ths of one
+    wheel: int
+
+// Opens a window titled `title` whose inside is `width` by `height` pixels.
+pub fn open(title: str, width: int, height: int) -> result[link, str]:
+    match gui_sys.window_open(title, width, height):
+        case ok(win):
+            ret ok(link(win=win, open=true, extent=(width, height), pending=[], shown=false, surrogate=0, wheel=0))
+        case err(reason):
+            ret err("cannot open a window: {reason}")
+
+impl link:
+    // Whether the window is open: until `close`.
+    fn is_open(self) -> bool:
+        ret self.open
+
+    // The window's width and height in pixels, as the last `resize` event gave them.
+    fn size(self) -> tuple[int, int]:
+        ret self.extent
+
+    // The events that have happened since the last call, without waiting for any.
+    fn events(self) -> list[event]:
+        if self.open:
+            self.take(0)
+        found = self.pending
+        self.pending = []
+        ret found
+
+    // The events that have happened since the last call, waiting for one if there are none, or
+    // none if the window is closed.
+    fn wait(self) -> list[event]:
+        while self.open and self.pending.len() == 0:
+            self.take(-1)
+        ret self.events()
+
+    // Whether the desktop will say when it has put the last image on the screen, which
+    // `gui.window` would wait up to a second for: never, since `pace` asks it instead.
+    fn awaiting(self) -> bool:
+        ret false
+
+    // Waits until the desktop has put the last image shown on the screen, at its next vblank,
+    // if one was shown since the last call, or else until `until`, by `time.clock`, at the
+    // latest, and returns the events meanwhile.
+    fn pace(self, until: float) -> list[event]:
+        if self.open and self.shown:
+            self.shown = false
+            if gui_sys.window_frame(self.win):
+                ret self.events()
+        left = until - time.clock()
+        if self.open and left > 0.0:
+            // whole milliseconds, rounded up, so the wait never ends early
+            self.take(int(left * 1000.0 + 0.999).unwrap_or(0))
+        ret self.events()
+
+    // Shows `c` in the window, its top left pixel at the window's. What the window has outside
+    // `c` is black.
+    fn show(self, c: canvas):
+        if not self.open or c.width <= 0 or c.height <= 0:
+            ret
+        pixels = gui_sys.pack(c.pixels, 0, c.width * c.height, 0)
+        gui_sys.window_show(self.win, c.width, c.height, pixels)
+        self.shown = true
+
+    // Sets the title the window's frame shows.
+    fn set_title(self, title: str):
+        if self.open:
+            gui_sys.window_set_title(self.win, title)
+
+    // Closes the window.
+    fn close(self):
+        if self.open:
+            gui_sys.window_close(self.win)
+            self.open = false
+
+    // Waits at most `timeout` milliseconds (forever if negative) for a message if none came,
+    // and decodes every message since the last call.
+    fn take(self, timeout: int):
+        records = gui_sys.window_events(self.win, timeout)
+        at = 0
+        while at + 16 <= records.len():
+            self.decode(records[at:at + 16])
+            at += 16
+
+    // Adds the events the record `raw` of a message stands for to the pending ones.
+    fn decode(self, raw: bytes):
+        message = get32(raw, 0)
+        if message == 5:
+            // WM_SIZE, unless the window was minimized
+            width = get16(raw, 8)
+            height = get16(raw, 10)
+            if get32(raw, 4) != 1 and width > 0 and height > 0 and (width, height) != self.extent:
+                self.extent = (width, height)
+                self.pending.append(event.resize(width, height))
+        elif message == 16:
+            self.pending.append(event.close)
+        elif message == 256 or message == 260:
+            // WM_KEYDOWN and WM_SYSKEYDOWN, which bit 30 of `lParam` marks as a repeat
+            if get32(raw, 8) / 1073741824 % 2 == 0:
+                self.pending.append(event.key_down(key_name(get32(raw, 4), get32(raw, 12))))
+        elif message == 257 or message == 261:
+            self.pending.append(event.key_up(key_name(get32(raw, 4), get32(raw, 12))))
+        elif message == 258:
+            self.typed(get32(raw, 4))
+        elif message == 512:
+            self.pending.append(event.mouse_move(get16s(raw, 8), get16s(raw, 10)))
+        elif message >= 513 and message <= 520:
+            self.button(message, get16s(raw, 8), get16s(raw, 10))
+        elif message == 522:
+            self.scrolled(get16s(raw, 6))
+
+    // Adds the event of the button message `message` at `x`, `y`: `WM_LBUTTONDOWN` (513) and
+    // `WM_LBUTTONUP`, then the right button's and the middle one's, three apart.
+    fn button(self, message: int, x: int, y: int):
+        names = ["left", "right", "middle"]
+        index = (message - 513) / 3
+        if (message - 513) % 3 == 0:
+            self.pending.append(event.mouse_down(names[index], x, y))
+        elif (message - 513) % 3 == 1:
+            self.pending.append(event.mouse_up(names[index], x, y))
+
+    // Adds a `scroll` for each whole step the wheel has turned, `delta` 120ths more of one, away
+    // from the user if positive.
+    fn scrolled(self, delta: int):
+        self.wheel += delta
+        while self.wheel >= 120:
+            self.wheel -= 120
+            self.pending.append(event.scroll(1))
+        while self.wheel <= -120:
+            self.wheel += 120
+            self.pending.append(event.scroll(-1))
+
+    // Adds a `text` event for the UTF-16 code unit `unit` of a `WM_CHAR`, joining the halves of
+    // a character outside the Basic Multilingual Plane, and leaving out control characters, as
+    // X11 types none.
+    fn typed(self, unit: int):
+        if unit >= 55296 and unit <= 56319:
+            self.surrogate = unit
+            ret
+        code = unit
+        if unit >= 56320 and unit <= 57343:
+            if self.surrogate == 0:
+                ret
+            code = 65536 + (self.surrogate - 55296) * 1024 + unit - 56320
+        self.surrogate = 0
+        if code >= 32 and code != 127:
+            self.pending.append(event.text(gui_keys.utf8(code)))
+
+// The name of the key with the virtual-key code `key`, which types `typed` without Shift (as
+// `MapVirtualKeyW` gives it, a letter in uppercase), named as `gui_keys.keymap.name` names keys.
+fn key_name(key: int, typed: int) -> str:
+    if key >= 112 and key <= 123:
+        ret "f{key - 111}"
+    if key >= 96 and key <= 105:
+        ret "{key - 96}"
+    keys = [8, 9, 13, 16, 17, 18, 20, 27, 32, 33, 34, 35, 36, 37, 38, 39, 40, 45, 46, 91, 92]
+    names = ["backspace", "tab", "enter", "shift", "control", "alt", "caps_lock", "escape"]
+    names.extend(["space", "page_up", "page_down", "end", "home", "left", "up", "right", "down"])
+    names.extend(["insert", "delete", "super", "super"])
+    for i in range(keys.len()):
+        if keys[i] == key:
+            ret names[i]
+    // the top bit marks a dead key, which types with the next one
+    code = typed % 2147483648
+    if code < 33 or code == 127:
+        ret "unknown"
+    ret gui_keys.utf8(code).lower()

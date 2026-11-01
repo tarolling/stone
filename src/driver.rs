@@ -4,7 +4,7 @@
 
 use crate::ast::{Expr, ExprKind, Mod};
 use crate::checker::{Analysis, Calls, TypeChecker};
-use crate::codegen::{Os, Target};
+use crate::codegen::{self, Os, Subsystem, Target};
 use crate::debug;
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
 use crate::interpreter::{Exit, Interpreter, Limits};
@@ -295,11 +295,11 @@ pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
 /// arm64 assembly to `build/out.s` and links it into an arm64 Linux `build/out`.
 pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
     let (sources, loaded) = load(Path::new(DEFAULT_ENTRY), source, &MapSources::default());
-    compile_module(&loaded?, &sources, output, target)
+    compile_module(&loaded?, &sources, output, target, Subsystem::Console)
 }
 
 /// Compiles a checked module, such as one from [`load`], to a native executable for `target` at
-/// `output`.
+/// `output`, which on Windows is a program of `subsystem`.
 ///
 /// For example, compiling for [`Target::ARM64_MACOS`] on an x86-64 Linux machine writes an arm64
 /// macOS executable, with no cross toolchain installed.
@@ -308,6 +308,7 @@ pub fn compile_module(
     sources: &SourceMap,
     output: &Path,
     target: Target,
+    subsystem: Subsystem,
 ) -> Result<(), Box<dyn Error>> {
     let unsupported = unsupported(&checked.module, sources, target.os);
     if !unsupported.is_empty() {
@@ -316,22 +317,19 @@ pub fn compile_module(
     let mut generator = target.generator();
     generator.set_sources(sources.clone());
     generator.set_analysis(Rc::clone(&checked.analysis));
-    generator.compile(&checked.module, output)?;
+    let assembly = generator.assemble(&checked.module)?;
+    codegen::link(&assembly, output, target, subsystem)?;
     Ok(())
 }
 
 /// The builtin modules a Windows program cannot use yet, by the prefix of their linked names,
 /// with the name an error gives each.
-const WINDOWS_UNSUPPORTED: [(&str, &str); 3] = [
-    ("net.", "the net module"),
-    ("gui.", "the gui module"),
-    ("os.run", "os.run"),
-];
+const WINDOWS_UNSUPPORTED: [(&str, &str); 2] = [("net.", "the net module"), ("os.run", "os.run")];
 
 /// Returns an error for each place the program's own files name a builtin module or function
-/// that compiled code and the interpreter do not support yet on `os`: on Windows, the `net` and
-/// `gui` modules and `os.run`. The modules' own files are not the program's, so they name
-/// nothing.
+/// that compiled code and the interpreter do not support yet on `os`: on Windows, the `net`
+/// module and `os.run`. The modules' own files are not the program's, so they name nothing, and
+/// `gui`, which uses `net` elsewhere, opens Win32 windows there.
 ///
 /// For example, `net.connect("example.com", 80)` in a program for Windows is the error
 /// `the net module is not supported on Windows yet` at `net.connect`.
@@ -540,7 +538,7 @@ mod tests {
     use crate::span::FileId;
 
     #[test]
-    fn windows_programs_cannot_use_net_gui_or_os_run_yet() {
+    fn windows_programs_cannot_use_net_or_os_run_yet() {
         let source = "\
 use net
 use os
@@ -563,11 +561,16 @@ c = gui.canvas(width=1, height=1, pixels=[0])
             [
                 "main.stn:5:12: error: os.run is not supported on Windows yet",
                 "main.stn:7:9: error: the net module is not supported on Windows yet",
-                "main.stn:8:5: error: the gui module is not supported on Windows yet",
             ]
         );
         let output = std::env::temp_dir().join(format!("stone-net-{}.exe", std::process::id()));
-        let built = compile_module(&checked, &sources, &output, Target::X64_WINDOWS);
+        let built = compile_module(
+            &checked,
+            &sources,
+            &output,
+            Target::X64_WINDOWS,
+            Subsystem::Console,
+        );
         assert!(built.is_err());
         assert!(!output.exists());
     }

@@ -494,6 +494,39 @@ fn build_rejects_an_unknown_target() {
     );
 }
 
+#[test]
+fn windows_gui_needs_a_windows_target() {
+    let (output, _) = stone(
+        &["build", "--windows-gui", "--target", "aarch64-linux"],
+        "windows_gui_linux",
+        "print(1)\n",
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: --windows-gui needs a Windows target, such as --target x86_64-windows\n"
+    );
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let exe = dir.join("windows_gui.exe");
+    let (output, _) = stone(
+        &[
+            "build",
+            "--windows-gui",
+            "--target",
+            "x86_64-windows",
+            "-o",
+            exe.to_str().unwrap(),
+        ],
+        "windows_gui",
+        "print(1)\n",
+    );
+    assert!(output.status.success(), "{output:?}");
+    // the subsystem, at offset 68 of the optional header, after the PE signature and COFF header
+    let bytes = std::fs::read(&exe).unwrap();
+    let pe = u32::from_le_bytes(bytes[60..64].try_into().unwrap()) as usize;
+    assert_eq!(u16::from_le_bytes([bytes[pe + 92], bytes[pe + 93]]), 2);
+}
+
 /// Returns the `--target` name of the machine the tests run on.
 ///
 /// For example, it is `x86_64-linux` on an x86-64 Linux machine.
@@ -1377,3 +1410,8 @@ fn file_errors_are_worded_the_same_in_both_backends() {
 #[cfg(unix)]
 #[path = "cli/unix.rs"]
 mod unix;
+
+/// Tests of the `gui` module's Win32 windows, which run where Windows programs and PowerShell
+/// do: on Windows, and under WSL.
+#[path = "cli/windows_gui.rs"]
+mod windows_gui;

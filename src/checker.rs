@@ -84,17 +84,21 @@ pub enum Handle {
     Socket,
     /// A TCP port waiting for connections, which `net.listen` makes.
     Listener,
+    /// A Win32 window, which `gui_sys.window_open` makes for the `gui` module on Windows. It has
+    /// no methods: only `gui_sys`'s functions take it.
+    Window,
 }
 
 impl Handle {
     /// Every kind of handle.
-    pub const ALL: [Handle; 2] = [Handle::Socket, Handle::Listener];
+    pub const ALL: [Handle; 3] = [Handle::Socket, Handle::Listener, Handle::Window];
 
     /// Returns the name a signature writes this type by, such as `socket`.
     pub fn name(self) -> &'static str {
         match self {
             Handle::Socket => "socket",
             Handle::Listener => "listener",
+            Handle::Window => "native_window",
         }
     }
 
@@ -1112,8 +1116,19 @@ const ORDERED: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str, Kind::Bytes];
 const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
 /// The names of the types built into the language, which no enum or struct may take.
 const BUILTIN_TYPES: &[&str] = &[
-    "int", "float", "bool", "str", "bytes", "list", "tuple", OPTION, RESULT, "Self", "socket",
+    "int",
+    "float",
+    "bool",
+    "str",
+    "bytes",
+    "list",
+    "tuple",
+    OPTION,
+    RESULT,
+    "Self",
+    "socket",
     "listener",
+    "native_window",
 ];
 /// The message for a map key of another kind.
 const MAP_KEY: &str = "a map key must be int, str, or bool, found {}";
@@ -7721,6 +7736,10 @@ impl Inference {
         };
         match owner {
             Some(handle) => self.expect(&Ty::Handle(handle), receiver_ty, receiver),
+            // `close` and `set_timeout` take any handle but a window
+            None if self.resolve(receiver_ty) == Ty::Handle(Handle::Window) => {
+                self.error(call, format!("'native_window' has no method '{name}'"));
+            }
             None => self.require(
                 receiver_ty.clone(),
                 &[Kind::Handle],
@@ -7848,6 +7867,35 @@ impl Inference {
                     self.arity_error(call.span, name, &params.len().to_string(), args.len());
                 }
                 Ty::Bytes
+            }
+            "gui_sys.on_windows"
+            | "gui_sys.window_open"
+            | "gui_sys.window_events"
+            | "gui_sys.window_frame"
+            | "gui_sys.window_show"
+            | "gui_sys.window_set_title"
+            | "gui_sys.window_close" => {
+                let window = Ty::Handle(Handle::Window);
+                let (params, ret) = match name {
+                    "gui_sys.on_windows" => (vec![], Ty::Bool),
+                    "gui_sys.window_open" => (
+                        vec![Ty::Str, Ty::Int, Ty::Int],
+                        Ty::Enum(RESULT.to_string(), vec![window, Ty::Str]),
+                    ),
+                    "gui_sys.window_events" => (vec![window, Ty::Int], Ty::Bytes),
+                    "gui_sys.window_frame" => (vec![window], Ty::Bool),
+                    "gui_sys.window_show" => (vec![window, Ty::Int, Ty::Int, Ty::Bytes], Ty::Unit),
+                    "gui_sys.window_set_title" => (vec![window, Ty::Str], Ty::Unit),
+                    _ => (vec![window], Ty::Unit),
+                };
+                if args.len() == params.len() {
+                    for ((arg, ty), param) in args.iter().zip(arg_types).zip(&params) {
+                        self.expect(param, ty, arg.span);
+                    }
+                } else {
+                    self.arity_error(call.span, name, &params.len().to_string(), args.len());
+                }
+                ret
             }
             "net_sys.connect_unix" | "net_sys.ready" => {
                 let params = match name {

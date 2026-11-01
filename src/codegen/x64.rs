@@ -9,6 +9,7 @@ pub mod bytes;
 mod emit;
 pub mod floats;
 pub mod fs;
+pub mod gui_windows;
 pub mod net;
 pub mod process;
 pub mod sort;
@@ -23,7 +24,7 @@ use crate::codegen::context::{
 };
 use crate::codegen::x64::builtins::print;
 use crate::codegen::x64::system::{Sys, system_call};
-use crate::codegen::{AssemblyGenerator, Os, Target};
+use crate::codegen::{AssemblyGenerator, Os, Subsystem, Target};
 use crate::project::SourceMap;
 use crate::span::Span;
 use crate::stdlib::CUT_CHARACTER;
@@ -53,7 +54,7 @@ pub struct X64Generator {
 impl AssemblyGenerator for X64Generator {
     fn compile(&mut self, module: &Mod, output: &Path) -> std::io::Result<()> {
         let text = self.assemble(module).map_err(std::io::Error::other)?;
-        crate::codegen::link(&text, output, self.target())
+        crate::codegen::link(&text, output, self.target(), Subsystem::Console)
     }
 
     fn assemble(&mut self, module: &Mod) -> Result<String, String> {
@@ -65,7 +66,8 @@ impl AssemblyGenerator for X64Generator {
     }
 
     fn scan(&mut self, module: &Mod) -> Result<(), String> {
-        self.ctx.lower(module)
+        let os = self.target().os;
+        self.ctx.lower(module, os)
     }
 
     fn generate(&mut self, module: &Mod) -> Result<(), String> {
@@ -418,6 +420,8 @@ impl X64Generator {
         if self.ctx.uses(&["stone.bytes_text"]) {
             fs.push("stone.bytes_text");
         }
+        // only a program for Windows calls these, since gui_sys.on_windows() is a constant
+        fs.extend(self.ctx.module_routines("stone.win_"));
         if !fs.is_empty() {
             fs::fs_runtime(self, &fs);
         }

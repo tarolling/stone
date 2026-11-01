@@ -8,17 +8,29 @@
 
 use super::BuiltinDoc;
 
+// Win32 windows, which `gui_win32.stn` shows its canvases in on Windows, and none elsewhere
+#[cfg(windows)]
+#[path = "gui/windows.rs"]
+mod system;
+#[cfg(not(windows))]
+#[path = "gui/unsupported.rs"]
+mod system;
+
+pub use system::{NativeWindow, open};
+
 /// The name a program imports the module by, as in `use gui`.
 pub const MODULE: &str = "gui";
 
 /// The module's stone source, which `use gui` links with the program.
 pub const SOURCE: &str = include_str!("gui.stn");
 
-/// The modules written in stone that `gui.stn` uses and only stone's own modules may: X11 and
-/// Wayland windows, keymaps and the keysym table, and the byte helpers both display protocols share.
-pub const INTERNAL_SOURCES: [(&str, &str); 5] = [
+/// The modules written in stone that `gui.stn` uses and only stone's own modules may: X11,
+/// Wayland, and Win32 windows, keymaps and the keysym table, and the byte helpers the display
+/// protocols share.
+pub const INTERNAL_SOURCES: [(&str, &str); 6] = [
     ("gui_x11", include_str!("gui_x11.stn")),
     ("gui_wayland", include_str!("gui_wayland.stn")),
+    ("gui_win32", include_str!("gui_win32.stn")),
     ("gui_keys", include_str!("gui_keys.stn")),
     ("gui_keysyms", include_str!("gui_keysyms.stn")),
     ("gui_wire", include_str!("gui_wire.stn")),
@@ -30,7 +42,7 @@ pub const SYS_MODULE: &str = "gui_sys";
 /// What the internal module is for.
 pub const SYS_MODULE_DOC: &str = "The native routines behind the builtin `gui` module.";
 
-pub static SYS_DOCS: [BuiltinDoc; 5] = [
+pub static SYS_DOCS: [BuiltinDoc; 12] = [
     BuiltinDoc {
         name: "gui_sys.pack",
         signature: "gui_sys.pack(pixels: list[int], start: int, count: int, format: int) -> \
@@ -61,6 +73,49 @@ pub static SYS_DOCS: [BuiltinDoc; 5] = [
         name: "gui_sys.shm_send",
         signature: "gui_sys.shm_send(s: socket, data: bytes) -> result[int, str]",
         description: "Sends `data` on `s` with the descriptor of the memory it shares.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.on_windows",
+        signature: "gui_sys.on_windows() -> bool",
+        description: "Returns whether the program runs on Windows, which compiled code knows \
+                      as it is built, so an `if` on it keeps only the code for its system.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.window_open",
+        signature: "gui_sys.window_open(title: str, width: int, height: int) -> \
+                    result[native_window, str]",
+        description: "Opens a Win32 window titled `title` whose inside is `width` by `height` \
+                      pixels.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.window_events",
+        signature: "gui_sys.window_events(w: native_window, timeout_ms: int) -> bytes",
+        description: "Waits at most `timeout_ms` milliseconds (-1 for ever) for a message to \
+                      `w` if none has come, handles every message waiting, and returns those \
+                      to `w` since the last call, 16 bytes each.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.window_frame",
+        signature: "gui_sys.window_frame(w: native_window) -> bool",
+        description: "Waits until the desktop next puts its windows on the screen, and \
+                      returns false if it cannot tell.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.window_show",
+        signature: "gui_sys.window_show(w: native_window, width: int, height: int, pixels: \
+                    bytes)",
+        description: "Shows the image `width` by `height` whose pixels `pack` laid out in \
+                      format 0 in `w`, which keeps it to paint again.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.window_set_title",
+        signature: "gui_sys.window_set_title(w: native_window, title: str)",
+        description: "Sets the title of `w`.",
+    },
+    BuiltinDoc {
+        name: "gui_sys.window_close",
+        signature: "gui_sys.window_close(w: native_window)",
+        description: "Closes `w`.",
     },
 ];
 

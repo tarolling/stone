@@ -201,6 +201,9 @@ pub enum Value {
     /// A TCP port waiting for connections, which copies share and which closes once nothing
     /// holds it.
     Listener(Rc<RefCell<net::Listener>>),
+    /// A Win32 window of the `gui` module, which copies share and which closes once nothing
+    /// holds it.
+    Window(Rc<RefCell<gui::NativeWindow>>),
 }
 
 /// A map key, which is an int, a string, or a bool, since those hash and compare exactly.
@@ -624,6 +627,7 @@ impl Value {
             // a handle prints as its type, as a function does
             Value::Socket(_) => out.push_str(Handle::Socket.name()),
             Value::Listener(_) => out.push_str(Handle::Listener.name()),
+            Value::Window(_) => out.push_str(Handle::Window.name()),
             Value::List(items) => {
                 out.push('[');
                 for (i, item) in items.iter().enumerate() {
@@ -700,7 +704,7 @@ impl Value {
     fn drops_early(&self) -> bool {
         match self {
             Value::List(_) | Value::Map(_) | Value::Enum(_) => true,
-            Value::Socket(_) | Value::Listener(_) => true,
+            Value::Socket(_) | Value::Listener(_) | Value::Window(_) => true,
             Value::Tuple(fields) => fields.iter().any(Value::drops_early),
             Value::Struct(value) => value.fields.iter().any(Value::drops_early),
             _ => false,
@@ -3049,6 +3053,41 @@ impl<'out> Interpreter<'out> {
             ) => {
                 let packed = gui::pack(&ints(pixels), *start, *count, *format);
                 return Ok(Value::Bytes(packed.into()));
+            }
+            ("gui_sys.on_windows", []) => return Ok(Value::Bool(cfg!(windows))),
+            ("gui_sys.window_open", [Value::Str(title), Value::Int(width), Value::Int(height)]) => {
+                let opened = gui::open(title, *width, *height)
+                    .map(|window| Value::Window(Rc::new(RefCell::new(window))));
+                return Ok(result(opened));
+            }
+            ("gui_sys.window_events", [Value::Window(window), Value::Int(timeout)]) => {
+                self.out.flush()?;
+                let records = window.borrow_mut().events(*timeout);
+                return Ok(Value::Bytes(records.into()));
+            }
+            ("gui_sys.window_frame", [Value::Window(window)]) => {
+                self.out.flush()?;
+                return Ok(Value::Bool(window.borrow_mut().frame()));
+            }
+            (
+                "gui_sys.window_show",
+                [
+                    Value::Window(window),
+                    Value::Int(width),
+                    Value::Int(height),
+                    Value::Bytes(pixels),
+                ],
+            ) => {
+                window.borrow_mut().show(*width, *height, pixels);
+                return Ok(Value::Unit);
+            }
+            ("gui_sys.window_set_title", [Value::Window(window), Value::Str(title)]) => {
+                window.borrow_mut().set_title(title);
+                return Ok(Value::Unit);
+            }
+            ("gui_sys.window_close", [Value::Window(window)]) => {
+                window.borrow_mut().close();
+                return Ok(Value::Unit);
             }
             ("gui_sys.shm_create", [Value::Socket(socket), Value::Int(size)]) => {
                 return Ok(result(

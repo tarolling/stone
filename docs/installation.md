@@ -91,8 +91,10 @@ compiler. Its Linux executables are static programs that need no C library, so t
 Linux machine with the same processor. Its macOS executables call the system only through
 `libSystem`, which every Mac has, and are signed, so they run on any Apple silicon Mac with
 macOS 12 or later. Its Windows executables import only from the system's `kernel32.dll` and
-`bcrypt.dll`, so they run on any x86-64 Windows 10 or 11 machine, though programs that use the
-`net` or `gui` module or `os.run` cannot be built for Windows yet, nor run on it. Executables
+`bcrypt.dll` (plus `user32.dll`, `gdi32.dll`, and `dwmapi.dll` for windows from the `gui`
+module, which need Windows 10 version 1703 or later), so they run on any x86-64 Windows 10 or 11
+machine, though programs that use the `net` module or `os.run` cannot be built for Windows yet,
+nor run on it. Executables
 are for the machine stone runs on unless `--target` picks another (see
 [the CLI reference](reference/cli.md)), and none needs anything else installed. Executables for
 Intel Macs are not supported. The interpreter runs the same programs everywhere.

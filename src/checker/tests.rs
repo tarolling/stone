@@ -5252,6 +5252,42 @@ fn handles_are_never_compared_or_map_keys() {
 }
 
 #[test]
+fn native_windows_are_handles_without_methods() {
+    assert_eq!(
+        linked_errors("fn keep(w: native_window) -> native_window:\n    ret w\n"),
+        []
+    );
+    assert_eq!(
+        linked_errors("fn f(w: native_window):\n    w.close()\n"),
+        [("'native_window' has no method 'close'".to_string(), 2, 5)]
+    );
+    assert_eq!(
+        linked_errors("fn f(w: native_window):\n    print(w.send(\"a\"))\n"),
+        [("expected socket, found native_window".to_string(), 2, 11)]
+    );
+    assert_eq!(
+        linked_errors("fn f(w: native_window) -> bool:\n    ret w == w\n"),
+        [(
+            "'==' and '!=' cannot compare native_window".to_string(),
+            2,
+            9
+        )]
+    );
+    assert_eq!(
+        linked_errors("fn f(w: native_window):\n    m = {w: 1}\n    print(m.len())\n"),
+        [(
+            "a map key must be int, str, or bool, found native_window".to_string(),
+            2,
+            10
+        )]
+    );
+    assert_eq!(
+        linked_errors("struct native_window:\n    x: int\n"),
+        [("cannot redefine builtin 'native_window'".to_string(), 1, 8)]
+    );
+}
+
+#[test]
 fn bytes_have_types() {
     let cases = [
         ("b\"ab\"", "bytes"),

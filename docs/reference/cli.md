@@ -21,7 +21,7 @@ stone run examples/basics.stn
 stone run sum.stn 1 2 3 < numbers.txt
 ```
 
-## `stone build FILE... [-o OUTPUT] [--target TARGET]...`
+## `stone build FILE... [-o OUTPUT] [--target TARGET]... [--windows-gui]`
 
 Compiles each program to a native executable in its build directory (see
 [Where executables go](#where-executables-go)), writing the assembly next to it with a `.s`
@@ -33,9 +33,16 @@ Mac has, and is signed, as macOS requires, so it runs on any Apple silicon Mac w
 later. Either has a symbol table, so tools such as `gdb`, `lldb`, `perf`, and `objdump` show
 its functions by name, such as `fn.area` for a stone function `area` and `main` for the
 top-level code. A Windows executable is a console program that imports only from the system's
-own `kernel32.dll` and `bcrypt.dll`, so it runs on any x86-64 Windows 10 or 11 machine; the
-`net` and `gui` modules and `os.run` are not supported there yet, and building a program that
-uses them for Windows is an error.
+own `kernel32.dll` and `bcrypt.dll` (and, for a program that opens windows with the `gui`
+module, `user32.dll`, `gdi32.dll`, and `dwmapi.dll`), so it runs on any x86-64 Windows 10 or 11
+machine; windows need Windows 10 version 1703 or later. The `net` module and `os.run` are not
+supported there yet, and building a program that uses them for Windows is an error.
+
+`--windows-gui` builds Windows executables as programs with windows rather than console
+programs, so opening one from Explorer opens no console beside its window. Such a program has
+no console at all: what it prints goes nowhere unless its output is redirected, and `input()`
+finds the input already over. It needs a Windows target, either through `--target` or as the
+machine stone runs on, and changes nothing for the other targets of the same build.
 
 The executable is for the machine stone runs on: x86-64 or arm64 Linux, arm64 macOS, or x86-64
 Windows.

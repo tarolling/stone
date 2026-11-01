@@ -1667,3 +1667,35 @@ fn math_constants_are_immediates() {
         )
     );
 }
+
+/// Links, checks, and lowers the program `source` for `os`, returning the IR dump.
+fn dump_for(source: &str, os: crate::codegen::Os) -> String {
+    let sources = crate::project::MapSources::default();
+    let (_, module) = crate::driver::load(std::path::Path::new("main.stn"), source, &sources);
+    let module = module.unwrap().module;
+    let analysis = TypeChecker::new().analyze(&module);
+    let program = lower_for(&module, &analysis, os).unwrap();
+    program.functions.iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn a_gui_program_lowers_only_the_windows_of_its_system() {
+    use crate::codegen::Os;
+    let source = "use gui\n\
+                  match gui.open(\"t\", 10, 10):\n    case ok(w):\n        \
+                  w.show(gui.blank(10, 10, 0))\n        print(w.next_frame())\n        \
+                  w.close()\n    case err(e):\n        print(e)\n";
+    let windows = dump_for(source, Os::Windows);
+    assert!(windows.contains("stone.win_open"), "{windows}");
+    for absent in ["stone.net_", "gui_x11.", "gui_wayland."] {
+        assert!(!windows.contains(absent), "{absent} in {windows}");
+    }
+    let linux = dump_for(source, Os::Linux);
+    assert!(
+        linux.contains("gui_x11.") && linux.contains("stone.net_"),
+        "{linux}"
+    );
+    for absent in ["stone.win_", "gui_win32."] {
+        assert!(!linux.contains(absent), "{absent} in {linux}");
+    }
+}

@@ -3,7 +3,7 @@ use std::error::Error;
 use std::io::{IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
-use stone::codegen::Target;
+use stone::codegen::{Os, Subsystem, Target};
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver::{self, Checked};
 use stone::format;
@@ -56,6 +56,11 @@ enum Command {
         /// several; each target other than this machine builds into `build/<TARGET>/`.
         #[arg(long = "target", value_name = "TARGET", value_parser = str::parse::<Target>)]
         targets: Vec<Target>,
+        /// Builds Windows programs as programs with windows, which start with no console, so
+        /// opening one from Explorer opens no console, and what it prints goes nowhere unless
+        /// its output is redirected. Needs a Windows target.
+        #[arg(long)]
+        windows_gui: bool,
     },
     /// Removes the build directory that `stone build` made.
     Clean {
@@ -101,6 +106,8 @@ enum ExecutionMode {
         output: Option<PathBuf>,
         /// What to build for, or the host if empty.
         targets: Vec<Target>,
+        /// Whether Windows executables start with no console.
+        windows_gui: bool,
     },
     Check(String),
     Clean(Option<PathBuf>),
@@ -131,10 +138,12 @@ fn main() -> ExitCode {
             files,
             output,
             targets,
+            windows_gui,
         }) => ExecutionMode::Build {
             files,
             output,
             targets,
+            windows_gui,
         },
         Some(Command::Check { file }) => ExecutionMode::Check(file),
         Some(Command::Clean { path }) => ExecutionMode::Clean(path),
@@ -161,7 +170,14 @@ fn main() -> ExitCode {
             files,
             output,
             targets,
-        } => build(&files, output.as_deref(), &targets),
+            windows_gui,
+        } => {
+            let subsystem = match windows_gui {
+                true => Subsystem::Gui,
+                false => Subsystem::Console,
+            };
+            build(&files, output.as_deref(), &targets, subsystem)
+        }
         ExecutionMode::Check(file) => {
             let Some(source) = read(&file) else {
                 return ExitCode::FAILURE;
@@ -240,8 +256,13 @@ fn main() -> ExitCode {
 ///
 /// For example, building `a.stn` and `b.stn` on an x86-64 Linux machine writes `build/a` and
 /// `build/b`, and adding `--target aarch64-macos` also writes `build/aarch64-macos/a` and
-/// `build/aarch64-macos/b`.
-fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCode {
+/// `build/aarch64-macos/b`. Windows executables are programs of `subsystem`.
+fn build(
+    files: &[String],
+    output: Option<&Path>,
+    targets: &[Target],
+    subsystem: Subsystem,
+) -> ExitCode {
     let mut unique: Vec<Target> = Vec::new();
     for &target in targets {
         if !unique.contains(&target) {
@@ -250,6 +271,14 @@ fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCod
     }
     if output.is_some() && (files.len() > 1 || unique.len() > 1) {
         eprintln!("error: -o names one executable, so it needs exactly one file and one target");
+        return ExitCode::FAILURE;
+    }
+    let windows = match unique.is_empty() {
+        true => Target::host().is_ok_and(|host| host.os == Os::Windows),
+        false => unique.iter().any(|target| target.os == Os::Windows),
+    };
+    if subsystem == Subsystem::Gui && !windows {
+        eprintln!("error: --windows-gui needs a Windows target, such as --target x86_64-windows");
         return ExitCode::FAILURE;
     }
     let mut status = ExitCode::SUCCESS;
@@ -269,7 +298,7 @@ fn build(files: &[String], output: Option<&Path>, targets: &[Target]) -> ExitCod
                         driver::output_path(entry, target)
                     }
                 };
-                driver::compile_module(checked, sources, &path, target)?;
+                driver::compile_module(checked, sources, &path, target, subsystem)?;
                 println!("Compiled {}", path.display());
             }
             Ok(())

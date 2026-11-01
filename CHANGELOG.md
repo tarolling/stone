@@ -10,6 +10,23 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- The `gui` module works on Windows, with Win32 windows, under both `stone run` and in built
+  programs: the same `gui.window` API, events, and `gui.run` as on Linux and macOS. One canvas
+  pixel is one screen pixel on every monitor, `next_frame` waits for the desktop's next frame,
+  and the window repaints itself from the last canvas shown. Windows need Windows 10 version
+  1703 or later. A program imports `user32.dll`, `gdi32.dll`, and `dwmapi.dll` only if it
+  opens a window.
+- `stone build --windows-gui` builds Windows executables that start with no console, so opening
+  one from Explorer shows only its window. What such a program prints goes nowhere unless its
+  output is redirected.
+
+### Changed
+
+- Programs that use the `gui` module are no longer rejected for Windows. The `net` module and
+  `os.run` still are.
+
 ## [0.4.0] - 2026-10-30
 
 ### Added

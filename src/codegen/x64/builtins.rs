@@ -481,7 +481,8 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
 /// since vregs live in the rest, like the other free routines.
 ///
 /// With `handles`, a value whose tag is negative is a socket or listener, whose descriptor it
-/// closes first, through `net::free_handle`, before the tag becomes the queue's link.
+/// closes first, through `net::free_handle`, before the tag becomes the queue's link, or on
+/// Windows a window, which `gui_windows::free_handle` closes.
 pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, handles: bool) {
     r#gen.emit("stone.enum_new:");
     r#gen.emit("\tpush\trdi");
@@ -566,7 +567,9 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, handles: bool) {
     r#gen.emit("\tpop\trbx");
     r#gen.emit(".Lfree_enum_queued:");
     r#gen.emit("\tret");
-    if handles {
+    if handles && r#gen.target().os == Os::Windows {
+        super::gui_windows::free_handle(r#gen);
+    } else if handles {
         super::net::free_handle(r#gen);
     }
 }

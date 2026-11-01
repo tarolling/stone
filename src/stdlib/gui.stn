@@ -5,16 +5,20 @@
 // from the top left, each color written 0xRRGGBB as `rgb` makes it. Drawing outside a canvas
 // draws nothing there, so a shape may hang over an edge.
 //
-// A window shows a canvas on the screen. `gui` speaks the X11 protocol to the display server
-// itself (in `gui_x11`), over a socket from `net`, so it needs no C library: on Linux any desktop
-// runs an X11 server (XWayland under Wayland), and on macOS XQuartz does. `DISPLAY` says where
-// it is.
+// A window shows a canvas on the screen. On Linux and macOS, `gui` speaks the Wayland or X11
+// protocol to the display server itself (in `gui_wayland` and `gui_x11`), over a socket from
+// `net`, so it needs no C library: Linux desktops run a Wayland compositor or an X11 server, and
+// on macOS XQuartz is one. `WAYLAND_DISPLAY` and `DISPLAY` say where they are. On Windows it
+// opens Win32 windows (in `gui_win32`).
 //
-// It reaches the system through `gui_sys`, which only stone's own modules may use, as `gui_x11`,
-// `gui_keys`, and `gui_wire` are.
+// It reaches the system through `gui_sys`, which only stone's own modules may use, as
+// `gui_win32`, `gui_x11`, `gui_keys`, and `gui_wire` are. `gui_sys.on_windows()` is a constant
+// to compiled code, so a program built for Windows has none of the X11 and Wayland code, and one
+// built for another system none of the Win32.
 
 use gui_sys
 use gui_wayland
+use gui_win32
 use gui_x11
 use os
 use time
@@ -231,22 +235,34 @@ pub enum event:
 // A window on the screen, which shows a canvas. It is a handle, like a socket: a copy of it is
 // the same window, though events one copy takes the other never sees.
 pub struct window:
-    // whether it is on a Wayland compositor, and the window there or on an X server, each in a
-    // list, which is one value, since a list or a result holds at most 32 values in each
-    // element, and the other list empty
+    // whether it is on a Wayland compositor, and the window there, on an X server, or on
+    // Windows, each in a list, which is one value, since a list or a result holds at most 32
+    // values in each element, and the other lists empty
     wayland: bool
     x: list[gui_x11.link]
     wl: list[gui_wayland.link]
+    win: list[gui_win32.link]
     // when `next_frame` returns if the display does not say, by `time.clock`
     due: float
 
-// Opens a window `width` by `height` pixels titled `title`: on the Wayland compositor
-// `WAYLAND_DISPLAY` names, or if there is none or it fails, on the X server `DISPLAY` names.
-// `STONE_GUI` set to `wayland` or `x11` asks for one alone.
+// Opens a window `width` by `height` pixels titled `title`: on Windows, a Win32 window, and
+// elsewhere on the Wayland compositor `WAYLAND_DISPLAY` names, or if there is none or it fails,
+// on the X server `DISPLAY` names. `STONE_GUI` set to `wayland` or `x11` asks for one alone.
 pub fn open(title: str, width: int, height: int) -> result[window, str]:
     if width < 1 or height < 1 or width > 32767 or height > 32767:
         ret err("invalid window size: {width}x{height}")
     choice = os.env("STONE_GUI").unwrap_or("")
+    if gui_sys.on_windows():
+        if choice != "" and choice != "windows":
+            ret err("STONE_GUI is '{choice}', but on Windows can only be 'windows'")
+        win = gui_win32.open(title, width, height)?
+        ret ok(window(wayland=false, x=[], wl=[], win=[win], due=time.clock()))
+    else:
+        ret open_display(title, width, height, choice)
+
+// Opens a window as `open` does where there is no Win32, on Wayland or X11 as `choice`, the
+// value of `STONE_GUI`, asks.
+fn open_display(title: str, width: int, height: int, choice: str) -> result[window, str]:
     if choice != "" and choice != "wayland" and choice != "x11":
         ret err("STONE_GUI is '{choice}', but can only be 'wayland' or 'x11'")
     on_wayland = os.env("WAYLAND_DISPLAY").unwrap_or("") != ""
@@ -256,42 +272,56 @@ pub fn open(title: str, width: int, height: int) -> result[window, str]:
     if choice == "wayland" or choice == "" and on_wayland:
         match gui_wayland.open(title, width, height):
             case ok(wl):
-                ret ok(window(wayland=true, x=[], wl=[wl], due=time.clock()))
+                ret ok(window(wayland=true, x=[], wl=[wl], win=[], due=time.clock()))
             case err(reason):
                 if choice == "wayland" or not on_x11:
                     ret err(reason)
     x = gui_x11.open(title, width, height)?
-    ret ok(window(wayland=false, x=[x], wl=[], due=time.clock()))
+    ret ok(window(wayland=false, x=[x], wl=[], win=[], due=time.clock()))
 
 impl window:
     // Whether the window is open: until `close`, or the connection breaks.
     fn is_open(self) -> bool:
-        if self.wayland:
+        if gui_sys.on_windows():
+            ret self.win[0].is_open()
+        elif self.wayland:
             ret self.wl[0].is_open()
-        ret self.x[0].is_open()
+        else:
+            ret self.x[0].is_open()
 
     // The window's width and height in pixels, as the last `resize` event gave them.
     fn size(self) -> tuple[int, int]:
-        if self.wayland:
+        if gui_sys.on_windows():
+            ret self.win[0].size()
+        elif self.wayland:
             ret self.wl[0].size()
-        ret self.x[0].size()
+        else:
+            ret self.x[0].size()
 
     // The events that have happened since the last call, without waiting for any.
     fn events(self) -> list[event]:
-        if self.wayland:
+        if gui_sys.on_windows():
+            got = self.win[0].events()
+            ret got
+        elif self.wayland:
             found = self.wl[0].events()
             ret found
-        es = self.x[0].events()
-        ret es
+        else:
+            es = self.x[0].events()
+            ret es
 
     // The events that have happened since the last call, waiting for one if there are none, or
     // none if the window is closed.
     fn wait(self) -> list[event]:
-        if self.wayland:
+        if gui_sys.on_windows():
+            got = self.win[0].wait()
+            ret got
+        elif self.wayland:
             found = self.wl[0].wait()
             ret found
-        es = self.x[0].wait()
-        ret es
+        else:
+            es = self.x[0].wait()
+            ret es
 
     // Waits until it is time to draw the next image, and returns the events that have happened
     // since the last call, as `events` does. That is when the display has put the last image
@@ -301,7 +331,9 @@ impl window:
     // times a second.
     fn next_frame(self) -> list[event]:
         awaiting = false
-        if self.wayland:
+        if gui_sys.on_windows():
+            awaiting = self.win[0].awaiting()
+        elif self.wayland:
             awaiting = self.wl[0].awaiting()
         else:
             awaiting = self.x[0].awaiting()
@@ -309,7 +341,9 @@ impl window:
         if awaiting:
             until = time.clock() + hidden_wait()
         found = []
-        if self.wayland:
+        if gui_sys.on_windows():
+            found = self.win[0].pace(until)
+        elif self.wayland:
             found = self.wl[0].pace(until)
         else:
             found = self.x[0].pace(until)
@@ -321,23 +355,29 @@ impl window:
         ret found
 
     // Shows `c` in the window, its top left pixel at the window's. What the window has outside
-    // `c` stays as it was on X11, and is black on Wayland.
+    // `c` stays as it was on X11, and is black on Wayland and Windows.
     fn show(self, c: canvas):
-        if self.wayland:
+        if gui_sys.on_windows():
+            self.win[0].show(c)
+        elif self.wayland:
             self.wl[0].show(c)
         else:
             self.x[0].show(c)
 
     // Sets the title the window's frame shows.
     fn set_title(self, title: str):
-        if self.wayland:
+        if gui_sys.on_windows():
+            self.win[0].set_title(title)
+        elif self.wayland:
             self.wl[0].set_title(title)
         else:
             self.x[0].set_title(title)
 
     // Closes the window.
     fn close(self):
-        if self.wayland:
+        if gui_sys.on_windows():
+            self.win[0].close()
+        elif self.wayland:
             self.wl[0].close()
         else:
             self.x[0].close()

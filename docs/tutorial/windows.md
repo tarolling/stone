@@ -70,6 +70,14 @@ Mac has an X11 server with XQuartz. `gui.open` finds it through `WAYLAND_DISPLAY
 preferring Wayland, and without either it returns an error. Where a Wayland compositor draws no
 title bars, as on GNOME, `gui` draws its own.
 
+On Windows (10 version 1703 or later), a window is an ordinary Win32 window and needs no
+display variable. One pixel of a canvas is one pixel of the screen, whatever the monitor's
+scaling, and the window repaints itself from the last canvas shown, so `redraw` never comes
+there. Build a program with windows using `stone build --windows-gui` so that opening it from
+Explorer opens no console beside it (see [the CLI reference](../reference/cli.md)). While the
+window is being dragged or resized, Windows holds the program until the mouse button is
+released, so the window shows the last canvas until then.
+
 ## Apps
 
 Most programs with a window keep some state, change it at each event, and draw it. The

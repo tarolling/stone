@@ -7,7 +7,7 @@
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
 use crate::checker::{Analysis, Structs, Type, TypeChecker, variants};
 use crate::codegen::ir::inline::inline;
-use crate::codegen::ir::lower::lower;
+use crate::codegen::ir::lower::lower_for;
 use crate::codegen::ir::opt::optimize;
 use crate::codegen::ir::trig;
 use crate::codegen::ir::{Callee, Inst, Program};
@@ -119,7 +119,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 36] = [
+pub const MODULE_ROUTINES: [(&str, &str); 42] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -158,6 +158,13 @@ pub const MODULE_ROUTINES: [(&str, &str); 36] = [
     ("gui_sys.shm_write", "stone.net_shm_write"),
     ("gui_sys.shm_send", "stone.net_shm_send"),
     ("gui_sys.take_fd", "stone.net_take_fd"),
+    // Win32 windows, which only Windows has (see `x64::gui_windows`)
+    ("gui_sys.window_open", "stone.win_open"),
+    ("gui_sys.window_events", "stone.win_events"),
+    ("gui_sys.window_frame", "stone.win_frame"),
+    ("gui_sys.window_show", "stone.win_show"),
+    ("gui_sys.window_set_title", "stone.win_set_title"),
+    ("gui_sys.window_close", "stone.win_close"),
 ];
 
 /// The routines of the `fs` module that can return an error, which needs the routines that
@@ -189,6 +196,7 @@ const FS_FAILING: &[&str] = &[
     "stone.net_read_bytes",
     "stone.net_read_exact",
     "stone.net_read_all_bytes",
+    "stone.win_open",
 ];
 
 /// The runtime routines of `net_sys` and of the methods of sockets and listeners, which the
@@ -544,10 +552,10 @@ impl Context {
         Ok(())
     }
 
-    /// Lowers the checked `module` to IR, then notes every runtime routine it calls and whether it
-    /// counts references.
-    pub fn lower(&mut self, module: &Mod) -> Result<(), String> {
-        self.program = lower(module, &self.analysis)?;
+    /// Lowers the checked `module` to IR for a program that runs on `os`, then notes every
+    /// runtime routine it calls and whether it counts references.
+    pub fn lower(&mut self, module: &Mod, os: Os) -> Result<(), String> {
+        self.program = lower_for(module, &self.analysis, os)?;
         for function in &mut self.program.functions {
             trig::share(function);
             trig::expand(function);
@@ -864,10 +872,15 @@ impl Context {
             .any(|ty| mentions_bytes(ty, &self.analysis, &mut HashSet::new()))
     }
 
-    /// Returns whether the program can make sockets or listeners, whose descriptors
+    /// Returns whether the program can make sockets, listeners, or windows, which
     /// `stone.free_enum` closes.
     pub fn needs_handles(&self) -> bool {
-        self.uses(&["stone.net_connect", "stone.net_listen", "stone.net_accept"])
+        self.uses(&[
+            "stone.net_connect",
+            "stone.net_listen",
+            "stone.net_accept",
+            "stone.win_open",
+        ])
     }
 
     /// Returns whether the program has enum values, which need `stone.free_enum`.

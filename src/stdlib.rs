@@ -74,7 +74,7 @@ pub static SOURCE_MODULES: [(&str, &str); 2] =
 
 /// The modules written in stone that only stone's own modules may use, as they may use
 /// [`INTERNAL_MODULES`], by name with their source.
-pub static INTERNAL_SOURCE_MODULES: [(&str, &str); 5] = gui::INTERNAL_SOURCES;
+pub static INTERNAL_SOURCE_MODULES: [(&str, &str); 6] = gui::INTERNAL_SOURCES;
 
 /// Returns the builtin module named `name`, internal ones included.
 ///
@@ -416,7 +416,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 10] = [
 /// `ordering`, and `output` are not here, since the prelude defines them in stone.
 ///
 /// A `signature` is the type as a signature writes it, such as `list[T]` for `list`.
-pub static TYPE_DOCS: [BuiltinDoc; 11] = [
+pub static TYPE_DOCS: [BuiltinDoc; 12] = [
     BuiltinDoc {
         name: "int",
         signature: "int",
@@ -479,6 +479,14 @@ pub static TYPE_DOCS: [BuiltinDoc; 11] = [
         description: "A port waiting for TCP connections, from `net.listen`. It is a handle, so a \
                       copy refers to the same port, which closes right after the last statement \
                       that uses it.",
+    },
+    BuiltinDoc {
+        name: "native_window",
+        signature: "native_window",
+        description: "A Win32 window, which the `gui` module opens on Windows through its own \
+                      internal modules, and which no other code can make. It is a handle, so a \
+                      copy refers to the same window, which closes right after the last \
+                      statement that uses it.",
     },
 ];
 

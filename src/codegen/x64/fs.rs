@@ -42,9 +42,9 @@ pub(super) const EINTR: i64 = 4;
 ///
 /// They follow the System V calling convention and need the string, list, and enum runtimes,
 /// `stone.str_int` for an error number with no reason in the tables, and `stone.list_sort_str`
-/// for `stone.fs_list_dir`. `used` may also hold `stone.os_run` and the `stone.net_` routines,
-/// which share their pieces, so they are emitted once (see `process::run_runtime` and
-/// `net::net_runtime`).
+/// for `stone.fs_list_dir`. `used` may also hold `stone.os_run`, the `stone.net_` routines, and
+/// on Windows the `stone.win_` routines, which share their pieces, so they are emitted once (see
+/// `process::run_runtime`, `net::net_runtime`, and `gui_windows::window_runtime`).
 pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     let uses = |label: &str| used.contains(&label);
     let flags = OpenFlags::of(r#gen.target());
@@ -69,6 +69,14 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     }
     if !net.is_empty() {
         super::net::net_runtime(r#gen, &net);
+    }
+    let windows: Vec<&str> = used
+        .iter()
+        .copied()
+        .filter(|label| label.starts_with("stone.win_"))
+        .collect();
+    if !windows.is_empty() {
+        super::gui_windows::window_runtime(r#gen, &windows);
     }
     if used.iter().any(|label| {
         matches!(

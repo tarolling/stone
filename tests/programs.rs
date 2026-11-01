@@ -54,6 +54,13 @@ const PROGRAM_DIRS: [&str; 3] = ["examples", "tests/programs", "docs/examples"];
 /// `("printing", "build-aarch64", "...")` only when cross-compiling it for aarch64.
 const SKIPS: &[(&str, &str, &str)] = &[];
 
+/// Programs about what only other systems have, which no backend runs on Windows, as
+/// `(file stem, reason)`.
+const NOT_ON_WINDOWS: &[(&str, &str)] = &[(
+    "gui_no_display",
+    "it opens no window for want of DISPLAY, which a Win32 window does not need",
+)];
+
 /// A way of executing a stone program.
 #[derive(Clone, Copy)]
 enum Backend {
@@ -388,6 +395,13 @@ fn check_all(backend: Backend) {
             Backend::Windows(runner) => runner.skip_reason(&program),
             _ => None,
         };
+        let on_windows = cfg!(windows) || matches!(backend, Backend::Windows(_));
+        let runner_skip = runner_skip.or_else(|| {
+            NOT_ON_WINDOWS
+                .iter()
+                .find(|(name, _)| on_windows && *name == name_of(&program))
+                .map(|(_, reason)| *reason)
+        });
         if let Some(reason) = skip_reason(&program, backend).or(runner_skip) {
             eprintln!(
                 "skipped {} ({}): {reason}",

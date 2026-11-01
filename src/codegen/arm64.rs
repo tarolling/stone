@@ -27,7 +27,7 @@ use crate::codegen::context::{
     STRING_METHOD_ROUTINES, escape, function_statics, global_label, immortal_bytes,
     immortal_string, variant_statics,
 };
-use crate::codegen::{AssemblyGenerator, Os, Target};
+use crate::codegen::{AssemblyGenerator, Os, Subsystem, Target};
 use crate::project::SourceMap;
 use crate::span::Span;
 use crate::stdlib::CUT_CHARACTER;
@@ -61,7 +61,7 @@ pub struct Arm64Generator {
 impl AssemblyGenerator for Arm64Generator {
     fn compile(&mut self, module: &Mod, output: &Path) -> std::io::Result<()> {
         let text = self.assemble(module).map_err(std::io::Error::other)?;
-        crate::codegen::link(&text, output, self.target())
+        crate::codegen::link(&text, output, self.target(), Subsystem::Console)
     }
 
     fn assemble(&mut self, module: &Mod) -> Result<String, String> {
@@ -73,7 +73,8 @@ impl AssemblyGenerator for Arm64Generator {
     }
 
     fn scan(&mut self, module: &Mod) -> Result<(), String> {
-        self.ctx.lower(module)
+        let os = self.target().os;
+        self.ctx.lower(module, os)
     }
 
     fn generate(&mut self, module: &Mod) -> Result<(), String> {

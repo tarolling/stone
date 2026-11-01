@@ -134,7 +134,7 @@ counter:
 #[test]
 fn programs_import_what_they_call_by_dll() {
     let object = assemble(PROGRAM, Architecture::X64).unwrap();
-    let file = link(&object).unwrap();
+    let file = link(&object, Subsystem::Console).unwrap();
     assert_eq!(
         imports(&file),
         [
@@ -153,7 +153,7 @@ fn programs_import_what_they_call_by_dll() {
 #[test]
 fn sections_are_laid_out_on_their_alignments() {
     let object = assemble(PROGRAM, Architecture::X64).unwrap();
-    let file = link(&object).unwrap();
+    let file = link(&object, Subsystem::Console).unwrap();
     let (optional, sections) = headers(&file);
     assert_eq!(u16_at(&file, optional), 0x20b);
     assert_eq!(u64_at(&file, optional + 24), BASE);
@@ -189,9 +189,29 @@ fn sections_are_laid_out_on_their_alignments() {
 }
 
 #[test]
+fn a_program_with_windows_starts_with_no_console() {
+    let object = assemble(PROGRAM, Architecture::X64).unwrap();
+    let console = link(&object, Subsystem::Console).unwrap();
+    let gui = link(&object, Subsystem::Gui).unwrap();
+    let (optional, _) = headers(&gui);
+    assert_eq!(u16_at(&gui, optional + 68), IMAGE_SUBSYSTEM_WINDOWS_GUI);
+    // the subsystem, and the timestamp and checksum, which are hashed from the rest, are all
+    // that differ
+    let stamp = optional - 16..optional - 12;
+    let checksum = optional + 64..optional + 68;
+    let differing: Vec<usize> = (0..gui.len()).filter(|&i| gui[i] != console[i]).collect();
+    assert!(
+        differing
+            .iter()
+            .all(|&i| i == optional + 68 || stamp.contains(&i) || checksum.contains(&i)),
+        "{differing:?}"
+    );
+}
+
+#[test]
 fn calls_reach_thunks_that_jump_through_the_address_table() {
     let object = assemble(PROGRAM, Architecture::X64).unwrap();
-    let file = link(&object).unwrap();
+    let file = link(&object, Subsystem::Console).unwrap();
     let (optional, sections) = headers(&file);
     let entry = u32_at(&file, optional + 16);
     let text = &sections[0];
@@ -220,8 +240,8 @@ fn calls_reach_thunks_that_jump_through_the_address_table() {
 #[test]
 fn images_are_stamped_and_checksummed_reproducibly() {
     let object = assemble(PROGRAM, Architecture::X64).unwrap();
-    let file = link(&object).unwrap();
-    assert_eq!(link(&object).unwrap(), file);
+    let file = link(&object, Subsystem::Console).unwrap();
+    assert_eq!(link(&object, Subsystem::Console).unwrap(), file);
     assert_eq!(&file[64..78], &DOS_STUB[..14]);
     let (optional, _) = headers(&file);
     let time = u32_at(&file, optional - 20 + 4);
@@ -246,13 +266,19 @@ fn unknown_functions_are_errors() {
         Architecture::X64,
     )
     .unwrap();
-    assert_eq!(link(&object), Err("undefined label 'printf'".to_string()));
+    assert_eq!(
+        link(&object, Subsystem::Console),
+        Err("undefined label 'printf'".to_string())
+    );
     let object = assemble(
         "\t.intel_syntax noprefix\n\t.text\nmain:\n\tret\n",
         Architecture::X64,
     )
     .unwrap();
-    assert_eq!(link(&object), Err("'_start' is never defined".to_string()));
+    assert_eq!(
+        link(&object, Subsystem::Console),
+        Err("'_start' is never defined".to_string())
+    );
 }
 
 #[test]
@@ -264,6 +290,7 @@ use os
 use time
 use fs
 use random
+use gui
 print(args(), os.env(\"A\"), os.hostname(), os.cpu_count(), os.pid(), os.cwd())
 print(time.now(), time.clock(), random.randint(1, 6), input(\"\"))
 print(fs.read(\"a\"), fs.write(\"a\", \"b\"), fs.append(\"a\", \"b\"), fs.list_dir(\".\"))
@@ -272,6 +299,14 @@ time.sleep(0)
 xs = [0]
 for i in range(100000):
     xs.append(i)
+match gui.open(\"t\", 1, 1):
+    case ok(w):
+        w.show(gui.blank(1, 1, 0))
+        w.set_title(\"u\")
+        print(w.next_frame(), w.wait())
+        w.close()
+    case err(e):
+        print(e)
 ";
     let (_, module) = crate::driver::load(
         std::path::Path::new("main.stn"),
@@ -290,7 +325,7 @@ for i in range(100000):
         );
     }
     let object = assemble(&assembly, Architecture::X64).unwrap();
-    let file = link(&object).unwrap();
+    let file = link(&object, Subsystem::Console).unwrap();
     let imported: Vec<String> = imports(&file).into_iter().flat_map(|(_, f)| f).collect();
     for (_, functions) in IMPORTS {
         for function in functions {

@@ -47,6 +47,7 @@ use crate::checker::{
     may_name_struct, place, place_root, place_spans, range_args, struct_display, type_text,
     variant_display, variants,
 };
+use crate::codegen::Os;
 use crate::codegen::context::{FUNCTION_PREFIX, module_routine};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::{FileId, Span};
@@ -70,6 +71,13 @@ type Variables = HashMap<(Option<String>, String), Type>;
 ///
 /// Fails only on input the checker rejects, such as a constant type no backend supports.
 pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
+    lower_for(module, analysis, Os::Linux)
+}
+
+/// Lowers `module` as [`lower`] does, for a program that runs on `os`, which
+/// `gui_sys.on_windows()` reads as a constant: an `if` on it lowers only the branch taken, so a
+/// Windows program never reaches the X11 and Wayland code, and a Linux one never the Win32.
+pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, String> {
     let Mod::Module { body } = module;
     let Analysis {
         types,
@@ -145,6 +153,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
     let global_set: HashSet<String> = globals.iter().cloned().collect();
     let global_reads = global_reads(body, &stone_globals);
     let context = Context {
+        os,
         types,
         variables: &variables,
         globals: &globals,
@@ -557,6 +566,8 @@ fn mangle(ty: &Type) -> String {
 
 /// What lowering each function shares.
 struct Context<'a> {
+    /// The system the program runs on, which `gui_sys.on_windows()` tells.
+    os: Os,
     types: &'a HashMap<Span, Type>,
     /// The type of each variable, including one for each value of a tuple variable, such as
     /// `t.0` for `t`.
@@ -2042,6 +2053,13 @@ impl<'a> Lowerer<'a> {
                 self.leave(&values);
             }
 
+            StmtKind::If { test, body, orelse } if let Some(taken) = self.on_windows(test) => {
+                let branch = if taken { body } else { orelse };
+                for stmt in branch {
+                    self.stmt(stmt)?;
+                }
+            }
+
             StmtKind::If { test, body, orelse } => {
                 let then = self.new_block();
                 let end = self.new_block();
@@ -3513,6 +3531,26 @@ impl<'a> Lowerer<'a> {
             self.push(Inst::Release { src, kind });
         }
         Ok(())
+    }
+
+    /// Returns whether `test` is true, if it is `gui_sys.on_windows()` or `not` of it, which is
+    /// a constant for the system the program is lowered for.
+    ///
+    /// For example, `not gui_sys.on_windows()` is `Some(false)` for Windows.
+    fn on_windows(&self, test: &Expr) -> Option<bool> {
+        match &test.kind {
+            ExprKind::Call { func, args, .. } if args.is_empty() => match &func.kind {
+                ExprKind::Name { id, .. } if id == "gui_sys.on_windows" => {
+                    Some(self.context.os == Os::Windows)
+                }
+                _ => None,
+            },
+            ExprKind::UnaryOp {
+                op: UnaryOp::Not,
+                operand,
+            } => self.on_windows(operand).map(|taken| !taken),
+            _ => None,
+        }
     }
 
     /// Lowers a test, going to `then` if it is true and to `otherwise` if not, and ends the
@@ -5958,6 +5996,10 @@ impl<'a> Lowerer<'a> {
                         vec![(value, Some(RcKind::Str))]
                     }),
                 )
+            }
+            "gui_sys.on_windows" => {
+                let windows = self.context.os == Os::Windows;
+                Ok(self.finish(Operand::Imm(windows as i64), into))
             }
             _ if let Some(label) = module_routine(name) => {
                 let mut values = Vec::new();

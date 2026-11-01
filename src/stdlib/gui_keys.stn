@@ -225,7 +225,7 @@ fn special_name(sym: int) -> str:
     ret "unknown"
 
 // The UTF-8 text of the Unicode character `code`, or nothing for 0.
-fn utf8(code: int) -> str:
+pub fn utf8(code: int) -> str:
     if code <= 0:
         ret ""
     units = [code]

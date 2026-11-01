@@ -1325,6 +1325,32 @@ mod tests {
     }
 
     #[test]
+    fn win32_window_forms_match_gnu_as() {
+        check(&[
+            ("mov DWORD PTR [rsp + 96], 40", "c7 44 24 60 28 00 00 00"),
+            (
+                "mov DWORD PTR [rsp + 108], 2097153",
+                "c7 44 24 6c 01 00 20 00",
+            ),
+            ("mov DWORD PTR [rax + 4], r14d", "44 89 70 04"),
+            ("mov DWORD PTR [rax], r13d", "44 89 28"),
+            ("mov eax, DWORD PTR [rsp + 104]", "8b 44 24 68"),
+            ("sub eax, DWORD PTR [rsp + 96]", "2b 44 24 60"),
+            ("movzx eax, al", "0f b6 c0"),
+            ("add QWORD PTR [rsi + 32], 16", "48 83 46 20 10"),
+            ("mov eax, 2147483648", "b8 00 00 00 80"),
+            ("mov eax, 4294967294", "b8 fe ff ff ff"),
+            ("test r14, 19", "49 f7 c6 13 00 00 00"),
+            ("neg eax", "f7 d8"),
+            ("cmova r12, rax", "4c 0f 47 e0"),
+            ("cmp r13d, 129", "41 81 fd 81 00 00 00"),
+            ("dec QWORD PTR [rax - 8]", "48 ff 48 f8"),
+            ("movq QWORD PTR [rsp + 40], xmm4", "66 0f d6 64 24 28"),
+            ("movq xmm5, QWORD PTR [rsp + 48]", "f3 0f 7e 6c 24 30"),
+        ]);
+    }
+
+    #[test]
     fn packed_doubles_and_quadwords_match_gnu_as() {
         check(&[
             ("movupd xmm3, XMMWORD PTR [rax + rcx * 8]", "66 0f 10 1c c8"),

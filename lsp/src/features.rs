@@ -1813,7 +1813,12 @@ fn method_applies(method: &str, ty: &Type) -> bool {
     };
     // the methods of the prelude's traits are on every type that implements them
     match method {
-        "eq" => return !matches!(kind, "list" | "map" | "socket" | "listener"),
+        "eq" => {
+            return !matches!(
+                kind,
+                "list" | "map" | "socket" | "listener" | "native_window"
+            );
+        }
         "cmp" | "min" | "max" | "clamp" => {
             return matches!(kind, "int" | "float" | "str" | "bytes");
         }

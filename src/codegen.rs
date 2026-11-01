@@ -20,6 +20,7 @@ use std::str::FromStr;
 use crate::ast::Mod;
 use crate::checker::Analysis;
 use crate::project::SourceMap;
+pub use pe::Subsystem;
 use std::rc::Rc;
 
 /// A processor that `stone build` can compile for.
@@ -322,11 +323,22 @@ fn parse_level(text: &str) -> Option<Level> {
 /// `cf fa ed fe`, one built for Linux with `7f 45 4c 46` (`\x7fELF`), and one built for Windows
 /// with `4d 5a` (`MZ`).
 pub fn executable(assembly: &str, target: Target, name: &str) -> Result<Vec<u8>, String> {
+    executable_of(assembly, target, name, Subsystem::Console)
+}
+
+/// Assembles and links `assembly` as [`executable`] does, as a program of `subsystem` on
+/// Windows, which other systems have no notion of.
+pub fn executable_of(
+    assembly: &str,
+    target: Target,
+    name: &str,
+    subsystem: Subsystem,
+) -> Result<Vec<u8>, String> {
     let object = asm::assemble(assembly, target.arch)?;
     match target.os {
         Os::Linux => elf::link(&object, target.arch),
         Os::MacOs => macho::link(&object, name),
-        Os::Windows => pe::link(&object),
+        Os::Windows => pe::link(&object, subsystem),
     }
 }
 
@@ -339,7 +351,12 @@ pub fn executable(assembly: &str, target: Target, name: &str) -> Result<Vec<u8>,
 /// For example, linking to `build/out` for Linux writes `build/out.s` and the static executable
 /// `build/out`. The executable is written beside `output` first and then renamed over it, so a
 /// copy of the old program that is still running keeps working.
-pub fn link(assembly: &str, output: &Path, target: Target) -> std::io::Result<()> {
+pub fn link(
+    assembly: &str,
+    output: &Path,
+    target: Target,
+    subsystem: Subsystem,
+) -> std::io::Result<()> {
     let source = output.with_extension("s");
     if let Some(dir) = output.parent() {
         std::fs::create_dir_all(dir)?;
@@ -349,12 +366,13 @@ pub fn link(assembly: &str, output: &Path, target: Target) -> std::io::Result<()
     let name = output.file_name().ok_or_else(|| {
         std::io::Error::other(format!("'{}' is not a file name", output.display()))
     })?;
-    let executable = executable(assembly, target, &name.to_string_lossy()).map_err(|e| {
-        std::io::Error::other(format!(
-            "internal error: cannot assemble {}: {e}",
-            source.display()
-        ))
-    })?;
+    let executable =
+        executable_of(assembly, target, &name.to_string_lossy(), subsystem).map_err(|e| {
+            std::io::Error::other(format!(
+                "internal error: cannot assemble {}: {e}",
+                source.display()
+            ))
+        })?;
     let mut temporary = std::ffi::OsString::from(".");
     temporary.push(name);
     temporary.push(".tmp");
@@ -743,7 +761,7 @@ os.exit(0)
         assert!(assembly.contains(call), "{assembly}");
         let leaky = assembly.replace(call, &format!("{leak}{call}"));
         let output = std::env::temp_dir().join(format!("stone-leak-{}", std::process::id()));
-        link(&leaky, &output, target).unwrap();
+        link(&leaky, &output, target, Subsystem::Console).unwrap();
 
         let checked = Command::new(&output)
             .env("STONE_LEAK_CHECK", "1")

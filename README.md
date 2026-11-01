@@ -1,4 +1,5 @@
 <p align="center"><img src="docs/_static/logo.svg" alt="stone logo" width="128"></p>
+<p align="center"><a href="https://discord.gg/ta3tR7zsm2"><img src="https://img.shields.io/discord/1565937817920737313?logo=discord&logoColor=white" alt="Chat on Discord"></a></p>
 
 # stone
 

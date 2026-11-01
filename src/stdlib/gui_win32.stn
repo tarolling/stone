@@ -1,7 +1,10 @@
 // Win32 windows for the `gui` module on Windows, which only stone's own modules may use. The
-// window itself is native (`gui_sys.window_open`): its procedure records each message `gui`
-// reports as 16 bytes, the message, `wParam`, `lParam`, and for a key the character it types,
-// each four bytes, least significant first, which `decode` turns into events here.
+// window itself is native (`gui_sys.window_open`), on a thread of its own, so it goes on showing
+// what the program draws while it is moved or resized: its procedure records each message `gui`
+// reports as 16 bytes, the message, `wParam`, `lParam`, and for a key the character it types or
+// for a size or the mouse the window's DPI, each four bytes, least significant first, which
+// `decode` turns into events here. Sizes and points are the screen's pixels there, and logical
+// ones here, 96 DPI being 100%.
 
 use gui.canvas
 use gui.event
@@ -28,12 +31,19 @@ pub struct link:
     surrogate: int
     // how far the wheel has turned toward the next step, in Windows' 120ths of one
     wheel: int
+    // the dots per inch the window is drawn at, 96 at 100%
+    dpi: int
 
-// Opens a window titled `title` whose inside is `width` by `height` pixels.
-pub fn open(title: str, width: int, height: int) -> result[link, str]:
-    match gui_sys.window_open(title, width, height):
+// Opens a window titled `title` whose inside is `width` by `height` logical pixels, at the scale
+// `scale`, or its monitor's for 0.0.
+pub fn open(title: str, width: int, height: int, scale: float) -> result[link, str]:
+    dpi = int(scale * 96.0 + 0.5).unwrap_or(0)
+    match gui_sys.window_open(title, width, height, dpi):
         case ok(win):
-            ret ok(link(win=win, open=true, extent=(width, height), pending=[], shown=false, surrogate=0, wheel=0))
+            opened = link(win=win, open=true, extent=(width, height), pending=[], shown=false, surrogate=0, wheel=0, dpi=96)
+            // the first record says the window's size and DPI
+            opened.take(0)
+            ret ok(opened)
         case err(reason):
             ret err("cannot open a window: {reason}")
 
@@ -42,9 +52,13 @@ impl link:
     fn is_open(self) -> bool:
         ret self.open
 
-    // The window's width and height in pixels, as the last `resize` event gave them.
+    // The window's width and height in logical pixels, as the last `resize` event gave them.
     fn size(self) -> tuple[int, int]:
         ret self.extent
+
+    // How many of the screen's pixels a logical pixel is across, such as 1.5 at 150%.
+    fn scale(self) -> float:
+        ret float(self.dpi) / 96.0
 
     // The events that have happened since the last call, without waiting for any.
     fn events(self) -> list[event]:
@@ -114,8 +128,9 @@ impl link:
         message = get32(raw, 0)
         if message == 5:
             // WM_SIZE, unless the window was minimized
-            width = get16(raw, 8)
-            height = get16(raw, 10)
+            self.dpi = get32(raw, 12)
+            width = self.logical(get16(raw, 8))
+            height = self.logical(get16(raw, 10))
             if get32(raw, 4) != 1 and width > 0 and height > 0 and (width, height) != self.extent:
                 self.extent = (width, height)
                 self.pending.append(event.resize(width, height))
@@ -130,11 +145,25 @@ impl link:
         elif message == 258:
             self.typed(get32(raw, 4))
         elif message == 512:
-            self.pending.append(event.mouse_move(get16s(raw, 8), get16s(raw, 10)))
+            self.dpi = get32(raw, 12)
+            self.pending.append(event.mouse_move(self.point(get16s(raw, 8)), self.point(get16s(raw, 10))))
         elif message >= 513 and message <= 520:
-            self.button(message, get16s(raw, 8), get16s(raw, 10))
+            self.dpi = get32(raw, 12)
+            self.button(message, self.point(get16s(raw, 8)), self.point(get16s(raw, 10)))
         elif message == 522:
             self.scrolled(get16s(raw, 6))
+
+    // The logical pixels `pixels` of the screen's make, to the nearest, for a size.
+    fn logical(self, pixels: int) -> int:
+        ret (pixels * 96 + self.dpi / 2) / self.dpi
+
+    // The logical pixel the screen's pixel `at` is in, counted from the window's inside, which
+    // may be left of it or above it, so negative.
+    fn point(self, at: int) -> int:
+        scaled = at * 96
+        if scaled < 0:
+            ret (scaled - self.dpi + 1) / self.dpi
+        ret scaled / self.dpi
 
     // Adds the event of the button message `message` at `x`, `y`: `WM_LBUTTONDOWN` (513) and
     // `WM_LBUTTONUP`, then the right button's and the middle one's, three apart.

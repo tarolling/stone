@@ -5,6 +5,7 @@
 //! stop at a 0 byte or need UTF-8 text, as the interpreter's `Value::Bytes` arms do.
 
 use crate::codegen::AssemblyGenerator;
+use crate::stdlib::gui::MAX_SCALED;
 
 /// Emits the routines `used` lists, each following the System V calling convention:
 ///
@@ -23,6 +24,9 @@ use crate::codegen::AssemblyGenerator;
 ///   `stone.bytes_check` found are all bytes
 /// - `stone.gui_pack` returns new bytes of the `rdx` colors of the list `rdi` from `rsi`, laid
 ///   out as `rcx` says, as `stdlib::gui::pack` does
+/// - `stone.gui_pack_scaled` returns new bytes of the image `rsi` by `rdx` whose colors are the
+///   list `rdi`, scaled to `rcx` by `r8`, laid out as `r9` says, as `stdlib::gui::pack_scaled`
+///   does
 pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     let uses = |label: &str| used.contains(&label);
     if uses("stone.bytes_eq") {
@@ -162,6 +166,9 @@ pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if uses("stone.gui_pack") {
         pack(r#gen);
     }
+    if uses("stone.gui_pack_scaled") {
+        pack_scaled(r#gen);
+    }
 }
 
 /// Emits `stone.gui_pack`, which writes each color's bytes one at a time: blue, green, red, and
@@ -216,41 +223,139 @@ fn pack(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tjae\t.Lgui_pack_done");
     r#gen.emit("\tmov\trdx, QWORD PTR [rsi + rcx * 8]");
     r#gen.emit("\tinc\trcx");
-    r#gen.emit("\tcmp\tr14, 1");
-    r#gen.emit("\tje\t.Lgui_pack_xrgb");
-    r#gen.emit("\tjb\t.Lgui_pack_bgrx");
-    r#gen.emit("\tcmp\tr14, 3");
-    r#gen.emit("\tje\t.Lgui_pack_bgra");
+    store_color(r#gen, "r14", ".Lgui_pack", ".Lgui_pack_next");
+    r#gen.emit(".Lgui_pack_done:");
+    r#gen.emit("\tmov\trax, r9");
+    for reg in ["r14", "r13", "r12", "rbx"] {
+        r#gen.emit(&format!("\tpop\t{reg}"));
+    }
+    r#gen.emit("\tret");
+}
+
+/// Emits code that stores the color in `rdx` at `rdi` as the format in `format` (a register)
+/// lays it out, moves `rdi` past it, and jumps to `next`, changing `rax` and `rdx`. Its labels
+/// start with `prefix`.
+fn store_color(r#gen: &mut dyn AssemblyGenerator, format: &str, prefix: &str, next: &str) {
+    r#gen.emit(&format!("\tcmp\t{format}, 1"));
+    r#gen.emit(&format!("\tje\t{prefix}_xrgb"));
+    r#gen.emit(&format!("\tjb\t{prefix}_bgrx"));
+    r#gen.emit(&format!("\tcmp\t{format}, 3"));
+    r#gen.emit(&format!("\tje\t{prefix}_bgra"));
     for (offset, last) in [(2, false), (1, false), (0, true)] {
         pack_byte(r#gen, offset, last);
     }
     r#gen.emit("\tadd\trdi, 3");
-    r#gen.emit("\tjmp\t.Lgui_pack_next");
-    r#gen.emit(".Lgui_pack_bgrx:");
+    r#gen.emit(&format!("\tjmp\t{next}"));
+    r#gen.emit(&format!("{prefix}_bgrx:"));
     for (offset, last) in [(0, false), (1, false), (2, true)] {
         pack_byte(r#gen, offset, last);
     }
     r#gen.emit("\txor\teax, eax");
     r#gen.emit("\tmov\tbyte ptr [rdi + 3], al");
     r#gen.emit("\tadd\trdi, 4");
-    r#gen.emit("\tjmp\t.Lgui_pack_next");
-    r#gen.emit(".Lgui_pack_bgra:");
+    r#gen.emit(&format!("\tjmp\t{next}"));
+    r#gen.emit(&format!("{prefix}_bgra:"));
     for (offset, last) in [(0, false), (1, false), (2, false), (3, true)] {
         pack_byte(r#gen, offset, last);
     }
     r#gen.emit("\tadd\trdi, 4");
-    r#gen.emit("\tjmp\t.Lgui_pack_next");
-    r#gen.emit(".Lgui_pack_xrgb:");
+    r#gen.emit(&format!("\tjmp\t{next}"));
+    r#gen.emit(&format!("{prefix}_xrgb:"));
     for (offset, last) in [(3, false), (2, false), (1, true)] {
         pack_byte(r#gen, offset, last);
     }
     r#gen.emit("\txor\teax, eax");
     r#gen.emit("\tmov\tbyte ptr [rdi], al");
     r#gen.emit("\tadd\trdi, 4");
-    r#gen.emit("\tjmp\t.Lgui_pack_next");
-    r#gen.emit(".Lgui_pack_done:");
-    r#gen.emit("\tmov\trax, r9");
-    for reg in ["r14", "r13", "r12", "rbx"] {
+    r#gen.emit(&format!("\tjmp\t{next}"));
+}
+
+/// Emits `stone.gui_pack_scaled`, which writes each pixel of the scaled image in turn, as
+/// `stdlib::gui::pack_scaled` does: the row it takes is a division per row, and the pixel of
+/// that row a running sum per pixel.
+fn pack_scaled(r#gen: &mut dyn AssemblyGenerator) {
+    // rbx holds the colors, r12 the width, r13 the height, r14 the new width, r15 the new
+    // height, rbp the format, [rsp] the colors' count, and [rsp + 8] the new bytes; rdi points
+    // where the next pixel's bytes go, r8 counts rows, r9 is where the row taken starts, r10
+    // counts pixels, r11 is the pixel of the row taken, and rsi the running sum
+    r#gen.emit("stone.gui_pack_scaled:");
+    for reg in ["rbp", "rbx", "r12", "r13", "r14", "r15"] {
+        r#gen.emit(&format!("\tpush\t{reg}"));
+    }
+    r#gen.emit("\tsub\trsp, 24");
+    r#gen.emit("\tmov\trbx, rdi");
+    r#gen.emit("\tmov\tr12, rsi");
+    r#gen.emit("\tmov\tr13, rdx");
+    r#gen.emit("\tmov\tr14, rcx");
+    r#gen.emit("\tmov\tr15, r8");
+    r#gen.emit("\tmov\trbp, r9");
+    // no bytes unless every size is from 1 to MAX_SCALED, which as unsigned is one test each
+    for reg in ["r12", "r13", "r14", "r15"] {
+        r#gen.emit(&format!("\tlea\trax, [{reg} - 1]"));
+        r#gen.emit(&format!("\tcmp\trax, {}", MAX_SCALED - 1));
+        r#gen.emit("\tja\t.Lgui_pack_scaled_empty");
+    }
+    r#gen.emit("\tmov\trdi, r14");
+    r#gen.emit("\timul\trdi, r15");
+    r#gen.emit("\tmov\trax, rdi");
+    r#gen.emit("\tshl\trdi, 2");
+    r#gen.emit("\tcmp\trbp, 1");
+    r#gen.emit("\tjbe\t.Lgui_pack_scaled_sized");
+    r#gen.emit("\tcmp\trbp, 3");
+    r#gen.emit("\tje\t.Lgui_pack_scaled_sized");
+    r#gen.emit("\tsub\trdi, rax");
+    r#gen.emit(".Lgui_pack_scaled_sized:");
+    r#gen.emit("\tcall\tstone.str_new");
+    r#gen.emit("\tmov\tQWORD PTR [rsp + 8], rax");
+    r#gen.emit("\tmov\trdi, rax");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx]");
+    r#gen.emit("\tmov\tQWORD PTR [rsp], rax");
+    r#gen.emit("\tmov\trbx, QWORD PTR [rbx + 16]");
+    r#gen.emit("\txor\tr8d, r8d");
+    r#gen.emit(".Lgui_pack_scaled_row:");
+    r#gen.emit("\tcmp\tr8, r15");
+    r#gen.emit("\tjae\t.Lgui_pack_scaled_done");
+    r#gen.emit("\tmov\trax, r8");
+    r#gen.emit("\timul\trax, r13");
+    r#gen.emit("\txor\tedx, edx");
+    r#gen.emit("\tdiv\tr15");
+    r#gen.emit("\timul\trax, r12");
+    r#gen.emit("\tmov\tr9, rax");
+    r#gen.emit("\txor\tr10d, r10d");
+    r#gen.emit("\txor\tr11d, r11d");
+    r#gen.emit("\txor\tesi, esi");
+    r#gen.emit(".Lgui_pack_scaled_next:");
+    r#gen.emit("\tcmp\tr10, r14");
+    r#gen.emit("\tjae\t.Lgui_pack_scaled_rowed");
+    r#gen.emit("\tinc\tr10");
+    // a pixel past the colors is black
+    r#gen.emit("\tlea\trax, [r9 + r11]");
+    r#gen.emit("\txor\tedx, edx");
+    r#gen.emit("\tcmp\trax, QWORD PTR [rsp]");
+    r#gen.emit("\tjae\t.Lgui_pack_scaled_color");
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbx + rax * 8]");
+    r#gen.emit(".Lgui_pack_scaled_color:");
+    store_color(r#gen, "rbp", ".Lgui_pack_scaled", ".Lgui_pack_scaled_step");
+    // the pixel taken moves on by one each time the sum of widths passes the new width
+    r#gen.emit(".Lgui_pack_scaled_step:");
+    r#gen.emit("\tadd\trsi, r12");
+    r#gen.emit(".Lgui_pack_scaled_carry:");
+    r#gen.emit("\tcmp\trsi, r14");
+    r#gen.emit("\tjb\t.Lgui_pack_scaled_next");
+    r#gen.emit("\tsub\trsi, r14");
+    r#gen.emit("\tinc\tr11");
+    r#gen.emit("\tjmp\t.Lgui_pack_scaled_carry");
+    r#gen.emit(".Lgui_pack_scaled_rowed:");
+    r#gen.emit("\tinc\tr8");
+    r#gen.emit("\tjmp\t.Lgui_pack_scaled_row");
+    r#gen.emit(".Lgui_pack_scaled_empty:");
+    r#gen.emit("\txor\tedi, edi");
+    r#gen.emit("\tcall\tstone.str_new");
+    r#gen.emit("\tmov\tQWORD PTR [rsp + 8], rax");
+    r#gen.emit(".Lgui_pack_scaled_done:");
+    r#gen.emit("\tmov\trax, QWORD PTR [rsp + 8]");
+    r#gen.emit("\tadd\trsp, 24");
+    for reg in ["r15", "r14", "r13", "r12", "rbx", "rbp"] {
         r#gen.emit(&format!("\tpop\t{reg}"));
     }
     r#gen.emit("\tret");

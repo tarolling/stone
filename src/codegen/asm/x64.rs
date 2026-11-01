@@ -1347,6 +1347,17 @@ mod tests {
             ("dec QWORD PTR [rax - 8]", "48 ff 48 f8"),
             ("movq QWORD PTR [rsp + 40], xmm4", "66 0f d6 64 24 28"),
             ("movq xmm5, QWORD PTR [rsp + 48]", "f3 0f 7e 6c 24 30"),
+            ("cmovz r14, r13", "4d 0f 44 f5"),
+            ("cmovg r14, r12", "4d 0f 4f f4"),
+            ("imul rax, rax, 96", "48 6b c0 60"),
+            ("movzx r9d, WORD PTR [rsp + 108]", "44 0f b7 4c 24 6c"),
+            ("movzx eax, r14w", "41 0f b7 c6"),
+            ("shl r9d, 16", "41 c1 e1 10"),
+            ("or r9d, eax", "41 09 c1"),
+            ("div rcx", "48 f7 f1"),
+            ("shr rdx, 1", "48 d1 ea"),
+            ("mov r12d, DWORD PTR [rsp + 168]", "44 8b a4 24 a8 00 00 00"),
+            ("mov r8d, DWORD PTR [rbx]", "44 8b 03"),
         ]);
     }
 

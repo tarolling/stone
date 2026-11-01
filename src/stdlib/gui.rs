@@ -42,7 +42,7 @@ pub const SYS_MODULE: &str = "gui_sys";
 /// What the internal module is for.
 pub const SYS_MODULE_DOC: &str = "The native routines behind the builtin `gui` module.";
 
-pub static SYS_DOCS: [BuiltinDoc; 12] = [
+pub static SYS_DOCS: [BuiltinDoc; 13] = [
     BuiltinDoc {
         name: "gui_sys.pack",
         signature: "gui_sys.pack(pixels: list[int], start: int, count: int, format: int) -> \
@@ -75,6 +75,14 @@ pub static SYS_DOCS: [BuiltinDoc; 12] = [
         description: "Sends `data` on `s` with the descriptor of the memory it shares.",
     },
     BuiltinDoc {
+        name: "gui_sys.pack_scaled",
+        signature: "gui_sys.pack_scaled(pixels: list[int], width: int, height: int, out_width: \
+                    int, out_height: int, format: int) -> bytes",
+        description: "Returns the bytes of the image `width` by `height` whose colors are \
+                      `pixels`, scaled to `out_width` by `out_height`, each pixel taking the \
+                      color of the one it falls in, laid out in `format` as `pack` does.",
+    },
+    BuiltinDoc {
         name: "gui_sys.on_windows",
         signature: "gui_sys.on_windows() -> bool",
         description: "Returns whether the program runs on Windows, which compiled code knows \
@@ -82,17 +90,18 @@ pub static SYS_DOCS: [BuiltinDoc; 12] = [
     },
     BuiltinDoc {
         name: "gui_sys.window_open",
-        signature: "gui_sys.window_open(title: str, width: int, height: int) -> \
+        signature: "gui_sys.window_open(title: str, width: int, height: int, dpi: int) -> \
                     result[native_window, str]",
         description: "Opens a Win32 window titled `title` whose inside is `width` by `height` \
-                      pixels.",
+                      logical pixels, on a thread of its own, drawn at `dpi` dots per inch, or \
+                      at its monitor's (following it to another) if `dpi` is 0.",
     },
     BuiltinDoc {
         name: "gui_sys.window_events",
         signature: "gui_sys.window_events(w: native_window, timeout_ms: int) -> bytes",
         description: "Waits at most `timeout_ms` milliseconds (-1 for ever) for a message to \
-                      `w` if none has come, handles every message waiting, and returns those \
-                      to `w` since the last call, 16 bytes each.",
+                      `w` if none has come, and returns those to `w` since the last call, 16 \
+                      bytes each.",
     },
     BuiltinDoc {
         name: "gui_sys.window_frame",
@@ -105,7 +114,8 @@ pub static SYS_DOCS: [BuiltinDoc; 12] = [
         signature: "gui_sys.window_show(w: native_window, width: int, height: int, pixels: \
                     bytes)",
         description: "Shows the image `width` by `height` whose pixels `pack` laid out in \
-                      format 0 in `w`, which keeps it to paint again.",
+                      format 0 in `w`, each pixel a logical one, scaled to the window's DPI, \
+                      and keeps it to paint again.",
     },
     BuiltinDoc {
         name: "gui_sys.window_set_title",
@@ -130,18 +140,72 @@ pub static SYS_DOCS: [BuiltinDoc; 12] = [
 pub fn pack(pixels: &[i64], start: i64, count: i64, format: i64) -> Vec<u8> {
     let start = start.clamp(0, pixels.len() as i64) as usize;
     let count = count.clamp(0, (pixels.len() - start) as i64) as usize;
-    let width = if matches!(format, 0 | 1 | 3) { 4 } else { 3 };
-    let mut out = Vec::with_capacity(count * width);
+    let mut out = Vec::with_capacity(count * bytes_per_pixel(format));
     for &color in &pixels[start..start + count] {
-        let [b, g, r] = [color as u8, (color >> 8) as u8, (color >> 16) as u8];
-        match format {
-            0 => out.extend_from_slice(&[b, g, r, 0]),
-            1 => out.extend_from_slice(&[0, r, g, b]),
-            3 => out.extend_from_slice(&[b, g, r, (color >> 24) as u8]),
-            _ => out.extend_from_slice(&[r, g, b]),
+        put(&mut out, color, format);
+    }
+    out
+}
+
+/// The largest width or height [`pack_scaled`] takes, before or after scaling, which is far
+/// past any window's.
+pub const MAX_SCALED: i64 = 1 << 18;
+
+/// Returns the bytes of the image `width` by `height` whose colors are `pixels`, a row at a
+/// time, scaled to `out_width` by `out_height`, as [`pack`] lays each out in `format`. Each
+/// pixel of the new image takes the color of the one it falls in: pixel `x` of a row takes
+/// pixel `x * width / out_width` of its row, rounded down, and row `y` takes row
+/// `y * height / out_height`. A pixel past the end of `pixels` is black. Any size below 1 or
+/// above [`MAX_SCALED`] gives no bytes.
+///
+/// For example, scaling a row of two pixels to three gives the first pixel twice and the second
+/// once: `pack_scaled(&[1, 2], 2, 1, 3, 1, 2)` is `[0, 0, 1, 0, 0, 1, 0, 0, 2]`.
+pub fn pack_scaled(
+    pixels: &[i64],
+    width: i64,
+    height: i64,
+    out_width: i64,
+    out_height: i64,
+    format: i64,
+) -> Vec<u8> {
+    if [width, height, out_width, out_height]
+        .iter()
+        .any(|&size| !(1..=MAX_SCALED).contains(&size))
+    {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity((out_width * out_height) as usize * bytes_per_pixel(format));
+    for y in 0..out_height {
+        let row = y * height / out_height * width;
+        // the source pixel moves on by one each time `width` steps add up to `out_width`
+        let (mut source, mut step) = (0, 0);
+        for _ in 0..out_width {
+            let color = pixels.get((row + source) as usize).copied().unwrap_or(0);
+            put(&mut out, color, format);
+            step += width;
+            while step >= out_width {
+                step -= out_width;
+                source += 1;
+            }
         }
     }
     out
+}
+
+/// The bytes a pixel takes in `format`, as [`pack`] lays it out.
+fn bytes_per_pixel(format: i64) -> usize {
+    if matches!(format, 0 | 1 | 3) { 4 } else { 3 }
+}
+
+/// Appends the bytes of `color` in `format` to `out`, as [`pack`] lays them out.
+fn put(out: &mut Vec<u8>, color: i64, format: i64) {
+    let [b, g, r] = [color as u8, (color >> 8) as u8, (color >> 16) as u8];
+    match format {
+        0 => out.extend_from_slice(&[b, g, r, 0]),
+        1 => out.extend_from_slice(&[0, r, g, b]),
+        3 => out.extend_from_slice(&[b, g, r, (color >> 24) as u8]),
+        _ => out.extend_from_slice(&[r, g, b]),
+    }
 }
 
 #[cfg(test)]
@@ -160,6 +224,51 @@ mod tests {
         // with the alpha of bits 24 to 31, for a buffer with an alpha channel
         assert_eq!(pack(&pixels, 0, 1, 3), [0x30, 0x20, 0x10, 0]);
         assert_eq!(pack(&[0x80a0_b0c0], 0, 1, 3), [0xc0, 0xb0, 0xa0, 0x80]);
+    }
+
+    #[test]
+    fn images_scale_to_the_nearest_pixel() {
+        // doubled, each pixel becomes two by two
+        let doubled = pack_scaled(&[1, 2, 3, 4], 2, 2, 4, 4, 2);
+        let rows: Vec<Vec<u8>> = doubled
+            .chunks(12)
+            .map(|row| row.iter().skip(2).step_by(3).copied().collect())
+            .collect();
+        assert_eq!(
+            rows,
+            [[1, 1, 2, 2], [1, 1, 2, 2], [3, 3, 4, 4], [3, 3, 4, 4]]
+        );
+        // at 150%, pixels are one or two across, unevenly
+        let blues = |packed: Vec<u8>| -> Vec<u8> { packed.iter().step_by(4).copied().collect() };
+        assert_eq!(blues(pack_scaled(&[1, 2], 2, 1, 3, 1, 0)), [1, 1, 2]);
+        assert_eq!(
+            blues(pack_scaled(&[1, 2, 3, 4], 4, 1, 6, 1, 0)),
+            [1, 1, 2, 3, 3, 4]
+        );
+        // halved, every other pixel
+        assert_eq!(blues(pack_scaled(&[1, 2, 3, 4], 4, 1, 2, 1, 0)), [1, 3]);
+        // the same size is `pack` of all of it, in every format
+        let pixels = [0x102030, 0x80a0_b0c0, 0x0a0b0c, 0xffffff];
+        for format in 0..4 {
+            assert_eq!(
+                pack_scaled(&pixels, 2, 2, 2, 2, format),
+                pack(&pixels, 0, 4, format)
+            );
+        }
+    }
+
+    #[test]
+    fn scaling_tolerates_odd_sizes() {
+        // a pixel past the end is black
+        assert_eq!(
+            pack_scaled(&[0xffffff], 2, 1, 2, 1, 2),
+            [255, 255, 255, 0, 0, 0]
+        );
+        for (width, height, out_width, out_height) in
+            [(0, 1, 1, 1), (1, 1, -1, 1), (1, 1, 1, MAX_SCALED + 1)]
+        {
+            assert!(pack_scaled(&[1], width, height, out_width, out_height, 0).is_empty());
+        }
     }
 
     #[test]

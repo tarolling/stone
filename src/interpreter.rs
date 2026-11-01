@@ -3054,9 +3054,33 @@ impl<'out> Interpreter<'out> {
                 let packed = gui::pack(&ints(pixels), *start, *count, *format);
                 return Ok(Value::Bytes(packed.into()));
             }
+            (
+                "gui_sys.pack_scaled",
+                [
+                    Value::List(pixels),
+                    Value::Int(width),
+                    Value::Int(height),
+                    Value::Int(out_width),
+                    Value::Int(out_height),
+                    Value::Int(format),
+                ],
+            ) => {
+                let pixels = ints(pixels);
+                let packed =
+                    gui::pack_scaled(&pixels, *width, *height, *out_width, *out_height, *format);
+                return Ok(Value::Bytes(packed.into()));
+            }
             ("gui_sys.on_windows", []) => return Ok(Value::Bool(cfg!(windows))),
-            ("gui_sys.window_open", [Value::Str(title), Value::Int(width), Value::Int(height)]) => {
-                let opened = gui::open(title, *width, *height)
+            (
+                "gui_sys.window_open",
+                [
+                    Value::Str(title),
+                    Value::Int(width),
+                    Value::Int(height),
+                    Value::Int(dpi),
+                ],
+            ) => {
+                let opened = gui::open(title, *width, *height, *dpi)
                     .map(|window| Value::Window(Rc::new(RefCell::new(window))));
                 return Ok(result(opened));
             }

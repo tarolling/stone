@@ -7857,8 +7857,11 @@ impl Inference {
                 };
                 Ty::Enum(RESULT.to_string(), vec![value, Ty::Str])
             }
-            "gui_sys.pack" => {
-                let params = [Ty::List(Box::new(Ty::Int)), Ty::Int, Ty::Int, Ty::Int];
+            "gui_sys.pack" | "gui_sys.pack_scaled" => {
+                let mut params = vec![Ty::List(Box::new(Ty::Int)), Ty::Int, Ty::Int, Ty::Int];
+                if name == "gui_sys.pack_scaled" {
+                    params.extend([Ty::Int, Ty::Int]);
+                }
                 if args.len() == params.len() {
                     for ((arg, ty), param) in args.iter().zip(arg_types).zip(&params) {
                         self.expect(param, ty, arg.span);
@@ -7879,7 +7882,7 @@ impl Inference {
                 let (params, ret) = match name {
                     "gui_sys.on_windows" => (vec![], Ty::Bool),
                     "gui_sys.window_open" => (
-                        vec![Ty::Str, Ty::Int, Ty::Int],
+                        vec![Ty::Str, Ty::Int, Ty::Int, Ty::Int],
                         Ty::Enum(RESULT.to_string(), vec![window, Ty::Str]),
                     ),
                     "gui_sys.window_events" => (vec![window, Ty::Int], Ty::Bytes),

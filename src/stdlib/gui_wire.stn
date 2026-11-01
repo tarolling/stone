@@ -45,3 +45,38 @@ pub fn get16s(data: bytes, at: int) -> int:
 // The four bytes at `at` of `data`, least significant first.
 pub fn get32(data: bytes, at: int) -> int:
     ret get16(data, at) + get16(data, at + 2) * 65536
+
+// The screen's pixels `logical` pixels take at the scale `scale`, to the nearest.
+pub fn physical(logical: int, scale: float) -> int:
+    ret int(float(logical) * scale + 0.5).unwrap_or(0)
+
+// The logical pixels `physical` pixels of the screen make at the scale `scale`, to the nearest,
+// for a size.
+pub fn logical(physical: int, scale: float) -> int:
+    ret int(float(physical) / scale + 0.5).unwrap_or(0)
+
+// The logical pixel the screen's pixel `at` falls in at the scale `scale`, counted from the
+// window's inside, which may be left of it or above it, so negative.
+pub fn logical_point(at: int, scale: float) -> int:
+    exact = float(at) / scale
+    whole = int(exact).unwrap_or(0)
+    if float(whole) > exact:
+        whole -= 1
+    ret whole
+
+// How far a canvas `size` logical pixels across reaches into a window `logical` logical pixels
+// and `physical` of the screen's across: all of it for a canvas as big as the window.
+pub fn reach(size: int, logical: int, physical: int) -> int:
+    if logical <= 0:
+        ret size
+    ret size * physical / logical
+
+// The scale the X resources `resources` set with `Xft.dpi`, 96 being 100%, or 0.0 if they set
+// none from 0.5 to 8.
+pub fn resource_scale(resources: str) -> float:
+    for line in resources.splitlines():
+        if line.startswith("Xft.dpi:"):
+            scale = float(line[8:].strip()).unwrap_or(0.0) / 96.0
+            if scale >= 0.5 and scale <= 8.0:
+                ret scale
+    ret 0.0

@@ -1,17 +1,26 @@
 // X11 windows for the `gui` module, which only stone's own modules may use: the X11 protocol
 // spoken over a socket from `net`, with MIT-SHM for images when the server is on this machine,
 // and the Present extension, where the server has it, to put them on the screen at its vblank.
+//
+// X11 knows only the screen's pixels, so a window is scaled as the desktop asks through the
+// `Xft.dpi` resource, 96 being 100%: its sizes and points are logical pixels here, and its
+// canvases are scaled up to the screen's as they are shown.
 
 use fs
 use gui.canvas
 use gui.event
 use gui_keys
 use gui_sys
+use gui_wire
 use gui_wire.byte_list
 use gui_wire.get16
 use gui_wire.get16s
 use gui_wire.get32
+use gui_wire.logical
+use gui_wire.logical_point
 use gui_wire.pad
+use gui_wire.physical
+use gui_wire.reach
 use gui_wire.put16
 use gui_wire.put32
 use gui_wire.put_bytes
@@ -28,8 +37,10 @@ pub struct link:
     shm: shared
     // the pixmaps it presents images from, if it can
     present: presenter
-    // its width and height
+    // its width and height, in logical pixels, and in the screen's in a list, which is one value,
+    // since a list or a result holds at most 32 values in each element
     extent: tuple[int, int]
+    screen: list[int]
     open: bool
     // events decoded but not given out yet
     pending: list[event]
@@ -51,6 +62,8 @@ struct server:
     keys: gui_keys.keymap
     // the atoms of `WM_PROTOCOLS`, `WM_DELETE_WINDOW`, `_NET_WM_NAME`, and `UTF8_STRING`
     atoms: list[int]
+    // how many of the screen's pixels a logical pixel is across, 0.0 until it is known
+    scale: float
 
 // Memory a window shares with a local X server through the MIT-SHM extension, which `show` puts
 // images in, so they do not go through the socket.
@@ -80,11 +93,13 @@ struct presenter:
     serial: int
     waiting: bool
 
-// Opens a window `width` by `height` pixels titled `title`, on the display `DISPLAY` names.
-pub fn open(title: str, width: int, height: int) -> result[link, str]:
+// Opens a window `width` by `height` logical pixels titled `title`, on the display `DISPLAY`
+// names, at the scale `scale`, or the one the desktop sets for 0.0.
+pub fn open(title: str, width: int, height: int, scale: float) -> result[link, str]:
     found = connect_display()?
     conn = found[0]
     w = handshake(conn, found[1], width, height)?
+    w.setup.scale = scale
     w.create(title, found[2])?
     ret ok(w)
 
@@ -211,12 +226,12 @@ fn handshake(conn: socket, number: str, width: int, height: int) -> result[link,
     keys = gui_keys.empty(reply[34], 0)
     msb = reply[30] == 1
     most = get16(reply, 26) * 4
-    found = server(id=id, gc=gc, root=root, depth=depth, msb=msb, limit=most, keys=keys, atoms=[])
+    found = server(id=id, gc=gc, root=root, depth=depth, msb=msb, limit=most, keys=keys, atoms=[], scale=0.0)
     shm = shared(opcode=0, event=0, seg=gc + step, size=0, busy=false)
     pixmaps = [gc + 3 * step, gc + 4 * step]
     present = presenter(opcode=0, eid=gc + 2 * step, pixmaps=pixmaps, busy=[0, 0], size=(0, 0), serial=0, waiting=false)
     size = (width, height)
-    w = link(conn=conn, setup=found, shm=shm, present=present, extent=size, open=true, pending=[], ahead=b"")
+    w = link(conn=conn, setup=found, shm=shm, present=present, extent=size, screen=[width, height], open=true, pending=[], ahead=b"")
     ret ok(w)
 
 // The error for a setup reply too short for what it says it holds.
@@ -250,6 +265,10 @@ impl link:
     // The window's width and height in pixels, as the last `resize` event gave them.
     fn size(self) -> tuple[int, int]:
         ret self.extent
+
+    // How many of the screen's pixels a logical pixel is across.
+    fn scale(self) -> float:
+        ret self.setup.scale
 
     // The events that have happened since the last call, without waiting for any.
     fn events(self) -> list[event]:
@@ -287,38 +306,48 @@ impl link:
     // `c` stays as it was. With Present, `c` goes into a pixmap that the server puts on the
     // window at its next vblank.
     fn show(self, c: canvas):
-        if not self.open or c.width == 0 or c.width > 32767:
+        // the image in the screen's pixels, as far as the canvas reaches into the window, which
+        // is the canvas itself at 100%
+        width = reach(c.width, self.extent[0], self.screen[0])
+        height = reach(c.height, self.extent[1], self.screen[1])
+        if not self.open or width <= 0 or width > 32767 or height <= 0:
             ret
-        rows = c.height.min(32767)
+        rows = height.min(32767)
         format = 0
         if self.setup.msb:
             format = 1
+        image = b""
+        if width == c.width and height == c.height:
+            image = gui_sys.pack(c.pixels, 0, width * rows, format)
+        else:
+            image = gui_sys.pack_scaled(c.pixels, c.width, c.height, width, height, format)
+            image = image[:width * rows * 4]
         drawable = self.setup.id
         pixmap = -1
-        if self.present.opcode > 0 and rows > 0:
-            pixmap = self.idle_pixmap(c.width, rows)
+        if self.present.opcode > 0:
+            pixmap = self.idle_pixmap(width, rows)
             if not self.open:
                 ret
             drawable = self.present.pixmaps[pixmap]
         if self.shm.opcode > 0:
-            shared = self.share(c, rows, format, drawable)
+            shared = self.share(image, width, rows, drawable)
             if shared:
                 self.present_pixmap(pixmap)
                 ret
-        per = ((self.setup.limit - 24) / (c.width * 4)).max(1)
+        per = ((self.setup.limit - 24) / (width * 4)).max(1)
         y = 0
         while y < rows:
             n = per.min(rows - y)
             // PutImage of ZPixmap pixels, with no left padding
-            head = put16([72, 2], 6 + n * c.width)
+            head = put16([72, 2], 6 + n * width)
             head = put32(head, drawable)
             head = put32(head, self.setup.gc)
-            head = put16(head, c.width)
+            head = put16(head, width)
             head = put16(head, n)
             head = put16(head, 0)
             head = put16(head, y)
             head.extend([0, self.setup.depth, 0, 0])
-            pixels = gui_sys.pack(c.pixels, y * c.width, n * c.width, format)
+            pixels = image[y * width * 4:(y + n) * width * 4]
             match self.conn.send_bytes(bytes(head).unwrap() + pixels):
                 case ok(_):
                     y += n
@@ -365,22 +394,21 @@ impl link:
         self.present.busy[index] = self.present.serial
         self.present.waiting = true
 
-    // Shows the first `rows` rows of `c` through shared memory, its pixels laid out as `format`
-    // says, in `drawable`, and says whether it could. Once it cannot, it never tries again.
-    fn share(self, c: canvas, rows: int, format: int, drawable: int) -> bool:
+    // Shows `image`, packed pixels `width` by `rows`, through shared memory in `drawable`, and
+    // says whether it could. Once it cannot, it never tries again.
+    fn share(self, image: bytes, width: int, rows: int, drawable: int) -> bool:
         // the server may still be reading the last image
         while self.open and self.shm.busy:
             self.step()
         if not self.open:
             ret true
-        need = c.width * rows * 4
+        need = width * rows * 4
         if need > self.shm.size:
             took = self.attach(need)
             if not took:
                 self.shm.opcode = 0
                 ret not self.open
-        pixels = gui_sys.pack(c.pixels, 0, c.width * rows, format)
-        match gui_sys.shm_write(self.conn, 0, pixels):
+        match gui_sys.shm_write(self.conn, 0, image):
             case ok(_):
                 self.shm.busy = true
             case err(_):
@@ -388,9 +416,9 @@ impl link:
                 ret false
         // ShmPutImage of the whole image, at the drawable's top left, with a completion event
         body = put32(put32([], drawable), self.setup.gc)
-        body = put16(put16(body, c.width), rows)
+        body = put16(put16(body, width), rows)
         body = put16(put16(body, 0), 0)
-        body = put16(put16(body, c.width), rows)
+        body = put16(put16(body, width), rows)
         body = put16(put16(body, 0), 0)
         body.extend([self.setup.depth, 2, 1, 0])
         body = put32(put32(body, self.shm.seg), 0)
@@ -452,6 +480,11 @@ impl link:
             body = put16(put16([], name.len()), 0)
             asks.extend(request(16, 0, put_bytes(body, name.bytes())))
         asks.extend(request(101, 0, [self.setup.keys.first, 256 - self.setup.keys.first, 0, 0]))
+        if self.setup.scale <= 0.0:
+            // GetProperty of the root's RESOURCE_MANAGER (23), a STRING (31), up to 256 KiB,
+            // for the scale `Xft.dpi` sets
+            body = put32(put32(put32([], self.setup.root), 23), 31)
+            asks.extend(request(20, 0, put32(put32(body, 0), 65536)))
         if local:
             body = put16(put16([], 7), 0)
             asks.extend(request(98, 0, put_bytes(body, b"MIT-SHM")))
@@ -467,6 +500,13 @@ impl link:
         self.setup.keys.per = keys[1]
         for i in range(get32(keys, 4)):
             self.setup.keys.syms.append(get32(keys, 32 + 4 * i))
+        if self.setup.scale <= 0.0:
+            resources = self.reply()?
+            text = resources[32:32 + get32(resources, 16)].text().unwrap_or("")
+            self.setup.scale = gui_wire.resource_scale(text)
+            if self.setup.scale <= 0.0:
+                self.setup.scale = 1.0
+        self.screen = [physical(self.extent[0], self.setup.scale), physical(self.extent[1], self.setup.scale)]
         // both answers about extensions come before anything asked after them
         shm = b""
         if local:
@@ -479,7 +519,7 @@ impl link:
         // listens for: keys, buttons, motion, exposure, and changes of its size
         body = put32(put32([], self.setup.id), self.setup.root)
         body = put16(put16(body, 0), 0)
-        body = put16(put16(body, self.extent[0]), self.extent[1])
+        body = put16(put16(body, self.screen[0]), self.screen[1])
         body = put16(put16(body, 0), 1)
         body = put32(put32(body, 0), 2050)
         body = put32(put32(body, 0), 163919)
@@ -620,13 +660,15 @@ impl link:
         elif code == 4 or code == 5:
             self.button(raw)
         elif code == 6:
-            self.pending.append(event.mouse_move(get16s(raw, 24), get16s(raw, 26)))
+            x = logical_point(get16s(raw, 24), self.setup.scale)
+            self.pending.append(event.mouse_move(x, logical_point(get16s(raw, 26), self.setup.scale)))
         elif code == 12:
             if get16(raw, 16) == 0:
                 self.pending.append(event.redraw)
         elif code == 22:
-            width = get16(raw, 20)
-            height = get16(raw, 22)
+            self.screen = [get16(raw, 20), get16(raw, 22)]
+            width = logical(self.screen[0], self.setup.scale)
+            height = logical(self.screen[1], self.setup.scale)
             if (width, height) != self.extent:
                 self.extent = (width, height)
                 self.pending.append(event.resize(width, height))
@@ -654,8 +696,8 @@ impl link:
 
     // Adds the event of the button press or release `raw`.
     fn button(self, raw: bytes):
-        x = get16s(raw, 24)
-        y = get16s(raw, 26)
+        x = logical_point(get16s(raw, 24), self.setup.scale)
+        y = logical_point(get16s(raw, 26), self.setup.scale)
         button = raw[1]
         pressed = raw[0] % 128 == 4
         if button >= 1 and button <= 3:

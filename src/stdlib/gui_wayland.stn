@@ -2,6 +2,12 @@
 // protocol spoken over a Unix socket from `net`, with images in memory shared with the
 // compositor, and a frame of our own (a title bar, a close button, and edges to resize by) where
 // the compositor does not draw one.
+//
+// Sizes, points, and canvases are in the compositor's logical pixels, as its surfaces are, and
+// buffers in the screen's: the scale is `STONE_GUI_SCALE`'s, else the compositor's preferred
+// fractional scale (with `wp_fractional_scale_v1`, shown through `wp_viewporter`), else its
+// preferred whole scale (`wl_surface` version 6), else 1. Canvases and our frame are scaled up
+// pixel by pixel, to the nearest of the screen's pixels.
 
 use gui
 use gui.canvas
@@ -10,8 +16,10 @@ use gui_keys
 use gui_sys
 use gui_wire.get16
 use gui_wire.get32
+use gui_wire.physical
 use gui_wire.put16
 use gui_wire.put32
+use gui_wire.reach
 use net
 use net_sys
 use os
@@ -29,7 +37,8 @@ pub struct link:
     look: frame
     store: buffers
     mouse: pointer
-    keys: keyboard
+    // in a list, so the link holds no more values than a result may
+    keys: list[keyboard]
 
 // The protocol's objects: the id the next new one gets, each one's id by its role, and its role
 // by its id, which is empty for an id the compositor has freed for reuse. A compositor keeps an
@@ -54,11 +63,14 @@ struct frame:
 // The memory shared with the compositor, which holds two buffers of the content, two of our
 // frame, and the cursor's: whether each content and frame buffer is busy, from its commit until
 // the compositor releases it (none before the first configure), a row of black pixels as wide as
-// the content, and the width of our frame's edges the buffers were made for.
+// the content's buffers, the width of our frame's edges the buffers were made for, the scale
+// they were made for, and whether `STONE_GUI_SCALE` fixed it.
 struct buffers:
     busy: list[bool]
     black: list[int]
     border: int
+    scale: float
+    fixed: bool
 
 // The pointer: the serial of its last enter or button, the surface it is on (`content`,
 // `frame`, or nothing), where on it, the wheel's movement not given out as
@@ -94,19 +106,22 @@ fn new_link(conn: socket, keys: gui_keys.keymap) -> link:
     zero = (0, 0)
     o = objects(next=2, ids={"display": 1}, roles={1: "display"})
     f = frame(title="", want=zero, active=no, snug=no, clicked=-1.0)
-    s = buffers(busy=[], black=[], border=0)
+    s = buffers(busy=[], black=[], border=0, scale=1.0, fixed=no)
     m = pointer(serial=0, on="", at=zero, wheel=0, stepped=no)
     t = keyboard(map=keys, state=0, held=-1, due=0.0, rate=25, delay=600)
-    ret link(conn=conn, open=no, extent=zero, pending=[], objs=o, look=f, store=s, mouse=m, keys=t)
+    ret link(conn=conn, open=no, extent=zero, pending=[], objs=o, look=f, store=s, mouse=m, keys=[t])
 
 // Opens a window `width` by `height` pixels titled `title`, on the compositor `WAYLAND_DISPLAY`
-// names, and returns once it is on the screen.
-pub fn open(title: str, width: int, height: int) -> result[link, str]:
+// names, and returns once it is on the screen, at the scale `scale`, or the compositor's for 0.0.
+pub fn open(title: str, width: int, height: int, scale: float) -> result[link, str]:
     conn = connect()?
     w = new_link(conn, gui_keys.unused())
     w.open = true
     w.extent = (width, height)
     w.look.title = title
+    if scale > 0.0:
+        w.store.scale = scale
+        w.store.fixed = true
     w.setup()?
     ret ok(w)
 
@@ -131,6 +146,10 @@ impl link:
     fn size(self) -> tuple[int, int]:
         ret self.extent
 
+    // How many of the screen's pixels a logical pixel is across.
+    fn scale(self) -> float:
+        ret self.store.scale
+
     // The events that have happened since the last call, without waiting for any.
     fn events(self) -> list[event]:
         while self.open and net_sys.ready(self.conn, 0):
@@ -145,8 +164,8 @@ impl link:
     fn wait(self) -> list[event]:
         while self.open and self.pending.len() == 0:
             ms = -1
-            if self.keys.held >= 0 and self.keys.rate > 0:
-                left = (self.keys.due - time.clock()) * 1000.0
+            if self.keys[0].held >= 0 and self.keys[0].rate > 0:
+                left = (self.keys[0].due - time.clock()) * 1000.0
                 ms = int(left.max(0.0)).unwrap_or(0) + 1
             if net_sys.ready(self.conn, ms):
                 self.step()
@@ -171,8 +190,8 @@ impl link:
             left = until - time.clock()
             if left <= 0.0:
                 break
-            if self.keys.held >= 0 and self.keys.rate > 0:
-                left = left.min(self.keys.due - time.clock())
+            if self.keys[0].held >= 0 and self.keys[0].rate > 0:
+                left = left.min(self.keys[0].due - time.clock())
             ms = int(left.max(0.0) * 1000.0).unwrap_or(0) + 1
             if net_sys.ready(self.conn, ms):
                 self.step()
@@ -189,16 +208,25 @@ impl link:
         i = self.free(0)
         if not self.open:
             ret
-        width = self.extent[0]
-        height = self.extent[1]
+        // the buffer's size, and the canvas's in the screen's pixels, which at 100% are the same
+        size = self.pixels(self.extent)
+        width = size[0]
+        height = size[1]
+        across = reach(c.width, self.extent[0], width)
+        down = reach(c.height, self.extent[1], height)
         offset = i * width * height * 4
-        rows = c.height.min(height)
-        if c.width == width:
-            self.write(offset, gui_sys.pack(c.pixels, 0, width * rows, 0))
+        rows = down.min(height)
+        image = b""
+        if across == c.width and down == c.height:
+            image = gui_sys.pack(c.pixels, 0, c.width * rows, 0)
+        elif across > 0 and down > 0:
+            image = gui_sys.pack_scaled(c.pixels, c.width, c.height, across, down, 0)
+        if across == width:
+            self.write(offset, image[:width * rows * 4])
         else:
+            shown = across.min(width)
             for row in range(rows):
-                shown = c.width.min(width)
-                data = gui_sys.pack(c.pixels, row * c.width, shown, 0)
+                data = image[row * across * 4:(row * across + shown) * 4]
                 if shown < width:
                     data = data + gui_sys.pack(self.store.black, 0, width - shown, 0)
                 self.write(offset + row * width * 4, data)
@@ -247,7 +275,8 @@ impl link:
                 ret err("the Wayland compositor has no {needed}")
         decorated = globals.contains("zxdg_decoration_manager_v1")
         ours = not decorated and globals.contains("wl_subcompositor")
-        wanted = [("wl_compositor", "compositor", 4), ("wl_shm", "shm", 1)]
+        // version 6 of wl_compositor gives its surfaces' preferred scale
+        wanted = [("wl_compositor", "compositor", 6), ("wl_shm", "shm", 1)]
         wanted.append(("xdg_wm_base", "wm_base", 1))
         if globals.contains("wl_seat"):
             wanted.append(("wl_seat", "seat", 7))
@@ -257,6 +286,14 @@ impl link:
             wanted.append(("zxdg_decoration_manager_v1", "decorations", 1))
         if globals.contains("wp_cursor_shape_manager_v1"):
             wanted.append(("wp_cursor_shape_manager_v1", "shapes", 1))
+        viewed = globals.contains("wp_viewporter")
+        if viewed:
+            wanted.append(("wp_viewporter", "viewporter", 1))
+            if globals.contains("wp_fractional_scale_manager_v1"):
+                wanted.append(("wp_fractional_scale_manager_v1", "fractions", 1))
+        elif self.store.fixed:
+            // without a viewport, a buffer's scale is whole
+            self.store.scale = float(int(self.store.scale + 0.5).unwrap_or(1).max(1))
         asks = []
         for want in wanted:
             found = globals[want[0]]
@@ -275,6 +312,9 @@ impl link:
         asks.extend(message(xdg, 1, [top]))
         asks.extend(message(top, 2, text_words(self.look.title)))
         asks.extend(message(top, 3, text_words("stone")))
+        if self.id("fractions") != 0:
+            fraction = self.make("fraction")
+            asks.extend(message(self.id("fractions"), 1, [fraction, surface]))
         if decorated:
             // the compositor's own frame
             decoration = self.make("decoration")
@@ -288,8 +328,14 @@ impl link:
             sub = self.make("subsurface")
             asks.extend(message(self.id("subcompositor"), 1, [sub, content, surface]))
             asks.extend(message(sub, 5, []))
+            if viewed:
+                view = self.make("frame_view")
+                asks.extend(message(self.id("viewporter"), 1, [view, surface]))
         else:
             self.objs.ids["content"] = surface
+        if viewed:
+            view = self.make("view")
+            asks.extend(message(self.id("viewporter"), 1, [view, self.id("content")]))
         cursor = self.make("cursor")
         asks.extend(message(compositor, 0, [cursor]))
         // a commit with no buffer, which the compositor answers with the first configure
@@ -405,6 +451,12 @@ impl link:
                     self.look.snug = true
         elif role == "toplevel" and op == 1:
             self.pending.append(event.close)
+        elif role == "fraction" and op == 0:
+            // preferred_scale, in 120ths
+            self.rescale(float(get32(raw, 8)) / 120.0)
+        elif role == "surface" and op == 2 and self.id("fraction") == 0:
+            // preferred_buffer_scale
+            self.rescale(float(signed(get32(raw, 8))))
         elif role == "seat" and op == 0:
             self.capabilities(get32(raw, 8))
         elif role == "pointer":
@@ -444,6 +496,33 @@ impl link:
             self.commit_content(0)
             self.pending.append(event.redraw)
 
+    // Acts on the compositor's preferring the scale `scale`: unless `STONE_GUI_SCALE` fixed the
+    // scale, takes it, and once the window is on the screen, makes new buffers for it, draws our
+    // frame again, and gives a `redraw` event, since the window's size is the same.
+    fn rescale(self, scale: float):
+        if self.store.fixed or not (scale >= 0.5 and scale <= 8.0) or scale == self.store.scale:
+            ret
+        self.store.scale = scale
+        if not self.configured():
+            ret
+        self.rebuild()
+        if self.ours():
+            self.draw_frame()
+        self.pending.append(event.redraw)
+
+    // The size in the screen's pixels of `size` in logical ones, a buffer's for a surface.
+    fn pixels(self, size: tuple[int, int]) -> tuple[int, int]:
+        ret (physical(size[0], self.store.scale), physical(size[1], self.store.scale))
+
+    // The requests that show a buffer for `size` in logical pixels on the surface `surface`, at
+    // the window's scale, through its viewport `view` if the compositor has viewports.
+    fn scaled(self, surface: int, view: int, size: tuple[int, int]) -> list[int]:
+        if view != 0:
+            // set_destination
+            ret message(view, 2, [size[0], size[1]])
+        // set_buffer_scale
+        ret message(surface, 8, [int(self.store.scale).unwrap_or(1)])
+
     // Whether the first configure has come, and buffers made for it.
     fn configured(self) -> bool:
         ret self.store.busy.len() > 0
@@ -478,9 +557,10 @@ impl link:
                     opcode = 1
                 self.send(message(old, opcode, []))
                 self.objs.roles.pop(old)
-        whole = self.whole()
-        width = self.extent[0]
-        height = self.extent[1]
+        whole = self.pixels(self.whole())
+        extent = self.pixels(self.extent)
+        width = extent[0]
+        height = extent[1]
         content = width * height * 4
         frame = 0
         if self.ours():
@@ -542,8 +622,10 @@ impl link:
         asks = []
         if self.objs.ids.contains("paced") and not self.awaiting():
             asks = message(surface, 3, [self.make("callback")])
+        size = self.pixels(self.extent)
+        asks.extend(self.scaled(surface, self.id("view"), self.extent))
         asks.extend(message(surface, 1, [self.id("content{i}"), 0, 0]))
-        asks.extend(message(surface, 9, [0, 0, self.extent[0], self.extent[1]]))
+        asks.extend(message(surface, 9, [0, 0, size[0], size[1]]))
         asks.extend(message(surface, 6, []))
         self.send(asks)
         self.store.busy[i] = true
@@ -569,15 +651,26 @@ impl link:
         strip.rect(close, 0, bar, bar, color)
         strip.line(close + 8, 8, close + 15, 15, light)
         strip.line(close + 15, 8, close + 8, 15, light)
-        content = self.extent[0] * self.extent[1] * 4
-        start = 2 * content + (i - 2) * whole[0] * whole[1] * 4 + b * whole[0] * 4
-        self.write(start, gui_sys.pack(strip.pixels, 0, whole[0] * bar, 3))
+        // the title bar's rows in the screen's pixels, in a buffer of the whole surface
+        size = self.pixels(whole)
+        top = physical(b, self.store.scale)
+        rows = physical(b + bar, self.store.scale) - top
+        data = b""
+        if size[0] == whole[0] and rows == bar:
+            data = gui_sys.pack(strip.pixels, 0, whole[0] * bar, 3)
+        else:
+            data = gui_sys.pack_scaled(strip.pixels, whole[0], bar, size[0], rows, 3)
+        extent = self.pixels(self.extent)
+        content = extent[0] * extent[1] * 4
+        start = 2 * content + (i - 2) * size[0] * size[1] * 4 + top * size[0] * 4
+        self.write(start, data)
         surface = self.id("surface")
         geometry = [b, b, whole[0] - 2 * b, whole[1] - 2 * b]
         asks = message(self.id("xdg"), 3, geometry)
         asks.extend(message(self.id("subsurface"), 1, [b, b + bar]))
+        asks.extend(self.scaled(surface, self.id("frame_view"), whole))
         asks.extend(message(surface, 1, [self.id("frame{i - 2}"), 0, 0]))
-        asks.extend(message(surface, 9, [0, 0, whole[0], whole[1]]))
+        asks.extend(message(surface, 9, [0, 0, size[0], size[1]]))
         asks.extend(message(surface, 6, []))
         self.send(asks)
         self.store.busy[i] = true
@@ -725,45 +818,45 @@ impl link:
                 case ok(data):
                     if data.len() > 0:
                         text = data[:data.len() - 1].text().unwrap_or("")
-                        self.keys.map = gui_keys.parse(text)
+                        self.keys[0].map = gui_keys.parse(text)
                 case err(_):
                     ret
         elif op == 2:
-            self.keys.held = -1
+            self.keys[0].held = -1
         elif op == 3:
             // key(serial, time, key, state), the key's evdev code 8 less than its XKB keycode
             code = get32(raw, 16) + 8
-            name = self.keys.map.name(code)
+            name = self.keys[0].map.name(code)
             if get32(raw, 20) == 1:
                 self.pending.append(event.key_down(name))
-                typed = self.keys.map.text(code, self.keys.state)
-                self.keys.held = -1
+                typed = self.keys[0].map.text(code, self.keys[0].state)
+                self.keys[0].held = -1
                 if typed != "":
                     self.pending.append(event.text(typed))
-                    self.keys.held = code
-                    self.keys.due = time.clock() + float(self.keys.delay) / 1000.0
+                    self.keys[0].held = code
+                    self.keys[0].due = time.clock() + float(self.keys[0].delay) / 1000.0
             else:
                 self.pending.append(event.key_up(name))
-                if self.keys.held == code:
-                    self.keys.held = -1
+                if self.keys[0].held == code:
+                    self.keys[0].held = -1
         elif op == 4:
             // modifiers(serial, depressed, latched, locked, group)
-            self.keys.state = mask([get32(raw, 12), get32(raw, 16), get32(raw, 20)])
+            self.keys[0].state = mask([get32(raw, 12), get32(raw, 16), get32(raw, 20)])
         elif op == 5:
             // repeat_info(rate, delay)
-            self.keys.rate = signed(get32(raw, 8))
-            self.keys.delay = signed(get32(raw, 12))
+            self.keys[0].rate = signed(get32(raw, 8))
+            self.keys[0].delay = signed(get32(raw, 12))
 
     // Gives the text of the key held down again if it is due to repeat.
     fn repeat(self):
-        if self.keys.held < 0 or self.keys.rate <= 0:
+        if self.keys[0].held < 0 or self.keys[0].rate <= 0:
             ret
         now = time.clock()
-        if now >= self.keys.due:
-            typed = self.keys.map.text(self.keys.held, self.keys.state)
+        if now >= self.keys[0].due:
+            typed = self.keys[0].map.text(self.keys[0].held, self.keys[0].state)
             if typed != "":
                 self.pending.append(event.text(typed))
-            self.keys.due = (self.keys.due + 1.0 / float(self.keys.rate)).max(now)
+            self.keys[0].due = (self.keys[0].due + 1.0 / float(self.keys[0].rate)).max(now)
 
 // The modifiers any of `masks` holds, as Shift (1), Caps Lock (2), and Control (4).
 fn mask(masks: list[int]) -> int:

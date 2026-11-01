@@ -10,7 +10,7 @@ const UNSUPPORTED: &str = "Win32 windows are only on Windows";
 pub enum NativeWindow {}
 
 /// Fails, since there are no Win32 windows here.
-pub fn open(_: &str, _: i64, _: i64) -> Result<NativeWindow, String> {
+pub fn open(_: &str, _: i64, _: i64, _: i64) -> Result<NativeWindow, String> {
     Err(UNSUPPORTED.to_string())
 }
 

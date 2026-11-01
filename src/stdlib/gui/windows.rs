@@ -1,13 +1,20 @@
 //! Win32 windows for the `gui` module under `stone run` on Windows, as compiled code makes them
-//! in `x64::gui_windows`: the window procedure records the messages `gui_win32.stn` reads, 16
-//! bytes each (the message, `wParam`, `lParam`, and for a key the character it types, as
-//! little-endian 32-bit words), and paints the last image shown, which it keeps.
+//! in `x64::gui_windows`.
+//!
+//! Each window lives on a thread of its own, which creates it and handles its messages, so the
+//! loop Windows runs while the window is moved or resized holds up only that thread, and the
+//! program goes on drawing. The window procedure records the messages `gui_win32.stn` reads, 16
+//! bytes each (the message, `wParam`, `lParam`, and a fourth word: for a key the character it
+//! types, and for a size or the mouse the window's DPI, as little-endian 32-bit words), and paints
+//! the last image shown, which it keeps, scaled from the canvas's logical pixels to the screen's.
 
 use crate::stdlib::fs::io_message;
-use std::cell::RefCell;
 use std::ffi::c_void;
 use std::ptr::{null, null_mut};
-use std::sync::Once;
+use std::sync::mpsc::channel;
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, Once};
+use std::thread::JoinHandle;
+use std::time::Duration;
 
 type Handle = *mut c_void;
 type Procedure = unsafe extern "system" fn(Handle, u32, usize, isize) -> isize;
@@ -41,6 +48,7 @@ struct Message {
 }
 
 #[repr(C)]
+#[derive(Default)]
 struct Rect {
     left: i32,
     top: i32,
@@ -93,19 +101,31 @@ unsafe extern "system" {
         param: *mut c_void,
     ) -> Handle;
     fn DefWindowProcW(window: Handle, message: u32, wparam: usize, lparam: isize) -> isize;
-    fn PeekMessageW(message: *mut Message, window: Handle, min: u32, max: u32, remove: u32) -> i32;
+    fn GetMessageW(message: *mut Message, window: Handle, min: u32, max: u32) -> i32;
     fn TranslateMessage(message: *const Message) -> i32;
     fn DispatchMessageW(message: *const Message) -> isize;
-    fn MsgWaitForMultipleObjects(
-        count: u32,
-        handles: *const Handle,
-        all: i32,
-        milliseconds: u32,
-        wake: u32,
-    ) -> u32;
+    fn PostMessageW(window: Handle, message: u32, wparam: usize, lparam: isize) -> i32;
+    fn PostQuitMessage(code: i32);
     fn GetWindowLongPtrW(window: Handle, index: i32) -> isize;
     fn SetWindowLongPtrW(window: Handle, index: i32, value: isize) -> isize;
-    fn AdjustWindowRectEx(rect: *mut Rect, style: u32, menu: i32, ex_style: u32) -> i32;
+    fn AdjustWindowRectExForDpi(
+        rect: *mut Rect,
+        style: u32,
+        menu: i32,
+        ex_style: u32,
+        dpi: u32,
+    ) -> i32;
+    fn GetDpiForWindow(window: Handle) -> u32;
+    fn SetWindowPos(
+        window: Handle,
+        after: Handle,
+        x: i32,
+        y: i32,
+        width: i32,
+        height: i32,
+        flags: u32,
+    ) -> i32;
+    fn GetClientRect(window: Handle, rect: *mut Rect) -> i32;
     fn ShowWindow(window: Handle, show: i32) -> i32;
     fn SetWindowTextW(window: Handle, text: *const u16) -> i32;
     fn DestroyWindow(window: Handle) -> i32;
@@ -122,20 +142,23 @@ unsafe extern "system" {
 
 #[link(name = "gdi32")]
 unsafe extern "system" {
-    fn SetDIBitsToDevice(
+    fn StretchDIBits(
         dc: Handle,
         x: i32,
         y: i32,
-        width: u32,
-        height: u32,
+        width: i32,
+        height: i32,
         source_x: i32,
         source_y: i32,
-        start: u32,
-        lines: u32,
+        source_width: i32,
+        source_height: i32,
         bits: *const c_void,
         info: *const BitmapInfo,
         usage: u32,
+        operation: u32,
     ) -> i32;
+    fn SetStretchBltMode(dc: Handle, mode: i32) -> i32;
+    fn PatBlt(dc: Handle, x: i32, y: i32, width: i32, height: i32, operation: u32) -> i32;
     fn GetStockObject(object: i32) -> Handle;
 }
 
@@ -153,6 +176,7 @@ const WM_NCCREATE: u32 = 0x81;
 const WM_SIZE: u32 = 0x05;
 const WM_PAINT: u32 = 0x0f;
 const WM_CLOSE: u32 = 0x10;
+const WM_ERASEBKGND: u32 = 0x14;
 const WM_KEYDOWN: u32 = 0x100;
 const WM_KEYUP: u32 = 0x101;
 const WM_CHAR: u32 = 0x102;
@@ -166,6 +190,11 @@ const WM_RBUTTONUP: u32 = 0x205;
 const WM_MBUTTONDOWN: u32 = 0x207;
 const WM_MBUTTONUP: u32 = 0x208;
 const WM_MOUSEWHEEL: u32 = 0x20a;
+const WM_DPICHANGED: u32 = 0x2e0;
+
+/// The message the program's thread posts to have a window's own thread close it, the first of
+/// `WM_APP`'s.
+pub const WM_CLOSE_WINDOW: u32 = 0x8000;
 
 /// The buttons of `wParam`'s mouse state (`MK_LBUTTON`, `MK_RBUTTON`, `MK_MBUTTON`), which say
 /// whether one is still held when another comes up.
@@ -174,19 +203,24 @@ const BUTTONS_HELD: usize = 0x13;
 /// `WS_OVERLAPPEDWINDOW`: a title bar, a frame to resize by, and the buttons to minimize,
 /// maximize, and close.
 const OVERLAPPED_WINDOW: u32 = 0x00cf_0000;
-const CS_OWNDC: u32 = 0x20;
 const CW_USEDEFAULT: i32 = i32::MIN;
 const GWLP_USERDATA: i32 = -21;
 const SW_SHOW: i32 = 5;
-const PM_REMOVE: u32 = 1;
-const QS_ALLINPUT: u32 = 0x04ff;
-const INFINITE: u32 = u32::MAX;
+const SWP_NOMOVE: u32 = 0x2;
+const SWP_NOZORDER: u32 = 0x4;
+const SWP_NOACTIVATE: u32 = 0x10;
 const IDC_ARROW: usize = 32512;
 const BLACK_BRUSH: i32 = 4;
 const MAPVK_VK_TO_CHAR: u32 = 2;
+const COLORONCOLOR: i32 = 3;
+const SRCCOPY: u32 = 0x00cc_0020;
+const BLACKNESS: u32 = 0x0000_0042;
 
-/// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`, so a pixel of a canvas is a pixel of the
-/// screen on every monitor.
+/// The DPI of a screen at 100%, where a logical pixel is a physical one.
+const BASE_DPI: i64 = 96;
+
+/// `DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2`, so the window learns each monitor's DPI and
+/// `gui` scales its canvases itself.
 const PER_MONITOR_AWARE_V2: isize = -4;
 
 /// The name every window's class is registered by, `stone`.
@@ -199,13 +233,21 @@ const CLASS: [u16; 6] = [
     0,
 ];
 
-/// What a window's procedure reaches through `GWLP_USERDATA`: the messages it recorded and the
-/// image it paints. It lives in a box of its own, so it stays where the window points while
-/// messages are dispatched, and nothing borrows it across a call that may dispatch one.
+/// What a window's thread and the program's share: the window's state, and a signal that a
+/// message was recorded. The window procedure reaches it through `GWLP_USERDATA`.
+struct Shared {
+    state: Mutex<State>,
+    recorded: Condvar,
+    /// The DPI `STONE_GUI_SCALE` fixes, or 0 for the monitor's.
+    fixed_dpi: u32,
+}
+
 #[derive(Default)]
 struct State {
-    records: RefCell<Vec<u8>>,
-    image: RefCell<Image>,
+    records: Vec<u8>,
+    image: Image,
+    /// The DPI the window is drawn at.
+    dpi: u32,
 }
 
 #[derive(Default)]
@@ -217,9 +259,10 @@ struct Image {
 
 /// A window on the screen, which closes when dropped.
 pub struct NativeWindow {
-    /// The window, or null once closed.
-    window: Handle,
-    state: Box<State>,
+    /// The window, or 0 once closed (a number, since a window may be used from any thread).
+    window: usize,
+    shared: Arc<Shared>,
+    thread: Option<JoinHandle<()>>,
 }
 
 impl std::fmt::Debug for NativeWindow {
@@ -239,17 +282,25 @@ fn last_reason() -> String {
     full.strip_suffix(": ''").unwrap_or(&full).to_string()
 }
 
-/// Opens a window titled `title` whose inside is `width` by `height` pixels.
+/// Returns the physical pixels `logical` pixels take at `dpi`, rounded to the nearest.
+///
+/// For example, `physical(300, 144)` is `450`.
+fn physical(logical: i64, dpi: u32) -> i32 {
+    ((logical * dpi as i64 + BASE_DPI / 2) / BASE_DPI) as i32
+}
+
+/// Opens a window titled `title` whose inside is `width` by `height` logical pixels, drawn at
+/// `dpi` dots per inch, or at its monitor's if `dpi` is 0.
 ///
 /// The first window makes the process aware of each monitor's DPI and registers the class all
 /// windows share.
-pub fn open(title: &str, width: i64, height: i64) -> Result<NativeWindow, String> {
+pub fn open(title: &str, width: i64, height: i64, dpi: i64) -> Result<NativeWindow, String> {
     static REGISTER: Once = Once::new();
     REGISTER.call_once(|| unsafe {
         SetProcessDpiAwarenessContext(PER_MONITOR_AWARE_V2 as Handle);
         let class = WindowClass {
             size: size_of::<WindowClass>() as u32,
-            style: CS_OWNDC,
+            style: 0,
             procedure,
             class_extra: 0,
             window_extra: 0,
@@ -263,63 +314,135 @@ pub fn open(title: &str, width: i64, height: i64) -> Result<NativeWindow, String
         };
         RegisterClassExW(&class);
     });
-    let mut rect = Rect {
-        left: 0,
-        top: 0,
-        right: width as i32,
-        bottom: height as i32,
-    };
-    let state = Box::<State>::default();
+    let shared = Arc::new(Shared {
+        state: Mutex::default(),
+        recorded: Condvar::new(),
+        fixed_dpi: dpi.clamp(0, u32::MAX as i64) as u32,
+    });
     let title = wide(title);
-    let window = unsafe {
-        AdjustWindowRectEx(&mut rect, OVERLAPPED_WINDOW, 0, 0);
-        CreateWindowExW(
+    let (opened, result) = channel();
+    let own = Arc::clone(&shared);
+    let thread = std::thread::spawn(move || {
+        let created = unsafe { create(&own, &title, width, height) };
+        let window = match created {
+            Ok(window) => window,
+            Err(reason) => {
+                let _ = opened.send(Err(reason));
+                return;
+            }
+        };
+        let _ = opened.send(Ok(window as usize));
+        let mut message = std::mem::MaybeUninit::<Message>::uninit();
+        while unsafe { GetMessageW(message.as_mut_ptr(), null_mut(), 0, 0) } > 0 {
+            unsafe {
+                TranslateMessage(message.as_ptr());
+                DispatchMessageW(message.as_ptr());
+            }
+        }
+        // `own` lives until here, as long as the window procedure may reach it
+        drop(own);
+    });
+    match result.recv() {
+        Ok(Ok(window)) => Ok(NativeWindow {
+            window,
+            shared,
+            thread: Some(thread),
+        }),
+        Ok(Err(reason)) => {
+            let _ = thread.join();
+            Err(reason)
+        }
+        Err(_) => Err("the window's thread failed".to_string()),
+    }
+}
+
+/// Creates and shows the window of `shared` on the calling thread, which handles its messages
+/// from then on, its inside `width` by `height` logical pixels, and records its size and DPI as
+/// a first `WM_SIZE`.
+unsafe fn create(
+    shared: &Shared,
+    title: &[u16],
+    width: i64,
+    height: i64,
+) -> Result<Handle, String> {
+    unsafe {
+        let window = CreateWindowExW(
             0,
             CLASS.as_ptr(),
             title.as_ptr(),
             OVERLAPPED_WINDOW,
             CW_USEDEFAULT,
             CW_USEDEFAULT,
-            rect.right - rect.left,
-            rect.bottom - rect.top,
+            CW_USEDEFAULT,
+            CW_USEDEFAULT,
             null_mut(),
             null_mut(),
             GetModuleHandleW(null()),
-            &*state as *const State as *mut c_void,
-        )
-    };
-    if window.is_null() {
-        return Err(last_reason());
+            shared as *const Shared as *mut c_void,
+        );
+        if window.is_null() {
+            return Err(last_reason());
+        }
+        // the frame is drawn at the monitor's DPI, and the inside at the window's
+        let monitor = GetDpiForWindow(window);
+        let dpi = match shared.fixed_dpi {
+            0 => monitor,
+            fixed => fixed,
+        };
+        lock(shared).dpi = dpi;
+        let mut rect = Rect {
+            right: physical(width, dpi),
+            bottom: physical(height, dpi),
+            ..Rect::default()
+        };
+        AdjustWindowRectExForDpi(&mut rect, OVERLAPPED_WINDOW, 0, 0, monitor);
+        SetWindowPos(
+            window,
+            null_mut(),
+            0,
+            0,
+            rect.right - rect.left,
+            rect.bottom - rect.top,
+            SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE,
+        );
+        ShowWindow(window, SW_SHOW);
+        let mut client = Rect::default();
+        GetClientRect(window, &mut client);
+        let size = (client.bottom as u32) << 16 | client.right as u32 & 0xffff;
+        record(shared, WM_SIZE, 0, size as isize, dpi);
+        Ok(window)
     }
-    unsafe { ShowWindow(window, SW_SHOW) };
-    Ok(NativeWindow { window, state })
+}
+
+/// Locks the state of `shared`, which a panic while holding it leaves usable.
+fn lock(shared: &Shared) -> MutexGuard<'_, State> {
+    shared
+        .state
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
 impl NativeWindow {
     /// Waits at most `timeout` milliseconds (forever if negative) for a message if none has
-    /// been recorded, handles every message waiting, and returns the records since the last
-    /// call.
+    /// been recorded, and returns the records since the last call.
     pub fn events(&mut self, timeout: i64) -> Vec<u8> {
-        if self.window.is_null() {
-            return std::mem::take(&mut self.state.records.borrow_mut());
-        }
-        let waiting = !self.state.records.borrow().is_empty();
-        if !waiting && timeout != 0 {
-            let milliseconds = if timeout < 0 {
-                INFINITE
+        let mut state = lock(&self.shared);
+        if self.window != 0 && state.records.is_empty() && timeout != 0 {
+            let empty = |state: &mut State| state.records.is_empty();
+            let recorded = &self.shared.recorded;
+            state = if timeout < 0 {
+                recorded
+                    .wait_while(state, empty)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
             } else {
-                timeout.min(INFINITE as i64 - 1) as u32
+                let wait = Duration::from_millis(timeout as u64);
+                recorded
+                    .wait_timeout_while(state, wait, empty)
+                    .unwrap_or_else(|poisoned| poisoned.into_inner())
+                    .0
             };
-            unsafe { MsgWaitForMultipleObjects(0, null(), 0, milliseconds, QS_ALLINPUT) };
         }
-        let mut message = std::mem::MaybeUninit::<Message>::uninit();
-        while unsafe { PeekMessageW(message.as_mut_ptr(), null_mut(), 0, 0, PM_REMOVE) } != 0 {
-            unsafe {
-                TranslateMessage(message.as_ptr());
-                DispatchMessageW(message.as_ptr());
-            }
-        }
-        std::mem::take(&mut self.state.records.borrow_mut())
+        std::mem::take(&mut state.records)
     }
 
     /// Waits for the desktop to put its windows on the screen next, returning whether it could.
@@ -330,44 +453,46 @@ impl NativeWindow {
     /// Keeps the image `width` by `height` of 32-bit pixels, blue first, and paints it. An image
     /// with fewer bytes than its size needs is not shown.
     pub fn show(&mut self, width: i64, height: i64, pixels: &[u8]) {
-        if self.window.is_null()
+        if self.window == 0
             || width <= 0
             || height <= 0
+            || width > i32::MAX as i64
+            || height > i32::MAX as i64
             || (pixels.len() as i64) < width.saturating_mul(height).saturating_mul(4)
         {
             return;
         }
-        {
-            let mut image = self.state.image.borrow_mut();
-            image.width = width as i32;
-            image.height = height as i32;
-            image.pixels.clear();
-            image
-                .pixels
-                .extend_from_slice(&pixels[..(width * height * 4) as usize]);
-        }
+        let mut state = lock(&self.shared);
+        state.image.width = width as i32;
+        state.image.height = height as i32;
+        state.image.pixels.clear();
+        state
+            .image
+            .pixels
+            .extend_from_slice(&pixels[..(width * height * 4) as usize]);
+        let window = self.window as Handle;
         unsafe {
-            let dc = GetDC(self.window);
-            paint(dc, &self.state.image.borrow());
-            ReleaseDC(self.window, dc);
+            let dc = GetDC(window);
+            paint(window, dc, &state);
+            ReleaseDC(window, dc);
         }
     }
 
     /// Sets the window's title.
     pub fn set_title(&mut self, title: &str) {
-        if !self.window.is_null() {
-            unsafe { SetWindowTextW(self.window, wide(title).as_ptr()) };
+        if self.window != 0 {
+            unsafe { SetWindowTextW(self.window as Handle, wide(title).as_ptr()) };
         }
     }
 
-    /// Closes the window, if it is open.
+    /// Closes the window, if it is open, and waits for its thread to end.
     pub fn close(&mut self) {
-        if !self.window.is_null() {
-            unsafe {
-                SetWindowLongPtrW(self.window, GWLP_USERDATA, 0);
-                DestroyWindow(self.window);
+        if self.window != 0 {
+            unsafe { PostMessageW(self.window as Handle, WM_CLOSE_WINDOW, 0, 0) };
+            if let Some(thread) = self.thread.take() {
+                let _ = thread.join();
             }
-            self.window = null_mut();
+            self.window = 0;
         }
     }
 }
@@ -378,54 +503,81 @@ impl Drop for NativeWindow {
     }
 }
 
-/// Paints `image` at the top left of `dc`.
-unsafe fn paint(dc: Handle, image: &Image) {
-    if image.width == 0 {
-        return;
+/// Paints the image of `state` at the top left of `dc`, the device context of `window`, each
+/// canvas pixel covering the screen's pixels at the window's DPI, and the rest of the inside
+/// black.
+///
+/// A canvas as big as the window's inside, in logical pixels, covers all of it, so at a scale
+/// such as 150% its pixels are one or two screen pixels across, the nearest one to each.
+unsafe fn paint(window: Handle, dc: Handle, state: &State) {
+    let mut client = Rect::default();
+    unsafe { GetClientRect(window, &mut client) };
+    let (width, height) = (client.right as i64, client.bottom as i64);
+    let dpi = state.dpi.max(1) as i64;
+    let logical = |size: i64| (size * BASE_DPI + dpi / 2) / dpi;
+    let image = &state.image;
+    let (mut across, mut down) = (0, 0);
+    if image.width > 0 && logical(width) > 0 && logical(height) > 0 {
+        across = (image.width as i64 * width / logical(width)) as i32;
+        down = (image.height as i64 * height / logical(height)) as i32;
+        let info = BitmapInfo {
+            size: 40,
+            width: image.width,
+            // negative for rows from the top
+            height: -image.height,
+            planes: 1,
+            bit_count: 32,
+            compression: 0,
+            size_image: 0,
+            x_per_meter: 0,
+            y_per_meter: 0,
+            colors_used: 0,
+            colors_important: 0,
+            colors: [0],
+        };
+        unsafe {
+            SetStretchBltMode(dc, COLORONCOLOR);
+            StretchDIBits(
+                dc,
+                0,
+                0,
+                across,
+                down,
+                0,
+                0,
+                image.width,
+                image.height,
+                image.pixels.as_ptr().cast(),
+                &info,
+                0,
+                SRCCOPY,
+            );
+        }
     }
-    let info = BitmapInfo {
-        size: 40,
-        width: image.width,
-        // negative for rows from the top
-        height: -image.height,
-        planes: 1,
-        bit_count: 32,
-        compression: 0,
-        size_image: 0,
-        x_per_meter: 0,
-        y_per_meter: 0,
-        colors_used: 0,
-        colors_important: 0,
-        colors: [0],
-    };
+    let (width, height) = (width as i32, height as i32);
     unsafe {
-        SetDIBitsToDevice(
-            dc,
-            0,
-            0,
-            image.width as u32,
-            image.height as u32,
-            0,
-            0,
-            0,
-            image.height as u32,
-            image.pixels.as_ptr().cast(),
-            &info,
-            0,
-        );
+        if across < width {
+            PatBlt(dc, across, 0, width - across, height, BLACKNESS);
+        }
+        if down < height {
+            PatBlt(dc, 0, down, across.min(width), height - down, BLACKNESS);
+        }
     }
 }
 
-/// Records a message to the window of `state` as `gui_win32.stn` reads it.
-fn record(state: &State, message: u32, wparam: usize, lparam: isize, extra: u32) {
-    let mut records = state.records.borrow_mut();
+/// Records a message to the window of `shared` as `gui_win32.stn` reads it, and wakes the
+/// program if it waits for one.
+fn record(shared: &Shared, message: u32, wparam: usize, lparam: isize, extra: u32) {
+    let mut state = lock(shared);
     for word in [message, wparam as u32, lparam as u32, extra] {
-        records.extend_from_slice(&word.to_le_bytes());
+        state.records.extend_from_slice(&word.to_le_bytes());
     }
+    shared.recorded.notify_all();
 }
 
-/// The procedure of every window: it records what `gui` reports, paints the last image, and
-/// leaves the rest to `DefWindowProcW`.
+/// The procedure of every window, which runs on the window's own thread: it records what `gui`
+/// reports, paints the last image, follows the window to a monitor of another DPI, closes the
+/// window when the program asks, and leaves the rest to `DefWindowProcW`.
 unsafe extern "system" fn procedure(
     window: Handle,
     message: u32,
@@ -434,44 +586,69 @@ unsafe extern "system" fn procedure(
 ) -> isize {
     unsafe {
         if message == WM_NCCREATE {
-            // the state comes as CreateWindowExW's last argument, the first field of the
+            // the shared state comes as CreateWindowExW's last argument, the first field of the
             // CREATESTRUCTW `lParam` points to
-            let state = *(lparam as *const *const State);
-            SetWindowLongPtrW(window, GWLP_USERDATA, state as isize);
+            let shared = *(lparam as *const *const Shared);
+            SetWindowLongPtrW(window, GWLP_USERDATA, shared as isize);
             return DefWindowProcW(window, message, wparam, lparam);
         }
-        let state = GetWindowLongPtrW(window, GWLP_USERDATA) as *const State;
-        let Some(state) = state.as_ref() else {
+        let shared = GetWindowLongPtrW(window, GWLP_USERDATA) as *const Shared;
+        let Some(shared) = shared.as_ref() else {
             return DefWindowProcW(window, message, wparam, lparam);
         };
+        let dpi = || lock(shared).dpi;
         match message {
-            WM_CLOSE => {
-                record(state, message, wparam, lparam, 0);
+            WM_CLOSE_WINDOW => {
+                SetWindowLongPtrW(window, GWLP_USERDATA, 0);
+                DestroyWindow(window);
+                PostQuitMessage(0);
                 0
             }
+            WM_CLOSE | WM_CHAR => {
+                record(shared, message, wparam, lparam, 0);
+                0
+            }
+            WM_ERASEBKGND => 1,
             WM_PAINT => {
                 let mut painting = std::mem::MaybeUninit::<Paint>::uninit();
                 let dc = BeginPaint(window, painting.as_mut_ptr());
-                paint(dc, &state.image.borrow());
+                paint(window, dc, &lock(shared));
                 EndPaint(window, painting.as_ptr());
                 0
             }
-            WM_SIZE | WM_CHAR | WM_MOUSEMOVE | WM_MOUSEWHEEL => {
-                record(state, message, wparam, lparam, 0);
+            WM_DPICHANGED => {
+                // the window keeps its logical size on the new monitor, unless its scale is fixed
+                if shared.fixed_dpi == 0 {
+                    lock(shared).dpi = wparam as u32 & 0xffff;
+                    let rect = &*(lparam as *const Rect);
+                    SetWindowPos(
+                        window,
+                        null_mut(),
+                        rect.left,
+                        rect.top,
+                        rect.right - rect.left,
+                        rect.bottom - rect.top,
+                        SWP_NOZORDER | SWP_NOACTIVATE,
+                    );
+                }
+                0
+            }
+            WM_SIZE | WM_MOUSEMOVE | WM_MOUSEWHEEL => {
+                record(shared, message, wparam, lparam, dpi());
                 0
             }
             WM_KEYDOWN | WM_KEYUP | WM_SYSKEYDOWN | WM_SYSKEYUP => {
                 let typed = MapVirtualKeyW(wparam as u32, MAPVK_VK_TO_CHAR);
-                record(state, message, wparam, lparam, typed);
+                record(shared, message, wparam, lparam, typed);
                 DefWindowProcW(window, message, wparam, lparam)
             }
             WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN => {
-                record(state, message, wparam, lparam, 0);
+                record(shared, message, wparam, lparam, dpi());
                 SetCapture(window);
                 0
             }
             WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP => {
-                record(state, message, wparam, lparam, 0);
+                record(shared, message, wparam, lparam, dpi());
                 if wparam & BUTTONS_HELD == 0 {
                     ReleaseCapture();
                 }

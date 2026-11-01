@@ -7,15 +7,15 @@ use std::io::Read;
 use std::process::Stdio;
 use std::time::{Duration, Instant};
 
-/// A program that opens a window titled by its argument, shows it in red, and prints every
-/// event until it is asked to close.
+/// A program that opens a window titled by its argument, shows it in red, and prints its scale
+/// and every event until it is asked to close.
 const EVENTS: &str = "\
 use gui
 
 match gui.open(args()[0], 200, 100):
     case ok(w):
         w.show(gui.blank(200, 100, gui.rgb(255, 0, 0)))
-        print(\"open\")
+        print(\"open at {w.scale()}\")
         while w.is_open():
             for e in w.wait():
                 print(e)
@@ -30,7 +30,6 @@ match gui.open(args()[0], 200, 100):
 /// Basic Multilingual Plane type it once, a drag goes on outside the window, and two half steps
 /// of the wheel make one.
 const EXPECTED: &str = "\
-open
 event.key_down('f5')
 event.key_up('f5')
 event.key_down('left')
@@ -106,13 +105,39 @@ impl Host {
     }
 }
 
-/// Runs `program` (with its arguments) in `dir` while `windows_gui.ps1` drives the window
-/// titled `title`, and returns what the driver and then the program printed.
-fn drive(host: Host, dir: &Path, program: &mut Command, title: &str) -> (String, String) {
+/// A program that opens a window titled by its argument and draws it in another color at each
+/// frame until it is asked to close.
+const FRAMES: &str = "\
+use gui
+
+w = gui.open(args()[0], 64, 64).unwrap()
+n = 0
+while w.is_open():
+    for e in w.next_frame():
+        if e == gui.event.close:
+            w.close()
+    n += 1
+    w.show(gui.blank(64, 64, gui.rgb(n * 7 % 256, 255, 0)))
+print(\"closed\")
+";
+
+/// Runs `program` (with its arguments) in `dir`, with `STONE_GUI_SCALE` set to `scale` unless
+/// it is empty, while `windows_gui.ps1` drives the window titled `title` with the arguments
+/// `driving`, and returns what the driver and then the program printed.
+fn drive(
+    host: Host,
+    dir: &Path,
+    program: &mut Command,
+    (title, scale): (&str, &str),
+    driving: &[&str],
+) -> (String, String) {
+    if !scale.is_empty() {
+        program.env("STONE_GUI_SCALE", scale);
+    }
     let mut child = program
         .current_dir(dir)
         .env("STONE_LEAK_CHECK", "1")
-        .env("WSLENV", "STONE_LEAK_CHECK")
+        .env("WSLENV", "STONE_LEAK_CHECK:STONE_GUI_SCALE")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -130,7 +155,8 @@ fn drive(host: Host, dir: &Path, program: &mut Command, title: &str) -> (String,
     let driver = Command::new(powershell)
         .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File"])
         .arg(host.windows_path(&script))
-        .args(["-Title", title, "-Color", &0xff0000.to_string()])
+        .args(["-Title", title])
+        .args(driving)
         .current_dir(dir)
         .output()
         .unwrap();
@@ -162,20 +188,14 @@ fn drive(host: Host, dir: &Path, program: &mut Command, title: &str) -> (String,
     (driven, stdout)
 }
 
-#[test]
-fn win32_windows_report_input_in_order_under_both_backends() {
-    let Some(host) = Host::find() else {
-        eprintln!("skipping: this machine runs no Windows programs");
-        return;
-    };
-    let dir = host.work_dir();
-    std::fs::create_dir_all(&dir).unwrap();
-    let source = dir.join("events.stn");
-    std::fs::write(&source, EVENTS).unwrap();
-    let exe = dir.join("events.exe");
+/// Builds the stone program `source` for Windows as `name.exe` in `dir`, returning its path.
+fn build(dir: &Path, name: &str, source: &str) -> PathBuf {
+    let path = dir.join(format!("{name}.stn"));
+    std::fs::write(&path, source).unwrap();
+    let exe = dir.join(format!("{name}.exe"));
     let built = Command::new(env!("CARGO_BIN_EXE_stone"))
         .arg("build")
-        .arg(&source)
+        .arg(&path)
         .args(["--target", "x86_64-windows", "-o"])
         .arg(&exe)
         .output()
@@ -185,18 +205,89 @@ fn win32_windows_report_input_in_order_under_both_backends() {
         "{}",
         String::from_utf8_lossy(&built.stderr)
     );
-    let title = format!("stone gui test {}", std::process::id());
-    let (driven, printed) = drive(host, &dir, Command::new(&exe).arg(&title), &title);
-    assert_eq!(driven, "ok\n");
-    assert_eq!(printed.replace("\r\n", "\n"), EXPECTED);
-    // the interpreter runs on Windows only there
+    exe
+}
+
+/// Checks what [`EVENTS`] prints, as `program` runs it, at the scale `scale` (or the system's if
+/// empty): the scale the driver found, and the same events in logical pixels at any scale.
+fn check_events(host: Host, dir: &Path, program: &mut Command, title: &str, scale: &str) {
+    let color = 0xff0000.to_string();
+    let scale_arg = if scale.is_empty() { "0" } else { scale };
+    let driving = [
+        "-Color", &color, "-Scale", scale_arg, "-Width", "200", "-Height", "100",
+    ];
+    let (driven, printed) = drive(host, dir, program, (title, scale), &driving);
+    let found = driven
+        .lines()
+        .next()
+        .and_then(|line| line.strip_prefix("scale "))
+        .and_then(|scale| scale.parse::<f64>().ok())
+        .unwrap_or_else(|| panic!("{driven}"));
+    assert_eq!(
+        driven,
+        format!("scale {}\nok\n", driven[6..].lines().next().unwrap())
+    );
+    assert_eq!(
+        printed.replace("\r\n", "\n"),
+        format!("open at {found:?}\n{EXPECTED}")
+    );
+}
+
+#[test]
+fn win32_windows_report_input_in_order_under_both_backends() {
+    let Some(host) = Host::find() else {
+        eprintln!("skipping: this machine runs no Windows programs");
+        return;
+    };
+    let dir = host.work_dir();
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = build(&dir, "events", EVENTS);
+    let id = std::process::id();
+    for scale in ["", "1.5"] {
+        let title = format!("stone gui test {id} {scale}");
+        check_events(host, &dir, Command::new(&exe).arg(&title), &title, scale);
+        // the interpreter runs on Windows only there
+        if host == Host::Windows {
+            let title = format!("stone gui run {id} {scale}");
+            let mut run = Command::new(env!("CARGO_BIN_EXE_stone"));
+            run.arg("run").arg(dir.join("events.stn")).arg(&title);
+            check_events(host, &dir, &mut run, &title, scale);
+        }
+    }
+}
+
+#[test]
+fn win32_windows_go_on_drawing_while_moved() {
+    let Some(host) = Host::find() else {
+        eprintln!("skipping: this machine runs no Windows programs");
+        return;
+    };
+    let dir = host.work_dir().join("frames");
+    std::fs::create_dir_all(&dir).unwrap();
+    let exe = build(&dir, "frames", FRAMES);
+    let title = format!("stone gui frames {}", std::process::id());
+    let (driven, printed) = drive(
+        host,
+        &dir,
+        Command::new(&exe).arg(&title),
+        (&title, ""),
+        &["-Mode", "move"],
+    );
+    assert!(
+        driven.ends_with("\nok\n") && driven.lines().count() == 2,
+        "{driven}"
+    );
+    assert_eq!(printed.replace("\r\n", "\n"), "closed\n");
     if host == Host::Windows {
-        let title = format!("stone gui run {}", std::process::id());
+        let title = format!("stone gui frames run {}", std::process::id());
         let mut run = Command::new(env!("CARGO_BIN_EXE_stone"));
-        run.arg("run").arg(&source).arg(&title);
-        let (driven, printed) = drive(host, &dir, &mut run, &title);
-        assert_eq!(driven, "ok\n");
-        assert_eq!(printed.replace("\r\n", "\n"), EXPECTED);
+        run.arg("run").arg(dir.join("frames.stn")).arg(&title);
+        let (driven, printed) = drive(host, &dir, &mut run, (&title, ""), &["-Mode", "move"]);
+        assert!(
+            driven.ends_with("\nok\n") && driven.lines().count() == 2,
+            "{driven}"
+        );
+        assert_eq!(printed.replace("\r\n", "\n"), "closed\n");
     }
 }
 

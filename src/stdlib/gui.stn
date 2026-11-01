@@ -248,21 +248,37 @@ pub struct window:
 // Opens a window `width` by `height` pixels titled `title`: on Windows, a Win32 window, and
 // elsewhere on the Wayland compositor `WAYLAND_DISPLAY` names, or if there is none or it fails,
 // on the X server `DISPLAY` names. `STONE_GUI` set to `wayland` or `x11` asks for one alone.
+//
+// Its pixels are logical ones, as are a canvas's: on a screen scaled to 200%, each is two of the
+// screen's pixels across, so a window looks as big on every screen, and `scale` says how many.
+// `STONE_GUI_SCALE`, a number from 0.5 to 8, sets the scale instead of the system.
 pub fn open(title: str, width: int, height: int) -> result[window, str]:
     if width < 1 or height < 1 or width > 32767 or height > 32767:
         ret err("invalid window size: {width}x{height}")
     choice = os.env("STONE_GUI").unwrap_or("")
+    forced = forced_scale()?
     if gui_sys.on_windows():
         if choice != "" and choice != "windows":
             ret err("STONE_GUI is '{choice}', but on Windows can only be 'windows'")
-        win = gui_win32.open(title, width, height)?
+        win = gui_win32.open(title, width, height, forced)?
         ret ok(window(wayland=false, x=[], wl=[], win=[win], due=time.clock()))
     else:
-        ret open_display(title, width, height, choice)
+        ret open_display(title, width, height, choice, forced)
+
+// The scale `STONE_GUI_SCALE` sets, or 0.0 if it is not set, for the system's.
+fn forced_scale() -> result[float, str]:
+    text = os.env("STONE_GUI_SCALE").unwrap_or("")
+    if text == "":
+        ret ok(0.0)
+    scale = float(text).unwrap_or(0.0)
+    // written so that nan is refused too
+    if not (scale >= 0.5 and scale <= 8.0):
+        ret err("STONE_GUI_SCALE is '{text}', but must be a number from 0.5 to 8")
+    ret ok(scale)
 
 // Opens a window as `open` does where there is no Win32, on Wayland or X11 as `choice`, the
-// value of `STONE_GUI`, asks.
-fn open_display(title: str, width: int, height: int, choice: str) -> result[window, str]:
+// value of `STONE_GUI`, asks, at the scale `forced`, or the display's for 0.0.
+fn open_display(title: str, width: int, height: int, choice: str, forced: float) -> result[window, str]:
     if choice != "" and choice != "wayland" and choice != "x11":
         ret err("STONE_GUI is '{choice}', but can only be 'wayland' or 'x11'")
     on_wayland = os.env("WAYLAND_DISPLAY").unwrap_or("") != ""
@@ -270,13 +286,13 @@ fn open_display(title: str, width: int, height: int, choice: str) -> result[wind
     if choice == "" and not on_wayland and not on_x11:
         ret err("no display: neither WAYLAND_DISPLAY nor DISPLAY is set")
     if choice == "wayland" or choice == "" and on_wayland:
-        match gui_wayland.open(title, width, height):
+        match gui_wayland.open(title, width, height, forced):
             case ok(wl):
                 ret ok(window(wayland=true, x=[], wl=[wl], win=[], due=time.clock()))
             case err(reason):
                 if choice == "wayland" or not on_x11:
                     ret err(reason)
-    x = gui_x11.open(title, width, height)?
+    x = gui_x11.open(title, width, height, forced)?
     ret ok(window(wayland=false, x=[x], wl=[], win=[], due=time.clock()))
 
 impl window:
@@ -297,6 +313,16 @@ impl window:
             ret self.wl[0].size()
         else:
             ret self.x[0].size()
+
+    // How many of the screen's pixels each of the window's is across: 1.0 at 100%, 2.0 at 200%,
+    // and 1.5 at 150%, where a canvas's pixels are one or two of the screen's.
+    fn scale(self) -> float:
+        if gui_sys.on_windows():
+            ret self.win[0].scale()
+        elif self.wayland:
+            ret self.wl[0].scale()
+        else:
+            ret self.x[0].scale()
 
     // The events that have happened since the last call, without waiting for any.
     fn events(self) -> list[event]:

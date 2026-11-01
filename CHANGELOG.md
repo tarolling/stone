@@ -13,11 +13,18 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 ### Added
 
 - The `gui` module works on Windows, with Win32 windows, under both `stone run` and in built
-  programs: the same `gui.window` API, events, and `gui.run` as on Linux and macOS. One canvas
-  pixel is one screen pixel on every monitor, `next_frame` waits for the desktop's next frame,
-  and the window repaints itself from the last canvas shown. Windows need Windows 10 version
-  1703 or later. A program imports `user32.dll`, `gdi32.dll`, and `dwmapi.dll` only if it
-  opens a window.
+  programs: the same `gui.window` API, events, and `gui.run` as on Linux and macOS.
+  `next_frame` waits for the desktop's next frame, and the window repaints itself from the last
+  canvas shown, also while it is dragged or resized, when the program goes on running and
+  drawing. Windows need Windows 10 version 1703 or later. A program imports `user32.dll`,
+  `gdi32.dll`, and `dwmapi.dll` only if it opens a window.
+- Windows from `gui` follow the display's scaling on Windows, X11, and Wayland: sizes, points,
+  and canvases are in logical pixels, which `gui` shows as one or more of the screen's each (to
+  the nearest, so at 150% a canvas pixel is one or two), and the new `w.scale()` gives the
+  scale. Windows takes it from the monitor (and follows a window to another monitor), X11 from
+  the `Xft.dpi` resource, and Wayland from the compositor's preferred scale, fractional where
+  it has `wp_fractional_scale_v1` and `wp_viewporter`, whole otherwise, with a `redraw` event
+  when it changes. `STONE_GUI_SCALE` (0.5 to 8) sets the scale instead.
 - `stone build --windows-gui` builds Windows executables that start with no console, so opening
   one from Explorer shows only its window. What such a program prints goes nowhere unless its
   output is redirected.

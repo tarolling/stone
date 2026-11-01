@@ -3,6 +3,7 @@
 
 use super::{pop_frame, push_frame};
 use crate::codegen::AssemblyGenerator;
+use crate::stdlib::gui::MAX_SCALED;
 
 /// Emits the routines `used` lists, as `x64::bytes::bytes_runtime` describes them.
 pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
@@ -145,6 +146,120 @@ pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if uses("stone.gui_pack") {
         pack(r#gen);
     }
+    if uses("stone.gui_pack_scaled") {
+        pack_scaled(r#gen);
+    }
+}
+
+/// Emits `stone.gui_pack_scaled`, as `x64::bytes` does, for the list in `x0`, the size in `x1`
+/// and `x2`, the new size in `x3` and `x4`, and the format in `x5`.
+fn pack_scaled(r#gen: &mut dyn AssemblyGenerator) {
+    let saved = ["x19", "x20", "x21", "x22", "x23", "x24", "x25", "x26"];
+    // x19 holds the colors, x20 the width, x21 the height, x22 the new width, x23 the new
+    // height, x24 the format, x25 the colors' count, and x26 the new bytes; x10 points where
+    // the next pixel's bytes go, x9 counts rows, x11 is where the row taken starts, x12 counts
+    // pixels, x13 is the pixel of the row taken, x14 the running sum, and x15 the color
+    r#gen.emit("stone.gui_pack_scaled:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tmov\tx20, x1");
+    r#gen.emit("\tmov\tx21, x2");
+    r#gen.emit("\tmov\tx22, x3");
+    r#gen.emit("\tmov\tx23, x4");
+    r#gen.emit("\tmov\tx24, x5");
+    // no bytes unless every size is from 1 to MAX_SCALED, which as unsigned is one test each
+    r#gen.emit(&format!("\tmov\tx9, #{}", MAX_SCALED - 1));
+    for reg in ["x20", "x21", "x22", "x23"] {
+        r#gen.emit(&format!("\tsub\tx10, {reg}, #1"));
+        r#gen.emit("\tcmp\tx10, x9");
+        r#gen.emit("\tb.hi\t.Lgui_pack_scaled_empty");
+    }
+    r#gen.emit("\tmul\tx9, x22, x23");
+    r#gen.emit("\tlsl\tx0, x9, #2");
+    r#gen.emit("\tcmp\tx24, #1");
+    r#gen.emit("\tb.ls\t.Lgui_pack_scaled_sized");
+    r#gen.emit("\tcmp\tx24, #3");
+    r#gen.emit("\tb.eq\t.Lgui_pack_scaled_sized");
+    r#gen.emit("\tsub\tx0, x0, x9");
+    r#gen.emit(".Lgui_pack_scaled_sized:");
+    r#gen.emit("\tbl\tstone.str_new");
+    r#gen.emit("\tmov\tx26, x0");
+    r#gen.emit("\tmov\tx10, x0");
+    r#gen.emit("\tldr\tx25, [x19]");
+    r#gen.emit("\tldr\tx19, [x19, #16]");
+    r#gen.emit("\tmov\tx9, #0");
+    r#gen.emit(".Lgui_pack_scaled_row:");
+    r#gen.emit("\tcmp\tx9, x23");
+    r#gen.emit("\tb.hs\t.Lgui_pack_scaled_done");
+    r#gen.emit("\tmul\tx11, x9, x21");
+    r#gen.emit("\tudiv\tx11, x11, x23");
+    r#gen.emit("\tmul\tx11, x11, x20");
+    r#gen.emit("\tmov\tx12, #0");
+    r#gen.emit("\tmov\tx13, #0");
+    r#gen.emit("\tmov\tx14, #0");
+    r#gen.emit(".Lgui_pack_scaled_next:");
+    r#gen.emit("\tcmp\tx12, x22");
+    r#gen.emit("\tb.hs\t.Lgui_pack_scaled_rowed");
+    r#gen.emit("\tadd\tx12, x12, #1");
+    // a pixel past the colors is black
+    r#gen.emit("\tadd\tx16, x11, x13");
+    r#gen.emit("\tmov\tx15, #0");
+    r#gen.emit("\tcmp\tx16, x25");
+    r#gen.emit("\tb.hs\t.Lgui_pack_scaled_color");
+    r#gen.emit("\tldr\tx15, [x19, x16, lsl #3]");
+    r#gen.emit(".Lgui_pack_scaled_color:");
+    r#gen.emit("\tlsr\tx16, x15, #8");
+    r#gen.emit("\tlsr\tx17, x15, #16");
+    r#gen.emit("\tcmp\tx24, #1");
+    r#gen.emit("\tb.eq\t.Lgui_pack_scaled_xrgb");
+    r#gen.emit("\tb.lo\t.Lgui_pack_scaled_bgrx");
+    r#gen.emit("\tcmp\tx24, #3");
+    r#gen.emit("\tb.eq\t.Lgui_pack_scaled_bgra");
+    r#gen.emit("\tstrb\tw17, [x10]");
+    r#gen.emit("\tstrb\tw16, [x10, #1]");
+    r#gen.emit("\tstrb\tw15, [x10, #2]");
+    r#gen.emit("\tadd\tx10, x10, #3");
+    r#gen.emit("\tb\t.Lgui_pack_scaled_step");
+    r#gen.emit(".Lgui_pack_scaled_bgrx:");
+    r#gen.emit("\tstrb\tw15, [x10]");
+    r#gen.emit("\tstrb\tw16, [x10, #1]");
+    r#gen.emit("\tstrb\tw17, [x10, #2]");
+    r#gen.emit("\tstrb\twzr, [x10, #3]");
+    r#gen.emit("\tadd\tx10, x10, #4");
+    r#gen.emit("\tb\t.Lgui_pack_scaled_step");
+    r#gen.emit(".Lgui_pack_scaled_bgra:");
+    r#gen.emit("\tstrb\tw15, [x10]");
+    r#gen.emit("\tstrb\tw16, [x10, #1]");
+    r#gen.emit("\tstrb\tw17, [x10, #2]");
+    r#gen.emit("\tlsr\tx16, x15, #24");
+    r#gen.emit("\tstrb\tw16, [x10, #3]");
+    r#gen.emit("\tadd\tx10, x10, #4");
+    r#gen.emit("\tb\t.Lgui_pack_scaled_step");
+    r#gen.emit(".Lgui_pack_scaled_xrgb:");
+    r#gen.emit("\tstrb\twzr, [x10]");
+    r#gen.emit("\tstrb\tw17, [x10, #1]");
+    r#gen.emit("\tstrb\tw16, [x10, #2]");
+    r#gen.emit("\tstrb\tw15, [x10, #3]");
+    r#gen.emit("\tadd\tx10, x10, #4");
+    // the pixel taken moves on by one each time the sum of widths passes the new width
+    r#gen.emit(".Lgui_pack_scaled_step:");
+    r#gen.emit("\tadd\tx14, x14, x20");
+    r#gen.emit(".Lgui_pack_scaled_carry:");
+    r#gen.emit("\tcmp\tx14, x22");
+    r#gen.emit("\tb.lo\t.Lgui_pack_scaled_next");
+    r#gen.emit("\tsub\tx14, x14, x22");
+    r#gen.emit("\tadd\tx13, x13, #1");
+    r#gen.emit("\tb\t.Lgui_pack_scaled_carry");
+    r#gen.emit(".Lgui_pack_scaled_rowed:");
+    r#gen.emit("\tadd\tx9, x9, #1");
+    r#gen.emit("\tb\t.Lgui_pack_scaled_row");
+    r#gen.emit(".Lgui_pack_scaled_empty:");
+    r#gen.emit("\tmov\tx0, #0");
+    r#gen.emit("\tbl\tstone.str_new");
+    r#gen.emit("\tmov\tx26, x0");
+    r#gen.emit(".Lgui_pack_scaled_done:");
+    r#gen.emit("\tmov\tx0, x26");
+    pop_frame(r#gen, &saved);
 }
 
 /// Emits `stone.gui_pack`, as `x64::bytes` does, for the list in `x0`, the first position in

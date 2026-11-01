@@ -71,12 +71,15 @@ preferring Wayland, and without either it returns an error. Where a Wayland comp
 title bars, as on GNOME, `gui` draws its own.
 
 On Windows (10 version 1703 or later), a window is an ordinary Win32 window and needs no
-display variable. One pixel of a canvas is one pixel of the screen, whatever the monitor's
-scaling, and the window repaints itself from the last canvas shown, so `redraw` never comes
-there. Build a program with windows using `stone build --windows-gui` so that opening it from
-Explorer opens no console beside it (see [the CLI reference](../reference/cli.md)). While the
-window is being dragged or resized, Windows holds the program until the mouse button is
-released, so the window shows the last canvas until then.
+display variable. It repaints itself from the last canvas shown, so `redraw` never comes there,
+and the program goes on running while the window is dragged or resized. Build a program with
+windows using `stone build --windows-gui` so that opening it from Explorer opens no console
+beside it (see [the CLI reference](../reference/cli.md)).
+
+Sizes, points, and canvases are in logical pixels, so a window is as big on a screen scaled to
+200% as on one at 100%: there, each pixel of a canvas is two of the screen's across, and at
+150% one or two. `w.scale()` says how many of the screen's pixels a logical one is, as the
+system's display settings make it, and `STONE_GUI_SCALE` (from 0.5 to 8) sets it instead.
 
 ## Apps
 

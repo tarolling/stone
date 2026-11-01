@@ -2013,8 +2013,20 @@ right after the last statement that uses it, or sooner with `close`. Its methods
   the canvas does not reach, the window keeps what it showed on X11, and is black on Wayland.
 - `w.size() -> tuple[int, int]` returns the window's width and height, as the last `resize`
   event gave them.
+- `w.scale() -> float` returns how many of the screen's pixels each of the window's is across:
+  1.0 at 100%, 2.0 at 200%, 1.5 at 150%.
 - `w.set_title(title: str)` sets the title on the window's frame.
 - `w.close()` closes the window.
+
+A window's sizes, the points of its events, and the canvases it shows are in logical pixels,
+which `gui` shows as `w.scale()` of the screen's pixels each, to the nearest, so at 150% a
+canvas pixel is one or two of the screen's across. The scale is `STONE_GUI_SCALE`'s, a number
+from 0.5 to 8, if it is set, and otherwise the display's: on Windows the monitor's, which follows
+the window to another monitor; on X11 the `Xft.dpi` resource's (96 is 100%), or 1.0 without
+one; and on Wayland the compositor's preferred scale for the window, which may be fractional
+where the compositor has `wp_fractional_scale_v1` and `wp_viewporter`, and which gives a
+`redraw` event when it changes. A Wayland compositor without `wp_viewporter` takes whole scales
+only, so `STONE_GUI_SCALE` is rounded there.
 
 `events`, `wait`, `next_frame`, `show`, `set_title`, and `close` change the window, so each is a statement or
 the whole value of an assignment, as in `es = w.events()`.
@@ -2033,6 +2045,8 @@ window needs gives `err("the Wayland compositor has no xdg_wm_base")`, a protoco
 away gives its reason,
 as in `err("the X server refused the connection: No protocol specified")`, and one whose pixels
 are not 24-bit color is `err("unsupported display format: depth 16, 16 bits per pixel")`.
+A `STONE_GUI_SCALE` that is not a number from 0.5 to 8 is
+`err("STONE_GUI_SCALE is '3x', but must be a number from 0.5 to 8")`.
 
 ### Events
 

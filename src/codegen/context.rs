@@ -75,6 +75,7 @@ pub const BYTES_ROUTINES: &[&str] = &[
     "stone.bytes_check",
     "stone.bytes_from_list",
     "stone.gui_pack",
+    "stone.gui_pack_scaled",
 ];
 
 /// Runtime routines that need the string runtime, even in a program where no expression is a
@@ -119,7 +120,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 42] = [
+pub const MODULE_ROUTINES: [(&str, &str); 43] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -153,6 +154,7 @@ pub const MODULE_ROUTINES: [(&str, &str); 42] = [
     ("net_sys.connect_unix", "stone.net_connect_unix"),
     ("net_sys.ready", "stone.net_ready"),
     ("gui_sys.pack", "stone.gui_pack"),
+    ("gui_sys.pack_scaled", "stone.gui_pack_scaled"),
     // they work on a socket, so the net runtime has them
     ("gui_sys.shm_create", "stone.net_shm_create"),
     ("gui_sys.shm_write", "stone.net_shm_write"),

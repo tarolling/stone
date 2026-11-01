@@ -312,9 +312,11 @@ and `recvmsg` and `pread` for a descriptor the server sends, which the interpret
 the C library and compiled code makes as system calls. On Windows, which has no display
 protocol over a socket, a window is a Win32 window, kept as thin as the protocols: a native
 layer (the same `user32.dll` and `gdi32.dll` calls under `stone run` and in a built program)
-opens it, records each message to it as 16 bytes, paints the last image shown, and waits for
-the desktop's next frame with `DwmFlush`, while `gui`'s stone code turns the records into
-events. A built program picks its system's half when it is compiled, so one for Windows holds
+opens it on a thread of its own, which runs the window's messages, records each as 16 bytes,
+and paints the last image shown, so the window keeps drawing while Windows holds that thread in
+a drag or resize, and waits for the desktop's next frame with `DwmFlush`, while `gui`'s stone
+code turns the records into events. Windows are in logical pixels on every system, and the
+native help scales an image up to the screen's pixels, to the nearest, as it packs it. A built program picks its system's half when it is compiled, so one for Windows holds
 none of the X11 and Wayland code, and one for Linux none of the Win32. A socket's timeout is a `poll` before each read, send, or accept, in both
 backends, so a wait runs out at the same point under `stone run` and in a built program. `stone build` writes either executable itself, with its own assembler and linkers,
 including the Mach-O file's imports and its code signature, so it needs no assembler, linker,

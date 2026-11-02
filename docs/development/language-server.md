@@ -20,6 +20,19 @@ symbol with all its references in every file. The analysis recovers from syntax 
 by statement, so features keep working around a typo, and it hides type errors until the syntax
 and `use` errors are fixed.
 
+A program's root is the nearest directory holding a `main.stn` or a package's `stone.toml`, and
+its entry file that `main.stn` or, for a library, its `lib.stn`. Packages need nothing of their
+own: `project::link` reads manifests through the same `Sources`, so the editor sees the program's
+dependencies, from directories and from the package store, without downloading. Linking reports a
+package that cannot be read once, in the manifest, and notes an error at each `use` of it in
+`Linked::unavailable`, which only the editor shows. `features::package_diagnostics` gives the
+errors of every `stone.toml` and `stone.lock`, which the server publishes to those files' URIs,
+and when the client allows it the server registers a watcher for both, so editing a manifest or
+running `stone fetch` reanalyzes every open document. Hover, completion, and diagnostics show a
+dependency's linked names as the program writes them (`project::shown_names`, `geo.shapes.area`
+for `geo.1.shapes.area`), and a symbol in a dependency, or in a downloaded package opened on its
+own, cannot be renamed.
+
 | file | role |
 | --- | --- |
 | `lsp/src/lib.rs` | the initialize handshake, open documents, diagnostics, and request dispatch |

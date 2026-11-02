@@ -1821,3 +1821,618 @@ fn a_library_cannot_name_a_trait_of_the_entry_file_as_a_type() {
         13,
     );
 }
+
+const GEO_MANIFEST: (&str, &str) = (
+    "../geo/stone.toml",
+    "[package]\nname = \"geo\"\nversion = \"1.2.0\"\n",
+);
+
+const GEO_SHAPES: (&str, &str) = (
+    "../geo/shapes.stn",
+    "pub fn area(x: int) -> int:\n    ret x * x\n\nfn hidden() -> int:\n    ret 0\n",
+);
+
+const USES_GEO: (&str, &str) = (
+    "stone.toml",
+    "[dependencies]\ngeo = { path = \"../geo\" }\n",
+);
+
+#[test]
+fn a_path_dependency_is_used_by_its_name() {
+    assert_eq!(
+        output(&[
+            (
+                "main.stn",
+                "use geo.shapes\nuse geo.shapes.area\nprint(shapes.area(2) + area(3))\n"
+            ),
+            USES_GEO,
+            GEO_MANIFEST,
+            GEO_SHAPES,
+        ]),
+        "13\n"
+    );
+}
+
+#[test]
+fn a_packages_own_name_loads_its_lib() {
+    let lib = ("../geo/lib.stn", "pub fn one() -> int:\n    ret 1\n");
+    assert_eq!(
+        output(&[
+            (
+                "main.stn",
+                "use geo\nuse geo.one\nprint(geo.one() + one())\n"
+            ),
+            USES_GEO,
+            GEO_MANIFEST,
+            lib,
+        ]),
+        "2\n"
+    );
+    assert_error(
+        &[
+            ("main.stn", "use geo\n"),
+            USES_GEO,
+            GEO_MANIFEST,
+            GEO_SHAPES,
+        ],
+        "main.stn",
+        "package 'geo' has no lib.stn, so use one of its modules",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn a_packages_files_use_its_own_modules_and_dependencies() {
+    // the program and the package each have a module `util`, and they do not meet
+    assert_eq!(
+        output(&[
+            (
+                "main.stn",
+                "use util\nuse geo.shapes\nprint(util.n() + shapes.n())\n"
+            ),
+            ("util.stn", "pub fn n() -> int:\n    ret 100\n"),
+            USES_GEO,
+            (
+                "../geo/stone.toml",
+                "[package]\nname = \"geo\"\n\n[dependencies]\nnum = { path = \"../num\" }\n",
+            ),
+            (
+                "../geo/shapes.stn",
+                "use util\nuse num\npub fn n() -> int:\n    ret util.n() + num.n()\n",
+            ),
+            ("../geo/util.stn", "pub fn n() -> int:\n    ret 20\n"),
+            ("../num/stone.toml", "[package]\nname = \"num\"\n"),
+            ("../num/lib.stn", "pub fn n() -> int:\n    ret 3\n"),
+        ]),
+        "123\n"
+    );
+}
+
+#[test]
+fn a_package_cannot_see_the_programs_modules_or_its_dependencies() {
+    assert_error(
+        &[
+            ("main.stn", "use geo.shapes\nprint(shapes.area(1))\n"),
+            ("helper.stn", "pub fn n() -> int:\n    ret 1\n"),
+            USES_GEO,
+            GEO_MANIFEST,
+            (
+                "../geo/shapes.stn",
+                "use helper\npub fn area(x: int) -> int:\n    ret x\n",
+            ),
+        ],
+        "../geo/shapes.stn",
+        "no module named 'helper'",
+        1,
+        5,
+    );
+    // a dependency's own dependencies are its alone
+    assert_error(
+        &[
+            ("main.stn", "use num\n"),
+            USES_GEO,
+            (
+                "../geo/stone.toml",
+                "[package]\nname = \"geo\"\n\n[dependencies]\nnum = { path = \"../num\" }\n",
+            ),
+            ("../num/stone.toml", "[package]\nname = \"num\"\n"),
+            ("../num/lib.stn", "pub fn n() -> int:\n    ret 3\n"),
+        ],
+        "main.stn",
+        "no module named 'num'",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn a_packages_private_functions_stay_private() {
+    assert_error(
+        &[
+            ("main.stn", "use geo.shapes.hidden\n"),
+            USES_GEO,
+            GEO_MANIFEST,
+            GEO_SHAPES,
+        ],
+        "main.stn",
+        "'hidden' is private to module 'geo.shapes'",
+        1,
+        16,
+    );
+}
+
+#[test]
+fn a_missing_package_module_is_named_as_written() {
+    assert_error(
+        &[
+            ("main.stn", "use geo.lines\n"),
+            USES_GEO,
+            GEO_MANIFEST,
+            GEO_SHAPES,
+        ],
+        "main.stn",
+        "no module named 'geo.lines'",
+        1,
+        5,
+    );
+}
+
+#[test]
+fn a_dependency_cannot_share_a_name_with_a_module_of_the_program() {
+    for local in ["geo.stn", "geo/lines.stn"] {
+        assert_error(
+            &[
+                ("main.stn", "print(1)\n"),
+                (local, "pub fn n() -> int:\n    ret 1\n"),
+                USES_GEO,
+                GEO_MANIFEST,
+            ],
+            "stone.toml",
+            "'geo' is both a dependency and a module of this program, so rename one",
+            2,
+            1,
+        );
+    }
+}
+
+#[test]
+fn a_path_dependency_needs_a_manifest() {
+    assert_error(
+        &[("main.stn", "print(1)\n"), USES_GEO, GEO_SHAPES],
+        "stone.toml",
+        "'../geo' has no stone.toml, so it is not a package",
+        2,
+        1,
+    );
+}
+
+#[test]
+fn manifest_errors_point_into_the_manifest() {
+    assert_error(
+        &[
+            ("main.stn", "print(1)\n"),
+            ("stone.toml", "[dependencies]\ngeo = { path = 1 }\n"),
+        ],
+        "stone.toml",
+        "'path' is a string, not an integer",
+        2,
+        16,
+    );
+    assert_error(
+        &[
+            ("main.stn", "print(1)\n"),
+            USES_GEO,
+            ("../geo/stone.toml", "[package]\nnam = \"geo\"\n"),
+        ],
+        "../geo/stone.toml",
+        "unknown key 'nam' in [package], which holds name, version, stone, description, and \
+         license",
+        2,
+        1,
+    );
+}
+
+#[test]
+fn a_dependency_needs_a_name() {
+    assert_error(
+        &[
+            ("main.stn", "print(1)\n"),
+            USES_GEO,
+            ("../geo/stone.toml", "[package]\nversion = \"1.0\"\n"),
+        ],
+        "../geo/stone.toml",
+        "a package that others use has a name, as name = \"geo\" under [package]",
+        1,
+        1,
+    );
+}
+
+#[test]
+fn packages_are_linked_under_their_names_and_compatibility_classes() {
+    let a = |version: &str, n: &str| {
+        [
+            (
+                format!("../a{n}/stone.toml"),
+                format!("[package]\nname = \"a\"\nversion = \"{version}\"\n"),
+            ),
+            (
+                format!("../a{n}/lib.stn"),
+                format!("pub fn make() -> int:\n    ret {n}\n"),
+            ),
+        ]
+    };
+    let mut files: Vec<(String, String)> = vec![
+        (
+            "main.stn".into(),
+            "use one\nuse two\nuse three\nprint(one.make() + two.make() + three.make())\n".into(),
+        ),
+        (
+            "stone.toml".into(),
+            "[dependencies]\none = { path = \"../a1\" }\ntwo = { path = \"../a2\" }\n\
+             three = { path = \"../a3\" }\n"
+                .into(),
+        ),
+    ];
+    files.extend(a("1.4.0", "1"));
+    files.extend(a("2.0.1", "2"));
+    files.extend(a("1.0.0", "3"));
+    let files: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(path, source)| (path.as_str(), source.as_str()))
+        .collect();
+    assert_eq!(output(&files), "6\n");
+    assert_eq!(
+        defined_functions(&files),
+        ["a.1.make", "a.2.make", "a.1.2.make"]
+    );
+}
+
+#[test]
+fn one_directory_is_one_package_however_it_is_reached() {
+    let files = [
+        (
+            "main.stn",
+            "use geo\nuse other\nprint(geo.one() + other.one())\n",
+        ),
+        (
+            "stone.toml",
+            "[dependencies]\ngeo = { path = \"../geo\" }\nother = { path = \"../x/../geo\" }\n",
+        ),
+        GEO_MANIFEST,
+        (
+            "../geo/lib.stn",
+            "use lib\npub fn one() -> int:\n    ret 1\n",
+        ),
+    ];
+    assert_eq!(output(&files), "2\n");
+    assert_eq!(defined_functions(&files), ["geo.1.one"]);
+}
+
+#[test]
+fn a_dependencys_files_are_never_reported_unused() {
+    let (map, diagnostics) = driver::check_program(
+        Path::new("main.stn"),
+        "use geo.shapes\nprint(shapes.area(2))\n",
+        &sources_of(&[USES_GEO, GEO_MANIFEST, GEO_SHAPES]),
+    );
+    let rendered: Vec<String> = diagnostics.iter().map(|d| map.render(d)).collect();
+    assert_eq!(rendered, Vec::<String>::new());
+}
+
+/// Builds in-memory sources from `(path, source)` pairs, with `store` as the package store.
+fn stored_sources(files: &[(&str, &str)]) -> MapSources {
+    let mut sources = sources_of(files);
+    sources.set_store("store");
+    sources
+}
+
+/// The files of `version` of the package `json` from `github:alice/json` in the store, whose
+/// `lib.stn` has `pub fn v() -> str` giving the version, plus `extra` dependencies in its
+/// manifest.
+fn stored_json(version: &str, extra: &str) -> Vec<(String, String)> {
+    let dir = format!("store/github.com/alice/json/{version}");
+    vec![
+        (
+            format!("{dir}/stone.toml"),
+            format!("[package]\nname = \"json\"\nversion = \"{version}\"\n{extra}"),
+        ),
+        (
+            format!("{dir}/lib.stn"),
+            format!("pub fn v() -> str:\n    ret \"{version}\"\n"),
+        ),
+    ]
+}
+
+/// Loads a program whose entry file is the first of `files` from sources with a store, returning
+/// what it prints (or its rendered errors) and every file linking wrote.
+fn stored_run(files: &[(String, String)]) -> (String, Vec<(PathBuf, String)>) {
+    let pairs: Vec<(&str, &str)> = files
+        .iter()
+        .map(|(p, s)| (p.as_str(), s.as_str()))
+        .collect();
+    let sources = stored_sources(&pairs[1..]);
+    let (map, result) = driver::load(Path::new(pairs[0].0), pairs[0].1, &sources);
+    let printed = match result {
+        Ok(checked) => {
+            let mut out = vec![];
+            driver::run_module(
+                &checked.module,
+                &checked.calls,
+                &mut std::io::empty(),
+                &mut out,
+                &[],
+                Limits::DEFAULT,
+            )
+            .expect("program should run");
+            String::from_utf8(out).unwrap()
+        }
+        // the expected paths are written with windows' separator as `/`
+        Err(errors) => errors
+            .0
+            .iter()
+            .map(|d| map.render(d).replace('\\', "/"))
+            .collect(),
+    };
+    (printed, sources.written())
+}
+
+fn owned(files: &[(&str, &str)]) -> Vec<(String, String)> {
+    files
+        .iter()
+        .map(|(p, s)| (p.to_string(), s.to_string()))
+        .collect()
+}
+
+const USES_JSON: (&str, &str) = (
+    "stone.toml",
+    "[dependencies]\njson = { github = \"alice/json\", version = \"1.2\" }\n",
+);
+
+#[test]
+fn a_package_from_a_host_is_read_from_the_store_and_locked() {
+    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    files.extend(stored_json("1.2.0", ""));
+    let (printed, written) = stored_run(&files);
+    assert_eq!(printed, "1.2.0\n");
+    let [(path, lock)] = written.as_slice() else {
+        panic!("one file written: {written:?}");
+    };
+    assert_eq!(path, Path::new("stone.lock"));
+    let (lock, errors) = crate::package::lock::Lock::parse(lock, FileId(0));
+    assert_eq!(errors, []);
+    let entry = &lock.entries[0];
+    assert_eq!(
+        (
+            entry.name.as_str(),
+            entry.source.to_string(),
+            entry.version.to_string()
+        ),
+        ("json", "github:alice/json".to_string(), "1.2.0".to_string())
+    );
+
+    // with the lock written, linking again writes nothing
+    let text = written[0].1.clone();
+    files.push(("stone.lock".into(), text));
+    assert_eq!(stored_run(&files), ("1.2.0\n".to_string(), vec![]));
+}
+
+#[test]
+fn the_newest_version_any_package_needs_is_used() {
+    let mut files = owned(&[
+        (
+            "main.stn",
+            "use json\nuse geo\nprint(json.v())\nprint(geo.v())\n",
+        ),
+        (
+            "stone.toml",
+            "[dependencies]\njson = { github = \"alice/json\", version = \"1.2\" }\n\
+             geo = { path = \"../geo\" }\n",
+        ),
+        (
+            "../geo/stone.toml",
+            "[package]\nname = \"geo\"\n\n[dependencies]\n\
+             j = { github = \"alice/json\", version = \"1.3.0\" }\n",
+        ),
+        (
+            "../geo/lib.stn",
+            "use j\npub fn v() -> str:\n    ret j.v()\n",
+        ),
+    ]);
+    files.extend(stored_json("1.2.0", ""));
+    files.extend(stored_json("1.3.0", ""));
+    files.extend(stored_json("1.9.0", ""));
+    assert_eq!(stored_run(&files).0, "1.3.0\n1.3.0\n");
+}
+
+#[test]
+fn a_package_that_is_not_downloaded_is_an_error_where_it_is_named() {
+    let files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    let (printed, written) = stored_run(&files);
+    assert!(
+        printed
+            .starts_with("stone.toml:2:1: error: json 1.2.0 (github:alice/json) is not downloaded"),
+        "{printed}"
+    );
+    assert_eq!(written, []);
+}
+
+/// Returns the first line of each of `diagnostics` rendered from `linked`'s files.
+fn first_lines(linked: &Linked, diagnostics: &[Diagnostic]) -> Vec<String> {
+    diagnostics
+        .iter()
+        .map(|d| linked.sources.render(d).lines().next().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_use_of_a_package_that_is_not_downloaded_is_noted_for_editors() {
+    let sources = stored_sources(&[USES_JSON]);
+    let linked = link(
+        Path::new("main.stn"),
+        "use json\nprint(json.v())\n",
+        &sources,
+    );
+    // the program's errors say it once, where the manifest names the package
+    assert_eq!(
+        first_lines(&linked, &linked.diagnostics),
+        ["stone.toml:2:1: error: json 1.2.0 (github:alice/json) is not downloaded"]
+    );
+    assert_eq!(
+        first_lines(&linked, &linked.unavailable),
+        [
+            "main.stn:1:5: error: 'json' cannot be used: json 1.2.0 (github:alice/json) is not \
+             downloaded; run `stone fetch`"
+        ]
+    );
+}
+
+#[test]
+fn a_use_of_a_directory_that_is_not_a_package_is_noted_for_editors() {
+    let sources = sources_of(&[USES_GEO]);
+    let linked = link(Path::new("main.stn"), "use geo.shapes\n", &sources);
+    assert_eq!(
+        first_lines(&linked, &linked.unavailable),
+        [
+            "main.stn:1:5: error: 'geo' cannot be used: '../geo' has no stone.toml, so it is not \
+             a package"
+        ]
+    );
+}
+
+#[test]
+fn a_use_of_a_package_whose_manifest_has_errors_points_at_it() {
+    let sources = sources_of(&[USES_GEO, ("../geo/stone.toml", "[package]\nname = 1\n")]);
+    let linked = link(Path::new("main.stn"), "use geo\n", &sources);
+    assert_eq!(
+        first_lines(&linked, &linked.unavailable),
+        ["main.stn:1:5: error: 'geo' cannot be used, because of an error in its stone.toml"]
+    );
+}
+
+#[test]
+fn linking_tells_which_package_each_file_belongs_to() {
+    let sources = sources_of(&[USES_GEO, GEO_MANIFEST, GEO_SHAPES]);
+    let linked = link(
+        Path::new("main.stn"),
+        "use geo.shapes\nprint(shapes.area(2))\n",
+        &sources,
+    );
+    assert_eq!(linked.diagnostics, []);
+    let geo = &linked.packages[1];
+    assert_eq!(
+        (geo.name.as_str(), geo.prefix.as_str(), geo.root.as_path()),
+        ("geo", "geo.1", Path::new("../geo"))
+    );
+    assert_eq!(linked.packages[0].prefix, "");
+    let shapes = linked.sources.find(Path::new("../geo/shapes.stn")).unwrap();
+    assert_eq!(linked.file_packages[shapes.0 as usize], 1);
+    assert_eq!(linked.file_packages[0], 0);
+    assert_eq!(linked.file_packages.len(), linked.sources.files().count());
+}
+
+#[test]
+fn shown_names_leave_out_compatibility_classes() {
+    let package = |name: &str, prefix: &str| PackageInfo {
+        name: name.to_string(),
+        version: None,
+        source: None,
+        deps: vec![],
+        root: PathBuf::new(),
+        prefix: prefix.to_string(),
+    };
+    let one = [package("app", ""), package("geo", "geo.1")];
+    assert_eq!(
+        shown_names("fn geo.1.shapes.area(x: geo.1.Point) -> geo.1", &one),
+        "fn geo.shapes.area(x: geo.Point) -> geo"
+    );
+    // only where a name starts, so other names are left alone
+    assert_eq!(
+        shown_names("ageo.1.x xgeo.1 geo.12", &one),
+        "ageo.1.x xgeo.1 geo.12"
+    );
+    // two packages of one name keep what tells them apart
+    let two = [
+        package("app", ""),
+        package("geo", "geo.1"),
+        package("geo", "geo.2"),
+        package("geo", "geo.1.2"),
+    ];
+    assert_eq!(
+        shown_names("geo.1.a geo.2.b geo.1.2.c", &two),
+        "geo.1.a geo.2.b geo.1.2.c"
+    );
+}
+
+#[test]
+fn a_package_whose_files_changed_does_not_match_its_lock() {
+    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    files.extend(stored_json("1.2.0", ""));
+    let wrong = format!("sha256:{}", "0".repeat(64));
+    files.push((
+        "stone.lock".into(),
+        format!(
+            "[[package]]\nname = \"json\"\ngithub = \"alice/json\"\nversion = \"1.2.0\"\n\
+             hash = \"{wrong}\"\n"
+        ),
+    ));
+    let (printed, written) = stored_run(&files);
+    assert!(
+        printed.starts_with(&format!(
+            "stone.lock:5:8: error: json 1.2.0 (github:alice/json) does not hold what it held \
+             when it was locked: its hash was {wrong}, and is now sha256:"
+        )),
+        "{printed}"
+    );
+    assert_eq!(written, []);
+}
+
+#[test]
+fn a_package_from_a_host_must_be_the_version_it_was_released_as() {
+    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    files.push((
+        "store/github.com/alice/json/1.2.0/stone.toml".into(),
+        "[package]\nname = \"json\"\nversion = \"1.1.0\"\n".into(),
+    ));
+    files.push((
+        "store/github.com/alice/json/1.2.0/lib.stn".into(),
+        "pub fn v() -> str:\n    ret \"1.1.0\"\n".into(),
+    ));
+    let (printed, _) = stored_run(&files);
+    assert!(
+        printed.starts_with(
+            "store/github.com/alice/json/1.2.0/stone.toml:3:11: error: this package says it is \
+             version 1.1.0, but it was released as 1.2.0"
+        ),
+        "{printed}"
+    );
+}
+
+#[test]
+fn a_package_from_a_host_cannot_use_a_directory() {
+    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    files.extend(stored_json(
+        "1.2.0",
+        "\n[dependencies]\nnum = { path = \"../num\" }\n",
+    ));
+    let (printed, _) = stored_run(&files);
+    assert!(
+        printed.starts_with(
+            "store/github.com/alice/json/1.2.0/stone.toml:6:1: error: a package from a host \
+             cannot use a directory, since the directory is not part of its release"
+        ),
+        "{printed}"
+    );
+}
+
+#[test]
+fn packages_from_hosts_need_a_store() {
+    assert_error(
+        &[("main.stn", "print(1)\n"), USES_JSON],
+        "stone.toml",
+        "json 1.2.0 (github:alice/json) cannot be downloaded, since there is no directory to \
+         keep packages in; set STONE_HOME",
+        2,
+        1,
+    );
+}

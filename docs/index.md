@@ -50,10 +50,19 @@ philosophy
 
 ```{toctree}
 :maxdepth: 2
+:caption: Guides
+
+guides/packages
+guides/publishing
+```
+
+```{toctree}
+:maxdepth: 2
 :caption: Reference
 
 reference/syntax
 reference/modules
+reference/manifest
 reference/types
 reference/builtins
 reference/runtime-errors

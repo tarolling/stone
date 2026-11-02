@@ -75,6 +75,17 @@ What it should infer next:
 - **Dead code.** Functions that are never called should be left out, not only unused runtime
   routines.
 
+Status: packages apply the same idea to versions. A `stone.toml` gives each dependency only the
+oldest version it works with, and stone uses the newest version anything in the program asks
+for, as Go does, so there are no version ranges to write, no solver to fail, and the same
+manifests always give the same versions without a lockfile choosing them. `stone.lock` only
+records a hash of what each package held when it was first downloaded, so a release that changes
+fails to build rather than changing a program. Two major versions of one package can be used at
+once, linked under different names, so there is no conflict to resolve by hand. Packages are
+downloaded from GitHub and GitLab releases, so there is no registry to run or to trust beyond the
+host and the hashes. Not done yet: packages in a subdirectory of a repository, sources other than
+GitHub and GitLab, and a shared database of checksums beyond trust on first use.
+
 ## Simple like Python
 
 The code a programmer reads and writes should look like Python's and need as few concepts.

@@ -13,6 +13,7 @@ pub mod interpreter;
 pub mod last_use;
 pub mod lexer;
 pub mod lift;
+pub mod package;
 pub mod parser;
 pub mod project;
 pub mod repl;

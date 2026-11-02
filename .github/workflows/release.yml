@@ -78,7 +78,7 @@ jobs:
     - name: Build
       run: |
         export PATH="$HOME/.cargo/bin:$PATH"
-        cargo build --release --locked -p stone --features self-update --target ${{ matrix.target }}
+        cargo build --release --locked -p stone --features self-update,fetch --target ${{ matrix.target }}
     - name: Smoke test
       if: matrix.smoke
       run: |

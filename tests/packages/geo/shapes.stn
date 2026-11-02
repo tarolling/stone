@@ -1,0 +1,5 @@
+// a module of the package, which uses another of its modules by its path
+use sum
+
+pub fn perimeter(sides: list[int]) -> int:
+    ret sum.total(sides)

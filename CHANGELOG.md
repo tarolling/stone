@@ -12,6 +12,28 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Packages, first step: a program can depend on other packages through a `stone.toml` next to
+  its entry file. Each `[dependencies]` entry names a directory for now
+  (`geo = { path = "../geo" }`), and its files use the package by that name: `use geo.shapes`
+  loads the package's `shapes.stn`, and `use geo` loads its `lib.stn`. A package's files see
+  only their own modules and their own dependencies, and two versions of one package with
+  different major versions can both be used.
+- Dependencies can name packages from GitHub and GitLab releases
+  (`json = { github = "alice/stone-json", version = "1.2.0" }`, or `gitlab` with an optional
+  `host`), read from the package store in `$STONE_HOME/packages` (`~/.stone/packages`, or
+  `%LOCALAPPDATA%\stone\packages` on Windows). Each dependency gives the oldest version it works
+  with, and the newest version any package in the program asks for is used, as Go selects
+  them, so the same manifests always give the same versions. `stone.lock`, written next to
+  `stone.toml`, records a hash of each package's files, and a package whose files no longer
+  match fails to build.
+- `stone add github:owner/repo` (or `gitlab:group/project`, a link to either, `--host` for
+  another GitLab, and `@1.2` for the newest 1.2.x or `@latest`, the default) adds a package's
+  newest release to `stone.toml` and downloads it with everything it uses; `stone remove`,
+  `stone fetch [--locked]`, and `stone tree` manage the rest. `run`, `build`, and `check`
+  download what a program uses but the store lacks, unless given `--offline`. A version is a
+  release whose tag is the version (`v1.2.0` or `1.2.0`), and only the `stone.toml` and `.stn`
+  files of its source archive are kept. `GITHUB_TOKEN` and `GITLAB_TOKEN` reach private
+  repositories. Downloading needs a build with the `fetch` feature, as release builds are.
 - The `gui` module works on Windows, with Win32 windows, under both `stone run` and in built
   programs: the same `gui.window` API, events, and `gui.run` as on Linux and macOS.
   `next_frame` waits for the desktop's next frame, and the window repaints itself from the last

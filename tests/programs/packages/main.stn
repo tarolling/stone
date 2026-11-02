@@ -1,0 +1,10 @@
+use geo
+use geo.Point
+use geo.shapes
+use num
+
+p = Point(x=3, y=4)
+print(geo.dist2(geo.origin(), p))
+print(p.shifted(2))
+print(shapes.perimeter([3, 4, 5]))
+print(num.cube(2))

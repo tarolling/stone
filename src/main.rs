@@ -10,6 +10,7 @@ use stone::format;
 use stone::interpreter::{Exit, Limits};
 use stone::project::{FsSources, SourceMap};
 
+mod deps;
 mod uninstall;
 #[cfg(feature = "self-update")]
 mod update;
@@ -34,6 +35,9 @@ struct Args {
 enum Command {
     /// Runs a file with the interpreter.
     Run {
+        /// Use only packages already downloaded.
+        #[arg(long)]
+        offline: bool,
         /// The file to run.
         file: String,
         /// Arguments for the program, which it reads with `args()`.
@@ -61,6 +65,9 @@ enum Command {
         /// its output is redirected. Needs a Windows target.
         #[arg(long)]
         windows_gui: bool,
+        /// Use only packages already downloaded.
+        #[arg(long)]
+        offline: bool,
     },
     /// Removes the build directory that `stone build` made.
     Clean {
@@ -72,6 +79,41 @@ enum Command {
     Check {
         /// The file to check.
         file: String,
+        /// Use only packages already downloaded.
+        #[arg(long)]
+        offline: bool,
+    },
+    /// Adds a package from a GitHub or GitLab release to the program in the current directory,
+    /// naming it in `stone.toml` and downloading it.
+    Add {
+        /// The package, as `github:owner/repo` or `gitlab:group/project`, or a link to one,
+        /// optionally followed by `@latest` (the default) or a version such as `@1.2`, which is
+        /// the newest 1.2.x.
+        package: String,
+        /// The name the program uses it under, instead of the package's own.
+        #[arg(long)]
+        name: Option<String>,
+        /// The host of a GitLab of its own, such as `gitlab.example.com`.
+        #[arg(long)]
+        host: Option<String>,
+    },
+    /// Removes a package from the program in the current directory.
+    Remove {
+        /// The name the program uses it under.
+        name: String,
+    },
+    /// Downloads every package a program uses and brings its `stone.lock` up to date.
+    Fetch {
+        /// A program's entry file or directory. Defaults to the current directory.
+        path: Option<PathBuf>,
+        /// Fail if `stone.lock` would change, as in CI.
+        #[arg(long)]
+        locked: bool,
+    },
+    /// Shows the packages a program uses, and the packages they use.
+    Tree {
+        /// A program's entry file or directory. Defaults to the current directory.
+        path: Option<PathBuf>,
     },
     /// Rewrites files in the standard layout.
     Fmt {
@@ -108,8 +150,23 @@ enum ExecutionMode {
         targets: Vec<Target>,
         /// Whether Windows executables start with no console.
         windows_gui: bool,
+        offline: bool,
     },
-    Check(String),
+    Check {
+        file: String,
+        offline: bool,
+    },
+    Add {
+        package: String,
+        name: Option<String>,
+        host: Option<String>,
+    },
+    Remove(String),
+    Fetch {
+        path: Option<PathBuf>,
+        locked: bool,
+    },
+    Tree(Option<PathBuf>),
     Clean(Option<PathBuf>),
     Fmt {
         paths: Vec<PathBuf>,
@@ -119,6 +176,7 @@ enum ExecutionMode {
     Run {
         file: String,
         args: Vec<String>,
+        offline: bool,
     },
     Uninstall {
         yes: bool,
@@ -133,19 +191,41 @@ fn main() -> ExitCode {
     let args = Args::parse();
 
     let mode = match args.command {
-        Some(Command::Run { file, args }) => ExecutionMode::Run { file, args },
+        Some(Command::Run {
+            file,
+            args,
+            offline,
+        }) => ExecutionMode::Run {
+            file,
+            args,
+            offline,
+        },
         Some(Command::Build {
             files,
             output,
             targets,
             windows_gui,
+            offline,
         }) => ExecutionMode::Build {
             files,
             output,
             targets,
             windows_gui,
+            offline,
         },
-        Some(Command::Check { file }) => ExecutionMode::Check(file),
+        Some(Command::Check { file, offline }) => ExecutionMode::Check { file, offline },
+        Some(Command::Add {
+            package,
+            name,
+            host,
+        }) => ExecutionMode::Add {
+            package,
+            name,
+            host,
+        },
+        Some(Command::Remove { name }) => ExecutionMode::Remove(name),
+        Some(Command::Fetch { path, locked }) => ExecutionMode::Fetch { path, locked },
+        Some(Command::Tree { path }) => ExecutionMode::Tree(path),
         Some(Command::Clean { path }) => ExecutionMode::Clean(path),
         Some(Command::Fmt { paths, check }) => ExecutionMode::Fmt { paths, check },
         Some(Command::Update { check, version }) => ExecutionMode::Update {
@@ -158,6 +238,7 @@ fn main() -> ExitCode {
                 ExecutionMode::Run {
                     file,
                     args: args.args,
+                    offline: false,
                 }
             } else {
                 ExecutionMode::Repl
@@ -171,17 +252,27 @@ fn main() -> ExitCode {
             output,
             targets,
             windows_gui,
+            offline,
         } => {
             let subsystem = match windows_gui {
                 true => Subsystem::Gui,
                 false => Subsystem::Console,
             };
-            build(&files, output.as_deref(), &targets, subsystem)
+            build(&files, output.as_deref(), &targets, subsystem, offline)
         }
-        ExecutionMode::Check(file) => {
+        ExecutionMode::Add {
+            package,
+            name,
+            host,
+        } => deps::add(&package, name.as_deref(), host.as_deref()),
+        ExecutionMode::Remove(name) => deps::remove(&name),
+        ExecutionMode::Fetch { path, locked } => deps::fetch(path.as_deref(), locked),
+        ExecutionMode::Tree(path) => deps::tree(path.as_deref()),
+        ExecutionMode::Check { file, offline } => {
             let Some(source) = read(&file) else {
                 return ExitCode::FAILURE;
             };
+            deps::prepare(Path::new(&file), offline);
             let (sources, diagnostics) =
                 driver::check_program(Path::new(&file), &source, &FsSources);
             // warnings alone still pass
@@ -222,7 +313,11 @@ fn main() -> ExitCode {
                 },
             }
         }
-        ExecutionMode::Run { file, args } => with_program(&file, |checked, sources| {
+        ExecutionMode::Run {
+            file,
+            args,
+            offline,
+        } => with_program(&file, offline, |checked, sources| {
             // the interpreter runs only what the machine it runs on can
             if let Ok(host) = Target::host() {
                 let unsupported = driver::unsupported(&checked.module, sources, host.os);
@@ -262,6 +357,7 @@ fn build(
     output: Option<&Path>,
     targets: &[Target],
     subsystem: Subsystem,
+    offline: bool,
 ) -> ExitCode {
     let mut unique: Vec<Target> = Vec::new();
     for &target in targets {
@@ -283,7 +379,7 @@ fn build(
     }
     let mut status = ExitCode::SUCCESS;
     for file in files {
-        let code = with_program(file, |checked, sources| {
+        let code = with_program(file, offline, |checked, sources| {
             let targets = if unique.is_empty() {
                 vec![Target::host()?]
             } else {
@@ -467,14 +563,17 @@ fn read(file: &str) -> Option<String> {
 ///
 /// Diagnostics are rendered with the path of the file they are in, the line, and a caret under
 /// the problem, while other errors, such as runtime errors, are printed as `file: error: message`.
-/// A program that ended with `os.exit` prints nothing more and exits with its status.
+/// A program that ended with `os.exit` prints nothing more and exits with its status. The
+/// packages it uses are downloaded first, unless `offline`.
 fn with_program(
     file: &str,
+    offline: bool,
     action: impl FnOnce(&Checked, &SourceMap) -> Result<(), Box<dyn Error>>,
 ) -> ExitCode {
     let Some(source) = read(file) else {
         return ExitCode::FAILURE;
     };
+    deps::prepare(Path::new(file), offline);
     let (sources, result) = driver::load(Path::new(file), &source, &FsSources);
     let err = match result {
         Ok(checked) => {

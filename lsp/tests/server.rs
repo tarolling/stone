@@ -1,5 +1,6 @@
 //! Drives the language server over an in-memory connection, the way an editor would.
 
+use std::path::{Path, PathBuf};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
@@ -19,16 +20,21 @@ impl Session {
     /// Starts a server and completes the initialize handshake, offering `encodings` as the
     /// client's position encodings. Returns the session and the server's capabilities.
     fn start(encodings: Option<&[&str]>) -> (Session, Value) {
+        let capabilities = match encodings {
+            Some(encodings) => json!({ "general": { "positionEncodings": encodings } }),
+            None => json!({}),
+        };
+        Session::start_with(capabilities)
+    }
+
+    /// Starts a server like [`Session::start`], for a client with these capabilities.
+    fn start_with(capabilities: Value) -> (Session, Value) {
         let (server, client) = Connection::memory();
         let handle = std::thread::spawn(move || stone_lsp::run(server).unwrap());
         let mut session = Session {
             client,
             server: Some(handle),
             next_id: 0,
-        };
-        let capabilities = match encodings {
-            Some(encodings) => json!({ "general": { "positionEncodings": encodings } }),
-            None => json!({}),
         };
         let result = session.request("initialize", json!({ "capabilities": capabilities }));
         session.notify("initialized", json!({}));
@@ -76,11 +82,18 @@ impl Session {
 
     /// Returns the next diagnostics the server publishes.
     fn diagnostics(&self) -> Value {
+        let (uri, diagnostics) = self.published();
+        assert_eq!(uri, URI);
+        diagnostics
+    }
+
+    /// Returns the next diagnostics the server publishes, and the URI of the file they are for.
+    fn published(&self) -> (String, Value) {
         match self.receive() {
-            Message::Notification(n) if n.method == "textDocument/publishDiagnostics" => {
-                assert_eq!(n.params["uri"], URI);
-                n.params["diagnostics"].clone()
-            }
+            Message::Notification(n) if n.method == "textDocument/publishDiagnostics" => (
+                n.params["uri"].as_str().unwrap().to_string(),
+                n.params["diagnostics"].clone(),
+            ),
             other => panic!("expected diagnostics, got {other:?}"),
         }
     }
@@ -329,4 +342,85 @@ fn a_change_to_one_file_republishes_the_others_in_its_program() {
     );
     assert_eq!(published(2), [(util.to_string(), 0), (main.to_string(), 1)]);
     session.shut_down();
+}
+
+/// Returns a new empty directory for a test named `name`.
+fn scratch(name: &str) -> PathBuf {
+    let dir = std::env::temp_dir().join(format!("stone-lsp-test-{}-{name}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    dir
+}
+
+fn uri_of(path: &Path) -> String {
+    stone_lsp::uri::file_uri(path).unwrap().as_str().to_string()
+}
+
+#[test]
+fn watches_manifests_and_publishes_their_errors() {
+    let dir = scratch("manifests");
+    let (app, geo) = (dir.join("app"), dir.join("geo"));
+    std::fs::create_dir_all(&app).unwrap();
+    std::fs::create_dir_all(&geo).unwrap();
+    let main = "use geo\nprint(geo.one())\n";
+    std::fs::write(app.join("main.stn"), main).unwrap();
+    let manifest = "[dependencies]\ngeo = { path = \"../geo\" }\n";
+    std::fs::write(app.join("stone.toml"), manifest).unwrap();
+    std::fs::write(geo.join("lib.stn"), "pub fn one() -> int:\n    ret 1\n").unwrap();
+
+    let (session, _) = Session::start_with(json!({
+        "workspace": { "didChangeWatchedFiles": { "dynamicRegistration": true } }
+    }));
+    // the server asks to hear of changes to manifests and lockfiles
+    let request = match session.receive() {
+        Message::Request(request) => request,
+        other => panic!("expected a request, got {other:?}"),
+    };
+    assert_eq!(request.method, "client/registerCapability");
+    let registration = &request.params["registrations"][0];
+    assert_eq!(registration["method"], "workspace/didChangeWatchedFiles");
+    assert_eq!(
+        registration["registerOptions"]["watchers"],
+        json!([{ "globPattern": "**/stone.toml" }, { "globPattern": "**/stone.lock" }])
+    );
+    let reply = Response::new_ok(request.id, Value::Null);
+    session.client.sender.send(reply.into()).unwrap();
+
+    let main_uri = uri_of(&app.join("main.stn"));
+    session.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": main_uri, "languageId": "stone", "version": 1, "text": main }
+        }),
+    );
+    // `geo` has no stone.toml yet, which the `use` and the program's manifest both say
+    let (uri, found) = session.published();
+    assert_eq!(uri, main_uri);
+    assert_eq!(
+        found[0]["message"],
+        "'geo' cannot be used: '../geo' has no stone.toml, so it is not a package"
+    );
+    let manifest_uri = uri_of(&app.join("stone.toml"));
+    let (uri, found) = session.published();
+    assert_eq!(uri, manifest_uri);
+    assert_eq!(
+        found[0]["range"]["start"],
+        json!({ "line": 1, "character": 0 })
+    );
+
+    std::fs::write(geo.join("stone.toml"), "[package]\nname = \"geo\"\n").unwrap();
+    let geo_manifest = uri_of(&geo.join("stone.toml"));
+    session.notify(
+        "workspace/didChangeWatchedFiles",
+        json!({ "changes": [{ "uri": geo_manifest, "type": 1 }] }),
+    );
+    assert_eq!(session.published(), (main_uri, json!([])));
+    // both manifests, the fixed one cleared
+    let mut rest = vec![session.published(), session.published()];
+    rest.sort_by(|a, b| a.0.cmp(&b.0));
+    let mut expected = vec![(manifest_uri, json!([])), (geo_manifest, json!([]))];
+    expected.sort_by(|a, b| a.0.cmp(&b.0));
+    assert_eq!(rest, expected);
+    session.shut_down();
+    let _ = std::fs::remove_dir_all(&dir);
 }

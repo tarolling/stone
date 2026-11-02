@@ -1411,7 +1411,119 @@ fn file_errors_are_worded_the_same_in_both_backends() {
 #[path = "cli/unix.rs"]
 mod unix;
 
+/// Tests of downloading packages from a fake GitHub, which need the `fetch` feature.
+#[cfg(feature = "fetch")]
+#[path = "cli/packages.rs"]
+mod packages;
+
+#[cfg(not(feature = "fetch"))]
+#[test]
+fn add_without_feature_explains_how_to_get_a_build_that_downloads() {
+    let dir = project("package_no_fetch", &[("main.stn", "print(1)\n")]);
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["add", "github:alice/json"])
+        .current_dir(&dir)
+        .output()
+        .expect("stone should run");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("cannot download packages"), "{stderr}");
+    assert!(!dir.join("stone.toml").exists());
+}
+
+#[test]
+fn tree_shows_the_packages_a_program_uses() {
+    let dir = project(
+        "package_tree",
+        &[
+            ("app/main.stn", "print(1)\n"),
+            (
+                "app/stone.toml",
+                "[package]\nname = \"app\"\nversion = \"0.2.0\"\n\n[dependencies]\n\
+                 geo = { path = \"../geo\" }\nshapes = { path = \"../shapes\" }\n",
+            ),
+            (
+                "geo/stone.toml",
+                "[package]\nname = \"geo\"\nversion = \"1.0.0\"\n\n[dependencies]\n\
+                 nums = { path = \"../num\" }\n",
+            ),
+            (
+                "shapes/stone.toml",
+                "[package]\nname = \"shapes\"\n\n[dependencies]\nnum = { path = \"../num\" }\n",
+            ),
+            ("num/stone.toml", "[package]\nname = \"num\"\n"),
+        ],
+    );
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["tree", "app"])
+        .current_dir(&dir)
+        .output()
+        .expect("stone should run");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).replace('\\', "/"),
+        "app 0.2.0\n\
+         ├── geo 1.0.0 (path:geo)\n\
+         │   └── nums = num (path:num)\n\
+         └── shapes (path:shapes)\n    \
+         └── num (path:num) (*)\n"
+    );
+}
+
 /// Tests of the `gui` module's Win32 windows, which run where Windows programs and PowerShell
 /// do: on Windows, and under WSL.
 #[path = "cli/windows_gui.rs"]
 mod windows_gui;
+
+#[test]
+fn a_package_from_the_store_runs_and_is_locked() {
+    let dir = project(
+        "package_store",
+        &[
+            ("app/main.stn", "use json\nprint(json.v())\n"),
+            (
+                "app/stone.toml",
+                "[dependencies]\njson = { github = \"alice/json\", version = \"1.2\" }\n",
+            ),
+            (
+                "home/packages/github.com/alice/json/1.2.0/stone.toml",
+                "[package]\nname = \"json\"\nversion = \"1.2.0\"\n",
+            ),
+            (
+                "home/packages/github.com/alice/json/1.2.0/lib.stn",
+                "pub fn v() -> str:\n    ret \"1.2.0\"\n",
+            ),
+        ],
+    );
+    let run = |command: &str| {
+        Command::new(env!("CARGO_BIN_EXE_stone"))
+            .args([command, "app/main.stn"])
+            .current_dir(&dir)
+            .env("STONE_HOME", dir.join("home"))
+            .output()
+            .expect("stone should run")
+    };
+    let output = run("run");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "1.2.0\n");
+    let lock = std::fs::read_to_string(dir.join("app/stone.lock")).expect("lock written");
+    assert!(lock.contains("name = \"json\"\ngithub = \"alice/json\"\nversion = \"1.2.0\"\n"));
+
+    // a changed release no longer matches the lock
+    std::fs::write(
+        dir.join("home/packages/github.com/alice/json/1.2.0/lib.stn"),
+        "pub fn v() -> str:\n    ret \"changed\"\n",
+    )
+    .unwrap();
+    let output = run("check");
+    assert_eq!(output.status.code(), Some(1));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("error: json 1.2.0 (github:alice/json) does not hold what it held"),
+        "{stderr}"
+    );
+    assert_eq!(
+        std::fs::read_to_string(dir.join("app/stone.lock")).unwrap(),
+        lock
+    );
+}

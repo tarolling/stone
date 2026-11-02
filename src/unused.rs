@@ -59,8 +59,11 @@ pub fn find(linked: &Linked, analysis: &Analysis) -> Vec<Diagnostic> {
         }
     }
 
-    let skipped =
-        |span: Span| span.file == FileId::PRELUDE || linked.sources.file(span.file).is_builtin();
+    // stone's own files, and the files of the packages a program depends on, are not its author's
+    let skipped = |span: Span| {
+        let file = linked.sources.file(span.file);
+        span.file == FileId::PRELUDE || file.is_builtin() || file.is_dependency()
+    };
     let mut warnings = vec![];
     for (symbol, reads) in analysis.symbols.iter().zip(&reads) {
         let short = symbol.name.rsplit('.').next().unwrap_or(&symbol.name);

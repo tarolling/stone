@@ -2253,3 +2253,222 @@ fn formatting_replaces_the_whole_document() {
     let edits = formatting(&doc("x=1\ny=\"é\"")).unwrap();
     assert_eq!(edits[0].range, Range::new(at(1, 1), at(2, 6)));
 }
+
+/// In-memory files at absolute paths, with `/store` as the package store.
+fn packaged(files: &[(&str, &str)]) -> MapSources {
+    let mut sources = MapSources::default();
+    for (path, text) in files {
+        sources.insert(*path, *text);
+    }
+    sources.set_store("/store");
+    sources
+}
+
+/// Opens the file at `path` of `sources` as part of the program it belongs to.
+fn packaged_doc(path: &str, sources: &MapSources) -> Document {
+    Document::in_program(Path::new(path), sources, Encoding::Utf16).expect("the file should exist")
+}
+
+const APP_MANIFEST: (&str, &str) = (
+    "/p/stone.toml",
+    "[dependencies]\ngeo = { path = \"../geo\" }\n\
+     json = { github = \"alice/json\", version = \"1.2\" }\n",
+);
+const APP_MAIN: (&str, &str) = (
+    "/p/main.stn",
+    "use geo.shapes\nuse json\nprint(shapes.area(2), json.v())\n",
+);
+const GEO_FILES: [(&str, &str); 3] = [
+    (
+        "/geo/stone.toml",
+        "[package]\nname = \"geo\"\nversion = \"1.2.0\"\n",
+    ),
+    (
+        "/geo/shapes.stn",
+        "pub fn area(x: int) -> int:\n    ret x * x\n",
+    ),
+    ("/geo/lib.stn", "pub fn unit() -> int:\n    ret 1\n"),
+];
+const JSON_FILES: [(&str, &str); 2] = [
+    (
+        "/store/github.com/alice/json/1.2.0/stone.toml",
+        "[package]\nname = \"json\"\nversion = \"1.2.0\"\n",
+    ),
+    (
+        "/store/github.com/alice/json/1.2.0/lib.stn",
+        "pub fn v() -> str:\n    ret \"1.2.0\"\n",
+    ),
+];
+
+/// The files of a program that uses a package in a directory and one downloaded into the store.
+fn app_files() -> Vec<(&'static str, &'static str)> {
+    let mut files = vec![APP_MAIN, APP_MANIFEST];
+    files.extend(GEO_FILES);
+    files.extend(JSON_FILES);
+    files
+}
+
+#[test]
+fn a_program_with_packages_has_no_errors() {
+    let doc = packaged_doc("/p/main.stn", &packaged(&app_files()));
+    assert_eq!(diagnostics(&doc), []);
+}
+
+#[test]
+fn a_use_of_a_package_that_is_not_downloaded_says_to_fetch_it() {
+    let mut files = vec![APP_MAIN, APP_MANIFEST];
+    files.extend(GEO_FILES);
+    let doc = packaged_doc("/p/main.stn", &packaged(&files));
+    let found = diagnostics(&doc);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].range, Range::new(at(2, 5), at(2, 9)));
+    assert_eq!(
+        found[0].message,
+        "'json' cannot be used: json 1.2.0 (github:alice/json) is not downloaded; run `stone fetch`"
+    );
+}
+
+#[test]
+fn errors_in_a_manifest_are_published_for_its_file() {
+    let mut files = vec![APP_MAIN, APP_MANIFEST];
+    files.extend(GEO_FILES);
+    let doc = packaged_doc("/p/main.stn", &packaged(&files));
+    let published = package_diagnostics(&doc);
+    let manifest: Uri = "file:///p/stone.toml".parse().unwrap();
+    let (_, found) = published
+        .iter()
+        .find(|(uri, _)| *uri == manifest)
+        .expect("the program's manifest");
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].range.start, at(3, 1));
+    assert_eq!(
+        found[0].message,
+        "json 1.2.0 (github:alice/json) is not downloaded"
+    );
+    // every manifest is published, so one that is fixed has its errors cleared
+    let geo: Uri = "file:///geo/stone.toml".parse().unwrap();
+    assert!(
+        published
+            .iter()
+            .any(|(uri, found)| *uri == geo && found.is_empty())
+    );
+}
+
+#[test]
+fn definition_opens_a_packages_file() {
+    let doc = packaged_doc("/p/main.stn", &packaged(&app_files()));
+    let location = |pos| definition(&doc, &uri_of("main.stn"), pos, None).unwrap();
+    // `area` in `shapes.area(2)`, from a directory
+    let area = location(at(3, 15));
+    assert_eq!(area.uri.as_str(), "file:///geo/shapes.stn");
+    assert_eq!(area.range.start, at(1, 8));
+    // `v` in `json.v()`, from the store
+    let v = location(at(3, 28));
+    assert_eq!(
+        v.uri.as_str(),
+        "file:///store/github.com/alice/json/1.2.0/lib.stn"
+    );
+    // the `use` of a package's module opens it
+    assert_eq!(location(at(1, 10)).uri.as_str(), "file:///geo/shapes.stn");
+}
+
+#[test]
+fn a_packages_names_cannot_be_renamed() {
+    let doc = packaged_doc("/p/main.stn", &packaged(&app_files()));
+    assert_eq!(prepare_rename(&doc, at(3, 15)), None);
+    assert_eq!(
+        rename(&doc, &uri_of("main.stn"), at(3, 15), "size"),
+        Err("'area' belongs to the package 'geo'".to_string())
+    );
+}
+
+#[test]
+fn a_downloaded_packages_own_files_cannot_be_renamed() {
+    let sources = packaged(&app_files());
+    let doc = packaged_doc("/store/github.com/alice/json/1.2.0/lib.stn", &sources);
+    assert_eq!(prepare_rename(&doc, at(1, 8)), None);
+    assert_eq!(
+        rename(&doc, &uri_of("lib.stn"), at(1, 8), "w"),
+        Err("'v' belongs to the package 'json'".to_string())
+    );
+}
+
+#[test]
+fn hover_names_a_packages_function_as_the_program_does() {
+    let doc = packaged_doc("/p/main.stn", &packaged(&app_files()));
+    assert_eq!(
+        hover_text(&doc, at(3, 15)).unwrap(),
+        "```stone\nfn geo.shapes.area(x: int) -> int\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(1, 10)).unwrap(),
+        "```stone\nmodule geo.shapes\n```"
+    );
+}
+
+#[test]
+fn use_completion_offers_dependencies_and_their_modules() {
+    let files = [
+        ("/p/main.stn", "use \nuse geo.\nuse json.\n"),
+        APP_MANIFEST,
+        GEO_FILES[0],
+        GEO_FILES[1],
+        GEO_FILES[2],
+        JSON_FILES[0],
+        JSON_FILES[1],
+    ];
+    let sources = packaged(&files);
+    let doc = packaged_doc("/p/main.stn", &sources);
+    let items = |pos: Position| -> Vec<(String, Option<String>)> {
+        let mut items: Vec<(String, Option<String>)> = completion(&doc, pos, &sources)
+            .into_iter()
+            .map(|i| (i.label, i.detail))
+            .collect();
+        items.sort();
+        items
+    };
+    let first = items(at(1, 5));
+    assert!(
+        first.contains(&("geo".to_string(), Some("package geo 1.2.0".to_string()))),
+        "{first:?}"
+    );
+    assert!(first.contains(&("json".to_string(), Some("package json 1.2.0".to_string()))));
+    // a package's modules, and the functions of its lib.stn, which is not a module of its own
+    assert_eq!(
+        items(at(2, 9)),
+        [
+            ("shapes".to_string(), None),
+            ("unit".to_string(), Some("fn geo.unit() -> int".to_string())),
+        ]
+    );
+    assert_eq!(
+        items(at(3, 10)),
+        [("v".to_string(), Some("fn json.v() -> str".to_string()))]
+    );
+}
+
+#[test]
+fn a_file_in_a_librarys_directory_is_checked_with_its_dependencies() {
+    let files = [
+        (
+            "/lib/stone.toml",
+            "[package]\nname = \"lib\"\n\n[dependencies]\ngeo = { path = \"../geo\" }\n",
+        ),
+        (
+            "/lib/lib.stn",
+            "use parts.sum\npub fn total() -> int:\n    ret sum.two()\n",
+        ),
+        (
+            "/lib/parts/sum.stn",
+            "use geo\npub fn two() -> int:\n    ret geo.unit() + geo.unit()\n",
+        ),
+        GEO_FILES[0],
+        GEO_FILES[2],
+    ];
+    let doc = packaged_doc("/lib/parts/sum.stn", &packaged(&files));
+    assert_eq!(diagnostics(&doc), []);
+    assert_eq!(
+        doc.file,
+        doc.sources.find(Path::new("/lib/parts/sum.stn")).unwrap()
+    );
+}

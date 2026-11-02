@@ -89,5 +89,17 @@ A result also has methods: `is_ok()`, `is_err()`, `unwrap()`, `unwrap_or(default
 stops the program with the error in the message, as in
 `cannot unwrap err: invalid literal for int() with base 10: '4x'`.
 
+A program that handles an error by reporting it can write the report with `eprint`, which
+takes the same values as `print` but writes the line to standard error, so it stays apart from
+the program's output:
+
+```stone
+match int("4x"):
+    case ok(n):
+        print(n)
+    case err(e):
+        eprint("skipping:", e)
+```
+
 With results in hand, {doc}`networking` shows a program that talks over the network, where
 almost anything can fail.

@@ -148,8 +148,10 @@ pub static BUILTINS: [&str; 10] = [
 ];
 
 /// The prelude, a stone file linked into every program, which defines `option[T]`, `ordering`,
-/// `result[T, E]`, the traits `eq`, `ord`, and `display`, and the sort `xs.sort()` uses for values of other
-/// types.
+/// `result[T, E]`, the struct `output`, the traits `eq`, `ord`, `display`, `from[T]`, and
+/// `try_from[T]`, the sort `xs.sort()` uses for values of other types, the list methods that take
+/// a function (`map`, `filter`, ...), `min`, `max`, and `clamp`, and the argument reduction of
+/// the trigonometric functions for huge arguments.
 pub const PRELUDE: &str = include_str!("prelude.stn");
 
 /// The prelude's struct of what a command run by `os.run` did: its exit status, then what it
@@ -469,7 +471,7 @@ pub static TYPE_DOCS: [BuiltinDoc; 12] = [
     BuiltinDoc {
         name: "socket",
         signature: "socket",
-        description: "A TCP connection from the `net` module. It is a handle, so a copy refers to \
+        description: "A TCP or Unix-socket connection from the `net` module. It is a handle, so a copy refers to \
                       the same connection, which closes right after the last statement that uses \
                       it.",
     },

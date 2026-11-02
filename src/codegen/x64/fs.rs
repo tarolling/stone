@@ -1,5 +1,6 @@
 //! The x86-64 runtime of the `fs` module, which reads and writes files and directories with
-//! Linux system calls, as `stdlib::fs` does through Rust's `std::fs` for the interpreter.
+//! system calls (Linux's, or on Windows the shims over `kernel32.dll` that `system` emits), as
+//! `stdlib::fs` does through Rust's `std::fs` for the interpreter.
 //!
 //! Each routine takes counted strings, which it borrows, and returns a new result, as
 //! `stone.parse_int_result` does: `ok` (tag 0) of its value, or `err` (tag 1) of a message worded

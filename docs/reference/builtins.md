@@ -57,6 +57,8 @@ for i in range(2, 5):
     print(i)   // 2, then 3, then 4
 ```
 
+## Conversions
+
 Conversions are calls of a type by its name with one value, as `int(x)`, which the prelude's
 traits `from` and `try_from` make. A conversion that cannot fail gives the type, and one that can
 gives a `result[T, str]`, which `?` passes on or `unwrap` takes apart. A program gives its own
@@ -240,7 +242,7 @@ around the change, so write `x = xs.pop()` first. The whole value of an assignme
 
 On a map, `pop` removes the entry for `key` and returns `some` of its value, or `none` if the map
 has no entry for it. The other entries keep their order, and adding `key` again puts it last.
-Removing an entry moves the ones after it, so it takes time in proportion to the map's size.
+It takes about the same time however large the map is.
 
 ```stone
 stack = [1, 2, 3]
@@ -1168,6 +1170,9 @@ whose stdout or stderr is not UTF-8 text, or holds a null byte (`not valid UTF-8
 and a `cmd` or argument holding a null character. A file with no `#!` line is not run through a
 shell, so it gives `exec format error`.
 
+`os.run` is not supported on Windows yet: building a program that calls it for Windows, or
+running or checking one on Windows, is the error `os.run is not supported on Windows yet`.
+
 ```stone
 use os
 
@@ -1742,20 +1747,25 @@ fs.write("out/report.txt", "done\n").unwrap()
 
 ## The `net` module
 
-`net` makes TCP connections and finds the addresses of hosts. Import it like a builtin module,
+`net` makes TCP connections and Unix-socket connections, and finds the addresses of hosts. Import it like a builtin module,
 with `use net` to call `net.connect("example.com", 80)`, or with `use net.connect` to call
 `connect("example.com", 80)`. Unlike the other builtin modules, it is written in stone, and a
 program that uses it is linked with its source, so its functions behave alike under `stone run`
 and in a built program, and an editor can show their code. A file named `net.stn` next to the
-entry file cannot be imported. TLS (`https`) is not supported.
+entry file cannot be imported. TLS (`https`) is not supported, and neither is Windows yet:
+building a program that uses `net` for Windows, or running or checking one on Windows, is the
+error `the net module is not supported on Windows yet`.
 
 A connection is a `socket`, and a port waiting for connections a `listener`. Both are types a
 signature can name, as in `fn serve(l: listener)`. A copy of one refers to the same connection,
 since a connection cannot be copied, and they cannot be compared with `==`. Each closes by
 itself right after the last statement that uses it, at the same point under both backends, or
-sooner with [`close`](#close). Their methods, [`send`](#send), `read_line`,
-[`read`](#read), `read_all`, [`accept`](#accept), and [`port`](#port), are listed
-with the other methods. Text is sent and read as UTF-8; there is no type for other bytes yet.
+sooner with [`close`](#close). Their methods, [`send`](#send), [`read_line`](#read_line),
+[`read`](#read), [`read_all`](#read_all), [`send_bytes`](#send_bytes),
+[`read_bytes`](#read_bytes), [`read_exact`](#read_exact), [`read_all_bytes`](#read_all_bytes),
+[`set_timeout`](#set_timeout), [`accept`](#accept), [`port`](#port), and [`close`](#close), are
+listed with the other methods. Text is sent and read as UTF-8, and other data as
+[`bytes`](types.md#bytes), through the same buffer.
 
 ```stone
 use net
@@ -1976,6 +1986,14 @@ on most desktops), and if there is none or it fails, the X server `DISPLAY` name
 `STONE_GUI` to `wayland` or `x11` asks for one of them alone. Every Linux desktop has one or the
 other, and on macOS XQuartz runs an X server.
 
+On Windows (10 version 1703 or later), a window is an ordinary Win32 window, which needs no
+display server: `STONE_GUI` may only be unset or `windows` there. Each window runs its messages
+on a thread of its own, so moving or resizing it keeps the program drawing, the window follows
+the scale of the monitor it is on, and `next_frame` waits for the desktop compositor's next
+frame. A built program imports `user32.dll`, `gdi32.dll`, and `dwmapi.dll` only if it opens a
+window, and `stone build --windows-gui` makes it a program with windows rather than a console
+program, so opening it from Explorer opens no console.
+
 On Wayland, a compositor that draws windows' frames itself (`zxdg_decoration_manager_v1`, as KDE,
 Sway, and Hyprland have) draws the window's; for one that does not, as GNOME's and WSLg's do not,
 `gui` draws its own: a title bar with the title and a close button, which moves the window when
@@ -2010,7 +2028,8 @@ right after the last statement that uses it, or sooner with `close`. Its methods
   cannot tell (an X server without Present), it is about 60 times a second. It waits on the
   display's connection, using no processor time meanwhile.
 - `w.show(c: canvas)` shows the canvas in the window, its top left pixel at the window's. Where
-  the canvas does not reach, the window keeps what it showed on X11, and is black on Wayland.
+  the canvas does not reach, the window keeps what it showed on X11, and is black on Wayland
+  and Windows.
 - `w.size() -> tuple[int, int]` returns the window's width and height, as the last `resize`
   event gave them.
 - `w.scale() -> float` returns how many of the screen's pixels each of the window's is across:
@@ -2049,7 +2068,10 @@ away gives its reason,
 as in `err("the X server refused the connection: No protocol specified")`, and one whose pixels
 are not 24-bit color is `err("unsupported display format: depth 16, 16 bits per pixel")`.
 A `STONE_GUI_SCALE` that is not a number from 0.5 to 8 is
-`err("STONE_GUI_SCALE is '3x', but must be a number from 0.5 to 8")`.
+`err("STONE_GUI_SCALE is '3x', but must be a number from 0.5 to 8")`, a size outside that range
+is `err("invalid window size: 0x480")`, and a `STONE_GUI` other than `wayland` or `x11` is
+`err("STONE_GUI is 'mac', but can only be 'wayland' or 'x11'")`, or on Windows, other than
+`windows`, `err("STONE_GUI is 'x11', but on Windows can only be 'windows'")`.
 
 ### Events
 

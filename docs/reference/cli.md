@@ -4,7 +4,7 @@
 stone [FILE [ARGS...]] [COMMAND]
 ```
 
-Every command reads one `.stn` file, the entry file, along with every module it uses (see
+`run`, `build`, and `check` read one `.stn` file, the entry file, along with every module it uses (see
 [Modules](modules.md)), then checks them before doing anything else. If the checker
 finds errors, the command prints all of them and exits with status 1 without running anything.
 Errors print as `file:line:col: error: message`, followed by the source line and a caret under
@@ -41,7 +41,8 @@ top-level code. A Windows executable is a console program that imports only from
 own `kernel32.dll` and `bcrypt.dll` (and, for a program that opens windows with the `gui`
 module, `user32.dll`, `gdi32.dll`, and `dwmapi.dll`), so it runs on any x86-64 Windows 10 or 11
 machine; windows need Windows 10 version 1703 or later. The `net` module and `os.run` are not
-supported there yet, and building a program that uses them for Windows is an error.
+supported there yet, so building a program that uses them for Windows is an error, and so is
+running or checking one on Windows.
 
 `--windows-gui` builds Windows executables as programs with windows rather than console
 programs, so opening one from Explorer opens no console beside its window. Such a program has
@@ -80,7 +81,8 @@ stone build examples/basics.stn --target aarch64-linux --target aarch64-macos
 
 The release archives use the same names for the machines the `stone` binary itself runs on,
 such as `stone-x86_64-linux.tar.gz` and `stone-x86_64-windows.zip`, plus
-`stone-x86_64-macos.tar.gz` for Intel Macs, where stone runs programs but cannot build them.
+`stone-x86_64-macos.tar.gz` for Intel Macs, where stone runs programs and builds them for the
+other targets, but cannot build programs for Intel Macs, so a build there needs `--target`.
 
 The executable reads its own arguments and standard input the same way, so `./build/sum 1 2 3`
 behaves like `stone run sum.stn 1 2 3`.
@@ -237,11 +239,11 @@ returns no value, such as `print(1)`.
 
 ```text
 $ stone
-stone 0.2.0. Press Ctrl+D to exit.
+stone 0.4.1. Press Ctrl+D to exit.
 >>> x = 6
 >>> x * 7
 42
->>> fn greet(name: str) -> str;
+>>> fn greet(name: str) -> str:
 ...     ret "hi " + name
 ...
 >>> greet("Ada")

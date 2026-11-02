@@ -7,23 +7,30 @@
 //! `bodies` twice, and does it again on every turn of a loop. [`optimize`] runs these passes over
 //! each function:
 //!
-//! 1. A `list_unique` of a variable inside a loop that cannot make the list shared again moves
+//! 1. A copy whose source cannot change while it is read is replaced by its source (see
+//!    [`forward_copies`]), so a `for` loop over `range(n)` compares with `n` itself, and a
+//!    remainder by a power of two only compared with 0 becomes a test of the low bits (see
+//!    [`test_remainders`]).
+//! 2. A `list_unique` of a variable inside a loop that cannot make the list shared again moves
 //!    before the loop, as a `list_unique_or_null`, since the variable may be null when the loop
 //!    never runs. Copying a shared list early is invisible, since lists are values.
-//! 2. An `element_slot`, or a `list_load` in a loop that changes no list, whose list and index the
+//! 3. An `element_slot`, or a `list_load` in a loop that changes no list, whose list and index the
 //!    loop never changes, and which every turn runs before anything that could fail or call out,
 //!    runs once before the loop, behind a copy of the loop's test, so it fails exactly when the
 //!    first turn would, and not at all for a loop that never runs. The ones inside the loop
 //!    become copies of its result.
-//! 3. Within a function, an `element_slot` or `list_load` already done on every path to it
+//! 4. Within a function, an `element_slot` or `list_load` already done on every path to it
 //!    becomes a copy of the earlier result, and a `list_unique` of a list already unique is
 //!    dropped, as long as nothing between them could change the list or share it.
-//! 4. A slot that is a constant past another, such as a field of an element at `add v4, 3`, is
+//! 5. A slot that is a constant past another, such as a field of an element at `add v4, 3`, is
 //!    read and written as an offset from it (`list_get v0, v4 + 3`), and work whose result
 //!    nothing reads is dropped.
-//! 5. Each loop tests at the bottom as well as on entry (see [`rotate_loops`]), and then a list
+//! 6. Each loop tests at the bottom as well as on entry (see [`rotate_loops`]), and then a list
 //!    the loop reads and writes without moving its elements has its elements' address loaded
 //!    once on the way in (see [`hoist_data`]).
+//!
+//! [`never_negative`] also tells the backends which indexes, such as a `range` counter, need no
+//! adjustment for counting from the end.
 //!
 //! The IR is not SSA, so every fact is about vregs and dies when any vreg it names is written.
 

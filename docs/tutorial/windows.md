@@ -33,7 +33,8 @@ so a shape may hang over an edge.
 `gui.event` values: `key_down` and `key_up` with the key's name (`"a"`, `"enter"`, `"left"`),
 `text` with what a key typed, `mouse_move`, `mouse_down`, and `mouse_up` with the point (and
 the button's name), `scroll`, `resize` with the new size, `redraw` when the window lost what
-it showed, and `close` when its close button is pressed. `next_frame()` returns the same
+it showed, `close` when its close button is pressed, and `failed` if the connection to the
+display breaks. `next_frame()` returns the same
 events, after waiting until the screen has shown the last image, so a loop that reads events
 with it, draws, and shows makes an animation at the screen's own rate, with no tearing:
 
@@ -117,13 +118,14 @@ print(gui.run("counter", 300, 100, counter(clicks=0)))
 ```
 
 `update` changes the state in place, as a method that changes `self` does, and `draw` only
-reads it. `run` returns the last state, so the program can go on with it after the window
-closes.
+reads it. `run` returns `ok` of the last state, so the program can go on with it after the
+window closes, or an `err` if the window does not open or its connection breaks.
 
 For a bigger program, `examples/spin.stn` in the repository draws spinning 3D shapes: it builds
 meshes with `math.sin` and `math.cos`, turns and lights them, sorts their faces with
 `sort_by_key`, and fills them in on a canvas, all in stone. Built with
-`stone build examples/spin.stn` and run as `examples/build/spin`, it draws 60 frames a second.
+`stone build examples/spin.stn` and run as `examples/build/spin`, it draws a frame each time the
+screen refreshes.
 
 That is the whole tutorial. The {doc}`../reference/syntax` and {doc}`../reference/builtins`
 pages cover the details, including every method of a [socket](../reference/builtins.md#send)

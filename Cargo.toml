@@ -38,7 +38,7 @@ tar = { version = "0.4", default-features = false, optional = true }
 unexpected_cfgs = { level = "warn", check-cfg = ["cfg(fuzzing)"] }
 
 [features]
-# `stone self-update`, which downloads releases over HTTPS. release.yml turns it on
+# `stone update`, which downloads releases over HTTPS. release.yml turns it on
 self-update = ["dep:self_update"]
 # downloading packages from GitHub and GitLab releases. release.yml turns it on
 fetch = ["dep:ureq", "dep:flate2", "dep:tar"]

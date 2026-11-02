@@ -20,7 +20,8 @@ the compiler can always infer them instead.
 Python 3.15's `lazy import numpy` is a good example. Python needs the keyword because
 importing a module runs its top-level code, which can be slow and can have side effects, so
 the interpreter cannot delay it without being told to. stone avoids the problem by design: a
-library module holds only `use` and `fn`, so importing it runs nothing, and the compiler
+library module holds only `use`, `fn`, `enum`, `struct`, `trait`, and `impl`, so importing it
+runs nothing, and the compiler
 links in only what the program uses. Every import is effectively lazy, and there is no keyword
 for it.
 
@@ -69,11 +70,12 @@ What stone already infers:
 
 What it should infer next:
 
-- **Where values live and when they are copied.** Values that never escape a function should
-  live on its stack, and an update to a value nothing else refers to should happen in place.
-  See [value semantics](#value-semantics).
-- **Dead code.** Functions that are never called should be left out, not only unused runtime
-  routines.
+- **Where values live.** Values that never escape a function should live on its stack. An
+  update to a value nothing else refers to already happens in place; see
+  [value semantics](#value-semantics).
+- **Dead code.** A library's functions, and the runtime routines only they call, are already
+  left out unless the program reaches them; the entry file's own functions that are never
+  called should be left out too.
 
 Status: packages apply the same idea to versions. A `stone.toml` gives each dependency only the
 oldest version it works with, and stone uses the newest version anything in the program asks
@@ -191,7 +193,8 @@ either, so they are shared freely: each is stored once, with a count of the vari
 it, and a `match` hands out its values with a reference each.
 
 A connection is the one thing that is not a value, since it cannot be copied: a `socket` or
-`listener` from the `net` module is a handle, and copies of it refer to the same connection.
+`listener` from the `net` module is a handle, and copies of it refer to the same connection, and
+so is a `gui` window, which holds a connection to the display or, on Windows, a native window.
 Nothing asks the programmer to close one, as nothing asks them to free memory: both backends
 close it right after the last statement that uses it, the point where the interpreter drops
 the variable and compiled code releases it, so the other end sees the connection close at the
@@ -217,15 +220,15 @@ remainder by a constant, which multiply by a magic number, and globals that hold
 the whole program, which read as that literal. Arithmetic on whole lists, such as `a * 2.0 + b`,
 compiles to one loop with no intermediate lists and no index checks, which handles two elements
 at a time with SSE2 or NEON where the operations allow, so on the `vector` benchmark it is
-about 2.7 times as fast as numpy, which builds a temporary array for each operator. A tuple is
+about 3.8 times as fast as numpy, which builds a temporary array for each operator. A tuple is
 never allocated: its values live in registers like any other variables, a function takes and
 returns them as separate values, and a list of tuples stores each element's values side by side,
 like a Rust `Vec<(i64, String)>`, which is a first step toward choosing where every value lives.
 Structs are compiled the same way, so a `list[Point]` is a flat array of coordinates whose fields
-are read at fixed offsets, so the `nbody` benchmark runs within about 1.5 times of C.
+are read at fixed offsets, so the `nbody` benchmark runs within about 1.4 times of C.
 The trigonometric functions of `math` are expanded inline at each call, from the same code the
 interpreter runs, so both give the same bits, and the compiler computes each value once, a sine
-and a cosine of the same value with one reduction, so the `trig` benchmark runs about 20% faster
+and a cosine of the same value with one reduction, so the `trig` benchmark runs about 15% faster
 than C calling glibc.
 A generic function, or a method of a generic struct, is compiled once for each set of types it is
 used with, so its copies are as fast as functions written for each type, and a generic struct is
@@ -250,9 +253,9 @@ yet capture connections or, in a generic function, values of a type parameter.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.
-Wider vectors
-such as AVX2 on targets that have them, and optimization passes (inlining, constant
-propagation, removing checks and reference counts it can prove redundant) are future work.
+Wider vectors such as AVX2 on targets that have them, splitting a value's live range around
+calls, and removing reference counts it can prove redundant beyond moves at last use are future
+work.
 
 ## Errors like Rust
 

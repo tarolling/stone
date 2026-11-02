@@ -56,7 +56,7 @@ wire it into `Server::handle_request` and `capabilities`.
 
    ```sh
    npx @vscode/vsce package
-   code --install-extension stone-0.1.0.vsix
+   code --install-extension stone-lang-<version>.vsix
    ```
 
 `npm test` runs the extension's tests, which cover how `server.js` picks a server: the

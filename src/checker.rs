@@ -1,11 +1,13 @@
 //! Type checker and name resolver that validates a stone AST before it runs.
 //!
 //! Function signatures are written, and every other type is inferred. Every expression gets one of
-//! `int`, `float`, `bool`, `str`, `list[T]`, `tuple[...]`, a struct, an enum, or `option[T]`, and every
-//! variable keeps a single type for its whole life. Each parameter and return type comes from the
-//! function's signature, so `fn add(a: int, b: int) -> int` is `fn(int, int) -> int`, and a
-//! function without `->` returns no value, so its call can only be a statement. Functions are
-//! monomorphic, and every call is checked against the signature.
+//! `int`, `float`, `bool`, `str`, `bytes`, `list[T]`, `map[K, V]`, `tuple[...]`, a struct, an enum
+//! (`option[T]` and `result[T, E]` among them), a function type such as `fn(int) -> int`, a
+//! type parameter, or a handle such as `socket`, and every variable keeps a single type for its
+//! whole life. Each parameter and return type comes from the function's signature, so
+//! `fn add(a: int, b: int) -> int` is `fn(int, int) -> int`, and a function without `->` returns no
+//! value, so its call can only be a statement. A generic function's body is checked once, with
+//! each type parameter opaque, and every call is checked against the signature.
 //!
 //! Scoping follows Python. Inside a function, parameters and every name the function assigns are
 //! local, and other names refer to top-level variables or functions. Functions can only be
@@ -80,7 +82,8 @@ pub enum Type {
 /// What a [`Type::Handle`] holds on to.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Handle {
-    /// A TCP connection, which `net.connect` and `listener.accept()` make.
+    /// A TCP or Unix-socket connection, which `net.connect`, `net.connect_unix`, and
+    /// `listener.accept()` make.
     Socket,
     /// A TCP port waiting for connections, which `net.listen` makes.
     Listener,

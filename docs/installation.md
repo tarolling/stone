@@ -97,7 +97,8 @@ machine, though programs that use the `net` module or `os.run` cannot be built f
 nor run on it. Executables
 are for the machine stone runs on unless `--target` picks another (see
 [the CLI reference](reference/cli.md)), and none needs anything else installed. Executables for
-Intel Macs are not supported. The interpreter runs the same programs everywhere.
+Intel Macs are not supported. The interpreter runs the same programs everywhere, apart from
+those that use `net` or `os.run` on Windows.
 
 ## Editor support
 

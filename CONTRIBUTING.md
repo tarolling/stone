@@ -29,8 +29,8 @@ cargo build
 cargo test
 ```
 
-The test suite runs the programs `stone build` compiles, so it needs x86-64 or arm64 Linux (or
-arm64 macOS). To also run the cross-target tests and compare the built-in assembler with GNU's,
+The test suite runs the programs `stone build` compiles, so it needs x86-64 or arm64 Linux, arm64
+macOS, or x86-64 Windows. To also run the cross-target tests and compare the built-in assembler with GNU's,
 install qemu-user and the other processor's binutils, for example
 `sudo apt-get install qemu-user binutils-aarch64-linux-gnu` on x86-64 Debian or Ubuntu. Tests
 that need missing tools skip themselves. See [building](docs/development/building.md) for the
@@ -58,8 +58,8 @@ A few rules hold across the codebase:
 - Every stage returns an error on bad input and never panics.
 - The checker only accepts programs that both backends run identically.
 - Runtime error messages, and the positions they point at, match between backends.
-- The `stone` crate depends only on `clap` (plus the opt-in `self-update` feature). Compiled
-  programs depend on no libc.
+- The `stone` crate depends only on `clap` (plus the opt-in `self-update` and `fetch`
+  features). Compiled programs depend on no libc.
 
 The [style guide](docs/development/style.md) lists the conventions for code, comments, docs, and
 commit messages, and the checklist for adding a builtin or keyword.
@@ -71,12 +71,14 @@ CI must pass before a pull request is merged. It runs, among other things:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo clippy --all-targets --features self-update -- -D warnings
+cargo clippy --all-targets --features self-update,fetch -- -D warnings
 cargo test
 cargo test --features self-update --bin stone
+cargo test --features fetch --lib --test cli
 ```
 
-on x86-64 Linux, arm64 Linux, and arm64 macOS, plus the shell script tests, the VS Code
+on x86-64 Linux and x86-64 Windows (`cargo test` alone on arm64 Linux and arm64 macOS), plus the
+shell script tests, `scripts/test-install.ps1` on Windows, the VS Code
 extension's `npm test`, and a short fuzzing run. Keep each pull request to one change, and
 describe what it does and how you tested it.
 

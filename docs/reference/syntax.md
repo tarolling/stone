@@ -62,9 +62,9 @@ These names are reserved and cannot be used for variables or functions:
 
 A statement ends at the end of its line. A statement that opens a block (`fn`, `if`, `elif`,
 `else`, `while`, `for`, `case`) ends in `:`, followed either by an indented block on the next
-lines or by a single simple statement on the same line. `enum`, `struct`, `impl`, and `match`
-end in `:` too, and are always followed by an indented block: of variants or fields, one per
-line, of `fn`s, or of `case`s:
+lines or by a single simple statement on the same line. `enum`, `struct`, `trait`, `impl`, and
+`match` end in `:` too, and are always followed by an indented block: of variants or fields, one
+per line, of `fn`s, or of `case`s:
 
 ```stone
 for i in range(3):
@@ -143,7 +143,8 @@ are an error.
 | function definition | `fn f(a: int, b: int) -> int:` or `fn first[T](xs: list[T]) -> T:` plus a block |
 | enum definition | `enum Shape:` or `enum Tree[T]:` plus a block of variants, such as `Circle(float)` and `Empty` |
 | struct definition | `struct Point:` or `struct Pair[A, B]:` plus a block of fields, such as `x: float` and `y: float` |
-| `impl` block | `impl Point:` plus a block of `fn`s, such as `fn norm(self) -> float:` plus a block |
+| trait definition | `trait Shape:` or `trait add[R]:` plus a block of `fn`s, each with a block or none, such as `fn area(self) -> float` |
+| `impl` block | `impl Point:` or `impl Shape for Circle:` plus a block of `fn`s, such as `fn norm(self) -> float:` plus a block |
 | `match` | `match s:` plus a block of cases, such as `case Shape.Circle(r):` plus a block |
 | `ret` | `ret`, `ret x`, `ret (a, b)` |
 | `if` / `elif` / `else` | `if x < 0:` ... `elif x == 0:` ... `else:` ... |
@@ -154,8 +155,8 @@ are an error.
 
 A `for` loop's variable is a plain name, or names to unpack each tuple of a list into. Unpacking
 takes names only, each once, as many as the tuple has values; an element such as `xs[0]` is
-assigned on a line of its own. Functions, enums, structs, and `impl` blocks can only be defined
-at the top level.
+assigned on a line of its own. Functions, enums, structs, traits, and `impl` blocks can only be
+defined at the top level.
 `use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
 
 ## Augmented assignment
@@ -220,8 +221,8 @@ From lowest to highest precedence:
 | `or` | `bool` conditions |
 | `and` | `bool` conditions |
 | `not` | a `bool` condition |
-| `==` `!=` `<` `<=` `>` `>=` `in` `not in` | numbers and strings; `==` and `!=` also bools, tuples, structs, options, and enums; `in` and `not in` a value and a map, list, or string |
-| `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings |
+| `==` `!=` `<` `<=` `>` `>=` `in` `not in` | numbers, strings, bytes, and structs that implement `ord`; `==` and `!=` also bools, tuples, structs, options, and enums; `in` and `not in` a value and a map, list, string, or bytes |
+| `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings or two bytes |
 | `*` `/` `%` | two ints or two floats, or lists of them |
 | unary `+` `-` | an int or a float, or a list of them |
 | `**` | an int or float base and an `int` exponent, or lists of them |

@@ -1,8 +1,10 @@
 //! The built-in PE linker, which turns an assembled x86-64 [`Object`] into a Windows executable.
 //!
 //! Windows has no stable system call interface, so a Windows program calls the system through
-//! `kernel32.dll`, and `bcrypt.dll` for random numbers, the DLLs that every Windows has. The
-//! executable is a PE32+ console program that imports the functions in [`IMPORTS`]. Each call
+//! `kernel32.dll`, and `bcrypt.dll` for random numbers, the DLLs that every Windows has, plus
+//! `user32.dll`, `gdi32.dll`, and `dwmapi.dll` for a program that opens a `gui` window. The
+//! executable is a PE32+ console program, or with [`Subsystem::Gui`] one with windows and no
+//! console, that imports the functions in [`IMPORTS`] it calls. Each call
 //! to one, `call WriteFile`, goes to a thunk after the code that jumps through the function's
 //! slot in the import address table, which the loader fills in. Every other address is relative
 //! to the instruction that uses it, so the image needs no base relocations and loads anywhere.

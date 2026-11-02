@@ -151,7 +151,7 @@ fn prepare(
                     program.file("c").into(),
                     "-o".into(),
                     binary.clone().into(),
-                    // for sqrt in nbody
+                    // for sqrt in nbody and the trigonometry in trig
                     "-lm".into(),
                 ]
             }

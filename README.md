@@ -25,7 +25,7 @@ irm https://raw.githubusercontent.com/tarolling/stone/main/install.ps1 | iex
 
 to upgrade later, run `stone update` (or `stone update --check` to see if there is a new release). to remove it, run `stone uninstall`.
 
-`stone run` and `stone check` work everywhere. `stone build` writes executables itself, with no assembler, linker, or C compiler installed: static x86-64 or arm64 linux programs, arm64 macos programs that need only the system's `libSystem`, or x86-64 windows programs that need only `kernel32.dll` (without the `net` and `gui` modules or `os.run` for now). it builds for the machine it runs on, and `--target` (`x86_64-linux`, `aarch64-linux`, `aarch64-macos`, or `x86_64-windows`) builds for any of them from any machine.
+`stone run` and `stone check` work everywhere. `stone build` writes executables itself, with no assembler, linker, or C compiler installed: static x86-64 or arm64 linux programs, arm64 macos programs that need only the system's `libSystem`, or x86-64 windows programs that need only `kernel32.dll` and `bcrypt.dll` (plus `user32.dll`, `gdi32.dll`, and `dwmapi.dll` for `gui` windows). windows programs cannot use the `net` module or `os.run` yet, under `stone run` or `stone build`. it builds for the machine it runs on, and `--target` (`x86_64-linux`, `aarch64-linux`, `aarch64-macos`, or `x86_64-windows`) builds for any of them from any machine.
 
 to build from source instead, with rust installed:
 
@@ -54,8 +54,11 @@ if you use a coding agent, give it [`docs/agents/python-to-stone.md`](https://ra
 | `src/` | the `stone` library (lexer, parser, interpreter, codegen) and the CLI in `main.rs` |
 | `examples/` | sample programs, each with the output it should print in a `.out` file |
 | `tests/programs/` | small programs that each cover one feature, also with `.out` files |
-| `tests/programs.rs` | runs every program above through both backends and compares output |
-| `docs/` | architecture notes and the grammar (`stone.gram`, `stone.asdl`) |
+| `tests/programs.rs` | runs every program above, and the tutorial's in `docs/examples/`, through both backends and compares output |
+| `docs/` | the documentation site (Sphinx), with the tutorial's programs in `docs/examples/`, the grammar in `docs/grammar/`, and prompts for coding agents in `docs/agents/` |
+| `lsp/` | `stone-lsp`, the language server |
+| `editors/vscode/` | the VS Code extension, which runs `stone-lsp` |
+| `fuzz/` | fuzz targets, including one that compares `stone run` with `stone build` on generated programs |
 | `bench/` | benchmarks comparing `stone build` with C and Python (see `bench/README.md`) |
 
 ## testing

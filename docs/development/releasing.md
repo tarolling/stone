@@ -31,7 +31,7 @@ sh scripts/changelog.sh release CHANGELOG.md 0.1.3         # what the bump after
 2. Tag the release and push the tag:
 
    ```sh
-   git tag v0.1.3 && git push origin v0.1.3
+   git tag v<version> && git push origin v<version>
    ```
 
 3. Bump to the next version, which edits `Cargo.toml` and stone's entry in each `Cargo.lock`,
@@ -44,13 +44,14 @@ sh scripts/changelog.sh release CHANGELOG.md 0.1.3         # what the bump after
    ```
 
 `.github/workflows/release.yml` checks that the tag matches `Cargo.toml`, builds `stone` with the
-`self-update` feature for x86-64 and arm64 Linux (musl) and macOS, smoke-tests each binary it can
-run, and publishes `stone-<target>.tar.gz` plus a `.sha256` for each as a GitHub release, with
+`self-update` and `fetch` features for x86-64 and arm64 Linux (musl) and macOS and for x86-64
+Windows, smoke-tests each binary it can run, and publishes `stone-<target>.tar.gz`, or
+`stone-x86_64-windows.zip` for Windows, plus a `.sha256` for each as a GitHub release, with
 the version's section of `CHANGELOG.md` as its notes. It is always marked Latest.
 Running the workflow by hand from the Actions tab builds and tests the archives without
 publishing.
 
-`install.sh` and `stone update` both download from these releases. To test the install
+`install.sh`, `install.ps1`, and `stone update` all download from these releases. To test the install
 script against a local release, build first and run
 
 ```sh
@@ -67,7 +68,7 @@ The same steps, with `editors/vscode/CHANGELOG.md` and `editors/vscode/package.j
 1. Tag the release and push the tag:
 
    ```sh
-   git tag vscode-v0.1.6 && git push origin vscode-v0.1.6
+   git tag vscode-v<version> && git push origin vscode-v<version>
    ```
 
 2. Bump to the next version, which edits `editors/vscode/package.json` and `package-lock.json`
@@ -84,8 +85,8 @@ platform plus a universal one, and publishes them to the VS Code Marketplace and
 show `editors/vscode/CHANGELOG.md` on their Changelog tabs (the packaged copy has the tag's
 notes under the version's heading, dated that day). Then it creates a GitHub release
 titled "VS Code extension X.Y.Z" with every `.vsix` attached and the version's section of the
-changelog as its notes. That release is never marked Latest, since `install.sh` and
-`stone update` download from the Latest release.
+changelog as its notes. That release is never marked Latest, since `install.sh`,
+`install.ps1`, and `stone update` download from the Latest release.
 Publishing needs the repository secret `OVSX_PAT` for Open VSX, and `AZURE_CLIENT_ID` and
 `AZURE_TENANT_ID` for a Microsoft Entra ID app that is a member of the `tarolling` Marketplace
 publisher.

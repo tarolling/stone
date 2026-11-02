@@ -21,8 +21,11 @@ stone promises memory safety, so these are security issues, not only bugs:
   free.
 - Input to `stone run`, `stone build`, `stone check`, or the language server that makes them run
   code or touch files they should not, beyond the program itself and its build output.
-- Weaknesses in how stone is installed or updated: `install.sh`, `stone update`, or the release
-  archives and their checksums.
+- Weaknesses in how stone is installed or updated: `install.sh`, `install.ps1`, `stone update`,
+  or the release archives and their checksums.
+- Weaknesses in how packages are downloaded and checked: a release archive that writes outside
+  its directory in the store, or a package whose contents differ from the hash in `stone.lock`
+  without an error.
 - `stone clean` or `stone uninstall` deleting anything other than what they document.
 
 A crash, panic, or wrong output with no security impact is an ordinary bug. Please report it as a

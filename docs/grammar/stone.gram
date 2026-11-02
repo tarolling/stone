@@ -4,7 +4,7 @@
 
 # ========================= START OF THE GRAMMAR =========================
 
-# Comments run from '#' to the end of the line and are dropped by the lexer, along with blank
+# stone comments run from '//' to the end of the line and are dropped by the lexer, along with blank
 # lines, so neither ever produces NEWLINE, INDENT, or DEDENT.
 
 # NUMBER is an int literal such as 42, or a float literal such as 1.5, 1e3, or 2.5e-3. A float
@@ -246,7 +246,8 @@ while_stmt:
 # For statement
 # -------------
 
-# the iterable is a list, or range(n) or range(a, b), which counts without building one
+# the iterable is a list, a str (its characters), bytes (its ints), a map (its keys), or
+# range(n) or range(a, b), which counts without building one
 for_stmt:
     | 'for' star_targets 'in' ~ expressions ':' block
 
@@ -263,7 +264,8 @@ expression:
     | lambdef
 
 # a function written where it is used, whose body is one expression on the same line; it may
-# use only its own parameters, whose types may be left out
+# use its own parameters, whose types may be left out, and the variables around it, of which it
+# captures copies
 lambdef:
     | '|' [parameters] '|' expression
 

@@ -1,10 +1,13 @@
 //! The builtin `gui` module: canvases to draw on, and windows that show them.
 //!
 //! Like `net`, `gui` is written in stone, in `gui.stn`, which a program that says `use gui` is
-//! linked with like a module file of its own. It speaks the X11 protocol itself over a socket
-//! from `net`, and reaches the system through the internal module `gui_sys`, whose one function,
-//! [`pack`], turns pixels into the bytes a display or an image file takes, which a loop in stone
-//! would do too slowly under `stone run`. Compiled code does the same in `stone.gui_pack`.
+//! linked with like a module file of its own. It speaks the Wayland or the X11 protocol itself
+//! over a socket from `net`, or on Windows opens Win32 windows, and reaches the system through
+//! the internal module `gui_sys`. Its functions [`pack`] and [`pack_scaled`] turn pixels into the
+//! bytes a display or an image file takes, which a loop in stone would do too slowly under
+//! `stone run`, and the rest share memory with a display server, take descriptors it sends, and
+//! drive Win32 windows. Compiled code does the same in `stone.gui_pack` and the routines beside
+//! it.
 
 use super::BuiltinDoc;
 

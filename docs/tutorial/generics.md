@@ -27,10 +27,10 @@ worked out from how the result is used. Arguments must agree, so with
 
 The checker checks a generic function's body once, for every type `T` could be, so a mistake
 is always reported inside the function, never at a distant call. A value of type `T` can be
-assigned, passed, returned, printed, and stored in lists, tuples, options, and map values. It
-cannot be used in arithmetic, compared with `==` or `<`, converted with `str`, used as a
-condition, indexed, looped over, or matched, and it has no methods, since `T` might be a type
-that allows none of these. A list of `T` is still a list, so `xs.len()`, `xs.append(x)`, and
+assigned, passed, returned, printed, written into a string with `str(x)` or `"{x}"`, and stored
+in lists, tuples, options, and map values. It cannot be used in arithmetic, compared with `==`
+or `<`, used as a condition, indexed, looped over, or matched, and its only method is
+`display`, since `T` might be a type that allows none of the rest. A list of `T` is still a list, so `xs.len()`, `xs.append(x)`, and
 `xs[0]` all work on a `list[T]`. To give `T` methods, or let it be compared, bound it by a trait,
 as {doc}`traits` shows.
 

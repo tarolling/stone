@@ -22,7 +22,7 @@ runs, reporting every place they conflict.
 | enums | the variants an `enum` lists, such as `Shape.Circle(1.0)`, which never change |
 | `ordering` | `less`, `equal`, or `greater`, which `cmp` returns |
 | `fn(T1, ...) -> R` | functions, such as `fn(int, list[str]) -> bool`, which are values: named, passed, stored, and called |
-| `socket`, `listener` | a TCP connection, and a port waiting for connections, from the [`net` module](builtins.md#the-net-module): handles, so a copy refers to the same connection, which closes right after the last statement that uses it |
+| `socket`, `listener` | a TCP or Unix-socket connection, and a port waiting for connections, from the [`net` module](builtins.md#the-net-module): handles, so a copy refers to the same connection, which closes right after the last statement that uses it |
 
 ## Writing types
 
@@ -55,7 +55,7 @@ after. Assigning a different type later is an error:
 
 ```text
 x = 1
-x = "one"   # error: cannot assign str to 'x', which is int
+x = "one"   // error: cannot assign str to 'x', which is int
 ```
 
 An empty list `[]` starts with an unknown element type, which is filled in by what is appended
@@ -88,8 +88,8 @@ as `int` or a struct, and cannot take types of its own (`T[int]`).
 The body is checked once, with each type parameter as a type of its own that stands for any
 type, so every error is reported inside the generic function or at an argument, never because
 of a distant call. A value of type `T` can be assigned, passed, returned, printed, and stored
-in lists, tuples, options, and map values, but not used in arithmetic, compared, converted with
-`str`, used as a condition, indexed, iterated, matched, or used as a map key, and it has only the
+in lists, tuples, options, and map values, but not used in arithmetic, compared, used as a
+condition, indexed, iterated, matched, or used as a map key, and it has only the
 methods of the traits that bound it (see [Traits](#traits)). Two different type parameters are
 different types.
 
@@ -441,8 +441,8 @@ Values separated by commas need their parentheses everywhere else, so `x = 1, 2`
 
 A tuple prints as Python prints one, `(1, 'a')`, with strings inside it quoted. `==` and `!=`
 compare two tuples value by value, so `(1, "a") == (1, "a")` is `true`, as long as no value is a
-list or a map. A tuple cannot be ordered with `<`, iterated, converted with `str`, or used in
-arithmetic or as a condition.
+list or a map. A tuple cannot be ordered with `<`, iterated, or used in arithmetic or as a
+condition.
 
 A tuple is not stored anywhere of its own: the compiler keeps each of its values where it would
 keep a variable, passes and returns them as separate values, and stores the values of a list's
@@ -483,8 +483,8 @@ variable may still be named `output`, though a function may not.
 
 A struct prints with its name and fields, as in `Point(x=1.0, y=2.0)`, with the strings it holds
 quoted. `==` and `!=` compare two structs field by field, as long as no field holds a list or a
-map. A struct cannot be ordered with `<`, converted with `str`, iterated, or used in arithmetic or
-as a condition.
+map. A struct cannot be ordered with `<` unless it implements `ord` (see [Traits](#traits)), and
+cannot be iterated or used in arithmetic or as a condition.
 
 Structs are defined at the top level, and can be used before their definition. A library module
 makes one usable from other files with `pub struct`, and `use shapes.Point` imports it, or
@@ -572,13 +572,14 @@ it in place. An entry changes like a list's element, through any place that star
 variable: `m[k] += 1`, `m[k].append(x)`, `m[k].x = 1.0`, `grid[r][c] = v` for a map of maps,
 `p.counts[k] += 1` for a struct's field, and `p.counts.pop(k)`. A plain assignment `m[k] = v`
 adds the entry if it is missing, but a key on the way to what changes, or the target of `+=`,
-must have one, or the program stops with `key not found`. A map cannot be compared with `==`,
-converted with `str`, or used in arithmetic or as a condition.
+must have one, or the program stops with `key not found`. A map cannot be compared with `==`
+or used in arithmetic or as a condition.
 
 An entry is stored as a key and its value's values side by side, as a list stores tuples, in
 insertion order, with a hash table to find each key, so reading and setting an entry takes
-about the same time however large the map is. Removing an entry moves the ones after it down,
-so `pop` takes time in proportion to the map's size. An entry can hold at most 32 values,
+about the same time however large the map is. `pop` takes about the same time too: it marks
+the entry removed, and the map closes up the gaps once removed entries are more than half, so
+the entries left keep their order. An entry can hold at most 32 values,
 counting its key and each field of its value's tuples and structs.
 
 ## Enums
@@ -631,8 +632,7 @@ variable. Values print as they are written, as in `Shape.Rect(2.0, 3.0)`, with t
 hold quoted. `==` and `!=` compare two values of an enum, or two options, by variant and then by
 the values they hold, so `some(1) == some(1)` and `x != none` work, as long as no variant holds a
 list or a map. Comparing values nested more than 10,000 deep stops the program, as printing them
-does. They cannot be ordered with `<`, converted with `str`, or used in arithmetic or as
-conditions; `match` tells them apart and names their values.
+does. They cannot be ordered with `<` or used in arithmetic or as conditions; `match` tells them apart and names their values.
 
 Enums are defined at the top level, and can be used before their definition. A library module
 makes one usable from other files with `pub enum`, and `use shapes.Shape` imports it, or
@@ -777,11 +777,11 @@ These keep the two backends identical and catch common mistakes:
   results, and `str(3)` writes them.
 - **Conditions are `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject ints,
   floats, strings, lists, and `none`, so `if 1 or 0:` is an error; write `n != 0` instead of `n`.
-- **Lists and maps are not comparable.** `==` and `!=` compare numbers, bools, strings, and
-  tuples, structs, options, and enum values of them, part by part, but not lists or maps, even
+- **Lists and maps are not comparable.** `==` and `!=` compare numbers, bools, strings, bytes,
+  and tuples, structs, options, and enum values of them, part by part, but not lists or maps, even
   inside another value, unless a struct holding one implements `eq`. Functions, sockets, and
   listeners are never compared. `<`, `<=`, `>`, and `>=`
-  compare only numbers, strings, and structs that implement `ord`.
+  compare only numbers, strings, bytes, and structs that implement `ord`.
 - **A call without a value is a statement.** A function without `->`, and builtins such as
   `print`, return no value, so their calls can only be statements of their own.
 - **Matches cover every value.** The cases of a `match` must fit every value of its subject,
@@ -804,8 +804,9 @@ These keep the two backends identical and catch common mistakes:
   argument and returns the changed one instead. A function that changes a parameter and then
   never uses it gets a warning, since its caller cannot see the change.
 - **`range` is only a `for` iterable.** It cannot be stored or passed around.
-- **Functions are top level, and only called.** A function cannot be assigned, stored, or
-  passed as a value, and a builtin's name cannot be assigned to.
+- **Functions are defined at the top level.** A function's name is a value that can be
+  assigned, stored, and passed (see [Functions](#functions)), but builtins, methods, and
+  variants are not values, and a builtin's name cannot be assigned to.
 - **Signatures are written.** Every parameter has a type, and a function that returns a value
   writes its type after `->`.
 - **Calls match.** Each call passes as many arguments as the function has parameters, each of

@@ -49,20 +49,22 @@ only changes how others name it. `use` statements come first in a file.
 
 ## pub
 
-A function is private to its file unless it starts with `pub`. `main.stn` can call
+A function is private to its file unless it starts with `pub`, and so is a struct, an enum, or a
+trait (`pub struct Point:`), which `use stats.Point` imports. `main.stn` can call
 `stats.mean` and `stats.best`, but not `stats.total`, which only `stats.stn` itself can use. Two
 modules can each have a private function with the same name without clashing.
 
 ## What a module holds
 
-A module other than the entry file holds only `use` statements and functions. Using a module
-never runs any code, so two modules may use each other. A module's functions see their own
+A module other than the entry file holds only `use` statements and definitions: functions,
+structs, enums, traits, and `impl` blocks. Using a module never runs any code, so two modules may use each other. A module's functions see their own
 parameters and locals, the functions of their own file, and what that file uses, but never the
 entry file's variables.
 
 The checker infers types across every file together, so a function in a module gets its types
 from how the program calls it.
 
-See {doc}`../reference/modules` for every rule.
+See {doc}`../reference/modules` for every rule, and {doc}`../guides/packages` for using modules
+from other projects.
 
 Next, {doc}`errors`.

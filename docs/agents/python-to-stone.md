@@ -16,8 +16,9 @@ since stone copies values.
    sometimes `None`, a name reused for an int and then a float, or a list that mixes types). Find
    arithmetic that could pass 64 bits, such as products in hashes and random number generators,
    and check that every intermediate value stays below 2^63, or the result will wrap. Decide how each will be translated
-   before converting anything. If something cannot be translated (networking, threads,
-   third-party libraries), say so up front and ask whether to continue.
+   before converting anything. If something cannot be translated (threads, third-party
+   libraries, TLS, or on Windows, networking and subprocesses), say so up front and ask whether to
+   continue.
 2. **Choose the types.** Write down a stone signature for every function: each parameter's type
    and the return type. A value that may be missing becomes `option[T]`; a value that is one of
    several shapes becomes an `enum`; a class becomes a `struct`; a function that mutates an
@@ -181,7 +182,7 @@ The error is the message Python's `int(s)` raises, such as
 | `s.replace(a, b)`, `s.count(a)`, `s.rfind(a)`, `s.splitlines()` | the same; `rfind` gives an option, as `find` does |
 | `s.isdigit()`, `s.isalpha()` | loops over characters, comparing with `<` and `>` |
 | `s * 3` | a loop of `+=` |
-| `ord(c)`, `chr(n)` | not available; compare characters as strings (`c >= "a" and c <= "z"`) |
+| `ord(c)`, `chr(n)` | for ASCII, `c.bytes()[0]` and `bytes([n])?.text()?` (in a function that returns a `result[T, str]`); to test a character's range, compare strings (`c >= "a" and c <= "z"`) |
 | `input()`, `except EOFError:` | `input()` is a `result[str, str]`: `input().unwrap()` where a line must be there, or `match` it, whose `err` is the end of the input |
 | `sys.stdin`, `for line in sys.stdin` | `while not eof(): line = input().unwrap()` |
 | `open(path).read()` | `fs.read(path)`, a `result[str, str]`, after `use fs` |
@@ -198,7 +199,7 @@ The error is the message Python's `int(s)` raises, such as
 | `input=` to a subprocess | not available: the program's stdin is empty |
 | `os.environ.get("X", "d")` | `os.env("X").unwrap_or("d")`, after `use os` |
 | `random.randint`, `time.time()` | `random.randint`, `time.now()`, after `use random` and `use time` |
-| `b"..."`, `bytes([...])`, `data[i]`, `s.encode()`, `data.decode()` | the same `b"..."` and `bytes([...])`, `data[i]` is an int, `s.bytes()`, `data.text()` (a result: `err` for bytes that are not UTF-8) |
+| `b"..."`, `bytes([...])`, `data[i]`, `s.encode()`, `data.decode()` | the same `b"..."`, `bytes([...])` gives a result (`err` for a value outside 0 to 255), `data[i]` is an int, `s.bytes()`, `data.text()` (a result: `err` for bytes that are not UTF-8) |
 | `open(p, "rb").read()`, `open(p, "wb").write(data)` | `fs.read_bytes(p)`, `fs.write_bytes(p, data)`, after `use fs` |
 | `socket.create_connection((host, port), timeout=t)`, `sock.settimeout(t)` | `net.connect_timeout(host, port, t)`, `c.set_timeout(t)`, after `use net`; a timeout is `err("timed out")` |
 | `sock.sendall(data)`, `sock.recv(n)`, a `makefile()` line | `c.send_bytes(data)` or `c.send(text)`, `c.read_bytes(n)`, `c.read_line()` (`ok(none)` at the end) |
@@ -248,7 +249,7 @@ could hit.
 - **List operators.** `xs + ys` adds element by element (and stops if the lengths differ), and
   `xs * 2` doubles each element. The checker catches some of these; read each one carefully.
 - **`find`.** It returns `some(i)` or `none`, never -1: `s.find(t).unwrap_or(-1)`.
-- **Sorting.** `xs.sort()` sorts ints, floats, strings, and structs that implement `ord`, and is
+- **Sorting.** `xs.sort()` sorts ints, floats, strings, bytes, and structs that implement `ord`, and is
   stable for structs, like Python's sort. Floats sort `nan` last.
 
 ## Worked example

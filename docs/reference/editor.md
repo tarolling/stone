@@ -32,7 +32,8 @@ indentation after a line ending in `:`.
 ## Installing
 
 Install "stone" by tarolling from the VS Code Marketplace, or from Open VSX in editors such as
-VSCodium. On Linux and macOS (x86-64 or arm64) the extension bundles `stone-lsp`. On other
+VSCodium. On Linux and macOS (x86-64 or arm64) and x86-64 Windows the extension bundles
+`stone-lsp`. On other
 platforms, or for other editors, install the server with
 
 ```sh

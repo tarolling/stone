@@ -23,7 +23,7 @@ type Identifier = String;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Constant {
-    /// An arbitrary-precision integer that auto-promotes and never overflows, such as `42`.
+    /// A 64-bit signed integer, such as `42`, whose arithmetic wraps on overflow.
     Int(i64),
     // signed integers
     I8(i8),
@@ -425,8 +425,9 @@ pub enum ExprKind {
         step: Option<Box<Expr>>,
     },
     /// A lambda, such as `|x| x * 2` or `|p: Point| p.x`, a function written where it is used,
-    /// which may use only its own parameters. Linking turns each into a function of its own
-    /// ([`crate::lift::lift_lambdas`]), so only code that parses without linking ever sees one.
+    /// which may use its own parameters and the variables around it. Linking turns each into a
+    /// function of its own ([`crate::lift::lift_lambdas`]), so only code that parses without
+    /// linking ever sees one.
     Lambda { args: Arguments, body: Box<Expr> },
     /// A lambda that uses variables from outside it, which linking turns into a value of the
     /// function `function` it makes of the lambda ([`crate::lift::lift_lambdas`]) holding a copy
@@ -579,13 +580,13 @@ pub enum StmtKind {
         op: Operator,
         value: Box<Expr>,
     },
-    /// A `for` loop, such as `for i in 10: print(i)`.
+    /// A `for` loop, such as `for i in range(10): print(i)`.
     For {
         target: Box<Expr>,
         iter: Box<Expr>,
         body: Vec<Stmt>,
     },
-    /// A `while` loop, such as `while x: x = x - 1`.
+    /// A `while` loop, such as `while x > 0: x = x - 1`.
     While { test: Box<Expr>, body: Vec<Stmt> },
     /// An `if` statement, where `elif` and `else` branches are nested in `orelse`.
     If {

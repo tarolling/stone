@@ -69,8 +69,9 @@ functions.
 
 ## Builtin modules
 
-`os`, `math`, `random`, `time`, and `fs` are builtin modules with no file, so `use math`,
-`use math.sqrt`, and `use math as m` work in any file without a `math.stn`. A program cannot have
+`os`, `math`, `random`, `time`, `fs`, `net`, and `gui` are builtin modules, so `use math`,
+`use math.sqrt`, and `use math as m` work in any file without a `math.stn`. The first five have
+no file, and `net` and `gui` are written in stone and linked with a program that uses them. A program cannot have
 a module of its own with one of those names: using it is the error
 `'math' is a builtin module, so rename math.stn`. `prelude` is taken too, since the functions of
 stone's prelude are linked as if in a module of that name. See [the builtins](builtins.md) for
@@ -79,10 +80,12 @@ their functions:
 | module | for |
 | --- | --- |
 | [`os`](builtins.md#the-os-module) | the machine and process a program runs on |
-| [`math`](builtins.md#the-math-module) | absolute values, least and greatest, square roots, and rounding down |
+| [`math`](builtins.md#the-math-module) | absolute values, least and greatest, square roots, rounding down, trigonometry, and the constants `pi`, `tau`, and `e` |
 | [`random`](builtins.md#the-random-module) | pseudo-random numbers, the same in every backend after a seed |
 | [`time`](builtins.md#the-time-module) | the time of day, timing code, and sleeping |
 | [`fs`](builtins.md#the-fs-module) | reading and writing files and directories |
+| [`net`](builtins.md#the-net-module) | TCP and Unix-socket connections, and finding hosts' addresses |
+| [`gui`](builtins.md#the-gui-module) | drawing pictures and showing them in windows |
 
 A builtin module's functions are only reachable through it, so a program can still name its
 own variables and functions `min`, `max`, `sleep`, or `env`.

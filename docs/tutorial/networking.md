@@ -3,7 +3,8 @@
 The builtin `net` module connects programs over TCP. `net.connect(host, port)` opens a
 connection to a server and `net.listen(host, port)` waits for connections of its own. Both
 return a result, since a host can be unknown, a port refused, or a connection cut at any time,
-and so does every method of a connection.
+and so does every method of a connection that sends, reads, or accepts. `net` is not supported
+on Windows yet.
 
 ## Connections
 
@@ -60,6 +61,16 @@ fn ask(host: str, question: str) -> result[str, str]:
     c.send("{question}\n")?
     ret ok(c.read_line()?.unwrap_or(""))
 ```
+
+## Unix sockets and waiting
+
+`net.connect_unix(path)` connects to the Unix socket at `path`, through which a server on the
+same machine, such as a display server or `/var/run/docker.sock`, takes connections. It gives the
+same `socket` as `net.connect`, with the same methods.
+
+A program that has other work to do between messages can ask first: `net.ready(c, seconds)` is
+`true` once a read of `c` would not wait, waiting at most `seconds` for something to arrive, and
+`false` if nothing came in that time, so `net.ready(c, 0.0)` only looks.
 
 ## Hosts and addresses
 

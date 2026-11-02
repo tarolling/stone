@@ -1,0 +1,53 @@
+// a map is written with braces, from each key to its value
+ages = {"ada": 36, "alan": 41}
+print(ages["ada"], ages.len())
+
+// assigning to a key adds its entry, or replaces the value of one it has
+ages["grace"] = 85
+ages["ada"] += 1
+print(ages)
+
+// in looks for a key
+print("alan" in ages, "linus" in ages, "linus" not in ages)
+
+// get gives an option, for a key that may be missing
+print(ages.get("linus"), ages.get("grace").unwrap_or(0))
+
+// for walks the keys in the order their entries were added
+for name in ages:
+    print(name, ages[name])
+for name, age in ages.items():
+    print("{name} is {age}")
+
+// pop removes an entry and gives its value as an option
+print(ages.pop("alan"), ages.pop("alan"))
+print(ages.keys(), ages.values())
+
+// counting is a map's classic job
+counts = {}
+for word in "the cat saw the dog".split():
+    counts[word] = counts.get(word).unwrap_or(0) + 1
+print(counts)
+
+// an entry changes in place through any place, such as a list it holds
+groups = {"even": [0], "odd": []}
+for i in range(1, 6):
+    if i % 2 == 0:
+        groups["even"].append(i)
+    else:
+        groups["odd"].append(i)
+print(groups)
+
+// assigning a map copies it, as with lists
+copy = counts
+copy["the"] = 0
+print(counts["the"], copy["the"])
+
+// a function names a map's type with its key and value types
+fn total(m: map[str, int]) -> int:
+    sum = 0
+    for k in m:
+        sum += m[k]
+    ret sum
+
+print(total(counts))

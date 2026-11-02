@@ -142,7 +142,7 @@ For a private repository, or to avoid GitHub's limit on requests without a token
 `GITHUB_TOKEN` (or `GITLAB_TOKEN`) to a token that can read it.
 
 Release builds of stone can download. A build from source needs the `fetch` feature for that
-(`cargo install --features fetch`), and without it reads only packages already downloaded.
+(`cargo install --git https://github.com/tarolling/stone --features fetch stone`), and without it reads only packages already downloaded.
 
 ## In the editor
 

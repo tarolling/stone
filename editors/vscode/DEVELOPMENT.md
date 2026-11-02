@@ -25,7 +25,7 @@ This file is left out of the packaged extension, so it does not show on the Mark
 
    ```sh
    npx @vscode/vsce package
-   code --install-extension stone-lang-0.1.3.vsix
+   code --install-extension stone-lang-<version>.vsix
    ```
 
 ## Tests
@@ -41,7 +41,7 @@ in `CHANGELOG.md` and sets `package.json`, `package-lock.json`, and `stone-lsp`'
 `lsp/Cargo.toml` and `Cargo.lock` together, and commit what it prints:
 
 ```sh
-git tag vscode-v0.1.6 && git push origin vscode-v0.1.6
+git tag vscode-v<version> && git push origin vscode-v<version>
 sh scripts/bump-version.sh vscode patch   # or minor, major, or a version such as 1.0.0
 ```
 

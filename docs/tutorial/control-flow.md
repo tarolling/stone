@@ -19,16 +19,21 @@ ends only with `break` or `ret`.
 
 Comparisons are `==`, `!=`, `<`, `<=`, `>`, and `>=`. They chain the way they do in Python:
 `1 < x < 10` means `1 < x and x < 10`, and evaluates `x` once. `<` and its relatives compare
-numbers and strings; `==` and `!=` also compare bools, and tuples, structs, options, and enum
-values part by part, but not lists or maps.
+numbers, strings, bytes, and structs that implement `ord` (see {doc}`traits`); `==` and `!=`
+also compare bools, and tuples, structs, options, and enum values part by part, but not lists or
+maps.
+
+`in` and `not in` ask whether a list holds a value, a string holds some text, or a map has a
+key, as in `"b" in ["a", "b"]`, `"ell" in "hello"`, and `key not in counts`. They never chain
+with other comparisons.
 
 `and`, `or`, and `not` combine conditions and short-circuit, so `x != 0 and 10 / x > 1` never
 divides by zero.
 
 ## Loops
 
-`while` checks its condition before each iteration. `for` walks a list or counts with
-`range`:
+`while` checks its condition before each iteration. `for` walks a list, the characters of a
+string, the keys of a map, or the ints of `bytes`, or counts with `range`:
 
 - `range(n)` counts `0, 1, ..., n - 1`
 - `range(a, b)` counts `a, a + 1, ..., b - 1`

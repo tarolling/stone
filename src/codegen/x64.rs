@@ -595,7 +595,7 @@ mod tests {
     use crate::driver::parse_program;
     use crate::stdlib::MAX_CALL_DEPTH;
 
-    /// Parses and assembles `source` without invoking gcc.
+    /// Parses and assembles `source`.
     fn assemble(source: &str) -> Result<String, String> {
         let module = parse_program(source).map_err(|e| e.to_string())?;
         X64Generator::new().assemble(&module)
@@ -977,7 +977,7 @@ mod tests {
         }
     }
 
-    /// Links and assembles `source` without invoking gcc, so that it can `use os`.
+    /// Links and assembles `source`, so that it can `use os`.
     fn assemble_linked(source: &str) -> String {
         let (_, module) = crate::driver::load(
             Path::new("main.stn"),

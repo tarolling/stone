@@ -15,8 +15,13 @@ sibling `.out` file. This is the main guarantee that the interpreter and the com
 tested too, by building each program with `--target` and running it under qemu-user, when the
 emulator is on `PATH`: `qemu-aarch64` on an x86-64 machine, or `qemu-x86_64` on an arm64 one.
 Otherwise that pass is skipped with a note. Compiled programs are static and need no libc, so
-qemu needs nothing else. CI runs both backends: each job installs qemu-user for the other
+qemu needs nothing else. CI runs both backends: each Linux job installs qemu-user for the other
 processor, and an arm64 job runs the suite natively.
+
+Off macOS, every program is also built for `aarch64-macos` without running it, and off Windows,
+a `build-x86_64-windows` pass builds every program as an `.exe` and runs it through WSL interop
+or `wine` when either is there, and otherwise only links it. A program that uses `net` or
+`os.run` is skipped for Windows. The macOS and Windows CI jobs run every program natively.
 
 `tests/assembler.rs` checks the built-in assembler and linker against GNU's. For every golden
 program and both processors, it assembles the backend's output with GNU as, links it with GNU
@@ -34,11 +39,21 @@ tests/programs/
 ```
 
 A program that should fail at runtime also gets a `name.err` file holding text its stderr must
-contain, such as `division by zero`. It must then exit with an error under both backends, after
-printing its `.out`.
+contain, the position line without the path, such as `:3:7: error: division by zero`. It must
+then exit with an error under both backends, after printing its `.out`. A few more sibling files
+set a program up:
+
+- `name.stderr`: the exact stderr every backend must write, for programs that use `eprint`
+  (without one, a successful run's stderr is not checked)
+- `name.in`: the program's standard input, which is otherwise empty
+- `name.args`: its command-line arguments, one per line
+- `name.env`: `NAME=value` lines added to its environment, for `os.env`
+- `name.files/`: a directory copied into the program's working directory before it runs. Each
+  backend runs a program in a new empty directory of its own, so programs that write files
+  never meet
 
 A program of several files is a directory instead, run from its `main.stn`, with the `.out` (and
-any `.err`, `.in`, or `.args`) next to `main.stn`:
+any `.err`, `.in`, `.args`, `.env`, or `main.files/`) next to `main.stn`:
 
 ```text
 tests/programs/

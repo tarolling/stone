@@ -14,18 +14,22 @@ cargo +nightly fuzz run parse -- -dict=fuzz/stone.dict
 | target | input | checks |
 | --- | --- | --- |
 | `lex`, `parse` | arbitrary text | the front end returns tokens, a module, or an error, and never panics, overflows the stack, or takes exponential time |
+| `format` | arbitrary text | formatting returns an error or text that formatting again leaves unchanged, and never panics |
 | `interpret` | arbitrary text | the interpreter finishes under `fuzz::LIMITS` without panicking |
 | `codegen` | arbitrary text that parses | both backends' `assemble` succeeds or returns an error, and the assembly it returns assembles and links |
 | `structured` | generated programs | the same stages on deep, valid programs, which both backends must compile, assemble, and link |
 | `differential` | generated programs | `stone run` and `stone build` print the same output |
 
 `stone_fuzz::generate` writes valid programs rule by rule from the grammar, tracking scope so
-every name and call is defined and every program passes the checker. Seeds for the text targets
+every name and call is defined and every program passes the checker. Besides ints, floats, and
+bools, they use strings, structs with `impl` blocks, enums, options, maps, and lists of them,
+under rules in `fuzz/src/compound.rs` that keep them from failing at runtime. Seeds for the text targets
 are the `.stn` programs in `fuzz/corpus/<target>/`, and `fuzz/stone.dict` lists stone's tokens.
 
 `cargo test --manifest-path fuzz/Cargo.toml` checks the generator on stable Rust, including
-that generated programs pass the checker, that 2,000 of them assemble and link for both
-processors, and that 150 of them print the same under both backends. The compiled side builds
+that generated programs pass the checker and format stably, that 2,000 of them assemble and link
+for every target, and that 150 of them print the same under both backends and free everything
+they allocate, plus the same checks on longer programs, which reach compound values more often. The compiled side builds
 for the host's processor unless `STONE_FUZZ_TARGET` names the other one, such as
 `STONE_FUZZ_TARGET=aarch64` on an x86-64 machine, which runs the program under qemu-user, as
 the golden tests do.

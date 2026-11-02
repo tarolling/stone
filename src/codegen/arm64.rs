@@ -635,7 +635,7 @@ mod tests {
     use crate::codegen::context::function_label;
     use crate::driver::parse_program;
 
-    /// Parses and assembles `source` without invoking gcc.
+    /// Parses and assembles `source`.
     fn assemble(source: &str) -> Result<String, String> {
         let module = parse_program(source).map_err(|e| e.to_string())?;
         Arm64Generator::new().assemble(&module)
@@ -871,7 +871,7 @@ mod tests {
         }
     }
 
-    /// Links and assembles `source` without invoking gcc, so that it can `use os`.
+    /// Links and assembles `source`, so that it can `use os`.
     fn assemble_linked(source: &str) -> String {
         let (_, module) = crate::driver::load(
             Path::new("main.stn"),

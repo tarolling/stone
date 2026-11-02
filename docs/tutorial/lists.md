@@ -24,14 +24,16 @@ from it.
 - `items.pop()` removes the last element and returns it as an option, which is `none` if the
   list is empty, and `items.pop(i)` removes and returns the one at `i`.
   `items.insert(i, value)` puts `value` at `i`, `items.extend(more)` adds every element of
-  `more` to the end, and `items.sort()` puts a list of numbers or strings in ascending order.
+  `more` to the end, and `items.sort()` puts the list in ascending order, for numbers, strings,
+  and any other type that can be ordered with `<`.
 - `items[start:stop]` is a new list of part of `items`, as in Python.
 - `value in items` tests whether some element equals `value`, and `value not in items` whether
-  none does. `in` works on maps (their keys) and strings (their text) too.
+  none does. `in` works on {doc}`maps` (their keys) and strings (their text) too.
 - `for item in items:` walks the list in order, as it was when the loop started. If the body
   appends to the list, the loop does not visit the new elements.
 
-An index past either end stops the program with `list index out of range`.
+An index past either end stops the program with an error such as
+`list index out of range (index 5, length 1)`.
 
 ## Slices, more methods, and arithmetic
 
@@ -132,4 +134,4 @@ prints
 :language: text
 ```
 
-Next, {doc}`structs`.
+Next, {doc}`maps`.

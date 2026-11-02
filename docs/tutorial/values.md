@@ -18,8 +18,12 @@ prints
 | `float` | `2.5`, `1e16`, `0.1` | IEEE 754 double |
 | `bool` | `true`, `false` | |
 | `str` | `"hello"`, `"a\tb\n"` | double quotes only, cannot span lines; `\n`, `\"`, and other escapes |
+| `bytes` | `b"GET\r\n"`, `b"\x00\xff"` | data that is not text, whose elements are ints from 0 to 255; see [Bytes](../reference/types.md#bytes) |
 | `list[T]` | `[1, 2, 3]` | see {doc}`lists` |
+| `tuple[A, B]` | `(1, "one")` | a few values of different types; see {doc}`lists` |
+| `map[K, V]` | `{"a": 1}`, `{}` | values found by key; see {doc}`maps` |
 | `option[T]` | `some(1)`, `none` | a value that may be missing; see {doc}`enums` |
+| `result[T, E]` | `ok(1)`, `err("no")` | a value or an error; see {doc}`errors` |
 
 Variables never have types written down. The checker infers each variable's type from what is
 assigned to it, and a variable keeps that type: assigning `"a"` to a variable that holds an `int`

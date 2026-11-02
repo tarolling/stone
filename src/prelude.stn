@@ -4,8 +4,8 @@
 //
 // Builtins such as `find`, `pop`, `get`, and `os.env` make options by tag, so `none` stays the
 // first variant and `some` the second, `cmp` on builtin types makes orderings by tag, so `less`,
-// `equal`, and `greater` stay in that order, and `parse_int` and `parse_float` make results by
-// tag, so `ok` stays before `err`. `os.run` fills an `output` by field order, so `status`,
+// `equal`, and `greater` stay in that order, and `int(s)`, `float(s)`, `input`, and the `fs`
+// functions make results by tag, so `ok` stays before `err`. `os.run` fills an `output` by field order, so `status`,
 // `stdout`, and `stderr` stay in that order.
 
 // A value that may be missing: `some(x)` holds one, and `none` holds nothing.
@@ -37,8 +37,8 @@ pub struct output:
 pub trait eq:
     fn eq(self, other: Self) -> bool
 
-// Values in an order, which `<`, `<=`, `>`, `>=`, and `sort` use. `int`, `float`, and `str`
-// implement it, and a struct may too, as in `impl ord for Version:`.
+// Values in an order, which `<`, `<=`, `>`, `>=`, and `sort` use. `int`, `float`, `str`, and
+// `bytes` implement it, and a struct may too, as in `impl ord for Version:`.
 pub trait ord:
     fn cmp(self, other: Self) -> ordering
 

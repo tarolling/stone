@@ -1,0 +1,16 @@
+36 2
+{'ada': 37, 'alan': 41, 'grace': 85}
+true false true
+none 85
+ada 37
+alan 41
+grace 85
+ada is 37
+alan is 41
+grace is 85
+some(41) none
+['ada', 'grace'] [37, 85]
+{'the': 2, 'cat': 1, 'saw': 1, 'dog': 1}
+{'even': [0, 2, 4], 'odd': [1, 3, 5]}
+2 0
+5

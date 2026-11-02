@@ -5,7 +5,8 @@
 //! `.text`, `.data`, `.bss`, `.section`, `.globl`, `.p2align`, `.balign`, `.zero`, `.quad`, and
 //! `.string`, and the instructions [`x64`] and [`arm64`] encode. [`assemble`] returns an
 //! [`Object`], whose sections still refer to labels through [`Fixup`]s, and
-//! [`elf::link`](crate::codegen::elf::link) lays it out and resolves them. For example,
+//! [`elf::link`](crate::codegen::elf::link), [`macho::link`](crate::codegen::macho::link), or
+//! [`pe::link`](crate::codegen::pe::link) lays it out and resolves them. For example,
 //! assembling `main:\n\tret` for x86-64 gives an `.text` of `[0xc3]` and the symbol `main` at 0.
 
 pub mod arm64;

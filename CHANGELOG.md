@@ -12,9 +12,9 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
-- Packages, first step: a program can depend on other packages through a `stone.toml` next to
-  its entry file. Each `[dependencies]` entry names a directory for now
-  (`geo = { path = "../geo" }`), and its files use the package by that name: `use geo.shapes`
+- Packages: a program can depend on other packages through a `stone.toml` next to its entry
+  file. A `[dependencies]` entry names a directory (`geo = { path = "../geo" }`) or a release
+  (below), and its files use the package by that name: `use geo.shapes`
   loads the package's `shapes.stn`, and `use geo` loads its `lib.stn`. A package's files see
   only their own modules and their own dependencies, and two versions of one package with
   different major versions can both be used.
@@ -39,7 +39,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `next_frame` waits for the desktop's next frame, and the window repaints itself from the last
   canvas shown, also while it is dragged or resized, when the program goes on running and
   drawing. Windows need Windows 10 version 1703 or later. A program imports `user32.dll`,
-  `gdi32.dll`, and `dwmapi.dll` only if it opens a window.
+  `gdi32.dll`, and `dwmapi.dll` only if it opens a window. `STONE_GUI` may only be unset or
+  `windows` there, and any other value is an error from `gui.open`.
 - Windows from `gui` follow the display's scaling on Windows, X11, and Wayland: sizes, points,
   and canvases are in logical pixels, which `gui` shows as one or more of the screen's each (to
   the nearest, so at 150% a canvas pixel is one or two), and the new `w.scale()` gives the
@@ -52,6 +53,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - `stone build --windows-gui` builds Windows executables that start with no console, so opening
   one from Explorer shows only its window. What such a program prints goes nowhere unless its
   output is redirected.
+
+- A tutorial page on maps, and the documentation brought up to date with the language: Windows
+  support in the reference, guides, and agent prompts, a new benchmark baseline that includes
+  `trig`, and corrected statements about `str` of any value, map `pop`, function values, and
+  more. `stone build --help` lists `x86_64-windows` among the targets.
 
 ### Changed
 

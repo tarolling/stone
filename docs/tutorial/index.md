@@ -14,6 +14,7 @@ values
 control-flow
 functions
 lists
+maps
 structs
 enums
 generics

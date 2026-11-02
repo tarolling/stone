@@ -1,8 +1,9 @@
 # Building and contributing
 
 stone is a Rust workspace (edition 2024). The `stone` crate itself depends only on `clap`,
-unless built with the opt-in `self-update` feature. The workspace also holds `lsp/` (the
-`stone-lsp` language server), and separate `fuzz/` and `bench/` crates.
+unless built with the opt-in `self-update` feature (for `stone update`) or `fetch` feature (for
+downloading packages). The workspace also holds `lsp/` (the `stone-lsp` language server), and
+separate `fuzz/` and `bench/` crates.
 
 ## Setup
 
@@ -13,9 +14,9 @@ cargo build
 ```
 
 `stone build` assembles and links programs itself, so it needs no other tools, but the test
-suite runs what it builds, so it needs x86-64 or arm64 Linux. To also run the other processor's
-programs, and to compare the built-in assembler with GNU's, install qemu-user and the GNU
-binutils for both processors, which on an x86-64 Debian or Ubuntu machine is
+suite runs what it builds, so it needs x86-64 or arm64 Linux, arm64 macOS, or x86-64 Windows.
+On Linux, to also run the other processor's programs, and to compare the built-in assembler with
+GNU's, install qemu-user and the GNU binutils for both processors, which on an x86-64 Debian or Ubuntu machine is
 `sudo apt-get install qemu-user binutils-aarch64-linux-gnu` (see [testing](testing.md)).
 
 ## Everyday commands
@@ -46,9 +47,10 @@ Every push and pull request runs, and must pass, on x86-64 Linux:
 ```sh
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
-cargo clippy --all-targets --features self-update -- -D warnings
+cargo clippy --all-targets --features self-update,fetch -- -D warnings
 cargo test
 cargo test --features self-update --bin stone
+cargo test --features fetch --lib --test cli
 shellcheck install.sh scripts/*.sh
 sh scripts/test-install.sh
 sh scripts/test-bump-version.sh
@@ -56,12 +58,15 @@ sh scripts/test-changelog.sh
 (cd editors/vscode && npm test)
 ```
 
-with `qemu-user` and `binutils-aarch64-linux-gnu` installed, so every golden program is also
-cross-built for arm64 and run under qemu, and the built-in assembler is compared with GNU as for
-both processors. Other jobs run:
+with `qemu-user`, `binutils-aarch64-linux-gnu`, `xvfb`, and `weston` installed, so every golden
+program is also cross-built for arm64 and run under qemu, the built-in assembler is compared with
+GNU as for both processors, and `gui` windows open on Xvfb and a headless Weston. Other jobs run:
 
-- `cargo test` natively on arm64 Linux (`ubuntu-24.04-arm`), with `qemu-user` and
-  `binutils-x86-64-linux-gnu` for the x86-64 cross pass.
+- `cargo test` natively on arm64 Linux (`ubuntu-24.04-arm`), with `qemu-user`,
+  `binutils-x86-64-linux-gnu`, `xvfb`, and `weston` for the x86-64 cross pass and the windows.
+- On x86-64 Windows (`windows-latest`), both clippy runs, `cargo test` (so every golden program
+  runs as a PE executable), the `self-update` and `fetch` tests, `scripts/test-install.ps1` under
+  both PowerShell 7 and Windows PowerShell, and the VS Code extension's `npm test`.
 - `cargo test` and `cargo test --manifest-path fuzz/Cargo.toml` natively on arm64 macOS
   (`macos-15`), so every golden program runs as a signed Mach-O.
 - The fuzz program generator's tests, then each crash target fuzzed for a minute on nightly.

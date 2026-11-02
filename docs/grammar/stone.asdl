@@ -22,9 +22,9 @@ module stone
           | Assign(expr* targets, expr value)
           | AugAssign(expr target, operator op, expr value)
 
-          -- use 'orelse' because else is a keyword in target languages
-          | For(expr target, expr iter, stmt* body, stmt* orelse)
-          | While(expr test, stmt* body, stmt* orelse)
+          -- use 'orelse' because else is a keyword in target languages; loops have no else
+          | For(expr target, expr iter, stmt* body)
+          | While(expr test, stmt* body)
           | If(expr test, stmt* body, stmt* orelse)
 
           | Match(expr subject, match_case* cases)
@@ -65,7 +65,7 @@ module stone
 
     operator = Add | Subtract | Multiply | Divide | Modulo | Power
 
-    unaryop = Invert | Not | UAdd | USub
+    unaryop = Not | UAdd | USub
 
     cmpop = Eq | NotEq | Lt | LtE | Gt | GtE | In | NotIn
 
@@ -78,7 +78,7 @@ module stone
     type_param = (identifier name, trait_name* bounds)
 
     -- a trait, maybe through its module and with type arguments, such as geo.Shape or from[int]
-    trait_name = (identifier name, type_expr* args)
+    trait_name = (identifier name, type* args)
 
     variant = (identifier name, type* fields)
 

@@ -343,10 +343,11 @@ pub fn executable_of(
 }
 
 /// Writes `assembly` to `output` with a `.s` extension, then assembles it with the built-in
-/// assembler ([`asm`]) and links it with the built-in linker for `target`'s system ([`elf`] or
-/// [`macho`]) into the executable `output`. A Linux program needs no C library, since its
-/// runtime makes system calls itself and starts at its own `_start`, and a macOS program needs
-/// only `libSystem`. Building either needs no assembler, linker, or C compiler.
+/// assembler ([`asm`]) and links it with the built-in linker for `target`'s system ([`elf`],
+/// [`macho`], or [`pe`]) into the executable `output`. A Linux program needs no C library, since
+/// its runtime makes system calls itself and starts at its own `_start`, a macOS program needs
+/// only `libSystem`, and a Windows program only the system's DLLs. Building any of them needs no
+/// assembler, linker, or C compiler.
 ///
 /// For example, linking to `build/out` for Linux writes `build/out.s` and the static executable
 /// `build/out`. The executable is written beside `output` first and then renamed over it, so a

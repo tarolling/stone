@@ -54,9 +54,9 @@ enum Command {
         /// The assembly goes next to it with a `.s` extension.
         #[arg(short, long)]
         output: Option<PathBuf>,
-        /// The system to build for: `x86_64-linux`, `aarch64-linux`, or `aarch64-macos`,
-        /// optionally with a processor level such as `x86_64v3-linux`. Defaults to this machine,
-        /// and any can be built for from any machine. Give it more than once to build for
+        /// The system to build for: `x86_64-linux`, `aarch64-linux`, `aarch64-macos`, or
+        /// `x86_64-windows`, optionally with a processor level such as `x86_64v3-linux`. Defaults
+        /// to this machine, and any can be built for from any machine. Give it more than once to build for
         /// several; each target other than this machine builds into `build/<TARGET>/`.
         #[arg(long = "target", value_name = "TARGET", value_parser = str::parse::<Target>)]
         targets: Vec<Target>,

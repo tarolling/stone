@@ -1,4 +1,5 @@
-//! The stone programming language: a lexer, parser, tree-walking interpreter, and x86-64 compiler.
+//! The stone programming language: a lexer, parser, tree-walking interpreter, and a compiler for
+//! x86-64 and arm64 on Linux, macOS, and Windows.
 //!
 //! For example, [`driver::interpret`] runs a source string and [`driver::compile`] turns one
 //! into a native executable.

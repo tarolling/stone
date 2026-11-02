@@ -196,7 +196,8 @@ pub enum Value {
     /// A function named as a value, such as `double` in `xs.map(double)`, which prints as its
     /// type.
     Function(FunctionRef),
-    /// A TCP connection, which copies share and which closes once nothing holds it.
+    /// A TCP or Unix-socket connection, which copies share and which closes once nothing holds
+    /// it.
     Socket(Rc<RefCell<net::Socket>>),
     /// A TCP port waiting for connections, which copies share and which closes once nothing
     /// holds it.

@@ -38,6 +38,7 @@ file by the path it was built from.
 | `key not found: 'pear'` | `m[k]` for a key `m` has no entry for. It gives the key, quoted if it is a string |
 | `pop from empty list` | `pop(i)` on an empty list (`pop()` gives `none` instead) |
 | `pop index out of range` | `pop(i)` with `i` at or past the length, or before the start |
+| `bytes index out of range (index 3, length 3)` | a `bytes` index at or past the length, or a negative index before the start. It gives the index as written and the length |
 | `string index out of range (index -4, length 3)` | a string index at or past the length, or a negative index before the start. It gives the index as written and the string's length in bytes |
 | `cannot cut a string inside a character` | `s[i]` of a byte that is part of a character outside ASCII, or a slice that would hold only part of one (see [strings](types.md#strings)) |
 | `slice step cannot be zero` | a slice such as `xs[::0]` or `s[::0]` |
@@ -45,18 +46,21 @@ file by the path it was built from.
 | `cannot convert float to int (nan or out of range)` | `math.floor()` of nan, an infinity, or a float outside the int range |
 | `empty separator` | `split("")` |
 | `integer overflow in abs` | `math.abs()` of the smallest int, whose absolute value does not fit in an int |
-| `math domain error` | `math.sqrt()` of a negative number, as in Python |
+| `math domain error` | `math.sqrt()` of a negative number, `math.sin()`, `math.cos()`, or `math.tan()` of an infinity, or `math.asin()` or `math.acos()` of a number outside -1 to 1, as in Python |
 | `min of an empty list` | `math.min()` of an empty list |
 | `max of an empty list` | `math.max()` of an empty list |
 | `empty range for randint` | `random.randint(low, high)` with `low` greater than `high` |
 | `cannot choose from an empty list` | `random.choice()` of an empty list |
+| `clamp's lower bound is greater than its upper bound, or one of them is nan` | `x.clamp(lo, hi)` with `lo` greater than `hi`, as in `5.clamp(10, 0)`, or a bound that is nan |
+| `could not read the current directory` | `os.cwd()` when the working directory cannot be read, such as after it was deleted |
 | `sleep length must be non-negative` | `time.sleep()` of a negative number or nan |
 | `sleep length is too large` | `time.sleep()` of 2^63 seconds or more |
 | `recursion is too deep (more than 1000 nested calls)` | more than 1,000 calls active at once |
 | `cannot unwrap none` | `unwrap()` of an option that is `none` |
 | `cannot unwrap err: ...` | `unwrap()` of a result that is an `err`, followed by the error as `print` writes it, as in `cannot unwrap err: end of input`, or `cannot unwrap err: invalid literal for int() with base 10: 'x'` for `int("x").unwrap()` |
 | `cannot unwrap_err ok: ...` | `unwrap_err()` of a result that is an `ok`, followed by the value |
-| `value is nested too deeply to print (more than 10000 levels)` | `print` of an enum or struct value inside more than 9,999 others, as in a long linked list. What comes before it on the line stays printed |
+| `value is nested too deeply to print (more than 10000 levels)` | `print` of an enum or struct value inside more than 9,999 others, as in a long linked list. `print` builds its whole line first, so nothing of the line is printed |
+| `value is nested too deeply to compare (more than 10000 levels)` | `==` or `!=` of enum values nested more than 10,000 deep |
 | `'name' is used before it is assigned` | a function read a global that had not been assigned yet when it ran |
 
 Arithmetic on lists computes the whole expression for the first element, then the second, and
@@ -66,7 +70,7 @@ Such an error points at the whole list expression, `a / b + c / d`, while a numb
 once inside it, such as `(n / m)` in `xs * (n / m)`, fails at its own expression.
 
 Integer `+`, `-`, `*`, and `**` wrap around on overflow instead of failing. Float arithmetic
-follows IEEE 754 apart from division by zero and `math.sqrt` of a negative number, so it produces `inf`, `-inf`, and `nan` instead of
+follows IEEE 754 apart from division by zero and the `math` domain errors above, so it produces `inf`, `-inf`, and `nan` instead of
 errors.
 A float `**` multiplies by repeated squaring and takes the reciprocal for a negative exponent, so
 `0.0 ** -1` is `inf`.

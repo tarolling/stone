@@ -3,7 +3,8 @@
 //!
 //! Routines take their arguments in `x0` and up and return in `x0`, as AAPCS64 does, keep what
 //! must survive a call in `x19` and up, and save those with [`push_frame`]. Floats travel as
-//! their bits in general registers, as in generated code, and only move to `d0` for arithmetic.
+//! their bits in general registers, as generated code passes them to and from routines, and only
+//! move to `d0` for arithmetic.
 //! The float text routines and `stone.fmod` are in `floats.rs`.
 
 use super::emit::CALLER_SAVED;

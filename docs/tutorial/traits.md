@@ -17,8 +17,8 @@ signature, `fn area(self) -> float`, without a body, and a type implements the t
 `impl Shape for Circle:` block that defines each of them, with the same parameters and result.
 A method of the trait can also have a body, which is a default: every type that implements the
 trait gets it, unless its `impl` block defines the method itself, as `Rect` could with its own
-`describe`. A trait's methods all take `self`, and inside a trait `Self` is the type that
-implements it, as in `fn same(self, other: Self) -> bool`.
+`describe`. A method of a trait you write takes `self` (only the prelude's conversion traits,
+below, have methods without it), and inside a trait `Self` is the type that implements it, as in `fn same(self, other: Self) -> bool`.
 
 Once a type implements a trait, its methods are called like any other: `Circle(r=1.0).area()`.
 A struct's methods, inherent or from traits, all have different names, so a call never needs to
@@ -45,13 +45,21 @@ so `4.describe()` works once `impl Shape for int:` does.
 Two traits come with every program. `eq` is what `==` and `!=` use. Every type `==` compares
 part by part implements it already, and a struct can say what equal means for it instead, with
 `impl eq for Tag:` and `fn eq(self, other: Self) -> bool`; that is also how a struct that holds a
-list becomes comparable. `ord` is what `<`, `<=`, `>`, `>=`, and `sort` use: `int`, `float`, and
-`str` implement it, and a struct can with `fn cmp(self, other: Self) -> ordering`, which returns
+list becomes comparable. `ord` is what `<`, `<=`, `>`, `>=`, and `sort` use: `int`, `float`,
+`str`, and `bytes` implement it, and a struct can with `fn cmp(self, other: Self) -> ordering`, which returns
 one of `less`, `equal`, or `greater`. Bounds work with them too, so `fn largest[T: ord]` can use
 `>` on any ordered type, and `[T: eq]` lets a function use `==`.
 
 Sorting a list of a struct uses its `cmp` and keeps values it finds equal in the order they were
 in.
+
+Every `ord` type also has three methods: `a.min(b)` and `a.max(b)` give the lesser and the
+greater of two values, and `x.clamp(lo, hi)` gives `x` kept between `lo` and `hi`, stopping the
+program if `lo` is greater than `hi`:
+
+```stone
+print(3.min(5), "pear".max("apple"), 12.clamp(0, 10))   // 3 pear 10
+```
 
 ## Writing values as text
 

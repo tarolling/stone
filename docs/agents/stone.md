@@ -14,13 +14,16 @@ Full documentation: <https://tarolling.github.io/stone/>. The pages to keep open
 ## Your loop
 
 Install with `curl -fsSL https://raw.githubusercontent.com/tarolling/stone/main/install.sh | sh`
-(it puts `stone` in `~/.local/bin`). Source files end in `.stn`.
+(it puts `stone` in `~/.local/bin`), or on Windows in PowerShell with
+`irm https://raw.githubusercontent.com/tarolling/stone/main/install.ps1 | iex`. Source files end
+in `.stn`.
 
 | command | does |
 | --- | --- |
 | `stone check app.stn` | type checks without running; run it after every edit |
 | `stone run app.stn [args...]` | interprets the program; heavy loops can run slower than in Python |
-| `stone build app.stn` | compiles a standalone executable to `build/app` next to the file; use it for large inputs and timing |
+| `stone build app.stn` | compiles a standalone executable to `build/app` next to the file; use it for large inputs and timing. `--target x86_64-linux`, `aarch64-linux`, `aarch64-macos`, or `x86_64-windows` builds for another machine, and `--windows-gui` makes a Windows program with windows open no console |
+| `stone clean` | deletes the `build/` directories `stone build` made |
 | `stone fmt app.stn` | rewrites the file in the standard layout (only whitespace changes); run it before finishing |
 | `stone` | starts a REPL |
 
@@ -504,7 +507,11 @@ Builtin modules, imported with `use math` (or `use math.sqrt`):
   gives `err("timed out")`), and `close()`; a `listener` has `accept()`, `port()`,
   `set_timeout(seconds)`, and `close()`.
   Both are types for signatures (`fn serve(l: listener)`), copies share the connection, and each
-  closes by itself right after the last statement that uses it. No TLS
+  closes by itself right after the last statement that uses it. `connect_unix(path)` connects
+  to a Unix socket, and `ready(s, seconds)` (a bool) says whether a read would not wait. No TLS
+
+On Windows, programs cannot use `net` or `os.run` yet: building one for Windows, or running or
+checking one there, is an error.
 
 Reading all of standard input:
 
@@ -578,7 +585,7 @@ print(echo())   // ok('you said hello\n')
 ```
 
 `gui` draws on canvases (`gui.blank(w, h, color)`, colors from `gui.rgb(r, g, b)`) and shows
-them in windows over Wayland or X11. A canvas is a value with `width`, `height`, and `pixels`, and its
+them in windows over Wayland or X11, or as Win32 windows on Windows. A canvas is a value with `width`, `height`, and `pixels`, and its
 methods draw on it in place:
 
 ```stone
@@ -594,10 +601,11 @@ print(c.ppm().len())         // 107, a PPM image for fs.write_bytes
 
 A window is `gui.open(title, w, h)?`, then a loop of `es = w.events()` (non-blocking; `w.wait()`
 blocks; `w.next_frame()` waits for the screen's next frame, for animation), `w.show(c)`, and
-`w.close()` on `gui.event.close`. Or implement the trait `gui.app`
-(`fn update(self, e: gui.event)` changing `self`, `fn draw(self, c: gui.canvas) -> gui.canvas`,
-optional `fn done(self) -> bool`) and call `gui.run(title, w, h, state)`, which returns the last
-state. Events are lowercase variants: `key_down(name)`, `key_up(name)`, `text(t)`,
+`w.close()` on `gui.event.close`. Sizes and points are logical pixels, which `w.scale()` (a
+float) turns into the screen's. Or implement the trait `gui.app`
+(`fn draw(self, c: gui.canvas) -> gui.canvas`, plus optional `fn update(self, e: gui.event)`
+changing `self` and `fn done(self) -> bool`) and call `gui.run(title, w, h, state)`, which
+returns a `result` of the last state. Events are lowercase variants: `key_down(name)`, `key_up(name)`, `text(t)`,
 `mouse_move(x, y)`, `mouse_down(button, x, y)`, `mouse_up(button, x, y)`, `scroll(steps)`,
 `resize(w, h)`, `redraw`, `close`, `tick(seconds)`, `failed(reason)`. A `case _:` that does
 nothing in a function without a value is `ret`.

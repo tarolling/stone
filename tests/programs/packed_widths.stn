@@ -1,0 +1,24 @@
+// arithmetic on lists runs over groups of elements at once (two, or four on x86-64 v3) and
+// then one at a time, so every length up to two groups and a remainder gives the same elements
+fn floats(n: int, k: float) -> list[float]:
+    xs = []
+    for i in range(n):
+        xs.append(float(i) * k + 0.5)
+    ret xs
+
+fn ints(n: int, k: int) -> list[int]:
+    xs = []
+    for i in range(n):
+        xs.append(i * k - 3)
+    ret xs
+
+for n in range(10):
+    x = floats(n, 1.5)
+    y = floats(n, 0.75)
+    print(n, -x / y, x - y * x)
+    // written over in place, since nothing else holds y's list
+    y = 2.0 * x + y
+    print(y)
+    a = ints(n, 7)
+    b = ints(n, -2)
+    print(-(a - b) + a, a + 3 - b)

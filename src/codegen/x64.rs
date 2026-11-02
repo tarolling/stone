@@ -6,6 +6,7 @@
 
 pub mod builtins;
 pub mod bytes;
+pub mod cpu;
 mod emit;
 pub mod floats;
 pub mod fs;
@@ -40,13 +41,13 @@ const ARG_REGS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
 /// Code generator for x86-64 that emits GNU assembler source in Intel syntax.
 ///
 /// For example, `a + b` with `a` and `b` in registers becomes a `mov` and an `add`.
-#[derive(Default)]
 pub struct X64Generator {
     output: String,
     /// What the backends share about the program being compiled.
     ctx: Context,
-    /// The system the program runs on, which decides how the runtime calls it.
-    os: Os,
+    /// The processor and system the program runs on: the system decides how the runtime calls
+    /// it, and the processor's level which instructions it may use.
+    target: Target,
     /// The span of the instruction being emitted, which its runtime errors point at.
     span: Span,
 }
@@ -91,7 +92,7 @@ impl AssemblyGenerator for X64Generator {
             self.emit_function(&function)?;
         }
 
-        match self.os {
+        match self.target.os {
             Os::Windows => {
                 let args = self.ctx.uses(&["stone.args"]);
                 let env = self.ctx.needs_env();
@@ -136,7 +137,7 @@ impl AssemblyGenerator for X64Generator {
         if self.ctx.needs_env() {
             builtins::env_runtime(self);
         }
-        if self.os == Os::Windows {
+        if self.target.os == Os::Windows {
             self.emit("\t.text");
             let text = self.output.clone();
             windows::windows_shims(self, &text);
@@ -149,7 +150,7 @@ impl AssemblyGenerator for X64Generator {
         ctx.emit_constants(self);
         self.ctx = ctx;
 
-        if self.os == Os::Linux {
+        if self.target.os == Os::Linux {
             // suppress the linker's executable stack warning
             self.emit("\t.section\t.note.GNU-stack,\"\",@progbits");
         }
@@ -163,12 +164,7 @@ impl AssemblyGenerator for X64Generator {
     }
 
     fn target(&self) -> Target {
-        let arch = crate::codegen::Architecture::X64;
-        Target {
-            arch,
-            os: self.os,
-            level: arch.baseline(),
-        }
+        self.target
     }
 
     fn set_sources(&mut self, sources: SourceMap) {
@@ -180,18 +176,36 @@ impl AssemblyGenerator for X64Generator {
     }
 }
 
+impl Default for X64Generator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl X64Generator {
-    /// Returns a generator for x86-64 Linux.
+    /// Returns a generator for x86-64 Linux at the baseline level.
     pub fn new() -> Self {
-        Self::default()
+        Self::for_target(Target::X64_LINUX)
     }
 
-    /// Returns a generator for x86-64 running `os`, Linux or Windows.
-    pub fn for_os(os: Os) -> Self {
+    /// Returns a generator for `target`, an x86-64 target running Linux or Windows.
+    ///
+    /// For example, `X64Generator::for_target("x86_64v3-linux".parse()?)` emits AVX2 for
+    /// arithmetic on lists (see [`Self::avx2`]).
+    pub fn for_target(target: Target) -> Self {
         Self {
-            os,
-            ..Self::default()
+            output: String::new(),
+            ctx: Context::default(),
+            target,
+            span: Span::default(),
         }
+    }
+
+    /// Returns whether the target's level, x86-64 `v3` or above, assumes AVX2.
+    ///
+    /// For example, it is false for `x86_64-linux` and true for `x86_64v3-linux`.
+    fn avx2(&self) -> bool {
+        self.target.level.major >= 3
     }
 
     /// Emits the code behind every [`Context::fail_label`] and [`Context::fail_at`], plus
@@ -599,6 +613,108 @@ mod tests {
     fn assemble(source: &str) -> Result<String, String> {
         let module = parse_program(source).map_err(|e| e.to_string())?;
         X64Generator::new().assemble(&module)
+    }
+
+    /// Parses and assembles `source` for `target`, such as `x86_64v3-linux`.
+    fn assemble_for(source: &str, target: &str) -> String {
+        let module = parse_program(source).unwrap();
+        X64Generator::for_target(target.parse().unwrap())
+            .assemble(&module)
+            .unwrap()
+    }
+
+    /// Returns the instructions of `assembly` from the first that starts with `first` through
+    /// the first `jl` after it, the body of a packed loop.
+    fn packed_loop<'a>(assembly: &'a str, first: &str) -> Vec<&'a str> {
+        let lines: Vec<&str> = assembly.lines().map(str::trim).collect();
+        let start = lines
+            .iter()
+            .position(|line| line.starts_with(first))
+            .unwrap_or_else(|| panic!("no {first} in {assembly}"));
+        let end = start
+            + lines[start..]
+                .iter()
+                .position(|l| l.starts_with("jl"))
+                .unwrap();
+        lines[start..=end].to_vec()
+    }
+
+    #[test]
+    fn a_program_above_the_baseline_checks_its_processor_first() {
+        for target in ["x86_64-linux", "x86_64-windows"] {
+            let assembly = assemble_for("print(1)\n", target);
+            assert!(!assembly.contains("cpuid") && !assembly.contains("xgetbv"));
+        }
+        for (target, xgetbv) in [
+            ("x86_64v2-linux", false),
+            ("x86_64v3-linux", true),
+            ("x86_64v4-windows", true),
+        ] {
+            let assembly = assemble_for("print(1)\n", target);
+            let start = &assembly[assembly.find("_start:").unwrap()..];
+            let check = start.find("\tcpuid").unwrap_or_else(|| panic!("{start}"));
+            // before anything else, main above all
+            assert!(check < start.find("\tcall\tmain").unwrap(), "{start}");
+            assert_eq!(start.contains("\txgetbv"), xgetbv, "{target}");
+            let level = &target[6..8];
+            let message = format!("error: this program needs an x86-64 {level} processor");
+            assert!(assembly.contains(&message), "{target}");
+        }
+    }
+
+    #[test]
+    fn arithmetic_on_lists_takes_four_elements_at_a_time_from_x86_64_v3() {
+        let source = "fn f(a: float, x: list[float], y: list[float]) -> list[float]:\n    \
+                      ret a * x + y\n\
+                      fn g(x: list[float], y: list[float]) -> list[float]:\n    ret -x / y\n\
+                      fn h(x: list[int], y: list[int]) -> list[int]:\n    ret -(x - y)\n\
+                      print(f(2.0, [1.0], [2.0]), g([1.0], [2.0]), h([1], [2]))\n";
+        let baseline = assemble_for(source, "x86_64-linux");
+        assert!(baseline.contains("\tmulpd\txmm"), "{baseline}");
+        assert!(baseline.contains("\tand\trdx, -2\n"), "{baseline}");
+        assert!(!baseline.contains(" ymm") && !baseline.contains("\tymm"));
+        assert!(!baseline.contains("vzeroupper"));
+
+        let wide = assemble_for(source, "x86_64v3-linux");
+        for sse in [
+            "addpd",
+            "subpd",
+            "mulpd",
+            "divpd",
+            "paddq",
+            "psubq",
+            "pxor",
+            "movupd",
+            "cmppd",
+            "punpcklqdq",
+        ] {
+            assert!(!wide.contains(&format!("\t{sse}\t")), "{sse} in {wide}");
+        }
+        assert!(wide.contains("\tvpbroadcastq\tymm"), "{wide}");
+        // the functions' loops, plus the copies inlined into the top level
+        let loops = wide.matches("\tand\trdx, -4\n\txor\tecx, ecx").count();
+        assert!(loops >= 3, "{wide}");
+        assert_eq!(
+            wide.matches("\tadd\trcx, 4\n\tcmp\trcx, rdx").count(),
+            loops,
+            "{wide}"
+        );
+        // each loop is followed by one vzeroupper, which every way out of it passes
+        assert_eq!(wide.matches("\tvzeroupper").count(), loops, "{wide}");
+        let saxpy = packed_loop(&wide, "vmovupd\tymm");
+        assert!(
+            saxpy.iter().any(|line| line.starts_with("vmulpd\tymm"))
+                && saxpy.iter().any(|line| line.starts_with("vaddpd\tymm")),
+            "{saxpy:?}"
+        );
+        // three operands, so nothing is copied between registers in the loop
+        assert!(!wide.contains("movapd"), "{wide}");
+        // a zero divisor stops the loop before its group, for the single loop to report
+        let division = &wide[wide.find("vxorpd").unwrap()..];
+        let compare = division.find("\tvcmppd").unwrap();
+        assert!(compare < division.find("\tvdivpd").unwrap(), "{division}");
+        assert!(division.contains("\tvmovmskpd\teax, ymm"), "{division}");
+        assert!(wide.contains("\tvpsubq\tymm"), "{wide}");
     }
 
     #[test]

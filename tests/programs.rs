@@ -27,7 +27,8 @@
 //! `main.stn`), which is copied into the working directory first.
 //!
 //! The compiler is also tested for the other architecture, such as aarch64 on an x86-64 machine,
-//! by cross-compiling each program with `stone build --target` and running it under qemu-user.
+//! by cross-compiling each program with `stone build --target` and running it under qemu-user,
+//! and on an x86-64 machine with AVX2 for `x86_64v3`, whose arithmetic on lists uses it.
 //! `stone build` needs no other tools for any target, but running the program needs qemu (such
 //! as `qemu-aarch64`) on `PATH`, so the pass is skipped with a note when it is missing. Compiled
 //! programs are static and need no libc, so qemu needs nothing else.
@@ -70,6 +71,9 @@ enum Backend {
     Cross(Architecture),
     /// `stone build --target x86_64-windows`, run by the [`WindowsRunner`].
     Windows(WindowsRunner),
+    /// `stone build --target x86_64v3-<system>` on an x86-64 machine that has AVX2, which that
+    /// level's arithmetic on lists uses.
+    Level,
 }
 
 impl Backend {
@@ -80,6 +84,7 @@ impl Backend {
             Backend::Cross(Architecture::X64) => "build-x86_64",
             Backend::Cross(Architecture::Arm64) => "build-aarch64",
             Backend::Windows(_) => "build-x86_64-windows",
+            Backend::Level => "build-x86_64v3",
         }
     }
 }
@@ -322,10 +327,10 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 .current_dir(&cwd),
             &input,
         ),
-        Backend::Build | Backend::Cross(_) | Backend::Windows(_) => {
+        Backend::Build | Backend::Cross(_) | Backend::Windows(_) | Backend::Level => {
             let suffix = match backend {
                 Backend::Windows(_) => ".exe",
-                Backend::Build => std::env::consts::EXE_SUFFIX,
+                Backend::Build | Backend::Level => std::env::consts::EXE_SUFFIX,
                 _ => "",
             };
             let exe = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -339,6 +344,10 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 }
                 Backend::Windows(_) => {
                     build.arg("--target").arg("x86_64-windows");
+                }
+                Backend::Level => {
+                    let system = if cfg!(windows) { "windows" } else { "linux" };
+                    build.arg("--target").arg(format!("x86_64v3-{system}"));
                 }
                 _ => {}
             }
@@ -513,6 +522,45 @@ fn cross_compiler_matches_expected() {
         return;
     }
     check_all(Backend::Cross(arch));
+}
+
+/// Builds every program for x86-64 `v3` and runs it, on an x86-64 machine that reaches that level,
+/// so the AVX2 code it emits must print what the baseline's does.
+#[test]
+fn leveled_compiler_matches_expected() {
+    if !cfg!(target_arch = "x86_64") || cfg!(target_os = "macos") {
+        return;
+    }
+    if !reaches_x86_64_v3() {
+        eprintln!("skipped running programs built for x86_64v3: this processor lacks AVX2");
+        return;
+    }
+    check_all(Backend::Level);
+}
+
+/// Returns whether this machine has every feature of x86-64 `v3`, which a program built for it
+/// checks for before it runs.
+fn reaches_x86_64_v3() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::is_x86_feature_detected as has;
+        has!("sse3")
+            && has!("ssse3")
+            && has!("sse4.1")
+            && has!("sse4.2")
+            && has!("popcnt")
+            && has!("cmpxchg16b")
+            && has!("avx")
+            && has!("avx2")
+            && has!("bmi1")
+            && has!("bmi2")
+            && has!("f16c")
+            && has!("fma")
+            && has!("lzcnt")
+            && has!("movbe")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    false
 }
 
 /// Builds every program for x86-64 Windows and runs it as a Windows program where one can run

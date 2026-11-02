@@ -70,8 +70,11 @@ left out means Linux.
 The optional level names the processor features the program may assume: `v1` to `v4` for
 x86-64 (the x86-64 psABI levels, so `x86_64v3-linux` assumes AVX2), and `v8`, `v8.1` to `v8.9`,
 `v9`, or `v9.1` to `v9.5` for arm64 (as in `aarch64v8.2-macos`). Without one, the program runs on
-every processor of the architecture. stone does not use the extra features yet, so for now every
-level builds the same program.
+every processor of the architecture. At x86-64 `v3` and above, arithmetic on whole lists works on
+four elements at a time with AVX2, rather than two with SSE2. The other levels build the same
+code as the baseline for now. A program built for an x86-64 level above `v1` first checks that
+the processor has every feature of the level, and otherwise stops before running anything, with
+`error: this program needs an x86-64 v3 processor` (naming its level) and exit status 1.
 
 ```sh
 stone build examples/basics.stn

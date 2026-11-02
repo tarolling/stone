@@ -97,8 +97,9 @@ impl fmt::Display for Architecture {
 ///
 /// It is written after the architecture in a target name, such as `x86_64v3-linux` (x86-64 with
 /// AVX2, `major: 3, minor: 0`) or `aarch64v8.2-macos` (Armv8.2, `major: 8, minor: 2`). A level
-/// lets the compiler use those features, but never requires it: code generation emits baseline
-/// code for now, which runs on every processor of the architecture.
+/// lets the compiler use those features, but never requires it. For now only x86-64 `v3` and
+/// above change the code, whose arithmetic on lists uses AVX2, and a program built for an x86-64
+/// level above `v1` checks its processor at startup ([`x64::cpu::level_check`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Level {
     pub major: u8,
@@ -221,8 +222,8 @@ impl Target {
     /// Returns a new code generator for this target.
     pub fn generator(self) -> Box<dyn AssemblyGenerator> {
         match self.arch {
-            Architecture::X64 => Box::new(x64::X64Generator::for_os(self.os)),
-            Architecture::Arm64 => Box::new(arm64::Arm64Generator::for_os(self.os)),
+            Architecture::X64 => Box::new(x64::X64Generator::for_target(self)),
+            Architecture::Arm64 => Box::new(arm64::Arm64Generator::for_target(self)),
         }
     }
 }
@@ -658,6 +659,7 @@ mod tests {
                 "{name}"
             );
             assert_eq!(target.to_string(), canonical, "{name}");
+            assert_eq!(target.generator().target(), target, "{name}");
         }
         assert_eq!(Target::X64_LINUX.level, Architecture::X64.baseline());
         assert_eq!(Target::ARM64_MACOS.level, Architecture::Arm64.baseline());

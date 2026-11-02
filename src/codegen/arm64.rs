@@ -45,15 +45,15 @@ const ARG_REGS: [&str; 8] = ["x0", "x1", "x2", "x3", "x4", "x5", "x6", "x7"];
 /// runtime's calls into the system differ between the two (see [`builtins::system_call`]).
 ///
 /// For example, `a + b` with `a` and `b` in registers becomes one `add`.
-#[derive(Default)]
 pub struct Arm64Generator {
     output: String,
     /// What the backends share about the program being compiled.
     ctx: Context,
     /// Whether some float `%` calls `stone.fmod`, emitted after the code that uses it.
     uses_fmod: bool,
-    /// The system the program runs on, which decides how the runtime calls it.
-    os: Os,
+    /// The processor and system the program runs on: the system decides how the runtime calls
+    /// it, and the processor's level which instructions it may use.
+    target: Target,
     /// The span of the instruction being emitted, which its runtime errors point at.
     span: Span,
 }
@@ -138,7 +138,7 @@ impl AssemblyGenerator for Arm64Generator {
         if self.ctx.needs_env() {
             builtins::env_runtime(self);
         }
-        if self.os == Os::MacOs {
+        if self.target.os == Os::MacOs {
             self.emit("\t.text");
             let text = self.output.clone();
             builtins::system_shims(self, &text);
@@ -151,7 +151,7 @@ impl AssemblyGenerator for Arm64Generator {
         ctx.emit_constants(self);
         self.ctx = ctx;
 
-        if self.os == Os::Linux {
+        if self.target.os == Os::Linux {
             // suppress the linker's executable stack warning
             self.emit("\t.section\t.note.GNU-stack,\"\",@progbits");
         }
@@ -165,12 +165,7 @@ impl AssemblyGenerator for Arm64Generator {
     }
 
     fn target(&self) -> Target {
-        let arch = crate::codegen::Architecture::Arm64;
-        Target {
-            arch,
-            os: self.os,
-            level: arch.baseline(),
-        }
+        self.target
     }
 
     fn set_sources(&mut self, sources: SourceMap) {
@@ -182,19 +177,28 @@ impl AssemblyGenerator for Arm64Generator {
     }
 }
 
+impl Default for Arm64Generator {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Arm64Generator {
-    /// Returns a generator for AArch64 Linux.
+    /// Returns a generator for AArch64 Linux at the baseline level.
     pub fn new() -> Self {
-        Self::default()
+        Self::for_target(Target::ARM64_LINUX)
     }
 
-    /// Returns a generator for AArch64 running `os`. stone writes no arm64 Windows programs
-    /// ([`ARM64_WINDOWS`](crate::codegen::ARM64_WINDOWS)), so the runtime treats every system
-    /// but Linux as macOS.
-    pub fn for_os(os: Os) -> Self {
+    /// Returns a generator for `target`, an AArch64 target. stone writes no arm64 Windows
+    /// programs ([`ARM64_WINDOWS`](crate::codegen::ARM64_WINDOWS)), so the runtime treats every
+    /// system but Linux as macOS. Code generation emits the same code at every level for now.
+    pub fn for_target(target: Target) -> Self {
         Self {
-            os,
-            ..Self::default()
+            output: String::new(),
+            ctx: Context::default(),
+            uses_fmod: false,
+            target,
+            span: Span::default(),
         }
     }
 

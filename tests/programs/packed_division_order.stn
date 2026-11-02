@@ -1,0 +1,12 @@
+// lists are divided a group of elements at a time, but each element is still divided in turn:
+// at index 5 the outer division's divisor is zero, which comes before the inner division's zero
+// divisor at index 6, though both are in the same group of four
+x = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+y = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0]
+z = [2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0, 2.0]
+print(x / (y / z))
+y[5] = 0.0
+z[6] = 0.0
+print("before")
+print(x / (y / z))
+print("after")

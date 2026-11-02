@@ -4,7 +4,8 @@
 //! this assembles the backend's text with [`asm::assemble`] and links it with [`elf::link`],
 //! then assembles the same text with GNU as and links it with GNU ld at the same section
 //! addresses, and requires `.text`, `.rodata`, and `.data` to hold the same bytes and `.bss`
-//! to have the same size. Nothing runs, so no emulator is needed.
+//! to have the same size. Nothing runs, so no emulator is needed. x86-64 is also checked at
+//! level `v3`, whose arithmetic on lists uses AVX2 instructions.
 //!
 //! The host's `as` and `ld` serve its own architecture, and `aarch64-linux-gnu-as` and
 //! `aarch64-linux-gnu-ld` (or the `x86_64-linux-gnu-` pair) the other one. An architecture
@@ -15,7 +16,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
 use stone::codegen::asm::{self, Section};
-use stone::codegen::{Architecture, elf};
+use stone::codegen::{Architecture, Target, elf};
 use stone::project::FsSources;
 
 const PROGRAM_DIRS: [&str; 4] = [
@@ -139,7 +140,7 @@ fn difference(object: &asm::Object, section: Section, ours: &[u8], theirs: &[u8]
 /// Assembles one program both ways for `arch` and returns how they differ, if at all.
 fn compare(
     program: &Path,
-    arch: Architecture,
+    target: Target,
     (gnu_as, gnu_ld): &(String, String),
     dir: &Path,
 ) -> Result<(), String> {
@@ -147,14 +148,18 @@ fn compare(
     let (sources, loaded) = stone::driver::load(program, &source, &FsSources);
     let module = loaded.map_err(|e| format!("does not check: {e:?}"))?.module;
     // with sources, as `stone build` compiles, so runtime errors record where they are
-    let mut generator = arch.generator();
+    let arch = target.arch;
+    let mut generator = target.generator();
     generator.set_sources(sources);
     let text = generator.assemble(&module)?;
     let object = asm::assemble(&text, arch)?;
     let layout = elf::layout(&object, arch);
     let ours = sections(&elf::link(&object, arch)?);
 
-    let stem = format!("{}-{arch}", program.display().to_string().replace('/', "_"));
+    let stem = format!(
+        "{}-{target}",
+        program.display().to_string().replace('/', "_")
+    );
     let source = dir.join(format!("{stem}.s"));
     let objfile = dir.join(format!("{stem}.o"));
     let exe = dir.join(&stem);
@@ -210,17 +215,18 @@ fn compare(
     Ok(())
 }
 
-fn matches_gnu(arch: Architecture) {
+fn matches_gnu(target: Target) {
+    let arch = target.arch;
     let Some(tools) = gnu_tools(arch) else {
         eprintln!("skipped comparing with GNU as for {arch}: its as and ld were not found");
         return;
     };
-    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("assembler-{arch}"));
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(format!("assembler-{target}"));
     std::fs::create_dir_all(&dir).unwrap();
     let failures: Vec<String> = programs()
         .iter()
         .filter_map(|program| {
-            compare(program, arch, &tools, &dir)
+            compare(program, target, &tools, &dir)
                 .err()
                 .map(|error| format!("{}: {error}", program.display()))
         })
@@ -230,10 +236,15 @@ fn matches_gnu(arch: Architecture) {
 
 #[test]
 fn x86_64_matches_gnu_as() {
-    matches_gnu(Architecture::X64);
+    matches_gnu(Target::X64_LINUX);
+}
+
+#[test]
+fn x86_64_v3_matches_gnu_as() {
+    matches_gnu("x86_64v3-linux".parse().unwrap());
 }
 
 #[test]
 fn aarch64_matches_gnu_as() {
-    matches_gnu(Architecture::Arm64);
+    matches_gnu(Target::ARM64_LINUX);
 }

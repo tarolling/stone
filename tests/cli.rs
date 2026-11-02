@@ -557,6 +557,70 @@ fn build_for_the_host_target_by_name_runs() {
     assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n");
 }
 
+/// Returns whether this machine has every feature of x86-64 `level` (2 to 4) that the check at
+/// the start of a program built for it reads.
+#[cfg(target_arch = "x86_64")]
+fn host_reaches(level: u8) -> bool {
+    use std::arch::is_x86_feature_detected as has;
+    let v2 = has!("sse3")
+        && has!("ssse3")
+        && has!("sse4.1")
+        && has!("sse4.2")
+        && has!("popcnt")
+        && has!("cmpxchg16b");
+    let v3 = v2
+        && has!("avx")
+        && has!("avx2")
+        && has!("bmi1")
+        && has!("bmi2")
+        && has!("f16c")
+        && has!("fma")
+        && has!("lzcnt")
+        && has!("movbe");
+    let v4 = v3
+        && has!("avx512f")
+        && has!("avx512bw")
+        && has!("avx512cd")
+        && has!("avx512dq")
+        && has!("avx512vl");
+    match level {
+        2 => v2,
+        3 => v3,
+        _ => v4,
+    }
+}
+
+#[cfg(target_arch = "x86_64")]
+#[test]
+fn a_program_built_for_a_level_runs_only_on_a_processor_that_reaches_it() {
+    let system = host_target().split_once('-').unwrap().1;
+    for level in 2..=4 {
+        let name = format!("level_v{level}");
+        let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(&name);
+        let target = format!("x86_64v{level}-{system}");
+        let (output, _) = stone(
+            &["build", "--target", &target, "-o", exe.to_str().unwrap()],
+            &name,
+            "print(6 * 7)\n",
+        );
+        assert!(output.status.success(), "{output:?}");
+        let run = Command::new(&exe).output().expect("the binary should run");
+        if host_reaches(level) {
+            assert_eq!(String::from_utf8_lossy(&run.stdout), "42\n", "{target}");
+            assert_eq!(run.status.code(), Some(0), "{target}");
+        } else {
+            // the check runs before anything else, so nothing is printed
+            assert_eq!(run.stdout, b"", "{target}");
+            assert_eq!(
+                String::from_utf8_lossy(&run.stderr),
+                format!("error: this program needs an x86-64 v{level} processor\n"),
+                "{target}"
+            );
+            assert_eq!(run.status.code(), Some(1), "{target}");
+        }
+    }
+}
+
 /// Writes `source` as `main.stn` in a fresh temporary directory named after `name`, then runs it
 /// from that directory both with `stone run` and as a binary from `stone build`, returning each
 /// run's output.

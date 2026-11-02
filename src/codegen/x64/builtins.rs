@@ -4,6 +4,7 @@ use crate::codegen::context::{
     SMALLEST_CLASS, STDIN_BUFFER, TEXT_BLOCK,
 };
 pub use crate::codegen::context::{IMMORTAL, immortal_string};
+use crate::codegen::x64::cpu::level_check;
 use crate::codegen::x64::sort::sort_runtime;
 use crate::codegen::x64::system::{Sys, system_call};
 use crate::codegen::{AssemblyGenerator, Os};
@@ -11,11 +12,13 @@ use crate::codegen::{AssemblyGenerator, Os};
 /// Emits `_start`, where the kernel starts the program, with the argument count at `[rsp]`, the
 /// arguments after it, then a null, then the environment. It calls `main` with the count in
 /// `rdi`, the arguments in `rsi`, and the environment in `rdx`, as a C program's `main` gets them,
-/// then ends the program with the status `main` returns.
+/// then ends the program with the status `main` returns. Above the baseline level, it first
+/// checks the processor has the level's features ([`level_check`]).
 pub fn start_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\t.globl\t_start");
     r#gen.emit("_start:");
     r#gen.emit("\txor\tebp, ebp"); // the outermost frame
+    level_check(r#gen);
     r#gen.emit("\tmov\trdi, QWORD PTR [rsp]");
     r#gen.emit("\tlea\trsi, [rsp + 8]");
     r#gen.emit("\tlea\trdx, [rsi + rdi * 8 + 8]");

@@ -76,6 +76,18 @@ const XMM: [&str; 16] = [
     "xmm11", "xmm12", "xmm13", "xmm14", "xmm15",
 ];
 
+/// The 256-bit vector registers, by number, which share their low halves with [`XMM`].
+const YMM: [&str; 16] = [
+    "ymm0", "ymm1", "ymm2", "ymm3", "ymm4", "ymm5", "ymm6", "ymm7", "ymm8", "ymm9", "ymm10",
+    "ymm11", "ymm12", "ymm13", "ymm14", "ymm15",
+];
+
+/// Returns the `xmm` register that is the low half of `reg`, such as `xmm3` for `ymm3` (and
+/// `xmm3` itself).
+fn low_half(reg: &str) -> &'static str {
+    XMM[reg[3..].parse::<usize>().unwrap_or_default()]
+}
+
 /// The registers of a packed loop while it is emitted.
 struct Packing {
     /// The vector registers holding nothing, taken from the end.
@@ -85,6 +97,9 @@ struct Packing {
     /// The register holding the sign bit in both halves, for negating floats.
     mask: Option<&'static str>,
     float: bool,
+    /// Whether the loop works on four elements at a time in `ymm` registers with AVX2, rather
+    /// than two in `xmm` registers with SSE2.
+    wide: bool,
     /// The label after the loop.
     stop: String,
 }
@@ -314,9 +329,11 @@ impl X64Generator {
     /// Moves `src` into `dst`, going through `rax` when both are in memory or the immediate is too
     /// wide to store directly.
     /// Emits a [`Inst::Packed`] loop with SSE2, two elements at a time in `xmm3` to `xmm15`, which
-    /// hold no vregs. `rcx` counts the elements done, `rdx` holds the number of whole pairs' worth,
-    /// and `rax` holds a pointer that was spilled. Each number is copied to both halves of a
-    /// register once, before the loop.
+    /// hold no vregs, or at x86-64 `v3` and above with AVX2, four at a time in `ymm3` to `ymm15`.
+    /// `rcx` counts the elements done, `rdx` holds the number of whole groups' worth, and `rax`
+    /// holds a pointer that was spilled. Each number is copied to every element of a register
+    /// once, before the loop. An AVX2 loop ends with `vzeroupper`, since the rest of the program
+    /// uses SSE instructions, which run slowly while the upper halves hold anything.
     fn packed(
         &mut self,
         frame: &Frame,
@@ -326,12 +343,23 @@ impl X64Generator {
         out: Operand,
         len: Operand,
     ) -> Result<(), String> {
+        let wide = self.avx2();
+        let registers = if wide { YMM } else { XMM };
         let mut packing = Packing {
-            free: (3..16).rev().map(|n| XMM[n]).collect(),
+            free: (3..16).rev().map(|n| registers[n]).collect(),
             numbers: Vec::new(),
             mask: None,
             float,
+            wide,
             stop: self.ctx.new_label("packed_done"),
+        };
+        // copies the low element of `reg` to the others
+        let broadcast = |reg: &str| {
+            if wide {
+                format!("\tvpbroadcastq\t{reg}, {}", low_half(reg))
+            } else {
+                format!("\tpunpcklqdq\t{reg}, {reg}")
+            }
         };
         let mut numbers = Vec::new();
         number_operands(kernel, &mut numbers);
@@ -340,27 +368,29 @@ impl X64Generator {
                 continue;
             }
             let reg = packing.take()?;
+            let low = low_half(reg);
             match frame.value(number)? {
-                Value::Reg(gpr) => self.emit(&format!("\tmovq\t{reg}, {gpr}")),
+                Value::Reg(gpr) => self.emit(&format!("\tmovq\t{low}, {gpr}")),
                 value => {
                     self.load("rax", value);
-                    self.emit(&format!("\tmovq\t{reg}, rax"));
+                    self.emit(&format!("\tmovq\t{low}, rax"));
                 }
             }
-            self.emit(&format!("\tpunpcklqdq\t{reg}, {reg}"));
+            self.emit(&broadcast(reg));
             packing.numbers.push((number, reg));
         }
         if float && has_neg(kernel) {
-            // flipping the sign bit of each half negates it
+            // flipping the sign bit of each element negates it
             let reg = packing.take()?;
             self.load("rax", Value::Imm(i64::MIN));
-            self.emit(&format!("\tmovq\t{reg}, rax"));
-            self.emit(&format!("\tpunpcklqdq\t{reg}, {reg}"));
+            self.emit(&format!("\tmovq\t{}, rax", low_half(reg)));
+            self.emit(&broadcast(reg));
             packing.mask = Some(reg);
         }
+        let step = if wide { 4 } else { 2 };
         let len = frame.value(len)?;
         self.load("rdx", len);
-        self.emit("\tand\trdx, -2");
+        self.emit(&format!("\tand\trdx, -{step}"));
         self.emit("\txor\tecx, ecx");
         self.emit("\ttest\trdx, rdx");
         self.emit(&format!("\tjz\t{}", packing.stop));
@@ -368,21 +398,30 @@ impl X64Generator {
         self.emit(&format!("{top}:"));
         let (result, _) = self.packed_node(frame, &mut packing, kernel)?;
         let base = self.base(frame.value(out)?, "rax");
-        self.emit(&format!(
-            "\tmovupd\tXMMWORD PTR [{base} + rcx * 8], {result}"
-        ));
-        self.emit("\tadd\trcx, 2");
+        if wide {
+            self.emit(&format!(
+                "\tvmovupd\tYMMWORD PTR [{base} + rcx * 8], {result}"
+            ));
+        } else {
+            self.emit(&format!(
+                "\tmovupd\tXMMWORD PTR [{base} + rcx * 8], {result}"
+            ));
+        }
+        self.emit(&format!("\tadd\trcx, {step}"));
         self.emit("\tcmp\trcx, rdx");
         self.emit(&format!("\tjl\t{top}"));
         self.emit(&format!("{}:", packing.stop));
+        if wide {
+            self.emit("\tvzeroupper");
+        }
         let done = frame.reg(done)?;
         self.store(done, "rcx");
         Ok(())
     }
 
     /// Emits the instructions for one node of a packed kernel inside the loop, returning the
-    /// register holding its two results and whether the node owns that register, which a
-    /// broadcast number does not.
+    /// register holding its results and whether the node owns that register, which a broadcast
+    /// number does not.
     fn packed_node(
         &mut self,
         frame: &Frame,
@@ -402,8 +441,15 @@ impl X64Generator {
             Kernel::Element(data) => {
                 let reg = packing.take()?;
                 let base = self.base(frame.value(*data)?, "rax");
-                self.emit(&format!("\tmovupd\t{reg}, XMMWORD PTR [{base} + rcx * 8]"));
+                if packing.wide {
+                    self.emit(&format!("\tvmovupd\t{reg}, YMMWORD PTR [{base} + rcx * 8]"));
+                } else {
+                    self.emit(&format!("\tmovupd\t{reg}, XMMWORD PTR [{base} + rcx * 8]"));
+                }
                 Ok((reg, true))
+            }
+            Kernel::Binary(..) | Kernel::Neg(_) if packing.wide => {
+                self.packed_operation(frame, packing, node)
             }
             Kernel::Binary(op, lhs, rhs) => {
                 let (lhs, lhs_owned) = self.packed_node(frame, packing, lhs)?;
@@ -464,6 +510,71 @@ impl X64Generator {
                     Ok((dst, true))
                 }
             }
+        }
+    }
+
+    /// Emits an operation of an AVX2 kernel, as [`Self::packed_node`] does, with three-operand
+    /// instructions that write their result over an operand the node owns, so nothing is copied.
+    fn packed_operation(
+        &mut self,
+        frame: &Frame,
+        packing: &mut Packing,
+        node: &Kernel,
+    ) -> Result<(&'static str, bool), String> {
+        match node {
+            Kernel::Binary(op, lhs, rhs) => {
+                let (lhs, lhs_owned) = self.packed_node(frame, packing, lhs)?;
+                let (rhs, rhs_owned) = self.packed_node(frame, packing, rhs)?;
+                let mnemonic = match (op, packing.float) {
+                    (BinOp::Add, true) => "vaddpd",
+                    (BinOp::Sub, true) => "vsubpd",
+                    (BinOp::Mul, true) => "vmulpd",
+                    (BinOp::Div, true) => {
+                        // stop before a group with a zero divisor, for the single loop to report
+                        let zero = packing.take()?;
+                        self.emit(&format!("\tvxorpd\t{zero}, {zero}, {zero}"));
+                        self.emit(&format!("\tvcmppd\t{zero}, {zero}, {rhs}, 0"));
+                        self.emit(&format!("\tvmovmskpd\teax, {zero}"));
+                        self.emit("\ttest\teax, eax");
+                        self.emit(&format!("\tjnz\t{}", packing.stop));
+                        packing.give(zero);
+                        "vdivpd"
+                    }
+                    (BinOp::Add, false) => "vpaddq",
+                    (BinOp::Sub, false) => "vpsubq",
+                    _ => return Err(format!("{op:?} cannot be packed")),
+                };
+                let dst = match (lhs_owned, rhs_owned) {
+                    (true, _) => lhs,
+                    (false, true) => rhs,
+                    (false, false) => packing.take()?,
+                };
+                self.emit(&format!("\t{mnemonic}\t{dst}, {lhs}, {rhs}"));
+                if lhs_owned && rhs_owned {
+                    packing.give(rhs);
+                }
+                Ok((dst, true))
+            }
+            Kernel::Neg(operand) => {
+                let (src, owned) = self.packed_node(frame, packing, operand)?;
+                if packing.float {
+                    let mask = packing.mask.ok_or("a packed negation has no sign mask")?;
+                    let dst = if owned { src } else { packing.take()? };
+                    self.emit(&format!("\tvxorpd\t{dst}, {src}, {mask}"));
+                    Ok((dst, true))
+                } else {
+                    // 0 - x
+                    let zero = packing.take()?;
+                    self.emit(&format!("\tvpxor\t{zero}, {zero}, {zero}"));
+                    let dst = if owned { src } else { zero };
+                    self.emit(&format!("\tvpsubq\t{dst}, {zero}, {src}"));
+                    if owned {
+                        packing.give(zero);
+                    }
+                    Ok((dst, true))
+                }
+            }
+            Kernel::Number(_) | Kernel::Element(_) => self.packed_node(frame, packing, node),
         }
     }
 

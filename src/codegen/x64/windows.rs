@@ -16,6 +16,7 @@
 
 use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{INVALID_TEXT_CODE, UTSNAME_FIELD};
+use crate::codegen::x64::cpu::level_check;
 use crate::codegen::x64::system::{Sys, system_call};
 use crate::stdlib::fs::{WINDOWS_ERRNO, WINDOWS_ERROR_BASE};
 
@@ -65,6 +66,7 @@ pub fn start_runtime(r#gen: &mut dyn AssemblyGenerator, args: bool, env: bool) {
     emit(r#gen, "\tand\trsp, -16");
     // room for the arguments of the calls, then two words of its own
     emit(r#gen, "\tsub\trsp, 80");
+    level_check(r#gen);
     // rbx holds the count of arguments, r12 the arguments, and r13 the environment
     emit(r#gen, "\txor\tebx, ebx");
     emit(r#gen, "\txor\tr12d, r12d");

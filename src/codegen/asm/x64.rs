@@ -33,13 +33,14 @@ enum Kind {
     General,
     /// `ah`, `ch`, `dh`, or `bh`, which no instruction with a REX prefix can name.
     HighByte,
+    /// A vector register: `xmm0`-`xmm15`, or `ymm0`-`ymm15` with a size of 32.
     Xmm,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct Reg {
     num: u8,
-    /// The size in bytes, 16 for `xmm` registers.
+    /// The size in bytes, 16 for `xmm` registers and 32 for `ymm` registers.
     size: u8,
     kind: Kind,
 }
@@ -100,13 +101,15 @@ fn register(name: &str) -> Option<Reg> {
             kind: Kind::HighByte,
         });
     }
-    if let Some(num) = name.strip_prefix("xmm") {
-        let num: u8 = num.parse().ok().filter(|n| *n < 16)?;
-        return Some(Reg {
-            num,
-            size: 16,
-            kind: Kind::Xmm,
-        });
+    for (prefix, size) in [("xmm", 16), ("ymm", 32)] {
+        if let Some(num) = name.strip_prefix(prefix) {
+            let num: u8 = num.parse().ok().filter(|n| *n < 16)?;
+            return Some(Reg {
+                num,
+                size,
+                kind: Kind::Xmm,
+            });
+        }
     }
     let rest = name.strip_prefix('r')?;
     let digits = rest.trim_end_matches(['d', 'w', 'b']);
@@ -163,6 +166,7 @@ fn parse_memory(text: &str) -> Result<Mem, String> {
         "dword ptr" => Some(4),
         "qword ptr" => Some(8),
         "xmmword ptr" => Some(16),
+        "ymmword ptr" => Some(32),
         _ => return Err(bad()),
     };
     let mut mem = Mem {
@@ -246,12 +250,27 @@ enum Rm<'a> {
     Mem(&'a Mem),
 }
 
+/// The fields of a VEX prefix besides the REX bits it carries.
+#[derive(Clone, Copy)]
+struct Vex {
+    /// The implied mandatory prefix: 0 for none, 1 for `66`, 2 for `f3`, 3 for `f2`.
+    pp: u8,
+    /// The implied opcode map: 1 for `0f`, 2 for `0f 38`, 3 for `0f 3a`.
+    map: u8,
+    /// Whether the instruction works on 256 bits (`ymm`) rather than 128.
+    long: bool,
+    /// The extra source register, or 0 when there is none.
+    vvvv: u8,
+}
+
 /// An instruction under construction: prefixes, REX bits, opcode, ModRM operands, and an
-/// immediate, assembled in that order by [`Inst::finish`].
+/// immediate, assembled in that order by [`Inst::finish`]. With a [`Vex`], a VEX prefix takes
+/// the place of the prefixes and the REX prefix.
 #[derive(Default)]
 struct Inst<'a> {
     /// Mandatory and operand-size prefixes, which go before any REX prefix.
     prefixes: Vec<u8>,
+    vex: Option<Vex>,
     w: bool,
     /// The REX.B bit for an opcode that holds its register in its low three bits.
     opcode_b: bool,
@@ -289,6 +308,12 @@ impl<'a> Inst<'a> {
 
     fn w(mut self, w: bool) -> Self {
         self.w = w;
+        self
+    }
+
+    /// Makes the instruction a VEX one.
+    fn vex(mut self, vex: Vex) -> Self {
+        self.vex = Some(vex);
         self
     }
 
@@ -361,7 +386,21 @@ impl<'a> Inst<'a> {
                 }
             }
         }
-        if rex != 0x40 || self.force_rex {
+        if let Some(vex) = self.vex {
+            // R, X, and B are stored inverted, as is vvvv; GNU as takes the short form whenever
+            // it can say everything
+            let (r, x, b) = (rex >> 2 & 1, rex >> 1 & 1, rex & 1);
+            let tail = (!vex.vvvv & 15) << 3 | u8::from(vex.long) << 2 | vex.pp;
+            if x == 0 && b == 0 && !self.w && vex.map == 1 {
+                bytes.extend_from_slice(&[0xc5, (r ^ 1) << 7 | tail]);
+            } else {
+                bytes.extend_from_slice(&[
+                    0xc4,
+                    (r ^ 1) << 7 | (x ^ 1) << 6 | (b ^ 1) << 5 | vex.map,
+                    u8::from(self.w) << 7 | tail,
+                ]);
+            }
+        } else if rex != 0x40 || self.force_rex {
             if self.forbid_rex {
                 return Err("ah, bh, ch, and dh cannot be used here".to_string());
             }
@@ -586,6 +625,19 @@ fn encode(mnemonic: &str, operands: &[Operand]) -> Result<Encoded, String> {
     };
     let mismatch = || Err(format!("operand sizes of '{mnemonic}' do not match"));
     let unknown = || Err(format!("unknown instruction '{mnemonic}'"));
+
+    if mnemonic.starts_with('v') {
+        return avx(mnemonic, operands);
+    }
+    let wide = |operand: &Operand| match operand {
+        Reg(reg) => reg.size == 32,
+        Mem(mem) => mem.size == Some(32),
+        _ => false,
+    };
+    if operands.iter().any(wide) {
+        // only VEX instructions name ymm registers
+        return if is_known(mnemonic) { bad() } else { unknown() };
+    }
 
     if let Some(&(_, ext)) = ARITHMETIC.iter().find(|(name, _)| *name == mnemonic) {
         let [dst, src] = operands else { return bad() };
@@ -970,6 +1022,8 @@ fn encode(mnemonic: &str, operands: &[Operand]) -> Result<Encoded, String> {
         ("leave", []) => fixed(&[0xc9]),
         ("nop", []) => fixed(&[0x90]),
         ("syscall", []) => fixed(&[0x0f, 0x05]),
+        ("cpuid", []) => fixed(&[0x0f, 0xa2]),
+        ("xgetbv", []) => fixed(&[0x0f, 0x01, 0xd0]),
         ("movsb", []) => fixed(&[0xa4]),
         ("movsq", []) => fixed(&[0x48, 0xa5]),
         ("stosb", []) => fixed(&[0xaa]),
@@ -981,6 +1035,132 @@ fn encode(mnemonic: &str, operands: &[Operand]) -> Result<Encoded, String> {
         },
         _ if is_known(mnemonic) => bad(),
         _ => unknown(),
+    }
+}
+
+/// AVX instructions written `op dst, src1, src2/mem` on packed doubles or quadwords, with their
+/// opcode in the `0f` map under an implied `66` prefix.
+const AVX: [(&str, u8); 8] = [
+    ("vaddpd", 0x58),
+    ("vmulpd", 0x59),
+    ("vsubpd", 0x5c),
+    ("vdivpd", 0x5e),
+    ("vxorpd", 0x57),
+    ("vpaddq", 0xd4),
+    ("vpsubq", 0xfb),
+    ("vpxor", 0xef),
+];
+
+/// Returns a vector register of `size` bytes or a memory operand of that size (or none written)
+/// as the ModRM `rm` field.
+fn source(operand: &Operand, size: u8) -> Option<Rm<'_>> {
+    match operand {
+        Operand::Reg(reg) if reg.kind == Kind::Xmm && reg.size == size => Some(Rm::Reg(*reg)),
+        Operand::Mem(mem) if mem.size.is_none_or(|bytes| bytes == size) => Some(Rm::Mem(mem)),
+        _ => None,
+    }
+}
+
+/// Encodes a VEX instruction, one of [`AVX`] or the few others the backend emits.
+fn avx(mnemonic: &str, operands: &[Operand]) -> Result<Encoded, String> {
+    use Operand::*;
+    let bad = || {
+        Err(format!(
+            "'{mnemonic}' cannot take these operands ({} given)",
+            operands.len()
+        ))
+    };
+    // an implied 66 prefix in the 0f map, as every form here but vzeroupper and vpbroadcastq has
+    let packed = |size: u8, vvvv: u8| Vex {
+        pp: 1,
+        map: 1,
+        long: size == 32,
+        vvvv,
+    };
+    let vector = |operand: &Operand| match operand {
+        Reg(reg) if reg.kind == Kind::Xmm => Some(*reg),
+        _ => None,
+    };
+    if let Some(&(_, opcode)) = AVX.iter().find(|(name, _)| *name == mnemonic) {
+        let [dst, first, second] = operands else {
+            return bad();
+        };
+        let (Some(dst), Some(first)) = (vector(dst), vector(first)) else {
+            return bad();
+        };
+        let Some(second) = source(second, dst.size).filter(|_| first.size == dst.size) else {
+            return bad();
+        };
+        return Inst::new(&[opcode])
+            .vex(packed(dst.size, first.num))
+            .reg(dst, second)
+            .finish();
+    }
+    match (mnemonic, operands) {
+        ("vmovupd", [Reg(dst), src]) if dst.kind == Kind::Xmm => {
+            let Some(src) = source(src, dst.size).filter(|src| matches!(src, Rm::Mem(_))) else {
+                return bad();
+            };
+            Inst::new(&[0x10])
+                .vex(packed(dst.size, 0))
+                .reg(*dst, src)
+                .finish()
+        }
+        ("vmovupd", [Mem(mem), Reg(src)])
+            if src.kind == Kind::Xmm && mem.size.is_none_or(|size| size == src.size) =>
+        {
+            Inst::new(&[0x11])
+                .vex(packed(src.size, 0))
+                .reg(*src, Rm::Mem(mem))
+                .finish()
+        }
+        ("vcmppd", [dst, first, second, Imm(predicate)]) => {
+            let (Some(dst), Some(first)) = (vector(dst), vector(first)) else {
+                return bad();
+            };
+            let Some(second) = source(second, dst.size).filter(|_| first.size == dst.size) else {
+                return bad();
+            };
+            Inst::new(&[0xc2])
+                .vex(packed(dst.size, first.num))
+                .reg(dst, second)
+                .imm(*predicate, 1)
+                .finish()
+        }
+        ("vmovmskpd", [Reg(dst), Reg(src)])
+            if dst.kind == Kind::General && dst.size == 4 && src.kind == Kind::Xmm =>
+        {
+            Inst::new(&[0x50])
+                .vex(packed(src.size, 0))
+                .reg(*dst, Rm::Reg(*src))
+                .finish()
+        }
+        ("vpbroadcastq", [Reg(dst), src]) if dst.kind == Kind::Xmm => {
+            let Some(src) = source(src, 16) else {
+                return bad();
+            };
+            Inst::new(&[0x59])
+                .vex(Vex {
+                    map: 2,
+                    ..packed(dst.size, 0)
+                })
+                .reg(*dst, src)
+                .finish()
+        }
+        ("vzeroupper", []) => fixed(&[0xc5, 0xf8, 0x77]),
+        _ if AVX.iter().any(|(name, _)| *name == mnemonic)
+            || [
+                "vmovupd",
+                "vcmppd",
+                "vmovmskpd",
+                "vpbroadcastq",
+                "vzeroupper",
+            ]
+            .contains(&mnemonic) =>
+        {
+            bad()
+        }
+        _ => Err(format!("unknown instruction '{mnemonic}'")),
     }
 }
 
@@ -1035,6 +1215,8 @@ fn is_known(mnemonic: &str) -> bool {
         "leave",
         "nop",
         "syscall",
+        "cpuid",
+        "xgetbv",
         "movsb",
         "movsq",
         "stosb",
@@ -1042,6 +1224,8 @@ fn is_known(mnemonic: &str) -> bool {
     ]
     .contains(&mnemonic)
         || UNARY.iter().any(|(name, ..)| *name == mnemonic)
+        || SSE.iter().any(|(name, ..)| *name == mnemonic)
+        || ARITHMETIC.iter().any(|(name, _)| *name == mnemonic)
 }
 
 fn mov(dst: &Operand, src: &Operand) -> Result<Encoded, String> {
@@ -1401,6 +1585,56 @@ mod tests {
     }
 
     #[test]
+    fn avx2_forms_match_gnu_as() {
+        check(&[
+            (
+                "vmovupd ymm3, YMMWORD PTR [rax + rcx * 8]",
+                "c5 fd 10 1c c8",
+            ),
+            (
+                "vmovupd ymm15, YMMWORD PTR [r9 + rcx * 8]",
+                "c4 41 7d 10 3c c9",
+            ),
+            (
+                "vmovupd ymm4, YMMWORD PTR [r13 + rcx * 8]",
+                "c4 c1 7d 10 64 cd 00",
+            ),
+            (
+                "vmovupd YMMWORD PTR [rax + rcx * 8], ymm3",
+                "c5 fd 11 1c c8",
+            ),
+            (
+                "vmovupd YMMWORD PTR [r10 + rcx * 8], ymm12",
+                "c4 41 7d 11 24 ca",
+            ),
+            ("vaddpd ymm3, ymm4, ymm5", "c5 dd 58 dd"),
+            ("vaddpd ymm3, ymm4, ymm12", "c4 c1 5d 58 dc"),
+            ("vaddpd ymm12, ymm4, ymm5", "c5 5d 58 e5"),
+            ("vaddpd ymm3, ymm12, ymm5", "c5 9d 58 dd"),
+            ("vaddpd ymm13, ymm14, ymm15", "c4 41 0d 58 ef"),
+            ("vsubpd ymm3, ymm4, ymm12", "c4 c1 5d 5c dc"),
+            ("vmulpd ymm3, ymm4, ymm12", "c4 c1 5d 59 dc"),
+            ("vdivpd ymm3, ymm4, ymm12", "c4 c1 5d 5e dc"),
+            ("vxorpd ymm3, ymm3, ymm3", "c5 e5 57 db"),
+            ("vxorpd ymm9, ymm4, ymm11", "c4 41 5d 57 cb"),
+            ("vpaddq ymm3, ymm4, ymm12", "c4 c1 5d d4 dc"),
+            ("vpsubq ymm3, ymm4, ymm12", "c4 c1 5d fb dc"),
+            ("vpxor ymm3, ymm3, ymm3", "c5 e5 ef db"),
+            ("vpxor ymm10, ymm10, ymm10", "c4 41 2d ef d2"),
+            ("vcmppd ymm3, ymm4, ymm5, 0", "c5 dd c2 dd 00"),
+            ("vcmppd ymm10, ymm4, ymm15, 0", "c4 41 5d c2 d7 00"),
+            ("vmovmskpd eax, ymm3", "c5 fd 50 c3"),
+            ("vmovmskpd eax, ymm12", "c4 c1 7d 50 c4"),
+            ("vpbroadcastq ymm3, xmm3", "c4 e2 7d 59 db"),
+            ("vpbroadcastq ymm12, xmm12", "c4 42 7d 59 e4"),
+            ("vpbroadcastq ymm3, xmm12", "c4 c2 7d 59 dc"),
+            ("vzeroupper", "c5 f8 77"),
+            ("cpuid", "0f a2"),
+            ("xgetbv", "0f 01 d0"),
+        ]);
+    }
+
+    #[test]
     fn floats_and_strings_match_gnu_as() {
         check(&[
             ("movq xmm0, rax", "66 48 0f 6e c0"),
@@ -1489,6 +1723,16 @@ mod tests {
                 "push",
                 &["eax"],
                 "'push' cannot take these operands (1 given)",
+            ),
+            (
+                "addpd",
+                &["ymm3", "ymm4"],
+                "'addpd' cannot take these operands (2 given)",
+            ),
+            (
+                "vaddpd",
+                &["ymm3", "xmm4", "ymm5"],
+                "'vaddpd' cannot take these operands (3 given)",
             ),
         ] {
             assert_eq!(

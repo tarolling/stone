@@ -58,6 +58,15 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   support in the reference, guides, and agent prompts, a new benchmark baseline that includes
   `trig`, and corrected statements about `str` of any value, map `pop`, function values, and
   more. `stone build --help` lists `x86_64-windows` among the targets.
+- `stone build --target x86_64v3` (and `v4`) makes arithmetic on whole lists work on four
+  elements at a time with AVX2, rather than two with SSE2, which made `y = 0.5 * x + y` on lists
+  that fit in the cache about 1.45 times as fast. Results are the same bits as the interpreter's,
+  since no fused multiply-add is used, and a zero divisor still stops the program at its own
+  element.
+- A program built for an x86-64 level above `v1` checks at startup that the processor has every
+  feature of the level, and otherwise stops before running anything with
+  `error: this program needs an x86-64 v3 processor` (naming its level) and exit status 1,
+  rather than dying of an illegal instruction.
 
 ### Changed
 

@@ -2167,7 +2167,12 @@ fn stored_run(files: &[(String, String)]) -> (String, Vec<(PathBuf, String)>) {
             .expect("program should run");
             String::from_utf8(out).unwrap()
         }
-        Err(errors) => errors.0.iter().map(|d| map.render(d)).collect(),
+        // the expected paths are written with windows' separator as `/`
+        Err(errors) => errors
+            .0
+            .iter()
+            .map(|d| map.render(d).replace('\\', "/"))
+            .collect(),
     };
     (printed, sources.written())
 }

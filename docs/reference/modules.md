@@ -112,6 +112,16 @@ A module's functions see their parameters and locals, their own file's functions
 the names their file binds with `use`. They never see the entry file's variables or functions:
 reading one is `undefined name` or `undefined function`, as for any unknown name.
 
+## Packages
+
+A program whose entry file has a `stone.toml` beside it can use packages, other directories of
+modules that it names under `[dependencies]` (see {doc}`../guides/packages` and
+{doc}`manifest`). A path that starts with a dependency's name is in that package: `use geo` loads
+the package's `lib.stn`, `use geo.shapes` its `shapes.stn`, and `use geo.area` the `pub fn area`
+of its `lib.stn`. A dependency cannot share its name with a module or directory of the program.
+A package's files follow the same rules as any module, see only the package's own modules and
+dependencies, and name their own modules by their paths within the package.
+
 ## Types
 
 The checker checks the whole program at once, the same way it does within one file. A module's

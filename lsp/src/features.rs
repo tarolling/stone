@@ -18,9 +18,10 @@ use stone::checker::{
 };
 use stone::diagnostic::Severity;
 use stone::lexer::Lexer;
+use stone::package::{LIB, MANIFEST};
 use stone::project::{
-    DEFAULT_ENTRY, Import, Linked, MapSources, SourceFile, SourceMap, Sources, Target, link,
-    link_in,
+    DEFAULT_ENTRY, Import, Linked, MapSources, PackageInfo, SourceFile, SourceMap, Sources, Target,
+    link, link_in, shown_names,
 };
 use stone::span::{FileId, Pos, Span};
 use stone::stdlib::{
@@ -54,6 +55,14 @@ pub struct Document {
     pub public: HashSet<String>,
     /// The directory module paths start from.
     pub root: PathBuf,
+    /// An error at each `use` of a package that could not be read, saying why.
+    unavailable: Vec<stone::diagnostic::Diagnostic>,
+    /// The program, then every package it uses.
+    packages: Vec<PackageInfo>,
+    /// The package each file belongs to, by index into `packages`.
+    file_packages: Vec<usize>,
+    /// Where downloaded packages are kept, whose files are never changed.
+    store: Option<PathBuf>,
     /// The document's tokens, which tell the text of its strings from code.
     tokens: Vec<Token>,
     encoding: Encoding,
@@ -64,23 +73,29 @@ impl Document {
     /// requests until the text changes.
     pub fn new(text: String, encoding: Encoding) -> Self {
         let linked = link(Path::new(DEFAULT_ENTRY), &text, &MapSources::default());
-        Self::from_linked(linked, FileId(0), encoding)
+        Self::from_linked(linked, FileId(0), None, encoding)
     }
 
     /// Analyzes the file at `path` as part of its program, reading every file from `sources`, or
     /// returns `None` if there is no file at `path`.
     ///
-    /// The program is the one whose entry file is the nearest `main.stn` in the file's directory or
-    /// one above it. If that program does not use the file yet, the file is checked as an entry
-    /// file of its own, from the program's root if it is in a directory under it.
+    /// The program's root is the nearest directory, the file's own or one above it, that holds a
+    /// `main.stn` or a package's `stone.toml`, and its entry file is that `main.stn` or, for a
+    /// library, its `lib.stn`. If that program does not use the file yet, the file is checked as
+    /// an entry file of its own, from the program's root if it is in a directory under it.
     pub fn in_program(path: &Path, sources: &dyn Sources, encoding: Encoding) -> Option<Self> {
         let text = sources.read(path)?;
         let linked = program_of(path, &text, sources);
         let file = linked.sources.find(path).unwrap_or(FileId(0));
-        Some(Self::from_linked(linked, file, encoding))
+        Some(Self::from_linked(linked, file, sources.store(), encoding))
     }
 
-    fn from_linked(linked: Linked, file: FileId, encoding: Encoding) -> Self {
+    fn from_linked(
+        linked: Linked,
+        file: FileId,
+        store: Option<PathBuf>,
+        encoding: Encoding,
+    ) -> Self {
         let analysis = stone::driver::analyze_linked(&linked);
         let unused = stone::unused::find(&linked, &analysis);
         let text = linked.sources.file(file).source.clone();
@@ -97,8 +112,41 @@ impl Document {
             imports: linked.imports,
             public: linked.public,
             root: linked.root,
+            unavailable: linked.unavailable,
+            packages: linked.packages,
+            file_packages: linked.file_packages,
+            store,
             encoding,
         }
+    }
+
+    /// Returns `text` with the linked names of packages' modules written as the program's files
+    /// write them, as `geo.shapes.area` for `geo.1.shapes.area`.
+    fn shown(&self, text: &str) -> String {
+        shown_names(text, &self.packages)
+    }
+
+    /// Returns the package `file` belongs to: its index in `packages`.
+    fn package_of(&self, file: FileId) -> usize {
+        self.file_packages
+            .get(file.0 as usize)
+            .copied()
+            .unwrap_or(0)
+    }
+
+    /// Returns the name of the package whose code `file` is, if it is not the program's own to
+    /// change: a package the program depends on, or a program in the store, which is a
+    /// downloaded package opened on its own.
+    fn package_owning(&self, file: FileId) -> Option<String> {
+        let source = self.sources.file(file);
+        if let Some(package) = &source.package {
+            return Some(package.clone());
+        }
+        let stored = self
+            .store
+            .as_ref()
+            .is_some_and(|store| source.path.starts_with(store));
+        stored.then(|| self.packages[self.package_of(file)].name.clone())
     }
 
     /// Returns the symbol whose name is at `position`, with the span of that appearance.
@@ -219,19 +267,26 @@ impl Document {
 /// Links the program the file at `path` belongs to. See [`Document::in_program`].
 fn program_of(path: &Path, text: &str, sources: &dyn Sources) -> Linked {
     let dir = path.parent().unwrap_or(Path::new(""));
+    let holds = |d: &Path, name: &str| sources.read(&d.join(name)).is_some();
     let root = dir
         .ancestors()
-        .find(|d| sources.read(&d.join(DEFAULT_ENTRY)).is_some());
+        .find(|d| holds(d, DEFAULT_ENTRY) || holds(d, MANIFEST));
     let Some(root) = root else {
         return link(path, text, sources);
     };
-    let main = root.join(DEFAULT_ENTRY);
-    if main == path {
-        return link(path, text, sources);
-    }
-    let linked = link(&main, &sources.read(&main).unwrap_or_default(), sources);
-    if linked.sources.find(path).is_some() {
-        return linked;
+    let lib = format!("{LIB}.stn");
+    let entry = [DEFAULT_ENTRY, lib.as_str()]
+        .into_iter()
+        .map(|name| root.join(name))
+        .find(|entry| sources.read(entry).is_some());
+    if let Some(entry) = entry {
+        if entry == path {
+            return link(path, text, sources);
+        }
+        let linked = link(&entry, &sources.read(&entry).unwrap_or_default(), sources);
+        if linked.sources.find(path).is_some() {
+            return linked;
+        }
     }
     // not used by the program yet
     if dir == root {
@@ -244,27 +299,63 @@ fn program_of(path: &Path, text: &str, sources: &dyn Sources) -> Linked {
 /// Returns the document's problems as LSP diagnostics.
 pub fn diagnostics(doc: &Document) -> Vec<Diagnostic> {
     let found = doc.analysis.diagnostics.iter().map(|d| (d, false));
+    // the program's errors say once, in the manifest, why a package cannot be used, and an
+    // editor shows it at each `use` of it too
+    let unavailable = doc.unavailable.iter().map(|d| (d, false));
     // an editor fades what is unused as well as underlining it
     let unused = doc.unused.iter().map(|d| (d, true));
     let mut diagnostics: Vec<_> = found
+        .chain(unavailable)
         .chain(unused)
         .filter(|(d, _)| d.span.file == doc.file)
         .collect();
     diagnostics.sort_by_key(|(d, _)| d.span.start);
     diagnostics
         .into_iter()
-        .map(|(d, unused)| Diagnostic {
-            range: doc.index.range(d.span),
-            severity: Some(match d.severity {
-                Severity::Error => DiagnosticSeverity::ERROR,
-                Severity::Warning => DiagnosticSeverity::WARNING,
-            }),
-            source: Some("stone".to_string()),
-            message: d.message.clone(),
-            tags: unused.then(|| vec![DiagnosticTag::UNNECESSARY]),
-            ..Diagnostic::default()
+        .map(|(d, unused)| lsp_diagnostic(doc, &doc.index, d, unused))
+        .collect()
+}
+
+/// Returns the diagnostics of each `stone.toml` and `stone.lock` of the program `doc` belongs
+/// to, by the file's URI. A file with none is included too, so an editor clears what it showed
+/// before.
+pub fn package_diagnostics(doc: &Document) -> Vec<(Uri, Vec<Diagnostic>)> {
+    doc.sources
+        .files()
+        .filter(|(_, file)| file.is_package_file())
+        .filter_map(|(id, file)| {
+            let index = LineIndex::new(&file.source, doc.encoding);
+            let found = doc
+                .analysis
+                .diagnostics
+                .iter()
+                .filter(|d| d.span.file == id)
+                .map(|d| lsp_diagnostic(doc, &index, d, false))
+                .collect();
+            Some((file_uri(&file.path)?, found))
         })
         .collect()
+}
+
+/// Converts a diagnostic of a file whose lines `index` knows to the protocol's, tagged as
+/// `unused` code if it is one.
+fn lsp_diagnostic(
+    doc: &Document,
+    index: &LineIndex,
+    d: &stone::diagnostic::Diagnostic,
+    unused: bool,
+) -> Diagnostic {
+    Diagnostic {
+        range: index.range(d.span),
+        severity: Some(match d.severity {
+            Severity::Error => DiagnosticSeverity::ERROR,
+            Severity::Warning => DiagnosticSeverity::WARNING,
+        }),
+        source: Some("stone".to_string()),
+        message: doc.shown(&d.message),
+        tags: unused.then(|| vec![DiagnosticTag::UNNECESSARY]),
+        ..Diagnostic::default()
+    }
 }
 
 /// Describes a symbol the way stone would declare it, such as `fn add(a: int) -> int`,
@@ -710,6 +801,15 @@ fn markdown(code: &str, text: Option<&str>) -> HoverContents {
 /// Describes what is at `position`: a symbol's declaration with the comment above its definition
 /// (see [`doc_comment`]), a builtin's documentation, or the type of the innermost expression there.
 pub fn hover(doc: &Document, position: Position) -> Option<Hover> {
+    let mut hover = hover_at(doc, position)?;
+    if let HoverContents::Markup(markup) = &mut hover.contents {
+        markup.value = doc.shown(&markup.value);
+    }
+    Some(hover)
+}
+
+/// Does the work of [`hover`], with names as they are linked.
+fn hover_at(doc: &Document, position: Position) -> Option<Hover> {
     let pos = doc.index.pos(position);
     if !doc.in_code(pos) {
         return expression_hover(doc, pos);
@@ -978,9 +1078,12 @@ pub fn references(
 pub fn prepare_rename(doc: &Document, position: Position) -> Option<PrepareRenameResponse> {
     let (symbol, span) = doc.symbol_at(position)?;
     // the prelude's names, such as `some`, and those of modules like `net` belong to the
-    // language
+    // language, and a package's to the package
     let file = doc.analysis.symbols[symbol].span.file;
-    if file == FileId::PRELUDE || doc.sources.file(file).is_builtin() {
+    if file == FileId::PRELUDE
+        || doc.sources.file(file).is_builtin()
+        || doc.package_owning(file).is_some()
+    {
         return None;
     }
     Some(PrepareRenameResponse::Range(doc.index.range(span)))
@@ -1011,6 +1114,13 @@ pub fn rename(
     let symbol = &doc.analysis.symbols[index];
     if symbol.span.file == FileId::PRELUDE || doc.sources.file(symbol.span.file).is_builtin() {
         return Err(format!("'{}' is a builtin", doc.local_name(symbol)));
+    }
+    // renaming it would change the package's files, which other programs use too
+    if let Some(package) = doc.package_owning(symbol.span.file) {
+        return Err(format!(
+            "'{}' belongs to the package '{package}'",
+            doc.local_name(symbol)
+        ));
     }
     if is_reserved(new_name) {
         return Err(format!("'{new_name}' is a builtin"));
@@ -1218,6 +1328,17 @@ pub fn completion(
     position: Position,
     sources: &dyn Sources,
 ) -> Vec<CompletionItem> {
+    let mut items = completion_at(doc, position, sources);
+    for item in &mut items {
+        if let Some(detail) = &mut item.detail {
+            *detail = doc.shown(detail);
+        }
+    }
+    items
+}
+
+/// Does the work of [`completion`], with names as they are linked.
+fn completion_at(doc: &Document, position: Position, sources: &dyn Sources) -> Vec<CompletionItem> {
     let pos = doc.index.pos(position);
     if !doc.in_code(pos) {
         return vec![];
@@ -1917,15 +2038,27 @@ fn builtin_module_functions(module: &str) -> Vec<CompletionItem> {
 fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<CompletionItem> {
     let parent = path.rsplit_once('.').map_or("", |(parent, _)| parent);
     let names: Vec<&str> = parent.split('.').filter(|n| !n.is_empty()).collect();
-    let dir = names.iter().fold(doc.root.clone(), |dir, n| dir.join(n));
+    // a path that starts with a dependency's name is in that package's directory
+    let package = &doc.packages[doc.package_of(doc.file)];
+    let dependency = names.first().and_then(|first| {
+        let (_, i) = package.deps.iter().find(|(name, _)| name == first)?;
+        Some(&doc.packages[*i])
+    });
+    let (root, within) = match dependency {
+        Some(dependency) => (dependency.root.clone(), &names[1..]),
+        None => (doc.root.clone(), &names[..]),
+    };
+    let dir = within.iter().fold(root, |dir, n| dir.join(n));
     let mut items: Vec<CompletionItem> = vec![];
     for entry in sources.entries(&dir) {
         let Some(name) = entry.file_stem().and_then(|s| s.to_str()) else {
             continue;
         };
         let kind = if entry.extension().is_some_and(|ext| ext == "stn") {
-            // the entry file cannot be imported
-            if doc.sources.find(&entry) == Some(FileId(0)) {
+            // the entry file cannot be imported, and a package's lib.stn is the package itself
+            if doc.sources.find(&entry) == Some(FileId(0))
+                || (dependency.is_some() && within.is_empty() && name == LIB)
+            {
                 continue;
             }
             CompletionItemKind::MODULE
@@ -1944,6 +2077,22 @@ fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<Comp
         });
     }
     if names.is_empty() {
+        for (name, i) in &package.deps {
+            if items.iter().any(|item| item.label == *name) {
+                continue;
+            }
+            let dependency = &doc.packages[*i];
+            let version = dependency
+                .version
+                .as_ref()
+                .map_or(String::new(), |v| format!(" {v}"));
+            items.push(CompletionItem {
+                label: name.clone(),
+                kind: Some(CompletionItemKind::MODULE),
+                detail: Some(format!("package {}{version}", dependency.name)),
+                ..CompletionItem::default()
+            });
+        }
         let modules = MODULES.iter().map(|module| module.name);
         for module in modules.chain(SOURCE_MODULES.iter().map(|(name, _)| *name)) {
             if items.iter().any(|i| i.label == module) {
@@ -1957,7 +2106,24 @@ fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<Comp
             });
         }
     }
-    if let [name] = names[..]
+    if let Some(dependency) = dependency {
+        // the module the path names, or the package's lib.stn
+        let module = match within {
+            [] => dependency.prefix.clone(),
+            within => format!("{}.{}", dependency.prefix, within.join(".")),
+        };
+        if let Some((file, _)) = doc.sources.files().find(|(_, f)| f.module == module) {
+            items.extend(module_functions(doc, file));
+        } else if doc.package_of(doc.file) == 0 {
+            // a module the program does not use yet, loaded as the program would load it
+            let entry = doc.root.join(DEFAULT_ENTRY);
+            let used = link(&entry, &format!("use {}\n", names.join(".")), sources);
+            let used = Document::from_linked(used, FileId(0), None, doc.encoding);
+            if let Some((file, _)) = used.sources.files().find(|(_, f)| f.module == module) {
+                items.extend(module_functions(&used, file));
+            }
+        }
+    } else if let [name] = names[..]
         && stone::stdlib::module(name).is_some()
     {
         items.extend(builtin_module_functions(name));
@@ -1972,7 +2138,7 @@ fn use_completion(doc: &Document, path: &str, sources: &dyn Sources) -> Vec<Comp
                 &format!("use {module}\n"),
                 &MapSources::default(),
             );
-            let used = Document::from_linked(used, FileId(0), doc.encoding);
+            let used = Document::from_linked(used, FileId(0), None, doc.encoding);
             if let Some((file, _)) = used.sources.files().find(|(_, f)| f.module == module) {
                 items.extend(module_functions(&used, file));
             }

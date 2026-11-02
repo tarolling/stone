@@ -10,7 +10,12 @@ finds errors, the command prints all of them and exits with status 1 without run
 Errors print as `file:line:col: error: message`, followed by the source line and a caret under
 the problem.
 
-## `stone run FILE [ARGS...]`
+A program with a `stone.toml` next to its entry file uses packages (see
+{doc}`../guides/packages`). `run`, `build`, and `check` first download any package the program
+uses that is not downloaded yet, unless given `--offline`, which uses only what is already in
+the package store and never connects to anything.
+
+## `stone run [--offline] FILE [ARGS...]`
 
 Interprets the program. `stone FILE` is shorthand for `stone run FILE`. Everything after the
 file is passed to the program, which reads it with `args()`, even arguments that start with `-`.
@@ -21,7 +26,7 @@ stone run examples/basics.stn
 stone run sum.stn 1 2 3 < numbers.txt
 ```
 
-## `stone build FILE... [-o OUTPUT] [--target TARGET]... [--windows-gui]`
+## `stone build FILE... [-o OUTPUT] [--target TARGET]... [--windows-gui] [--offline]`
 
 Compiles each program to a native executable in its build directory (see
 [Where executables go](#where-executables-go)), writing the assembly next to it with a `.s`
@@ -122,7 +127,7 @@ stone clean examples/basics.stn   # removes examples/build
 stone clean                      # removes ./build
 ```
 
-## `stone check FILE`
+## `stone check [--offline] FILE`
 
 Reports every syntax and type error without running the program, and exits with status 1 if
 there are any. Warnings alone print but leave the status at 0.
@@ -145,6 +150,45 @@ main.stn:3:17: warning: parameter 'h' is never used; remove it or name it '_h'
 
 ```sh
 stone check examples/basics.stn
+```
+
+## `stone add PACKAGE [--name NAME] [--host HOST]`
+
+Adds a package from a GitHub or GitLab release to the program in the current directory: it finds
+the release, downloads it with every package it uses, names it under `[dependencies]` in
+`stone.toml` (making the file if there is none), and updates `stone.lock`. `PACKAGE` is
+`github:owner/repo`, `gitlab:group/project`, or a link to either, optionally followed by
+`@latest` (the default, the newest release that is not a pre-release), `@1.2` (the newest 1.2.x),
+or an exact version such as `@1.2.3`. The dependency is named by the package's own name unless
+`--name` gives another, and `--host` names a GitLab of your own, such as `gitlab.example.com`.
+Adding a package that is already there changes its version to the one found.
+
+```sh
+stone add github:alice/stone-json
+stone add gitlab:bob/num@0.3 --name numbers
+```
+
+## `stone remove NAME`
+
+Removes the dependency `NAME` from the current directory's `stone.toml`, and from `stone.lock`
+along with any package only it used. The downloaded files stay in the package store.
+
+## `stone fetch [PATH] [--locked]`
+
+Downloads every package the program in `PATH` (an entry file or a directory, by default the
+current directory) uses, and brings its `stone.lock` up to date. With `--locked`, it fails if
+`stone.lock` would change instead of changing it, so CI builds only what was locked.
+
+## `stone tree [PATH]`
+
+Prints the packages the program in `PATH` uses, each with its version and source, and below each
+the packages it uses in turn. A package used under a name other than its own shows as
+`name = package`, and one that appears again is marked `(*)` and not expanded again.
+
+```text
+app
+└── json 1.2.0 (github:alice/stone-json)
+    └── num 0.3.0 (github:bob/num)
 ```
 
 ## `stone fmt [PATH...] [--check]`

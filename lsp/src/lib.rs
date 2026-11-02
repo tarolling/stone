@@ -5,25 +5,26 @@
 //! document changes, which publishes its diagnostics, and requests like hover and rename are
 //! answered from that analysis by [`features`].
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use lsp_server::{Connection, ErrorCode, ExtractError, Message, Notification, Request, Response};
 use lsp_types::notification::{
-    DidChangeTextDocument, DidCloseTextDocument, DidOpenTextDocument,
+    DidChangeTextDocument, DidChangeWatchedFiles, DidCloseTextDocument, DidOpenTextDocument,
     Notification as LspNotification, PublishDiagnostics,
 };
 use lsp_types::request::{
     Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
-    PrepareRenameRequest, References, Rename, Request as LspRequest,
+    PrepareRenameRequest, References, RegisterCapability, Rename, Request as LspRequest,
 };
 use lsp_types::{
-    CompletionOptions, CompletionResponse, DocumentSymbolResponse, GotoDefinitionResponse,
+    CompletionOptions, CompletionResponse, Diagnostic, DidChangeWatchedFilesRegistrationOptions,
+    DocumentSymbolResponse, FileSystemWatcher, GlobPattern, GotoDefinitionResponse,
     HoverProviderCapability, InitializeParams, InitializeResult, OneOf, PositionEncodingKind,
-    PublishDiagnosticsParams, RenameOptions, ServerCapabilities, ServerInfo,
-    TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkDoneProgressOptions,
+    PublishDiagnosticsParams, Registration, RegistrationParams, RenameOptions, ServerCapabilities,
+    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkDoneProgressOptions,
 };
 
 use stone::project::{FsSources, Sources};
@@ -52,11 +53,15 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
         }),
     };
     connection.initialize_finish(id, serde_json::to_value(result)?)?;
+    if watches_files(&params) {
+        connection.sender.send(watch_packages()?.into())?;
+    }
 
     let mut server = Server {
         encoding,
         texts: HashMap::new(),
         documents: HashMap::new(),
+        published: HashSet::new(),
         builtins: write_builtins_reference().map(Builtins::new),
     };
     for message in &connection.receiver {
@@ -110,6 +115,41 @@ fn replace_file(path: &Path, text: &str) -> Option<()> {
     std::fs::rename(&temporary, path).ok()
 }
 
+/// Returns whether the client can be asked to say when files change on disk.
+fn watches_files(params: &InitializeParams) -> bool {
+    let watched = params
+        .capabilities
+        .workspace
+        .as_ref()
+        .and_then(|workspace| workspace.did_change_watched_files.as_ref());
+    watched.and_then(|w| w.dynamic_registration) == Some(true)
+}
+
+/// Returns the request that asks the client to say when a `stone.toml` or `stone.lock` changes,
+/// as an edit to a manifest or `stone fetch` does, since either can change what is wrong in any
+/// program and neither is a document the server is sent.
+fn watch_packages() -> Result<Request, serde_json::Error> {
+    let watcher = |pattern: &str| FileSystemWatcher {
+        glob_pattern: GlobPattern::String(pattern.to_string()),
+        kind: None,
+    };
+    let options = DidChangeWatchedFilesRegistrationOptions {
+        watchers: vec![watcher("**/stone.toml"), watcher("**/stone.lock")],
+    };
+    let params = RegistrationParams {
+        registrations: vec![Registration {
+            id: "stone-packages".to_string(),
+            method: DidChangeWatchedFiles::METHOD.to_string(),
+            register_options: Some(serde_json::to_value(options)?),
+        }],
+    };
+    Ok(Request::new(
+        "stone-packages".to_string().into(),
+        RegisterCapability::METHOD.to_string(),
+        params,
+    ))
+}
+
 /// Picks UTF-8 positions if the client supports them, and UTF-16 otherwise.
 fn negotiate_encoding(params: &InitializeParams) -> Encoding {
     let offered = params
@@ -156,6 +196,9 @@ struct Server {
     texts: HashMap<Uri, String>,
     /// The analysis of each open document.
     documents: HashMap<Uri, Document>,
+    /// The `stone.toml` and `stone.lock` files whose diagnostics were published last, which are
+    /// cleared once no open document's program has them.
+    published: HashSet<Uri>,
     /// Where definitions of builtins go, or `None` if the reference file could not be written.
     builtins: Option<Builtins>,
 }
@@ -291,6 +334,8 @@ impl Server {
                 };
                 (params.text_document.uri, None)
             }
+            // a manifest or lockfile changed on disk
+            DidChangeWatchedFiles::METHOD => return self.reanalyze(None),
             _ => return vec![],
         };
 
@@ -303,7 +348,13 @@ impl Server {
                 self.documents.remove(&uri);
             }
         }
+        self.reanalyze(Some(uri))
+    }
 
+    /// Analyzes every open document again, returning the diagnostics to publish: those of
+    /// `changed` first, which may have been closed, then the other documents', then those of
+    /// the packages' files.
+    fn reanalyze(&mut self, changed: Option<Uri>) -> Vec<Notification> {
         // a change to one file can change what is wrong in any other file of its program
         let workspace = self.workspace();
         self.documents = self
@@ -318,10 +369,53 @@ impl Server {
             .collect();
 
         // the changed document first, and a closed one's diagnostics are cleared
-        let mut uris: Vec<&Uri> = self.documents.keys().filter(|u| **u != uri).collect();
+        let mut uris: Vec<&Uri> = self
+            .documents
+            .keys()
+            .filter(|u| Some(*u) != changed.as_ref())
+            .collect();
         uris.sort_by_key(|u| u.as_str());
-        let mut replies = vec![publish(&uri, self.documents.get(&uri))];
+        let mut replies: Vec<Notification> = changed
+            .iter()
+            .map(|uri| publish(uri, self.documents.get(uri)))
+            .collect();
         replies.extend(uris.into_iter().map(|u| publish(u, self.documents.get(u))));
+
+        // a package file may belong to several programs, which find the same errors in it
+        let mut packages: Vec<(Uri, Vec<Diagnostic>)> = vec![];
+        for doc in self.documents.values() {
+            for (uri, found) in features::package_diagnostics(doc) {
+                let at = match packages.iter().position(|(u, _)| *u == uri) {
+                    Some(at) => at,
+                    None => {
+                        packages.push((uri, vec![]));
+                        packages.len() - 1
+                    }
+                };
+                for diagnostic in found {
+                    if !packages[at].1.contains(&diagnostic) {
+                        packages[at].1.push(diagnostic);
+                    }
+                }
+            }
+        }
+        packages.sort_by_key(|(u, _)| u.as_str().to_string());
+        let mut cleared: Vec<Uri> = self
+            .published
+            .iter()
+            .filter(|uri| !packages.iter().any(|(u, _)| u == *uri))
+            .cloned()
+            .collect();
+        cleared.sort_by_key(|u| u.as_str().to_string());
+        self.published = packages.iter().map(|(uri, _)| uri.clone()).collect();
+        for (uri, found) in packages {
+            let params = PublishDiagnosticsParams::new(uri, found, None);
+            replies.push(Notification::new(
+                PublishDiagnostics::METHOD.to_string(),
+                params,
+            ));
+        }
+        replies.extend(cleared.iter().map(|uri| publish(uri, None)));
         replies
     }
 

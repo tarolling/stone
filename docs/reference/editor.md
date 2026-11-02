@@ -19,6 +19,12 @@ arguments, speaking LSP over stdin and stdout, for files ending in `.stn`.
 - **Outline** of functions and variables, with each function's parameters and locals.
 - **Completion** of names visible at the cursor, builtins, and keywords.
 - **Formatting**: Format Document (and format on save) rewrites the file as `stone fmt` does.
+- **Packages** (see {doc}`../guides/packages`) are read from the package store and from
+  directories, as the compiler reads them, but never downloaded: a package that is not
+  downloaded yet is an error at each `use` of it and in `stone.toml`, with the hint to run
+  `stone fetch`, and the errors clear once it has run. Go to definition opens a package's files,
+  and a package's names cannot be renamed. A file inside a package is checked as part of it,
+  with the package's own dependencies.
 
 The VS Code extension also provides syntax highlighting, comment toggling, bracket matching, and
 indentation after a line ending in `:`.

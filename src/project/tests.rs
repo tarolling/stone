@@ -2252,6 +2252,113 @@ fn a_package_that_is_not_downloaded_is_an_error_where_it_is_named() {
     assert_eq!(written, []);
 }
 
+/// Returns the first line of each of `diagnostics` rendered from `linked`'s files.
+fn first_lines(linked: &Linked, diagnostics: &[Diagnostic]) -> Vec<String> {
+    diagnostics
+        .iter()
+        .map(|d| linked.sources.render(d).lines().next().unwrap().to_string())
+        .collect()
+}
+
+#[test]
+fn a_use_of_a_package_that_is_not_downloaded_is_noted_for_editors() {
+    let sources = stored_sources(&[USES_JSON]);
+    let linked = link(
+        Path::new("main.stn"),
+        "use json\nprint(json.v())\n",
+        &sources,
+    );
+    // the program's errors say it once, where the manifest names the package
+    assert_eq!(
+        first_lines(&linked, &linked.diagnostics),
+        ["stone.toml:2:1: error: json 1.2.0 (github:alice/json) is not downloaded"]
+    );
+    assert_eq!(
+        first_lines(&linked, &linked.unavailable),
+        [
+            "main.stn:1:5: error: 'json' cannot be used: json 1.2.0 (github:alice/json) is not \
+             downloaded; run `stone fetch`"
+        ]
+    );
+}
+
+#[test]
+fn a_use_of_a_directory_that_is_not_a_package_is_noted_for_editors() {
+    let sources = sources_of(&[USES_GEO]);
+    let linked = link(Path::new("main.stn"), "use geo.shapes\n", &sources);
+    assert_eq!(
+        first_lines(&linked, &linked.unavailable),
+        [
+            "main.stn:1:5: error: 'geo' cannot be used: '../geo' has no stone.toml, so it is not \
+             a package"
+        ]
+    );
+}
+
+#[test]
+fn a_use_of_a_package_whose_manifest_has_errors_points_at_it() {
+    let sources = sources_of(&[USES_GEO, ("../geo/stone.toml", "[package]\nname = 1\n")]);
+    let linked = link(Path::new("main.stn"), "use geo\n", &sources);
+    assert_eq!(
+        first_lines(&linked, &linked.unavailable),
+        ["main.stn:1:5: error: 'geo' cannot be used, because of an error in its stone.toml"]
+    );
+}
+
+#[test]
+fn linking_tells_which_package_each_file_belongs_to() {
+    let sources = sources_of(&[USES_GEO, GEO_MANIFEST, GEO_SHAPES]);
+    let linked = link(
+        Path::new("main.stn"),
+        "use geo.shapes\nprint(shapes.area(2))\n",
+        &sources,
+    );
+    assert_eq!(linked.diagnostics, []);
+    let geo = &linked.packages[1];
+    assert_eq!(
+        (geo.name.as_str(), geo.prefix.as_str(), geo.root.as_path()),
+        ("geo", "geo.1", Path::new("../geo"))
+    );
+    assert_eq!(linked.packages[0].prefix, "");
+    let shapes = linked.sources.find(Path::new("../geo/shapes.stn")).unwrap();
+    assert_eq!(linked.file_packages[shapes.0 as usize], 1);
+    assert_eq!(linked.file_packages[0], 0);
+    assert_eq!(linked.file_packages.len(), linked.sources.files().count());
+}
+
+#[test]
+fn shown_names_leave_out_compatibility_classes() {
+    let package = |name: &str, prefix: &str| PackageInfo {
+        name: name.to_string(),
+        version: None,
+        source: None,
+        deps: vec![],
+        root: PathBuf::new(),
+        prefix: prefix.to_string(),
+    };
+    let one = [package("app", ""), package("geo", "geo.1")];
+    assert_eq!(
+        shown_names("fn geo.1.shapes.area(x: geo.1.Point) -> geo.1", &one),
+        "fn geo.shapes.area(x: geo.Point) -> geo"
+    );
+    // only where a name starts, so other names are left alone
+    assert_eq!(
+        shown_names("ageo.1.x xgeo.1 geo.12", &one),
+        "ageo.1.x xgeo.1 geo.12"
+    );
+    // two packages of one name keep what tells them apart
+    let two = [
+        package("app", ""),
+        package("geo", "geo.1"),
+        package("geo", "geo.2"),
+        package("geo", "geo.1.2"),
+    ];
+    assert_eq!(
+        shown_names("geo.1.a geo.2.b geo.1.2.c", &two),
+        "geo.1.a geo.2.b geo.1.2.c"
+    );
+}
+
 #[test]
 fn a_package_whose_files_changed_does_not_match_its_lock() {
     let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);

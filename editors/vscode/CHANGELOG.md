@@ -10,6 +10,23 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Packages work in the editor. A program's dependencies, from directories and from the package
+  store, are checked with it, go to definition opens their files, and `use` completes their
+  names and modules. A package that is not downloaded yet is an error at each `use` of it, with
+  the hint to run `stone fetch`.
+- Errors in `stone.toml` and `stone.lock` are shown in those files, and editing either, or
+  running `stone fetch`, checks every open file again.
+- A file inside a package (a directory with a `stone.toml`) is checked as part of the package,
+  with its own dependencies, even when the package has no `main.stn`.
+
+### Changed
+
+- A package's functions and types show with the names the program writes, as
+  `geo.shapes.area` rather than `geo.1.shapes.area`.
+- A package's names cannot be renamed, since other programs use them too.
+
 ## [0.4.0] - 2026-10-30
 
 ### Added

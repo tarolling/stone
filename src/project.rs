@@ -308,6 +308,12 @@ pub struct Linked {
     pub public: HashSet<String>,
     /// The packages from hosts the program uses that are not downloaded, which are errors too.
     pub missing: Vec<(Source, Version)>,
+    /// An error at each `use` of a dependency that could not be read, saying why, for editors.
+    /// These are not in `diagnostics`, which report each such dependency once, where its
+    /// manifest names it.
+    pub unavailable: Vec<Diagnostic>,
+    /// The package each file belongs to, by index into `packages`.
+    pub file_packages: Vec<usize>,
     /// The program's `stone.lock` and the text to write to it, if it should change.
     pub lock: Option<(PathBuf, String)>,
     /// The program, then every package it uses, for `stone tree`.
@@ -326,6 +332,52 @@ pub struct PackageInfo {
     /// Each package it uses, by the name it uses it under and its index in
     /// [`Linked::packages`], sorted by name.
     pub deps: Vec<(String, usize)>,
+    /// The directory its module paths start from.
+    pub root: PathBuf,
+    /// What its modules' linked names start with, as `geo.1`, or empty for the program.
+    pub prefix: String,
+}
+
+/// Returns `text` with each dependency's linked prefix written as the package's name, the way
+/// the program's files name it, wherever the prefix starts a name.
+///
+/// For example, with `geo` 1.2.0 a dependency, `fn geo.1.shapes.area(p: geo.1.Point)` becomes
+/// `fn geo.shapes.area(p: geo.Point)`. A prefix has a segment of digits, which no name of the
+/// program's own has, so nothing else changes. Two packages of one name keep their prefixes,
+/// which are what tell them apart.
+pub fn shown_names(text: &str, packages: &[PackageInfo]) -> String {
+    let dependencies = || packages.iter().filter(|p| !p.prefix.is_empty());
+    let prefixes: Vec<(&str, &str)> = dependencies()
+        .filter(|p| dependencies().filter(|q| q.name == p.name).count() == 1)
+        .map(|p| (p.prefix.as_str(), p.name.as_str()))
+        .collect();
+    if prefixes.is_empty() {
+        return text.to_string();
+    }
+    let is_word = |c: char| c.is_alphanumeric() || c == '_';
+    let mut shown = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut previous: Option<char> = None;
+    while let Some(c) = rest.chars().next() {
+        let starts_name = previous.is_none_or(|p| !is_word(p) && p != '.');
+        let found = prefixes.iter().find(|(prefix, _)| {
+            rest.starts_with(prefix)
+                && rest[prefix.len()..]
+                    .chars()
+                    .next()
+                    .is_none_or(|n| !is_word(n))
+        });
+        if let Some((prefix, name)) = found.filter(|_| starts_name) {
+            shown.push_str(name);
+            rest = &rest[prefix.len()..];
+            previous = name.chars().last();
+            continue;
+        }
+        shown.push(c);
+        rest = &rest[c.len_utf8()..];
+        previous = Some(c);
+    }
+    shown
 }
 
 /// The entry file's name for programs given as a single source string, such as by
@@ -367,7 +419,7 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
             prefix: String::new(),
             name: String::new(),
             deps: HashMap::new(),
-            unavailable: HashSet::new(),
+            unavailable: HashMap::new(),
             source: None,
             version: None,
         }],
@@ -375,6 +427,8 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
         nodes: HashMap::new(),
         named: HashMap::new(),
         missing: vec![],
+        failed: HashMap::new(),
+        unavailable: vec![],
         lock: None,
         diagnostics: vec![],
     };
@@ -442,8 +496,9 @@ struct Package {
     /// Each package its files use, by the name they use it under.
     deps: HashMap<String, usize>,
     /// The names of its dependencies that could not be read, whose errors are reported where
-    /// the manifest names them, so a `use` of one says nothing more.
-    unavailable: HashSet<String>,
+    /// the manifest names them, so a `use` of one says nothing more, with the reason, if one
+    /// was given, for editors (see [`Linked::unavailable`]).
+    unavailable: HashMap<String, Option<String>>,
     /// Where it comes from and its version, for `stone tree`.
     source: Option<Source>,
     version: Option<Version>,
@@ -486,6 +541,11 @@ struct Loader<'a> {
     named: HashMap<resolve::Target, (Span, String, String)>,
     /// The packages from hosts that are not in the store.
     missing: Vec<(Source, Version)>,
+    /// Why each package that could not be read could not be, when that is said where it is
+    /// named.
+    failed: HashMap<resolve::Target, String>,
+    /// The errors at each `use` of a dependency that could not be read.
+    unavailable: Vec<Diagnostic>,
     /// The lockfile to write, if it should change.
     lock: Option<(PathBuf, String)>,
     diagnostics: Vec<Diagnostic>,
@@ -587,20 +647,23 @@ impl Loader<'_> {
                 prefix,
                 name: node.name.clone(),
                 deps: HashMap::new(),
-                unavailable: HashSet::new(),
+                unavailable: HashMap::new(),
                 source: Some(source),
                 version,
             });
             index.insert(target.clone(), self.packages.len() - 1);
         }
+        let failed = std::mem::take(&mut self.failed);
         let bind = |package: &mut Package, requirements: &[Requirement]| {
             for r in requirements {
-                match index.get(&selection.resolve(&r.target)) {
+                let target = selection.resolve(&r.target);
+                match index.get(&target) {
                     Some(&i) => {
                         package.deps.insert(r.name.clone(), i);
                     }
                     None => {
-                        package.unavailable.insert(r.name.clone());
+                        let reason = failed.get(&target).or_else(|| failed.get(&r.target));
+                        package.unavailable.insert(r.name.clone(), reason.cloned());
                     }
                 }
             }
@@ -677,28 +740,33 @@ impl Loader<'_> {
             resolve::Target::Remote(source, version) => match self.sources.store() {
                 Some(store) => package_dir(&store, source, version),
                 None => {
-                    self.diagnostics.push(Diagnostic::error(
-                        span,
-                        format!(
-                            "{key} {version} ({source}) cannot be downloaded, since there is no \
-                             directory to keep packages in; set STONE_HOME"
-                        ),
-                    ));
+                    let message = format!(
+                        "{key} {version} ({source}) cannot be downloaded, since there is no \
+                         directory to keep packages in; set STONE_HOME"
+                    );
+                    self.failed.insert(target.clone(), message.clone());
+                    self.diagnostics.push(Diagnostic::error(span, message));
                     return None;
                 }
             },
         };
         let path = dir.join(MANIFEST);
         let Some(source) = self.sources.read(&path) else {
-            let message = match target {
-                resolve::Target::Path(_) => {
-                    format!("'{written}' has no {MANIFEST}, so it is not a package")
-                }
+            let (message, hint) = match target {
+                resolve::Target::Path(_) => (
+                    format!("'{written}' has no {MANIFEST}, so it is not a package"),
+                    "",
+                ),
                 resolve::Target::Remote(source, version) => {
                     self.missing.push((source.clone(), version.clone()));
-                    format!("{key} {version} ({source}) is not downloaded")
+                    (
+                        format!("{key} {version} ({source}) is not downloaded"),
+                        "; run `stone fetch`",
+                    )
                 }
             };
+            self.failed
+                .insert(target.clone(), format!("{message}{hint}"));
             self.diagnostics.push(Diagnostic::error(span, message));
             return None;
         };
@@ -897,12 +965,24 @@ impl Loader<'_> {
             };
             let unavailable = self.packages[self.file_package[file.0 as usize]]
                 .unavailable
-                .contains(&path[0].0);
-            let target = match self.resolve(file, &path) {
-                // the manifest's error says why
-                Err(_) if unavailable => None,
-                Ok(target) => Some(target),
-                Err(e) => {
+                .get(&path[0].0)
+                .cloned();
+            let target = match (self.resolve(file, &path), unavailable) {
+                (Ok(target), _) => Some(target),
+                // the manifest's error says why, and editors show it at the `use` too
+                (Err(_), Some(reason)) => {
+                    let name = &path[0].0;
+                    let message = match reason {
+                        Some(reason) => format!("'{name}' cannot be used: {reason}"),
+                        None => format!(
+                            "'{name}' cannot be used, because of an error in its {MANIFEST}"
+                        ),
+                    };
+                    let span = path[0].1.to(path[path.len() - 1].1);
+                    self.unavailable.push(Diagnostic::error(span, message));
+                    None
+                }
+                (Err(e), None) => {
                     self.diagnostics.push(e);
                     None
                 }
@@ -1411,6 +1491,8 @@ impl Loader<'_> {
                     version: package.version.clone(),
                     source: package.source.clone(),
                     deps,
+                    root: package.root.clone(),
+                    prefix: package.prefix.clone(),
                 }
             })
             .collect();
@@ -1438,6 +1520,8 @@ impl Loader<'_> {
             imports,
             public,
             missing: self.missing,
+            unavailable: self.unavailable,
+            file_packages: self.file_package,
             lock: self.lock,
             packages,
         }

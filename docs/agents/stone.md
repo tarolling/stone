@@ -611,6 +611,21 @@ directory: `geometry/shapes.stn` is `use geometry.shapes`, called as `shapes.are
 `fn`, `struct`, `enum`, `trait`, and `impl`, never top-level statements. A program of several
 files conventionally starts at `main.stn`.
 
+Packages come from GitHub or GitLab releases, named in a `stone.toml` beside `main.stn`, which
+`stone add github:owner/repo` writes. Never write a version range: `version` is the oldest
+version the program works with, and stone picks the newest that any package asks for. A path
+starting with the dependency's name is in the package: `use json` loads its `lib.stn`, and
+`use json.parse` its `parse.stn` (or `lib.stn`'s `pub fn parse`).
+
+```toml
+[dependencies]
+json = { github = "alice/stone-json", version = "1.2.0" }
+geo = { path = "../geo" }
+```
+
+`stone run` downloads what is missing, `stone tree` shows what is used, and `stone.lock`, which
+stone writes, holds each package's hash and belongs in version control.
+
 ## Style
 
 Indent with four spaces. Write comment lines directly above a function to document it (editors

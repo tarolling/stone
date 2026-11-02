@@ -10,6 +10,8 @@
 # up the window's thread until it ends, checks that the program goes on drawing meanwhile, ends
 # the loop, and asks the window to close.
 #
+# It parks the real pointer in the screen's corner first, so a resize puts no window under it.
+#
 # It prints the window's scale, then `ok`, or what failed.
 param([string]$Title, [int]$Color, [double]$Scale = 0, [int]$Width = 0, [int]$Height = 0,
     [string]$Mode = "events")
@@ -29,6 +31,10 @@ public static class Win {
     [DllImport("user32.dll")]
     public static extern bool SetWindowPos(IntPtr window, IntPtr after, int x, int y, int width,
         int height, uint flags);
+    [DllImport("user32.dll")]
+    public static extern bool SetCursorPos(int x, int y);
+    [DllImport("user32.dll")]
+    public static extern int GetSystemMetrics(int index);
     [DllImport("user32.dll")]
     public static extern bool SetProcessDpiAwarenessContext(IntPtr context);
     [DllImport("user32.dll")]
@@ -67,6 +73,9 @@ public static class Win {
 "@
 
 [Win]::SetProcessDpiAwarenessContext([IntPtr](-4)) | Out-Null
+# park the real pointer in the screen's corner, since a window that grows under it would make
+# Windows send a mouse move that the posted ones do not account for
+[Win]::SetCursorPos([Win]::GetSystemMetrics(0) - 1, [Win]::GetSystemMetrics(1) - 1) | Out-Null
 $window = [IntPtr]::Zero
 for ($i = 0; $i -lt 300 -and $window -eq [IntPtr]::Zero; $i++) {
     Start-Sleep -Milliseconds 100

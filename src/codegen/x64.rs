@@ -25,7 +25,7 @@ use crate::codegen::context::{
 };
 use crate::codegen::x64::builtins::print;
 use crate::codegen::x64::system::{Sys, system_call};
-use crate::codegen::{AssemblyGenerator, Os, Subsystem, Target};
+use crate::codegen::{AssemblyGenerator, Level, Os, Subsystem, Target};
 use crate::project::SourceMap;
 use crate::span::Span;
 use crate::stdlib::CUT_CHARACTER;
@@ -176,6 +176,20 @@ impl AssemblyGenerator for X64Generator {
     }
 }
 
+/// Returns whether x86-64 at `level`, `v2` or above, has SSE4.1, as `roundsd` needs.
+pub fn sse41(level: Level) -> bool {
+    level.major >= 2
+}
+
+/// Returns whether x86-64 at `level`, `v3` or above, has BMI1, BMI2, and LZCNT, so the runtime
+/// may count bits with `lzcnt` and `tzcnt`, shift by a register other than `cl` with `shlx` and
+/// `shrx`, and rotate with `rorx`.
+///
+/// For example, it is false for `v2` and true for `v3`.
+pub fn bmi(level: Level) -> bool {
+    level.major >= 3
+}
+
 impl Default for X64Generator {
     fn default() -> Self {
         Self::new()
@@ -191,7 +205,7 @@ impl X64Generator {
     /// Returns a generator for `target`, an x86-64 target running Linux or Windows.
     ///
     /// For example, `X64Generator::for_target("x86_64v3-linux".parse()?)` emits AVX2 for
-    /// arithmetic on lists (see [`Self::avx2`]).
+    /// arithmetic on lists (see [`Self::vectors`]).
     pub fn for_target(target: Target) -> Self {
         Self {
             output: String::new(),
@@ -201,11 +215,23 @@ impl X64Generator {
         }
     }
 
-    /// Returns whether the target's level, x86-64 `v3` or above, assumes AVX2.
+    /// Returns whether the target's level, x86-64 `v2` or above, assumes SSE4.1, whose
+    /// `roundsd` rounds a float to a whole one.
+    fn sse41(&self) -> bool {
+        sse41(self.target.level)
+    }
+
+    /// Returns the widest vector instructions the target's level assumes: AVX-512 at x86-64
+    /// `v4`, AVX2 at `v3`, and SSE2 below.
     ///
-    /// For example, it is false for `x86_64-linux` and true for `x86_64v3-linux`.
-    fn avx2(&self) -> bool {
-        self.target.level.major >= 3
+    /// For example, it is `Vectors::Sse2` for `x86_64-linux` and `Vectors::Avx2` for
+    /// `x86_64v3-linux`.
+    fn vectors(&self) -> emit::Vectors {
+        match self.target.level.major {
+            0..=2 => emit::Vectors::Sse2,
+            3 => emit::Vectors::Avx2,
+            _ => emit::Vectors::Avx512,
+        }
     }
 
     /// Emits the code behind every [`Context::fail_label`] and [`Context::fail_at`], plus
@@ -715,6 +741,89 @@ mod tests {
         assert!(compare < division.find("\tvdivpd").unwrap(), "{division}");
         assert!(division.contains("\tvmovmskpd\teax, ymm"), "{division}");
         assert!(wide.contains("\tvpsubq\tymm"), "{wide}");
+    }
+
+    #[test]
+    fn arithmetic_on_lists_takes_eight_elements_at_a_time_from_x86_64_v4() {
+        let source = "fn f(a: float, x: list[float], y: list[float]) -> list[float]:\n    \
+                      ret -(a * x) / y\n\
+                      fn g(x: list[int], y: list[int]) -> list[int]:\n    ret -(x * y) + 3\n\
+                      print(f(2.0, [1.0], [2.0]), g([1], [2]))\n";
+        let wide = assemble_for(source, "x86_64v4-linux");
+        assert!(!wide.contains(" ymm") && !wide.contains("\tymm"), "{wide}");
+        // numbers are broadcast from general registers, with no trip through xmm
+        assert!(wide.contains("\tvpbroadcastq\tzmm"), "{wide}");
+        assert!(!wide.contains("\tvpbroadcastq\tzmm3, xmm"), "{wide}");
+        let loops = wide.matches("\tand\trdx, -8\n\txor\tecx, ecx").count();
+        assert!(loops >= 2, "{wide}");
+        assert_eq!(
+            wide.matches("\tadd\trcx, 8\n\tcmp\trcx, rdx").count(),
+            loops,
+            "{wide}"
+        );
+        // after each loop, the last elements under a mask of as many bits
+        assert_eq!(
+            wide.matches("\tbzhi\teax, eax, edx\n\tkmovb\tk1, eax")
+                .count(),
+            loops,
+            "{wide}"
+        );
+        assert!(wide.contains("{k1}{z}, ZMMWORD PTR ["), "{wide}");
+        assert!(wide.contains("]{k1}, zmm"), "{wide}");
+        assert_eq!(wide.matches("\tvzeroupper").count(), loops, "{wide}");
+        // a zero divisor stops a group before it divides, in the tail only among its elements
+        let division = &wide[wide.find("\tvcmppd\tk2, ").unwrap()..];
+        assert!(division.starts_with("\tvcmppd\tk2, zmm"), "{division}");
+        assert!(division.find("\tkortestb\tk2, k2").unwrap() < division.find("\tvdivpd").unwrap());
+        assert!(wide.contains("\tvcmppd\tk2{k1}, zmm"), "{wide}");
+        // ints multiply in vectors, which only AVX-512 can
+        assert!(wide.contains("\tvpmullq\tzmm"), "{wide}");
+        assert!(wide.contains("\tvpxorq\tzmm"), "{wide}");
+    }
+
+    #[test]
+    fn only_avx512_multiplies_ints_in_vectors() {
+        let source = "fn g(x: list[int], y: list[int]) -> list[int]:\n    ret x * y + 3\n\
+                      print(g([1], [2]))\n";
+        for target in ["x86_64-linux", "x86_64v3-linux"] {
+            let assembly = function_text(&assemble_for(source, target), "g");
+            // no loop, so the one over single elements does everything
+            assert!(!assembly.contains("rdx, -"), "{target}: {assembly}");
+            assert!(!assembly.contains("mm"), "{target}: {assembly}");
+        }
+    }
+
+    #[test]
+    fn the_runtime_uses_the_bit_instructions_each_level_has() {
+        // floats print through bignums, sorting radix-sorts, maps hash strings, and random
+        // numbers rotate
+        let source = "use math\nuse random\nrandom.seed(1)\n\
+                      xs = []\nfor i in range(100):\n    xs.append(random.randint(0, 1000))\n\
+                      xs.sort()\nnames = [\"b\", \"a\"]\nnames.sort()\n\
+                      m = {\"k\": 1}\nprint(xs[0], names, m[\"k\"], 1.5, math.floor(2.5))\n";
+        let level_forms = ["\tlzcnt\t", "\ttzcnt\t", "\tshlx\t", "\tshrx\t", "\trorx\t"];
+        for target in ["x86_64-linux", "x86_64v2-linux"] {
+            let assembly = assemble_for(source, target);
+            for form in level_forms {
+                assert!(!assembly.contains(form), "{form} at {target}");
+            }
+            assert!(assembly.contains("\tshr\trdx, cl"), "{target}");
+            assert!(assembly.contains("\trol\trax, 7"), "{target}");
+        }
+        assert!(!assemble_for(source, "x86_64-linux").contains("roundsd"));
+        assert!(assemble_for(source, "x86_64v2-linux").contains("\troundsd\t"));
+        let bmi = assemble_for(source, "x86_64v3-linux");
+        for form in level_forms {
+            assert!(bmi.contains(form), "{form} at v3");
+        }
+        // shld and shifts of memory have no such form
+        for shift in ["shl\trdx", "shr\trax", "shr\trdx", "shr\tr8"] {
+            assert!(!bmi.contains(&format!("\t{shift}, cl\n")), "{shift}");
+        }
+        assert!(
+            !bmi.contains("\trol\t") && !bmi.contains("\tbsf\t"),
+            "{bmi}"
+        );
     }
 
     #[test]

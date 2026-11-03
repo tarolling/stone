@@ -58,15 +58,27 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   support in the reference, guides, and agent prompts, a new benchmark baseline that includes
   `trig`, and corrected statements about `str` of any value, map `pop`, function values, and
   more. `stone build --help` lists `x86_64-windows` among the targets.
-- `stone build --target x86_64v3` (and `v4`) makes arithmetic on whole lists work on four
+- `stone build --target x86_64v3` makes arithmetic on whole lists work on four
   elements at a time with AVX2, rather than two with SSE2, which made `y = 0.5 * x + y` on lists
   that fit in the cache about 1.45 times as fast. Results are the same bits as the interpreter's,
   since no fused multiply-add is used, and a zero divisor still stops the program at its own
   element.
+- `stone build --target x86_64v4` works on eight elements at a time with AVX-512 and does the
+  last few under a mask, so no element is left for a loop over single ones, and it multiplies
+  lists of ints in vectors too (`vpmullq`).
+- `stone build --target aarch64v9-linux` (and later levels on Linux) uses SVE: as many elements
+  at a time as the processor's vectors hold, whatever their length, the last group under a
+  partial predicate, and ints multiplied in vectors. macOS keeps NEON at every level, since
+  Apple's Armv9 processors have no SVE.
+- `math.floor` rounds down with one instruction where the processor has one: `fcvtms` on arm64
+  and `roundsd` at x86-64 `v2` and above, with a branch-free step down after truncating at `v1`.
+  At `v3` and above, the runtime uses BMI2's shifts and rotations and LZCNT's and BMI1's bit
+  counts where they save work (radix sorting, hashing strings, random numbers, printing floats).
 - A program built for an x86-64 level above `v1` checks at startup that the processor has every
   feature of the level, and otherwise stops before running anything with
   `error: this program needs an x86-64 v3 processor` (naming its level) and exit status 1,
-  rather than dying of an illegal instruction.
+  rather than dying of an illegal instruction. A Linux program built for `aarch64v9` or later
+  does the same with `error: this program needs an aarch64 v9 processor with SVE2`.
 
 ### Changed
 

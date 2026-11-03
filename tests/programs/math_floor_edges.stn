@@ -1,0 +1,14 @@
+// math.floor rounds down with one instruction where the processor has one (roundsd from
+// x86-64 v2, fcvtms on arm64) and by truncating and stepping down otherwise, so every edge must
+// agree: zeros, halves, the largest floats with fractions, whole floats past 2^52, and both
+// ends of the int range
+use math
+
+xs = [0.0, -0.0, 0.5, -0.5, 0.99999999999999989, -0.99999999999999989, 1.0, -1.0]
+xs.extend([2.5, -2.5, 4503599627370495.5, -4503599627370495.5, 4503599627370497.0])
+xs.extend([-4503599627370497.0, 9007199254740993.0, -9223372036854775808.0])
+xs.extend([9223372036854774784.0, -9223372036854774784.0, 1e-300, -1e-300])
+for x in xs:
+    print(x, math.floor(x))
+// a float just past the largest int is out of range, as the interpreter says
+print(math.floor(9223372036854775808.0))

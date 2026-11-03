@@ -406,6 +406,7 @@ pub fn start_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tadd\tx1, sp, #8");
     r#gen.emit("\tadd\tx2, x1, x0, lsl #3");
     r#gen.emit("\tadd\tx2, x2, #8");
+    super::cpu::level_check(r#gen);
     r#gen.emit("\tbl\tmain");
     system_call(r#gen, Sys::Exit);
 }

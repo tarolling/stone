@@ -220,7 +220,8 @@ remainder by a constant, which multiply by a magic number, and globals that hold
 the whole program, which read as that literal. Arithmetic on whole lists, such as `a * 2.0 + b`,
 compiles to one loop with no intermediate lists and no index checks, which handles two elements
 at a time with SSE2 or NEON where the operations allow (four with AVX2 for `--target x86_64v3`,
-which then checks the processor at startup), so on the `vector` benchmark it is
+eight with AVX-512 for `v4`, and as many as the vectors hold with SVE for `aarch64v9-linux`,
+each of which then checks the processor at startup), so on the `vector` benchmark it is
 about 3.8 times as fast as numpy, which builds a temporary array for each operator. A tuple is
 never allocated: its values live in registers like any other variables, a function takes and
 returns them as separate values, and a list of tuples stores each element's values side by side,
@@ -254,9 +255,9 @@ yet capture connections or, in a generic function, values of a type parameter.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.
-Wider vectors at the other levels (AVX-512 for x86-64 `v4`, SVE for arm64), splitting a value's
-live range around calls, and removing reference counts it can prove redundant beyond moves at
-last use are future work.
+Vector code beyond arithmetic on lists (searching strings, comparing lists, summing them),
+splitting a value's live range around calls, and removing reference counts it can prove
+redundant beyond moves at last use are future work.
 
 ## Errors like Rust
 

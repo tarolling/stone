@@ -5,7 +5,9 @@
 //! then assembles the same text with GNU as and links it with GNU ld at the same section
 //! addresses, and requires `.text`, `.rodata`, and `.data` to hold the same bytes and `.bss`
 //! to have the same size. Nothing runs, so no emulator is needed. x86-64 is also checked at
-//! level `v3`, whose arithmetic on lists uses AVX2 instructions.
+//! level `v2`, whose `math.floor` uses `roundsd`, `v3`, whose arithmetic on lists uses AVX2 and
+//! whose runtime uses BMI2 and LZCNT, and `v4`, whose arithmetic uses AVX-512, and AArch64 at
+//! `v9` on Linux, whose uses SVE.
 //!
 //! The host's `as` and `ld` serve its own architecture, and `aarch64-linux-gnu-as` and
 //! `aarch64-linux-gnu-ld` (or the `x86_64-linux-gnu-` pair) the other one. An architecture
@@ -175,7 +177,12 @@ fn compare(
             ))
         }
     };
-    run(Command::new(gnu_as).arg("-o").arg(&objfile).arg(&source))?;
+    let mut assembler = Command::new(gnu_as);
+    if target.arch == Architecture::Arm64 && target.level.major >= 9 {
+        // GNU as takes SVE instructions only when told the processor has them
+        assembler.arg("-march=armv9-a");
+    }
+    run(assembler.arg("-o").arg(&objfile).arg(&source))?;
     let address = |section| format!("{:#x}", layout.address(section));
     run(Command::new(gnu_ld)
         .args(["-static", "-nostdlib", "-e", "_start"])
@@ -240,11 +247,26 @@ fn x86_64_matches_gnu_as() {
 }
 
 #[test]
+fn x86_64_v2_matches_gnu_as() {
+    matches_gnu("x86_64v2-linux".parse().unwrap());
+}
+
+#[test]
 fn x86_64_v3_matches_gnu_as() {
     matches_gnu("x86_64v3-linux".parse().unwrap());
 }
 
 #[test]
+fn x86_64_v4_matches_gnu_as() {
+    matches_gnu("x86_64v4-linux".parse().unwrap());
+}
+
+#[test]
 fn aarch64_matches_gnu_as() {
     matches_gnu(Target::ARM64_LINUX);
+}
+
+#[test]
+fn aarch64_v9_matches_gnu_as() {
+    matches_gnu("aarch64v9-linux".parse().unwrap());
 }

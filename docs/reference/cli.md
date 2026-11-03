@@ -70,11 +70,16 @@ left out means Linux.
 The optional level names the processor features the program may assume: `v1` to `v4` for
 x86-64 (the x86-64 psABI levels, so `x86_64v3-linux` assumes AVX2), and `v8`, `v8.1` to `v8.9`,
 `v9`, or `v9.1` to `v9.5` for arm64 (as in `aarch64v8.2-macos`). Without one, the program runs on
-every processor of the architecture. At x86-64 `v3` and above, arithmetic on whole lists works on
-four elements at a time with AVX2, rather than two with SSE2. The other levels build the same
-code as the baseline for now. A program built for an x86-64 level above `v1` first checks that
-the processor has every feature of the level, and otherwise stops before running anything, with
-`error: this program needs an x86-64 v3 processor` (naming its level) and exit status 1.
+every processor of the architecture. Arithmetic on whole lists works on two elements at a time
+with SSE2 or NEON at the baseline, four with AVX2 at x86-64 `v3`, eight with AVX-512 at `v4`
+(the last few under a mask), and on Linux at arm64 `v9` and above as many as the processor's SVE
+vectors hold; AVX-512 and SVE also multiply ints in vectors. macOS uses NEON at every level,
+since Apple's Armv9 processors have no SVE. `math.floor` uses `roundsd` from x86-64 `v2`, and
+the runtime uses BMI2 and LZCNT from `v3`. A program built for an x86-64 level above `v1`
+first checks that the processor has every feature of the level, and otherwise stops before
+running anything, with `error: this program needs an x86-64 v3 processor` (naming its level) and
+exit status 1. A Linux program built for arm64 `v9` or later checks for SVE and SVE2 the same
+way, with `error: this program needs an aarch64 v9 processor with SVE2`.
 
 ```sh
 stone build examples/basics.stn

@@ -18,7 +18,9 @@
 
 use super::inline::retarget;
 use super::opt::predecessors;
-use super::{BinOp, Block, BlockId, Cond, Function, Inst, Operand, Terminator, TrigFunc, VReg};
+use super::{
+    BinOp, Block, BlockId, Cond, Function, Inst, Operand, Rounding, Terminator, TrigFunc, VReg,
+};
 use crate::stdlib::math::DOMAIN_ERROR;
 use crate::stdlib::math::trig::{self, Arith};
 use std::collections::{HashMap, HashSet};
@@ -500,6 +502,7 @@ impl Builder {
             dst: q,
             src: n,
             checked: false,
+            rounding: Rounding::Zero,
         });
         if offset != 0 {
             self.push(Inst::Binary {

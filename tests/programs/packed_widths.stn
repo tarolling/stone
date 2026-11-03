@@ -1,5 +1,6 @@
-// arithmetic on lists runs over groups of elements at once (two, or four on x86-64 v3) and
-// then one at a time, so every length up to two groups and a remainder gives the same elements
+// arithmetic on lists runs over groups of elements at once (two, four on x86-64 v3, eight and
+// then the rest under a mask on v4, or as many as the vector length under SVE) and then one at
+// a time, so every length up to two of the widest groups and a remainder gives the same elements
 fn floats(n: int, k: float) -> list[float]:
     xs = []
     for i in range(n):
@@ -12,7 +13,7 @@ fn ints(n: int, k: int) -> list[int]:
         xs.append(i * k - 3)
     ret xs
 
-for n in range(10):
+for n in range(18):
     x = floats(n, 1.5)
     y = floats(n, 0.75)
     print(n, -x / y, x - y * x)
@@ -22,3 +23,5 @@ for n in range(10):
     a = ints(n, 7)
     b = ints(n, -2)
     print(-(a - b) + a, a + 3 - b)
+    // ints multiply, wrapping on overflow, in vectors where the processor can
+    print(a * b - a * 3, -(a * 4611686018427387904))

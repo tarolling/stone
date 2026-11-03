@@ -29,6 +29,7 @@ use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{
     SORT_INSERTION_MAX, SORT_PART_MIN, SORT_RADIX_FACTOR, SORT_SPLIT_MIN,
 };
+use crate::codegen::x64::builtins::{lowest_set_bit, shift_by_cl};
 use crate::stdlib::FLOAT_KEY_NAN;
 
 /// The bits of positive infinity, which every NaN's bits without the sign are above.
@@ -335,7 +336,7 @@ fn str_less(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tjmp\t.Lsort_str_less_words");
     // the lowest set bit of the difference is in the first byte that differs
     r#gen.emit(".Lsort_str_less_differ:");
-    r#gen.emit("\tbsf\tr9, r9");
+    lowest_set_bit(r#gen, "r9");
     r#gen.emit("\tshr\tr9, 3");
     r#gen.emit("\tadd\trax, r9");
     r#gen.emit("\tmovzx\tr9d, BYTE PTR [r10 + rax]");
@@ -684,7 +685,7 @@ fn radix_sort(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lradix_split_count:");
     r#gen.emit("\tmov\trax, QWORD PTR [r13 + r8 * 8]");
     r#gen.emit("\tsub\trax, r14");
-    r#gen.emit("\tshr\trax, cl");
+    shift_by_cl(r#gen, "shr", "rax");
     r#gen.emit("\tinc\tQWORD PTR [rsi + rax * 8]");
     r#gen.emit("\tinc\tr8");
     r#gen.emit("\tcmp\tr8, r12");
@@ -704,7 +705,7 @@ fn radix_sort(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trax, QWORD PTR [r13 + r8 * 8]");
     r#gen.emit("\tmov\trdx, rax");
     r#gen.emit("\tsub\trdx, r14");
-    r#gen.emit("\tshr\trdx, cl");
+    shift_by_cl(r#gen, "shr", "rdx");
     r#gen.emit("\tmov\tr9, QWORD PTR [rsi + rdx * 8]");
     r#gen.emit("\tmov\tQWORD PTR [r10 + r9 * 8], rax");
     r#gen.emit("\tinc\tr9");
@@ -830,7 +831,7 @@ fn radix_range(r#gen: &mut dyn AssemblyGenerator) {
     // a byte every key shares leaves the order as it is
     r#gen.emit("\tmov\trax, QWORD PTR [r13]");
     r#gen.emit("\tsub\trax, rbx");
-    r#gen.emit("\tshr\trax, cl");
+    shift_by_cl(r#gen, "shr", "rax");
     r#gen.emit("\tmovzx\teax, al");
     r#gen.emit("\tcmp\tQWORD PTR [rsi + rax * 8], r12");
     r#gen.emit("\tje\t.Lradix_range_next");
@@ -850,7 +851,7 @@ fn radix_range(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trax, QWORD PTR [r13 + r8 * 8]");
     r#gen.emit("\tmov\trdx, rax");
     r#gen.emit("\tsub\trdx, rbx");
-    r#gen.emit("\tshr\trdx, cl");
+    shift_by_cl(r#gen, "shr", "rdx");
     r#gen.emit("\tmovzx\tedx, dl");
     r#gen.emit("\tmov\tr9, QWORD PTR [rsi + rdx * 8]");
     r#gen.emit("\tmov\tQWORD PTR [r15 + r9 * 8], rax");

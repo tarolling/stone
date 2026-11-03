@@ -450,10 +450,16 @@ pub(super) fn rename_inst(
             dst: reg(dst),
             src: o(src),
         },
-        Inst::FloatToInt { dst, src, checked } => Inst::FloatToInt {
+        Inst::FloatToInt {
+            dst,
+            src,
+            checked,
+            rounding,
+        } => Inst::FloatToInt {
             dst: reg(dst),
             src: o(src),
             checked,
+            rounding,
         },
         Inst::EnumTag { dst, value } => Inst::EnumTag {
             dst: reg(dst),

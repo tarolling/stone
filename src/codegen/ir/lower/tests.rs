@@ -829,13 +829,11 @@ fn math_sqrt_and_floor_check_their_argument_first() {
          b1:\n  fail \"math domain error\"\n\
          b2:\n  v2 = fsqrt v1\n  ret v2\n"
     );
+    // one checked conversion that rounds down, which each backend emits as the processor allows
     let floor = "use math\nfn f(x: float) -> int:\n    ret math.floor(x)\nprint(f(2.5))\n";
     assert_eq!(
         first_function(floor),
-        "fn f(v0):\n\
-         b0:\n  v1 = float_to_int v0\n  v2 = int_to_float v1\n  fbr_lt v0, v2 -> b1, b2\n\
-         b1:\n  v1 = sub v1, 1\n  jmp b2\n\
-         b2:\n  ret v1\n"
+        "fn f(v0):\nb0:\n  v1 = float_floor_to_int v0\n  ret v1\n"
     );
 }
 
@@ -957,8 +955,11 @@ fn elementwise_arithmetic_packs_pairs_when_it_can() {
     // ints add and subtract in pairs
     let ir = first_function("fn f(a: list[int]) -> list[int]:\n    ret a - 1 + a\nf([1])\n");
     assert!(ir.contains("add(sub([v"), "{ir}");
+    // and multiply, which wraps, so a backend with a vector multiply packs it too
+    let ir = first_function("fn f(a: list[int]) -> list[int]:\n    ret a * 3 + a\nf([1])\n");
+    assert!(ir.contains("add(mul([v"), "{ir}");
     // but nothing else on ints packs, so the single loop does all of it
-    let ir = first_function("fn f(a: list[int]) -> list[int]:\n    ret a * 3\nf([1])\n");
+    let ir = first_function("fn f(a: list[int]) -> list[int]:\n    ret a % 3\nf([1])\n");
     assert!(!ir.contains("packed"), "{ir}");
     let ir = first_function("fn f(a: list[float]) -> list[float]:\n    ret a ** 2\nf([1.5])\n");
     assert!(!ir.contains("packed"), "{ir}");

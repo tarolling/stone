@@ -10,6 +10,7 @@ use crate::codegen::AssemblyGenerator;
 use crate::codegen::context::{
     BIG_LIMBS, EXPONENT_LIMIT, FUNCTION_PREFIX, MAX_DIGITS, REDUCE_PIO2,
 };
+use crate::codegen::x64::bmi;
 use crate::stdlib::math::trig::REDUCE_LARGE;
 
 /// The bignums the float routines work in. Formatting uses all of them, and reading a number
@@ -271,11 +272,19 @@ pub fn bignum_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\txor\teax, eax");
     r#gen.emit("\ttest\trcx, rcx");
     r#gen.emit("\tjz\t.Lbig_bitlen_done");
-    r#gen.emit("\tbsr\trax, QWORD PTR [rdi + rcx * 8]");
-    r#gen.emit("\tinc\trax");
-    r#gen.emit("\tdec\trcx");
-    r#gen.emit("\tshl\trcx, 6");
-    r#gen.emit("\tadd\trax, rcx");
+    if bmi(r#gen.target().level) {
+        // 64 bits a limb, less the top limb's leading zeros
+        r#gen.emit("\tlzcnt\trax, QWORD PTR [rdi + rcx * 8]");
+        r#gen.emit("\tshl\trcx, 6");
+        r#gen.emit("\tsub\trcx, rax");
+        r#gen.emit("\tmov\trax, rcx");
+    } else {
+        r#gen.emit("\tbsr\trax, QWORD PTR [rdi + rcx * 8]");
+        r#gen.emit("\tinc\trax");
+        r#gen.emit("\tdec\trcx");
+        r#gen.emit("\tshl\trcx, 6");
+        r#gen.emit("\tadd\trax, rcx");
+    }
     r#gen.emit(".Lbig_bitlen_done:");
     r#gen.emit("\tret");
 }

@@ -4,10 +4,51 @@ use crate::codegen::context::{
     SMALLEST_CLASS, STDIN_BUFFER, TEXT_BLOCK,
 };
 pub use crate::codegen::context::{IMMORTAL, immortal_string};
+use crate::codegen::x64::bmi;
 use crate::codegen::x64::cpu::level_check;
 use crate::codegen::x64::sort::sort_runtime;
 use crate::codegen::x64::system::{Sys, system_call};
 use crate::codegen::{AssemblyGenerator, Os};
+
+/// Emits `op reg, cl`, a shift of the 64-bit `reg` by the count in `rcx`, or from x86-64 `v3`
+/// BMI2's `shlx`, `shrx`, or `sarx`, which take the count from `rcx` as a whole register and set
+/// no flags, so they are one micro-op rather than the three of a shift by `cl`. `op` is `shl`,
+/// `shr`, or `sar`.
+///
+/// For example, `shift_by_cl(r#gen, "shr", "rax")` emits `shr rax, cl` at `v1` and
+/// `shrx rax, rax, rcx` at `v3`.
+pub fn shift_by_cl(r#gen: &mut dyn AssemblyGenerator, op: &str, reg: &str) {
+    if bmi(r#gen.target().level) {
+        r#gen.emit(&format!("\t{op}x\t{reg}, {reg}, rcx"));
+    } else {
+        r#gen.emit(&format!("\t{op}\t{reg}, cl"));
+    }
+}
+
+/// Emits a rotation of the 64-bit `reg` left by `count` bits, which from x86-64 `v3` is BMI2's
+/// `rorx` the other way, setting no flags.
+///
+/// For example, `rotate_left(r#gen, "rax", 7)` emits `rol rax, 7` at `v1` and
+/// `rorx rax, rax, 57` at `v3`.
+pub fn rotate_left(r#gen: &mut dyn AssemblyGenerator, reg: &str, count: u32) {
+    if bmi(r#gen.target().level) {
+        r#gen.emit(&format!("\trorx\t{reg}, {reg}, {}", 64 - count));
+    } else {
+        r#gen.emit(&format!("\trol\t{reg}, {count}"));
+    }
+}
+
+/// Emits code that writes to the 64-bit `reg` the number of its lowest set bit, which must
+/// exist: `bsf`, or from x86-64 `v3` BMI1's `tzcnt`, which gives the same for anything but 0
+/// and is faster on AMD processors.
+pub fn lowest_set_bit(r#gen: &mut dyn AssemblyGenerator, reg: &str) {
+    let op = if bmi(r#gen.target().level) {
+        "tzcnt"
+    } else {
+        "bsf"
+    };
+    r#gen.emit(&format!("\t{op}\t{reg}, {reg}"));
+}
 
 /// Emits `_start`, where the kernel starts the program, with the argument count at `[rsp]`, the
 /// arguments after it, then a null, then the environment. It calls `main` with the count in
@@ -88,7 +129,7 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lmem_alloc_cut:");
     r#gen.emit("\tmov\trax, QWORD PTR [rip + stone.heap_next]");
     r#gen.emit("\tmov\tedx, 1");
-    r#gen.emit("\tshl\trdx, cl");
+    shift_by_cl(r#gen, "shl", "rdx");
     r#gen.emit("\tadd\trdx, rax");
     r#gen.emit("\tcmp\trdx, QWORD PTR [rip + stone.heap_end]");
     r#gen.emit("\tja\t.Lmem_alloc_region");
@@ -170,7 +211,7 @@ pub fn allocator(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(&format!("\tcmp\trcx, {LARGEST_CLASS}"));
     r#gen.emit("\tja\t.Lmem_realloc_large");
     r#gen.emit("\tmov\tedx, 1");
-    r#gen.emit("\tshl\trdx, cl");
+    shift_by_cl(r#gen, "shl", "rdx");
     r#gen.emit("\tcmp\trax, rdx");
     r#gen.emit("\tja\t.Lmem_realloc_move");
     r#gen.emit("\tmov\trax, rdi");
@@ -1597,7 +1638,7 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
         r#gen.emit("\tmov\tr8, QWORD PTR [rdx + rcx - 8]");
         r#gen.emit("\tshl\tecx, 3");
         r#gen.emit("\tneg\tecx"); // 64 - 8 * length, as a shift reads it
-        r#gen.emit("\tshr\tr8, cl");
+        shift_by_cl(r#gen, "shr", "r8");
         r#gen.emit("\tjmp\t.Lmap_probe_last");
         r#gen.emit(".Lmap_probe_words:");
         r#gen.emit("\tcmp\trcx, 8");
@@ -3823,7 +3864,7 @@ pub fn random_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     r#gen.emit("\tmov\tr10, QWORD PTR [rcx + 24]");
     // the result is rotl(s1 * 5, 7) * 9
     r#gen.emit("\tlea\trax, [rsi + rsi * 4]");
-    r#gen.emit("\trol\trax, 7");
+    rotate_left(r#gen, "rax", 7);
     r#gen.emit("\tlea\trax, [rax + rax * 8]");
     r#gen.emit("\tmov\trdx, rsi");
     r#gen.emit("\tshl\trdx, 17");
@@ -3832,7 +3873,7 @@ pub fn random_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     r#gen.emit("\txor\trsi, r9");
     r#gen.emit("\txor\tr8, r10");
     r#gen.emit("\txor\tr9, rdx");
-    r#gen.emit("\trol\tr10, 45");
+    rotate_left(r#gen, "r10", 45);
     r#gen.emit("\tmov\tQWORD PTR [rcx], r8");
     r#gen.emit("\tmov\tQWORD PTR [rcx + 8], rsi");
     r#gen.emit("\tmov\tQWORD PTR [rcx + 16], r9");

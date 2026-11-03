@@ -621,6 +621,52 @@ fn a_program_built_for_a_level_runs_only_on_a_processor_that_reaches_it() {
     }
 }
 
+/// Builds `packed_widths` for `aarch64v9-linux` and runs it under qemu-aarch64 with SVE vectors
+/// of 128, 512, and 2048 bits, which must all print what the interpreter does, since the loop
+/// takes as many elements at a time as the processor's vectors hold, and on a processor without
+/// SVE, which must stop at the startup check.
+#[cfg(target_os = "linux")]
+#[test]
+fn sve_code_runs_alike_at_every_vector_length() {
+    let qemu = "qemu-aarch64";
+    if Command::new(qemu).arg("--version").output().is_err() {
+        eprintln!("skipped running SVE code at several vector lengths: {qemu} was not found");
+        return;
+    }
+    let programs = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/programs");
+    let exe = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("sve_packed_widths");
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["build", "--target", "aarch64v9-linux", "-o"])
+        .arg(&exe)
+        .arg(programs.join("packed_widths.stn"))
+        .output()
+        .expect("stone should run");
+    assert!(output.status.success(), "{output:?}");
+    let expected = std::fs::read_to_string(programs.join("packed_widths.out")).unwrap();
+    for bytes in [16, 64, 256] {
+        let cpu = format!("max,sve-default-vector-length={bytes}");
+        let run = Command::new(qemu)
+            .args(["-cpu", &cpu])
+            .arg(&exe)
+            .env("STONE_LEAK_CHECK", "1")
+            .output()
+            .unwrap();
+        assert!(run.status.success(), "{cpu}: {run:?}");
+        assert_eq!(String::from_utf8_lossy(&run.stdout), expected, "{cpu}");
+    }
+    let run = Command::new(qemu)
+        .args(["-cpu", "cortex-a72"])
+        .arg(&exe)
+        .output()
+        .unwrap();
+    assert_eq!(run.stdout, b"");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stderr),
+        "error: this program needs an aarch64 v9 processor with SVE2\n"
+    );
+    assert_eq!(run.status.code(), Some(1));
+}
+
 /// Writes `source` as `main.stn` in a fresh temporary directory named after `name`, then runs it
 /// from that directory both with `stone run` and as a binary from `stone build`, returning each
 /// run's output.

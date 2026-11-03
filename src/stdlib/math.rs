@@ -209,8 +209,9 @@ pub fn sqrt(x: f64) -> Result<f64, String> {
 /// out of range.
 ///
 /// For example, `floor(-2.5)` returns `Ok(-3)` and `floor(2.5)` returns `Ok(2)`. Compiled code
-/// truncates toward zero, converts back, and subtracts 1 if that went up, which is exact for
-/// every float in range.
+/// checks the same range, then rounds down with one instruction where the processor has one
+/// (`roundsd` from x86-64 `v2`, `fcvtms` on arm64), and otherwise truncates, converts back, and
+/// subtracts 1 if that went up, which is exact for every float in range.
 pub fn floor(x: f64) -> Result<i64, String> {
     // -2^63 fits in an int but 2^63 does not, and nan fails both checks
     if !(i64::MIN as f64..-(i64::MIN as f64)).contains(&x) {

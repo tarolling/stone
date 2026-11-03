@@ -35,7 +35,7 @@ mod tests;
 use super::inline::retarget;
 use super::{
     BinOp, Block, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, Program, RcKind,
-    Terminator, TrigFunc, VReg, leaf_name, variable_of,
+    Rounding, Terminator, TrigFunc, VReg, leaf_name, variable_of,
 };
 use crate::ast::{
     Arg, BoolOp, Constant, Expr, ExprKind, Keyword, MatchCase, Mod, Operator, Pattern, PatternKind,
@@ -5643,37 +5643,15 @@ impl<'a> Lowerer<'a> {
                 if !float {
                     return Ok(self.finish(x, into));
                 }
-                // truncate toward zero, which fails on nan or overflow, then step down if that
-                // went up, which only happens for a negative number with a fraction
-                let truncated = self.fresh();
+                // fails on nan or overflow, as the interpreter's floor does
+                let dst = self.dst(into);
                 self.push(Inst::FloatToInt {
-                    dst: truncated,
+                    dst,
                     src: x,
                     checked: true,
+                    rounding: Rounding::Down,
                 });
-                let back = self.fresh();
-                self.push(Inst::IntToFloat {
-                    dst: back,
-                    src: Operand::Reg(truncated),
-                });
-                let (down, done) = (self.new_block(), self.new_block());
-                self.terminate(Terminator::CmpBranch {
-                    cond: Cond::Lt,
-                    float: true,
-                    lhs: x,
-                    rhs: Operand::Reg(back),
-                    then: down,
-                    otherwise: done,
-                });
-                self.start(down);
-                self.push(Inst::Binary {
-                    op: BinOp::Sub,
-                    dst: truncated,
-                    lhs: Operand::Reg(truncated),
-                    rhs: Operand::Imm(1),
-                });
-                self.start(done);
-                Ok(self.finish(Operand::Reg(truncated), into))
+                Ok(Operand::Reg(dst))
             }
             _ => Err(format!("there is no function '{name}'")),
         }
@@ -6536,6 +6514,7 @@ impl<'a> Lowerer<'a> {
             dst: whole,
             src: x,
             checked: false,
+            rounding: Rounding::Zero,
         });
         self.new_variant(dst, ok, vec![Operand::Reg(whole)], &[None]);
         self.jump(end);
@@ -8176,9 +8155,10 @@ struct FusedList {
 const MAX_PACKED_SIZE: usize = 10;
 
 impl Fused {
-    /// Returns whether every operation in the tree can be computed two elements at a time with
-    /// packed instructions, on floats if `float` and ints otherwise: adding, subtracting, and
-    /// negating either, and multiplying and dividing floats.
+    /// Returns whether every operation in the tree can be computed several elements at a time
+    /// with packed instructions, on floats if `float` and ints otherwise: adding, subtracting,
+    /// multiplying, and negating either, and dividing floats. Ints wrap, so a vector multiply
+    /// gives what the interpreter does, though a backend without one packs no int multiply.
     fn packable(&self, float: bool) -> bool {
         match self {
             Fused::Number(_) => true,
@@ -8190,8 +8170,8 @@ impl Fused {
                 rhs,
             } => {
                 let packs = match op {
-                    BinOp::Add | BinOp::Sub => true,
-                    BinOp::Mul | BinOp::Div => float,
+                    BinOp::Add | BinOp::Sub | BinOp::Mul => true,
+                    BinOp::Div => float,
                     BinOp::Rem | BinOp::Pow | BinOp::DivUnchecked => false,
                 };
                 packs && *node == float && lhs.packable(float) && rhs.packable(float)

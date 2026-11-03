@@ -727,6 +727,162 @@ fn vector(mnemonic: &str, operands: &[&str]) -> Option<Result<u32>> {
     })
 }
 
+/// Parses an SVE vector register `z0`-`z31` with the suffix `suffix`, such as `z16` from
+/// `z16.d` (and `z16` itself for an empty suffix).
+fn zreg(text: &str, suffix: &str) -> Result<u32> {
+    text.strip_prefix('z')
+        .and_then(|rest| rest.strip_suffix(suffix))
+        .and_then(|num| num.parse::<u32>().ok())
+        .filter(|num| *num < 32)
+        .ok_or_else(|| format!("bad register '{text}', expected a z register{suffix}"))
+}
+
+/// Parses an SVE predicate register `p0`-`p15` with the suffix `suffix`, such as `p0` from
+/// `p0/z` or `p1.d`.
+fn preg(text: &str, suffix: &str) -> Result<u32> {
+    text.strip_prefix('p')
+        .and_then(|rest| rest.strip_suffix(suffix))
+        .and_then(|num| num.parse::<u32>().ok())
+        .filter(|num| *num < 16)
+        .ok_or_else(|| format!("bad register '{text}', expected a p register{suffix}"))
+}
+
+/// Returns whether an instruction is one of SVE's, by its mnemonic or its first operand.
+fn is_sve(mnemonic: &str, operands: &[&str]) -> bool {
+    let register = |prefix: char| {
+        operands.first().is_some_and(|first| {
+            first
+                .strip_prefix(prefix)
+                .is_some_and(|rest| rest.starts_with(|c: char| c.is_ascii_digit()))
+        })
+    };
+    matches!(
+        mnemonic,
+        "whilelo" | "ld1d" | "st1d" | "movprfx" | "ptest" | "incd"
+    ) || register('z')
+        || register('p')
+}
+
+/// Encodes the SVE instructions the backend emits for arithmetic on a vector of doubles or ints
+/// as long as the processor's (`.d` elements only), returning `None` for anything else.
+///
+/// These are `whilelo` of x registers, `ld1d`/`st1d` at `[xN, xM, lsl #3]`, the unpredicated
+/// `fadd`, `fsub`, `fmul`, `add`, `sub`, and SVE2's `mul`, the predicated `fdiv`, `fdivr`,
+/// `fneg`, and `neg`, `movprfx`, `dup` from an x register, `fcmeq` with `#0.0`, `ptest`, and
+/// `incd`.
+fn sve(mnemonic: &str, operands: &[&str]) -> Option<Result<u32>> {
+    if !is_sve(mnemonic, operands) {
+        return None;
+    }
+    let count = |n: usize| -> Result<()> {
+        match operands.len() == n {
+            true => Ok(()),
+            false => Err(format!(
+                "'{mnemonic}' takes {n} operands, but {} were given",
+                operands.len()
+            )),
+        }
+    };
+    let zd = |text: &str| zreg(text, ".d");
+    let three = |base: u32| -> Result<u32> {
+        count(3)?;
+        let (rd, rn, rm) = (zd(operands[0])?, zd(operands[1])?, zd(operands[2])?);
+        Ok(base | rm << 16 | rn << 5 | rd)
+    };
+    // zdn, pg/m, zdn, zm: the first source must be the destination
+    let destructive = |base: u32| -> Result<u32> {
+        count(4)?;
+        let (rdn, pg, first, rm) = (
+            zd(operands[0])?,
+            preg(operands[1], "/m")?,
+            zd(operands[2])?,
+            zd(operands[3])?,
+        );
+        if first != rdn {
+            return Err(format!("'{mnemonic}' must write over its first source"));
+        }
+        Ok(base | pg << 10 | rm << 5 | rdn)
+    };
+    let unary = |base: u32| -> Result<u32> {
+        count(3)?;
+        let (rd, pg, rn) = (zd(operands[0])?, preg(operands[1], "/m")?, zd(operands[2])?);
+        Ok(base | pg << 10 | rn << 5 | rd)
+    };
+    let x = |text: &str| -> Result<u32> { xreg(text).map(|reg| reg.num) };
+    // {zt.d}, then [xn, xm, lsl #3]
+    let access = |base: u32, predicate: &str| -> Result<u32> {
+        count(3)?;
+        let zt = operands[0]
+            .strip_prefix('{')
+            .and_then(|rest| rest.strip_suffix('}'))
+            .ok_or_else(|| format!("bad register list '{}'", operands[0]))
+            .and_then(zd)?;
+        let pg = preg(operands[1], predicate)?;
+        let bad = || format!("bad address '{}'", operands[2]);
+        let inner = operands[2]
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+            .ok_or_else(bad)?;
+        let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+        let [rn, rm, "lsl #3"] = parts[..] else {
+            return Err(bad());
+        };
+        let rn = gpr_or_sp(rn)
+            .ok()
+            .filter(|r| r.kind == Kind::X)
+            .ok_or_else(bad)?;
+        Ok(base | x(rm)? << 16 | pg << 10 | rn.num << 5 | zt)
+    };
+    Some(match mnemonic {
+        "whilelo" => (|| {
+            count(3)?;
+            let pd = preg(operands[0], ".d")?;
+            Ok(0x25e01c00 | x(operands[2])? << 16 | x(operands[1])? << 5 | pd)
+        })(),
+        "ld1d" => access(0xa5e04000, "/z"),
+        "st1d" => access(0xe5e04000, ""),
+        "fadd" => three(0x65c00000),
+        "fsub" => three(0x65c00400),
+        "fmul" => three(0x65c00800),
+        "add" => three(0x04e00000),
+        "sub" => three(0x04e00400),
+        "mul" => three(0x04e06000),
+        "fdiv" => destructive(0x65cd8000),
+        "fdivr" => destructive(0x65cc8000),
+        "fneg" => unary(0x04dda000),
+        "neg" => unary(0x04d7a000),
+        "movprfx" => (|| {
+            count(2)?;
+            Ok(0x0420bc00 | zreg(operands[1], "")? << 5 | zreg(operands[0], "")?)
+        })(),
+        "dup" => (|| {
+            count(2)?;
+            Ok(0x05e03800 | x(operands[1])? << 5 | zd(operands[0])?)
+        })(),
+        "fcmeq" => (|| {
+            count(4)?;
+            if operands[3] != "#0.0" {
+                return Err("fcmeq compares with #0.0".to_string());
+            }
+            let (pd, pg, zn) = (
+                preg(operands[0], ".d")?,
+                preg(operands[1], "/z")?,
+                zd(operands[2])?,
+            );
+            Ok(0x65d22000 | pg << 10 | zn << 5 | pd)
+        })(),
+        "ptest" => (|| {
+            count(2)?;
+            Ok(0x2550c000 | preg(operands[0], "")? << 10 | preg(operands[1], ".b")? << 5)
+        })(),
+        "incd" => (|| {
+            count(1)?;
+            Ok(0x04f0e3e0 | x(operands[0])?)
+        })(),
+        _ => Err(format!("'{mnemonic}' does not take SVE registers")),
+    })
+}
+
 fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
     let count = |n: usize| -> Result<()> {
         if operands.len() == n {
@@ -738,6 +894,9 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
             ))
         }
     };
+    if let Some(word) = sve(mnemonic, operands) {
+        return word.map(|word| (word, None));
+    }
     if let Some(word) = vector(mnemonic, operands) {
         return word.map(|word| (word, None));
     }
@@ -1142,10 +1301,16 @@ fn encode(mnemonic: &str, operands: &[&str]) -> Result<Word> {
             let rm = dreg(operands[1])?;
             Ok((0x1e602000 | rm.num << 16 | rn.num << 5, None))
         }
-        "fcvtzs" => {
+        // toward zero, or toward negative infinity
+        "fcvtzs" | "fcvtms" => {
             count(2)?;
             let (rd, rn) = (xreg(operands[0])?, dreg(operands[1])?);
-            Ok((0x9e780000 | rn.num << 5 | rd.num, None))
+            let opcode = if mnemonic == "fcvtzs" {
+                0x9e780000
+            } else {
+                0x9e700000
+            };
+            Ok((opcode | rn.num << 5 | rd.num, None))
         }
         "scvtf" => {
             count(2)?;
@@ -1403,6 +1568,57 @@ mod tests {
     }
 
     #[test]
+    fn sve_forms_match_gnu_as() {
+        check(&[
+            ("whilelo p0.d, x10, x11", "25eb1d40"),
+            ("whilelo p0.d, xzr, x11", "25eb1fe0"),
+            ("ld1d {z16.d}, p0/z, [x16, x10, lsl #3]", "a5ea4210"),
+            ("ld1d {z31.d}, p0/z, [x9, x10, lsl #3]", "a5ea413f"),
+            ("ld1d {z20.d}, p0/z, [x21, x10, lsl #3]", "a5ea42b4"),
+            ("st1d {z16.d}, p0, [x16, x10, lsl #3]", "e5ea4210"),
+            ("st1d {z31.d}, p0, [x22, x10, lsl #3]", "e5ea42df"),
+            ("fadd z16.d, z17.d, z18.d", "65d20230"),
+            ("fadd z31.d, z30.d, z29.d", "65dd03df"),
+            ("fsub z16.d, z17.d, z18.d", "65d20630"),
+            ("fmul z16.d, z17.d, z18.d", "65d20a30"),
+            ("add z16.d, z17.d, z18.d", "04f20230"),
+            ("sub z16.d, z17.d, z18.d", "04f20630"),
+            ("mul z16.d, z17.d, z18.d", "04f26230"),
+            ("mul z31.d, z3.d, z20.d", "04f4607f"),
+            ("fdiv z16.d, p0/m, z16.d, z18.d", "65cd8250"),
+            ("fdiv z31.d, p0/m, z31.d, z17.d", "65cd823f"),
+            ("fdivr z18.d, p0/m, z18.d, z16.d", "65cc8212"),
+            ("fneg z16.d, p0/m, z17.d", "04dda230"),
+            ("fneg z20.d, p0/m, z20.d", "04dda294"),
+            ("neg z16.d, p0/m, z17.d", "04d7a230"),
+            ("movprfx z16, z17", "0420be30"),
+            ("movprfx z20, z16", "0420be14"),
+            ("dup z16.d, x17", "05e03a30"),
+            ("dup z31.d, x3", "05e0387f"),
+            ("fcmeq p1.d, p0/z, z16.d, #0.0", "65d22201"),
+            ("fcmeq p1.d, p0/z, z31.d, #0.0", "65d223e1"),
+            ("ptest p0, p1.b", "2550c020"),
+            ("incd x10", "04f0e3ea"),
+            ("incd x5", "04f0e3e5"),
+        ]);
+        for line in [
+            "fdiv z16.d, p0/m, z17.d, z18.d",
+            "fadd z16.s, z17.s, z18.s",
+            "ld1d {z16.d}, p0/m, [x16, x10, lsl #3]",
+            "ld1d {z16.d}, p0/z, [x16, x10, lsl #2]",
+            "st1d {z16.d}, p0/z, [x16, x10, lsl #3]",
+            "fcmeq p1.d, p0/z, z16.d, #1.0",
+            "whilelo p0.d, w10, w11",
+            "dup z16.d, w3",
+            "fadd z32.d, z17.d, z18.d",
+            "whilelo p16.d, x10, x11",
+            "incd w10",
+        ] {
+            assert!(word(line).is_err(), "{line}");
+        }
+    }
+
+    #[test]
     fn floats_and_control_match_gnu_as() {
         check(&[
             ("fmov d0, x1", "9e670020"),
@@ -1419,6 +1635,8 @@ mod tests {
             ("fcmp d0, d1", "1e612000"),
             ("fcmp d1, #0.0", "1e602028"),
             ("fcvtzs x0, d1", "9e780020"),
+            ("fcvtms x0, d0", "9e700000"),
+            ("fcvtms x5, d17", "9e700225"),
             ("scvtf d0, x1", "9e620020"),
             ("fsqrt d0, d0", "1e61c000"),
             ("ror x0, x1, #57", "93c1e420"),

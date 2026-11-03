@@ -71,9 +71,29 @@ enum Backend {
     Cross(Architecture),
     /// `stone build --target x86_64-windows`, run by the [`WindowsRunner`].
     Windows(WindowsRunner),
-    /// `stone build --target x86_64v3-<system>` on an x86-64 machine that has AVX2, which that
-    /// level's arithmetic on lists uses.
-    Level,
+    /// `stone build --target` for a level above the host's baseline, such as
+    /// `x86_64v3-<system>`, whose arithmetic on lists uses wider vector instructions.
+    Level(Leveled),
+}
+
+/// A target level the golden programs are built for, and how its programs run.
+#[derive(Clone, Copy)]
+struct Leveled {
+    /// The target's name before its system, such as `x86_64v4`.
+    name: &'static str,
+    runner: LevelRunner,
+}
+
+/// How a program built for a [`Leveled`] target runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LevelRunner {
+    /// Directly, on a processor that reaches the level.
+    Native,
+    /// Under Intel's Software Development Emulator as a Sapphire Rapids processor, for AVX-512
+    /// on a processor without it.
+    Sde,
+    /// Under qemu-aarch64, whose default processor has SVE2.
+    Qemu,
 }
 
 impl Backend {
@@ -84,7 +104,13 @@ impl Backend {
             Backend::Cross(Architecture::X64) => "build-x86_64",
             Backend::Cross(Architecture::Arm64) => "build-aarch64",
             Backend::Windows(_) => "build-x86_64-windows",
-            Backend::Level => "build-x86_64v3",
+            Backend::Level(Leveled {
+                name: "x86_64v3", ..
+            }) => "build-x86_64v3",
+            Backend::Level(Leveled {
+                name: "x86_64v4", ..
+            }) => "build-x86_64v4",
+            Backend::Level(_) => "build-aarch64v9",
         }
     }
 }
@@ -327,10 +353,10 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 .current_dir(&cwd),
             &input,
         ),
-        Backend::Build | Backend::Cross(_) | Backend::Windows(_) | Backend::Level => {
+        Backend::Build | Backend::Cross(_) | Backend::Windows(_) | Backend::Level(_) => {
             let suffix = match backend {
                 Backend::Windows(_) => ".exe",
-                Backend::Build | Backend::Level => std::env::consts::EXE_SUFFIX,
+                Backend::Build | Backend::Level(_) => std::env::consts::EXE_SUFFIX,
                 _ => "",
             };
             let exe = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -345,9 +371,11 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 Backend::Windows(_) => {
                     build.arg("--target").arg("x86_64-windows");
                 }
-                Backend::Level => {
+                Backend::Level(level) => {
                     let system = if cfg!(windows) { "windows" } else { "linux" };
-                    build.arg("--target").arg(format!("x86_64v3-{system}"));
+                    build
+                        .arg("--target")
+                        .arg(format!("{}-{system}", level.name));
                 }
                 _ => {}
             }
@@ -358,6 +386,22 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
             let mut command = match backend {
                 Backend::Cross(arch) => {
                     let mut command = Command::new(emulator(arch));
+                    command.arg(&exe);
+                    command
+                }
+                Backend::Level(Leveled {
+                    runner: LevelRunner::Sde,
+                    ..
+                }) => {
+                    let mut command = Command::new(SDE);
+                    command.args(["-spr", "--"]).arg(&exe);
+                    command
+                }
+                Backend::Level(Leveled {
+                    runner: LevelRunner::Qemu,
+                    ..
+                }) => {
+                    let mut command = Command::new(emulator(Architecture::Arm64));
                     command.arg(&exe);
                     command
                 }
@@ -535,7 +579,102 @@ fn leveled_compiler_matches_expected() {
         eprintln!("skipped running programs built for x86_64v3: this processor lacks AVX2");
         return;
     }
-    check_all(Backend::Level);
+    check_all(Backend::Level(Leveled {
+        name: "x86_64v3",
+        runner: LevelRunner::Native,
+    }));
+}
+
+/// Builds every program for Linux on Armv9 and runs it, directly on an arm64 Linux machine with
+/// SVE2 or else under qemu-aarch64, whose default processor has it, so the SVE code it emits
+/// must print what NEON's does.
+#[test]
+fn sve_compiler_matches_expected() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let runner = if reaches_sve2() {
+        LevelRunner::Native
+    } else if runs(emulator(Architecture::Arm64)) {
+        LevelRunner::Qemu
+    } else {
+        eprintln!(
+            "skipped running programs built for aarch64v9: this processor lacks SVE2 and \
+             qemu-aarch64 was not found"
+        );
+        return;
+    };
+    check_all(Backend::Level(Leveled {
+        name: "aarch64v9",
+        runner,
+    }));
+}
+
+/// Returns whether this machine is an arm64 one with SVE and SVE2, which a program built for
+/// `aarch64v9-linux` checks for before it runs.
+fn reaches_sve2() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        std::arch::is_aarch64_feature_detected!("sve")
+            && std::arch::is_aarch64_feature_detected!("sve2")
+    }
+    #[cfg(not(target_arch = "aarch64"))]
+    false
+}
+
+/// Intel's Software Development Emulator, which runs AVX-512 code on any x86-64 processor.
+const SDE: &str = "sde64";
+
+/// Builds every program for x86-64 `v4` and runs it, directly on a machine that reaches that
+/// level or else under Intel SDE (`sde64`) on Linux, so the AVX-512 code it emits must print what
+/// the baseline's does.
+#[test]
+fn avx512_compiler_matches_expected() {
+    if !cfg!(target_arch = "x86_64") || cfg!(target_os = "macos") {
+        return;
+    }
+    let runner = if reaches_x86_64_v4() {
+        LevelRunner::Native
+    } else if cfg!(target_os = "linux") && sde_runs() {
+        LevelRunner::Sde
+    } else {
+        eprintln!(
+            "skipped running programs built for x86_64v4: this processor lacks AVX-512 and \
+             {SDE} was not found"
+        );
+        return;
+    };
+    check_all(Backend::Level(Leveled {
+        name: "x86_64v4",
+        runner,
+    }));
+}
+
+/// Returns whether Intel SDE is on `PATH`, which has no `--version` but answers `-version`.
+fn sde_runs() -> bool {
+    Command::new(SDE)
+        .arg("-version")
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+/// Returns whether this machine has every feature of x86-64 `v4`, which a program built for it
+/// checks for before it runs.
+fn reaches_x86_64_v4() -> bool {
+    #[cfg(target_arch = "x86_64")]
+    {
+        use std::arch::is_x86_feature_detected as has;
+        reaches_x86_64_v3()
+            && has!("avx512f")
+            && has!("avx512dq")
+            && has!("avx512cd")
+            && has!("avx512bw")
+            && has!("avx512vl")
+    }
+    #[cfg(not(target_arch = "x86_64"))]
+    false
 }
 
 /// Returns whether this machine has every feature of x86-64 `v3`, which a program built for it

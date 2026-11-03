@@ -14,6 +14,7 @@
 
 pub mod builtins;
 pub mod bytes;
+pub mod cpu;
 mod emit;
 pub mod floats;
 pub mod fs;
@@ -191,7 +192,8 @@ impl Arm64Generator {
 
     /// Returns a generator for `target`, an AArch64 target. stone writes no arm64 Windows
     /// programs ([`ARM64_WINDOWS`](crate::codegen::ARM64_WINDOWS)), so the runtime treats every
-    /// system but Linux as macOS. Code generation emits the same code at every level for now.
+    /// system but Linux as macOS. Only Linux at Armv9 and above changes the code, using SVE
+    /// ([`Self::sve`]).
     pub fn for_target(target: Target) -> Self {
         Self {
             output: String::new(),
@@ -200,6 +202,16 @@ impl Arm64Generator {
             target,
             span: Span::default(),
         }
+    }
+
+    /// Returns whether the target assumes SVE and SVE2, as Armv9 requires: on Linux at `v9` and
+    /// above. macOS never does, since Apple's Armv9 processors have neither, so there `v9` emits
+    /// what the baseline does.
+    ///
+    /// For example, it is true for `aarch64v9-linux` and false for `aarch64v9-macos` and
+    /// `aarch64v8.6-linux`.
+    pub fn sve(&self) -> bool {
+        self.target.os == Os::Linux && self.target.level.major >= 9
     }
 
     /// Emits the code behind every [`Context::fail_label`] and [`Context::fail_at`], plus
@@ -687,6 +699,69 @@ mod tests {
         let call = fill.find("\tbl\tstone.list_append").expect(&fill);
         assert!(fill[..store].contains("\tb.ge\t.Lappend_grow"), "{fill}");
         assert!(store < call, "{fill}");
+    }
+
+    /// Parses and assembles `source` for `target`, such as `aarch64v9-linux`.
+    fn assemble_for(source: &str, target: &str) -> String {
+        let module = parse_program(source).unwrap();
+        Arm64Generator::for_target(target.parse().unwrap())
+            .assemble(&module)
+            .unwrap()
+    }
+
+    const LIST_ARITHMETIC: &str = "fn f(a: float, x: list[float], y: list[float]) -> \
+                                   list[float]:\n    ret -(a * x) / y\n\
+                                   fn g(x: list[int], y: list[int]) -> list[int]:\n    \
+                                   ret -(x * y) + 3\n\
+                                   print(f(2.0, [1.0], [2.0]), g([1], [2]))\n";
+
+    #[test]
+    fn arithmetic_on_lists_uses_sve_on_linux_from_armv9() {
+        let sve = assemble_for(LIST_ARITHMETIC, "aarch64v9-linux");
+        assert!(!sve.contains(".2d"), "{sve}");
+        let f = function_text(&sve, "f");
+        // one loop for the whole list, the last group under a partial predicate
+        assert_eq!(f.matches("\twhilelo\tp0.d, x10, x11").count(), 2, "{f}");
+        assert!(
+            f.contains("\tincd\tx10\n\twhilelo\tp0.d, x10, x11\n\tb.mi\t"),
+            "{f}"
+        );
+        assert!(f.contains("\tdup\tz"), "{f}");
+        assert!(f.contains("p0/z, ["), "{f}");
+        assert!(f.contains("\tst1d\t{z"), "{f}");
+        // a zero divisor stops the group before it divides
+        let compare = f.find("\tfcmeq\tp1.d, p0/z, z").unwrap();
+        let test = f.find("\tptest\tp0, p1.b\n\tb.ne\t").unwrap();
+        let divide = f.find("\tfdiv").unwrap();
+        assert!(compare < test && test < divide, "{f}");
+        assert!(f.contains("\tfneg\tz"), "{f}");
+        // ints multiply in vectors, which NEON cannot
+        let g = function_text(&sve, "g");
+        assert!(g.contains("\tmul\tz"), "{g}");
+        assert!(g.contains("\tneg\tz"), "{g}");
+        // and the program checks for SVE2 before main
+        let start = &sve[sve.find("_start:").unwrap()..];
+        let check = start.find("\ttbz\tx12, #1, ").unwrap();
+        assert!(check < start.find("\tbl\tmain").unwrap(), "{start}");
+        assert!(sve.contains("needs an aarch64 v9 processor with SVE2"));
+    }
+
+    #[test]
+    fn apple_and_older_processors_keep_neon() {
+        for target in ["aarch64-linux", "aarch64v8.6-linux", "aarch64v9-macos"] {
+            let neon = assemble_for(LIST_ARITHMETIC, target);
+            for sve in ["whilelo", "ld1d", "st1d", "ptest", "incd", "\tdup\tz"] {
+                assert!(!neon.contains(sve), "{sve} for {target}");
+            }
+            assert!(!neon.contains("SVE2"), "{target}");
+            assert!(function_text(&neon, "f").contains(".2d"), "{target}");
+            // nothing multiplies ints two at a time, so the single loop does everything
+            let g = function_text(&neon, "g");
+            assert!(
+                !g.contains(".2d") && !g.contains("lsr\tx11"),
+                "{target}: {g}"
+            );
+        }
     }
 
     #[test]

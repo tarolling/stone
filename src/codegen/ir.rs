@@ -305,6 +305,20 @@ impl Kernel {
         }
     }
 
+    /// Returns whether the kernel multiplies anything, which on ints needs a vector multiply
+    /// that only some levels have (x86-64 `v4`'s `vpmullq`, SVE's `mul`).
+    ///
+    /// For example, it is true for `add(mul([v1], 3), [v2])` and false for `sub([v1], 3)`.
+    pub fn multiplies(&self) -> bool {
+        match self {
+            Kernel::Element(_) | Kernel::Number(_) => false,
+            Kernel::Binary(op, lhs, rhs) => {
+                *op == BinOp::Mul || lhs.multiplies() || rhs.multiplies()
+            }
+            Kernel::Neg(operand) => operand.multiplies(),
+        }
+    }
+
     fn show(&self, float: bool, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let prefix = if float { "f" } else { "" };
         match self {
@@ -324,6 +338,15 @@ impl Kernel {
             }
         }
     }
+}
+
+/// How [`Inst::FloatToInt`] rounds a float that is not a whole number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Rounding {
+    /// Toward zero, as `int` does: 2.5 gives 2 and -2.5 gives -2.
+    Zero,
+    /// Toward negative infinity, as `math.floor` does: 2.5 gives 2 and -2.5 gives -3.
+    Down,
 }
 
 /// One instruction. Every instruction reads all of its inputs before writing `dst`, so `dst` may
@@ -509,13 +532,17 @@ pub enum Inst {
     },
     /// Converts an int to the bits of the nearest float.
     IntToFloat { dst: VReg, src: Operand },
-    /// Converts a float's bits to an int, dropping the fraction. When `checked`, it fails on nan
-    /// or overflow (`v2 = float_to_int v1`); otherwise the float is known to fit, as when `int`
-    /// has compared it with the bounds first (`v2 = float_trunc v1`).
+    /// Converts a float's bits to an int, dropping the fraction (`Rounding::Zero`) or rounding
+    /// down (`Rounding::Down`, for `math.floor`). When `checked`, it fails on nan or overflow
+    /// (`v2 = float_to_int v1`, `v2 = float_floor_to_int v1`); otherwise the float is known to
+    /// fit, as when `int` has compared it with the bounds first (`v2 = float_trunc v1`,
+    /// `v2 = float_floor v1`). A float rounds down to an int exactly when it fits itself, so
+    /// both roundings check the same bounds.
     FloatToInt {
         dst: VReg,
         src: Operand,
         checked: bool,
+        rounding: Rounding,
     },
     /// The tag of the enum value `value`, which says which of its enum's variants it is, numbered
     /// from 0 in the order the enum lists them.
@@ -1073,10 +1100,20 @@ impl fmt::Display for Inst {
                 write!(f, "list_init {list}[{index}], {value}")
             }
             Inst::IntToFloat { dst, src } => write!(f, "{dst} = int_to_float {src}"),
-            Inst::FloatToInt { dst, src, checked } => match checked {
-                true => write!(f, "{dst} = float_to_int {src}"),
-                false => write!(f, "{dst} = float_trunc {src}"),
-            },
+            Inst::FloatToInt {
+                dst,
+                src,
+                checked,
+                rounding,
+            } => {
+                let name = match (checked, rounding) {
+                    (true, Rounding::Zero) => "float_to_int",
+                    (false, Rounding::Zero) => "float_trunc",
+                    (true, Rounding::Down) => "float_floor_to_int",
+                    (false, Rounding::Down) => "float_floor",
+                };
+                write!(f, "{dst} = {name} {src}")
+            }
             Inst::EnumTag { dst, value } => write!(f, "{dst} = enum_tag {value}"),
             Inst::FieldGet { dst, value, slot } => write!(f, "{dst} = field_get {value}, {slot}"),
             Inst::FieldInit { value, slot, src } => {

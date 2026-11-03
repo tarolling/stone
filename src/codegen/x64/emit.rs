@@ -15,7 +15,7 @@ use crate::codegen::ir::liveness::analyze;
 use crate::codegen::ir::opt::never_negative;
 use crate::codegen::ir::{
     BinOp, BlockId, Callee, Cond, EarlyReturn, FIELDS_OFFSET, Function, Inst, Kernel, Operand,
-    RcKind, Terminator, VReg, variable_of,
+    RcKind, Rounding, Terminator, VReg, variable_of,
 };
 use crate::codegen::regalloc::{Location, float_vregs, hints, linear_scan, parallel_moves};
 use crate::codegen::{AssemblyGenerator, magic_signed};
@@ -82,24 +82,62 @@ const YMM: [&str; 16] = [
     "ymm11", "ymm12", "ymm13", "ymm14", "ymm15",
 ];
 
-/// Returns the `xmm` register that is the low half of `reg`, such as `xmm3` for `ymm3` (and
-/// `xmm3` itself).
+/// The 512-bit vector registers below 16, by number, which share their low halves with [`YMM`].
+const ZMM: [&str; 16] = [
+    "zmm0", "zmm1", "zmm2", "zmm3", "zmm4", "zmm5", "zmm6", "zmm7", "zmm8", "zmm9", "zmm10",
+    "zmm11", "zmm12", "zmm13", "zmm14", "zmm15",
+];
+
+/// Returns the `xmm` register that is the low part of `reg`, such as `xmm3` for `ymm3` or
+/// `zmm3` (and `xmm3` itself).
 fn low_half(reg: &str) -> &'static str {
     XMM[reg[3..].parse::<usize>().unwrap_or_default()]
+}
+
+/// The vector instructions a packed loop uses, the widest the target's level allows.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Vectors {
+    /// SSE2, two elements at a time in `xmm` registers, on every x86-64 processor.
+    Sse2,
+    /// AVX2, four at a time in `ymm` registers, from `v3`.
+    Avx2,
+    /// AVX-512, eight at a time in `zmm` registers with opmasks, from `v4`.
+    Avx512,
+}
+
+impl Vectors {
+    /// Returns how many elements one register holds, such as 4 for AVX2.
+    fn lanes(self) -> usize {
+        match self {
+            Vectors::Sse2 => 2,
+            Vectors::Avx2 => 4,
+            Vectors::Avx512 => 8,
+        }
+    }
+
+    /// Returns the registers of this width, by number.
+    fn registers(self) -> [&'static str; 16] {
+        match self {
+            Vectors::Sse2 => XMM,
+            Vectors::Avx2 => YMM,
+            Vectors::Avx512 => ZMM,
+        }
+    }
 }
 
 /// The registers of a packed loop while it is emitted.
 struct Packing {
     /// The vector registers holding nothing, taken from the end.
     free: Vec<&'static str>,
-    /// Each number in the kernel and the register holding it in both halves.
+    /// Each number in the kernel and the register holding it in every element.
     numbers: Vec<(Operand, &'static str)>,
-    /// The register holding the sign bit in both halves, for negating floats.
-    mask: Option<&'static str>,
+    /// The register holding the sign bit in every element, for negating floats.
+    sign: Option<&'static str>,
     float: bool,
-    /// Whether the loop works on four elements at a time in `ymm` registers with AVX2, rather
-    /// than two in `xmm` registers with SSE2.
-    wide: bool,
+    vectors: Vectors,
+    /// The opmask register that selects the last elements, while an AVX-512 loop's tail is
+    /// emitted.
+    tail: Option<&'static str>,
     /// The label after the loop.
     stop: String,
 }
@@ -326,14 +364,16 @@ impl X64Generator {
         }
     }
 
-    /// Moves `src` into `dst`, going through `rax` when both are in memory or the immediate is too
-    /// wide to store directly.
-    /// Emits a [`Inst::Packed`] loop with SSE2, two elements at a time in `xmm3` to `xmm15`, which
-    /// hold no vregs, or at x86-64 `v3` and above with AVX2, four at a time in `ymm3` to `ymm15`.
-    /// `rcx` counts the elements done, `rdx` holds the number of whole groups' worth, and `rax`
-    /// holds a pointer that was spilled. Each number is copied to every element of a register
-    /// once, before the loop. An AVX2 loop ends with `vzeroupper`, since the rest of the program
-    /// uses SSE instructions, which run slowly while the upper halves hold anything.
+    /// Emits a [`Inst::Packed`] loop, as wide as the target's level allows ([`Vectors`]): with
+    /// SSE2, two elements at a time in `xmm3` to `xmm15`, which hold no vregs; at x86-64 `v3`
+    /// and above with AVX2, four at a time in `ymm3` to `ymm15`; and at `v4` with AVX-512, eight
+    /// at a time in `zmm3` to `zmm15`, then the last few under the opmask `k1`, so nothing is left
+    /// for the single loop unless a zero divisor stopped it. `rcx` counts the elements done, `rdx`
+    /// holds the number of whole groups' worth, and `rax` holds a pointer that was spilled. Each
+    /// number is copied to every element of a register once, before the loop. An AVX loop ends
+    /// with `vzeroupper`, since the rest of the program uses SSE instructions, which run slowly
+    /// while the upper halves hold anything. Only AVX-512 multiplies ints (`vpmullq`), so below
+    /// `v4` a kernel that does stops at once, leaving everything to the single loop.
     fn packed(
         &mut self,
         frame: &Frame,
@@ -343,23 +383,20 @@ impl X64Generator {
         out: Operand,
         len: Operand,
     ) -> Result<(), String> {
-        let wide = self.avx2();
-        let registers = if wide { YMM } else { XMM };
+        let vectors = self.vectors();
+        let done = frame.reg(done)?;
+        if !float && kernel.multiplies() && vectors != Vectors::Avx512 {
+            self.mov(done, Value::Imm(0));
+            return Ok(());
+        }
         let mut packing = Packing {
-            free: (3..16).rev().map(|n| registers[n]).collect(),
+            free: (3..16).rev().map(|n| vectors.registers()[n]).collect(),
             numbers: Vec::new(),
-            mask: None,
+            sign: None,
             float,
-            wide,
+            vectors,
+            tail: None,
             stop: self.ctx.new_label("packed_done"),
-        };
-        // copies the low element of `reg` to the others
-        let broadcast = |reg: &str| {
-            if wide {
-                format!("\tvpbroadcastq\t{reg}, {}", low_half(reg))
-            } else {
-                format!("\tpunpcklqdq\t{reg}, {reg}")
-            }
         };
         let mut numbers = Vec::new();
         number_operands(kernel, &mut numbers);
@@ -368,54 +405,103 @@ impl X64Generator {
                 continue;
             }
             let reg = packing.take()?;
-            let low = low_half(reg);
-            match frame.value(number)? {
-                Value::Reg(gpr) => self.emit(&format!("\tmovq\t{low}, {gpr}")),
+            let gpr = match frame.value(number)? {
+                Value::Reg(gpr) => gpr,
                 value => {
                     self.load("rax", value);
-                    self.emit(&format!("\tmovq\t{low}, rax"));
+                    "rax"
                 }
-            }
-            self.emit(&broadcast(reg));
+            };
+            self.broadcast(vectors, reg, gpr);
             packing.numbers.push((number, reg));
         }
         if float && has_neg(kernel) {
             // flipping the sign bit of each element negates it
             let reg = packing.take()?;
             self.load("rax", Value::Imm(i64::MIN));
-            self.emit(&format!("\tmovq\t{}, rax", low_half(reg)));
-            self.emit(&broadcast(reg));
-            packing.mask = Some(reg);
+            self.broadcast(vectors, reg, "rax");
+            packing.sign = Some(reg);
         }
-        let step = if wide { 4 } else { 2 };
+        let step = vectors.lanes();
         let len = frame.value(len)?;
+        let tail = self.ctx.new_label("packed_tail");
         self.load("rdx", len);
         self.emit(&format!("\tand\trdx, -{step}"));
         self.emit("\txor\tecx, ecx");
         self.emit("\ttest\trdx, rdx");
-        self.emit(&format!("\tjz\t{}", packing.stop));
+        let after = match vectors {
+            Vectors::Avx512 => &tail,
+            _ => &packing.stop,
+        };
+        self.emit(&format!("\tjz\t{after}"));
         let top = self.ctx.new_label("packed");
         self.emit(&format!("{top}:"));
-        let (result, _) = self.packed_node(frame, &mut packing, kernel)?;
-        let base = self.base(frame.value(out)?, "rax");
-        if wide {
-            self.emit(&format!(
-                "\tvmovupd\tYMMWORD PTR [{base} + rcx * 8], {result}"
-            ));
-        } else {
-            self.emit(&format!(
-                "\tmovupd\tXMMWORD PTR [{base} + rcx * 8], {result}"
-            ));
+        let (result, owned) = self.packed_node(frame, &mut packing, kernel)?;
+        self.packed_store(frame, &packing, out, result)?;
+        if owned {
+            packing.give(result);
         }
         self.emit(&format!("\tadd\trcx, {step}"));
         self.emit("\tcmp\trcx, rdx");
         self.emit(&format!("\tjl\t{top}"));
+        if vectors == Vectors::Avx512 {
+            // the rest, fewer than a group, under a mask of as many low bits
+            self.emit(&format!("{tail}:"));
+            self.load("rdx", len);
+            self.emit("\tsub\trdx, rcx");
+            self.emit(&format!("\tjz\t{}", packing.stop));
+            self.emit("\tmov\teax, -1");
+            self.emit("\tbzhi\teax, eax, edx");
+            self.emit("\tkmovb\tk1, eax");
+            packing.tail = Some("k1");
+            let (result, _) = self.packed_node(frame, &mut packing, kernel)?;
+            self.packed_store(frame, &packing, out, result)?;
+            self.emit("\tadd\trcx, rdx");
+        }
         self.emit(&format!("{}:", packing.stop));
-        if wide {
+        if vectors != Vectors::Sse2 {
             self.emit("\tvzeroupper");
         }
-        let done = frame.reg(done)?;
         self.store(done, "rcx");
+        Ok(())
+    }
+
+    /// Copies the low element of the vector register `reg` from the general register `gpr` to
+    /// every element of `reg`.
+    fn broadcast(&mut self, vectors: Vectors, reg: &'static str, gpr: &str) {
+        let low = low_half(reg);
+        match vectors {
+            Vectors::Sse2 => {
+                self.emit(&format!("\tmovq\t{low}, {gpr}"));
+                self.emit(&format!("\tpunpcklqdq\t{reg}, {reg}"));
+            }
+            Vectors::Avx2 => {
+                self.emit(&format!("\tmovq\t{low}, {gpr}"));
+                self.emit(&format!("\tvpbroadcastq\t{reg}, {low}"));
+            }
+            Vectors::Avx512 => self.emit(&format!("\tvpbroadcastq\t{reg}, {gpr}")),
+        }
+    }
+
+    /// Stores the group of results in `result` at the elements `rcx` counts to of `out`, only
+    /// those the tail's mask selects if the tail is being emitted.
+    fn packed_store(
+        &mut self,
+        frame: &Frame,
+        packing: &Packing,
+        out: Operand,
+        result: &str,
+    ) -> Result<(), String> {
+        let base = self.base(frame.value(out)?, "rax");
+        let mask = packing.tail.map(|k| format!("{{{k}}}")).unwrap_or_default();
+        let line = match packing.vectors {
+            Vectors::Sse2 => format!("\tmovupd\tXMMWORD PTR [{base} + rcx * 8], {result}"),
+            Vectors::Avx2 => format!("\tvmovupd\tYMMWORD PTR [{base} + rcx * 8], {result}"),
+            Vectors::Avx512 => {
+                format!("\tvmovupd\tZMMWORD PTR [{base} + rcx * 8]{mask}, {result}")
+            }
+        };
+        self.emit(&line);
         Ok(())
     }
 
@@ -441,14 +527,25 @@ impl X64Generator {
             Kernel::Element(data) => {
                 let reg = packing.take()?;
                 let base = self.base(frame.value(*data)?, "rax");
-                if packing.wide {
-                    self.emit(&format!("\tvmovupd\t{reg}, YMMWORD PTR [{base} + rcx * 8]"));
-                } else {
-                    self.emit(&format!("\tmovupd\t{reg}, XMMWORD PTR [{base} + rcx * 8]"));
-                }
+                let line = match (packing.vectors, packing.tail) {
+                    (Vectors::Sse2, _) => {
+                        format!("\tmovupd\t{reg}, XMMWORD PTR [{base} + rcx * 8]")
+                    }
+                    (Vectors::Avx2, _) => {
+                        format!("\tvmovupd\t{reg}, YMMWORD PTR [{base} + rcx * 8]")
+                    }
+                    // the elements past the end are never read, so they cannot fault
+                    (Vectors::Avx512, Some(k)) => {
+                        format!("\tvmovupd\t{reg}{{{k}}}{{z}}, ZMMWORD PTR [{base} + rcx * 8]")
+                    }
+                    (Vectors::Avx512, None) => {
+                        format!("\tvmovupd\t{reg}, ZMMWORD PTR [{base} + rcx * 8]")
+                    }
+                };
+                self.emit(&line);
                 Ok((reg, true))
             }
-            Kernel::Binary(..) | Kernel::Neg(_) if packing.wide => {
+            Kernel::Binary(..) | Kernel::Neg(_) if packing.vectors != Vectors::Sse2 => {
                 self.packed_operation(frame, packing, node)
             }
             Kernel::Binary(op, lhs, rhs) => {
@@ -489,7 +586,7 @@ impl X64Generator {
             Kernel::Neg(operand) => {
                 let (src, owned) = self.packed_node(frame, packing, operand)?;
                 if packing.float {
-                    let mask = packing.mask.ok_or("a packed negation has no sign mask")?;
+                    let sign = packing.sign.ok_or("a packed negation has no sign mask")?;
                     let dst = if owned {
                         src
                     } else {
@@ -497,7 +594,7 @@ impl X64Generator {
                         self.emit(&format!("\tmovapd\t{reg}, {src}"));
                         reg
                     };
-                    self.emit(&format!("\txorpd\t{dst}, {mask}"));
+                    self.emit(&format!("\txorpd\t{dst}, {sign}"));
                     Ok((dst, true))
                 } else {
                     // 0 - x
@@ -513,14 +610,18 @@ impl X64Generator {
         }
     }
 
-    /// Emits an operation of an AVX2 kernel, as [`Self::packed_node`] does, with three-operand
-    /// instructions that write their result over an operand the node owns, so nothing is copied.
+    /// Emits an operation of an AVX2 or AVX-512 kernel, as [`Self::packed_node`] does, with
+    /// three-operand instructions that write their result over an operand the node owns, so
+    /// nothing is copied.
     fn packed_operation(
         &mut self,
         frame: &Frame,
         packing: &mut Packing,
         node: &Kernel,
     ) -> Result<(&'static str, bool), String> {
+        let avx512 = packing.vectors == Vectors::Avx512;
+        // zeroing a zmm register takes AVX-512's own form, which ymm registers do not have
+        let zero_with = if avx512 { "vpxorq" } else { "vpxor" };
         match node {
             Kernel::Binary(op, lhs, rhs) => {
                 let (lhs, lhs_owned) = self.packed_node(frame, packing, lhs)?;
@@ -532,16 +633,23 @@ impl X64Generator {
                     (BinOp::Div, true) => {
                         // stop before a group with a zero divisor, for the single loop to report
                         let zero = packing.take()?;
-                        self.emit(&format!("\tvxorpd\t{zero}, {zero}, {zero}"));
-                        self.emit(&format!("\tvcmppd\t{zero}, {zero}, {rhs}, 0"));
-                        self.emit(&format!("\tvmovmskpd\teax, {zero}"));
-                        self.emit("\ttest\teax, eax");
+                        self.emit(&format!("\t{zero_with}\t{zero}, {zero}, {zero}"));
+                        if avx512 {
+                            let mask = packing.tail.map(|k| format!("{{{k}}}")).unwrap_or_default();
+                            self.emit(&format!("\tvcmppd\tk2{mask}, {zero}, {rhs}, 0"));
+                            self.emit("\tkortestb\tk2, k2");
+                        } else {
+                            self.emit(&format!("\tvcmppd\t{zero}, {zero}, {rhs}, 0"));
+                            self.emit(&format!("\tvmovmskpd\teax, {zero}"));
+                            self.emit("\ttest\teax, eax");
+                        }
                         self.emit(&format!("\tjnz\t{}", packing.stop));
                         packing.give(zero);
                         "vdivpd"
                     }
                     (BinOp::Add, false) => "vpaddq",
                     (BinOp::Sub, false) => "vpsubq",
+                    (BinOp::Mul, false) if avx512 => "vpmullq",
                     _ => return Err(format!("{op:?} cannot be packed")),
                 };
                 let dst = match (lhs_owned, rhs_owned) {
@@ -558,14 +666,14 @@ impl X64Generator {
             Kernel::Neg(operand) => {
                 let (src, owned) = self.packed_node(frame, packing, operand)?;
                 if packing.float {
-                    let mask = packing.mask.ok_or("a packed negation has no sign mask")?;
+                    let sign = packing.sign.ok_or("a packed negation has no sign mask")?;
                     let dst = if owned { src } else { packing.take()? };
-                    self.emit(&format!("\tvxorpd\t{dst}, {src}, {mask}"));
+                    self.emit(&format!("\tvxorpd\t{dst}, {src}, {sign}"));
                     Ok((dst, true))
                 } else {
                     // 0 - x
                     let zero = packing.take()?;
-                    self.emit(&format!("\tvpxor\t{zero}, {zero}, {zero}"));
+                    self.emit(&format!("\t{zero_with}\t{zero}, {zero}, {zero}"));
                     let dst = if owned { src } else { zero };
                     self.emit(&format!("\tvpsubq\t{dst}, {zero}, {src}"));
                     if owned {
@@ -578,6 +686,8 @@ impl X64Generator {
         }
     }
 
+    /// Moves `src` into `dst`, going through `rax` when both are in memory or the immediate is too
+    /// wide to store directly.
     fn mov(&mut self, dst: Value, src: Value) {
         if dst == src {
             return;
@@ -1564,18 +1674,30 @@ impl X64Generator {
                 dst,
                 src,
                 checked: true,
+                rounding,
             } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 self.load("rax", src);
-                self.gen_float_to_int();
+                self.gen_float_to_int(*rounding);
                 self.store(dst, "rax");
             }
 
-            Inst::FloatToInt { dst, src, .. } => {
+            Inst::FloatToInt {
+                dst, src, rounding, ..
+            } => {
                 let (dst, src) = (frame.reg(*dst)?, frame.value(*src)?);
                 let src = self.float_source(src, "xmm0");
                 let target = self.target(dst, None);
-                self.emit(&format!("\tcvttsd2si\t{target}, {src}"));
+                match rounding {
+                    Rounding::Down if self.sse41() => {
+                        self.emit(&format!("\troundsd\txmm1, {src}, 9"));
+                        self.emit(&format!("\tcvttsd2si\t{target}, xmm1"));
+                    }
+                    _ => self.emit(&format!("\tcvttsd2si\t{target}, {src}")),
+                }
+                if *rounding == Rounding::Down && !self.sse41() {
+                    self.step_down(target, &src);
+                }
                 self.store(dst, target);
             }
 
@@ -2079,15 +2201,24 @@ impl X64Generator {
         self.emit("\tadd\trax, rdx");
     }
 
-    /// Converts the float whose bits are in `rax` to an int in `rax`, dropping any fraction.
+    /// Converts the float whose bits are in `rax` to an int in `rax`, dropping any fraction or,
+    /// for `Rounding::Down`, rounding down: with `roundsd` first from x86-64 `v2`, and otherwise
+    /// by stepping the truncated int down after ([`Self::step_down`]).
     ///
     /// `cvttsd2si` gives the minimum int for nan and for anything out of range, so that result
     /// exits with an error unless the float really was -2^63.
-    fn gen_float_to_int(&mut self) {
+    fn gen_float_to_int(&mut self, rounding: Rounding) {
         let fail = self.fail_here("cannot convert float to int (nan or out of range)");
         let done = self.ctx.new_label("to_int");
+        let round_first = rounding == Rounding::Down && self.sse41();
         self.emit("\tmovq\txmm0, rax");
-        self.emit("\tmov\trcx, rax");
+        if round_first {
+            // a float rounds down to an int exactly when it fits itself
+            self.emit("\troundsd\txmm0, xmm0, 9");
+            self.emit("\tmovq\trcx, xmm0");
+        } else {
+            self.emit("\tmov\trcx, rax");
+        }
         self.emit("\tcvttsd2si\trax, xmm0");
         self.emit(&format!("\tmov\trdx, {}", i64::MIN));
         self.emit("\tcmp\trax, rdx");
@@ -2099,5 +2230,17 @@ impl X64Generator {
         self.emit("\tcmp\trcx, rdx");
         self.emit(&format!("\tjne\t{fail}"));
         self.emit(&format!("{done}:"));
+        if rounding == Rounding::Down && !round_first {
+            self.step_down("rax", "xmm0");
+        }
+    }
+
+    /// Subtracts 1 from `int`, the float in the `xmm` register `float` truncated, if truncating
+    /// went up, which only a negative float with a fraction does, so `int` becomes the float
+    /// rounded down without a branch: the comparison's carry is the 1. It changes `xmm1`.
+    fn step_down(&mut self, int: &str, float: &str) {
+        self.emit(&format!("\tcvtsi2sd\txmm1, {int}"));
+        self.emit(&format!("\tucomisd\t{float}, xmm1"));
+        self.emit(&format!("\tsbb\t{int}, 0"));
     }
 }

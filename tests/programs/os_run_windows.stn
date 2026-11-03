@@ -1,0 +1,44 @@
+// os.run on Windows runs a program, captures what it writes, and gives its exit status
+use os
+
+out = os.run("cmd", ["/c", "echo out& echo err>&2& exit /b 3"]).unwrap()
+print(out.status)
+print(out)
+
+// the arguments reach the program's command line quoted as Rust quotes them, which cmd's echo
+// shows as they are
+print(os.run("cmd", ["/c", "echo", "one", "two  spaces", "say \"hi\"", ""]).unwrap().stdout.strip())
+
+// the program reads nothing from stdin
+print(os.run("sort", []))
+
+// the program gets the environment
+print(os.run("cmd", ["/c", "echo %STONE_RUN_GREETING%"]).unwrap().stdout.strip())
+
+// a nonzero status is still ok, and a negative one keeps its sign
+print(os.run("cmd", ["/c", "exit /b 7"]).unwrap().status)
+print(os.run("cmd", ["/c", "exit /b -5"]).unwrap().status)
+
+// only a program that cannot start is an err, and a batch file starts only through cmd
+print(os.run("stone-surely-missing-command", []))
+print(os.run(".\\nope", []))
+print(os.run(".\\data.txt", []))
+print(os.run(".\\build.bat", []))
+print(os.run("", []))
+print(os.run("cmd", ["/c", "type", "bad.bin"]))
+
+// output far past what a pipe holds, on both streams at once
+big = os.run("cmd", ["/c", "for /l %i in (1,1,10000) do @(echo out %i& echo err %i 1>&2)"]).unwrap()
+lines = big.stdout.split("\r\n")
+print(big.stdout.len(), big.stderr.len(), lines.len(), lines[9999])
+
+// a value may be named output, and ? passes an err on
+fn first_line(cmd: str, args: list[str]) -> result[str, str]:
+    output = os.run(cmd, args)?
+    if output.status != 0:
+        ret err("{cmd} exited with {output.status}")
+    ret ok(output.stdout.split("\r\n")[0])
+
+print(first_line("cmd", ["/c", "echo a b"]))
+print(first_line("cmd", ["/c", "exit 4"]))
+print(first_line("stone-surely-missing-command", []))

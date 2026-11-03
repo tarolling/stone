@@ -13,11 +13,11 @@
 use super::BuiltinDoc;
 use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
 
-// the sockets themselves, over `std::net` and the C library's `poll` on Unix, and none yet on
-// Windows, where a program that uses the module is an error before it runs
-#[cfg(unix)]
+// the sockets themselves, over `std::net` and the C library's `poll` on Unix or Winsock's
+// `WSAPoll` on Windows, and none on other systems
+#[cfg(any(unix, windows))]
 mod system;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 #[path = "net/unsupported.rs"]
 mod system;
 
@@ -35,7 +35,7 @@ pub const SYS_MODULE: &str = "net_sys";
 /// What the internal module is for.
 pub const SYS_MODULE_DOC: &str = "The system calls behind the builtin `net` module.";
 
-pub static SYS_DOCS: [BuiltinDoc; 5] = [
+pub static SYS_DOCS: [BuiltinDoc; 7] = [
     BuiltinDoc {
         name: "net_sys.connect",
         signature: "net_sys.connect(address: list[int], port: int, name: str) -> \
@@ -66,6 +66,19 @@ pub static SYS_DOCS: [BuiltinDoc; 5] = [
         signature: "net_sys.ready(s: socket, timeout_ms: int) -> bool",
         description: "Returns whether a read of `s` would not wait, checking for at most \
                       `timeout_ms` milliseconds, or forever if it is -1.",
+    },
+    BuiltinDoc {
+        name: "net_sys.on_windows",
+        signature: "net_sys.on_windows() -> bool",
+        description: "Returns whether the program runs on Windows, a constant that lowering \
+                      folds, so only the branch taken is compiled.",
+    },
+    BuiltinDoc {
+        name: "net_sys.lookup",
+        signature: "net_sys.lookup(host: str, name: str) -> result[bytes, str]",
+        description: "Returns the addresses the system's resolver gives `name`, each its \
+                      length, 4 or 16, then its bytes, and none for a host it does not know. \
+                      Errors quote `host`. Only Windows asks.",
     },
 ];
 
@@ -161,6 +174,56 @@ pub fn complete_prefix(bytes: &[u8]) -> usize {
     bytes.len()
 }
 
+/// The most bytes of addresses [`lookup`] gives, which compiled code's buffer holds.
+pub const LOOKUP_SIZE: usize = 4096;
+
+/// Returns the addresses the system's resolver gives `name`, in its order, for
+/// `net_sys.lookup`, which `net.stn` asks on Windows: each its length, 4 or 16, then its bytes,
+/// as many as fit in [`LOOKUP_SIZE`] bytes, and none for a host the resolver does not know.
+/// Other errors quote `host`.
+///
+/// For example, `lookup("127.0.0.1", "here")` is `Ok(vec![4, 127, 0, 0, 1])`.
+pub fn lookup(name: &str, host: &str) -> Result<Vec<u8>, String> {
+    use super::fs::{error_message, host as system, windows_errno};
+    use std::net::ToSocketAddrs;
+    if cfg!(fuzzing) {
+        return Err(super::fs::message(
+            "networking is disabled while fuzzing",
+            host,
+        ));
+    }
+    match (name, 0).to_socket_addrs() {
+        Ok(found) => Ok(records(found.map(|address| address.ip()), LOOKUP_SIZE)),
+        // WSAHOST_NOT_FOUND and WSANO_DATA, or on Unix, which finds addresses in stone, any
+        Err(e) => {
+            match e.raw_os_error() {
+                Some(code) if cfg!(windows) && code != 11001 && code != 11004 => Err(
+                    error_message(system(), windows_errno(code as i64, None), host),
+                ),
+                _ => Ok(vec![]),
+            }
+        }
+    }
+}
+
+/// Returns `addresses` as [`lookup`] gives them, stopping at the first that does not fit in
+/// `size` bytes.
+fn records(addresses: impl IntoIterator<Item = IpAddr>, size: usize) -> Vec<u8> {
+    let mut records = vec![];
+    for address in addresses {
+        let bytes = match address {
+            IpAddr::V4(v4) => v4.octets().to_vec(),
+            IpAddr::V6(v6) => v6.octets().to_vec(),
+        };
+        if records.len() + 1 + bytes.len() > size {
+            break;
+        }
+        records.push(bytes.len() as u8);
+        records.extend(bytes);
+    }
+    records
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -181,6 +244,19 @@ mod tests {
         assert_eq!(socket_address(&[256, 0, 0, 1], 80), None);
         assert_eq!(socket_address(&[127, 0, 0, 1], 65536), None);
         assert_eq!(socket_address(&[127, 0, 0, 1], -1), None);
+    }
+
+    #[test]
+    fn a_lookup_gives_each_address_after_its_length() {
+        assert_eq!(lookup("127.0.0.1", "here"), Ok(vec![4, 127, 0, 0, 1]));
+        let mut loopback = vec![16];
+        loopback.extend([0; 15]);
+        loopback.push(1);
+        assert_eq!(lookup("::1", "here"), Ok(loopback));
+        // as many as fit, as compiled code's buffer holds them
+        let four = IpAddr::V4(Ipv4Addr::LOCALHOST);
+        let sixteen = IpAddr::V6(Ipv6Addr::LOCALHOST);
+        assert_eq!(records([four, four, sixteen, four], 12).len(), 10);
     }
 
     #[test]

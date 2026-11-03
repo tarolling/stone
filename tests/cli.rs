@@ -1585,6 +1585,11 @@ fn tree_shows_the_packages_a_program_uses() {
 #[path = "cli/windows_gui.rs"]
 mod windows_gui;
 
+/// Tests of Windows programs that start others, which run where Windows programs do: on
+/// Windows, and under WSL.
+#[path = "cli/windows.rs"]
+mod windows;
+
 #[test]
 fn a_package_from_the_store_runs_and_is_locked() {
     let dir = project(

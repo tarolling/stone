@@ -1170,8 +1170,15 @@ whose stdout or stderr is not UTF-8 text, or holds a null byte (`not valid UTF-8
 and a `cmd` or argument holding a null character. A file with no `#!` line is not run through a
 shell, so it gives `exec format error`.
 
-`os.run` is not supported on Windows yet: building a program that calls it for Windows, or
-running or checking one on Windows, is the error `os.run is not supported on Windows yet`.
+On Windows, a `cmd` holding `\` or `/` names the program's file, and any other is looked for in
+each directory of `PATH` (separated by `;`), never in the working directory first. A `cmd` whose
+file name has no extension gets `.exe`, so `os.run("git", [...])` finds `git.exe`. The arguments
+reach the program on one command line, quoted as Rust's `std::process::Command` quotes them,
+which the C runtime and Rust split back into the same arguments; the program's own name on it is
+the path that was found. The status is the exit code, and no program is stopped by a signal. A
+batch file (`.bat` or `.cmd`) is not started directly, since `cmd.exe` would read its arguments
+by other rules: it gives `exec format error`, and `os.run("cmd", ["/c", "build.bat"])` runs one.
+Text a Windows program writes usually ends its lines with `\r\n`.
 
 ```stone
 use os
@@ -1752,9 +1759,10 @@ with `use net` to call `net.connect("example.com", 80)`, or with `use net.connec
 `connect("example.com", 80)`. Unlike the other builtin modules, it is written in stone, and a
 program that uses it is linked with its source, so its functions behave alike under `stone run`
 and in a built program, and an editor can show their code. A file named `net.stn` next to the
-entry file cannot be imported. TLS (`https`) is not supported, and neither is Windows yet:
-building a program that uses `net` for Windows, or running or checking one on Windows, is the
-error `the net module is not supported on Windows yet`.
+entry file cannot be imported. TLS (`https`) is not supported. On Windows, every function but
+[`net.connect_unix`](#netconnect_unix) works: building a program that uses that one for
+Windows, or running or checking one on Windows, is the error
+`net.connect_unix is not supported on Windows yet`.
 
 A connection is a `socket`, and a port waiting for connections a `listener`. Both are types a
 signature can name, as in `fn serve(l: listener)`. A copy of one refers to the same connection,
@@ -1813,6 +1821,12 @@ the same way under both backends:
 IPv4 addresses come before IPv6 ones. The environment variables `STONE_HOSTS` and
 `STONE_RESOLV_CONF` name other files to read instead, and a `nameserver` line may give a port
 of its own, as in `nameserver 127.0.0.1:5353`, which tests use for a DNS server of their own.
+
+Windows keeps its hosts file and DNS settings elsewhere, so there `localhost` is still
+`127.0.0.1` and `::1`, but any other name is asked of the system's resolver (`GetAddrInfoW`),
+under both backends, unless `STONE_HOSTS` or `STONE_RESOLV_CONF` is set, which makes `net` find
+addresses itself as above. A name the resolver does not know is
+`err("unknown host: 'name'")`.
 A name that no server knows is the error `unknown host: 'name'`.
 
 ### `net.connect`

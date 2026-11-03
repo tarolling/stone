@@ -3071,7 +3071,14 @@ impl<'out> Interpreter<'out> {
                     gui::pack_scaled(&pixels, *width, *height, *out_width, *out_height, *format);
                 return Ok(Value::Bytes(packed.into()));
             }
-            ("gui_sys.on_windows", []) => return Ok(Value::Bool(cfg!(windows))),
+            ("gui_sys.on_windows" | "net_sys.on_windows", []) => {
+                return Ok(Value::Bool(cfg!(windows)));
+            }
+            ("net_sys.lookup", [Value::Str(host), Value::Str(name)]) => {
+                self.out.flush()?;
+                let found = net::lookup(name, host).map(|records| Value::Bytes(records.into()));
+                return Ok(result(found));
+            }
             (
                 "gui_sys.window_open",
                 [

@@ -21,9 +21,11 @@ use crate::codegen::context::{
     CLOSED_EARLY_CODE, FD_MISSING_CODE, INVALID_ADDRESS_CODE, INVALID_TEXT_CODE,
     LISTENER_CLOSED_CODE, SHM_MISSING_CODE, SOCKET_CLOSED_CODE, TIMED_OUT_CODE, immortal_string,
 };
-use crate::stdlib::net::{MAX_REPLY, READ_SIZE};
+use crate::stdlib::net::{LOOKUP_SIZE, MAX_REPLY, READ_SIZE};
 
-use super::fs::{EINTR, close};
+use super::fs::{EINTR, close, routine_end, routine_start};
+use super::system::{Sys, system_call};
+use crate::codegen::Os;
 
 /// The tag of a socket, which no enum's variant has, since tags count up from 0.
 pub const SOCKET_TAG: i64 = -1;
@@ -124,6 +126,9 @@ pub fn net_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if uses("stone.net_ready") {
         ready(r#gen);
     }
+    if uses("stone.net_lookup") {
+        lookup(r#gen);
+    }
     if uses("stone.net_shm_create") {
         shm_create(r#gen);
     }
@@ -211,9 +216,22 @@ fn fail_with_code(r#gen: &mut dyn AssemblyGenerator, label: &str, code: i64) {
     r#gen.emit(&format!("\tjmp\t{label}_err"));
 }
 
-/// Emits a system call `number`, made again while a signal interrupts it, whose arguments are
-/// already in place except that `again` sets them, if given.
-fn syscall(r#gen: &mut dyn AssemblyGenerator, label: &str, number: i64, setup: &[&str]) {
+/// Emits the system call `call`, made again while a signal interrupts it, whose arguments are
+/// already in place except those `setup` sets, at `label`.
+fn syscall(r#gen: &mut dyn AssemblyGenerator, label: &str, call: Sys, setup: &[&str]) {
+    r#gen.emit(&format!("{label}:"));
+    for line in setup {
+        r#gen.emit(&format!("\t{line}"));
+    }
+    system_call(r#gen, call);
+    r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
+    r#gen.emit(&format!("\tje\t{label}"));
+}
+
+/// Emits the Linux system call `number` as [`syscall`] does, for the calls only Linux makes:
+/// those of shared memory and descriptors sent over Unix sockets, which `gui` reaches only on
+/// Linux.
+fn linux_syscall(r#gen: &mut dyn AssemblyGenerator, label: &str, number: i64, setup: &[&str]) {
     r#gen.emit(&format!("{label}:"));
     for line in setup {
         r#gen.emit(&format!("\t{line}"));
@@ -318,7 +336,7 @@ fn connect(r#gen: &mut dyn AssemblyGenerator) {
     syscall(
         r#gen,
         &format!("{label}_connect"),
-        42, // sys_connect
+        Sys::Connect,
         &["mov\trdi, r12", "lea\trsi, [rbp - 80]", "mov\trdx, r15"],
     );
     r#gen.emit("\ttest\trax, rax");
@@ -339,8 +357,7 @@ fn connect(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tedx, 4"); // SO_ERROR
     r#gen.emit("\tlea\tr10, [rbp - 88]");
     r#gen.emit("\tlea\tr8, [rbp - 112]");
-    r#gen.emit("\tmov\teax, 55"); // sys_getsockopt
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Getsockopt);
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjs\t{label}_close"));
     r#gen.emit("\tmov\teax, DWORD PTR [rbp - 88]");
@@ -393,7 +410,7 @@ fn connect_unix(r#gen: &mut dyn AssemblyGenerator) {
     syscall(
         r#gen,
         &format!("{label}_connect"),
-        42, // sys_connect
+        Sys::Connect,
         &["mov\trdi, r12", "mov\trsi, rsp", "mov\trdx, r15"],
     );
     r#gen.emit("\ttest\trax, rax");
@@ -432,8 +449,7 @@ fn ready(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(".Lnet_ready_again:");
     r#gen.emit("\tmov\trdi, rsp");
     r#gen.emit("\tmov\tesi, 1");
-    r#gen.emit("\tmov\teax, 7"); // sys_poll
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Poll);
     r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
     r#gen.emit("\tje\t.Lnet_ready_again");
     r#gen.emit("\tadd\trsp, 24");
@@ -492,7 +508,7 @@ fn shm_create(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\txor\tr14, r14");
     r#gen.emit("\ttest\tr12, r12");
     r#gen.emit("\tcmovns\tr14, r12");
-    syscall(
+    linux_syscall(
         r#gen,
         &format!("{label}_size"),
         77, // sys_ftruncate
@@ -536,7 +552,7 @@ fn shm_write(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(&format!("{label}_next:"));
     r#gen.emit("\tcmp\tr15, r14");
     r#gen.emit(&format!("\tjae\t{label}_written"));
-    syscall(
+    linux_syscall(
         r#gen,
         &format!("{label}_again"),
         18, // sys_pwrite64
@@ -596,7 +612,7 @@ fn shm_send(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tQWORD PTR [rsp + 80], rax");
     r#gen.emit("\tmov\trax, QWORD PTR [rbx + 72]");
     r#gen.emit("\tmov\tQWORD PTR [rsp + 88], rax");
-    syscall(
+    linux_syscall(
         r#gen,
         &format!("{label}_message"),
         46, // sys_sendmsg
@@ -612,7 +628,7 @@ fn shm_send(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(&format!("{label}_next:"));
     r#gen.emit("\tcmp\tr14, r13");
     r#gen.emit(&format!("\tjae\t{label}_sent"));
-    syscall(
+    linux_syscall(
         r#gen,
         &format!("{label}_again"),
         44, // sys_sendto
@@ -685,7 +701,7 @@ fn take_fd(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit(&format!("{label}_next:"));
     r#gen.emit("\tcmp\tr12, r14");
     r#gen.emit(&format!("\tjae\t{label}_read"));
-    syscall(
+    linux_syscall(
         r#gen,
         &format!("{label}_again"),
         17, // sys_pread64
@@ -737,21 +753,18 @@ fn listen(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tedx, 2"); // SO_REUSEADDR
     r#gen.emit("\tlea\tr10, [rbp - 88]");
     r#gen.emit("\tmov\tr8, 4");
-    r#gen.emit("\tmov\teax, 54"); // sys_setsockopt
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Setsockopt);
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjs\t{label}_close"));
     r#gen.emit("\tmov\trdi, r12");
     r#gen.emit("\tlea\trsi, [rbp - 80]");
     r#gen.emit("\tmov\trdx, r15");
-    r#gen.emit("\tmov\teax, 49"); // sys_bind
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Bind);
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjs\t{label}_close"));
     r#gen.emit("\tmov\trdi, r12");
     r#gen.emit("\tmov\tesi, 128");
-    r#gen.emit("\tmov\teax, 50"); // sys_listen
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Listen);
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjs\t{label}_close"));
     // the port the system picked, if the address asked for 0
@@ -759,8 +772,7 @@ fn listen(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trdi, r12");
     r#gen.emit("\tlea\trsi, [rbp - 80]");
     r#gen.emit("\tlea\trdx, [rbp - 88]");
-    r#gen.emit("\tmov\teax, 51"); // sys_getsockname
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Getsockname);
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjs\t{label}_close"));
     r#gen.emit("\tmovzx\teax, byte ptr [rbp - 78]");
@@ -783,8 +795,7 @@ fn fcntl(r#gen: &mut dyn AssemblyGenerator, command: i64, third: &str) {
     r#gen.emit(&format!("\t{third}"));
     r#gen.emit("\tmov\trdi, r12");
     r#gen.emit(&format!("\tmov\tesi, {command}"));
-    r#gen.emit("\tmov\teax, 72"); // sys_fcntl
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Fcntl);
     r#gen.emit("\ttest\trax, rax");
 }
 
@@ -801,13 +812,56 @@ fn open_socket(r#gen: &mut dyn AssemblyGenerator, label: &str, kind: i64) {
     r#gen.emit("\tmov\trdi, r14");
     r#gen.emit(&format!("\tmov\tesi, {}", kind | SOCK_CLOEXEC));
     r#gen.emit("\txor\tedx, edx");
-    r#gen.emit("\tmov\teax, 41"); // sys_socket
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Socket);
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjns\t{label}_opened"));
     fail_with_errno(r#gen, label, Some("rbx"));
     r#gen.emit(&format!("{label}_opened:"));
     r#gen.emit("\tmov\tr12, rax");
+}
+
+/// Emits `stone.net_lookup(host, name)`, `net_sys.lookup`: `ok` of the bytes the system's
+/// resolver writes for `name` (see [`Sys::Lookup`]), or `err` quoting `host`.
+fn lookup(r#gen: &mut dyn AssemblyGenerator) {
+    let label = "stone.net_lookup";
+    // rbx holds the host, r12 the name, r13 the buffer, and r14 what it holds
+    routine_start(r#gen, label, INVALID_ADDRESS_CODE);
+    r#gen.emit("\tmov\tr12, rsi");
+    r#gen.emit(&format!("\tmov\tedi, {LOOKUP_SIZE}"));
+    r#gen.emit("\tcall\tstone.mem_alloc");
+    r#gen.emit("\tmov\tr13, rax");
+    r#gen.emit("\tmov\trdi, r12");
+    r#gen.emit("\tmov\trsi, r13");
+    r#gen.emit(&format!("\tmov\tedx, {LOOKUP_SIZE}"));
+    system_call(r#gen, Sys::Lookup);
+    r#gen.emit("\tmov\tr14, rax");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit(&format!("\tjs\t{label}_free"));
+    r#gen.emit("\tmov\trdi, r13");
+    r#gen.emit("\tmov\trsi, rax");
+    r#gen.emit("\tcall\tstone.str_slice");
+    r#gen.emit(&format!("{label}_free:"));
+    r#gen.emit("\tmov\tr15, rax");
+    r#gen.emit("\tmov\trax, r13");
+    r#gen.emit("\tcall\tstone.mem_free");
+    r#gen.emit("\ttest\tr14, r14");
+    r#gen.emit(&format!("\tjns\t{label}_found"));
+    r#gen.emit("\tmov\trdi, r14");
+    r#gen.emit("\tneg\trdi");
+    r#gen.emit(&format!("\tjmp\t{label}_err"));
+    r#gen.emit(&format!("{label}_found:"));
+    r#gen.emit("\tmov\trdi, r15");
+    r#gen.emit("\tmov\tesi, 1"); // a string slot, as bytes are laid out
+    r#gen.emit("\tcall\t.Lfs_ok");
+    r#gen.emit(&format!("\tjmp\t{label}_done"));
+    routine_end(r#gen, label);
+}
+
+/// Emits a `close` of the socket or listener whose descriptor is in `reg`, whose result is
+/// ignored.
+fn close_socket(r#gen: &mut dyn AssemblyGenerator, reg: &str) {
+    r#gen.emit(&format!("\tmov\trdi, {reg}"));
+    system_call(r#gen, Sys::CloseSocket);
 }
 
 /// Emits the return of `ok` of the new handle in `rax`.
@@ -823,7 +877,7 @@ fn ok_handle(r#gen: &mut dyn AssemblyGenerator, label: &str) {
 fn closing_failure(r#gen: &mut dyn AssemblyGenerator, label: &str) {
     r#gen.emit(&format!("{label}_close:"));
     r#gen.emit("\tmov\tr13, rax");
-    close(r#gen, "r12");
+    close_socket(r#gen, "r12");
     r#gen.emit("\tmov\trax, r13");
     fail_with_errno(r#gen, label, Some("rbx"));
 }
@@ -842,7 +896,7 @@ fn accept(r#gen: &mut dyn AssemblyGenerator) {
     syscall(
         r#gen,
         &format!("{label}_again"),
-        288, // sys_accept4
+        Sys::Accept4,
         &[
             "mov\trdi, r12",
             "xor\tesi, esi",
@@ -870,11 +924,13 @@ fn close_handle(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 16]");
     r#gen.emit("\ttest\trdi, rdi");
     r#gen.emit("\tjs\t.Lnet_close_done");
-    r#gen.emit("\tmov\teax, 3"); // sys_close
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::CloseSocket);
     r#gen.emit("\tmov\tQWORD PTR [rbx + 16], -1");
-    close_shared(r#gen, ".Lnet_close");
-    close_received(r#gen, ".Lnet_close");
+    // only Linux shares memory and receives descriptors
+    if r#gen.target().os != Os::Windows {
+        close_shared(r#gen, ".Lnet_close");
+        close_received(r#gen, ".Lnet_close");
+    }
     r#gen.emit(&format!("\tcmp\tQWORD PTR [rbx], {SOCKET_TAG}"));
     r#gen.emit("\tjne\t.Lnet_close_done");
     r#gen.emit("\tmov\trax, QWORD PTR [rbx + 24]");
@@ -922,7 +978,7 @@ fn send(r#gen: &mut dyn AssemblyGenerator) {
     syscall(
         r#gen,
         &format!("{label}_again"),
-        44, // sys_sendto
+        Sys::Sendto,
         &[
             "mov\trdi, r13",
             "lea\trsi, [r12 + r15]",
@@ -997,55 +1053,73 @@ fn receive(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcall\t.Lnet_wait");
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit("\tjnz\t.Lnet_receive_done");
-    // recvmsg, which also takes a descriptor sent along: the iovec at [rsp], the msghdr from
-    // [rsp + 16], and room for one SCM_RIGHTS control message from [rsp + 72]
-    r#gen.emit(".Lnet_receive_again:");
-    r#gen.emit("\tsub\trsp, 96");
-    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 24]");
-    r#gen.emit("\tadd\trax, QWORD PTR [rbx + 40]");
-    r#gen.emit("\tmov\tQWORD PTR [rsp], rax");
-    r#gen.emit(&format!("\tmov\tQWORD PTR [rsp + 8], {READ_SIZE}"));
-    r#gen.emit("\txor\teax, eax");
-    for offset in [16, 24, 64, 72, 80, 88] {
-        r#gen.emit(&format!("\tmov\tQWORD PTR [rsp + {offset}], rax"));
+    if r#gen.target().os == Os::Windows {
+        // Windows sends no descriptors along
+        syscall(
+            r#gen,
+            ".Lnet_receive_again",
+            Sys::Recvfrom,
+            &[
+                "mov\trdi, QWORD PTR [rbx + 16]",
+                "mov\trsi, QWORD PTR [rbx + 24]",
+                "add\trsi, QWORD PTR [rbx + 40]",
+                &format!("mov\tedx, {READ_SIZE}"),
+                "xor\tr10, r10",
+                "xor\tr8, r8",
+                "xor\tr9, r9",
+            ],
+        );
+    } else {
+        // recvmsg, which also takes a descriptor sent along: the iovec at [rsp], the msghdr from
+        // [rsp + 16], and room for one SCM_RIGHTS control message from [rsp + 72]
+        r#gen.emit(".Lnet_receive_again:");
+        r#gen.emit("\tsub\trsp, 96");
+        r#gen.emit("\tmov\trax, QWORD PTR [rbx + 24]");
+        r#gen.emit("\tadd\trax, QWORD PTR [rbx + 40]");
+        r#gen.emit("\tmov\tQWORD PTR [rsp], rax");
+        r#gen.emit(&format!("\tmov\tQWORD PTR [rsp + 8], {READ_SIZE}"));
+        r#gen.emit("\txor\teax, eax");
+        for offset in [16, 24, 64, 72, 80, 88] {
+            r#gen.emit(&format!("\tmov\tQWORD PTR [rsp + {offset}], rax"));
+        }
+        r#gen.emit("\tmov\tQWORD PTR [rsp + 32], rsp");
+        r#gen.emit("\tmov\tQWORD PTR [rsp + 40], 1");
+        r#gen.emit("\tlea\trax, [rsp + 72]");
+        r#gen.emit("\tmov\tQWORD PTR [rsp + 48], rax");
+        r#gen.emit("\tmov\tQWORD PTR [rsp + 56], 24");
+        linux_syscall(
+            r#gen,
+            ".Lnet_receive_message",
+            47, // sys_recvmsg
+            &[
+                "mov\trdi, QWORD PTR [rbx + 16]",
+                "lea\trsi, [rsp + 16]",
+                &format!("mov\tedx, {MSG_CMSG_CLOEXEC}"),
+            ],
+        );
+        // a cmsghdr of SOL_SOCKET and SCM_RIGHTS holds a descriptor, which replaces any before
+        r#gen.emit("\ttest\trax, rax");
+        r#gen.emit("\tjs\t.Lnet_receive_unmessaged");
+        r#gen.emit("\tcmp\tQWORD PTR [rsp + 56], 20");
+        r#gen.emit("\tjb\t.Lnet_receive_unmessaged");
+        r#gen.emit("\tmov\trcx, 1");
+        r#gen.emit("\tshl\trcx, 32");
+        r#gen.emit("\tinc\trcx");
+        r#gen.emit("\tcmp\tQWORD PTR [rsp + 80], rcx");
+        r#gen.emit("\tjne\t.Lnet_receive_unmessaged");
+        r#gen.emit("\tmov\tr8, rax");
+        r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 88]");
+        r#gen.emit("\ttest\trdi, rdi");
+        r#gen.emit("\tjs\t.Lnet_receive_kept");
+        r#gen.emit("\tmov\teax, 3"); // sys_close
+        r#gen.emit("\tsyscall");
+        r#gen.emit(".Lnet_receive_kept:");
+        r#gen.emit("\tmov\teax, DWORD PTR [rsp + 88]");
+        r#gen.emit("\tmov\tQWORD PTR [rbx + 88], rax");
+        r#gen.emit("\tmov\trax, r8");
+        r#gen.emit(".Lnet_receive_unmessaged:");
+        r#gen.emit("\tadd\trsp, 96");
     }
-    r#gen.emit("\tmov\tQWORD PTR [rsp + 32], rsp");
-    r#gen.emit("\tmov\tQWORD PTR [rsp + 40], 1");
-    r#gen.emit("\tlea\trax, [rsp + 72]");
-    r#gen.emit("\tmov\tQWORD PTR [rsp + 48], rax");
-    r#gen.emit("\tmov\tQWORD PTR [rsp + 56], 24");
-    syscall(
-        r#gen,
-        ".Lnet_receive_message",
-        47, // sys_recvmsg
-        &[
-            "mov\trdi, QWORD PTR [rbx + 16]",
-            "lea\trsi, [rsp + 16]",
-            &format!("mov\tedx, {MSG_CMSG_CLOEXEC}"),
-        ],
-    );
-    // a cmsghdr of SOL_SOCKET and SCM_RIGHTS holds a descriptor, which replaces any before
-    r#gen.emit("\ttest\trax, rax");
-    r#gen.emit("\tjs\t.Lnet_receive_unmessaged");
-    r#gen.emit("\tcmp\tQWORD PTR [rsp + 56], 20");
-    r#gen.emit("\tjb\t.Lnet_receive_unmessaged");
-    r#gen.emit("\tmov\trcx, 1");
-    r#gen.emit("\tshl\trcx, 32");
-    r#gen.emit("\tinc\trcx");
-    r#gen.emit("\tcmp\tQWORD PTR [rsp + 80], rcx");
-    r#gen.emit("\tjne\t.Lnet_receive_unmessaged");
-    r#gen.emit("\tmov\tr8, rax");
-    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 88]");
-    r#gen.emit("\ttest\trdi, rdi");
-    r#gen.emit("\tjs\t.Lnet_receive_kept");
-    r#gen.emit("\tmov\teax, 3"); // sys_close
-    r#gen.emit("\tsyscall");
-    r#gen.emit(".Lnet_receive_kept:");
-    r#gen.emit("\tmov\teax, DWORD PTR [rsp + 88]");
-    r#gen.emit("\tmov\tQWORD PTR [rbx + 88], rax");
-    r#gen.emit("\tmov\trax, r8");
-    r#gen.emit(".Lnet_receive_unmessaged:");
-    r#gen.emit("\tadd\trsp, 96");
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit("\tjs\t.Lnet_receive_done");
     r#gen.emit("\tjnz\t.Lnet_receive_got");
@@ -1137,8 +1211,7 @@ fn wait(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tQWORD PTR [rsp + 16], rax");
     r#gen.emit("\tlea\trdi, [rsp + 16]");
     r#gen.emit("\tmov\tesi, 1");
-    r#gen.emit("\tmov\teax, 7"); // sys_poll
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Poll);
     r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
     r#gen.emit("\tje\t.Lnet_wait_again");
     r#gen.emit("\ttest\trax, rax");
@@ -1162,8 +1235,7 @@ fn wait(r#gen: &mut dyn AssemblyGenerator) {
 fn wait_now(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tedi, 1"); // CLOCK_MONOTONIC
     r#gen.emit("\tmov\trsi, rsp");
-    r#gen.emit("\tmov\teax, 228"); // sys_clock_gettime
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::ClockGettime);
     r#gen.emit("\tmov\trax, QWORD PTR [rsp]");
     r#gen.emit("\timul\trax, rax, 1000000000");
     r#gen.emit("\tadd\trax, QWORD PTR [rsp + 8]");
@@ -1517,7 +1589,7 @@ fn exchange(r#gen: &mut dyn AssemblyGenerator) {
     syscall(
         r#gen,
         &format!("{label}_random"),
-        318, // sys_getrandom
+        Sys::Getrandom,
         &["lea\trdi, [rbp - 88]", "mov\tesi, 2", "xor\tedx, edx"],
     );
     r#gen.emit("\ttest\trax, rax");
@@ -1547,15 +1619,14 @@ fn exchange(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tand\tedi, 255"); // the family
     r#gen.emit(&format!("\tmov\tesi, {}", 2 | SOCK_CLOEXEC)); // SOCK_DGRAM
     r#gen.emit("\txor\tedx, edx");
-    r#gen.emit("\tmov\teax, 41"); // sys_socket
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Socket);
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit(&format!("\tjs\t{label}_failed"));
     r#gen.emit("\tmov\tr13, rax");
     syscall(
         r#gen,
         &format!("{label}_connect"),
-        42, // sys_connect
+        Sys::Connect,
         &["mov\trdi, r13", "lea\trsi, [rbp - 80]", "mov\trdx, r15"],
     );
     r#gen.emit("\ttest\trax, rax");
@@ -1563,7 +1634,7 @@ fn exchange(r#gen: &mut dyn AssemblyGenerator) {
     syscall(
         r#gen,
         &format!("{label}_send"),
-        44, // sys_sendto
+        Sys::Sendto,
         &[
             "mov\trdi, r13",
             "mov\trsi, r12",
@@ -1601,8 +1672,7 @@ fn exchange(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tQWORD PTR [rbp - 88], rax");
     r#gen.emit("\tlea\trdi, [rbp - 88]");
     r#gen.emit("\tmov\tesi, 1");
-    r#gen.emit("\tmov\teax, 7"); // sys_poll
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Poll);
     r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
     r#gen.emit(&format!("\tje\t{label}_wait"));
     r#gen.emit("\ttest\trax, rax");
@@ -1614,8 +1684,7 @@ fn exchange(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\txor\tr10, r10");
     r#gen.emit("\txor\tr8, r8");
     r#gen.emit("\txor\tr9, r9");
-    r#gen.emit("\tmov\teax, 45"); // sys_recvfrom
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::Recvfrom);
     r#gen.emit(&format!("\tcmp\trax, -{EINTR}"));
     r#gen.emit(&format!("\tje\t{label}_wait"));
     r#gen.emit("\ttest\trax, rax");
@@ -1666,8 +1735,7 @@ fn exchange(r#gen: &mut dyn AssemblyGenerator) {
 fn now(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tedi, 1"); // CLOCK_MONOTONIC
     r#gen.emit("\tlea\trsi, [rbp - 80]");
-    r#gen.emit("\tmov\teax, 228"); // sys_clock_gettime
-    r#gen.emit("\tsyscall");
+    system_call(r#gen, Sys::ClockGettime);
     r#gen.emit("\tmov\trax, QWORD PTR [rbp - 80]");
     r#gen.emit("\timul\trax, rax, 1000000000");
     r#gen.emit("\tadd\trax, QWORD PTR [rbp - 72]");
@@ -1679,7 +1747,7 @@ fn now(r#gen: &mut dyn AssemblyGenerator) {
 fn cleanup(r#gen: &mut dyn AssemblyGenerator, label: &str, way: &str) {
     r#gen.emit("\ttest\tr13, r13");
     r#gen.emit(&format!("\tjs\t{label}_{way}_closed"));
-    close(r#gen, "r13");
+    close_socket(r#gen, "r13");
     r#gen.emit(&format!("{label}_{way}_closed:"));
     for reg in ["r12", "r14"] {
         r#gen.emit(&format!("\ttest\t{reg}, {reg}"));
@@ -1690,38 +1758,43 @@ fn cleanup(r#gen: &mut dyn AssemblyGenerator, label: &str, way: &str) {
     }
 }
 
-/// Emits `.Lfree_handle`, which `stone.free_enum` calls for a handle in `rax` whose count reached
-/// 0: it closes the descriptor unless closed already, and frees a socket's buffer, preserving
-/// every register except `rcx` and `rdx`, as the free routines must.
-pub fn free_handle(r#gen: &mut dyn AssemblyGenerator) {
-    r#gen.emit(".Lfree_handle:");
+/// Emits `label`, which `stone.free_enum` calls (as `.Lfree_handle`) for a socket or listener in
+/// `rax` whose count reached 0: it closes the descriptor unless closed already, and frees a
+/// socket's buffer, preserving every register except `rcx` and `rdx`, as the free routines
+/// must.
+pub fn free_handle(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+    r#gen.emit(&format!("{label}:"));
     r#gen.emit("\tpush\trax");
     r#gen.emit("\tpush\trdi");
     r#gen.emit("\tpush\tr11");
     r#gen.emit("\tmov\trdi, QWORD PTR [rax + 16]");
     r#gen.emit("\ttest\trdi, rdi");
-    r#gen.emit("\tjs\t.Lfree_handle_closed");
-    r#gen.emit("\tmov\teax, 3"); // sys_close
-    r#gen.emit("\tsyscall");
+    r#gen.emit(&format!("\tjs\t{label}_closed"));
+    system_call(r#gen, Sys::CloseSocket);
     r#gen.emit("\tmov\trax, QWORD PTR [rsp + 16]");
-    // and its shared memory and the descriptor it received last, if it has them
-    for slot in [72, 88] {
+    // and its shared memory and the descriptor it received last, if it has them, which only
+    // Linux's do
+    let linux_slots: &[i64] = match r#gen.target().os {
+        Os::Windows => &[],
+        _ => &[72, 88],
+    };
+    for &slot in linux_slots {
         r#gen.emit(&format!("\tmov\trdi, QWORD PTR [rax + {slot}]"));
         r#gen.emit("\ttest\trdi, rdi");
-        r#gen.emit(&format!("\tjs\t.Lfree_handle_{slot}"));
+        r#gen.emit(&format!("\tjs\t{label}_{slot}"));
         r#gen.emit("\tmov\teax, 3"); // sys_close
         r#gen.emit("\tsyscall");
         r#gen.emit("\tmov\trax, QWORD PTR [rsp + 16]");
-        r#gen.emit(&format!(".Lfree_handle_{slot}:"));
+        r#gen.emit(&format!("{label}_{slot}:"));
     }
-    r#gen.emit(".Lfree_handle_closed:");
+    r#gen.emit(&format!("{label}_closed:"));
     r#gen.emit(&format!("\tcmp\tQWORD PTR [rax], {SOCKET_TAG}"));
-    r#gen.emit("\tjne\t.Lfree_handle_done");
+    r#gen.emit(&format!("\tjne\t{label}_done"));
     r#gen.emit("\tmov\trax, QWORD PTR [rax + 24]");
     r#gen.emit("\ttest\trax, rax");
-    r#gen.emit("\tjz\t.Lfree_handle_done");
+    r#gen.emit(&format!("\tjz\t{label}_done"));
     r#gen.emit("\tcall\tstone.mem_free");
-    r#gen.emit(".Lfree_handle_done:");
+    r#gen.emit(&format!("{label}_done:"));
     r#gen.emit("\tpop\tr11");
     r#gen.emit("\tpop\trdi");
     r#gen.emit("\tpop\trax");

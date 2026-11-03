@@ -46,15 +46,18 @@ pub const STACK_SIZE: u64 = 8 << 20;
 
 /// The functions a program may call, each through `call` with its name, such as
 /// `call WriteFile`, by the DLL that has them. Any other undefined symbol is an error.
-pub const IMPORTS: [(&str, &[&str]); 5] = [
+pub const IMPORTS: [(&str, &[&str]); 6] = [
     (
         "KERNEL32.dll",
         &[
             "AcquireSRWLockExclusive",
+            "CancelIo",
             "CloseHandle",
             "CreateDirectoryW",
             "CreateEventW",
             "CreateFileW",
+            "CreateNamedPipeW",
+            "CreateProcessW",
             "CreateThread",
             "DeleteFileW",
             "ExitProcess",
@@ -68,9 +71,11 @@ pub const IMPORTS: [(&str, &[&str]); 5] = [
             "GetCurrentDirectoryW",
             "GetCurrentProcessId",
             "GetEnvironmentStringsW",
+            "GetExitCodeProcess",
             "GetFileAttributesW",
             "GetLastError",
             "GetModuleHandleW",
+            "GetOverlappedResult",
             "GetProcessHeap",
             "GetStdHandle",
             "GetSystemTimePreciseAsFileTime",
@@ -84,9 +89,11 @@ pub const IMPORTS: [(&str, &[&str]); 5] = [
             "ReleaseSRWLockExclusive",
             "ResetEvent",
             "SetEvent",
+            "SetHandleInformation",
             "Sleep",
             "VirtualAlloc",
             "VirtualFree",
+            "WaitForMultipleObjects",
             "WaitForSingleObject",
             "WideCharToMultiByte",
             "WriteConsoleW",
@@ -94,6 +101,28 @@ pub const IMPORTS: [(&str, &[&str]); 5] = [
         ],
     ),
     ("bcrypt.dll", &["BCryptGenRandom"]),
+    // the net module's sockets
+    (
+        "WS2_32.dll",
+        &[
+            "FreeAddrInfoW",
+            "GetAddrInfoW",
+            "WSAGetLastError",
+            "WSASocketW",
+            "WSAStartup",
+            "accept",
+            "bind",
+            "closesocket",
+            "connect",
+            "getsockname",
+            "getsockopt",
+            "ioctlsocket",
+            "listen",
+            "recv",
+            "select",
+            "send",
+        ],
+    ),
     // the gui module's windows
     (
         "USER32.dll",

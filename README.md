@@ -25,7 +25,7 @@ irm https://raw.githubusercontent.com/tarolling/stone/main/install.ps1 | iex
 
 to upgrade later, run `stone update` (or `stone update --check` to see if there is a new release). to remove it, run `stone uninstall`.
 
-`stone run` and `stone check` work everywhere. `stone build` writes executables itself, with no assembler, linker, or C compiler installed: static x86-64 or arm64 linux programs, arm64 macos programs that need only the system's `libSystem`, or x86-64 windows programs that need only `kernel32.dll` and `bcrypt.dll` (plus `user32.dll`, `gdi32.dll`, and `dwmapi.dll` for `gui` windows). windows programs cannot use the `net` module or `os.run` yet, under `stone run` or `stone build`. it builds for the machine it runs on, and `--target` (`x86_64-linux`, `aarch64-linux`, `aarch64-macos`, or `x86_64-windows`) builds for any of them from any machine.
+`stone run` and `stone check` work everywhere. `stone build` writes executables itself, with no assembler, linker, or C compiler installed: static x86-64 or arm64 linux programs, arm64 macos programs that need only the system's `libSystem`, or x86-64 windows programs that need only `kernel32.dll` and `bcrypt.dll` (plus `user32.dll`, `gdi32.dll`, and `dwmapi.dll` for `gui` windows, and `ws2_32.dll` for `net`). windows programs cannot use `net.connect_unix` yet, under `stone run` or `stone build`. it builds for the machine it runs on, and `--target` (`x86_64-linux`, `aarch64-linux`, `aarch64-macos`, or `x86_64-windows`) builds for any of them from any machine.
 
 to build from source instead, with rust installed:
 

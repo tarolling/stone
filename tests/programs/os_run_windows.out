@@ -1,0 +1,17 @@
+3
+output(status=3, stdout='out\r\n', stderr='err\r\n')
+one "two  spaces" "say \"hi\"" ""
+ok(output(status=0, stdout='', stderr=''))
+hello from the parent
+7
+-5
+err("no such file or directory: 'stone-surely-missing-command'")
+err("no such file or directory: '.\\nope'")
+err("exec format error: '.\\data.txt'")
+err("exec format error: '.\\build.bat'")
+err("no such file or directory: ''")
+err("not valid UTF-8 text: 'cmd'")
+98894 108894 10001 out 10000
+ok('a b')
+err('cmd exited with 4')
+err("no such file or directory: 'stone-surely-missing-command'")

@@ -291,10 +291,12 @@ use time
 use fs
 use random
 use gui
+use net
 print(args(), os.env(\"A\"), os.hostname(), os.cpu_count(), os.pid(), os.cwd())
 print(time.now(), time.clock(), random.randint(1, 6), input(\"\"))
 print(fs.read(\"a\"), fs.write(\"a\", \"b\"), fs.append(\"a\", \"b\"), fs.list_dir(\".\"))
 print(fs.exists(\"a\"), fs.remove(\"a\"), fs.make_dir(\"d\"))
+print(os.run(\"cmd\", [\"/c\"]))
 time.sleep(0)
 xs = [0]
 for i in range(100000):
@@ -305,6 +307,14 @@ match gui.open(\"t\", 1, 1):
         w.set_title(\"u\")
         print(w.next_frame(), w.wait())
         w.close()
+    case err(e):
+        print(e)
+match net.listen(\"127.0.0.1\", 0):
+    case ok(l):
+        l.set_timeout(1.0)
+        c = net.connect_timeout(\"127.0.0.1\", l.port(), 1.0).unwrap()
+        c.set_timeout(1.0)
+        print(c.send(\"x\"), l.accept(), net.ready(c, 0.0), c.read(), net.resolve(\"a.b\"))
     case err(e):
         print(e)
 ";

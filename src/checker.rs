@@ -7875,6 +7875,7 @@ impl Inference {
                 Ty::Bytes
             }
             "gui_sys.on_windows"
+            | "net_sys.on_windows"
             | "gui_sys.window_open"
             | "gui_sys.window_events"
             | "gui_sys.window_frame"
@@ -7883,7 +7884,7 @@ impl Inference {
             | "gui_sys.window_close" => {
                 let window = Ty::Handle(Handle::Window);
                 let (params, ret) = match name {
-                    "gui_sys.on_windows" => (vec![], Ty::Bool),
+                    "gui_sys.on_windows" | "net_sys.on_windows" => (vec![], Ty::Bool),
                     "gui_sys.window_open" => (
                         vec![Ty::Str, Ty::Int, Ty::Int, Ty::Int],
                         Ty::Enum(RESULT.to_string(), vec![window, Ty::Str]),
@@ -7903,7 +7904,7 @@ impl Inference {
                 }
                 ret
             }
-            "net_sys.connect_unix" | "net_sys.ready" => {
+            "net_sys.connect_unix" | "net_sys.ready" | "net_sys.lookup" => {
                 let params = match name {
                     "net_sys.ready" => vec![Ty::Handle(Handle::Socket), Ty::Int],
                     _ => vec![Ty::Str, Ty::Str],
@@ -7917,6 +7918,7 @@ impl Inference {
                 }
                 match name {
                     "net_sys.ready" => Ty::Bool,
+                    "net_sys.lookup" => Ty::Enum(RESULT.to_string(), vec![Ty::Bytes, Ty::Str]),
                     _ => Ty::Enum(
                         RESULT.to_string(),
                         vec![Ty::Handle(Handle::Socket), Ty::Str],

@@ -200,7 +200,7 @@ pub(crate) fn host() -> Os {
 /// gives: the code first, then the number.
 ///
 /// For example, `ERROR_ALREADY_EXISTS` (183) is `EEXIST` (17).
-pub const WINDOWS_ERRNO: [(i64, i64); 17] = [
+pub const WINDOWS_ERRNO: [(i64, i64); 34] = [
     (2, 2),    // ERROR_FILE_NOT_FOUND: ENOENT
     (3, 2),    // ERROR_PATH_NOT_FOUND: ENOENT
     (4, 24),   // ERROR_TOO_MANY_OPEN_FILES: EMFILE
@@ -216,8 +216,26 @@ pub const WINDOWS_ERRNO: [(i64, i64); 17] = [
     (112, 28), // ERROR_DISK_FULL: ENOSPC
     (145, 39), // ERROR_DIR_NOT_EMPTY: ENOTEMPTY
     (183, 17), // ERROR_ALREADY_EXISTS: EEXIST
+    (193, 8),  // ERROR_BAD_EXE_FORMAT: ENOEXEC
     (206, 36), // ERROR_FILENAME_EXCED_RANGE: ENAMETOOLONG
     (267, 20), // ERROR_DIRECTORY: ENOTDIR
+    // Winsock's
+    (10013, 13),  // WSAEACCES: EACCES
+    (10022, 22),  // WSAEINVAL: EINVAL
+    (10024, 24),  // WSAEMFILE: EMFILE
+    (10035, 11),  // WSAEWOULDBLOCK: EAGAIN
+    (10047, 97),  // WSAEAFNOSUPPORT: EAFNOSUPPORT
+    (10048, 98),  // WSAEADDRINUSE: EADDRINUSE
+    (10049, 99),  // WSAEADDRNOTAVAIL: EADDRNOTAVAIL
+    (10050, 100), // WSAENETDOWN: ENETDOWN
+    (10051, 101), // WSAENETUNREACH: ENETUNREACH
+    (10053, 103), // WSAECONNABORTED: ECONNABORTED
+    (10054, 104), // WSAECONNRESET: ECONNRESET
+    (10057, 107), // WSAENOTCONN: ENOTCONN
+    (10058, 32),  // WSAESHUTDOWN: EPIPE
+    (10060, 110), // WSAETIMEDOUT: ETIMEDOUT
+    (10061, 111), // WSAECONNREFUSED: ECONNREFUSED
+    (10065, 113), // WSAEHOSTUNREACH: EHOSTUNREACH
 ];
 
 /// What [`windows_errno`] adds to a Windows error code that has no Linux number, so it stays
@@ -486,6 +504,18 @@ mod tests {
             error_message(Os::Windows, windows_errno(80, None), "x"),
             "file exists: 'x'"
         );
+        // Winsock's codes, which sockets give
+        assert_eq!(windows_errno(10061, None), 111);
+        assert_eq!(
+            error_message(Os::Windows, windows_errno(10054, None), "x"),
+            "connection reset by peer: 'x'"
+        );
+        for (code, errno) in WINDOWS_ERRNO {
+            assert!(
+                errors(Os::Windows).any(|(number, _)| number == errno),
+                "{code} becomes {errno}, which has no reason"
+            );
+        }
 
         let dir = scratch("windows-errno");
         let file = dir.join("a.txt");

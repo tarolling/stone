@@ -340,17 +340,16 @@ pub fn compile_module(
     Ok(())
 }
 
-/// The builtin modules a Windows program cannot use yet, by the prefix of their linked names,
-/// with the name an error gives each.
-const WINDOWS_UNSUPPORTED: [(&str, &str); 2] = [("net.", "the net module"), ("os.run", "os.run")];
+/// The builtin functions a Windows program cannot use yet, by linked name.
+const WINDOWS_UNSUPPORTED: [&str; 1] = ["net.connect_unix"];
 
-/// Returns an error for each place the program's own files name a builtin module or function
-/// that compiled code and the interpreter do not support yet on `os`: on Windows, the `net`
-/// module and `os.run`. The modules' own files are not the program's, so they name nothing, and
-/// `gui`, which uses `net` elsewhere, opens Win32 windows there.
+/// Returns an error for each place the program's own files name a builtin function that
+/// compiled code and the interpreter do not support yet on `os`: on Windows,
+/// `net.connect_unix`. The modules' own files are not the program's, so they name nothing, and
+/// `gui`, which uses `net.connect_unix` elsewhere, opens Win32 windows there.
 ///
-/// For example, `net.connect("example.com", 80)` in a program for Windows is the error
-/// `the net module is not supported on Windows yet` at `net.connect`.
+/// For example, `net.connect_unix("/tmp/x")` in a program for Windows is the error
+/// `net.connect_unix is not supported on Windows yet` at `net.connect_unix`.
 pub fn unsupported(module: &Mod, sources: &SourceMap, os: Os) -> Vec<Diagnostic> {
     if os != Os::Windows {
         return Vec::new();
@@ -360,16 +359,12 @@ pub fn unsupported(module: &Mod, sources: &SourceMap, os: Os) -> Vec<Diagnostic>
         let ExprKind::Name { id, .. } = &expr.kind else {
             return;
         };
-        let Some((_, what)) = WINDOWS_UNSUPPORTED
-            .iter()
-            .find(|(prefix, _)| id.starts_with(prefix) || id == prefix.trim_end_matches('.'))
-        else {
-            return;
-        };
-        errors.push(Diagnostic::error(
-            expr.span,
-            format!("{what} is not supported on Windows yet"),
-        ));
+        if WINDOWS_UNSUPPORTED.contains(&id.as_str()) {
+            errors.push(Diagnostic::error(
+                expr.span,
+                format!("{id} is not supported on Windows yet"),
+            ));
+        }
     };
     let Mod::Module { body } = module;
     let mut blocks = vec![&body[..]];
@@ -556,7 +551,7 @@ mod tests {
     use crate::span::FileId;
 
     #[test]
-    fn windows_programs_cannot_use_net_or_os_run_yet() {
+    fn windows_programs_cannot_use_unix_sockets_yet() {
         let source = "\
 use net
 use os
@@ -566,6 +561,7 @@ fn f() -> result[output, str]:
 print(f().is_ok(), os.pid() > 0)
 s = net.connect(\"localhost\", 80)
 c = gui.canvas(width=1, height=1, pixels=[0])
+u = net.connect_unix(\"/tmp/x\")
 ";
         let (sources, checked) = load(Path::new("main.stn"), source, &MapSources::default());
         let checked = checked.unwrap();
@@ -576,10 +572,7 @@ c = gui.canvas(width=1, height=1, pixels=[0])
             .collect();
         assert_eq!(
             errors,
-            [
-                "main.stn:5:12: error: os.run is not supported on Windows yet",
-                "main.stn:7:9: error: the net module is not supported on Windows yet",
-            ]
+            ["main.stn:9:9: error: net.connect_unix is not supported on Windows yet"]
         );
         let output = std::env::temp_dir().join(format!("stone-net-{}.exe", std::process::id()));
         let built = compile_module(

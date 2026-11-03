@@ -27,8 +27,9 @@ match wait():
     case err(e):
         print("failed:", e)
 
-// a port nothing listens on refuses at once, timeout or not
+// a port nothing listens on refuses before the time runs out: at once, or on Windows, which
+// tries again, in about two seconds
 l = net.listen("127.0.0.1", 0).unwrap()
 port = l.port()
 l.close()
-print(net.connect_timeout("127.0.0.1", port, 1.0).unwrap_err() == "connection refused: '127.0.0.1:{port}'")
+print(net.connect_timeout("127.0.0.1", port, 10.0).unwrap_err() == "connection refused: '127.0.0.1:{port}'")

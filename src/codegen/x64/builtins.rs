@@ -524,10 +524,11 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
 /// freeing one. It preserves every register except `rax`, `rcx`, `rdx`, and `xmm0` to `xmm2`,
 /// since vregs live in the rest, like the other free routines.
 ///
-/// With `handles`, a value whose tag is negative is a socket or listener, whose descriptor it
-/// closes first, through `net::free_handle`, before the tag becomes the queue's link, or on
-/// Windows a window, which `gui_windows::free_handle` closes.
-pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, handles: bool) {
+/// A value whose tag is negative is a handle, closed first, before the tag becomes the queue's
+/// link: with `sockets`, a socket or listener, whose descriptor `net::free_handle` closes, and
+/// with `windows`, a Windows window, which `gui_windows::free_handle` closes.
+pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, sockets: bool, windows: bool) {
+    let handles = sockets || windows;
     r#gen.emit("stone.enum_new:");
     r#gen.emit("\tpush\trdi");
     r#gen.emit("\tpush\trsi");
@@ -611,10 +612,21 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, handles: bool) {
     r#gen.emit("\tpop\trbx");
     r#gen.emit(".Lfree_enum_queued:");
     r#gen.emit("\tret");
-    if handles && r#gen.target().os == Os::Windows {
-        super::gui_windows::free_handle(r#gen);
-    } else if handles {
-        super::net::free_handle(r#gen);
+    match (sockets, windows) {
+        (true, true) => {
+            // Windows has both kinds of handle, told apart by their tags
+            r#gen.emit(".Lfree_handle:");
+            r#gen.emit(&format!(
+                "\tcmp\tQWORD PTR [rax], {}",
+                super::gui_windows::WINDOW_TAG
+            ));
+            r#gen.emit("\tje\t.Lfree_window");
+            super::net::free_handle(r#gen, ".Lfree_socket");
+            super::gui_windows::free_handle(r#gen, ".Lfree_window");
+        }
+        (true, false) => super::net::free_handle(r#gen, ".Lfree_handle"),
+        (false, true) => super::gui_windows::free_handle(r#gen, ".Lfree_handle"),
+        (false, false) => {}
     }
 }
 

@@ -12,7 +12,7 @@ use super::{BuiltinDoc, fs};
 use std::ffi::{c_char, c_int, c_long};
 #[cfg(unix)]
 use std::os::unix::process::{CommandExt, ExitStatusExt};
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 use std::process::{Child, Command, Stdio};
 
 /// The name a program imports the module by, as in `use os`.
@@ -132,6 +132,8 @@ unsafe extern "C" {
 unsafe extern "system" {
     fn GetComputerNameExW(format: i32, buffer: *mut u16, size: *mut u32) -> i32;
     fn GetActiveProcessorCount(group: u16) -> u32;
+    fn GetFileAttributesW(name: *const u16) -> u32;
+    fn GetLastError() -> u32;
 }
 
 /// `sysconf`'s name for the number of processors that are online.
@@ -245,6 +247,85 @@ pub fn candidates(cmd: &str, path: Option<&str>) -> Vec<String> {
         .collect()
 }
 
+/// Returns the paths `os.run` tries on Windows, in order, for the command `cmd` when `PATH` is
+/// `path`.
+///
+/// A command holding `\` or `/` is itself the only path, an empty one has none, and any other is
+/// joined to each directory of `path`, which `;` separates, its quotes dropped and empty
+/// directories skipped, as `std::env::split_paths` reads it; with no `PATH` there are no
+/// directories, and the working directory is never searched. Each path gets `.exe` when the
+/// command's file name has no extension. For example,
+/// `windows_candidates("git", Some("C:\\bin;D:\\"))` is `["C:\\bin\\git.exe", "D:\\git.exe"]`,
+/// and `windows_candidates(".\\run.com", None)` is `[".\\run.com"]`.
+pub fn windows_candidates(cmd: &str, path: Option<&str>) -> Vec<String> {
+    if cmd.is_empty() {
+        return vec![];
+    }
+    let name = cmd.rsplit(['\\', '/']).next().unwrap_or(cmd);
+    let file = match name.rfind('.') {
+        Some(dot) if dot > 0 => cmd.to_string(),
+        _ => format!("{cmd}.exe"),
+    };
+    if cmd.contains(['\\', '/']) {
+        return vec![file];
+    }
+    path.unwrap_or("")
+        .split(';')
+        .map(|dir| dir.replace('"', ""))
+        .filter(|dir| !dir.is_empty())
+        .map(|dir| match dir.ends_with(['\\', '/']) {
+            true => format!("{dir}{file}"),
+            false => format!("{dir}\\{file}"),
+        })
+        .collect()
+}
+
+/// Returns whether `path` names a batch file, which `os.run` never starts itself, since
+/// Windows would run it through `cmd.exe` by rules of quoting of its own. It is the error
+/// `exec format error`; `os.run("cmd", ["/c", "build.bat"])` runs one.
+///
+/// For example, `is_batch("make.CMD")` is true.
+pub fn is_batch(path: &str) -> bool {
+    let lower = path.to_ascii_lowercase();
+    lower.ends_with(".bat") || lower.ends_with(".cmd")
+}
+
+/// Returns the command line `os.run` starts `program` with on Windows, as Rust's
+/// `std::process::Command` writes it, which is what a program's C runtime and Rust's
+/// `std::env::args` split back into `args`.
+///
+/// The program is always quoted. An argument is quoted when it is empty or holds a space or a
+/// tab, a `"` becomes `\"` with every backslash before it doubled, and so do the backslashes
+/// that end a quoted argument; other backslashes stay as they are. For example,
+/// `windows_command_line("t.exe", &["a b".into(), "c\\".into()])` is `"t.exe" "a b" c\`.
+pub fn windows_command_line(program: &str, args: &[String]) -> String {
+    let mut line = format!("\"{program}\"");
+    for arg in args {
+        line.push(' ');
+        let quote = arg.is_empty() || arg.contains([' ', '\t']);
+        if quote {
+            line.push('"');
+        }
+        let mut backslashes = 0;
+        for c in arg.chars() {
+            if c == '\\' {
+                backslashes += 1;
+            } else {
+                if c == '"' {
+                    line.extend(std::iter::repeat_n('\\', backslashes + 1));
+                }
+                backslashes = 0;
+            }
+            line.push(c);
+        }
+        if quote {
+            line.extend(std::iter::repeat_n('\\', backslashes));
+            line.push('"');
+        }
+    }
+    line
+}
+
 /// Runs the program `cmd` with the arguments `args`, its stdin empty and its stdout and stderr
 /// captured, and returns its status and what it wrote, or the message of why it could not run.
 ///
@@ -297,9 +378,94 @@ pub fn run(cmd: &str, args: &[String]) -> Result<(i64, String, String), String> 
     ))
 }
 
-/// Fails, since `os.run` is not supported on Windows yet, where a program that calls it is an
-/// error before it runs (`driver::unsupported`).
-#[cfg(not(unix))]
+/// The Windows error codes of a path `os.run` finds nothing at, so it moves on to the next:
+/// `ERROR_FILE_NOT_FOUND`, `ERROR_PATH_NOT_FOUND`, and `ERROR_INVALID_NAME`.
+pub const WINDOWS_NOT_FOUND: [i64; 3] = [2, 3, 123];
+
+/// The Windows error code of a path `os.run` may not run, `ERROR_ACCESS_DENIED`, which it
+/// remembers and moves on from.
+pub const WINDOWS_DENIED: i64 = 5;
+
+/// The Windows error code of a file that is no program, `ERROR_BAD_EXE_FORMAT`, which a batch
+/// file gives too.
+pub const WINDOWS_BAD_FORMAT: i64 = 193;
+
+/// Runs the program `cmd` as [`run`] does on Unix, trying each of [`windows_candidates`] in
+/// turn with the same rules: a path whose file attributes cannot be read because it names
+/// nothing moves on, and so does one that `CreateProcessW` may not run, remembered, while any
+/// other error stops, a batch file ([`is_batch`]) failing as `exec format error`. The status
+/// is the exit code, sign-extended from its 32 bits, and the program is started with the
+/// command line [`windows_command_line`] writes, whose first word is the path tried.
+///
+/// For example, `run("cmd", &["/c".into(), "exit /b 2".into()])` returns `Ok((2, "", ""))`.
+#[cfg(windows)]
+pub fn run(cmd: &str, args: &[String]) -> Result<(i64, String, String), String> {
+    if cmd.contains('\0') || args.iter().any(|arg| arg.contains('\0')) {
+        return Err(fs::message(NULL_IN_COMMAND, cmd));
+    }
+    if cfg!(fuzzing) {
+        return Err(fs::message(RUN_DISABLED, cmd));
+    }
+    let path = std::env::var_os("PATH").map(|path| path.to_string_lossy().into_owned());
+    let mut denied = false;
+    let mut last = WINDOWS_NOT_FOUND[0];
+    for candidate in windows_candidates(cmd, path.as_deref()) {
+        let code = match attributes_error(&candidate) {
+            Some(code) => code,
+            None if is_batch(&candidate) => WINDOWS_BAD_FORMAT,
+            None => {
+                let spawned = Command::new(&candidate)
+                    .args(args)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::piped())
+                    .spawn();
+                match spawned {
+                    Ok(child) => return finish(cmd, child),
+                    Err(error) => match error.raw_os_error() {
+                        Some(code) => code as i64,
+                        None => return Err(fs::io_message(&error, cmd)),
+                    },
+                }
+            }
+        };
+        match code {
+            code if WINDOWS_NOT_FOUND.contains(&code) => last = code,
+            WINDOWS_DENIED => {
+                denied = true;
+                last = code;
+            }
+            code => return Err(windows_failure(code, cmd)),
+        }
+    }
+    let code = if denied { WINDOWS_DENIED } else { last };
+    Err(windows_failure(code, cmd))
+}
+
+/// Returns the message of the Windows error `code` about the command `cmd`, worded by Linux's
+/// number for it with none of the path rules of [`fs::windows_errno`], as compiled code words
+/// it.
+#[cfg(windows)]
+fn windows_failure(code: i64, cmd: &str) -> String {
+    fs::error_message(fs::host(), fs::windows_errno(code, None), cmd)
+}
+
+/// Returns the error code `GetFileAttributesW` gives for `path`, or `None` if it names
+/// something, as compiled code asks before it starts a program.
+#[cfg(windows)]
+fn attributes_error(path: &str) -> Option<i64> {
+    let wide: Vec<u16> = path.encode_utf16().chain([0]).collect();
+    // SAFETY: the name is a null-terminated UTF-16 string that lives through the call
+    let attributes = unsafe { GetFileAttributesW(wide.as_ptr()) };
+    match attributes {
+        // INVALID_FILE_ATTRIBUTES
+        u32::MAX => Some(unsafe { GetLastError() } as i64),
+        _ => None,
+    }
+}
+
+/// Fails, since `os.run` has no implementation on this system.
+#[cfg(not(any(unix, windows)))]
 pub fn run(cmd: &str, _: &[String]) -> Result<(i64, String, String), String> {
     Err(fs::message(
         "os.run is not supported on this system yet",
@@ -308,15 +474,18 @@ pub fn run(cmd: &str, _: &[String]) -> Result<(i64, String, String), String> {
 }
 
 /// Waits for the program `child` that `cmd` started and returns its status and output.
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn finish(cmd: &str, child: Child) -> Result<(i64, String, String), String> {
     let output = child
         .wait_with_output()
         .map_err(|error| fs::io_message(&error, cmd))?;
+    #[cfg(unix)]
     let status = match output.status.code() {
         Some(code) => code as i64,
         None => -(output.status.signal().unwrap_or(0) as i64),
     };
+    #[cfg(windows)]
+    let status = output.status.code().unwrap_or(0) as i64;
     let text = |bytes: Vec<u8>| match fs::is_text(&bytes) {
         true => Ok(String::from_utf8(bytes).unwrap_or_default()),
         false => Err(fs::message(fs::INVALID_TEXT, cmd)),
@@ -357,6 +526,75 @@ mod tests {
         );
         assert_eq!(candidates("ls", Some("")), ["./ls"]);
         assert_eq!(candidates("ls", None), ["/bin/ls", "/usr/bin/ls"]);
+    }
+
+    #[test]
+    fn windows_commands_are_looked_for_in_each_directory_of_path() {
+        let path = Some(r#"C:\bin;;"C:\Program Files\x";D:\tools\"#);
+        assert_eq!(
+            windows_candidates("git", path),
+            [
+                r"C:\bin\git.exe",
+                r"C:\Program Files\x\git.exe",
+                r"D:\tools\git.exe"
+            ]
+        );
+        // a command with an extension is tried as it is
+        assert_eq!(
+            windows_candidates("run.com", Some(r"C:\bin")),
+            [r"C:\bin\run.com"]
+        );
+        // a command holding a separator is the only path, and an empty one has none
+        assert_eq!(windows_candidates(r".\tool", path), [r".\tool.exe"]);
+        assert_eq!(windows_candidates("a/b.txt", path), ["a/b.txt"]);
+        assert_eq!(windows_candidates(r"dir.d\tool", None), [r"dir.d\tool.exe"]);
+        assert_eq!(
+            windows_candidates(".hidden", Some("C:/")),
+            ["C:/.hidden.exe"]
+        );
+        assert_eq!(windows_candidates("", path), Vec::<String>::new());
+        assert_eq!(windows_candidates("git", None), Vec::<String>::new());
+    }
+
+    #[test]
+    fn batch_files_are_never_run_directly() {
+        assert!(is_batch(r"C:\x\build.BAT"));
+        assert!(is_batch("make.cmd"));
+        assert!(!is_batch("cmd.exe"));
+        assert!(!is_batch(r"C:\cmd\tool.exe"));
+    }
+
+    #[test]
+    fn windows_command_lines_quote_as_rust_does() {
+        let line = |args: &[&str]| {
+            let args: Vec<String> = args.iter().map(|arg| arg.to_string()).collect();
+            windows_command_line(r"C:\bin\tool.exe", &args)
+        };
+        assert_eq!(line(&[]), r#""C:\bin\tool.exe""#);
+        assert_eq!(line(&["a", "b c", ""]), r#""C:\bin\tool.exe" a "b c" """#);
+        // backslashes are literal unless a quote follows them
+        assert_eq!(line(&[r"a\b", r"a\\"]), r#""C:\bin\tool.exe" a\b a\\"#);
+        assert_eq!(line(&[r#"say "hi""#]), r#""C:\bin\tool.exe" "say \"hi\"""#);
+        assert_eq!(line(&[r#"a\"b"#]), r#""C:\bin\tool.exe" a\\\"b"#);
+        assert_eq!(line(&[r"dir with\ "]), r#""C:\bin\tool.exe" "dir with\ ""#);
+        assert_eq!(line(&[r"end\ \"]), r#""C:\bin\tool.exe" "end\ \\""#);
+        assert_eq!(line(&["tab\there"]), "\"C:\\bin\\tool.exe\" \"tab\there\"");
+    }
+
+    #[test]
+    #[cfg(windows)]
+    fn run_captures_status_and_output_on_windows() {
+        let script = "echo out& echo err 1>&2& exit /b 3";
+        let ran = run("cmd", &["/c".into(), script.into()]).unwrap();
+        assert_eq!(ran, (3, "out\r\n".to_string(), "err \r\n".to_string()));
+        assert_eq!(
+            run("stone-surely-missing-command", &[]),
+            Err("no such file or directory: 'stone-surely-missing-command'".to_string())
+        );
+        assert_eq!(
+            run("", &[]),
+            Err("no such file or directory: ''".to_string())
+        );
     }
 
     #[test]

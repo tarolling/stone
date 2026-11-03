@@ -13,6 +13,7 @@ pub mod fs;
 pub mod gui_windows;
 pub mod net;
 pub mod process;
+pub mod process_windows;
 pub mod sort;
 pub mod system;
 pub mod windows;
@@ -127,8 +128,11 @@ impl AssemblyGenerator for X64Generator {
             let enums = self.ctx.needs_enums();
             builtins::memory_runtime(self, enums);
             if enums {
-                let handles = self.ctx.needs_handles();
-                builtins::enum_runtime(self, handles);
+                let sockets =
+                    self.ctx
+                        .uses(&["stone.net_connect", "stone.net_listen", "stone.net_accept"]);
+                let windows = self.ctx.uses(&["stone.win_open"]);
+                builtins::enum_runtime(self, sockets, windows);
             }
         } else if prints {
             // the text print builds

@@ -4,8 +4,10 @@
 // It finds addresses itself, as the C library would: an address written as text is used as it
 // is, a name is looked up in `/etc/hosts`, then `localhost` is the loopback addresses, and any
 // other name is asked of the DNS servers `/etc/resolv.conf` lists. The environment variables
-// `STONE_HOSTS` and `STONE_RESOLV_CONF` name other files to read instead. Addresses are lists of
-// 4 (IPv4) or 16 (IPv6) bytes, and IPv4 addresses come before IPv6 ones.
+// `STONE_HOSTS` and `STONE_RESOLV_CONF` name other files to read instead. Windows keeps its
+// settings elsewhere, so there a name other than `localhost` is asked of the system's resolver,
+// unless one of those variables is set. Addresses are lists of 4 (IPv4) or 16 (IPv6) bytes, and
+// IPv4 addresses come before IPv6 ones.
 //
 // It reaches the system through `net_sys`, which only stone's own modules may use.
 
@@ -142,12 +144,35 @@ fn addresses(host: str) -> result[list[list[int]], str]:
         name = name[:-1]
     if not valid_name(name):
         ret err("invalid host name: '{host}'")
+    if net_sys.on_windows():
+        if os.env("STONE_HOSTS").is_none() and os.env("STONE_RESOLV_CONF").is_none():
+            ret system_lookup(host, name)
     found = hosts_lookup(name)
     if found.len() > 0:
         ret ok(found)
     if name == "localhost" or name.endswith(".localhost"):
         ret ok([[127, 0, 0, 1], loopback6()])
     ret dns_lookup(host, name)
+
+// Returns the addresses the system's resolver gives `name`, as Windows programs find them,
+// through its hosts file and DNS settings.
+fn system_lookup(host: str, name: str) -> result[list[list[int]], str]:
+    if name == "localhost" or name.endswith(".localhost"):
+        ret ok([[127, 0, 0, 1], loopback6()])
+    // each address is its length, then its bytes
+    records = net_sys.lookup(host, name)?
+    found = []
+    at = 0
+    while at < records.len():
+        width = records[at]
+        address = []
+        for b in records[at + 1:at + 1 + width]:
+            address.append(b)
+        found.append(address)
+        at += 1 + width
+    if found.len() == 0:
+        ret err("unknown host: '{host}'")
+    ret ok(ipv4_first(found))
 
 // Returns the IPv6 loopback address, `::1`.
 fn loopback6() -> list[int]:

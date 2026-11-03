@@ -82,8 +82,17 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Changed
 
-- Programs that use the `gui` module are no longer rejected for Windows. The `net` module and
-  `os.run` still are.
+- Programs that use the `gui` module or the `net` module are no longer rejected for Windows.
+  Only `net.connect_unix` still is.
+- `os.run` works on Windows, in built programs and under `stone run`. A command without `\` or
+  `/` is looked for in each directory of `PATH`, with `.exe` added when its name has no
+  extension, and the arguments are quoted onto the command line as Rust quotes them. The status
+  is the exit code. A batch file gives `exec format error`; run it through `cmd /c`.
+- The `net` module works on Windows, in built programs and under `stone run`, except
+  `net.connect_unix`. Built programs import its functions from `ws2_32.dll` only if they use
+  it. A name other than `localhost` is looked up by the system's resolver there, unless
+  `STONE_HOSTS` or `STONE_RESOLV_CONF` is set. Windows tries a refused connection again for
+  about two seconds before it reports it.
 
 ## [0.4.0] - 2026-10-30
 

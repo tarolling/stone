@@ -120,7 +120,7 @@ const STRING_ROUTINES: &[&str] = &[
 ///
 /// For example, `os.env("HOME")` lowers to a call of `stone.os_env`. The `math` module lowers
 /// to plain IR instead, so it has none.
-pub const MODULE_ROUTINES: [(&str, &str); 43] = [
+pub const MODULE_ROUTINES: [(&str, &str); 44] = [
     ("os.env", "stone.os_env"),
     ("os.has_env", "stone.os_has_env"),
     ("os.platform", "stone.os_platform"),
@@ -153,6 +153,8 @@ pub const MODULE_ROUTINES: [(&str, &str); 43] = [
     ("net_sys.exchange", "stone.net_exchange"),
     ("net_sys.connect_unix", "stone.net_connect_unix"),
     ("net_sys.ready", "stone.net_ready"),
+    // only Windows asks its resolver, since net.stn finds addresses itself elsewhere
+    ("net_sys.lookup", "stone.net_lookup"),
     ("gui_sys.pack", "stone.gui_pack"),
     ("gui_sys.pack_scaled", "stone.gui_pack_scaled"),
     // they work on a socket, so the net runtime has them
@@ -203,8 +205,9 @@ const FS_FAILING: &[&str] = &[
 
 /// The runtime routines of `net_sys` and of the methods of sockets and listeners, which the
 /// `fs` routines' pieces come with (see `x64::net::net_runtime`).
-pub const NET_ROUTINES: [&str; 20] = [
+pub const NET_ROUTINES: [&str; 21] = [
     "stone.net_connect",
+    "stone.net_lookup",
     "stone.net_connect_unix",
     "stone.net_ready",
     "stone.net_shm_create",

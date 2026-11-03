@@ -57,9 +57,22 @@ const SKIPS: &[(&str, &str, &str)] = &[];
 
 /// Programs about what only other systems have, which no backend runs on Windows, as
 /// `(file stem, reason)`.
-const NOT_ON_WINDOWS: &[(&str, &str)] = &[(
-    "gui_no_display",
-    "it opens no window for want of DISPLAY, which a Win32 window does not need",
+const NOT_ON_WINDOWS: &[(&str, &str)] = &[
+    (
+        "gui_no_display",
+        "it opens no window for want of DISPLAY, which a Win32 window does not need",
+    ),
+    (
+        "os_run",
+        "it runs sh and other Unix programs; os_run_windows is its twin",
+    ),
+];
+
+/// Programs about what only Windows has, which only Windows backends run, as
+/// `(file stem, reason)`.
+const ONLY_ON_WINDOWS: &[(&str, &str)] = &[(
+    "os_run_windows",
+    "it runs cmd.exe and other Windows programs; os_run is its twin",
 )];
 
 /// A way of executing a stone program.
@@ -450,9 +463,14 @@ fn check_all(backend: Backend) {
         };
         let on_windows = cfg!(windows) || matches!(backend, Backend::Windows(_));
         let runner_skip = runner_skip.or_else(|| {
-            NOT_ON_WINDOWS
+            let listed = if on_windows {
+                NOT_ON_WINDOWS
+            } else {
+                ONLY_ON_WINDOWS
+            };
+            listed
                 .iter()
-                .find(|(name, _)| on_windows && *name == name_of(&program))
+                .find(|(name, _)| *name == name_of(&program))
                 .map(|(_, reason)| *reason)
         });
         if let Some(reason) = skip_reason(&program, backend).or(runner_skip) {

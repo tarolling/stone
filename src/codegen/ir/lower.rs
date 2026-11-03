@@ -75,8 +75,9 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
 }
 
 /// Lowers `module` as [`lower`] does, for a program that runs on `os`, which
-/// `gui_sys.on_windows()` reads as a constant: an `if` on it lowers only the branch taken, so a
-/// Windows program never reaches the X11 and Wayland code, and a Linux one never the Win32.
+/// `gui_sys.on_windows()` and `net_sys.on_windows()` read as a constant: an `if` on one lowers
+/// only the branch taken, so a Windows program never reaches the X11 and Wayland code, and a
+/// Linux one never the Win32 windows or Windows' resolver.
 pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, String> {
     let Mod::Module { body } = module;
     let Analysis {
@@ -3533,14 +3534,16 @@ impl<'a> Lowerer<'a> {
         Ok(())
     }
 
-    /// Returns whether `test` is true, if it is `gui_sys.on_windows()` or `not` of it, which is
-    /// a constant for the system the program is lowered for.
+    /// Returns whether `test` is true, if it is `gui_sys.on_windows()` or `net_sys.on_windows()`,
+    /// or `not` of one, which is a constant for the system the program is lowered for.
     ///
     /// For example, `not gui_sys.on_windows()` is `Some(false)` for Windows.
     fn on_windows(&self, test: &Expr) -> Option<bool> {
         match &test.kind {
             ExprKind::Call { func, args, .. } if args.is_empty() => match &func.kind {
-                ExprKind::Name { id, .. } if id == "gui_sys.on_windows" => {
+                ExprKind::Name { id, .. }
+                    if id == "gui_sys.on_windows" || id == "net_sys.on_windows" =>
+                {
                     Some(self.context.os == Os::Windows)
                 }
                 _ => None,
@@ -5975,7 +5978,7 @@ impl<'a> Lowerer<'a> {
                     }),
                 )
             }
-            "gui_sys.on_windows" => {
+            "gui_sys.on_windows" | "net_sys.on_windows" => {
                 let windows = self.context.os == Os::Windows;
                 Ok(self.finish(Operand::Imm(windows as i64), into))
             }

@@ -1,19 +1,23 @@
-//! The sockets behind the `net` module on Unix, over `std::net` for TCP, UDP, and Unix
-//! sockets, and the C library's `poll`, `memfd_create`, `sendmsg`, and `recvmsg` for what it
-//! lacks.
+//! The sockets behind the `net` module on Unix and Windows, over `std::net` for TCP, UDP, and
+//! Unix sockets, and for what it lacks the C library's `poll`, `memfd_create`, `sendmsg`, and
+//! `recvmsg` on Unix, or Winsock's `WSAPoll` on Windows, which has no Unix sockets here.
 
 use super::{
     CLOSED_EARLY, FD_MISSING, INVALID_ADDRESS, LISTENER_CLOSED, MAX_REPLY, READ_SIZE, SHM_MISSING,
     SOCKET_CLOSED, TIMED_OUT, complete_prefix, socket_address, timeout_ms,
 };
-use crate::stdlib::fs::{self, INVALID_TEXT, io_message, is_text, message};
+use crate::stdlib::fs::{INVALID_TEXT, io_message, is_text, message};
 use std::ffi::{c_int, c_short};
 use std::io::{ErrorKind, Read, Write};
 use std::net::{
     IpAddr, Ipv4Addr, Ipv6Addr, Shutdown, SocketAddr, TcpListener, TcpStream, UdpSocket,
 };
-use std::os::fd::{AsRawFd, RawFd};
+#[cfg(unix)]
+use std::os::fd::{AsRawFd, RawFd as Raw};
+#[cfg(unix)]
 use std::os::unix::net::UnixStream;
+#[cfg(windows)]
+use std::os::windows::io::{AsRawSocket, RawSocket as Raw};
 use std::time::{Duration, Instant};
 
 /// The reason fuzzing gives for every `net_sys` call, so fuzzed programs never reach the network.
@@ -28,14 +32,36 @@ fn address_of(address: &[i64], port: i64, name: &str) -> Result<SocketAddr, Stri
     socket_address(address, port).ok_or_else(|| message(INVALID_ADDRESS, name))
 }
 
+/// Returns the descriptor of a socket, or on Windows its `SOCKET`.
+#[cfg(unix)]
+fn raw_of(socket: &impl AsRawFd) -> Raw {
+    socket.as_raw_fd()
+}
+#[cfg(windows)]
+fn raw_of(socket: &impl AsRawSocket) -> Raw {
+    socket.as_raw_socket()
+}
+
 /// The `poll` events of a descriptor ready to read and ready to write.
+#[cfg(unix)]
 const POLLIN: c_short = 1;
+#[cfg(unix)]
 const POLLOUT: c_short = 4;
 
-/// The `struct pollfd` libc's `poll` takes.
+/// The `WSAPoll` events of a socket ready to read and ready to write, `POLLRDNORM` and
+/// `POLLWRNORM`.
+#[cfg(windows)]
+const POLLIN: c_short = 0x100;
+#[cfg(windows)]
+const POLLOUT: c_short = 0x10;
+
+/// The `struct pollfd` libc's `poll` takes, or the `WSAPOLLFD` Winsock's `WSAPoll` takes.
 #[repr(C)]
 struct PollFd {
+    #[cfg(unix)]
     fd: c_int,
+    #[cfg(windows)]
+    fd: usize,
     events: c_short,
     revents: c_short,
 }
@@ -44,11 +70,36 @@ struct PollFd {
 /// `unsigned int` on macOS.
 #[cfg(target_os = "macos")]
 type NfdsT = std::ffi::c_uint;
-#[cfg(not(target_os = "macos"))]
+#[cfg(all(unix, not(target_os = "macos")))]
 type NfdsT = std::ffi::c_ulong;
 
+#[cfg(unix)]
 unsafe extern "C" {
     fn poll(fds: *mut PollFd, nfds: NfdsT, timeout: c_int) -> c_int;
+}
+
+#[cfg(windows)]
+#[link(name = "ws2_32")]
+unsafe extern "system" {
+    fn WSAPoll(fds: *mut PollFd, nfds: u32, timeout: c_int) -> c_int;
+}
+
+/// Waits at most `ms` milliseconds, or forever if it is negative, for `socket` to be ready for
+/// `events`, returning how many sockets are, or -1 for an error that the system's last error
+/// gives.
+fn poll_one(socket: Raw, events: c_short, ms: c_int) -> c_int {
+    let mut pollfd = PollFd {
+        fd: socket as _,
+        events,
+        revents: 0,
+    };
+    // SAFETY: pollfd is one valid, writable `struct pollfd` for the whole call
+    #[cfg(unix)]
+    let ready = unsafe { poll(&mut pollfd, 1, ms) };
+    // SAFETY: pollfd is one valid, writable `WSAPOLLFD` for the whole call
+    #[cfg(windows)]
+    let ready = unsafe { WSAPoll(&mut pollfd, 1, ms) };
+    ready
 }
 
 /// One buffer of a [`MsgHdr`], C's `struct iovec`.
@@ -83,7 +134,7 @@ unsafe extern "C" {
 /// all, or forever if it is -1, failing with [`TIMED_OUT`] when the time runs out, as compiled
 /// code's `.Lnet_wait` does: a signal that cuts the wait short starts it again with the time
 /// left.
-fn wait(fd: c_int, events: c_short, timeout: i64) -> Result<(), String> {
+fn wait(fd: Raw, events: c_short, timeout: i64) -> Result<(), String> {
     if timeout < 0 {
         return Ok(());
     }
@@ -94,13 +145,7 @@ fn wait(fd: c_int, events: c_short, timeout: i64) -> Result<(), String> {
             return Err(TIMED_OUT.to_string());
         }
         let ms = left.as_nanos().div_ceil(1_000_000) as c_int;
-        let mut pollfd = PollFd {
-            fd,
-            events,
-            revents: 0,
-        };
-        // SAFETY: pollfd is one valid, writable `struct pollfd` for the whole call
-        let ready = unsafe { poll(&mut pollfd, 1, ms) };
+        let ready = poll_one(fd, events, ms);
         if ready > 0 {
             return Ok(());
         }
@@ -123,6 +168,7 @@ fn reason(error: &std::io::Error) -> String {
 #[derive(Debug)]
 enum Stream {
     Tcp(TcpStream),
+    #[cfg(unix)]
     Unix(UnixStream),
 }
 
@@ -130,6 +176,7 @@ impl Stream {
     fn set_nonblocking(&self, nonblocking: bool) -> std::io::Result<()> {
         match self {
             Stream::Tcp(stream) => stream.set_nonblocking(nonblocking),
+            #[cfg(unix)]
             Stream::Unix(stream) => stream.set_nonblocking(nonblocking),
         }
     }
@@ -137,16 +184,17 @@ impl Stream {
     fn shutdown(&self) -> std::io::Result<()> {
         match self {
             Stream::Tcp(stream) => stream.shutdown(Shutdown::Both),
+            #[cfg(unix)]
             Stream::Unix(stream) => stream.shutdown(Shutdown::Both),
         }
     }
-}
 
-impl AsRawFd for Stream {
-    fn as_raw_fd(&self) -> RawFd {
+    /// Returns the connection's descriptor, or on Windows its `SOCKET`.
+    fn raw(&self) -> Raw {
         match self {
-            Stream::Tcp(stream) => stream.as_raw_fd(),
-            Stream::Unix(stream) => stream.as_raw_fd(),
+            Stream::Tcp(stream) => raw_of(stream),
+            #[cfg(unix)]
+            Stream::Unix(stream) => raw_of(stream),
         }
     }
 }
@@ -155,6 +203,7 @@ impl Read for Stream {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
         match self {
             Stream::Tcp(stream) => stream.read(buf),
+            #[cfg(unix)]
             Stream::Unix(stream) => stream.read(buf),
         }
     }
@@ -164,6 +213,7 @@ impl Write for Stream {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         match self {
             Stream::Tcp(stream) => stream.write(buf),
+            #[cfg(unix)]
             Stream::Unix(stream) => stream.write(buf),
         }
     }
@@ -233,7 +283,7 @@ impl Socket {
             if sent == data.len() {
                 break Ok(sent as i64);
             }
-            if let Err(e) = wait(stream.as_raw_fd(), POLLOUT, timeout) {
+            if let Err(e) = wait(stream.raw(), POLLOUT, timeout) {
                 break Err(e);
             }
             match stream.write(&data[sent..]) {
@@ -255,12 +305,13 @@ impl Socket {
         let mut chunk = vec![0; READ_SIZE];
         let timeout = self.timeout;
         let stream = self.stream()?;
-        wait(stream.as_raw_fd(), POLLIN, timeout)?;
+        wait(stream.raw(), POLLIN, timeout)?;
         let (n, fd) = loop {
             let read = match stream {
                 // a Unix socket may bring a descriptor along, which only Linux's runtime takes
+                #[cfg(unix)]
                 Stream::Unix(unix) if cfg!(target_os = "linux") => {
-                    read_with_fd(unix.as_raw_fd(), &mut chunk)
+                    read_with_fd(raw_of(unix), &mut chunk)
                 }
                 _ => stream.read(&mut chunk).map(|n| (n, None)),
             };
@@ -384,13 +435,12 @@ impl Socket {
     /// Returns at most `size` bytes from the start of the file whose descriptor the other end
     /// sent most recently, as a Wayland compositor sends its keymap, and closes it.
     pub fn take_fd(&mut self, size: i64) -> Result<Vec<u8>, String> {
-        use std::os::unix::fs::FileExt;
         self.stream()?;
         let file = self.received.take().ok_or_else(|| FD_MISSING.to_string())?;
         let mut data = vec![0; size.max(0) as usize];
         let mut filled = 0;
         while filled < data.len() {
-            match file.read_at(&mut data[filled..], filled as u64) {
+            match read_at(&file, &mut data[filled..], filled as u64) {
                 Ok(0) => break,
                 Ok(n) => filled += n,
                 Err(e) if e.kind() == ErrorKind::Interrupted => {}
@@ -416,7 +466,6 @@ impl Socket {
     /// Writes `data` to the shared memory from `offset`, returning its length. A write past the
     /// memory's end fails, rather than growing it.
     pub fn shm_write(&mut self, offset: i64, data: &[u8]) -> Result<i64, String> {
-        use std::os::unix::fs::FileExt;
         self.stream()?;
         let file = self
             .shared
@@ -426,8 +475,7 @@ impl Socket {
         if offset < 0 || offset as u64 + data.len() as u64 > size {
             return Err(reason(&std::io::Error::from_raw_os_error(ENOSPC)));
         }
-        file.write_all_at(data, offset as u64)
-            .map_err(|e| reason(&e))?;
+        write_all_at(file, data, offset as u64).map_err(|e| reason(&e))?;
         Ok(data.len() as i64)
     }
 
@@ -442,7 +490,7 @@ impl Socket {
             .shared
             .as_ref()
             .ok_or_else(|| SHM_MISSING.to_string())?;
-        let sent = send_with_fd(stream.as_raw_fd(), data, file.as_raw_fd())?;
+        let sent = send_with_fd(stream.raw(), data, file)?;
         // the descriptor went with the first part, and the rest is sent plainly
         stream.write_all(&data[sent..]).map_err(|e| reason(&e))?;
         Ok(data.len() as i64)
@@ -462,13 +510,7 @@ impl Socket {
         }
         let ms = timeout.clamp(-1, c_int::MAX as i64) as c_int;
         loop {
-            let mut pollfd = PollFd {
-                fd: stream.as_raw_fd(),
-                events: POLLIN,
-                revents: 0,
-            };
-            // SAFETY: pollfd is one valid, writable `struct pollfd` for the whole call
-            let ready = unsafe { poll(&mut pollfd, 1, ms) };
+            let ready = poll_one(stream.raw(), POLLIN, ms);
             if ready >= 0 || std::io::Error::last_os_error().kind() != ErrorKind::Interrupted {
                 return ready != 0;
             }
@@ -478,6 +520,37 @@ impl Socket {
 
 /// The error number of a write that does not fit, `ENOSPC`.
 const ENOSPC: i32 = 28;
+
+/// Reads from `file` at `offset` into `buf`, returning how much it read.
+fn read_at(file: &std::fs::File, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+    #[cfg(unix)]
+    return std::os::unix::fs::FileExt::read_at(file, buf, offset);
+    #[cfg(windows)]
+    return std::os::windows::fs::FileExt::seek_read(file, buf, offset);
+}
+
+/// Writes all of `data` to `file` from `offset`.
+fn write_all_at(file: &std::fs::File, data: &[u8], offset: u64) -> std::io::Result<()> {
+    #[cfg(unix)]
+    return std::os::unix::fs::FileExt::write_all_at(file, data, offset);
+    #[cfg(windows)]
+    {
+        let mut written = 0;
+        while written < data.len() {
+            match std::os::windows::fs::FileExt::seek_write(
+                file,
+                &data[written..],
+                offset + written as u64,
+            ) {
+                Ok(0) => return Err(ErrorKind::WriteZero.into()),
+                Ok(n) => written += n,
+                Err(e) if e.kind() == ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(())
+    }
+}
 
 /// Returns a new, empty file in memory, closed when the program runs another.
 #[cfg(target_os = "linux")]
@@ -505,7 +578,8 @@ fn memory_file() -> Result<std::fs::File, String> {
 /// Sends `data` on the socket `fd` with the descriptor `shared`, made again while a signal
 /// interrupts it, returning how much of `data` went.
 #[cfg(target_os = "linux")]
-fn send_with_fd(fd: RawFd, data: &[u8], shared: RawFd) -> Result<usize, String> {
+fn send_with_fd(fd: Raw, data: &[u8], shared: &std::fs::File) -> Result<usize, String> {
+    let shared = shared.as_raw_fd();
     // a cmsghdr of 20 bytes, its length, SOL_SOCKET, and SCM_RIGHTS, then the descriptor
     let mut control = [20u64, 1 | 1 << 32, shared as u32 as u64];
     let iov = IoVec {
@@ -538,7 +612,7 @@ fn send_with_fd(fd: RawFd, data: &[u8], shared: RawFd) -> Result<usize, String> 
 /// Reads what the socket `fd` has into `buf`, with a descriptor sent along, if one was,
 /// close-on-exec.
 #[cfg(target_os = "linux")]
-fn read_with_fd(fd: RawFd, buf: &mut [u8]) -> std::io::Result<(usize, Option<std::fs::File>)> {
+fn read_with_fd(fd: Raw, buf: &mut [u8]) -> std::io::Result<(usize, Option<std::fs::File>)> {
     use std::os::fd::FromRawFd;
     let mut control = [0u64; 3];
     let iov = IoVec {
@@ -563,19 +637,19 @@ fn read_with_fd(fd: RawFd, buf: &mut [u8]) -> std::io::Result<(usize, Option<std
     // a cmsghdr of SOL_SOCKET and SCM_RIGHTS holds the descriptor
     let fd = match msg.controllen >= 20 && control[1] == 1 | 1 << 32 {
         // SAFETY: the kernel made the descriptor for this process, and nothing else owns it
-        true => Some(unsafe { std::fs::File::from_raw_fd(control[2] as u32 as RawFd) }),
+        true => Some(unsafe { std::fs::File::from_raw_fd(control[2] as u32 as Raw) }),
         false => None,
     };
     Ok((n as usize, fd))
 }
 
-#[cfg(not(target_os = "linux"))]
-fn read_with_fd(_: RawFd, _: &mut [u8]) -> std::io::Result<(usize, Option<std::fs::File>)> {
+#[cfg(all(unix, not(target_os = "linux")))]
+fn read_with_fd(_: Raw, _: &mut [u8]) -> std::io::Result<(usize, Option<std::fs::File>)> {
     Err(ErrorKind::Unsupported.into())
 }
 
 #[cfg(not(target_os = "linux"))]
-fn send_with_fd(_: RawFd, _: &[u8], _: RawFd) -> Result<usize, String> {
+fn send_with_fd(_: Raw, _: &[u8], _: &std::fs::File) -> Result<usize, String> {
     Err(reason(&std::io::Error::from_raw_os_error(78)))
 }
 
@@ -597,7 +671,7 @@ impl Listener {
             .listener
             .as_ref()
             .ok_or_else(|| LISTENER_CLOSED.to_string())?;
-        wait(listener.as_raw_fd(), POLLIN, self.timeout)?;
+        wait(raw_of(listener), POLLIN, self.timeout)?;
         loop {
             match listener.accept() {
                 Ok((stream, _)) => return Ok(Socket::new(Stream::Tcp(stream))),
@@ -639,6 +713,7 @@ pub fn connect(address: &[i64], port: i64, name: &str, timeout: i64) -> Result<S
 }
 
 /// Connects to the Unix socket at `path`, which `name` quotes in errors.
+#[cfg(unix)]
 pub fn connect_unix(path: &str, name: &str) -> Result<Socket, String> {
     if cfg!(fuzzing) {
         return Err(NET_DISABLED.to_string());
@@ -646,14 +721,27 @@ pub fn connect_unix(path: &str, name: &str) -> Result<Socket, String> {
     let stream = UnixStream::connect(path).map_err(|e| {
         // a path that is not a socket is ENOTSOCK on macOS but ECONNREFUSED on Linux
         let e = match e.raw_os_error() {
-            Some(n) if cfg!(target_os = "macos") && i64::from(n) == fs::MACOS_ENOTSOCK => {
-                std::io::Error::from_raw_os_error(fs::MACOS_ECONNREFUSED as i32)
+            Some(n)
+                if cfg!(target_os = "macos")
+                    && i64::from(n) == crate::stdlib::fs::MACOS_ENOTSOCK =>
+            {
+                std::io::Error::from_raw_os_error(crate::stdlib::fs::MACOS_ECONNREFUSED as i32)
             }
             _ => e,
         };
         io_message(&e, name)
     })?;
     Ok(Socket::new(Stream::Unix(stream)))
+}
+
+/// Fails, since Windows programs cannot use Unix sockets yet, which `driver::unsupported`
+/// reports before a program runs.
+#[cfg(not(unix))]
+pub fn connect_unix(_: &str, name: &str) -> Result<Socket, String> {
+    Err(message(
+        "unix sockets are not supported on Windows yet",
+        name,
+    ))
 }
 
 /// Listens for connections to `port` at `address`, which may be 0 for the system to pick one.
@@ -721,11 +809,21 @@ pub fn exchange(
 }
 
 /// Returns two random bytes for a query's ID, from the system, as compiled code gets them from
-/// `getrandom` (`getentropy` on macOS).
+/// `getrandom` (`getentropy` on macOS, `BCryptGenRandom` on Windows).
+#[cfg(unix)]
 fn random_id() -> std::io::Result<[u8; 2]> {
     let mut id = [0; 2];
     std::fs::File::open("/dev/urandom")?.read_exact(&mut id)?;
     Ok(id)
+}
+
+/// Returns two random bytes for a query's ID, from the keys Rust's hash maps take from the
+/// system's random numbers.
+#[cfg(windows)]
+fn random_id() -> std::io::Result<[u8; 2]> {
+    use std::hash::BuildHasher;
+    let random = std::collections::hash_map::RandomState::new().hash_one(0u8);
+    Ok([random as u8, (random >> 8) as u8])
 }
 
 #[cfg(test)]
@@ -769,6 +867,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
     fn a_unix_socket_says_when_something_has_arrived() {
         let dir = std::env::temp_dir().join(format!("stone-unix-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -801,7 +900,7 @@ mod tests {
     /// Reads what `stream` sends until `buf` is full, returning the descriptor that came with it,
     /// as an X server receives one.
     #[cfg(target_os = "linux")]
-    fn receive_with_fd(stream: &UnixStream, buf: &mut [u8]) -> RawFd {
+    fn receive_with_fd(stream: &UnixStream, buf: &mut [u8]) -> Raw {
         unsafe extern "C" {
             fn recvmsg(fd: c_int, msg: *mut MsgHdr, flags: c_int) -> isize;
         }
@@ -824,7 +923,7 @@ mod tests {
         assert_eq!(n as usize, buf.len());
         // the cmsghdr's length, level, and type, then the descriptor
         assert_eq!(control[0], 20);
-        (control[2] & 0xffff_ffff) as RawFd
+        (control[2] & 0xffff_ffff) as Raw
     }
 
     #[test]
@@ -871,7 +970,7 @@ mod tests {
         std::fs::write(&new, "xkb_keymap {}").unwrap();
         for (path, data) in [(&old, &b"one"[..]), (&new, &b"two"[..])] {
             let file = std::fs::File::open(path).unwrap();
-            assert_eq!(send_with_fd(far.as_raw_fd(), data, file.as_raw_fd()), Ok(3));
+            assert_eq!(send_with_fd(far.as_raw_fd(), data, &file), Ok(3));
         }
         assert_eq!(socket.read_exact(6), Ok(b"onetwo".to_vec()));
         // the first descriptor was closed when the second came
@@ -879,7 +978,7 @@ mod tests {
         assert_eq!(socket.take_fd(100), Err(FD_MISSING.to_string()));
         // a size cuts the text short
         let file = std::fs::File::open(&new).unwrap();
-        send_with_fd(far.as_raw_fd(), b"!", file.as_raw_fd()).unwrap();
+        send_with_fd(far.as_raw_fd(), b"!", &file).unwrap();
         assert_eq!(socket.read_exact(1), Ok(b"!".to_vec()));
         assert_eq!(socket.take_fd(3), Ok(b"xkb".to_vec()));
         socket.close();

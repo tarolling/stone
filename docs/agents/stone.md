@@ -510,7 +510,7 @@ Builtin modules, imported with `use math` (or `use math.sqrt`):
   closes by itself right after the last statement that uses it. `connect_unix(path)` connects
   to a Unix socket, and `ready(s, seconds)` (a bool) says whether a read would not wait. No TLS
 
-On Windows, programs cannot use `net` or `os.run` yet: building one for Windows, or running or
+On Windows, programs cannot use `net.connect_unix` yet: building one for Windows, or running or
 checking one there, is an error.
 
 Reading all of standard input:

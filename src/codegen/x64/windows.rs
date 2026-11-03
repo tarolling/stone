@@ -383,6 +383,9 @@ pub fn windows_shims(r#gen: &mut dyn AssemblyGenerator, assembly: &str) {
     r#gen.emit("\t.zero\t8");
     r#gen.emit("\t.text");
     helpers(r#gen);
+    if calls.iter().any(|call| call.is_socket()) {
+        socket_helpers(r#gen);
+    }
 
     for call in calls {
         let name = call.name();
@@ -954,5 +957,427 @@ fn shim_body(r#gen: &mut dyn AssemblyGenerator, call: Sys, done: &str) {
             emit(r#gen, "\tmov\tecx, 0xffff"); // ALL_PROCESSOR_GROUPS
             emit(r#gen, "\tcall\tGetActiveProcessorCount");
         }
+        Sys::Socket
+        | Sys::Connect
+        | Sys::Bind
+        | Sys::Listen
+        | Sys::Accept4
+        | Sys::Getsockname
+        | Sys::Setsockopt
+        | Sys::Getsockopt
+        | Sys::Sendto
+        | Sys::Recvfrom
+        | Sys::Poll
+        | Sys::Fcntl
+        | Sys::CloseSocket
+        | Sys::Lookup => socket_body(r#gen, call, done),
+    }
+}
+
+/// `FIONBIO`, the `ioctlsocket` command that makes a socket non-blocking or blocking again, as
+/// the signed 32-bit value it is (`0x8004667e`).
+const FIONBIO: i64 = 0x8004667e - 0x1_0000_0000;
+
+/// Emits the helpers the socket shims call, from a 16-byte aligned stack, and the memory they
+/// keep:
+///
+/// - `.Lwin_wsa_start` starts Winsock the first time it is called, returning 0 in `rax`, or
+///   the negative Linux error number if Winsock cannot start
+/// - `.Lwin_wsa_errno` returns in `rax` the negative of Linux's number for `WSAGetLastError`'s
+///   code, as `.Lwin_errno` does for `GetLastError`'s
+fn socket_helpers(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("\t.bss");
+    r#gen.emit("\t.p2align\t4");
+    r#gen.emit("stone.wsa_data:");
+    r#gen.emit(&format!("\t.zero\t{WSA_DATA_SIZE}"));
+    r#gen.emit("stone.wsa_started:");
+    r#gen.emit("\t.zero\t8");
+    r#gen.emit("\t.text");
+
+    r#gen.emit(".Lwin_wsa_start:");
+    r#gen.emit("\txor\teax, eax");
+    r#gen.emit("\tcmp\tQWORD PTR [rip + stone.wsa_started], 0");
+    r#gen.emit("\tjne\t.Lwin_wsa_start_done");
+    r#gen.emit("\tsub\trsp, 40");
+    r#gen.emit("\tmov\tecx, 0x202"); // Winsock 2.2
+    r#gen.emit("\tlea\trdx, [rip + stone.wsa_data]");
+    r#gen.emit("\tcall\tWSAStartup");
+    r#gen.emit("\tadd\trsp, 40");
+    r#gen.emit("\ttest\teax, eax");
+    r#gen.emit("\tjnz\t.Lwin_wsa_start_failed");
+    r#gen.emit("\tmov\tQWORD PTR [rip + stone.wsa_started], 1");
+    r#gen.emit(".Lwin_wsa_start_done:");
+    r#gen.emit("\tret");
+    r#gen.emit(".Lwin_wsa_start_failed:");
+    r#gen.emit("\tmov\tecx, eax");
+    r#gen.emit("\tjmp\t.Lwin_map");
+
+    r#gen.emit(".Lwin_wsa_errno:");
+    r#gen.emit("\tsub\trsp, 40");
+    r#gen.emit("\tcall\tWSAGetLastError");
+    r#gen.emit("\tmov\tecx, eax");
+    r#gen.emit("\tadd\trsp, 40");
+    r#gen.emit("\tjmp\t.Lwin_map");
+}
+
+/// The size of the `WSADATA` that `WSAStartup` fills in, rounded up.
+const WSA_DATA_SIZE: i64 = 416;
+
+/// Emits the body of a socket call's shim, which works as [`shim_body`]'s do over Winsock.
+/// Addresses are Linux's but for the family, which `AF_INET6` gives as 10 and Winsock as 23,
+/// so the shims change it both ways. `poll` of the one descriptor every caller passes is a
+/// `select`, as Rust's `connect_timeout` waits on Windows, since `WSAPoll` misses a failed
+/// connection on older systems.
+fn socket_body(r#gen: &mut dyn AssemblyGenerator, call: Sys, done: &str) {
+    let emit = |r#gen: &mut dyn AssemblyGenerator, line: &str| r#gen.emit(line);
+    let label = |part: &str| format!(".Lsys_{}_{part}", call.name());
+    // a Winsock call's result in eax is SOCKET_ERROR (-1) for a failure
+    let check = |r#gen: &mut dyn AssemblyGenerator| {
+        r#gen.emit("\ttest\teax, eax");
+        r#gen.emit(&format!("\tjnz\t{}", label("failed")));
+        r#gen.emit("\txor\teax, eax");
+        r#gen.emit(&format!("\tjmp\t{done}"));
+    };
+    let failed = |r#gen: &mut dyn AssemblyGenerator| {
+        r#gen.emit(&format!("{}:", label("failed")));
+        r#gen.emit("\tcall\t.Lwin_wsa_errno");
+        r#gen.emit(&format!("\tjmp\t{done}"));
+    };
+    // copies the address at rsi, rdx bytes long, to local 0 with Winsock's family
+    let address_in = |r#gen: &mut dyn AssemblyGenerator| {
+        r#gen.emit("\tmov\trax, -22"); // EINVAL
+        r#gen.emit("\tcmp\trdx, 32");
+        r#gen.emit(&format!("\tja\t{done}"));
+        r#gen.emit("\tlea\trdi, [rsp + 64]");
+        r#gen.emit("\tmov\trcx, rdx");
+        r#gen.emit("\trep\tmovsb");
+        r#gen.emit("\tcmp\tword ptr [rsp + 64], 10");
+        r#gen.emit(&format!("\tjne\t{}", label("family")));
+        r#gen.emit("\tmov\tword ptr [rsp + 64], 23");
+        r#gen.emit(&format!("{}:", label("family")));
+        r#gen.emit(&format!("\tmov\trcx, {}", saved("rdi")));
+        r#gen.emit("\tlea\trdx, [rsp + 64]");
+        r#gen.emit(&format!("\tmov\tr8, {}", saved("rdx")));
+    };
+    // makes `socket` non-blocking for a `value` of 1 and blocking for 0, through local 7
+    let blocking = |r#gen: &mut dyn AssemblyGenerator, socket: &str, value: &str| {
+        r#gen.emit(&format!("\tmov\tDWORD PTR [rsp + 120], {value}"));
+        r#gen.emit(&format!("\tmov\trcx, {socket}"));
+        r#gen.emit(&format!("\tmov\tedx, {FIONBIO}"));
+        r#gen.emit("\tlea\tr8, [rsp + 120]");
+        r#gen.emit("\tcall\tioctlsocket");
+    };
+    match call {
+        Sys::Socket => {
+            emit(r#gen, "\tcall\t.Lwin_wsa_start");
+            emit(r#gen, "\ttest\trax, rax");
+            emit(r#gen, &format!("\tjnz\t{done}"));
+            emit(r#gen, &format!("\tmov\trcx, {}", saved("rdi")));
+            emit(r#gen, "\tcmp\tecx, 10"); // AF_INET6
+            emit(r#gen, &format!("\tjne\t{}", label("family")));
+            emit(r#gen, "\tmov\tecx, 23");
+            emit(r#gen, &format!("{}:", label("family")));
+            // the type without SOCK_CLOEXEC, which the flags below give
+            emit(r#gen, &format!("\tmov\trdx, {}", saved("rsi")));
+            emit(r#gen, "\tand\tedx, 15");
+            emit(r#gen, &format!("\tmov\tr8, {}", saved("rdx")));
+            emit(r#gen, "\txor\tr9d, r9d");
+            emit(r#gen, "\tmov\tQWORD PTR [rsp + 32], 0");
+            // WSA_FLAG_OVERLAPPED | WSA_FLAG_NO_HANDLE_INHERIT, as Rust's sockets have
+            emit(r#gen, "\tmov\tQWORD PTR [rsp + 40], 0x81");
+            emit(r#gen, "\tcall\tWSASocketW");
+            emit(r#gen, "\tcmp\trax, -1"); // INVALID_SOCKET
+            emit(r#gen, &format!("\tjne\t{done}"));
+            emit(r#gen, "\tcall\t.Lwin_wsa_errno");
+        }
+        Sys::Connect => {
+            address_in(r#gen);
+            emit(r#gen, "\tcall\tconnect");
+            emit(r#gen, "\ttest\teax, eax");
+            emit(r#gen, &format!("\tjz\t{done}"));
+            // a non-blocking socket is still connecting
+            emit(r#gen, "\tcall\tWSAGetLastError");
+            emit(r#gen, "\tmov\tecx, eax");
+            emit(r#gen, "\tmov\trax, -115"); // EINPROGRESS
+            emit(r#gen, "\tcmp\tecx, 10035"); // WSAEWOULDBLOCK
+            emit(r#gen, &format!("\tje\t{done}"));
+            emit(r#gen, "\tcall\t.Lwin_map");
+        }
+        Sys::Bind => {
+            address_in(r#gen);
+            emit(r#gen, "\tcall\tbind");
+            check(r#gen);
+            failed(r#gen);
+        }
+        Sys::Listen => {
+            emit(r#gen, &format!("\tmov\trcx, {}", saved("rdi")));
+            emit(r#gen, &format!("\tmov\trdx, {}", saved("rsi")));
+            emit(r#gen, "\tcall\tlisten");
+            check(r#gen);
+            failed(r#gen);
+        }
+        Sys::Accept4 => {
+            // the flags are SOCK_CLOEXEC, which the handle's flag gives
+            emit(r#gen, &format!("\tmov\trcx, {}", saved("rdi")));
+            emit(r#gen, &format!("\tmov\trdx, {}", saved("rsi")));
+            emit(r#gen, &format!("\tmov\tr8, {}", saved("rdx")));
+            emit(r#gen, "\tcall\taccept");
+            emit(r#gen, "\tcmp\trax, -1"); // INVALID_SOCKET
+            emit(r#gen, &format!("\tje\t{}", label("failed")));
+            emit(r#gen, &format!("\tmov\t{}, rax", local(0)));
+            emit(r#gen, "\tmov\trcx, rax");
+            emit(r#gen, "\tmov\tedx, 1"); // HANDLE_FLAG_INHERIT
+            emit(r#gen, "\txor\tr8d, r8d");
+            emit(r#gen, "\tcall\tSetHandleInformation");
+            emit(r#gen, &format!("\tmov\trax, {}", local(0)));
+            emit(r#gen, &format!("\tjmp\t{done}"));
+            failed(r#gen);
+        }
+        Sys::Getsockname => {
+            emit(r#gen, &format!("\tmov\trcx, {}", saved("rdi")));
+            emit(r#gen, &format!("\tmov\trdx, {}", saved("rsi")));
+            emit(r#gen, &format!("\tmov\tr8, {}", saved("rdx")));
+            emit(r#gen, "\tcall\tgetsockname");
+            emit(r#gen, "\ttest\teax, eax");
+            emit(r#gen, &format!("\tjnz\t{}", label("failed")));
+            emit(r#gen, &format!("\tmov\trax, {}", saved("rsi")));
+            emit(r#gen, "\tcmp\tword ptr [rax], 23"); // AF_INET6
+            emit(r#gen, &format!("\tjne\t{}", label("family")));
+            emit(r#gen, "\tmov\tword ptr [rax], 10");
+            emit(r#gen, &format!("{}:", label("family")));
+            emit(r#gen, "\txor\teax, eax");
+            emit(r#gen, &format!("\tjmp\t{done}"));
+            failed(r#gen);
+        }
+        Sys::Setsockopt => {
+            // SO_REUSEADDR lets another socket take a port in use on Windows, so it is left
+            // unset, as Rust leaves it
+            emit(r#gen, "\txor\teax, eax");
+            emit(r#gen, "\tcmp\trsi, 1"); // SOL_SOCKET
+            emit(r#gen, &format!("\tjne\t{}", label("other")));
+            emit(r#gen, "\tcmp\trdx, 2"); // SO_REUSEADDR
+            emit(r#gen, &format!("\tje\t{done}"));
+            emit(r#gen, &format!("{}:", label("other")));
+            emit(r#gen, "\tmov\trax, -92"); // ENOPROTOOPT
+        }
+        Sys::Getsockopt => {
+            // only SO_ERROR, whose Winsock code becomes Linux's
+            emit(r#gen, "\tmov\trax, -92"); // ENOPROTOOPT
+            emit(r#gen, "\tcmp\trsi, 1"); // SOL_SOCKET
+            emit(r#gen, &format!("\tjne\t{done}"));
+            emit(r#gen, "\tcmp\trdx, 4"); // SO_ERROR
+            emit(r#gen, &format!("\tjne\t{done}"));
+            emit(r#gen, "\tmov\trcx, rdi");
+            emit(r#gen, "\tmov\tedx, 0xffff"); // SOL_SOCKET
+            emit(r#gen, "\tmov\tr8d, 0x1007"); // SO_ERROR
+            emit(r#gen, "\tmov\tr9, r10");
+            emit(r#gen, &format!("\tmov\trax, {}", saved("r8")));
+            emit(r#gen, "\tmov\tQWORD PTR [rsp + 32], rax");
+            emit(r#gen, "\tcall\tgetsockopt");
+            emit(r#gen, "\ttest\teax, eax");
+            emit(r#gen, &format!("\tjnz\t{}", label("failed")));
+            emit(r#gen, &format!("\tmov\trax, {}", saved("r10")));
+            emit(r#gen, "\tmov\tecx, DWORD PTR [rax]");
+            emit(r#gen, "\txor\teax, eax");
+            emit(r#gen, "\ttest\tecx, ecx");
+            emit(r#gen, &format!("\tjz\t{done}"));
+            emit(r#gen, "\tcall\t.Lwin_map");
+            emit(r#gen, "\tneg\trax");
+            emit(r#gen, &format!("\tmov\trcx, {}", saved("r10")));
+            emit(r#gen, "\tmov\tDWORD PTR [rcx], eax");
+            emit(r#gen, "\txor\teax, eax");
+            emit(r#gen, &format!("\tjmp\t{done}"));
+            failed(r#gen);
+        }
+        Sys::Sendto | Sys::Recvfrom => {
+            // to the connected peer always, without Linux's flags but MSG_DONTWAIT, which a
+            // send makes by turning blocking off around it
+            let (function, dont_wait) = match call {
+                Sys::Sendto => ("send", true),
+                _ => ("recv", false),
+            };
+            if dont_wait {
+                emit(r#gen, "\tmov\trax, r10");
+                emit(r#gen, "\ttest\teax, 0x40"); // MSG_DONTWAIT
+                emit(r#gen, &format!("\tjz\t{}", label("blocking")));
+                blocking(r#gen, &saved("rdi"), "1");
+                emit(r#gen, &format!("{}:", label("blocking")));
+            }
+            emit(r#gen, &format!("\tmov\trcx, {}", saved("rdi")));
+            emit(r#gen, &format!("\tmov\trdx, {}", saved("rsi")));
+            emit(r#gen, &format!("\tmov\tr8, {}", saved("rdx")));
+            emit(r#gen, "\tmov\teax, 0x7fffffff");
+            emit(r#gen, "\tcmp\tr8, rax");
+            emit(r#gen, "\tcmova\tr8, rax");
+            emit(r#gen, "\txor\tr9d, r9d");
+            emit(r#gen, &format!("\tcall\t{function}"));
+            emit(r#gen, "\tmov\teax, eax");
+            emit(r#gen, "\tcmp\teax, -1"); // SOCKET_ERROR
+            emit(r#gen, &format!("\tjne\t{}", label("sent")));
+            emit(r#gen, "\tcall\t.Lwin_wsa_errno");
+            emit(r#gen, &format!("{}:", label("sent")));
+            if dont_wait {
+                emit(r#gen, &format!("\tmov\t{}, rax", local(0)));
+                emit(r#gen, &format!("\tmov\trax, {}", saved("r10")));
+                emit(r#gen, "\ttest\teax, 0x40"); // MSG_DONTWAIT
+                emit(r#gen, &format!("\tjz\t{}", label("restored")));
+                blocking(r#gen, &saved("rdi"), "0");
+                emit(r#gen, &format!("{}:", label("restored")));
+                emit(r#gen, &format!("\tmov\trax, {}", local(0)));
+            }
+        }
+        Sys::Poll => {
+            // three sets of the one socket: read if POLLIN, write if POLLOUT, and errors,
+            // each a count and a socket
+            emit(r#gen, "\tmov\teax, DWORD PTR [rdi]");
+            for set in [0, 2, 4] {
+                emit(r#gen, &format!("\tmov\t{}, 0", local(set)));
+                emit(r#gen, &format!("\tmov\t{}, rax", local(set + 1)));
+            }
+            emit(r#gen, &format!("\tmov\t{}, 1", local(4)));
+            emit(r#gen, "\tmovzx\tecx, word ptr [rdi + 4]");
+            for (event, set) in [(1, 0), (4, 2)] {
+                emit(r#gen, &format!("\ttest\tecx, {event}"));
+                emit(r#gen, &format!("\tjz\t{}", label(&format!("not_{event}"))));
+                emit(r#gen, &format!("\tmov\t{}, 1", local(set)));
+                emit(r#gen, &format!("{}:", label(&format!("not_{event}"))));
+            }
+            // milliseconds as a timeval, or none to wait forever
+            emit(r#gen, "\tmov\tQWORD PTR [rsp + 32], 0");
+            emit(r#gen, "\ttest\tedx, edx");
+            emit(r#gen, &format!("\tjs\t{}", label("forever")));
+            emit(r#gen, "\tmov\teax, edx");
+            emit(r#gen, "\txor\tedx, edx");
+            emit(r#gen, "\tmov\tecx, 1000");
+            emit(r#gen, "\tdiv\tecx");
+            emit(r#gen, "\timul\tedx, edx, 1000");
+            emit(r#gen, "\tmov\tDWORD PTR [rsp + 112], eax");
+            emit(r#gen, "\tmov\tDWORD PTR [rsp + 116], edx");
+            emit(r#gen, "\tlea\trax, [rsp + 112]");
+            emit(r#gen, "\tmov\tQWORD PTR [rsp + 32], rax");
+            emit(r#gen, &format!("{}:", label("forever")));
+            emit(r#gen, "\txor\tecx, ecx");
+            emit(r#gen, "\tlea\trdx, [rsp + 64]");
+            emit(r#gen, "\tlea\tr8, [rsp + 80]");
+            emit(r#gen, "\tlea\tr9, [rsp + 96]");
+            emit(r#gen, "\tcall\tselect");
+            emit(r#gen, "\tcmp\teax, -1"); // SOCKET_ERROR
+            emit(r#gen, &format!("\tje\t{}", label("failed")));
+            emit(r#gen, "\ttest\teax, eax");
+            emit(r#gen, &format!("\tjz\t{done}"));
+            // the events that came, as Linux's revents: POLLIN, POLLOUT, and POLLERR
+            emit(r#gen, "\txor\tecx, ecx");
+            for (event, set) in [(1, 0), (4, 2), (8, 4)] {
+                emit(
+                    r#gen,
+                    &format!("\tcmp\tDWORD PTR [rsp + {}], 0", 64 + 8 * set),
+                );
+                emit(r#gen, &format!("\tje\t{}", label(&format!("came_{event}"))));
+                emit(r#gen, &format!("\tor\tecx, {event}"));
+                emit(r#gen, &format!("{}:", label(&format!("came_{event}"))));
+            }
+            emit(r#gen, &format!("\tmov\trax, {}", saved("rdi")));
+            emit(r#gen, "\tmov\tword ptr [rax + 6], cx");
+            emit(r#gen, "\tmov\teax, 1");
+            emit(r#gen, &format!("\tjmp\t{done}"));
+            failed(r#gen);
+        }
+        Sys::Fcntl => {
+            // F_GETFL has no flags to give, and F_SETFL's O_NONBLOCK is FIONBIO
+            emit(r#gen, "\txor\teax, eax");
+            emit(r#gen, "\tcmp\trsi, 3"); // F_GETFL
+            emit(r#gen, &format!("\tje\t{done}"));
+            emit(r#gen, "\tmov\trax, -22"); // EINVAL
+            emit(r#gen, "\tcmp\trsi, 4"); // F_SETFL
+            emit(r#gen, &format!("\tjne\t{done}"));
+            emit(r#gen, "\tshr\tedx, 11"); // O_NONBLOCK
+            emit(r#gen, "\tand\tedx, 1");
+            blocking(r#gen, "rdi", "edx");
+            check(r#gen);
+            failed(r#gen);
+        }
+        Sys::CloseSocket => {
+            emit(r#gen, "\tmov\trcx, rdi");
+            emit(r#gen, "\tcall\tclosesocket");
+            check(r#gen);
+            failed(r#gen);
+        }
+        Sys::Lookup => {
+            // GetAddrInfoW with Rust's hints, a stream socket of any family, so the order is
+            // the interpreter's: local 0 to 5 are the ADDRINFOW of hints, and local 6 the list
+            emit(r#gen, "\tcall\t.Lwin_wsa_start");
+            emit(r#gen, "\ttest\trax, rax");
+            emit(r#gen, &format!("\tjnz\t{done}"));
+            emit(r#gen, &format!("\tmov\trax, {}", saved("rdi")));
+            emit(r#gen, "\tcall\t.Lwin_wide");
+            emit(r#gen, "\tmov\tecx, eax");
+            emit(r#gen, "\tmov\trax, -36"); // ENAMETOOLONG
+            emit(r#gen, "\ttest\tecx, ecx");
+            emit(r#gen, &format!("\tjz\t{done}"));
+            emit(r#gen, "\txor\teax, eax");
+            for slot in 0..7 {
+                emit(r#gen, &format!("\tmov\t{}, rax", local(slot)));
+            }
+            emit(r#gen, "\tmov\tDWORD PTR [rsp + 72], 1"); // SOCK_STREAM
+            emit(r#gen, "\tlea\trcx, [rip + stone.wide_path]");
+            emit(r#gen, "\txor\tedx, edx");
+            emit(r#gen, "\tlea\tr8, [rsp + 64]");
+            emit(r#gen, "\tlea\tr9, [rsp + 112]");
+            emit(r#gen, "\tcall\tGetAddrInfoW");
+            emit(r#gen, "\ttest\teax, eax");
+            emit(r#gen, &format!("\tjz\t{}", label("found")));
+            // WSAHOST_NOT_FOUND and WSANO_DATA find nothing
+            emit(r#gen, "\tmov\tecx, eax");
+            emit(r#gen, "\txor\teax, eax");
+            emit(r#gen, "\tcmp\tecx, 11001");
+            emit(r#gen, &format!("\tje\t{done}"));
+            emit(r#gen, "\tcmp\tecx, 11004");
+            emit(r#gen, &format!("\tje\t{done}"));
+            emit(r#gen, "\tcall\t.Lwin_map");
+            emit(r#gen, &format!("\tjmp\t{done}"));
+            // rdi walks the list, rsi writes, and r8 is the end of the room
+            emit(r#gen, &format!("{}:", label("found")));
+            emit(r#gen, "\tmov\trdi, QWORD PTR [rsp + 112]");
+            emit(r#gen, &format!("\tmov\trsi, {}", saved("rsi")));
+            emit(r#gen, "\tmov\tr8, rsi");
+            emit(r#gen, &format!("\tadd\tr8, {}", saved("rdx")));
+            emit(r#gen, &format!("{}:", label("next")));
+            emit(r#gen, "\ttest\trdi, rdi");
+            emit(r#gen, &format!("\tjz\t{}", label("walked")));
+            emit(r#gen, "\tmov\trax, QWORD PTR [rdi + 32]"); // ai_addr
+            emit(r#gen, "\tmovzx\tecx, word ptr [rax]");
+            emit(r#gen, "\tcmp\tecx, 2"); // AF_INET
+            emit(r#gen, &format!("\tje\t{}", label("four")));
+            emit(r#gen, "\tcmp\tecx, 23"); // AF_INET6
+            emit(r#gen, &format!("\tjne\t{}", label("skip")));
+            emit(r#gen, "\tlea\trcx, [rsi + 17]");
+            emit(r#gen, "\tcmp\trcx, r8");
+            emit(r#gen, &format!("\tja\t{}", label("walked")));
+            emit(r#gen, "\tmov\tbyte ptr [rsi], 16");
+            emit(r#gen, "\tmov\trcx, QWORD PTR [rax + 8]");
+            emit(r#gen, "\tmov\tQWORD PTR [rsi + 1], rcx");
+            emit(r#gen, "\tmov\trcx, QWORD PTR [rax + 16]");
+            emit(r#gen, "\tmov\tQWORD PTR [rsi + 9], rcx");
+            emit(r#gen, "\tadd\trsi, 17");
+            emit(r#gen, &format!("\tjmp\t{}", label("skip")));
+            emit(r#gen, &format!("{}:", label("four")));
+            emit(r#gen, "\tlea\trcx, [rsi + 5]");
+            emit(r#gen, "\tcmp\trcx, r8");
+            emit(r#gen, &format!("\tja\t{}", label("walked")));
+            emit(r#gen, "\tmov\tbyte ptr [rsi], 4");
+            emit(r#gen, "\tmov\tecx, DWORD PTR [rax + 4]");
+            emit(r#gen, "\tmov\tDWORD PTR [rsi + 1], ecx");
+            emit(r#gen, "\tadd\trsi, 5");
+            emit(r#gen, &format!("{}:", label("skip")));
+            emit(r#gen, "\tmov\trdi, QWORD PTR [rdi + 40]"); // ai_next
+            emit(r#gen, &format!("\tjmp\t{}", label("next")));
+            emit(r#gen, &format!("{}:", label("walked")));
+            emit(r#gen, &format!("\tsub\trsi, {}", saved("rsi")));
+            emit(r#gen, &format!("\tmov\t{}, rsi", local(7)));
+            emit(r#gen, "\tmov\trcx, QWORD PTR [rsp + 112]");
+            emit(r#gen, "\tcall\tFreeAddrInfoW");
+            emit(r#gen, &format!("\tmov\trax, {}", local(7)));
+        }
+        _ => unreachable!("{} is not a socket call", call.name()),
     }
 }

@@ -339,7 +339,8 @@ including the Mach-O file's imports and its code signature, so it needs no assem
 or C compiler installed, and builds for every target from any machine.
 
 On x86-64 Windows, a built program is a console executable that imports only from
-`kernel32.dll` (plus `BCryptGenRandom` from `bcrypt.dll`, to seed `random`), which
+`kernel32.dll` (plus `BCryptGenRandom` from `bcrypt.dll`, to seed `random`, and `ws2_32.dll`
+if it uses `net`), which
 `stone build` links itself as it does Mach-O files. The runtime is the Linux one: every system
 call it makes goes through a shim that keeps the call's Linux contract, Linux error numbers
 included, by calling the `kernel32.dll` function that does the same (`ReadFile` and `WriteFile`,
@@ -351,8 +352,15 @@ the same way. `_start` splits the command line into arguments by the rules Rust'
 library follows, and the environment's names are found without regard to case, as Windows
 finds them. The `gui` module opens Win32 windows there, through `user32.dll`, `gdi32.dll`,
 and `dwmapi.dll`, which a program imports only if it opens one, and `stone build --windows-gui`
-makes a program that starts with no console. The `net` module and `os.run` are not supported on
-Windows yet: the checker reports their use when building for Windows, or when running on it.
+makes a program that starts with no console. `os.run` starts a program with `CreateProcessW`,
+after looking for it in `PATH` by one rule both backends follow, with the command line Rust's
+standard library would write, and reads its output from two named pipes with overlapped reads,
+as Rust does. The `net` module's sockets go through the same kind of shims, over Winsock: each
+keeps its Linux call's contract, `poll` included, which `select` stands in for as it does in
+Rust's `connect_timeout`. Windows keeps its hosts file and DNS settings to itself, so there
+`net.stn` asks the system's resolver for a name's addresses rather than reading `/etc/hosts`
+and `/etc/resolv.conf`, under both backends. Only `net.connect_unix` is not supported on
+Windows yet: the checker reports its use when building for Windows, or when running on it.
 
 ## Two backends, one behavior
 

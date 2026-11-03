@@ -933,14 +933,13 @@ fn set_title(r#gen: &mut dyn AssemblyGenerator) {
     leave(r#gen, &saved);
 }
 
-/// Emits `.Lfree_handle` for Windows, where the only handles are windows: `stone.free_enum`
-/// calls it for a window in `rax` whose count reached 0, and it closes the window unless closed
+/// Emits `label` for Windows, which `stone.free_enum` calls (as `.Lfree_handle`) for a window in `rax` whose count reached 0, and it closes the window unless closed
 /// already, which ends its thread, then closes the thread and the event and frees the blocks,
 /// preserving every register except `rcx` and `rdx`, as the free routines must, `xmm3` to `xmm5`
 /// included, which a Windows call may change.
-pub fn free_handle(r#gen: &mut dyn AssemblyGenerator) {
+pub fn free_handle(r#gen: &mut dyn AssemblyGenerator, label: &str) {
     let saved = ["rax", "rdi", "r8", "r9", "r10", "r11"];
-    r#gen.emit(".Lfree_handle:");
+    r#gen.emit(&format!("{label}:"));
     enter(r#gen, &saved);
     r#gen.emit("\tsub\trsp, 64");
     for xmm in 3..6 {
@@ -950,31 +949,31 @@ pub fn free_handle(r#gen: &mut dyn AssemblyGenerator) {
         ));
     }
     r#gen.emit("\tmov\trdi, rax");
-    destroy(r#gen, "rdi", ".Lfree_handle");
+    destroy(r#gen, "rdi", label);
     for slot in [96, 88] {
         r#gen.emit(&format!("\tmov\trcx, QWORD PTR [rdi + {slot}]"));
         r#gen.emit("\ttest\trcx, rcx");
-        r#gen.emit(&format!("\tjz\t.Lfree_handle_{slot}"));
+        r#gen.emit(&format!("\tjz\t{label}_{slot}"));
         r#gen.emit("\tcall\tCloseHandle");
-        r#gen.emit(&format!(".Lfree_handle_{slot}:"));
+        r#gen.emit(&format!("{label}_{slot}:"));
     }
     for slot in [24, 48] {
         r#gen.emit(&format!("\tmov\tr8, QWORD PTR [rdi + {slot}]"));
         r#gen.emit("\ttest\tr8, r8");
-        r#gen.emit(&format!("\tjz\t.Lfree_handle_{slot}"));
+        r#gen.emit(&format!("\tjz\t{label}_{slot}"));
         r#gen.emit("\tcall\tGetProcessHeap");
         r#gen.emit("\tmov\trcx, rax");
         r#gen.emit("\txor\tedx, edx");
         r#gen.emit(&format!("\tmov\tr8, QWORD PTR [rdi + {slot}]"));
         r#gen.emit("\tcall\tHeapFree");
-        r#gen.emit(&format!(".Lfree_handle_{slot}:"));
+        r#gen.emit(&format!("{label}_{slot}:"));
     }
     // the title, if opening the window failed before it was freed
     r#gen.emit("\tmov\trax, QWORD PTR [rdi + 120]");
     r#gen.emit("\ttest\trax, rax");
-    r#gen.emit("\tjz\t.Lfree_handle_title");
+    r#gen.emit(&format!("\tjz\t{label}_title"));
     r#gen.emit("\tcall\tstone.mem_free");
-    r#gen.emit(".Lfree_handle_title:");
+    r#gen.emit(&format!("{label}_title:"));
     for xmm in 3..6 {
         r#gen.emit(&format!(
             "\tmovq\txmm{xmm}, QWORD PTR [rsp + {}]",

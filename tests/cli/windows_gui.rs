@@ -48,13 +48,13 @@ event.close
 
 /// How this machine runs Windows programs and PowerShell, if it does.
 #[derive(Clone, Copy, PartialEq)]
-enum Host {
+pub(super) enum Host {
     Windows,
     Wsl,
 }
 
 impl Host {
-    fn find() -> Option<Host> {
+    pub(super) fn find() -> Option<Host> {
         if cfg!(windows) {
             return Some(Host::Windows);
         }
@@ -72,7 +72,7 @@ impl Host {
 
     /// Returns the directory programs work in: under WSL, one on Windows' own disk, since its
     /// share of Linux files refuses to open files now and then.
-    fn work_dir(self) -> PathBuf {
+    pub(super) fn work_dir(self) -> PathBuf {
         let target = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("windows_gui");
         if self == Host::Windows {
             return target;
@@ -202,7 +202,7 @@ fn drive(
 }
 
 /// Builds the stone program `source` for Windows as `name.exe` in `dir`, returning its path.
-fn build(dir: &Path, name: &str, source: &str) -> PathBuf {
+pub(super) fn build(dir: &Path, name: &str, source: &str) -> PathBuf {
     let path = dir.join(format!("{name}.stn"));
     std::fs::write(&path, source).unwrap();
     let exe = dir.join(format!("{name}.exe"));

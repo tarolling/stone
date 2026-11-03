@@ -66,7 +66,10 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         utf8_check(r#gen);
     }
     if uses("stone.os_run") {
-        super::process::run_runtime(r#gen);
+        match r#gen.target().os {
+            Os::Windows => super::process_windows::run_runtime(r#gen),
+            _ => super::process::run_runtime(r#gen),
+        }
     }
     if !net.is_empty() {
         super::net::net_runtime(r#gen, &net);

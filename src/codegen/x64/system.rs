@@ -34,11 +34,33 @@ pub enum Sys {
     /// The number of processors, which only Windows asks for, since Linux reads it from
     /// [`CPU_ONLINE`](crate::codegen::context::CPU_ONLINE).
     CpuCount,
+    Socket,
+    Connect,
+    Bind,
+    Listen,
+    Accept4,
+    Getsockname,
+    Setsockopt,
+    Getsockopt,
+    Sendto,
+    Recvfrom,
+    /// `poll` of one descriptor, the only kind the runtime makes.
+    Poll,
+    /// `fcntl` of a socket, to get its flags or to make it block or not.
+    Fcntl,
+    /// `close` of a socket or listener, which Windows closes with `closesocket` rather than
+    /// `CloseHandle`.
+    CloseSocket,
+    /// The addresses Windows' resolver gives the host name string `rdi`, written to the `rdx`
+    /// bytes at `rsi` as `stdlib::net::lookup` gives them, returning how many bytes it wrote, 0
+    /// for a host it does not know. Only Windows asks, since `net.stn` finds addresses itself
+    /// on Linux.
+    Lookup,
 }
 
 impl Sys {
     /// Every call, in the order the Windows shims are emitted.
-    pub const ALL: [Sys; 19] = [
+    pub const ALL: [Sys; 33] = [
         Sys::Read,
         Sys::Write,
         Sys::Close,
@@ -58,7 +80,30 @@ impl Sys {
         Sys::Faccessat,
         Sys::Getrandom,
         Sys::CpuCount,
+        Sys::Socket,
+        Sys::Connect,
+        Sys::Bind,
+        Sys::Listen,
+        Sys::Accept4,
+        Sys::Getsockname,
+        Sys::Setsockopt,
+        Sys::Getsockopt,
+        Sys::Sendto,
+        Sys::Recvfrom,
+        Sys::Poll,
+        Sys::Fcntl,
+        Sys::CloseSocket,
+        Sys::Lookup,
     ];
+
+    /// Returns whether the call is one of a socket's, whose Windows shim calls `ws2_32.dll`.
+    pub fn is_socket(self) -> bool {
+        Sys::ALL[Sys::ALL
+            .iter()
+            .position(|&call| call == Sys::Socket)
+            .unwrap()..]
+            .contains(&self)
+    }
 
     /// Returns the call's Linux system call number, or `None` for one Linux has not.
     ///
@@ -84,6 +129,20 @@ impl Sys {
             Sys::Faccessat => 269,
             Sys::Getrandom => 318,
             Sys::CpuCount => return None,
+            Sys::Socket => 41,
+            Sys::Connect => 42,
+            Sys::Bind => 49,
+            Sys::Listen => 50,
+            Sys::Accept4 => 288,
+            Sys::Getsockname => 51,
+            Sys::Setsockopt => 54,
+            Sys::Getsockopt => 55,
+            Sys::Sendto => 44,
+            Sys::Recvfrom => 45,
+            Sys::Poll => 7,
+            Sys::Fcntl => 72,
+            Sys::CloseSocket => 3,
+            Sys::Lookup => return None,
         })
     }
 
@@ -109,6 +168,20 @@ impl Sys {
             Sys::Faccessat => "faccessat",
             Sys::Getrandom => "getrandom",
             Sys::CpuCount => "cpu_count",
+            Sys::Socket => "socket",
+            Sys::Connect => "connect",
+            Sys::Bind => "bind",
+            Sys::Listen => "listen",
+            Sys::Accept4 => "accept4",
+            Sys::Getsockname => "getsockname",
+            Sys::Setsockopt => "setsockopt",
+            Sys::Getsockopt => "getsockopt",
+            Sys::Sendto => "sendto",
+            Sys::Recvfrom => "recvfrom",
+            Sys::Poll => "poll",
+            Sys::Fcntl => "fcntl",
+            Sys::CloseSocket => "close_socket",
+            Sys::Lookup => "lookup",
         }
     }
 

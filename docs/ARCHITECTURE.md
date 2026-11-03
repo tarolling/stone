@@ -15,7 +15,6 @@
 - `stone build`: `project` -> `checker` -> `codegen::ir` (lower to IR, then `ir::inline` and `ir::opt`) -> `codegen::regalloc` (linear scan) -> `codegen::x64` or `codegen::arm64` (emit), picked by `--target`, which defaults to the host, -> `codegen::asm` (assemble) -> `codegen::elf`, `codegen::macho`, or `codegen::pe` (link), by the target's `Os`
 - `stone check`: `project` -> `checker` -> `unused`, printing every diagnostic and unused-name warning without running
 - `stone fmt`: `format`, a token formatter that keeps comments
-- the REPL: `repl`, which checks each entry together with the earlier ones and runs it on one `interpreter`
 - `stone add`, `remove`, `fetch`, and `tree`: `deps`, over `package`
 
 `project::link` lexes and parses the entry file, loads every module its `use` statements name, and
@@ -47,7 +46,6 @@ as `geometry.Point.shift`. Which one a call such as `p.shift(1.0)` calls depends
 | `unused` | warnings about names a program defines and never uses, for `stone check` and the language server |
 | `interpreter` | tree-walking evaluator, over a tree made of each body once with variables resolved to slots |
 | `format` | `stone fmt`, a formatter over tokens that keeps comments |
-| `repl` | the interactive session |
 | `codegen` | the `AssemblyGenerator` trait, `Target` (the `--target` names: an `Architecture`, a `Level`, and an `Os`), and `link`, which writes the `.s` file and the executable |
 | `codegen/device` | `Device`, the GPUs (`gfx1100`, `sm_90`) that code will run on beside a target; no backend generates GPU code yet |
 | `codegen/asm` | the built-in assembler: parses the GNU as syntax both backends emit and encodes it (`codegen/asm/x64.rs`, `codegen/asm/arm64.rs`), picking the same encodings as GNU as, with jumps relaxed to their short form where they reach |

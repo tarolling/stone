@@ -25,7 +25,6 @@ in `.stn`.
 | `stone build app.stn` | compiles a standalone executable to `build/app` next to the file; use it for large inputs and timing. `--target x86_64-linux`, `aarch64-linux`, `aarch64-macos`, or `x86_64-windows` builds for another machine, and `--windows-gui` makes a Windows program with windows open no console |
 | `stone clean` | deletes the `build/` directories `stone build` made |
 | `stone fmt app.stn` | rewrites the file in the standard layout (only whitespace changes); run it before finishing |
-| `stone` | starts a REPL |
 
 Errors print as `app.stn:3:7: error: message`, with the source line and a caret under the
 problem, and exit with status 1. Warnings use the same format with `warning:`. The messages are

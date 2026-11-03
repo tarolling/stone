@@ -11,7 +11,6 @@ use crate::interpreter::{Exit, Interpreter, Limits};
 use crate::lexer::Lexer;
 use crate::parser::Parser;
 use crate::project::{self, DEFAULT_ENTRY, Linked, MapSources, SourceMap, Sources};
-use crate::repl;
 use std::error::Error;
 use std::io::{BufRead, Write};
 use std::path::{Path, PathBuf};
@@ -508,40 +507,6 @@ pub fn stone_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
     }
     files.sort();
     Ok(files)
-}
-
-/// Runs an interactive session that reads entries from `input`, prints program output and
-/// expression values to `out`, and prints errors, plus prompts if `prompts` is set, to `err`.
-/// Modules named by `use` are read from `sources`. See [`crate::repl`].
-///
-/// For example, a session over the input `x = 1\nx + 1\n` prints `2` to `out`. An entry that
-/// calls `os.exit` ends the session, with the error [`Exit`] unless its status is 0.
-pub fn repl(
-    input: &mut (impl BufRead + Send),
-    out: &mut (impl Write + Send),
-    err: &mut (impl Write + Send),
-    prompts: bool,
-    sources: &(dyn Sources + Sync),
-) -> Result<(), Box<dyn Error>> {
-    // a thread of its own, since deep recursion needs more stack than the main thread has
-    let result = std::thread::scope(|scope| {
-        let thread = std::thread::Builder::new()
-            .stack_size(Limits::STACK_SIZE)
-            .spawn_scoped(scope, || {
-                let mut interpreter =
-                    Interpreter::with_output(out, Limits::DEFAULT).with_input(input);
-                match repl::run(&mut interpreter, err, prompts, sources) {
-                    Ok(0) => Ok(()),
-                    Ok(status) => Err(Ending::Exit(Exit(status))),
-                    Err(e) => Err(Ending::Error(e.to_string())),
-                }
-            })
-            .map_err(|e| Ending::Error(format!("could not start the interpreter: {e}")))?;
-        thread
-            .join()
-            .unwrap_or_else(|_| Err(Ending::Error("the interpreter panicked".to_string())))
-    });
-    result.map_err(Ending::into_error)
 }
 
 #[cfg(test)]

@@ -44,7 +44,6 @@ body:
         - stone run (interpreter)
         - stone build (compiler, or the compiled program)
         - stone check (checker errors)
-        - REPL
         - Language server or VS Code extension
         - install.sh, stone update, or stone uninstall
         - Documentation

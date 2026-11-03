@@ -454,29 +454,14 @@ fn run_and_build_load_imported_files() {
 }
 
 #[test]
-fn no_arguments_runs_a_quiet_session_over_piped_input() {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_stone"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
+fn no_arguments_prints_usage() {
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .output()
         .expect("stone should run");
-    let entries = "x = 2\nx * 3\n1 / 0\nfn f(n: int) -> int:\n    ret n + x\n\nf(1)\n";
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(entries.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert!(output.status.success(), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "6\n3\n");
-    assert_eq!(
-        String::from_utf8_lossy(&output.stderr),
-        "<stdin>:1:1: error: division by zero\n  |\n1 | 1 / 0\n  | ^^^^^\n"
+    assert!(!output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Usage:"),
+        "{output:?}"
     );
 }
 
@@ -772,30 +757,6 @@ fn exit_ends_the_program_with_its_status() {
         assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
         assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     }
-}
-
-#[test]
-fn exit_ends_a_session_with_its_status() {
-    use std::io::Write;
-    use std::process::Stdio;
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_stone"))
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .expect("stone should run");
-    let entries = "use os\nprint(1)\nos.exit(5)\nprint(2)\n";
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(entries.as_bytes())
-        .unwrap();
-    let output = child.wait_with_output().unwrap();
-    assert_eq!(output.status.code(), Some(5), "{output:?}");
-    assert_eq!(String::from_utf8_lossy(&output.stdout), "1\n");
-    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
 }
 
 #[test]

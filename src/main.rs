@@ -1,6 +1,6 @@
 use clap::{Parser as ClapParser, Subcommand};
 use std::error::Error;
-use std::io::{IsTerminal, Read};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use stone::codegen::{Os, Subsystem, Target};
@@ -18,7 +18,7 @@ mod update;
 /// The stone programming language executor.
 #[derive(ClapParser, Debug)]
 #[command(author, version, about = "The stone programming language executor")]
-#[command(args_conflicts_with_subcommands = true)]
+#[command(args_conflicts_with_subcommands = true, arg_required_else_help = true)]
 struct Args {
     #[command(subcommand)]
     command: Option<Command>,
@@ -172,7 +172,6 @@ enum ExecutionMode {
         paths: Vec<PathBuf>,
         check: bool,
     },
-    Repl,
     Run {
         file: String,
         args: Vec<String>,
@@ -233,17 +232,12 @@ fn main() -> ExitCode {
             tag: version,
         },
         Some(Command::Uninstall { yes }) => ExecutionMode::Uninstall { yes },
-        None => {
-            if let Some(file) = args.file {
-                ExecutionMode::Run {
-                    file,
-                    args: args.args,
-                    offline: false,
-                }
-            } else {
-                ExecutionMode::Repl
-            }
-        }
+        // clap prints the usage when there is neither a subcommand nor a file
+        None => ExecutionMode::Run {
+            file: args.file.unwrap_or_default(),
+            args: args.args,
+            offline: false,
+        },
     };
 
     match mode {
@@ -286,33 +280,6 @@ fn main() -> ExitCode {
         }
         ExecutionMode::Clean(path) => clean(path.as_deref()),
         ExecutionMode::Fmt { paths, check } => fmt(&paths, check),
-        ExecutionMode::Repl => {
-            // prompts only make sense for a person typing, so piped input runs quietly
-            let prompts = std::io::stdin().is_terminal();
-            if prompts {
-                let exit = match cfg!(windows) {
-                    true => "Ctrl+Z then Enter",
-                    false => "Ctrl+D",
-                };
-                eprintln!("stone {}. Press {exit} to exit.", env!("CARGO_PKG_VERSION"));
-            }
-            match driver::repl(
-                &mut std::io::BufReader::new(std::io::stdin()),
-                &mut std::io::stdout(),
-                &mut std::io::stderr(),
-                prompts,
-                &FsSources,
-            ) {
-                Ok(()) => ExitCode::SUCCESS,
-                Err(e) => match e.downcast_ref::<Exit>() {
-                    Some(Exit(status)) => ExitCode::from(*status),
-                    None => {
-                        eprintln!("error: {e}");
-                        ExitCode::FAILURE
-                    }
-                },
-            }
-        }
         ExecutionMode::Run {
             file,
             args,

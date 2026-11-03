@@ -136,21 +136,15 @@ struct Function {
     layout: Rc<Layout>,
     /// The body, resolved when the function was defined.
     body: Vec<code::Stmt>,
-    /// How the method calls of the check that saw this body were resolved, and its function
-    /// values and calls of them, since in an interactive session a later entry's check can
-    /// place the same code at other lines.
-    resolved: Rc<Calls>,
 }
 
-/// A function as a value: its linked name and printed type, and, for a lambda, the body it had
-/// when the value was made, since in an interactive session a later entry's lambda can take the
-/// same name, and the copies a closure holds, which its lambda takes before its arguments.
+/// A function as a value: its linked name and printed type, and the copies a closure holds,
+/// which its lambda takes before its arguments.
 #[derive(Clone)]
 pub struct FunctionRef {
     value: Arc<FunctionValue>,
     /// The function's id among the interpreter's functions.
     id: usize,
-    body: Option<Rc<Function>>,
     /// The type arguments of a generic function, from where the value was made.
     types: Option<Types>,
     /// The copies of variables a closure holds, empty for any other function value.
@@ -1152,9 +1146,6 @@ pub struct Interpreter<'out> {
     /// The type arguments of the next function [`Interpreter::invoke_body`] calls, if it is a
     /// copy of a generic function.
     next_types: Option<Types>,
-    /// Whether globals can move at their last use, which is never in an interactive session,
-    /// since a later entry may read them.
-    moves_globals: bool,
     /// An empty set of type arguments, which every call outside a generic function runs with.
     no_types: Types,
     /// Where `print` writes, which is stdout unless a caller captures it.
@@ -1176,7 +1167,7 @@ pub struct Interpreter<'out> {
     /// to check that values move rather than being copied.
     copies: u64,
     /// The `random` module's generator, seeded from the system's entropy on first use unless
-    /// `random.seed` seeds it first. It lasts the whole run, or the whole interactive session.
+    /// `random.seed` seeds it first. It lasts the whole run.
     rng: Option<Rng>,
 }
 
@@ -1223,7 +1214,6 @@ impl<'out> Interpreter<'out> {
             resolved: Rc::default(),
             types: Rc::default(),
             next_types: None,
-            moves_globals: false,
             no_types: Rc::default(),
             out: Box::new(out),
             errors: default_errors(),
@@ -1332,7 +1322,7 @@ impl<'out> Interpreter<'out> {
         Ok(ControlFlow::None)
     }
 
-    /// Runs the definitions in `body`, a program's or an interactive entry's, enums and structs
+    /// Runs the definitions in `body`, a program's, enums and structs
     /// first, so the functions resolved after them know every type they name, then resolves the
     /// rest of `body`, whose statements use variables for the last time as `last_uses` says.
     fn define_all(&mut self, body: &[Stmt], last_uses: &LastUses) -> Vec<code::Stmt> {
@@ -1363,7 +1353,6 @@ impl<'out> Interpreter<'out> {
                 collect_assigned(body, &mut assigned);
                 let globals = assigned.into_iter().map(|(name, _)| name).collect();
                 self.global_reads = global_reads(body, &globals);
-                self.moves_globals = true;
                 let last_uses = LastUses::new(body, &self.global_reads, &HashSet::new());
                 let program = self.define_all(body, &last_uses);
                 for stmt in &program {
@@ -1375,47 +1364,6 @@ impl<'out> Interpreter<'out> {
         }
 
         Ok(())
-    }
-
-    /// Runs one entry of an interactive session, keeping the globals and functions of earlier
-    /// entries, and prints the value of each top-level expression statement unless it is `none`.
-    ///
-    /// For example, after an entry `x = 1`, running the entry `x + 1` prints `2`, and running
-    /// `"hi"` prints `'hi'`, quoted as it would be inside a list.
-    pub fn run_entry(&mut self, body: &[Stmt], calls: Calls) -> EvalResult<()> {
-        // a later entry may read any global, so none moves
-        self.moves_globals = false;
-        self.resolved = Rc::new(calls);
-        let entry = self.define_all(body, &LastUses::default());
-        for stmt in &entry {
-            match &stmt.kind {
-                code::StmtKind::Expr(value) => {
-                    let value = self.eval_expr(value)?;
-                    if !matches!(value, Value::Unit) {
-                        let mut text = String::new();
-                        self.write_value(&mut text, &value, true)?;
-                        writeln!(self.out, "{text}")?;
-                    }
-                }
-                _ => {
-                    if let ControlFlow::Return(_) = self.eval_stmt(stmt)? {
-                        break; // top-level return
-                    }
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Returns the reader `input` and `eof` read from, so an interactive session can read its
-    /// entries from the same place.
-    pub fn input(&mut self) -> &mut (dyn BufRead + 'out) {
-        &mut *self.input
-    }
-
-    /// Returns the writer `print` writes to.
-    pub fn output(&mut self) -> &mut (dyn Write + 'out) {
-        &mut *self.out
     }
 
     /// Executes one statement and reports whether it breaks, continues, or returns, then drops
@@ -1460,15 +1408,8 @@ impl<'out> Interpreter<'out> {
         id
     }
 
-    /// Returns whether a function named `name` is defined.
-    fn has_function(&self, name: &str) -> bool {
-        self.function_names
-            .get(name)
-            .is_some_and(|id| self.functions[id].is_some())
-    }
-
     /// Runs the definition `stmt`: of a function, the functions of an `impl` block or a trait,
-    /// an enum, or a struct, replacing any earlier one of the same name.
+    /// an enum, or a struct.
     fn define_stmt(&mut self, stmt: &Stmt) {
         match &stmt.kind {
             StmtKind::FunctionDef {
@@ -1549,7 +1490,6 @@ impl<'out> Interpreter<'out> {
             params: args.len(),
             layout: Rc::new(layout),
             body,
-            resolved,
         }));
     }
 
@@ -1567,8 +1507,8 @@ impl<'out> Interpreter<'out> {
 
     /// Drops the variable `var` of the running body if it holds a list, the only value a
     /// change can copy, directly or in a tuple, or a handle (see [`Value::drops_early`]): a
-    /// local of the running function, or a global at the top level, unless globals cannot move
-    /// or the function `callee` may read it.
+    /// local of the running function, or a global at the top level, unless the function
+    /// `callee` may read it.
     fn drop_var(&mut self, var: code::Var, callee: Option<&str>) {
         match (var, self.frames.last_mut()) {
             (code::Var::Local(slot), Some(frame)) => {
@@ -1578,7 +1518,7 @@ impl<'out> Interpreter<'out> {
                     *value = None;
                 }
             }
-            (code::Var::Global(id), None) if self.moves_globals => {
+            (code::Var::Global(id), None) => {
                 let name = &self.global_names.names[id];
                 if self.globals[id].as_ref().is_some_and(Value::drops_early)
                     && callee.is_none_or(|callee| {
@@ -1601,11 +1541,10 @@ impl<'out> Interpreter<'out> {
     fn take_field(&mut self, field: &code::Place, callee: &str) {
         let global = self.frames.is_empty();
         if global
-            && (!self.moves_globals
-                || self
-                    .global_reads
-                    .get(callee)
-                    .is_some_and(|reads| reads.contains(self.var_name(field.root))))
+            && self
+                .global_reads
+                .get(callee)
+                .is_some_and(|reads| reads.contains(self.var_name(field.root)))
         {
             return;
         }
@@ -2140,22 +2079,14 @@ impl<'out> Interpreter<'out> {
             E::Function {
                 value,
                 id,
-                lambda,
                 types,
                 captures,
-            } => {
-                let body = match lambda {
-                    true => self.functions[*id].clone(),
-                    false => None,
-                };
-                Ok(Value::Function(FunctionRef {
-                    value: value.clone(),
-                    id: *id,
-                    body,
-                    types: self.instance_types(types),
-                    captures: self.eval_exprs(captures)?.into(),
-                }))
-            }
+            } => Ok(Value::Function(FunctionRef {
+                value: value.clone(),
+                id: *id,
+                types: self.instance_types(types),
+                captures: self.eval_exprs(captures)?.into(),
+            })),
             E::List(elts) => Ok(Value::list(self.eval_exprs(elts)?)),
             E::Tuple(elts) => Ok(Value::Tuple(self.eval_exprs(elts)?.into())),
         }
@@ -2607,11 +2538,7 @@ impl<'out> Interpreter<'out> {
         values.extend(self.eval_exprs(args)?);
         self.apply_moves(moves, &function.value.function);
         self.next_types = function.types.clone();
-        let result = match &function.body {
-            Some(body) => self.invoke_body(body.clone(), values, false)?,
-            None => self.invoke_id(function.id, values, false)?,
-        };
-        Ok(result.0)
+        Ok(self.invoke_id(function.id, values, false)?.0)
     }
 
     /// Calls a function of an `impl` block as `method` resolved the call at `span`: an associated
@@ -2677,7 +2604,7 @@ impl<'out> Interpreter<'out> {
             values.push(self.eval_expr(arg)?);
         }
         self.apply_moves(moves, name);
-        // a global the method may read stays, and a failed call in a session leaves it as it was
+        // a global the method may read stays
         let keep = self.keeps_receiver(root, name);
         let place = self.place_value(root, &steps, spans)?;
         values[0] = match keep {
@@ -2693,15 +2620,13 @@ impl<'out> Interpreter<'out> {
     }
 
     /// Returns whether a method `callee` that changes the variable `root` must leave it as it
-    /// is until the call returns: a global the method may read, or any global in a session,
-    /// where a failed call leaves it as it was.
+    /// is until the call returns, which a global the method may read must.
     fn keeps_receiver(&self, root: code::Var, callee: &str) -> bool {
         self.frames.is_empty()
-            && (!self.moves_globals
-                || self
-                    .global_reads
-                    .get(callee)
-                    .is_some_and(|reads| reads.contains(self.var_name(root))))
+            && self
+                .global_reads
+                .get(callee)
+                .is_some_and(|reads| reads.contains(self.var_name(root)))
     }
 
     /// Calls a method through a bound, as `x.area()` with `x` of type `T` in
@@ -2868,18 +2793,7 @@ impl<'out> Interpreter<'out> {
         {
             return Ok(found.function.clone());
         }
-        // a default method checked in an earlier REPL entry knows only the types that
-        // implemented its trait then, but a type's methods have names of their own, so its
-        // method is its own function if it has one, and the default otherwise
-        let name = method.function.rsplit('.').next().unwrap_or_default();
-        let own = format!("{key}.{name}");
-        if self.has_function(&own) {
-            return Ok(own);
-        }
-        match self.has_function(&method.function) {
-            true => Ok(method.function.clone()),
-            false => Err(format!("'{key}' does not implement '{}'", method.function).into()),
-        }
+        Err(format!("'{key}' does not implement '{}'", method.function).into())
     }
 
     /// Calls the builtin or user-defined function named `name` with already evaluated arguments.
@@ -3293,7 +3207,6 @@ impl<'out> Interpreter<'out> {
         }
 
         self.calls += 1;
-        let resolved = std::mem::replace(&mut self.resolved, function.resolved.clone());
         let types = match self.next_types.take() {
             Some(types) => std::mem::replace(&mut self.types, types),
             None => std::mem::replace(&mut self.types, self.no_types.clone()),
@@ -3312,7 +3225,6 @@ impl<'out> Interpreter<'out> {
             true => frame.and_then(|mut frame| frame.take("self")),
             false => None,
         };
-        self.resolved = resolved;
         self.types = types;
         self.calls -= 1;
 

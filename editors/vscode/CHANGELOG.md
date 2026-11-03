@@ -10,6 +10,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-03
+
 ### Added
 
 - Packages work in the editor. A program's dependencies, from directories and from the package

@@ -10,6 +10,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.4.1] - 2026-11-03
+
 ### Added
 
 - Packages: a program can depend on other packages through a `stone.toml` next to its entry
@@ -93,6 +95,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   it. A name other than `localhost` is looked up by the system's resolver there, unless
   `STONE_HOSTS` or `STONE_RESOLV_CONF` is set. Windows tries a refused connection again for
   about two seconds before it reports it.
+
+### Removed
+
+- The interactive session: `stone` with no file now prints its usage and exits with status 2.
+  Run a file with `stone FILE` or `stone run FILE` instead.
 
 ## [0.4.0] - 2026-10-30
 

@@ -1127,7 +1127,7 @@ os.exit(code: int)
 
 Stops the program at once with the exit status `code`. Nothing after it runs, and it prints
 nothing. The system keeps only the low 8 bits of the status, so `os.exit(256)` exits with 0 and
-`os.exit(-1)` with 255. In an interactive session, it ends the session.
+`os.exit(-1)` with 255.
 
 ```stone
 use os

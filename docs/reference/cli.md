@@ -238,38 +238,6 @@ stone fmt examples/basics.stn
 stone fmt --check src
 ```
 
-## `stone`
-
-With no file, stone starts an interactive session. Each entry runs as soon as it is complete,
-and variables, functions, and modules from earlier entries stay available. An expression on its
-own prints its value, with strings quoted as they are inside a list, unless it is a call that
-returns no value, such as `print(1)`.
-
-```text
-$ stone
-stone 0.4.1. Press Ctrl+D to exit.
->>> x = 6
->>> x * 7
-42
->>> fn greet(name: str) -> str:
-...     ret "hi " + name
-...
->>> greet("Ada")
-'hi Ada'
-```
-
-A line that opens a block, such as `fn f(n: int):` or `if x:`, continues the entry with a `...`
-prompt, and a blank line ends it. Every entry is checked together with the earlier ones as if
-they were one file, so `x = "a"` after `x = 6` is an error. An entry with an error is reported as
-`<stdin>:line:col` and discarded, and one that fails at runtime prints `error: message`; the
-session continues either way. Defining a function again replaces the earlier definition.
-`use` reads modules relative to the current directory, and `input()` reads the line after the
-entry.
-
-Ctrl+D ends the session (Ctrl+Z then Enter on Windows). stone does no line editing of its own,
-so run `rlwrap stone` for arrow keys and history. When standard input is not a terminal, stone prints no banner or
-prompts, so `printf 'x = 6\nx * 7\n' | stone` prints just `42`.
-
 ## `stone update [--check] [--version TAG]`
 
 Replaces the installed binary with a newer GitHub release, after verifying its checksum. With

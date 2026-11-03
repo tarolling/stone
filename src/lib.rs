@@ -17,7 +17,6 @@ pub mod lift;
 pub mod package;
 pub mod parser;
 pub mod project;
-pub mod repl;
 pub mod span;
 pub mod stdlib;
 pub mod token;

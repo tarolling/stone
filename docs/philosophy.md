@@ -176,9 +176,8 @@ caller moves its own reference in instead of keeping one, so the function change
 place. More generally, both backends find each variable's last use, and a value moves there
 instead of being copied: into a call (`ys = f(xs)`), another variable (`ys = xs`), or a list
 (`rows.append(row)`) when nothing reads it afterward. A global moves only into a function that
-never reads it, directly or through the functions it calls, and never in an interactive session,
-where a later entry may read it. Arithmetic on lists, such as `xs = xs * 2.0 + ys` or
-`xs += ys`, writes its result over an operand's list when that operand is at its last use or is
+never reads it, directly or through the functions it calls. Arithmetic on lists, such as
+`xs = xs * 2.0 + ys` or `xs += ys`, writes its result over an operand's list when that operand is at its last use or is
 the variable being assigned and nothing else refers to its list, so it allocates nothing.
 Tuples never change, so they need nothing of this: the compiler keeps each of a tuple's values as
 a variable of its own, counting only the strings and lists among them. Structs are kept the same

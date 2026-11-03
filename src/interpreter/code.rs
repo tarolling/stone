@@ -6,7 +6,7 @@
 //! becomes `Call::User` of `f`'s id, with no lookup left for the run.
 
 use super::{Interpreter, LastUses, Layout, Types, Value, field_path, is_definition};
-use crate::ast::{self, BoolOp, CompOp, Operator, PatternKind, UnaryOp, is_lambda, target_names};
+use crate::ast::{self, BoolOp, CompOp, Operator, PatternKind, UnaryOp, target_names};
 use crate::checker::{
     Calls, Conversion, FunctionValue, Method, Step, Type, may_name_enum, may_name_struct, place,
     place_spans, range_args,
@@ -153,7 +153,6 @@ pub(super) enum ExprKind {
     Function {
         value: Arc<FunctionValue>,
         id: usize,
-        lambda: bool,
         types: Option<Rc<InstanceTypes>>,
         captures: Vec<Expr>,
     },
@@ -274,7 +273,7 @@ fn holds_param(ty: &Type) -> bool {
 }
 
 /// Turns the AST of one body into [`Stmt`]s: a function's, given its [`Layout`], or the
-/// program's or an interactive entry's, whose variables are all globals.
+/// program's, whose variables are all globals.
 pub(super) struct Resolver<'r, 'out> {
     interpreter: &'r mut Interpreter<'out>,
     calls: &'r Calls,
@@ -650,7 +649,6 @@ impl<'r, 'out> Resolver<'r, 'out> {
                 Some(function) => ExprKind::Function {
                     value: function.clone(),
                     id: self.interpreter.function_id(&function.function),
-                    lambda: is_lambda(&function.function),
                     types: self.instance(expr.span),
                     captures: vec![],
                 },
@@ -664,7 +662,6 @@ impl<'r, 'out> Resolver<'r, 'out> {
                     Some(function) => ExprKind::Function {
                         value: function.clone(),
                         id: self.interpreter.function_id(&function.function),
-                        lambda: true,
                         types: self.instance(expr.span),
                         captures: self.exprs(captures),
                     },

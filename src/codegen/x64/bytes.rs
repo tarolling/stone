@@ -16,8 +16,9 @@ use crate::stdlib::gui::MAX_SCALED;
 /// - `stone.bytes_find` returns where the bytes in `rsi` first appear in `rdi`, or -1
 /// - `stone.bytes_at` returns the byte at position `rsi` of `rdi` as an int, which the caller
 ///   checked is in range
-/// - `stone.bytes_slice_of` returns new bytes of what the slice from `rsi` to `rdx` by `rcx`
-///   picks from `rdi`, with the missing bounds in `r8`, as `stone.str_slice_of` takes them
+/// - `stone.bytes_slice_of` returns the bytes the slice from `rsi` to `rdx` by `rcx` picks from
+///   `rdi`, with the missing bounds in `r8`, as `stone.str_slice_of` takes them: `rdi` itself,
+///   retained, if that is all of them, and otherwise new bytes
 /// - `stone.bytes_check` returns where the first value of the list of ints `rdi` that is not a
 ///   byte is, or -1
 /// - `stone.bytes_from_list` returns new bytes of the values of the list `rdi`, which
@@ -374,8 +375,10 @@ fn pack_byte(r#gen: &mut dyn AssemblyGenerator, offset: i64, last: bool) {
     }
 }
 
-/// Emits `stone.bytes_slice_of`, which copies the bytes a slice picks, as `stone.str_slice_of`
-/// does without its checks for cut characters.
+/// Emits `stone.bytes_slice_of`, which gives the bytes a slice picks, as `stone.str_slice_of`
+/// does without its checks for cut characters: the bytes themselves, retained, for a slice of all
+/// of them (`data[:]`), one block copy for any other step of 1 (`data[2:5]`), and otherwise a
+/// copy of each byte picked in turn (`data[::2]`).
 fn slice_of(r#gen: &mut dyn AssemblyGenerator) {
     // rbx holds the bytes, r12 the first index, r13 the step, r14 the count, and r15 the new
     // bytes; r9 holds the length while the bounds are clamped
@@ -390,6 +393,24 @@ fn slice_of(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tcall\tstone.str_len");
     r#gen.emit("\tmov\tr9, rax");
     super::builtins::slice_bounds(r#gen, "bytes_slice_of");
+    r#gen.emit("\tcmp\tr13, 1");
+    r#gen.emit("\tjne\t.Lbytes_slice_of_each");
+    // bytes never change, so a slice of all of them is them, shared
+    r#gen.emit("\ttest\tr12, r12");
+    r#gen.emit("\tjnz\t.Lbytes_slice_of_run");
+    r#gen.emit("\tcmp\tr14, r9");
+    r#gen.emit("\tjne\t.Lbytes_slice_of_run");
+    r#gen.emit("\tinc\tQWORD PTR [rbx - 8]");
+    r#gen.emit("\tmov\trax, rbx");
+    r#gen.emit("\tjmp\t.Lbytes_slice_of_end");
+    // a run of them is one block copy
+    r#gen.emit(".Lbytes_slice_of_run:");
+    r#gen.emit("\tlea\trdi, [rbx + r12]");
+    r#gen.emit("\tmov\trsi, r14");
+    r#gen.emit("\tcall\tstone.str_slice");
+    r#gen.emit("\tjmp\t.Lbytes_slice_of_end");
+    // any other step picks them one at a time
+    r#gen.emit(".Lbytes_slice_of_each:");
     r#gen.emit("\tmov\trdi, r14");
     r#gen.emit("\tcall\tstone.str_new");
     r#gen.emit("\tmov\tr15, rax");
@@ -397,14 +418,15 @@ fn slice_of(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\txor\tecx, ecx");
     r#gen.emit(".Lbytes_slice_of_loop:");
     r#gen.emit("\tcmp\trcx, r14");
-    r#gen.emit("\tjge\t.Lbytes_slice_of_end");
+    r#gen.emit("\tjge\t.Lbytes_slice_of_copied");
     r#gen.emit("\tmovzx\teax, byte ptr [rbx + rdx]");
     r#gen.emit("\tmov\tbyte ptr [r15 + rcx], al");
     r#gen.emit("\tadd\trdx, r13");
     r#gen.emit("\tinc\trcx");
     r#gen.emit("\tjmp\t.Lbytes_slice_of_loop");
-    r#gen.emit(".Lbytes_slice_of_end:");
+    r#gen.emit(".Lbytes_slice_of_copied:");
     r#gen.emit("\tmov\trax, r15");
+    r#gen.emit(".Lbytes_slice_of_end:");
     r#gen.emit("\tlea\trsp, [rbp - 40]");
     for reg in ["r15", "r14", "r13", "r12", "rbx"] {
         r#gen.emit(&format!("\tpop\t{reg}"));

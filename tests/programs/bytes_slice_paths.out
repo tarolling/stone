@@ -1,0 +1,8 @@
+5 true true true true
+b'a\x00b' b'\x00b\xff' b'\xffc' b'' b'' b''
+3 b'\x00c' b'c\xffb' b'\xffb\x00'
+5 97 99 0
+70000 true true true true
+b'012' b'123' b'ef' b'' b'' b''
+35000 b'147a' b'fed' b'321'
+70000 48 102 0

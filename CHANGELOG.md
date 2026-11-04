@@ -25,6 +25,13 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   loops, and computes on the processor when the launch says it did not run. No launch can run
   yet, so results are unchanged.
 
+### Fixed
+
+- Compiled slices of `bytes` are fast again: a slice of all of them (`data[:]`, or `data[:n]`
+  with `n` the length) shares them instead of copying, and any other slice by step 1 copies one
+  block. Before, every slice copied a byte at a time, which since 0.4.1's HiDPI scaling nearly
+  doubled the time a `gui` window takes to show each frame.
+
 ## [0.4.1] - 2026-11-03
 
 ### Added

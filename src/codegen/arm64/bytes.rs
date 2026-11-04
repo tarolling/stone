@@ -338,7 +338,9 @@ fn pack(r#gen: &mut dyn AssemblyGenerator) {
     pop_frame(r#gen, &saved);
 }
 
-/// Emits `stone.bytes_slice_of`, as `x64::bytes` does.
+/// Emits `stone.bytes_slice_of`, as `x64::bytes` does: the bytes themselves, retained, for a
+/// slice of all of them, `stone.str_slice` for any other step of 1, and otherwise a copy of each
+/// byte picked in turn.
 fn slice_of(r#gen: &mut dyn AssemblyGenerator) {
     // x19 holds the bytes, x20 the first index, x21 the step, x22 the count, and x23 the new
     // bytes; x9 holds the length while the bounds are clamped
@@ -349,6 +351,25 @@ fn slice_of(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tbl\tstone.str_len");
     r#gen.emit("\tmov\tx9, x0");
     super::builtins::slice_bounds(r#gen, "bytes_slice_of");
+    r#gen.emit("\tcmp\tx21, #1");
+    r#gen.emit("\tb.ne\t.Lbytes_slice_of_each");
+    // bytes never change, so a slice of all of them is them, shared
+    r#gen.emit("\tcbnz\tx20, .Lbytes_slice_of_run");
+    r#gen.emit("\tcmp\tx22, x9");
+    r#gen.emit("\tb.ne\t.Lbytes_slice_of_run");
+    r#gen.emit("\tldur\tx9, [x19, #-8]");
+    r#gen.emit("\tadd\tx9, x9, #1");
+    r#gen.emit("\tstur\tx9, [x19, #-8]");
+    r#gen.emit("\tmov\tx0, x19");
+    r#gen.emit("\tb\t.Lbytes_slice_of_end");
+    // a run of them is one copy
+    r#gen.emit(".Lbytes_slice_of_run:");
+    r#gen.emit("\tadd\tx0, x19, x20");
+    r#gen.emit("\tmov\tx1, x22");
+    r#gen.emit("\tbl\tstone.str_slice");
+    r#gen.emit("\tb\t.Lbytes_slice_of_end");
+    // any other step picks them one at a time
+    r#gen.emit(".Lbytes_slice_of_each:");
     r#gen.emit("\tmov\tx0, x22");
     r#gen.emit("\tbl\tstone.str_new");
     r#gen.emit("\tmov\tx23, x0");
@@ -356,14 +377,15 @@ fn slice_of(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx8, #0");
     r#gen.emit(".Lbytes_slice_of_loop:");
     r#gen.emit("\tcmp\tx8, x22");
-    r#gen.emit("\tb.ge\t.Lbytes_slice_of_end");
+    r#gen.emit("\tb.ge\t.Lbytes_slice_of_copied");
     r#gen.emit("\tldrb\tw9, [x19, x12]");
     r#gen.emit("\tstrb\tw9, [x23, x8]");
     r#gen.emit("\tadd\tx12, x12, x21");
     r#gen.emit("\tadd\tx8, x8, #1");
     r#gen.emit("\tb\t.Lbytes_slice_of_loop");
-    r#gen.emit(".Lbytes_slice_of_end:");
+    r#gen.emit(".Lbytes_slice_of_copied:");
     r#gen.emit("\tmov\tx0, x23");
+    r#gen.emit(".Lbytes_slice_of_end:");
     pop_frame(r#gen, &saved);
 }
 

@@ -176,7 +176,7 @@ impl Cond {
         }
     }
 
-    fn name(self) -> &'static str {
+    pub(crate) fn name(self) -> &'static str {
         match self {
             Cond::Eq => "eq",
             Cond::Ne => "ne",
@@ -918,6 +918,22 @@ impl Function {
 pub struct Program {
     pub functions: Vec<Function>,
     pub globals: Vec<String>,
+    /// Each piece of arithmetic on lists a GPU could compute, as lowering met it.
+    pub device_kernels: Vec<DeviceKernel>,
+}
+
+/// Arithmetic on lists that a GPU could compute, one element per thread, which
+/// [`gpu::kernels`](crate::codegen::gpu::kernels) turns into a kernel.
+///
+/// For example, `c = a * 2.0 + b` records `fadd(fmul([v1], 4611686018427387904), [v2])` at the
+/// span of `a * 2.0 + b`, where `[v1]` is an element of the list in `v1`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct DeviceKernel {
+    pub span: Span,
+    /// Whether the elements are floats, else ints.
+    pub float: bool,
+    /// What each element is, its lists' operands the lists themselves.
+    pub kernel: Kernel,
 }
 
 fn regs(operands: &[Operand]) -> Vec<VReg> {

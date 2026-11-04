@@ -47,7 +47,8 @@ as `geometry.Point.shift`. Which one a call such as `p.shift(1.0)` calls depends
 | `interpreter` | tree-walking evaluator, over a tree made of each body once with variables resolved to slots |
 | `format` | `stone fmt`, a formatter over tokens that keeps comments |
 | `codegen` | the `AssemblyGenerator` trait, `Target` (the `--target` names: an `Architecture`, a `Level`, and an `Os`), and `link`, which writes the `.s` file and the executable |
-| `codegen/device` | `Device`, the GPUs (`gfx1100`, `sm_90`) that code will run on beside a target; no backend generates GPU code yet |
+| `codegen/device` | `Device`, the GPUs (`gfx1100`, `sm_90`) that code will run on beside a target, and the PTX version each NVIDIA GPU needs |
+| `codegen/gpu` | GPU kernels for arithmetic on lists: the device IR (`gpu/ir.rs`), its kernels made from what lowering recorded (`gpu/kernel.rs`), and PTX for NVIDIA GPUs (`gpu/ptx.rs`), written by `stone build --gpu`; nothing launches them yet |
 | `codegen/asm` | the built-in assembler: parses the GNU as syntax both backends emit and encodes it (`codegen/asm/x64.rs`, `codegen/asm/arm64.rs`), picking the same encodings as GNU as, with jumps relaxed to their short form where they reach |
 | `codegen/elf` | the built-in linker for Linux: lays out sections, resolves fixups, and writes a static ELF executable with a symbol table |
 | `codegen/macho` | the built-in linker for macOS: a Mach-O executable that loads only `libSystem`, with an ad hoc code signature (`codegen/sha256`) |

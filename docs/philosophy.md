@@ -254,6 +254,13 @@ yet capture connections or, in a generic function, values of a type parameter.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.
+The same arithmetic on lists is the first code stone writes for GPUs: with `--gpu sm_75`,
+`stone build` turns each such expression into a kernel, in PTX for NVIDIA GPUs, that computes
+every element exactly as the processor does, rounding each float operation on its own and
+flagging a zero divisor for the program to report. No keyword marks the code for a GPU, since the
+compiler finds it. Launching the kernels, which needs a way to reach the GPU's driver from a
+program that uses no C library, and deciding when a list is large enough to be worth sending to
+the GPU, are future work, as are AMD GPUs.
 Vector code beyond arithmetic on lists (searching strings, comparing lists, summing them),
 splitting a value's live range around calls, and removing reference counts it can prove
 redundant beyond moves at last use are future work.

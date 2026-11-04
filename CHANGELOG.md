@@ -10,6 +10,21 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `stone build --gpu sm_75` (any NVIDIA GPU from `sm_50` to `sm_120`, more than once for several)
+  writes a PTX kernel for each piece of arithmetic on whole lists, such as `a * 2.0 + b`, beside
+  the executable as `<name>.sm_75.ptx`. The kernels compute each element exactly as the
+  processor does, but nothing launches them yet, so programs still compute everything on the
+  processor. AMD GPUs are not supported yet.
+- With NVIDIA's `ptxas` on `PATH` (or named by `STONE_PTXAS`), `--gpu` also compiles each PTX
+  file to machine code, `<name>.sm_75.cubin`, which a program that reaches the GPU's driver
+  itself will need. Without `ptxas` the build warns and goes on, and `ptxas` refusing the
+  kernels is an error.
+- A Linux program built with `--gpu` now asks to launch each such piece of arithmetic before it
+  loops, and computes on the processor when the launch says it did not run. No launch can run
+  yet, so results are unchanged.
+
 ## [0.4.1] - 2026-11-03
 
 ### Added

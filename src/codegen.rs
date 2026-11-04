@@ -5,6 +5,7 @@ pub mod asm;
 pub mod context;
 pub mod device;
 pub mod elf;
+pub mod gpu;
 pub mod ir;
 pub mod macho;
 pub mod pe;
@@ -419,6 +420,12 @@ pub trait AssemblyGenerator {
     /// Gives what the checker found in the module, which must have no errors, so compiling it
     /// does not check it again.
     fn set_analysis(&mut self, analysis: Rc<Analysis>);
+    /// Returns the arithmetic on lists that a GPU could compute, as the last [`Self::scan`]
+    /// recorded it.
+    fn device_kernels(&self) -> &[ir::DeviceKernel];
+    /// Makes arithmetic on lists that a GPU could compute first try one (see
+    /// [`ir::lower::lower_with`]), so the program calls `stone.gpu_launch` before it loops.
+    fn set_gpu_launch(&mut self, launch: bool);
 }
 
 /// Returns the magic multiplier and shift that divide by the constant `divisor` with a

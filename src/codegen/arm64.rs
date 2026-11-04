@@ -18,6 +18,7 @@ pub mod cpu;
 mod emit;
 pub mod floats;
 pub mod fs;
+pub mod gpu;
 pub mod net;
 pub mod process;
 pub mod sort;
@@ -175,6 +176,14 @@ impl AssemblyGenerator for Arm64Generator {
 
     fn set_analysis(&mut self, analysis: std::rc::Rc<crate::checker::Analysis>) {
         self.ctx.set_analysis(analysis);
+    }
+
+    fn device_kernels(&self) -> &[crate::codegen::ir::DeviceKernel] {
+        &self.ctx.program.device_kernels
+    }
+
+    fn set_gpu_launch(&mut self, launch: bool) {
+        self.ctx.gpu_launch = launch;
     }
 }
 
@@ -436,6 +445,9 @@ impl Arm64Generator {
         }
         if !fs.is_empty() {
             fs::fs_runtime(self, &fs);
+        }
+        if self.ctx.uses(&["stone.gpu_launch"]) {
+            gpu::gpu_runtime(self);
         }
         let random: Vec<&str> = [
             "stone.random_seed",

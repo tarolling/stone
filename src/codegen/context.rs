@@ -7,7 +7,7 @@
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
 use crate::checker::{Analysis, Structs, Type, TypeChecker, variants};
 use crate::codegen::ir::inline::inline;
-use crate::codegen::ir::lower::lower_for;
+use crate::codegen::ir::lower::lower_with;
 use crate::codegen::ir::opt::optimize;
 use crate::codegen::ir::trig;
 use crate::codegen::ir::{Callee, Inst, Program};
@@ -533,6 +533,9 @@ pub struct Context {
     /// Whether the program has strings or lists, which need the memory runtime, and `main` checks
     /// for leaks before it returns.
     pub counts_references: bool,
+    /// Whether arithmetic on lists that a GPU could compute first tries one, which a build with
+    /// `--gpu` for a system that can reach the GPU asks for.
+    pub gpu_launch: bool,
 }
 
 impl Context {
@@ -560,7 +563,7 @@ impl Context {
     /// Lowers the checked `module` to IR for a program that runs on `os`, then notes every
     /// runtime routine it calls and whether it counts references.
     pub fn lower(&mut self, module: &Mod, os: Os) -> Result<(), String> {
-        self.program = lower_for(module, &self.analysis, os)?;
+        self.program = lower_with(module, &self.analysis, os, self.gpu_launch)?;
         for function in &mut self.program.functions {
             trig::share(function);
             trig::expand(function);

@@ -480,6 +480,93 @@ fn build_rejects_an_unknown_target() {
 }
 
 #[test]
+fn build_writes_ptx_for_each_gpu_beside_the_program() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let exe = dir.join("gpu_kernels");
+    let ptx = dir.join("gpu_kernels.sm_75.ptx");
+    let _ = std::fs::remove_file(&ptx);
+    let exe_arg = exe.to_str().unwrap();
+    let (output, _) = stone(
+        &["build", "--gpu", "sm_75", "--gpu", "sm_90", "-o", exe_arg],
+        "gpu_kernels",
+        "a = [1.0, 2.0]\nb = [0.5, 0.25]\nprint(a * 2.0 + b)\nprint([1, 2] * 3)\n",
+    );
+    assert!(output.status.success(), "{output:?}");
+    let text = std::fs::read_to_string(&ptx).unwrap();
+    assert!(text.contains(".target sm_75\n"), "{text}");
+    assert!(text.contains(".visible .entry stone_k0("), "{text}");
+    assert!(text.contains(".visible .entry stone_k1("), "{text}");
+    assert!(text.contains("\tmul.rn.f64 \t"), "{text}");
+    let newer = std::fs::read_to_string(dir.join("gpu_kernels.sm_90.ptx")).unwrap();
+    assert!(newer.contains(".version 7.8\n.target sm_90\n"), "{newer}");
+    // nothing launches kernels yet, so the program computes as before
+    if cfg!(target_os = "linux") {
+        let ran = Command::new(&exe).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stdout),
+            "[2.5, 4.25]\n[3, 6]\n"
+        );
+    }
+}
+
+/// Returns whether NVIDIA's `ptxas` runs, which a GPU build needs to write machine code.
+fn has_ptxas() -> bool {
+    Command::new("ptxas")
+        .arg("--version")
+        .output()
+        .is_ok_and(|output| output.status.success())
+}
+
+#[test]
+fn build_compiles_the_kernels_of_each_gpu_to_a_cubin() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let exe = dir.join("gpu_cubin");
+    let cubin = dir.join("gpu_cubin.sm_75.cubin");
+    let _ = std::fs::remove_file(&cubin);
+    let (output, _) = stone(
+        &["build", "--gpu", "sm_75", "-o", exe.to_str().unwrap()],
+        "gpu_cubin",
+        "a = [1.0, 2.0]\nb = [0.5, 0.25]\nprint(a * 2.0 + b)\n",
+    );
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    if has_ptxas() {
+        let bytes = std::fs::read(&cubin).unwrap();
+        assert_eq!(&bytes[..4], b"\x7fELF");
+        assert!(!stderr.contains("warning"), "{stderr}");
+    } else {
+        // the program still builds and computes on the processor, and says why not on the GPU
+        assert!(!cubin.exists());
+        assert!(
+            stderr.contains("warning: cannot run 'ptxas' to compile the kernels for sm_75"),
+            "{stderr}"
+        );
+    }
+}
+
+#[test]
+fn build_rejects_a_gpu_it_cannot_generate_code_for() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let exe = dir.join("gpu_amd");
+    let _ = std::fs::remove_file(&exe);
+    let (output, _) = stone(
+        &["build", "--gpu", "gfx1100", "-o", exe.to_str().unwrap()],
+        "gpu_amd",
+        "print(1)\n",
+    );
+    assert!(!output.status.success());
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: AMD GPUs (gfx1100) are not supported yet\n"
+    );
+    assert!(!exe.exists());
+    let (output, _) = stone(&["build", "--gpu", "cuda"], "gpu_unknown", "print(1)\n");
+    assert!(!output.status.success());
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unknown GPU 'cuda'"), "{stderr}");
+}
+
+#[test]
 fn windows_gui_needs_a_windows_target() {
     let (output, _) = stone(
         &["build", "--windows-gui", "--target", "aarch64-linux"],

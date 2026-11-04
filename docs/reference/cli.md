@@ -26,7 +26,7 @@ stone run examples/basics.stn
 stone run sum.stn 1 2 3 < numbers.txt
 ```
 
-## `stone build FILE... [-o OUTPUT] [--target TARGET]... [--windows-gui] [--offline]`
+## `stone build FILE... [-o OUTPUT] [--target TARGET]... [--gpu GPU]... [--windows-gui] [--offline]`
 
 Compiles each program to a native executable in its build directory (see
 [Where executables go](#where-executables-go)), writing the assembly next to it with a `.s`
@@ -43,6 +43,17 @@ module, `user32.dll`, `gdi32.dll`, and `dwmapi.dll`), so it runs on any x86-64 W
 machine; windows need Windows 10 version 1703 or later. The `net` module and `os.run` are not
 supported there yet, so building a program that uses them for Windows is an error, and so is
 running or checking one on Windows.
+
+`--gpu` names a GPU, as its vendor names it (`sm_75`, `sm_90a`), to write kernels for: each
+piece of arithmetic on whole lists, such as `a * 2.0 + b`, becomes a kernel, and the kernels go
+next to each executable in a PTX file named after it and the GPU (`build/basics.sm_75.ptx`),
+which NVIDIA's driver compiles for the GPU it runs on. Give it more than once for several GPUs.
+Only NVIDIA GPUs from `sm_50` to `sm_120` are supported, so an AMD GPU such as `gfx1100` is an
+error. With NVIDIA's `ptxas` on `PATH` (or named by the `STONE_PTXAS` environment variable) the
+kernels are also compiled to machine code beside the PTX (`build/basics.sm_75.cubin`); without
+it, `stone build` warns and goes on, and a `ptxas` that rejects the kernels is an error. This is
+a first step: nothing runs the kernels yet, so the program still computes everything on the
+processor.
 
 `--windows-gui` builds Windows executables as programs with windows rather than console
 programs, so opening one from Explorer opens no console beside its window. Such a program has

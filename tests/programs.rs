@@ -87,6 +87,9 @@ enum Backend {
     /// `stone build --target` for a level above the host's baseline, such as
     /// `x86_64v3-<system>`, whose arithmetic on lists uses wider vector instructions.
     Level(Leveled),
+    /// `stone build --gpu sm_75` for the host, whose arithmetic on lists first tries to launch a
+    /// kernel and, finding no GPU to launch it on, computes on the processor.
+    Gpu,
 }
 
 /// A target level the golden programs are built for, and how its programs run.
@@ -124,6 +127,7 @@ impl Backend {
                 name: "x86_64v4", ..
             }) => "build-x86_64v4",
             Backend::Level(_) => "build-aarch64v9",
+            Backend::Gpu => "build-gpu",
         }
     }
 }
@@ -366,10 +370,14 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 .current_dir(&cwd),
             &input,
         ),
-        Backend::Build | Backend::Cross(_) | Backend::Windows(_) | Backend::Level(_) => {
+        Backend::Build
+        | Backend::Cross(_)
+        | Backend::Windows(_)
+        | Backend::Level(_)
+        | Backend::Gpu => {
             let suffix = match backend {
                 Backend::Windows(_) => ".exe",
-                Backend::Build | Backend::Level(_) => std::env::consts::EXE_SUFFIX,
+                Backend::Build | Backend::Level(_) | Backend::Gpu => std::env::consts::EXE_SUFFIX,
                 _ => "",
             };
             let exe = Path::new(env!("CARGO_TARGET_TMPDIR"))
@@ -383,6 +391,9 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
                 }
                 Backend::Windows(_) => {
                     build.arg("--target").arg("x86_64-windows");
+                }
+                Backend::Gpu => {
+                    build.args(["--gpu", "sm_75"]);
                 }
                 Backend::Level(level) => {
                     let system = if cfg!(windows) { "windows" } else { "linux" };
@@ -584,6 +595,18 @@ fn cross_compiler_matches_expected() {
         return;
     }
     check_all(Backend::Cross(arch));
+}
+
+/// Builds every program with a launch of each of its kernels on a GPU, and runs it where there is
+/// none, so the processor's loop that follows each launch must print what it always has, and the
+/// arguments the launch is given must be released.
+#[test]
+fn gpu_compiler_matches_expected() {
+    // only Linux programs launch kernels so far
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    check_all(Backend::Gpu);
 }
 
 /// Builds every program for x86-64 `v3` and runs it, on an x86-64 machine that reaches that level,

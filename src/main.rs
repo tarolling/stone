@@ -3,6 +3,7 @@ use std::error::Error;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use stone::codegen::device::Device;
 use stone::codegen::{Os, Subsystem, Target};
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver::{self, Checked};
@@ -60,6 +61,12 @@ enum Command {
         /// several; each target other than this machine builds into `build/<TARGET>/`.
         #[arg(long = "target", value_name = "TARGET", value_parser = str::parse::<Target>)]
         targets: Vec<Target>,
+        /// A GPU to write kernels for, named as its vendor names it, such as `sm_75`. Each
+        /// piece of arithmetic on lists becomes a kernel in `<output>.<GPU>.ptx`, though nothing
+        /// launches them yet. Give it more than once for several GPUs; only NVIDIA's are
+        /// supported.
+        #[arg(long = "gpu", value_name = "GPU", value_parser = str::parse::<Device>)]
+        devices: Vec<Device>,
         /// Builds Windows programs as programs with windows, which start with no console, so
         /// opening one from Explorer opens no console, and what it prints goes nowhere unless
         /// its output is redirected. Needs a Windows target.
@@ -148,6 +155,8 @@ enum ExecutionMode {
         output: Option<PathBuf>,
         /// What to build for, or the host if empty.
         targets: Vec<Target>,
+        /// The GPUs to write kernels for.
+        devices: Vec<Device>,
         /// Whether Windows executables start with no console.
         windows_gui: bool,
         offline: bool,
@@ -203,12 +212,14 @@ fn main() -> ExitCode {
             files,
             output,
             targets,
+            devices,
             windows_gui,
             offline,
         }) => ExecutionMode::Build {
             files,
             output,
             targets,
+            devices,
             windows_gui,
             offline,
         },
@@ -245,6 +256,7 @@ fn main() -> ExitCode {
             files,
             output,
             targets,
+            devices,
             windows_gui,
             offline,
         } => {
@@ -252,7 +264,14 @@ fn main() -> ExitCode {
                 true => Subsystem::Gui,
                 false => Subsystem::Console,
             };
-            build(&files, output.as_deref(), &targets, subsystem, offline)
+            build(
+                &files,
+                output.as_deref(),
+                &targets,
+                &devices,
+                subsystem,
+                offline,
+            )
         }
         ExecutionMode::Add {
             package,
@@ -318,11 +337,13 @@ fn main() -> ExitCode {
 ///
 /// For example, building `a.stn` and `b.stn` on an x86-64 Linux machine writes `build/a` and
 /// `build/b`, and adding `--target aarch64-macos` also writes `build/aarch64-macos/a` and
-/// `build/aarch64-macos/b`. Windows executables are programs of `subsystem`.
+/// `build/aarch64-macos/b`. Windows executables are programs of `subsystem`, and each GPU of
+/// `devices` gets a `.ptx` file beside each executable.
 fn build(
     files: &[String],
     output: Option<&Path>,
     targets: &[Target],
+    devices: &[Device],
     subsystem: Subsystem,
     offline: bool,
 ) -> ExitCode {
@@ -344,6 +365,12 @@ fn build(
         eprintln!("error: --windows-gui needs a Windows target, such as --target x86_64-windows");
         return ExitCode::FAILURE;
     }
+    for device in devices {
+        if let Err(message) = device.ptx_version() {
+            eprintln!("error: {message}");
+            return ExitCode::FAILURE;
+        }
+    }
     let mut status = ExitCode::SUCCESS;
     for file in files {
         let code = with_program(file, offline, |checked, sources| {
@@ -361,7 +388,7 @@ fn build(
                         driver::output_path(entry, target)
                     }
                 };
-                driver::compile_module(checked, sources, &path, target, subsystem)?;
+                driver::compile_module(checked, sources, &path, target, subsystem, devices)?;
                 println!("Compiled {}", path.display());
             }
             Ok(())

@@ -34,8 +34,8 @@ mod tests;
 
 use super::inline::retarget;
 use super::{
-    BinOp, Block, BlockId, Callee, Cond, Function, Inst, Kernel, Operand, Program, RcKind,
-    Rounding, Terminator, TrigFunc, VReg, leaf_name, variable_of,
+    BinOp, Block, BlockId, Callee, Cond, DeviceKernel, Function, Inst, Kernel, Operand, Program,
+    RcKind, Rounding, Terminator, TrigFunc, VReg, leaf_name, variable_of,
 };
 use crate::ast::{
     Arg, BoolOp, Constant, Expr, ExprKind, Keyword, MatchCase, Mod, Operator, Pattern, PatternKind,
@@ -49,6 +49,7 @@ use crate::checker::{
 };
 use crate::codegen::Os;
 use crate::codegen::context::{FUNCTION_PREFIX, module_routine};
+use crate::codegen::gpu::kernel::{Argument, arguments};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::{FileId, Span};
 use crate::stdlib::{
@@ -79,6 +80,22 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
 /// only the branch taken, so a Windows program never reaches the X11 and Wayland code, and a
 /// Linux one never the Win32 windows or Windows' resolver.
 pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, String> {
+    lower_with(module, analysis, os, false)
+}
+
+/// Lowers `module` as [`lower_for`] does and, if `gpu_launch`, has each piece of arithmetic on
+/// lists that a GPU could compute ([`Program::device_kernels`]) first call `stone.gpu_launch`,
+/// which gives 1 if the GPU computed the result and 0 if the processor must, as it does with
+/// the loop that follows.
+///
+/// For example, `c = a * 2.0 + b` then lowers to `v9 = call stone.gpu_launch(0, v8)`, where
+/// `v8` is the list of the kernel's arguments, and a branch on `v9` that skips the loop.
+pub fn lower_with(
+    module: &Mod,
+    analysis: &Analysis,
+    os: Os,
+    gpu_launch: bool,
+) -> Result<Program, String> {
     let Mod::Module { body } = module;
     let Analysis {
         types,
@@ -155,6 +172,7 @@ pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, S
     let global_reads = global_reads(body, &stone_globals);
     let context = Context {
         os,
+        gpu_launch,
         types,
         variables: &variables,
         globals: &globals,
@@ -176,6 +194,7 @@ pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, S
         conversions,
         helpers: RefCell::new(Vec::new()),
         requested: RefCell::new(Vec::new()),
+        device_kernels: RefCell::new(Vec::new()),
     };
 
     let mut functions = Vec::new();
@@ -313,7 +332,12 @@ pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, S
         });
     }
 
-    Ok(Program { functions, globals })
+    let device_kernels = context.device_kernels.take();
+    Ok(Program {
+        functions,
+        globals,
+        device_kernels,
+    })
 }
 
 /// Returns the stone functions `function` calls directly or takes the address of, by their stone
@@ -567,6 +591,8 @@ fn mangle(ty: &Type) -> String {
 
 /// What lowering each function shares.
 struct Context<'a> {
+    /// Whether a piece of arithmetic on lists that a GPU could compute first tries one.
+    gpu_launch: bool,
     /// The system the program runs on, which `gui_sys.on_windows()` tells.
     os: Os,
     types: &'a HashMap<Span, Type>,
@@ -615,6 +641,8 @@ struct Context<'a> {
     /// each enum and struct type the program prints, and one that compares values of each enum
     /// type it compares.
     helpers: RefCell<Vec<Helper>>,
+    /// Each piece of arithmetic on lists a GPU could compute, in the order lowering met it.
+    device_kernels: RefCell<Vec<DeviceKernel>>,
 }
 
 /// A copy of a function lowering makes: of a generic function for the types `instance` gives
@@ -4128,6 +4156,31 @@ impl<'a> Lowerer<'a> {
         };
         self.push(call);
         let temporaries: Vec<Operand> = lists.iter().map(|leaf| leaf.value).collect();
+        // where control goes when a GPU computed the elements, which is where the loop ends
+        let mut launched = None;
+        // a GPU has no register limit to keep under, and multiplies ints at every level
+        if tree.packable(float) {
+            // each read of a global is a value of its own, but a variable cannot change within
+            // an expression, so a kernel takes each variable's list once
+            let mut first = HashMap::new();
+            let lists = lists
+                .iter()
+                .map(|leaf| match &leaf.name {
+                    Some(name) => (leaf.value, *first.entry(name).or_insert(leaf.value)),
+                    None => (leaf.value, leaf.value),
+                })
+                .collect();
+            let kernel = tree.kernel(&lists);
+            let record = self.context.device_kernels.borrow().len();
+            self.context.device_kernels.borrow_mut().push(DeviceKernel {
+                span: self.span,
+                float,
+                kernel: kernel.clone(),
+            });
+            if self.context.gpu_launch {
+                launched = Some(self.launch(record, &kernel, result, len));
+            }
+        }
 
         // pairs of elements first, when the operations allow, then one at a time from where that
         // stopped
@@ -4162,7 +4215,8 @@ impl<'a> Lowerer<'a> {
             dst: index,
             src: start,
         });
-        let (header, body, exit) = (self.new_block(), self.new_block(), self.new_block());
+        let (header, body) = (self.new_block(), self.new_block());
+        let exit = launched.unwrap_or_else(|| self.new_block());
         self.loop_depth += 1;
         self.start(header);
         self.terminate(Terminator::CmpBranch {
@@ -4195,6 +4249,66 @@ impl<'a> Lowerer<'a> {
         }
         self.own(Operand::Reg(result), kind);
         Ok(Operand::Reg(result))
+    }
+
+    /// Tries kernel number `record`, which computes `kernel` for `len` elements into the list
+    /// `result`, on a GPU: calls `stone.gpu_launch` with the kernel's number and a list of its
+    /// arguments (the result's and the lists' element addresses and the length and numbers, in
+    /// the order the kernel takes them), then branches. Control continues in a new block, where
+    /// the processor computes the elements, if the call gives 0, and goes to the block it
+    /// returns, which the caller makes the end of that computation, if it gives 1.
+    fn launch(&mut self, record: usize, kernel: &Kernel, result: VReg, len: VReg) -> BlockId {
+        let out = self.fresh();
+        self.push(Inst::ListData {
+            dst: out,
+            list: Operand::Reg(result),
+        });
+        let mut params = vec![Operand::Reg(out), Operand::Reg(len)];
+        for argument in arguments(kernel) {
+            match argument {
+                Argument::List(list) => {
+                    let data = self.fresh();
+                    self.push(Inst::ListData { dst: data, list });
+                    params.push(Operand::Reg(data));
+                }
+                Argument::Number(number) => params.push(number),
+            }
+        }
+        let list = self.fresh();
+        self.push(Inst::Call {
+            dsts: vec![list],
+            callee: Callee::Runtime("stone.list_new"),
+            args: vec![Operand::Imm(params.len() as i64), Operand::Imm(0)],
+        });
+        for (index, value) in params.into_iter().enumerate() {
+            self.push(Inst::ListSet {
+                list: Operand::Reg(list),
+                index: Operand::Imm(index as i64),
+                value,
+                offset: 0,
+            });
+        }
+        let ran = self.fresh();
+        self.push(Inst::Call {
+            dsts: vec![ran],
+            callee: Callee::Runtime("stone.gpu_launch"),
+            args: vec![Operand::Imm(record as i64), Operand::Reg(list)],
+        });
+        self.push(Inst::Release {
+            src: Operand::Reg(list),
+            kind: RcKind::List,
+        });
+        let (processor, done) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Ne,
+            float: false,
+            lhs: Operand::Reg(ran),
+            rhs: Operand::Imm(0),
+            then: done,
+            otherwise: processor,
+        });
+        self.start(processor);
+        done
     }
 
     /// Computes `lhs op rhs` on two numbers or, for `+`, two strings, both of type `ty`, into

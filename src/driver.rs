@@ -4,6 +4,9 @@
 
 use crate::ast::{Expr, ExprKind, Mod};
 use crate::checker::{Analysis, Calls, TypeChecker};
+use crate::codegen::device::Device;
+use crate::codegen::gpu::compile::{CompileError, compile_cubin};
+use crate::codegen::gpu::{cubin, ptx};
 use crate::codegen::{self, Os, Subsystem, Target};
 use crate::debug;
 use crate::diagnostic::{Diagnostic, Diagnostics, Severity};
@@ -312,11 +315,12 @@ pub fn compile(source: &str, output: &Path) -> Result<(), Box<dyn Error>> {
 /// arm64 assembly to `build/out.s` and links it into an arm64 Linux `build/out`.
 pub fn compile_for(source: &str, output: &Path, target: Target) -> Result<(), Box<dyn Error>> {
     let (sources, loaded) = load(Path::new(DEFAULT_ENTRY), source, &MapSources::default());
-    compile_module(&loaded?, &sources, output, target, Subsystem::Console)
+    compile_module(&loaded?, &sources, output, target, Subsystem::Console, &[])
 }
 
 /// Compiles a checked module, such as one from [`load`], to a native executable for `target` at
-/// `output`, which on Windows is a program of `subsystem`.
+/// `output`, which on Windows is a program of `subsystem`, and writes the kernels of its
+/// arithmetic on lists for each of `devices` beside it ([`ptx_path`]). Nothing launches them yet.
 ///
 /// For example, compiling for [`Target::ARM64_MACOS`] on an x86-64 Linux machine writes an arm64
 /// macOS executable, with no cross toolchain installed.
@@ -326,17 +330,55 @@ pub fn compile_module(
     output: &Path,
     target: Target,
     subsystem: Subsystem,
+    devices: &[Device],
 ) -> Result<(), Box<dyn Error>> {
     let unsupported = unsupported(&checked.module, sources, target.os);
     if !unsupported.is_empty() {
         return Err(Box::new(Diagnostics(unsupported)));
     }
+    for device in devices {
+        device.ptx_version()?;
+    }
     let mut generator = target.generator();
     generator.set_sources(sources.clone());
     generator.set_analysis(Rc::clone(&checked.analysis));
+    // only Linux programs launch kernels so far
+    generator.set_gpu_launch(!devices.is_empty() && target.os == Os::Linux);
     let assembly = generator.assemble(&checked.module)?;
     codegen::link(&assembly, output, target, subsystem)?;
+    if !devices.is_empty() {
+        let kernels = codegen::gpu::kernels(generator.device_kernels())?;
+        for &device in devices {
+            let text = ptx::module(&kernels, device)?;
+            std::fs::write(ptx_path(output, device), &text)?;
+            match compile_cubin(&text, device) {
+                Ok(bytes) => {
+                    cubin::parse(&bytes)?;
+                    std::fs::write(cubin_path(output, device), bytes)?;
+                }
+                // without a compiler the program computes on the processor, as it did before
+                Err(CompileError::Missing(message)) => eprintln!("warning: {message}"),
+                Err(error) => return Err(Box::new(error)),
+            }
+        }
+    }
     Ok(())
+}
+
+/// Returns where `stone build` writes the PTX for `device` of the executable at `output`, which
+/// is named as its assembly is, with the device before `.ptx`.
+///
+/// For example, `ptx_path(Path::new("build/basics"), sm_75)` is `build/basics.sm_75.ptx`.
+pub fn ptx_path(output: &Path, device: Device) -> PathBuf {
+    output.with_extension(format!("{device}.ptx"))
+}
+
+/// Returns where `stone build` writes the machine code `ptxas` makes for `device` of the
+/// executable at `output`, beside its PTX.
+///
+/// For example, `cubin_path(Path::new("build/basics"), sm_75)` is `build/basics.sm_75.cubin`.
+pub fn cubin_path(output: &Path, device: Device) -> PathBuf {
+    output.with_extension(format!("{device}.cubin"))
 }
 
 /// The builtin functions a Windows program cannot use yet, by linked name.
@@ -546,6 +588,7 @@ u = net.connect_unix(\"/tmp/x\")
             &output,
             Target::X64_WINDOWS,
             Subsystem::Console,
+            &[],
         );
         assert!(built.is_err());
         assert!(!output.exists());

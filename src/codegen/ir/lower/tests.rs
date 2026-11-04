@@ -1700,3 +1700,112 @@ fn a_gui_program_lowers_only_the_windows_of_its_system() {
         assert!(!linux.contains(absent), "{absent} in {linux}");
     }
 }
+
+/// Returns the kernels a GPU would run for `source`, as `gpu::kernels` makes them from what
+/// lowering recorded.
+fn device_kernels(source: &str) -> (Program, Vec<crate::codegen::gpu::ir::Kernel>) {
+    let program = lower_source(source);
+    let kernels = crate::codegen::gpu::kernels(&program.device_kernels).unwrap();
+    (program, kernels)
+}
+
+#[test]
+fn arithmetic_on_lists_records_a_kernel_for_a_gpu() {
+    use crate::codegen::gpu::ir::Ty;
+    let (program, kernels) = device_kernels(
+        "a = [1.0, 2.0]\nb = [3.0, 4.0]\nc = a * 2.0 + b\nprint(c)\nd = [1, 2] - [3, 4] * 3\nprint(d)\n",
+    );
+    let floats: Vec<bool> = program.device_kernels.iter().map(|k| k.float).collect();
+    assert_eq!(floats, [true, false]);
+    let params: Vec<&[Ty]> = kernels.iter().map(|k| k.params.as_slice()).collect();
+    assert_eq!(
+        params,
+        [
+            &[Ty::Ptr, Ty::I64, Ty::Ptr, Ty::Ptr][..],
+            &[Ty::Ptr, Ty::I64, Ty::Ptr, Ty::Ptr][..]
+        ]
+    );
+    let sites: Vec<(usize, usize)> = kernels
+        .iter()
+        .map(|k| (k.sites[0].start.line, k.sites[0].start.col))
+        .collect();
+    assert_eq!(sites, [(3, 5), (5, 5)]);
+}
+
+#[test]
+fn arithmetic_too_big_to_pack_in_registers_still_records_a_kernel() {
+    let (program, _) =
+        device_kernels("a = [1, 2]\nc = a * a + a * a + a * a + a * a + a\nprint(c)\n");
+    assert_eq!(program.device_kernels.len(), 1);
+    let dump: String = program.functions.iter().map(ToString::to_string).collect();
+    assert!(!dump.contains("packed"), "{dump}");
+}
+
+#[test]
+fn arithmetic_a_gpu_cannot_compute_records_no_kernel() {
+    let (program, _) = device_kernels("a = [7, 8]\nb = [2, 3]\nc = a % b\nprint(c)\n");
+    assert_eq!(program.device_kernels, []);
+}
+
+#[test]
+fn copies_of_a_generic_function_share_one_kernel() {
+    let (program, kernels) = device_kernels(
+        "fn twice[T](xs: list[float], tag: T) -> list[float]:\n    print(tag)\n    ret xs * 2.0\n\
+         print(twice([1.0], 1))\nprint(twice([2.0], \"a\"))\n",
+    );
+    assert_eq!(program.device_kernels.len(), 2);
+    assert_eq!(kernels.len(), 1);
+    assert_eq!(kernels[0].sites.len(), 1);
+}
+
+#[test]
+fn a_variable_read_twice_is_one_list_of_its_kernel() {
+    use crate::codegen::gpu::ir::Ty;
+    let (_, kernels) = device_kernels(
+        "a = [1.0, 2.0]\nb = [3.0, 4.0]\nprint(a * 3.0 - b * b + a / b)\n\
+         fn f(xs: list[int]) -> list[int]:\n    ret xs * xs + xs\nprint(f([1]))\n",
+    );
+    let params: Vec<&[Ty]> = kernels.iter().map(|k| k.params.as_slice()).collect();
+    assert_eq!(
+        params,
+        // functions lower before the top level
+        [
+            &[Ty::Ptr, Ty::I64, Ty::Ptr][..],
+            &[Ty::Ptr, Ty::I64, Ty::Ptr, Ty::Ptr, Ty::Ptr][..]
+        ]
+    );
+}
+
+/// Links, checks, and lowers the program `source` for Linux, with or without launches of its
+/// kernels on a GPU, returning the IR dump.
+fn dump_launching(source: &str, gpu_launch: bool) -> String {
+    let sources = crate::project::MapSources::default();
+    let (_, module) = crate::driver::load(std::path::Path::new("main.stn"), source, &sources);
+    let module = module.unwrap().module;
+    let analysis = TypeChecker::new().analyze(&module);
+    let program = lower_with(&module, &analysis, crate::codegen::Os::Linux, gpu_launch).unwrap();
+    program.functions.iter().map(ToString::to_string).collect()
+}
+
+#[test]
+fn a_program_for_a_gpu_tries_each_kernel_before_the_loop() {
+    let source = "a = [1.0, 2.0]\nb = [3.0, 4.0]\nprint(a * 2.0 + b)\nprint([1, 2] * 3)\n";
+    let without = dump_launching(source, false);
+    assert!(!without.contains("gpu_launch"), "{without}");
+    let with = dump_launching(source, true);
+    // one launch per recorded kernel, by its number, each given the result, length, and
+    // arguments in the order the kernel takes them
+    assert_eq!(with.matches("stone.gpu_launch(0, ").count(), 1, "{with}");
+    assert_eq!(with.matches("stone.gpu_launch(1, ").count(), 1, "{with}");
+    // the loop that computes the same on the processor is still there for a launch that fails
+    assert_eq!(
+        with.matches("list_set").count(),
+        without.matches("list_set").count() + 7
+    );
+}
+
+#[test]
+fn arithmetic_a_gpu_cannot_compute_is_never_launched() {
+    let with = dump_launching("a = [7, 8]\nb = [2, 3]\nprint(a % b)\n", true);
+    assert!(!with.contains("gpu_launch"), "{with}");
+}

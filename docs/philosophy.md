@@ -216,7 +216,8 @@ operations of constants and branches on them, computes repeated arithmetic once 
 loop never changes before the loop, drops work and whole loops whose results nothing reads (a
 loop only when it is sure to end, so a program that never stops still never stops), removes
 index checks, reads, and uniqueness checks it can prove repeated (moving those a loop repeats
-before it), allocates registers with linear scan, keeping floats in the processor's
+before it) and index checks a loop's own test proves (comparing a loop's bound with a list's
+length once, before the loop, when the bound is not the length itself), allocates registers with linear scan, keeping floats in the processor's
 floating-point registers, and specializes a few cases such as division and
 remainder by a constant, which multiply by a magic number, and globals that hold one literal for
 the whole program, which read as that literal. Arithmetic on whole lists, such as `a * 2.0 + b`,

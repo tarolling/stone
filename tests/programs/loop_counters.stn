@@ -1,0 +1,32 @@
+// for loops whose variable is their count, with cont, break, nesting, and a variable read after
+fn evens(n: int) -> int:
+    s = 0
+    for i in range(n):
+        if i % 2 == 1:
+            cont
+        s += i
+    ret s
+
+fn first_over(xs: list[int], limit: int) -> int:
+    at = -1
+    for i in range(xs.len()):
+        if xs[i] > limit:
+            at = i
+            break
+    ret at
+
+fn table(n: int) -> int:
+    s = 0
+    for i in range(n):
+        for j in range(i, n):
+            s += i * 10 + j
+    ret s
+
+fn last(n: int) -> int:
+    k = 0
+    for i in range(n):
+        k = i
+    ret k
+
+print(evens(10), evens(0), first_over([1, 5, 9, 2], 4), first_over([1], 4))
+print(table(4), last(5), last(0))

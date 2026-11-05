@@ -1,0 +1,39 @@
+// indexes a loop's own test proves are in range, and loops whose bound may pass a length
+fn total(xs: list[int]) -> int:
+    s = 0
+    for i in range(xs.len()):
+        s += xs[i]
+    ret s
+
+fn dot(xs: list[float], ys: list[float], n: int) -> float:
+    s = 0.0
+    for i in range(n):
+        s += xs[i] * ys[i]
+    ret s
+
+fn scale(xs: list[int], n: int, k: int) -> list[int]:
+    for i in range(n):
+        xs[i] = xs[i] * k
+    ret xs
+
+fn weighted(xs: list[int]) -> int:
+    n = xs.len()
+    i = 0
+    s = 0
+    while i < n:
+        s += xs[i] * i
+        i += 1
+    ret s
+
+fn rows(a: list[list[int]], b: list[list[int]], n: int) -> int:
+    s = 0
+    for i in range(n):
+        for k in range(n):
+            s += a[i][k] * b[k][i]
+    ret s
+
+print(total([1, 2, 3, 4]), total([]))
+print(dot([1.0, 2.0, 3.0], [4.0, 5.0, 6.0], 3), dot([1.0, 2.0], [3.0, 4.0], 0), dot([1.0], [2.0], -2))
+print(scale([1, 2, 3, 4], 2, 10), scale([1, 2], 2, -1))
+print(weighted([5, 6, 7]))
+print(rows([[1, 2], [3, 4]], [[5, 6], [7, 8]], 2))

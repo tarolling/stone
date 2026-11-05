@@ -35,6 +35,12 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   change nothing later code reads and are sure to end, such as a `for` loop over `range` whose
   results go unused. Anything that could fail, such as reading a list or dividing by a variable,
   still runs, so a program fails where it did before, and a loop that may never end still runs.
+- Compiled loops over lists check fewer indexes. In `for i in range(xs.len()):`, `xs[i]` needs
+  no check, and a loop whose bound is some other value, such as `for k in range(n):` reading
+  `a[i][k]` and `b[k]`, compares `n` with each list's length once before it starts and then runs
+  a copy with no checks, or the loop as before when `n` is past a length, so it still fails at the
+  same index. A `for` loop's variable and its count also share one register. Multiplying
+  matrices of lists is about 40% faster.
 
 ### Fixed
 

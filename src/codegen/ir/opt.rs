@@ -35,9 +35,17 @@
 //! 9. Work whose result nothing needs is dropped, and so is a loop that changes nothing anything
 //!    after it reads and is sure to end (see [`dead::remove_dead`] and
 //!    [`dead::remove_dead_loops`]).
-//! 10. Each loop tests at the bottom as well as on entry (see [`rotate_loops`]), and then a list
+//! 10. An index a loop's own test proves in range, such as `i` in `for i in range(xs.len())`, is
+//!     not checked, and a loop whose bound is not the list's length runs a copy with no checks
+//!     when one comparison before it finds the bound within every length (see
+//!     [`ranges::remove_range_checks`]). A `for` loop's variable and its count become one vreg
+//!     (see [`counters::coalesce_counters`]).
+//! 11. Each loop tests at the bottom as well as on entry (see [`rotate_loops`]), and then a list
 //!     the loop reads and writes without moving its elements has its elements' address loaded
 //!     once on the way in (see [`hoist_data`]).
+//!
+//! Blocks a pass adds go right before their loop (see [`place_before`]), so values the loop
+//! shares with them do not live across the rest of the function.
 //!
 //! Nothing that can fail, call out, or touch memory or a count is removed or moved past anything
 //! that could, so a program that fails still fails where the interpreter does.
@@ -48,9 +56,11 @@
 //! The IR is not SSA, so every fact is about vregs and dies when any vreg it names is written.
 
 mod cfg;
+mod counters;
 mod dead;
 mod fold;
 mod licm;
+mod ranges;
 
 use super::inline::{rename_inst, retarget};
 use super::{
@@ -76,6 +86,8 @@ pub fn optimize(program: &mut Program) {
             | dead::remove_dead_loops(function)
             | cfg::simplify_cfg(function)
         {}
+        while ranges::remove_range_checks(function) {}
+        while counters::coalesce_counters(function) {}
         rotate_loops(function);
         hoist_data(function);
     }
@@ -344,6 +356,52 @@ pub(super) fn predecessors(function: &Function) -> Vec<Vec<usize>> {
     preds
 }
 
+/// Moves each new block of `placements`, a block and the block it goes before, to sit right
+/// before that block, keeping every other block in its order and renumbering every way to one,
+/// so the work a pass adds before a loop stays beside the loop. A block a pass appends at the end
+/// of a function would otherwise stretch the live range of every vreg it shares with the loop
+/// over everything between, since a live range has no holes, and calls there would leave such a
+/// vreg only the registers that survive calls.
+///
+/// For example, with blocks `b0` to `b3` and `[(3, 1)]`, `b3` becomes `b1`, and `b1` and `b2`
+/// become `b2` and `b3`.
+pub(super) fn place_before(function: &mut Function, placements: &[(usize, usize)]) {
+    let count = function.blocks.len();
+    let moved: HashSet<usize> = placements.iter().map(|&(block, _)| block).collect();
+    let mut order = Vec::with_capacity(count);
+    for b in 0..count {
+        if moved.contains(&b) {
+            continue;
+        }
+        debug_assert!(b != 0 || placements.iter().all(|&(_, before)| before != 0));
+        order.extend(
+            placements
+                .iter()
+                .filter(|&&(_, before)| before == b)
+                .map(|&(block, _)| block),
+        );
+        order.push(b);
+    }
+    debug_assert_eq!(
+        order.len(),
+        count,
+        "every moved block goes before one that stays"
+    );
+    let mut renumber = vec![0; count];
+    for (at, &b) in order.iter().enumerate() {
+        renumber[b] = at;
+    }
+    let mut blocks: Vec<Option<Block>> = std::mem::take(&mut function.blocks)
+        .into_iter()
+        .map(Some)
+        .collect();
+    for b in order {
+        let mut block = blocks[b].take().expect("each block is placed once");
+        block.term = retarget(&block.term, |BlockId(t)| BlockId(renumber[t]), |o| o);
+        function.blocks.push(block);
+    }
+}
+
 /// Removes repeated index checks and uniqueness checks, through the facts available on entry to
 /// each block: those that hold at the end of every block before it, found by iterating to a fixed
 /// point from the optimistic guess that every fact holds everywhere but the entry.
@@ -458,7 +516,7 @@ fn eliminate(function: &mut Function) {
 /// of one, as an offset from that vreg, as long as neither is written in between.
 ///
 /// For example, `v5 = add v4, 3` then `v6 = list_get v0, v5` becomes `v6 = list_get v0, v4 + 3`,
-/// which the backends address directly, and `v5` is left for [`remove_dead`] if nothing else
+/// which the backends address directly, and `v5` is left for [`dead::remove_dead`] if nothing else
 /// reads it.
 fn fold_offsets(function: &mut Function) {
     for block in &mut function.blocks {
@@ -823,6 +881,8 @@ fn rotate_loops(function: &mut Function) {
 /// starts, and only if it runs at all.
 fn hoist_data(function: &mut Function) {
     let preds = predecessors(function);
+    // each new block, and the loop's first block, which it goes before
+    let mut placements = Vec::new();
     for l in loops(function, &preds) {
         // the one way in, which a rotated loop takes once each time it starts
         let outside: Vec<usize> = preds[l.header]
@@ -917,7 +977,9 @@ fn hoist_data(function: &mut Function) {
         let term = &function.blocks[before].term;
         let moved = |b: BlockId| if b == entry { way_in } else { b };
         function.blocks[before].term = retarget(term, moved, |operand| operand);
+        placements.push((way_in.0, entry.0));
     }
+    place_before(function, &placements);
 }
 
 /// A place in a function: a block and the index of an instruction in it, where the block's
@@ -1345,6 +1407,7 @@ fn hoist_checks(function: &mut Function) -> bool {
         before.spans.extend(header_spans);
         before.term = test;
         before.term_span = header_span;
+        place_before(function, &[(guard, l.header)]);
         return true;
     }
     false
@@ -1511,8 +1574,10 @@ mod tests {
             "f",
         );
         let loads = |inst: &Inst| matches!(inst, Inst::ListLoad { .. });
-        // a[i] once before the loop; a[i][k], b[k], and b[k][j] each turn
-        assert_eq!(count(&f, loads), (3, 1), "{f}");
+        // a[i] once before the loop; a[i][k], b[k], and b[k][j] each turn, except that the copy
+        // run when n is at most the lengths of a[i] and b reads a[i][k] and b[k] unchecked
+        assert_eq!(count(&f, loads), (4, 1), "{f}");
+        assert_eq!(count(&f, is_unchecked_read), (2, 0), "{f}");
     }
 
     #[test]
@@ -1847,5 +1912,108 @@ mod tests {
                 "{f}"
             );
         }
+    }
+
+    fn is_checked_read(inst: &Inst) -> bool {
+        matches!(inst, Inst::ListLoad { .. })
+    }
+
+    fn is_unchecked_read(inst: &Inst) -> bool {
+        matches!(inst, Inst::ListGet { .. } | Inst::DataGet { .. })
+    }
+
+    #[test]
+    fn an_index_a_loop_over_the_length_proves_is_not_checked() {
+        for body in [
+            "for i in range(xs.len()):\n        s += xs[i]",
+            "n = xs.len()\n    for i in range(n):\n        s += xs[i] * 2",
+            "n = xs.len()\n    i = 0\n    while i < n:\n        s += xs[i]\n        i += 1",
+        ] {
+            let f = optimized(
+                &format!("fn f(xs: list[int]) -> int:\n    s = 0\n    {body}\n    ret s\n"),
+                "f",
+            );
+            let all = |pick: fn(&Inst) -> bool| {
+                let (inside, outside) = count(&f, pick);
+                inside + outside
+            };
+            assert_eq!(all(is_checked_read), 0, "{body}: {f}");
+            assert_eq!(all(is_unchecked_read), 1, "{body}: {f}");
+        }
+    }
+
+    #[test]
+    fn a_loop_whose_bound_may_pass_the_length_runs_unchecked_only_when_it_does_not() {
+        let f = optimized(
+            "fn f(xs: list[int], ys: list[int], n: int) -> int:\n    s = 0\n    \
+             for i in range(n):\n        s += xs[i] * ys[i]\n    ret s\n",
+            "f",
+        );
+        // the checked loop stays for a bound past either length, beside an unchecked copy
+        assert_eq!(count(&f, is_checked_read).0, 2, "{f}");
+        assert_eq!(count(&f, is_unchecked_read).0, 2, "{f}");
+        // a length read before the list shrinks is only a bound, so it is compared too
+        let f = optimized(
+            "fn f(xs: list[int]) -> int:\n    s = 0\n    n = xs.len()\n    xs.pop()\n    \
+             for i in range(n):\n        s += xs[i]\n    ret s\n",
+            "f",
+        );
+        assert_eq!(count(&f, is_checked_read).0, 1, "{f}");
+        assert_eq!(count(&f, is_unchecked_read).0, 1, "{f}");
+    }
+
+    #[test]
+    fn an_index_the_loop_cannot_prove_stays_checked() {
+        for body in [
+            // the index is not the counter
+            "for i in range(xs.len()):\n        s += xs[i - 1]",
+            "for i in range(xs.len()):\n        i = 5\n        s += xs[i]",
+            // the list may shrink or change
+            "for i in range(xs.len()):\n        s += xs[i]\n        xs.pop()",
+            // the read is not on every turn, and there is no length to prove it by
+            "for i in range(n):\n        if i > 2:\n            s += xs[i]",
+        ] {
+            let f = optimized(
+                &format!("fn f(xs: list[int], n: int) -> int:\n    s = 0\n    {body}\n    ret s\n"),
+                "f",
+            );
+            assert!(count(&f, is_checked_read).0 >= 1, "{body}: {f}");
+            assert_eq!(count(&f, is_unchecked_read).0, 0, "{body}: {f}");
+        }
+    }
+
+    fn is_register_copy(inst: &Inst) -> bool {
+        matches!(
+            inst,
+            Inst::Copy {
+                src: Operand::Reg(_),
+                ..
+            }
+        )
+    }
+
+    #[test]
+    fn a_for_loop_counts_in_its_variable_alone() {
+        for body in [
+            "for i in range(n):\n        s += i * i",
+            "for i in range(n):\n        if i % 3 == 0:\n            cont\n        s += i",
+            "for i in range(xs.len()):\n        s += xs[i]",
+        ] {
+            let f = optimized(
+                &format!("fn f(xs: list[int], n: int) -> int:\n    s = 0\n    {body}\n    ret s\n"),
+                "f",
+            );
+            assert_eq!(count(&f, is_register_copy).0, 0, "{body}: {f}");
+        }
+    }
+
+    #[test]
+    fn a_loop_variable_assigned_in_the_loop_keeps_its_copy() {
+        let f = optimized(
+            "fn f(n: int) -> int:\n    s = 0\n    for i in range(n):\n        i += 2\n        \
+             s += i\n    ret s\n",
+            "f",
+        );
+        assert_eq!(count(&f, is_register_copy).0, 1, "{f}");
     }
 }

@@ -18,7 +18,7 @@ A benchmark of arithmetic on lists can also have a numpy version, `name.np.py`, 
 
 - `stone / C -O2` is how many times slower compiled stone is than optimized C. Lower is better for stone.
 - `Python / stone` is how many times faster compiled stone is than CPython. Higher is better for stone.
-- `C -O0` is a useful anchor. gcc at `-O0` does no optimization at all and keeps every variable in memory, where stone allocates registers, inlines small functions, and removes checks it can prove repeated, though it does far less than gcc at `-O2`.
+- `C -O0` is a useful anchor. gcc at `-O0` does no optimization at all and keeps every variable in memory, where stone allocates registers, inlines small functions, folds constants, moves invariant arithmetic out of loops, drops work nothing reads, and removes checks it can prove repeated, though it does far less than gcc at `-O2`.
 - The geometric mean row summarizes the ratios, treating 2x faster and 2x slower symmetrically.
 - Times include process startup, which is about 1 ms for the native programs and tens of milliseconds for Python.
 

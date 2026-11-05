@@ -25,6 +25,17 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   loops, and computes on the processor when the launch says it did not run. No launch can run
   yet, so results are unchanged.
 
+### Changed
+
+- Compiled programs do less needless work. Operations of constants are computed at compile time
+  and branches on constants become jumps, so `if` blocks that can never run are left out;
+  arithmetic repeated on every path, such as `p * p` in a test and again in the body, is done
+  once; arithmetic a loop computes from values it never changes, such as `i * width` in an inner
+  loop, runs once before the loop; and work nothing reads is dropped, including whole loops that
+  change nothing later code reads and are sure to end, such as a `for` loop over `range` whose
+  results go unused. Anything that could fail, such as reading a list or dividing by a variable,
+  still runs, so a program fails where it did before, and a loop that may never end still runs.
+
 ### Fixed
 
 - Compiled slices of `bytes` are fast again: a slice of all of them (`data[:]`, or `data[:n]`

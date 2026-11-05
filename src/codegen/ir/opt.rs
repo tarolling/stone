@@ -1,6 +1,7 @@
 //! Optimizations over lowered IR that remove work the lowering of each statement on its own
-//! repeats: checking an index into a list again, reading an element again, and making a list
-//! unique again.
+//! repeats or never needs: computing with constants, computing the same value again or on every
+//! turn of a loop, checking an index into a list again, reading an element again, making a list
+//! unique again, and loops whose work nothing reads.
 //!
 //! Lowering checks every index and makes every list it changes unique, statement by statement, so
 //! `bodies[i].vx -= dx * m` followed by `bodies[i].vy -= dy * m` checks `i` and the uniqueness of
@@ -8,46 +9,73 @@
 //! each function:
 //!
 //! 1. A copy whose source cannot change while it is read is replaced by its source (see
-//!    [`forward_copies`]), so a `for` loop over `range(n)` compares with `n` itself, and a
-//!    remainder by a power of two only compared with 0 becomes a test of the low bits (see
+//!    [`forward_copies`]), so a `for` loop over `range(n)` compares with `n` itself.
+//! 2. Operations of constants become their results and branches on constants become jumps (see
+//!    [`fold::fold_constants`]), and the graph of blocks is cleaned up (see
+//!    [`cfg::simplify_cfg`]): empty blocks that only jump are skipped, a block that is the only
+//!    way into the next absorbs it, and blocks nothing reaches go.
+//! 3. A remainder by a power of two only compared with 0 becomes a test of the low bits (see
 //!    [`test_remainders`]).
-//! 2. A `list_unique` of a variable inside a loop that cannot make the list shared again moves
+//! 4. Arithmetic a loop computes from values it never changes runs once before it (see
+//!    [`licm::hoist_invariants`]).
+//! 5. A `list_unique` of a variable inside a loop that cannot make the list shared again moves
 //!    before the loop, as a `list_unique_or_null`, since the variable may be null when the loop
 //!    never runs. Copying a shared list early is invisible, since lists are values.
-//! 3. An `element_slot`, or a `list_load` in a loop that changes no list, whose list and index the
+//! 6. An `element_slot`, or a `list_load` in a loop that changes no list, whose list and index the
 //!    loop never changes, and which every turn runs before anything that could fail or call out,
 //!    runs once before the loop, behind a copy of the loop's test, so it fails exactly when the
 //!    first turn would, and not at all for a loop that never runs. The ones inside the loop
 //!    become copies of its result.
-//! 4. Within a function, an `element_slot` or `list_load` already done on every path to it
-//!    becomes a copy of the earlier result, and a `list_unique` of a list already unique is
-//!    dropped, as long as nothing between them could change the list or share it.
-//! 5. A slot that is a constant past another, such as a field of an element at `add v4, 3`, is
-//!    read and written as an offset from it (`list_get v0, v4 + 3`), and work whose result
-//!    nothing reads is dropped.
-//! 6. Each loop tests at the bottom as well as on entry (see [`rotate_loops`]), and then a list
-//!    the loop reads and writes without moving its elements has its elements' address loaded
-//!    once on the way in (see [`hoist_data`]).
+//! 7. Within a function, an `element_slot`, `list_load`, or arithmetic already done on every path
+//!    to it becomes a copy of the earlier result, and a `list_unique` of a list already unique is
+//!    dropped, as long as nothing between them could change the list, share it, or write the
+//!    operands.
+//! 8. A slot that is a constant past another, such as a field of an element at `add v4, 3`, is
+//!    read and written as an offset from it (`list_get v0, v4 + 3`).
+//! 9. Work whose result nothing needs is dropped, and so is a loop that changes nothing anything
+//!    after it reads and is sure to end (see [`dead::remove_dead`] and
+//!    [`dead::remove_dead_loops`]).
+//! 10. Each loop tests at the bottom as well as on entry (see [`rotate_loops`]), and then a list
+//!     the loop reads and writes without moving its elements has its elements' address loaded
+//!     once on the way in (see [`hoist_data`]).
+//!
+//! Nothing that can fail, call out, or touch memory or a count is removed or moved past anything
+//! that could, so a program that fails still fails where the interpreter does.
 //!
 //! [`never_negative`] also tells the backends which indexes, such as a `range` counter, need no
 //! adjustment for counting from the end.
 //!
 //! The IR is not SSA, so every fact is about vregs and dies when any vreg it names is written.
 
+mod cfg;
+mod dead;
+mod fold;
+mod licm;
+
 use super::inline::{rename_inst, retarget};
-use super::{BinOp, Block, BlockId, Cond, Function, Inst, Operand, Program, Terminator, VReg};
+use super::{
+    BinOp, Block, BlockId, Cond, Function, Inst, Operand, Program, Rounding, Terminator, VReg,
+};
 use std::collections::{HashMap, HashSet};
 
 /// Runs every optimization over each function of `program`.
 pub fn optimize(program: &mut Program) {
     for function in &mut program.functions {
         while forward_copies(function) {}
+        while fold::fold_constants(function) | cfg::simplify_cfg(function) {}
         test_remainders(function);
+        if licm::hoist_invariants(function) {
+            while forward_copies(function) {}
+        }
         while hoist_unique(function) {}
         while hoist_checks(function) {}
         eliminate(function);
+        while forward_copies(function) {}
         fold_offsets(function);
-        remove_dead(function);
+        while dead::remove_dead(function)
+            | dead::remove_dead_loops(function)
+            | cfg::simplify_cfg(function)
+        {}
         rotate_loops(function);
         hoist_data(function);
     }
@@ -71,6 +99,90 @@ enum Fact {
         index: Operand,
         value: VReg,
     },
+    /// `dst` holds `what` of `lhs` and `rhs` (0 for one that takes one operand), computed from
+    /// them alone.
+    Computed {
+        what: Computation,
+        lhs: Operand,
+        rhs: Operand,
+        dst: VReg,
+    },
+}
+
+/// What an instruction that [`is_arithmetic`] computes, apart from its operands.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+enum Computation {
+    Binary(BinOp),
+    FloatBinary(BinOp),
+    Neg,
+    FloatNeg,
+    FloatAbs,
+    FloatSqrt,
+    Not,
+    Compare(Cond, bool),
+    IntToFloat,
+    FloatToInt(Rounding),
+}
+
+/// Returns what `inst` computes, of which operands, and where it writes it, when it
+/// [`is_arithmetic`], with the operands of int `+`, `*`, and comparisons in one order, so that
+/// `a * b` and `b * a` are the same computation.
+///
+/// For example, `v2 = mul v1, v0` gives `(Binary(Mul), v0, v1, v2)`, and `v3 = cmp_gt v1, v0`
+/// gives `(Compare(Lt, false), v0, v1, v3)`.
+fn computation(inst: &Inst) -> Option<(Computation, Operand, Operand, VReg)> {
+    if !is_arithmetic(inst) {
+        return None;
+    }
+    let ordered = |a: Operand, b: Operand| {
+        let rank = |o: Operand| match o {
+            Operand::Reg(VReg(r)) => (0, r as i64),
+            Operand::Imm(i) => (1, i),
+        };
+        if rank(b) < rank(a) {
+            (b, a, true)
+        } else {
+            (a, b, false)
+        }
+    };
+    let none = Operand::Imm(0);
+    Some(match *inst {
+        Inst::Binary { op, dst, lhs, rhs } => {
+            let (lhs, rhs) = if matches!(op, BinOp::Add | BinOp::Mul) {
+                let (lhs, rhs, _) = ordered(lhs, rhs);
+                (lhs, rhs)
+            } else {
+                (lhs, rhs)
+            };
+            (Computation::Binary(op), lhs, rhs, dst)
+        }
+        Inst::FloatBinary { op, dst, lhs, rhs } => (Computation::FloatBinary(op), lhs, rhs, dst),
+        Inst::Neg { dst, src } => (Computation::Neg, src, none, dst),
+        Inst::FloatNeg { dst, src } => (Computation::FloatNeg, src, none, dst),
+        Inst::FloatAbs { dst, src } => (Computation::FloatAbs, src, none, dst),
+        Inst::FloatSqrt { dst, src } => (Computation::FloatSqrt, src, none, dst),
+        Inst::Not { dst, src } => (Computation::Not, src, none, dst),
+        Inst::IntToFloat { dst, src } => (Computation::IntToFloat, src, none, dst),
+        Inst::FloatToInt {
+            dst, src, rounding, ..
+        } => (Computation::FloatToInt(rounding), src, none, dst),
+        Inst::Compare {
+            cond,
+            float,
+            dst,
+            lhs,
+            rhs,
+        } => {
+            let (lhs, rhs, swapped) = if float {
+                (lhs, rhs, false)
+            } else {
+                ordered(lhs, rhs)
+            };
+            let cond = if swapped { cond.swap() } else { cond };
+            (Computation::Compare(cond, float), lhs, rhs, dst)
+        }
+        _ => return None,
+    })
 }
 
 impl Fact {
@@ -82,6 +194,9 @@ impl Fact {
             Fact::Unique(list) => *list == reg,
             Fact::Loaded { list, index, value } => {
                 *list == reg || *value == reg || *index == Operand::Reg(reg)
+            }
+            Fact::Computed { lhs, rhs, dst, .. } => {
+                *dst == reg || *lhs == Operand::Reg(reg) || *rhs == Operand::Reg(reg)
             }
         }
     }
@@ -117,7 +232,8 @@ fn transfer(facts: &mut HashSet<Fact>, inst: &Inst) {
         facts.retain(|fact| !matches!(fact, Fact::Loaded { .. }));
     }
     match inst {
-        Inst::Call { .. } => facts.clear(),
+        // a call changes no vreg but those it writes
+        Inst::Call { .. } => facts.retain(|fact| matches!(fact, Fact::Computed { .. })),
         Inst::Retain { .. } => facts.retain(|fact| !matches!(fact, Fact::Unique(_))),
         Inst::Release {
             src: Operand::Reg(reg),
@@ -162,6 +278,32 @@ fn transfer(facts: &mut HashSet<Fact>, inst: &Inst) {
             value: *dst,
         });
     }
+    if let Some((what, lhs, rhs, dst)) = computation(inst)
+        && lhs != Operand::Reg(dst)
+        && rhs != Operand::Reg(dst)
+    {
+        facts.insert(Fact::Computed {
+            what,
+            lhs,
+            rhs,
+            dst,
+        });
+    }
+}
+
+/// Returns the vreg an earlier instruction left the same computation in, according to `facts`,
+/// if any.
+fn computed_value(facts: &HashSet<Fact>, inst: &Inst) -> Option<VReg> {
+    let (what, lhs, rhs, _) = computation(inst)?;
+    facts.iter().find_map(|fact| match *fact {
+        Fact::Computed {
+            what: w,
+            lhs: l,
+            rhs: r,
+            dst,
+        } if w == what && l == lhs && r == rhs => Some(dst),
+        _ => None,
+    })
 }
 
 /// Returns the value an earlier read of the same element left in `facts`, if any.
@@ -285,6 +427,18 @@ fn eliminate(function: &mut Function) {
                         index,
                     },
                 },
+                inst if computation(&inst).is_some() => match computed_value(&facts, &inst) {
+                    Some(value) => Inst::Copy {
+                        dst: inst.defs()[0],
+                        src: Operand::Reg(value),
+                    },
+                    None => inst,
+                },
+                // a copy of itself does nothing
+                Inst::Copy {
+                    dst,
+                    src: Operand::Reg(src),
+                } if dst == src => continue,
                 // the list is already unique, so this would do nothing
                 inst if is_unique_of_itself(&inst)
                     .is_some_and(|list| facts.contains(&Fact::Unique(list))) =>
@@ -345,9 +499,41 @@ fn fold_offsets(function: &mut Function) {
     }
 }
 
+/// Returns whether `inst` computes its result from its operands alone and never fails, so that
+/// running it earlier, again, or not at all changes nothing but the vregs it writes.
+///
+/// For example, `v2 = mul v0, v1` and `v2 = div v0, 8` qualify, but `v2 = div v0, v1` may divide
+/// by zero and `v2 = len v0` reads memory, so neither does.
+fn is_arithmetic(inst: &Inst) -> bool {
+    match inst {
+        Inst::Binary { op, rhs, .. } => match op {
+            BinOp::Add | BinOp::Sub | BinOp::Mul => true,
+            BinOp::Div | BinOp::Rem => matches!(rhs, Operand::Imm(d) if *d != 0 && *d != -1),
+            BinOp::Pow => matches!(rhs, Operand::Imm(e) if *e >= 0),
+            BinOp::DivUnchecked => false,
+        },
+        Inst::FloatBinary { op, .. } => matches!(
+            op,
+            BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::DivUnchecked
+        ),
+        Inst::Neg { .. }
+        | Inst::FloatNeg { .. }
+        | Inst::FloatAbs { .. }
+        | Inst::FloatSqrt { .. }
+        | Inst::Not { .. }
+        | Inst::Compare { .. }
+        | Inst::IntToFloat { .. }
+        | Inst::FloatToInt { checked: false, .. } => true,
+        _ => false,
+    }
+}
+
 /// Returns whether removing `inst` changes nothing but the vregs it writes: it never fails, calls
 /// out, or changes memory or a count.
 fn is_removable(inst: &Inst) -> bool {
+    if is_arithmetic(inst) {
+        return true;
+    }
     match inst {
         Inst::Binary { op, .. } => matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul),
         Inst::FloatBinary { op, .. } => {
@@ -379,39 +565,6 @@ fn is_removable(inst: &Inst) -> bool {
         | Inst::FieldGet { .. }
         | Inst::LoadGlobal { checked: false, .. } => true,
         _ => false,
-    }
-}
-
-/// Removes the instructions whose results nothing reads, when removing them changes nothing else,
-/// until none is left.
-fn remove_dead(function: &mut Function) {
-    loop {
-        let mut used: HashSet<VReg> = HashSet::new();
-        for block in &function.blocks {
-            for inst in &block.insts {
-                used.extend(inst.uses());
-            }
-            used.extend(block.term.uses());
-        }
-        let mut removed = false;
-        for block in &mut function.blocks {
-            let (insts, spans) = (
-                std::mem::take(&mut block.insts),
-                std::mem::take(&mut block.spans),
-            );
-            for (inst, span) in insts.into_iter().zip(spans) {
-                let dead = is_removable(&inst) && inst.defs().iter().all(|def| !used.contains(def));
-                if dead {
-                    removed = true;
-                } else {
-                    block.insts.push(inst);
-                    block.spans.push(span);
-                }
-            }
-        }
-        if !removed {
-            break;
-        }
     }
 }
 
@@ -1539,5 +1692,160 @@ mod tests {
             "f",
         );
         assert_eq!(count(&f, is_check), (1, 0), "{f}");
+    }
+
+    fn is_binary(inst: &Inst) -> bool {
+        matches!(inst, Inst::Binary { .. } | Inst::FloatBinary { .. })
+    }
+
+    fn is_mul(inst: &Inst) -> bool {
+        matches!(inst, Inst::Binary { op: BinOp::Mul, .. })
+    }
+
+    fn has_loop(f: &Function) -> bool {
+        !loops(f, &predecessors(f)).is_empty()
+    }
+
+    #[test]
+    fn constant_arithmetic_folds() {
+        let f = optimized(
+            "fn f() -> int:\n    a = 3 * 4 + 1\n    b = a * 2 - 9 / 2 + 7 % 4 + 2 ** 3\n    ret b\n",
+            "f",
+        );
+        assert_eq!(count(&f, is_binary), (0, 0), "{f}");
+        assert_eq!(f.blocks.len(), 1, "{f}");
+        assert_eq!(
+            f.blocks[0].term,
+            Terminator::Return(vec![Operand::Imm(33)]),
+            "{f}"
+        );
+    }
+
+    #[test]
+    fn a_constant_condition_drops_the_way_not_taken() {
+        let f = optimized(
+            "fn f(x: int) -> int:\n    if 1 > 2:\n        print(\"never\")\n    \
+             n = 0\n    while n < 0:\n        print(\"never\")\n    ret x\n",
+            "f",
+        );
+        assert_eq!(f.blocks.len(), 1, "{f}");
+        assert!(
+            !f.blocks[0]
+                .insts
+                .iter()
+                .any(|inst| matches!(inst, Inst::Call { .. })),
+            "{f}"
+        );
+    }
+
+    #[test]
+    fn operations_that_fail_or_give_nan_are_not_folded() {
+        for (ret, body) in [
+            ("int", "a = 0\n    ret 1 / a"),
+            ("int", "a = 0\n    ret 1 % a"),
+            (
+                "int",
+                "a = 0 - 9223372036854775807 - 1\n    ret a / (0 - 1)",
+            ),
+            ("int", "a = 0 - 1\n    ret 2 ** a"),
+            ("float", "a = 0.0\n    ret 1.0 / a"),
+            ("float", "a = 1e308 * 10.0\n    ret a - a"),
+        ] {
+            let f = optimized(&format!("fn f() -> {ret}:\n    {body}\n"), "f");
+            assert_eq!(count(&f, is_binary).1, 1, "{body}: {f}");
+        }
+    }
+
+    #[test]
+    fn a_loop_with_no_effect_is_removed() {
+        for body in [
+            "for i in range(n):\n        y = i * 3 + 7",
+            "z = 0\n    for i in range(n):\n        z += i",
+            "for i in range(n):\n        for j in range(i, n):\n            y = i * j",
+            "i = 10\n    while i > n:\n        i -= 1",
+            "i = 0\n    while i <= 100:\n        i += 1",
+            "i = 0\n    while n != i:\n        i += 1",
+            "for i in range(n):\n        if i % 3 == 0:\n            y = 1",
+            // the loop reads the length again every turn, but nothing in it can change it
+            "for x in xs:\n        y = x * 2",
+        ] {
+            let f = optimized(
+                &format!("fn f(n: int, xs: list[int]) -> int:\n    {body}\n    ret 5\n"),
+                "f",
+            );
+            assert!(!has_loop(&f), "{body}: {f}");
+            assert_eq!(f.blocks.len(), 1, "{body}: {f}");
+        }
+    }
+
+    #[test]
+    fn a_loop_that_may_fail_never_end_or_be_read_stays() {
+        for body in [
+            // a checked read and a division by a variable can fail
+            "for i in range(n):\n        y = xs[i]",
+            "for i in range(n):\n        y = 10 / i",
+            // these may never end
+            "i = 0\n    while i <= n:\n        i += 1",
+            "i = 0\n    while n > 0:\n        i += 1",
+            "i = 0\n    while i < n:\n        i += 2",
+            // what the loop computes is read after it
+            "i = 0\n    while i < n:\n        i += 1\n    print(i)",
+            "z = 0\n    for i in range(n):\n        z += i\n    print(z)",
+            "for i in range(n):\n        print(i)",
+        ] {
+            let f = optimized(
+                &format!("fn f(n: int, xs: list[int]) -> int:\n    {body}\n    ret 5\n"),
+                "f",
+            );
+            assert!(has_loop(&f), "{body}: {f}");
+        }
+    }
+
+    #[test]
+    fn an_invariant_product_leaves_the_loop() {
+        let f = optimized(
+            "fn f(n: int, a: int, b: int) -> int:\n    s = 0\n    for i in range(n):\n        \
+             for j in range(n):\n            s += a * b + i * n + j\n    ret s\n",
+            "f",
+        );
+        // `a * b` leaves both loops and `i * n` the inner one
+        assert_eq!(count(&f, is_mul), (1, 1), "{f}");
+        let inner = f.blocks.iter().filter(|b| b.loop_depth > 1);
+        assert!(
+            inner.flat_map(|b| &b.insts).all(|inst| !is_mul(inst)),
+            "{f}"
+        );
+    }
+
+    #[test]
+    fn a_repeated_computation_is_done_once() {
+        let f = optimized("fn f(a: int, b: int) -> int:\n    ret a * b + b * a\n", "f");
+        assert_eq!(count(&f, is_mul), (0, 1), "{f}");
+        let f = optimized(
+            "fn f(p: int, n: int) -> int:\n    if p * p <= n:\n        ret p * p\n    ret 0\n",
+            "f",
+        );
+        assert_eq!(count(&f, is_mul), (0, 1), "{f}");
+        // a write between the two makes them differ
+        let f = optimized(
+            "fn f(a: int, b: int) -> int:\n    x = a * b\n    a += 1\n    ret x + a * b\n",
+            "f",
+        );
+        assert_eq!(count(&f, is_mul), (0, 2), "{f}");
+    }
+
+    #[test]
+    fn an_empty_block_that_only_jumps_is_skipped() {
+        let f = optimized(
+            "fn f(n: int, xs: list[int]) -> int:\n    s = 0\n    if n > 0:\n        \
+             if n > 1:\n            s = xs[0]\n    ret s\n",
+            "f",
+        );
+        for block in &f.blocks {
+            assert!(
+                !(block.insts.is_empty() && matches!(block.term, Terminator::Jump(_))),
+                "{f}"
+            );
+        }
     }
 }

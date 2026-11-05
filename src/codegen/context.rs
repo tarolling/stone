@@ -870,6 +870,10 @@ impl Context {
                 "stone.net_exchange",
                 // the prelude's rem_pio2_large, whose types are the prelude's
                 REDUCE_PIO2,
+                // a prelude function lowered for a call that folding later removed, as
+                // rem_pio2_large is for `math.sin` of a constant, still makes its lists
+                "stone.list_new",
+                "stone.list_new_wide",
             ])
     }
 

@@ -38,22 +38,22 @@ pub struct Liveness {
 
 /// A fixed-size set of vregs.
 #[derive(Clone, PartialEq)]
-struct Set(Vec<u64>);
+pub(super) struct Set(Vec<u64>);
 
 impl Set {
-    fn new(size: u32) -> Set {
+    pub(super) fn new(size: u32) -> Set {
         Set(vec![0; (size as usize).div_ceil(64)])
     }
 
-    fn insert(&mut self, reg: VReg) {
+    pub(super) fn insert(&mut self, reg: VReg) {
         self.0[reg.0 as usize / 64] |= 1 << (reg.0 % 64);
     }
 
-    fn remove(&mut self, reg: VReg) {
+    pub(super) fn remove(&mut self, reg: VReg) {
         self.0[reg.0 as usize / 64] &= !(1 << (reg.0 % 64));
     }
 
-    fn contains(&self, reg: VReg) -> bool {
+    pub(super) fn contains(&self, reg: VReg) -> bool {
         self.0[reg.0 as usize / 64] & (1 << (reg.0 % 64)) != 0
     }
 
@@ -77,8 +77,11 @@ impl Set {
     }
 }
 
-/// Computes which vregs are live where in `function`, and turns that into intervals.
-pub fn analyze(function: &Function) -> Liveness {
+/// Returns the vregs live on entry to each block of `function` and on its exit, in that order.
+///
+/// For example, in `b0: v1 = copy 0; jmp b1` and `b1: ret v1`, `v1` is live on exit from `b0`
+/// and on entry to `b1`, and nothing is live on entry to `b0`.
+pub(super) fn block_liveness(function: &Function) -> (Vec<Set>, Vec<Set>) {
     let count = function.vreg_count;
     let blocks = &function.blocks;
 
@@ -126,6 +129,14 @@ pub fn analyze(function: &Function) -> Liveness {
             changed |= live_in[b].union(&input);
         }
     }
+    (live_in, live_out)
+}
+
+/// Computes which vregs are live where in `function`, and turns that into intervals.
+pub fn analyze(function: &Function) -> Liveness {
+    let count = function.vreg_count;
+    let blocks = &function.blocks;
+    let (live_in, live_out) = block_liveness(function);
 
     let mut start = vec![u32::MAX; count as usize];
     let mut end = vec![0u32; count as usize];

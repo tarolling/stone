@@ -1,0 +1,5 @@
+// a division by a zero the compiler can see still fails where it is
+a = 10
+b = a - 10
+print("start")
+print(a / b)

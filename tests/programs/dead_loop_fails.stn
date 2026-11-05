@@ -1,0 +1,9 @@
+// a loop whose results are unused still fails where a read would
+fn check(xs: list[int], n: int) -> int:
+    for i in range(n):
+        y = xs[i]
+    ret 0
+
+print("before")
+print(check([1, 2, 3], 3))
+print(check([1, 2, 3], 5))

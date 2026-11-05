@@ -807,7 +807,7 @@ mod tests {
 
     #[test]
     fn division_by_a_power_of_two_shifts_instead_of_dividing() {
-        let assembly = assemble("x = 7\nprint(x / 8, x / -2)\n").unwrap();
+        let assembly = assemble("x = int(\"7\").unwrap()\nprint(x / 8, x / -2)\n").unwrap();
         assert!(!assembly.contains("sdiv"), "{assembly}");
         assert!(assembly.contains(", #3\n"), "{assembly}");
         assert!(!assembly.contains("division by zero"), "{assembly}");
@@ -815,7 +815,7 @@ mod tests {
 
     #[test]
     fn modulo_by_a_power_of_two_shifts_instead_of_dividing() {
-        let assembly = assemble("x = 7\nprint(x % 8, x % -2, x % 1)\n").unwrap();
+        let assembly = assemble("x = int(\"7\").unwrap()\nprint(x % 8, x % -2, x % 1)\n").unwrap();
         assert!(!assembly.contains("sdiv"), "{assembly}");
         assert!(assembly.contains("\tlsl\tx9, x9, #3"), "{assembly}");
         assert!(!assembly.contains("division by zero"), "{assembly}");
@@ -824,8 +824,9 @@ mod tests {
     #[test]
     fn division_by_a_variable_keeps_both_checks() {
         for divisor in ["y", "0", "-1"] {
-            let source =
-                format!("x = 7\ny = int(\"2\").unwrap()\nprint(x / {divisor}, x % {divisor})\n");
+            let source = format!(
+                "x = int(\"7\").unwrap()\ny = int(\"2\").unwrap()\nprint(x / {divisor}, x % {divisor})\n"
+            );
             let assembly = assemble(&source).unwrap();
             assert!(assembly.contains("\tsdiv\t"), "{divisor}");
             assert!(assembly.contains("division by zero"), "{divisor}");
@@ -834,7 +835,7 @@ mod tests {
                 "{divisor}"
             );
         }
-        let constant = assemble("x = 7\nprint(x / 10, x % 10)\n").unwrap();
+        let constant = assemble("x = int(\"7\").unwrap()\nprint(x / 10, x % 10)\n").unwrap();
         assert!(constant.contains("\tmsub\t"), "{constant}");
         assert!(constant.contains("\tsmulh\t"), "{constant}");
         assert!(!constant.contains("\tsdiv\t"), "{constant}");
@@ -843,7 +844,10 @@ mod tests {
 
     #[test]
     fn float_comparisons_use_conditions_that_are_false_for_nan() {
-        let assembly = assemble("a = 1.5\nb = -a * 2.0 + a / 0.5\nprint(a < b, a <= b)\n").unwrap();
+        let assembly = assemble(
+            "a = 1.5\nc = float(\"1.5\").unwrap()\nb = -c * 2.0 + c / 0.5\nprint(a < b, a <= b)\n",
+        )
+        .unwrap();
         for instruction in [
             "\tfmul\t", "\tfadd\t", "\tfdiv\t", "\tfcmp\t", "mi\n", "ls\n",
         ] {
@@ -881,7 +885,10 @@ mod tests {
 
     #[test]
     fn converting_a_float_to_an_int_is_checked() {
-        let assembly = assemble("print(int(2.5), float(2))\n").unwrap();
+        let assembly = assemble(
+            "x = float(\"2.5\").unwrap()\nn = int(\"2\").unwrap()\nprint(int(x), float(n))\n",
+        )
+        .unwrap();
         assert!(assembly.contains("\tfcvtzs\t"), "{assembly}");
         assert!(assembly.contains("\tscvtf\t"), "{assembly}");
         assert!(assembly.contains("cannot convert float to int"));
@@ -1080,7 +1087,7 @@ mod tests {
         }
 
         let draws = assemble_linked(
-            "use random\nprint(random.random(), random.randint(1, 2), random.choice([3]))\n",
+            "use random\nn = int(\"2\").unwrap()\nprint(random.random(), random.randint(1, n), random.choice([3]))\n",
         );
         for label in ["stone.random_float:", "stone.random_below:"] {
             assert!(draws.contains(label), "{label} in {draws}");

@@ -1,0 +1,4 @@
+// trigonometry of constants, whose reduction of huge arguments the compiler can see is never needed
+use math
+
+print(math.sin(55.91), math.cos(-3.5), math.tan(0.5), math.atan2(1.0, 2.0))

@@ -896,7 +896,7 @@ mod tests {
 
     #[test]
     fn division_by_a_power_of_two_shifts_instead_of_dividing() {
-        let assembly = assemble("x = 7\nprint(x / 8, x / -2)\n").unwrap();
+        let assembly = assemble("x = int(\"7\").unwrap()\nprint(x / 8, x / -2)\n").unwrap();
         assert!(!assembly.contains("idiv"), "{assembly}");
         assert!(assembly.contains("\tsar\trax, 3"), "{assembly}");
         assert!(!assembly.contains("division by zero"), "{assembly}");
@@ -904,7 +904,7 @@ mod tests {
 
     #[test]
     fn division_by_another_nonzero_constant_skips_the_checks() {
-        let assembly = assemble("x = 7\nprint(x / 10, x / -3)\n").unwrap();
+        let assembly = assemble("x = int(\"7\").unwrap()\nprint(x / 10, x / -3)\n").unwrap();
         // a magic multiplier instead of idiv
         assert!(!assembly.contains("idiv"), "{assembly}");
         assert!(assembly.contains("\timul\trdx"), "{assembly}");
@@ -914,7 +914,7 @@ mod tests {
 
     #[test]
     fn modulo_by_a_power_of_two_shifts_instead_of_dividing() {
-        let assembly = assemble("x = 7\nprint(x % 8, x % -2, x % 1)\n").unwrap();
+        let assembly = assemble("x = int(\"7\").unwrap()\nprint(x % 8, x % -2, x % 1)\n").unwrap();
         assert!(!assembly.contains("idiv"), "{assembly}");
         assert!(assembly.contains("\tshl\trcx, 3"), "{assembly}");
         assert!(!assembly.contains("division by zero"), "{assembly}");
@@ -922,11 +922,12 @@ mod tests {
 
     #[test]
     fn modulo_by_a_safe_constant_skips_the_checks() {
-        let assembly = assemble("x = 7\nprint(x % 10, x % -3)\n").unwrap();
+        let assembly = assemble("x = int(\"7\").unwrap()\nprint(x % 10, x % -3)\n").unwrap();
         assert!(!assembly.contains("idiv"), "{assembly}");
         assert!(assembly.contains("\timul\trdx"), "{assembly}");
         assert!(!assembly.contains("division by zero"), "{assembly}");
-        let checked = assemble("x = 7\ny = int(\"3\").unwrap()\nprint(x % y)\n").unwrap();
+        let checked =
+            assemble("x = int(\"7\").unwrap()\ny = int(\"3\").unwrap()\nprint(x % y)\n").unwrap();
         assert!(checked.contains("division by zero"), "{checked}");
         assert!(!checked.contains("integer overflow"), "{checked}");
     }
@@ -955,7 +956,10 @@ mod tests {
 
     #[test]
     fn float_arithmetic_uses_sse() {
-        let assembly = assemble("a = 1.5\nb = -a * 2.0 + a / 0.5\nprint(a < b)\n").unwrap();
+        let assembly = assemble(
+            "a = 1.5\nc = float(\"1.5\").unwrap()\nb = -c * 2.0 + c / 0.5\nprint(a < b)\n",
+        )
+        .unwrap();
         for instruction in [
             "\tmulsd\t",
             "\taddsd\t",
@@ -991,9 +995,12 @@ mod tests {
     #[test]
     fn converting_a_float_to_an_int_is_checked() {
         // int compares with the bounds first, so the conversion itself needs no check
-        let assembly = assemble("print(int(2.5), float(2))\n").unwrap();
+        let assembly = assemble(
+            "x = float(\"2.5\").unwrap()\nn = int(\"2\").unwrap()\nprint(int(x), float(n))\n",
+        )
+        .unwrap();
         assert!(assembly.contains("\tcvttsd2si\t"));
-        assert!(assembly.contains("\tcvtsi2sd\txmm0, rax"));
+        assert!(assembly.contains("\tcvtsi2sd\txmm0, "));
         assert!(assembly.contains("cannot convert float to int"));
     }
 
@@ -1208,7 +1215,8 @@ mod tests {
     #[test]
     fn division_by_a_variable_zero_or_minus_one_keeps_the_checks() {
         for divisor in ["y", "0", "-1"] {
-            let source = format!("x = 7\ny = int(\"2\").unwrap()\nprint(x / {divisor})\n");
+            let source =
+                format!("x = int(\"7\").unwrap()\ny = int(\"2\").unwrap()\nprint(x / {divisor})\n");
             let assembly = assemble(&source).unwrap();
             assert!(assembly.contains("division by zero"), "{divisor}");
             assert!(
@@ -1336,7 +1344,7 @@ mod tests {
         }
 
         let draws = assemble_linked(
-            "use random\nprint(random.random(), random.randint(1, 2), random.choice([3]))\n",
+            "use random\nn = int(\"2\").unwrap()\nprint(random.random(), random.randint(1, n), random.choice([3]))\n",
         );
         for label in ["stone.random_float:", "stone.random_below:"] {
             assert!(draws.contains(label), "{label} in {draws}");

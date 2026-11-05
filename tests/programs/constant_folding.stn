@@ -1,0 +1,25 @@
+// operations of constants give what they would give computed while the program runs
+use math
+
+a = 3 * 4 + 1
+print(a, a * 2 - 9 / 2 + 7 % 4 + 2 ** 3)
+big = 9223372036854775807
+print(big + 1, big * 2, -big - 1)
+print(-7 / 2, -7 % 2, 7 / -2, 7 % -2, 2 ** 64, 3 ** 40)
+low = 0 - 9223372036854775807 - 1
+print(low % -1, low / 1, low * -1)
+x = 0.1 + 0.2
+print(x, 1.0 / 3.0, 2.5 * -4.0, 1e308 * 10.0, -(1e308 * 10.0))
+print(float(7), int(2.9), int(-2.9), int(-0.5), math.floor(-2.5), math.sqrt(2.0))
+print(1.5 < 2.5, 2 >= 3, not (1 == 1), 0.0 == -0.0)
+inf = 1e308 * 10.0
+nan = inf - inf
+print(nan, nan == nan, nan != nan, nan < 1.0)
+if 1 > 2:
+    print("never")
+else:
+    print("taken")
+n = 0
+while n < 3:
+    n += 1
+print(n)

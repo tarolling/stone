@@ -50,7 +50,7 @@ pub enum Operand {
 }
 
 /// An arithmetic operator, for ints in [`Inst::Binary`] and floats in [`Inst::FloatBinary`].
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum BinOp {
     Add,
     Sub,
@@ -120,7 +120,7 @@ impl TrigFunc {
 /// A comparison, as in [`Inst::Compare`] and [`Terminator::CmpBranch`].
 ///
 /// For example, `Cond::of(&CompOp::LessThan)` is `Some(Cond::Lt)`, and its negation is `Cond::Ge`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Cond {
     Eq,
     Ne,
@@ -341,7 +341,7 @@ impl Kernel {
 }
 
 /// How [`Inst::FloatToInt`] rounds a float that is not a whole number.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum Rounding {
     /// Toward zero, as `int` does: 2.5 gives 2 and -2.5 gives -2.
     Zero,

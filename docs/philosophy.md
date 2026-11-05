@@ -211,7 +211,10 @@ compiler can keep values in registers and reorder freely. Runtime checks such as
 stay in the language, and the compiler's job is to prove them unnecessary and remove them, not
 to let the programmer turn them off.
 
-Status: the compiler lowers to an IR, inlines small functions that call no others, removes
+Status: the compiler lowers to an IR, inlines small functions that call no others, folds
+operations of constants and branches on them, computes repeated arithmetic once and arithmetic a
+loop never changes before the loop, drops work and whole loops whose results nothing reads (a
+loop only when it is sure to end, so a program that never stops still never stops), removes
 index checks, reads, and uniqueness checks it can prove repeated (moving those a loop repeats
 before it), allocates registers with linear scan, keeping floats in the processor's
 floating-point registers, and specializes a few cases such as division and

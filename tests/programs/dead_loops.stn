@@ -1,0 +1,52 @@
+// loops that change nothing anything after them reads go away, and loops that do stay
+fn unused(n: int) -> int:
+    for i in range(n):
+        y = i * 3 + 7
+    z = 0
+    for i in range(n):
+        z += i * i
+    for i in range(n):
+        for j in range(i, n):
+            w = i * j
+    ret n
+
+fn used(n: int) -> int:
+    z = 0
+    for i in range(n):
+        z += i * i
+    ret z
+
+fn counted(n: int) -> int:
+    i = 0
+    while i < n:
+        i += 1
+    ret i
+
+fn falling(n: int) -> int:
+    i = n
+    while i > 0:
+        i -= 1
+    k = 0
+    while k != n:
+        k += 1
+    ret i + k
+
+fn inner_dead(n: int) -> int:
+    total = 0
+    for i in range(n):
+        for j in range(1000):
+            waste = j * i
+        total += i
+    ret total
+
+fn printing(n: int):
+    for i in range(n):
+        if i % 2 == 0:
+            print(i)
+
+print(unused(1000))
+print(used(1000))
+print(counted(10), counted(-5))
+print(falling(7), falling(0))
+print(inner_dead(50))
+printing(5)

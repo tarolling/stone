@@ -29,6 +29,13 @@ module stone
 
           | Match(expr subject, match_case* cases)
 
+          -- 'msg' is evaluated only if 'test' is false
+          | Assert(expr test, expr? msg)
+
+          -- only at the top level of a file; linking turns each into a FunctionDef without
+          -- parameters named test.<line>.<col>, which only stone test calls
+          | Test(string name, stmt* body)
+
           | Expr(expr value)
           | Use(identifier* path, identifier? alias)
           | Break | Continue

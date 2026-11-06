@@ -289,7 +289,9 @@ shows the same errors in the editor. Runtime errors print the same way, pointing
 expression that failed, from compiled programs as well as from the interpreter: the compiler
 renders each place an error can happen into the executable, so it costs nothing until the error
 happens. A failed `unwrap` of an `err` shows the error it found, as in
-`cannot unwrap err: end of input`. Labels, notes, suggestions, error codes, and the chain of calls behind a runtime error
+`cannot unwrap err: end of input`, and a failed `assert` of a comparison shows both sides, as in
+`assertion failed: [1, 2] == [1, 3]`. `stone test` runs each test block alone, interpreted
+or compiled, with the same report from both. Labels, notes, suggestions, error codes, and the chain of calls behind a runtime error
 are future work.
 
 ## Run anywhere: no libc

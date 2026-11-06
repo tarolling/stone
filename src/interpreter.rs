@@ -1347,23 +1347,40 @@ impl<'out> Interpreter<'out> {
     }
 
     pub fn evaluate(&mut self, module: &Mod) -> Result<(), Box<dyn std::error::Error>> {
-        match module {
-            Mod::Module { body } => {
-                let mut assigned = vec![];
-                collect_assigned(body, &mut assigned);
-                let globals = assigned.into_iter().map(|(name, _)| name).collect();
-                self.global_reads = global_reads(body, &globals);
-                let last_uses = LastUses::new(body, &self.global_reads, &HashSet::new());
-                let program = self.define_all(body, &last_uses);
-                for stmt in &program {
-                    if let ControlFlow::Return(_) = self.eval_stmt(stmt)? {
-                        break; // top-level return
-                    }
-                }
+        let program = self.define_module(module);
+        for stmt in &program {
+            if let ControlFlow::Return(_) = self.eval_stmt(stmt)? {
+                break; // top-level return
             }
         }
-
         Ok(())
+    }
+
+    /// Defines everything `module` defines and calls its function `name`, which takes no
+    /// arguments, without running any of its top-level statements, as `stone test` runs a test.
+    ///
+    /// For example, running `test.4.1` of a module whose top level prints `hi` and whose test
+    /// block at 4:1 prints `1` prints only `1`.
+    pub fn run_function(
+        &mut self,
+        module: &Mod,
+        name: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.define_module(module);
+        self.invoke(name, vec![], false)?;
+        Ok(())
+    }
+
+    /// Defines the functions, enums, and structs of `module` and returns its top-level
+    /// statements, resolved and ready to run.
+    fn define_module(&mut self, module: &Mod) -> Vec<code::Stmt> {
+        let Mod::Module { body } = module;
+        let mut assigned = vec![];
+        collect_assigned(body, &mut assigned);
+        let globals = assigned.into_iter().map(|(name, _)| name).collect();
+        self.global_reads = global_reads(body, &globals);
+        let last_uses = LastUses::new(body, &self.global_reads, &HashSet::new());
+        self.define_all(body, &last_uses)
     }
 
     /// Executes one statement and reports whether it breaks, continues, or returns, then drops
@@ -1729,6 +1746,10 @@ impl<'out> Interpreter<'out> {
                 self.eval_expr(value)?;
                 Ok(ControlFlow::None)
             }
+            S::Assert { test, msg } => {
+                self.assert(test, msg.as_ref())?;
+                Ok(ControlFlow::None)
+            }
             S::Match { subject, cases } => {
                 let value = self.eval_expr(subject)?;
                 for (pattern, body) in cases {
@@ -1981,25 +2002,7 @@ impl<'out> Interpreter<'out> {
                 let mut current = self.eval_expr(left)?;
                 for (op, comparator) in comparisons {
                     let next = self.eval_expr(comparator)?;
-                    let holds = match op {
-                        CompOp::Equal => self.values_equal(&current, &next, 0)?,
-                        CompOp::NotEqual => !self.values_equal(&current, &next, 0)?,
-                        CompOp::LessThan => {
-                            self.order(&current, &next)?.is_some_and(Ordering::is_lt)
-                        }
-                        CompOp::LessThanEqual => {
-                            self.order(&current, &next)?.is_some_and(Ordering::is_le)
-                        }
-                        CompOp::GreaterThan => {
-                            self.order(&current, &next)?.is_some_and(Ordering::is_gt)
-                        }
-                        CompOp::GreaterThanEqual => {
-                            self.order(&current, &next)?.is_some_and(Ordering::is_ge)
-                        }
-                        CompOp::In | CompOp::NotIn => {
-                            return Err("'in' cannot be chained with other comparisons".into());
-                        }
-                    };
+                    let holds = self.holds(op, &current, &next)?;
                     if !holds {
                         return Ok(Value::Bool(false));
                     }
@@ -2224,8 +2227,13 @@ impl<'out> Interpreter<'out> {
     ///
     /// For example, `call_method("len", Value::Str("abc".into()), vec![])` returns `Value::Int(3)`.
     /// Returns whether two values are equal, as `==` compares them: part by part, except a
-    /// struct that implements `eq`, whose `eq` says, and an enum value more than
-    /// [`stdlib::MAX_PRINT_DEPTH`] deep, which fails as compiled code does.
+    /// struct that implements `eq`, whose `eq` says, and a list or map by its length first and
+    /// then element by element, or for a map entry by entry in the left one's order, each value
+    /// looked up by its key in the right one. An enum value, list, or map more than
+    /// [`stdlib::MAX_PRINT_DEPTH`] deep fails, as compiled code does.
+    ///
+    /// For example, `{"a": 1, "b": 2} == {"b": 2, "a": 1}` is true, and `[1, 2] == [1]` compares
+    /// no elements.
     fn values_equal(&mut self, a: &Value, b: &Value, depth: usize) -> EvalResult<bool> {
         let all_equal = |this: &mut Self, a: &[Value], b: &[Value], depth: usize| {
             for (a, b) in a.iter().zip(b) {
@@ -2252,8 +2260,102 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(x.tag == y.tag && all_equal(self, &x.fields, &y.fields, depth + 1)?)
             }
+            (Value::List(x), Value::List(y)) => {
+                if depth >= stdlib::MAX_PRINT_DEPTH {
+                    return Err(stdlib::COMPARE_DEPTH.into());
+                }
+                Ok(x.len() == y.len() && all_equal(self, x, y, depth + 1)?)
+            }
+            (Value::Map(x), Value::Map(y)) => {
+                if depth >= stdlib::MAX_PRINT_DEPTH {
+                    return Err(stdlib::COMPARE_DEPTH.into());
+                }
+                if x.len() != y.len() {
+                    return Ok(false);
+                }
+                for (key, value) in x.iter() {
+                    let Some(other) = y.find(key) else {
+                        return Ok(false);
+                    };
+                    if !self.values_equal(value, other, depth + 1)? {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            }
             _ => a.equals(b, depth),
         }
+    }
+
+    /// Returns whether `a op b` holds, for a comparison `op` other than `in` and `not in`.
+    ///
+    /// For example, `1 < 2` holds, and `nan == nan` does not.
+    fn holds(&mut self, op: &CompOp, a: &Value, b: &Value) -> EvalResult<bool> {
+        Ok(match op {
+            CompOp::Equal => self.values_equal(a, b, 0)?,
+            CompOp::NotEqual => !self.values_equal(a, b, 0)?,
+            CompOp::LessThan => self.order(a, b)?.is_some_and(Ordering::is_lt),
+            CompOp::LessThanEqual => self.order(a, b)?.is_some_and(Ordering::is_le),
+            CompOp::GreaterThan => self.order(a, b)?.is_some_and(Ordering::is_gt),
+            CompOp::GreaterThanEqual => self.order(a, b)?.is_some_and(Ordering::is_ge),
+            CompOp::In | CompOp::NotIn => {
+                return Err("'in' cannot be chained with other comparisons".into());
+            }
+        })
+    }
+
+    /// Runs `assert test, msg`: nothing if `test` is true, and otherwise the error
+    /// `assertion failed`, at `test`, followed by the message if there is one, or else, for a
+    /// test that is one comparison, by its two sides as `print` writes them in a list, as in
+    /// `assertion failed: [1, 2] == [1, 3]`. Each side is evaluated once, left first.
+    fn assert(&mut self, test: &code::Expr, msg: Option<&code::Expr>) -> EvalResult<()> {
+        use code::ExprKind as E;
+        let sides = match &test.kind {
+            E::Compare(left, comparisons) if comparisons.len() == 1 => {
+                let (op, right) = &comparisons[0];
+                let a = self.eval_expr(left)?;
+                let b = self.eval_expr(right)?;
+                let holds = self.holds(op, &a, &b).map_err(|e| located(e, test.span))?;
+                Some((holds, a, op, b))
+            }
+            E::Membership(op, needle, container) => {
+                let a = self.eval_expr(needle)?;
+                let b = self.eval_expr(container)?;
+                let found = self.contains(&b, &a).map_err(|e| located(e, test.span))?;
+                Some((found == (*op == CompOp::In), a, op, b))
+            }
+            _ => None,
+        };
+        let holds = match &sides {
+            Some((holds, ..)) => *holds,
+            None => self.eval_expr(test)?.is_true(),
+        };
+        if holds {
+            return Ok(());
+        }
+        let mut message = stdlib::ASSERTION_FAILED.to_string();
+        match (msg, sides) {
+            (Some(msg), _) => {
+                let Value::Str(text) = self.eval_expr(msg)? else {
+                    return Err(located(
+                        "an assert's message must be a str".into(),
+                        msg.span,
+                    ));
+                };
+                message.push_str(": ");
+                message.push_str(&text);
+            }
+            (None, Some((_, a, op, b))) => {
+                // a value nested too deeply to write fails at the test, as compiled code does
+                let at_test = |e| located(e, test.span);
+                message.push_str(": ");
+                self.write_value(&mut message, &a, true).map_err(at_test)?;
+                message.push_str(&format!(" {} ", stdlib::comparison_text(op)));
+                self.write_value(&mut message, &b, true).map_err(at_test)?;
+            }
+            (None, None) => {}
+        }
+        Err(Box::new(Diagnostic::error(test.span, message)))
     }
 
     /// Returns whether `container` holds `needle`, as `needle in container` and

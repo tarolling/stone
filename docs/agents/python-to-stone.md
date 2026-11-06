@@ -52,7 +52,7 @@ since stone copies values.
 | `[x for x in xs if p(x)]`, `list(filter(p, xs))` | `xs.filter(p)` |
 | `any(p(x) for x in xs)`, `all(...)` | `xs.any(p)`, `xs.all(p)` |
 | `min(xs, key=f)`, `max(xs, key=f)` | `xs.min_by_key(f).unwrap()`, `xs.max_by_key(f).unwrap()`; of equal keys, `max_by_key` gives the last, where Python's `max` gives the first |
-| `x in xs`, `t in s`, `x not in xs` | the same; elements compare with `==`, so not lists or maps, and `in` never chains |
+| `x in xs`, `t in s`, `x not in xs` | the same; elements compare with `==`, and `in` never chains |
 | `xs.sort(key=f)` | `xs.sort_by_key(f)` |
 | `xs.sort(key=f, reverse=True)` | `xs.sort_by_key(g)` with `g` negating `f`'s key, which keeps equal keys in order as Python does, or a struct with `impl ord` |
 | `xs.remove(x)`, `xs.index(x)` | a loop that finds the index, then `pop(i)` |
@@ -139,6 +139,7 @@ print(total)
 | a closure, or a lambda that reads a variable | a lambda reading it, which captures a copy where it is written; a closure that changes what it captured (`nonlocal`) becomes a function that takes and returns it |
 | `return a, b` | `ret (a, b)`, with `-> tuple[A, B]` |
 | returning `None` on failure | `-> option[T]`, returning `none` or `some(x)` |
+| `assert x > 0, f"bad {x}"` | `assert x > 0, "bad {x}"`: the same, but the message must be a `str` |
 | `raise` | return a `result[T, str]` with `err("message")` and let the caller decide; `os.exit(1)` after printing a message for a fatal error |
 | `try: int(s) except ValueError:` | `match int(s):` with `case ok(n):` and `case err(message):`, since `int(s)` of a `str` (or a float) returns a `result[int, str]` |
 | `int(s)` where bad text should end the program | `int(s).unwrap()`, which stops it with `cannot unwrap err:` and the reason |

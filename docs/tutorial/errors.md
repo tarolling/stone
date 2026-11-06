@@ -57,6 +57,22 @@ A runtime error prints like a checker error, pointing at the expression that fai
 with status 1. `stone run` and a compiled executable print the same thing. See {doc}`../reference/runtime-errors` for
 every one.
 
+A program can check what it relies on with `assert`, which stops it the same way unless a
+condition holds:
+
+```stone
+fn average(values: list[int]) -> int:
+    assert values.len() > 0, "average of no values"
+    total = 0
+    for v in values:
+        total += v
+    ret total / values.len()
+```
+
+A failed comparison shows both sides, so `assert xs == [1, 3]` with `xs` holding `[1, 2]` stops
+with `assertion failed: [1, 2] == [1, 3]`, and a message after a comma, which must be a `str`,
+says what went wrong in its place. The message is only evaluated when the assertion fails.
+
 ## Errors you expect
 
 Some failures are part of a program's job, such as a line of a file that is not a number. stone

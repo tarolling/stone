@@ -10,6 +10,13 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-06
+
+### Added
+
+- `assert` is highlighted as a keyword, and so is `test` where a test block opens.
+- The outline shows each test block as `test "description"`, and unused warnings never name one.
+
 ## [0.4.1] - 2026-11-03
 
 ### Added

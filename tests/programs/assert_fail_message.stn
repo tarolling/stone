@@ -1,0 +1,9 @@
+// a failed assert with a message shows the message after "assertion failed"
+
+fn check(n: int):
+    assert n > 0, "n is {n}"
+
+check(1)
+print("one passed")
+check(-1)
+print("never")

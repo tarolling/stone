@@ -17,6 +17,10 @@ use std::collections::{HashMap, HashSet};
 #[derive(Debug, Default)]
 pub(crate) struct GlobalReads {
     functions: HashMap<String, HashSet<String>>,
+    /// The globals each function reads itself, by the function's name.
+    direct: HashMap<String, HashSet<String>>,
+    /// The functions each function may call, by the function's name.
+    calls: HashMap<String, HashSet<String>>,
     /// The name of every function of an `impl` block, by its own name, since a call such as
     /// `x.get()` may call any of them named `get`: which struct `x` is, nothing here knows.
     methods: HashMap<String, Vec<String>>,
@@ -73,6 +77,24 @@ impl GlobalReads {
             read.extend(self.values.iter().cloned());
         }
         read
+    }
+
+    /// Returns how the function `name` may read the global `global`: `Some(None)` if it reads it
+    /// itself, `Some(Some(f))` if only through a call of the function `f`, the first such by
+    /// name, and `None` if it does not.
+    ///
+    /// For example, after `fn f() -> int: ret g` and `fn h() -> int: ret f()`, `h` reads `g`
+    /// through `f`.
+    pub(crate) fn read_by(&self, name: &str, global: &str) -> Option<Option<&str>> {
+        if self.direct.get(name)?.contains(global) {
+            return Some(None);
+        }
+        let mut callees: Vec<&String> = self.calls.get(name)?.iter().collect();
+        callees.sort();
+        callees
+            .into_iter()
+            .find(|callee| self.functions[callee.as_str()].contains(global))
+            .map(|callee| Some(callee.as_str()))
     }
 
     /// Returns the functions of `impl` blocks a call of `name` after a dot may call, as in
@@ -277,6 +299,7 @@ pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalRe
         if names.calls_a_value(is_function, &reads.value_fields) {
             called.extend(valued.iter().cloned());
         }
+        reads.direct.insert(name.clone(), read.clone());
         reads.functions.insert(name.clone(), read);
         calls.insert(name.clone(), called);
     }
@@ -302,6 +325,7 @@ pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalRe
         .iter()
         .flat_map(|function| reads.functions[function].iter().cloned())
         .collect();
+    reads.calls = calls;
     reads
 }
 
@@ -341,6 +365,14 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Names<'a>) {
             expr_names(target, out);
             expr_names(value, out);
         }
+        // a failed comparison writes both sides, a struct as its own `display` says
+        StmtKind::Assert { test, msg } => {
+            out.methods.push("display");
+            expr_names(test, out);
+            if let Some(msg) = msg {
+                expr_names(msg, out);
+            }
+        }
         StmtKind::Expr { value } | StmtKind::Return { value: Some(value) } => {
             expr_names(value, out)
         }
@@ -374,6 +406,7 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Names<'a>) {
         | StmtKind::ImplDef { .. }
         | StmtKind::TraitDef { .. }
         | StmtKind::Use { .. }
+        | StmtKind::Test { .. }
         | StmtKind::Break
         | StmtKind::Continue => {}
     }
@@ -608,6 +641,15 @@ impl Liveness<'_> {
                 self.expr(value, &mut live);
                 live
             }
+            // the message runs only if the test fails, but may read anything the test does
+            StmtKind::Assert { test, msg } => {
+                let mut live = out;
+                if let Some(msg) = msg {
+                    self.expr(msg, &mut live);
+                }
+                self.expr(test, &mut live);
+                live
+            }
             StmtKind::Expr { value } | StmtKind::Return { value: Some(value) } => {
                 let mut live = out;
                 self.expr(value, &mut live);
@@ -671,6 +713,7 @@ impl Liveness<'_> {
             | StmtKind::Break
             | StmtKind::Continue
             | StmtKind::FunctionDef { .. }
+            | StmtKind::Test { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }
@@ -998,11 +1041,11 @@ mod tests {
         let source = "struct V:\n    n: int\nimpl display for V:\n    fn display(self) -> str:\n        \
                       ret str(ws[0])\nfn show(v: V):\n    print(v)\nfn text(v: V) -> str:\n    \
                       ret str(v)\nfn own(v: V) -> str:\n    ret v.display()\nfn other(v: V) -> int:\n    \
-                      ret v.n\nws = [1]\n";
+                      ret v.n\nfn check(v: V, w: V):\n    assert v == w\nws = [1]\n";
         let module = parse(source).unwrap();
         let crate::ast::Mod::Module { body } = &module;
         let reads = global_reads(body, &HashSet::from(["ws".to_string()]));
-        for name in ["show", "text", "own"] {
+        for name in ["show", "text", "own", "check"] {
             assert_eq!(reads[name], HashSet::from(["ws".to_string()]), "{name}");
         }
         assert!(reads["other"].is_empty());

@@ -1,0 +1,24 @@
+// one passing test, one whose failure is in a function it calls, and one that prints first
+struct Point:
+    x: int
+    y: int
+
+fn parse(text: str) -> Point:
+    parts = text.split(",")
+    ret Point(x=int(parts[0]).unwrap(), y=int(parts[1]).unwrap())
+
+print("top-level code never runs under stone test")
+
+test "parses a point":
+    p = parse("3,4")
+    assert p.x == 3
+    assert p.y == 4
+
+test "parses a point without a comma":
+    p = parse("34")
+    assert p.x == 34
+
+test "prints before it fails":
+    print("checking the origin")
+    eprint("to stderr")
+    assert parse("0,0") == Point(x=0, y=1)

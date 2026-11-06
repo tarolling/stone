@@ -39,7 +39,7 @@ use super::{
 };
 use crate::ast::{
     Arg, BoolOp, Constant, Expr, ExprKind, Keyword, MatchCase, Mod, Operator, Pattern, PatternKind,
-    Stmt, StmtKind, UnaryOp, constant_int,
+    Stmt, StmtKind, UnaryOp, constant_int, is_lambda, is_test,
 };
 use crate::checker::{
     Analysis, Conversion, Converter, DISPLAY, EQ, Enums, Instance, Method, Methods, OPTION, ORD,
@@ -53,16 +53,20 @@ use crate::codegen::gpu::kernel::{Argument, arguments};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
 use crate::span::{FileId, Span};
 use crate::stdlib::{
-    BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, CUT_CHARACTER, END_OF_INPUT,
-    INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE, PRELUDE_CLAMP,
-    PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR, UNWRAP_NONE,
-    UNWRAP_OK, math, module_constant, random,
+    ASSERTION_FAILED, BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, CUT_CHARACTER,
+    END_OF_INPUT, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE,
+    PRELUDE_CLAMP, PRELUDE_SORT, PRINT_DEPTH, SLICE_STEP_ZERO, STRING_INDEX_RANGE, UNWRAP_ERR,
+    UNWRAP_NONE, UNWRAP_OK, math, module_constant, random,
 };
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 
 /// The type of each variable, keyed by the function it belongs to (`None` for globals) and name.
 type Variables = HashMap<(Option<String>, String), Type>;
+
+/// The environment variable that names the test a build for `stone test` runs, as in
+/// `STONE_TEST=test.4.1`.
+pub const TEST_VARIABLE: &str = "STONE_TEST";
 
 /// Lowers every function in `module`, then its top-level code as `main`, using what the checker
 /// learned about it in `analysis`: the types it inferred for every expression, for every
@@ -80,7 +84,7 @@ pub fn lower(module: &Mod, analysis: &Analysis) -> Result<Program, String> {
 /// only the branch taken, so a Windows program never reaches the X11 and Wayland code, and a
 /// Linux one never the Win32 windows or Windows' resolver.
 pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, String> {
-    lower_with(module, analysis, os, false)
+    lower_with(module, analysis, os, false, None)
 }
 
 /// Lowers `module` as [`lower_for`] does and, if `gpu_launch`, has each piece of arithmetic on
@@ -90,11 +94,16 @@ pub fn lower_for(module: &Mod, analysis: &Analysis, os: Os) -> Result<Program, S
 ///
 /// For example, `c = a * 2.0 + b` then lowers to `v9 = call stone.gpu_launch(0, v8)`, where
 /// `v8` is the list of the kernel's arguments, and a branch on `v9` that skips the loop.
+///
+/// With `tests`, the linked names of test functions such as `test.4.1`, it lowers a build for
+/// `stone test` instead: `main` runs none of the top-level statements, but calls the one test
+/// that the `STONE_TEST` environment variable names, failing if it names none of them.
 pub fn lower_with(
     module: &Mod,
     analysis: &Analysis,
     os: Os,
     gpu_launch: bool,
+    tests: Option<&[String]>,
 ) -> Result<Program, String> {
     let Mod::Module { body } = module;
     let Analysis {
@@ -204,7 +213,8 @@ pub fn lower_with(
     let mut generic = HashMap::new();
     let mut bodies = HashMap::new();
     // a function of another file (the prelude, a library, or a module of the standard library
-    // written in stone) is lowered only once lowered code calls it or takes its address
+    // written in stone), or a lambda, is lowered only once lowered code calls it or takes its
+    // address, and a test block's function never is, since nothing outside `stone test` calls it
     let mut deferred = HashSet::new();
     for stmt in body {
         match &stmt.kind {
@@ -221,7 +231,7 @@ pub fn lower_with(
                 name, args, body, ..
             } => {
                 bodies.insert(name.clone(), (&args.args, body));
-                if stmt.span.file != FileId::ENTRY {
+                if stmt.span.file != FileId::ENTRY || is_test(name) || is_lambda(name) {
                     deferred.insert(name.clone());
                     continue;
                 }
@@ -271,7 +281,11 @@ pub fn lower_with(
             _ => top_level.push(stmt.clone()),
         }
     }
-    functions.push(Lowerer::new(&context, None).function(&[], &top_level)?);
+    let main = Lowerer::new(&context, None);
+    functions.push(match tests {
+        Some(tests) => main.test_main(tests),
+        None => main.function(&[], &top_level)?,
+    });
     // an instance can call other instances, and both instances and helpers can ask for the
     // helpers of the enums and structs their values hold, so this runs until none is left
     let (mut made, mut instanced, mut scanned) = (0, 0, 0);
@@ -321,6 +335,8 @@ pub fn lower_with(
         functions.push(match helper {
             Helper::Print(ty @ Type::Struct { .. }) => lowerer.struct_printer(&ty)?,
             Helper::Print(ty) => lowerer.enum_printer(&ty)?,
+            Helper::Equal(Type::List(elem)) => lowerer.list_comparer(&elem)?,
+            Helper::Equal(Type::Map(key, value)) => lowerer.map_comparer(&key, &value)?,
             Helper::Equal(ty) => lowerer.enum_comparer(&ty)?,
             Helper::FunctionValue {
                 function,
@@ -514,7 +530,7 @@ fn method_receivers<'a>(body: &'a [Stmt], out: &mut HashSet<&'a str>) {
 enum Helper {
     /// Prints a value of an enum or struct type.
     Print(Type),
-    /// Compares two values of an enum type with `==`.
+    /// Compares two values of an enum, list, or map type with `==`.
     Equal(Type),
     /// The code of a function value of the stone function `function` (the label of its copy,
     /// for a generic one), which takes the value first and then arguments of types `params`, and
@@ -534,14 +550,16 @@ impl Helper {
     /// Returns the helper's label.
     ///
     /// For example, `option[list[int]]` is printed by `stone.print_enum.option.list_int`, `Point`
-    /// by `stone.print_struct.Point`, and two `option[int]`s are compared by
-    /// `stone.eq_enum.option.int`.
+    /// by `stone.print_struct.Point`, two `option[int]`s are compared by
+    /// `stone.eq_enum.option.int`, and two `list[str]`s by `stone.eq_list.str`.
     fn label(&self) -> String {
         match self {
             Helper::Print(ty @ Type::Struct { .. }) => {
                 format!("stone.print_struct.{}", mangle(ty))
             }
             Helper::Print(ty) => format!("stone.print_enum.{}", mangle(ty)),
+            Helper::Equal(Type::List(elem)) => format!("stone.eq_list.{}", mangle(elem)),
+            Helper::Equal(ty @ Type::Map(..)) => format!("stone.eq_map.{}", mangle(ty)),
             Helper::Equal(ty) => format!("stone.eq_enum.{}", mangle(ty)),
             Helper::FunctionValue { function, .. } => format!("stone.fn_value.{function}"),
         }
@@ -1095,6 +1113,74 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Makes the `main` of a build for `stone test`, which calls the test function of `tests`
+    /// that the `STONE_TEST` environment variable names, such as `test.4.1`, and runs none of
+    /// the program's top-level statements, or stops the program if it names none of them.
+    fn test_main(mut self, tests: &[String]) -> Function {
+        let entry = self.new_block();
+        self.start(entry);
+        let key = self.fresh();
+        self.push(Inst::StrAddr {
+            dst: key,
+            text: TEST_VARIABLE.to_string(),
+        });
+        // a new string, or 0 when the variable is not set
+        let name = self.runtime_call("stone.os_env", vec![Operand::Reg(key)], None);
+        let (missing, done) = (self.new_block(), self.new_block());
+        let first = self.new_block();
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Eq,
+            float: false,
+            lhs: name,
+            rhs: Operand::Imm(0),
+            then: missing,
+            otherwise: first,
+        });
+        self.start(first);
+        for test in tests {
+            let text = self.fresh();
+            self.push(Inst::StrAddr {
+                dst: text,
+                text: test.clone(),
+            });
+            let same = self.runtime_call("stone.str_eq", vec![name, Operand::Reg(text)], None);
+            let (run, next) = (self.new_block(), self.new_block());
+            self.terminate(Terminator::Branch {
+                cond: same,
+                then: run,
+                otherwise: next,
+            });
+            self.start(run);
+            let result = self.fresh();
+            self.push(Inst::Call {
+                dsts: vec![result],
+                callee: Callee::User(test.clone()),
+                args: vec![],
+            });
+            self.jump(done);
+            self.start(next);
+        }
+        self.jump(missing);
+        self.start(missing);
+        self.terminate(Terminator::Fail(
+            format!("{TEST_VARIABLE} names no test of this program"),
+            vec![],
+        ));
+        self.start(done);
+        self.push(Inst::Release {
+            src: name,
+            kind: RcKind::Str,
+        });
+        self.leave(&[Operand::Imm(0)]);
+        Function {
+            name: None,
+            params: vec![],
+            blocks: self.layout(),
+            vreg_count: self.vreg_count,
+            helper: false,
+        }
+    }
+
     /// Makes the function that prints a value of the enum type `ty` as the interpreter does, such
     /// as `Shape.Rect(2.0, 3.0)` or `some('a')`, given the value and how many enum values it is
     /// inside. Printing one nested too deeply stops the program, pointing at the `print` that
@@ -1273,6 +1359,203 @@ impl<'a> Lowerer<'a> {
         })
     }
 
+    /// Makes the function that compares two lists whose elements are of type `elem` with `==`,
+    /// given the two and how many enum values, lists, and maps they are inside, returning 1 if
+    /// they are equal and 0 if not: the same length, and then the same elements, compared in
+    /// turn until two differ. Comparing ones nested too deeply stops the program, as
+    /// [`Lowerer::enum_comparer`] does.
+    fn list_comparer(mut self, elem: &Type) -> Result<Function, String> {
+        let (a, b, depth) = (self.fresh(), self.fresh(), self.fresh());
+        let entry = self.new_block();
+        self.start(entry);
+        self.compare_depth = self.enter_level(Operand::Reg(depth), COMPARE_DEPTH);
+        let width = self.leaves(elem).len();
+        let compared = self.compared(elem);
+        // the lengths in slots, which are equal exactly when the counts of elements are
+        let (len_a, len_b) = (self.fresh(), self.fresh());
+        self.push(Inst::ListLen {
+            dst: len_a,
+            list: Operand::Reg(a),
+        });
+        self.push(Inst::ListLen {
+            dst: len_b,
+            list: Operand::Reg(b),
+        });
+        let (same, equal, differ) = (self.new_block(), self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Eq,
+            float: false,
+            lhs: Operand::Reg(len_a),
+            rhs: Operand::Reg(len_b),
+            then: same,
+            otherwise: differ,
+        });
+        self.start(same);
+        let next = self.fresh();
+        self.push(Inst::Copy {
+            dst: next,
+            src: Operand::Imm(0),
+        });
+        let (header, body, step) = (self.new_block(), self.new_block(), self.new_block());
+        self.loop_depth += 1;
+        self.jump(header);
+        self.start(header);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(next),
+            rhs: Operand::Reg(len_a),
+            then: body,
+            otherwise: equal,
+        });
+        self.start(body);
+        // comparing changes nothing, so the values are borrowed
+        let lhs = self.borrowed_slots(Operand::Reg(a), Operand::Reg(next), width);
+        let rhs = self.borrowed_slots(Operand::Reg(b), Operand::Reg(next), width);
+        self.equal_leaves(&compared, &lhs, &rhs, step, differ);
+        self.start(step);
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: next,
+            lhs: Operand::Reg(next),
+            rhs: Operand::Imm(width as i64),
+        });
+        self.jump(header);
+        self.loop_depth -= 1;
+        self.start(equal);
+        self.terminate(Terminator::Return(vec![Operand::Imm(1)]));
+        self.start(differ);
+        self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
+        Ok(Function {
+            name: self.name.clone(),
+            params: vec![a, b, depth],
+            blocks: self.layout(),
+            vreg_count: self.vreg_count,
+            helper: true,
+        })
+    }
+
+    /// Makes the function that compares two maps from `key` to `value` with `==`, given the two
+    /// and how many enum values, lists, and maps they are inside, returning 1 if they are equal
+    /// and 0 if not: the same number of entries, and then, for each entry of the first in order,
+    /// an entry for its key in the second whose value is equal, stopping at the first that is
+    /// missing or differs. Comparing ones nested too deeply stops the program, as
+    /// [`Lowerer::enum_comparer`] does.
+    fn map_comparer(mut self, key: &Type, value: &Type) -> Result<Function, String> {
+        let (a, b, depth) = (self.fresh(), self.fresh(), self.fresh());
+        let entry = self.new_block();
+        self.start(entry);
+        self.compare_depth = self.enter_level(Operand::Reg(depth), COMPARE_DEPTH);
+        // an entry is its key, then its value's values
+        let width = 1 + self.leaves(value).len();
+        let compared = self.compared(value);
+        // removed entries are left out of both, so each holds exactly its entries
+        self.close_up(Operand::Reg(a));
+        self.close_up(Operand::Reg(b));
+        let (len_a, len_b) = (self.fresh(), self.fresh());
+        self.push(Inst::ListLen {
+            dst: len_a,
+            list: Operand::Reg(a),
+        });
+        self.push(Inst::ListLen {
+            dst: len_b,
+            list: Operand::Reg(b),
+        });
+        let (same, equal, differ) = (self.new_block(), self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Eq,
+            float: false,
+            lhs: Operand::Reg(len_a),
+            rhs: Operand::Reg(len_b),
+            then: same,
+            otherwise: differ,
+        });
+        self.start(same);
+        let next = self.fresh();
+        self.push(Inst::Copy {
+            dst: next,
+            src: Operand::Imm(0),
+        });
+        let (header, body, found, step) = (
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+            self.new_block(),
+        );
+        self.loop_depth += 1;
+        self.jump(header);
+        self.start(header);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(next),
+            rhs: Operand::Reg(len_a),
+            then: body,
+            otherwise: equal,
+        });
+        self.start(body);
+        let entry_key = self.fresh();
+        self.push(Inst::ListGet {
+            dst: entry_key,
+            list: Operand::Reg(a),
+            index: Operand::Reg(next),
+            offset: 0,
+        });
+        let other = self.map_find(Operand::Reg(b), Operand::Reg(entry_key), key, None);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Ge,
+            float: false,
+            lhs: other,
+            rhs: Operand::Imm(0),
+            then: found,
+            otherwise: differ,
+        });
+        self.start(found);
+        let first = self.slot(Operand::Reg(next), 1);
+        let lhs = self.borrowed_slots(Operand::Reg(a), first, width - 1);
+        let first = self.slot(other, 1);
+        let rhs = self.borrowed_slots(Operand::Reg(b), first, width - 1);
+        self.equal_leaves(&compared, &lhs, &rhs, step, differ);
+        self.start(step);
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: next,
+            lhs: Operand::Reg(next),
+            rhs: Operand::Imm(width as i64),
+        });
+        self.jump(header);
+        self.loop_depth -= 1;
+        self.start(equal);
+        self.terminate(Terminator::Return(vec![Operand::Imm(1)]));
+        self.start(differ);
+        self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
+        Ok(Function {
+            name: self.name.clone(),
+            params: vec![a, b, depth],
+            blocks: self.layout(),
+            vreg_count: self.vreg_count,
+            helper: true,
+        })
+    }
+
+    /// Reads the `count` slots of `list` from slot `first` on, borrowed rather than retained,
+    /// for code that only looks at them while the list is alive and unchanged.
+    fn borrowed_slots(&mut self, list: Operand, first: Operand, count: usize) -> Vec<Operand> {
+        (0..count)
+            .map(|field| {
+                let index = self.slot(first, field);
+                let dst = self.fresh();
+                self.push(Inst::ListGet {
+                    dst,
+                    list,
+                    index,
+                    offset: 0,
+                });
+                Operand::Reg(dst)
+            })
+            .collect()
+    }
+
     /// Asks for `helper` to be made, unless something asked for it before, and returns its label.
     fn helper(&self, helper: Helper) -> String {
         let label = helper.label();
@@ -1418,7 +1701,7 @@ impl<'a> Lowerer<'a> {
                         otherwise,
                     });
                 }
-                Type::Enum { .. } => {
+                Type::Enum { .. } | Type::List(_) | Type::Map(..) => {
                     let label = self.helper(Helper::Equal(leaf.clone()));
                     let equal = self.fresh();
                     self.push(Inst::Call {
@@ -2147,6 +2430,8 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
+            StmtKind::Assert { test, msg } => self.assert_stmt(test, msg.as_deref())?,
+
             StmtKind::Continue => {
                 if let Some(header) = self.loops.last().map(|l| l.header) {
                     self.release_held(self.loops.len());
@@ -2154,7 +2439,10 @@ impl<'a> Lowerer<'a> {
                 }
             }
 
-            StmtKind::FunctionDef { .. } | StmtKind::ImplDef { .. } | StmtKind::TraitDef { .. } => {
+            StmtKind::FunctionDef { .. }
+            | StmtKind::Test { .. }
+            | StmtKind::ImplDef { .. }
+            | StmtKind::TraitDef { .. } => {
                 return Err("functions must be defined at the top level".to_string());
             }
             StmtKind::EnumDef { .. } | StmtKind::StructDef { .. } => {}
@@ -4878,6 +5166,217 @@ impl<'a> Lowerer<'a> {
         Ok(Operand::Reg(dst))
     }
 
+    /// Lowers `assert test, msg`, which goes on if `test` is true and otherwise stops the program
+    /// at `test` with [`ASSERTION_FAILED`], followed by the message, evaluated only then,
+    /// or, for a test that is one comparison, by its two sides as `print` writes them in a list,
+    /// each evaluated once, left first, as the interpreter's `assert` does.
+    fn assert_stmt(&mut self, test: &Expr, msg: Option<&Expr>) -> Result<(), String> {
+        let (pass, failed) = (self.new_block(), self.new_block());
+        let compared = match &test.kind {
+            ExprKind::Compare {
+                left,
+                ops,
+                comparators,
+            } if ops.len() == 1 && msg.is_none() => Some((left, &ops[0], &comparators[0])),
+            _ => None,
+        };
+        let Some((left, op, right)) = compared else {
+            self.cond(test, pass, failed)?;
+            self.start(failed);
+            if let Some(msg) = msg {
+                let text = self.expr(msg)?;
+                self.fail_assertion(test.span, Some((&Type::Str, &[text])), None);
+                // never runs, but the text is no longer owned on the way on
+                self.release_temp(text);
+            }
+            self.stop_assertion(test.span);
+            self.start(pass);
+            return Ok(());
+        };
+        let left_ty = self.type_of(left)?;
+        let right_ty = self.type_of(right)?;
+        let lhs = self.expr_flat(left)?;
+        let result = self.fresh();
+        let rhs = if op.is_membership() {
+            let held = self.container(right, &right_ty, &[])?;
+            let outer = std::mem::replace(&mut self.span, test.span);
+            let found = self.contains_values(held, &right_ty, &lhs, None)?;
+            self.span = outer;
+            match op {
+                crate::ast::CompOp::NotIn => self.push(Inst::Not {
+                    dst: result,
+                    src: found,
+                }),
+                _ => self.push(Inst::Copy {
+                    dst: result,
+                    src: found,
+                }),
+            }
+            vec![held]
+        } else {
+            let rhs = self.expr_flat(right)?;
+            let cond = Cond::of(op).ok_or("'in' is not a comparison of two values")?;
+            let outer = std::mem::replace(&mut self.span, test.span);
+            self.compare_link(cond, &right_ty, &lhs, &rhs, result);
+            self.span = outer;
+            rhs
+        };
+        let done = self.new_block();
+        self.terminate(Terminator::Branch {
+            cond: Operand::Reg(result),
+            then: done,
+            otherwise: failed,
+        });
+        self.start(failed);
+        self.fail_assertion(
+            test.span,
+            Some((&left_ty, &lhs)),
+            Some((crate::stdlib::comparison_text(op), &right_ty, &rhs)),
+        );
+        self.stop_assertion(test.span);
+        self.start(done);
+        for value in lhs.into_iter().chain(rhs) {
+            self.release_temp(value);
+        }
+        self.jump(pass);
+        self.start(pass);
+        Ok(())
+    }
+
+    /// Stops the program at `span` with [`ASSERTION_FAILED`], then `: ` and `first`'s values as
+    /// `print` writes them, a string as written in a list when `second` follows it, and then
+    /// the comparison and `second`'s values, if given. Nothing is written without `first`, and
+    /// [`Lowerer::stop_assertion`] then ends the block.
+    fn fail_assertion(
+        &mut self,
+        span: Span,
+        first: Option<(&Type, &[Operand])>,
+        second: Option<(&str, &Type, &[Operand])>,
+    ) {
+        let outer_span = std::mem::replace(&mut self.span, span);
+        if let Some((ty, values)) = first {
+            let outer = self.runtime_call("stone.text_begin", vec![], None);
+            self.print_text(&format!("{ASSERTION_FAILED}: "));
+            self.print_flat(ty, values, second.is_some());
+            if let Some((op, ty, values)) = second {
+                self.print_text(&format!(" {op} "));
+                self.print_flat(ty, values, true);
+            }
+            let message = self.runtime_call("stone.text_end", vec![outer], None);
+            self.push(Inst::Call {
+                dsts: vec![],
+                callee: Callee::Runtime("stone.fail"),
+                args: vec![message],
+            });
+        }
+        self.span = outer_span;
+    }
+
+    /// Ends a failed assertion's block at `span` with [`ASSERTION_FAILED`], which only runs if
+    /// [`Lowerer::fail_assertion`] wrote no message, since its call stops the program first.
+    fn stop_assertion(&mut self, span: Span) {
+        let outer = std::mem::replace(&mut self.span, span);
+        self.terminate(Terminator::Fail(ASSERTION_FAILED.to_string(), vec![]));
+        self.span = outer;
+    }
+
+    /// Writes 1 into `result` if `lhs op rhs` holds for the values `lhs_values` and
+    /// `rhs_values` of two values of type `ty`, and 0 if not, for a comparison `cond` other than
+    /// `in`, borrowing both.
+    fn compare_link(
+        &mut self,
+        cond: Cond,
+        ty: &Type,
+        lhs_values: &[Operand],
+        rhs_values: &[Operand],
+        result: VReg,
+    ) {
+        let (lhs, rhs) = (lhs_values[0], rhs_values[0]);
+        match ty.clone() {
+            // ordered by its `cmp`, whose ordering's tag says which comes first
+            ty if !matches!(cond, Cond::Eq | Cond::Ne) && self.implements(&ty, ORD) => {
+                let order = self.compare_call(&ty, "cmp", lhs_values, rhs_values);
+                let tag = self.fresh();
+                self.push(Inst::EnumTag {
+                    dst: tag,
+                    value: Operand::Reg(order),
+                });
+                // `less` is 0, `equal` 1, and `greater` 2
+                let (cond, against) = match cond {
+                    Cond::Lt => (Cond::Eq, 0),
+                    Cond::Le => (Cond::Ne, 2),
+                    Cond::Gt => (Cond::Eq, 2),
+                    _ => (Cond::Ne, 0),
+                };
+                self.push(Inst::Compare {
+                    cond,
+                    float: false,
+                    dst: result,
+                    lhs: Operand::Reg(tag),
+                    rhs: Operand::Imm(against),
+                });
+                self.push(Inst::Release {
+                    src: Operand::Reg(order),
+                    kind: RcKind::Enum,
+                });
+            }
+            // compared value by value, which only == and != do
+            ty if is_compound(&ty) => {
+                let (yes, no, join) = (self.new_block(), self.new_block(), self.new_block());
+                self.equal_branch(&ty, lhs_values, rhs_values, yes, no);
+                let equal = i64::from(cond == Cond::Eq);
+                self.start(yes);
+                self.push(Inst::Copy {
+                    dst: result,
+                    src: Operand::Imm(equal),
+                });
+                self.jump(join);
+                self.start(no);
+                self.push(Inst::Copy {
+                    dst: result,
+                    src: Operand::Imm(1 - equal),
+                });
+                self.start(join);
+            }
+            // strings and bytes compare by contents
+            ty @ (Type::Str | Type::Bytes) if cond == Cond::Ne => {
+                let equal = self.fresh();
+                self.push(Inst::Call {
+                    dsts: vec![equal],
+                    callee: Callee::Runtime(equality_routine(&ty)),
+                    args: vec![lhs, rhs],
+                });
+                self.push(Inst::Not {
+                    dst: result,
+                    src: Operand::Reg(equal),
+                });
+            }
+            ty @ (Type::Str | Type::Bytes) if cond == Cond::Eq => self.push(Inst::Call {
+                dsts: vec![result],
+                callee: Callee::Runtime(equality_routine(&ty)),
+                args: vec![lhs, rhs],
+            }),
+            // ordered by a call that returns -1, 0, or 1
+            ty @ (Type::Str | Type::Bytes) => {
+                let order = self.runtime_call(order_routine(&ty), vec![lhs, rhs], None);
+                self.push(Inst::Compare {
+                    cond,
+                    float: false,
+                    dst: result,
+                    lhs: order,
+                    rhs: Operand::Imm(0),
+                });
+            }
+            ty => self.push(Inst::Compare {
+                cond,
+                float: ty == Type::Float,
+                dst: result,
+                lhs,
+                rhs,
+            }),
+        }
+    }
+
     /// Lowers a comparison used as a value, which is 1 or 0. Each counted operand is released
     /// once the links that read it are done, including when a chain stops early.
     fn compare(
@@ -4903,91 +5402,9 @@ impl<'a> Lowerer<'a> {
         let mut lhs_values = self.expr_flat(left)?;
         for (i, (op, comparator)) in ops.iter().zip(comparators).enumerate() {
             let rhs_values = self.expr_flat(comparator)?;
-            let (lhs, rhs) = (lhs_values[0], rhs_values[0]);
             let cond = Cond::of(op).ok_or("'in' is not a comparison of two values")?;
-            match self.type_of(comparator)? {
-                // ordered by its `cmp`, whose ordering's tag says which comes first
-                ty if !matches!(cond, Cond::Eq | Cond::Ne) && self.implements(&ty, ORD) => {
-                    let order = self.compare_call(&ty, "cmp", &lhs_values, &rhs_values);
-                    let tag = self.fresh();
-                    self.push(Inst::EnumTag {
-                        dst: tag,
-                        value: Operand::Reg(order),
-                    });
-                    // `less` is 0, `equal` 1, and `greater` 2
-                    let (cond, against) = match cond {
-                        Cond::Lt => (Cond::Eq, 0),
-                        Cond::Le => (Cond::Ne, 2),
-                        Cond::Gt => (Cond::Eq, 2),
-                        _ => (Cond::Ne, 0),
-                    };
-                    self.push(Inst::Compare {
-                        cond,
-                        float: false,
-                        dst: result,
-                        lhs: Operand::Reg(tag),
-                        rhs: Operand::Imm(against),
-                    });
-                    self.push(Inst::Release {
-                        src: Operand::Reg(order),
-                        kind: RcKind::Enum,
-                    });
-                }
-                // compared value by value, which only == and != do
-                ty if is_compound(&ty) => {
-                    let (yes, no, join) = (self.new_block(), self.new_block(), self.new_block());
-                    self.equal_branch(&ty, &lhs_values, &rhs_values, yes, no);
-                    let equal = i64::from(cond == Cond::Eq);
-                    self.start(yes);
-                    self.push(Inst::Copy {
-                        dst: result,
-                        src: Operand::Imm(equal),
-                    });
-                    self.jump(join);
-                    self.start(no);
-                    self.push(Inst::Copy {
-                        dst: result,
-                        src: Operand::Imm(1 - equal),
-                    });
-                    self.start(join);
-                }
-                // strings and bytes compare by contents
-                ty @ (Type::Str | Type::Bytes) if cond == Cond::Ne => {
-                    let equal = self.fresh();
-                    self.push(Inst::Call {
-                        dsts: vec![equal],
-                        callee: Callee::Runtime(equality_routine(&ty)),
-                        args: vec![lhs, rhs],
-                    });
-                    self.push(Inst::Not {
-                        dst: result,
-                        src: Operand::Reg(equal),
-                    });
-                }
-                ty @ (Type::Str | Type::Bytes) if cond == Cond::Eq => self.push(Inst::Call {
-                    dsts: vec![result],
-                    callee: Callee::Runtime(equality_routine(&ty)),
-                    args: vec![lhs, rhs],
-                }),
-                // ordered by a call that returns -1, 0, or 1
-                ty @ (Type::Str | Type::Bytes) => {
-                    let order = self.runtime_call(order_routine(&ty), vec![lhs, rhs], None);
-                    self.push(Inst::Compare {
-                        cond,
-                        float: false,
-                        dst: result,
-                        lhs: order,
-                        rhs: Operand::Imm(0),
-                    });
-                }
-                ty => self.push(Inst::Compare {
-                    cond,
-                    float: ty == Type::Float,
-                    dst: result,
-                    lhs,
-                    rhs,
-                }),
-            }
+            let ty = self.type_of(comparator)?;
+            self.compare_link(cond, &ty, &lhs_values, &rhs_values, result);
             for value in lhs_values {
                 self.release_temp(value);
             }
@@ -8161,10 +8578,13 @@ enum Location {
     },
 }
 
-/// Returns whether `==` compares values of type `ty` value by value: a tuple, a struct, or an
-/// enum value, rather than one number, bool, or string.
+/// Returns whether `==` compares values of type `ty` part by part: a tuple, a struct, an enum
+/// value, a list, or a map, rather than one number, bool, or string.
 fn is_compound(ty: &Type) -> bool {
-    matches!(ty, Type::Tuple(_) | Type::Struct { .. } | Type::Enum { .. })
+    matches!(
+        ty,
+        Type::Tuple(_) | Type::Struct { .. } | Type::Enum { .. } | Type::List(_) | Type::Map(..)
+    )
 }
 
 /// Returns whether a value of type `ty` is or holds an enum value, in a list or tuple, which

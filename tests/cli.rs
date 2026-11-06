@@ -1690,3 +1690,98 @@ fn a_package_from_the_store_runs_and_is_locked() {
         lock
     );
 }
+
+/// Copies the directory `from` and everything in it to `to`, replacing what was there.
+fn copy_dir(from: &Path, to: &Path) {
+    let _ = std::fs::remove_dir_all(to);
+    std::fs::create_dir_all(to).unwrap();
+    for entry in std::fs::read_dir(from).unwrap() {
+        let path = entry.unwrap().path();
+        let target = to.join(path.file_name().unwrap());
+        if path.is_dir() {
+            copy_dir(&path, &target);
+        } else {
+            std::fs::copy(&path, &target).unwrap();
+        }
+    }
+}
+
+/// Runs `stone test <args>` in a copy of `tests/testing` named after `name`, returning its exit
+/// code and stdout.
+fn stone_test(name: &str, args: &[&str]) -> (Option<i32>, String) {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join(name);
+    copy_dir(Path::new("tests/testing"), &dir);
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("test")
+        .args(args)
+        .current_dir(&dir)
+        .env("STONE_LEAK_CHECK", "1")
+        .output()
+        .expect("stone should run");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert_eq!(stderr, "", "stone test wrote to stderr");
+    // Windows writes paths with backslashes, and the fixtures' sources hold none
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    let stdout = match cfg!(windows) {
+        true => stdout.replace('\\', "/"),
+        false => stdout,
+    };
+    (output.status.code(), stdout)
+}
+
+#[test]
+fn stone_test_reports_every_test_alike_under_both_backends() {
+    let expected = std::fs::read_to_string("tests/testing/report.txt").unwrap();
+    assert_eq!(stone_test("testing-run", &[]), (Some(1), expected.clone()));
+    assert_eq!(
+        stone_test("testing-build", &["--build", "-j", "2"]),
+        (Some(1), expected)
+    );
+}
+
+#[test]
+fn stone_test_runs_only_what_its_paths_and_filter_pick() {
+    assert_eq!(
+        stone_test(
+            "testing-filter",
+            &["app", "shapes.stn", "--filter", "parses a point"]
+        ),
+        (
+            Some(1),
+            "\
+shapes.stn
+  ok      parses a point
+  FAILED  parses a point without a comma
+
+failures:
+
+shapes.stn: parses a point without a comma
+shapes.stn:8:47: error: list index out of range (index 1, length 1)
+  |
+8 |     ret Point(x=int(parts[0]).unwrap(), y=int(parts[1]).unwrap())
+  |                                               ^^^^^^^^
+
+1 passed, 1 failed, 3 filtered out in 1 file
+"
+            .to_string()
+        )
+    );
+    assert_eq!(
+        stone_test("testing-passing", &["app"]),
+        (
+            Some(0),
+            "\
+app/geo/vec.stn
+  ok      dot of two vectors
+  ok      dot of nothing
+
+2 passed, 0 failed in 1 file
+"
+            .to_string()
+        )
+    );
+    assert_eq!(
+        stone_test("testing-none", &["plain.stn"]),
+        (Some(0), "no tests found\n".to_string())
+    );
+}

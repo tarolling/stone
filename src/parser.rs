@@ -57,6 +57,9 @@ pub struct Parser {
     /// allow. Skipping the others gives the same tree, but fewer expectations and hints, so a
     /// statement that fails is parsed again exhaustively for its error message.
     exhaustive: bool,
+    /// How many blocks the statement being parsed is inside, which is 0 at the top level of a
+    /// file, the only place a test block may be.
+    nesting: usize,
     /// How many statements failed with shortcuts but parsed exhaustively, which would mean a
     /// shortcut skipped an alternative that matches.
     #[cfg(test)]
@@ -114,6 +117,7 @@ impl Parser {
             recovered: vec![],
             hints: vec![],
             exhaustive: false,
+            nesting: 0,
             #[cfg(test)]
             rescued: 0,
         }

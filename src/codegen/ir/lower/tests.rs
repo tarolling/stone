@@ -1783,7 +1783,14 @@ fn dump_launching(source: &str, gpu_launch: bool) -> String {
     let (_, module) = crate::driver::load(std::path::Path::new("main.stn"), source, &sources);
     let module = module.unwrap().module;
     let analysis = TypeChecker::new().analyze(&module);
-    let program = lower_with(&module, &analysis, crate::codegen::Os::Linux, gpu_launch).unwrap();
+    let program = lower_with(
+        &module,
+        &analysis,
+        crate::codegen::Os::Linux,
+        gpu_launch,
+        None,
+    )
+    .unwrap();
     program.functions.iter().map(ToString::to_string).collect()
 }
 
@@ -1808,4 +1815,64 @@ fn a_program_for_a_gpu_tries_each_kernel_before_the_loop() {
 fn arithmetic_a_gpu_cannot_compute_is_never_launched() {
     let with = dump_launching("a = [7, 8]\nb = [2, 3]\nprint(a % b)\n", true);
     assert!(!with.contains("gpu_launch"), "{with}");
+}
+
+#[test]
+fn a_test_block_and_its_lambdas_are_never_lowered_for_run_or_build() {
+    let source = "fn double(x: int) -> int:\n    ret x * 2\n\
+                  used = |x: int| x - 1\n\
+                  print(double(used(3)))\n\
+                  test \"doubles\":\n    assert [1].map(|x| x * 3) == [3]\n    assert double(2) == 4\n";
+    let program = lower_source(source);
+    let mut names: Vec<String> = program
+        .functions
+        .iter()
+        .filter_map(|f| f.name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["double", "lambda.3.8", "stone.fn_value.lambda.3.8"]);
+}
+
+#[test]
+fn a_test_build_runs_the_test_its_environment_names_and_no_top_level_code() {
+    let source = "\
+print(\"top-level code\")
+fn double(x: int) -> int:
+    ret x * 2
+test \"doubles\":
+    assert double(2) == 4
+test \"prints\":
+    print(1)
+";
+    let sources = crate::project::MapSources::default();
+    let (_, checked) = crate::driver::load(std::path::Path::new("main.stn"), source, &sources);
+    let checked = checked.unwrap();
+    let tests: Vec<String> = checked.tests.iter().map(|t| t.function.clone()).collect();
+    assert_eq!(tests, ["test.4.1", "test.6.1"]);
+    let program = lower_with(
+        &checked.module,
+        &checked.analysis,
+        crate::codegen::Os::Linux,
+        false,
+        Some(&tests),
+    )
+    .unwrap();
+    let main = program
+        .functions
+        .iter()
+        .find(|f| f.name.is_none())
+        .unwrap()
+        .to_string();
+    assert!(main.contains("stone.os_env"), "{main}");
+    assert!(main.contains("call test.4.1()"), "{main}");
+    assert!(main.contains("call test.6.1()"), "{main}");
+    assert!(main.contains("STONE_TEST names no test"), "{main}");
+    assert!(!main.contains("top-level code"), "{main}");
+    let mut names: Vec<String> = program
+        .functions
+        .iter()
+        .filter_map(|f| f.name.clone())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["double", "test.4.1", "test.6.1"]);
 }

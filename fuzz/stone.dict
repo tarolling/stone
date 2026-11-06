@@ -6,6 +6,7 @@
 "break"
 "case"
 "cont"
+"assert"
 "enum"
 "fn"
 "elif"

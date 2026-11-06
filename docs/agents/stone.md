@@ -402,8 +402,8 @@ assign the result where 'add' is called
   strings with values in them: `"n = {n}"`, or `"n = " + str(n)`. `str` and `{x}` take any value
   and write it as `print` does.
 - Conditions must be `bool`: write `if xs.len() > 0:`, `if s != "":`, `if n != 0:`.
-- `==` does not compare lists or maps (it does compare numbers, strings, bools, tuples, structs,
-  options, and enums). Compare lists with a loop.
+- `==` compares numbers, strings, bools, lists, maps, tuples, structs, options, and enums,
+  part by part (maps ignore insertion order), but never function values or sockets.
 - `/` on ints truncates toward zero, and `%` takes the dividend's sign: `-7 / 2 == -3`,
   `-7 % 2 == -1`. There is no `//`; that starts a comment.
 - `**` takes an `int` exponent, which cannot be negative on an int: use `2.0 ** -1`, and
@@ -424,6 +424,13 @@ assign the result where 'add' is called
   in the code, or start from a non-empty value.
 - Functions, structs, enums, traits, and `impl` blocks are top level only.
 - Recursion is limited to 1000 nested calls.
+- `assert test` and `assert test, "message"` work as in Python, anywhere: a failed comparison
+  shows both sides (`assertion failed: [1, 2] == [1, 3]`), and the message must be a `str`
+  (`assert n > 0, "n is {n}"`), evaluated only on failure.
+- Tests are top-level `test "description":` blocks, not `test_` functions, which `stone test
+  [PATH...]` runs (`--filter TEXT` for some, `--build` to run them compiled); `stone run` and
+  `stone build` skip them. A test cannot read a global (even through a function it calls), so
+  it builds its own values.
 
 ## Not in stone, and what to write instead
 

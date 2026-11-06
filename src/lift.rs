@@ -6,10 +6,60 @@
 //! the lambda becomes `fn lambda.1.52(limit, x): ret x > limit`, whose first parameter takes the
 //! copy, and the argument becomes [`ExprKind::Closure`] of `lambda.1.52` holding `limit`.
 
-use crate::ast::{Arg, Arguments, Expr, ExprContext, ExprKind, Stmt, StmtKind, lambda_name};
+use crate::ast::{
+    Arg, Arguments, Expr, ExprContext, ExprKind, Stmt, StmtKind, lambda_name, test_name,
+};
 use crate::checker::collect_assigned;
+use crate::diagnostic::Diagnostic;
+use crate::project::Test;
 use crate::span::Span;
 use std::collections::HashSet;
+
+/// Turns every test block at the top level of `body` into a function of its own, named by
+/// [`test_name`], with no parameters and no value, in its place, and returns each test it made,
+/// noting an error in `errors` for a description an earlier test of the file has.
+///
+/// For example, `test "adds one":` on line 4 becomes `fn test.4.1():` with the test's block, and
+/// the test `adds one` of the function `test.4.1`. Run before [`lift_lambdas`], so a lambda in a
+/// test is lifted out of the function it becomes.
+pub fn lift_tests(body: &mut [Stmt], errors: &mut Vec<Diagnostic>) -> Vec<Test> {
+    let mut tests: Vec<Test> = vec![];
+    for stmt in body {
+        let StmtKind::Test {
+            name,
+            name_span,
+            body,
+        } = &mut stmt.kind
+        else {
+            continue;
+        };
+        if tests.iter().any(|test| test.description == *name) {
+            errors.push(Diagnostic::error(
+                *name_span,
+                format!("this file already has a test \"{name}\""),
+            ));
+        }
+        let function = test_name(stmt.span);
+        tests.push(Test {
+            description: std::mem::take(name),
+            function: function.clone(),
+            span: *name_span,
+        });
+        stmt.kind = StmtKind::FunctionDef {
+            name: function,
+            name_span: *name_span,
+            public: false,
+            type_params: vec![],
+            args: Arguments {
+                args: vec![],
+                captures: 0,
+            },
+            returns: None,
+            body: std::mem::take(body),
+        };
+    }
+    tests
+}
 
 /// Turns every lambda in `body` into a function of its own, named by [`lambda_name`], which goes
 /// just before the top-level statement holding it, and the lambda into that function's name, or,
@@ -107,9 +157,17 @@ impl Lifter {
                 self.expr(value);
                 vec![]
             }
+            StmtKind::Assert { test, msg } => {
+                self.expr(test);
+                if let Some(msg) = msg {
+                    self.expr(msg);
+                }
+                vec![]
+            }
             StmtKind::Use { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
+            | StmtKind::Test { .. }
             | StmtKind::Break
             | StmtKind::Continue => vec![],
         };

@@ -19,6 +19,7 @@ pub mod parser;
 pub mod project;
 pub mod span;
 pub mod stdlib;
+pub mod testing;
 pub mod token;
 pub mod unused;
 

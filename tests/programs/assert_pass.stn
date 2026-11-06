@@ -1,0 +1,64 @@
+// assert passes silently when its test holds, evaluating each side of a comparison once, left
+// then right, and its message only when the test fails
+
+struct Point:
+    x: int
+    y: int
+
+impl Point:
+    fn shifted(self, dx: int) -> Point:
+        assert dx >= 0, "only right, not {dx}"
+        ret Point(x=self.x + dx, y=self.y)
+
+// equal when they are as far from the origin, whatever the direction
+struct Distance:
+    steps: int
+
+impl eq for Distance:
+    fn eq(self, other: Self) -> bool:
+        ret self.steps * self.steps == other.steps * other.steps
+
+struct Version:
+    major: int
+    minor: int
+
+impl ord for Version:
+    fn cmp(self, other: Self) -> ordering:
+        if self.major != other.major:
+            ret self.major.cmp(other.major)
+        ret self.minor.cmp(other.minor)
+
+fn noisy(name: str, value: int) -> int:
+    print("evaluating {name}")
+    ret value
+
+fn halve(n: int) -> int:
+    assert n % 2 == 0, "{n} is odd"
+    ret n / 2
+
+assert 1 + 1 == 2
+assert 0.1 + 0.2 != 0.3
+assert "abc" < "abd"
+assert true
+assert not false
+assert (1, "a") == (1, "a")
+assert [1, 2, 3] == [1, 2, 3]
+assert [[1], [2, 3]] != [[1], [2]]
+assert {"a": 1, "b": 2} == {"b": 2, "a": 1}
+assert Point(x=1, y=2) == Point(y=2, x=1)
+assert [Distance(steps=3)] == [Distance(steps=-3)]
+assert Version(major=1, minor=2) < Version(major=1, minor=10)
+assert Version(major=2, minor=0) >= Version(major=1, minor=10)
+assert 2 in [1, 2, 3]
+assert 4 not in [1, 2, 3]
+assert "b" in {"a": 1, "b": 2}
+assert "ell" in "hello"
+assert [2] in [[1], [2]]
+assert noisy("left", 1) < noisy("right", 2)
+
+xs = [1, 2, 3]
+// the message would fail if it were evaluated
+assert xs.len() == 3, "{xs[10]}"
+assert halve(10) == 5
+print(Point(x=1, y=2).shifted(3))
+print("done")

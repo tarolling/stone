@@ -1,0 +1,5 @@
+// no test blocks, so stone test skips this file; `test` is still a name here
+fn test(n: int) -> int:
+    ret n * 10
+
+print(test(1))

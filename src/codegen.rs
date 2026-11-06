@@ -426,6 +426,10 @@ pub trait AssemblyGenerator {
     /// Makes arithmetic on lists that a GPU could compute first try one (see
     /// [`ir::lower::lower_with`]), so the program calls `stone.gpu_launch` before it loops.
     fn set_gpu_launch(&mut self, launch: bool);
+    /// Makes a build for `stone test` that runs one of `tests`, the linked names of the program's
+    /// test functions, as `STONE_TEST` names it, and none of its top-level statements (see
+    /// [`ir::lower::lower_with`]).
+    fn set_tests(&mut self, tests: Vec<String>);
 }
 
 /// Returns the magic multiplier and shift that divide by the constant `divisor` with a

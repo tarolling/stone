@@ -536,6 +536,9 @@ pub struct Context {
     /// Whether arithmetic on lists that a GPU could compute first tries one, which a build with
     /// `--gpu` for a system that can reach the GPU asks for.
     pub gpu_launch: bool,
+    /// The linked names of the test functions a build for `stone test` runs, one per run, or
+    /// `None` for an ordinary build.
+    pub tests: Option<Vec<String>>,
 }
 
 impl Context {
@@ -563,7 +566,8 @@ impl Context {
     /// Lowers the checked `module` to IR for a program that runs on `os`, then notes every
     /// runtime routine it calls and whether it counts references.
     pub fn lower(&mut self, module: &Mod, os: Os) -> Result<(), String> {
-        self.program = lower_with(module, &self.analysis, os, self.gpu_launch)?;
+        let tests = self.tests.as_deref();
+        self.program = lower_with(module, &self.analysis, os, self.gpu_launch, tests)?;
         for function in &mut self.program.functions {
             trig::share(function);
             trig::expand(function);
@@ -1245,6 +1249,12 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
             collect_calls_from_expr(target, calls);
             collect_calls_from_expr(value, calls);
         }
+        StmtKind::Assert { test, msg } => {
+            collect_calls_from_expr(test, calls);
+            if let Some(msg) = msg {
+                collect_calls_from_expr(msg, calls);
+            }
+        }
         StmtKind::Return { value } => {
             if let Some(v) = value {
                 collect_calls_from_expr(v, calls);
@@ -1287,6 +1297,7 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
         }
         StmtKind::EnumDef { .. }
         | StmtKind::StructDef { .. }
+        | StmtKind::Test { .. }
         | StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Use { .. } => {}

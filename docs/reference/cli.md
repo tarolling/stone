@@ -11,7 +11,7 @@ Errors print as `file:line:col: error: message`, followed by the source line and
 the problem.
 
 A program with a `stone.toml` next to its entry file uses packages (see
-{doc}`../guides/packages`). `run`, `build`, and `check` first download any package the program
+{doc}`../guides/packages`). `run`, `build`, `check`, and `test` first download any package the program
 uses that is not downloaded yet, unless given `--offline`, which uses only what is already in
 the package store and never connects to anything.
 
@@ -171,6 +171,31 @@ main.stn:3:17: warning: parameter 'h' is never used; remove it or name it '_h'
 
 ```sh
 stone check examples/basics.stn
+```
+
+## `stone test [PATH...] [--build] [--filter TEXT] [-j N] [--offline]`
+
+Runs the test blocks (`test "description":`) of every file of `PATH` that has any, every such
+file under a directory, and those under the current directory if no path is given (see
+{doc}`../guides/testing`). Each file is checked as part of the program it belongs to, the
+nearest directory at or above it with a `main.stn` or a `stone.toml`. Each test runs alone,
+without the file's top-level statements, with no arguments and empty input, and passes if it
+ends without a runtime error (`os.exit(0)` included). What a failing test printed is shown with
+its error; a passing test's output is not.
+
+The report lists each file and its tests as `ok` or `FAILED`, then every failure, then a count
+such as `3 passed, 1 failed in 2 files`. The status is 1 if a test failed or a file has errors.
+With nothing to run, it prints `no tests found` and the status is 0.
+
+`--build` compiles each file into an executable under `build/test/` in its program's directory
+(`build/test/geo/shapes` for `geo/shapes.stn`) and runs each test as a run of it, instead of
+interpreting it. `--filter` runs only the tests whose description contains `TEXT`. `-j` tests
+`N` files at once, one per processor by default; a file's tests run one after another.
+
+```sh
+stone test
+stone test geo --filter "area"
+stone test --build
 ```
 
 ## `stone add PACKAGE [--name NAME] [--host HOST]`

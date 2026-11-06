@@ -185,6 +185,10 @@ impl AssemblyGenerator for Arm64Generator {
     fn set_gpu_launch(&mut self, launch: bool) {
         self.ctx.gpu_launch = launch;
     }
+
+    fn set_tests(&mut self, tests: Vec<String>) {
+        self.ctx.tests = Some(tests);
+    }
 }
 
 impl Default for Arm64Generator {

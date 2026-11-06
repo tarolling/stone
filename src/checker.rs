@@ -27,7 +27,7 @@ use std::sync::Arc;
 use crate::ast::{
     Arguments, CompOp, Constant, Expr, ExprKind, Field, Keyword, MatchCase, Mod, Operator, Pattern,
     PatternKind, Stmt, StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Variant,
-    constant_int, is_lambda, target_names,
+    constant_int, is_lambda, is_test, target_names,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
@@ -1136,11 +1136,12 @@ const BUILTIN_TYPES: &[&str] = &[
 /// The message for a map key of another kind.
 const MAP_KEY: &str = "a map key must be int, str, or bool, found {}";
 
-/// A list or map inside a type, which keeps `==` from comparing it, and the innermost struct
-/// field that holds it, if any, as the struct's name and the field's.
+/// A function value, handle, or unbounded type parameter inside a type, which keeps `==` from
+/// comparing it, and the innermost struct field that holds it, if any, as the struct's name and
+/// the field's.
 ///
-/// For example, in `tuple[int, Bag]`, where `Bag` has a field `items: list[int]`, it is
-/// `list[int]` in `Bag.items`.
+/// For example, in `tuple[int, Bag]`, where `Bag` has a field `run: fn(int)`, it is `fn(int)`
+/// in `Bag.run`.
 struct Uncomparable {
     ty: Ty,
     field: Option<(String, String)>,
@@ -2238,6 +2239,46 @@ impl Inference {
                 locals.extend(assigned.into_iter().map(|(name, _)| name));
                 AssignmentCheck::new(locals, &mut self.diagnostics).block(body, Some(params));
             }
+        }
+        self.check_tests(body);
+    }
+
+    /// Reports each test of the top level `body` that may read a global, itself or through a
+    /// function it calls, since `stone test` runs a test without the top-level code that would
+    /// assign it.
+    ///
+    /// For example, after `LIMIT = 10`, `test "limit": assert LIMIT == 10` is an error, and so is
+    /// a test calling a function that reads `LIMIT`.
+    fn check_tests(&mut self, body: &[Stmt]) {
+        let tests: Vec<(&str, Span)> = body
+            .iter()
+            .filter_map(|stmt| match &stmt.kind {
+                StmtKind::FunctionDef {
+                    name, name_span, ..
+                } if is_test(name) => Some((name.as_str(), *name_span)),
+                _ => None,
+            })
+            .collect();
+        if tests.is_empty() || self.globals.is_empty() {
+            return;
+        }
+        let globals: HashSet<String> = self.globals.keys().cloned().collect();
+        let reads = crate::last_use::global_reads(body, &globals);
+        for (name, span) in tests {
+            let Some(global) = reads.get(name).and_then(|read| read.iter().min()) else {
+                continue;
+            };
+            let through = match reads.read_by(name, global) {
+                Some(Some(function)) => format!(" (through '{function}')"),
+                _ => String::new(),
+            };
+            self.error(
+                span,
+                format!(
+                    "this test reads the global '{global}'{through}, but stone test runs no \
+                     top-level code"
+                ),
+            );
         }
     }
 
@@ -4415,6 +4456,21 @@ impl Inference {
                 self.check_block(body);
                 self.check_block(orelse);
             }
+            StmtKind::Assert { test, msg } => {
+                let ty = self.infer(test);
+                self.require_condition(ty, test.span);
+                if let Some(msg) = msg {
+                    let ty = self.infer(msg);
+                    if !self.unify(&Ty::Str, &ty) {
+                        let message = format!(
+                            "an assert's message must be a str, found {}; write the value into \
+                             one, as in \"{{x}}\"",
+                            self.show(&ty)
+                        );
+                        self.error(msg.span, message);
+                    }
+                }
+            }
             StmtKind::Expr { value } => {
                 self.statement_call = Some(value.without_try().span);
                 // the one place a call that returns no value can be
@@ -4480,6 +4536,8 @@ impl Inference {
                 }
             }
             StmtKind::Match { subject, cases } => self.check_match(subject, cases),
+            // linking makes each test a function, so this is code that was never linked
+            StmtKind::Test { .. } => {}
             StmtKind::Break => {
                 if self.loop_depth == 0 {
                     self.error(stmt.span, "'break' outside a loop");
@@ -8128,11 +8186,12 @@ impl Inference {
 
     /// Checks the deferred constraints, fills in types nothing pinned down, and builds the
     /// [`Analysis`].
-    /// Checks that `==` and `!=` can compare values of type `ty`: numbers, bools, strings, and
-    /// tuples, structs, and enums of them, but no list or map, even inside another value, since
-    /// compiled code would compare them by address.
+    /// Checks that `==` and `!=` can compare values of type `ty`: numbers, bools, strings, bytes,
+    /// and lists, maps, tuples, structs, and enums of them, but no function value or handle, even
+    /// inside another value.
     ///
-    /// For example, `(1, "a") == t` is fine, while `(1, [2]) == t` is an error naming `list[int]`.
+    /// For example, `(1, [2]) == t` is fine, while `(1, f) == t` for a function `f` is an error
+    /// naming its type.
     fn check_equality(&mut self, ty: &Ty, span: Span, what: &str) {
         let ty = self.shallow(ty);
         match ty {
@@ -8140,7 +8199,7 @@ impl Inference {
             Ty::Var(_) => {
                 self.unify(&ty, &Ty::Int);
             }
-            Ty::List(_) | Ty::Map(..) | Ty::Unit | Ty::Fn(..) | Ty::Handle(_) => {
+            Ty::Unit | Ty::Fn(..) | Ty::Handle(_) => {
                 let message = format!("{what} cannot compare {}", self.show(&ty));
                 self.error(span, message);
             }
@@ -8171,17 +8230,20 @@ impl Inference {
         }
     }
 
-    /// Finds a list or map inside `ty`, looking into tuples, the fields of structs, and the values
-    /// of every variant of enums, each enum and struct once, by its name in `seen`.
+    /// Finds a function value, handle, or unbounded type parameter inside `ty`, looking into
+    /// lists, the values of maps, tuples, the fields of structs, and the values of every variant
+    /// of enums, each enum and struct once, by its name in `seen`.
     fn uncomparable(&self, ty: &Ty, seen: &mut HashSet<String>) -> Option<Uncomparable> {
         match self.shallow(ty) {
             Ty::Param(p) if self.type_params[p].bounds.iter().any(|b| b.name == EQ) => None,
             // a struct that implements `eq` compares however it says
             Ty::Struct(name, _) if self.impls.contains_key(&(EQ.to_string(), name.clone())) => None,
-            // a type parameter may be a list or a map
-            ty @ (Ty::List(_) | Ty::Map(..) | Ty::Param(_) | Ty::Fn(..) | Ty::Handle(_)) => {
+            // a type parameter may be a function
+            ty @ (Ty::Param(_) | Ty::Fn(..) | Ty::Handle(_)) => {
                 Some(Uncomparable { ty, field: None })
             }
+            Ty::List(elem) => self.uncomparable(&elem, seen),
+            Ty::Map(_, value) => self.uncomparable(&value, seen),
             Ty::Tuple(fields) => fields
                 .iter()
                 .find_map(|field| self.uncomparable(field, seen)),
@@ -8422,7 +8484,7 @@ impl Inference {
             Ty::Param(p) => self.type_params[p].bounds.iter().any(|b| b.name == trait_),
             // every type `==` compares part by part
             ty if trait_ == EQ => {
-                !matches!(ty, Ty::List(_) | Ty::Map(..) | Ty::Unit)
+                !matches!(ty, Ty::Unit | Ty::Fn(..) | Ty::Handle(_))
                     && self.uncomparable(&ty, &mut HashSet::new()).is_none()
             }
             Ty::Int | Ty::Float | Ty::Str | Ty::Bytes if trait_ == ORD => true,
@@ -9385,6 +9447,13 @@ impl<'a> AssignmentCheck<'a> {
                 self.reads(value, &assigned);
                 Some(assigned)
             }
+            StmtKind::Assert { test, msg } => {
+                self.reads(test, &assigned);
+                if let Some(msg) = msg {
+                    self.reads(msg, &assigned);
+                }
+                Some(assigned)
+            }
             StmtKind::Expr { value } => {
                 self.reads(value, &assigned);
                 Some(assigned)
@@ -9446,6 +9515,7 @@ impl<'a> AssignmentCheck<'a> {
             }
             StmtKind::Break | StmtKind::Continue => None,
             StmtKind::FunctionDef { .. }
+            | StmtKind::Test { .. }
             | StmtKind::Use { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
@@ -9604,6 +9674,8 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
             | StmtKind::Use { .. }
             | StmtKind::Return { .. }
             | StmtKind::Expr { .. }
+            | StmtKind::Assert { .. }
+            | StmtKind::Test { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
         }
@@ -9937,6 +10009,12 @@ impl ParameterUse<'_> {
                 self.expr(value);
             }
             StmtKind::Expr { value } => self.expr(value),
+            StmtKind::Assert { test, msg } => {
+                self.expr(test);
+                if let Some(msg) = msg {
+                    self.expr(msg);
+                }
+            }
             StmtKind::Return { value } => {
                 if let Some(value) = value {
                     self.expr(value);
@@ -9967,6 +10045,7 @@ impl ParameterUse<'_> {
             | StmtKind::ImplDef { .. }
             | StmtKind::TraitDef { .. }
             | StmtKind::Use { .. }
+            | StmtKind::Test { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
         }

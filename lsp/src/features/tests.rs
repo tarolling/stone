@@ -624,6 +624,54 @@ fn document_symbols_nest_locals_in_functions() {
 }
 
 #[test]
+fn document_symbols_show_a_test_block_by_its_description() {
+    let source = "\
+fn double(x: int) -> int:
+    ret x * 2
+
+test \"doubles a number\":
+    n = double(2)
+    assert n == 4
+";
+    let doc = doc(source);
+    let outline: Vec<(String, SymbolKind, Vec<String>)> = document_symbols(&doc)
+        .into_iter()
+        .map(|s| {
+            let children = s
+                .children
+                .unwrap_or_default()
+                .into_iter()
+                .map(|c| c.name)
+                .collect();
+            (s.name, s.kind, children)
+        })
+        .collect();
+    assert_eq!(
+        outline,
+        [
+            (
+                "double".to_string(),
+                SymbolKind::FUNCTION,
+                vec!["x".to_string()]
+            ),
+            (
+                "test \"doubles a number\"".to_string(),
+                SymbolKind::METHOD,
+                vec!["n".to_string()]
+            ),
+        ]
+    );
+    let labels: Vec<String> = completion(&doc, at(5, 9), &MapSources::default())
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert!(labels.contains(&"double".to_string()), "{labels:?}");
+    assert!(!labels.iter().any(|l| l.contains("test.")), "{labels:?}");
+    let shown = hover(&doc, at(4, 8)).map(|h| format!("{:?}", h.contents));
+    assert_eq!(shown, None);
+}
+
+#[test]
 fn completion_offers_what_is_in_scope() {
     let doc = doc(SOURCE);
     let labels = |pos: Position| -> Vec<(String, Option<CompletionItemKind>)> {

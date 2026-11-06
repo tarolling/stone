@@ -6,3 +6,6 @@ pub fn dot(a: list[int], b: list[int]) -> int:
 
 fn square(x: int, y: int) -> int:
     ret x * y
+
+test "dot multiplies and adds":
+    assert dot([1, 2], [3, 4]) == 11

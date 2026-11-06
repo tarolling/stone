@@ -1070,6 +1070,39 @@ impl Parser {
         Err(self.error_here("parse_return_stmt"))
     }
 
+    /// Parses an assert statement, such as `assert x > 0` or `assert x > 0, "x is {x}"`.
+    ///
+    /// ```text
+    /// assert_stmt: 'assert' expression [',' expression]
+    /// ```
+    pub(super) fn parse_assert_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+        if self.expect(TokenType::Keyword("assert")).is_some()
+            && let Ok(test) = self.parse_expression()
+        {
+            let after = self.pos;
+            let msg = match self.expect(TokenType::Comma) {
+                Some(_) => match self.parse_expression() {
+                    Ok(msg) => Some(msg),
+                    Err(_) => {
+                        self.pos = mark;
+                        return Err(self.error_here("parse_assert_stmt"));
+                    }
+                },
+                None => {
+                    self.pos = after;
+                    None
+                }
+            };
+            return Ok(Box::new(Stmt::new(
+                StmtKind::Assert { test, msg },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
+        Err(self.error_here("parse_assert_stmt"))
+    }
+
     /// Parses the chain of targets in an assignment, such as `a = b =` in `a = b = 1`.
     ///
     /// ```text
@@ -1235,6 +1268,9 @@ impl Parser {
         let mark = self.pos;
 
         if !self.exhaustive {
+            if self.at_test() {
+                return self.parse_test_def().inspect_err(|_| self.pos = mark);
+            }
             // each alternative fails at once unless it starts with its own keyword
             let rule: fn(&mut Self) -> Result<Box<Stmt>, ParserError> =
                 match self.compound_keyword() {
@@ -1306,7 +1342,63 @@ impl Parser {
         }
         self.pos = mark;
 
+        // test_def
+        if let Ok(stmt) = self.parse_test_def() {
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
         Err(self.error_here("parse_compound_stmt"))
+    }
+
+    /// Returns whether a test block starts here: the name `test` and then a string. `test` is
+    /// no keyword, so it stays a name everywhere else, as in `fn test(x: int)`, since a name is
+    /// never followed by a string otherwise.
+    fn at_test(&self) -> bool {
+        let token = |offset: usize| self.tokens.get(self.pos + offset).map(|t| &t.r#type);
+        matches!(token(0), Some(TokenType::Name(name)) if name == "test")
+            && matches!(
+                token(1),
+                Some(TokenType::String(_) | TokenType::StringStart(_))
+            )
+    }
+
+    /// Parses a test block, such as `test "adds one":` plus a block, at the top level of a file.
+    ///
+    /// ```text
+    /// test_def: NAME('test') STRING ':' block
+    /// ```
+    pub(super) fn parse_test_def(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+        if !self.at_test() {
+            return Err(self.error_here("parse_test_def"));
+        }
+        let test_span = self.advance().span;
+        let description = self.peek().clone();
+        if self.nesting > 0 {
+            self.hint(test_span, "a test can only be at the top level of a file");
+        } else if let TokenType::String(name) = description.r#type {
+            self.pos += 1;
+            if self.expect_block_start().is_some()
+                && let Ok(body) = self.parse_block()
+            {
+                return Ok(Box::new(Stmt::new(
+                    StmtKind::Test {
+                        name,
+                        name_span: description.span,
+                        body,
+                    },
+                    self.span_from(mark),
+                )));
+            }
+        } else {
+            self.hint(
+                description.span,
+                "a test's description is a plain string, without values in braces",
+            );
+        }
+        self.pos = mark;
+        Err(self.error_here("parse_test_def"))
     }
 
     /// Returns the keyword a compound statement starting here would start with, after any `pub`,
@@ -1372,7 +1464,7 @@ impl Parser {
         // no expression starts with these keywords, which only their own statements take
         let statement_keyword = matches!(
             self.peek().r#type,
-            TokenType::Keyword("ret" | "use" | "break" | "cont")
+            TokenType::Keyword("ret" | "use" | "break" | "cont" | "assert")
         );
         let (assign, augmented) = if self.exhaustive {
             (true, true)
@@ -1419,6 +1511,12 @@ impl Parser {
 
         // use_stmt
         if let Ok(stmt) = self.parse_use_stmt() {
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
+        // assert_stmt
+        if let Ok(stmt) = self.parse_assert_stmt() {
             return Ok(stmt);
         }
         self.pos = mark;
@@ -1501,6 +1599,7 @@ impl Parser {
     /// ```
     pub(super) fn parse_statements(&mut self) -> Result<Vec<Stmt>, ParserError> {
         let mut results: Vec<Stmt> = vec![];
+        self.nesting += 1;
         while !matches!(self.peek().r#type, TokenType::Dedent | TokenType::Eof) {
             let start = self.pos;
             match self.parse_recoverable_statement() {
@@ -1510,6 +1609,7 @@ impl Parser {
                 None => {}
             }
         }
+        self.nesting -= 1;
 
         debug!("parse_statements: successfully parsed statement*");
         Ok(results)

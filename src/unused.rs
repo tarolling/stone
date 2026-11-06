@@ -17,7 +17,7 @@
 
 use std::collections::{HashMap, HashSet};
 
-use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind, is_lambda};
+use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind, is_lambda, is_test};
 use crate::checker::{Analysis, SymbolKind, struct_display};
 use crate::diagnostic::{Diagnostic, Severity};
 use crate::project::Linked;
@@ -91,7 +91,8 @@ pub fn find(linked: &Linked, analysis: &Analysis) -> Vec<Diagnostic> {
             SymbolKind::Parameter if reads.is_empty() && symbol.name != "self" => {
                 format!("parameter '{short}' is never used; remove it or name it '_{short}'")
             }
-            SymbolKind::Function if !is_lambda(&symbol.name) => {
+            // only `stone test` calls a test, and only through `Linked::tests`
+            SymbolKind::Function if !is_lambda(&symbol.name) && !is_test(&symbol.name) => {
                 if outside {
                     continue;
                 }
@@ -259,8 +260,10 @@ impl Facts {
             }
             StmtKind::Return { .. }
             | StmtKind::AugAssign { .. }
+            | StmtKind::Assert { .. }
             | StmtKind::Expr { .. }
             | StmtKind::Use { .. }
+            | StmtKind::Test { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
         }
@@ -331,6 +334,26 @@ for i in range(3):
 print(total)
 ";
         assert_eq!(unused(source), []);
+    }
+
+    #[test]
+    fn a_test_block_is_never_unused_but_what_it_defines_may_be() {
+        let source = "\
+fn double(x: int) -> int:
+    ret x * 2
+
+test \"doubles\":
+    extra = 1
+    assert double(2) == 4
+";
+        assert_eq!(
+            unused(source),
+            [warning(
+                "variable 'extra' is never used; remove it or name it '_extra'",
+                5,
+                5
+            )]
+        );
     }
 
     #[test]

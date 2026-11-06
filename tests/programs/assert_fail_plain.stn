@@ -1,0 +1,6 @@
+// a failed test that is not a single comparison says only that it failed
+
+ready = true
+n = 0
+assert ready and n > 0
+print("never")

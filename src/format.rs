@@ -493,6 +493,26 @@ mod tests {
     }
 
     #[test]
+    fn an_assert_spaces_its_test_and_message() {
+        lines(&[
+            ("assert x==1,\"m\"", "assert x == 1, \"m\""),
+            ("assert  ok", "assert ok"),
+            (
+                "assert \"a\" not in xs,\"{xs}\"",
+                "assert \"a\" not in xs, \"{xs}\"",
+            ),
+        ]);
+    }
+
+    #[test]
+    fn a_test_block_keeps_its_description_and_indents_its_body() {
+        assert_eq!(
+            fmt("test   \"adds\" :\n  assert 1+1==2\nfn test(n: int) -> int:\n  ret n\n"),
+            "test \"adds\":\n    assert 1 + 1 == 2\nfn test(n: int) -> int:\n    ret n\n"
+        );
+    }
+
+    #[test]
     fn operators_take_spaces_around_them() {
         lines(&[
             ("x=1+2*3", "x = 1 + 2 * 3"),

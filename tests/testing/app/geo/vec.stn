@@ -1,0 +1,14 @@
+// a library module's tests run in its program, so `use geo.units` resolves from `app`
+use geo.units
+
+pub fn dot(a: list[int], b: list[int]) -> int:
+    total = 0
+    for i in range(a.len()):
+        total += a[i] * b[i] * units.scale()
+    ret total
+
+test "dot of two vectors":
+    assert dot([1, 2], [3, 4]) == 11
+
+test "dot of nothing":
+    assert dot([], []) == 0

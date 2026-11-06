@@ -63,6 +63,11 @@ pub(super) enum StmtKind {
         orelse: Vec<Stmt>,
     },
     Expr(Expr),
+    /// An `assert`, whose message is evaluated only if the test fails.
+    Assert {
+        test: Expr,
+        msg: Option<Expr>,
+    },
     Match {
         subject: Expr,
         cases: Vec<(Pattern, Vec<Stmt>)>,
@@ -463,6 +468,10 @@ impl<'r, 'out> Resolver<'r, 'out> {
                 let top = self.top_call(value, last_uses, &[]);
                 StmtKind::Expr(self.expr_with(value, top.as_ref()))
             }
+            ast::StmtKind::Assert { test, msg } => StmtKind::Assert {
+                test: self.expr(test),
+                msg: msg.as_ref().map(|msg| self.expr(msg)),
+            },
             ast::StmtKind::Match { subject, cases } => StmtKind::Match {
                 subject: self.expr(subject),
                 cases: cases
@@ -470,6 +479,9 @@ impl<'r, 'out> Resolver<'r, 'out> {
                     .map(|case| (self.pattern(&case.pattern), self.block(&case.body)))
                     .collect(),
             },
+            ast::StmtKind::Test { .. } => {
+                StmtKind::Fail("a test can only be at the top level of a file".into())
+            }
             ast::StmtKind::Break => StmtKind::Break,
             ast::StmtKind::Continue => StmtKind::Continue,
             ast::StmtKind::Use { .. } => {

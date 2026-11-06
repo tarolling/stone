@@ -1077,6 +1077,30 @@ pub const UNWRAP_NONE: &str = "cannot unwrap none";
 /// `cannot unwrap err: invalid literal for int() with base 10: 'x'`.
 pub const UNWRAP_ERR: &str = "cannot unwrap err";
 
+/// What a failed `assert` stops the program with, which goes on with `: ` and its message, or
+/// for a test that is one comparison, the two sides as `print` writes them in a list.
+///
+/// For example, `assert x == "a"` with `x` holding `b` stops with
+/// `assertion failed: 'b' == 'a'`.
+pub const ASSERTION_FAILED: &str = "assertion failed";
+
+/// Returns how a comparison is written, as a failed `assert` shows it.
+///
+/// For example, `CompOp::NotIn` is `not in`.
+pub fn comparison_text(op: &crate::ast::CompOp) -> &'static str {
+    use crate::ast::CompOp;
+    match op {
+        CompOp::Equal => "==",
+        CompOp::NotEqual => "!=",
+        CompOp::LessThan => "<",
+        CompOp::LessThanEqual => "<=",
+        CompOp::GreaterThan => ">",
+        CompOp::GreaterThanEqual => ">=",
+        CompOp::In => "in",
+        CompOp::NotIn => "not in",
+    }
+}
+
 /// The start of the error `unwrap_err` stops the program with on an `ok`, which goes on with `: `
 /// and the value as `print` writes it, such as `cannot unwrap_err ok: 12`.
 pub const UNWRAP_OK: &str = "cannot unwrap_err ok";

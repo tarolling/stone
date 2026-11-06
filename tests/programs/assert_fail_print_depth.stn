@@ -1,0 +1,15 @@
+// a failed comparison whose side is nested too deeply to write fails at the test with that error
+
+struct Tree:
+    label: int
+    kids: list[Tree]
+
+fn deep(n: int) -> Tree:
+    t = Tree(label=0, kids=[])
+    for _ in range(n):
+        t = Tree(label=1, kids=[t])
+    ret t
+
+// the labels differ, so comparing stops at once, but writing the left side goes all the way down
+assert deep(20000) == Tree(label=2, kids=[])
+print("never")

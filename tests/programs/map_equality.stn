@@ -1,0 +1,15 @@
+// maps compare as sets of entries, whatever order they were added in
+a = {"x": 1, "y": 2}
+b = {"y": 2, "x": 1}
+print(a == b, a != b)
+print(a == {"x": 1}, a == {"x": 1, "y": 3}, a == {"x": 1, "z": 2})
+print({} == {1: 1}, {1: [1, 2]} == {1: [1, 2]}, {1: [1, 2]} == {1: [2, 1]})
+c = {"x": 1, "y": 2, "z": 3}
+c.pop("z")
+print(c == a)
+d = {"z": 3, "x": 1, "y": 2}
+d.pop("z")
+print(d == a, d == c)
+print({true: some("t")} == {true: some("t")}, {true: some("t")} == {true: none})
+print([a, b] == [b, a], (a, 1) == (b, 1))
+print(a in [c, d])

@@ -376,38 +376,9 @@ impl Generator {
         }
     }
 
-    /// Returns whether `==` accepts the type: no list or map anywhere inside it.
-    fn comparable(&self, ty: &Ty) -> bool {
-        self.comparable_in(ty, &mut vec![])
-    }
-
-    fn comparable_in(&self, ty: &Ty, seen: &mut Vec<usize>) -> bool {
-        match ty {
-            Ty::List(_) | Ty::Map(..) | Ty::G(_) => false,
-            Ty::Option(t) | Ty::H(t) => self.comparable_in(t, seen),
-            Ty::Struct(i) | Ty::Enum(i) => {
-                // an enum holding itself is comparable if the rest of it is, and one still being
-                // declared only holds comparable types
-                if seen.contains(i) || *i >= self.types.len() {
-                    return true;
-                }
-                seen.push(*i);
-                let parts: Vec<&Ty> = match &self.types[*i] {
-                    TypeDef::Struct { fields, .. } => fields.iter().collect(),
-                    TypeDef::Enum { variants } => variants.iter().flatten().collect(),
-                };
-                let all = parts.iter().all(|t| self.comparable_in(t, seen));
-                seen.pop();
-                all
-            }
-            _ => true,
-        }
-    }
-
     /// Emits one to four `struct` and `enum` declarations, such as `struct S0:` with
-    /// `x0: option[int]`, then `enum E1:` with `V0` and `V1(S0, E1)`. About half hold no list or
-    /// map, so `==` can compare them. About half the time [`GENERIC_TYPES`] come first, which
-    /// the declarations may then hold.
+    /// `x0: option[int]`, then `enum E1:` with `V0` and `V1(S0, E1)`. About half the time
+    /// [`GENERIC_TYPES`] come first, which the declarations may then hold.
     pub(crate) fn declarations(&mut self, u: &mut Unstructured) -> Result<()> {
         // decided here, so programs without declarations are generated as before
         if u.arbitrary()? {
@@ -416,7 +387,6 @@ impl Generator {
         }
         for _ in 0..u.int_in_range(1..=4)? {
             let index = self.types.len();
-            self.plain = u.arbitrary()?;
             if u.arbitrary()? {
                 let mut fields = vec![];
                 for _ in 0..u.int_in_range(1..=4)? {
@@ -453,33 +423,30 @@ impl Generator {
                 }
             }
         }
-        self.plain = false;
         Ok(())
     }
 
     /// Generates the type of a field or variant value, from the leaves, the types declared so
-    /// far, and `own`, the enum being declared, if it may hold itself. While declaring a plain
-    /// type, it gives only comparable types.
+    /// far, and `own`, the enum being declared, if it may hold itself.
     fn field_type(&mut self, u: &mut Unstructured, own: Option<usize>, depth: usize) -> Result<Ty> {
         let nested = depth < MAX_TYPE_DEPTH;
-        let lists = !self.plain;
         let last = if self.generic_types { 11 } else { 10 };
         let ty = match u.int_in_range(0..=last)? {
             1 => Ty::Float,
             2 => Ty::Str,
             3 => Ty::Bool,
-            4 if lists => Ty::List(Box::new(Ty::Int)),
+            4 => Ty::List(Box::new(Ty::Int)),
             5 | 6 if !self.types.is_empty() => self.declared_type(u)?,
             7 if nested => Ty::Option(Box::new(self.field_type(u, own, depth + 1)?)),
-            8 if nested && lists => {
+            8 if nested => {
                 let key = *u.choose(&[Key::Str, Key::Int, Key::Bool])?;
                 Ty::Map(key, Box::new(self.part_type(u, own, depth + 1)?))
             }
-            9 if nested && lists => Ty::List(Box::new(self.part_type(u, own, depth + 1)?)),
+            9 if nested => Ty::List(Box::new(self.part_type(u, own, depth + 1)?)),
             11 if nested && self.generic_types => {
                 let inner = Box::new(self.part_type(u, own, depth + 1)?);
                 match u.arbitrary()? {
-                    true if lists => Ty::G(inner),
+                    true => Ty::G(inner),
                     _ => Ty::H(inner),
                 }
             }
@@ -487,17 +454,13 @@ impl Generator {
                 let own = Ty::Enum(own.unwrap());
                 match u.int_in_range(0..=2)? {
                     1 => Ty::Option(Box::new(own)),
-                    2 if lists => Ty::List(Box::new(own)),
+                    2 => Ty::List(Box::new(own)),
                     _ => own,
                 }
             }
             _ => Ty::Int,
         };
-        // an earlier type may hold a list or map
-        Ok(match self.plain && !self.comparable(&ty) {
-            true => Ty::Int,
-            false => ty,
-        })
+        Ok(ty)
     }
 
     /// Generates the type of a list element or map value, which may hold few enough values.
@@ -1586,8 +1549,7 @@ impl Generator {
         Ok(true)
     }
 
-    /// Generates a comparable type for `==`, such as `option[int]` or a struct with no list or
-    /// map inside it.
+    /// Generates a comparable type for `==`, such as `option[int]`, `list[str]`, or a struct.
     fn comparable_type(&mut self, u: &mut Unstructured) -> Result<Ty> {
         // only programs with generic types take a byte for them, so others choose as before
         if self.generic_types && u.int_in_range(0..=3)? == 0 {
@@ -1597,16 +1559,19 @@ impl Generator {
             };
             return Ok(Ty::H(Box::new(inner)));
         }
-        let mut choices = vec![Ty::Option(Box::new(Ty::Int)), Ty::Option(Box::new(Ty::Str))];
+        let mut choices = vec![
+            Ty::Option(Box::new(Ty::Int)),
+            Ty::Option(Box::new(Ty::Str)),
+            Ty::List(Box::new(Ty::Int)),
+            Ty::Map(Key::Str, Box::new(Ty::Int)),
+        ];
         for i in 0..self.types.len() {
             let ty = match self.types[i] {
                 TypeDef::Struct { .. } => Ty::Struct(i),
                 TypeDef::Enum { .. } => Ty::Enum(i),
             };
-            if self.comparable(&ty) {
-                choices.push(Ty::Option(Box::new(ty.clone())));
-                choices.push(ty);
-            }
+            choices.push(Ty::Option(Box::new(ty.clone())));
+            choices.push(ty);
         }
         // declared types first, as the fuzzer's bytes favor the end of the list
         choices.reverse();
@@ -1624,7 +1589,7 @@ impl Generator {
         let paths = self.paths(scope);
         let comparable: Vec<&Path> = paths
             .iter()
-            .filter(|p| !p.ty.is_leaf() && self.comparable(&p.ty))
+            .filter(|p| !p.ty.is_leaf())
             .collect();
         let (a, ty) = if !comparable.is_empty() && u.arbitrary()? {
             let path = comparable[u.choose_index(comparable.len())?];

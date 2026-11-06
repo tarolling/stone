@@ -1367,11 +1367,14 @@ fn for_loops_iterate_over_lists() {
 }
 
 #[test]
-fn lists_cannot_be_compared() {
+fn lists_compare_by_their_elements() {
+    assert_eq!(type_of_symbol("x = [1] == [1]\n", "x"), "bool");
+    assert_eq!(type_of_symbol("x = [[1.0], []] != [[2.0]]\n", "x"), "bool");
+    assert_eq!(type_of_symbol("x = {1: [\"a\"]} == {}\n", "x"), "bool");
     assert_error(
-        "x = [1] == [1]\n",
-        "'==' and '!=' cannot compare list[int]",
-        1,
+        "fn f(x: int) -> int:\n    ret x\nx = [f] == [f]\n",
+        "'==' and '!=' cannot compare list[fn(int) -> int], since it holds fn(int) -> int",
+        3,
         5,
     );
 }
@@ -3544,48 +3547,27 @@ fn compared_values_must_have_one_type() {
 }
 
 #[test]
-fn values_holding_lists_or_maps_cannot_be_compared() {
+fn values_holding_lists_or_maps_compare_part_by_part() {
+    for source in [
+        "struct Bag:\n    items: list[int]\nb = Bag(items=[])\nx = b == b\n",
+        "t = (1, [2])\nx = t == t\n",
+        "y = some({1: 2})\nx = y == none\n",
+        "enum Tree:\n    Leaf\n    Node(int, list[Tree])\nt = Tree.Leaf\nx = t == t\n",
+        "struct T:\n    kids: list[T]\nt = T(kids=[])\nx = t == t\n",
+    ] {
+        assert_eq!(type_of_symbol(source, "x"), "bool", "{source}");
+    }
     assert_error(
-        "struct Bag:\n    items: list[int]\nb = Bag(items=[])\nprint(b == b)\n",
-        "'==' and '!=' cannot compare Bag, since field 'Bag.items' holds list[int]",
+        "struct Bag:\n    items: list[fn(int)]\nb = Bag(items=[])\nprint(b == b)\n",
+        "'==' and '!=' cannot compare Bag, since field 'Bag.items' holds fn(int)",
         4,
-        7,
-    );
-    assert_error(
-        "struct Bag:\n    items: list[int]\nstruct Box:\n    bag: tuple[int, Bag]\n\
-         b = Box(bag=(1, Bag(items=[])))\nprint(b != b)\n",
-        "'==' and '!=' cannot compare Box, since field 'Bag.items' holds list[int]",
-        6,
-        7,
-    );
-    assert_error(
-        "t = (1, [2])\nprint(t == t)\n",
-        "'==' and '!=' cannot compare tuple[int, list[int]], since it holds list[int]",
-        2,
-        7,
-    );
-    assert_error(
-        "x = some({1: 2})\nprint(x == none)\n",
-        "'==' and '!=' cannot compare option[map[int, int]], since it holds map[int, int]",
-        2,
-        7,
-    );
-    assert_error(
-        "enum Tree:\n    Leaf\n    Node(int, list[Tree])\nt = Tree.Leaf\nprint(t == t)\n",
-        "'==' and '!=' cannot compare Tree, since it holds list[Tree]",
-        5,
         7,
     );
 }
 
 #[test]
-fn maps_cannot_be_compared() {
-    assert_error(
-        "x = {1: 1} == {1: 1}\n",
-        "'==' and '!=' cannot compare map[int, int]",
-        1,
-        5,
-    );
+fn maps_compare_by_their_entries() {
+    assert_eq!(type_of_symbol("x = {1: 1} == {1: 1}\n", "x"), "bool");
 }
 
 #[test]
@@ -4215,12 +4197,11 @@ fn equality_looks_through_type_arguments() {
         )),
         []
     );
-    assert_error(
-        &format!("{TYPES}print(Pair(first=[1], second=2) == Pair(first=[1], second=2))\n"),
-        "'==' and '!=' cannot compare Pair[list[int], int], since field 'Pair.first' holds \
-         list[int]",
-        12,
-        7,
+    assert_eq!(
+        errors(&format!(
+            "{TYPES}print(Pair(first=[1], second=2) == Pair(first=[1], second=2))\n"
+        )),
+        []
     );
 }
 
@@ -4708,24 +4689,20 @@ fn a_struct_that_implements_eq_compares_however_it_says() {
         assert_eq!(type_of_symbol(&source, name), "bool");
     }
     assert_eq!(method_calls(&source), [("Bag.eq".to_string(), true, false)]);
-    // without the impl block, the list keeps it from comparing
-    assert_error(
-        "struct Bag:\n    items: list[int]\nb = Bag(items=[]) == Bag(items=[])\n",
-        "'==' and '!=' cannot compare Bag, since field 'Bag.items' holds list[int]",
-        3,
-        5,
+    // without the impl block, it compares its list element by element
+    assert_eq!(
+        type_of_symbol(
+            "struct Bag:\n    items: list[int]\nb = Bag(items=[]) == Bag(items=[])\n",
+            "b"
+        ),
+        "bool"
     );
     // a struct without its own `eq` has the one that compares part by part
     assert_eq!(
         type_of_symbol("struct P:\n    x: int\nb = P(x=1).eq(P(x=2))\n", "b"),
         "bool"
     );
-    assert_error(
-        "b = [1].eq([2])\n",
-        "'==' and '!=' cannot compare list[int]",
-        1,
-        5,
-    );
+    assert_eq!(type_of_symbol("b = [1].eq([2])\n", "b"), "bool");
 }
 
 #[test]
@@ -4745,10 +4722,15 @@ fn bounds_by_eq_and_ord_allow_comparisons() {
         2,
         9,
     );
+    assert_eq!(
+        errors("fn same[T: eq](a: T, b: T) -> bool:\n    ret a == b\nx = same([1], [2])\n"),
+        []
+    );
     assert_error(
-        "fn same[T: eq](a: T, b: T) -> bool:\n    ret a == b\nx = same([1], [2])\n",
-        "'list[int]' does not implement 'eq', which 'same' needs for 'T'",
-        3,
+        "fn same[T: eq](a: T, b: T) -> bool:\n    ret a == b\nfn f(x: int):\n    print(x)\n\
+         x = same(f, f)\n",
+        "'fn(int)' does not implement 'eq', which 'same' needs for 'T'",
+        5,
         5,
     );
 }
@@ -5090,16 +5072,12 @@ fn in_needs_a_value_of_the_containers_kind() {
 
 #[test]
 fn in_compares_elements_as_equality_does() {
+    assert_eq!(type_of_symbol("b = [1] in [[1]]\n", "b"), "bool");
+    assert_eq!(type_of_symbol("b = [[1]].contains([1])\n", "b"), "bool");
     assert_error(
-        "b = [1] in [[1]]\n",
-        "'in' and 'not in' cannot compare list[int]",
-        1,
-        5,
-    );
-    assert_error(
-        "b = [[1]].contains([1])\n",
-        "'contains' cannot compare list[int]",
-        1,
+        "fn f(x: int) -> int:\n    ret x\nb = f in [f]\n",
+        "'in' and 'not in' cannot compare fn(int) -> int",
+        3,
         5,
     );
     assert_error(
@@ -5858,4 +5836,72 @@ fn every_type_the_prelude_defines_is_visible_everywhere() {
             assert!(visible_type(name, FileId::PRELUDE), "{name}");
         }
     }
+}
+
+#[test]
+fn an_assert_tests_a_bool_and_explains_with_a_str() {
+    assert_eq!(
+        errors("x = 1\nassert x == 1, \"x is {x}\"\nassert x > 0\n"),
+        []
+    );
+    assert_error(
+        "x = 1\nassert x\n",
+        "a condition must be bool, found int",
+        2,
+        8,
+    );
+    assert_error(
+        "x = 1\nassert x > 0, x\n",
+        "an assert's message must be a str, found int; write the value into one, as in \"{x}\"",
+        2,
+        15,
+    );
+    assert_error("assert y > 0\n", "undefined name 'y'", 1, 8);
+}
+
+#[test]
+fn an_assert_compares_what_equality_compares() {
+    assert_eq!(
+        errors("xs = [1]\nassert xs == [1], \"{xs}\"\nassert {\"a\": xs} != {}\n"),
+        []
+    );
+    assert_error(
+        "fn double(x: int) -> int:\n    ret x * 2\nf = double\nassert f == double\n",
+        "'==' and '!=' cannot compare fn(int) -> int",
+        4,
+        8,
+    );
+}
+
+#[test]
+fn a_test_reads_no_global_since_no_top_level_code_runs_before_it() {
+    let source = "LIMIT = 10\n\
+                  fn clamp(x: int) -> int:\n    ret x.min(LIMIT)\n\
+                  fn twice(x: int) -> int:\n    ret clamp(x) * 2\n\
+                  test \"direct\":\n    assert LIMIT == 10\n\
+                  test \"indirect\":\n    assert twice(20) == 20\n\
+                  test \"as a value\":\n    f = clamp\n    assert f(20) == 10\n\
+                  test \"own variable\":\n    LIMIT = 3\n    assert LIMIT == 3\n\
+                  test \"no globals\":\n    assert 1.min(2) == 1\n";
+    let advice = "but stone test runs no top-level code";
+    assert_eq!(
+        errors(source),
+        [
+            (
+                format!("this test reads the global 'LIMIT', {advice}"),
+                6,
+                6
+            ),
+            (
+                format!("this test reads the global 'LIMIT' (through 'twice'), {advice}"),
+                8,
+                6
+            ),
+            (
+                format!("this test reads the global 'LIMIT' (through 'clamp'), {advice}"),
+                10,
+                6
+            ),
+        ]
+    );
 }

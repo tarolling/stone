@@ -1,0 +1,48 @@
+// lists compare element by element, lengths first
+struct Point:
+    x: int
+    y: int
+
+struct Loose:
+    name: str
+    size: int
+
+// two loose values are equal when their names are, whatever their sizes
+impl eq for Loose:
+    fn eq(self, other: Self) -> bool:
+        print("comparing {self.name} and {other.name}")
+        ret self.name == other.name
+
+enum Shape:
+    Dot
+    Line(list[Point])
+
+print([1, 2, 3] == [1, 2, 3])
+print([1, 2, 3] == [1, 2])
+print([1, 2, 3] != [1, 2, 4])
+print([] == [0][:0])
+print(["a", "b"] == ["a", "b"], ["a"] == ["b"])
+print([[1], [2, 3]] == [[1], [2, 3]], [[1], [2, 3]] == [[1], [3, 2]])
+nan = float("nan").unwrap()
+print([1.0, 2.0] == [1.0, 2.0], [nan] == [nan], [0.0] == [-0.0])
+print([(1, "a"), (2, "b")] == [(1, "a"), (2, "b")], [(1, "a")] == [(1, "b")])
+print([Point(x=1, y=2)] == [Point(x=1, y=2)], [Point(x=1, y=2)] == [Point(x=2, y=1)])
+print([some(1), none] == [some(1), none], [some([1])] == [some([2])])
+print(Shape.Line([Point(x=0, y=0)]) == Shape.Line([Point(x=0, y=0)]))
+print(Shape.Line([]) == Shape.Dot)
+// a struct's own eq is called for each element in turn, stopping at the first that differs
+print([Loose(name="a", size=1), Loose(name="b", size=2)] == [Loose(name="a", size=3), Loose(name="b", size=4)])
+print([Loose(name="a", size=1), Loose(name="b", size=2)] == [Loose(name="x", size=1), Loose(name="b", size=2)])
+// different lengths compare no elements
+print([Loose(name="a", size=1)] == [])
+print([1, 2] in [[1], [1, 2]], [3] not in [[1], [1, 2]])
+print([[1, 2], [3]].contains([3]))
+xs = [1, 2]
+ys = xs
+ys.append(3)
+print(xs == ys, xs == ys[:2])
+
+fn same[T: eq](a: T, b: T) -> bool:
+    ret a == b
+
+print(same([1], [1]), same([["a"]], [["b"]]))

@@ -1,0 +1,30 @@
+// `stone run` and `stone build` run the top-level code and never a test block
+struct Point:
+    x: int
+    y: int
+
+impl Point:
+    fn shifted(self, dx: int) -> Point:
+        ret Point(x=self.x + dx, y=self.y)
+
+// `test` is still a name where no description follows it
+fn test(n: int) -> int:
+    ret n * 10
+
+test "never runs, or it would fail":
+    print("a test ran")
+    assert false, "tests do not run under stone run"
+
+print(test(4))
+
+test "shifts a point":
+    p = Point(x=1, y=2).shifted(3)
+    step = 2
+    assert [p.x, p.y].map(|v| v + step) == [6, 4]
+
+fn either(test: bool, a: str, b: str) -> str:
+    if test:
+        ret a
+    ret b
+
+print(either(true, "top-level code ran", "no"))

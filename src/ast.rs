@@ -356,6 +356,24 @@ pub fn is_lambda(name: &str) -> bool {
     number(parts.next()) && number(parts.next()) && parts.next() == Some("lambda")
 }
 
+/// Returns the name of the function a test block becomes, from the span of the block, which
+/// starts at its `test`.
+///
+/// For example, a test whose `test` is at line 4, col 1 becomes `test.4.1`.
+pub fn test_name(span: Span) -> String {
+    format!("test.{}.{}", span.start.line, span.start.col)
+}
+
+/// Returns whether `name` is a function made of a test block, as [`test_name`] names it, maybe
+/// renamed for its module, as `util.test.4.1`.
+///
+/// For example, `test.4.1` and `util.test.4.1` are, while `test` and `util.test` are not.
+pub fn is_test(name: &str) -> bool {
+    let mut parts = name.rsplit('.');
+    let number = |part: Option<&str>| part.is_some_and(|p| p.parse::<usize>().is_ok());
+    number(parts.next()) && number(parts.next()) && parts.next() == Some("test")
+}
+
 /// The kind of an [`Expr`], such as a call or a binary operation.
 #[derive(Debug, Clone, PartialEq)]
 pub enum ExprKind {
@@ -501,6 +519,7 @@ impl Stmt {
     pub fn blocks(&self) -> Vec<&[Stmt]> {
         match &self.kind {
             StmtKind::FunctionDef { body, .. }
+            | StmtKind::Test { body, .. }
             | StmtKind::For { body, .. }
             | StmtKind::While { body, .. } => vec![body],
             StmtKind::If { body, orelse, .. } => vec![body, orelse],
@@ -515,6 +534,7 @@ impl Stmt {
             | StmtKind::Use { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
+            | StmtKind::Assert { .. }
             | StmtKind::Break
             | StmtKind::Continue => vec![],
         }
@@ -534,7 +554,9 @@ impl Stmt {
             StmtKind::While { test, .. } | StmtKind::If { test, .. } => vec![test],
             StmtKind::Expr { value } => vec![value],
             StmtKind::Match { subject, .. } => vec![subject],
+            StmtKind::Assert { test, msg } => [&**test].into_iter().chain(msg.as_deref()).collect(),
             StmtKind::FunctionDef { .. }
+            | StmtKind::Test { .. }
             | StmtKind::Use { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
@@ -664,6 +686,21 @@ pub enum StmtKind {
     Match {
         subject: Box<Expr>,
         cases: Vec<MatchCase>,
+    },
+    /// An `assert` statement, such as `assert x > 0, "x is {x}"`, which stops the program with
+    /// a runtime error at `test` unless it is true, evaluating `msg`, a `str`, only then.
+    Assert {
+        test: Box<Expr>,
+        msg: Option<Box<Expr>>,
+    },
+    /// A test block, such as `test "adds one":` plus a block, which only the top level of a
+    /// file holds. `name` is its description and `name_span` the literal's. Linking turns each
+    /// into a function named [`test_name`] ([`crate::lift::lift_tests`]), so only code that
+    /// parses without linking sees one.
+    Test {
+        name: String,
+        name_span: Span,
+        body: Vec<Stmt>,
     },
     /// A `break` statement.
     Break,

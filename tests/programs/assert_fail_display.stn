@@ -1,0 +1,13 @@
+// a struct on a side of a failed comparison is written by its own display
+
+struct Money:
+    cents: int
+
+impl display for Money:
+    fn display(self) -> str:
+        ret "{self.cents} cents"
+
+total = [Money(cents=150), Money(cents=275)]
+assert total.len() == 2
+assert total[0] == Money(cents=100)
+print("never")

@@ -12,13 +12,13 @@ use lsp_types::{
     DocumentSymbol, Hover, HoverContents, Location, MarkupContent, MarkupKind, Position,
     PrepareRenameResponse, Range, SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
-use stone::ast::is_lambda;
+use stone::ast::{is_lambda, is_test};
 use stone::checker::{
     Analysis, ORD, Symbol, SymbolKind as StoneSymbolKind, Type, prints_bare, struct_display,
 };
 use stone::diagnostic::Severity;
 use stone::lexer::Lexer;
-use stone::package::{LIB, MANIFEST};
+use stone::package::LIB;
 use stone::project::{
     DEFAULT_ENTRY, Import, Linked, MapSources, PackageInfo, SourceFile, SourceMap, Sources, Target,
     link, link_in, shown_names,
@@ -267,13 +267,10 @@ impl Document {
 /// Links the program the file at `path` belongs to. See [`Document::in_program`].
 fn program_of(path: &Path, text: &str, sources: &dyn Sources) -> Linked {
     let dir = path.parent().unwrap_or(Path::new(""));
-    let holds = |d: &Path, name: &str| sources.read(&d.join(name)).is_some();
-    let root = dir
-        .ancestors()
-        .find(|d| holds(d, DEFAULT_ENTRY) || holds(d, MANIFEST));
-    let Some(root) = root else {
+    let Some(root) = stone::driver::program_root(path, sources) else {
         return link(path, text, sources);
     };
+    let root = root.as_path();
     let lib = format!("{LIB}.stn");
     let entry = [DEFAULT_ENTRY, lib.as_str()]
         .into_iter()
@@ -1247,7 +1244,16 @@ pub fn document_symbols(doc: &Document) -> Vec<DocumentSymbol> {
                 outline.children = Some(fields.chain(methods).collect());
                 return outline;
             }
-            function_outline(doc, symbol, &symbol.name)
+            let mut outline = function_outline(doc, symbol, &symbol.name);
+            // a test's symbol is at its description, which names it as written
+            if is_test(&symbol.name)
+                && let Some(description) = doc.text_at(symbol.span)
+            {
+                outline.name = format!("test {description}");
+                outline.detail = None;
+                outline.kind = SymbolKind::METHOD;
+            }
+            outline
         })
         .collect();
     outline.sort_by_key(|s| (s.range.start.line, s.range.start.character));
@@ -1455,7 +1461,10 @@ fn completion_at(doc: &Document, position: Position, sources: &dyn Sources) -> V
     // locals come first, so they win over a global with the same name
     let mut visible: Vec<&Symbol> = doc.analysis.visible_at(doc.file, pos).collect();
     visible.sort_by_key(|s| s.scope.is_none());
-    for symbol in visible.into_iter().filter(|s| !is_lambda(&s.name)) {
+    for symbol in visible
+        .into_iter()
+        .filter(|s| !is_lambda(&s.name) && !is_test(&s.name))
+    {
         let label = doc.local_name(symbol);
         if items.iter().any(|item| item.label == label) {
             continue;

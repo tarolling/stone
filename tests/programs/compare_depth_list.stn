@@ -1,0 +1,12 @@
+// a struct can hold a list of itself, so comparing can nest without bound until it fails
+struct Tree:
+    kids: list[Tree]
+
+fn deep(n: int) -> Tree:
+    t = Tree(kids=[])
+    for _ in range(n):
+        t = Tree(kids=[t])
+    ret t
+
+print(deep(10) == deep(10), deep(10) == deep(11))
+print(deep(20000) == deep(20000))

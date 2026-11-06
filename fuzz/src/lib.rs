@@ -178,8 +178,6 @@ struct Generator {
     /// Variables the function being generated has changed in place, so it can read any changed
     /// parameter before returning.
     changed: Vec<String>,
-    /// Whether the type being declared may only hold comparable types, so `==` accepts it.
-    plain: bool,
 }
 
 impl Generator {

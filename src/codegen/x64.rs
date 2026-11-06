@@ -187,6 +187,10 @@ impl AssemblyGenerator for X64Generator {
     fn set_gpu_launch(&mut self, launch: bool) {
         self.ctx.gpu_launch = launch;
     }
+
+    fn set_tests(&mut self, tests: Vec<String>) {
+        self.ctx.tests = Some(tests);
+    }
 }
 
 /// Returns whether x86-64 at `level`, `v2` or above, has SSE4.1, as `roundsd` needs.

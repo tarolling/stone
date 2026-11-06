@@ -52,15 +52,19 @@ These names are reserved and cannot be used for variables or functions:
 | `while` | loops while a condition holds |
 | `for`, `in` | loops over a list or a `range`; `for` also names the type in `impl Shape for Circle:`, and `in` and `not in` test membership, as in `x in xs` |
 | `match`, `case` | runs the first case whose pattern fits a value |
+| `assert` | stops the program with an error unless a condition holds, as in `assert x > 0` |
 | `break` | leaves the innermost loop |
 | `cont` | skips to the next iteration of the innermost loop |
 | `and`, `or`, `not` | boolean operators, with short-circuiting `and` and `or` |
 | `true`, `false` | the `bool` values |
 | `none` | the option that holds no value |
 
+`test` is a keyword only where a test block opens, at the start of a top-level line and followed
+by a string, so it may still name a variable, a parameter, or a function.
+
 ## Lines and blocks
 
-A statement ends at the end of its line. A statement that opens a block (`fn`, `if`, `elif`,
+A statement ends at the end of its line. A statement that opens a block (`fn`, `test`, `if`, `elif`,
 `else`, `while`, `for`, `case`) ends in `:`, followed either by an indented block on the next
 lines or by a single simple statement on the same line. `enum`, `struct`, `trait`, `impl`, and
 `match` end in `:` too, and are always followed by an indented block: of variants or fields, one
@@ -150,6 +154,8 @@ are an error.
 | `if` / `elif` / `else` | `if x < 0:` ... `elif x == 0:` ... `else:` ... |
 | `while` | `while i < 10:` plus a block |
 | `for` | `for x in items:`, `for c in text:`, `for i in range(n):`, `for name, score in pairs:` |
+| `assert` | `assert x > 0`, `assert xs == [1, 2]`, `assert n > 0, "n is {n}"` |
+| test block | `test "parses a point":` plus a block, at the top level only |
 | `break`, `cont` | inside a loop only |
 | `use` | `use util`, `use geometry.shapes.area as area` |
 
@@ -157,6 +163,35 @@ A `for` loop's variable is a plain name, or names to unpack each tuple of a list
 takes names only, each once, as many as the tuple has values; an element such as `xs[0]` is
 assigned on a line of its own. Functions, enums, structs, traits, and `impl` blocks can only be
 defined at the top level.
+
+`assert test` stops the program with a runtime error at `test`, which must be a `bool`, unless
+it is true. When `test` is a single comparison (`==`, `!=`, `<`, `<=`, `>`, `>=`, `in`, or
+`not in`), the error shows both sides as `print` writes them, strings quoted, as in
+`assertion failed: [1, 2] == [1, 3]`; otherwise it says `assertion failed`. A message after a
+comma, `assert n > 0, "n is {n}"`, must be a `str` and replaces the sides
+(`assertion failed: n is -1`), and is evaluated only if the test fails. Each side runs once, left
+then right, and `assert` works anywhere a statement does.
+
+A test block, `test "description":` plus a block, holds code that checks the code around it,
+usually with `assert`:
+
+```stone
+fn double(x: int) -> int:
+    ret x * 2
+
+test "doubles negative numbers":
+    assert double(-3) == -6
+
+print(double(4))
+```
+
+`stone run` and `stone build` never run a test block, so this program prints `8`, while
+`stone test` runs each test alone (see {doc}`../guides/testing`). A test runs without the
+program's top-level code, so it may not read a global, directly or through the
+functions it calls; it makes what it needs itself. Its description is a plain string, without
+values in braces, and no two tests of a file share one. Test blocks may be in any file, library
+modules included, and a package's tests are left out of the programs that use it.
+
 `use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
 
 ## Augmented assignment

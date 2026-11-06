@@ -54,6 +54,7 @@ philosophy
 
 guides/packages
 guides/publishing
+guides/testing
 ```
 
 ```{toctree}

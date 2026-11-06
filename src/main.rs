@@ -9,7 +9,8 @@ use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
 use stone::driver::{self, Checked};
 use stone::format;
 use stone::interpreter::{Exit, Limits};
-use stone::project::{FsSources, SourceMap};
+use stone::project::{DEFAULT_ENTRY, FsSources, SourceMap};
+use stone::testing;
 
 mod deps;
 mod uninstall;
@@ -81,6 +82,26 @@ enum Command {
         /// A program's entry file or directory, whose `build` directory to remove. Defaults to
         /// the current directory.
         path: Option<PathBuf>,
+    },
+    /// Runs the test blocks (`test "description":`) of files, each test alone and without the
+    /// file's top-level code.
+    Test {
+        /// The files to test, or directories to test every file with test blocks under.
+        /// Defaults to the current directory.
+        paths: Vec<PathBuf>,
+        /// Compile each file and run its tests as native programs, instead of with the
+        /// interpreter.
+        #[arg(long)]
+        build: bool,
+        /// Run only the tests whose description contains this text.
+        #[arg(long, value_name = "TEXT")]
+        filter: Option<String>,
+        /// How many files to test at once. Defaults to one per processor.
+        #[arg(short, long, value_name = "N")]
+        jobs: Option<usize>,
+        /// Use only packages already downloaded.
+        #[arg(long)]
+        offline: bool,
     },
     /// Checks a file for errors without running it.
     Check {
@@ -165,6 +186,11 @@ enum ExecutionMode {
         file: String,
         offline: bool,
     },
+    Test {
+        paths: Vec<PathBuf>,
+        options: testing::Options,
+        offline: bool,
+    },
     Add {
         package: String,
         name: Option<String>,
@@ -224,6 +250,21 @@ fn main() -> ExitCode {
             offline,
         },
         Some(Command::Check { file, offline }) => ExecutionMode::Check { file, offline },
+        Some(Command::Test {
+            paths,
+            build,
+            filter,
+            jobs,
+            offline,
+        }) => ExecutionMode::Test {
+            paths,
+            options: testing::Options {
+                build,
+                filter,
+                jobs: jobs.unwrap_or_else(testing::default_jobs),
+            },
+            offline,
+        },
         Some(Command::Add {
             package,
             name,
@@ -297,6 +338,11 @@ fn main() -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
+        ExecutionMode::Test {
+            paths,
+            options,
+            offline,
+        } => test(&paths, &options, offline),
         ExecutionMode::Clean(path) => clean(path.as_deref()),
         ExecutionMode::Fmt { paths, check } => fmt(&paths, check),
         ExecutionMode::Run {
@@ -398,6 +444,42 @@ fn build(
         }
     }
     status
+}
+
+/// Runs `stone test`, testing every file of `paths` with test blocks (every such file under a
+/// directory, and under the current directory if there are none) as `options` says, after
+/// downloading the packages their programs use unless `offline`.
+///
+/// For example, `stone test geo` runs the tests of `geo/shapes.stn` and `geo/vec.stn`, printing
+/// a line per test and a summary, and fails if any test failed or any file has errors.
+fn test(paths: &[PathBuf], options: &testing::Options, offline: bool) -> ExitCode {
+    let paths = match paths.is_empty() {
+        true => vec![PathBuf::from(".")],
+        false => paths.to_vec(),
+    };
+    let (files, errors) = testing::test_files(&paths);
+    let mut status = ExitCode::SUCCESS;
+    for error in &errors {
+        eprintln!("{error}");
+        status = ExitCode::FAILURE;
+    }
+    let mut prepared = vec![];
+    for file in &files {
+        let root = driver::program_root(file, &FsSources)
+            .unwrap_or_else(|| file.parent().unwrap_or(Path::new("")).to_path_buf());
+        if !prepared.contains(&root) {
+            deps::prepare(&root.join(DEFAULT_ENTRY), offline);
+            prepared.push(root);
+        }
+    }
+    match testing::run(&files, options, &mut std::io::stdout().lock()) {
+        Ok(true) => status,
+        Ok(false) => ExitCode::FAILURE,
+        Err(e) => {
+            eprintln!("error: {e}");
+            ExitCode::FAILURE
+        }
+    }
 }
 
 /// Runs `stone clean`, removing the build directory of the program in `path`, an entry file or a

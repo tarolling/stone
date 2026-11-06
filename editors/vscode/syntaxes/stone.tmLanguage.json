@@ -127,7 +127,11 @@
         },
         {
           "name": "keyword.control.stone",
-          "match": "\\b(if|elif|else|while|for|in|break|cont|ret|match|case)\\b"
+          "match": "\\b(if|elif|else|while|for|in|break|cont|ret|match|case|assert)\\b"
+        },
+        {
+          "name": "keyword.control.stone",
+          "match": "^(test)(?=[ \\t]+\")"
         },
         {
           "name": "keyword.operator.logical.stone",

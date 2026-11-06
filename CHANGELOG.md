@@ -10,6 +10,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.4.2] - 2026-11-06
+
 ### Added
 
 - `stone build --gpu sm_75` (any NVIDIA GPU from `sm_50` to `sm_120`, more than once for several)
@@ -24,6 +26,27 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - A Linux program built with `--gpu` now asks to launch each such piece of arithmetic before it
   loops, and computes on the processor when the launch says it did not run. No launch can run
   yet, so results are unchanged.
+- `==` and `!=` compare lists and maps, and values holding them: lists element by element, and
+  maps by their entries, whatever order they were added in, so `[1, 2] == [1, 2]` and
+  `{"a": 1, "b": 2} == {"b": 2, "a": 1}` are true. So `in` finds a list in a list of lists, and
+  `T: eq` accepts lists and maps.
+- `assert test` stops the program with a runtime error unless `test` holds, under `stone run`
+  and in built programs alike. A failed comparison shows both sides, as in
+  `assertion failed: [1, 2] == [1, 3]`, and `assert n > 0, "n is {n}"` gives a message instead,
+  evaluated only when the assertion fails. `assert` is now a keyword, so it cannot name a
+  variable or function.
+- Test blocks: `test "parses a point":` plus a block, at the top level of any file, holds
+  checks that `stone run` and `stone build` never run (and never compile). A test may not read
+  a global, directly or through the functions it calls, since tests run without the program's
+  top-level code, and no two tests of a file may share a description. A package's tests are
+  left out of the programs that use it. `test` stays an ordinary name everywhere else.
+- `stone test [PATH...]` runs the test blocks of every file under the paths (the current
+  directory by default), each test alone and without the file's top-level code, checking each
+  file as part of the program it belongs to. It prints each test as `ok` or `FAILED`, then each
+  failure with what the test printed and its error, then a count, and exits with status 1 if
+  anything failed. `--filter TEXT` runs only the tests whose description contains `TEXT`,
+  `--build` compiles each file and runs its tests as native programs (in `build/test/`), and
+  `-j N` tests `N` files at once (one per processor by default).
 
 ### Changed
 

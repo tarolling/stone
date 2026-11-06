@@ -1,0 +1,7 @@
+// a message that fails stops the program with its own error
+
+xs = [1, 2]
+assert xs.len() == 2, "{xs[5]}"
+print("passed")
+assert xs.len() == 3, "{xs[5]}"
+print("never")

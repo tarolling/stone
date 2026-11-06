@@ -1,0 +1,8 @@
+// a test cannot read a global, even through a function it calls
+LIMIT = 10
+
+fn clamp(n: int) -> int:
+    ret n.min(LIMIT)
+
+test "clamps":
+    assert clamp(20) == 10

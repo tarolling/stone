@@ -2436,3 +2436,89 @@ fn packages_from_hosts_need_a_store() {
         1,
     );
 }
+
+/// Links a program whose entry file is the first of `files`, without checking it.
+fn linked(files: &[(&str, &str)]) -> Linked {
+    let (entry, source) = files[0];
+    link(Path::new(entry), source, &sources_of(&files[1..]))
+}
+
+/// Returns the names of the functions of a linked module, in order.
+fn function_names(linked: &Linked) -> Vec<String> {
+    let Mod::Module { body } = &linked.module;
+    body.iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::FunctionDef { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn a_test_block_becomes_a_function_that_nothing_runs() {
+    let main = (
+        "main.stn",
+        "print(1)\n\ntest \"adds one\":\n    assert 1 + 1 == 2\n",
+    );
+    let program = linked(&[main]);
+    assert_eq!(program.diagnostics, []);
+    assert!(function_names(&program).contains(&"test.3.1".to_string()));
+    assert_eq!(
+        program.tests,
+        [Test {
+            description: "adds one".to_string(),
+            function: "test.3.1".to_string(),
+            span: Span {
+                file: FileId::ENTRY,
+                start: Pos { line: 3, col: 6 },
+                end: Pos { line: 3, col: 16 },
+            },
+        }]
+    );
+    assert_eq!(output(&[main]), "1\n");
+}
+
+#[test]
+fn a_library_modules_tests_are_its_functions_but_not_the_programs_tests() {
+    let program = linked(&[
+        ("main.stn", "use util\nprint(util.one())\n"),
+        (
+            "util.stn",
+            "pub fn one() -> int:\n    ret 1\n\ntest \"one is one\":\n    assert one() == 1\n",
+        ),
+    ]);
+    assert_eq!(program.diagnostics, []);
+    assert!(function_names(&program).contains(&"util.test.4.1".to_string()));
+    assert_eq!(program.tests, []);
+}
+
+#[test]
+fn a_dependencys_tests_are_left_out() {
+    // the test would not check, but nothing of it is linked
+    assert_eq!(
+        output(&[
+            ("main.stn", "use geo.shapes\nprint(shapes.area(2))\n"),
+            USES_GEO,
+            GEO_MANIFEST,
+            (
+                "../geo/shapes.stn",
+                "pub fn area(x: int) -> int:\n    ret x * x\n\ntest \"area\":\n    assert nothing\n",
+            ),
+        ]),
+        "4\n"
+    );
+}
+
+#[test]
+fn a_files_tests_have_different_descriptions() {
+    assert_error(
+        &[(
+            "main.stn",
+            "test \"same\":\n    assert true\n\ntest \"same\":\n    assert true\n",
+        )],
+        "main.stn",
+        "this file already has a test \"same\"",
+        4,
+        6,
+    );
+}

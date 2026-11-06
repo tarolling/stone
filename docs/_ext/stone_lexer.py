@@ -20,6 +20,7 @@ from pygments.token import (
 KEYWORDS = (
     "and",
     "as",
+    "assert",
     "break",
     "case",
     "cont",
@@ -162,6 +163,8 @@ class StoneLexer(RegexLexer):
         "root": [
             (r"\s+", Whitespace),
             (r"//.*$", Comment.Single),
+            # `test` is a keyword only where a test block opens, so `fn test()` stays a name
+            (r'^test(?=[ \t]+")', Keyword),
             (r'\bb"', String.Double, "bytes"),
             (r'"', String.Double, "string"),
             (r"(fn)(\s+)([A-Za-z_]\w*)", bygroups(Keyword, Whitespace, Name.Function)),

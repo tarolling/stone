@@ -1,0 +1,6 @@
+// strings on either side of a failed comparison are quoted, so spaces show
+
+names = ["x", "y"]
+assert "z" not in names
+assert "x" not in names
+print("never")

@@ -1,0 +1,6 @@
+// a failed comparison shows both sides as print writes them
+
+xs = [1, 2]
+print("before")
+assert xs == [1, 3]
+print("never")

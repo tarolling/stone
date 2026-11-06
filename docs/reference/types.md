@@ -777,11 +777,13 @@ These keep the two backends identical and catch common mistakes:
   results, and `str(3)` writes them.
 - **Conditions are `bool`.** `if`, `elif`, `while`, `and`, `or`, and `not` reject ints,
   floats, strings, lists, and `none`, so `if 1 or 0:` is an error; write `n != 0` instead of `n`.
-- **Lists and maps are not comparable.** `==` and `!=` compare numbers, bools, strings, bytes,
-  and tuples, structs, options, and enum values of them, part by part, but not lists or maps, even
-  inside another value, unless a struct holding one implements `eq`. Functions, sockets, and
-  listeners are never compared. `<`, `<=`, `>`, and `>=`
-  compare only numbers, strings, bytes, and structs that implement `ord`.
+- **Functions and connections are not comparable.** `==` and `!=` compare numbers, bools,
+  strings, bytes, and lists, maps, tuples, structs, options, and enum values of them, part by
+  part: two lists are equal if they have the same length and equal elements in order, and two
+  maps if they have the same keys with equal values, whatever order they were added in, so
+  `{"a": 1, "b": 2} == {"b": 2, "a": 1}`. Functions, sockets, listeners, and windows are never
+  compared, even inside another value, unless a struct holding one implements `eq`. `<`, `<=`,
+  `>`, and `>=` compare only numbers, strings, bytes, and structs that implement `ord`.
 - **A call without a value is a statement.** A function without `->`, and builtins such as
   `print`, return no value, so their calls can only be statements of their own.
 - **Matches cover every value.** The cases of a `match` must fit every value of its subject,

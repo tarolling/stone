@@ -1,0 +1,2 @@
+pub fn scale() -> int:
+    ret 1

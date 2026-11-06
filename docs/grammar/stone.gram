@@ -83,6 +83,7 @@ simple_stmt:
     | expressions 
     | return_stmt
     | use_stmt
+    | assert_stmt
     | 'break'
     | 'cont' 
 
@@ -96,6 +97,7 @@ compound_stmt:
     | if_stmt
     | for_stmt
     | while_stmt
+    | test_def
 
 # SIMPLE STATEMENTS
 # =================
@@ -117,6 +119,10 @@ augassign:
 return_stmt:
     | 'ret' [expressions] 
 
+# the message runs only if the test fails
+assert_stmt:
+    | 'assert' expression [',' expression]
+
 # only valid at the top level of a file, which the checker enforces
 use_stmt:
     | 'use' NAME ('.' NAME)* ['as' NAME]
@@ -130,6 +136,14 @@ use_stmt:
 block:
     | NEWLINE INDENT statements DEDENT 
     | simple_stmts
+
+# Test blocks
+# -----------
+
+# only at the top level of a file, and `test` is a keyword only here, so it stays a name
+# anywhere else; the description is a string without values, unique in its file
+test_def:
+    | "test" STRING ':' block
 
 # Function definitions
 # --------------------

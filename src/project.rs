@@ -318,6 +318,20 @@ pub struct Linked {
     pub lock: Option<(PathBuf, String)>,
     /// The program, then every package it uses, for `stone tree`.
     pub packages: Vec<PackageInfo>,
+    /// The test blocks of the entry file, in order, which `stone test` runs.
+    pub tests: Vec<Test>,
+}
+
+/// A test block of a file, such as `test "adds one":`, which linking makes a function of
+/// ([`crate::lift::lift_tests`]).
+#[derive(Debug, Clone, PartialEq)]
+pub struct Test {
+    /// What the test says it checks, as `adds one`.
+    pub description: String,
+    /// The linked name of the function it is, as `test.4.1`.
+    pub function: String,
+    /// Where its description is written.
+    pub span: Span,
 }
 
 /// A package a program is linked with, as `stone tree` shows it.
@@ -430,6 +444,7 @@ pub fn link_in(root: &Path, entry: &Path, source: &str, sources: &dyn Sources) -
         failed: HashMap::new(),
         unavailable: vec![],
         lock: None,
+        tests: vec![],
         diagnostics: vec![],
     };
     loader.add(entry.to_path_buf(), String::new(), source.to_string(), 0);
@@ -548,6 +563,8 @@ struct Loader<'a> {
     unavailable: Vec<Diagnostic>,
     /// The lockfile to write, if it should change.
     lock: Option<(PathBuf, String)>,
+    /// The entry file's tests.
+    tests: Vec<Test>,
     diagnostics: Vec<Diagnostic>,
 }
 
@@ -566,8 +583,17 @@ impl Loader<'_> {
                 .into_iter()
                 .filter(|e| !cut.contains(&e.span.start.line)),
         );
-        errors.sort_by_key(|d| (d.span.start.line, d.span.start.col));
         let Mod::Module { body } = &mut parsed;
+        if package == 0 {
+            let tests = crate::lift::lift_tests(body, &mut errors);
+            if id == FileId::ENTRY {
+                self.tests = tests;
+            }
+        } else {
+            // a package's tests are its own, so its users never check or build them
+            body.retain(|stmt| !matches!(stmt.kind, StmtKind::Test { .. }));
+        }
+        errors.sort_by_key(|d| (d.span.start.line, d.span.start.col));
         crate::lift::lift_lambdas(body);
         self.diagnostics.extend(errors);
         self.files.push(SourceFile {
@@ -1524,6 +1550,7 @@ impl Loader<'_> {
             file_packages: self.file_package,
             lock: self.lock,
             packages,
+            tests: self.tests,
         }
     }
 }
@@ -1975,6 +2002,12 @@ impl<'a> Rewriter<'a> {
                 self.block(orelse);
             }
             StmtKind::Expr { value } => self.expr(value),
+            StmtKind::Assert { test, msg } => {
+                self.expr(test);
+                if let Some(msg) = msg {
+                    self.expr(msg);
+                }
+            }
             StmtKind::Match { subject, cases } => {
                 self.expr(subject);
                 for case in cases {
@@ -1987,6 +2020,7 @@ impl<'a> Rewriter<'a> {
             | StmtKind::ImplDef { .. }
             | StmtKind::TraitDef { .. }
             | StmtKind::Use { .. }
+            | StmtKind::Test { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
         }

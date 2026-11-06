@@ -67,6 +67,15 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
         StmtKind::Return { value } => StmtKind::Return {
             value: value.map(|v| Box::new(strip_expr(*v))),
         },
+        StmtKind::Test { name, body, .. } => StmtKind::Test {
+            name,
+            name_span: Span::default(),
+            body: strip_all(body),
+        },
+        StmtKind::Assert { test, msg } => StmtKind::Assert {
+            test: Box::new(strip_expr(*test)),
+            msg: msg.map(|m| Box::new(strip_expr(*m))),
+        },
         StmtKind::Assign { targets, value } => StmtKind::Assign {
             targets: targets.into_iter().map(strip_expr).collect(),
             value: Box::new(strip_expr(*value)),
@@ -3469,6 +3478,10 @@ fn shortcuts_report_errors_alike() {
         "x ** = 2\n",
         "x == 1 = 2\n",
         "x = 1 if y\n",
+        "fn f():\n    test \"a\":\n        f()\n",
+        "test \"a{b}\":\n    f()\n",
+        "test \"a\"\n",
+        "test \"a\":\n",
         "lambda x: x\n",
         "x = y?\n",
         "  x = 1\n",
@@ -3488,4 +3501,135 @@ fn shortcuts_report_errors_alike() {
         assert_shortcuts_agree(source, crate::span::FileId(1), source);
         assert_shortcuts_agree(source, crate::span::FileId::ENTRY, source);
     }
+}
+
+#[test]
+fn an_assert_takes_a_test_and_maybe_a_message() {
+    let name = |id: &str| -> Box<Expr> {
+        Box::new(
+            ExprKind::Name {
+                id: id.to_string(),
+                ctx: ExprContext::Load,
+            }
+            .into(),
+        )
+    };
+    assert_eq!(
+        parse_ok("assert ok\nassert ok, why\n"),
+        Mod::Module {
+            body: vec![
+                StmtKind::Assert {
+                    test: name("ok"),
+                    msg: None
+                }
+                .into(),
+                StmtKind::Assert {
+                    test: name("ok"),
+                    msg: Some(name("why"))
+                }
+                .into(),
+            ]
+        }
+    );
+}
+
+#[test]
+fn an_assert_needs_a_test() {
+    assert_eq!(
+        error_of("assert\n"),
+        (
+            "expected an expression, found end of line".to_string(),
+            1,
+            7
+        )
+    );
+    assert_eq!(
+        error_of("assert x,\n"),
+        (
+            "expected an expression, found end of line".to_string(),
+            1,
+            10
+        )
+    );
+    assert_eq!(
+        error_of("assert = 1\n"),
+        ("expected an expression, found '='".to_string(), 1, 8)
+    );
+}
+
+#[test]
+fn a_test_block_has_a_description_and_a_body() {
+    let call = |name: &str| -> Stmt {
+        StmtKind::Expr {
+            value: Box::new(
+                ExprKind::Call {
+                    func: Box::new(
+                        ExprKind::Name {
+                            id: name.to_string(),
+                            ctx: ExprContext::Load,
+                        }
+                        .into(),
+                    ),
+                    args: vec![],
+                    keywords: vec![],
+                }
+                .into(),
+            ),
+        }
+        .into()
+    };
+    assert_eq!(
+        parse_ok("test \"adds \\\"one\\\"\":\n    f()\n    g()\n"),
+        Mod::Module {
+            body: vec![
+                StmtKind::Test {
+                    name: "adds \"one\"".to_string(),
+                    name_span: Span::default(),
+                    body: vec![call("f"), call("g")],
+                }
+                .into()
+            ]
+        }
+    );
+}
+
+#[test]
+fn test_is_still_a_name_where_no_description_follows() {
+    let source = "fn test(x: int) -> int:\n    ret x\ntest = test(1)\nprint(test)\n";
+    let Mod::Module { body } = parse_ok(source);
+    assert!(matches!(body[0].kind, StmtKind::FunctionDef { .. }));
+    assert!(matches!(body[1].kind, StmtKind::Assign { .. }));
+    assert!(matches!(body[2].kind, StmtKind::Expr { .. }));
+}
+
+#[test]
+fn a_test_block_is_top_level_with_a_plain_description() {
+    assert_eq!(
+        error_of("fn f():\n    test \"inner\":\n        f()\n"),
+        (
+            "a test can only be at the top level of a file".to_string(),
+            2,
+            5
+        )
+    );
+    assert_eq!(
+        error_of("if x:\n    test \"inner\":\n        f()\n"),
+        (
+            "a test can only be at the top level of a file".to_string(),
+            2,
+            5
+        )
+    );
+    assert_eq!(
+        error_of("test \"adds {n}\":\n    f()\n"),
+        (
+            "a test's description is a plain string, without values in braces".to_string(),
+            1,
+            6
+        )
+    );
+    assert_eq!(
+        error_of("test \"adds\"\n    f()\n"),
+        ("expected ':', found end of line".to_string(), 1, 12)
+    );
 }

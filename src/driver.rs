@@ -67,6 +67,8 @@ pub struct Checked {
     pub calls: Calls,
     /// Everything the checker learned about the module, which compiling it reuses.
     pub analysis: Rc<Analysis>,
+    /// The test blocks of the entry file, in order, which `stone test` runs.
+    pub tests: Vec<project::Test>,
 }
 
 /// Loads, links, and checks the program whose entry file is at `entry` and holds `source`,
@@ -80,12 +82,24 @@ pub fn load(
     source: &str,
     sources: &dyn Sources,
 ) -> (SourceMap, Result<Checked, Diagnostics>) {
-    let linked = project::link(entry, source, sources);
+    check_linked(project::link(entry, source, sources), sources)
+}
+
+/// Checks a program that linking gave, as [`load`] does, writing its `stone.lock` through
+/// `sources` if it should change.
+///
+/// For example, a module of a program linked as its entry with [`project::link_in`], as
+/// `stone test` links each file, is checked as its own program.
+pub fn check_linked(
+    linked: Linked,
+    sources: &dyn Sources,
+) -> (SourceMap, Result<Checked, Diagnostics>) {
     let lock_error = write_lock(&linked, sources);
     let Linked {
         module,
         sources,
         mut diagnostics,
+        tests,
         ..
     } = linked;
     diagnostics.extend(lock_error);
@@ -101,6 +115,7 @@ pub fn load(
         calls: analysis.calls(),
         warnings: analysis.diagnostics.clone(),
         analysis: Rc::new(analysis),
+        tests,
     };
     (sources, Ok(checked))
 }
@@ -243,18 +258,48 @@ pub fn run_module(
     args: &[String],
     limits: Limits,
 ) -> Result<(), Box<dyn Error>> {
-    // a thread of its own, since deep recursion needs more stack than the main thread has
+    on_interpreter_thread(|| {
+        Interpreter::with_output(out, limits)
+            .with_input(input)
+            .with_args(args.to_vec())
+            .with_calls(calls.clone())
+            .evaluate(ast)
+    })
+}
+
+/// Runs the test function `function` of a checked module, such as `test.4.1`, with the
+/// tree-walking interpreter, without any of the module's top-level statements: it prints to `out`,
+/// writes `eprint`'s lines to `errors`, reads no input, gets no arguments, and stops once it
+/// exceeds `limits`.
+///
+/// For example, running the test of `test "one":` plus `print(1)` appends `1\n` to `out`, and
+/// one whose `assert` fails returns that runtime error. `os.exit(0)` passes, and any other status
+/// ends with the error [`Exit`].
+pub fn run_test(
+    ast: &Mod,
+    calls: &Calls,
+    function: &str,
+    out: &mut (impl Write + Send),
+    errors: &mut (impl Write + Send),
+    limits: Limits,
+) -> Result<(), Box<dyn Error>> {
+    on_interpreter_thread(|| {
+        Interpreter::with_output(out, limits)
+            .with_errors(errors)
+            .with_calls(calls.clone())
+            .run_function(ast, function)
+    })
+}
+
+/// Runs `run` on a thread with [`Limits::STACK_SIZE`] of stack, since deep recursion needs more
+/// than the main thread has, and turns how it ended into an error that can leave the thread.
+fn on_interpreter_thread(
+    run: impl FnOnce() -> Result<(), Box<dyn Error>> + Send,
+) -> Result<(), Box<dyn Error>> {
     let result = std::thread::scope(|scope| {
         let thread = std::thread::Builder::new()
             .stack_size(Limits::STACK_SIZE)
-            .spawn_scoped(scope, || {
-                let result = Interpreter::with_output(out, limits)
-                    .with_input(input)
-                    .with_args(args.to_vec())
-                    .with_calls(calls.clone())
-                    .evaluate(ast);
-                Ending::of(result)
-            })
+            .spawn_scoped(scope, || Ending::of(run()))
             .map_err(|e| Ending::Error(format!("could not start the interpreter: {e}")))?;
         thread
             .join()
@@ -332,6 +377,45 @@ pub fn compile_module(
     subsystem: Subsystem,
     devices: &[Device],
 ) -> Result<(), Box<dyn Error>> {
+    compile_with(checked, sources, output, target, subsystem, devices, None)
+}
+
+/// Compiles a checked module, as [`compile_module`] does, into a build for `stone test`: an
+/// executable that runs none of the module's top-level statements, but the one test function of
+/// [`Checked::tests`] whose linked name the `STONE_TEST` environment variable holds.
+///
+/// For example, running the build of a file whose test block at 4:1 prints `1` with
+/// `STONE_TEST=test.4.1` prints `1`, and running it with no such test fails with
+/// `error: STONE_TEST names no test of this program`.
+pub fn compile_tests(
+    checked: &Checked,
+    sources: &SourceMap,
+    output: &Path,
+    target: Target,
+) -> Result<(), Box<dyn Error>> {
+    let tests = checked.tests.iter().map(|t| t.function.clone()).collect();
+    compile_with(
+        checked,
+        sources,
+        output,
+        target,
+        Subsystem::Console,
+        &[],
+        Some(tests),
+    )
+}
+
+/// Compiles a checked module as [`compile_module`] does, into a build for `stone test` if
+/// `tests` lists its test functions.
+fn compile_with(
+    checked: &Checked,
+    sources: &SourceMap,
+    output: &Path,
+    target: Target,
+    subsystem: Subsystem,
+    devices: &[Device],
+    tests: Option<Vec<String>>,
+) -> Result<(), Box<dyn Error>> {
     let unsupported = unsupported(&checked.module, sources, target.os);
     if !unsupported.is_empty() {
         return Err(Box::new(Diagnostics(unsupported)));
@@ -344,6 +428,9 @@ pub fn compile_module(
     generator.set_analysis(Rc::clone(&checked.analysis));
     // only Linux programs launch kernels so far
     generator.set_gpu_launch(!devices.is_empty() && target.os == Os::Linux);
+    if let Some(tests) = tests {
+        generator.set_tests(tests);
+    }
     let assembly = generator.assemble(&checked.module)?;
     codegen::link(&assembly, output, target, subsystem)?;
     if !devices.is_empty() {
@@ -430,6 +517,20 @@ pub const BUILD_DIR: &str = "build";
 /// The file that marks a build directory as stone's, so `stone clean` never deletes a `build`
 /// directory something else made.
 pub const MARKER: &str = ".stone";
+
+/// Returns the root of the program the file at `path` belongs to: the nearest directory at or
+/// above the file's own that holds a `main.stn` or a `stone.toml`, or `None` if none does, when
+/// the file is a program of its own.
+///
+/// For example, with `app/main.stn` and `app/geo/shapes.stn`, the root of `app/geo/shapes.stn`
+/// is `app`, so linking it there resolves `use geo.vec` as the program does.
+pub fn program_root(path: &Path, sources: &dyn Sources) -> Option<PathBuf> {
+    let dir = path.parent().unwrap_or(Path::new(""));
+    let holds = |d: &Path, name: &str| sources.read(&d.join(name)).is_some();
+    dir.ancestors()
+        .find(|d| holds(d, DEFAULT_ENTRY) || holds(d, crate::package::MANIFEST))
+        .map(Path::to_path_buf)
+}
 
 /// Returns the build directory of the program whose entry file is `entry`: `build` next to it,
 /// in the same directory that is the root of the program's modules.
@@ -555,6 +656,7 @@ pub fn stone_files(dir: &Path) -> std::io::Result<Vec<PathBuf>> {
 mod tests {
     use super::*;
     use crate::checker::Type;
+    use crate::codegen::ir::lower::TEST_VARIABLE;
     use crate::span::FileId;
 
     #[test]
@@ -592,6 +694,119 @@ u = net.connect_unix(\"/tmp/x\")
         );
         assert!(built.is_err());
         assert!(!output.exists());
+    }
+
+    #[test]
+    fn a_test_runs_alone_without_the_top_level_code() {
+        let source = "\
+print(\"top-level code\")
+
+fn double(x: int) -> int:
+    ret x * 2
+
+test \"doubles\":
+    print(double(2))
+    assert double(2) == 4
+
+test \"doubles wrong\":
+    eprint(\"checking\")
+    assert double(2) == 5
+";
+        let (sources, checked) = load(Path::new("main.stn"), source, &MapSources::default());
+        let checked = checked.unwrap();
+        let names: Vec<(&str, &str)> = checked
+            .tests
+            .iter()
+            .map(|t| (t.description.as_str(), t.function.as_str()))
+            .collect();
+        assert_eq!(
+            names,
+            [("doubles", "test.6.1"), ("doubles wrong", "test.10.1")]
+        );
+        let run = |function: &str| {
+            let (mut out, mut errors) = (vec![], vec![]);
+            let result = run_test(
+                &checked.module,
+                &checked.calls,
+                function,
+                &mut out,
+                &mut errors,
+                Limits::DEFAULT,
+            );
+            let error = result.err().map(|e| match e.downcast_ref::<Diagnostic>() {
+                Some(d) => sources.render(d).lines().next().unwrap().to_string(),
+                None => e.to_string(),
+            });
+            (
+                String::from_utf8(out).unwrap(),
+                String::from_utf8(errors).unwrap(),
+                error,
+            )
+        };
+        assert_eq!(run("test.6.1"), ("4\n".to_string(), String::new(), None));
+        assert_eq!(
+            run("test.10.1"),
+            (
+                String::new(),
+                "checking\n".to_string(),
+                Some("main.stn:12:12: error: assertion failed: 4 == 5".to_string())
+            )
+        );
+    }
+
+    #[test]
+    fn a_test_build_runs_the_test_stone_test_names() {
+        let Ok(target) = Target::host() else {
+            return;
+        };
+        let source = "\
+print(\"top-level code\")
+
+test \"passes\":
+    print(1)
+
+test \"fails\":
+    xs = [1, 2]
+    assert xs == [1, 3]
+";
+        let (sources, checked) = load(Path::new("main.stn"), source, &MapSources::default());
+        let checked = checked.unwrap();
+        let dir = std::env::temp_dir().join(format!("stone-test-build-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let output = dir.join("main");
+        compile_tests(&checked, &sources, &output, target).unwrap();
+        let run = |name: Option<&str>| {
+            let mut command = std::process::Command::new(&output);
+            command.env_remove(TEST_VARIABLE);
+            if let Some(name) = name {
+                command.env(TEST_VARIABLE, name);
+            }
+            let done = command.output().unwrap();
+            (
+                done.status.code(),
+                String::from_utf8(done.stdout).unwrap(),
+                String::from_utf8(done.stderr).unwrap(),
+            )
+        };
+        assert_eq!(
+            run(Some("test.3.1")),
+            (Some(0), "1\n".to_string(), String::new())
+        );
+        let (status, out, errors) = run(Some("test.6.1"));
+        assert_eq!((status, out.as_str()), (Some(1), ""));
+        assert!(
+            errors.starts_with("main.stn:8:12: error: assertion failed: [1, 2] == [1, 3]"),
+            "{errors}"
+        );
+        assert_eq!(
+            run(None),
+            (
+                Some(1),
+                String::new(),
+                "error: STONE_TEST names no test of this program\n".to_string()
+            )
+        );
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]

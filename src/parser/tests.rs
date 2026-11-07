@@ -3,6 +3,7 @@ use crate::ast::*;
 use crate::diagnostic::Diagnostic;
 use crate::lexer::Lexer;
 use crate::span::{Pos, Span};
+use crate::stdlib::spec::FormatSpec;
 use crate::token::{Token, TokenType};
 use std::sync::mpsc;
 use std::thread;
@@ -224,6 +225,7 @@ fn strip_pattern(pattern: Pattern) -> Pattern {
 fn strip_type(ty: TypeExpr) -> TypeExpr {
     let kind = match ty.kind {
         TypeExprKind::List(elem) => TypeExprKind::List(Box::new(strip_type(*elem))),
+        TypeExprKind::Set(elem) => TypeExprKind::Set(Box::new(strip_type(*elem))),
         TypeExprKind::Map(key, value) => {
             TypeExprKind::Map(Box::new(strip_type(*key)), Box::new(strip_type(*value)))
         }
@@ -269,6 +271,10 @@ fn strip_expr(expr: Expr) -> Expr {
         ExprKind::Try { value } => ExprKind::Try {
             value: strip_box(value),
         },
+        ExprKind::FormattedValue { value, spec } => ExprKind::FormattedValue {
+            value: strip_box(value),
+            spec,
+        },
         ExprKind::Compare {
             left,
             ops,
@@ -311,6 +317,9 @@ fn strip_expr(expr: Expr) -> Expr {
         ExprKind::Dict { keys, values } => ExprKind::Dict {
             keys: strip_all(keys),
             values: strip_all(values),
+        },
+        ExprKind::Set { elts } => ExprKind::Set {
+            elts: strip_all(elts),
         },
         ExprKind::Tuple { elts, ctx } => ExprKind::Tuple {
             elts: strip_all(elts),
@@ -1528,11 +1537,50 @@ fn unclosed_dict_is_an_error() {
         ("expected '}', found end of line".to_string(), 1, 10)
     );
     assert_eq!(
-        error_of("x = {1, 2}\n"),
+        error_of("x = {1: 2, 3}\n"),
         (
             "a map entry is a key, ':', and a value, as in '{\"a\": 1}'".to_string(),
             1,
-            7
+            13
+        )
+    );
+}
+
+#[test]
+fn set_literals_parse() {
+    let set = |elts: Vec<Expr>| -> Expr { ExprKind::Set { elts }.into() };
+    assert_eq!(expr_of("{1}\n"), set(vec![*int(1)]));
+    assert_eq!(expr_of("{1, x,}\n"), set(vec![*int(1), *name("x")]));
+    assert_eq!(
+        expr_of("{{1}, {2: 3}}\n"),
+        set(vec![
+            set(vec![*int(1)]),
+            ExprKind::Dict {
+                keys: vec![*int(2)],
+                values: vec![*int(3)]
+            }
+            .into()
+        ])
+    );
+    assert_eq!(
+        error_of("x = {1, 2: 3}\n"),
+        (
+            "a set holds values alone, and a map holds entries alone, as in '{1, 2}' or \
+             '{\"a\": 1}'"
+                .to_string(),
+            1,
+            10
+        )
+    );
+}
+
+#[test]
+fn set_types_parse() {
+    assert_eq!(
+        signature_of("fn f(s: set[str]) -> set[int]: ret\n"),
+        (
+            vec![Some("set[str]".to_string())],
+            Some("set[int]".to_string())
         )
     );
 }
@@ -3196,6 +3244,46 @@ fn a_string_with_values_is_a_joined_string() {
     );
     // a string with none is a constant, even with braces
     assert_eq!(only_expr("\"{{x}}\"\n"), text("{x}").kind);
+}
+
+#[test]
+fn a_value_with_a_format_spec_is_a_formatted_value() {
+    let spec = |text: &str| Box::new(FormatSpec::parse(text).unwrap());
+    assert_eq!(
+        only_expr("\"a{x:.2f}b{y}\"\n"),
+        ExprKind::JoinedStr {
+            values: vec![
+                text("a"),
+                ExprKind::FormattedValue {
+                    value: Box::new(named("x")),
+                    spec: spec(".2f"),
+                }
+                .into(),
+                text("b"),
+                named("y"),
+            ],
+        }
+    );
+    // the spec follows the whole value
+    assert_eq!(
+        only_expr("\"{a + b:>5}\"\n"),
+        ExprKind::JoinedStr {
+            values: vec![
+                ExprKind::FormattedValue {
+                    value: Box::new(
+                        ExprKind::BinOp {
+                            op: Operator::Add,
+                            left: Box::new(named("a")),
+                            right: Box::new(named("b")),
+                        }
+                        .into()
+                    ),
+                    spec: spec(">5"),
+                }
+                .into(),
+            ],
+        }
+    );
 }
 
 #[test]

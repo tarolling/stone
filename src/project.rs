@@ -1685,6 +1685,7 @@ fn mangle(ty: &TypeExpr, this: &str) -> String {
         TypeExprKind::Str => "str".to_string(),
         TypeExprKind::Bytes => "bytes".to_string(),
         TypeExprKind::List(elem) => format!("list_{}", mangle(elem, this)),
+        TypeExprKind::Set(elem) => format!("set_{}", mangle(elem, this)),
         TypeExprKind::Map(key, value) => {
             format!("map_{}_{}", mangle(key, this), mangle(value, this))
         }
@@ -1714,7 +1715,7 @@ fn names_struct(
 ) -> bool {
     let names = |ty: &TypeExpr| names_struct(ty, structs, library, module);
     match &ty.kind {
-        TypeExprKind::List(elem) => names(elem),
+        TypeExprKind::List(elem) | TypeExprKind::Set(elem) => names(elem),
         TypeExprKind::Map(key, value) => names(key) || names(value),
         TypeExprKind::Tuple(fields) => fields.iter().any(names),
         TypeExprKind::Function { params, ret } => {
@@ -2033,7 +2034,7 @@ impl<'a> Rewriter<'a> {
     /// `shapes.Shape` becomes `geometry.shapes.Shape` after `use geometry.shapes`.
     fn type_expr(&mut self, ty: &mut TypeExpr) {
         match &mut ty.kind {
-            TypeExprKind::List(elem) => self.type_expr(elem),
+            TypeExprKind::List(elem) | TypeExprKind::Set(elem) => self.type_expr(elem),
             TypeExprKind::Map(key, value) => {
                 self.type_expr(key);
                 self.type_expr(value);
@@ -2235,9 +2236,9 @@ impl<'a> Rewriter<'a> {
                 self.expr(left);
                 self.expr(right);
             }
-            ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
-                self.expr(operand)
-            }
+            ExprKind::UnaryOp { operand, .. }
+            | ExprKind::Try { value: operand }
+            | ExprKind::FormattedValue { value: operand, .. } => self.expr(operand),
             ExprKind::Compare {
                 left, comparators, ..
             } => {
@@ -2257,7 +2258,7 @@ impl<'a> Rewriter<'a> {
                     self.expr(value);
                 }
             }
-            ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
+            ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } | ExprKind::Set { elts } => {
                 elts.iter_mut().for_each(|e| self.expr(e))
             }
             ExprKind::Dict { keys, values } => {

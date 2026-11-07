@@ -56,6 +56,7 @@
       "beginCaptures": { "0": { "name": "punctuation.section.interpolation.begin.stone" } },
       "endCaptures": { "0": { "name": "punctuation.section.interpolation.end.stone" } },
       "patterns": [
+        { "name": "constant.other.placeholder.format-spec.stone", "match": ":[^{}\"|]*(?=\\})" },
         { "include": "#braces" },
         { "include": "$self" }
       ]
@@ -98,7 +99,7 @@
       }
     },
     "type-annotation": {
-      "match": "(->|:)\\s*((?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str|bytes|socket|listener)(?:\\]|,\\s*(?:(?:list|map|tuple|option|result)\\[)*(?:int|float|bool|str|bytes|socket|listener))*)(?![A-Za-z0-9_(])",
+      "match": "(->|:)\\s*((?:(?:list|map|set|tuple|option|result)\\[)*(?:int|float|bool|str|bytes|socket|listener)(?:\\]|,\\s*(?:(?:list|map|set|tuple|option|result)\\[)*(?:int|float|bool|str|bytes|socket|listener))*)(?![A-Za-z0-9_(])",
       "captures": {
         "1": { "name": "punctuation.separator.annotation.stone" },
         "2": { "name": "support.type.stone" }

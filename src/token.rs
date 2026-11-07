@@ -1,6 +1,7 @@
 //! Token definitions and reserved keywords for the stone grammar.
 
 use crate::span::Span;
+use crate::stdlib::spec::FormatSpec;
 
 /// The kind of a token, such as `Name("x")` or `Number(42)`.
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +19,8 @@ pub enum TokenType {
     StringMiddle(String),
     /// The text of a string after its last value, as `b"` in `"a{x}b"`.
     StringEnd(String),
+    /// The format spec after a `:` that ends a value in a string, as `.2f` in `"{x:.2f}"`.
+    FormatSpec(Box<FormatSpec>),
     /// A bytes literal, as `b"a\x00"`, which may hold any byte.
     Bytes(Vec<u8>),
     /// An operator such as `+` or `+=`, held as static text so that matching one allocates nothing.

@@ -11,7 +11,7 @@ since stone copies values.
 
 1. **Inventory before writing.** Read the whole Python program and list what it uses that stone
    lacks (see "Not in stone" in the stone guide): classes with inheritance, exceptions, closures
-   that change what they capture (a lambda copies the variables it reads), comprehensions, format specs in f-strings, default and keyword arguments,
+   that change what they capture (a lambda copies the variables it reads), comprehensions, values inside f-string format specs (`{x:.{p}f}`), default and keyword arguments,
    sets, and values whose type varies (a variable that is
    sometimes `None`, a name reused for an int and then a float, or a list that mixes types). Find
    arithmetic that could pass 64 bits, such as products in hashes and random number generators,
@@ -64,7 +64,10 @@ since stone copies values.
 | `d.pop(k, default)` | `d.pop(k).unwrap_or(default)` |
 | `d[k] += 1`, `d[k].append(x)` | the same, but the key must exist |
 | `defaultdict(int)` | check `k in d` before reading or changing |
-| `set()`, `s.add(x)`, `x in s` | `map[T, bool]`: `s[x] = true`, `x in s` |
+| `set()`, `s.add(x)`, `x in s` | `{}` or `{1, 2}`, `s.add(x)`, `x in s`: a `set[T]` of ints, strings, or bools, kept in insertion order |
+| `s.discard(x)`, `s.remove(x)` | `s.remove(x)`, which returns whether `s` had `x` and never fails |
+| `a \| b`, `a & b`, `a - b`, `a <= b`, `a >= b`, `a.isdisjoint(b)` | `a.union(b)`, `a.intersection(b)`, `a.difference(b)`, `a.is_subset(b)`, `a.is_superset(b)`, `a.is_disjoint(b)` (no set operators) |
+| `set(xs)`, `list(s)`, `sorted(s)` | `set(xs)`, `list(s)`; then `.sort()` the list |
 | `collections.Counter` | a map of counts, or a list of structs as in the worked example |
 
 An entry changes in place as a list's element does, through any place, but stone has no
@@ -85,8 +88,8 @@ for letter, group in groups.items():
 // a set of ints
 seen = {}
 for n in [3, 1, 3, 2, 1]:
-    seen[n] = true
-print(seen.len(), 2 in seen, 7 in seen)
+    seen.add(n)
+print(seen, seen.len(), 2 in seen, 7 in seen)
 ```
 
 ### Classes
@@ -174,7 +177,7 @@ The error is the message Python's `int(s)` raises, such as
 | Python | stone |
 | --- | --- |
 | `f"{name}: {score}"` | `"{name}: {score}"`: drop the `f`, since every stone string takes values |
-| `f"{score:.2f}"`, `f"{n:>5}"` | no format specs yet; round or pad by hand |
+| `f"{score:.2f}"`, `f"{n:>5}"` | `"{score:.2f}"`, `"{n:>5}"`: the same specs, written out; `{x:{w}}` becomes padding by hand or a fixed width |
 | `"{}"` or `"a {b}"` that is not an f-string | `"{{}}"`, `"a {{b}}"`: double the braces |
 | `__str__` | `impl display for T:` with `fn display(self) -> str`, which `print` and `str` use |
 | `print(a, b, sep=", ")`, `end=""` | build one string, then `print` it |

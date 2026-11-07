@@ -444,11 +444,12 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
             expr_names(left, out);
             expr_names(right, out);
         }
-        ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
-            expr_names(operand, out)
-        }
+        ExprKind::UnaryOp { operand, .. }
+        | ExprKind::Try { value: operand }
+        | ExprKind::FormattedValue { value: operand, .. } => expr_names(operand, out),
         ExprKind::BoolOp { values, .. }
         | ExprKind::List { elts: values, .. }
+        | ExprKind::Set { elts: values }
         | ExprKind::Tuple { elts: values, .. } => {
             values.iter().for_each(|value| expr_names(value, out))
         }

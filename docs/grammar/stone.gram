@@ -182,6 +182,7 @@ param:
 type:
     | 'list' '[' type ']'
     | 'map' '[' type ',' type [','] ']'
+    | 'set' '[' type ']'
     | 'tuple' '[' type (',' type)+ [','] ']'
     | 'fn' '(' [','.type+ [',']] ')' ['->' type]
     | NAME ('.' NAME)* ['[' ','.type+ [','] ']']
@@ -377,10 +378,15 @@ strings:
     | (string)+ 
 
 # a string with values in it is lexed as its pieces of text around them, as in `"a{x}b"`, which
-# is STRING_START("a"), the tokens of `x`, then STRING_END("b")
+# is STRING_START("a"), the tokens of `x`, then STRING_END("b"); a `:` that ends a value starts
+# its format spec, lexed whole as FORMAT_SPEC, as `:.2f` in `"{x:.2f}"`
 string[expr]:
     | STRING 
-    | STRING_START expression (STRING_MIDDLE expression)* STRING_END
+    | STRING_START value (STRING_MIDDLE value)* STRING_END
+
+value[expr]:
+    | expression FORMAT_SPEC
+    | expression
 
 # a bytes literal, BYTES as in `b"a\x00"`, written one after another to join
 bytes: BYTES+
@@ -388,8 +394,10 @@ bytes: BYTES+
 list:
     | '[' [named_expressions] ']' 
 
+# `{}` is an empty map or set, which the checker tells by its use
 dict:
     | '{' [kvpair (',' kvpair)* [',']] '}' 
+    | '{' expression (',' expression)* [','] '}' 
 
 kvpair:
     | expression ':' expression 

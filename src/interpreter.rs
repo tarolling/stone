@@ -13,6 +13,7 @@ use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
 use crate::span::Span;
 use crate::stdlib::random::Rng;
+use crate::stdlib::spec::{self, FormatSpec, Presentation};
 use crate::stdlib::{self, MAX_CALL_DEPTH, OUTPUT, fs, gui, math, net, os, time};
 use std::cell::RefCell;
 use std::cmp::Ordering;
@@ -640,8 +641,11 @@ impl Value {
                         out.push_str(", ");
                     }
                     key.value().write(out, true, depth, custom)?;
-                    out.push_str(": ");
-                    value.write(out, true, depth, custom)?;
+                    // a set's entries hold no value, which no map's do
+                    if !matches!(value, Value::Unit) {
+                        out.push_str(": ");
+                        value.write(out, true, depth, custom)?;
+                    }
                 }
                 out.push('}');
             }
@@ -741,6 +745,8 @@ impl Value {
                 }
                 a.tag == b.tag && all_equal(&a.fields, &b.fields, depth + 1)?
             }
+            // the entries of sets, which hold no value
+            (Value::Unit, Value::Unit) => true,
             // the checker compares nothing else
             _ => false,
         })
@@ -986,6 +992,15 @@ fn unary(op: UnaryOp, value: Value) -> EvalResult<Value> {
 fn change_map(map: &mut MapValue, name: &str, args: &[Value]) -> EvalResult<Value> {
     match (name, args) {
         ("pop", [key]) => Ok(map.remove(&MapKey::of(key)?).map_or_else(none, some)),
+        // a set is a map whose entries hold no value
+        ("add", [value]) => {
+            let key = MapKey::of(value)?;
+            if !map.contains(&key) {
+                map.insert(key, Value::Unit);
+            }
+            Ok(Value::Unit)
+        }
+        ("remove", [value]) => Ok(Value::Bool(map.remove(&MapKey::of(value)?).is_some())),
         _ => Err(format!("a map has no method '{name}' that changes it").into()),
     }
 }
@@ -1950,12 +1965,28 @@ impl<'out> Interpreter<'out> {
                 }
             }
             // every value is evaluated before any is written, like a call's arguments
-            E::JoinedStr(values) => {
-                let values = self.eval_exprs(values)?;
-                let mut text = String::new();
-                for value in &values {
-                    self.write_value(&mut text, value, false)?;
+            E::JoinedStr(pieces) => {
+                let mut values = Vec::with_capacity(pieces.len());
+                for piece in pieces {
+                    values.push(match &piece.kind {
+                        E::FormattedValue(value, spec) => (self.eval_expr(value)?, Some(spec)),
+                        _ => (self.eval_expr(piece)?, None),
+                    });
                 }
+                let mut text = String::new();
+                for (value, spec) in &values {
+                    match spec {
+                        Some(spec) => self.write_formatted(&mut text, value, spec)?,
+                        None => self.write_value(&mut text, value, false)?,
+                    }
+                }
+                Ok(Value::Str(text.into()))
+            }
+            // only a string's values have specs, which the string writes
+            E::FormattedValue(value, spec) => {
+                let value = self.eval_expr(value)?;
+                let mut text = String::new();
+                self.write_formatted(&mut text, &value, spec)?;
                 Ok(Value::Str(text.into()))
             }
             E::Dict(entries) => {
@@ -1965,6 +1996,14 @@ impl<'out> Interpreter<'out> {
                     map.insert(key, self.eval_expr(value)?);
                 }
                 Ok(Value::Map(Rc::new(map)))
+            }
+            // a set is a map whose entries hold no value
+            E::Set(elts) => {
+                let mut set = MapValue::default();
+                for elt in elts {
+                    set.insert(MapKey::of(&self.eval_expr(elt)?)?, Value::Unit);
+                }
+                Ok(Value::Map(Rc::new(set)))
             }
             // short-circuiting
             E::BoolOp(op, values) => {
@@ -2207,6 +2246,33 @@ impl<'out> Interpreter<'out> {
     /// whose type implements `display` itself written as its `display` method returns.
     ///
     /// For example, `[p]` writes `[(1, 2)]` when `p`'s `display` returns `"(1, 2)"`.
+    /// Writes `value` into `out` as the format spec `spec` says: a number as its type says, and
+    /// any other value as `print` writes it, cut to a str's precision, then padded.
+    fn write_formatted(
+        &mut self,
+        out: &mut String,
+        value: &Value,
+        spec: &FormatSpec,
+    ) -> EvalResult<()> {
+        let float = spec.ty.is_some_and(Presentation::is_float);
+        let text = match value {
+            Value::Int(n) if float => spec::float_text(*n as f64, spec),
+            Value::Int(n) => spec::int_text(*n, spec),
+            Value::Float(x) => spec::float_text(*x, spec),
+            _ => {
+                let mut text = String::new();
+                self.write_value(&mut text, value, false)?;
+                if let Some(precision) = spec.precision {
+                    text.truncate(spec::truncate(&text, precision).len());
+                }
+                out.push_str(&spec::layout(&text, spec, false));
+                return Ok(());
+            }
+        };
+        out.push_str(&spec::layout(&text, spec, true));
+        Ok(())
+    }
+
     fn write_value(&mut self, out: &mut String, value: &Value, nested: bool) -> EvalResult<()> {
         value.write(out, nested, 0, &mut |value, out| {
             let Value::Struct(s) = value else {
@@ -2401,6 +2467,10 @@ impl<'out> Interpreter<'out> {
                 self.write_value(&mut text, &receiver, false)?;
                 Ok(Value::Str(text.into()))
             }
+            ("abs", Value::Int(x), []) => Ok(Value::Int(math::abs_int(*x)?)),
+            ("abs", Value::Float(x), []) => Ok(Value::Float(math::abs_float(*x))),
+            ("floor", Value::Int(x), []) => Ok(Value::Int(*x)),
+            ("floor", Value::Float(x), []) => Ok(Value::Int(math::floor(*x)?)),
             (_, Value::Socket(socket), _) => {
                 // a read may wait, so what was printed shows first
                 self.out.flush()?;
@@ -2506,6 +2576,32 @@ impl<'out> Interpreter<'out> {
                     .map(|(key, value)| Value::Tuple(Rc::from([key.value(), value.clone()])))
                     .collect();
                 Ok(Value::List(Rc::new(items)))
+            }
+            ("union" | "intersection" | "difference", Value::Map(set), [Value::Map(other)]) => {
+                let mut result = MapValue::default();
+                let keep = |key: &MapKey| match name {
+                    "intersection" => other.contains(key),
+                    "difference" => !other.contains(key),
+                    _ => true,
+                };
+                for (key, _) in set.iter().filter(|(key, _)| keep(key)) {
+                    result.insert(key.clone(), Value::Unit);
+                }
+                if name == "union" {
+                    for (key, _) in other.iter().filter(|(key, _)| !set.contains(key)) {
+                        result.insert(key.clone(), Value::Unit);
+                    }
+                }
+                Ok(Value::Map(Rc::new(result)))
+            }
+            ("is_subset", Value::Map(set), [Value::Map(other)]) => {
+                Ok(Value::Bool(set.iter().all(|(key, _)| other.contains(key))))
+            }
+            ("is_superset", Value::Map(set), [Value::Map(other)]) => {
+                Ok(Value::Bool(other.iter().all(|(key, _)| set.contains(key))))
+            }
+            ("is_disjoint", Value::Map(set), [Value::Map(other)]) => {
+                Ok(Value::Bool(!set.iter().any(|(key, _)| other.contains(key))))
             }
             ("strip", Value::Str(s), []) => Ok(Value::Str(stdlib::strip(s).into())),
             ("strip", _, _) => Err("strip() is called on a str, with no arguments".into()),
@@ -2851,6 +2947,20 @@ impl<'out> Interpreter<'out> {
                     .collect::<Result<Vec<u8>, String>>()
                     .map(|bytes| Value::Bytes(bytes.into())),
             ),
+            // a set from a list's elements, the first of equal ones kept, and a list from a set's
+            (set @ Type::Map(..), Value::List(items)) if set.is_set() => {
+                let mut result = MapValue::default();
+                for item in items.iter() {
+                    let key = MapKey::of(item)?;
+                    if !result.contains(&key) {
+                        result.insert(key, Value::Unit);
+                    }
+                }
+                Value::Map(Rc::new(result))
+            }
+            (Type::List(_), Value::Map(set)) => {
+                Value::List(Rc::new(set.iter().map(|(key, _)| key.value()).collect()))
+            }
             // every type converts from itself
             (_, value) => value,
         })

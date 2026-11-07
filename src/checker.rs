@@ -31,9 +31,10 @@ use crate::ast::{
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
+use crate::stdlib::spec::{FormatSpec, Presentation};
 use crate::stdlib::{
-    HANDLE_METHODS, MAX_ELEMENT_VALUES, METHODS, ORD_METHODS, OUTPUT, PRELUDE_CLAMP, STR_METHODS,
-    changes_receiver, is_builtin, is_reserved, prelude_method,
+    HANDLE_METHODS, MAX_ELEMENT_VALUES, METHODS, ORD_METHODS, OUTPUT, PRELUDE_CLAMP, SET_METHODS,
+    STR_METHODS, changes_receiver, is_builtin, is_reserved, prelude_method,
 };
 
 #[cfg(test)]
@@ -128,6 +129,19 @@ impl Type {
                 .collect(),
             other => vec![other.clone()],
         }
+    }
+
+    /// Returns whether this is a set, which is a map whose entries hold no value: an empty
+    /// tuple, which no program can write.
+    ///
+    /// For example, `set[int]` is `Type::Map(Int, Tuple([]))`, while `map[int, str]` is no set.
+    pub fn is_set(&self) -> bool {
+        matches!(self, Type::Map(_, value) if matches!(&**value, Type::Tuple(fields) if fields.is_empty()))
+    }
+
+    /// Returns the type of a set of `elem`, a map whose entries hold no value.
+    pub fn set_of(elem: Type) -> Type {
+        Type::Map(Box::new(elem), Box::new(Type::Tuple(vec![])))
     }
 
     /// Returns whether a value of this type is flattened into [`Type::leaves`] of its own: a
@@ -239,6 +253,7 @@ impl Display for Type {
             Type::Bytes => write!(f, "bytes"),
             Type::Unit => write!(f, "no value"),
             Type::List(elem) => write!(f, "list[{elem}]"),
+            Type::Map(key, _) if self.is_set() => write!(f, "set[{key}]"),
             Type::Map(key, value) => write!(f, "map[{key}, {value}]"),
             Type::Tuple(fields) => {
                 let fields: Vec<String> = fields.iter().map(Type::to_string).collect();
@@ -530,6 +545,13 @@ pub fn builtin_conversion(target: &Type, source: &Type) -> Option<bool> {
         (Type::Float, Type::Int) => Some(false),
         (Type::Int, Type::Float | Type::Str) | (Type::Float, Type::Str) => Some(true),
         (Type::Bytes, Type::List(elem)) if **elem == Type::Int => Some(true),
+        // a set from a list's elements, and a list from a set's
+        (set @ Type::Map(key, _), Type::List(elem))
+        | (Type::List(elem), set @ Type::Map(key, _))
+            if set.is_set() && key == elem =>
+        {
+            Some(false)
+        }
         _ => None,
     }
 }
@@ -622,6 +644,7 @@ pub fn type_text(ty: &Type) -> String {
     let all = |types: &[Type]| types.iter().map(type_text).collect::<Vec<_>>().join(", ");
     match ty {
         Type::List(elem) => format!("list[{}]", type_text(elem)),
+        Type::Map(key, _) if ty.is_set() => format!("set[{}]", type_text(key)),
         Type::Map(key, value) => format!("map[{}, {}]", type_text(key), type_text(value)),
         Type::Tuple(fields) => format!("tuple[{}]", all(fields)),
         Type::Enum { name, args } | Type::Struct { name, args } if args.is_empty() => {
@@ -995,6 +1018,9 @@ enum Bound {
     NumberOrList(NumberTy),
     /// Any number or list of numbers, as `a` is in `a * b`, or also a string for `+`.
     Numeric { strings: bool },
+    /// Any type but the value a set's entries hold, as the value of a map that is read is, or a
+    /// type parameter's argument.
+    Present,
 }
 
 /// A number type, for [`Bound::NumberOrList`].
@@ -1025,6 +1051,7 @@ impl Bound {
     /// Returns what both bounds allow, if anything.
     fn meet(self, other: Bound) -> Option<Bound> {
         match (self, other) {
+            (Bound::Present, bound) | (bound, Bound::Present) => Some(bound),
             (Bound::NumberOrList(a), Bound::NumberOrList(b)) => (a == b).then_some(self),
             (bound @ Bound::NumberOrList(_), Bound::Numeric { .. })
             | (Bound::Numeric { .. }, bound @ Bound::NumberOrList(_)) => Some(bound),
@@ -1038,7 +1065,7 @@ impl Bound {
     fn default(self) -> Ty {
         match self {
             Bound::NumberOrList(number) => number.ty(),
-            Bound::Numeric { .. } => Ty::Int,
+            Bound::Numeric { .. } | Bound::Present => Ty::Int,
         }
     }
 }
@@ -1117,6 +1144,10 @@ const ORDERED: &[Kind] = &[Kind::Int, Kind::Float, Kind::Str, Kind::Bytes];
 /// What `int` and `float` convert from.
 /// What the `math` functions take.
 const NUMERIC: &[Kind] = &[Kind::Int, Kind::Float];
+
+/// The kinds a float's format type such as `.2f` takes, a float unless the value turns out to be
+/// an int.
+const FLOAT_FIRST: &[Kind] = &[Kind::Float, Kind::Int];
 /// The names of the types built into the language, which no enum or struct may take.
 const BUILTIN_TYPES: &[&str] = &[
     "int",
@@ -1125,6 +1156,7 @@ const BUILTIN_TYPES: &[&str] = &[
     "str",
     "bytes",
     "list",
+    "set",
     "tuple",
     OPTION,
     RESULT,
@@ -1760,6 +1792,9 @@ impl Inference {
     /// Returns whether a type variable with `bound` can become `ty`, passing the bound on if `ty`
     /// is another variable.
     fn admits(&mut self, bound: Bound, ty: &Ty) -> bool {
+        if bound == Bound::Present && !matches!(ty, Ty::Var(_)) {
+            return !is_no_value(ty);
+        }
         match ty {
             Ty::Var(y) => match self.bounds.get(y) {
                 None => {
@@ -1779,11 +1814,13 @@ impl Inference {
                 Bound::Numeric { .. } => {
                     matches!(self.shallow(elem), Ty::Int | Ty::Float | Ty::Var(_))
                 }
+                Bound::Present => true,
             },
             Ty::Str | Ty::Bytes => bound == Bound::Numeric { strings: true },
             ty => match bound {
                 Bound::NumberOrList(number) => *ty == number.ty(),
                 Bound::Numeric { .. } => NumberTy::of(ty).is_some(),
+                Bound::Present => true,
             },
         }
     }
@@ -1834,6 +1871,9 @@ impl Inference {
             Ty::Bytes => "bytes".to_string(),
             Ty::Unit => "no value".to_string(),
             Ty::List(elem) => format!("list[{}]", self.show(&elem)),
+            Ty::Map(key, value) if is_no_value(&self.resolve(&value)) => {
+                format!("set[{}]", self.show(&key))
+            }
             Ty::Map(key, value) => format!("map[{}, {}]", self.show(&key), self.show(&value)),
             Ty::Tuple(fields) => {
                 let fields: Vec<String> = fields.iter().map(|f| self.show(f)).collect();
@@ -1858,8 +1898,8 @@ impl Inference {
                 }
             }
             Ty::Var(x) => match self.bounds.get(&x) {
+                Some(Bound::Present) | None => "unknown".to_string(),
                 Some(bound) => self.show(&bound.default()),
-                None => "unknown".to_string(),
             },
             Ty::Handle(handle) => handle.name().to_string(),
         }
@@ -2144,6 +2184,73 @@ impl Inference {
             message,
             ord: false,
         });
+    }
+
+    /// Requires the value of type `ty` at `span` to be one that the format spec `spec` can
+    /// write: an int for an int's type such as `x`, a number for a float's type such as `.2f`
+    /// (an int is converted), a str for `s`, a number for a sign, `#`, `=`, or grouping, and a
+    /// float or str for a precision with no type. A spec that only pads takes any value.
+    fn require_spec(&mut self, ty: Ty, spec: &FormatSpec, span: Span) {
+        if let Some(presentation) = spec.ty {
+            let (allowed, message): (&'static [Kind], &'static str) = match presentation {
+                Presentation::Decimal => (&[Kind::Int], "format type 'd' needs an int, found {}"),
+                Presentation::Binary => (&[Kind::Int], "format type 'b' needs an int, found {}"),
+                Presentation::Octal => (&[Kind::Int], "format type 'o' needs an int, found {}"),
+                Presentation::Hex { upper: false } => {
+                    (&[Kind::Int], "format type 'x' needs an int, found {}")
+                }
+                Presentation::Hex { upper: true } => {
+                    (&[Kind::Int], "format type 'X' needs an int, found {}")
+                }
+                Presentation::Fixed { upper: false } => (
+                    FLOAT_FIRST,
+                    "format type 'f' needs an int or float, found {}",
+                ),
+                Presentation::Fixed { upper: true } => (
+                    FLOAT_FIRST,
+                    "format type 'F' needs an int or float, found {}",
+                ),
+                Presentation::Exponent { upper: false } => (
+                    FLOAT_FIRST,
+                    "format type 'e' needs an int or float, found {}",
+                ),
+                Presentation::Exponent { upper: true } => (
+                    FLOAT_FIRST,
+                    "format type 'E' needs an int or float, found {}",
+                ),
+                Presentation::General { upper: false } => (
+                    FLOAT_FIRST,
+                    "format type 'g' needs an int or float, found {}",
+                ),
+                Presentation::General { upper: true } => (
+                    FLOAT_FIRST,
+                    "format type 'G' needs an int or float, found {}",
+                ),
+                Presentation::Percent => (
+                    FLOAT_FIRST,
+                    "format type '%' needs an int or float, found {}",
+                ),
+                Presentation::Str => (&[Kind::Str], "format type 's' needs a str, found {}"),
+            };
+            self.require(ty, allowed, span, message);
+            return;
+        }
+        if spec.needs_number() {
+            self.require(
+                ty.clone(),
+                NUMERIC,
+                span,
+                "a sign, '#', '=', or grouping in a format spec needs an int or float, found {}",
+            );
+        }
+        if spec.precision.is_some() {
+            self.require(
+                ty,
+                &[Kind::Float, Kind::Str],
+                span,
+                "a precision in a format spec with no type needs a float or str, found {}",
+            );
+        }
     }
 
     /// Requires `ty` to be ordered, as `<` and `sort` need: `int`, `float`, `str`, or a type
@@ -2516,6 +2623,10 @@ impl Inference {
         if type_params.is_empty() {
             return (params, ret);
         }
+        // no type parameter stands for the value a set's entries hold
+        for arg in &type_args {
+            self.bound_present(arg);
+        }
         let params = params
             .iter()
             .map(|p| Self::substitute(p, &type_params, &type_args))
@@ -2714,6 +2825,9 @@ impl Inference {
         let all = |tys: &[Ty]| tys.iter().map(|t| self.mangle(t)).collect::<Vec<_>>();
         match self.resolve(ty) {
             Ty::List(elem) => format!("list_{}", self.mangle(&elem)),
+            Ty::Map(key, value) if is_no_value(&self.resolve(&value)) => {
+                format!("set_{}", self.mangle(&key))
+            }
             Ty::Map(key, value) => format!("map_{}_{}", self.mangle(&key), self.mangle(&value)),
             Ty::Tuple(fields) => format!("tuple{}_{}", fields.len(), all(&fields).join("_")),
             Ty::Enum(name, args) | Ty::Struct(name, args) if args.is_empty() => name,
@@ -3029,7 +3143,11 @@ impl Inference {
             Some(format!(
                 "'{name}' is a field of '{short}', so a method cannot have its name"
             ))
-        } else if !self.structs.contains_key(owner) && METHODS.contains(&name.as_str()) {
+        } else if !self.structs.contains_key(owner)
+            && METHODS.contains(&name.as_str())
+            // a builtin type that can have methods is never a set
+            && !SET_METHODS.contains(&name.as_str())
+        {
             Some(format!(
                 "'{name}' is a builtin method, so a method cannot have its name"
             ))
@@ -3781,7 +3899,11 @@ impl Inference {
                 .get(name)
                 .map_or(0, |info| info.type_params.len()),
         };
-        (0..count).map(|_| self.fresh()).collect()
+        let args: Vec<Ty> = (0..count).map(|_| self.fresh()).collect();
+        for arg in &args {
+            self.bound_present(arg);
+        }
+        args
     }
 
     /// Declares the name of every enum defined at the top level of `body`, returning each with
@@ -4056,6 +4178,7 @@ impl Inference {
                 self.check_written_width(key);
                 self.check_written_width(value);
             }
+            TypeExprKind::Set(elem) => self.check_written_width(elem),
             TypeExprKind::Named { args, .. } => {
                 args.iter().for_each(|a| self.check_written_width(a))
             }
@@ -4127,6 +4250,11 @@ impl Inference {
                 let key_ty = self.written_type(key, errors);
                 self.require(key_ty.clone(), MAP_KEYS, key.span, MAP_KEY);
                 Ty::Map(Box::new(key_ty), Box::new(self.written_type(value, errors)))
+            }
+            TypeExprKind::Set(elem) => {
+                let elem_ty = self.written_type(elem, errors);
+                self.require(elem_ty.clone(), MAP_KEYS, elem.span, SET_ELEMENT);
+                set_of(elem_ty)
             }
             TypeExprKind::Tuple(fields) => Ty::Tuple(
                 fields
@@ -5058,6 +5186,12 @@ impl Inference {
             "str" => Some(Ty::Str),
             "bytes" => Some(Ty::Bytes),
             "bool" => Some(Ty::Bool),
+            "list" => Some(Ty::List(Box::new(self.fresh()))),
+            "set" => {
+                let elem = self.fresh();
+                self.require(elem.clone(), MAP_KEYS, span, SET_ELEMENT);
+                Some(set_of(elem))
+            }
             _ => None,
         };
         let resolved = self.resolve_name(id);
@@ -5163,6 +5297,13 @@ impl Inference {
             (Ty::Bytes, Ty::List(elem)) if self.may_match(elem, &Ty::Int, false) => {
                 self.unify(elem, &Ty::Int);
                 Some(true)
+            }
+            // a set from a list's elements, and a list from a set's
+            (Ty::Map(key, value), Ty::List(elem)) | (Ty::List(elem), Ty::Map(key, value))
+                if is_no_value(&self.resolve(value)) && self.may_match(key, elem, false) =>
+            {
+                self.unify(key, elem);
+                Some(false)
             }
             // every type converts from itself, its type arguments as they are
             (target, source)
@@ -5988,6 +6129,18 @@ impl Inference {
             self.check_changing_call(call.span, receiver, name, &ret);
             self.check_change_of(receiver, true);
         }
+        // until it is settled, the call is known to be a method, not a builtin of the same name
+        // such as a set's `add`, which tells whether it changes its receiver
+        self.methods.insert(
+            call.span,
+            Method {
+                function: candidate.function.clone(),
+                receiver: true,
+                changes: candidate.changes,
+                implementations: None,
+                trait_args: vec![],
+            },
+        );
         let result = self.fresh();
         self.deferred_overloads.push(DeferredOverload {
             call: call.span,
@@ -6528,6 +6681,11 @@ impl Inference {
                 }
                 Ty::Str
             }
+            ExprKind::FormattedValue { value, spec } => {
+                let ty = self.infer(value);
+                self.require_spec(ty, spec, value.span);
+                Ty::Str
+            }
             ExprKind::Constant { value, .. } => match **value {
                 Constant::Bool(_) => Ty::Bool,
                 Constant::Str(_) | Constant::Char(_) => Ty::Str,
@@ -6728,6 +6886,16 @@ impl Inference {
                 self.map_literals.push((expr.span, map.clone()));
                 map
             }
+            ExprKind::Set { elts } => {
+                let elem = self.fresh();
+                for elt in elts {
+                    let ty = self.infer(elt);
+                    self.expect(&elem, &ty, elt.span);
+                }
+                let span = elts.first().map_or(expr.span, |elt| elt.span);
+                self.require(elem.clone(), MAP_KEYS, span, SET_ELEMENT);
+                set_of(elem)
+            }
             ExprKind::Tuple { elts, .. } => {
                 Ty::Tuple(elts.iter().map(|elt| self.infer(elt)).collect())
             }
@@ -6786,6 +6954,10 @@ impl Inference {
             }
             Ty::Map(key, entry) => {
                 self.indexed_maps.insert(value.span);
+                if !self.require_map_values(&value_ty, value.span, SET_INDEX) {
+                    self.infer(slice);
+                    return (self.fresh(), Indexed::Map);
+                }
                 if matches!(slice.kind, ExprKind::Slice { .. }) {
                     self.error(slice.span, "a map cannot be sliced");
                     return (*entry, Indexed::Map);
@@ -6811,6 +6983,54 @@ impl Inference {
         let index = self.infer(slice);
         self.expect(&Ty::Int, &index, slice.span);
         (elem, indexed)
+    }
+
+    /// Requires the map `map_ty`, whose values an operation at `span` reads or writes, not to be
+    /// a set, which holds none, reporting `message` with the type for `{}` if it is one. A map
+    /// whose values are not known yet can no longer become a set. Returns whether it is a map.
+    ///
+    /// For example, `s[1]` of a `set[int]` is an error, and so is `m.add(1)` after `m[1] = 2`.
+    fn require_map_values(&mut self, map_ty: &Ty, span: Span, message: &str) -> bool {
+        let Ty::Map(_, value) = self.shallow(map_ty) else {
+            return true;
+        };
+        match self.shallow(&value) {
+            ty if is_no_value(&ty) => {
+                let message = message.replace("{}", &self.show(map_ty));
+                self.error(span, message);
+                false
+            }
+            _ => {
+                self.bound_present(&value);
+                true
+            }
+        }
+    }
+
+    /// Notes that the unknown `ty`, if it is one, can never be the value a set's entries hold, as
+    /// a map's value that is read cannot, nor a type parameter's argument.
+    fn bound_present(&mut self, ty: &Ty) {
+        let Ty::Var(x) = self.shallow(ty) else {
+            return;
+        };
+        let bound = match self.bounds.get(&x) {
+            Some(old) => old.meet(Bound::Present).unwrap_or(*old),
+            None => Bound::Present,
+        };
+        self.bounds.insert(x, bound);
+    }
+
+    /// Requires the receiver of the set method `name`, of type `receiver_ty` at `span`, to be a
+    /// set, returning its element type. An empty `{}` not yet known to be a map becomes a set.
+    ///
+    /// For example, `s.add(1)` makes an unknown `s = {}` a `set[int]`.
+    fn require_set(&mut self, receiver_ty: &Ty, span: Span, name: &str) -> Ty {
+        let elem = self.fresh();
+        if !self.unify(&set_of(elem.clone()), receiver_ty) {
+            let message = format!("'{name}' needs a set, found {}", self.show(receiver_ty));
+            self.error(span, message);
+        }
+        elem
     }
 
     /// Checks a test of whether a container holds a value: a map's key, a list's element, which
@@ -6881,6 +7101,7 @@ impl Inference {
             }
             Ty::Map(key, value) => {
                 self.indexed_maps.insert(deferred.value);
+                self.require_map_values(&deferred.value_ty, deferred.value, SET_INDEX);
                 self.expect(&key, &deferred.index_ty, deferred.slice.span);
                 self.expect(&value, &deferred.result, deferred.slice.span);
             }
@@ -7389,7 +7610,9 @@ impl Inference {
             Ty::Var(_)
                 if !METHODS.contains(&name)
                     || HANDLE_METHODS.contains(&name)
-                    || (STR_METHODS.contains(&name) || ORD_METHODS.contains(&name))
+                    || (STR_METHODS.contains(&name)
+                        || ORD_METHODS.contains(&name)
+                        || SET_METHODS.contains(&name))
                         && self.struct_method_named(name) =>
             {
                 // as a global a function checked before the global's assignment reads, which
@@ -7419,13 +7642,16 @@ impl Inference {
         }
         let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
         if changes_receiver(name) {
-            // `pop` returns what it takes out, and the others return nothing
-            self.note_changing_call(call.span, receiver, name, name == "pop");
-            if name != "pop" && self.statement_call != Some(call.span) {
+            // `pop` returns what it takes out, `remove` whether it was there, and the others
+            // return nothing
+            let returns = name == "pop" || name == "remove";
+            self.note_changing_call(call.span, receiver, name, returns);
+            if !returns && self.statement_call != Some(call.span) {
+                let what = if name == "add" { "a set" } else { "a list" };
                 self.error(
                     call.span,
                     format!(
-                        "'{name}' changes a list and returns none, so it can only be a statement \
+                        "'{name}' changes {what} and returns none, so it can only be a statement \
                          of its own"
                     ),
                 );
@@ -7475,12 +7701,35 @@ impl Inference {
                 let value = self.fresh();
                 let map = Ty::Map(Box::new(key.clone()), Box::new(value.clone()));
                 self.expect(&map, &receiver_ty, receiver.span);
+                self.require_map_values(&receiver_ty, receiver.span, "'get' needs a map, found {}");
                 if args.len() == 1 {
                     self.expect(&key, &arg_types[0], args[0].span);
                 } else {
                     self.arity_error(call.span, name, "1", args.len());
                 }
                 Ty::Enum(OPTION.to_string(), vec![value])
+            }
+            "add" | "remove" => {
+                let elem = self.require_set(&receiver_ty, receiver.span, name);
+                match (args, &arg_types[..]) {
+                    ([arg], [ty]) => self.expect(&elem, ty, arg.span),
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                if name == "add" { Ty::Unit } else { Ty::Bool }
+            }
+            "union" | "intersection" | "difference" | "is_subset" | "is_superset"
+            | "is_disjoint" => {
+                let elem = self.require_set(&receiver_ty, receiver.span, name);
+                let set = set_of(elem);
+                match (args, &arg_types[..]) {
+                    ([arg], [ty]) => self.expect(&set, ty, arg.span),
+                    _ => self.arity_error(call.span, name, "1", args.len()),
+                }
+                if name.starts_with("is_") {
+                    Ty::Bool
+                } else {
+                    set
+                }
             }
             "append" => {
                 if args.len() != 1 {
@@ -7494,6 +7743,11 @@ impl Inference {
                 let Ty::Map(key, value) = self.shallow(&receiver_ty) else {
                     unreachable!("the receiver is a map")
                 };
+                self.require_map_values(
+                    &receiver_ty,
+                    receiver.span,
+                    "'pop' needs a map or list, found {}; 'remove' takes a set's element out",
+                );
                 match (args, &arg_types[..]) {
                     ([arg], [ty]) => self.expect(&key, ty, arg.span),
                     _ => self.arity_error(call.span, name, "1", args.len()),
@@ -7505,6 +7759,8 @@ impl Inference {
                 let value = self.fresh();
                 let map = Ty::Map(Box::new(key.clone()), Box::new(value.clone()));
                 self.expect(&map, &receiver_ty, receiver.span);
+                let message = format!("'{name}' needs a map, found {{}}");
+                self.require_map_values(&receiver_ty, receiver.span, &message);
                 if !args.is_empty() {
                     self.arity_error(call.span, name, "0", args.len());
                 }
@@ -7575,6 +7831,21 @@ impl Inference {
                     self.arity_error(call.span, name, "0", args.len());
                 }
                 Ty::Str
+            }
+            // the methods of `math.abs` and `math.floor`
+            "abs" | "floor" => {
+                if !args.is_empty() {
+                    self.arity_error(call.span, name, "0", args.len());
+                }
+                let message = match name {
+                    "abs" => "'abs' needs an int or float, found {}",
+                    _ => "'floor' needs an int or float, found {}",
+                };
+                self.require(receiver_ty.clone(), NUMERIC, receiver.span, message);
+                match name {
+                    "abs" => receiver_ty,
+                    _ => Ty::Int,
+                }
             }
             "eq" => {
                 if args.len() != 1 {
@@ -9554,9 +9825,9 @@ impl<'a> AssignmentCheck<'a> {
                 self.reads(left, assigned);
                 self.reads(right, assigned);
             }
-            ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
-                self.reads(operand, assigned)
-            }
+            ExprKind::UnaryOp { operand, .. }
+            | ExprKind::Try { value: operand }
+            | ExprKind::FormattedValue { value: operand, .. } => self.reads(operand, assigned),
             ExprKind::Compare {
                 left, comparators, ..
             } => {
@@ -9586,7 +9857,7 @@ impl<'a> AssignmentCheck<'a> {
                 self.reads(value, assigned);
                 self.reads(slice, assigned);
             }
-            ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
+            ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } | ExprKind::Set { elts } => {
                 for elt in elts {
                     self.reads(elt, assigned);
                 }
@@ -9693,6 +9964,30 @@ const TUPLE_CHANGE: &str = "a tuple cannot be changed; build a new one, as in 't
 const MAP_PAIRS: &str = "a map gives its keys; iterate 'm.items()' for its keys and values";
 /// The kinds a map's keys may be, which hash and compare exactly.
 const MAP_KEYS: &[Kind] = &[Kind::Int, Kind::Str, Kind::Bool];
+
+/// The error for a set element of a kind [`MAP_KEYS`] does not allow.
+const SET_ELEMENT: &str = "a set element must be int, str, or bool, found {}";
+
+/// The error for indexing a set, which holds no values to read.
+const SET_INDEX: &str = "a set cannot be indexed; test 'x in s' or loop over it";
+
+/// Returns the type of the values a set's entries hold, since a set is a map whose entries
+/// hold none: an empty tuple, which no program can write.
+fn no_value() -> Ty {
+    Ty::Tuple(vec![])
+}
+
+/// Returns whether `ty` is the empty tuple a set's entries hold, [`no_value`].
+fn is_no_value(ty: &Ty) -> bool {
+    matches!(ty, Ty::Tuple(fields) if fields.is_empty())
+}
+
+/// Returns the type of a set of `elem`, a map from `elem` to [`no_value`].
+///
+/// For example, `set_of(Ty::Int)` is `set[int]`.
+fn set_of(elem: Ty) -> Ty {
+    Ty::Map(Box::new(elem), Box::new(no_value()))
+}
 
 impl Indexed {
     /// Returns the error for changing an element of what was indexed, if it cannot be changed.
@@ -10088,9 +10383,9 @@ impl ParameterUse<'_> {
                 self.expr(left);
                 self.expr(right);
             }
-            ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
-                self.expr(operand)
-            }
+            ExprKind::UnaryOp { operand, .. }
+            | ExprKind::Try { value: operand }
+            | ExprKind::FormattedValue { value: operand, .. } => self.expr(operand),
             ExprKind::Compare {
                 left, comparators, ..
             } => {
@@ -10114,7 +10409,7 @@ impl ParameterUse<'_> {
                 self.expr(value);
                 self.expr(slice);
             }
-            ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
+            ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } | ExprKind::Set { elts } => {
                 elts.iter().for_each(|elt| self.expr(elt))
             }
             ExprKind::Dict { keys, values } => {

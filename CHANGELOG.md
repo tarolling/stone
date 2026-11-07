@@ -10,6 +10,25 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `x.abs()` and `x.floor()` on ints and floats, the methods of `math.abs` and `math.floor`, with
+  the same results and errors: `(-2.5).abs()` is 2.5 and `(-2.5).floor()` is -3.
+- Format specs: a `:` after a value in a string says how it is written, with Python's format
+  specification mini-language, `[[fill]align][sign][#][0][width][grouping][.precision][type]`,
+  so `"{x:.2f}"`, `"{n:>5}"`, `"{n:08}"`, `"{x:e}"`, `"{n:,}"`, and `"{n:#x}"` write the same
+  text as in Python, floats rounded half to even on their exact value under both backends.
+  Fill, alignment, and width pad any value; the checker reports a spec that does not fit its
+  value's type, such as `"{name:.2f}"` for a str. A value inside a spec, as in `"{x:.{p}f}"`,
+  is not supported yet.
+- Sets: `set[T]` of ints, strings, or bools, written `{1, 2, 3}`, kept in insertion order and
+  printed as `{1, 2, 3}`. `{}` is an empty map or set, whichever its use makes it, so
+  `seen = {}` then `seen.add(x)` is a set. `s.add(x)`, `s.remove(x)` (which returns whether
+  `s` had `x`), `x in s`, `s.contains(x)`, `s.len()`, `for x in s`, and `==` in any order, plus
+  `union`, `intersection`, `difference`, `is_subset`, `is_superset`, and `is_disjoint`, and the
+  conversions `set(xs)` and `list(s)`. A set is a value, as lists and maps are, and compiled
+  code stores it as a map whose entries hold no value.
+
 ## [0.4.2] - 2026-11-06
 
 ### Added

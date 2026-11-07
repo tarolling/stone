@@ -632,6 +632,85 @@ fn join_find_and_startswith_take_strs() {
 }
 
 #[test]
+fn a_format_spec_takes_the_values_its_type_writes() {
+    for source in [
+        "x = \"{1:d}{1:x}{1.5:.2f}{2:.2f}{\"s\":s}{\"s\":.2}{1.5:.3}{1:+}{1.5:,}\"\n",
+        // padding takes any value
+        "x = \"{[1]:>5}{true:^6}{(1, \"a\"):*<9}\"\n",
+    ] {
+        assert_eq!(errors(source), [], "{source}");
+    }
+    assert_error(
+        "x = \"{1.5:d}\"\n",
+        "format type 'd' needs an int, found float",
+        1,
+        7,
+    );
+    assert_error(
+        "x = \"{\"a\":.2f}\"\n",
+        "format type 'f' needs an int or float, found str",
+        1,
+        7,
+    );
+    assert_error(
+        "x = \"{1:s}\"\n",
+        "format type 's' needs a str, found int",
+        1,
+        7,
+    );
+    assert_error(
+        "x = \"{\"a\":+}\"\n",
+        "a sign, '#', '=', or grouping in a format spec needs an int or float, found str",
+        1,
+        7,
+    );
+    assert_error(
+        "x = \"{1:.2}\"\n",
+        "a precision in a format spec with no type needs a float or str, found int",
+        1,
+        7,
+    );
+    // a spec types a value nothing else does
+    assert_eq!(
+        type_of_symbol("xs = []\nx = \"{xs[0]:.2f}\"\nxs.append(xs[0])\n", "xs"),
+        "list[float]"
+    );
+    assert_eq!(
+        type_of_symbol("xs = []\nx = \"{xs[0]:x}\"\nxs.append(xs[0])\n", "xs"),
+        "list[int]"
+    );
+}
+
+#[test]
+fn abs_and_floor_are_methods_of_numbers() {
+    assert_eq!(type_of_symbol("x = (-2).abs()\n", "x"), "int");
+    assert_eq!(type_of_symbol("x = (-2.5).abs()\n", "x"), "float");
+    assert_eq!(type_of_symbol("x = 2.5.floor()\n", "x"), "int");
+    assert_eq!(
+        type_of_symbol("xs = []\ny = xs[0].abs()\nxs.append(1.5)\n", "y"),
+        "float"
+    );
+    assert_error(
+        "x = \"a\".abs()\n",
+        "'abs' needs an int or float, found str",
+        1,
+        5,
+    );
+    assert_error(
+        "x = [1.5].floor()\n",
+        "'floor' needs an int or float, found list[float]",
+        1,
+        5,
+    );
+    assert_error(
+        "x = 1.abs(2)\n",
+        "'abs' takes 0 arguments, but 1 was given",
+        1,
+        5,
+    );
+}
+
+#[test]
 fn replace_case_lines_rfind_and_count_take_strs() {
     let source = "a = \"ab\".replace(\"a\", \"b\")\nb = \"ab\".replace(\"a\", \"b\", 1)\n\
                   c = \"ab\".lower()\nd = \"ab\".upper()\ne = \"a\\nb\".splitlines()\n\
@@ -5903,5 +5982,132 @@ fn a_test_reads_no_global_since_no_top_level_code_runs_before_it() {
                 6
             ),
         ]
+    );
+}
+
+#[test]
+fn set_literals_and_braces_have_types() {
+    assert_eq!(type_of_symbol("s = {1, 2}\n", "s"), "set[int]");
+    assert_eq!(type_of_symbol("s = {}\ns.add(\"a\")\n", "s"), "set[str]");
+    assert_eq!(
+        type_of_symbol("s = {}\nfor x in s:\n    print(x)\n", "s"),
+        "map[int, int]"
+    );
+    assert_eq!(
+        type_of_symbol(
+            "fn f(s: set[bool]) -> int:\n    ret s.len()\nn = f({})\nm = {}\n",
+            "m"
+        ),
+        "map[int, int]"
+    );
+    assert_eq!(type_of_symbol("s = {1}\nr = s.remove(1)\n", "r"), "bool");
+    assert_eq!(
+        type_of_symbol("s = {1}\nu = s.union({2})\n", "u"),
+        "set[int]"
+    );
+    assert_eq!(
+        type_of_symbol("s = {1}\nb = s.is_subset({2})\n", "b"),
+        "bool"
+    );
+    assert_eq!(type_of_symbol("s = set([\"a\"])\n", "s"), "set[str]");
+    assert_eq!(
+        type_of_symbol("xs = list({1.5 > 1.0})\n", "xs"),
+        "list[bool]"
+    );
+    assert_eq!(
+        errors("s = {1}\nprint(2 in s, s.contains(3), s == {1}, s.len())\n"),
+        []
+    );
+}
+
+#[test]
+fn set_elements_are_int_str_or_bool() {
+    assert_error(
+        "s = {1.5}\n",
+        "a set element must be int, str, or bool, found float",
+        1,
+        6,
+    );
+    assert_error(
+        "fn f(s: set[list[int]]): ret\n",
+        "a set element must be int, str, or bool, found list[int]",
+        1,
+        13,
+    );
+    assert_error("s = {1, \"a\"}\n", "expected int, found str", 1, 9);
+}
+
+#[test]
+fn a_set_is_not_a_map() {
+    assert_error(
+        "s = {1}\nprint(s[1])\n",
+        "a set cannot be indexed; test 'x in s' or loop over it",
+        2,
+        7,
+    );
+    assert_error(
+        "s = {}\ns.add(1)\ns[1] = 2\n",
+        "a set cannot be indexed; test 'x in s' or loop over it",
+        3,
+        1,
+    );
+    assert_error(
+        "s = {}\ns[1] = 2\ns.add(1)\n",
+        "'add' needs a set, found map[int, int]",
+        3,
+        1,
+    );
+    assert_error(
+        "m = {\"a\": 1}\nm.add(\"b\")\n",
+        "'add' needs a set, found map[str, int]",
+        2,
+        1,
+    );
+    assert_error(
+        "s = {1}\nprint(s.keys())\n",
+        "'keys' needs a map, found set[int]",
+        2,
+        7,
+    );
+    assert_error(
+        "s = {1}\nprint(s.get(1))\n",
+        "'get' needs a map, found set[int]",
+        2,
+        7,
+    );
+    assert_error(
+        "fn f[T](m: map[int, T]) -> int:\n    ret m.len()\nprint(f({1}))\n",
+        "expected map[int, unknown], found set[int]",
+        3,
+        9,
+    );
+    assert_error(
+        "s = {1}\nprint(s < {2})\n",
+        "'<' needs int, float, str, bytes, or a type that implements 'ord', found set[int]",
+        2,
+        7,
+    );
+}
+
+#[test]
+fn set_methods_take_sets_of_their_element_type() {
+    assert_error("s = {1}\ns.add(\"a\")\n", "expected int, found str", 2, 7);
+    assert_error(
+        "s = {1}\nprint(s.union({\"a\"}))\n",
+        "expected set[int], found set[str]",
+        2,
+        15,
+    );
+    assert_error(
+        "s = {1}\nx = s.add(2)\n",
+        "'add' changes a set and returns none, so it can only be a statement of its own",
+        2,
+        5,
+    );
+    assert_error(
+        "s = {1}\nprint(set(1))\n",
+        "cannot convert int to set[unknown]",
+        2,
+        11,
     );
 }

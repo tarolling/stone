@@ -1,0 +1,40 @@
+// format specs after a value in a string, which write it as Python's format does
+struct Point:
+    x: int
+    y: int
+
+enum Shape:
+    Circle(float)
+    Empty
+
+fn row(name: str, price: float, count: int) -> str:
+    ret "{name:<10}|{price:>9.2f}|{count:>5}"
+
+x = 3.14159
+n = 42
+big = 1234567
+s = "stone"
+print("{x:.2f} {x:.0f} {x:10.3f}| {x:<10.1f}| {x:^10.2f}| {x:+.1f} {-x:+.1f} {x: .1f}")
+print("{x:e} {x:.2E} {12345.678:.3e} {0.0:.1e} {1e-300:e}")
+print("{x:g} {1234567.0:g} {0.0001:g} {0.00001:g} {100.0:g} {100.0:#g} {9.99:.2g} {x:G}")
+print("{x:.3} {123.0:.3} {12.0:.3} {1e20:.3} {1.0:} {1e16:#}")
+print("{0.25:%} {0.25:.1%} {-0.5:.0%} {2:.0%}")
+print("{n} {n:5}| {n:<5}| {n:^5}| {n:05} {-n:05} {-n:=+6} {n:+} {n: }")
+print("{big:,} {big:_} {1234:010,} {1234:09,} {1234:0>10,} {1234567.891:,} {1234567.891:015,.2f}")
+print("{255:x} {255:#X} {-255:#x} {5:#010b} {5:b} {8:#o} {3735928559:_x} {3735928559:#_x}")
+print("{n:.2f} {n:e} {n:%}")
+print("{s:>8}| {s:<8}| {s:^9}| {s:*^9}| {s:.3}| {s:08}| {s:é>7}")
+print("{-0.0:.2f} {-0.001:.2f} {2.675:.2f} {0.125:.2f} {0.375:.2f} {9.995:.2f} {999.96:.1f}")
+inf = 1e308 * 10.0
+nan = inf - inf
+print("{inf:f} {-inf:F} {nan:+f} {inf:010} {inf:%} {nan:e}")
+print("{-9223372036854775807 - 1:d} {-9223372036854775807 - 1:x} {9223372036854775807:,}")
+print("{5e-324:.3e} {1.7976931348623157e308:.0e} {1e300:.0f}")
+// any value pads its text
+print("[{Point(x=1, y=2):>20}] [{[1, 2]:*<9}] [{true:5}] [{some(3):^9}] [{Shape.Circle(1.5):>20}]")
+print("[{(1, "a"):-^12}] [{Shape.Empty:14}]")
+print(row("tea", 3.5, 12))
+print(row("espresso", 12.25, 3))
+widths = [1, 22, 333]
+for w in widths:
+    print("[{w:>4}] [{w:04}] [{float(w) * 1.5:8.3f}]")

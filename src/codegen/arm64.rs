@@ -105,13 +105,19 @@ impl AssemblyGenerator for Arm64Generator {
         self.emit_list_runtime()?;
         let formats_floats = self.ctx.prints_floats || self.ctx.uses(&["stone.str_float"]);
         let parses_floats = self.ctx.uses(&["stone.parse_float_result"]);
+        let spec_floats = self
+            .ctx
+            .uses(&["stone.print_float_fixed", "stone.print_float_exp"]);
         if formats_floats {
             floats::float_runtime(self);
+        }
+        if spec_floats {
+            floats::float_spec_runtime(self);
         }
         if parses_floats {
             floats::decimal_runtime(self);
         }
-        if formats_floats || parses_floats {
+        if formats_floats || parses_floats || spec_floats {
             floats::bignum_runtime(self);
         }
         if self.ctx.uses(&["stone.str_float"]) {

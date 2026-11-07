@@ -312,6 +312,292 @@ fn call_with(r#gen: &mut dyn AssemblyGenerator, routine: &str, big: &str, value:
     r#gen.emit(&format!("\tbl\t{routine}"));
 }
 
+/// Emits `stone.print_float_fixed` and `stone.print_float_exp`, which write the float whose bits
+/// are in `x0` into the text being built with `x1` digits after the point, the same way as x64's
+/// `float_spec_runtime`.
+pub fn float_spec_runtime(r#gen: &mut dyn AssemblyGenerator) {
+    let [mant, _, _, scale, scale2, scale4, scale8, sum] = BIGS;
+    let print = |r#gen: &mut dyn AssemblyGenerator, text: &str| {
+        for byte in text.bytes() {
+            r#gen.emit(&format!("\tmov\tw0, #{byte}"));
+            r#gen.emit("\tbl\tstone.print_char");
+        }
+    };
+    // prints x23 zeros, counting x23 down
+    let zeros = |r#gen: &mut dyn AssemblyGenerator, label: &str| {
+        r#gen.emit(&format!("{label}:"));
+        r#gen.emit("\tcmp\tx23, #0");
+        r#gen.emit(&format!("\tb.le\t{label}_done"));
+        r#gen.emit("\tmov\tw0, #48");
+        r#gen.emit("\tbl\tstone.print_char");
+        r#gen.emit("\tsub\tx23, x23, #1");
+        r#gen.emit(&format!("\tb\t{label}"));
+        r#gen.emit(&format!("{label}_done:"));
+    };
+    let times = |r#gen: &mut dyn AssemblyGenerator, big: &str, factor: u32| {
+        address(r#gen, "x0", big);
+        r#gen.emit(&format!("\tmov\tx1, #{factor}"));
+        r#gen.emit("\tmov\tx2, #0");
+        r#gen.emit("\tbl\tstone.big_mul_add");
+    };
+    // the text's block in x9, its length in x10, and its bytes from x11
+    let text = |r#gen: &mut dyn AssemblyGenerator| {
+        r#gen.emit("\tadrp\tx9, stone.text");
+        r#gen.emit("\tldr\tx9, [x9, :lo12:stone.text]");
+        r#gen.emit("\tldr\tx10, [x9]");
+        r#gen.emit("\tadd\tx11, x9, #16");
+    };
+
+    // x19 is 1 for scientific notation, x20 the digits after the point, x21 the exponent of
+    // the first digit, x22 how many digits there are, x23 which one is next, x24 where the
+    // digits start in the text, and x25 the float's mantissa
+    let saved = ["x19", "x20", "x21", "x22", "x23", "x24", "x25"];
+    r#gen.emit("stone.print_float_exp:");
+    r#gen.emit("\tmov\tx9, #1");
+    r#gen.emit("\tb\t.Lfspec");
+    r#gen.emit("stone.print_float_fixed:");
+    r#gen.emit("\tmov\tx9, #0");
+    r#gen.emit(".Lfspec:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x9");
+    r#gen.emit("\tmov\tx20, x1");
+    r#gen.emit("\tmov\tx21, x0");
+    r#gen.emit("\tand\tx9, x0, #0x7fffffffffffffff");
+    r#gen.emit("\tmovz\tx10, #0x7ff0, lsl #48");
+    r#gen.emit("\tcmp\tx9, x10");
+    r#gen.emit("\tb.ls\t.Lfspec_number");
+    // nan, whatever its sign
+    print(r#gen, "nan");
+    r#gen.emit("\tb\t.Lfspec_done");
+    r#gen.emit(".Lfspec_number:");
+    r#gen.emit("\ttbz\tx21, #63, .Lfspec_positive");
+    print(r#gen, "-");
+    r#gen.emit(".Lfspec_positive:");
+    r#gen.emit("\tand\tx21, x21, #0x7fffffffffffffff");
+    r#gen.emit("\tmovz\tx10, #0x7ff0, lsl #48");
+    r#gen.emit("\tcmp\tx21, x10");
+    r#gen.emit("\tb.ne\t.Lfspec_finite");
+    print(r#gen, "inf");
+    r#gen.emit("\tb\t.Lfspec_done");
+
+    // the float is m * 2^e, with m in x25 and e in x22, so mant = m and scale = 1, then one is
+    // shifted by e
+    r#gen.emit(".Lfspec_finite:");
+    r#gen.emit("\tubfx\tx10, x21, #52, #11");
+    r#gen.emit("\tand\tx25, x21, #0xfffffffffffff");
+    r#gen.emit("\tmov\tx22, #-1074");
+    r#gen.emit("\tcbz\tx10, .Lfspec_decoded");
+    r#gen.emit("\tsub\tx22, x10, #1075");
+    r#gen.emit("\torr\tx25, x25, #0x10000000000000");
+    r#gen.emit(".Lfspec_decoded:");
+    call_with(r#gen, "stone.big_set", mant, "x25");
+    call_with(r#gen, "stone.big_set", scale, "#1");
+    // zero is 0 / 1, with an exponent of 0
+    r#gen.emit("\tmov\tx21, #0");
+    r#gen.emit("\tcbz\tx25, .Lfspec_scaled");
+    r#gen.emit("\ttbnz\tx22, #63, .Lfspec_fraction");
+    call_with(r#gen, "stone.big_shl", mant, "x22");
+    r#gen.emit("\tb\t.Lfspec_estimate");
+    r#gen.emit(".Lfspec_fraction:");
+    r#gen.emit("\tneg\tx4, x22");
+    call_with(r#gen, "stone.big_shl", scale, "x4");
+    // an exponent of ten no greater than the first digit's, floor((bitlen(m) - 1 + e) *
+    // log10(2)), divides one of them
+    r#gen.emit(".Lfspec_estimate:");
+    r#gen.emit("\tclz\tx9, x25");
+    r#gen.emit("\tmov\tx10, #63");
+    r#gen.emit("\tsub\tx9, x10, x9");
+    r#gen.emit("\tadd\tx9, x9, x22");
+    move_wide(r#gen, "x10", 1292913986); // floor(2^32 * log10(2))
+    r#gen.emit("\tmul\tx9, x9, x10");
+    r#gen.emit("\tasr\tx21, x9, #32");
+    r#gen.emit("\ttbnz\tx21, #63, .Lfspec_small");
+    call_with(r#gen, "stone.big_mul_pow10", scale, "x21");
+    r#gen.emit("\tb\t.Lfspec_lower");
+    r#gen.emit(".Lfspec_small:");
+    r#gen.emit("\tneg\tx4, x21");
+    call_with(r#gen, "stone.big_mul_pow10", mant, "x4");
+    // then mant / scale comes into [1, 10): scale grows tenfold while mant reaches 10 times it
+    r#gen.emit(".Lfspec_lower:");
+    call2(r#gen, "stone.big_copy", sum, scale);
+    times(r#gen, sum, 10);
+    call2(r#gen, "stone.big_cmp", mant, sum);
+    r#gen.emit("\ttbnz\tx0, #63, .Lfspec_raise");
+    call2(r#gen, "stone.big_copy", scale, sum);
+    r#gen.emit("\tadd\tx21, x21, #1");
+    r#gen.emit("\tb\t.Lfspec_lower");
+    // and mant grows tenfold while it is below scale
+    r#gen.emit(".Lfspec_raise:");
+    call2(r#gen, "stone.big_cmp", mant, scale);
+    r#gen.emit("\ttbz\tx0, #63, .Lfspec_scaled");
+    times(r#gen, mant, 10);
+    r#gen.emit("\tsub\tx21, x21, #1");
+    r#gen.emit("\tb\t.Lfspec_raise");
+    r#gen.emit(".Lfspec_scaled:");
+    for (double, from) in [(scale2, scale), (scale4, scale2), (scale8, scale4)] {
+        call2(r#gen, "stone.big_copy", double, from);
+        call_with(r#gen, "stone.big_shl", double, "#1");
+    }
+    // the digits: one more than the precision in scientific notation, and otherwise those down
+    // to 10^-precision
+    r#gen.emit("\tadd\tx22, x20, #1");
+    r#gen.emit("\tcbnz\tx19, .Lfspec_count");
+    r#gen.emit("\tadds\tx22, x22, x21");
+    r#gen.emit("\tb.gt\t.Lfspec_count");
+    // no digit reaches 10^-precision, so the float rounds to 0 or, past half of it, to it
+    r#gen.emit("\tb.lt\t.Lfspec_zero");
+    call2(r#gen, "stone.big_copy", sum, scale);
+    times(r#gen, sum, 5);
+    call2(r#gen, "stone.big_cmp", mant, sum);
+    // exactly half is a tie, which goes to the even 0
+    r#gen.emit("\tcmp\tx0, #0");
+    r#gen.emit("\tb.le\t.Lfspec_zero");
+    r#gen.emit("\tcbz\tx20, .Lfspec_one");
+    print(r#gen, "0.");
+    r#gen.emit("\tsub\tx23, x20, #1");
+    zeros(r#gen, ".Lfspec_before_one");
+    r#gen.emit(".Lfspec_one:");
+    print(r#gen, "1");
+    r#gen.emit("\tb\t.Lfspec_done");
+    r#gen.emit(".Lfspec_zero:");
+    print(r#gen, "0");
+    r#gen.emit("\tcbz\tx20, .Lfspec_done");
+    print(r#gen, ".");
+    r#gen.emit("\tmov\tx23, x20");
+    zeros(r#gen, ".Lfspec_places");
+    r#gen.emit("\tb\t.Lfspec_done");
+
+    r#gen.emit(".Lfspec_count:");
+    text(r#gen);
+    r#gen.emit("\tmov\tx24, x10");
+    // a fixed number below 1 starts 0.00, with -exponent - 1 zeros
+    r#gen.emit("\tcbnz\tx19, .Lfspec_digits");
+    r#gen.emit("\ttbz\tx21, #63, .Lfspec_digits");
+    print(r#gen, "0.");
+    r#gen.emit("\tmvn\tx23, x21");
+    zeros(r#gen, ".Lfspec_leading");
+    r#gen.emit(".Lfspec_digits:");
+    r#gen.emit("\tmov\tx23, #0");
+    // the point goes before digit 1 in scientific notation, and before the first digit after
+    // the units otherwise
+    r#gen.emit(".Lfspec_digit:");
+    r#gen.emit("\tcbz\tx23, .Lfspec_extract");
+    r#gen.emit("\tadd\tx9, x21, #1");
+    r#gen.emit("\tcbz\tx19, .Lfspec_point");
+    r#gen.emit("\tmov\tx9, #1");
+    r#gen.emit(".Lfspec_point:");
+    r#gen.emit("\tcmp\tx23, x9");
+    r#gen.emit("\tb.ne\t.Lfspec_extract");
+    print(r#gen, ".");
+    r#gen.emit(".Lfspec_extract:");
+    r#gen.emit("\tbl\t.Lfspec_take");
+    r#gen.emit("\tadd\tw0, w0, #48");
+    r#gen.emit("\tbl\tstone.print_char");
+    r#gen.emit("\tadd\tx23, x23, #1");
+    r#gen.emit("\tcmp\tx23, x22");
+    r#gen.emit("\tb.ge\t.Lfspec_round");
+    times(r#gen, mant, 10);
+    r#gen.emit("\tb\t.Lfspec_digit");
+
+    // twice what remains, against scale, rounds the last digit, a tie to an even one
+    r#gen.emit(".Lfspec_round:");
+    call2(r#gen, "stone.big_copy", sum, mant);
+    call_with(r#gen, "stone.big_shl", sum, "#1");
+    call2(r#gen, "stone.big_cmp", sum, scale);
+    r#gen.emit("\ttbnz\tx0, #63, .Lfspec_rounded");
+    r#gen.emit("\tcbnz\tx0, .Lfspec_carry");
+    text(r#gen);
+    r#gen.emit("\tsub\tx10, x10, #1");
+    r#gen.emit("\tldrb\tw12, [x11, x10]");
+    // odd, as '0' is even
+    r#gen.emit("\ttbz\tw12, #0, .Lfspec_rounded");
+    // back over the digits, past the point, 9s becoming 0s
+    r#gen.emit(".Lfspec_carry:");
+    text(r#gen);
+    r#gen.emit(".Lfspec_carry_loop:");
+    r#gen.emit("\tcmp\tx10, x24");
+    r#gen.emit("\tb.ls\t.Lfspec_overflow");
+    r#gen.emit("\tsub\tx10, x10, #1");
+    r#gen.emit("\tldrb\tw12, [x11, x10]");
+    r#gen.emit("\tcmp\tw12, #46"); // '.'
+    r#gen.emit("\tb.eq\t.Lfspec_carry_loop");
+    r#gen.emit("\tcmp\tw12, #57"); // '9'
+    r#gen.emit("\tb.ne\t.Lfspec_increment");
+    r#gen.emit("\tmov\tw12, #48");
+    r#gen.emit("\tstrb\tw12, [x11, x10]");
+    r#gen.emit("\tb\t.Lfspec_carry_loop");
+    r#gen.emit(".Lfspec_increment:");
+    r#gen.emit("\tadd\tw12, w12, #1");
+    r#gen.emit("\tstrb\tw12, [x11, x10]");
+    r#gen.emit("\tb\t.Lfspec_rounded");
+    // every digit was a 9: the first becomes a 1 and the exponent goes up, and in fixed
+    // notation a 0 goes on the end and the point moves one digit right
+    r#gen.emit(".Lfspec_overflow:");
+    r#gen.emit("\tmov\tw12, #49");
+    r#gen.emit("\tstrb\tw12, [x11, x24]");
+    r#gen.emit("\tadd\tx21, x21, #1");
+    r#gen.emit("\tcbnz\tx19, .Lfspec_rounded");
+    print(r#gen, "0");
+    text(r#gen);
+    r#gen.emit("\tmov\tx13, x24");
+    r#gen.emit(".Lfspec_find_point:");
+    r#gen.emit("\tadd\tx13, x13, #1");
+    r#gen.emit("\tcmp\tx13, x10");
+    r#gen.emit("\tb.hs\t.Lfspec_rounded");
+    r#gen.emit("\tldrb\tw12, [x11, x13]");
+    r#gen.emit("\tcmp\tw12, #46");
+    r#gen.emit("\tb.ne\t.Lfspec_find_point");
+    r#gen.emit("\tmov\tw12, #48");
+    r#gen.emit("\tstrb\tw12, [x11, x13]");
+    r#gen.emit("\tadd\tx13, x13, #1");
+    r#gen.emit("\tmov\tw12, #46");
+    r#gen.emit("\tstrb\tw12, [x11, x13]");
+    // then scientific notation's exponent, signed and of at least two digits
+    r#gen.emit(".Lfspec_rounded:");
+    r#gen.emit("\tcbz\tx19, .Lfspec_done");
+    print(r#gen, "e");
+    r#gen.emit("\tmov\tw0, #43"); // '+'
+    r#gen.emit("\ttbz\tx21, #63, .Lfspec_exponent_sign");
+    r#gen.emit("\tmov\tw0, #45"); // '-'
+    r#gen.emit("\tneg\tx21, x21");
+    r#gen.emit(".Lfspec_exponent_sign:");
+    r#gen.emit("\tbl\tstone.print_char");
+    r#gen.emit("\tcmp\tx21, #100");
+    r#gen.emit("\tb.lo\t.Lfspec_two_digits");
+    r#gen.emit("\tmov\tx9, #100");
+    r#gen.emit("\tudiv\tx10, x21, x9");
+    r#gen.emit("\tmsub\tx21, x10, x9, x21");
+    r#gen.emit("\tadd\tw0, w10, #48");
+    r#gen.emit("\tbl\tstone.print_char");
+    r#gen.emit(".Lfspec_two_digits:");
+    r#gen.emit("\tmov\tx9, #10");
+    r#gen.emit("\tudiv\tx10, x21, x9");
+    r#gen.emit("\tmsub\tx21, x10, x9, x21");
+    r#gen.emit("\tadd\tw0, w10, #48");
+    r#gen.emit("\tbl\tstone.print_char");
+    r#gen.emit("\tadd\tw0, w21, #48");
+    r#gen.emit("\tbl\tstone.print_char");
+    r#gen.emit(".Lfspec_done:");
+    pop_frame(r#gen, &saved);
+
+    // returns in x0 floor(mant / scale), which is below 10, taking 8, 4, 2, and 1 times scale
+    // from mant where they fit
+    r#gen.emit(".Lfspec_take:");
+    r#gen.emit("\tstp\tx29, x30, [sp, #-16]!");
+    r#gen.emit("\tmov\tx4, #0");
+    for (multiple, times) in [(scale8, 8), (scale4, 4), (scale2, 2), (scale, 1)] {
+        let skip = format!(".Lfspec_take_{times}");
+        call2(r#gen, "stone.big_cmp", mant, multiple);
+        r#gen.emit(&format!("\ttbnz\tx0, #63, {skip}"));
+        call2(r#gen, "stone.big_sub", mant, multiple);
+        r#gen.emit(&format!("\tadd\tx4, x4, #{times}"));
+        r#gen.emit(&format!("{skip}:"));
+    }
+    r#gen.emit("\tmov\tx0, x4");
+    r#gen.emit("\tldp\tx29, x30, [sp], #16");
+    r#gen.emit("\tret");
+}
+
 /// Emits `stone.format_float`, which writes the float whose bits are in `x0` into the 64-byte
 /// buffer at `x1`, and `stone.print_float`, which prints the float in `x0`, the same way as
 /// x64's `float_runtime`.

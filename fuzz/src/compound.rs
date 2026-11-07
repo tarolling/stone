@@ -54,6 +54,8 @@ pub(crate) enum Ty {
     List(Box<Ty>),
     Option(Box<Ty>),
     Map(Key, Box<Ty>),
+    /// `set[K]`, whose elements are of a map key's type.
+    Set(Key),
     Struct(usize),
     Enum(usize),
     /// `G[T]`, the generic struct of [`GENERIC_TYPES`], holding a `T` and a list of them.
@@ -358,6 +360,7 @@ impl Generator {
             Ty::List(t) => format!("list[{}]", self.type_name(t)),
             Ty::Option(t) => format!("option[{}]", self.type_name(t)),
             Ty::Map(k, v) => format!("map[{}, {}]", k.name(), self.type_name(v)),
+            Ty::Set(k) => format!("set[{}]", k.name()),
             Ty::Struct(i) => format!("S{i}"),
             Ty::Enum(i) => format!("E{i}"),
             Ty::G(t) => format!("G[{}]", self.type_name(t)),
@@ -499,6 +502,7 @@ impl Generator {
             }
             5 => Ty::List(Box::new(self.part_type(u, None, 1)?)),
             6 if declared => Ty::Option(Box::new(self.declared_type(u)?)),
+            6 => Ty::Set(*u.choose(&[Key::Str, Key::Int, Key::Bool])?),
             8..=11 if self.generic_types => {
                 let inner = Box::new(self.part_type(u, None, 1)?);
                 match u.arbitrary()? {
@@ -884,6 +888,11 @@ impl Generator {
                     }
                 }
                 Ty::List(_) if *ty == Ty::Int => out.push(Source::Len(i)),
+                Ty::Set(key) => match ty {
+                    Ty::Int => out.push(Source::Len(i)),
+                    Ty::Bool => out.push(Source::Contains(i, *key)),
+                    _ => {}
+                },
                 Ty::G(t) => {
                     if **t == *ty {
                         out.push(Source::Value(i));
@@ -1121,6 +1130,14 @@ impl Generator {
                 )),
             },
             Ty::Map(key, value) => Ok(self.map_literal(u, scope, *key, value, nesting, pinned)?.0),
+            Ty::Set(key) => {
+                let count = if deep { 1 } else { u.int_in_range(1..=3)? };
+                let mut elements = Vec::with_capacity(count);
+                for _ in 0..count {
+                    elements.push(key.literal(u)?);
+                }
+                Ok(format!("{{{}}}", elements.join(", ")))
+            }
             Ty::Struct(i) => self.construct(u, scope, *i, nesting),
             Ty::Enum(i) => {
                 let count = self.variants(*i).len();
@@ -1379,6 +1396,17 @@ impl Generator {
                 let value = self.value(u, scope, t, 0, true)?;
                 self.line(indent, &format!("{target}.add({value})"));
             }
+            // nothing tracks a set's elements, so it may gain or lose any
+            Ty::Set(key) => {
+                let element = key.literal(u)?;
+                let line = match u.int_in_range(0..=3)? {
+                    0 => format!("{target}.remove({element})"),
+                    1 => format!("{target} = {target}.union({{{element}}})"),
+                    2 => format!("{target} = {target}.difference({{{element}}})"),
+                    _ => format!("{target}.add({element})"),
+                };
+                self.line(indent, &line);
+            }
             Ty::Struct(s) if self.methods(*s).iter().any(|m| m.changes) && u.arbitrary()? => {
                 let changing: Vec<usize> = (0..self.methods(*s).len())
                     .filter(|&m| self.methods(*s)[m].changes)
@@ -1564,6 +1592,7 @@ impl Generator {
             Ty::Option(Box::new(Ty::Str)),
             Ty::List(Box::new(Ty::Int)),
             Ty::Map(Key::Str, Box::new(Ty::Int)),
+            Ty::Set(Key::Int),
         ];
         for i in 0..self.types.len() {
             let ty = match self.types[i] {
@@ -1587,10 +1616,7 @@ impl Generator {
         nesting: usize,
     ) -> Result<(String, String)> {
         let paths = self.paths(scope);
-        let comparable: Vec<&Path> = paths
-            .iter()
-            .filter(|p| !p.ty.is_leaf())
-            .collect();
+        let comparable: Vec<&Path> = paths.iter().filter(|p| !p.ty.is_leaf()).collect();
         let (a, ty) = if !comparable.is_empty() && u.arbitrary()? {
             let path = comparable[u.choose_index(comparable.len())?];
             (fill(u, &path.text)?, path.ty.clone())

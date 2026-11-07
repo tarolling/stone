@@ -5,6 +5,7 @@
 
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
+use crate::stdlib::spec::FormatSpec;
 use crate::token::{RESERVED_KEYWORDS, Token, TokenType};
 use std::error::Error;
 use std::fmt::Display;
@@ -464,6 +465,49 @@ impl Lexer {
         })
     }
 
+    /// Lexes a format spec after the `:` at `start` that ends a value in a string, up to the `}`
+    /// after it, which is left for the string's text to go on from.
+    ///
+    /// For example, `{x:>8.2f}` gives a `FormatSpec` for `>8.2f`. The spec is parsed here, so a
+    /// bad one is an error pointing into it.
+    fn lex_format_spec(&mut self, start: Pos) -> Result<TokenType, LexError> {
+        let text_start = self.pos();
+        let mut text = String::new();
+        loop {
+            match self.peek() {
+                Some('}') => break,
+                Some('{') => {
+                    let brace = self.pos();
+                    self.advance();
+                    return Err(LexError {
+                        message: "values in a format spec are not supported yet".to_string(),
+                        span: Span::new(brace, self.pos()),
+                    });
+                }
+                None | Some('\n' | '"') => {
+                    return Err(LexError {
+                        message: "a format spec must end with '}'".to_string(),
+                        span: Span::new(start, self.pos()),
+                    });
+                }
+                Some(ch) => {
+                    text.push(ch);
+                    self.advance();
+                }
+            }
+        }
+        FormatSpec::parse(&text)
+            .map(|spec| TokenType::FormatSpec(Box::new(spec)))
+            .map_err(|(offset, message)| {
+                let at = Pos::new(text_start.line, text_start.col + offset);
+                let end = Pos::new(at.line, at.col + 1);
+                LexError {
+                    message,
+                    span: Span::new(at, end),
+                }
+            })
+    }
+
     /// Lexes a bytes literal after its opening `b"`, which started at `start`.
     ///
     /// For example, `b"a\x00{"` gives `Bytes([97, 0, 123])`: any byte can be written with `\x`,
@@ -674,10 +718,7 @@ impl Lexer {
             }
             Some(':') if self.holes.last().is_some_and(|hole| hole.depth == 0) => {
                 self.advance();
-                return Err(LexError {
-                    message: "format specs such as '{x:.2f}' are not supported yet".to_string(),
-                    span: Span::new(start, self.pos()),
-                });
+                self.lex_format_spec(start)?
             }
             Some(':') => {
                 self.advance();
@@ -1421,6 +1462,30 @@ testing(1, 2, 3)"#;
     }
 
     #[test]
+    fn a_colon_ending_a_value_starts_its_format_spec() {
+        use TokenType::{StringEnd, StringStart};
+        let tokens = Lexer::new("\"a{x:>5.2f}b\"\n").lex().unwrap();
+        let spans: Vec<(TokenType, Span)> =
+            tokens.into_iter().map(|t| (t.r#type, t.span)).collect();
+        let at = |start, end| Span::new(Pos::new(1, start), Pos::new(1, end));
+        let spec = FormatSpec::parse(">5.2f").unwrap();
+        assert_eq!(
+            spans[..4],
+            [
+                (text(StringStart, "a"), at(1, 4)),
+                (name("x"), at(4, 5)),
+                (TokenType::FormatSpec(Box::new(spec)), at(5, 11)),
+                (text(StringEnd, "b"), at(11, 14)),
+            ]
+        );
+        // a colon inside brackets is not one, and a fill may be a brace's neighbor
+        assert_eq!(
+            types_of("\"{xs[1:]:-^3}\"\n")[6],
+            TokenType::FormatSpec(Box::new(FormatSpec::parse("-^3").unwrap()))
+        );
+    }
+
+    #[test]
     fn doubled_braces_are_braces() {
         assert_eq!(
             types_of("\"{{x}} }}{{\"\n")[0],
@@ -1490,10 +1555,17 @@ testing(1, 2, 3)"#;
             ),
             ("x = \"a}b\"\n", "a '}' in a string is written '}}'", (7, 8)),
             (
-                "x = \"{x:.2f}\"\n",
-                "format specs such as '{x:.2f}' are not supported yet",
-                (8, 9),
+                "x = \"{x:.f}\"\n",
+                "a '.' in a format spec must be followed by a precision, as in '.2f'",
+                (9, 10),
             ),
+            (
+                "x = \"{x:{w}}\"\n",
+                "values in a format spec are not supported yet",
+                (9, 10),
+            ),
+            ("x = \"{x:>5q}\"\n", "unknown format type 'q'", (11, 12)),
+            ("x = \"{x:>5\n", "a format spec must end with '}'", (8, 11)),
             ("x = \"{x\ny = 1\n", "unterminated string", (5, 8)),
             ("x = \"{(x\n", "unterminated string", (5, 9)),
         ] {
@@ -1599,7 +1671,8 @@ testing(1, 2, 3)"#;
         for source in [
             "a = \"{}\" + b\n",
             "a = \"}\"\n",
-            "a = \"{x:.2f}\"\n",
+            "a = \"{x:.f}\"\n",
+            "a = \"{x:{w}}\"\n",
             "a = \"\\q\"\n",
             "a = 99999999999999999999\n",
             "a = \"never closed\n",

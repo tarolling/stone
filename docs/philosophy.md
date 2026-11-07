@@ -108,7 +108,8 @@ Status: every string writes the values of the expressions in braces inside it, a
 f-strings do, but with no `f` to remember, since a string that should hold braces writes `{{`
 and `}}`. `str` and `print` write any value, through the prelude's trait `display`, which a
 struct can implement to say how it is written everywhere it appears. Format specs such as
-`{x:.2f}` are not supported yet. The one obvious way extends to layout: `stone fmt` (and the
+`{x:.2f}` and `{n:>5}` are Python's, so a program moved from Python writes the same text, and
+the compiler checks each against its value's type. The one obvious way extends to layout: `stone fmt` (and the
 editor's Format Document) writes every file in one standard style, changing only whitespace.
 
 ## Memory safety and value semantics
@@ -165,9 +166,11 @@ do instead:
 - A `for` loop walks the list as it was when the loop started, so appending to the list inside
   the loop does not make the loop run longer.
 
-Status: lists, and maps, which compiled code stores as lists of entries with a hash table
-beside them, have value semantics in both backends, and a change reaches into either through
-any place, such as `p.counts[k] += 1`. Compiled code checks a list's reference
+Status: lists, maps, which compiled code stores as lists of entries with a hash table beside
+them, and sets, which are maps whose entries are their keys alone, have value semantics in both
+backends, and a change reaches into any of them through any place, such as
+`p.counts[k] += 1` or `g.edges[i].add(j)`. An empty `{}` is a map or a set by its use, so the
+language never asks which. Compiled code checks a list's reference
 count before changing it and copies the list only when something else refers to it
 (`list_unique` in the IR), so changing a list that only one variable holds is still done in
 place. A function owns each parameter it assigns or changes, and the caller hands it a reference

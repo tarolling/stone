@@ -425,3 +425,215 @@ fn rem_pio2_large(x: float) -> tuple[float, float, float]:
         y0 = -y0
         y1 = -y1
     ret (n % 8.0, y0, y1)
+
+// The text of an int that a format spec writes, as `stdlib::spec::int_text` writes it: its sign
+// (`sign` 1 for `+` and 2 for a space before a number that is not negative), `prefix`, such as
+// `0x` for `#x`, and its digits in `radix`, uppercase for `upper`. Format specs call this and
+// the other `spec_` functions as the program's own code would, so every target writes the same
+// text, and none of them calls another, so a call is never too deep where the interpreter's is
+// not.
+fn spec_int(value: int, radix: int, upper: bool, sign: int, prefix: str) -> str:
+    digits = "0123456789abcdef"
+    if upper:
+        digits = "0123456789ABCDEF"
+    // counted below zero, where the smallest int has room
+    n = value
+    if n > 0:
+        n = 0 - n
+    text = ""
+    while true:
+        text = digits[0 - n % radix] + text
+        n = n / radix
+        if n == 0:
+            break
+    if value < 0:
+        ret "-" + prefix + text
+    if sign == 1:
+        ret "+" + prefix + text
+    if sign == 2:
+        ret " " + prefix + text
+    ret prefix + text
+
+// The text of a float that a format spec writes, as `stdlib::spec::float_text` writes it, from
+// `body`, the float as the runtime wrote it: with `kind` 0 its digits to `precision` places
+// (for `f` and `%`, which `percent` marks), 1 in scientific notation (for `e`), 2 and 3 in
+// scientific notation to one less than `precision` digits, which become `g`'s text (3 for a
+// spec with a precision and no type, which switches sooner and keeps a `.0`), and 4 as `print`
+// writes it.
+fn spec_float(body: str, kind: int, precision: int, alternate: bool, upper: bool, sign: int, percent: bool) -> str:
+    text = body
+    negative = body.startswith("-")
+    if negative:
+        text = body[1:]
+    if text != "inf" and text != "nan":
+        if kind == 2 or kind == 3:
+            // `g` takes 6 digits unless told, and at least 1
+            places = precision
+            if places < 0:
+                places = 6
+            elif places < 1:
+                places = 1
+            // read with no option or result, so formatting needs no enum runtime
+            split = 0
+            while text[split] != "e":
+                split += 1
+            mantissa = text[:split]
+            power = 0
+            for digit in text[split + 2:]:
+                for value in range(10):
+                    if digit == "0123456789"[value]:
+                        power = power * 10 + value
+            if text[split + 1] == "-":
+                power = 0 - power
+            limit = places
+            if kind == 3:
+                limit = places - 1
+            if power < -4 or power >= limit:
+                if not alternate and mantissa.contains("."):
+                    while mantissa.endswith("0"):
+                        mantissa = mantissa[:-1]
+                    if mantissa.endswith("."):
+                        mantissa = mantissa[:-1]
+                elif alternate and not mantissa.contains("."):
+                    mantissa = mantissa + "."
+                text = mantissa + text[split:]
+            else:
+                // the same digits, with the point where the exponent puts it
+                digits = mantissa.replace(".", "")
+                whole = "0"
+                fraction = digits
+                if power >= 0:
+                    whole = digits[:power + 1]
+                    fraction = digits[power + 1:]
+                else:
+                    for _ in range(0 - power - 1):
+                        fraction = "0" + fraction
+                text = whole
+                if fraction != "" or alternate:
+                    text = text + "." + fraction
+                if not alternate and text.contains("."):
+                    while text.endswith("0"):
+                        text = text[:-1]
+                    if text.endswith("."):
+                        text = text[:-1]
+            if kind == 3 and not text.contains(".") and not text.contains("e"):
+                text = text + ".0"
+        elif alternate and not text.contains("."):
+            point = 0
+            while point < text.len() and text[point] != "e":
+                point += 1
+            text = text[:point] + "." + text[point:]
+    if percent:
+        text = text + "%"
+    if upper:
+        text = text.upper()
+    if negative:
+        ret "-" + text
+    if sign == 1:
+        ret "+" + text
+    if sign == 2:
+        ret " " + text
+    ret text
+
+// Lays out a value's text in a format spec's `width`, as `stdlib::spec::layout` does: a
+// `numeric` text's digits are grouped with `grouping` (empty for none), by fours for a `radix`
+// int, after any sign and any prefix (`alternate`), and by threes otherwise, then the width is
+// filled with `fill`, the value `align`ed 0 left, 1 right, 2 center, or 3 after its sign, where
+// zeros fill as digits do.
+fn spec_layout(text: str, numeric: bool, radix: bool, alternate: bool, fill: str, align: int, width: int, grouping: str) -> str:
+    lead = ""
+    grouped = text
+    rest = ""
+    shown = 0
+    if numeric:
+        start = 0
+        if text.startswith("-") or text.startswith("+") or text.startswith(" "):
+            start = 1
+        every = 3
+        allowed = "0123456789"
+        if radix:
+            every = 4
+            allowed = "0123456789abcdefABCDEF"
+            if alternate:
+                start += 2
+        end = start
+        while end < text.len() and allowed.contains(text[end]):
+            end += 1
+        lead = text[:start]
+        digits = text[start:end]
+        rest = text[end:]
+        // zeros after the sign fill the digits' width, and are grouped like them
+        least = 0
+        if fill == "0" and align == 3:
+            least = width - lead.len() - rest.len()
+        grouped = digits
+        if grouping == "":
+            for _ in range(least - digits.len()):
+                grouped = "0" + grouped
+        elif digits != "":
+            // CPython's grouping: a group of padding never starts with a separator, so it may
+            // come out one wider
+            grouped = ""
+            remaining = digits.len()
+            while true:
+                size = remaining
+                if least > size:
+                    size = least
+                if size < 1:
+                    size = 1
+                if size > every:
+                    size = every
+                taken = remaining
+                if taken > size:
+                    taken = size
+                group = digits[remaining - taken:remaining]
+                for _ in range(size - taken):
+                    group = "0" + group
+                if grouped == "":
+                    grouped = group
+                else:
+                    grouped = group + grouping + grouped
+                remaining -= taken
+                least -= size
+                if remaining <= 0 and least <= 0:
+                    break
+                least -= 1
+        shown = lead.len() + grouped.len() + rest.len()
+    else:
+        // the text is placed whole, as wide as its count of characters
+        for _character in text:
+            shown += 1
+    missing = width - shown
+    left = 0
+    middle = 0
+    right = 0
+    if align == 0:
+        right = missing
+    elif align == 1:
+        left = missing
+    elif align == 2:
+        left = missing / 2
+        right = missing - left
+    else:
+        middle = missing
+    before = ""
+    for _ in range(left):
+        before = before + fill
+    inside = ""
+    for _ in range(middle):
+        inside = inside + fill
+    after = ""
+    for _ in range(right):
+        after = after + fill
+    ret before + lead + inside + grouped + rest + after
+
+// Cuts `text` to at most `precision` characters, as a format spec's precision does to a str.
+fn spec_truncate(text: str, precision: int) -> str:
+    cut = ""
+    count = 0
+    for character in text:
+        if count == precision:
+            break
+        cut = cut + character
+        count += 1
+    ret cut

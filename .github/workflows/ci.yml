@@ -13,7 +13,7 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/checkout@v7.0.1
     - name: Check formatting
       run: cargo fmt --check
     - name: Lint
@@ -49,7 +49,7 @@ jobs:
   build-arm64:
     runs-on: ubuntu-24.04-arm
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/checkout@v7.0.1
     - name: Install Rust if the runner lacks it
       run: command -v rustup || curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
     - name: Build
@@ -70,7 +70,7 @@ jobs:
   build-macos:
     runs-on: macos-15
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/checkout@v7.0.1
     - name: Build
       run: cargo build --verbose
     - name: Run tests
@@ -85,7 +85,7 @@ jobs:
   build-windows:
     runs-on: windows-latest
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/checkout@v7.0.1
     - name: Lint
       run: cargo clippy --all-targets -- -D warnings
     - name: Lint with self-update and fetch
@@ -113,7 +113,7 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/checkout@v7.0.1
     - name: Install nightly and cargo-fuzz
       run: |
         rustup toolchain install nightly --profile minimal
@@ -130,7 +130,7 @@ jobs:
         done
     - name: Upload crashing inputs
       if: failure()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v4.6.2
       with:
         name: fuzz-artifacts
         path: fuzz/artifacts

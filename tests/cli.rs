@@ -1031,6 +1031,179 @@ fn compiled_trig_matches_the_interpreter() {
     assert_eq!(actual.lines().count(), expected.lines().count());
 }
 
+/// Returns a random format spec that Python's `format` takes for a value of `kind`, `'i'` for
+/// an int, `'f'` for a float, and `'s'` for a str, built from the parts of the mini-language in
+/// order: fill and alignment, sign, `#`, `0`, width, grouping, precision, and type.
+fn random_spec(state: &mut u64, kind: char) -> String {
+    let mut pick = |n: u64| xorshift(state) % n;
+    let types: &[&str] = match kind {
+        'i' => &[
+            "", "d", "b", "o", "x", "X", "e", "E", "f", "F", "g", "G", "%",
+        ],
+        'f' => &["", "", "e", "E", "f", "F", "g", "G", "%"],
+        _ => &["", "s"],
+    };
+    let ty = types[pick(types.len() as u64) as usize];
+    let radix = matches!(ty, "b" | "o" | "x" | "X");
+    let mut spec = String::new();
+    if pick(10) < 4 {
+        if pick(2) == 0 {
+            spec.push(['*', '0', '-', 'x', ' ', 'é', '#'][pick(7) as usize]);
+        }
+        let aligns = if kind == 's' { "<>^" } else { "<>^=" };
+        spec.push(aligns.as_bytes()[pick(aligns.len() as u64) as usize] as char);
+    }
+    if kind != 's' && pick(10) < 3 {
+        spec.push(['+', '-', ' '][pick(3) as usize]);
+    }
+    if kind != 's' && pick(10) < 2 {
+        spec.push('#');
+    }
+    if pick(10) < 3 {
+        spec.push('0');
+    }
+    if pick(10) < 6 {
+        spec.push_str(&(pick(25) + 1).to_string());
+    }
+    if kind != 's' && pick(10) < 3 {
+        spec.push(if radix || pick(2) == 0 { '_' } else { ',' });
+    }
+    // an int takes a precision only as a float, and a str only with no sign
+    let float = matches!(ty, "e" | "E" | "f" | "F" | "g" | "G" | "%");
+    if pick(10) < 6 && (kind != 'i' || float) {
+        spec.push_str(&format!(".{}", pick(21)));
+    }
+    spec + ty
+}
+
+#[test]
+fn format_specs_write_what_python_writes() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipping: python3 is not on PATH");
+        return;
+    }
+    let mut state = 0x853c_49e6_748f_ea9b;
+    // values written the same way in stone and in Python, each reading back exactly
+    let mut floats: Vec<String> = [
+        "0.0",
+        "-0.0",
+        "inf",
+        "-inf",
+        "nan",
+        "0.5",
+        "2.5",
+        "-1.5",
+        "9.995",
+        "0.125",
+        "1e16",
+        "5e-324",
+        "1.7976931348623157e308",
+        "0.05",
+        "99.5",
+        "2.675",
+        "1234567.891",
+    ]
+    .iter()
+    .map(|text| text.to_string())
+    .collect();
+    while floats.len() < 250 {
+        let random = xorshift(&mut state);
+        let unit = (random >> 11) as f64 / (1u64 << 53) as f64;
+        let value = match random % 4 {
+            0 => f64::from_bits(xorshift(&mut state)),
+            1 => (unit - 0.5) * 2000.0,
+            2 => ((unit - 0.5) * 200.0 * 1e4).round() / 1e4,
+            _ => 10f64.powf(unit * 34.0 - 12.0),
+        };
+        if value.is_finite() {
+            floats.push(format!("{value:e}"));
+        }
+    }
+    let mut ints: Vec<String> = ["0", "-1", "1", "255", "-255", "9223372036854775807"]
+        .iter()
+        .map(|text| text.to_string())
+        .collect();
+    ints.push("-9223372036854775807 - 1".to_string());
+    while ints.len() < 250 {
+        let random = xorshift(&mut state);
+        let value = match random % 2 {
+            0 => random as i64,
+            _ => (random % 200_001) as i64 - 100_000,
+        };
+        ints.push(value.to_string());
+    }
+    let texts: Vec<String> = (0..80)
+        .map(|_| {
+            let length = xorshift(&mut state) % 12;
+            (0..length)
+                .map(|_| ['a', 'b', 'é', ' ', 'x', 'y'][(xorshift(&mut state) % 6) as usize])
+                .collect()
+        })
+        .collect();
+    let specs: Vec<(char, Vec<String>)> = ['f', 'i', 's']
+        .into_iter()
+        .map(|kind| {
+            let specs = (0..40).map(|_| random_spec(&mut state, kind)).collect();
+            (kind, specs)
+        })
+        .collect();
+
+    // a list of each kind, then a line of every spec per value, the same in both languages
+    let list = |values: &[String], quote: bool| {
+        let items: Vec<String> = values
+            .iter()
+            .map(|value| match (quote, value.as_str()) {
+                (true, _) => format!("\"{value}\""),
+                (_, "inf") => "1e308 * 10.0".to_string(),
+                (_, "-inf") => "-(1e308 * 10.0)".to_string(),
+                (_, "nan") => "1e308 * 10.0 - 1e308 * 10.0".to_string(),
+                _ => value.clone(),
+            })
+            .collect();
+        format!("[{}]", items.join(", "))
+    };
+    let lists = [list(&floats, false), list(&ints, false), list(&texts, true)];
+    let mut source = String::new();
+    let mut python = String::new();
+    for ((kind, specs), values) in specs.iter().zip(&lists) {
+        // a variable of its own for each kind, since a variable has one type
+        let holes: Vec<String> = specs
+            .iter()
+            .map(|spec| format!("{{{kind}:{spec}}}"))
+            .collect();
+        let holes = holes.join("|");
+        source.push_str(&format!(
+            "for {kind} in {values}:\n    print(\"{holes}\")\n"
+        ));
+        python.push_str(&format!(
+            "for {kind} in {values}:\n    print(f\"{holes}\")\n",
+            values = if *kind == 'f' {
+                format!("[float(x) for x in {values}]")
+            } else {
+                values.clone()
+            }
+        ));
+    }
+    let script = std::env::temp_dir().join("stone_format_specs.py");
+    std::fs::write(&script, &python).unwrap();
+    let expected = Command::new("python3")
+        .arg(&script)
+        .output()
+        .expect("python3 should run");
+    assert!(expected.status.success(), "{expected:?}");
+    let expected = String::from_utf8_lossy(&expected.stdout);
+
+    let (_, [run, built]) = run_and_build_in("format_specs_differential", &source);
+    for output in [run, built] {
+        assert!(output.status.success(), "{output:?}");
+        let actual = String::from_utf8_lossy(&output.stdout);
+        for (line, (want, got)) in expected.lines().zip(actual.lines()).enumerate() {
+            assert_eq!(got, want, "line {}", line + 1);
+        }
+        assert_eq!(actual.lines().count(), expected.lines().count());
+    }
+}
+
 /// Returns the type of every program header of the ELF executable `bytes`, such as 3 for
 /// `PT_INTERP`, which names the dynamic loader a program needs.
 fn program_header_types(bytes: &[u8]) -> Vec<u32> {

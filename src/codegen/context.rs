@@ -1332,7 +1332,9 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
             collect_calls_from_expr(left, calls);
             collect_calls_from_expr(right, calls);
         }
-        ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => {
+        ExprKind::UnaryOp { operand, .. }
+        | ExprKind::Try { value: operand }
+        | ExprKind::FormattedValue { value: operand, .. } => {
             collect_calls_from_expr(operand, calls)
         }
         ExprKind::BoolOp { values, .. } | ExprKind::JoinedStr { values } => {
@@ -1352,7 +1354,7 @@ fn collect_calls_from_expr(expr: &Expr, calls: &mut HashSet<String>) {
             collect_calls_from_expr(value, calls);
             collect_calls_from_expr(slice, calls);
         }
-        ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } => {
+        ExprKind::List { elts, .. } | ExprKind::Tuple { elts, .. } | ExprKind::Set { elts } => {
             for elt in elts {
                 collect_calls_from_expr(elt, calls);
             }

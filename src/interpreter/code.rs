@@ -13,6 +13,7 @@ use crate::checker::{
 };
 use crate::span::Span;
 use crate::stdlib;
+use crate::stdlib::spec::FormatSpec;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -163,7 +164,11 @@ pub(super) enum ExprKind {
     },
     Try(Box<Expr>),
     JoinedStr(Vec<Expr>),
+    /// A value of a string with a format spec, written as the spec says.
+    FormattedValue(Box<Expr>, Box<FormatSpec>),
     Dict(Vec<(Expr, Expr)>),
+    /// A set literal, its elements in order.
+    Set(Vec<Expr>),
     BoolOp(BoolOp, Vec<Expr>),
     Binary(Operator, Box<Expr>, Box<Expr>),
     Unary(UnaryOp, Box<Expr>),
@@ -593,12 +598,16 @@ impl<'r, 'out> Resolver<'r, 'out> {
             }
             ast::ExprKind::Try { value } => ExprKind::Try(Box::new(self.expr_with(value, top))),
             ast::ExprKind::JoinedStr { values } => ExprKind::JoinedStr(self.exprs(values)),
+            ast::ExprKind::FormattedValue { value, spec } => {
+                ExprKind::FormattedValue(Box::new(self.expr(value)), spec.clone())
+            }
             ast::ExprKind::Dict { keys, values } => ExprKind::Dict(
                 keys.iter()
                     .zip(values)
                     .map(|(key, value)| (self.expr(key), self.expr(value)))
                     .collect(),
             ),
+            ast::ExprKind::Set { elts } => ExprKind::Set(self.exprs(elts)),
             ast::ExprKind::BoolOp { op, values } => {
                 ExprKind::BoolOp(op.clone(), self.exprs(values))
             }

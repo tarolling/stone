@@ -227,7 +227,9 @@ fn hover_documents_methods() {
     // the `len` in `"é".len()`
     let text = hover_text(&doc(SOURCE), at(7, 18)).unwrap();
     assert!(
-        text.starts_with("```stone\n(str | bytes | list[T] | map[K, V]).len() -> int\n```\n"),
+        text.starts_with(
+            "```stone\n(str | bytes | list[T] | map[K, V] | set[T]).len() -> int\n```\n"
+        ),
         "{text}"
     );
     // a variable named like a method is still a variable
@@ -410,15 +412,16 @@ fn definition_of_a_builtin_opens_the_reference_file() {
         Range::new(Position::new(line, 3), Position::new(line, 8))
     );
 
-    // the `len` in the reference's `// (str | bytes | list[T] | map[K, V]).len() -> int` line
+    // the `len` in the reference's `// (str | bytes | list[T] | map[K, V] | set[T]).len() -> int`
+    // line
     let len = definition(&doc, &uri(), at(7, 18), Some(&builtins)).unwrap();
     let line = text
         .lines()
-        .position(|l| l.starts_with("// (str | bytes | list[T] | map[K, V]).len("))
+        .position(|l| l.starts_with("// (str | bytes | list[T] | map[K, V] | set[T]).len("))
         .unwrap() as u32;
     assert_eq!(
         len.range,
-        Range::new(Position::new(line, 39), Position::new(line, 42))
+        Range::new(Position::new(line, 48), Position::new(line, 51))
     );
 }
 
@@ -742,11 +745,21 @@ fn completion_after_a_dot_offers_methods() {
         "keys",
         "values",
         "items",
+        "add",
+        "remove",
+        "union",
+        "intersection",
+        "difference",
+        "is_subset",
+        "is_superset",
+        "is_disjoint",
         "eq",
         "cmp",
         "min",
         "max",
         "clamp",
+        "abs",
+        "floor",
         "display",
         "send",
         "read_line",
@@ -788,7 +801,7 @@ fn completion_after_a_dot_offers_methods() {
 fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
     let doc = doc(
         "xs = [1]\nxs.\ns = \"a\"\ns.\nm = {\"a\": 1}\nm.\no = some(1)\no.\nn = 1\nn.\n\
-         r = int(\"1\")\nr.\n",
+         r = int(\"1\")\nr.\nt = {1}\nt.\n",
     );
     let labels = |pos: Position| -> Vec<String> {
         completion(&doc, pos, &MapSources::default())
@@ -852,10 +865,12 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
         labels(at(8, 3)),
         ["is_some", "is_none", "unwrap", "unwrap_or", "eq", "display"]
     );
-    // a number has the methods of the prelude's traits
+    // a number has the methods of the prelude's traits, and its own
     assert_eq!(
         labels(at(10, 3)),
-        ["eq", "cmp", "min", "max", "clamp", "display"]
+        [
+            "eq", "cmp", "min", "max", "clamp", "abs", "floor", "display"
+        ]
     );
     assert_eq!(
         labels(at(12, 3)),
@@ -868,6 +883,22 @@ fn completion_after_a_dot_offers_the_methods_of_the_receivers_type() {
             "ok",
             "err",
             "eq",
+            "display"
+        ]
+    );
+    assert_eq!(
+        labels(at(14, 3)),
+        [
+            "len",
+            "contains",
+            "add",
+            "remove",
+            "union",
+            "intersection",
+            "difference",
+            "is_subset",
+            "is_superset",
+            "is_disjoint",
             "display"
         ]
     );
@@ -2519,4 +2550,17 @@ fn a_file_in_a_librarys_directory_is_checked_with_its_dependencies() {
         doc.file,
         doc.sources.find(Path::new("/lib/parts/sum.stn")).unwrap()
     );
+}
+
+#[test]
+fn a_format_spec_is_a_strings_text() {
+    let source = "x = 1.5\nprint(\"{x:>8.2f}\")\n";
+    // nothing is offered inside the spec, and hover shows only the type, as in text
+    assert_eq!(offered(source, at(2, 12)), Vec::<String>::new());
+    assert_eq!(
+        hover_text(&doc(source), at(2, 12)).as_deref(),
+        Some("```stone\nstr\n```")
+    );
+    // while its value is still code
+    assert!(hover(&doc(source), at(2, 9)).is_some());
 }

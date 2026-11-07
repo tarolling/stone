@@ -6,6 +6,7 @@ pub mod math;
 pub mod net;
 pub mod os;
 pub mod random;
+pub mod spec;
 pub mod time;
 
 /// A module that is part of stone rather than a file of the program, such as `os`.
@@ -228,7 +229,7 @@ pub fn prelude_variant(name: &str) -> Option<&'static str> {
 }
 
 /// Names of the builtin methods, which are called on a value, such as `xs.len()`.
-pub static METHODS: [&str; 59] = [
+pub static METHODS: [&str; 69] = [
     "len",
     "append",
     "pop",
@@ -268,11 +269,21 @@ pub static METHODS: [&str; 59] = [
     "keys",
     "values",
     "items",
+    "add",
+    "remove",
+    "union",
+    "intersection",
+    "difference",
+    "is_subset",
+    "is_superset",
+    "is_disjoint",
     "eq",
     "cmp",
     "min",
     "max",
     "clamp",
+    "abs",
+    "floor",
     "display",
     "send",
     "read_line",
@@ -288,6 +299,19 @@ pub static METHODS: [&str; 59] = [
     "read_bytes",
     "read_exact",
     "read_all_bytes",
+];
+
+/// The builtin methods only a set has, which [`METHODS`] lists too. A struct may have methods of
+/// the same names.
+pub const SET_METHODS: [&str; 8] = [
+    "add",
+    "remove",
+    "union",
+    "intersection",
+    "difference",
+    "is_subset",
+    "is_superset",
+    "is_disjoint",
 ];
 
 /// The builtin methods only a `str` has, which [`METHODS`] lists too. A struct may have methods of the same names.
@@ -332,7 +356,7 @@ pub const HANDLE_METHODS: [&str; 12] = [
 pub fn changes_receiver(name: &str) -> bool {
     matches!(
         name,
-        "append" | "pop" | "insert" | "extend" | "sort" | "sort_by_key"
+        "append" | "pop" | "insert" | "extend" | "sort" | "sort_by_key" | "add" | "remove"
     )
 }
 
@@ -418,7 +442,7 @@ pub static BUILTIN_DOCS: [BuiltinDoc; 10] = [
 /// `ordering`, and `output` are not here, since the prelude defines them in stone.
 ///
 /// A `signature` is the type as a signature writes it, such as `list[T]` for `list`.
-pub static TYPE_DOCS: [BuiltinDoc; 12] = [
+pub static TYPE_DOCS: [BuiltinDoc; 13] = [
     BuiltinDoc {
         name: "int",
         signature: "int",
@@ -457,6 +481,12 @@ pub static TYPE_DOCS: [BuiltinDoc; 12] = [
                       type `V`, kept in insertion order. Like a list, it is a value.",
     },
     BuiltinDoc {
+        name: "set",
+        signature: "set[T]",
+        description: "A set of distinct elements of type `T`, which is `int`, `str`, or `bool`, \
+                      written `{1, 2}`, kept in insertion order. Like a list, it is a value.",
+    },
+    BuiltinDoc {
         name: "tuple",
         signature: "tuple[T1, T2, ...]",
         description: "Two or more values of fixed types, such as `(1, \"a\")`, which never change.",
@@ -492,12 +522,12 @@ pub static TYPE_DOCS: [BuiltinDoc; 12] = [
     },
 ];
 
-pub static METHOD_DOCS: [BuiltinDoc; 59] = [
+pub static METHOD_DOCS: [BuiltinDoc; 69] = [
     BuiltinDoc {
         name: "len",
-        signature: "(str | bytes | list[T] | map[K, V]).len() -> int",
-        description: "Returns the number of bytes in a string or bytes, elements in a list, or \
-                      entries in a map.",
+        signature: "(str | bytes | list[T] | map[K, V] | set[T]).len() -> int",
+        description: "Returns the number of bytes in a string or bytes, elements in a list or \
+                      set, or entries in a map.",
     },
     BuiltinDoc {
         name: "append",
@@ -728,10 +758,11 @@ pub static METHOD_DOCS: [BuiltinDoc; 59] = [
     BuiltinDoc {
         name: "contains",
         signature: "str.contains(text: str) -> bool | bytes.contains(part: bytes) -> bool | \
-                    list[T].contains(value: T) -> bool | map[K, V].contains(key: K) -> bool",
+                    list[T].contains(value: T) -> bool | map[K, V].contains(key: K) -> bool | \
+                    set[T].contains(value: T) -> bool",
         description: "Returns whether the string has `text` in it, the bytes `part`, the list \
-                      an element equal to `value`, as `==` compares them, or the map an entry \
-                      for `key`, so \
+                      an element equal to `value`, as `==` compares them, the map an entry \
+                      for `key`, or the set the element `value`, so \
                       `\"hello\".contains(\"ell\")` and `[1, 2].contains(2)` are `true`. \
                       `value in c` makes the same test, and `value not in c` the opposite.",
     },
@@ -761,6 +792,55 @@ pub static METHOD_DOCS: [BuiltinDoc; 59] = [
         description: "Returns a new list of the map's entries as `(key, value)` tuples, in the \
                       order their keys were added, so `for k, v in m.items()` goes through \
                       both.",
+    },
+    BuiltinDoc {
+        name: "add",
+        signature: "set[T].add(value: T)",
+        description: "Adds `value` to the set in place, after its other elements, unless the set \
+                      has it already. A statement of its own, as `append` is.",
+    },
+    BuiltinDoc {
+        name: "remove",
+        signature: "set[T].remove(value: T) -> bool",
+        description: "Takes `value` out of the set in place and returns whether the set had it, \
+                      so `{1, 2}.remove(3)` is `false` and changes nothing.",
+    },
+    BuiltinDoc {
+        name: "union",
+        signature: "set[T].union(other: set[T]) -> set[T]",
+        description: "Returns a new set of the elements of either set: the set's own, in order, \
+                      then those of `other` it lacks, so `{1, 2}.union({2, 3})` is \
+                      `{1, 2, 3}`.",
+    },
+    BuiltinDoc {
+        name: "intersection",
+        signature: "set[T].intersection(other: set[T]) -> set[T]",
+        description: "Returns a new set of the set's elements that `other` has too, in the set's \
+                      order, so `{1, 2, 3}.intersection({3, 2})` is `{2, 3}`.",
+    },
+    BuiltinDoc {
+        name: "difference",
+        signature: "set[T].difference(other: set[T]) -> set[T]",
+        description: "Returns a new set of the set's elements that `other` lacks, in the set's \
+                      order, so `{1, 2, 3}.difference({2})` is `{1, 3}`.",
+    },
+    BuiltinDoc {
+        name: "is_subset",
+        signature: "set[T].is_subset(other: set[T]) -> bool",
+        description: "Returns whether `other` has every element of the set, so \
+                      `{1}.is_subset({1, 2})` is `true`, as is any set's `is_subset` of itself.",
+    },
+    BuiltinDoc {
+        name: "is_superset",
+        signature: "set[T].is_superset(other: set[T]) -> bool",
+        description: "Returns whether the set has every element of `other`, so \
+                      `{1, 2}.is_superset({2})` is `true`.",
+    },
+    BuiltinDoc {
+        name: "is_disjoint",
+        signature: "set[T].is_disjoint(other: set[T]) -> bool",
+        description: "Returns whether the two sets have no element in common, so \
+                      `{1}.is_disjoint({2})` is `true`.",
     },
     BuiltinDoc {
         name: "eq",
@@ -800,6 +880,20 @@ pub static METHOD_DOCS: [BuiltinDoc; 59] = [
                       `hi`, and the value itself otherwise, for any type that implements `ord`, \
                       so `12.clamp(0, 10)` is 10. It stops the program if `lo` is greater than \
                       `hi` or either is nan.",
+    },
+    BuiltinDoc {
+        name: "abs",
+        signature: "(int | float).abs() -> int | float",
+        description: "Returns the number without its sign, as the same type, as `math.abs` does, \
+                      so `(-2.5).abs()` is 2.5 and `(-0.0).abs()` is 0.0. It stops the program \
+                      for the smallest int, whose absolute value does not fit in an int.",
+    },
+    BuiltinDoc {
+        name: "floor",
+        signature: "(int | float).floor() -> int",
+        description: "Returns the greatest int that is at most the number, as `math.floor` \
+                      does, so `(-2.5).floor()` is -3. It stops the program for a float that is \
+                      nan or does not fit in an int.",
     },
     BuiltinDoc {
         name: "display",
@@ -1725,7 +1819,11 @@ mod tests {
                 "min",
                 "max",
                 "clamp",
-                "rem_pio2_large"
+                "rem_pio2_large",
+                "spec_int",
+                "spec_float",
+                "spec_layout",
+                "spec_truncate"
             ]
         );
         // each method the prelude gives is a prelude function of the same name

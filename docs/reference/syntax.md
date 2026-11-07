@@ -96,6 +96,7 @@ module's name in a `use` or before a `.`.
 | result | `ok(1)`, `err("bad")` |
 | list | `[]`, `[1, 2, 3]`, `[[1.0], []]` |
 | map | `{}`, `{"a": 1, "b": 2}`, `{1: [2.5], 3: [],}` |
+| set | `{}`, `{1, 2, 3}`, `{"a",}` |
 | tuple | `(1, "a")`, `(x, y, z,)`, `(1, ("a", [2.5]))` |
 | struct | `Point(x=1.0, y=2.0)`, `Line(end=q, start=p)` |
 
@@ -127,8 +128,15 @@ another join, as in `"a" "b"`. Inside a string:
 | `}}` | a `}` |
 
 A lone `}`, an empty `{}`, and a value that does not close before the end of the line are
-errors. A `:` after the expression, as in `{x:.2f}`, is kept for format specs, which are not
-supported yet.
+errors. A `:` after the expression starts a format spec, as in `{x:.2f}`, which runs to the `}`
+and follows Python's format specification mini-language:
+
+```text
+[[fill]align][sign][#][0][width][grouping][.precision][type]
+```
+
+A spec is written out, so a value inside one, as in `{x:.{p}f}`, is an error, and so is a spec
+that does not parse, such as `{x:.f}`. [Types](types.md#format-specs) lists what each part does.
 
 A bytes literal is a `b` right before a string literal's opening quote, as in `b"GET\r\n"`. It
 takes the same escapes, except that `\xhh` writes any byte, from `\x00` to `\xff`. Its other
@@ -350,6 +358,11 @@ A function whose first parameter is `self`, with no type, is a method, called on
 A map literal is a key, `:`, and a value for each entry, separated by commas, in braces:
 `{"ann": 31, "bob": 27}`. `m[k]` reads the value of `k`'s entry, and `m[k] = v` sets it, adding
 the entry if `m` has none. See [Types](types.md#maps).
+
+## Sets
+
+A set literal is its elements, separated by commas, in braces, with no colons: `{1, 2, 3}`.
+`{}` is an empty map or an empty set, whichever its use makes it. See [Types](types.md#sets).
 
 ## Slices
 

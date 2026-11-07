@@ -10,6 +10,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Format specs, as `:.2f` in `"{x:.2f}"`, are highlighted, and hover and completion leave
+  them alone, as they do a string's text.
+- Completion offers `abs` and `floor` after an int or a float.
+- Completion offers a set's methods after a set, and `set` among the types, which hover
+  documents; `set[T]` is highlighted as a type.
+
 ## [0.4.2] - 2026-11-06
 
 ### Added

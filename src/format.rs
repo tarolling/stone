@@ -339,6 +339,8 @@ enum Kind {
     TextMiddle,
     /// The text of a string after its last value.
     TextEnd,
+    /// A format spec after a value in a string, with its `:`, as `:.2f`.
+    Spec,
 }
 
 impl Kind {
@@ -391,6 +393,7 @@ impl Spacer {
             TokenType::StringStart(_) => Kind::TextStart,
             TokenType::StringMiddle(_) => Kind::TextMiddle,
             TokenType::StringEnd(_) => Kind::TextEnd,
+            TokenType::FormatSpec(_) => Kind::Spec,
             _ => Kind::Operand,
         };
         let space = match (previous, kind) {
@@ -421,7 +424,8 @@ impl Spacer {
                 | Kind::Try
                 | Kind::CloseBar
                 | Kind::TextMiddle
-                | Kind::TextEnd,
+                | Kind::TextEnd
+                | Kind::Spec,
             ) => false,
             (Some(Kind::Named), _) | (_, Kind::Named) => false,
             (Some(p), Kind::Open)
@@ -645,6 +649,11 @@ mod tests {
             (
                 r#"print("{{ not a value }}")"#,
                 r#"print("{{ not a value }}")"#,
+            ),
+            // a format spec keeps its spelling, spaces and all, against its value
+            (
+                r#"print("{ x :>8.2f}|{n: ^5}|{ s:*<3}")"#,
+                r#"print("{x:>8.2f}|{n: ^5}|{s:*<3}")"#,
             ),
         ]);
     }

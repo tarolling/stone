@@ -261,6 +261,18 @@ impl Parser {
                     span: self.span_from(mark),
                 }));
             }
+        } else if self.peek().r#type == TokenType::Name("set".to_string()) {
+            // 'set' '[' type ']'
+            self.pos += 1;
+            if self.expect(TokenType::LBracket).is_some()
+                && let Ok(elem) = self.nested(Self::parse_type)
+                && self.expect(TokenType::RBracket).is_some()
+            {
+                return Ok(Box::new(TypeExpr {
+                    kind: TypeExprKind::Set(elem),
+                    span: self.span_from(mark),
+                }));
+            }
         } else if self.peek().r#type == TokenType::Name("map".to_string()) {
             // 'map' '[' type ',' type [','] ']'
             self.pos += 1;

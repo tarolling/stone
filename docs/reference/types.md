@@ -15,6 +15,7 @@ runs, reporting every place they conflict.
 | `bytes` | immutable sequences of any bytes, such as `b"\x00\xff"`, for data that is not text |
 | `list[T]` | growable lists of `T`, which are values: assigning or passing one copies it |
 | `map[K, V]` | maps from keys of type `K`, which are `int`, `str`, or `bool`, to values of type `V`, which are values like lists |
+| `set[T]` | sets of distinct elements of type `T`, which are `int`, `str`, or `bool`, and which are values like lists |
 | `tuple[T1, T2, ...]` | two or more values of fixed types, such as `(1, "a")`, which never change |
 | `option[T]` | `some(x)`, which holds a `T`, or `none`, which holds nothing |
 | `result[T, E]` | `ok(x)`, which holds a `T`, or `err(e)`, which holds an error `E` |
@@ -34,7 +35,7 @@ fn scale(xs: list[float], k: float) -> list[float]:
 ```
 
 `int`, `float`, `bool`, and `str` are written as their names, a list as `list[T]`, so a grid
-of floats is `list[list[float]]`, a map as `map[K, V]`, so word counts are `map[str, int]`, a
+of floats is `list[list[float]]`, a map as `map[K, V]`, so word counts are `map[str, int]`, a set as `set[T]`, a
 tuple as `tuple[` and the type of each value, so a name and a
 score is `tuple[str, int]`, an option as `option[T]`, a function as `fn` and its parameters'
 types in parentheses, then `->` and the type it returns if it returns one, so a test of an int is
@@ -383,7 +384,50 @@ Every string works this way, with no prefix. The values are evaluated left to ri
 is written, like a call's arguments, and a value may hold strings of its own, even with values in
 them (`"{"{x}!"}"`), as well as indexes, slices, and maps. `{{` and `}}` write a brace, and a
 lone `}`, an empty `{}`, or a value that runs past the end of the line is an error. A `:` after
-a value is kept for format specs such as `{x:.2f}`, which are not supported yet.
+a value starts its format spec.
+
+### Format specs
+
+A format spec after a value's `:` says how it is written, with Python's format specification
+mini-language, `[[fill]align][sign][#][0][width][grouping][.precision][type]`, and gives the same
+text Python does:
+
+```stone
+x = 3.14159
+n = 42
+print("{x:.2f} {x:8.3f}| {x:e} {n:>5}| {n:05} {n:#x} {1234567:,} {0.25:.0%}")
+// 3.14    3.142| 3.141590e+00    42| 00042 0x2a 1,234,567 25%
+```
+
+| part | means |
+| --- | --- |
+| `fill` | the character that fills the width, a space unless given; it must come before an `align` |
+| `align` | `<` left, the default for text; `>` right, the default for numbers; `^` centered; `=` a number's fill after its sign, as in `-  42` |
+| `sign` | `+` writes a sign on every number, a space writes one before a number that is not negative, and `-`, the default, only a negative number's |
+| `#` | an int's prefix, `0b`, `0o`, `0x`, or `0X`, and a point a float always keeps |
+| `0` | with no fill given, zeros fill a number's width after its sign, and grouping applies to them, as in `{1234:010,}`, which is `00,001,234`; text is filled with zeros on its right |
+| `width` | the fewest characters the value takes |
+| `grouping` | `,` or `_` between groups of three digits, or `_` between groups of four for `b`, `o`, `x`, and `X` |
+| `.precision` | for `f`, `e`, and `%`, the digits after the point; for `g`, and with no type, the digits in all; for a str, the most characters kept |
+
+| type | for | writes |
+| --- | --- | --- |
+| `d` | int | the int in decimal, as with no type |
+| `b`, `o`, `x`, `X` | int | the int in binary, octal, or hexadecimal, uppercase for `X` |
+| `f`, `F` | int, float | a fixed count of digits after the point, 6 unless given; `F` writes `INF` and `NAN` |
+| `e`, `E` | int, float | scientific notation, as `3.14e+00`, with 6 digits after the point unless given |
+| `g`, `G` | int, float | fixed or scientific by the number's size, with 6 digits unless given and no trailing zeros |
+| `%` | int, float | the number times 100 as `f` writes it, then `%` |
+| `s` | str | the str, as with no type |
+| none | any value | a number as `print` writes it, or as `g` does with a precision; any other value as `print` writes it, padded |
+
+Floats round half to even on their exact value, as Python's do, so `{2.675:.2f}` is `2.67`
+(2.675 is a little less as a float), and an int with a float's type is converted first. Fill,
+alignment, and width work on any value, a list, struct, enum, or option included, which pad the
+text `print` writes, while a sign, `#`, `=`, and grouping need a number, and a precision with no
+type needs a float or str. The checker reports a spec that does not fit its value's type, such as
+`{name:.2f}` for a str. There is no `c` or `n` type, no `z`, and a value inside a spec, as in
+`{x:.{p}f}`, is not supported yet.
 
 ## Bytes
 
@@ -572,8 +616,9 @@ it in place. An entry changes like a list's element, through any place that star
 variable: `m[k] += 1`, `m[k].append(x)`, `m[k].x = 1.0`, `grid[r][c] = v` for a map of maps,
 `p.counts[k] += 1` for a struct's field, and `p.counts.pop(k)`. A plain assignment `m[k] = v`
 adds the entry if it is missing, but a key on the way to what changes, or the target of `+=`,
-must have one, or the program stops with `key not found`. A map cannot be compared with `==`
-or used in arithmetic or as a condition.
+must have one, or the program stops with `key not found`. Two maps are equal when they have
+the same keys with equal values, in any order. A map cannot be ordered with `<` or used in
+arithmetic or as a condition.
 
 An entry is stored as a key and its value's values side by side, as a list stores tuples, in
 insertion order, with a hash table to find each key, so reading and setting an entry takes
@@ -581,6 +626,51 @@ about the same time however large the map is. `pop` takes about the same time to
 the entry removed, and the map closes up the gaps once removed entries are more than half, so
 the entries left keep their order. An entry can hold at most 32 values,
 counting its key and each field of its value's tuples and structs.
+
+## Sets
+
+A set holds distinct elements, like a `set` in Python or a `HashSet` in Rust, and is written
+with braces and no colons:
+
+```stone
+seen = {3, 1, 2, 1}
+seen.add(4)                  // adds an element, after the others
+seen.add(1)                  // changes nothing, since it is there
+print(seen, seen.len(), 2 in seen)   // {3, 1, 2, 4} 4 true
+print(seen.remove(3), seen.remove(9))   // true false
+```
+
+Elements are `int`, `str`, or `bool`, all of one type. A set keeps them in the order they were
+first added, which is the order it prints and loops in. `{}` is an empty map or an empty set,
+whichever its use makes it: `s.add(x)` or passing it where a `set[T]` goes makes it a set, and
+`m[k] = v` a map, while a `{}` nothing tells apart is a map. Either way it prints as `{}`.
+
+`s.add(x)` is a statement of its own, as `append` is, and `s.remove(x)` takes `x` out and says
+whether it was there, so it can be a value too. The other methods give new sets or tests,
+keeping the receiver's order first:
+
+| method | gives |
+| --- | --- |
+| `a.union(b)` | the elements of either, `a`'s first |
+| `a.intersection(b)` | `a`'s elements that `b` has |
+| `a.difference(b)` | `a`'s elements that `b` lacks |
+| `a.is_subset(b)` | whether `b` has every element of `a` |
+| `a.is_superset(b)` | whether `a` has every element of `b` |
+| `a.is_disjoint(b)` | whether they share no element |
+
+```stone
+a = {1, 2, 3}
+b = {2, 3, 4}
+print(a.union(b), a.intersection(b), a.difference(b))   // {1, 2, 3, 4} {2, 3} {1}
+print({2, 3}.is_subset(a), a.is_disjoint({7}))         // true true
+```
+
+`set(xs)` makes a set of a list's elements, the first of equal ones kept, and `list(s)` a list
+of a set's. `x in s` and `s.contains(x)` test an element, `==` compares two sets in any order,
+and like lists and maps, sets are values that change in place through any place that starts at
+a variable, as `g.edges[i].add(j)` does. A set is a map whose entries are their keys alone, so
+adding, removing, and testing an element take about the same time however large the set is. A
+set cannot be indexed, ordered with `<`, or used in arithmetic or as a condition.
 
 ## Enums
 

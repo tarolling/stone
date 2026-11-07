@@ -199,10 +199,11 @@ own is an error. Method names are not reserved, so they also work as ordinary na
 ### `len`
 
 ```text
-(str | bytes | list[T] | map[K, V]).len() -> int
+(str | bytes | list[T] | map[K, V] | set[T]).len() -> int
 ```
 
-Returns the number of bytes in a string or bytes, elements in a list, or entries in a map.
+Returns the number of bytes in a string or bytes, elements in a list or set, or entries in a
+map.
 
 ```stone
 print("stone".len(), [1, 2, 3].len(), {"a": 1}.len())   // 5 3 1
@@ -719,12 +720,12 @@ print(r.ok(), r.err())   // some(7) none
 ### `contains`
 
 ```text
-str.contains(text: str) -> bool | bytes.contains(part: bytes) -> bool | list[T].contains(value: T) -> bool | map[K, V].contains(key: K) -> bool
+str.contains(text: str) -> bool | bytes.contains(part: bytes) -> bool | list[T].contains(value: T) -> bool | map[K, V].contains(key: K) -> bool | set[T].contains(value: T) -> bool
 ```
 
 Returns whether the string has `text` in it (the empty string is in every string), the bytes
 `part` in them, the list an
-element equal to `value`, or the map an entry for `key`. A list compares its elements with `value`
+element equal to `value`, the map an entry for `key`, or the set the element `value`. A list compares its elements with `value`
 in order, as `value == element` does, and stops at the first that is equal, so its elements must
 be values `==` can compare, and a struct with its own `eq` compares by it. The operators `in` and
 `not in` make the same test: `value in c` is `c.contains(value)`, except that it evaluates
@@ -797,6 +798,110 @@ for name, age in ages.items():
     print(name, age)
 ```
 
+### `add`
+
+```text
+set[T].add(value: T)
+```
+
+Adds `value` to the set in place, after its other elements, unless the set has it already. Like
+`append`, it changes its set and returns nothing, so it is a statement of its own.
+
+```stone
+seen = {}
+for word in ["a", "b", "a"]:
+    seen.add(word)
+print(seen)   // {'a', 'b'}
+```
+
+### `remove`
+
+```text
+set[T].remove(value: T) -> bool
+```
+
+Takes `value` out of the set in place and returns whether the set had it, leaving the other
+elements in order. A set closes up the gaps once removed elements are more than half of it.
+
+```stone
+s = {1, 2, 3}
+print(s.remove(2), s.remove(9))   // true false
+print(s)                          // {1, 3}
+```
+
+### `union`
+
+```text
+set[T].union(other: set[T]) -> set[T]
+```
+
+Returns a new set of the elements of either set: the set's own, in order, then those of `other`
+it lacks.
+
+```stone
+print({1, 2}.union({2, 3}))   // {1, 2, 3}
+```
+
+### `intersection`
+
+```text
+set[T].intersection(other: set[T]) -> set[T]
+```
+
+Returns a new set of the set's elements that `other` has too, in the set's order.
+
+```stone
+print({1, 2, 3}.intersection({3, 2}))   // {2, 3}
+```
+
+### `difference`
+
+```text
+set[T].difference(other: set[T]) -> set[T]
+```
+
+Returns a new set of the set's elements that `other` lacks, in the set's order.
+
+```stone
+print({1, 2, 3}.difference({2}))   // {1, 3}
+```
+
+### `is_subset`
+
+```text
+set[T].is_subset(other: set[T]) -> bool
+```
+
+Returns whether `other` has every element of the set, so every set is a subset of itself.
+
+```stone
+print({1}.is_subset({1, 2}), {3}.is_subset({1, 2}))   // true false
+```
+
+### `is_superset`
+
+```text
+set[T].is_superset(other: set[T]) -> bool
+```
+
+Returns whether the set has every element of `other`.
+
+```stone
+print({1, 2}.is_superset({2}))   // true
+```
+
+### `is_disjoint`
+
+```text
+set[T].is_disjoint(other: set[T]) -> bool
+```
+
+Returns whether the two sets have no element in common.
+
+```stone
+print({1}.is_disjoint({2}), {1}.is_disjoint({1}))   // true false
+```
+
 ### `eq`
 
 ```text
@@ -865,6 +970,33 @@ than `hi`, or if either is `nan`, as Rust's `clamp` does.
 
 ```stone
 print(12.clamp(0, 10), (-3).clamp(0, 10), 0.5.clamp(0.0, 1.0))   // 10 0 0.5
+```
+
+### `abs`
+
+```text
+(int | float).abs() -> int | float
+```
+
+Returns the number without its sign, as the same type, exactly as `math.abs` does: `-0.0` gives
+`0.0`, and it stops the program with `integer overflow in abs` for the smallest int, whose
+absolute value does not fit in an int.
+
+```stone
+print((-7).abs(), (-2.5).abs(), 3.abs())   // 7 2.5 3
+```
+
+### `floor`
+
+```text
+(int | float).floor() -> int
+```
+
+Returns the greatest int that is at most the number, exactly as `math.floor` does. An int is
+returned as it is, and a float that is `nan` or does not fit in an int stops the program.
+
+```stone
+print((-2.5).floor(), 2.5.floor(), 7.floor())   // -3 2 7
 ```
 
 ### `display`

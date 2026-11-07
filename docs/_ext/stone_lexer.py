@@ -98,11 +98,21 @@ METHODS = (
     "keys",
     "values",
     "items",
+    "add",
+    "remove",
+    "union",
+    "intersection",
+    "difference",
+    "is_subset",
+    "is_superset",
+    "is_disjoint",
     "eq",
     "cmp",
     "min",
     "max",
     "clamp",
+    "abs",
+    "floor",
     "display",
     "send",
     "read_line",
@@ -149,6 +159,8 @@ class StoneLexer(RegexLexer):
         ],
         "value": [
             (r"\}", String.Interpol, "#pop"),
+            # a format spec, as `:.2f` in `"{x:.2f}"`, which runs to the value's end
+            (r':[^{}\n"|]*(?=\})', String.Interpol),
             (r"\{", Punctuation, "braces"),
             (r"\n", Whitespace, "#pop:2"),
             include("root"),
@@ -177,9 +189,9 @@ class StoneLexer(RegexLexer):
                 bygroups(Keyword.Namespace, Whitespace, Name.Namespace),
             ),
             (
-                # a type name, maybe inside list[, map[, tuple[, option[, or result[, then closing
+                # a type name, maybe inside list[, map[, set[, tuple[, option[, or result[, then closing
                 # brackets or more types
-                r"(->|:)(\s*)((?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str|bytes|socket|listener)(?:\]|,\s*(?:(?:list|map|tuple|option|result)\[)*(?:int|float|bool|str|bytes|socket|listener))*)(?![\w(])",
+                r"(->|:)(\s*)((?:(?:list|map|set|tuple|option|result)\[)*(?:int|float|bool|str|bytes|socket|listener)(?:\]|,\s*(?:(?:list|map|set|tuple|option|result)\[)*(?:int|float|bool|str|bytes|socket|listener))*)(?![\w(])",
                 bygroups(Punctuation, Whitespace, Keyword.Type),
             ),
             (r"\b(self|Self)\b", Name.Builtin.Pseudo),

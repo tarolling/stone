@@ -16,6 +16,17 @@ use stone::interpreter::Limits;
 
 mod compound;
 
+/// Format specs the generator writes after an int in a string, from each part of the
+/// mini-language, including a float's types, which convert the int.
+const INT_SPECS: [&str; 12] = [
+    "5", "08", "+,", "#x", "_b", "#o", ">6", "^7d", ".2f", "e", "X", "*<+10_",
+];
+
+/// Format specs the generator writes after a float in a string.
+const FLOAT_SPECS: [&str; 12] = [
+    ".2f", ">10.3e", "+g", "08.1f", ",.2f", "^12", ".3", "%", "#.0f", "E", "_.4G", "*<9.1%",
+];
+
 /// Limits for fuzzing the interpreter, small enough that every input finishes quickly.
 ///
 /// For example, `while true:` runs out of fuel after 10,000 iterations instead of hanging.
@@ -253,6 +264,9 @@ impl Generator {
                     let test = self.comparison(u, scope)?;
                     let label = self.fresh("s");
                     self.line(indent, &format!("print(\"{label}\", {value}, {test})"));
+                } else if u.ratio(1, 3)? {
+                    let spec = u.choose(&INT_SPECS)?;
+                    self.line(indent, &format!("print(\"{{{value}:{spec}}}\")"));
                 } else {
                     self.line(indent, &format!("print({value})"));
                 }
@@ -586,10 +600,15 @@ impl Generator {
             let op = *u.choose(&["==", "!=", "<", "<=", ">", ">="])?;
             let operand = self.float_expression(u, scope, 0)?;
             let label = self.fresh("s");
-            self.line(
-                indent,
-                &format!("print(\"{label}\", {value}, {value} {op} {operand})"),
-            );
+            if u.ratio(1, 3)? {
+                let spec = u.choose(&FLOAT_SPECS)?;
+                self.line(indent, &format!("print(\"{label} {{{value}:{spec}}}\")"));
+            } else {
+                self.line(
+                    indent,
+                    &format!("print(\"{label}\", {value}, {value} {op} {operand})"),
+                );
+            }
         }
         Ok(())
     }

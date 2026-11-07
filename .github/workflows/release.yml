@@ -16,7 +16,7 @@ jobs:
   check-version:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/checkout@v7.0.1
     - name: Check the tag matches Cargo.toml
       if: startsWith(github.ref, 'refs/tags/')
       run: |
@@ -65,7 +65,7 @@ jobs:
         # Git Bash on Windows, so every runner runs the same steps
         shell: bash
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - uses: actions/checkout@v7.0.1
     - name: Install Rust if the runner lacks it
       run: command -v rustup || curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --profile minimal
     - name: Install musl tools
@@ -111,7 +111,7 @@ jobs:
         cp target/${{ matrix.target }}/release/stone.exe LICENSE README.md package/
         (cd package && 7z a -tzip ../dist/$archive stone.exe LICENSE README.md)
         (cd dist && sha256sum $archive > $archive.sha256)
-    - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+    - uses: actions/upload-artifact@v7.0.1
       with:
         name: stone-${{ matrix.machine }}
         path: dist/*
@@ -123,8 +123,8 @@ jobs:
     permissions:
       contents: write
     steps:
-    - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+    - uses: actions/checkout@v7.0.1
+    - uses: actions/download-artifact@v8.0.1
       with:
         path: dist
         merge-multiple: true

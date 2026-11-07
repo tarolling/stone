@@ -48,10 +48,12 @@ use crate::checker::{
     variant_display, variants,
 };
 use crate::codegen::Os;
-use crate::codegen::context::{FUNCTION_PREFIX, module_routine};
+use crate::codegen::context::{FUNCTION_PREFIX, function_label, module_routine};
 use crate::codegen::gpu::kernel::{Argument, arguments};
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
+use crate::project::PRELUDE_MODULE;
 use crate::span::{FileId, Span};
+use crate::stdlib::spec::{Align, FormatSpec, Presentation, Sign};
 use crate::stdlib::{
     ASSERTION_FAILED, BYTE_RANGE, BYTES_INDEX_RANGE, CLAMP_RANGE, COMPARE_DEPTH, CUT_CHARACTER,
     END_OF_INPUT, INDEX_RANGE, LENGTHS_DIFFER, MAX_PRINT_DEPTH, POP_EMPTY, POP_RANGE,
@@ -371,6 +373,11 @@ fn referenced_functions(function: &Function) -> impl Iterator<Item = &str> {
                 ..
             } => Some(name.as_str()),
             Inst::FunctionAddress { label, .. } => label.strip_prefix(FUNCTION_PREFIX),
+            // a prelude function a format spec calls
+            Inst::Call {
+                callee: Callee::Helper(label),
+                ..
+            } => label.strip_prefix(FUNCTION_PREFIX),
             // expanded later, when one may reduce through the prelude
             Inst::Trig { func, .. } if func.reduces() => Some(math::trig::REDUCE_LARGE),
             Inst::SinCos { .. } | Inst::ReducePio2 { .. } => Some(math::trig::REDUCE_LARGE),
@@ -446,8 +453,8 @@ fn constant_globals(body: &[Stmt], reads: &GlobalReads) -> HashMap<String, i64> 
     constants
 }
 
-/// Returns whether any code in `body`, functions included, calls `pop` with a key on a map, whose
-/// type `types` gives by span.
+/// Returns whether any code in `body`, functions included, calls `pop` with a key on a map or
+/// `remove` on a set, whose type `types` gives by span.
 fn pops_maps(body: &[Stmt], types: &HashMap<Span, Type>) -> bool {
     let mut found = false;
     visit_statements(body, &mut |stmt| {
@@ -455,7 +462,7 @@ fn pops_maps(body: &[Stmt], types: &HashMap<Span, Type>) -> bool {
             expr.visit(&mut |expr| {
                 if let ExprKind::Call { func, args, .. } = &expr.kind
                     && let ExprKind::Attribute { value, attr, .. } = &func.kind
-                    && attr == "pop"
+                    && (attr == "pop" || attr == "remove")
                     && args.len() == 1
                     && matches!(types.get(&value.span), Some(Type::Map(..)))
                 {
@@ -584,6 +591,7 @@ fn instance_label(function: &str, args: &[Type]) -> String {
 fn mangle(ty: &Type) -> String {
     match ty {
         Type::List(elem) => format!("list_{}", mangle(elem)),
+        Type::Map(key, _) if ty.is_set() => format!("set_{}", mangle(key)),
         Type::Map(key, value) => format!("map_{}_{}", mangle(key), mangle(value)),
         Type::Tuple(fields) => {
             let fields: Vec<String> = fields.iter().map(mangle).collect();
@@ -4063,6 +4071,8 @@ impl<'a> Lowerer<'a> {
                 Ok(self.finish(values[0], into))
             }
             ExprKind::JoinedStr { values } => self.joined(values, into, kind),
+            // only a string's values have specs, so this is a string of one value
+            ExprKind::FormattedValue { .. } => self.joined(std::slice::from_ref(expr), into, kind),
             ExprKind::Dict { keys, values } => {
                 let (width, codes) = self.element_layout(expr);
                 let kinds = self.element_kinds(expr);
@@ -4090,6 +4100,18 @@ impl<'a> Lowerer<'a> {
                     self.release_temp(key);
                 }
                 Ok(Operand::Reg(map))
+            }
+            ExprKind::Set { elts } => {
+                let key_ty = self.map_key(expr).ok_or("a set literal is a set")?;
+                let set = self.new_set(&key_ty);
+                // owned from the start, so a `?` in a later element frees it and what it holds
+                self.own(set, kind);
+                for elt in elts {
+                    let value = self.expr(elt)?;
+                    self.map_put(set, value, &key_ty, &[], &[RcKind::of(&key_ty)]);
+                    self.release_temp(value);
+                }
+                Ok(set)
             }
             ExprKind::Constant { value, .. } => {
                 let value = match &**value {
@@ -5566,6 +5588,9 @@ impl<'a> Lowerer<'a> {
         kind: Option<RcKind>,
     ) -> Result<Operand, String> {
         match name {
+            // lowered as `math.abs` and `math.floor` of the receiver
+            "abs" => self.math("math.abs", std::slice::from_ref(receiver), into),
+            "floor" => self.math("math.floor", std::slice::from_ref(receiver), into),
             "cmp" => {
                 let ty = self.type_of(receiver)?;
                 let lhs = self.expr(receiver)?;
@@ -5777,6 +5802,19 @@ impl<'a> Lowerer<'a> {
                 // append returns none
                 Ok(self.finish(Operand::Imm(0), into))
             }
+            "add" => {
+                // the receiver's indexes, then the element, then the change
+                let key_ty = self.map_key(receiver).ok_or("only a set has 'add'")?;
+                let indexes = self.place_indexes(receiver)?;
+                let value = self.expr(&args[0])?;
+                let set = self.unique_place(receiver, &indexes)?;
+                self.map_put(set, value, &key_ty, &[], &[RcKind::of(&key_ty)]);
+                self.release_temp(value);
+                Ok(self.finish(Operand::Imm(0), into))
+            }
+            "remove" => self.set_remove(receiver, &args[0], into),
+            "union" | "intersection" | "difference" | "is_subset" | "is_superset"
+            | "is_disjoint" => self.set_operation(receiver, name, &args[0], into, kind),
             "pop" if args.is_empty() => self.pop_last(receiver, into),
             "pop" if self.map_key(receiver).is_some() => self.map_pop(receiver, &args[0], into),
             "keys" => self.map_column(receiver, 0..1, into),
@@ -7002,6 +7040,32 @@ impl<'a> Lowerer<'a> {
             }
             (Type::Int, Type::Float) => return self.float_to_int_result(arg, into),
             (Type::Bytes, _) => return self.bytes_result(arg, into),
+            (set @ Type::Map(key, _), Type::List(_)) if set.is_set() => {
+                let list = self.expr(arg)?;
+                let result = self.new_set(key);
+                self.each_element(list, 1, |this, position| {
+                    let values = this.load_slots(list, position, 1, 0..1, &[None]);
+                    this.map_put(result, values[0], key, &[], &[RcKind::of(key)]);
+                    Ok(())
+                })?;
+                self.release_temp(list);
+                self.own(result, Some(RcKind::List));
+                return Ok(self.finish(result, into));
+            }
+            // a set's entries are laid out as a list of its elements, with an index the list
+            // never reads
+            (Type::List(_), set) if set.is_set() => {
+                let set = self.expr(arg)?;
+                self.close_up(set);
+                self.take(set, Some(RcKind::List));
+                let list = self.fresh();
+                self.push(Inst::Copy {
+                    dst: list,
+                    src: set,
+                });
+                self.own(Operand::Reg(list), Some(RcKind::List));
+                return Ok(self.finish(Operand::Reg(list), into));
+            }
             _ => return Err(format!("cannot convert {source} to {target}")),
         };
         let src = self.expr(arg)?;
@@ -8048,6 +8112,223 @@ impl<'a> Lowerer<'a> {
         }
     }
 
+    /// Makes a new empty set of elements of type `key_ty`, which owns its reference.
+    fn new_set(&mut self, key_ty: &Type) -> Operand {
+        let set = self.fresh();
+        let codes = RcKind::codes(&[RcKind::of(key_ty)]);
+        self.push(Inst::Call {
+            dsts: vec![set],
+            callee: Callee::Runtime("stone.list_new_wide"),
+            args: vec![Operand::Imm(0), Operand::Imm(codes), Operand::Imm(1)],
+        });
+        Operand::Reg(set)
+    }
+
+    /// Lowers `body` once for each element of `list`, whose elements are `width` slots, in a loop
+    /// this adds, giving it the element's position. A set or map must be closed up first.
+    fn each_element(
+        &mut self,
+        list: Operand,
+        width: usize,
+        mut body: impl FnMut(&mut Self, Operand) -> Result<(), String>,
+    ) -> Result<(), String> {
+        let count = self.element_count(list, width);
+        let next = self.fresh();
+        self.push(Inst::Copy {
+            dst: next,
+            src: Operand::Imm(0),
+        });
+        let (header, inside, exit) = (self.new_block(), self.new_block(), self.new_block());
+        self.loop_depth += 1;
+        self.jump(header);
+        self.start(header);
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Lt,
+            float: false,
+            lhs: Operand::Reg(next),
+            rhs: count,
+            then: inside,
+            otherwise: exit,
+        });
+        self.start(inside);
+        body(self, Operand::Reg(next))?;
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: next,
+            lhs: Operand::Reg(next),
+            rhs: Operand::Imm(1),
+        });
+        self.jump(header);
+        self.loop_depth -= 1;
+        self.start(exit);
+        Ok(())
+    }
+
+    /// Lowers `receiver.remove(value)` for a set, which is whether the set had `value`, into
+    /// `into` if given. The receiver's indexes are evaluated, then the value, then the entry is
+    /// removed as [`Lowerer::map_pop`] removes one: `stone.map_take` marks it removed, its
+    /// counted key is released and zeroed, and `stone.map_settle` closes up the set if removed
+    /// entries are more than half of it.
+    fn set_remove(
+        &mut self,
+        receiver: &Expr,
+        value_expr: &Expr,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let key_ty = self.map_key(receiver).ok_or("only a set has 'remove'")?;
+        let indexes = self.place_indexes(receiver)?;
+        let value = self.expr(value_expr)?;
+        let set = self.unique_place(receiver, &indexes)?;
+        let string = Operand::Imm((key_ty == Type::Str) as i64);
+        let first = self.runtime_call("stone.map_take", vec![set, value, string], None);
+        self.release_temp(value);
+        let found = self.at_least_zero(first, into);
+        let (taken, end) = (self.new_block(), self.new_block());
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Ne,
+            float: false,
+            lhs: found,
+            rhs: Operand::Imm(0),
+            then: taken,
+            otherwise: end,
+        });
+        self.start(taken);
+        if let Some(kind) = RcKind::of(&key_ty) {
+            let old = self.fresh();
+            self.push(Inst::ListGet {
+                dst: old,
+                list: set,
+                index: first,
+                offset: 0,
+            });
+            self.push(Inst::ListSet {
+                list: set,
+                index: first,
+                value: Operand::Imm(0),
+                offset: 0,
+            });
+            self.push(Inst::Release {
+                src: Operand::Reg(old),
+                kind,
+            });
+        }
+        self.push(Inst::Call {
+            dsts: vec![],
+            callee: Callee::Runtime("stone.map_settle"),
+            args: vec![set],
+        });
+        self.jump(end);
+        self.start(end);
+        Ok(found)
+    }
+
+    /// Lowers the set operation `name` of `receiver` with the set `other`, evaluating the
+    /// receiver first, into `into` if given: `union`, `intersection`, and `difference` make a new
+    /// set, the receiver's elements in order first, and the `is_` tests give 1 or 0.
+    ///
+    /// For example, `{1, 2}.union({2, 3})` adds 1 and 2, then 3, to a new set.
+    fn set_operation(
+        &mut self,
+        receiver: &Expr,
+        name: &str,
+        other: &Expr,
+        into: Option<VReg>,
+        kind: Option<RcKind>,
+    ) -> Result<Operand, String> {
+        let key_ty = self
+            .map_key(receiver)
+            .ok_or("only a set has set operations")?;
+        let kinds = [RcKind::of(&key_ty)];
+        let left = self.list_operand(receiver, &[other])?;
+        let right = self.expr(other)?;
+        self.close_up(left);
+        self.close_up(right);
+        // `is_superset` is `is_subset` the other way around
+        let (from, against) = match name {
+            "is_superset" => (right, left),
+            _ => (left, right),
+        };
+        let result = match name {
+            "union" | "intersection" | "difference" => {
+                let result = self.new_set(&key_ty);
+                // the receiver's elements the other set has, or lacks, or all of them
+                let keep = match name {
+                    "intersection" => Some(Cond::Ge),
+                    "difference" => Some(Cond::Lt),
+                    _ => None,
+                };
+                self.each_element(from, 1, |this, position| {
+                    let values = this.load_slots(from, position, 1, 0..1, &[None]);
+                    let Some(cond) = keep else {
+                        this.map_put(result, values[0], &key_ty, &[], &kinds);
+                        return Ok(());
+                    };
+                    let found = this.map_find(against, values[0], &key_ty, None);
+                    let (add, skip) = (this.new_block(), this.new_block());
+                    this.terminate(Terminator::CmpBranch {
+                        cond,
+                        float: false,
+                        lhs: found,
+                        rhs: Operand::Imm(0),
+                        then: add,
+                        otherwise: skip,
+                    });
+                    this.start(add);
+                    this.map_put(result, values[0], &key_ty, &[], &kinds);
+                    this.jump(skip);
+                    this.start(skip);
+                    Ok(())
+                })?;
+                if name == "union" {
+                    self.each_element(against, 1, |this, position| {
+                        let values = this.load_slots(against, position, 1, 0..1, &[None]);
+                        this.map_put(result, values[0], &key_ty, &[], &kinds);
+                        Ok(())
+                    })?;
+                }
+                self.own(result, kind);
+                result
+            }
+            _ => {
+                // a subset has no element the other lacks, and disjoint sets none it has
+                let missing = match name {
+                    "is_disjoint" => Cond::Ge,
+                    _ => Cond::Lt,
+                };
+                let dst = self.dst(into);
+                self.push(Inst::Copy {
+                    dst,
+                    src: Operand::Imm(1),
+                });
+                self.each_element(from, 1, |this, position| {
+                    let values = this.load_slots(from, position, 1, 0..1, &[None]);
+                    let found = this.map_find(against, values[0], &key_ty, None);
+                    let (fails, next) = (this.new_block(), this.new_block());
+                    this.terminate(Terminator::CmpBranch {
+                        cond: missing,
+                        float: false,
+                        lhs: found,
+                        rhs: Operand::Imm(0),
+                        then: fails,
+                        otherwise: next,
+                    });
+                    this.start(fails);
+                    this.push(Inst::Copy {
+                        dst,
+                        src: Operand::Imm(0),
+                    });
+                    this.jump(next);
+                    this.start(next);
+                    Ok(())
+                })?;
+                Operand::Reg(dst)
+            }
+        };
+        self.release_temp(left);
+        self.release_temp(right);
+        Ok(self.finish(result, into))
+    }
+
     /// Lowers `receiver.keys()` or `receiver.values()` for a map to a new list holding, for each
     /// entry in order, the values in `leaves` of it, retained, into `into` if given: `0..1` is
     /// the key, and the rest are the value's.
@@ -8332,10 +8613,15 @@ impl<'a> Lowerer<'a> {
         let values = self.load_slots(list, Operand::Reg(next), width, 0..width, &kinds);
         if let Some(key) = key {
             self.print_flat(key, &values[..1], true);
-            self.print_char(':');
-            self.print_char(' ');
         }
-        self.print_flat(elem, &values[keyed..], true);
+        // a set's entries hold no value
+        if key.is_none() || width > 1 {
+            if key.is_some() {
+                self.print_char(':');
+                self.print_char(' ');
+            }
+            self.print_flat(elem, &values[keyed..], true);
+        }
         self.push(Inst::Binary {
             op: BinOp::Add,
             dst: next,
@@ -8433,13 +8719,19 @@ impl<'a> Lowerer<'a> {
         for piece in pieces {
             values.push(match &piece.kind {
                 ExprKind::Constant { value, .. } if matches!(&**value, Constant::Str(_)) => None,
+                ExprKind::FormattedValue { value, .. } => {
+                    Some((self.expr_flat(value)?, self.type_of(value)?))
+                }
                 _ => Some((self.expr_flat(piece)?, self.type_of(piece)?)),
             });
         }
         let outer = self.runtime_call("stone.text_begin", vec![], None);
         for (piece, value) in pieces.iter().zip(&values) {
             match value {
-                Some((leaves, ty)) => self.print_flat(ty, leaves, false),
+                Some((leaves, ty)) => match &piece.kind {
+                    ExprKind::FormattedValue { spec, .. } => self.print_formatted(ty, leaves, spec),
+                    _ => self.print_flat(ty, leaves, false),
+                },
                 None => {
                     if let ExprKind::Constant { value, .. } = &piece.kind
                         && let Constant::Str(text) = &**value
@@ -8455,6 +8747,186 @@ impl<'a> Lowerer<'a> {
         }
         self.own(text, kind);
         Ok(text)
+    }
+
+    /// Prints a value of a string as its format spec `spec` says, as the interpreter's
+    /// `write_formatted` does: an int through the prelude's `spec_int`, a float (or an int with
+    /// a float's type) from the digits `stone.print_float_fixed` or `stone.print_float_exp`
+    /// writes through `spec_float`, and anything else as `print` writes it, cut by
+    /// `spec_truncate` to a precision; then `spec_layout` groups and pads the text. The prelude's
+    /// functions are called as helpers, which count no call, so a value formats at any depth, as
+    /// in the interpreter.
+    fn print_formatted(&mut self, ty: &Type, values: &[Operand], spec: &FormatSpec) {
+        let numeric = matches!(ty, Type::Int | Type::Float);
+        let float = spec.ty.is_some_and(Presentation::is_float);
+        let sign = Operand::Imm(match spec.sign {
+            Sign::Minus => 0,
+            Sign::Plus => 1,
+            Sign::Space => 2,
+        });
+        let flag = |value: bool| Operand::Imm(value as i64);
+        let (radix, upper) = match spec.ty {
+            Some(Presentation::Binary) => (2, false),
+            Some(Presentation::Octal) => (8, false),
+            Some(Presentation::Hex { upper }) => (16, upper),
+            _ => (10, false),
+        };
+        let text = match ty {
+            Type::Int if !float => {
+                let prefix = match (spec.alternate, radix, upper) {
+                    (false, _, _) | (_, 10, _) => "",
+                    (_, 2, _) => "0b",
+                    (_, 8, _) => "0o",
+                    (_, _, false) => "0x",
+                    (_, _, true) => "0X",
+                };
+                let prefix = self.literal_borrowed(prefix);
+                let args = vec![values[0], Operand::Imm(radix), flag(upper), sign, prefix];
+                self.prelude_call("spec_int", args)
+            }
+            Type::Int | Type::Float => {
+                let mut x = values[0];
+                if *ty == Type::Int {
+                    let converted = self.fresh();
+                    self.push(Inst::IntToFloat {
+                        dst: converted,
+                        src: x,
+                    });
+                    x = Operand::Reg(converted);
+                }
+                let precision = spec.precision.map_or(-1, |p| p as i64);
+                // the general forms take scientific digits of one less than their precision
+                let general = (spec.precision.unwrap_or(6).max(1) - 1) as i64;
+                let fixed = spec.precision.unwrap_or(6) as i64;
+                let (routine, places, kind, upper) = match spec.ty {
+                    Some(Presentation::Fixed { upper }) => {
+                        (Some("stone.print_float_fixed"), fixed, 0, upper)
+                    }
+                    Some(Presentation::Percent) => {
+                        let scaled = self.fresh();
+                        self.push(Inst::FloatBinary {
+                            op: BinOp::Mul,
+                            dst: scaled,
+                            lhs: x,
+                            rhs: Operand::Imm(100f64.to_bits() as i64),
+                        });
+                        x = Operand::Reg(scaled);
+                        (Some("stone.print_float_fixed"), fixed, 0, false)
+                    }
+                    Some(Presentation::Exponent { upper }) => {
+                        (Some("stone.print_float_exp"), fixed, 1, upper)
+                    }
+                    Some(Presentation::General { upper }) => {
+                        (Some("stone.print_float_exp"), general, 2, upper)
+                    }
+                    _ if spec.precision.is_some() => {
+                        (Some("stone.print_float_exp"), general, 3, false)
+                    }
+                    _ => (None, 0, 4, false),
+                };
+                let outer = self.runtime_call("stone.text_begin", vec![], None);
+                match routine {
+                    Some(routine) => {
+                        self.push(Inst::Call {
+                            dsts: vec![],
+                            callee: Callee::Runtime(routine),
+                            args: vec![x, Operand::Imm(places)],
+                        });
+                    }
+                    None => self.push(Inst::Call {
+                        dsts: vec![],
+                        callee: Callee::Print(Type::Float),
+                        args: vec![x],
+                    }),
+                }
+                let body = self.runtime_call("stone.text_end", vec![outer], None);
+                let percent = spec.ty == Some(Presentation::Percent);
+                let args = vec![
+                    body,
+                    Operand::Imm(kind),
+                    Operand::Imm(precision),
+                    flag(spec.alternate),
+                    flag(upper),
+                    sign,
+                    flag(percent),
+                ];
+                let text = self.prelude_call("spec_float", args);
+                self.push(Inst::Release {
+                    src: body,
+                    kind: RcKind::Str,
+                });
+                text
+            }
+            _ => {
+                let outer = self.runtime_call("stone.text_begin", vec![], None);
+                self.print_flat(ty, values, false);
+                let text = self.runtime_call("stone.text_end", vec![outer], None);
+                match spec.precision {
+                    Some(precision) => {
+                        let args = vec![text, Operand::Imm(precision as i64)];
+                        let cut = self.prelude_call("spec_truncate", args);
+                        self.push(Inst::Release {
+                            src: text,
+                            kind: RcKind::Str,
+                        });
+                        cut
+                    }
+                    None => text,
+                }
+            }
+        };
+        let (fill, align) = spec.placement(numeric);
+        let text = if spec.width > 0 || numeric && spec.grouping.is_some() {
+            let fill = self.literal_borrowed(&fill.to_string());
+            let grouping =
+                self.literal_borrowed(&spec.grouping.map(String::from).unwrap_or_default());
+            let align = match align {
+                Align::Left => 0,
+                Align::Right => 1,
+                Align::Center => 2,
+                Align::AfterSign => 3,
+            };
+            let args = vec![
+                text,
+                flag(numeric),
+                flag(numeric && !float && radix != 10),
+                flag(spec.alternate),
+                fill,
+                Operand::Imm(align),
+                Operand::Imm(spec.width as i64),
+                grouping,
+            ];
+            let laid = self.prelude_call("spec_layout", args);
+            self.push(Inst::Release {
+                src: text,
+                kind: RcKind::Str,
+            });
+            laid
+        } else {
+            text
+        };
+        self.push(Inst::Call {
+            dsts: vec![],
+            callee: Callee::Print(Type::Str),
+            args: vec![text],
+        });
+        self.push(Inst::Release {
+            src: text,
+            kind: RcKind::Str,
+        });
+    }
+
+    /// Calls the prelude's function `name`, which borrows every one of `args` and returns a new
+    /// string, as a helper, so the call counts toward no depth, as no call does when the
+    /// interpreter formats a value.
+    fn prelude_call(&mut self, name: &str, args: Vec<Operand>) -> Operand {
+        let dst = self.fresh();
+        self.push(Inst::Call {
+            dsts: vec![dst],
+            callee: Callee::Helper(function_label(&format!("{PRELUDE_MODULE}.{name}"))),
+            args,
+        });
+        Operand::Reg(dst)
     }
 
     /// Prints `text` as it is, through the string printer.
@@ -8779,12 +9251,15 @@ fn has_call(expr: &Expr) -> bool {
         // making a closure changes no list
         ExprKind::Lambda { .. } | ExprKind::Closure { .. } => false,
         // a struct among a string's values may be written by its own `display`
-        ExprKind::Call { .. } | ExprKind::JoinedStr { .. } => true,
+        ExprKind::Call { .. } | ExprKind::JoinedStr { .. } | ExprKind::FormattedValue { .. } => {
+            true
+        }
         ExprKind::Constant { .. } | ExprKind::Name { .. } => false,
         ExprKind::BinOp { left, right, .. } => has_call(left) || has_call(right),
         ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => has_call(operand),
         ExprKind::BoolOp { values, .. }
         | ExprKind::List { elts: values, .. }
+        | ExprKind::Set { elts: values }
         | ExprKind::Tuple { elts: values, .. } => values.iter().any(has_call),
         ExprKind::Dict { keys, values } => keys.iter().chain(values).any(has_call),
         ExprKind::Compare {

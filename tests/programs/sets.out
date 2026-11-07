@@ -1,0 +1,27 @@
+{3, 1, 2}
+3
+{3, 1, 2, 4}
+true false true true
+true
+false
+{2, 4}
+{1, 2, 3, 4}
+{2, 3}
+{1}
+{4}
+false
+true
+true
+true
+false
+true
+true
+{'pear', 'fig', 'kiwi'}
+pear
+fig
+kiwi
+3 4
+{3, 1, 2}
+[true, false]
+[0, 2, 4, 6]
+{}

@@ -234,6 +234,7 @@ impl Document {
                         | TokenType::StringStart(_)
                         | TokenType::StringMiddle(_)
                         | TokenType::StringEnd(_)
+                        | TokenType::FormatSpec(_)
                         | TokenType::Bytes(_)
                 ) && token.span.start < pos
                     && pos < token.span.end
@@ -1935,6 +1936,7 @@ fn method_applies(method: &str, ty: &Type) -> bool {
         Type::Str => "str",
         Type::Bytes => "bytes",
         Type::List(_) => "list",
+        Type::Map(..) if ty.is_set() => "set",
         Type::Map(..) => "map",
         Type::Enum { name, .. } if name == stone::checker::OPTION => "option",
         Type::Enum { name, .. } if name == stone::checker::RESULT => "result",
@@ -1946,7 +1948,7 @@ fn method_applies(method: &str, ty: &Type) -> bool {
         "eq" => {
             return !matches!(
                 kind,
-                "list" | "map" | "socket" | "listener" | "native_window"
+                "list" | "map" | "set" | "socket" | "listener" | "native_window"
             );
         }
         "cmp" | "min" | "max" | "clamp" => {

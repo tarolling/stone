@@ -72,8 +72,8 @@ print("last:", nums[-1], "reversed:", nums[::-1])
 The differences from Python here: `fn` instead of `def`, a type on every parameter, `-> T` for a
 return value, `ret` instead of `return`, `cont` instead of `continue`, `true`/`false`, `//`
 comments, double-quoted strings only, every string writing the values of the `{expression}`s in
-it with no `f` prefix (`{{` and `}}` for braces), `xs.len()` instead of `len(xs)`, and `math.abs`
-instead of `abs`. Variables are never annotated; their types are inferred. `for _ in range(n):` works for
+it with no `f` prefix (`{{` and `}}` for braces), `xs.len()` instead of `len(xs)`, and `x.abs()`
+instead of `abs(x)`. Variables are never annotated; their types are inferred. `for _ in range(n):` works for
 a loop variable you do not need, and `main` is an ordinary function name.
 
 ## Types
@@ -87,6 +87,7 @@ a loop variable you do not need, and `main` is an ordinary function name.
 | `bytes` | `b"\x00\xff"` | immutable raw bytes; `b[i]` is an int, slices, `+`, `"s".bytes()`, `b.text()` (a result), `bytes([1, 2])` (a result) |
 | `list[T]` | `[1, 2]`, `[]` | all elements one type |
 | `map[K, V]` | `{"a": 1}`, `{}` | keys `int`, `str`, or `bool`; insertion order |
+| `set[T]` | `{1, 2}`, `{}` | elements `int`, `str`, or `bool`; insertion order; `{}` is a set when its use says so |
 | `tuple[A, B]` | `(1, "a")` | two or more values, always in parentheses |
 | `option[T]` | `some(1)`, `none` | stone's replacement for `None` |
 | `result[T, E]` | `ok(1)`, `err("bad")` | stone's replacement for exceptions |
@@ -94,7 +95,7 @@ a loop variable you do not need, and `main` is an ordinary function name.
 | enum | `Shape.Circle(1.0)` | variants that hold values, as in Rust |
 | `fn(A) -> B` | `double` | a function named without parentheses; `fn(A)` returns no value |
 
-### Lists, maps, and tuples
+### Lists, maps, sets, and tuples
 
 ```stone
 fn divide(a: int, b: int) -> tuple[int, int]:
@@ -119,6 +120,12 @@ for name, age in ages.items():
 gone = ages.pop("bob")
 print(gone, ages.keys(), ages.values())
 
+seen = {}
+for w in ["a", "b", "a"]:
+    seen.add(w)
+had = seen.remove("b")
+print(seen, had, "a" in seen, seen.union({"c"}), set([1, 1, 2]), list({3, 4}))
+
 q, r = divide(17, 5)
 pairs = [("a", 1), ("b", 2)]
 for name, n in pairs:
@@ -127,7 +134,9 @@ for name, n in pairs:
 
 `for k in m` goes through a map's keys in insertion order; `m.keys()`, `m.values()`, and
 `m.items()` return new lists. `m[k]` stops the program if `k` is missing; test `k in m` or use
-`m.get(k)` when it might be. `x in c` and `x not in c` test a map's keys, a list's elements (by
+`m.get(k)` when it might be. A set (`{1, 2}`, or a `{}` that `add` or a `set[T]` parameter makes
+one) has `add(x)` (a statement), `remove(x)` (whether it was there), `union`, `intersection`,
+`difference`, `is_subset`, `is_superset`, and `is_disjoint`, but no indexing. `x in c` and `x not in c` test a map's keys, a set's elements, a list's elements (by
 `==`), or a string's text, as `c.contains(x)` does, and never chain: write `(x in xs) == b`. `m.pop(k)` returns an option and, like a list's `pop`, may be used
 inside any expression, as in `m.pop(k).unwrap_or(0)`. Entries change in place like list elements, through any
 place: `m[k] += 1`, `m[k].append(x)`, `p.counts[k] = 0`. Only `m[k] = v` adds a missing key; `+=`
@@ -437,14 +446,15 @@ assign the result where 'add' is called
 | Python | stone |
 | --- | --- |
 | `[f(x) for x in xs if p(x)]` | `xs.filter(p).map(f)` with named functions, or a `for` loop with `if` and `append` |
-| `f"{a} and {b}"`, `"%d" % n`, `.format` | `"{a} and {b}"`: every string takes values, with no `f`; format specs (`{x:.2f}`) are not supported yet |
+| `f"{a} and {b}"`, `f"{x:.2f}"`, `"%d" % n`, `.format` | `"{a} and {b}"`, `"{x:.2f}"`: every string takes values, with no `f`, and Python's format specs (`{n:>5}`, `{n:08}`, `{x:e}`, `{n:,}`) write the same text; a value inside a spec (`{x:.{p}f}`) is not supported |
 | `"{}"` in a string that is not an f-string | `"{{}}"`, since braces hold values |
 | `__str__`, `__repr__` | `impl display for T:` with `fn display(self) -> str` |
 | `a if cond else b` | an `if`/`else` assigning a variable |
 | `for k, v in d.items():` | the same; `d.items()` is a list of tuples |
 | `d.pop(k)`, `d.pop(k, default)` | `d.pop(k)` returns an option: `.unwrap_or(default)` |
 | `del d[k]` | `d.pop(k)` as a statement |
-| `set()` | `map[K, bool]` |
+| `set()`, `{1, 2}`, `s.add(x)`, `s.discard(x)` | `{}`, `{1, 2}`, `s.add(x)`, `s.remove(x)` (which returns whether it was there); a `set[T]` of ints, strings, or bools keeps insertion order |
+| `a \| b`, `a & b`, `a - b`, `a <= b` | `a.union(b)`, `a.intersection(b)`, `a.difference(b)`, `a.is_subset(b)` (no set operators) |
 | `def f(x, n=1)`, `f(n=2)` | every argument, positionally (only structs take names) |
 | `lambda x: x * 2` | `\|x\| x * 2`; a lambda may read variables around it, as copies taken where it is written |
 | `map(f, xs)`, `filter(f, xs)`, `any`/`all` with a generator | `xs.map(f)`, `xs.filter(f)`, `xs.any(f)`, `xs.all(f)` |
@@ -454,7 +464,7 @@ assign the result where 'add' is called
 | `None`, `Optional[T]` | `none`, `option[T]` |
 | `pass` | restructure so every block has a real statement |
 | `del`, `global`, `nonlocal`, `is`, `with`, `yield` | not available |
-| `len(x)`, `abs`, `min(a, b)`, `max(a, b)`, `min(xs)` | `x.len()`, `math.abs`, `a.min(b)`, `a.max(b)`, `math.min(xs)` |
+| `len(x)`, `abs(x)`, `min(a, b)`, `max(a, b)`, `min(xs)` | `x.len()`, `x.abs()` or `math.abs(x)`, `a.min(b)`, `a.max(b)`, `math.min(xs)` |
 | `max(lo, min(x, hi))` | `x.clamp(lo, hi)` |
 | `sorted(xs)`, `xs.sort(key=f, reverse=True)` | `ys = xs` then `ys.sort()` or `ys.sort_by_key(f)`, both stable; reverse with `ys[::-1]` |
 | `"ab" * 3` | a loop of `+=`; only the string methods below exist |

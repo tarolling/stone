@@ -426,7 +426,14 @@ impl Parser {
             TokenType::StringStart(value) => {
                 let mut values = vec![text(value, self.advance().span)];
                 loop {
-                    values.push(*self.parse_expression()?);
+                    let value = self.parse_expression()?;
+                    if let TokenType::FormatSpec(spec) = &self.peek().r#type {
+                        let spec = spec.clone();
+                        let span = value.span.to(self.advance().span);
+                        values.push(Expr::new(ExprKind::FormattedValue { value, spec }, span));
+                    } else {
+                        values.push(*value);
+                    }
                     let token = self.peek().clone();
                     match token.r#type {
                         TokenType::StringMiddle(value) => {
@@ -739,11 +746,13 @@ impl Parser {
         error(self)
     }
 
-    /// Parses a map literal, a key and its value per entry.
+    /// Parses a map literal, a key and its value per entry, or a set literal, a value per
+    /// element.
     ///
     /// ```text
     /// dict:
     ///     | '{' [kvpair (',' kvpair)* [',']] '}'
+    ///     | '{' expression (',' expression)* [','] '}'
     /// kvpair:
     ///     | expression ':' expression
     /// ```
@@ -756,6 +765,9 @@ impl Parser {
             loop {
                 let before = self.pos;
                 if let Ok(key) = self.parse_expression() {
+                    if keys.is_empty() && self.at_set_element_end() {
+                        return self.parse_set_rest(mark, *key);
+                    }
                     if self.expect(TokenType::Colon).is_some()
                         && let Ok(value) = self.parse_expression()
                     {
@@ -788,6 +800,50 @@ impl Parser {
         }
         self.pos = mark;
 
+        Err(self.error_here("parse_dict"))
+    }
+
+    /// Returns whether the token after a braced literal's first value ends that value as a set's
+    /// element: a `,` or the closing `}`, rather than the `:` of a map entry.
+    fn at_set_element_end(&self) -> bool {
+        matches!(self.peek().r#type, TokenType::Comma | TokenType::RBrace)
+    }
+
+    /// Parses the rest of a set literal whose `{` is at `mark` and whose first element is
+    /// `first`: more elements separated by commas, an optional trailing comma, and the `}`.
+    ///
+    /// For example, after `{1` in `{1, 2, 3}`, it parses `, 2, 3}`.
+    fn parse_set_rest(&mut self, mark: usize, first: Expr) -> ParseExprResult {
+        let mut elts = vec![first];
+        while self.expect(TokenType::Comma).is_some() {
+            let before = self.pos;
+            match self.parse_expression() {
+                Ok(elt) => {
+                    if self.peek().r#type == TokenType::Colon {
+                        let span = self.peek().span;
+                        self.hint(
+                            span,
+                            "a set holds values alone, and a map holds entries alone, as in \
+                             '{1, 2}' or '{\"a\": 1}'",
+                        );
+                        self.pos = mark;
+                        return Err(self.error_here("parse_dict"));
+                    }
+                    elts.push(*elt);
+                }
+                Err(_) => {
+                    self.pos = before;
+                    break;
+                }
+            }
+        }
+        if self.expect(TokenType::RBrace).is_some() {
+            return Ok(Box::new(Expr::new(
+                ExprKind::Set { elts },
+                self.span_from(mark),
+            )));
+        }
+        self.pos = mark;
         Err(self.error_here("parse_dict"))
     }
 

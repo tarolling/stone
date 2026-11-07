@@ -1,0 +1,58 @@
+// `{}` is a set when its use says so
+seen = {}
+for word in "the cat saw the dog and the cat ran".split():
+    if word not in seen:
+        seen.add(word)
+print(seen)
+print(seen.len())
+
+fn unique(xs: list[int]) -> set[int]:
+    found = {}
+    for x in xs:
+        found.add(x)
+    ret found
+
+fn total(s: set[int]) -> int:
+    sum = 0
+    for x in s:
+        sum += x
+    ret sum
+
+u = unique([5, 3, 5, 1, 3])
+print(u)
+print(total(u))
+print(total({}))
+
+// sets in structs and lists change in place through their places
+struct Graph:
+    edges: list[set[int]]
+    names: set[str]
+
+g = Graph(edges=[{}, {}, {}], names={})
+g.edges[0].add(1)
+g.edges[0].add(2)
+g.edges[1].add(2)
+g.names.add("a")
+g.names.add("b")
+print(g.edges)
+print(g.names)
+removed = g.edges[0].remove(2)
+print(removed, g.edges[0])
+
+// a global set a function reads
+blocked = {"x", "y"}
+
+fn allowed(name: str) -> bool:
+    ret name not in blocked
+
+print(allowed("x"), allowed("z"))
+
+// many removals close up the entries, and string elements are freed
+names = {}
+for i in range(200):
+    names.add("n{i}")
+for i in range(190):
+    names.remove("n{i}")
+print(names)
+names.add("n0")
+print(names.len(), "n0" in names, "n5" in names, "n195" in names)

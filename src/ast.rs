@@ -13,6 +13,7 @@
 use std::{error::Error, fmt::Display};
 
 use crate::span::Span;
+use crate::stdlib::spec::FormatSpec;
 
 type Identifier = String;
 // `String` is built in
@@ -263,9 +264,12 @@ impl Expr {
             ExprKind::BoolOp { values, .. }
             | ExprKind::JoinedStr { values }
             | ExprKind::List { elts: values, .. }
+            | ExprKind::Set { elts: values }
             | ExprKind::Tuple { elts: values, .. } => values.iter().collect(),
             ExprKind::BinOp { left, right, .. } => vec![left, right],
-            ExprKind::UnaryOp { operand, .. } | ExprKind::Try { value: operand } => vec![operand],
+            ExprKind::UnaryOp { operand, .. }
+            | ExprKind::Try { value: operand }
+            | ExprKind::FormattedValue { value: operand, .. } => vec![operand],
             ExprKind::Compare {
                 left, comparators, ..
             } => [&**left].into_iter().chain(comparators).collect(),
@@ -304,6 +308,7 @@ impl Expr {
             ExprKind::BoolOp { values, .. }
             | ExprKind::JoinedStr { values }
             | ExprKind::List { elts: values, .. }
+            | ExprKind::Set { elts: values }
             | ExprKind::Tuple { elts: values, .. }
             | ExprKind::Closure {
                 captures: values, ..
@@ -311,6 +316,7 @@ impl Expr {
             ExprKind::BinOp { left, right, .. } => vec![left, right],
             ExprKind::UnaryOp { operand, .. }
             | ExprKind::Try { value: operand }
+            | ExprKind::FormattedValue { value: operand, .. }
             | ExprKind::Attribute { value: operand, .. }
             | ExprKind::Lambda { body: operand, .. } => vec![operand],
             ExprKind::Compare {
@@ -403,6 +409,13 @@ pub enum ExprKind {
     /// [`Constant::Str`] of text between values, or a value, which is written as `print` writes
     /// it. A string with no values is a [`ExprKind::Constant`].
     JoinedStr { values: Vec<Expr> },
+    /// A value of a [`ExprKind::JoinedStr`] with a format spec after it, such as `x:.2f` in
+    /// `"{x:.2f}"`, which says how the value is written. It appears only among a string's
+    /// values, and its span covers the value and the spec.
+    FormattedValue {
+        value: Box<Expr>,
+        spec: Box<FormatSpec>,
+    },
     /// A literal value, such as `42`, `"hi"`, or `true`.
     Constant {
         value: Box<Constant>,
@@ -430,8 +443,10 @@ pub enum ExprKind {
     /// A list literal, such as `[1, 2, 3]`.
     List { elts: Vec<Expr>, ctx: ExprContext },
     /// A map literal, such as `{"a": 1, "b": 2}`, with each key and the value after it at the
-    /// same position. `{}` is an empty map.
+    /// same position. `{}` is an empty map or set, which the checker tells by its use.
     Dict { keys: Vec<Expr>, values: Vec<Expr> },
+    /// A set literal of one or more elements, such as `{1, 2, 3}`.
+    Set { elts: Vec<Expr> },
     /// A tuple of two or more values, such as `(1, "a")`, or, as an assignment or `for` target,
     /// names to unpack a tuple into, such as `q, r` in `q, r = divide(7, 2)`.
     Tuple { elts: Vec<Expr>, ctx: ExprContext },
@@ -856,6 +871,8 @@ pub enum TypeExprKind {
     List(Box<TypeExpr>),
     /// A map from the first type to the second, such as `map[str, int]`.
     Map(Box<TypeExpr>, Box<TypeExpr>),
+    /// A set of the given element type, such as `set[str]`.
+    Set(Box<TypeExpr>),
     /// A tuple of two or more types, such as `tuple[int, str]`.
     Tuple(Vec<TypeExpr>),
     /// Any other type by name, with its type arguments: a struct or enum such as `Shape` or
@@ -883,6 +900,7 @@ impl Display for TypeExpr {
             TypeExprKind::Bytes => write!(f, "bytes"),
             TypeExprKind::List(elem) => write!(f, "list[{elem}]"),
             TypeExprKind::Map(key, value) => write!(f, "map[{key}, {value}]"),
+            TypeExprKind::Set(elem) => write!(f, "set[{elem}]"),
             TypeExprKind::Tuple(elts) => {
                 write!(f, "tuple[")?;
                 for (i, elt) in elts.iter().enumerate() {

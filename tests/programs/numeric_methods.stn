@@ -1,0 +1,15 @@
+// abs and floor as methods on ints and floats, as math.abs and math.floor
+fn distance(a: float, b: float) -> float:
+    ret (a - b).abs()
+
+n = -7
+x = -2.5
+print(n.abs(), x.abs(), (-0.0).abs(), 3.abs())
+print(x.floor(), (2.5).floor(), n.floor(), (-0.5).floor())
+print(distance(1.0, 4.5))
+xs = [-3, 4, -5]
+total = 0
+for v in xs:
+    total += v.abs()
+print(total)
+print(xs[0].abs() + xs[2].abs())

@@ -46,6 +46,8 @@ module stone
          | Compare(expr left, cmpop* ops, expr* comparators)
          | Call(expr func, expr* args, keyword* keywords)
          | JoinedStr(expr* values)
+         -- a value of a JoinedStr with its format spec, as x:.2f in "{x:.2f}"
+         | FormattedValue(expr value, format_spec spec)
          | Constant(constant value, string? kind)
 
          | Attribute(expr value, identifier attr, expr_context ctx)
@@ -54,6 +56,7 @@ module stone
          | Name(identifier id, expr_context ctx)
          | List(expr* elts, expr_context ctx)
          | Dict(expr* keys, expr* values)
+         | Set(expr* elts)
          | Tuple(expr* elts, expr_context ctx)
 
          -- can appear only in Subscript
@@ -101,7 +104,7 @@ module stone
             -- path names the variant, such as Shape.Circle, some, or none
             | MatchVariant(identifier* path, pattern* fields)
 
-    type = Int | Float | Bool | Str | Bytes | List(type elem) | Map(type key, type value)
+    type = Int | Float | Bool | Str | Bytes | List(type elem) | Map(type key, type value) | Set(type elem)
          | Tuple(type* elts)
          -- a struct, such as Point, an enum, such as Shape, option[T], or a type parameter, such as T
          | Named(identifier name, type* args)

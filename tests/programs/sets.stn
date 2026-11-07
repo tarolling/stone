@@ -1,0 +1,54 @@
+// sets keep their elements in the order they were added
+s = {3, 1, 2, 1}
+print(s)
+print(s.len())
+s.add(4)
+s.add(1)
+print(s)
+print("{2 in s} {5 in s} {5 not in s} {s.contains(4)}")
+
+// remove says whether the element was there
+print(s.remove(3))
+print(s.remove(9))
+s.remove(1)
+print(s)
+
+// operations give new sets, the receiver's elements first
+a = {1, 2, 3}
+b = {2, 3, 4}
+print(a.union(b))
+print(a.intersection(b))
+print(a.difference(b))
+print(b.difference(a))
+print(a.is_subset(b))
+print({2, 3}.is_subset(a))
+print(a.is_superset({1, 3}))
+print(a.is_disjoint({7, 8}))
+print(a.is_disjoint(b))
+
+// equality ignores order
+print({1, 2} == {2, 1})
+print({1, 2} != {1, 2, 3})
+
+// strings print quoted, as in a list
+words = {"pear", "fig"}
+words.add("kiwi")
+print(words)
+for w in words:
+    print(w)
+
+// a set is a value, so a copy changes alone
+t = words
+t.add("plum")
+print(words.len(), t.len())
+
+// conversions
+print(set([3, 1, 3, 2]))
+print(list({true, false, true}))
+evens = set([0, 2, 4])
+print(list(evens.union({6})))
+
+// an empty set prints like an empty map
+none_yet = {"x"}
+none_yet.remove("x")
+print(none_yet)

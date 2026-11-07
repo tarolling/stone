@@ -2,6 +2,7 @@ use super::*;
 use lsp_types::{CompletionItemKind, DiagnosticSeverity, HoverContents, Range, SymbolKind};
 use std::path::Path;
 use stone::project::MapSources;
+use stone::stdlib::INTERNAL_SOURCE_MODULES;
 
 const SOURCE: &str = "\
 total = 0
@@ -2563,4 +2564,54 @@ fn a_format_spec_is_a_strings_text() {
     );
     // while its value is still code
     assert!(hover(&doc(source), at(2, 9)).is_some());
+}
+
+#[test]
+fn the_written_prelude_and_modules_are_recognized_by_path() {
+    let builtins = Builtins::new("file:///cache/builtins.stn".parse().unwrap());
+    let written = |path: &str| builtins.written(Path::new(path));
+    assert_eq!(written("/cache/prelude.stn"), Some(Written::Prelude));
+    assert_eq!(written("/cache/net.stn"), Some(Written::Module("net")));
+    assert_eq!(
+        written("/cache/gui_x11.stn"),
+        Some(Written::Module("gui_x11"))
+    );
+    // a file of the same name elsewhere is the user's own, and other names are not stone's
+    assert_eq!(written("/project/prelude.stn"), None);
+    assert_eq!(written("/cache/main.stn"), None);
+    assert_eq!(written("/cache/builtins.stn"), None);
+}
+
+#[test]
+fn the_written_prelude_is_analyzed_as_the_prelude() {
+    let doc = Document::builtin(Written::Prelude, PRELUDE, Encoding::Utf16).unwrap();
+    assert_eq!(doc.file, FileId::PRELUDE);
+    assert_eq!(diagnostics(&doc), []);
+    // `none` and `some` in `enum option[T]:` are its variants
+    let line = PRELUDE.lines().position(|l| l == "    none").unwrap() as u32;
+    let none = hover_text(&doc, Position::new(line, 4)).unwrap();
+    assert!(none.contains("none"), "{none}");
+    let some = hover_text(&doc, Position::new(line + 1, 4)).unwrap();
+    assert!(some.contains("some"), "{some}");
+    // references stay in the file, and its names belong to the language
+    let uri: Uri = "file:///cache/prelude.stn".parse().unwrap();
+    let found = references(&doc, &uri, Position::new(line, 4), true);
+    assert!(!found.is_empty());
+    assert!(found.iter().all(|l| l.uri == uri));
+    assert_eq!(prepare_rename(&doc, Position::new(line, 4)), None);
+}
+
+#[test]
+fn the_written_modules_are_analyzed_as_stones_own() {
+    for (module, source) in SOURCE_MODULES.iter().chain(&INTERNAL_SOURCE_MODULES) {
+        let doc = Document::builtin(Written::Module(module), source, Encoding::Utf16).unwrap();
+        assert!(doc.sources.file(doc.file).is_builtin(), "{module}");
+        assert_eq!(diagnostics(&doc), [], "{module}");
+    }
+}
+
+#[test]
+fn an_edited_copy_of_the_prelude_is_checked_as_written() {
+    let edited = format!("{PRELUDE}\nx = 1\n");
+    assert!(Document::builtin(Written::Prelude, &edited, Encoding::Utf16).is_none());
 }

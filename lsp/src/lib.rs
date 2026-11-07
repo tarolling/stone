@@ -361,8 +361,17 @@ impl Server {
             .texts
             .iter()
             .map(|(uri, text)| {
-                let doc = file_path(uri)
-                    .and_then(|path| Document::in_program(&path, &workspace, self.encoding))
+                let path = file_path(uri);
+                // the prelude and modules the server wrote out are stone's, not a program's
+                let builtin = path
+                    .as_deref()
+                    .zip(self.builtins.as_ref())
+                    .and_then(|(path, builtins)| builtins.written(path))
+                    .and_then(|written| Document::builtin(written, text, self.encoding));
+                let doc = builtin
+                    .or_else(|| {
+                        path.and_then(|path| Document::in_program(&path, &workspace, self.encoding))
+                    })
                     .unwrap_or_else(|| Document::new(text.clone(), self.encoding));
                 (uri.clone(), doc)
             })

@@ -18,6 +18,12 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 - Completion offers a set's methods after a set, and `set` among the types, which hover
   documents; `set[T]` is highlighted as a type.
 
+### Fixed
+
+- The prelude and stone's own modules, opened through go to definition, no longer show errors
+  such as `expected a variant name, found 'none'`, and hover, references, and go to
+  definition work inside them.
+
 ## [0.4.2] - 2026-11-06
 
 ### Added

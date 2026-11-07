@@ -90,6 +90,41 @@ impl Document {
         Some(Self::from_linked(linked, file, sources.store(), encoding))
     }
 
+    /// Analyzes `text`, a file the server wrote beside the builtins reference, as what it is: the
+    /// prelude, or a module written in stone, linked into a program that uses it. Returns `None`
+    /// if `text` is no longer the source stone embeds, which is then checked like any file.
+    ///
+    /// For example, the prelude's `enum option[T]:` names a variant `none`, which no other file
+    /// may, so it has no errors only when analyzed as the prelude.
+    pub fn builtin(written: Written, text: &str, encoding: Encoding) -> Option<Self> {
+        let (source, entry) = match written {
+            Written::Prelude => (PRELUDE, String::new()),
+            // `use gui` loads the internal modules `gui` uses
+            Written::Module(module) => (
+                source_module(module)?,
+                match stone::stdlib::is_internal_module(module) {
+                    true => "use gui\n".to_string(),
+                    false => format!("use {module}\n"),
+                },
+            ),
+        };
+        if text != source {
+            return None;
+        }
+        let linked = link(Path::new(DEFAULT_ENTRY), &entry, &MapSources::default());
+        let file = match written {
+            Written::Prelude => FileId::PRELUDE,
+            Written::Module(module) => {
+                linked
+                    .sources
+                    .files()
+                    .find(|(_, file)| file.module == module && file.is_builtin())?
+                    .0
+            }
+        };
+        Some(Self::from_linked(linked, file, None, encoding))
+    }
+
     fn from_linked(
         linked: Linked,
         file: FileId,
@@ -169,11 +204,12 @@ impl Document {
     /// The prelude is not in any program's files, so a span in it has no location here; see
     /// [`Builtins::prelude_location`].
     fn location(&self, span: Span, uri: &Uri) -> Option<Location> {
-        if span.file == FileId::PRELUDE || self.sources.file(span.file).is_builtin() {
-            return None;
-        }
+        // which may be the prelude itself, opened from where the server writes it
         if span.file == self.file {
             return Some(Location::new(uri.clone(), self.index.range(span)));
+        }
+        if span.file == FileId::PRELUDE || self.sources.file(span.file).is_builtin() {
+            return None;
         }
         let file = self.sources.file(span.file);
         let index = LineIndex::new(&file.source, self.encoding);
@@ -881,6 +917,16 @@ fn expression_hover(doc: &Document, pos: Pos) -> Option<Hover> {
     })
 }
 
+/// A file of stone's own that the server writes beside the builtins reference, which
+/// [`Document::builtin`] analyzes as what it is.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Written {
+    /// `prelude.stn`.
+    Prelude,
+    /// A module written in stone, internal ones included, as `net` for `net.stn`.
+    Module(&'static str),
+}
+
 /// Where builtins are documented: the file [`builtins_reference`] generates, written out by the
 /// server so editors can open it.
 pub struct Builtins {
@@ -945,6 +991,36 @@ impl Builtins {
             modules,
             types,
         }
+    }
+
+    /// Returns which of stone's own files `path` is, if it is one the server wrote beside the
+    /// reference.
+    ///
+    /// For example, with the reference at `/tmp/stone-lsp-0.4.3/builtins.stn`,
+    /// `/tmp/stone-lsp-0.4.3/net.stn` is `Written::Module("net")`, and `/project/net.stn` is
+    /// `None`.
+    pub fn written(&self, path: &Path) -> Option<Written> {
+        let dir = crate::uri::file_path(&self.uri)?;
+        let normal = |path: &Path| {
+            let text = path.to_string_lossy().replace('\\', "/");
+            // a Windows client may write the drive in either case
+            match cfg!(windows) {
+                true => text.to_ascii_lowercase(),
+                false => text,
+            }
+        };
+        if normal(path.parent()?) != normal(dir.parent()?) {
+            return None;
+        }
+        let name = path.file_name()?.to_str()?.strip_suffix(".stn")?;
+        if name == "prelude" {
+            return Some(Written::Prelude);
+        }
+        SOURCE_MODULES
+            .iter()
+            .chain(&stone::stdlib::INTERNAL_SOURCE_MODULES)
+            .find(|(module, _)| *module == name)
+            .map(|(module, _)| Written::Module(module))
     }
 
     /// Returns where `span`, a span in the prelude, is in the prelude's file.

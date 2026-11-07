@@ -253,6 +253,32 @@ fn definition_of_a_builtin_opens_its_documentation() {
 }
 
 #[test]
+fn the_prelude_a_definition_opens_has_no_errors() {
+    let (mut session, _) = Session::start(None);
+    session.open("x = some(1)\nprint(x)\n");
+    session.diagnostics();
+
+    let location = session.request("textDocument/definition", position(0, 5));
+    let uri = location["uri"].as_str().unwrap().to_string();
+    assert!(uri.ends_with("/prelude.stn"), "{uri}");
+    let path = stone_lsp::uri::file_path(&uri.parse().unwrap()).unwrap();
+    let text = std::fs::read_to_string(path).unwrap();
+    session.notify(
+        "textDocument/didOpen",
+        json!({
+            "textDocument": { "uri": uri, "languageId": "stone", "version": 1, "text": text }
+        }),
+    );
+    // its `none` variant is no error there, nor anything else
+    let (published, diagnostics) = session.published();
+    assert_eq!(published, uri);
+    assert_eq!(diagnostics, json!([]));
+    // then the other open document again
+    session.diagnostics();
+    session.shut_down();
+}
+
+#[test]
 fn formatting_rewrites_the_document() {
     let (mut session, capabilities) = Session::start(None);
     assert_eq!(capabilities["documentFormattingProvider"], true);

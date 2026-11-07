@@ -414,7 +414,7 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 })
                 .map(|variant| format!("\n    {}", variant_signature(variant)))
                 .collect();
-            let params = type_params_of(analysis, &symbol.name);
+            let params = type_params_of(analysis, &symbol.name, Some(symbol.span.file));
             format!("enum {}{params}{}", symbol.name, variants.concat())
         }
         (StoneSymbolKind::Variant, Type::Function { ret, .. }) => match &**ret {
@@ -425,7 +425,7 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
             let fields: Vec<String> = struct_fields(analysis, &symbol.name)
                 .map(|field| format!("\n    {}: {}", field.name, field.ty))
                 .collect();
-            let params = type_params_of(analysis, &symbol.name);
+            let params = type_params_of(analysis, &symbol.name, Some(symbol.span.file));
             format!("struct {}{params}{}", symbol.name, fields.concat())
         }
         (StoneSymbolKind::Field, ty) => {
@@ -444,7 +444,7 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                     _ => None,
                 })
                 .collect();
-            let params = type_params_of(analysis, &symbol.name);
+            let params = type_params_of(analysis, &symbol.name, Some(symbol.span.file));
             format!("trait {}{params}{}", symbol.name, methods.concat())
         }
         (StoneSymbolKind::TypeParam, _) => {
@@ -504,18 +504,25 @@ fn function_signature(
         Type::Unit => String::new(),
         ret => format!(" -> {ret}"),
     };
-    let type_params = type_params_of(analysis, function);
+    let file = analysis.functions.get(function).map(|extent| extent.file);
+    let type_params = type_params_of(analysis, function, file);
     format!("fn {shown}{type_params}({}){returns}", params.join(", "))
 }
 
-/// Writes the type parameters of the generic function, struct, or enum `owner` as its definition
-/// does, such as `[A, B]`, or nothing if it is not generic.
-fn type_params_of(analysis: &Analysis, owner: &str) -> String {
+/// Writes the type parameters of the generic function, struct, enum, or trait `owner`, defined
+/// in `file` if that is known, as its definition does, such as `[A, B]`, or nothing if it is not
+/// generic. The file tells a function from a prelude trait of the same name, as `fn add` is
+/// from the trait `add[R]`.
+fn type_params_of(analysis: &Analysis, owner: &str, file: Option<FileId>) -> String {
     let names: Vec<String> = analysis
         .symbols
         .iter()
         .enumerate()
-        .filter(|(_, s)| s.kind == StoneSymbolKind::TypeParam && s.scope.as_deref() == Some(owner))
+        .filter(|(_, s)| {
+            s.kind == StoneSymbolKind::TypeParam
+                && s.scope.as_deref() == Some(owner)
+                && file.is_none_or(|file| s.span.file == file)
+        })
         .map(|(i, s)| format!("{}{}", s.name, bounds_of(analysis, i)))
         .collect();
     match names.is_empty() {
@@ -570,6 +577,7 @@ fn bound_methods<'a>(
             s.kind == StoneSymbolKind::TypeParam
                 && s.name == param
                 && s.scope.as_deref() == Some(function)
+                && s.span.file == doc.file
         }) {
             traits.extend(
                 analysis
@@ -1348,7 +1356,8 @@ fn function_outline(doc: &Document, symbol: &Symbol, function: &str) -> Document
     let children = analysis
         .symbols
         .iter()
-        .filter(|s| s.scope.as_deref() == Some(function))
+        // a function may share a prelude trait's name, whose members are in the prelude
+        .filter(|s| s.scope.as_deref() == Some(function) && s.span.file == extent.file)
         .map(|s| document_symbol(doc, s, s.span))
         .collect();
     outline.children = Some(children);
@@ -1923,6 +1932,7 @@ fn type_completion(doc: &Document, pos: Pos, slot: Slot) -> Vec<CompletionItem> 
         let params = analysis.symbols.iter().filter(|s| {
             s.kind == StoneSymbolKind::TypeParam
                 && s.scope.is_some()
+                && s.span.file == doc.file
                 && (s.scope.as_deref() == function || s.scope.as_deref() == owner)
         });
         for param in params {

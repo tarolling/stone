@@ -27,7 +27,9 @@ use crate::ast::{
     Expr, ExprContext, ExprKind, Mod, Pattern, PatternKind, Stmt, StmtKind, TraitName, TypeExpr,
     TypeExprKind, TypeParam,
 };
-use crate::checker::{DISPLAY, EQ, FROM, OPTION, ORD, RESULT, TRY_FROM, collect_assigned};
+use crate::checker::{
+    DISPLAY, EQ, FROM, OPERATOR_TRAITS, OPTION, ORD, RESULT, TRY_FROM, collect_assigned,
+};
 use crate::diagnostic::{Diagnostic, excerpt, location};
 use crate::lexer::Lexer;
 use crate::package::lock::{Lock, Locked};
@@ -1355,7 +1357,9 @@ impl Loader<'_> {
                             // and which of its conversions a program may give one
                             Ok((linked, _, _))
                                 if [EQ, ORD, DISPLAY, FROM, TRY_FROM]
-                                    .contains(&trait_name.name.as_str())
+                                    .iter()
+                                    .chain(OPERATOR_TRAITS)
+                                    .any(|t| *t == trait_name.name)
                                     && matches!(
                                         linked.as_str(),
                                         "int" | "float" | "bool" | "str"

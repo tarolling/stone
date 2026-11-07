@@ -6,8 +6,8 @@ mod code;
 
 use crate::ast::{Arg, BoolOp, CompOp, Constant, Expr, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::checker::{
-    Calls, Conversion, Converter, FunctionValue, Handle, Method, Step, Type, collect_assigned,
-    place, prints_bare, struct_display,
+    self, Calls, Conversion, Converter, FunctionValue, Handle, Method, Step, Type,
+    collect_assigned, place, prints_bare, struct_display,
 };
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
@@ -907,7 +907,36 @@ fn elementwise(lazy: &Lazy) -> EvalResult<Value> {
     Ok(Value::list(items))
 }
 
-/// Applies the binary operator `op` to two numbers, or `+` to two strings.
+/// Returns whether the trait method `function` called on `receiver` is a builtin operation:
+/// an operator trait's method, such as `add.add`, on a number or a string.
+fn builtin_operand(function: &str, receiver: &Value) -> bool {
+    function
+        .split_once('.')
+        .is_some_and(|(trait_, _)| checker::OPERATOR_TRAITS.contains(&trait_))
+        && matches!(
+            receiver,
+            Value::Int(_) | Value::Float(_) | Value::Str(_) | Value::Bytes(_)
+        )
+}
+
+/// Computes the operator trait method `function`, such as `add.add`, on `values`, the receiver
+/// first, as the builtin operation, for a receiver that [`builtin_operand`] accepts.
+///
+/// For example, `add.add` on 2 and 3 gives 5, and `neg.neg` on 2.5 gives -2.5.
+fn builtin_operator(function: &str, values: &[Value]) -> EvalResult<Value> {
+    let trait_ = function
+        .split_once('.')
+        .map_or(function, |(trait_, _)| trait_);
+    match (checker::trait_operator(trait_), values) {
+        (Some(op), [left, right]) => binary(op, left.clone(), right.clone()),
+        (None, [value]) => unary(UnaryOp::UnarySub, value.clone()),
+        _ => Err(format!("'{function}' takes the wrong values").into()),
+    }
+}
+
+/// An augmented assignment's operator, and the impl of its trait it calls, if any.
+struct Augmented<'a>(Operator, Option<&'a code::OperatorCall>);
+
 /// Applies `op` to two evaluated operands, computing it at once when both are numbers or
 /// strings and leaving it for [`elementwise`] when either holds a list.
 ///
@@ -1639,11 +1668,17 @@ impl<'out> Interpreter<'out> {
                 }
                 Ok(ControlFlow::None)
             }
-            S::AugAssign { target, op, value } => {
+            S::AugAssign {
+                target,
+                op,
+                value,
+                call,
+            } => {
+                let op = &Augmented(*op, call.as_ref());
                 match target {
                     code::AugTarget::Var { var, span } => {
                         let old = self.read_var(*var).map_err(|e| located(e, *span))?;
-                        let new = self.augmented(*op, old, value, stmt.span)?;
+                        let new = self.augmented(op, old, value, stmt.span)?;
                         self.set_var(*var, new);
                     }
                     code::AugTarget::Element {
@@ -1658,7 +1693,7 @@ impl<'out> Interpreter<'out> {
                         let mut steps = indexes.clone();
                         steps.push(PlaceStep::Index(index.clone()));
                         let old = self.read_place(root, &steps, target_spans)?;
-                        let new = self.augmented(*op, old, value, stmt.span)?;
+                        let new = self.augmented(op, old, value, stmt.span)?;
                         // the value cannot change the list or map, which only this statement can
                         self.store_at(root, &indexes, spans, index, *span, &new)?;
                     }
@@ -1666,7 +1701,7 @@ impl<'out> Interpreter<'out> {
                         // the indexes once, then the old field, then the value
                         let (root, steps, spans) = self.eval_place(place)?;
                         let old = self.read_place(root, &steps, spans)?;
-                        let new = self.augmented(*op, old, value, stmt.span)?;
+                        let new = self.augmented(op, old, value, stmt.span)?;
                         *self.place_value(root, &steps, spans)? = new;
                     }
                     code::AugTarget::Invalid => return Err("Invalid assignment target".into()),
@@ -1883,11 +1918,17 @@ impl<'out> Interpreter<'out> {
     /// raises points at the statement, `span`.
     fn augmented(
         &mut self,
-        op: Operator,
+        &Augmented(op, call): &Augmented,
         old: Value,
         value: &code::Expr,
         span: Span,
     ) -> EvalResult<Value> {
+        if let Some(call) = call {
+            let right = self.eval_expr(value)?;
+            return self
+                .call_operator(span, call, vec![old, right])
+                .map_err(|e| located(e, span));
+        }
         let right = self.arithmetic(value)?;
         let result = match combine(op, Lazy::Value(old), right) {
             Ok(Lazy::Value(value)) => Ok(value),
@@ -2029,6 +2070,11 @@ impl<'out> Interpreter<'out> {
             E::Unary(op, operand) => {
                 let val = self.eval_expr(operand)?;
                 unary(*op, val)
+            }
+            E::Operator(call, operands) => {
+                // the left operand first
+                let values = self.eval_exprs(operands)?;
+                self.call_operator(expr.span, call, values)
             }
             E::Membership(op, needle, container) => {
                 // the value looked for, then where
@@ -2852,6 +2898,11 @@ impl<'out> Interpreter<'out> {
                 let name = method.function.rsplit('.').next().unwrap_or_default();
                 return self.call_method(name, receiver, values);
             }
+            if builtin_operand(&method.function, &receiver) {
+                let mut values = vec![receiver];
+                values.extend(self.eval_exprs(args)?);
+                return builtin_operator(&method.function, &values);
+            }
             let function = self.implementation(span, method, &receiver)?;
             let mut values = Vec::with_capacity(args.len() + 1);
             values.push(receiver);
@@ -2884,6 +2935,30 @@ impl<'out> Interpreter<'out> {
             *self.place_value(root, &steps, spans)? = changed;
         }
         Ok(result)
+    }
+
+    /// Calls the impl that the arithmetic operator at `span` resolved to with its operands'
+    /// `values`, the left first: a struct's method, the method of the type that a type
+    /// parameter is in the running copy, or the builtin operation of a number or a string.
+    ///
+    /// For example, `a + b` in `fn total[T: add[T]]` adds two ints in the copy for `int`, and
+    /// calls `V.add..V` in the copy for `V`.
+    fn call_operator(
+        &mut self,
+        span: Span,
+        call: &code::OperatorCall,
+        values: Vec<Value>,
+    ) -> EvalResult<Value> {
+        let method = &call.method;
+        if method.implementations.is_none() {
+            self.next_types = self.instance_types(&call.types);
+            return Ok(self.invoke_id(call.function, values, false)?.0);
+        }
+        if builtin_operand(&method.function, &values[0]) {
+            return builtin_operator(&method.function, &values);
+        }
+        let function = self.implementation(span, method, &values[0])?;
+        Ok(self.invoke(&function, values, false)?.0)
     }
 
     /// Evaluates the conversion `Type(arg)`, with a builtin conversion or the function of an

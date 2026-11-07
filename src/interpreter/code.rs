@@ -42,6 +42,9 @@ pub(super) enum StmtKind {
         target: AugTarget,
         op: Operator,
         value: Expr,
+        /// The impl of the operator's trait the operation calls, for a struct or a type
+        /// parameter.
+        call: Option<OperatorCall>,
     },
     /// A `for` loop over `range`, whose bounds are evaluated once.
     ForRange {
@@ -172,6 +175,9 @@ pub(super) enum ExprKind {
     BoolOp(BoolOp, Vec<Expr>),
     Binary(Operator, Box<Expr>, Box<Expr>),
     Unary(UnaryOp, Box<Expr>),
+    /// An arithmetic operator that calls the impl of its trait, with its operands, the left
+    /// first, as `v + w` calls `V.add..V` with `v` and `w`.
+    Operator(Box<OperatorCall>, Vec<Expr>),
     /// `needle in container` or `needle not in container`.
     Membership(CompOp, Box<Expr>, Box<Expr>),
     Compare(Box<Expr>, Vec<(CompOp, Expr)>),
@@ -194,6 +200,14 @@ pub(super) enum ExprKind {
     Tuple(Vec<Expr>),
     /// An expression that cannot run, which fails with its message.
     Fail(String),
+}
+
+/// The method an arithmetic operator on a struct or a type parameter calls: the checker's
+/// [`Method`], the id of its function, and the copy's types.
+pub(super) struct OperatorCall {
+    pub method: Rc<Method>,
+    pub function: usize,
+    pub types: Option<Rc<InstanceTypes>>,
 }
 
 /// What a call calls, as the checker and the definitions resolved it.
@@ -443,6 +457,7 @@ impl<'r, 'out> Resolver<'r, 'out> {
                     target,
                     op: *op,
                     value: self.expr(value),
+                    call: self.operator_call(stmt.span),
                 }
             }
             ast::StmtKind::For { target, iter, body } => {
@@ -558,6 +573,17 @@ impl<'r, 'out> Resolver<'r, 'out> {
 
     /// Returns the type arguments of the call or function value at `span`, if it names a generic
     /// function.
+    /// Returns the impl the arithmetic operator at `span` calls, if the checker resolved it to
+    /// one, for an operand that is a struct or a type parameter.
+    fn operator_call(&mut self, span: Span) -> Option<OperatorCall> {
+        let method = self.calls.methods.get(&span)?;
+        Some(OperatorCall {
+            method: Rc::new(method.clone()),
+            function: self.interpreter.function_id(&method.function),
+            types: self.instance(span),
+        })
+    }
+
     fn instance(&self, span: Span) -> Option<Rc<InstanceTypes>> {
         let instance = self.calls.instances.get(&span)?;
         let params = self.calls.type_params.get(&instance.function)?;
@@ -611,10 +637,16 @@ impl<'r, 'out> Resolver<'r, 'out> {
             ast::ExprKind::BoolOp { op, values } => {
                 ExprKind::BoolOp(op.clone(), self.exprs(values))
             }
-            ast::ExprKind::BinOp { op, left, right } => {
-                ExprKind::Binary(*op, self.boxed(left), self.boxed(right))
-            }
-            ast::ExprKind::UnaryOp { op, operand } => ExprKind::Unary(*op, self.boxed(operand)),
+            ast::ExprKind::BinOp { op, left, right } => match self.operator_call(expr.span) {
+                Some(call) => {
+                    ExprKind::Operator(Box::new(call), vec![self.expr(left), self.expr(right)])
+                }
+                None => ExprKind::Binary(*op, self.boxed(left), self.boxed(right)),
+            },
+            ast::ExprKind::UnaryOp { op, operand } => match self.operator_call(expr.span) {
+                Some(call) => ExprKind::Operator(Box::new(call), vec![self.expr(operand)]),
+                None => ExprKind::Unary(*op, self.boxed(operand)),
+            },
             ast::ExprKind::Compare {
                 left,
                 ops,

@@ -48,6 +48,33 @@ pub trait ord:
 pub trait display:
     fn display(self) -> str
 
+// Values that `+` adds to, which `a + b` and `a += b` call with `a` as `self`, so the left
+// operand's type picks the impl, as in `impl add[Vector] for Vector:`. `int` and `float` add
+// their own type, and `str` and `bytes` join theirs.
+pub trait add[R]:
+    fn add(self, other: R) -> Self
+
+// Values that `-` subtracts from, as `add` is for `+`. `int` and `float` implement it.
+pub trait sub[R]:
+    fn sub(self, other: R) -> Self
+
+// Values that `*` multiplies, as `add` is for `+`, as in `impl mul[float] for Vector:`. `int`
+// and `float` implement it.
+pub trait mul[R]:
+    fn mul(self, other: R) -> Self
+
+// Values that `/` divides, as `add` is for `+`. `int` and `float` implement it.
+pub trait div[R]:
+    fn div(self, other: R) -> Self
+
+// Values that `%` takes the remainder of, as `add` is for `+`. `int` and `float` implement it.
+pub trait rem[R]:
+    fn rem(self, other: R) -> Self
+
+// Values that `-x` negates. `int` and `float` implement it.
+pub trait neg:
+    fn neg(self) -> Self
+
 // How a value of type `T` becomes a value of the implementing type, which `Type(value)` calls,
 // as in `Fahrenheit(c)` after `impl from[Celsius] for Fahrenheit:`. Every type converts from
 // itself, every value to `str` through `display`, and an `int` to a `float`.

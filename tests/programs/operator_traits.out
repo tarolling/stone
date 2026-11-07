@@ -1,0 +1,17 @@
+V(x=1.5, y=1.0) V(x=0.5, y=3.0) V(x=2.0, y=4.0) V(x=0.5, y=-2.0) V(x=0.25, y=0.5) V(x=-1.0, y=-2.0)
+V(x=2.0, y=0.0) V(x=0.5, y=-1.0)
+V(x=4.5, y=3.0) V(x=1.0, y=2.0)
+[V(x=-1.0, y=-2.0), V(x=1.5, y=1.0)]
+Holder(pos=V(x=0.75, y=-1.0), name='h')
+{'k': V(x=0.5, y=3.0)}
+Words(items=['a'], label='w') Words(items=['a', 'b'], label='w+') Words(items=['a', 'b', 'a'], label='w+w')
+[Words(items=['a', 'c', 'a', 'c'], label='w+w+')]
+Clock(hour=3) Clock(hour=2)
+Pair(a='x', b='w')
+V(x=1.5, y=1.0) 6 0.75
+rst b'ab' Words(items=['a', 'a'], label='ww')
+5 ab V(x=1.5, y=1.0)
+V(x=-1.0, y=-2.0) -3 -2.5
+V(x=2.0, y=4.0) 3.0
+[V(x=1.5, y=1.0), V(x=0.5, y=-1.0)] [3, 2] ['xy', 'y']
+3

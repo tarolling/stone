@@ -155,7 +155,7 @@ are an error.
 | function definition | `fn f(a: int, b: int) -> int:` or `fn first[T](xs: list[T]) -> T:` plus a block |
 | enum definition | `enum Shape:` or `enum Tree[T]:` plus a block of variants, such as `Circle(float)` and `Empty` |
 | struct definition | `struct Point:` or `struct Pair[A, B]:` plus a block of fields, such as `x: float` and `y: float` |
-| trait definition | `trait Shape:` or `trait add[R]:` plus a block of `fn`s, each with a block or none, such as `fn area(self) -> float` |
+| trait definition | `trait Shape:` or `trait combine[R]:` plus a block of `fn`s, each with a block or none, such as `fn area(self) -> float` |
 | `impl` block | `impl Point:` or `impl Shape for Circle:` plus a block of `fn`s, such as `fn norm(self) -> float:` plus a block |
 | `match` | `match s:` plus a block of cases, such as `case Shape.Circle(r):` plus a block |
 | `ret` | `ret`, `ret x`, `ret (a, b)` |
@@ -265,9 +265,9 @@ From lowest to highest precedence:
 | `and` | `bool` conditions |
 | `not` | a `bool` condition |
 | `==` `!=` `<` `<=` `>` `>=` `in` `not in` | numbers, strings, bytes, and structs that implement `ord`; `==` and `!=` also bools, tuples, structs, options, and enums; `in` and `not in` a value and a map, list, string, or bytes |
-| `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings or two bytes |
-| `*` `/` `%` | two ints or two floats, or lists of them |
-| unary `+` `-` | an int or a float, or a list of them |
+| `+` `-` | two ints or two floats, or lists of them; `+` also joins two strings or two bytes; a struct or type parameter that implements `add` or `sub` |
+| `*` `/` `%` | two ints or two floats, or lists of them; a struct or type parameter that implements `mul`, `div`, or `rem` |
+| unary `+` `-` | an int or a float, or a list of them; for `-`, a struct or type parameter that implements `neg` |
 | `**` | an int or float base and an `int` exponent, or lists of them |
 | calls `f(x)`, method calls `xs.len()`, fields `p.x`, indexing `xs[i]`, slicing `xs[i:j:k]`, `?` | `?`: a result or an option, in a function that returns one |
 
@@ -283,6 +283,8 @@ compares them, or the string `c` the text `x`, and `x not in c` is its opposite,
 `**` groups right to left and binds tighter than a unary sign on its left, as in Python, so
 `2 ** 3 ** 2 == 512` and `-2 ** 2 == -4`, while `2 ** -1` raises to `-1`.
 Parentheses group as usual. Operands are evaluated left to right.
+On a struct, an arithmetic operator calls its trait's method with the left operand as `self`,
+so `a + b` is `a.add(b)` (see [Types](types.md#operator-traits)).
 
 A method call such as `xs.len()` evaluates the value before the `.` first, then the
 arguments. A change, `xs[i][j] = v`, `ps[i].x = v`, or `xs[i].append(v)`, evaluates the assigned

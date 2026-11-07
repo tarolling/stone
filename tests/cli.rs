@@ -1537,8 +1537,9 @@ fn check_reports_a_mistake_inside_a_generic_function() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{}:2:9: error: '+' needs int, float, str, or bytes operands, found T\n  |\n2 |     ret \
-             xs[0] + xs[1]\n  |         ^^^^^^^^^^^^^\n",
+            "{}:2:9: error: '+' needs 'T' to implement 'add', since 'T' may be any type; bound \
+             it, as in '[T: add[T]]'\n  |\n2 |     ret xs[0] + xs[1]\n  |         \
+             ^^^^^^^^^^^^^\n",
             file.display()
         )
     );

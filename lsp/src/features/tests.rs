@@ -2077,12 +2077,12 @@ fn a_captured_name_is_the_variable_it_copies() {
 const GENERIC_TRAITS: &str = "\
 struct V:
     x: int
-trait add[R]:
+trait combine[R]:
     fn add(self, other: R) -> Self
-impl add[int] for V:
+impl combine[int] for V:
     fn add(self, other: int) -> Self:
         ret V(x=self.x + other)
-impl add[V] for V:
+impl combine[V] for V:
     fn add(self, other: V) -> Self:
         ret V(x=self.x + other.x)
 v = V(x=1).add(2)
@@ -2096,7 +2096,7 @@ fn hover_shows_a_generic_trait_and_the_method_of_each_impl() {
     assert_eq!(diagnostics(&doc), []);
     assert_eq!(
         hover_text(&doc, at(3, 7)).unwrap(),
-        "```stone\ntrait add[R]\n    fn add(self, other: R) -> Self\n```"
+        "```stone\ntrait combine[R]\n    fn add(self, other: R) -> Self\n```"
     );
     assert_eq!(
         hover_text(&doc, at(6, 8)).unwrap(),

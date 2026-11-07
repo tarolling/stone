@@ -3335,7 +3335,7 @@ fn structs_are_not_numbers_or_strings() {
     let p = format!("{POINT}p = Point(x=1.0, y=2.0)\n");
     assert_error(
         &format!("{p}print(p + 1)\n"),
-        "'+' needs int, float, str, or bytes operands, found Point",
+        "'+' needs int, float, str, bytes, or a type that implements 'add', found Point",
         5,
         7,
     );
@@ -3988,11 +3988,16 @@ fn arguments_agree_on_a_type_parameter() {
 
 #[test]
 fn a_type_parameter_is_any_type_inside_its_function() {
-    let message = |op: &str| format!("'{op}' needs an int or float operand, found T");
-    assert_error("fn f[T](x: T) -> T:\n    ret -x\n", &message("-"), 2, 10);
+    assert_error(
+        "fn f[T](x: T) -> T:\n    ret -x\n",
+        "'-' needs 'T' to implement 'neg', since 'T' may be any type; bound it, as in '[T: neg]'",
+        2,
+        9,
+    );
     assert_error(
         "fn f[T](x: T, y: T) -> T:\n    ret x + y\n",
-        "'+' needs int, float, str, or bytes operands, found T",
+        "'+' needs 'T' to implement 'add', since 'T' may be any type; bound it, as in \
+         '[T: add[T]]'",
         2,
         9,
     );
@@ -4255,7 +4260,8 @@ fn values_of_a_generic_type_agree_on_its_arguments() {
 fn a_generic_types_parameters_are_opaque_in_its_methods() {
     assert_error(
         "struct Box[T]:\n    x: T\nimpl Box:\n    fn bump(self) -> T:\n        ret self.x + 1\n",
-        "'+' needs int, float, str, or bytes operands, found T",
+        "'+' needs 'T' to implement 'add', since 'T' may be any type; bound it, as in \
+         '[T: add[T]]'",
         5,
         13,
     );
@@ -5641,15 +5647,15 @@ fn an_unknown_lambda_parameter_suggests_its_type() {
     );
 }
 
-const ADD: &str = "struct V:\n    x: int\ntrait add[R]:\n    fn add(self, other: R) -> Self\n    \
-fn twice(self, other: R) -> Self:\n        ret self.add(other).add(other)\n\
-impl add[int] for V:\n    fn add(self, other: int) -> Self:\n        ret V(x=self.x + other)\n\
-impl add[V] for V:\n    fn add(self, other: V) -> Self:\n        ret V(x=self.x + other.x)\n";
+const ADD: &str = "struct V:\n    x: int\ntrait combine[R]:\n    fn combine(self, other: R) -> Self\n    \
+fn twice(self, other: R) -> Self:\n        ret self.combine(other).combine(other)\n\
+impl combine[int] for V:\n    fn combine(self, other: int) -> Self:\n        ret V(x=self.x + other)\n\
+impl combine[V] for V:\n    fn combine(self, other: V) -> Self:\n        ret V(x=self.x + other.x)\n";
 
 #[test]
 fn a_call_picks_the_impl_of_a_generic_trait_its_arguments_fit() {
     let source = format!(
-        "{ADD}a = V(x=1).add(2)\nb = V(x=1).add(V(x=2))\nc = V(x=1).twice(3)\n\
+        "{ADD}a = V(x=1).combine(2)\nb = V(x=1).combine(V(x=2))\nc = V(x=1).twice(3)\n\
          d = V(x=1).twice(V(x=4))\n"
     );
     for name in ["a", "b", "c", "d"] {
@@ -5658,17 +5664,17 @@ fn a_call_picks_the_impl_of_a_generic_trait_its_arguments_fit() {
     assert_eq!(
         method_calls(&source),
         [
-            ("V.add..V".to_string(), true, false),
-            ("V.add..int".to_string(), true, false),
-            ("add.add".to_string(), true, false),
-            ("add.twice".to_string(), true, false),
+            ("V.combine..V".to_string(), true, false),
+            ("V.combine..int".to_string(), true, false),
+            ("combine.combine".to_string(), true, false),
+            ("combine.twice".to_string(), true, false),
         ]
     );
     let analysis = analyze_source(&source);
     let mut twice: Vec<String> = analysis
         .instances
         .values()
-        .filter(|i| i.function == "add.twice")
+        .filter(|i| i.function == "combine.twice")
         .map(|i| format!("{:?}", i.args))
         .collect();
     twice.sort();
@@ -5685,16 +5691,16 @@ fn a_call_picks_the_impl_of_a_generic_trait_its_arguments_fit() {
 fn an_impl_of_a_generic_trait_is_picked_once_the_arguments_are_known() {
     // `xs[0]` is not known to be an int until the append after it
     let source = format!(
-        "{ADD}fn f(v: V) -> V:\n    xs = []\n    r = v.add(xs[0])\n    xs.append(3)\n    ret r\n"
+        "{ADD}fn f(v: V) -> V:\n    xs = []\n    r = v.combine(xs[0])\n    xs.append(3)\n    ret r\n"
     );
-    assert!(method_calls(&source).contains(&("V.add..int".to_string(), true, false)));
+    assert!(method_calls(&source).contains(&("V.combine..int".to_string(), true, false)));
 }
 
 #[test]
 fn a_call_of_a_generic_traits_method_needs_an_impl_that_fits() {
     assert_error(
-        &format!("{ADD}V(x=1).add(\"s\")\n"),
-        "no 'add' of 'V' takes str: 'V' implements 'add[int]' and 'add[V]'",
+        &format!("{ADD}V(x=1).combine(\"s\")\n"),
+        "no 'combine' of 'V' takes str: 'V' implements 'combine[int]' and 'combine[V]'",
         13,
         8,
     );
@@ -5704,28 +5710,28 @@ fn a_call_of_a_generic_traits_method_needs_an_impl_that_fits() {
 fn a_generic_trait_is_implemented_once_for_each_set_of_arguments() {
     assert_error(
         &format!(
-            "{ADD}impl add[int] for V:\n    fn add(self, other: int) -> Self:\n        ret self\n"
+            "{ADD}impl combine[int] for V:\n    fn combine(self, other: int) -> Self:\n        ret self\n"
         ),
-        "'V' already implements 'add[int]'",
+        "'V' already implements 'combine[int]'",
         13,
-        19,
+        23,
     );
     assert_error(
-        "struct B[T]:\n    v: T\ntrait add[R]:\n    fn add(self, other: R) -> Self\n\
-         impl add[T] for B:\n    fn add(self, other: T) -> Self:\n        ret self\n\
-         impl add[int] for B:\n    fn add(self, other: int) -> Self:\n        ret self\n",
-        "'B' already implements 'add[T]', which overlaps 'add[int]'",
+        "struct B[T]:\n    v: T\ntrait combine[R]:\n    fn combine(self, other: R) -> Self\n\
+         impl combine[T] for B:\n    fn combine(self, other: T) -> Self:\n        ret self\n\
+         impl combine[int] for B:\n    fn combine(self, other: int) -> Self:\n        ret self\n",
+        "'B' already implements 'combine[T]', which overlaps 'combine[int]'",
         8,
-        19,
+        23,
     );
 }
 
 #[test]
 fn a_trait_takes_as_many_type_arguments_as_it_has_parameters() {
     assert_error(
-        "struct V:\n    x: int\ntrait add[R]:\n    fn add(self, other: R) -> Self\n\
-         impl add for V:\n    fn add(self, other: int) -> Self:\n        ret self\n",
-        "'add' takes 1 type argument, as in 'add[int]'",
+        "struct V:\n    x: int\ntrait combine[R]:\n    fn combine(self, other: R) -> Self\n\
+         impl combine for V:\n    fn combine(self, other: int) -> Self:\n        ret self\n",
+        "'combine' takes 1 type argument, as in 'combine[int]'",
         5,
         6,
     );
@@ -5736,19 +5742,19 @@ fn a_trait_takes_as_many_type_arguments_as_it_has_parameters() {
         9,
     );
     assert_error(
-        "trait add[int]:\n    fn add(self, other: int) -> Self\n",
+        "trait combine[int]:\n    fn combine(self, other: int) -> Self\n",
         "'int' is already a type",
         1,
-        11,
+        15,
     );
 }
 
 #[test]
 fn an_impl_of_a_generic_trait_takes_and_returns_what_its_arguments_say() {
     assert_error(
-        "struct V:\n    x: int\ntrait add[R]:\n    fn add(self, other: R) -> Self\n\
-         impl add[int] for V:\n    fn add(self, other: str) -> Self:\n        ret self\n",
-        "'add' must take and return what 'add[int]' says, as in 'fn add(self, int) -> V'",
+        "struct V:\n    x: int\ntrait combine[R]:\n    fn combine(self, other: R) -> Self\n\
+         impl combine[int] for V:\n    fn combine(self, other: str) -> Self:\n        ret self\n",
+        "'combine' must take and return what 'combine[int]' says, as in 'fn combine(self, int) -> V'",
         6,
         8,
     );
@@ -5757,8 +5763,8 @@ fn an_impl_of_a_generic_trait_takes_and_returns_what_its_arguments_say() {
 #[test]
 fn a_bound_may_give_a_generic_trait_its_arguments() {
     let source = format!(
-        "{ADD}fn inc[T: add[int]](x: T) -> T:\n    ret x.add(1)\n\
-         fn plus[T: add[U], U](x: T, y: U) -> T:\n    ret x.add(y)\n\
+        "{ADD}fn inc[T: combine[int]](x: T) -> T:\n    ret x.combine(1)\n\
+         fn plus[T: combine[U], U](x: T, y: U) -> T:\n    ret x.combine(y)\n\
          a = inc(V(x=1))\nb = plus(V(x=1), V(x=2))\nc = plus(V(x=1), 5)\n"
     );
     for name in ["a", "b", "c"] {
@@ -5766,23 +5772,166 @@ fn a_bound_may_give_a_generic_trait_its_arguments() {
     }
     let calls = trait_calls(&source);
     assert!(calls.contains(&(
-        "add.add".to_string(),
+        "combine.combine".to_string(),
         vec![
-            ("V[V]".to_string(), "V.add..V".to_string()),
-            ("V[int]".to_string(), "V.add..int".to_string()),
+            ("V[V]".to_string(), "V.combine..V".to_string()),
+            ("V[int]".to_string(), "V.combine..int".to_string()),
         ]
     )));
     assert_error(
-        &format!("{ADD}fn inc[T: add[int]](x: T) -> T:\n    ret x.add(1)\nx = inc(3)\n"),
-        "'int' does not implement 'add[int]', which 'inc' needs for 'T'",
+        &format!("{ADD}fn inc[T: combine[int]](x: T) -> T:\n    ret x.combine(1)\nx = inc(3)\n"),
+        "'int' does not implement 'combine[int]', which 'inc' needs for 'T'",
         15,
         5,
     );
     assert_error(
-        &format!("{ADD}fn inc[T: add[str]](x: T) -> T:\n    ret x\nx = inc(V(x=1))\n"),
-        "'V' does not implement 'add[str]', which 'inc' needs for 'T'",
+        &format!("{ADD}fn inc[T: combine[str]](x: T) -> T:\n    ret x\nx = inc(V(x=1))\n"),
+        "'V' does not implement 'combine[str]', which 'inc' needs for 'T'",
         15,
         5,
+    );
+}
+
+const OPERATORS: &str = "struct V:\n    x: int\n\
+impl add[V] for V:\n    fn add(self, other: V) -> Self:\n        ret V(x=self.x + other.x)\n\
+impl mul[int] for V:\n    fn mul(self, other: int) -> Self:\n        ret V(x=self.x * other)\n\
+impl mul[V] for V:\n    fn mul(self, other: V) -> Self:\n        ret V(x=self.x * other.x)\n\
+impl neg for V:\n    fn neg(self) -> Self:\n        ret V(x=-self.x)\n";
+
+#[test]
+fn operators_call_the_impls_of_their_traits() {
+    let source = format!(
+        "{OPERATORS}v = V(x=1)\na = v + v\nb = v * 2\nc = v * v\nd = -v\nvs = [v]\nvs[0] += v\n\
+         v *= 3\n"
+    );
+    for name in ["a", "b", "c", "d"] {
+        assert_eq!(type_of_symbol(&source, name), "V");
+    }
+    assert_eq!(
+        method_calls(&source),
+        [
+            ("V.add..V".to_string(), true, false),
+            ("V.mul..V".to_string(), true, false),
+            ("V.mul..int".to_string(), true, false),
+            ("V.neg".to_string(), true, false),
+        ]
+    );
+}
+
+#[test]
+fn an_operators_impl_is_picked_once_its_right_operand_is_known() {
+    // `xs[0]` is not known to be an int until the append after it
+    let source = format!(
+        "{OPERATORS}fn f(v: V) -> V:\n    xs = []\n    r = v * xs[0]\n    xs.append(3)\n    \
+         ret r\n"
+    );
+    assert!(method_calls(&source).contains(&("V.mul..int".to_string(), true, false)));
+}
+
+#[test]
+fn an_operator_on_a_type_parameter_calls_its_bounds_impl() {
+    let source = format!(
+        "{OPERATORS}fn total[T: add[T]](xs: list[T], zero: T) -> T:\n    acc = zero\n    \
+         for x in xs:\n        acc = acc + x\n    ret acc\nfn flip[T: neg](x: T) -> T:\n    \
+         ret -x\na = total([V(x=1)], V(x=0))\nb = total([1, 2], 0)\nc = total([\"a\"], \"\")\n\
+         d = total([b\"a\"], b\"\")\ne = flip(V(x=1))\nf = flip(2.5)\n"
+    );
+    assert_eq!(type_of_symbol(&source, "a"), "V");
+    assert_eq!(type_of_symbol(&source, "c"), "str");
+    assert_eq!(type_of_symbol(&source, "f"), "float");
+    let calls = trait_calls(&source);
+    assert!(calls.contains(&(
+        "add.add".to_string(),
+        vec![("V[V]".to_string(), "V.add..V".to_string())]
+    )));
+    assert!(calls.contains(&(
+        "neg.neg".to_string(),
+        vec![("V".to_string(), "V.neg".to_string())]
+    )));
+    assert_error(
+        &format!("{OPERATORS}fn total[T: add[T]](x: T) -> T:\n    ret x + x\ny = total(true)\n"),
+        "'bool' does not implement 'add[bool]', which 'total' needs for 'T'",
+        17,
+        5,
+    );
+    let builtin = format!(
+        "{OPERATORS}fn total[T: add[T]](x: T) -> T:\n    ret x\ny = total(\"a\".bytes())\n\
+         z = total(1.5)\n"
+    );
+    assert_eq!(errors(&builtin), []);
+}
+
+#[test]
+fn an_operator_needs_its_trait() {
+    assert_error(
+        "struct V:\n    x: int\nv = V(x=1)\nprint(v + v)\n",
+        "'+' needs int, float, str, bytes, or a type that implements 'add', found V",
+        4,
+        7,
+    );
+    assert_error(
+        &format!("{OPERATORS}print(V(x=1) - V(x=2))\n"),
+        "'-' needs int, float, or a type that implements 'sub', found V",
+        15,
+        7,
+    );
+    assert_error(
+        &format!("{OPERATORS}print(V(x=1) + 1)\n"),
+        "expected V, found int",
+        15,
+        16,
+    );
+    assert_error(
+        &format!("{OPERATORS}print(V(x=1) * \"a\")\n"),
+        "no 'mul' of 'V' takes str: 'V' implements 'mul[int]' and 'mul[V]'",
+        15,
+        16,
+    );
+    assert_error(
+        &format!("{OPERATORS}print(2 * V(x=1))\n"),
+        "the left operand's type picks the 'mul' that '*' calls, and int has none that takes V",
+        15,
+        7,
+    );
+    assert_error(
+        "fn f[T](a: T) -> T:\n    ret a + a\n",
+        "'+' needs 'T' to implement 'add', since 'T' may be any type; bound it, as in \
+         '[T: add[T]]'",
+        2,
+        9,
+    );
+    assert_error(
+        "struct V:\n    x: int\nprint(-V(x=1))\n",
+        "'-' needs an int, a float, or a type that implements 'neg', found V",
+        3,
+        7,
+    );
+    assert_error(
+        "fn f[T](a: T) -> T:\n    ret -a\n",
+        "'-' needs 'T' to implement 'neg', since 'T' may be any type; bound it, as in '[T: neg]'",
+        2,
+        9,
+    );
+}
+
+#[test]
+fn a_builtin_types_operators_are_its_own() {
+    assert_error(
+        "impl add[int] for int:\n    fn add(self, other: int) -> Self:\n        ret self\n",
+        "int's operators are builtin, so it cannot implement 'add'",
+        1,
+        19,
+    );
+    assert_error(
+        "trait add[R]:\n    fn add(self, other: R) -> Self\n",
+        "trait 'add' is already defined by the prelude",
+        1,
+        7,
+    );
+    // a function may share an operator trait's name
+    assert_eq!(
+        errors("fn add(a: int, b: int) -> int:\n    ret a + b\nprint(add(1, 2))\n"),
+        []
     );
 }
 

@@ -2,47 +2,47 @@
 struct V:
     x: int
 
-trait add[R]:
-    fn add(self, other: R) -> Self
+trait combine[R]:
+    fn combine(self, other: R) -> Self
     fn twice(self, other: R) -> Self:
-        ret self.add(other).add(other)
+        ret self.combine(other).combine(other)
 
-impl add[int] for V:
-    fn add(self, other: int) -> Self:
+impl combine[int] for V:
+    fn combine(self, other: int) -> Self:
         ret V(x=self.x + other)
 
-impl add[V] for V:
-    fn add(self, other: V) -> Self:
+impl combine[V] for V:
+    fn combine(self, other: V) -> Self:
         ret V(x=self.x * 10 + other.x)
 
 // a builtin type may implement a trait of the program's
-impl add[str] for int:
-    fn add(self, other: str) -> Self:
+impl combine[str] for int:
+    fn combine(self, other: str) -> Self:
         ret self + other.len()
 
 // a generic struct's block may give the trait the struct's own parameter
 struct Box[T]:
     items: list[T]
 
-impl add[T] for Box:
-    fn add(self, other: T) -> Self:
+impl combine[T] for Box:
+    fn combine(self, other: T) -> Self:
         items = self.items
         items.append(other)
         ret Box(items=items)
 
-fn inc[T: add[int]](x: T) -> T:
-    ret x.add(1)
+fn inc[T: combine[int]](x: T) -> T:
+    ret x.combine(1)
 
-fn plus[T: add[U], U](x: T, y: U) -> T:
-    ret x.add(y).twice(y)
+fn plus[T: combine[U], U](x: T, y: U) -> T:
+    ret x.combine(y).twice(y)
 
 fn pick(xs: list[int]) -> int:
     ret xs[0]
 
 v = V(x=1)
-print(v.add(2), v.add(V(x=2)), v.twice(3), v.twice(V(x=4)))
+print(v.combine(2), v.combine(V(x=2)), v.twice(3), v.twice(V(x=4)))
 print(inc(v), plus(v, 5), plus(v, V(x=6)))
-print(3.add("abcd"), plus(3, "ab"))
-print(Box(items=[1]).add(2).twice(3), plus(Box(items=["a"]), "b"))
+print(3.combine("abcd"), plus(3, "ab"))
+print(Box(items=[1]).combine(2).twice(3), plus(Box(items=["a"]), "b"))
 // the argument's type is known only after the call is checked
-print(v.add(pick([7])))
+print(v.combine(pick([7])))

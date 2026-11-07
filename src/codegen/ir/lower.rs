@@ -42,10 +42,10 @@ use crate::ast::{
     Stmt, StmtKind, UnaryOp, constant_int, is_lambda, is_test,
 };
 use crate::checker::{
-    Analysis, Conversion, Converter, DISPLAY, EQ, Enums, Instance, Method, Methods, OPTION, ORD,
-    RESULT, Step, Structs, SymbolKind, Type, collect_assigned, collect_changed, may_name_enum,
-    may_name_struct, place, place_root, place_spans, range_args, struct_display, type_text,
-    variant_display, variants,
+    Analysis, Conversion, Converter, DISPLAY, EQ, Enums, Instance, Method, Methods,
+    OPERATOR_TRAITS, OPTION, ORD, RESULT, Step, Structs, SymbolKind, Type, collect_assigned,
+    collect_changed, may_name_enum, may_name_struct, place, place_root, place_spans, range_args,
+    struct_display, trait_operator, type_text, variant_display, variants,
 };
 use crate::codegen::Os;
 use crate::codegen::context::{FUNCTION_PREFIX, function_label, module_routine};
@@ -3183,8 +3183,9 @@ impl<'a> Lowerer<'a> {
         op: Operator,
         value: &Expr,
     ) -> Result<(), String> {
-        if has_field(target) || self.through_map(target) {
-            return self.aug_assign_place(target, op, value);
+        // an element that is a struct has several slots, which only a place reaches
+        if has_field(target) || self.through_map(target) || self.is_flat(target) {
+            return self.aug_assign_place(stmt.span, target, op, value);
         }
         let ExprKind::Subscript {
             value: list, slice, ..
@@ -3252,15 +3253,30 @@ impl<'a> Lowerer<'a> {
     /// the new value is stored.
     fn aug_assign_place(
         &mut self,
+        span: Span,
         target: &Expr,
         op: Operator,
         value: &Expr,
     ) -> Result<(), String> {
         let indexes = self.place_indexes(target)?;
         let location = self.locate(target, &indexes)?;
+        let ty = self.type_of(target)?;
+        // a struct's operator calls the impl of its trait, the old value as `self`
+        if let Some(method) = self.context.methods.get(&span)
+            && !is_builtin_operand(&ty)
+        {
+            let kinds = self.leaf_kinds(target)?;
+            // borrowed, since nothing the value runs can change the variable holding it
+            let this = self.location_values(&location);
+            let new = self.operator_impl_call(span, method, &ty, (this, &kinds), value)?;
+            for (&value, &kind) in new.iter().zip(&kinds) {
+                self.take(value, kind);
+            }
+            self.store_location(location, &new, &kinds);
+            return Ok(());
+        }
         // borrowed, since nothing the value runs can change the variable holding it
         let old = self.location_values(&location)[0];
-        let ty = self.type_of(target)?;
         let kind = RcKind::of(&ty);
         let new = match &ty {
             Type::List(elem) => {
@@ -6596,21 +6612,11 @@ impl<'a> Lowerer<'a> {
                     let value = self.method(receiver, name, args, into, kinds[0])?;
                     return Ok(vec![value]);
                 }
-                let (function, args) = method.resolve(&ty, &trait_args).ok_or_else(|| {
-                    format!(
-                        "'{ty}' does not implement the trait of '{}'",
-                        method.function
-                    )
-                })?;
-                let label = match args.is_empty() {
-                    true => function.clone(),
-                    false => self.request(Instance {
-                        function: function.clone(),
-                        args,
-                    }),
-                };
-                self.dispatched = Some((call.span, label));
-                function
+                if let Some(trait_) = builtin_operand(&method.function, &ty) {
+                    let value = self.builtin_operator(trait_, &ty, receiver, args.first(), into)?;
+                    return Ok(vec![value]);
+                }
+                self.bound_function(call.span, method, &ty, &trait_args)?
             }
             None => method.function.clone(),
         };
@@ -6633,6 +6639,130 @@ impl<'a> Lowerer<'a> {
             return self.user_call(function, call.span, &all, into, &kinds);
         }
         self.changing_call((function, call.span), receiver, args, into, &kinds)
+    }
+
+    /// Returns the function the call through a bound at `call` calls for a receiver of `ty`, the
+    /// bound's type arguments being `trait_args` in this copy, requesting its copy and leaving
+    /// its label in [`Lowerer::dispatched`] for the call.
+    fn bound_function(
+        &mut self,
+        call: Span,
+        method: &Method,
+        ty: &Type,
+        trait_args: &[Type],
+    ) -> Result<String, String> {
+        let (function, args) = method.resolve(ty, trait_args).ok_or_else(|| {
+            format!(
+                "'{ty}' does not implement the trait of '{}'",
+                method.function
+            )
+        })?;
+        let label = match args.is_empty() {
+            true => function.clone(),
+            false => self.request(Instance {
+                function: function.clone(),
+                args,
+            }),
+        };
+        self.dispatched = Some((call, label));
+        Ok(function)
+    }
+
+    /// Lowers the operator trait method `trait_` on `receiver`, a number or a string of type
+    /// `ty`, and `arg`, if any, as the builtin operation, as in `x.add(y)` or `x + y` in the
+    /// copy of `fn total[T: add[T]]` for `int`.
+    fn builtin_operator(
+        &mut self,
+        trait_: &str,
+        ty: &Type,
+        receiver: &Expr,
+        arg: Option<&Expr>,
+        into: Option<VReg>,
+    ) -> Result<Operand, String> {
+        let lhs = self.expr(receiver)?;
+        match (trait_operator(trait_), arg) {
+            (Some(op), Some(arg)) => {
+                let rhs = self.expr(arg)?;
+                Ok(self.binary(op, ty, lhs, rhs, into))
+            }
+            (None, None) => {
+                let dst = self.dst(into);
+                self.push(match ty {
+                    Type::Float => Inst::FloatNeg { dst, src: lhs },
+                    _ => Inst::Neg { dst, src: lhs },
+                });
+                Ok(Operand::Reg(dst))
+            }
+            _ => Err(format!("'{trait_}' takes the wrong operands")),
+        }
+    }
+
+    /// Calls the impl that the augmented assignment at `span` resolved its operator to, with
+    /// `this`, the borrowed values of the target's old value, of type `ty` and counted as
+    /// `kinds`, as `self`, and `value` after them, returning the new value's values, each a
+    /// temporary that owns its reference.
+    ///
+    /// For example, `vs[i] += w` reads the slots of `vs[i]`, then calls `V.add..V` with them and
+    /// `w`'s values.
+    fn operator_impl_call(
+        &mut self,
+        span: Span,
+        method: &Method,
+        ty: &Type,
+        (this, kinds): (Vec<Operand>, &[Option<RcKind>]),
+        value: &Expr,
+    ) -> Result<Vec<Operand>, String> {
+        let function = match &method.implementations {
+            Some(_) => {
+                let trait_args: Vec<Type> =
+                    method.trait_args.iter().map(|a| self.fill(a)).collect();
+                self.bound_function(span, method, ty, &trait_args)?
+            }
+            None => method.function.clone(),
+        };
+        let args = std::slice::from_ref(value);
+        // taken first, so that no call in the value moves what it reads
+        let movable = std::mem::take(&mut self.movable);
+        let (label, bound) = self.specialized_label(&function, span, args, 1);
+        let values = match bound.contains(&0) {
+            true => self.bound_values(value)?,
+            false => self.expr_flat(value)?,
+        };
+        let values = vec![values];
+        let given = self.give_references(&function, args, &values, &movable, 1)?;
+        // the old value stays where it is until the new one replaces it
+        if self
+            .context
+            .owned_params
+            .get(function.as_str())
+            .is_some_and(|owned| owned.first() == Some(&true))
+        {
+            for (&value, kind) in this.iter().zip(kinds) {
+                if kind.is_some() {
+                    self.push(Inst::Retain { src: value });
+                }
+            }
+        }
+        let dsts: Vec<VReg> = kinds.iter().map(|_| self.fresh()).collect();
+        self.push(Inst::Call {
+            dsts: dsts.clone(),
+            callee: Callee::User(label),
+            args: [this, values.concat()].concat(),
+        });
+        for (value, given) in values
+            .into_iter()
+            .flatten()
+            .zip(given.into_iter().flatten())
+        {
+            if !given {
+                self.release_temp(value);
+            }
+        }
+        let results: Vec<Operand> = dsts.into_iter().map(Operand::Reg).collect();
+        for (&result, &kind) in results.iter().zip(kinds) {
+            self.own(result, kind);
+        }
+        Ok(results)
     }
 
     /// Calls `function`, a method that changes `self`, on `receiver`, a variable or a place in
@@ -7496,6 +7626,17 @@ impl<'a> Lowerer<'a> {
                 self.element_values(value, slice, 0..width)
             }
             ExprKind::Attribute { value, attr, .. } => self.struct_field(value, attr),
+            // a struct's operator calls the impl of its trait, the left operand as `self`
+            ExprKind::BinOp { left, right, .. }
+                if self.context.methods.contains_key(&expr.span) =>
+            {
+                let method = &self.context.methods[&expr.span];
+                self.struct_call(expr, method, left, std::slice::from_ref(right), None)
+            }
+            ExprKind::UnaryOp { operand, .. } if self.context.methods.contains_key(&expr.span) => {
+                let method = &self.context.methods[&expr.span];
+                self.struct_call(expr, method, operand, &[], None)
+            }
             ExprKind::Call {
                 func,
                 args,
@@ -9240,6 +9381,19 @@ fn bin_op(op: Operator) -> BinOp {
         Operator::Modulo => BinOp::Rem,
         Operator::Power => BinOp::Pow,
     }
+}
+
+/// Returns whether `ty` is a number or a string, whose operators are builtin whatever trait
+/// a bound calls them through.
+fn is_builtin_operand(ty: &Type) -> bool {
+    matches!(ty, Type::Int | Type::Float | Type::Str | Type::Bytes)
+}
+
+/// Returns the operator trait of `function`, such as `add` for `add.add`, if it is one and a
+/// receiver of `ty` has it builtin.
+fn builtin_operand<'a>(function: &'a str, ty: &Type) -> Option<&'a str> {
+    let (trait_, _) = function.split_once('.')?;
+    (OPERATOR_TRAITS.contains(&trait_) && is_builtin_operand(ty)).then_some(trait_)
 }
 
 /// Returns whether evaluating `expr` can call a function or method, which is the only way code

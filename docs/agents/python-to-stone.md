@@ -103,6 +103,8 @@ print(seen, seen.len(), 2 in seen, 7 in seen)
 | a method that mutates `self` | the same method; stone changes the receiver in place |
 | `__eq__` | `impl eq for P:` with `fn eq(self, other: Self) -> bool` |
 | `__lt__`, `functools.total_ordering` | `impl ord for P:` with `fn cmp(self, other: Self) -> ordering` |
+| `__add__`, `__sub__`, `__mul__`, `__truediv__`, `__mod__`, `__neg__` | `impl add[P] for P:` with `fn add(self, other: P) -> Self`, and likewise `sub`, `mul`, `div`, `rem`, and `neg` (`fn neg(self) -> Self`); the result is always `P`, and one block per right operand's type (`impl mul[float] for P:`) |
+| `__radd__`, `__rmul__` (`2 * p`) | none: the left operand's type picks the impl, so write `p * 2.0` |
 | `__repr__` for printing | usually unnecessary: a struct prints as `P(x=1, y=2)`, like a dataclass |
 | subclasses that are alternatives (`Circle(Shape)`, `Square(Shape)`) | an `enum` with a variant per subclass and a `match` |
 | an abstract base class or a protocol | a `trait`, implemented by each struct, used through `[T: Trait]` |

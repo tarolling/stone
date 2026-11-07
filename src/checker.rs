@@ -306,6 +306,69 @@ pub const ORD: &str = "ord";
 /// text, which every type implements, and a struct may implement itself.
 pub const DISPLAY: &str = "display";
 
+/// The names of the prelude's traits that back `+`, `-`, `*`, `/`, and `%`, each generic over
+/// the right operand's type and called with the left operand as `self`, and of `neg`, which
+/// backs `-x`.
+pub const ADD: &str = "add";
+pub const SUB: &str = "sub";
+pub const MUL: &str = "mul";
+pub const DIV: &str = "div";
+pub const REM: &str = "rem";
+pub const NEG: &str = "neg";
+
+/// Every trait of [`operator_trait`], each also the name of its one method.
+pub const OPERATOR_TRAITS: &[&str] = &[ADD, SUB, MUL, DIV, REM, NEG];
+
+/// Returns the prelude trait an arithmetic operator calls on a value that is not a builtin
+/// number or string, which is also the name of its method, or `None` for `**` and unary `+`,
+/// which only numbers have.
+///
+/// For example, `operator_trait(Operator::Add, false)` is `Some("add")`, and
+/// `operator_trait(Operator::Subtract, true)` (`-x`) is `Some("neg")`.
+pub fn operator_trait(op: Operator, unary: bool) -> Option<&'static str> {
+    Some(match (op, unary) {
+        (Operator::Subtract, true) => NEG,
+        (_, true) => return None,
+        (Operator::Add, _) => ADD,
+        (Operator::Subtract, _) => SUB,
+        (Operator::Multiply, _) => MUL,
+        (Operator::Divide, _) => DIV,
+        (Operator::Modulo, _) => REM,
+        (Operator::Power, _) => return None,
+    })
+}
+
+/// Returns the binary operator whose trait is `trait_`, the reverse of [`operator_trait`], or
+/// `None` for `neg`, which backs unary `-`, and for any other trait.
+///
+/// For example, `trait_operator("mul")` is `Some(Operator::Multiply)`.
+pub fn trait_operator(trait_: &str) -> Option<Operator> {
+    Some(match trait_ {
+        ADD => Operator::Add,
+        SUB => Operator::Subtract,
+        MUL => Operator::Multiply,
+        DIV => Operator::Divide,
+        REM => Operator::Modulo,
+        _ => return None,
+    })
+}
+
+/// Returns whether `ty` implements the operator trait `trait_` with the type arguments `args`
+/// without a program's impl: `int` and `float` implement every one with their own type, and
+/// `str` and `bytes` implement `add` with theirs, which joins them.
+///
+/// For example, `builtin_operator(&Type::Str, "add", &[Type::Str])` is true, and
+/// `builtin_operator(&Type::Int, "add", &[Type::Float])` is false.
+pub fn builtin_operator(ty: &Type, trait_: &str, args: &[Type]) -> bool {
+    let numbers = matches!(ty, Type::Int | Type::Float) && OPERATOR_TRAITS.contains(&trait_);
+    let joins = matches!(ty, Type::Str | Type::Bytes) && trait_ == ADD;
+    let own = match trait_ {
+        NEG => args.is_empty(),
+        _ => matches!(args, [arg] if arg == ty),
+    };
+    (numbers || joins) && own
+}
+
 /// The name of the prelude's trait of conversions that cannot fail, which `Type(value)` calls.
 pub const FROM: &str = "from";
 
@@ -361,6 +424,7 @@ pub fn visible_type(name: &str, file: FileId) -> bool {
         || name.contains('.')
         || prints_bare(name)
         || [OUTPUT, EQ, ORD, DISPLAY, FROM, TRY_FROM].contains(&name)
+        || OPERATOR_TRAITS.contains(&name)
 }
 
 /// Maps each of `params`, a generic type's or function's type parameters, to the type at the
@@ -1911,6 +1975,14 @@ impl Inference {
         if self.solve_arithmetic(&op, false) {
             return;
         }
+        // an operand beside a struct or type parameter may be anything its impl takes
+        let picked = |ty: &Ty| matches!(ty, Ty::Struct(..) | Ty::Param(_));
+        if picked(&self.shallow(&op.left))
+            || op.right.as_ref().is_some_and(|r| picked(&self.shallow(r)))
+        {
+            self.arithmetic.push(op);
+            return;
+        }
         let strings = op.op == ArithmeticOp::Binary(Operator::Add);
         match &op.right {
             Some(_) if op.op == ArithmeticOp::Binary(Operator::Power) => {
@@ -1937,6 +2009,12 @@ impl Inference {
         let symbol = op.op.symbol();
         let left = self.shallow(&op.left);
         let Some(right) = &op.right else {
+            // `-v` negates a struct or type parameter through its `neg`
+            if op.op == ArithmeticOp::Unary(UnaryOp::UnarySub)
+                && matches!(left, Ty::Struct(..) | Ty::Param(_))
+            {
+                return self.solve_operator(op, NEG, &left, None, force);
+            }
             // `+x` or `-x`
             match &left {
                 Ty::Var(_) if !force => return false,
@@ -1955,6 +2033,36 @@ impl Inference {
         let right = self.shallow(right);
         if op.op == ArithmeticOp::Binary(Operator::Power) {
             return self.solve_power(op, left, right, force);
+        }
+        let ArithmeticOp::Binary(operator) = op.op else {
+            unreachable!("unary operations are handled above")
+        };
+        let trait_ = operator_trait(operator, false).expect("only '**' has no trait");
+        // the left operand's type picks the impl of its operator's trait
+        if matches!(left, Ty::Struct(..) | Ty::Param(_)) {
+            return self.solve_operator(op, trait_, &left, Some(&right), force);
+        }
+        if matches!(left, Ty::Var(_)) && matches!(right, Ty::Struct(..) | Ty::Param(_)) {
+            if !force {
+                return false;
+            }
+            // most impls take their own type, as `add[V]` does
+            self.unify(&left, &right);
+            return self.solve_operator(op, trait_, &right, Some(&right), force);
+        }
+        if let Ty::Struct(owner, _) = &right
+            && NumberTy::of(&left).is_some()
+            && self.has_trait_impl(owner, trait_)
+        {
+            let message = format!(
+                "the left operand's type picks the '{trait_}' that '{symbol}' calls, and {} has \
+                 none that takes {}",
+                self.show(&left),
+                self.show(&right)
+            );
+            self.error(op.span, message);
+            self.unify(&op.result, &right);
+            return true;
         }
         // a type parameter may be any type, so it is no operand, whatever the other one is
         if let Some(param) = [&left, &right]
@@ -2086,6 +2194,141 @@ impl Inference {
                 true
             }
         }
+    }
+
+    /// Checks the arithmetic `op` on `left`, a struct or a type parameter, as a call of the
+    /// method of the operator's trait `trait_` with `left` as `self` and `right`, if any, as its
+    /// argument, returning whether it could, as [`Inference::solve_arithmetic`] does. A struct's
+    /// impls are picked by the right operand's type, which is waited for while several may fit,
+    /// and a type parameter's by its bounds. The result is `Self`, `left`'s type.
+    ///
+    /// For example, with `impl mul[float] for V:` and `impl mul[V] for V:`, `v * 2.0` calls
+    /// `V.mul..float`, and in `fn f[T: add[T]](a: T, b: T) -> T`, `a + b` calls `add.add` with
+    /// `T` as `Self`.
+    fn solve_operator(
+        &mut self,
+        op: &Arithmetic,
+        trait_: &str,
+        left: &Ty,
+        right: Option<&Ty>,
+        force: bool,
+    ) -> bool {
+        let symbol = op.op.symbol();
+        let shown = self.show(left);
+        let candidates = match left {
+            Ty::Struct(owner, type_args) => {
+                self.candidates_where(owner, type_args, |m| m.trait_.as_deref() == Some(trait_))
+            }
+            Ty::Param(param) => {
+                let bounds: Vec<TraitBound> = self.type_params[*param]
+                    .bounds
+                    .iter()
+                    .filter(|b| b.name == trait_)
+                    .cloned()
+                    .collect();
+                bounds
+                    .into_iter()
+                    .map(|bound| {
+                        let method = self.traits[trait_]
+                            .methods
+                            .iter()
+                            .find(|m| m.name == trait_)
+                            .expect("an operator trait has its method");
+                        let mut type_args = vec![Ty::Param(*param)];
+                        type_args.extend(bound.args.iter().cloned());
+                        Candidate {
+                            function: format!("{trait_}.{trait_}"),
+                            type_args,
+                            symbol: method.symbol,
+                            changes: method.changes,
+                            bound: Some(trait_.to_string()),
+                            text: self.trait_text(trait_, &bound.args),
+                            trait_args: bound.args,
+                        }
+                    })
+                    .collect()
+            }
+            _ => unreachable!("only a struct or a type parameter picks an operator's impl"),
+        };
+        if candidates.is_empty() {
+            let message = match (left, right) {
+                (Ty::Param(_), _) => {
+                    let bound = match right {
+                        Some(_) => format!("{trait_}[{shown}]"),
+                        None => trait_.to_string(),
+                    };
+                    format!(
+                        "'{symbol}' needs '{shown}' to implement '{trait_}', since '{shown}' may \
+                         be any type; bound it, as in '[{shown}: {bound}]'"
+                    )
+                }
+                (_, None) => format!(
+                    "'{symbol}' needs an int, a float, or a type that implements '{trait_}', \
+                     found {shown}"
+                ),
+                (_, Some(_)) if trait_ == ADD => format!(
+                    "'+' needs int, float, str, bytes, or a type that implements 'add', found \
+                     {shown}"
+                ),
+                _ => format!(
+                    "'{symbol}' needs int, float, or a type that implements '{trait_}', found \
+                     {shown}"
+                ),
+            };
+            self.error(op.span, message);
+            self.unify(&op.result, left);
+            return true;
+        }
+        let arg_types: Vec<Ty> = right.into_iter().cloned().collect();
+        let unknown = arg_types
+            .iter()
+            .any(|arg| matches!(self.shallow(arg), Ty::Var(_)));
+        if candidates.len() > 1 && unknown && !force {
+            return false;
+        }
+        let fits = match candidates.len() {
+            1 => vec![0],
+            _ => self.fitting(&candidates, &arg_types),
+        };
+        let candidate = match fits.as_slice() {
+            [one] => candidates[*one].clone(),
+            [] => {
+                self.report_no_fit(op.operand_span, (trait_, &shown), &candidates, &arg_types);
+                self.unify(&op.result, left);
+                return true;
+            }
+            several => {
+                let texts: Vec<String> = several
+                    .iter()
+                    .map(|&i| format!("'{}'", candidates[i].text))
+                    .collect();
+                self.error(
+                    op.span,
+                    format!(
+                        "this '{symbol}' could call the '{trait_}' of any of {}, since its right \
+                         operand's type is not known",
+                        texts.join(", ")
+                    ),
+                );
+                self.unify(&op.result, left);
+                return true;
+            }
+        };
+        let params = self.candidate_params(&candidate);
+        // no name is written, so the call refers to no symbol, and renaming leaves it be
+        let unwritten = Span::empty(op.span.start).in_file(op.span.file);
+        let ret = self.call_candidate(op.span, unwritten, candidate);
+        for (param, arg) in params.iter().zip(&arg_types) {
+            self.expect(param, arg, op.operand_span);
+        }
+        self.unify(&op.result, &ret);
+        true
+    }
+
+    /// Returns whether the struct `owner` has an `impl` block of the trait `trait_`.
+    fn has_trait_impl(&self, owner: &str, trait_: &str) -> bool {
+        self.impl_args
+            .contains_key(&(trait_.to_string(), owner.to_string()))
     }
 
     /// Checks `base ** exponent` for [`Inference::solve_arithmetic`]. The exponent is an int, or
@@ -2422,7 +2665,11 @@ impl Inference {
             );
             return;
         }
-        if self.traits.contains_key(name) {
+        // a trait's name appears only in bounds and `impl` blocks, so a function may share a
+        // prelude trait's, as `fn add(a: int, b: int) -> int` does
+        if let Some(info) = self.traits.get(name)
+            && self.symbols[info.symbol].span.file != FileId::PRELUDE
+        {
             self.error(name_span, format!("'{name}' is already defined as a trait"));
             return;
         }
@@ -2902,6 +3149,13 @@ impl Inference {
         self.add_reference(trait_name.span, info.symbol);
         if (name == EQ || name == ORD || name == DISPLAY) && !self.structs.contains_key(owner) {
             self.error(owner_span, format!("{owner} already implements '{name}'"));
+            return None;
+        }
+        if OPERATOR_TRAITS.contains(&name.as_str()) && !self.structs.contains_key(owner) {
+            self.error(
+                owner_span,
+                format!("{owner}'s operators are builtin, so it cannot implement '{name}'"),
+            );
             return None;
         }
         // the arguments may name the struct's type parameters
@@ -3421,8 +3675,11 @@ impl Inference {
                 continue;
             };
             self.trait_spans.insert(stmt.span);
-            let error = if self.traits.contains_key(name) {
-                Some(format!("trait '{name}' is already defined"))
+            let error = if let Some(info) = self.traits.get(name) {
+                Some(match self.symbols[info.symbol].span.file {
+                    FileId::PRELUDE => format!("trait '{name}' is already defined by the prelude"),
+                    _ => format!("trait '{name}' is already defined"),
+                })
             } else if self.enums.contains_key(name) {
                 Some(format!("'{name}' is already defined as an enum"))
             } else if self.structs.contains_key(name) {
@@ -6043,9 +6300,23 @@ impl Inference {
     /// Returns a [`Candidate`] for each of the generic trait methods `name` of a value of
     /// `owner[type_args]`, one for each `impl` block.
     fn struct_candidates(&self, owner: &str, type_args: &[Ty], name: &str) -> Vec<Candidate> {
-        let mut keys: Vec<&String> = self.struct_methods[owner]
+        self.candidates_where(owner, type_args, |m| m.name == name)
+    }
+
+    /// Returns a [`Candidate`] for each of the methods of a value of `owner[type_args]` that
+    /// `keep` keeps, in the order their blocks are written.
+    fn candidates_where(
+        &self,
+        owner: &str,
+        type_args: &[Ty],
+        keep: impl Fn(&MethodInfo) -> bool,
+    ) -> Vec<Candidate> {
+        let Some(methods) = self.struct_methods.get(owner) else {
+            return vec![];
+        };
+        let mut keys: Vec<&String> = methods
             .iter()
-            .filter(|(_, m)| m.name == name)
+            .filter(|(_, m)| keep(m))
             .map(|(key, _)| key)
             .collect();
         // in the order the blocks are written
@@ -8759,6 +9030,7 @@ impl Inference {
                     && self.uncomparable(&ty, &mut HashSet::new()).is_none()
             }
             Ty::Int | Ty::Float | Ty::Str | Ty::Bytes if trait_ == ORD => true,
+            Ty::Int | Ty::Float if trait_ == NEG => true,
             ty => {
                 ty_key(&ty).is_some_and(|key| self.impls.contains_key(&(trait_.to_string(), key)))
             }
@@ -8788,6 +9060,12 @@ impl Inference {
                     builtin_conversion(&self.finalize(&ty), &self.finalize(&bound.args[0])) =>
             {
                 fallible == (bound.name == TRY_FROM)
+            }
+            ty if OPERATOR_TRAITS.contains(&bound.name.as_str())
+                && matches!(ty, Ty::Int | Ty::Float | Ty::Str | Ty::Bytes) =>
+            {
+                let args: Vec<Type> = bound.args.iter().map(|a| self.finalize(a)).collect();
+                builtin_operator(&self.finalize(&ty), &bound.name, &args)
             }
             ty => self.impl_for(&ty, &bound.name, &bound.args).is_some(),
         }

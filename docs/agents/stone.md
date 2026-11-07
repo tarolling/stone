@@ -315,6 +315,11 @@ impl ord for Version:
             ret self.major.cmp(other.major)
         ret self.minor.cmp(other.minor)
 
+// operators call the prelude's traits add, sub, mul, div, rem, and neg
+impl add[Version] for Version:
+    fn add(self, other: Version) -> Self:
+        ret Version(major=self.major + other.major, minor=self.minor + other.minor)
+
 fn first[T](xs: list[T]) -> T:
     ret xs[0]
 
@@ -322,11 +327,23 @@ fn greet_all[T: Named](xs: list[T]):
     for x in xs:
         print(x.greet())
 
+// int, float, str, and bytes implement add with themselves
+fn total[T: add[T]](xs: list[T], zero: T) -> T:
+    acc = zero
+    for x in xs:
+        acc += x
+    ret acc
+
 greet_all([Dog(nick="rex"), Dog(nick="fido")])
 vs = [Version(major=2, minor=0), Version(major=1, minor=5)]
 vs.sort()
 print(first(vs), first(["a", "b"]), vs[0] < vs[1])
+print(vs[0] + vs[1], total(vs, Version(major=0, minor=0)), total([1, 2], 0))
 ```
+
+An operator on a struct calls its trait's method with the left operand as `self`: `a + b` is
+`a.add(b)`, and the result is the left operand's type. The left operand picks the impl, so with
+`impl mul[float] for V:`, write `v * 2.0`, never `2.0 * v`.
 
 Inside a generic function a `T` can only be moved, stored, returned, and printed, plus the methods
 of its bounds. `[T: eq]` allows `==`, and `[T: ord]` allows `<` and `sort`. Implementing `ord`

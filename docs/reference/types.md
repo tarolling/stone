@@ -205,10 +205,10 @@ each type that keeps it, so a call through a bound calls the type's method direc
 ### Generic traits
 
 A trait may have type parameters, which its methods' signatures use, and each `impl` block gives
-them types:
+them types. The prelude's `add`, which backs `+` (see below), is one:
 
 ```stone
-trait add[R]:
+pub trait add[R]:
     fn add(self, other: R) -> Self
 
 impl add[int] for V:
@@ -227,6 +227,65 @@ arguments' types are known; a call that none fits names the blocks, as in
 `no 'add' of 'V' takes str: 'V' implements 'add[int]' and 'add[V]'`. A bound gives the trait its
 arguments, which may be other type parameters: `fn plus[T: add[U], U](x: T, y: U) -> T:` may
 call `x.add(y)`, and each call checks that its `T` implements `add` for its `U`.
+
+### Operator traits
+
+Arithmetic on a struct calls a method of one of the prelude's operator traits, with the left
+operand as `self` and the right one as `other`:
+
+| Operator | Trait | Method |
+| --- | --- | --- |
+| `a + b`, `a += b` | `add[R]` | `fn add(self, other: R) -> Self` |
+| `a - b`, `a -= b` | `sub[R]` | `fn sub(self, other: R) -> Self` |
+| `a * b`, `a *= b` | `mul[R]` | `fn mul(self, other: R) -> Self` |
+| `a / b`, `a /= b` | `div[R]` | `fn div(self, other: R) -> Self` |
+| `a % b`, `a %= b` | `rem[R]` | `fn rem(self, other: R) -> Self` |
+| `-a` | `neg` | `fn neg(self) -> Self` |
+
+```stone
+struct Vector:
+    x: float
+    y: float
+
+impl add[Vector] for Vector:
+    fn add(self, other: Vector) -> Self:
+        ret Vector(x=self.x + other.x, y=self.y + other.y)
+
+impl mul[float] for Vector:
+    fn mul(self, k: float) -> Self:
+        ret Vector(x=self.x * k, y=self.y * k)
+
+impl neg for Vector:
+    fn neg(self) -> Self:
+        ret Vector(x=-self.x, y=-self.y)
+
+v = Vector(x=1.0, y=2.0)
+print(v + v * 2.0, -v)  // Vector(x=3.0, y=6.0) Vector(x=-1.0, y=-2.0)
+```
+
+The result is always the left operand's type, so `a += b` keeps `a`'s type, and the left
+operand's type picks the impl: `v * 2.0` calls `mul[float]` of `Vector`, while `2.0 * v` is an
+error, since `float` has no `mul` that takes a `Vector`. A type implementing a trait for several
+right operands, as `mul[float]` and `mul[Vector]`, has the one the right operand's type fits.
+`**` and unary `+` stay numbers' alone.
+
+`int` and `float` implement every operator trait with their own type, and `str` and `bytes`
+implement `add` with theirs, so a bound works for numbers and strings too, which their own
+operators compute:
+
+```stone
+fn total[T: add[T]](xs: list[T], zero: T) -> T:
+    acc = zero
+    for x in xs:
+        acc += x
+    ret acc
+
+print(total([1, 2, 3], 0), total(["a", "b"], ""), total([v, v], Vector(x=0.0, y=0.0)))
+```
+
+A builtin type's operators are its own, so a program cannot implement an operator trait for
+one, and lists keep their element-by-element arithmetic. A function may still be named `add`,
+since a trait's name appears only in bounds and `impl` blocks.
 
 ### Conversions
 

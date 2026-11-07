@@ -28,6 +28,20 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `union`, `intersection`, `difference`, `is_subset`, `is_superset`, and `is_disjoint`, and the
   conversions `set(xs)` and `list(s)`. A set is a value, as lists and maps are, and compiled
   code stores it as a map whose entries hold no value.
+- Operator traits: the prelude's `add[R]`, `sub[R]`, `mul[R]`, `div[R]`, and `rem[R]` back `+`,
+  `-`, `*`, `/`, and `%` (and their `+=` forms), and `neg` backs `-x`, so
+  `impl add[Vector] for Vector:` with `fn add(self, other: Vector) -> Self` makes `a + b` work
+  on vectors, and `impl mul[float] for Vector:` makes `v * 2.0` work. The left operand's type
+  picks the impl, by the right operand's type, and the result is the left operand's type.
+  `int` and `float` implement every one with their own type, and `str` and `bytes` implement
+  `add`, so `fn total[T: add[T]](xs: list[T], zero: T) -> T` adds numbers, joins strings, and
+  adds vectors.
+
+### Changed
+
+- A program can no longer define a trait named `add`, `sub`, `mul`, `div`, `rem`, or `neg`,
+  which are now the prelude's (`trait 'add' is already defined by the prelude`). Functions
+  with those names are still fine.
 
 ## [0.4.2] - 2026-11-06
 

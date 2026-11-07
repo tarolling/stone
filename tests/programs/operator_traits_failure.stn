@@ -1,0 +1,6 @@
+// an operator through a bound fails as the builtin operation does for a number
+fn ratio[T: div[T]](a: T, b: T) -> T:
+    ret a / b
+
+print(ratio(7, 2))
+print(ratio(1, 0))

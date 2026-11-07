@@ -6,8 +6,8 @@
 //! it in place. [`live_after`] says which variables are still read after each statement, and
 //! [`last_uses`] which variables a statement uses for the last time.
 
-use crate::ast::{CompOp, Expr, ExprKind, Stmt, StmtKind, TypeExprKind, target_names};
-use crate::checker::collect_assigned;
+use crate::ast::{CompOp, Expr, ExprKind, Stmt, StmtKind, TypeExprKind, UnaryOp, target_names};
+use crate::checker::{NEG, collect_assigned, operator_trait};
 use crate::span::Span;
 use crate::stdlib::{is_builtin, prelude_method};
 use std::collections::{HashMap, HashSet};
@@ -361,7 +361,9 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Names<'a>) {
             targets.iter().for_each(|target| expr_names(target, out));
             expr_names(value, out);
         }
-        StmtKind::AugAssign { target, value, .. } => {
+        // a struct's operator calls its trait's method, named as the trait is
+        StmtKind::AugAssign { target, op, value } => {
+            out.methods.extend(operator_trait(*op, false));
             expr_names(target, out);
             expr_names(value, out);
         }
@@ -440,9 +442,18 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
             out.values.push(id);
         }
         ExprKind::Constant { .. } => {}
-        ExprKind::BinOp { left, right, .. } => {
+        // a struct's operator calls its trait's method, named as the trait is
+        ExprKind::BinOp { op, left, right } => {
+            out.methods.extend(operator_trait(*op, false));
             expr_names(left, out);
             expr_names(right, out);
+        }
+        ExprKind::UnaryOp {
+            op: UnaryOp::UnarySub,
+            operand,
+        } => {
+            out.methods.push(NEG);
+            expr_names(operand, out);
         }
         ExprKind::UnaryOp { operand, .. }
         | ExprKind::Try { value: operand }
@@ -1050,6 +1061,22 @@ mod tests {
             assert_eq!(reads[name], HashSet::from(["ws".to_string()]), "{name}");
         }
         assert!(reads["other"].is_empty());
+    }
+
+    #[test]
+    fn an_operator_reads_the_globals_its_traits_method_reads() {
+        let source = "struct V:\n    n: int\nimpl add[V] for V:\n    fn add(self, other: V) -> Self:\n        \
+                      ret V(n=ws[0])\nimpl neg for V:\n    fn neg(self) -> Self:\n        \
+                      ret V(n=ws[0])\nfn plus(v: V) -> V:\n    ret v + v\nfn grow(v: V) -> V:\n    \
+                      v += v\n    ret v\nfn flip(v: V) -> V:\n    ret -v\nfn times(v: V) -> V:\n    \
+                      ret v * v\nws = [1]\n";
+        let module = parse(source).unwrap();
+        let crate::ast::Mod::Module { body } = &module;
+        let reads = global_reads(body, &HashSet::from(["ws".to_string()]));
+        for name in ["plus", "grow", "flip"] {
+            assert_eq!(reads[name], HashSet::from(["ws".to_string()]), "{name}");
+        }
+        assert!(reads["times"].is_empty());
     }
 
     #[test]

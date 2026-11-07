@@ -1801,6 +1801,12 @@ mod tests {
                 ("eq".to_string(), vec!["eq".to_string()]),
                 ("ord".to_string(), vec!["cmp".to_string()]),
                 ("display".to_string(), vec!["display".to_string()]),
+                ("add".to_string(), vec!["add".to_string()]),
+                ("sub".to_string(), vec!["sub".to_string()]),
+                ("mul".to_string(), vec!["mul".to_string()]),
+                ("div".to_string(), vec!["div".to_string()]),
+                ("rem".to_string(), vec!["rem".to_string()]),
+                ("neg".to_string(), vec!["neg".to_string()]),
                 ("from".to_string(), vec!["from".to_string()]),
                 ("try_from".to_string(), vec!["try_from".to_string()]),
             ]

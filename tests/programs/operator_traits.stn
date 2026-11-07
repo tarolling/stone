@@ -1,0 +1,138 @@
+// arithmetic operators on structs call the prelude's operator traits, the left operand's type
+// picking the impl by the right operand's type
+struct V:
+    x: float
+    y: float
+
+impl add[V] for V:
+    fn add(self, other: V) -> Self:
+        ret V(x=self.x + other.x, y=self.y + other.y)
+
+impl sub[V] for V:
+    fn sub(self, other: V) -> Self:
+        ret V(x=self.x - other.x, y=self.y - other.y)
+
+impl mul[float] for V:
+    fn mul(self, k: float) -> Self:
+        ret V(x=self.x * k, y=self.y * k)
+
+impl mul[V] for V:
+    fn mul(self, other: V) -> Self:
+        ret V(x=self.x * other.x, y=self.y * other.y)
+
+impl div[float] for V:
+    fn div(self, k: float) -> Self:
+        ret V(x=self.x / k, y=self.y / k)
+
+impl neg for V:
+    fn neg(self) -> Self:
+        ret V(x=-self.x, y=-self.y)
+
+// a struct holding counted values, one of whose impls owns and changes its argument
+struct Words:
+    items: list[str]
+    label: str
+
+impl add[str] for Words:
+    fn add(self, word: str) -> Self:
+        items = self.items
+        items.append(word)
+        ret Words(items=items, label=self.label + "+")
+
+impl add[Words] for Words:
+    fn add(self, other: Words) -> Self:
+        other.label = self.label + other.label
+        items = self.items
+        for word in other.items:
+            items.append(word)
+        ret Words(items=items, label=other.label)
+
+// an int modulo, with an impl that reads a global
+struct Clock:
+    hour: int
+
+impl add[int] for Clock:
+    fn add(self, hours: int) -> Self:
+        ret Clock(hour=(self.hour + hours) % day)
+
+impl rem[int] for Clock:
+    fn rem(self, n: int) -> Self:
+        ret Clock(hour=self.hour % n)
+
+// a generic struct's impl
+struct Pair[T]:
+    a: T
+    b: T
+
+impl add[Pair[T]] for Pair:
+    fn add(self, other: Pair[T]) -> Self:
+        ret Pair(a=self.a, b=other.b)
+
+struct Holder:
+    pos: V
+    name: str
+
+// operators through bounds, which numbers and strings have builtin
+fn total[T: add[T]](xs: list[T], zero: T) -> T:
+    acc = zero
+    for x in xs:
+        acc += x
+    ret acc
+
+fn sum_by_method[T: add[T]](a: T, b: T) -> T:
+    ret a.add(b)
+
+fn flip[T: neg](x: T) -> T:
+    ret -x
+
+fn scale[T: mul[float]](x: T, k: float) -> T:
+    ret x * k
+
+fn first_plus[T: add[T]](xs: list[T]) -> list[T]:
+    xs[0] += xs[1]
+    ret xs
+
+// a function may be named like an operator's trait
+fn add(a: int, b: int) -> int:
+    ret a + b
+
+day = 24
+a = V(x=1.0, y=2.0)
+b = V(x=0.5, y=-1.0)
+print(a + b, a - b, a * 2.0, a * b, a / 4.0, -a)
+print(a + b * 2.0, -(a - b) + a)
+c = a
+c += b
+c *= 3.0
+print(c, a)
+vs = [a, b]
+vs[1] += a
+vs[0] = -vs[0]
+print(vs)
+h = Holder(pos=a, name="h")
+h.pos += b
+h.pos *= b
+print(h)
+m = {"k": a}
+m["k"] -= b
+print(m)
+w = Words(items=["a"], label="w")
+w2 = w + "b"
+w3 = w2 + w
+print(w, w2, w3)
+ws = [w]
+ws[0] += "c"
+ws[0] += ws[0]
+print(ws)
+clock = Clock(hour=20)
+clock += 7
+print(clock, Clock(hour=17) % 5)
+p = Pair(a="x", b="y") + Pair(a="z", b="w")
+print(p)
+print(total([a, b], V(x=0.0, y=0.0)), total([1, 2, 3], 0), total([0.5, 0.25], 0.0))
+print(total(["s", "t"], "r"), total([b"a", b"b"], b""), total([w, w], Words(items=[], label="")))
+print(sum_by_method(2, 3), sum_by_method("a", "b"), sum_by_method(a, b))
+print(flip(a), flip(3), flip(2.5))
+print(scale(a, 2.0), scale(1.5, 2.0))
+print(first_plus([a, b]), first_plus([1, 2]), first_plus(["x", "y"]))
+print(add(1, 2))

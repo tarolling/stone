@@ -168,6 +168,22 @@ impl Type {
             .collect()
     }
 
+    /// Returns whether this type names a type parameter anywhere, as `list[T]` does.
+    pub fn has_params(&self) -> bool {
+        match self {
+            Type::Param(_) => true,
+            Type::List(elem) => elem.has_params(),
+            Type::Map(key, value) => key.has_params() || value.has_params(),
+            Type::Tuple(types)
+            | Type::Enum { args: types, .. }
+            | Type::Struct { args: types, .. } => types.iter().any(Type::has_params),
+            Type::Function { params, ret } => {
+                params.iter().any(Type::has_params) || ret.has_params()
+            }
+            _ => false,
+        }
+    }
+
     /// Returns this type with each type parameter that `substitution` names replaced by its
     /// type.
     ///
@@ -629,7 +645,12 @@ impl Method {
     ///
     /// For example, `x.area()` calls `Circle.area` for a `Circle`, and `Shape.half` with
     /// `Circle` for `Self` if `Circle` keeps the default of `half`.
-    pub fn resolve(&self, ty: &Type, trait_args: &[Type]) -> Option<(String, Vec<Type>)> {
+    pub fn resolve(
+        &self,
+        ty: &Type,
+        trait_args: &[Type],
+        own: &[Type],
+    ) -> Option<(String, Vec<Type>)> {
         let Some(implementations) = &self.implementations else {
             return Some((self.function.clone(), vec![]));
         };
@@ -654,9 +675,12 @@ impl Method {
         {
             let mut copy = vec![ty.clone()];
             copy.extend(trait_args.iter().cloned());
+            copy.extend(own.iter().cloned());
             return Some((function.clone(), copy));
         }
-        Some((function.clone(), args))
+        let mut copy = args;
+        copy.extend(own.iter().cloned());
+        Some((function.clone(), copy))
     }
 }
 
@@ -676,11 +700,13 @@ pub fn type_key(ty: &Type) -> Option<&'static str> {
 pub type Methods = HashMap<Span, Method>;
 
 /// A function named as a value: its linked name, and its type as `print` writes it
-/// ([`type_text`]).
+/// ([`type_text`]). In generic code, a type that names the code's type parameters is kept
+/// too, as `ty`, so each copy can write it with its own types.
 #[derive(Debug, Clone, PartialEq)]
 pub struct FunctionValue {
     pub function: String,
     pub text: String,
+    pub ty: Option<Type>,
 }
 
 /// What running a checked program needs from its check besides the program: how each call of a
@@ -867,9 +893,11 @@ impl Analysis {
             .function_values
             .iter()
             .map(|(&span, function)| {
-                let text = self.types.get(&span).map(type_text).unwrap_or_default();
+                let ty = self.types.get(&span);
+                let text = ty.map(type_text).unwrap_or_default();
+                let ty = ty.filter(|ty| ty.has_params()).cloned();
                 let function = function.clone();
-                (span, Arc::new(FunctionValue { function, text }))
+                (span, Arc::new(FunctionValue { function, text, ty }))
             })
             .collect();
         Calls {
@@ -1352,6 +1380,8 @@ enum Held {
     Entry,
     /// A value of a generic enum, whose widest variant counts.
     Variants,
+    /// The values a closure captures, a tuple of them.
+    Captures,
 }
 
 /// A call of a generic function and the type arguments it fills the type parameters with.
@@ -2530,22 +2560,27 @@ impl Inference {
         self.declare_traits(body);
         self.declare_methods(body);
         self.find_changing_methods(body);
-        for stmt in body {
-            if let StmtKind::FunctionDef {
-                name,
-                name_span,
-                type_params,
-                args,
-                returns,
-                body,
-                ..
-            } = &stmt.kind
-            {
-                self.declare_function(name, *name_span, type_params, args, returns.as_ref());
-                self.function_spans.entry(name.clone()).or_insert(stmt.span);
-                if is_lambda(name) {
-                    let lambda = (args.clone(), body.clone(), *name_span);
-                    self.lambdas.insert(name.clone(), lambda);
+        // lambdas last, since one in generic code shares its enclosing function's type
+        // parameters
+        for lambdas in [false, true] {
+            for stmt in body {
+                if let StmtKind::FunctionDef {
+                    name,
+                    name_span,
+                    type_params,
+                    args,
+                    returns,
+                    body,
+                    ..
+                } = &stmt.kind
+                    && is_lambda(name) == lambdas
+                {
+                    self.declare_function(name, *name_span, type_params, args, returns.as_ref());
+                    self.function_spans.entry(name.clone()).or_insert(stmt.span);
+                    if lambdas {
+                        let lambda = (args.clone(), body.clone(), *name_span);
+                        self.lambdas.insert(name.clone(), lambda);
+                    }
                 }
             }
         }
@@ -2674,10 +2709,22 @@ impl Inference {
             return;
         }
         self.scope_params.clear();
-        let type_params = self.declare_type_params(name, type_params, true);
+        let lambda = is_lambda(name);
+        // a lambda in generic code is generic over its enclosing function's type parameters,
+        // which its written types may name
+        let type_params = match self.enclosing_function(name_span).filter(|_| lambda) {
+            Some(enclosing) => {
+                let params = self.functions[&enclosing].type_params.clone();
+                for &p in &params {
+                    self.scope_params
+                        .insert(self.type_params[p].name.clone(), p);
+                }
+                params
+            }
+            None => self.declare_type_params(name, type_params, true),
+        };
         let untyped = self.untyped_params.len();
         let (params, mut ret) = self.signature(args, returns, None);
-        let lambda = is_lambda(name);
         if lambda {
             // a lambda's types are inferred where it is used
             self.untyped_params.truncate(untyped);
@@ -2697,6 +2744,17 @@ impl Inference {
                 captures: args.captures,
             },
         );
+    }
+
+    /// Returns the function, not a lambda, whose definition holds the code at `span`, such as
+    /// a lambda written in it, if it is declared.
+    fn enclosing_function(&self, span: Span) -> Option<String> {
+        self.function_spans
+            .iter()
+            .filter(|(name, def)| !is_lambda(name) && def.encloses(span))
+            .map(|(name, _)| name)
+            .find(|name| self.functions.contains_key(*name))
+            .cloned()
     }
 
     /// Declares the type parameters of `owner`, a generic function, struct, or enum, adding them
@@ -2725,11 +2783,17 @@ impl Inference {
                 self.error(param.span, format!("'{name}' is already a type"));
                 continue;
             }
-            if self.scope_params.contains_key(name) {
-                self.error(
-                    param.span,
-                    format!("'{owner}' already has a type parameter '{name}'"),
-                );
+            if let Some(&outer) = self.scope_params.get(name) {
+                // a method's own parameters come after its struct's
+                let outer = &self.symbols[self.type_params[outer].symbol].scope;
+                let message = match outer.as_deref() {
+                    Some(outer) if outer != owner => format!(
+                        "'{name}' is already a type parameter of '{}'",
+                        struct_display(outer)
+                    ),
+                    _ => format!("'{owner}' already has a type parameter '{name}'"),
+                };
+                self.error(param.span, message);
                 continue;
             }
             let symbol = self.add_symbol(name, SymbolKind::TypeParam, param.span, Ty::Unit);
@@ -2864,6 +2928,7 @@ impl Inference {
     /// For example, `first` of `fn first[T](xs: list[T]) -> T:` with `str` for `T` takes a
     /// `list[str]` and gives a `str`.
     fn instantiate(&mut self, call: Span, function: &str, type_args: Vec<Ty>) -> (Vec<Ty>, Ty) {
+        let type_args = self.complete_type_args(function, type_args);
         let info = &self.functions[function];
         let (params, ret) = (info.params.clone(), info.ret.clone());
         let type_params = info.type_params.clone();
@@ -2886,6 +2951,35 @@ impl Inference {
             args: type_args,
         });
         (params, ret)
+    }
+
+    /// Returns `type_args`, the leading type arguments of a call of `function` (a method's
+    /// struct's, or a trait method's `Self` and trait arguments), with a fresh variable for each
+    /// of its type parameters after them, the method's own, which its arguments decide.
+    ///
+    /// For example, `map` of `impl Box: fn map[U](self, f: fn(T) -> U) -> Box[U]` called on a
+    /// `Box[int]` gets `[int, ?1]`.
+    fn complete_type_args(&mut self, function: &str, mut type_args: Vec<Ty>) -> Vec<Ty> {
+        let count = self
+            .functions
+            .get(function)
+            .map_or(0, |info| info.type_params.len());
+        while type_args.len() < count {
+            let fresh = self.fresh();
+            self.bound_present(&fresh);
+            type_args.push(fresh);
+        }
+        type_args
+    }
+
+    /// Returns `candidates` with their type arguments completed by
+    /// [`Inference::complete_type_args`].
+    fn complete_candidates(&mut self, mut candidates: Vec<Candidate>) -> Vec<Candidate> {
+        for candidate in &mut candidates {
+            let args = std::mem::take(&mut candidate.type_args);
+            candidate.type_args = self.complete_type_args(&candidate.function, args);
+        }
+        candidates
     }
 
     /// Returns the parameter types and return type a signature writes. In a function of the
@@ -3356,11 +3450,8 @@ impl Inference {
             .iter()
             .map(|&p| (self.type_params[p].name.clone(), p))
             .collect();
-        if let Some(param) = type_params.first() {
-            self.error(param.span, "a method cannot have type parameters for now");
-            // declared anyway, so its signature has no further errors
-            self.declare_type_params(&format!("{owner}.{name}"), type_params, false);
-        }
+        // and its own follow them, bounded as a function's may be
+        let own_params = self.declare_type_params(&format!("{owner}.{key}"), type_params, true);
         let short = struct_display(owner);
         let trait_method =
             trait_.map(|trait_| self.traits[trait_].methods.iter().any(|m| &m.name == name));
@@ -3423,7 +3514,7 @@ impl Inference {
                 name,
                 *name_span,
                 this,
-                (&params, &ret),
+                (&params, &ret, &own_params),
             );
         }
         let has_self = args.args.first().is_some_and(|arg| arg.arg == "self");
@@ -3435,7 +3526,7 @@ impl Inference {
             function.clone(),
             FunctionInfo {
                 symbol,
-                type_params: struct_params,
+                type_params: [struct_params, own_params].concat(),
                 params,
                 ret,
                 ret_written: returns.is_some(),
@@ -3473,22 +3564,63 @@ impl Inference {
         name: &str,
         name_span: Span,
         this: &Ty,
-        (params, ret): (&[Ty], &Ty),
+        (params, ret, own): (&[Ty], &Ty, &[usize]),
     ) {
         let info = &self.functions[&format!("{trait_}.{name}")];
         let (expected, expected_ret) = (info.params.clone(), info.ret.clone());
         let mut type_params = vec![self.traits[trait_].self_param];
         type_params.extend(&self.traits[trait_].params);
+        // the trait method's own type parameters, which the impl's stand for in turn
+        let trait_own = info.type_params[type_params.len()..].to_vec();
         let mut type_args = vec![this.clone()];
         type_args.extend(trait_args.iter().cloned());
+        let same_count = trait_own.len() == own.len();
+        if same_count {
+            type_params.extend(&trait_own);
+            type_args.extend(own.iter().map(|&p| Ty::Param(p)));
+        }
         let fill = |ty: &Ty| Self::substitute(ty, &type_params, &type_args);
         let same = |a: &Ty, b: &Ty| a == b || matches!(b, Ty::Var(_));
-        let matches = expected.len() == params.len()
+        let same_bounds = trait_own.iter().zip(own).all(|(&t, &i)| {
+            let filled = |bound: &TraitBound| TraitBound {
+                name: bound.name.clone(),
+                args: bound.args.iter().map(fill).collect(),
+            };
+            let expected: Vec<TraitBound> = self.type_params[t].bounds.iter().map(filled).collect();
+            let written = &self.type_params[i].bounds;
+            expected.len() == written.len() && expected.iter().all(|b| written.contains(b))
+        });
+        let matches = same_count
+            && same_bounds
+            && expected.len() == params.len()
             && expected.iter().zip(params).all(|(e, p)| same(&fill(e), p))
             && same(&fill(&expected_ret), ret);
         if matches {
             return;
         }
+        // the trait's bounds, under the impl's names when it has as many parameters
+        let names: Vec<String> = match same_count {
+            true => own
+                .iter()
+                .map(|&p| self.type_params[p].name.clone())
+                .collect(),
+            false => trait_own
+                .iter()
+                .map(|&p| self.type_params[p].name.clone())
+                .collect(),
+        };
+        let bounds: Vec<Vec<TraitBound>> = trait_own
+            .iter()
+            .map(|&t| {
+                let bounds = &self.type_params[t].bounds;
+                let filled = |b: &TraitBound| TraitBound {
+                    name: b.name.clone(),
+                    args: b.args.iter().map(fill).collect(),
+                };
+                bounds.iter().map(filled).collect()
+            })
+            .collect();
+        let own_text = self.type_params_text(&names, &bounds);
         let has_self = self.traits[trait_]
             .methods
             .iter()
@@ -3508,11 +3640,37 @@ impl Inference {
         self.error(
             name_span,
             format!(
-                "'{name}' must take and return what '{}' says, as in 'fn {name}({}){returns}'",
+                "'{name}' must take and return what '{}' says, as in \
+                 'fn {name}{own_text}({}){returns}'",
                 self.trait_text(trait_, trait_args),
                 rendered.join(", ")
             ),
         );
+    }
+
+    /// Returns how a definition writes type parameters named `names` with the `bounds` of
+    /// each after its name, or nothing if there are none.
+    ///
+    /// For example, `U` bounded by `ord` and `V` give `[U: ord, V]`.
+    fn type_params_text(&self, names: &[String], bounds: &[Vec<TraitBound>]) -> String {
+        if names.is_empty() {
+            return String::new();
+        }
+        let texts: Vec<String> = names
+            .iter()
+            .zip(bounds)
+            .map(|(name, bounds)| {
+                let bounds: Vec<String> = bounds
+                    .iter()
+                    .map(|b| self.trait_text(&b.name, &b.args))
+                    .collect();
+                match bounds.is_empty() {
+                    true => name.clone(),
+                    false => format!("{name}: {}", bounds.join(" + ")),
+                }
+            })
+            .collect();
+        format!("[{}]", texts.join(", "))
     }
 
     /// Reports each method of `trait_` without a default that the `impl` block for `owner`
@@ -3596,13 +3754,6 @@ impl Inference {
                     );
                     continue;
                 }
-                if let Some(param) = type_params.first() {
-                    self.error(
-                        param.span,
-                        "a trait's method cannot have type parameters for now",
-                    );
-                    continue;
-                }
                 let has_self = args.args.first().is_some_and(|arg| arg.arg == "self");
                 // a conversion makes a value, so it has none to be called on
                 let conversion =
@@ -3617,13 +3768,15 @@ impl Inference {
                     );
                     continue;
                 }
+                let function = format!("{owner}.{name}");
                 self.scope_params = scope.clone();
+                // a method's own type parameters come after `Self` and the trait's
+                let own_params = self.declare_type_params(&function, type_params, true);
                 let (params, ret) =
                     self.signature(args, returns.as_ref(), Some(&Ty::Param(self_param)));
                 self.scope_params.clear();
                 let symbol = self.add_symbol(name, SymbolKind::Method, *name_span, Ty::Unit);
                 self.symbols[symbol].scope = Some(owner.clone());
-                let function = format!("{owner}.{name}");
                 // a default's parameters are declared with its body, and the others' here, for
                 // editors to name
                 if body.is_empty() {
@@ -3637,7 +3790,7 @@ impl Inference {
                     function.clone(),
                     FunctionInfo {
                         symbol,
-                        type_params: [vec![self_param], trait_params.clone()].concat(),
+                        type_params: [vec![self_param], trait_params.clone(), own_params].concat(),
                         params,
                         ret,
                         ret_written: returns.is_some(),
@@ -6369,6 +6522,7 @@ impl Inference {
         args: &[Expr],
     ) -> Ty {
         let name_span = Self::attr_span(func, name);
+        let candidates = self.complete_candidates(candidates);
         // a single candidate reports its arguments' errors as any method does
         let fits = match candidates.len() {
             1 => vec![0],
@@ -6502,7 +6656,8 @@ impl Inference {
     }
 
     /// Settles a call that several candidates may have fit when it was checked.
-    fn settle_overload(&mut self, deferred: DeferredOverload) {
+    fn settle_overload(&mut self, mut deferred: DeferredOverload) {
+        deferred.candidates = self.complete_candidates(deferred.candidates);
         let arg_types: Vec<Ty> = deferred.args.iter().map(|(ty, _)| ty.clone()).collect();
         let fits = self.fitting(&deferred.candidates, &arg_types);
         let owner = (deferred.name.as_str(), deferred.owner.as_str());
@@ -7517,11 +7672,15 @@ impl Inference {
     ///
     /// For example, `double` of `fn double(x: int) -> int:` is a `fn(int) -> int`.
     fn function_value(&mut self, span: Span, id: &str, name: &str) -> Ty {
-        let (symbol, count) = {
+        let (symbol, type_params) = {
             let info = &self.functions[name];
-            (info.symbol, info.type_params.len())
+            (info.symbol, info.type_params.clone())
         };
-        let type_args = (0..count).map(|_| self.fresh()).collect();
+        // a lambda's are its enclosing function's, the same in every copy of it
+        let type_args = match is_lambda(name) {
+            true => type_params.iter().map(|&p| Ty::Param(p)).collect(),
+            false => type_params.iter().map(|_| self.fresh()).collect(),
+        };
         let (mut params, ret) = self.instantiate(span, name, type_args);
         // a closure holds the copies its lambda takes first
         params.drain(..self.functions[name].captures.min(params.len()));
@@ -8936,6 +9095,23 @@ impl Inference {
             });
             held.entry(function.clone()).or_default().extend(found);
         }
+        // and the values each closure in generic code captures
+        for (span, values) in &self.closure_values {
+            let captured = Ty::Tuple(values.iter().map(|(_, _, ty)| self.resolve(ty)).collect());
+            let mut params = vec![];
+            self.params_in(&captured, &mut params);
+            if params.is_empty() {
+                continue;
+            }
+            if let Some((function, _)) = spans
+                .iter()
+                .find(|(f, span_of)| !is_lambda(f) && span_of.encloses(*span))
+            {
+                held.entry(function.clone())
+                    .or_default()
+                    .push((captured, Held::Captures));
+            }
+        }
 
         // fill them in from each call outside a generic function's own type parameters
         let mut seen = HashSet::new();
@@ -9102,9 +9278,11 @@ impl Inference {
         if !self.traits.contains_key(trait_) {
             return None;
         }
-        let [this, trait_args @ ..] = args else {
+        let [this, rest @ ..] = args else {
             return None;
         };
+        // after the trait's type arguments come the method's own
+        let (trait_args, own) = rest.split_at(self.traits[trait_].params.len().min(rest.len()));
         let key = ty_key(this)?;
         let suffix = match trait_args {
             [] => String::new(),
@@ -9120,10 +9298,11 @@ impl Inference {
         {
             return Some((implemented.clone(), args.to_vec()));
         }
-        let type_args = match this {
+        let mut type_args = match this {
             Ty::Struct(_, type_args) => type_args.clone(),
             _ => vec![],
         };
+        type_args.extend(own.iter().cloned());
         Some((implemented.clone(), type_args))
     }
 
@@ -9196,6 +9375,10 @@ impl Inference {
                     count,
                 )
             }
+            Held::Captures => (
+                format!("the values a lambda captures, {}", self.show(ty)),
+                self.values(ty),
+            ),
         }
     }
 
@@ -9270,120 +9453,26 @@ impl Inference {
         }
     }
 
-    /// Reports what a closure cannot hold: a copy whose type depends on a type parameter, since
-    /// a lambda is not copied for each type a generic function is called with, a socket or a
-    /// listener, which closes after the last statement that uses it, and more values than one
-    /// object holds.
+    /// Reports a closure that captures more values than one object holds. One whose copies'
+    /// types depend on a type parameter is checked for each copy, in
+    /// [`Inference::check_instances`].
     ///
-    /// For example, `|y| y == x` in `fn has[T: eq](xs: list[T], x: T)` cannot capture `x`.
+    /// For example, `|x: int| b.f0 + x` cannot capture a struct `b` of 33 fields.
     fn check_closures(&mut self) {
         let mut errors = vec![];
         for (span, values) in &self.closure_values {
-            for (at, name, ty) in values {
-                let mut found = vec![];
-                self.params_in(ty, &mut found);
-                if let Some(&p) = found.first() {
-                    let param = &self.type_params[p].name;
-                    errors.push((
-                        *at,
-                        format!(
-                            "a lambda cannot capture '{name}' yet, since its type depends on the \
-                             type parameter {param}; write a function that takes '{name}' as a \
-                             parameter instead"
-                        ),
-                    ));
-                } else if self.holds_handle(ty, &mut HashSet::new()) {
-                    errors.push((
-                        *at,
-                        format!(
-                            "a lambda cannot capture '{name}', since it holds a connection, which \
-                             closes after the last statement that uses it; pass it as a parameter \
-                             instead"
-                        ),
-                    ));
-                }
-            }
+            // values of a type parameter are counted for each copy, in `check_instances`
+            let mut params = vec![];
+            values
+                .iter()
+                .for_each(|(_, _, ty)| self.params_in(ty, &mut params));
             let count: usize = values.iter().map(|(_, _, ty)| self.values(ty)).sum();
-            if count > MAX_ELEMENT_VALUES {
+            if count > MAX_ELEMENT_VALUES && params.is_empty() {
                 errors.push((
                     *span,
                     format!(
                         "a lambda can capture at most {MAX_ELEMENT_VALUES} values, but this one \
                          captures {count}; pass some as parameters instead"
-                    ),
-                ));
-            }
-        }
-        for (span, message) in errors {
-            self.error(span, message);
-        }
-    }
-
-    /// Returns whether a value of type `ty` is or holds a socket or listener anywhere, unless
-    /// `seen` shows its struct or enum was already looked through.
-    fn holds_handle(&self, ty: &Ty, seen: &mut HashSet<String>) -> bool {
-        match self.shallow(ty) {
-            Ty::Handle(_) => true,
-            Ty::List(elem) => self.holds_handle(&elem, seen),
-            Ty::Map(_, value) => self.holds_handle(&value, seen),
-            Ty::Tuple(fields) => fields.iter().any(|f| self.holds_handle(f, seen)),
-            Ty::Struct(name, args) => {
-                seen.insert(self.show(&Ty::Struct(name.clone(), args.clone())))
-                    && self
-                        .field_types(&name, &args)
-                        .iter()
-                        .any(|f| self.holds_handle(f, seen))
-            }
-            ty @ Ty::Enum(..) => {
-                seen.insert(self.show(&ty))
-                    && self
-                        .ty_variants(&ty)
-                        .unwrap_or_default()
-                        .iter()
-                        .flat_map(|(_, fields)| fields)
-                        .any(|f| self.holds_handle(f, seen))
-            }
-            _ => false,
-        }
-    }
-
-    /// Reports a function named as a value whose type depends on a type parameter, as `id` does
-    /// in `f = id` inside `fn wrap[T](x: T)`. The interpreter makes no copy of a generic
-    /// function, so it could not tell which type such a value has, which printing it writes.
-    fn check_function_values(&mut self) {
-        // a closure that captures such a value is reported for that, in `check_closures`
-        let closures: HashSet<Span> = self
-            .closure_values
-            .iter()
-            .filter(|(_, values)| {
-                values.iter().any(|(_, _, ty)| {
-                    let mut found = vec![];
-                    self.params_in(ty, &mut found);
-                    !found.is_empty()
-                })
-            })
-            .map(|(span, _)| *span)
-            .collect();
-        let mut errors = vec![];
-        for (span, id, _, ty) in &self.function_values {
-            if closures.contains(span) {
-                continue;
-            }
-            let mut found = vec![];
-            self.params_in(ty, &mut found);
-            if let Some(&p) = found.first() {
-                let (what, it, function) = match is_lambda(id) {
-                    true => ("this lambda".to_string(), "the function", "a lambda"),
-                    false => (format!("'{id}'"), "it", "a function value"),
-                };
-                errors.push((
-                    *span,
-                    format!(
-                        "{what} would be a value of type {}, which depends on the type parameter \
-                         '{}'; {function} cannot have such a type yet, so take {it} as a \
-                         parameter instead",
-                        self.show(ty),
-                        self.type_params[p].name
                     ),
                 ));
             }
@@ -9472,7 +9561,6 @@ impl Inference {
         self.check_instances();
         self.check_variant_widths();
         self.check_captured_params();
-        self.check_function_values();
         self.check_closures();
         for pending in std::mem::take(&mut self.matches) {
             self.check_cases(pending);

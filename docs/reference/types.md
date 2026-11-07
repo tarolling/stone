@@ -23,7 +23,7 @@ runs, reporting every place they conflict.
 | enums | the variants an `enum` lists, such as `Shape.Circle(1.0)`, which never change |
 | `ordering` | `less`, `equal`, or `greater`, which `cmp` returns |
 | `fn(T1, ...) -> R` | functions, such as `fn(int, list[str]) -> bool`, which are values: named, passed, stored, and called |
-| `socket`, `listener` | a TCP or Unix-socket connection, and a port waiting for connections, from the [`net` module](builtins.md#the-net-module): handles, so a copy refers to the same connection, which closes right after the last statement that uses it |
+| `socket`, `listener` | a TCP or Unix-socket connection, and a port waiting for connections, from the [`net` module](builtins.md#the-net-module): handles, so a copy refers to the same connection, which closes right after the last statement that uses it, or that uses the last closure holding it |
 
 ## Writing types
 
@@ -130,8 +130,19 @@ matching a variant gives the type filled in, so `p.first` is an `int`.
 An `impl` block of a generic struct takes no brackets: the struct's type parameters are in scope
 in all of its functions, and `self` is the struct with them, such as `Pair[A, B]`. Like a generic
 function's body, each function is checked once, with the type parameters as opaque types, and
-compiled once for each set of types it is used with. Methods cannot have type parameters of their
-own yet.
+compiled once for each set of types it is used with.
+
+A method or associated function can also have type parameters of its own, in brackets after its
+name, which come after its struct's and which each call infers, as for a generic function:
+
+```stone
+impl Pair:
+    fn with_first[C](self, c: C) -> Pair[C, B]:
+        ret Pair(first=c, second=self.second)
+```
+
+so `Pair(first=1, second="a").with_first(2.5)` is a `Pair[float, str]`. A method's own type
+parameter cannot take the name of its struct's.
 
 A generic type can hold itself, in a list or an enum as any type can, but only with the same type
 parameters: `enum Bad[T]:` with a variant `More(Bad[list[T]])` is an error, since a value could
@@ -164,8 +175,9 @@ impl Shape for Circle:
 
 A block that leaves out a method without a default, defines a function the trait does not have,
 or changes a method's signature is an error. Every method of a trait takes `self` first, except
-those of the prelude's `from` and `try_from`, and cannot have type parameters of its own for
-now. Inside a trait, `Self` is the type that
+those of the prelude's `from` and `try_from`. A trait's method may have type parameters of its
+own, with bounds, as in `fn convert[U: ord](self, u: U) -> U`, and each implementation writes
+as many, with the same bounds, under any names. Inside a trait, `Self` is the type that
 implements it, and inside any `impl` block, the block's type, as in `fn same(self, other: Self)`.
 A trait is not a type: a value always has the type of the struct or builtin type it is, and a
 function that takes any type implementing a trait has a type parameter with a bound.
@@ -196,8 +208,8 @@ In the body, a value of type `T` has the methods of those traits, and still noth
 is checked once for every type `T` could be. Two bounds with a method of the same name make a
 call of it an error. Each call checks its types against the bounds, so `total([1])` is an error
 unless `int` implements `Shape`, and a generic function passing its own `T` on must have the
-bound itself. Only a function's type parameters have bounds for now, not a struct's or an
-enum's.
+bound itself. A method's own type parameters can have bounds too, as in
+`fn smallest[U: ord](self, xs: list[U]) -> U`, but a struct's and an enum's cannot for now.
 
 The compiler makes a copy of the function for each set of types, and of each default method for
 each type that keeps it, so a call through a bound calls the type's method directly.
@@ -894,10 +906,10 @@ print(apply(double, 4), [1, 2].map(double))   // 8 [2, 4]
 
 Any expression of a function type can be called, such as a parameter, `fs[0](x)`, or a struct
 field that holds one, as `p.run(x)`. A generic function used as a value takes its types from
-where it is used. Builtins, methods, and variants are not values yet. A function value is never
-compared or used as a map key, and `print` writes it as its type, as `fn(int) -> int`. For
-now, a function named as a value inside a generic function cannot have a type that depends on
-the type parameters, such as `id` at `T`; take it as a parameter instead.
+where it is used, including inside another generic function, where `id` at `T` is a `fn(T) -> T`
+in each copy. Builtins, methods, and variants are not values yet. A function value is never
+compared or used as a map key, and `print` writes it as its type, as `fn(int) -> int`, with
+the types of the copy that made it.
 
 A lambda is a function written where it is used: its parameters between bars, then one
 expression on the same line, as `|x| x * 2`, `|a: int, b| a + b`, or `|| 1`. Its types come from
@@ -906,10 +918,12 @@ when nothing says it. A lambda is a function value like a named one.
 
 A lambda that uses variables from outside it, global or local, or the parameters of a lambda
 around it, is a closure: it holds a copy of each, taken where the lambda is written, so
-`|x| x * k` keeps the value `k` had then, whatever `k` holds later. A closure cannot change its
-copies, and cannot capture a socket or listener, or, in a generic function, a value whose type
-depends on a type parameter. Its type leaves out what it captures: `|x| x > limit` is a
-`fn(int) -> bool`.
+`|x| x * k` keeps the value `k` had then, whatever `k` holds later, and a variable its statement
+uses for the last time moves into it instead. A closure cannot change its copies. In a generic
+function it may capture a value of a type parameter, and is compiled once for each copy of the
+function, and it may capture a socket or listener, sharing the connection, which closes once
+neither the variable nor the closure will be used again. Its type leaves out what it captures:
+`|x| x > limit` is a `fn(int) -> bool`.
 
 A function never changes, so passing one copies nothing. The methods `map`, `filter`, `any`,
 `all`, `sort_by_key`, `min_by_key`, and `max_by_key` of lists take a function; see

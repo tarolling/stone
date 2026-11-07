@@ -1,0 +1,4 @@
+('tom', 1) ('tom', [2]) ('#7', 'seven')
+['cat tom:1', 'cat tom:2'] ['int 3:a']
+('tom', 1.5) ('#4', 1.5)
+(Cat(name='toms'), 's', 0) (Cat(name='tom!'), '!', true)

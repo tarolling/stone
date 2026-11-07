@@ -1503,7 +1503,7 @@ mod tests {
     fn generated_programs_use_traits() {
         let sources = compound_sources(500);
         // past the declarations, which end with the bounded function
-        let end = "    ret x.twice() + x.key()\n";
+        let end = "    ret [0].map(|z| x.twice() + z)[0] + x.key()\n";
         let uses = |feature: &str| {
             sources
                 .iter()

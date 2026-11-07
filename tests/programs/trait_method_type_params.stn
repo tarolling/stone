@@ -1,0 +1,49 @@
+// trait methods with type parameters of their own, implemented, defaulted, and through bounds
+trait tagged:
+    fn tag(self) -> str
+
+    fn with[U](self, u: U) -> tuple[str, U]
+
+    // a default that uses its own type parameter
+    fn labeled[U: display](self, xs: list[U]) -> list[str]:
+        out = []
+        for x in xs:
+            out.append("{self.tag()}:{x}")
+        ret out
+
+struct Cat:
+    name: str
+
+impl tagged for Cat:
+    fn tag(self) -> str:
+        ret "cat {self.name}"
+
+    fn with[V](self, u: V) -> tuple[str, V]:
+        ret (self.name, u)
+
+impl tagged for int:
+    fn tag(self) -> str:
+        ret "int {self}"
+
+    fn with[U](self, u: U) -> tuple[str, U]:
+        ret ("#{self}", u)
+
+// a generic trait whose method has its own parameter too
+trait combine[R]:
+    fn join[U](self, r: R, u: U) -> tuple[Self, R, U]
+
+impl combine[str] for Cat:
+    fn join[U](self, r: str, u: U) -> tuple[Cat, str, U]:
+        ret (Cat(name=self.name + r), r, u)
+
+fn describe[T: tagged](t: T) -> tuple[str, float]:
+    ret t.with(1.5)
+
+fn joined[T: combine[str]](t: T) -> tuple[T, str, bool]:
+    ret t.join("!", true)
+
+c = Cat(name="tom")
+print(c.with(1), c.with([2]), 7.with("seven"))
+print(c.labeled([1, 2]), 3.labeled(["a"]))
+print(describe(c), describe(4))
+print(c.join("s", 0), joined(c))

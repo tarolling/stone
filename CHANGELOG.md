@@ -12,6 +12,19 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Methods with type parameters of their own: `impl Box: fn map[U](self, f: fn(T) -> U) ->
+  Box[U]` comes after the struct's `T`, each call infers `U`, and associated functions
+  (`Box.wrap[U](u: U)`) and a trait's methods (`fn convert[U: ord](self, u: U) -> U`, each
+  implementation writing as many parameters with the same bounds) can have them too, bounds
+  included. Each set of types gets its own copy, as for a generic function.
+- Closures and function values in generic code: a lambda in a generic function may capture a
+  value of a type parameter, as `fn has[T: eq](xs: list[T], x: T) -> bool: ret xs.any(|y| y ==
+  x)` does, and a generic function may be named as a value there, as `xs.map(identity)`. `stone
+  build` compiles the lambda once for each copy of its function, and `print` writes the value's
+  type with that copy's types, such as `fn() -> int`.
+- A closure may capture a socket, a listener, or a `gui` window. It shares the connection, which
+  closes right after the last statement that uses either the variable or the closure, under both
+  backends.
 - `x.abs()` and `x.floor()` on ints and floats, the methods of `math.abs` and `math.floor`, with
   the same results and errors: `(-2.5).abs()` is 2.5 and `(-2.5).floor()` is -3.
 - Format specs: a `:` after a value in a string says how it is written, with Python's format
@@ -39,6 +52,8 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Changed
 
+- A variable a closure's statement uses for the last time moves into the closure instead of
+  being copied, so `ret |s: str| prefix + s` counts `prefix` once.
 - A program can no longer define a trait named `add`, `sub`, `mul`, `div`, `rem`, or `neg`,
   which are now the prelude's (`trait 'add' is already defined by the prelude`). Functions
   with those names are still fine.

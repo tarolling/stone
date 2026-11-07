@@ -14,6 +14,7 @@ use crate::checker::{
 use crate::span::Span;
 use crate::stdlib;
 use crate::stdlib::spec::FormatSpec;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -157,6 +158,9 @@ pub(super) struct Expr {
 pub(super) enum ExprKind {
     Constant(Value),
     Var(Var),
+    /// A local read for the last time, taken from its slot rather than copied, as a closure
+    /// takes what it captures there.
+    Take(Var),
     /// A function named as a value, or a closure, which holds a copy of the value of each of
     /// `captures`, taken where it is made.
     Function {
@@ -303,6 +307,9 @@ pub(super) struct Resolver<'r, 'out> {
     calls: &'r Calls,
     layout: Option<&'r Layout>,
     last_uses: &'r LastUses,
+    /// The locals a closure in the statement being resolved takes rather than copies: those it
+    /// uses for the last time and mentions only once.
+    closure_moves: Vec<String>,
 }
 
 /// The call a statement makes as its value, by span, and the variables it may take its
@@ -324,6 +331,7 @@ impl<'r, 'out> Resolver<'r, 'out> {
             calls,
             layout,
             last_uses,
+            closure_moves: Vec::new(),
         }
     }
 
@@ -348,6 +356,41 @@ impl<'r, 'out> Resolver<'r, 'out> {
         }
     }
 
+    /// Returns the locals a closure written in `stmt`, an assignment, an expression, or a
+    /// `ret`, takes rather than copies: those in `last_uses` that it mentions only once, so
+    /// nothing after the closure reads them, as lowering moves them.
+    ///
+    /// For example, in `ret |s: str| q + s`, the closure takes `q`.
+    fn closure_moves_of(&self, stmt: &ast::Stmt, last_uses: &[String]) -> Vec<String> {
+        let simple = matches!(
+            stmt.kind,
+            ast::StmtKind::Assign { .. }
+                | ast::StmtKind::Expr { .. }
+                | ast::StmtKind::Return { .. }
+        );
+        let Some(layout) = self.layout.filter(|_| simple) else {
+            return vec![];
+        };
+        let mut closures = false;
+        let mut mentions: HashMap<&str, usize> = HashMap::new();
+        for expr in stmt.exprs() {
+            expr.visit(&mut |e| match &e.kind {
+                ast::ExprKind::Closure { .. } => closures = true,
+                ast::ExprKind::Name { id, .. } => *mentions.entry(id.as_str()).or_default() += 1,
+                _ => {}
+            });
+        }
+        if !closures {
+            return vec![];
+        }
+        last_uses
+            .iter()
+            .filter(|name| mentions.get(name.as_str()) == Some(&1))
+            .filter(|name| layout.slot(name).is_some())
+            .cloned()
+            .collect()
+    }
+
     fn stmt(&mut self, stmt: &ast::Stmt) -> Stmt {
         let names = self.last_uses.get(stmt.span).cloned().unwrap_or_default();
         // a function drops only its own locals
@@ -357,7 +400,10 @@ impl<'r, 'out> Resolver<'r, 'out> {
             .filter(|name| layout.is_none_or(|layout| layout.slot(name).is_some()))
             .map(|name| self.var(name))
             .collect();
+        let moves = self.closure_moves_of(stmt, &names);
+        let outer = std::mem::replace(&mut self.closure_moves, moves);
         let kind = self.stmt_kind(stmt, &names);
+        self.closure_moves = outer;
         Stmt {
             kind,
             span: stmt.span,
@@ -716,7 +762,21 @@ impl<'r, 'out> Resolver<'r, 'out> {
                         value: function.clone(),
                         id: self.interpreter.function_id(&function.function),
                         types: self.instance(expr.span),
-                        captures: self.exprs(captures),
+                        captures: captures
+                            .iter()
+                            .map(|capture| match &capture.kind {
+                                // read for the last time, so the closure takes it
+                                ast::ExprKind::Name { id, .. }
+                                    if self.closure_moves.contains(id) =>
+                                {
+                                    Expr {
+                                        kind: ExprKind::Take(self.var(id)),
+                                        span: capture.span,
+                                    }
+                                }
+                                _ => self.expr(capture),
+                            })
+                            .collect(),
                     },
                     None => ExprKind::Fail("a closure must be checked before it runs".into()),
                 }

@@ -1572,6 +1572,38 @@ fn a_closure_holds_its_copies_and_its_code_finds_them() {
 }
 
 #[test]
+fn a_closure_takes_a_variable_at_its_last_use() {
+    let source = "fn prefixed(p: str) -> fn(str) -> str:\n    q = p + \"-\"\n    \
+                  ret |s: str| q + s\nf = prefixed(\"a\")\nprint(f(\"b\"))\n";
+    let program = lower_source(source);
+    let prefixed = program
+        .functions
+        .iter()
+        .find(|f| f.name.as_deref() == Some("prefixed"))
+        .unwrap()
+        .to_string();
+    // `q` gives its own reference to the closure, so it is neither retained nor released
+    assert!(prefixed.contains("field_init "), "{prefixed}");
+    assert!(!prefixed.contains("retain"), "{prefixed}");
+    assert_eq!(prefixed.matches("release_str").count(), 1, "{prefixed}");
+}
+
+#[test]
+fn a_closure_copies_a_variable_its_statement_reads_again() {
+    let source = "fn twice(p: str) -> list[fn(str) -> str]:\n    q = p + \"-\"\n    \
+                  ret [|s: str| q + s, |s: str| s + q]\nprint(twice(\"a\")[1](\"b\"))\n";
+    let program = lower_source(source);
+    let twice = program
+        .functions
+        .iter()
+        .find(|f| f.name.as_deref() == Some("twice"))
+        .unwrap()
+        .to_string();
+    // each closure keeps a reference of its own
+    assert_eq!(twice.matches("retain").count(), 2, "{twice}");
+}
+
+#[test]
 fn a_closure_passed_to_a_function_is_called_directly_with_its_copies() {
     let source = "fn above(xs: list[int], limit: int) -> list[int]:\n    \
                   ret xs.filter(|x| x > limit)\nprint(above([1, 5], 2))\n";

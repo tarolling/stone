@@ -1,0 +1,10 @@
+true false true
+fn() -> int fn() -> str fn() -> Cat
+3 three Cat(name='tom')
+[1, 2] ['a'] [[1.5]]
+Box(value=Box(value=1)) Box(value=Box(value='b'))
+[(1, 'x'), (2, 'x')] [('a', [true])]
+[3, 4, 5] ['b', 'c']
+[7, 7, 7] ['s', 's']
+2.5 fn() -> list[int]
+['c:1', 'c:2'] ['d:e']

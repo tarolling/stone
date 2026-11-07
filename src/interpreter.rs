@@ -7,7 +7,7 @@ mod code;
 use crate::ast::{Arg, BoolOp, CompOp, Constant, Expr, Mod, Operator, Stmt, StmtKind, UnaryOp};
 use crate::checker::{
     self, Calls, Conversion, Converter, FunctionValue, Handle, Method, Step, Type,
-    collect_assigned, place, prints_bare, struct_display,
+    collect_assigned, place, prints_bare, struct_display, type_text,
 };
 use crate::diagnostic::Diagnostic;
 use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
@@ -706,6 +706,8 @@ impl Value {
             Value::Socket(_) | Value::Listener(_) | Value::Window(_) => true,
             Value::Tuple(fields) => fields.iter().any(Value::drops_early),
             Value::Struct(value) => value.fields.iter().any(Value::drops_early),
+            // a closure that holds a connection closes it when it goes
+            Value::Function(function) => function.captures.iter().any(Value::drops_early),
             _ => false,
         }
     }
@@ -2164,13 +2166,21 @@ impl<'out> Interpreter<'out> {
                 Ok(Value::list(picked))
             }
             E::Var(var) => self.read_var(*var),
+            E::Take(var) => self.take_var(*var),
             E::Function {
                 value,
                 id,
                 types,
                 captures,
             } => Ok(Value::Function(FunctionRef {
-                value: value.clone(),
+                // in generic code, its type is written with this copy's types
+                value: match &value.ty {
+                    Some(ty) => Arc::new(FunctionValue {
+                        text: type_text(&ty.substitute(&self.types)),
+                        ..(**value).clone()
+                    }),
+                    None => value.clone(),
+                },
                 id: *id,
                 types: self.instance_types(types),
                 captures: self.eval_exprs(captures)?.into(),
@@ -3052,9 +3062,11 @@ impl<'out> Interpreter<'out> {
                 .iter()
                 .map(|a| a.substitute(&self.types))
                 .collect();
-            if let [this, trait_args @ ..] = args.as_slice()
+            // after the bound's type arguments come the method's own
+            if let [this, rest @ ..] = args.as_slice()
                 && !matches!(this, Type::Param(_))
-                && let Some((function, copy)) = method.resolve(this, trait_args)
+                && let (trait_args, own) = rest.split_at(method.trait_args.len().min(rest.len()))
+                && let Some((function, copy)) = method.resolve(this, trait_args, own)
             {
                 self.next_types = self
                     .resolved
@@ -3582,6 +3594,23 @@ impl<'out> Interpreter<'out> {
                 let name = self.var_name(var);
                 Err(format!("'{name}' is used before it is assigned").into())
             }
+        }
+    }
+
+    /// Returns the value of `var`, a local of the running function read for the last time,
+    /// leaving it unassigned, so whatever takes it holds the only reference.
+    fn take_var(&mut self, var: code::Var) -> EvalResult<Value> {
+        let taken = match var {
+            code::Var::Local(slot) => self
+                .frames
+                .last_mut()
+                .and_then(|frame| frame.slots.get_mut(slot))
+                .and_then(Option::take),
+            code::Var::Global(_) => return self.read_var(var),
+        };
+        match taken {
+            Some(value) => Ok(value),
+            None => self.read_var(var),
         }
     }
 

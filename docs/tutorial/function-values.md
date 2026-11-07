@@ -98,7 +98,11 @@ changed. A closure passed straight to a function, as `xs.filter(|x| x > limit)` 
 no more than a named function, since `stone build` passes its copies along with the other
 arguments instead of making a closure.
 
-For now, a closure cannot capture a socket or a listener, nor, inside a generic function, a value
-whose type depends on a type parameter; pass those as parameters instead.
+A closure works in generic code too: `fn has[T: eq](xs: list[T], x: T) -> bool: ret
+xs.any(|y| y == x)` captures a `T`, and `stone build` makes a copy of the lambda for each type
+`has` is called with. A closure can capture a socket or a listener as well, which it shares
+with the variable it came from: the connection closes once neither will be used again. A
+variable the closure's statement uses for the last time moves into the closure rather than
+being copied.
 
 Next, {doc}`input`.

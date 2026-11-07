@@ -1,0 +1,37 @@
+// a closure can capture a socket or a listener: it shares the connection, which closes once
+// neither the variable nor the closure will be used again
+use net
+
+fn sender(s: socket) -> fn(str) -> result[int, str]:
+    ret |text: str| s.send(text)
+
+fn through_a_closure(l: listener) -> result[str, str]:
+    c = net.connect("127.0.0.1", l.port())?
+    send = sender(l.accept()?)
+    send("one ")?
+    send("two")?
+    // nothing uses send after this, so the server's socket closes and read_all ends
+    ret c.read_all()
+
+fn port_of(l: listener) -> fn() -> int:
+    ret || l.port()
+
+fn kept(l: listener) -> result[list[str], str]:
+    c = net.connect("127.0.0.1", l.port())?
+    s = l.accept()?
+    // the closure holds a copy, so the connection stays open after s's last use
+    say = |text: str| s.send(text)
+    say("a\n")?
+    first = c.read_line()?.unwrap()
+    say("b")?
+    ret ok([first, c.read_all()?])
+
+fn generic_holder[T](x: T) -> fn() -> T:
+    ret || x
+
+l = net.listen("127.0.0.1", 0).unwrap()
+print(through_a_closure(l))
+print(port_of(l)() == l.port())
+print(kept(l))
+held = generic_holder(l)
+print(held().port() == l.port(), held)

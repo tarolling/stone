@@ -378,7 +378,8 @@ can be passed, returned, stored in lists and structs, and called: `f(x)`, `fs[0]
 inferred from where it is used (give a parameter a type when nothing else says it). A lambda may
 use the variables around it (a closure): `xs.filter(|x| x > limit)` copies `limit` where the lambda
 is written, so later changes to `limit` do not reach it, and the lambda cannot change its copy. A
-closure cannot capture a socket, a listener, or a value of a type parameter. Builtins (`print`, `str`), methods, and variants
+closure works in generic code (capturing a `T`) and may capture a socket or listener, which stays
+open while the closure may still be used. Builtins (`print`, `str`), methods, and variants
 are not values; wrap them in a function. Lists' helpers take functions: `map`, `filter`, `any`,
 `all`, `sort_by_key` (in place, stable, the key computed once per element), and `min_by_key` and
 `max_by_key` (options: the first least and the last greatest). Functions cannot be compared, and

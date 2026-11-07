@@ -1,0 +1,60 @@
+// methods and associated functions with type parameters of their own
+struct Box[T]:
+    value: T
+
+impl Box:
+    fn map[U](self, f: fn(T) -> U) -> Box[U]:
+        ret Box(value=f(self.value))
+
+    fn pair[U](self, other: U) -> tuple[T, U]:
+        ret (self.value, other)
+
+    fn wrap[U](u: U) -> Box[U]:
+        ret Box(value=u)
+
+struct Log:
+    lines: list[str]
+
+impl Log:
+    // changes self, so its call is a statement
+    fn add[U](self, value: U):
+        self.lines.append("{value}")
+
+    fn smallest[U: ord](self, xs: list[U]) -> option[U]:
+        if xs.len() == 0:
+            ret none
+        best = xs[0]
+        for x in xs:
+            best = best.min(x)
+        ret some(best)
+
+    fn single[U](u: U) -> list[U]:
+        ret [u]
+
+fn length(s: str) -> int:
+    ret s.len()
+
+b = Box(value="stone")
+print(b.map(length), b.map(|s| s + "!"))
+print(b.pair(3), b.pair([1.5]), b.map(length).pair("x"))
+print(Box.wrap(1), Box.wrap(Box.wrap("in")))
+log = Log(lines=[])
+log.add(1)
+log.add("two")
+log.add(b)
+print(log.lines)
+print(log.smallest([3, 1, 2]), log.smallest(["b", "a"]), log.smallest([0.5][1:]))
+print(Log.single(true), Log.single((1, "a")))
+
+// from generic code, the copies' types come from the caller's
+fn boxed_pair[A, B](a: A, b: B) -> tuple[A, B]:
+    ret Box.wrap(a).pair(b)
+
+fn twice(b: Box[int]) -> Box[Box[int]]:
+    ret b.map(|x| Box.wrap(x))
+
+print(boxed_pair(1, "b"), boxed_pair([true], 2.5))
+logs = [Log(lines=[]), Log(lines=["x"])]
+logs[1].add(boxed_pair(1, 2))
+print(logs)
+print(twice(Box(value=4)))

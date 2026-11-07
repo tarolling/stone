@@ -1170,22 +1170,6 @@ fn builtins_are_not_values_yet() {
 }
 
 #[test]
-fn a_function_value_in_generic_code_has_a_known_type() {
-    let source = "fn id[T](x: T) -> T:\n    ret x\n\
-                  fn wrap[T](x: T) -> T:\n    f = id\n    ret f(x)\n\
-                  fn fine[T](x: T) -> int:\n    f = len_of\n    ret f(\"ab\")\n\
-                  fn len_of(s: str) -> int:\n    ret s.len()\n\
-                  y = wrap(1)\nz = fine(1)\n";
-    assert_error(
-        source,
-        "'id' would be a value of type fn(T) -> T, which depends on the type parameter 'T'; a \
-         function value cannot have such a type yet, so take it as a parameter instead",
-        4,
-        9,
-    );
-}
-
-#[test]
 fn functions_and_builtins_cannot_be_assigned() {
     assert_error(
         "fn f() -> int:\n    ret 1\nf = 2\n",
@@ -4119,12 +4103,92 @@ fn type_parameters_are_declared_once_and_never_shadow_types() {
 }
 
 #[test]
-fn a_method_has_no_type_parameters_for_now() {
+fn a_method_can_have_type_parameters_of_its_own() {
+    let source = "struct B[T]:\n    v: T\nimpl B:\n    fn pair[U](self, u: U) -> tuple[T, U]:\n        ret (self.v, u)\n    fn wrap[U](u: U) -> B[U]:\n        ret B(v=u)\np = B(v=1).pair(\"a\")\nw = B.wrap(1.5)\n";
+    assert!(errors(source).is_empty(), "{:?}", errors(source));
+    assert_eq!(type_of_symbol(source, "p"), "tuple[int, str]");
+    assert_eq!(type_of_symbol(source, "w"), "B[float]");
+    let analysis = analyze_source(source);
+    assert_eq!(analysis.type_params["B.pair"], ["T", "U"]);
+}
+
+#[test]
+fn a_method_s_own_type_parameters_follow_the_rules_of_a_function_s() {
+    // opaque inside the body
     assert_error(
-        "struct P:\n    x: int\nimpl P:\n    fn f[T](self, t: T):\n        print(t)\n",
-        "a method cannot have type parameters for now",
+        "struct P:\n    x: int\nimpl P:\n    fn f[T](self, t: T):\n        print(t + t)\n",
+        "'+' needs 'T' to implement 'add', since 'T' may be any type; bound it, as in '[T: add[T]]'",
+        5,
+        15,
+    );
+    // its bounds are checked at the call
+    assert_error(
+        "struct P:\n    x: int\nimpl P:\n    fn f[T: ord](self, t: T) -> T:\n        ret t.max(t)\nfn g(x: int):\n    print(x)\nP(x=1).f(g)\n",
+        "'fn(int)' does not implement 'ord', which 'f' needs for 'T'",
+        8,
+        1,
+    );
+    // it cannot take the name of its struct's
+    assert_error(
+        "struct P[T]:\n    x: T\nimpl P:\n    fn f[T](self, t: T):\n        print(t)\n",
+        "'T' is already a type parameter of 'P'",
         4,
         10,
+    );
+    // it belongs to its method only
+    assert_error(
+        "struct P:\n    x: int\nimpl P:\n    fn f[T](self, t: T):\n        print(t)\n    fn g(self, t: T):\n        print(t)\n",
+        "there is no type 'T'",
+        6,
+        19,
+    );
+}
+
+#[test]
+fn a_trait_s_method_can_have_type_parameters_of_its_own() {
+    let source = "trait t:\n    fn f[U](self, u: U) -> U\nstruct A:\n    x: int\nimpl t for A:\n    fn f[V](self, v: V) -> V:\n        ret v\nfn g[T: t](x: T) -> str:\n    ret x.f(\"s\")\ny = A(x=1).f(2.5)\nz = g(A(x=1))\n";
+    assert!(errors(source).is_empty(), "{:?}", errors(source));
+    assert_eq!(type_of_symbol(source, "y"), "float");
+    let analysis = analyze_source(source);
+    assert_eq!(analysis.type_params["t.f"], ["Self", "U"]);
+    assert_eq!(analysis.type_params["A.f"], ["V"]);
+}
+
+#[test]
+fn an_implemented_method_has_the_trait_s_type_parameters_and_bounds() {
+    let trait_ =
+        "trait t:\n    fn f[U: ord](self, u: U) -> U\nstruct A:\n    x: int\nimpl t for A:\n";
+    let hint = "'f' must take and return what 't' says, as in 'fn f[U: ord](self, U) -> U'";
+    assert_error(
+        &format!("{trait_}    fn f(self, u: int) -> int:\n        ret u\nprint(A(x=1))\n"),
+        hint,
+        6,
+        8,
+    );
+    assert_error(
+        &format!("{trait_}    fn f[U](self, u: U) -> U:\n        ret u\nprint(A(x=1))\n"),
+        hint,
+        6,
+        8,
+    );
+    assert_error(
+        &format!(
+            "{trait_}    fn f[V: ord](self, v: V) -> V:\n        ret v\nprint(A(x=1).f(g))\nfn g(x: int):\n    print(x)\n"
+        ),
+        "'fn(int)' does not implement 'ord', which 'f' needs for 'V'",
+        8,
+        7,
+    );
+}
+
+#[test]
+fn a_method_cannot_call_itself_with_ever_larger_types() {
+    assert_error(
+        "struct P:\n    x: int\nimpl P:\n    fn f[T](self, t: T, n: int):\n        if n > 0:\n            self.f([t], n - 1)\nP(x=1).f(1, 3)\n",
+        "this call gives 'f' list[T] for 'T' and leads back to itself, so 'f' would need a copy \
+         for ever larger types",
+        6,
+        13,
     );
 }
 
@@ -5547,27 +5611,11 @@ fn a_lambda_cannot_change_what_it_captures() {
 }
 
 #[test]
-fn a_lambda_cannot_capture_a_value_of_a_type_parameter_yet() {
-    assert_error(
-        "fn has[T: eq](xs: list[T], x: T) -> bool:\n    ret xs.any(|y| y == x)\n",
-        "a lambda cannot capture 'x' yet, since its type depends on the type parameter T; write \
-         a function that takes 'x' as a parameter instead",
-        2,
-        25,
-    );
+fn a_lambda_can_capture_a_connection() {
+    let source = "use net\nfn f(s: listener, xs: list[int]) -> list[int]:\n    \
+                  ret xs.map(|x| x + s.port())\n";
+    assert_eq!(errors(source), []);
 }
-
-#[test]
-fn a_lambda_cannot_capture_a_connection() {
-    assert_error(
-        "use net\nfn f(s: listener, xs: list[int]) -> list[int]:\n    ret xs.map(|x| x + s.port())\n",
-        "a lambda cannot capture 's', since it holds a connection, which closes after the last \
-         statement that uses it; pass it as a parameter instead",
-        3,
-        24,
-    );
-}
-
 #[test]
 fn a_lambda_captures_at_most_thirty_two_values() {
     let fields: Vec<String> = (0..33).map(|i| format!("    f{i}: int\n")).collect();
@@ -5593,13 +5641,40 @@ fn a_lambda_s_parameter_may_share_a_global_s_name() {
 }
 
 #[test]
-fn a_lambda_cannot_depend_on_a_type_parameter_yet() {
+fn generic_code_can_name_functions_and_lambdas_as_values() {
+    let source = "fn id[T](x: T) -> T:\n    ret x\n\
+                  fn wrap[T](x: T) -> T:\n    f = id\n    ret f(x)\n\
+                  fn has[T: eq](xs: list[T], x: T) -> bool:\n    ret xs.any(|y| y == x)\n\
+                  fn same[T](xs: list[T]) -> list[T]:\n    ret xs.map(|x: T| x)\n\
+                  y = wrap(1)\nz = has([1], 2)\nw = same([\"a\"])\n";
+    assert_eq!(errors(source), []);
+    assert_eq!(type_of_symbol(source, "w"), "list[str]");
+    // a lambda shares its enclosing function's type parameters, and takes them at the closure
+    let analysis = analyze_source(source);
+    let lambda = analysis
+        .type_params
+        .keys()
+        .find(|name| name.starts_with("lambda.7."))
+        .expect("the lambda in 'has' is generic");
+    assert_eq!(analysis.type_params[lambda], ["T"]);
+}
+
+#[test]
+fn a_generic_lambda_captures_at_most_thirty_two_values_in_each_copy() {
+    let fields: Vec<String> = (0..32).map(|i| format!("    f{i}: int\n")).collect();
+    let values: Vec<String> = (0..32).map(|i| format!("f{i}=0")).collect();
+    let source = format!(
+        "struct Big:\n{}fn make[T](x: T, n: int) -> fn() -> int:\n    ret || n + [x].len()\n\
+         f = make(1, 2)\ng = make(Big({}), 2)\n",
+        fields.concat(),
+        values.join(", ")
+    );
     assert_error(
-        "fn g[T](xs: list[T]) -> list[T]:\n    ret xs.map(|x| x)\n",
-        "this lambda would be a value of type fn(T) -> T, which depends on the type parameter \
-         'T'; a lambda cannot have such a type yet, so take the function as a parameter instead",
-        2,
-        16,
+        &source,
+        "this call makes 'make' store the values a lambda captures, tuple[int, Big], which holds \
+         33 values, but at most 32 fit",
+        37,
+        5,
     );
 }
 

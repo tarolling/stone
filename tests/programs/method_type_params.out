@@ -1,0 +1,9 @@
+Box(value=5) Box(value='stone!')
+('stone', 3) ('stone', [1.5]) (5, 'x')
+Box(value=1) Box(value=Box(value='in'))
+['1', 'two', "Box(value='stone')"]
+some(1) some('a') none
+[true] [(1, 'a')]
+(1, 'b') ([true], 2.5)
+[Log(lines=[]), Log(lines=['x', '(1, 2)'])]
+Box(value=Box(value=4))

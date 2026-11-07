@@ -43,6 +43,8 @@ what it holds, so `Pair(first=1, second="one")` is a `Pair[int, str]` and `p.fir
 
 The functions of a generic struct's `impl` block use its type parameters without writing them
 again: in `impl Pair:`, `fn swap(self) -> Pair[B, A]:` returns a pair the other way around.
+A method can have type parameters of its own too, written after its name like a function's:
+`fn with_first[C](self, c: C) -> Pair[C, B]:` replaces the first value with one of any type.
 
 The compiler makes a copy of a generic function, or of a generic struct's methods, for each set
 of types the program uses it with, the way Rust does, so it runs as fast as one written for a

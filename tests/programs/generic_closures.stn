@@ -1,0 +1,69 @@
+// lambdas, closures, and function values inside generic code, one copy per set of types
+struct Box[T]:
+    value: T
+
+impl Box:
+    fn map[U](self, f: fn(T) -> U) -> Box[U]:
+        ret Box(value=f(self.value))
+
+    // a lambda capturing self, whose type is Box[T]
+    fn getter(self) -> fn() -> T:
+        ret || self.value
+
+trait tagged:
+    fn tag(self) -> str
+
+    fn tags[U: display](self, xs: list[U]) -> list[str]:
+        ret xs.map(|x| "{self.tag()}:{x}")
+
+struct Cat:
+    name: str
+
+impl tagged for Cat:
+    fn tag(self) -> str:
+        ret self.name
+
+fn has[T: eq](xs: list[T], x: T) -> bool:
+    ret xs.any(|y| y == x)
+
+fn make[T](x: T) -> fn() -> T:
+    ret || x
+
+fn identity[T](x: T) -> T:
+    ret x
+
+fn same[T](xs: list[T]) -> list[T]:
+    ret xs.map(identity)
+
+fn twice[U](b: Box[U]) -> Box[Box[U]]:
+    ret b.map(|x| Box(value=x))
+
+fn pairs[A, B](xs: list[A], b: B) -> list[tuple[A, B]]:
+    ret xs.map(|a: A| (a, b))
+
+fn above[T: ord](xs: list[T], limit: T) -> list[T]:
+    ret xs.filter(|x| x > limit)
+
+// a lambda inside a lambda, both capturing a value of a type parameter
+fn nested[T](x: T) -> fn(int) -> list[T]:
+    ret |n| range_of(n, || x)
+
+fn range_of[T](n: int, f: fn() -> T) -> list[T]:
+    out = []
+    for _ in range(n):
+        out.append(f())
+    ret out
+
+print(has([1, 2, 3], 2), has(["a"], "b"), has([Cat(name="x")], Cat(name="x")))
+f = make(3)
+g = make("three")
+h = make(Cat(name="tom"))
+print(f, g, h)
+print(f(), g(), h())
+print(same([1, 2]), same(["a"]), same([[1.5]]))
+print(twice(Box(value=1)), twice(Box(value="b")))
+print(pairs([1, 2], "x"), pairs(["a"], [true]))
+print(above([3, 1, 4, 1, 5], 2), above(["b", "a", "c"], "a"))
+print(nested(7)(3), nested("s")(2))
+print(Box(value=2.5).getter()(), Box(value=[1]).getter())
+print(Cat(name="c").tags([1, 2]), Cat(name="d").tags(["e"]))

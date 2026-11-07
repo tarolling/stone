@@ -1647,6 +1647,25 @@ fn hover_shows_a_generic_functions_type_parameters() {
 }
 
 #[test]
+fn hover_shows_a_method_s_own_type_parameters() {
+    let doc = doc(
+        "struct Box[T]:\n    v: T\nimpl Box:\n    fn map[U](self, f: fn(T) -> U) -> Box[U]:\n        ret Box(v=f(self.v))\ntrait t:\n    fn f[U: ord](self, u: U) -> U\nb = Box(v=1).map(|x| x > 0)\n",
+    );
+    assert_eq!(
+        hover_text(&doc, at(8, 14)).unwrap(),
+        "```stone\nfn Box.map[U](self, f: fn(T) -> U) -> Box[U]\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(4, 12)).unwrap(),
+        "```stone\n(type parameter) U\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(7, 8)).unwrap(),
+        "```stone\nfn t.f[U: ord](self, u: U) -> U\n```"
+    );
+}
+
+#[test]
 fn a_type_parameter_renames_everywhere_in_its_function() {
     let doc = doc(GENERIC);
     let edit = rename(&doc, &uri(), at(1, 29), "Item").unwrap();

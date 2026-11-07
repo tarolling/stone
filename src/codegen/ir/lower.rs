@@ -194,7 +194,7 @@ pub fn lower_with(
         global_set,
         handles: types
             .values()
-            .any(|ty| holds_handle(ty, structs, enums, &mut HashSet::new())),
+            .any(|ty| holds_handle(ty, (structs, enums), false, &mut HashSet::new())),
         enums,
         structs,
         methods,
@@ -226,7 +226,8 @@ pub fn lower_with(
                 args,
                 body,
                 ..
-            } if !params.is_empty() => {
+            // a lambda in generic code shares its enclosing function's type parameters
+            } if !params.is_empty() || type_params.contains_key(name) => {
                 generic.insert(name.clone(), (&args.args, body));
             }
             StmtKind::FunctionDef {
@@ -250,8 +251,9 @@ pub fn lower_with(
                     } = &method.kind
                     {
                         let function = format!("{name}.{method}");
-                        // a generic struct's methods are generic over its type parameters
-                        if type_params.contains_key(name) {
+                        // a generic struct's methods are generic over its type parameters,
+                        // and a method may have its own
+                        if type_params.contains_key(&function) {
                             generic.insert(function, (&args.args, body));
                             continue;
                         }
@@ -805,6 +807,9 @@ struct Lowerer<'a> {
     /// The variables the expression statement being lowered uses for the last time, which an
     /// `append` it makes may move into the list.
     statement_last_uses: Vec<String>,
+    /// The local variables a closure in the statement being lowered may take, rather than
+    /// copy: those it uses for the last time and mentions only once.
+    closure_moves: Vec<String>,
     /// The innermost statement or expression being lowered, which each instruction records as
     /// where a runtime error at it points.
     span: Span,
@@ -852,6 +857,7 @@ impl<'a> Lowerer<'a> {
             moved_globals: HashSet::new(),
             live_after: LiveAfter::new(),
             statement_last_uses: Vec::new(),
+            closure_moves: Vec::new(),
             place_keys: Vec::new(),
             span: Span::default(),
             held: Vec::new(),
@@ -2179,7 +2185,10 @@ impl<'a> Lowerer<'a> {
     /// precise.
     fn stmt(&mut self, stmt: &Stmt) -> Result<(), String> {
         let outer = std::mem::replace(&mut self.span, stmt.span);
+        let moves = self.closure_moves_of(stmt);
+        let outer_moves = std::mem::replace(&mut self.closure_moves, moves);
         let result = self.stmt_unspanned(stmt);
+        self.closure_moves = outer_moves;
         // a change through a map's entry may have evaluated a key to a new string
         for key in std::mem::take(&mut self.place_keys) {
             if self.current.is_some() {
@@ -2198,12 +2207,13 @@ impl<'a> Lowerer<'a> {
     /// interpreter drops it, and the other end sees it close at the same point in both backends.
     /// A variable `stmt` moved into a call is left to the callee.
     fn release_handles(&mut self, stmt: &Stmt) {
+        // a function value may be a closure that captured one, so it goes too
         let holds = |name: &str| {
             self.variable_type(variable_of(name)).is_some_and(|ty| {
                 holds_handle(
                     ty,
-                    self.context.structs,
-                    self.context.enums,
+                    (self.context.structs, self.context.enums),
+                    true,
                     &mut HashSet::new(),
                 )
             })
@@ -2260,6 +2270,40 @@ impl<'a> Lowerer<'a> {
                 }
             }
         }
+    }
+
+    /// Returns the local variables a closure written in `stmt`, an assignment, an expression, or
+    /// a `ret`, after which moved variables are cleared or not released, may take
+    /// rather than copy: ones the statement uses for the last time and mentions only once, so
+    /// nothing after the closure reads them.
+    ///
+    /// For example, in `ret |s: str| q + s`, `q` moves into the closure.
+    fn closure_moves_of(&self, stmt: &Stmt) -> Vec<String> {
+        let simple = matches!(
+            stmt.kind,
+            StmtKind::Assign { .. } | StmtKind::Expr { .. } | StmtKind::Return { .. }
+        );
+        let mut closures = false;
+        let mut mentions: HashMap<&str, usize> = HashMap::new();
+        for expr in stmt.exprs() {
+            expr.visit(&mut |e| match &e.kind {
+                ExprKind::Closure { .. } => closures = true,
+                ExprKind::Name { id, .. } => *mentions.entry(id.as_str()).or_default() += 1,
+                _ => {}
+            });
+        }
+        if !simple || !closures {
+            return vec![];
+        }
+        self.last_uses(stmt)
+            .into_iter()
+            .filter(|name| mentions.get(name.as_str()) == Some(&1))
+            .filter(|name| {
+                self.leaf_names(name)
+                    .iter()
+                    .any(|leaf| self.locals.contains_key(leaf))
+            })
+            .collect()
     }
 
     fn stmt_unspanned(&mut self, stmt: &Stmt) -> Result<(), String> {
@@ -4167,7 +4211,7 @@ impl<'a> Lowerer<'a> {
                         && !bound.captures.is_empty()
                     {
                         let (base, label, types) = (&bound.base, &bound.label, bound.captures);
-                        return self.closure_of(base, label, expr.span, types, values, into);
+                        return self.closure_of((base, label), expr.span, types, values, &[], into);
                     }
                     return self.function_value(&bound.base, &bound.label, expr.span, into);
                 }
@@ -6606,7 +6650,7 @@ impl<'a> Lowerer<'a> {
                     method.trait_args.iter().map(|a| self.fill(a)).collect();
                 // a number, a string, or a type compared part by part has the builtin method
                 if matches!(method.function.as_str(), "eq.eq" | "ord.cmp")
-                    && method.resolve(&ty, &trait_args).is_none()
+                    && method.resolve(&ty, &trait_args, &[]).is_none()
                 {
                     let name = method.function.rsplit('.').next().unwrap_or_default();
                     let value = self.method(receiver, name, args, into, kinds[0])?;
@@ -6651,7 +6695,17 @@ impl<'a> Lowerer<'a> {
         ty: &Type,
         trait_args: &[Type],
     ) -> Result<String, String> {
-        let (function, args) = method.resolve(ty, trait_args).ok_or_else(|| {
+        // the method's own type arguments come after `Self` and the bound's
+        let own: Vec<Type> = self
+            .context
+            .instances
+            .get(&call)
+            .map(|instance| {
+                let skip = (1 + trait_args.len()).min(instance.args.len());
+                instance.args[skip..].iter().map(|a| self.fill(a)).collect()
+            })
+            .unwrap_or_default();
+        let (function, args) = method.resolve(ty, trait_args, &own).ok_or_else(|| {
             format!(
                 "'{ty}' does not implement the trait of '{}'",
                 method.function
@@ -6940,21 +6994,40 @@ impl<'a> Lowerer<'a> {
         }
         let copy = self.callee_label(function, span);
         let mut values = Vec::new();
+        let mut given = Vec::new();
         for capture in captures {
-            values.extend(self.expr_flat(capture)?);
+            let flat = self.expr_flat(capture)?;
+            // a variable read here for the last time gives the closure its own references
+            let moves = matches!(&capture.kind, ExprKind::Name { id, .. }
+                if self.closure_moves.contains(id));
+            for (value, source) in flat.iter().zip(self.flat_sources(capture)) {
+                let local = source.as_ref().and_then(|s| self.locals.get(s)).copied();
+                given.push(match local {
+                    Some(local)
+                        if moves
+                            && *value == Operand::Reg(local)
+                            && self.counted_locals.iter().any(|(reg, _)| *reg == local) =>
+                    {
+                        self.moved_locals.insert(local)
+                    }
+                    _ => false,
+                });
+            }
+            values.extend(flat);
         }
-        self.closure_of(function, &copy, span, types, values, into)
+        self.closure_of((function, &copy), span, types, values, &given, into)
     }
 
     /// Makes the closure at `span` of the lambda's function `function`, whose copy is `copy`,
-    /// holding `values`, the values of copies of types `types`, as [`Lowerer::closure`] does.
+    /// holding `values`, the values of copies of types `types`, as [`Lowerer::closure`] does,
+    /// retaining each counted one but those `given` says a moved variable gave it.
     fn closure_of(
         &mut self,
-        function: &str,
-        copy: &str,
+        (function, copy): (&str, &str),
         span: Span,
         types: Vec<Type>,
         values: Vec<Operand>,
+        given: &[bool],
         into: Option<VReg>,
     ) -> Result<Operand, String> {
         let kinds: Vec<Option<RcKind>> = types
@@ -6963,9 +7036,11 @@ impl<'a> Lowerer<'a> {
             .map(|leaf| RcKind::of(&leaf))
             .collect();
         let label = self.function_code(function, copy, span, types)?;
-        // the closure keeps a reference to what it holds
-        for (&value, &kind) in values.iter().zip(&kinds) {
-            self.take(value, kind);
+        // the closure keeps a reference to what it holds, which a moved variable gave it
+        for (i, (&value, &kind)) in values.iter().zip(&kinds).enumerate() {
+            if !given.get(i).copied().unwrap_or(false) {
+                self.take(value, kind);
+            }
         }
         let code = self.fresh();
         self.push(Inst::FunctionAddress { dst: code, label });
@@ -9122,30 +9197,38 @@ fn order_routine(ty: &Type) -> &'static str {
     }
 }
 
-/// Returns whether a value of type `ty` is or holds a socket or listener, looking through lists,
-/// maps, tuples, the fields of structs, and the values of enums' variants, each struct and enum
-/// once, by its name in `seen`.
+/// Returns whether a value of type `ty` is or holds a socket, listener, or window anywhere,
+/// unless `seen` shows its struct or enum was already looked through, counting a function
+/// value as one if `functions`, since a closure may have captured one.
 ///
-/// For example, `socket`, `list[listener]`, and `option[socket]` do, and `list[str]` does not.
-fn holds_handle(ty: &Type, structs: &Structs, enums: &Enums, seen: &mut HashSet<String>) -> bool {
+/// For example, `list[socket]` holds one, and `fn(int) -> int` does if `functions`.
+fn holds_handle(
+    ty: &Type,
+    types: (&Structs, &Enums),
+    functions: bool,
+    seen: &mut HashSet<String>,
+) -> bool {
+    let (structs, enums) = types;
+    let mut holds = |ty: &Type| holds_handle(ty, types, functions, seen);
     match ty {
         Type::Handle(_) => true,
-        Type::List(elem) => holds_handle(elem, structs, enums, seen),
-        Type::Map(_, value) => holds_handle(value, structs, enums, seen),
-        Type::Tuple(fields) => fields.iter().any(|f| holds_handle(f, structs, enums, seen)),
+        Type::Function { .. } => functions,
+        Type::List(elem) => holds(elem),
+        Type::Map(_, value) => holds(value),
+        Type::Tuple(fields) => fields.iter().any(holds),
         Type::Struct { .. } => {
             seen.insert(ty.to_string())
                 && ty
                     .struct_fields(structs)
                     .iter()
-                    .any(|(_, f)| holds_handle(f, structs, enums, seen))
+                    .any(|(_, f)| holds_handle(f, types, functions, seen))
         }
         Type::Enum { .. } => {
             seen.insert(ty.to_string())
                 && variants(enums, ty)
                     .iter()
                     .flat_map(|(_, fields)| fields)
-                    .any(|f| holds_handle(f, structs, enums, seen))
+                    .any(|f| holds_handle(f, types, functions, seen))
         }
         _ => false,
     }

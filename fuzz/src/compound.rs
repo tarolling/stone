@@ -65,9 +65,10 @@ pub(crate) enum Ty {
     H(Box<Ty>),
 }
 
-/// A generic struct and enum, with methods that read, change, and make a `G`, a trait `K` that `G`
-/// implements, with a default method and a bounded function calling both, and an order on `G`s
-/// by their lengths, which a program declares first when it uses them.
+/// A generic struct and enum, with methods that read, change, and make a `G` (one with a type
+/// parameter of its own), a trait `K` that `G` implements, with default methods (one generic)
+/// and a bounded function calling both through a closure, and an order on `G`s by their lengths,
+/// which a program declares first when it uses them.
 pub(crate) const GENERIC_TYPES: &str = "\
 struct G[T]:
     v: T
@@ -83,6 +84,9 @@ impl G:
     fn wrap(x: T) -> G[T]:
         ret G(v=x, vs=[x, x])
 
+    fn sized[U](self, u: U) -> int:
+        ret [u].len() + self.vs.len() - 1
+
 enum H[T]:
     Nothing
     Just(T)
@@ -92,6 +96,8 @@ trait K:
     fn key(self) -> int
     fn twice(self) -> int:
         ret self.key() * 2
+    fn keyed_with[U](self, u: U) -> int:
+        ret [u, u].len() - 2 + self.key()
 
 impl K for G:
     fn key(self) -> int:
@@ -102,10 +108,10 @@ impl ord for G:
         ret self.vs.len().cmp(other.vs.len())
 
 fn keyed[T: K](x: T) -> int:
-    ret x.twice() + x.key()
+    ret [0].map(|z| x.twice() + z)[0] + x.key()
 
 fn bounded[T](g: G[T], n: int) -> result[int, str]:
-    if n >= g.vs.len():
+    if n >= g.sized(n):
         ret err(\"past \" + str(n))
     ret ok(n)
 
@@ -114,7 +120,7 @@ fn measured[T](g: G[T], n: int) -> result[int, str]:
     ret ok(k + g.key())
 
 fn looked_up[T](g: G[T], n: int) -> option[int]:
-    m = {0: g.key()}
+    m = {0: g.keyed_with(\"k\")}
     ret some(m.get(n)? + 1)
 
 fn plus_one(x: int) -> int:

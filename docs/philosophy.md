@@ -201,7 +201,9 @@ so is a `gui` window, which holds a connection to the display or, on Windows, a 
 Nothing asks the programmer to close one, as nothing asks them to free memory: both backends
 close it right after the last statement that uses it, the point where the interpreter drops
 the variable and compiled code releases it, so the other end sees the connection close at the
-same moment under `stone run` and in a built program. `close()` closes one sooner.
+same moment under `stone run` and in a built program. A closure that captured one holds a copy,
+so the connection stays open until the closure, too, is used for the last time. `close()` closes
+one sooner.
 
 ## Fast like Rust
 
@@ -239,8 +241,8 @@ The trigonometric functions of `math` are expanded inline at each call, from the
 interpreter runs, so both give the same bits, and the compiler computes each value once, a sine
 and a cosine of the same value with one reduction, so the `trig` benchmark runs about 15% faster
 than C calling glibc.
-A generic function, or a method of a generic struct, is compiled once for each set of types it is
-used with, so its copies are as fast as functions written for each type, and a generic struct is
+A generic function, or a method of a generic struct or one with type parameters of its own, is
+compiled once for each set of types it is used with, so its copies are as fast as functions written for each type, and a generic struct is
 flattened like any other. A call through a trait's bound is a direct call in each copy, and a
 trait's default method is compiled once for each type that keeps it. A conversion `T(x)` is a
 direct call of its impl, or the builtin conversion's own instructions, in each copy, while the
@@ -259,8 +261,9 @@ does, and `xs.map(|x| x * 2)` calls it directly. A lambda that uses variables fr
 a closure, which with value semantics captures copies of them where it is written, so no closure
 ever shares a variable; one passed straight to a function, as `xs.filter(|x| x > limit)`, is
 still called directly, its copies passed with the other arguments. A closure kept as a value is
-one object holding its code's address and its copies, counted like any other. Closures cannot
-yet capture connections or, in a generic function, values of a type parameter.
+one object holding its code's address and its copies, counted like any other, and a variable
+used for the last time where the closure is made moves into it rather than being counted twice.
+A closure in a generic function is compiled once for each copy of the function, like a call.
 Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
 as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
 that does not hold itself in registers, as tuples are, is future work.

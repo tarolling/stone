@@ -1186,8 +1186,10 @@ fn format_specs_write_what_python_writes() {
     }
     let script = std::env::temp_dir().join("stone_format_specs.py");
     std::fs::write(&script, &python).unwrap();
+    // Windows' python writes a pipe in the ANSI code page unless told otherwise
     let expected = Command::new("python3")
         .arg(&script)
+        .env("PYTHONIOENCODING", "utf-8")
         .output()
         .expect("python3 should run");
     assert!(expected.status.success(), "{expected:?}");

@@ -8,6 +8,7 @@
 *.env -text
 *.stderr -text
 **/*.files/** -text
+tests/testing/report.txt -text
 
 # a Windows checkout keeps \n in sources too, which the formatter and the docs tests compare
 *.stn text eol=lf

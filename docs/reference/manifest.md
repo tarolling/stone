@@ -12,7 +12,7 @@ version = "0.1.0"
 stone = "0.4"
 
 [dependencies]
-json = { github = "alice/stone-json", version = "1.2.0" }
+csv = { github = "alice/stone-csv", version = "1.2.0" }
 num = { gitlab = "bob/num", version = "0.3" }
 geo = { path = "../geo" }
 ```
@@ -31,14 +31,14 @@ error, as is a key one of them does not hold, so a misspelling is caught.
 | `license` | a string | Its license, as an SPDX expression such as `MIT` or `Apache-2.0`. |
 
 A **stone name** is made of ASCII letters, digits, and `_`, does not start with a digit, and is
-not a keyword. A `-` is not allowed, so the package in a repository `stone-json` is named
-something like `json` or `stone_json`.
+not a keyword. A `-` is not allowed, so the package in a repository `stone-csv` is named
+something like `csv` or `stone_json`.
 
 ## [dependencies]
 
-Each key is a dependency's name, which the package's files write in `use` (`use json`,
-`use json.encode`). Besides being a stone name, it cannot be a builtin module (`os`, `math`,
-`net`, ...), `prelude`, or a builtin (`print`, `some`, ...), and it cannot also be a module or
+Each key is a dependency's name, which the package's files write in `use` (`use csv`,
+`use csv.encode`). Besides being a stone name, it cannot be a builtin module (`os`, `math`,
+`json`, ...), `prelude`, or a builtin (`print`, `some`, ...), and it cannot also be a module or
 directory of the package. Its value is an inline table that says where it comes from:
 
 | form | where it comes from |
@@ -83,8 +83,8 @@ package from a host that the program uses, sorted:
 ```toml
 # written by stone: the hash of what each package downloaded held
 [[package]]
-name = "json"
-github = "alice/stone-json"
+name = "csv"
+github = "alice/stone-csv"
 version = "1.2.0"
 hash = "sha256:4f1c..."
 ```
@@ -101,7 +101,7 @@ Downloaded packages are kept in `$STONE_HOME/packages` if `STONE_HOME` is set, a
 
 ```text
 ~/.stone/packages/
-  github.com/alice/stone-json/1.2.0/
+  github.com/alice/stone-csv/1.2.0/
   gitlab.com/bob/num/0.3.0/
 ```
 

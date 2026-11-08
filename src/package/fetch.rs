@@ -433,18 +433,18 @@ mod tests {
         let dir = scratch("keeps");
         let data = archive(&[
             (
-                "alice-json-abc123/stone.toml",
-                "[package]\nname = \"json\"\n",
+                "alice-mime-abc123/stone.toml",
+                "[package]\nname = \"mime\"\n",
             ),
             (
-                "alice-json-abc123/lib.stn",
+                "alice-mime-abc123/lib.stn",
                 "pub fn one() -> int:\n    ret 1\n",
             ),
             (
-                "alice-json-abc123/sub/two.stn",
+                "alice-mime-abc123/sub/two.stn",
                 "pub fn two() -> int:\n    ret 2\n",
             ),
-            ("alice-json-abc123/README.md", "# json\n"),
+            ("alice-mime-abc123/README.md", "# mime\n"),
         ]);
         let target = dir.join("1.0.0");
         unpack(&data, &target).unwrap();

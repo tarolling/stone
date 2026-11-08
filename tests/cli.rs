@@ -1350,6 +1350,161 @@ fn format_specs_write_what_python_writes() {
     }
 }
 
+/// Writes a random JSON value of at most `depth` more levels into `out`, with whitespace, escapes,
+/// and number forms that `json.parse` and Python's `json.loads` read alike: no integer past 64
+/// bits, no float that overflows, no `\u0000`, and no lone surrogate, which stone refuses.
+fn random_json(state: &mut u64, depth: u32, out: &mut String) {
+    let space = |state: &mut u64, out: &mut String| {
+        for _ in 0..xorshift(state) % 3 {
+            out.push([' ', '\t', ' '][(xorshift(state) % 3) as usize]);
+        }
+    };
+    space(state, out);
+    let kind = xorshift(state) % if depth == 0 { 5 } else { 7 };
+    match kind {
+        0 => out.push_str(["null", "true", "false"][(xorshift(state) % 3) as usize]),
+        1 => {
+            let random = xorshift(state);
+            let value = match random % 4 {
+                0 => random as i64,
+                1 => i64::MIN,
+                2 => i64::MAX,
+                _ => (random % 2001) as i64 - 1000,
+            };
+            out.push_str(&value.to_string());
+        }
+        2 => {
+            let random = xorshift(state);
+            let value = match random % 3 {
+                0 => f64::from_bits(xorshift(state)),
+                1 => (random % 100_000) as f64 / 64.0 - 700.0,
+                _ => 10f64.powi((random % 600) as i32 - 300),
+            };
+            if !value.is_finite() {
+                out.push_str("-0.0");
+            } else if random.is_multiple_of(2) {
+                out.push_str(&format!("{value:e}"));
+            } else {
+                out.push_str(&format!("{value:?}"));
+            }
+        }
+        3 => out.push_str(
+            ["1e2", "-0", "0.5E-3", "12E+3", "-1.25e-400"][(xorshift(state) % 5) as usize],
+        ),
+        4 => {
+            out.push('"');
+            for _ in 0..xorshift(state) % 10 {
+                let pieces = [
+                    "a",
+                    "Z",
+                    " ",
+                    "é",
+                    "日本",
+                    "😀",
+                    "\\n",
+                    "\\\"",
+                    "\\\\",
+                    "\\/",
+                    "\\t",
+                    "\\b",
+                    "\\f",
+                    "\\r",
+                    "\\u0001",
+                    "\\u001f",
+                    "\\u00e9",
+                    "\\u65e5",
+                    "\\ud83d\\ude00",
+                    "\\uFFFF",
+                    "\u{7f}",
+                    "{",
+                    "}",
+                ];
+                out.push_str(pieces[(xorshift(state) % pieces.len() as u64) as usize]);
+            }
+            out.push('"');
+        }
+        5 => {
+            out.push('[');
+            let count = xorshift(state) % 5;
+            for i in 0..count {
+                if i > 0 {
+                    out.push(',');
+                }
+                random_json(state, depth - 1, out);
+            }
+            space(state, out);
+            out.push(']');
+        }
+        _ => {
+            out.push('{');
+            let count = xorshift(state) % 5;
+            for i in 0..count {
+                if i > 0 {
+                    out.push(',');
+                }
+                space(state, out);
+                // few keys, so that some repeat
+                let key =
+                    ["a", "b", "key", "é", "\\u0041", "\\n", ""][(xorshift(state) % 7) as usize];
+                out.push_str(&format!("\"{key}\""));
+                space(state, out);
+                out.push(':');
+                random_json(state, depth - 1, out);
+            }
+            space(state, out);
+            out.push('}');
+        }
+    }
+    space(state, out);
+}
+
+#[test]
+fn json_reads_and_writes_what_python_does() {
+    if Command::new("python3").arg("--version").output().is_err() {
+        eprintln!("skipping: python3 is not on PATH");
+        return;
+    }
+    let mut state = 0x9e37_79b9_7f4a_7c15;
+    let documents: Vec<String> = (0..300)
+        .map(|_| {
+            let mut text = String::new();
+            random_json(&mut state, 4, &mut text);
+            text
+        })
+        .collect();
+    let documents = documents.join("\n") + "\n";
+    let python = "import json, sys\n\
+                  for line in open('documents.txt', encoding='utf-8').read().splitlines():\n    \
+                  v = json.loads(line)\n    \
+                  print(json.dumps(v, separators=(',', ':'), ensure_ascii=False))\n    \
+                  print(json.dumps(v, indent=2, ensure_ascii=False))\n";
+    let source = "use fs\nuse json\n\
+                  for line in fs.read(\"documents.txt\").unwrap().splitlines():\n    \
+                  v = json.parse(line).unwrap()\n    \
+                  print(json.write(v))\n    \
+                  print(json.pretty(v, 2))\n";
+    let (dir, [run, built]) = run_and_build_with("json_differential", source, |dir| {
+        std::fs::write(dir.join("documents.txt"), &documents).unwrap();
+        std::fs::write(dir.join("expected.py"), python).unwrap();
+    });
+    let expected = Command::new("python3")
+        .arg("expected.py")
+        .current_dir(&dir)
+        .env("PYTHONIOENCODING", "utf-8")
+        .output()
+        .expect("python3 should run");
+    assert!(expected.status.success(), "{expected:?}");
+    let expected = String::from_utf8_lossy(&expected.stdout);
+    for output in [run, built] {
+        assert!(output.status.success(), "{output:?}");
+        let actual = String::from_utf8_lossy(&output.stdout);
+        for (line, (want, got)) in expected.lines().zip(actual.lines()).enumerate() {
+            assert_eq!(got, want, "line {}", line + 1);
+        }
+        assert_eq!(actual.lines().count(), expected.lines().count());
+    }
+}
+
 /// Returns the type of every program header of the ELF executable `bytes`, such as 3 for
 /// `PT_INTERP`, which names the dynamic loader a program needs.
 fn program_header_types(bytes: &[u8]) -> Vec<u32> {
@@ -1963,17 +2118,17 @@ fn a_package_from_the_store_runs_and_is_locked() {
     let dir = project(
         "package_store",
         &[
-            ("app/main.stn", "use json\nprint(json.v())\n"),
+            ("app/main.stn", "use mime\nprint(mime.v())\n"),
             (
                 "app/stone.toml",
-                "[dependencies]\njson = { github = \"alice/json\", version = \"1.2\" }\n",
+                "[dependencies]\nmime = { github = \"alice/mime\", version = \"1.2\" }\n",
             ),
             (
-                "home/packages/github.com/alice/json/1.2.0/stone.toml",
-                "[package]\nname = \"json\"\nversion = \"1.2.0\"\n",
+                "home/packages/github.com/alice/mime/1.2.0/stone.toml",
+                "[package]\nname = \"mime\"\nversion = \"1.2.0\"\n",
             ),
             (
-                "home/packages/github.com/alice/json/1.2.0/lib.stn",
+                "home/packages/github.com/alice/mime/1.2.0/lib.stn",
                 "pub fn v() -> str:\n    ret \"1.2.0\"\n",
             ),
         ],
@@ -1990,11 +2145,11 @@ fn a_package_from_the_store_runs_and_is_locked() {
     assert_eq!(String::from_utf8_lossy(&output.stderr), "");
     assert_eq!(String::from_utf8_lossy(&output.stdout), "1.2.0\n");
     let lock = std::fs::read_to_string(dir.join("app/stone.lock")).expect("lock written");
-    assert!(lock.contains("name = \"json\"\ngithub = \"alice/json\"\nversion = \"1.2.0\"\n"));
+    assert!(lock.contains("name = \"mime\"\ngithub = \"alice/mime\"\nversion = \"1.2.0\"\n"));
 
     // a changed release no longer matches the lock
     std::fs::write(
-        dir.join("home/packages/github.com/alice/json/1.2.0/lib.stn"),
+        dir.join("home/packages/github.com/alice/mime/1.2.0/lib.stn"),
         "pub fn v() -> str:\n    ret \"changed\"\n",
     )
     .unwrap();
@@ -2002,7 +2157,7 @@ fn a_package_from_the_store_runs_and_is_locked() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("error: json 1.2.0 (github:alice/json) does not hold what it held"),
+        stderr.contains("error: mime 1.2.0 (github:alice/mime) does not hold what it held"),
         "{stderr}"
     );
     assert_eq!(

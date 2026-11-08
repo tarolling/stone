@@ -12,6 +12,25 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- A builtin `json` module, written in stone: `json.parse(text)` reads strict JSON (RFC 8259)
+  into a `json.value`, an enum of `null`, `boolean`, `integer`, `number`, `text`, `array`, and
+  `object`, with errors that say what is wrong and at which line and column, and
+  `json.write(v)` and `json.pretty(v, indent)` write what Python's `json.dumps` writes. Neither
+  recurses, so values nested any number of levels deep are read and written, and reading shares
+  one string among repeated keys. `json.get` and `json.at` read an object's value or an array's
+  item as an option. A package dependency can no longer be named `json`.
+- `s += t` and `s = s + a + b` on a string or bytes now write onto the string in place when
+  nothing else refers to it, in both backends, so building text in a loop takes linear time
+  instead of quadratic.
+
+### Changed
+
+- Compiled maps of at most eight entries keep no hash index, and find a key by comparing the
+  keys in turn, so small maps take less memory and are faster to build and read. Adding an
+  entry to a map reserves its slots at once.
+- Compiled code reads a byte of `bytes` (`b[i]`, and `for x in b`) inline instead of through a
+  call, and checks a nonnegative index once against the length.
+
 - An x86-64 Windows program built with `--gpu` now runs its arithmetic on lists on an NVIDIA
   GPU. It carries the PTX for each GPU it was built for, plus the machine code when `ptxas` is
   there, and loads NVIDIA's `nvcuda.dll` from the system directory only when it runs. It picks

@@ -1486,6 +1486,35 @@ fn a_file_cannot_take_the_net_modules_name() {
 }
 
 #[test]
+fn json_is_a_module_of_stone_source_that_any_program_can_use() {
+    assert_eq!(
+        output(&[("main.stn", "use json\nprint(json.parse)\n")]),
+        "fn(str) -> result[value, str]\n"
+    );
+    assert_eq!(
+        output(&[(
+            "main.stn",
+            "use json.value\nfn f(v: value) -> bool:\n    ret v == value.null\nprint(f(value.null))\n"
+        )]),
+        "true\n"
+    );
+}
+
+#[test]
+fn a_file_cannot_take_the_json_modules_name() {
+    assert_error(
+        &[
+            ("main.stn", "use json\n"),
+            ("json.stn", "pub fn f() -> int:\n    ret 0\n"),
+        ],
+        "main.stn",
+        "'json' is a builtin module, so rename json.stn",
+        1,
+        5,
+    );
+}
+
+#[test]
 fn only_stones_own_modules_can_use_net_sys() {
     assert_error(
         &[("main.stn", "use net_sys\n")],
@@ -2127,15 +2156,15 @@ fn stored_sources(files: &[(&str, &str)]) -> MapSources {
     sources
 }
 
-/// The files of `version` of the package `json` from `github:alice/json` in the store, whose
+/// The files of `version` of the package `mime` from `github:alice/mime` in the store, whose
 /// `lib.stn` has `pub fn v() -> str` giving the version, plus `extra` dependencies in its
 /// manifest.
-fn stored_json(version: &str, extra: &str) -> Vec<(String, String)> {
-    let dir = format!("store/github.com/alice/json/{version}");
+fn stored_mime(version: &str, extra: &str) -> Vec<(String, String)> {
+    let dir = format!("store/github.com/alice/mime/{version}");
     vec![
         (
             format!("{dir}/stone.toml"),
-            format!("[package]\nname = \"json\"\nversion = \"{version}\"\n{extra}"),
+            format!("[package]\nname = \"mime\"\nversion = \"{version}\"\n{extra}"),
         ),
         (
             format!("{dir}/lib.stn"),
@@ -2186,13 +2215,13 @@ fn owned(files: &[(&str, &str)]) -> Vec<(String, String)> {
 
 const USES_JSON: (&str, &str) = (
     "stone.toml",
-    "[dependencies]\njson = { github = \"alice/json\", version = \"1.2\" }\n",
+    "[dependencies]\nmime = { github = \"alice/mime\", version = \"1.2\" }\n",
 );
 
 #[test]
 fn a_package_from_a_host_is_read_from_the_store_and_locked() {
-    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
-    files.extend(stored_json("1.2.0", ""));
+    let mut files = owned(&[("main.stn", "use mime\nprint(mime.v())\n"), USES_JSON]);
+    files.extend(stored_mime("1.2.0", ""));
     let (printed, written) = stored_run(&files);
     assert_eq!(printed, "1.2.0\n");
     let [(path, lock)] = written.as_slice() else {
@@ -2208,7 +2237,7 @@ fn a_package_from_a_host_is_read_from_the_store_and_locked() {
             entry.source.to_string(),
             entry.version.to_string()
         ),
-        ("json", "github:alice/json".to_string(), "1.2.0".to_string())
+        ("mime", "github:alice/mime".to_string(), "1.2.0".to_string())
     );
 
     // with the lock written, linking again writes nothing
@@ -2222,36 +2251,36 @@ fn the_newest_version_any_package_needs_is_used() {
     let mut files = owned(&[
         (
             "main.stn",
-            "use json\nuse geo\nprint(json.v())\nprint(geo.v())\n",
+            "use mime\nuse geo\nprint(mime.v())\nprint(geo.v())\n",
         ),
         (
             "stone.toml",
-            "[dependencies]\njson = { github = \"alice/json\", version = \"1.2\" }\n\
+            "[dependencies]\nmime = { github = \"alice/mime\", version = \"1.2\" }\n\
              geo = { path = \"../geo\" }\n",
         ),
         (
             "../geo/stone.toml",
             "[package]\nname = \"geo\"\n\n[dependencies]\n\
-             j = { github = \"alice/json\", version = \"1.3.0\" }\n",
+             j = { github = \"alice/mime\", version = \"1.3.0\" }\n",
         ),
         (
             "../geo/lib.stn",
             "use j\npub fn v() -> str:\n    ret j.v()\n",
         ),
     ]);
-    files.extend(stored_json("1.2.0", ""));
-    files.extend(stored_json("1.3.0", ""));
-    files.extend(stored_json("1.9.0", ""));
+    files.extend(stored_mime("1.2.0", ""));
+    files.extend(stored_mime("1.3.0", ""));
+    files.extend(stored_mime("1.9.0", ""));
     assert_eq!(stored_run(&files).0, "1.3.0\n1.3.0\n");
 }
 
 #[test]
 fn a_package_that_is_not_downloaded_is_an_error_where_it_is_named() {
-    let files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    let files = owned(&[("main.stn", "use mime\nprint(mime.v())\n"), USES_JSON]);
     let (printed, written) = stored_run(&files);
     assert!(
         printed
-            .starts_with("stone.toml:2:1: error: json 1.2.0 (github:alice/json) is not downloaded"),
+            .starts_with("stone.toml:2:1: error: mime 1.2.0 (github:alice/mime) is not downloaded"),
         "{printed}"
     );
     assert_eq!(written, []);
@@ -2270,18 +2299,18 @@ fn a_use_of_a_package_that_is_not_downloaded_is_noted_for_editors() {
     let sources = stored_sources(&[USES_JSON]);
     let linked = link(
         Path::new("main.stn"),
-        "use json\nprint(json.v())\n",
+        "use mime\nprint(mime.v())\n",
         &sources,
     );
     // the program's errors say it once, where the manifest names the package
     assert_eq!(
         first_lines(&linked, &linked.diagnostics),
-        ["stone.toml:2:1: error: json 1.2.0 (github:alice/json) is not downloaded"]
+        ["stone.toml:2:1: error: mime 1.2.0 (github:alice/mime) is not downloaded"]
     );
     assert_eq!(
         first_lines(&linked, &linked.unavailable),
         [
-            "main.stn:1:5: error: 'json' cannot be used: json 1.2.0 (github:alice/json) is not \
+            "main.stn:1:5: error: 'mime' cannot be used: mime 1.2.0 (github:alice/mime) is not \
              downloaded; run `stone fetch`"
         ]
     );
@@ -2366,20 +2395,20 @@ fn shown_names_leave_out_compatibility_classes() {
 
 #[test]
 fn a_package_whose_files_changed_does_not_match_its_lock() {
-    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
-    files.extend(stored_json("1.2.0", ""));
+    let mut files = owned(&[("main.stn", "use mime\nprint(mime.v())\n"), USES_JSON]);
+    files.extend(stored_mime("1.2.0", ""));
     let wrong = format!("sha256:{}", "0".repeat(64));
     files.push((
         "stone.lock".into(),
         format!(
-            "[[package]]\nname = \"json\"\ngithub = \"alice/json\"\nversion = \"1.2.0\"\n\
+            "[[package]]\nname = \"mime\"\ngithub = \"alice/mime\"\nversion = \"1.2.0\"\n\
              hash = \"{wrong}\"\n"
         ),
     ));
     let (printed, written) = stored_run(&files);
     assert!(
         printed.starts_with(&format!(
-            "stone.lock:5:8: error: json 1.2.0 (github:alice/json) does not hold what it held \
+            "stone.lock:5:8: error: mime 1.2.0 (github:alice/mime) does not hold what it held \
              when it was locked: its hash was {wrong}, and is now sha256:"
         )),
         "{printed}"
@@ -2389,19 +2418,19 @@ fn a_package_whose_files_changed_does_not_match_its_lock() {
 
 #[test]
 fn a_package_from_a_host_must_be_the_version_it_was_released_as() {
-    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
+    let mut files = owned(&[("main.stn", "use mime\nprint(mime.v())\n"), USES_JSON]);
     files.push((
-        "store/github.com/alice/json/1.2.0/stone.toml".into(),
-        "[package]\nname = \"json\"\nversion = \"1.1.0\"\n".into(),
+        "store/github.com/alice/mime/1.2.0/stone.toml".into(),
+        "[package]\nname = \"mime\"\nversion = \"1.1.0\"\n".into(),
     ));
     files.push((
-        "store/github.com/alice/json/1.2.0/lib.stn".into(),
+        "store/github.com/alice/mime/1.2.0/lib.stn".into(),
         "pub fn v() -> str:\n    ret \"1.1.0\"\n".into(),
     ));
     let (printed, _) = stored_run(&files);
     assert!(
         printed.starts_with(
-            "store/github.com/alice/json/1.2.0/stone.toml:3:11: error: this package says it is \
+            "store/github.com/alice/mime/1.2.0/stone.toml:3:11: error: this package says it is \
              version 1.1.0, but it was released as 1.2.0"
         ),
         "{printed}"
@@ -2410,15 +2439,15 @@ fn a_package_from_a_host_must_be_the_version_it_was_released_as() {
 
 #[test]
 fn a_package_from_a_host_cannot_use_a_directory() {
-    let mut files = owned(&[("main.stn", "use json\nprint(json.v())\n"), USES_JSON]);
-    files.extend(stored_json(
+    let mut files = owned(&[("main.stn", "use mime\nprint(mime.v())\n"), USES_JSON]);
+    files.extend(stored_mime(
         "1.2.0",
         "\n[dependencies]\nnum = { path = \"../num\" }\n",
     ));
     let (printed, _) = stored_run(&files);
     assert!(
         printed.starts_with(
-            "store/github.com/alice/json/1.2.0/stone.toml:6:1: error: a package from a host \
+            "store/github.com/alice/mime/1.2.0/stone.toml:6:1: error: a package from a host \
              cannot use a directory, since the directory is not part of its release"
         ),
         "{printed}"
@@ -2430,7 +2459,7 @@ fn packages_from_hosts_need_a_store() {
     assert_error(
         &[("main.stn", "print(1)\n"), USES_JSON],
         "stone.toml",
-        "json 1.2.0 (github:alice/json) cannot be downloaded, since there is no directory to \
+        "mime 1.2.0 (github:alice/mime) cannot be downloaded, since there is no directory to \
          keep packages in; set STONE_HOME",
         2,
         1,

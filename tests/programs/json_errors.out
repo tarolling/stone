@@ -1,0 +1,32 @@
+expected a value at line 1, column 4
+expected ',' or ']' at line 1, column 4
+expected a string key at line 1, column 9
+expected ':' at line 1, column 6
+expected a string key at line 1, column 2
+expected ',' or '}' at line 1, column 9
+expected the end of the text at line 1, column 2
+unexpected end of input at line 1, column 2
+unexpected end of input at line 1, column 3
+invalid number at line 1, column 3
+unexpected end of input at line 1, column 3
+expected a value at line 1, column 1
+expected a value at line 1, column 1
+expected a value at line 1, column 1
+expected a value at line 1, column 1
+expected a value at line 1, column 1
+expected a value at line 1, column 1
+unexpected end of input at line 1, column 5
+control character in a string at line 1, column 3
+invalid escape at line 1, column 2
+invalid \u escape at line 1, column 2
+lone surrogate in a string at line 1, column 2
+lone surrogate in a string at line 1, column 2
+lone surrogate in a string at line 1, column 2
+\u0000 cannot be in a stone string at line 1, column 2
+expected the end of the text at line 1, column 5
+expected the end of the text at line 1, column 5
+unexpected end of input at line 1, column 4
+expected a value at line 1, column 1
+expected a value at line 1, column 1
+err('expected a value at line 3, column 3')
+err('unexpected end of input at line 1, column 1')

@@ -10,7 +10,7 @@
 //!
 //! [dependencies]
 //! geo = { path = "../geo" }
-//! json = { github = "alice/stone-json", version = "1.2.0" }
+//! mime = { github = "alice/stone-mime", version = "1.2.0" }
 //! ```
 //!
 //! With that, `use geo.shapes` loads `shapes.stn` from the `geo` package's directory, and
@@ -81,7 +81,7 @@ pub enum Source {
 }
 
 impl fmt::Display for Source {
-    /// Writes the source as `stone add` reads it, such as `github:alice/json`.
+    /// Writes the source as `stone add` reads it, such as `github:alice/mime`.
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Source::GitHub { host: None, repo } => write!(f, "github:{repo}"),
@@ -459,7 +459,7 @@ mod tests {
         let manifest = read(
             "[package]\nname = \"app\"\nversion = \"0.1\"\n\n[dependencies]\n\
              geo = { path = \"../geo\" }\n\
-             json = { github = \"alice/stone-json\", version = \"1.2.0\" }\n\
+             mime = { github = \"alice/stone-mime\", version = \"1.2.0\" }\n\
              http = { gitlab = \"group/sub/http\", version = \"0.4\", host = \"git.corp.com\" }\n",
         );
         assert_eq!(manifest.name.unwrap().0, "app");
@@ -480,8 +480,8 @@ mod tests {
             [
                 ("geo".into(), "path:../geo".into(), None),
                 (
-                    "json".into(),
-                    "github:alice/stone-json".into(),
+                    "mime".into(),
+                    "github:alice/stone-mime".into(),
                     Some("1.2.0".into())
                 ),
                 (
@@ -537,31 +537,31 @@ mod tests {
     #[test]
     fn dependency_errors_explain_the_forms() {
         assert_eq!(
-            message("[dependencies]\njson = \"1.0\"\n"),
+            message("[dependencies]\nmime = \"1.0\"\n"),
             "write the dependency as { github = \"owner/repo\", version = \"1.0.0\" }, \
-             { gitlab = \"group/project\", version = \"1.0.0\" }, or { path = \"../json\" }"
+             { gitlab = \"group/project\", version = \"1.0.0\" }, or { path = \"../mime\" }"
         );
         assert_eq!(
-            message("[dependencies]\njson = { github = \"alice/json\" }\n"),
+            message("[dependencies]\nmime = { github = \"alice/mime\" }\n"),
             "a dependency from a host gives the oldest version it works with, as \
              version = \"1.0.0\""
         );
         assert_eq!(
-            message("[dependencies]\njson = { github = \"json\", version = \"1\" }\n"),
+            message("[dependencies]\nmime = { github = \"mime\", version = \"1\" }\n"),
             "a GitHub repository is written as 'owner/repo'"
         );
         assert_eq!(
-            message("[dependencies]\njson = { path = \"../json\", version = \"1\" }\n"),
+            message("[dependencies]\nmime = { path = \"../mime\", version = \"1\" }\n"),
             "a path dependency uses the directory as it is, so it has no version"
         );
         assert_eq!(
             message(
-                "[dependencies]\njson = { path = \"../json\", github = \"a/b\", version = \"1\" }\n"
+                "[dependencies]\nmime = { path = \"../mime\", github = \"a/b\", version = \"1\" }\n"
             ),
             "a dependency comes from one place, so give one of github, gitlab, and path"
         );
         assert_eq!(
-            message("[dependencies]\njson = { version = \"1\" }\n"),
+            message("[dependencies]\nmime = { version = \"1\" }\n"),
             "a dependency names where it comes from with github, gitlab, or path"
         );
         assert_eq!(

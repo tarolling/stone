@@ -1,0 +1,53 @@
+// maps of a few entries have no index until they grow past eight, which no program can see
+fn word(n: int) -> str:
+    // a new string each time, so equal keys are different strings
+    ret "key" + str(n)
+
+fn grow(m: map[str, int], n: int) -> map[str, int]:
+    for i in range(n):
+        m[word(i)] = i * i
+    ret m
+
+for size in [0, 1, 7, 8, 9, 20]:
+    m = grow({}, size)
+    found = 0
+    for i in range(size + 2):
+        if word(i) in m:
+            found += m[word(i)]
+    print(size, m.len(), found, m.get(word(size - 1)), m.get("missing"))
+
+// replacing a value keeps the entry where it is
+m = {"a": 1, "b": 2, "c": 3}
+m["b"] = 20
+m[word(1)] = 5
+m[word(1)] += 1
+print(m)
+// removing from a small map, then adding back
+first = m.pop("a")
+nothing = m.pop("zz")
+print(first, nothing, m)
+m["a"] = 100
+print(m, m.len())
+// a copy is changed on its own
+n = m
+n["d"] = 4
+print(m.len(), n.len(), m == n)
+n.pop("d")
+print(m == n, n == m)
+// a small map equals an indexed one with the same entries
+big = grow({}, 12)
+small = grow({}, 12)
+for i in range(4, 12):
+    big.pop(word(i))
+    small.pop(word(i))
+print(big == grow({}, 4), small.len(), small == big)
+// int and bool keys
+ints = {3: "c", 1: "a", 2: "b"}
+ints[1] = "A"
+flags = {true: 1, false: 0}
+print(ints, ints[1], 4 in ints, flags[true], flags)
+// sets are maps without values
+s = {"x", "y"}
+s.add("x")
+s.add(word(2))
+print(s, "key2" in s, s.len())

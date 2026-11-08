@@ -69,9 +69,10 @@ functions.
 
 ## Builtin modules
 
-`os`, `math`, `random`, `time`, `fs`, `net`, and `gui` are builtin modules, so `use math`,
-`use math.sqrt`, and `use math as m` work in any file without a `math.stn`. The first five have
-no file, and `net` and `gui` are written in stone and linked with a program that uses them. A program cannot have
+`os`, `math`, `random`, `time`, `fs`, `net`, `gui`, and `json` are builtin modules, so
+`use math`, `use math.sqrt`, and `use math as m` work in any file without a `math.stn`. The first
+five have no file, and `net`, `gui`, and `json` are written in stone and linked with a program
+that uses them. A program cannot have
 a module of its own with one of those names: using it is the error
 `'math' is a builtin module, so rename math.stn`. `prelude` is taken too, since the functions of
 stone's prelude are linked as if in a module of that name. See [the builtins](builtins.md) for
@@ -86,6 +87,7 @@ their functions:
 | [`fs`](builtins.md#the-fs-module) | reading and writing files and directories |
 | [`net`](builtins.md#the-net-module) | TCP and Unix-socket connections, and finding hosts' addresses |
 | [`gui`](builtins.md#the-gui-module) | drawing pictures and showing them in windows |
+| [`json`](builtins.md#the-json-module) | reading and writing JSON text |
 
 A builtin module's functions are only reachable through it, so a program can still name its
 own variables and functions `min`, `max`, `sleep`, or `env`.

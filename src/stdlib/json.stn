@@ -1,0 +1,574 @@
+// The builtin `json` module, which a program that says `use json` is linked with: reading JSON
+// text into values and writing values as JSON text.
+//
+// `json.parse` reads text as RFC 8259 defines it, strictly: no comments, trailing commas, single
+// quotes, leading zeros, `NaN`, or `Infinity`. A number without a fraction or exponent that fits
+// in 64 bits is an `integer`, and any other number a `number`. An object keeps its keys in the
+// order they first appear, and a key written twice keeps its last value, as Python's `json`
+// does. `json.write` and `json.pretty` write what Python's `json.dumps` writes, with
+// `ensure_ascii=False`: text outside ASCII is written as it is.
+//
+// Neither reads nor writes through recursion, so values nested as deeply as memory allows are
+// fine.
+
+// A JSON value: `null`, `true` or `false`, a number, a string, an array, or an object.
+pub enum value:
+    null
+    boolean(bool)
+    integer(int)
+    number(float)
+    text(str)
+    array(list[value])
+    object(map[str, value])
+
+////////////////////////////////////////////////////////////////
+// reading
+////////////////////////////////////////////////////////////////
+
+// Reads `source` as one JSON value, or gives an error that says what is wrong and where, as
+// `expected ',' or ']' at line 3, column 7`.
+pub fn parse(source: str) -> result[value, str]:
+    b = source.bytes()
+    n = b.len()
+    // the container being read, if `depth` is above 0: an object if `in_object`, whose entries
+    // so far are in `entries` and whose value being read is for `key`, and otherwise an array,
+    // whose items so far are in `items`
+    depth = 0
+    in_object = false
+    items = []
+    entries = {}
+    key = ""
+    // the containers around it, innermost last: whether each is an object, and each object's
+    // entries and key or each array's items
+    outer = []
+    arrays = []
+    maps = []
+    keys = []
+    // the keys read so far by a hash of their bytes, so that a key read again shares the string
+    // read first, as objects of one shape repeat the same keys
+    memo = {}
+    want_key = false
+    i = space(b, 0)
+    while true:
+        if want_key:
+            // read a key and its colon before the value
+            want_key = false
+            if i < n and b[i] <= 32:
+                i = space(b, i)
+            if i >= n or b[i] != 34:
+                ret err(failure(source, i, "expected a string key"))
+            start = i + 1
+            j = start
+            h = 0
+            while j < n:
+                c = b[j]
+                if c == 34 or c == 92 or c < 32:
+                    break
+                h = h * 31 + c
+                j += 1
+            if j < n and b[j] == 34:
+                key = ""
+                shared = false
+                match memo.get(h):
+                    case some(seen):
+                        shared = same(b, start, j, seen)
+                        if shared:
+                            key = seen
+                    case none:
+                        shared = false
+                if not shared:
+                    key = source[start:j]
+                    if memo.len() < 4096:
+                        memo[h] = key
+                i = j + 1
+            else:
+                found = string_at(source, b, i)?
+                key = found[0]
+                i = found[1]
+            if i < n and b[i] <= 32:
+                i = space(b, i)
+            if i >= n or b[i] != 58:
+                ret err(failure(source, i, "expected ':'"))
+            i += 1
+            if i < n and b[i] <= 32:
+                i = space(b, i)
+        // read one value at i, or open a container and read its first value next
+        if i >= n:
+            ret err(failure(source, i, "expected a value"))
+        c = b[i]
+        v = value.null
+        if c == 34:
+            found = string_at(source, b, i)?
+            v = value.text(found[0])
+            i = found[1]
+        elif c == 123 or c == 91:
+            i += 1
+            if i < n and b[i] <= 32:
+                i = space(b, i)
+            if c == 123 and i < n and b[i] == 125:
+                v = value.object({})
+                i += 1
+            elif c == 91 and i < n and b[i] == 93:
+                v = value.array([])
+                i += 1
+            else:
+                if depth > 0:
+                    outer.append(in_object)
+                    if in_object:
+                        maps.append(entries)
+                        keys.append(key)
+                    else:
+                        arrays.append(items)
+                depth += 1
+                in_object = c == 123
+                if in_object:
+                    entries = {}
+                    want_key = true
+                else:
+                    items = []
+                cont
+        elif c == 45 or (c >= 48 and c <= 57):
+            number = number_at(source, b, i)?
+            v = number[0]
+            i = number[1]
+        elif c == 116 and word(b, i, b"true"):
+            v = value.boolean(true)
+            i += 4
+        elif c == 102 and word(b, i, b"false"):
+            v = value.boolean(false)
+            i += 5
+        elif c == 110 and word(b, i, b"null"):
+            i += 4
+        else:
+            ret err(failure(source, i, "expected a value"))
+        // put the value in its container, closing each container it finishes
+        while true:
+            if i < n and b[i] <= 32:
+                i = space(b, i)
+            if depth == 0:
+                if i < n:
+                    ret err(failure(source, i, "expected the end of the text"))
+                ret ok(v)
+            if in_object:
+                entries[key] = v
+                if i < n and b[i] == 44:
+                    i += 1
+                    want_key = true
+                    break
+                if i >= n or b[i] != 125:
+                    ret err(failure(source, i, "expected ',' or '}}'"))
+                v = value.object(entries)
+            else:
+                items.append(v)
+                if i < n and b[i] == 44:
+                    i += 1
+                    if i < n and b[i] <= 32:
+                        i = space(b, i)
+                    break
+                if i >= n or b[i] != 93:
+                    ret err(failure(source, i, "expected ',' or ']'"))
+                v = value.array(items)
+            // the container is done, and the one around it is read again
+            i += 1
+            depth -= 1
+            if depth > 0:
+                in_object = outer.pop().unwrap()
+                if in_object:
+                    entries = maps.pop().unwrap()
+                    key = keys.pop().unwrap()
+                else:
+                    items = arrays.pop().unwrap()
+    ret ok(value.null)
+
+// Returns whether the bytes of `b` from `start` up to `end` are those of `s`.
+fn same(b: bytes, start: int, end: int, s: str) -> bool:
+    t = s.bytes()
+    if t.len() != end - start:
+        ret false
+    for k in range(t.len()):
+        if b[start + k] != t[k]:
+            ret false
+    ret true
+
+// Returns where the first byte at or after `i` that is not JSON whitespace is.
+fn space(b: bytes, i: int) -> int:
+    n = b.len()
+    while i < n:
+        c = b[i]
+        if c != 32 and c != 10 and c != 13 and c != 9:
+            ret i
+        i += 1
+    ret n
+
+// Returns whether the bytes of `w` are at `i` in `b`.
+fn word(b: bytes, i: int, w: bytes) -> bool:
+    if i + w.len() > b.len():
+        ret false
+    for k in range(w.len()):
+        if b[i + k] != w[k]:
+            ret false
+    ret true
+
+// Reads the string whose opening quote is at `i`, giving its text and where it ends.
+fn string_at(source: str, b: bytes, i: int) -> result[tuple[str, int], str]:
+    n = b.len()
+    start = i + 1
+    j = start
+    // most strings hold no escape, and are one copy of the source
+    while j < n:
+        c = b[j]
+        if c == 34:
+            ret ok((source[start:j], j + 1))
+        if c == 92 or c < 32:
+            break
+        j += 1
+    pieces = []
+    while j < n:
+        c = b[j]
+        if c == 34:
+            pieces.append(source[start:j])
+            ret ok(("".join(pieces), j + 1))
+        if c < 32:
+            ret err(failure(source, j, "control character in a string"))
+        if c != 92:
+            j += 1
+            cont
+        pieces.append(source[start:j])
+        if j + 1 >= n:
+            break
+        e = b[j + 1]
+        start = j + 2
+        if e == 34:
+            pieces.append("\"")
+        elif e == 92:
+            pieces.append("\\")
+        elif e == 47:
+            pieces.append("/")
+        elif e == 98:
+            pieces.append("\x08")
+        elif e == 102:
+            pieces.append("\x0c")
+        elif e == 110:
+            pieces.append("\n")
+        elif e == 114:
+            pieces.append("\r")
+        elif e == 116:
+            pieces.append("\t")
+        elif e == 117:
+            code = hex4(b, j + 2)
+            if code < 0:
+                ret err(failure(source, j, "invalid \\u escape"))
+            start = j + 6
+            if code >= 55296 and code < 57344:
+                // a surrogate, which must be the first of a pair
+                low = -1
+                if code < 56320 and word(b, j + 6, b"\\u"):
+                    low = hex4(b, j + 8)
+                if low < 56320 or low >= 57344:
+                    ret err(failure(source, j, "lone surrogate in a string"))
+                code = 65536 + (code - 55296) * 1024 + (low - 56320)
+                start = j + 12
+            if code == 0:
+                ret err(failure(source, j, "\\u0000 cannot be in a stone string"))
+            pieces.append(character(code))
+        else:
+            ret err(failure(source, j, "invalid escape"))
+        j = start
+    ret err(failure(source, n, "unterminated string"))
+
+// Returns the value of the four hexadecimal digits at `i`, or -1 if they are not there.
+fn hex4(b: bytes, i: int) -> int:
+    if i + 4 > b.len():
+        ret -1
+    code = 0
+    for k in range(4):
+        c = b[i + k]
+        d = -1
+        if c >= 48 and c <= 57:
+            d = c - 48
+        elif c >= 97 and c <= 102:
+            d = c - 87
+        elif c >= 65 and c <= 70:
+            d = c - 55
+        if d < 0:
+            ret -1
+        code = code * 16 + d
+    ret code
+
+// Returns the character whose code point is `code`, which is neither 0 nor a surrogate.
+fn character(code: int) -> str:
+    units = [code]
+    if code >= 65536:
+        units = [240 + code / 262144, 128 + code / 4096 % 64, 128 + code / 64 % 64, 128 + code % 64]
+    elif code >= 2048:
+        units = [224 + code / 4096, 128 + code / 64 % 64, 128 + code % 64]
+    elif code >= 128:
+        units = [192 + code / 64, 128 + code % 64]
+    ret bytes(units).unwrap().text().unwrap()
+
+// Reads the number at `i`, giving it and where it ends.
+fn number_at(source: str, b: bytes, i: int) -> result[tuple[value, int], str]:
+    n = b.len()
+    start = i
+    negative = b[i] == 45
+    if negative:
+        i += 1
+    if i >= n or b[i] < 48 or b[i] > 57:
+        ret err(failure(source, i, "invalid number"))
+    // the digits add up as a negative number, which reaches the most negative int too; 18 of
+    // them always fit, so only a longer number checks each step
+    whole = 0
+    fits = true
+    if b[i] == 48:
+        i += 1
+    else:
+        first = i
+        while i < n and b[i] >= 48 and b[i] <= 57:
+            whole = whole * 10 - (b[i] - 48)
+            i += 1
+            if i - first == 18:
+                break
+        while i < n and b[i] >= 48 and b[i] <= 57:
+            d = b[i] - 48
+            if whole < (-9223372036854775807 - 1 + d) / 10:
+                fits = false
+            elif fits:
+                whole = whole * 10 - d
+            i += 1
+    exact = true
+    if i < n and b[i] == 46:
+        exact = false
+        i += 1
+        if i >= n or b[i] < 48 or b[i] > 57:
+            ret err(failure(source, i, "invalid number"))
+        while i < n and b[i] >= 48 and b[i] <= 57:
+            i += 1
+    if i < n and (b[i] == 101 or b[i] == 69):
+        exact = false
+        i += 1
+        if i < n and (b[i] == 43 or b[i] == 45):
+            i += 1
+        if i >= n or b[i] < 48 or b[i] > 57:
+            ret err(failure(source, i, "invalid number"))
+        while i < n and b[i] >= 48 and b[i] <= 57:
+            i += 1
+    if exact and fits:
+        if negative:
+            ret ok((value.integer(whole), i))
+        if whole != -9223372036854775807 - 1:
+            ret ok((value.integer(-whole), i))
+    match float(source[start:i]):
+        case ok(x):
+            ret ok((value.number(x), i))
+        case err(_):
+            ret err(failure(source, start, "invalid number"))
+
+// Returns the error `what` at byte `at` of `source`, as `what at line L, column C`, columns
+// counting characters, or `unexpected end of input at ...` past the end.
+fn failure(source: str, at: int, what: str) -> str:
+    b = source.bytes()
+    line = 1
+    column = 1
+    end = at
+    if end > b.len():
+        end = b.len()
+    for k in range(end):
+        c = b[k]
+        if c == 10:
+            line += 1
+            column = 1
+        elif c < 128 or c >= 192:
+            column += 1
+    if at >= b.len():
+        what = "unexpected end of input"
+    ret "{what} at line {line}, column {column}"
+
+////////////////////////////////////////////////////////////////
+// writing
+////////////////////////////////////////////////////////////////
+
+// Writes `v` as compact JSON text, as Python's `json.dumps(v, separators=(",", ":"))` does.
+// A float that is nan or infinite, which JSON cannot write, is written as `null`.
+pub fn write(v: value) -> str:
+    ret written(v, -1)
+
+// Writes `v` as JSON text with each array item and object entry on a line of its own, indented
+// by `indent` spaces per level, as Python's `json.dumps(v, indent=indent)` does.
+pub fn pretty(v: value, indent: int) -> str:
+    if indent < 0:
+        indent = 0
+    ret written(v, indent)
+
+// Writes `v`, compactly if `indent` is -1 and otherwise indented by it.
+fn written(v: value, indent: int) -> str:
+    out = ""
+    // what ends a key: its quote and a colon
+    colon = "\":"
+    if indent >= 0:
+        colon = "\": "
+    // the containers open around the value being written, innermost last, with the position of
+    // the value being written in each
+    objects = []
+    arrays = []
+    pairs = []
+    positions = []
+    while true:
+        // write one value, or open a container and write its first value next
+        opened = false
+        match v:
+            case value.null:
+                out += "null"
+            case value.boolean(truth):
+                if truth:
+                    out += "true"
+                else:
+                    out += "false"
+            case value.integer(whole):
+                out += str(whole)
+            case value.number(x):
+                if x - x == 0.0:
+                    out += str(x)
+                else:
+                    out += "null"
+            case value.text(s):
+                out += "\""
+                out = escaped(out, s)
+                out += "\""
+            case value.array(xs):
+                if xs.len() == 0:
+                    out += "[]"
+                else:
+                    out += "["
+                    objects.append(false)
+                    arrays.append(xs)
+                    positions.append(0)
+                    opened = true
+            case value.object(m):
+                if m.len() == 0:
+                    out += "{{}}"
+                else:
+                    out += "{{"
+                    objects.append(true)
+                    pairs.append(m.items())
+                    positions.append(0)
+                    opened = true
+        // find the next value, closing each container that is done
+        while true:
+            depth = objects.len()
+            if depth == 0:
+                ret out
+            at = positions[depth - 1]
+            if opened:
+                opened = false
+            else:
+                at += 1
+                positions[depth - 1] = at
+            if objects[depth - 1]:
+                entries = pairs[pairs.len() - 1]
+                if at < entries.len():
+                    if indent >= 0:
+                        if at > 0:
+                            out += ","
+                        out = line(out, indent, depth)
+                        out += "\""
+                    elif at > 0:
+                        out += ",\""
+                    else:
+                        out += "\""
+                    entry = entries[at]
+                    out = escaped(out, entry[0])
+                    out += colon
+                    v = entry[1]
+                    break
+                objects.pop()
+                pairs.pop()
+                positions.pop()
+                if indent >= 0:
+                    out = line(out, indent, depth - 1)
+                out += "}}"
+            else:
+                items = arrays[arrays.len() - 1]
+                if at < items.len():
+                    if at > 0:
+                        out += ","
+                    if indent >= 0:
+                        out = line(out, indent, depth)
+                    v = items[at]
+                    break
+                objects.pop()
+                arrays.pop()
+                positions.pop()
+                if indent >= 0:
+                    out = line(out, indent, depth - 1)
+                out += "]"
+    ret out
+
+// Starts a new line of `out` indented `indent` spaces for each of `depth` levels.
+fn line(out: str, indent: int, depth: int) -> str:
+    out += "\n"
+    for _k in range(indent * depth):
+        out += " "
+    ret out
+
+// Writes the text of `s` onto `out` as a JSON string holds it, escaping what Python's `json`
+// escapes, without the quotes around it.
+fn escaped(out: str, s: str) -> str:
+    b = s.bytes()
+    n = b.len()
+    start = 0
+    for j in range(n):
+        c = b[j]
+        if c != 34 and c != 92 and c >= 32:
+            cont
+        if start < j:
+            out += s[start:j]
+        start = j + 1
+        if c == 34:
+            out += "\\\""
+        elif c == 92:
+            out += "\\\\"
+        elif c == 10:
+            out += "\\n"
+        elif c == 13:
+            out += "\\r"
+        elif c == 9:
+            out += "\\t"
+        elif c == 8:
+            out += "\\b"
+        elif c == 12:
+            out += "\\f"
+        else:
+            digits = "0123456789abcdef"
+            out += "\\u00"
+            out += digits[c / 16]
+            out += digits[c % 16]
+    if start == 0:
+        out += s
+    elif start < n:
+        out += s[start:n]
+    ret out
+
+////////////////////////////////////////////////////////////////
+// reading values
+////////////////////////////////////////////////////////////////
+
+// Gives the value of `key` in `v`, or `none` if `v` is not an object or has no such key.
+pub fn get(v: value, key: str) -> option[value]:
+    match v:
+        case value.object(m):
+            ret m.get(key)
+        case _:
+            ret none
+
+// Gives the item at `index` of `v`, counting a negative index from the end, or `none` if `v` is
+// not an array or has no such item.
+pub fn at(v: value, index: int) -> option[value]:
+    match v:
+        case value.array(xs):
+            if index < 0:
+                index += xs.len()
+            if index >= 0 and index < xs.len():
+                ret some(xs[index])
+            ret none
+        case _:
+            ret none

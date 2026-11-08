@@ -14,8 +14,6 @@ use crate::stdlib::gui::MAX_SCALED;
 ///   after those in `rsi`, byte by byte as unsigned numbers, the shorter first if one starts the
 ///   other
 /// - `stone.bytes_find` returns where the bytes in `rsi` first appear in `rdi`, or -1
-/// - `stone.bytes_at` returns the byte at position `rsi` of `rdi` as an int, which the caller
-///   checked is in range
 /// - `stone.bytes_slice_of` returns the bytes the slice from `rsi` to `rdx` by `rcx` picks from
 ///   `rdi`, with the missing bounds in `r8`, as `stone.str_slice_of` takes them: `rdi` itself,
 ///   retained, if that is all of them, and otherwise new bytes
@@ -112,11 +110,6 @@ pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tret");
         r#gen.emit(".Lbytes_find_none:");
         r#gen.emit("\tmov\trax, -1");
-        r#gen.emit("\tret");
-    }
-    if uses("stone.bytes_at") {
-        r#gen.emit("stone.bytes_at:");
-        r#gen.emit("\tmovzx\teax, byte ptr [rdi + rsi]");
         r#gen.emit("\tret");
     }
     if uses("stone.bytes_slice_of") {

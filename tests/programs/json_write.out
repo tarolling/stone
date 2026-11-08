@@ -1,0 +1,56 @@
+{"name":"stone","version":1,"ratio":0.5,"big":1e+22,"small":1e-07,"whole":3.0,"negative zero":-0.0,"flags":[true,false,null],"empty":[],"none":{},"nested":[[-1],{"k":"v"}]}
+{
+  "name": "stone",
+  "version": 1,
+  "ratio": 0.5,
+  "big": 1e+22,
+  "small": 1e-07,
+  "whole": 3.0,
+  "negative zero": -0.0,
+  "flags": [
+    true,
+    false,
+    null
+  ],
+  "empty": [],
+  "none": {},
+  "nested": [
+    [
+      -1
+    ],
+    {
+      "k": "v"
+    }
+  ]
+}
+{
+"name": "stone",
+"version": 1,
+"ratio": 0.5,
+"big": 1e+22,
+"small": 1e-07,
+"whole": 3.0,
+"negative zero": -0.0,
+"flags": [
+true,
+false,
+null
+],
+"empty": [],
+"none": {},
+"nested": [
+[
+-1
+],
+{
+"k": "v"
+}
+]
+}
+[
+    1
+]
+7
+""
+true
+[null,null,null]

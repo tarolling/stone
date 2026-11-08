@@ -6,8 +6,8 @@
 //! integers, booleans, arrays (which may span lines), and inline tables. Every key and value keeps
 //! its span, so errors point at the text, and `stone add` can edit a manifest in place.
 //!
-//! For example, reading `[dependencies]\njson = { github = "alice/json", version = "1.2.0" }\n`
-//! gives a table with one entry, `dependencies`, whose table has one entry, `json`.
+//! For example, reading `[dependencies]\nmime = { github = "alice/mime", version = "1.2.0" }\n`
+//! gives a table with one entry, `dependencies`, whose table has one entry, `mime`.
 
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
@@ -580,13 +580,13 @@ mod tests {
     fn headers_hold_the_lines_after_them() {
         let doc = read(
             "top = \"t\"\n\n[package]\nname = \"geo\"\n\n[dependencies]\n\
-             json = { github = \"alice/json\", version = \"1.2.0\" }\n",
+             mime = { github = \"alice/mime\", version = \"1.2.0\" }\n",
         );
         assert_eq!(string(&doc, "top"), "t");
         assert_eq!(string(table(&doc, "package"), "name"), "geo");
-        let json = table(table(&doc, "dependencies"), "json");
-        assert_eq!(string(json, "github"), "alice/json");
-        assert_eq!(string(json, "version"), "1.2.0");
+        let mime = table(table(&doc, "dependencies"), "mime");
+        assert_eq!(string(mime, "github"), "alice/mime");
+        assert_eq!(string(mime, "version"), "1.2.0");
     }
 
     #[test]
@@ -623,15 +623,15 @@ mod tests {
 
     #[test]
     fn keys_and_values_keep_their_spans() {
-        let doc = read("[dependencies]\njson = { version = \"1.0\" }\n");
+        let doc = read("[dependencies]\nmime = { version = \"1.0\" }\n");
         let deps = table(&doc, "dependencies");
-        let json = deps.get("json").unwrap();
+        let mime = deps.get("mime").unwrap();
         assert_eq!(
-            (json.key_span.start, json.key_span.end),
+            (mime.key_span.start, mime.key_span.end),
             (Pos::new(2, 1), Pos::new(2, 5))
         );
-        assert_eq!(json.key_span.file, FileId(1));
-        let version = table(deps, "json").get("version").unwrap();
+        assert_eq!(mime.key_span.file, FileId(1));
+        let version = table(deps, "mime").get("version").unwrap();
         assert_eq!(version.item.span.start, Pos::new(2, 20));
     }
 

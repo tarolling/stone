@@ -26,7 +26,7 @@ pub enum Target {
 
 impl Target {
     /// Returns the package the target is a version of: a directory, or a source with a
-    /// compatibility class, so `json` 1.x and 2.x are two packages.
+    /// compatibility class, so `mime` 1.x and 2.x are two packages.
     pub fn identity(&self) -> Identity {
         match self {
             Target::Path(dir) => Identity::Path(dir.clone()),

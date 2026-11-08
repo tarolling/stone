@@ -142,21 +142,21 @@ impl FakeGitHub {
     }
 }
 
-/// The files of a release of `json`, whose `v()` gives `version` and the `num` it uses.
-fn json_release(version: &str) -> Vec<(&'static str, String)> {
+/// The files of a release of `mime`, whose `v()` gives `version` and the `num` it uses.
+fn mime_release(version: &str) -> Vec<(&'static str, String)> {
     vec![
         (
             "stone.toml",
             format!(
-                "[package]\nname = \"json\"\nversion = \"{version}\"\n\n[dependencies]\n\
+                "[package]\nname = \"mime\"\nversion = \"{version}\"\n\n[dependencies]\n\
                  num = {{ github = \"bob/num\", version = \"0.3\" }}\n"
             ),
         ),
         (
             "lib.stn",
-            format!("use num\n\npub fn v() -> str:\n    ret \"json {version}, num \" + num.v()\n"),
+            format!("use num\n\npub fn v() -> str:\n    ret \"mime {version}, num \" + num.v()\n"),
         ),
-        ("README.md", "# json\n".to_string()),
+        ("README.md", "# mime\n".to_string()),
     ]
 }
 
@@ -194,11 +194,11 @@ fn stone_in(dir: &Path, api: &str, args: &[&str]) -> (bool, String, String) {
 fn packages_are_added_downloaded_locked_and_removed() {
     let github = FakeGitHub::default();
     github.release(
-        "alice/json",
+        "alice/mime",
         &[
-            ("v1.0.0", json_release("1.0.0")),
-            ("v1.2.0", json_release("1.2.0")),
-            ("v2.0.0-rc.1", json_release("2.0.0-rc.1")),
+            ("v1.0.0", mime_release("1.0.0")),
+            ("v1.2.0", mime_release("1.2.0")),
+            ("v2.0.0-rc.1", mime_release("2.0.0-rc.1")),
         ],
     );
     github.release(
@@ -211,28 +211,28 @@ fn packages_are_added_downloaded_locked_and_removed() {
     let api = github.serve();
     let dir = project(
         "package_fetching",
-        &[("app/main.stn", "use json\nprint(json.v())\n")],
+        &[("app/main.stn", "use mime\nprint(mime.v())\n")],
     );
 
     // the newest release that is not a pre-release, and the oldest num it names
-    let (ok, out, err) = stone_in(&dir, &api, &["add", "github:alice/json"]);
+    let (ok, out, err) = stone_in(&dir, &api, &["add", "github:alice/mime"]);
     assert!(ok, "{err}");
-    assert_eq!(out, "added json 1.2.0 (github:alice/json)\n");
+    assert_eq!(out, "added mime 1.2.0 (github:alice/mime)\n");
     assert_eq!(
         err,
-        "downloading github:alice/json 1.2.0\ndownloading github:bob/num 0.3.0\n"
+        "downloading github:alice/mime 1.2.0\ndownloading github:bob/num 0.3.0\n"
     );
     let manifest = std::fs::read_to_string(dir.join("app/stone.toml")).unwrap();
     assert_eq!(
         manifest,
-        "[dependencies]\njson = { github = \"alice/json\", version = \"1.2.0\" }\n"
+        "[dependencies]\nmime = { github = \"alice/mime\", version = \"1.2.0\" }\n"
     );
     let lock = std::fs::read_to_string(dir.join("app/stone.lock")).unwrap();
     assert!(
-        lock.contains("name = \"json\"") && lock.contains("name = \"num\""),
+        lock.contains("name = \"mime\"") && lock.contains("name = \"num\""),
         "{lock}"
     );
-    let stored = dir.join("home/packages/github.com/alice/json/1.2.0");
+    let stored = dir.join("home/packages/github.com/alice/mime/1.2.0");
     assert!(stored.join("lib.stn").is_file());
     assert!(!stored.join("README.md").exists());
 
@@ -242,7 +242,7 @@ fn packages_are_added_downloaded_locked_and_removed() {
     assert!(ok, "{err}");
     assert_eq!(
         (out.as_str(), err.as_str()),
-        ("json 1.2.0, num 0.3.0\n", "")
+        ("mime 1.2.0, num 0.3.0\n", "")
     );
     assert_eq!(github.asked.lock().unwrap().len(), asked);
 
@@ -250,7 +250,7 @@ fn packages_are_added_downloaded_locked_and_removed() {
     assert!(ok);
     assert_eq!(
         out,
-        "app\n└── json 1.2.0 (github:alice/json)\n    └── num 0.3.0 (github:bob/num)\n"
+        "app\n└── mime 1.2.0 (github:alice/mime)\n    └── num 0.3.0 (github:bob/num)\n"
     );
     let (ok, _, err) = stone_in(&dir, &api, &["fetch", "--locked"]);
     assert!(ok, "{err}");
@@ -260,15 +260,15 @@ fn packages_are_added_downloaded_locked_and_removed() {
     let (ok, _, err) = stone_in(&dir, &api, &["run", "--offline", "main.stn"]);
     assert!(!ok);
     assert!(
-        err.contains("error: json 1.2.0 (github:alice/json) is not downloaded"),
+        err.contains("error: mime 1.2.0 (github:alice/mime) is not downloaded"),
         "{err}"
     );
     let (ok, out, err) = stone_in(&dir, &api, &["run", "main.stn"]);
     assert!(ok, "{err}");
-    assert_eq!(out, "json 1.2.0, num 0.3.0\n");
+    assert_eq!(out, "mime 1.2.0, num 0.3.0\n");
     // each package's releases were read once per run that downloaded
     assert_eq!(
-        github.count("/repos/alice/json/releases?per_page=100&page=1"),
+        github.count("/repos/alice/mime/releases?per_page=100&page=1"),
         2
     );
 
@@ -308,20 +308,20 @@ fn packages_are_added_downloaded_locked_and_removed() {
     std::fs::remove_dir_all(dir.join("home")).unwrap();
 
     // an older release by its version, then a missing one
-    let (ok, out, err) = stone_in(&dir, &api, &["add", "github:alice/json@1.0"]);
+    let (ok, out, err) = stone_in(&dir, &api, &["add", "github:alice/mime@1.0"]);
     assert!(ok, "{err}");
-    assert_eq!(out, "added json 1.0.0 (github:alice/json)\n");
-    let (ok, _, err) = stone_in(&dir, &api, &["add", "github:alice/json@3"]);
+    assert_eq!(out, "added mime 1.0.0 (github:alice/mime)\n");
+    let (ok, _, err) = stone_in(&dir, &api, &["add", "github:alice/mime@3"]);
     assert!(!ok);
     assert_eq!(
         err,
-        "error: github:alice/json has no release matching 3.0.0 (its releases are 2.0.0-rc.1, \
+        "error: github:alice/mime has no release matching 3.0.0 (its releases are 2.0.0-rc.1, \
          1.2.0, 1.0.0)\n"
     );
 
-    let (ok, out, err) = stone_in(&dir, &api, &["remove", "json"]);
+    let (ok, out, err) = stone_in(&dir, &api, &["remove", "mime"]);
     assert!(ok, "{err}");
-    assert_eq!(out, "removed json\n");
+    assert_eq!(out, "removed mime\n");
     assert_eq!(
         std::fs::read_to_string(dir.join("app/stone.toml")).unwrap(),
         "[dependencies]\n"

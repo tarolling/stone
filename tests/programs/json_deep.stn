@@ -1,0 +1,27 @@
+// json: values nested far deeper than calls may go read, write, compare, and free
+use json
+
+fn nested(depth: int) -> str:
+    parts = []
+    for _i in range(depth):
+        parts.append("[")
+    parts.append("7")
+    for _i in range(depth):
+        parts.append("]")
+    ret "".join(parts)
+
+depth = 100000
+text = nested(depth)
+v = json.parse(text).unwrap()
+print(json.write(v) == text)
+// walk down to the 7
+levels = 0
+inner = v
+while json.at(inner, 0).is_some():
+    inner = json.at(inner, 0).unwrap()
+    levels += 1
+print(levels, json.write(inner))
+// indented, each level adds its own line
+pretty = json.pretty(json.parse(nested(3)).unwrap(), 2)
+print(pretty)
+print(json.write(json.parse(pretty).unwrap()))

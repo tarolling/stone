@@ -2391,7 +2391,9 @@ impl<'a> Lowerer<'a> {
                 let last_uses = self.last_uses(stmt);
                 // a call can also take a target's old value, which the assignment replaces, but
                 // not what a target's indexes read after it
-                if (self.is_stone_call(value) || self.is_elementwise(value))
+                if (self.is_stone_call(value)
+                    || self.is_elementwise(value)
+                    || self.is_string_sum(value))
                     && targets.iter().all(is_variable_target)
                 {
                     self.movable = last_uses.clone();
@@ -4490,10 +4492,10 @@ impl<'a> Lowerer<'a> {
                 let Operand::Reg(dst) = value else {
                     unreachable!("a byte is a register")
                 };
-                self.push(Inst::Call {
-                    dsts: vec![dst],
-                    callee: Callee::Runtime("stone.bytes_at"),
-                    args: vec![text, Operand::Reg(next)],
+                self.push(Inst::StrByte {
+                    dst,
+                    text,
+                    index: Operand::Reg(next),
                 });
                 Operand::Imm(1)
             }
@@ -4870,6 +4872,8 @@ impl<'a> Lowerer<'a> {
             ExprKind::BinOp { .. } | ExprKind::UnaryOp { .. } if self.is_elementwise(expr) => {
                 self.elementwise(expr, kind)
             }
+
+            ExprKind::BinOp { .. } if self.is_string_sum(expr) => self.string_sum(expr, into),
 
             ExprKind::BinOp { op, left, right } => {
                 let ty = self.type_of(expr)?;
@@ -5346,6 +5350,85 @@ impl<'a> Lowerer<'a> {
         Operand::Reg(dst)
     }
 
+    /// Returns whether `expr` adds strings or bytes, which [`Lowerer::string_sum`] lowers.
+    fn is_string_sum(&self, expr: &Expr) -> bool {
+        matches!(
+            expr.kind,
+            ExprKind::BinOp {
+                op: Operator::Add,
+                ..
+            }
+        ) && self
+            .type_of(expr)
+            .is_ok_and(|ty| matches!(ty, Type::Str | Type::Bytes))
+    }
+
+    /// Lowers a chain of `+` on strings or bytes, such as `s + a + b`, evaluating every operand
+    /// left to right and then adding each to the sum so far in turn.
+    ///
+    /// The sum grows in place through `stone.str_append`, which takes the sum's reference and
+    /// writes onto it when nothing else refers to it, whenever this code owns the sum: after the
+    /// first addition, from the start if the leftmost operand is a temporary, and from the start
+    /// too if it is a variable in [`Lowerer::movable`], which moves into the sum. So `s += t`, at
+    /// a variable's assignment as in a loop, and `s = s + a + b` copy only what they add, while
+    /// `t = s + a` with `s` read later copies `s` once, through `stone.str_concat`.
+    fn string_sum(&mut self, expr: &Expr, into: Option<VReg>) -> Result<Operand, String> {
+        let ty = self.type_of(expr)?;
+        let mut pieces = Vec::new();
+        let mut first = expr;
+        while let ExprKind::BinOp {
+            op: Operator::Add,
+            left,
+            right,
+        } = &first.kind
+        {
+            pieces.push(&**right);
+            first = left;
+        }
+        pieces.reverse();
+        // taken first, so that no call among the operands moves the variable the sum starts from
+        let movable = std::mem::take(&mut self.movable);
+        let mut sum = self.expr(first)?;
+        let mut values = Vec::with_capacity(pieces.len());
+        for piece in &pieces {
+            values.push(self.expr(piece)?);
+        }
+        let mut owned = match sum {
+            Operand::Reg(reg) => self.owned.remove(&reg).is_some(),
+            Operand::Imm(_) => false,
+        };
+        if !owned
+            && let ExprKind::Name { id, .. } = &first.kind
+            && movable.contains(id)
+            && self.is_counted_variable(id)
+        {
+            owned = self.mark_moved(id);
+        }
+        let last = values.len() - 1;
+        for (i, value) in values.into_iter().enumerate() {
+            let dst = if i == last {
+                self.dst(into)
+            } else {
+                self.fresh()
+            };
+            let routine = if owned {
+                "stone.str_append"
+            } else {
+                "stone.str_concat"
+            };
+            self.push(Inst::Call {
+                dsts: vec![dst],
+                callee: Callee::Runtime(routine),
+                args: vec![sum, value],
+            });
+            self.release_temp(value);
+            sum = Operand::Reg(dst);
+            owned = true;
+        }
+        self.own(sum, RcKind::of(&ty));
+        Ok(sum)
+    }
+
     /// Evaluates the operands of the arithmetic on lists `expr`, left to right, into a tree that
     /// [`Lowerer::element`] computes one element of. An operand that is a number, including
     /// arithmetic on numbers such as `2 + 3` in `a * (2 + 3)`, is computed here, once.
@@ -5536,6 +5619,7 @@ impl<'a> Lowerer<'a> {
             then: negative,
             otherwise: check,
         });
+        // only an index counted from the end can still be below 0
         self.start(negative);
         self.push(Inst::Binary {
             op: BinOp::Add,
@@ -5543,22 +5627,22 @@ impl<'a> Lowerer<'a> {
             lhs: Operand::Reg(position),
             rhs: len,
         });
-        self.start(check);
-        let start = Operand::Imm(0);
         self.fail_unless_with(
             Cond::Ge,
             Operand::Reg(position),
-            start,
+            Operand::Imm(0),
             message,
             values.clone(),
         );
+        self.terminate(Terminator::Jump(check));
+        self.start(check);
         self.fail_unless_with(below, Operand::Reg(position), len, message, values);
         Operand::Reg(position)
     }
 
     /// Lowers the bytes index `bytes[index]`, as [`Lowerer::string_index`] lowers a string's,
-    /// into a check that the index is in range and a call of `stone.bytes_at`, which gives the
-    /// byte as an int.
+    /// into a check that the index is in range and a `str_byte`, which reads the byte as an int
+    /// with no call, so a loop scanning bytes calls nothing.
     fn bytes_index(
         &mut self,
         bytes: &Expr,
@@ -5569,9 +5653,14 @@ impl<'a> Lowerer<'a> {
         let index = self.expr(index)?;
         let len = self.str_len(bytes, None);
         let position = self.list_position(index, len, false, BYTES_INDEX_RANGE);
-        let result = self.runtime_call("stone.bytes_at", vec![bytes, position], into);
+        let dst = into.unwrap_or_else(|| self.fresh());
+        self.push(Inst::StrByte {
+            dst,
+            text: bytes,
+            index: position,
+        });
         self.release_temp(bytes);
-        Ok(result)
+        Ok(Operand::Reg(dst))
     }
 
     /// Returns `Some(true)` if `expr` is one character of a string, `s[i]`, `Some(false)` if it is

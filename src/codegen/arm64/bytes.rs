@@ -93,11 +93,6 @@ pub fn bytes_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         r#gen.emit("\tmov\tx0, #-1");
         r#gen.emit("\tret");
     }
-    if uses("stone.bytes_at") {
-        r#gen.emit("stone.bytes_at:");
-        r#gen.emit("\tldrb\tw0, [x0, x1]");
-        r#gen.emit("\tret");
-    }
     if uses("stone.bytes_slice_of") {
         slice_of(r#gen);
     }

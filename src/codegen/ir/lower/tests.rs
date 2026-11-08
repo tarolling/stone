@@ -192,8 +192,8 @@ fn assigning_a_string_releases_the_old_value_after_computing_the_new_one() {
     assert_eq!(
         dump("fn f(s: str) -> str:\n    s = s + \"x\"\n    ret s\nprint(f(\"a\"))\n"),
         "fn f(v0):\n\
-         b0:\n  v1 = str \"x\"\n  v2 = call stone.str_concat(v0, v1)\n  \
-         release_str v0\n  v0 = copy v2\n  ret v0\n\
+         b0:\n  v1 = str \"x\"\n  v2 = call stone.str_append(v0, v1)\n  \
+         v0 = copy v2\n  ret v0\n\
          fn main():\n\
          b0:\n  v0 = str \"a\"\n  retain v0\n  v1 = call f(v0)\n  v2 = call stone.text_begin()\n  \
          call print[str](v1)\n  call stone.text_print(v2)\n  release_str v1\n  ret 0\n"
@@ -236,7 +236,7 @@ fn parameters_are_borrowed_unless_changed_and_temporaries_are_released_once_used
         "fn f(v0, v1):\n\
          b0:\n  v2 = list_load v0, 0\n  retain v2\n  v0 = list_unique v0\n  \
          v3 = list_store v0, v1, v2\n  release_str v3\n  v4 = list_load v0, 1\n  retain v4\n  \
-         v5 = str \"!\"\n  v6 = call stone.str_concat(v4, v5)\n  release_str v4\n  \
+         v5 = str \"!\"\n  v6 = call stone.str_append(v4, v5)\n  \
          v7 = call g(v6)\n  release_str v6\n  release_str v7\n  release_list v0\n  ret 0\n\
          fn g(v0):\n\
          b0:\n  retain v0\n  ret v0\n"
@@ -1584,7 +1584,8 @@ fn a_question_mark_returns_the_err_it_found_and_moves_like_a_call() {
     );
     // a temporary the statement made before the ? is released on the way out
     let source = "fn word(n: int) -> result[str, str]:\n    ret ok(str(n))\n\
-                  fn f(s: str) -> result[str, str]:\n    ret ok((s + \"!\") + word(1)?)\n\
+                  fn pair(a: str, b: str) -> str:\n    ret a\n\
+                  fn f(s: str) -> result[str, str]:\n    ret ok(pair(s + \"!\", word(1)?))\n\
                   print(f(\"a\"))\n";
     let second = dump(source);
     let f = second.split("fn f").nth(1).unwrap();
@@ -2031,4 +2032,32 @@ test \"prints\":
         .collect();
     names.sort();
     assert_eq!(names, ["double", "test.4.1", "test.6.1"]);
+}
+
+#[test]
+fn a_byte_of_bytes_is_read_inline() {
+    let text = dump("fn f(b: bytes, i: int) -> int:\n    ret b[i]\n");
+    assert!(text.contains("str_byte v0,"), "{text}");
+    assert!(!text.contains("stone.bytes_at"), "{text}");
+    let text =
+        dump("fn f(b: bytes) -> int:\n    t = 0\n    for x in b:\n        t += x\n    ret t\n");
+    assert!(text.contains("str_byte"), "{text}");
+    assert!(!text.contains("call"), "{text}");
+}
+
+#[test]
+fn appending_to_a_string_variable_moves_it_into_the_append() {
+    // the variable, the target of its own append, gives its reference to `stone.str_append`
+    let text = dump(
+        "fn f(n: int) -> str:\n    s = \"\"\n    for _i in range(n):\n        s += \"ab\"\n    ret s\n",
+    );
+    assert!(text.contains("call stone.str_append("), "{text}");
+    assert!(!text.contains("stone.str_concat"), "{text}");
+    // so does a temporary, through a chain of `+`
+    let text = dump("fn f(a: str, b: str) -> str:\n    ret a + b + \"!\" + b\n");
+    assert_eq!(text.matches("call stone.str_concat(").count(), 1, "{text}");
+    assert_eq!(text.matches("call stone.str_append(").count(), 2, "{text}");
+    // but a variable read again later is only borrowed
+    let text = dump("fn f(s: str) -> str:\n    t = s + \"!\"\n    ret s + t\n");
+    assert!(!text.contains("stone.str_append"), "{text}");
 }

@@ -4,7 +4,7 @@ These functions are part of the language and available everywhere. Their names c
 assigned to. The builtin [methods](#methods) are called on a value instead, as in `xs.len()`.
 The builtin modules, [`os`](#the-os-module), [`math`](#the-math-module),
 [`random`](#the-random-module), [`time`](#the-time-module), [`fs`](#the-fs-module),
-[`net`](#the-net-module), and [`gui`](#the-gui-module), are imported like module files, as in `use math`. The same descriptions appear on hover in the
+[`net`](#the-net-module), [`gui`](#the-gui-module), and [`json`](#the-json-module), are imported like module files, as in `use math`. The same descriptions appear on hover in the
 editor.
 
 ## `print`
@@ -2267,3 +2267,101 @@ trait app:
 ```
 
 `update` may change `self`, and `draw` and `done` only read it.
+
+## The `json` module
+
+`json` reads JSON text into values and writes values as JSON text. Import it like a builtin
+module, with `use json` to call `json.parse(text)`, or with `use json.parse` to call
+`parse(text)`. Like `net`, it is written in stone, so it behaves alike under `stone run` and in a
+built program, and an editor can show its code. A file named `json.stn` next to the entry file
+cannot be imported, and a package dependency cannot be named `json`.
+
+A JSON value is a `json.value`, an enum a signature can name, as in `fn show(v: json.value)`,
+and a `match` can take apart:
+
+```text
+enum value:
+    null
+    boolean(bool)
+    integer(int)
+    number(float)
+    text(str)
+    array(list[value])
+    object(map[str, value])
+```
+
+A number without a fraction or exponent that fits in an `int` is an `integer`, and any other
+number, such as `1.5`, `1e3`, or `9223372036854775808`, a `number`. An object keeps its keys in
+the order they first appear, and a key written twice keeps its last value, as Python's `json`
+does.
+
+```stone
+use json
+
+doc = json.parse("{{\"name\": \"stone\", \"tags\": [\"fast\", \"safe\"]}}").unwrap()
+match json.get(doc, "tags"):
+    case some(json.value.array(tags)):
+        print(tags.len())   // 2
+    case _:
+        print("no tags")
+print(json.write(doc))   // {"name":"stone","tags":["fast","safe"]}
+```
+
+Neither reading nor writing uses recursion, so values nested as deeply as memory allows are
+read and written; `==` and `print` on a `json.value` still stop past 1,000 levels. Reading
+shares one string among the keys that repeat in a document, as the objects of an array usually
+do.
+
+### `json.parse`
+
+```text
+json.parse(source: str) -> result[value, str]
+```
+
+Reads `source` as one JSON value, which whitespace may surround, as RFC 8259 defines it. It is
+strict: comments, trailing commas, single quotes, leading zeros, `+`, `NaN`, `Infinity`,
+control characters inside a string, and unknown escapes are errors. `\uXXXX` escapes are
+decoded, a pair of surrogates as one character; a lone surrogate, and `\u0000`, which no stone
+string can hold, are errors. An error says what is wrong and where, as
+`err("expected ',' or ']' at line 3, column 7")`, the column counting characters, or
+`unexpected end of input at ...` when the text stops early.
+
+### `json.write`
+
+```text
+json.write(v: value) -> str
+```
+
+Writes `v` as compact JSON text, as Python's `json.dumps(v, separators=(",", ":"),
+ensure_ascii=False)` writes it: `"`, `\`, and control characters are escaped (`\n`, `\t`, or
+`\u001b`), and any other text is written as it is. A float is written as `print` writes it,
+which is what Python writes, and nan and infinity, which JSON cannot hold, are written as
+`null`, as JavaScript writes them.
+
+### `json.pretty`
+
+```text
+json.pretty(v: value, indent: int) -> str
+```
+
+Writes `v` as `json.write` does, but with each item of an array and each entry of an object on
+a line of its own, indented by `indent` spaces for each level, and `": "` after each key, as
+Python's `json.dumps(v, indent=indent, ensure_ascii=False)` writes it. An empty array or
+object stays `[]` or `{}`.
+
+### `json.get`
+
+```text
+json.get(v: value, key: str) -> option[value]
+```
+
+Gives the value of `key` in `v`, or `none` if `v` is not an object or has no such key.
+
+### `json.at`
+
+```text
+json.at(v: value, index: int) -> option[value]
+```
+
+Gives the item at `index` of `v`, counting a negative index from the end, or `none` if `v` is
+not an array or has no such item.

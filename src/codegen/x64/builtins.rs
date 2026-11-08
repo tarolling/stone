@@ -1,7 +1,7 @@
 use crate::codegen::context::{CPU_ONLINE, PATH_BUFFER, UTSNAME_FIELD, UTSNAME_SIZE};
 use crate::codegen::context::{
     HEAP_REGION, LARGEST_CLASS, LEAK_PREFIX, LEAK_SUFFIX, OUT_OF_MEMORY, OUT_OF_MEMORY_LENGTH,
-    SMALLEST_CLASS, STDIN_BUFFER, TEXT_BLOCK,
+    SMALL_MAP, SMALLEST_CLASS, STDIN_BUFFER, TEXT_BLOCK,
 };
 pub use crate::codegen::context::{IMMORTAL, immortal_string};
 use crate::codegen::x64::bmi;
@@ -23,6 +23,28 @@ pub fn shift_by_cl(r#gen: &mut dyn AssemblyGenerator, op: &str, reg: &str) {
     } else {
         r#gen.emit(&format!("\t{op}\t{reg}, cl"));
     }
+}
+
+/// Emits a copy of `rcx` bytes from `rsi` to `rdi` that leaves them past the bytes and `rcx` at
+/// 0, as `rep movsb` does, but copies up to 32 bytes one `movsb` at a time, since `rep movsb`
+/// takes tens of cycles to start, longer than a short string takes to copy. `label` starts the
+/// names of its labels.
+///
+/// For example, `copy_bytes(r#gen, ".Lstr_slice_bytes")` emits the labels
+/// `.Lstr_slice_bytes_byte`, `.Lstr_slice_bytes_long`, and `.Lstr_slice_bytes_done`.
+pub fn copy_bytes(r#gen: &mut dyn AssemblyGenerator, label: &str) {
+    r#gen.emit("\tcmp\trcx, 32");
+    r#gen.emit(&format!("\tja\t{label}_long"));
+    r#gen.emit("\ttest\trcx, rcx");
+    r#gen.emit(&format!("\tjz\t{label}_done"));
+    r#gen.emit(&format!("{label}_byte:"));
+    r#gen.emit("\tmovsb");
+    r#gen.emit("\tdec\trcx");
+    r#gen.emit(&format!("\tjnz\t{label}_byte"));
+    r#gen.emit(&format!("\tjmp\t{label}_done"));
+    r#gen.emit(&format!("{label}_long:"));
+    r#gen.emit("\trep\tmovsb");
+    r#gen.emit(&format!("{label}_done:"));
 }
 
 /// Emits a rotation of the 64-bit `reg` left by `count` bits, which from x86-64 `v3` is BMI2's
@@ -849,7 +871,7 @@ fn text_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool, eprints: bool)
     r#gen.emit("\tmov\tQWORD PTR [rdi], rcx");
     r#gen.emit("\tlea\trdi, [rdi + rax + 16]");
     r#gen.emit("\tmov\trcx, rdx");
-    r#gen.emit("\trep\tmovsb");
+    copy_bytes(r#gen, ".Ltext_append_bytes");
     r#gen.emit("\tret");
 
     if strings {
@@ -1064,7 +1086,12 @@ pub fn str_float_runtime(r#gen: &mut dyn AssemblyGenerator) {
 ///   changing only `rax`, `rdx`, `rdi`, and `rsi`
 /// - `stone.str_concat` returns a new string holding `rdi` followed by `rsi`
 /// - `stone.str_slice` returns a new string holding the `rsi` bytes at `rdi`
-pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
+/// - `stone.str_append`, emitted if `appends`, returns a string holding `rdi` followed by `rsi`,
+///   taking the reference in `rdi`: when nothing else refers to `rdi`, it writes `rsi` onto it,
+///   growing its block to at least twice the size if it is too small, so appending in a loop
+///   copies each byte about twice; otherwise it copies both, as `stone.str_concat` does, and
+///   releases `rdi`. Bytes are laid out as strings are, so it serves them too.
+pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator, appends: bool) {
     r#gen.emit("stone.str_len:");
     r#gen.emit("\tmov\trax, QWORD PTR [rdi - 16]");
     r#gen.emit("\tret");
@@ -1141,10 +1168,10 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, r12");
     r#gen.emit("\tmov\trcx, r14");
-    r#gen.emit("\trep\tmovsb");
+    copy_bytes(r#gen, ".Lstr_concat_left_bytes");
     r#gen.emit("\tmov\trsi, r13");
     r#gen.emit("\tlea\trcx, [r15 + 1]"); // copy the terminator too
-    r#gen.emit("\trep\tmovsb");
+    copy_bytes(r#gen, ".Lstr_concat_right_bytes");
     r#gen.emit("\tlea\trsp, [rbp - 32]");
     r#gen.emit("\tpop\tr15");
     r#gen.emit("\tpop\tr14");
@@ -1152,6 +1179,9 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbp");
     r#gen.emit("\tret");
+    if appends {
+        str_append(r#gen);
+    }
     // rbx and r12 hold the bytes and their count across stone.str_new
     r#gen.emit("stone.str_slice:");
     r#gen.emit("\tpush\trbp");
@@ -1166,12 +1196,78 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit("\tmov\trcx, r12");
-    r#gen.emit("\trep\tmovsb");
+    copy_bytes(r#gen, ".Lstr_slice_bytes");
     r#gen.emit("\tmov\tbyte ptr [rdi], 0");
     r#gen.emit("\tlea\trsp, [rbp - 16]");
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbx");
     r#gen.emit("\tpop\trbp");
+    r#gen.emit("\tret");
+}
+
+/// Emits `stone.str_append` (see [`string_runtime`]). rbx holds the block of the string written
+/// onto, which starts 16 bytes before it, r12 the string appended, and r13 and r14 their
+/// lengths.
+fn str_append(r#gen: &mut dyn AssemblyGenerator) {
+    r#gen.emit("stone.str_append:");
+    // a string added to itself, or one something else refers to, is copied
+    r#gen.emit("\tcmp\trdi, rsi");
+    r#gen.emit("\tje\t.Lstr_append_copy");
+    r#gen.emit("\tcmp\tQWORD PTR [rdi - 8], 1");
+    r#gen.emit("\tjne\t.Lstr_append_copy");
+    r#gen.emit("\tpush\trbx");
+    r#gen.emit("\tpush\tr12");
+    r#gen.emit("\tpush\tr13");
+    r#gen.emit("\tpush\tr14");
+    r#gen.emit("\tlea\trbx, [rdi - 16]");
+    r#gen.emit("\tmov\tr12, rsi");
+    r#gen.emit("\tmov\tr13, QWORD PTR [rdi - 16]");
+    r#gen.emit("\tmov\tr14, QWORD PTR [rsi - 16]");
+    // the bytes the string needs: its length, its count, its bytes, and a terminator
+    r#gen.emit("\tlea\trsi, [r13 + r14 + 17]");
+    // the bytes its block holds, less the allocator's header: a class's power of two, or a
+    // mapping's length
+    r#gen.emit("\tmov\trcx, QWORD PTR [rbx - 8]");
+    r#gen.emit("\tmov\trdx, rcx");
+    r#gen.emit(&format!("\tcmp\trcx, {LARGEST_CLASS}"));
+    r#gen.emit("\tja\t.Lstr_append_room");
+    r#gen.emit("\tmov\tedx, 1");
+    shift_by_cl(r#gen, "shl", "rdx");
+    r#gen.emit(".Lstr_append_room:");
+    r#gen.emit("\tsub\trdx, 8");
+    r#gen.emit("\tcmp\trsi, rdx");
+    r#gen.emit("\tjbe\t.Lstr_append_write");
+    // at least twice as big, so the block grows a constant number of times per doubling
+    r#gen.emit("\tadd\trdx, rdx");
+    r#gen.emit("\tcmp\trsi, rdx");
+    r#gen.emit("\tcmovb\trsi, rdx");
+    r#gen.emit("\tmov\trdi, rbx");
+    r#gen.emit("\tcall\tstone.mem_realloc");
+    r#gen.emit("\tmov\trbx, rax");
+    r#gen.emit(".Lstr_append_write:");
+    r#gen.emit("\tlea\trdi, [rbx + r13 + 16]");
+    r#gen.emit("\tmov\trsi, r12");
+    r#gen.emit("\tlea\trcx, [r14 + 1]"); // the terminator too
+    copy_bytes(r#gen, ".Lstr_append_bytes");
+    r#gen.emit("\tadd\tr13, r14");
+    r#gen.emit("\tmov\tQWORD PTR [rbx], r13");
+    r#gen.emit("\tlea\trax, [rbx + 16]");
+    r#gen.emit("\tpop\tr14");
+    r#gen.emit("\tpop\tr13");
+    r#gen.emit("\tpop\tr12");
+    r#gen.emit("\tpop\trbx");
+    r#gen.emit("\tret");
+    r#gen.emit(".Lstr_append_copy:");
+    r#gen.emit("\tpush\trdi");
+    r#gen.emit("\tcall\tstone.str_concat");
+    r#gen.emit("\tpop\trdi");
+    r#gen.emit("\tdec\tQWORD PTR [rdi - 8]");
+    r#gen.emit("\tjnz\t.Lstr_append_done");
+    r#gen.emit("\tpush\trax");
+    r#gen.emit("\tmov\trax, rdi");
+    r#gen.emit("\tcall\tstone.free_str");
+    r#gen.emit("\tpop\trax");
+    r#gen.emit(".Lstr_append_done:");
     r#gen.emit("\tret");
 }
 
@@ -1371,8 +1467,10 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator, maps_shrink: bool) {
 /// removed, whether the keys are strings, and then that many slots, each 0 if empty, -1 if its
 /// entry was removed, or else 1 more than the first slot of an entry in its low 32 bits and 31
 /// bits of its key's hash above them, so that a probe passes most other keys without reading
-/// them. The table stays at most half full, counting removed entries. A copy of a map
-/// (`stone.list_copy`) has no index, and builds one when it is first used. Keys are ints, bools,
+/// them. The table stays at most half full, counting removed entries. A map of at most
+/// `1 << SMALL_MAP` entries that none were removed from has no index, and a lookup scans its
+/// keys instead. A copy of a map (`stone.list_copy`) has no index, and builds one when it is
+/// first used if it is not small. Keys are ints, bools,
 /// or strings, which `rdx` says by being 1. Strings are equal if their bytes are, which needs the
 /// string runtime only if `strings`.
 ///
@@ -1417,6 +1515,40 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     enter(r#gen);
     r#gen.emit("\tcmp\tQWORD PTR [rbx + 40], 0");
     r#gen.emit("\tjne\t.Lmap_find_indexed");
+    // a small map without an index is scanned, its keys in r14 in turn
+    r#gen.emit("\tmov\trcx, QWORD PTR [rbx + 32]");
+    r#gen.emit(&format!("\tshl\trcx, {SMALL_MAP}"));
+    r#gen.emit("\tcmp\trcx, QWORD PTR [rbx]");
+    r#gen.emit("\tjl\t.Lmap_find_build");
+    r#gen.emit("\txor\tr14d, r14d");
+    r#gen.emit(".Lmap_find_scan:");
+    r#gen.emit("\tcmp\tr14, QWORD PTR [rbx]");
+    r#gen.emit("\tjge\t.Lmap_find_none");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rax + r14 * 8]");
+    r#gen.emit("\tcmp\trdi, r12");
+    r#gen.emit("\tje\t.Lmap_find_found");
+    if strings {
+        r#gen.emit("\ttest\tr13, r13");
+        r#gen.emit("\tjz\t.Lmap_find_skip");
+        r#gen.emit("\tmov\trax, QWORD PTR [rdi - 16]");
+        r#gen.emit("\tcmp\trax, QWORD PTR [r12 - 16]");
+        r#gen.emit("\tjne\t.Lmap_find_skip");
+        r#gen.emit("\tmov\trsi, r12");
+        r#gen.emit("\tcall\tstone.str_eq");
+        r#gen.emit("\ttest\trax, rax");
+        r#gen.emit("\tjnz\t.Lmap_find_found");
+        r#gen.emit(".Lmap_find_skip:");
+    }
+    r#gen.emit("\tadd\tr14, QWORD PTR [rbx + 32]");
+    r#gen.emit("\tjmp\t.Lmap_find_scan");
+    r#gen.emit(".Lmap_find_found:");
+    r#gen.emit("\tmov\trax, r14");
+    leave(r#gen);
+    r#gen.emit(".Lmap_find_none:");
+    r#gen.emit("\tmov\trax, -1");
+    leave(r#gen);
+    r#gen.emit(".Lmap_find_build:");
     r#gen.emit("\tcall\t.Lmap_rebuild");
     r#gen.emit(".Lmap_find_indexed:");
     r#gen.emit("\tcall\t.Lmap_probe");
@@ -1432,7 +1564,16 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     // slots must be at most capacity * width
     r#gen.emit("\tmov\trax, QWORD PTR [rbx + 40]");
     r#gen.emit("\ttest\trax, rax");
-    r#gen.emit("\tjz\t.Lmap_add_rebuild");
+    r#gen.emit("\tjnz\t.Lmap_add_indexed");
+    // a map without an index gets one only when it would pass the small maps' entries
+    r#gen.emit("\tmov\trcx, QWORD PTR [rbx + 32]");
+    r#gen.emit(&format!("\tshl\trcx, {SMALL_MAP}"));
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbx]");
+    r#gen.emit("\tadd\trdx, QWORD PTR [rbx + 32]");
+    r#gen.emit("\tcmp\trdx, rcx");
+    r#gen.emit("\tjle\t.Lmap_add_room");
+    r#gen.emit("\tjmp\t.Lmap_add_rebuild");
+    r#gen.emit(".Lmap_add_indexed:");
     r#gen.emit("\tmov\trcx, QWORD PTR [rbx]");
     r#gen.emit("\tadd\trcx, QWORD PTR [rbx + 32]");
     r#gen.emit("\tadd\trcx, rcx");
@@ -1447,21 +1588,50 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit(".Lmap_add_room:");
     r#gen.emit("\tmov\tr14, QWORD PTR [rbx]");
     r#gen.emit("\tmov\tr15, QWORD PTR [rbx + 32]");
-    r#gen.emit("\tmov\trsi, r12");
-    r#gen.emit(".Lmap_add_slot:");
-    r#gen.emit("\tmov\trdi, rbx");
-    r#gen.emit("\tcall\tstone.list_append");
-    r#gen.emit("\txor\tesi, esi"); // the values are filled in by the caller
-    r#gen.emit("\tdec\tr15");
-    r#gen.emit("\tjnz\t.Lmap_add_slot");
+    // room for the entry's slots at once: twice the capacity, at least the entry and four
+    // entries' worth, so a small map grows its storage a few times
+    r#gen.emit("\tlea\trsi, [r14 + r15]");
+    r#gen.emit("\tcmp\trsi, QWORD PTR [rbx + 8]");
+    r#gen.emit("\tjle\t.Lmap_add_fits");
+    r#gen.emit("\tmov\trax, QWORD PTR [rbx + 8]");
+    r#gen.emit("\tadd\trax, rax");
+    r#gen.emit("\tcmp\trax, rsi");
+    r#gen.emit("\tcmovl\trax, rsi");
+    r#gen.emit("\tmov\trcx, r15");
+    r#gen.emit("\tshl\trcx, 2");
+    r#gen.emit("\tcmp\trax, rcx");
+    r#gen.emit("\tcmovl\trax, rcx");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 8], rax");
+    r#gen.emit("\tmov\trsi, rax");
+    r#gen.emit("\tshl\trsi, 3");
+    r#gen.emit("\tmov\trdi, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tcall\tstone.mem_realloc");
+    r#gen.emit("\tmov\tQWORD PTR [rbx + 16], rax");
+    r#gen.emit(".Lmap_add_fits:");
+    // the key, then zeros for the values, which the caller fills in
+    r#gen.emit("\tmov\trdx, QWORD PTR [rbx + 16]");
+    r#gen.emit("\tmov\tQWORD PTR [rdx + r14 * 8], r12");
+    r#gen.emit("\tmov\trcx, r15");
+    r#gen.emit(".Lmap_add_zero:");
+    r#gen.emit("\tdec\trcx");
+    r#gen.emit("\tjz\t.Lmap_add_filled");
+    r#gen.emit("\tlea\trax, [r14 + rcx]");
+    r#gen.emit("\tmov\tQWORD PTR [rdx + rax * 8], 0");
+    r#gen.emit("\tjmp\t.Lmap_add_zero");
+    r#gen.emit(".Lmap_add_filled:");
+    r#gen.emit("\tlea\trax, [r14 + r15]");
+    r#gen.emit("\tmov\tQWORD PTR [rbx], rax");
     r#gen.emit("\ttest\tr13, r13");
     r#gen.emit("\tjz\t.Lmap_add_key");
     r#gen.emit("\tinc\tQWORD PTR [r12 - 8]");
     r#gen.emit(".Lmap_add_key:");
+    r#gen.emit("\tcmp\tQWORD PTR [rbx + 40], 0");
+    r#gen.emit("\tje\t.Lmap_add_done");
     r#gen.emit("\tcall\t.Lmap_probe");
     r#gen.emit("\tlea\trdx, [r14 + 1]");
     r#gen.emit("\tor\trdx, rcx"); // the key's tag
     r#gen.emit("\tmov\tQWORD PTR [rax], rdx");
+    r#gen.emit(".Lmap_add_done:");
     r#gen.emit("\tmov\trax, r14");
     leave(r#gen);
 
@@ -2729,7 +2899,7 @@ pub fn conversion_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\trdi, rax");
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit("\tmov\trcx, r12");
-    r#gen.emit("\trep\tmovsb");
+    copy_bytes(r#gen, ".Lstr_int_bytes");
     r#gen.emit("\tlea\trsp, [rbp - 16]");
     r#gen.emit("\tpop\tr12");
     r#gen.emit("\tpop\trbx");
@@ -3496,7 +3666,7 @@ fn str_join(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tjz\t.Lstr_join_item");
     r#gen.emit("\tmov\trsi, rbx");
     r#gen.emit("\tmov\trcx, r13");
-    r#gen.emit("\trep\tmovsb");
+    copy_bytes(r#gen, ".Lstr_join_bytes");
     r#gen.emit(".Lstr_join_item:");
     r#gen.emit("\tmov\trax, QWORD PTR [r12 + 16]");
     r#gen.emit("\tmov\trsi, QWORD PTR [rax + r15 * 8]");

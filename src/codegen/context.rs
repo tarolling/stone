@@ -70,7 +70,6 @@ pub const BYTES_ROUTINES: &[&str] = &[
     "stone.bytes_eq",
     "stone.bytes_cmp",
     "stone.bytes_find",
-    "stone.bytes_at",
     "stone.bytes_slice_of",
     "stone.bytes_check",
     "stone.bytes_from_list",
@@ -308,6 +307,14 @@ pub const SMALLEST_CLASS: i64 = 5;
 /// For example, a 100-byte string is a 128-byte block of class 7, while a list of 10,000
 /// elements stores them in a mapping of 80,008 bytes rounded up to whole pages.
 pub const LARGEST_CLASS: i64 = 16;
+
+/// A map of at most `1 << SMALL_MAP` entries that has never had one removed keeps no hash
+/// index: finding a key scans its keys, comparing a string's pointer before its bytes, which
+/// for a few entries is faster than hashing and takes no memory, and building an index waits
+/// until one more entry would pass that many.
+///
+/// For example, a JSON object's map of 7 keys never allocates an index.
+pub const SMALL_MAP: i64 = 3;
 
 /// The size of each region the allocator maps to cut small blocks from.
 pub const HEAP_REGION: i64 = 1 << 20;

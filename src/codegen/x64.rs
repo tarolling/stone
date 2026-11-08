@@ -130,7 +130,8 @@ impl AssemblyGenerator for X64Generator {
             floats::reduce_pio2_runtime(self);
         }
         if self.ctx.needs_strings() {
-            builtins::string_runtime(self);
+            let appends = self.ctx.uses(&["stone.str_append"]);
+            builtins::string_runtime(self, appends);
         }
         if self.ctx.counts_references {
             let enums = self.ctx.needs_enums();

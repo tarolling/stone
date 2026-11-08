@@ -1,8 +1,8 @@
 //! The package store: where packages from hosts are downloaded, one directory per version.
 //!
 //! The store is `$STONE_HOME/packages`, which defaults to `~/.stone/packages`, or
-//! `%LOCALAPPDATA%\stone\packages` on Windows. `json` 1.4.0 from `github:alice/stone-json` is in
-//! `<store>/github.com/alice/stone-json/1.4.0/`, holding only the package's `stone.toml` and
+//! `%LOCALAPPDATA%\stone\packages` on Windows. `mime` 1.4.0 from `github:alice/stone-mime` is in
+//! `<store>/github.com/alice/stone-mime/1.4.0/`, holding only the package's `stone.toml` and
 //! `.stn` files.
 
 use std::path::{Path, PathBuf};
@@ -33,7 +33,7 @@ pub fn host(source: &Source) -> &str {
 
 /// Returns the directory of `version` of the package from `source` in the store `store`.
 ///
-/// For example, `json` 1.4.0 from `github:alice/json` is `<store>/github.com/alice/json/1.4.0`.
+/// For example, `mime` 1.4.0 from `github:alice/mime` is `<store>/github.com/alice/mime/1.4.0`.
 pub fn package_dir(store: &Path, source: &Source, version: &Version) -> PathBuf {
     let path = match source {
         Source::GitHub { repo, .. } => repo,

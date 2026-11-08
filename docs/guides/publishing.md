@@ -10,7 +10,7 @@ The repository's root is the package. It holds a `stone.toml` that names the pac
 its version, and the package's modules, as any stone program's root does:
 
 ```text
-stone-json/
+stone-csv/
   stone.toml
   lib.stn
   encode.stn
@@ -20,7 +20,7 @@ stone-json/
 
 ```toml
 [package]
-name = "json"
+name = "csv"
 version = "1.0.0"
 description = "Reading and writing JSON"
 license = "MIT"
@@ -32,9 +32,9 @@ license = "MIT"
 `version` is the version you are about to release. See {doc}`../reference/manifest` for every
 key.
 
-`lib.stn` is the module a program gets from `use json`, so it is where the package's main
+`lib.stn` is the module a program gets from `use csv`, so it is where the package's main
 functions go. The other modules are named by their paths, as in any program: a program writes
-`use json.encode` for `encode.stn` and `use json.parse.value` for `parse/value.stn`. A package
+`use csv.encode` for `encode.stn` and `use csv.parse.value` for `parse/value.stn`. A package
 needs no `lib.stn` if it has none to offer, and then programs use its modules by name.
 
 Only `pub` functions, structs, enums, and traits can be used from outside the package, and every
@@ -66,7 +66,7 @@ directory as it is:
 
 ```toml
 [dependencies]
-json = { path = "../stone-json" }
+csv = { path = "../stone-csv" }
 ```
 
 `stone check` and `stone run` in that program then report errors in the package's files too, and
@@ -86,7 +86,7 @@ the editor checks it as part of the package, with its own dependencies.
 
    or with the "Draft a new release" button on GitHub, or Deploy, Releases on GitLab.
 
-That's all: `stone add github:you/stone-json` now finds it. A release is found by its tag, which
+That's all: `stone add github:you/stone-csv` now finds it. A release is found by its tag, which
 must be a version, and drafts are left out. stone downloads the source archive the host makes of
 the tag, so no files need to be attached to the release.
 

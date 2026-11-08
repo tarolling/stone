@@ -1,0 +1,14 @@
+0 0 0 none none
+1 1 0 some(0) none
+7 7 91 some(36) none
+8 8 140 some(49) none
+9 9 204 some(64) none
+20 20 2470 some(361) none
+{'a': 1, 'b': 20, 'c': 3, 'key1': 6}
+some(1) none {'b': 20, 'c': 3, 'key1': 6}
+{'b': 20, 'c': 3, 'key1': 6, 'a': 100} 4
+4 5 false
+true true
+true 4 true
+{3: 'c', 1: 'A', 2: 'b'} A false 1 {true: 1, false: 0}
+{'x', 'y', 'key2'} true 3

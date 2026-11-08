@@ -1,0 +1,19 @@
+// json: escapes, surrogate pairs, and text outside ASCII, read and written
+use json
+
+while true:
+    match input():
+        case ok(line):
+            v = json.parse(line).unwrap()
+            print(json.write(v))
+            match v:
+                case json.value.text(s):
+                    print(s, s.len())
+                case _:
+                    print("not a string")
+        case err(_):
+            break
+
+// control characters are escaped as Python's json escapes them
+print(json.write(json.value.text("tab\tnew\nret\rbs\x08ff\x0cbell\x07esc\x1bquote\"back\\slash/")))
+print(json.write(json.value.text("ünïcödé 日本 😀")))

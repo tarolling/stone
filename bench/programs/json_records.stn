@@ -1,0 +1,58 @@
+// json_records: writing a list of records as JSON text, reading it back, and walking what was read
+use json
+
+fn records(n: int) -> json.value:
+    items = []
+    x = 12345
+    for i in range(n):
+        x = (x * 1103515245 + 12345) % 2147483648
+        name = "user{x % 1000}"
+        if x % 7 == 0:
+            name = "say \"hi\"\n" + name
+        tags = []
+        for k in range(x % 4):
+            tags.append(json.value.text("tag{k}"))
+        fields = {"id": json.value.integer(i), "name": json.value.text(name)}
+        fields["score"] = json.value.number(float(x % 4000) / 4.0)
+        fields["active"] = json.value.boolean(x % 3 == 0)
+        fields["tags"] = json.value.array(tags)
+        pos = {"x": json.value.integer(x % 640), "y": json.value.integer(x / 640 % 480)}
+        fields["pos"] = json.value.object(pos)
+        fields["note"] = json.value.null
+        items.append(json.value.object(fields))
+    ret json.value.array(items)
+
+fn checksum(v: json.value) -> int:
+    match v:
+        case json.value.null:
+            ret 1
+        case json.value.boolean(b):
+            if b:
+                ret 3
+            ret 2
+        case json.value.integer(n):
+            ret n
+        case json.value.number(f):
+            ret int(f * 4.0).unwrap()
+        case json.value.text(s):
+            ret s.len()
+        case json.value.array(xs):
+            total = 7
+            for x in xs:
+                total += checksum(x)
+            ret total
+        case json.value.object(m):
+            total = 11
+            for k, x in m.items():
+                total += k.len() + checksum(x)
+            ret total
+
+fn run(rounds: int, n: int) -> int:
+    doc = records(n)
+    total = 0
+    for _r in range(rounds):
+        text = json.write(doc)
+        total += text.len() + checksum(json.parse(text).unwrap())
+    ret total
+
+print(run(int(args()[0]).unwrap(), int(args()[1]).unwrap()))

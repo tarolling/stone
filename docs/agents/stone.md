@@ -529,6 +529,7 @@ assign the result where 'add' is called
 | `socket.create_connection((host, port), timeout)`, `sock.sendall(b)`, `sock.recv(n)` | `net.connect(host, port)` or `net.connect_timeout(host, port, seconds)`, `c.send(text)` or `c.send_bytes(data)`, `c.read_line()`/`c.read()`/`c.read_all()` for text and `c.read_bytes(n)`/`c.read_exact(n)`/`c.read_all_bytes()` for bytes, each a `result`; `c.set_timeout(seconds)` |
 | `open(path, "rb").read()`, `open(path, "wb").write(b)` | `fs.read_bytes(path)`, `fs.write_bytes(path, data)`, `fs.append_bytes(path, data)` |
 | `socketserver`, `s.bind(...); s.listen(); s.accept()` | `l = net.listen(host, port)?` then `c = l.accept()?`, one connection at a time |
+| `json.loads(s)`, `json.dumps(v)`, `json.dumps(v, indent=2)` | `json.parse(s)` (a `result[json.value, str]`), `json.write(v)` (compact), `json.pretty(v, 2)`; `v["k"]` is `json.get(v, "k")` and `v[0]` is `json.at(v, 0)`, both options |
 
 ## Builtins
 
@@ -577,6 +578,13 @@ Builtin modules, imported with `use math` (or `use math.sqrt`):
   Both are types for signatures (`fn serve(l: listener)`), copies share the connection, and each
   closes by itself right after the last statement that uses it. `connect_unix(path)` connects
   to a Unix socket, and `ready(s, seconds)` (a bool) says whether a read would not wait. No TLS
+
+- `json`: `parse(text)` (a `result[json.value, str]`, strict RFC 8259, with errors such as
+  `expected ',' or ']' at line 3, column 7`), `write(v)` (compact) and `pretty(v, indent)`, as
+  Python's `json.dumps` writes them, `get(v, key)` and `at(v, index)` (options). A
+  `json.value` is an enum: `null`, `boolean(bool)`, `integer(int)` (no fraction or exponent,
+  fits in an int), `number(float)`, `text(str)`, `array(list[value])`, and
+  `object(map[str, value])`, matched as `case json.value.integer(n):`
 
 On Windows, programs cannot use `net.connect_unix` yet: building one for Windows, or running or
 checking one there, is an error.
@@ -652,6 +660,35 @@ fn echo() -> result[str, str]:
 print(echo())   // ok('you said hello\n')
 ```
 
+JSON, read into `json.value`s and walked with `match` (braces in a literal are doubled):
+
+```stone
+use json
+
+fn total(v: json.value) -> int:
+    match v:
+        case json.value.integer(n):
+            ret n
+        case json.value.array(xs):
+            sum = 0
+            for x in xs:
+                sum += total(x)
+            ret sum
+        case json.value.object(m):
+            sum = 0
+            for k in m:
+                sum += total(m[k])
+            ret sum
+        case _:
+            ret 0
+
+doc = json.parse("{{\"a\": [1, 2, {{\"b\": 3}}], \"c\": \"x\"}}").unwrap()
+print(total(doc))                 // 6
+print(json.get(doc, "c"))         // some(value.text('x'))
+print(json.write(doc))            // {"a":[1,2,{"b":3}],"c":"x"}
+print(json.parse("[1,]"))         // err('expected a value at line 1, column 4')
+```
+
 `gui` draws on canvases (`gui.blank(w, h, color)`, colors from `gui.rgb(r, g, b)`) and shows
 them in windows over Wayland or X11, or as Win32 windows on Windows. A canvas is a value with `width`, `height`, and `pixels`, and its
 methods draw on it in place:
@@ -690,12 +727,12 @@ files conventionally starts at `main.stn`.
 Packages come from GitHub or GitLab releases, named in a `stone.toml` beside `main.stn`, which
 `stone add github:owner/repo` writes. Never write a version range: `version` is the oldest
 version the program works with, and stone picks the newest that any package asks for. A path
-starting with the dependency's name is in the package: `use json` loads its `lib.stn`, and
-`use json.parse` its `parse.stn` (or `lib.stn`'s `pub fn parse`).
+starting with the dependency's name is in the package: `use csv` loads its `lib.stn`, and
+`use csv.parse` its `parse.stn` (or `lib.stn`'s `pub fn parse`).
 
 ```toml
 [dependencies]
-json = { github = "alice/stone-json", version = "1.2.0" }
+csv = { github = "alice/stone-csv", version = "1.2.0" }
 geo = { path = "../geo" }
 ```
 

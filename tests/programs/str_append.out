@@ -1,0 +1,10 @@
+2000 ababab abab
+2002 2000 2001 2000 bcd bab
+xxxx
+literal lit
+0123456789012345678901234 start 012
+100000 0123456789
+err("invalid literal for int() with base 10: 'xa-'")
+A!BC!DEF!
+b'\x00\x01\xff\x00\xff\x00\xff\x00' b'\x00\x01' 8
+12132 1 2

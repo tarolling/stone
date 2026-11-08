@@ -172,7 +172,7 @@ pub enum Value {
     Int(i64),
     Float(f64),
     Bool(bool),
-    Str(Rc<str>),
+    Str(Rc<String>),
     /// Bytes, which may hold any byte and never change.
     Bytes(Rc<[u8]>),
     /// No value, what a function without `->` returns, which no variable can hold.
@@ -206,7 +206,7 @@ pub enum Value {
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum MapKey {
     Int(i64),
-    Str(Rc<str>),
+    Str(Rc<String>),
     Bool(bool),
 }
 
@@ -555,7 +555,12 @@ fn ints(values: &[Value]) -> Vec<i64> {
 
 /// Makes a new list of strings, such as the pieces `split` returns.
 fn str_list(items: Vec<&str>) -> Value {
-    Value::list(items.into_iter().map(|s| Value::Str(s.into())).collect())
+    Value::list(
+        items
+            .into_iter()
+            .map(|s| Value::Str(s.to_string().into()))
+            .collect(),
+    )
 }
 
 /// Returns the least of `values` for `math.min`, or the greatest for `math.max`, which must all be
@@ -841,7 +846,7 @@ impl From<&Constant> for Value {
     fn from(constant: &Constant) -> Self {
         match constant {
             Constant::Bool(b) => Value::Bool(*b),
-            Constant::Str(s) => Value::Str(s.as_str().into()),
+            Constant::Str(s) => Value::Str(s.clone().into()),
             Constant::Char(c) => Value::Str(c.to_string().into()),
             Constant::Bytes(b) => Value::Bytes(b.as_slice().into()),
             Constant::Int(i) | Constant::I64(i) => Value::Int(*i),
@@ -1702,10 +1707,23 @@ impl<'out> Interpreter<'out> {
                 value,
                 call,
             } => {
+                let appends = *op == Operator::Add && call.is_none();
                 let op = &Augmented(*op, call.as_ref());
                 match target {
                     code::AugTarget::Var { var, span } => {
                         let old = self.read_var(*var).map_err(|e| located(e, *span))?;
+                        if appends && let Value::Str(_) = old {
+                            // `s += t` writes onto `s` itself unless another value shares it,
+                            // so appending in a loop takes time in proportion to the length
+                            let right = self.eval_expr(value)?;
+                            drop(old);
+                            if let (Some(Value::Str(text)), Value::Str(piece)) =
+                                (self.variable_mut(*var), &right)
+                            {
+                                Rc::make_mut(text).push_str(piece);
+                            }
+                            return Ok(ControlFlow::None);
+                        }
                         let new = self.augmented(op, old, value, stmt.span)?;
                         self.set_var(*var, new);
                     }
@@ -2191,7 +2209,9 @@ impl<'out> Interpreter<'out> {
                 }
                 if let Value::Str(text) = &list {
                     let position = position(index, text.len(), stdlib::STRING_INDEX_RANGE)?;
-                    return Ok(Value::Str(stdlib::str_at(text, position)?.into()));
+                    return Ok(Value::Str(
+                        stdlib::str_at(text, position)?.to_string().into(),
+                    ));
                 }
                 let items = list.as_list()?;
                 let position = list_position(index, items.len())?;
@@ -2668,7 +2688,7 @@ impl<'out> Interpreter<'out> {
             ("len", Value::Bytes(b), []) => Ok(Value::Int(b.len() as i64)),
             ("bytes", Value::Str(s), []) => Ok(Value::Bytes(s.as_bytes().into())),
             ("text", Value::Bytes(b), []) => Ok(result(match fs::is_text(b) {
-                true => Ok(Value::Str(String::from_utf8_lossy(b).into())),
+                true => Ok(Value::Str(String::from_utf8_lossy(b).into_owned().into())),
                 false => Err(fs::INVALID_TEXT.to_string()),
             })),
             ("len", Value::List(items), []) => Ok(Value::Int(items.len() as i64)),
@@ -2724,7 +2744,7 @@ impl<'out> Interpreter<'out> {
             ("is_disjoint", Value::Map(set), [Value::Map(other)]) => {
                 Ok(Value::Bool(!set.iter().any(|(key, _)| other.contains(key))))
             }
-            ("strip", Value::Str(s), []) => Ok(Value::Str(stdlib::strip(s).into())),
+            ("strip", Value::Str(s), []) => Ok(Value::Str(stdlib::strip(s).to_string().into())),
             ("strip", _, _) => Err("strip() is called on a str, with no arguments".into()),
             ("split", Value::Str(s), []) => Ok(str_list(stdlib::split_whitespace(s))),
             ("split", Value::Str(s), [Value::Str(separator)]) => {
@@ -2735,7 +2755,7 @@ impl<'out> Interpreter<'out> {
                 let pieces = items
                     .iter()
                     .map(|item| match item {
-                        Value::Str(piece) => Ok(&**piece),
+                        Value::Str(piece) => Ok(piece.as_str()),
                         _ => Err("join() takes a list of strs"),
                     })
                     .collect::<Result<Vec<&str>, _>>()?;
@@ -3204,8 +3224,8 @@ impl<'out> Interpreter<'out> {
                 return Ok(os::env(name).map_or_else(none, |value| some(Value::Str(value.into()))));
             }
             ("os.has_env", [Value::Str(name)]) => return Ok(Value::Bool(os::has_env(name))),
-            ("os.platform", []) => return Ok(Value::Str(os::platform().into())),
-            ("os.arch", []) => return Ok(Value::Str(os::arch().into())),
+            ("os.platform", []) => return Ok(Value::Str(os::platform().to_string().into())),
+            ("os.arch", []) => return Ok(Value::Str(os::arch().to_string().into())),
             ("os.hostname", []) => return Ok(Value::Str(os::hostname().into())),
             ("os.cpu_count", []) => return Ok(Value::Int(os::cpu_count())),
             ("os.pid", []) => return Ok(Value::Int(os::pid())),
@@ -4107,6 +4127,14 @@ mod tests {
             .evaluate(&module)
             .unwrap();
         String::from_utf8(out).unwrap()
+    }
+
+    #[test]
+    fn appending_to_a_string_changes_only_the_variable_appended_to() {
+        let source = "s = \"a\"\nt = s\ns += \"b\"\nxs = [s]\ns += s\n\
+                      fn grow(u: str) -> str:\n    for _i in range(3):\n        u += \"!\"\n    ret u\n\
+                      print(s, t, xs, grow(s), s)\n";
+        assert_eq!(output(source), "abab a ['ab'] abab!!! abab\n");
     }
 
     #[test]

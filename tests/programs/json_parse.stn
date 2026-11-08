@@ -1,0 +1,53 @@
+// json.parse: every kind of value, reading values back with get, at, and match
+use json
+
+// Describes a value by its kind, for checking what parse made.
+fn kind(v: json.value) -> str:
+    match v:
+        case json.value.null:
+            ret "null"
+        case json.value.boolean(b):
+            ret "boolean {b}"
+        case json.value.integer(n):
+            ret "integer {n}"
+        case json.value.number(x):
+            ret "number {x}"
+        case json.value.text(s):
+            ret "text '{s}' of {s.len()} bytes"
+        case json.value.array(xs):
+            ret "array of {xs.len()}"
+        case json.value.object(m):
+            ret "object with keys {m.keys()}"
+
+// Describes the values inside an array or object, which nothing else has.
+fn inside(v: json.value) -> list[str]:
+    lines = []
+    match v:
+        case json.value.array(xs):
+            for x in xs:
+                lines.append(kind(x))
+        case json.value.object(m):
+            for k in m:
+                lines.append("{k} = {kind(m[k])}")
+        case _:
+            ret []
+    ret lines
+
+while true:
+    match input():
+        case ok(line):
+            v = json.parse(line).unwrap()
+            print(kind(v))
+            for line in inside(v):
+                print("   ", line)
+        case err(_):
+            break
+
+doc = json.parse("{{\"name\": \"stone\", \"tags\": [\"fast\", \"safe\"], \"size\": {{\"x\": 3}}}}").unwrap()
+print(json.get(doc, "name"))
+print(json.get(doc, "missing"))
+tags = json.get(doc, "tags").unwrap()
+print(json.at(tags, 0), json.at(tags, -1), json.at(tags, 2), json.at(doc, 0))
+print(json.get(json.get(doc, "size").unwrap(), "x"))
+print(json.get(tags, "x"))
+print(doc == json.parse(json.write(doc)).unwrap())

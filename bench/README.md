@@ -41,6 +41,7 @@ A benchmark of arithmetic on lists can also have a numpy version, `name.np.py`, 
 | `options` | making and matching `option[int]`, and a list of options | 10 million steps that may find nothing, keeping every 16th option |
 | `sort` | `sort` on lists of ints and floats, against C's `qsort` and Python's `list.sort` | sorting 2 million 62-bit ints, then 2 million floats |
 | `trig` | `math.sin`, `math.cos`, `math.atan2`, and `math.asin`, against glibc's | 3 million steps of a point around a wobbling circle |
+| `json_records` | the `json` module: writing, reading, and walking values, against Python's C-accelerated `json` and a hand-written C writer and parser | writing 20,000 records as JSON text, reading them back, and summing what was read, 10 times |
 
 Each workload size is in the benchmark's `.args` file, so every version reads it at runtime and gcc cannot specialize on a constant size. Sizes are chosen so `gcc -O2` takes at least about 40 ms and the whole suite finishes in a few minutes. The runner warns when any time is under 10 ms, which usually means gcc optimized the work away.
 

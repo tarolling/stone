@@ -2,8 +2,8 @@
 //! changing `[dependencies]` in place, so the rest of the file, comments included, stays as
 //! written.
 //!
-//! For example, `stone add github:alice/json@1.2` names `alice/json` on GitHub and the newest
-//! release 1.2.x, and adds `json = { github = "alice/json", version = "1.2.3" }` to the manifest.
+//! For example, `stone add github:alice/mime@1.2` names `alice/mime` on GitHub and the newest
+//! release 1.2.x, and adds `mime = { github = "alice/mime", version = "1.2.3" }` to the manifest.
 
 use super::toml::{self, Value, quote};
 use super::{Source, Version};
@@ -50,8 +50,8 @@ impl Wanted {
 /// GitHub Enterprise, `gitlab:group/project` (with `host` for another GitLab), or a link to one on
 /// `github.com` or `gitlab.com`, each optionally followed by `@` and what [`Wanted::parse`] reads.
 ///
-/// For example, `parse_spec("https://github.com/alice/json.git@latest", None)` is
-/// `github:alice/json` at its latest release.
+/// For example, `parse_spec("https://github.com/alice/mime.git@latest", None)` is
+/// `github:alice/mime` at its latest release.
 pub fn parse_spec(spec: &str, host: Option<&str>) -> Result<(Source, Wanted), String> {
     let (place, wanted) = match spec.rsplit_once('@') {
         Some((place, wanted)) => (place, Wanted::parse(wanted)?),
@@ -121,8 +121,8 @@ pub fn parse_spec(spec: &str, host: Option<&str>) -> Result<(Source, Wanted), St
 
 /// Writes the inline table a manifest names a dependency with.
 ///
-/// For example, `json` 1.2.0 from `github:alice/json` is
-/// `{ github = "alice/json", version = "1.2.0" }`.
+/// For example, `mime` 1.2.0 from `github:alice/mime` is
+/// `{ github = "alice/mime", version = "1.2.0" }`.
 pub fn dependency_value(source: &Source, version: &Version) -> String {
     let (kind, host, path) = match source {
         Source::GitHub { host, repo } => ("github", host, repo.clone()),
@@ -251,12 +251,12 @@ mod tests {
             repo: repo.to_string(),
         };
         assert_eq!(
-            parse_spec("github:alice/json", None),
-            Ok((github("alice/json"), Wanted::Latest))
+            parse_spec("github:alice/mime", None),
+            Ok((github("alice/mime"), Wanted::Latest))
         );
         assert_eq!(
-            parse_spec("https://github.com/alice/json.git", None),
-            Ok((github("alice/json"), Wanted::Latest))
+            parse_spec("https://github.com/alice/mime.git", None),
+            Ok((github("alice/mime"), Wanted::Latest))
         );
         let (source, wanted) =
             parse_spec("gitlab:group/sub/http@1.2", Some("git.corp.com")).unwrap();
@@ -274,8 +274,8 @@ mod tests {
     #[test]
     fn bad_specs_say_how_to_write_one() {
         assert_eq!(
-            parse_spec("alice/json", None).unwrap_err(),
-            "'alice/json' does not name a package; write github:owner/repo or gitlab:group/project"
+            parse_spec("alice/mime", None).unwrap_err(),
+            "'alice/mime' does not name a package; write github:owner/repo or gitlab:group/project"
         );
         assert_eq!(
             parse_spec("https://git.corp.com/g/p", None).unwrap_err(),
@@ -303,38 +303,38 @@ mod tests {
     fn a_dependency_is_added_after_the_others() {
         let text = "[package]\nname = \"app\"\n\n[dependencies]\n# geometry\ngeo = { path = \"../geo\" }\n\n[other]\n";
         assert_eq!(
-            set_dependency(text, "json", "{ x = 1 }").unwrap(),
+            set_dependency(text, "mime", "{ x = 1 }").unwrap(),
             "[package]\nname = \"app\"\n\n[dependencies]\n# geometry\ngeo = { path = \"../geo\" }\n\
-             json = { x = 1 }\n\n[other]\n"
+             mime = { x = 1 }\n\n[other]\n"
         );
         assert_eq!(
-            set_dependency("[dependencies]\n", "json", "{ x = 1 }").unwrap(),
-            "[dependencies]\njson = { x = 1 }\n"
+            set_dependency("[dependencies]\n", "mime", "{ x = 1 }").unwrap(),
+            "[dependencies]\nmime = { x = 1 }\n"
         );
         assert_eq!(
-            set_dependency("[package]\nname = \"app\"", "json", "{ x = 1 }").unwrap(),
-            "[package]\nname = \"app\"\n\n[dependencies]\njson = { x = 1 }\n"
+            set_dependency("[package]\nname = \"app\"", "mime", "{ x = 1 }").unwrap(),
+            "[package]\nname = \"app\"\n\n[dependencies]\nmime = { x = 1 }\n"
         );
         assert_eq!(
-            set_dependency("", "json", "{ x = 1 }").unwrap(),
-            "[dependencies]\njson = { x = 1 }\n"
+            set_dependency("", "mime", "{ x = 1 }").unwrap(),
+            "[dependencies]\nmime = { x = 1 }\n"
         );
     }
 
     #[test]
     fn a_dependency_is_replaced_where_it_is() {
-        let text = "[dependencies]\njson = { x = 1 }  # keep me\ngeo = { y = 2 }\n";
+        let text = "[dependencies]\nmime = { x = 1 }  # keep me\ngeo = { y = 2 }\n";
         assert_eq!(
-            set_dependency(text, "json", "{ x = 2 }").unwrap(),
-            "[dependencies]\njson = { x = 2 }  # keep me\ngeo = { y = 2 }\n"
+            set_dependency(text, "mime", "{ x = 2 }").unwrap(),
+            "[dependencies]\nmime = { x = 2 }  # keep me\ngeo = { y = 2 }\n"
         );
     }
 
     #[test]
     fn a_dependency_is_removed_with_its_line() {
-        let text = "[dependencies]\njson = { x = 1 }\ngeo = { y = 2 }\n";
+        let text = "[dependencies]\nmime = { x = 1 }\ngeo = { y = 2 }\n";
         assert_eq!(
-            remove_dependency(text, "json").unwrap(),
+            remove_dependency(text, "mime").unwrap(),
             "[dependencies]\ngeo = { y = 2 }\n"
         );
         assert_eq!(

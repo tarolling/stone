@@ -10,30 +10,30 @@ releases hold a stone package is one.
 In the directory of your program's `main.stn`, run
 
 ```sh
-stone add github:alice/stone-json
+stone add github:alice/stone-csv
 ```
 
-This finds the newest release of `alice/stone-json`, downloads it, and writes the dependency to
+This finds the newest release of `alice/stone-csv`, downloads it, and writes the dependency to
 `stone.toml`, making the file if there is none:
 
 ```toml
 [dependencies]
-json = { github = "alice/stone-json", version = "1.4.0" }
+csv = { github = "alice/stone-csv", version = "1.4.0" }
 ```
 
-The key, `json`, is the name the package gives itself, and the name your files use it under.
-`--name` picks another (`stone add github:alice/stone-json --name js`). The package can be named
+The key, `csv`, is the name the package gives itself, and the name your files use it under.
+`--name` picks another (`stone add github:alice/stone-csv --name sheet`). The package can be named
 in several ways:
 
 | you write | you get |
 | --- | --- |
-| `github:alice/stone-json` | the newest release |
-| `github:alice/stone-json@1.2` | the newest 1.2.x release |
-| `github:alice/stone-json@1.2.3` | exactly 1.2.3 |
-| `https://github.com/alice/stone-json` | the same as `github:alice/stone-json` |
+| `github:alice/stone-csv` | the newest release |
+| `github:alice/stone-csv@1.2` | the newest 1.2.x release |
+| `github:alice/stone-csv@1.2.3` | exactly 1.2.3 |
+| `https://github.com/alice/stone-csv` | the same as `github:alice/stone-csv` |
 | `gitlab:group/project`, `gitlab:group/subgroup/project` | a project on gitlab.com |
 | `gitlab:group/project --host gitlab.example.com` | a project on your own GitLab |
-| `github:github.example.com/alice/stone-json` | a repository on GitHub Enterprise |
+| `github:github.example.com/alice/stone-csv` | a repository on GitHub Enterprise |
 
 `@latest` is the default, and it skips pre-releases such as `2.0.0-beta.1`. To use one, give it
 exactly.
@@ -43,14 +43,14 @@ exactly.
 A package's modules are named by the dependency's name, then their path in the package:
 
 ```stone
-use json                // the package's lib.stn
-use json.encode         // encode.stn, or the pub fn encode of lib.stn
-use json.parse.value    // parse/value.stn, or the pub fn value of parse.stn
+use csv               // the package's lib.stn
+use csv.encode        // encode.stn, or the pub fn encode of lib.stn
+use csv.parse.value   // parse/value.stn, or the pub fn value of parse.stn
 
-print(json.decode("[1, 2]"))
+print(csv.decode("a,b"))
 ```
 
-`use json` loads the package's `lib.stn`, the module a package keeps its main functions in. A
+`use csv` loads the package's `lib.stn`, the module a package keeps its main functions in. A
 package's files see only their own modules and their own dependencies, never your program's, so
 two packages can each have a `util.stn` without meaning the same module.
 
@@ -77,16 +77,16 @@ Each dependency gives the oldest version it works with, and that is all a manife
 about versions. stone uses the newest of the versions that your program and the packages it uses
 ask for, which is how Go chooses versions:
 
-- Your program asks for `json` 1.2.0, and `geo` asks for `json` 1.3.0, so both get `json` 1.3.0.
+- Your program asks for `csv` 1.2.0, and `geo` asks for `csv` 1.3.0, so both get `csv` 1.3.0.
 - A newer 1.9.0 being released changes nothing, until something asks for it.
 
 So the same manifests always give the same versions, on every machine and on every day, and
 nothing is ever upgraded behind your back. To upgrade, ask for the newer version: run
-`stone add github:alice/stone-json` again, or edit the version in `stone.toml`.
+`stone add github:alice/stone-csv` again, or edit the version in `stone.toml`.
 
 Versions are [semantic versions](https://semver.org). A new major version may break the code that
 uses it, so 1.x and 2.x are treated as different packages: if one part of your program uses
-`json` 1.4.0 and another `json` 2.1.0, both are linked in, each under its own name, and neither
+`csv` 1.4.0 and another `csv` 2.1.0, both are linked in, each under its own name, and neither
 can see the other. Before 1.0, each minor version is its own: 0.3.x and 0.4.x are different
 packages too.
 
@@ -98,8 +98,8 @@ The first time a package is downloaded, stone writes a hash of its files to `sto
 ```toml
 # written by stone: the hash of what each package downloaded held
 [[package]]
-name = "json"
-github = "alice/stone-json"
+name = "csv"
+github = "alice/stone-csv"
 version = "1.4.0"
 hash = "sha256:4f1c..."
 ```
@@ -123,11 +123,11 @@ packages are:
 
   ```text
   app
-  └── json 1.4.0 (github:alice/stone-json)
+  └── csv 1.4.0 (github:alice/stone-csv)
       └── num 0.3.0 (github:bob/num)
   ```
 
-- `stone remove json` takes a dependency out of `stone.toml`, and out of `stone.lock` with any
+- `stone remove csv` takes a dependency out of `stone.toml`, and out of `stone.lock` with any
   package only it used.
 - `--offline`, given to `run`, `build`, or `check`, uses only what is already downloaded and
   never connects to anything.

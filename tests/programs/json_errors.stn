@@ -1,0 +1,17 @@
+// json.parse errors say what is wrong and where, counting columns in characters
+use json
+
+while true:
+    match input():
+        case ok(line):
+            match json.parse(line):
+                case ok(v):
+                    print("ok:", json.write(v))
+                case err(e):
+                    print(e)
+        case err(_):
+            break
+
+// a line break moves the position to the next line
+print(json.parse("[1,\n  2,\n  x]"))
+print(json.parse(""))

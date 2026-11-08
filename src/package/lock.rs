@@ -7,8 +7,8 @@
 //!
 //! ```toml
 //! [[package]]
-//! name = "json"
-//! github = "alice/stone-json"
+//! name = "mime"
+//! github = "alice/stone-mime"
 //! version = "1.4.0"
 //! hash = "sha256:4f1c..."
 //! ```
@@ -168,10 +168,10 @@ mod tests {
         let lock = Lock {
             entries: vec![
                 entry(
-                    "json",
+                    "mime",
                     Source::GitHub {
                         host: None,
-                        repo: "alice/json".into(),
+                        repo: "alice/mime".into(),
                     },
                     "1.4.0",
                 ),
@@ -188,7 +188,7 @@ mod tests {
         let text = lock.write();
         assert!(text.starts_with(HEADER));
         // sorted by name
-        assert!(text.find("http").unwrap() < text.find("json").unwrap());
+        assert!(text.find("http").unwrap() < text.find("mime").unwrap());
         let (read, errors) = Lock::parse(&text, FileId(1));
         assert_eq!(errors, []);
         let without_spans = |lock: &Lock| {

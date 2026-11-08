@@ -2,6 +2,7 @@
 
 pub mod fs;
 pub mod gui;
+pub mod json;
 pub mod math;
 pub mod net;
 pub mod os;
@@ -70,8 +71,11 @@ pub static INTERNAL_MODULES: [BuiltinModule; 2] = [
 
 /// The modules that are part of stone but written in stone, by name with their source, which a
 /// program that uses one is linked with like a module file of its own.
-pub static SOURCE_MODULES: [(&str, &str); 2] =
-    [(net::MODULE, net::SOURCE), (gui::MODULE, gui::SOURCE)];
+pub static SOURCE_MODULES: [(&str, &str); 3] = [
+    (net::MODULE, net::SOURCE),
+    (gui::MODULE, gui::SOURCE),
+    (json::MODULE, json::SOURCE),
+];
 
 /// The modules written in stone that only stone's own modules may use, as they may use
 /// [`INTERNAL_MODULES`], by name with their source.

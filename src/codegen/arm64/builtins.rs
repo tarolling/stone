@@ -13,7 +13,7 @@ use super::{address, pop_frame, push_frame};
 use crate::codegen::context::{CPU_ONLINE, PATH_BUFFER, UTSNAME_FIELD, UTSNAME_SIZE};
 use crate::codegen::context::{
     HEAP_REGION, IMMORTAL, LARGEST_CLASS, LEAK_PREFIX, LEAK_SUFFIX, OUT_OF_MEMORY,
-    OUT_OF_MEMORY_LENGTH, SMALLEST_CLASS, STDIN_BUFFER, TEXT_BLOCK, immortal_string,
+    OUT_OF_MEMORY_LENGTH, SMALL_MAP, SMALLEST_CLASS, STDIN_BUFFER, TEXT_BLOCK, immortal_string,
 };
 use crate::codegen::{AssemblyGenerator, Os};
 use crate::stdlib::os::HOSTNAME_BUFFER;
@@ -1360,7 +1360,11 @@ pub fn str_float_runtime(r#gen: &mut dyn AssemblyGenerator) {
 ///   changing only `x0`, `x1`, and `x9` through `x11`
 /// - `stone.str_concat` returns a new string holding `x0` followed by `x1`
 /// - `stone.str_slice` returns a new string holding the `x1` bytes at `x0`
-pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
+/// - `stone.str_append`, emitted if `appends`, returns a string holding `x0` followed by `x1`,
+///   taking the reference in `x0`, as x64's does: in place when nothing else refers to `x0`,
+///   growing its block to at least twice the size if it is too small, and otherwise copying
+///   both and releasing `x0`
+pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator, appends: bool) {
     r#gen.emit("stone.str_len:");
     r#gen.emit("\tldur\tx0, [x0, #-16]");
     r#gen.emit("\tret");
@@ -1439,6 +1443,9 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     copy_bytes(r#gen, "x9", "x20", "x22", ".Lstr_concat_right");
     pop_frame(r#gen, &saved);
 
+    if appends {
+        str_append(r#gen);
+    }
     // x19 and x20 hold the bytes and their count across stone.str_new
     let saved = ["x19", "x20"];
     r#gen.emit("stone.str_slice:");
@@ -1450,6 +1457,73 @@ pub fn string_runtime(r#gen: &mut dyn AssemblyGenerator) {
     r#gen.emit("\tmov\tx9, x0");
     copy_bytes(r#gen, "x9", "x19", "x20", ".Lstr_slice_copy");
     r#gen.emit("\tstrb\twzr, [x9]");
+    pop_frame(r#gen, &saved);
+}
+
+/// Emits `stone.str_append` (see [`string_runtime`]). x19 holds the block of the string written
+/// onto, which starts 16 bytes before it, x20 the string appended, and x21 and x22 their
+/// lengths.
+fn str_append(r#gen: &mut dyn AssemblyGenerator) {
+    let saved = ["x19", "x20", "x21", "x22"];
+    r#gen.emit("stone.str_append:");
+    // a string added to itself, or one something else refers to, is copied
+    r#gen.emit("\tcmp\tx0, x1");
+    r#gen.emit("\tb.eq\t.Lstr_append_copy");
+    r#gen.emit("\tldur\tx9, [x0, #-8]");
+    r#gen.emit("\tcmp\tx9, #1");
+    r#gen.emit("\tb.ne\t.Lstr_append_copy");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tsub\tx19, x0, #16");
+    r#gen.emit("\tmov\tx20, x1");
+    r#gen.emit("\tldur\tx21, [x0, #-16]");
+    r#gen.emit("\tldur\tx22, [x1, #-16]");
+    // the bytes the string needs: its length, its count, its bytes, and a terminator
+    r#gen.emit("\tadd\tx1, x21, x22");
+    r#gen.emit("\tadd\tx1, x1, #17");
+    // the bytes its block holds, less the allocator's header: a class's power of two, or a
+    // mapping's length
+    r#gen.emit("\tldur\tx9, [x19, #-8]");
+    r#gen.emit("\tmov\tx10, x9");
+    r#gen.emit(&format!("\tcmp\tx9, #{LARGEST_CLASS}"));
+    r#gen.emit("\tb.hi\t.Lstr_append_room");
+    r#gen.emit("\tmov\tx10, #1");
+    r#gen.emit("\tlsl\tx10, x10, x9");
+    r#gen.emit(".Lstr_append_room:");
+    r#gen.emit("\tsub\tx10, x10, #8");
+    r#gen.emit("\tcmp\tx1, x10");
+    r#gen.emit("\tb.ls\t.Lstr_append_write");
+    // at least twice as big, so the block grows a constant number of times per doubling
+    r#gen.emit("\tadd\tx10, x10, x10");
+    r#gen.emit("\tcmp\tx1, x10");
+    r#gen.emit("\tcsel\tx1, x1, x10, hs");
+    r#gen.emit("\tmov\tx0, x19");
+    r#gen.emit("\tbl\tstone.mem_realloc");
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit(".Lstr_append_write:");
+    r#gen.emit("\tadd\tx9, x19, x21");
+    r#gen.emit("\tadd\tx9, x9, #16");
+    r#gen.emit("\tmov\tx11, x20");
+    r#gen.emit("\tadd\tx10, x22, #1"); // the terminator too
+    copy_bytes(r#gen, "x9", "x11", "x10", ".Lstr_append_bytes");
+    r#gen.emit("\tadd\tx21, x21, x22");
+    r#gen.emit("\tstr\tx21, [x19]");
+    r#gen.emit("\tadd\tx0, x19, #16");
+    pop_frame(r#gen, &saved);
+    // x19 holds the string appended to and x20 the copy across the calls
+    let saved = ["x19", "x20"];
+    r#gen.emit(".Lstr_append_copy:");
+    push_frame(r#gen, &saved);
+    r#gen.emit("\tmov\tx19, x0");
+    r#gen.emit("\tbl\tstone.str_concat");
+    r#gen.emit("\tmov\tx20, x0");
+    r#gen.emit("\tldur\tx9, [x19, #-8]");
+    r#gen.emit("\tsub\tx9, x9, #1");
+    r#gen.emit("\tstur\tx9, [x19, #-8]");
+    r#gen.emit("\tcbnz\tx9, .Lstr_append_done");
+    r#gen.emit("\tmov\tx9, x19");
+    r#gen.emit("\tbl\tstone.free_str");
+    r#gen.emit(".Lstr_append_done:");
+    r#gen.emit("\tmov\tx0, x20");
     pop_frame(r#gen, &saved);
 }
 
@@ -1646,6 +1720,42 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     enter(r#gen);
     r#gen.emit("\tldr\tx9, [x19, #40]");
     r#gen.emit("\tcbnz\tx9, .Lmap_find_indexed");
+    // a small map without an index is scanned, its keys in x22 in turn
+    r#gen.emit("\tldr\tx10, [x19, #32]");
+    r#gen.emit(&format!("\tlsl\tx10, x10, #{SMALL_MAP}"));
+    r#gen.emit("\tldr\tx11, [x19]");
+    r#gen.emit("\tcmp\tx11, x10");
+    r#gen.emit("\tb.gt\t.Lmap_find_build");
+    r#gen.emit("\tmov\tx22, #0");
+    r#gen.emit(".Lmap_find_scan:");
+    r#gen.emit("\tldr\tx11, [x19]");
+    r#gen.emit("\tcmp\tx22, x11");
+    r#gen.emit("\tb.ge\t.Lmap_find_none");
+    r#gen.emit("\tldr\tx9, [x19, #16]");
+    r#gen.emit("\tldr\tx0, [x9, x22, lsl #3]");
+    r#gen.emit("\tcmp\tx0, x20");
+    r#gen.emit("\tb.eq\t.Lmap_find_found");
+    if strings {
+        r#gen.emit("\tcbz\tx21, .Lmap_find_skip");
+        r#gen.emit("\tldur\tx9, [x0, #-16]");
+        r#gen.emit("\tldur\tx10, [x20, #-16]");
+        r#gen.emit("\tcmp\tx9, x10");
+        r#gen.emit("\tb.ne\t.Lmap_find_skip");
+        r#gen.emit("\tmov\tx1, x20");
+        r#gen.emit("\tbl\tstone.str_eq");
+        r#gen.emit("\tcbnz\tx0, .Lmap_find_found");
+        r#gen.emit(".Lmap_find_skip:");
+    }
+    r#gen.emit("\tldr\tx9, [x19, #32]");
+    r#gen.emit("\tadd\tx22, x22, x9");
+    r#gen.emit("\tb\t.Lmap_find_scan");
+    r#gen.emit(".Lmap_find_found:");
+    r#gen.emit("\tmov\tx0, x22");
+    pop_frame(r#gen, &saved);
+    r#gen.emit(".Lmap_find_none:");
+    r#gen.emit("\tmov\tx0, #-1");
+    pop_frame(r#gen, &saved);
+    r#gen.emit(".Lmap_find_build:");
     r#gen.emit("\tbl\t.Lmap_rebuild");
     r#gen.emit(".Lmap_find_indexed:");
     r#gen.emit("\tbl\t.Lmap_probe");
@@ -1660,7 +1770,16 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     // a bigger index when one more entry would fill more than half of it: 2 * (len + width)
     // slots must be at most capacity * width
     r#gen.emit("\tldr\tx9, [x19, #40]");
-    r#gen.emit("\tcbz\tx9, .Lmap_add_rebuild");
+    r#gen.emit("\tcbnz\tx9, .Lmap_add_indexed");
+    // a map without an index gets one only when it would pass the small maps' entries
+    r#gen.emit("\tldr\tx10, [x19, #32]");
+    r#gen.emit(&format!("\tlsl\tx11, x10, #{SMALL_MAP}"));
+    r#gen.emit("\tldr\tx16, [x19]");
+    r#gen.emit("\tadd\tx16, x16, x10");
+    r#gen.emit("\tcmp\tx16, x11");
+    r#gen.emit("\tb.le\t.Lmap_add_room");
+    r#gen.emit("\tb\t.Lmap_add_rebuild");
+    r#gen.emit(".Lmap_add_indexed:");
     r#gen.emit("\tldr\tx10, [x19]");
     r#gen.emit("\tldr\tx11, [x19, #32]");
     r#gen.emit("\tadd\tx10, x10, x11");
@@ -1676,22 +1795,49 @@ pub fn map_runtime(r#gen: &mut dyn AssemblyGenerator, strings: bool) {
     r#gen.emit(".Lmap_add_room:");
     r#gen.emit("\tldr\tx22, [x19]");
     r#gen.emit("\tldr\tx23, [x19, #32]");
-    r#gen.emit("\tmov\tx1, x20");
-    r#gen.emit(".Lmap_add_slot:");
-    r#gen.emit("\tmov\tx0, x19");
-    r#gen.emit("\tbl\tstone.list_append");
-    r#gen.emit("\tmov\tx1, #0"); // the values are filled in by the caller
-    r#gen.emit("\tsub\tx23, x23, #1");
-    r#gen.emit("\tcbnz\tx23, .Lmap_add_slot");
+    // room for the entry's slots at once: twice the capacity, at least the entry and four
+    // entries' worth, so a small map grows its storage a few times
+    r#gen.emit("\tadd\tx1, x22, x23");
+    r#gen.emit("\tldr\tx9, [x19, #8]");
+    r#gen.emit("\tcmp\tx1, x9");
+    r#gen.emit("\tb.le\t.Lmap_add_fits");
+    r#gen.emit("\tadd\tx9, x9, x9");
+    r#gen.emit("\tcmp\tx9, x1");
+    r#gen.emit("\tcsel\tx9, x9, x1, ge");
+    r#gen.emit("\tlsl\tx10, x23, #2");
+    r#gen.emit("\tcmp\tx9, x10");
+    r#gen.emit("\tcsel\tx9, x9, x10, ge");
+    r#gen.emit("\tstr\tx9, [x19, #8]");
+    r#gen.emit("\tlsl\tx1, x9, #3");
+    r#gen.emit("\tldr\tx0, [x19, #16]");
+    r#gen.emit("\tbl\tstone.mem_realloc");
+    r#gen.emit("\tstr\tx0, [x19, #16]");
+    r#gen.emit(".Lmap_add_fits:");
+    // the key, then zeros for the values, which the caller fills in
+    r#gen.emit("\tldr\tx9, [x19, #16]");
+    r#gen.emit("\tstr\tx20, [x9, x22, lsl #3]");
+    r#gen.emit("\tadd\tx10, x22, x23");
+    r#gen.emit("\tadd\tx11, x22, #1");
+    r#gen.emit(".Lmap_add_zero:");
+    r#gen.emit("\tcmp\tx11, x10");
+    r#gen.emit("\tb.ge\t.Lmap_add_filled");
+    r#gen.emit("\tstr\txzr, [x9, x11, lsl #3]");
+    r#gen.emit("\tadd\tx11, x11, #1");
+    r#gen.emit("\tb\t.Lmap_add_zero");
+    r#gen.emit(".Lmap_add_filled:");
+    r#gen.emit("\tstr\tx10, [x19]");
     r#gen.emit("\tcbz\tx21, .Lmap_add_key");
     r#gen.emit("\tldur\tx9, [x20, #-8]");
     r#gen.emit("\tadd\tx9, x9, #1");
     r#gen.emit("\tstur\tx9, [x20, #-8]");
     r#gen.emit(".Lmap_add_key:");
+    r#gen.emit("\tldr\tx9, [x19, #40]");
+    r#gen.emit("\tcbz\tx9, .Lmap_add_done");
     r#gen.emit("\tbl\t.Lmap_probe");
     r#gen.emit("\tadd\tx9, x22, #1");
     r#gen.emit("\torr\tx9, x9, x12"); // the key's tag
     r#gen.emit("\tstr\tx9, [x0]");
+    r#gen.emit(".Lmap_add_done:");
     r#gen.emit("\tmov\tx0, x22");
     pop_frame(r#gen, &saved);
 

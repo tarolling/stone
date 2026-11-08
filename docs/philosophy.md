@@ -183,6 +183,13 @@ instead of being copied: into a call (`ys = f(xs)`), another variable (`ys = xs`
 never reads it, directly or through the functions it calls. Arithmetic on lists, such as
 `xs = xs * 2.0 + ys` or `xs += ys`, writes its result over an operand's list when that operand is at its last use or is
 the variable being assigned and nothing else refers to its list, so it allocates nothing.
+Adding to a string or bytes the same way, as in `s += t` in a loop or `s = s + a + b`, writes
+onto the string in place when nothing else refers to it, growing its block to at least twice
+its size when it is full, so building text a piece at a time takes time in proportion to its
+length in both backends, with no builder type to ask for. A map of at most eight entries
+keeps no hash table until it grows past that, and a lookup compares its keys in turn, so the
+many small maps a program such as a JSON reader makes cost neither the table's memory nor its
+hashing.
 Tuples never change, so they need nothing of this: the compiler keeps each of a tuple's values as
 a variable of its own, counting only the strings and lists among them. Structs are kept the same
 way, so changing a field of a struct in a variable (`p.x = 1.0`) is an assignment to that

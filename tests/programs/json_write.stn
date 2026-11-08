@@ -1,0 +1,28 @@
+// json.write and json.pretty write what Python's json.dumps writes
+use json
+
+fields = {"name": json.value.text("stone"), "version": json.value.integer(1)}
+fields["ratio"] = json.value.number(0.5)
+fields["big"] = json.value.number(1e+22)
+fields["small"] = json.value.number(1e-07)
+fields["whole"] = json.value.number(3.0)
+fields["negative zero"] = json.value.number(-0.0)
+fields["flags"] = json.value.array([json.value.boolean(true), json.value.boolean(false), json.value.null])
+fields["empty"] = json.value.array([])
+fields["none"] = json.value.object({})
+inner = json.value.object({"k": json.value.text("v")})
+fields["nested"] = json.value.array([json.value.array([json.value.integer(-1)]), inner])
+doc = json.value.object(fields)
+print(json.write(doc))
+print(json.pretty(doc, 2))
+print(json.pretty(doc, 0))
+print(json.pretty(json.value.array([json.value.integer(1)]), 4))
+print(json.pretty(json.value.integer(7), 2))
+print(json.write(json.value.text("")))
+// what write writes reads back as the same value
+text = json.write(doc)
+print(json.parse(text).unwrap() == doc)
+// JSON cannot write nan or infinity, which are written as null
+nan = float("nan").unwrap()
+inf = float("inf").unwrap()
+print(json.write(json.value.array([json.value.number(nan), json.value.number(inf), json.value.number(-inf)])))

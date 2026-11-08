@@ -1,0 +1,49 @@
+// appending to a string or bytes in place never changes another value that shares it
+fn grow(s: str, n: int) -> str:
+    for i in range(n):
+        s += str(i % 10)
+    ret s
+
+fn tail(s: str) -> result[str, str]:
+    s += "-"
+    s += int("x{s}")?.display()
+    ret ok(s)
+
+fn shout(words: list[str]) -> str:
+    out = ""
+    for w in words:
+        out = out + w.upper() + "!"
+    ret out
+
+s = ""
+for _i in range(1000):
+    s += "ab"
+print(s.len(), s[0:6], s[-4:])
+t = s
+s += "c"
+xs = [s, t]
+s += "d"
+print(s.len(), t.len(), xs[0].len(), xs[1].len(), s[-3:], t[-3:])
+s = "x"
+s += s
+s += s
+print(s)
+literal = "lit"
+copy = literal
+literal += "eral"
+print(literal, copy)
+print(grow("", 25), grow("start ", 3))
+long = grow("", 100000)
+print(long.len(), long[99990:])
+print(tail("a"))
+print(shout(["a", "bc", "def"]))
+b = b"\x00\x01"
+c = b
+for _i in range(3):
+    b += b"\xff\x00"
+print(b, c, b.len())
+// a chain of + adds each piece to the sum so far
+a = "1"
+d = "2"
+e = a + d + a + "3" + d
+print(e, a, d)

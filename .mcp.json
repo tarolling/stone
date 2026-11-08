@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "stone": {
+      "command": "target/debug/stone-lsp",
+      "args": ["--mcp"]
+    }
+  }
+}

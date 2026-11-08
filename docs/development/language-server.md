@@ -39,9 +39,30 @@ own, cannot be renamed.
 | `lsp/src/features.rs` | one pure function per request over a `Document` |
 | `lsp/src/line_index.rs` | converts stone's 1-based char positions to LSP's UTF-16 or UTF-8 positions |
 | `lsp/src/uri.rs` | converts between `file://` URIs and paths |
+| `lsp/src/mcp.rs`, `lsp/src/mcp/tools.rs` | `stone-lsp --mcp`, the MCP server for coding agents |
 
 To add a feature, write it in `features.rs` with unit tests in `lsp/src/features/tests.rs`, then
 wire it into `Server::handle_request` and `capabilities`.
+
+## The MCP server
+
+`stone-lsp --mcp` (`lsp/src/mcp.rs`) serves the Model Context Protocol over stdin and stdout:
+newline-delimited JSON-RPC 2.0, answering `initialize`, `ping`, `tools/list`, and `tools/call`
+with no other dependency than `serde_json`. Each tool in `lsp/src/mcp/tools.rs` reads the file it
+is given from disk into a `Document::in_program`, as the language server does for an open
+document, calls the same `features` function, and writes the answer as text: positions as
+`file:line:col: <line>` and diagnostics as `stone check` renders them. Snippets run on a thread
+of their own with a step limit (`Context::fuel`), and an answer stops waiting after
+`Context::timeout`. Tests in `lsp/src/mcp/tests.rs` drive `serve` and each tool over temporary
+directories, and `lsp/tests/stdio.rs` runs the binary with `--mcp`. To try it by hand:
+
+```sh
+cargo build -p stone-lsp
+printf '%s\n' '{"jsonrpc":"2.0","id":1,"method":"tools/list"}' | target/debug/stone-lsp --mcp
+```
+
+The repository's `.mcp.json` runs `target/debug/stone-lsp --mcp` for Claude Code sessions in the
+repository, so build it first.
 
 ## The VS Code extension
 
@@ -60,4 +81,7 @@ wire it into `Server::handle_request` and `capabilities`.
    ```
 
 `npm test` runs the extension's tests, which cover how `server.js` picks a server: the
-`stone.server.path` setting, then a bundled `server/stone-lsp`, then `stone-lsp` on `PATH`.
+`stone.server.path` setting, then a bundled `server/stone-lsp`, then `stone-lsp` on `PATH`. They
+also cover `mcp.js`, which offers `<server> --mcp` to VS Code's agents through
+`vscode.lm.registerMcpServerDefinitionProvider` (VS Code 1.101 and later; older versions skip it)
+and the `mcpServerDefinitionProviders` contribution.

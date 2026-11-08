@@ -1,6 +1,6 @@
 //! Runs the `stone-lsp` executable and talks to it over stdio, as an editor does.
 
-use std::io::BufReader;
+use std::io::{BufRead, BufReader, Write};
 use std::process::{Command, Stdio};
 
 use lsp_server::{Message, Notification, Request, RequestId};
@@ -66,4 +66,50 @@ fn serves_diagnostics_over_stdio_and_exits_cleanly() {
     send(Notification::new("exit".to_string(), json!(null)).into());
     drop(stdin);
     assert!(child.wait().unwrap().success());
+}
+
+#[test]
+fn serves_mcp_tools_over_stdio_with_the_mcp_flag() {
+    let dir = std::env::temp_dir().join(format!("stone-lsp-mcp-stdio-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(
+        dir.join("main.stn"),
+        "fn add(a: int, b: int) -> int:\n    ret a + b\nprint(add(1, 2))\n",
+    )
+    .unwrap();
+    let mut child = Command::new(env!("CARGO_BIN_EXE_stone-lsp"))
+        .arg("--mcp")
+        .current_dir(&dir)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .spawn()
+        .expect("stone-lsp --mcp should start");
+    let mut stdin = child.stdin.take().unwrap();
+    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+    let mut ask = |message: serde_json::Value| -> serde_json::Value {
+        writeln!(stdin, "{message}").unwrap();
+        let mut line = String::new();
+        stdout.read_line(&mut line).unwrap();
+        serde_json::from_str(&line).unwrap()
+    };
+
+    let initialized = ask(json!({
+        "jsonrpc": "2.0", "id": 1, "method": "initialize",
+        "params": { "protocolVersion": "2025-06-18", "capabilities": {} },
+    }));
+    assert_eq!(initialized["result"]["serverInfo"]["name"], "stone");
+    let hover = ask(json!({
+        "jsonrpc": "2.0", "id": 2, "method": "tools/call",
+        "params": {
+            "name": "stone_hover",
+            "arguments": { "path": "main.stn", "line": 3, "symbol": "add" },
+        },
+    }));
+    let text = hover["result"]["content"][0]["text"].as_str().unwrap();
+    assert!(text.contains("fn add(a: int, b: int) -> int"), "{text}");
+
+    drop(ask);
+    drop(stdin);
+    assert!(child.wait().unwrap().success());
+    let _ = std::fs::remove_dir_all(&dir);
 }

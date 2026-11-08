@@ -2,7 +2,8 @@
 
 `stone-lsp` is a language server for stone, and the "stone" VS Code extension runs it. Any
 editor that speaks the Language Server Protocol can use `stone-lsp` too: start it with no
-arguments, speaking LSP over stdin and stdout, for files ending in `.stn`.
+arguments, speaking LSP over stdin and stdout, for files ending in `.stn`. With `--mcp` it
+serves coding agents instead (see [Coding agents](#coding-agents-mcp)).
 
 ## Features
 
@@ -44,3 +45,37 @@ cargo install --git https://github.com/tarolling/stone stone-lsp
 
 - `stone.server.path`: the `stone-lsp` executable to run. When empty (the default), the
   extension runs its bundled server, or `stone-lsp` on `PATH` if it has none.
+
+## Coding agents (MCP)
+
+`stone-lsp --mcp` serves the same analysis to coding agents over the
+[Model Context Protocol](https://modelcontextprotocol.io), as Pylance does for Python. Its tools
+read programs from disk and analyze each file as part of its program, as the editor does:
+
+| tool | does |
+| --- | --- |
+| `stone_guide` | returns the guide to writing stone for agents, which the server asks agents to read first |
+| `stone_diagnostics` | checks a file, or every `.stn` file under a directory, and returns errors and warnings as `stone check` writes them |
+| `stone_check_snippet` | checks a program given as text |
+| `stone_run_snippet` | runs a program given as text with the interpreter, with optional input and arguments, returning its stdout, stderr, and how it ended; a step limit stops a loop that never ends |
+| `stone_hover` | describes what is at a position, as hover does |
+| `stone_definition` | says where the symbol at a position is defined |
+| `stone_references` | lists every use of the symbol at a position |
+| `stone_symbols` | outlines a file |
+| `stone_rename` | renames the symbol at a position in every file of its program, writing the files |
+| `stone_docs` | looks up a builtin function, method, type, module, or module function |
+
+A position is a 1-based `line` plus either `symbol`, the name as it appears on that line, or a
+1-based `column`. Relative paths start from the directory the server runs in, and answers show
+paths relative to it.
+
+The VS Code extension offers the server to VS Code's agents on VS Code 1.101 and later, so its
+tools appear in Copilot's agent mode with nothing to set up. For Claude Code, add it from the
+project's directory with
+
+```sh
+claude mcp add stone -- stone-lsp --mcp
+```
+
+using `stone-lsp` from `PATH` (see above for installing it), or the full path to the server the
+extension bundles. Any other agent that speaks MCP over stdio runs the same command.

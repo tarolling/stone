@@ -10,6 +10,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- `stone-lsp --mcp` serves the Model Context Protocol for coding agents, with tools that check
+  files and snippets, run snippets, describe symbols, find definitions and references, outline a
+  file, rename across a program, look up builtins, and return the guide to writing stone. On VS
+  Code 1.101 and later the extension offers it to VS Code's agents, such as Copilot's agent mode,
+  and Claude Code adds it with `claude mcp add stone -- stone-lsp --mcp`.
+
 ## [0.4.3] - 2026-11-07
 
 ### Added

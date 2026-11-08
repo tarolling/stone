@@ -58,7 +58,13 @@
           "description": "The stone-lsp executable to run, either a name on PATH or an absolute path, such as the target/debug/stone-lsp of a local build. When empty, the extension runs the server bundled with it, or stone-lsp on PATH if it has none."
         }
       }
-    }
+    },
+    "mcpServerDefinitionProviders": [
+      {
+        "id": "stone",
+        "label": "stone"
+      }
+    ]
   },
   "dependencies": {
     "vscode-languageclient": "^9.0.1"

@@ -267,6 +267,29 @@ pub fn run_module(
     })
 }
 
+/// Runs a checked module as [`run_module`] does, but writes `eprint`'s lines to `errors` rather
+/// than to standard error, so a caller such as the MCP server can capture both streams.
+///
+/// For example, running the module of `eprint(1)` appends `1\n` to `errors` and nothing to `out`.
+pub fn run_module_with_errors(
+    ast: &Mod,
+    calls: &Calls,
+    input: &mut (impl BufRead + Send),
+    out: &mut (impl Write + Send),
+    errors: &mut (impl Write + Send),
+    args: &[String],
+    limits: Limits,
+) -> Result<(), Box<dyn Error>> {
+    on_interpreter_thread(|| {
+        Interpreter::with_output(out, limits)
+            .with_errors(errors)
+            .with_input(input)
+            .with_args(args.to_vec())
+            .with_calls(calls.clone())
+            .evaluate(ast)
+    })
+}
+
 /// Runs the test function `function` of a checked module, such as `test.4.1`, with the
 /// tree-walking interpreter, without any of the module's top-level statements: it prints to `out`,
 /// writes `eprint`'s lines to `errors`, reads no input, gets no arguments, and stops once it

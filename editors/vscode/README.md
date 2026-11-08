@@ -9,6 +9,9 @@ Language support for stone `.stn` files, backed by the `stone-lsp` language serv
   opens a generated `builtins.stn` that documents the builtins
 - an outline of functions and variables, and completion of names, builtins, and keywords
 - formatting, with the same layout `stone fmt` writes
+- tools for coding agents: on VS Code 1.101 and later the extension offers `stone-lsp --mcp` as
+  an MCP server, so Copilot's agent mode can check files, run snippets, look up builtins, hover,
+  find definitions and references, and rename
 
 ## Install
 

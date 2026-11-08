@@ -2,6 +2,7 @@
 
 const vscode = require("vscode");
 const { LanguageClient } = require("vscode-languageclient/node");
+const { registerMcpServer } = require("./mcp");
 const { serverCommand } = require("./server");
 
 /** @type {LanguageClient | undefined} */
@@ -12,17 +13,25 @@ let client;
  *
  * The server runs as a child process speaking the Language Server Protocol over stdio. It is the
  * `stone.server.path` setting if set, else the server bundled with the extension, else
- * `stone-lsp` on PATH (see `serverCommand`).
+ * `stone-lsp` on PATH (see `serverCommand`). The same executable is offered to VS Code's agents as
+ * an MCP server, `stone-lsp --mcp` (see `registerMcpServer`).
  *
  * @param {vscode.ExtensionContext} context
  */
 async function activate(context) {
-  const configured = vscode.workspace.getConfiguration("stone").get("server.path", "");
-  const command = serverCommand(configured, context.extensionPath);
+  const command = () => {
+    const configured = vscode.workspace.getConfiguration("stone").get("server.path", "");
+    return serverCommand(configured, context.extensionPath);
+  };
+  // agents in VS Code 1.101 and later can call the same server's tools over MCP
+  const mcp = registerMcpServer(vscode, command, context.extension.packageJSON.version);
+  if (mcp) {
+    context.subscriptions.push(mcp);
+  }
   client = new LanguageClient(
     "stone",
     "stone",
-    { command },
+    { command: command() },
     { documentSelector: [{ language: "stone" }] },
   );
   await client.start();

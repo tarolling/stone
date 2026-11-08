@@ -35,6 +35,7 @@ use crate::uri::{file_path, file_uri};
 
 pub mod features;
 pub mod line_index;
+pub mod mcp;
 pub mod uri;
 
 /// Runs the server until the client shuts it down.
@@ -91,7 +92,7 @@ pub fn run(connection: Connection) -> Result<(), Box<dyn Error + Send + Sync>> {
 ///
 /// For example, on Linux this writes `/tmp/stone-lsp-0.1.0/builtins.stn` and
 /// `/tmp/stone-lsp-0.1.0/prelude.stn`.
-fn write_builtins_reference() -> Option<Uri> {
+pub(crate) fn write_builtins_reference() -> Option<Uri> {
     let dir = std::env::temp_dir().join(format!("stone-lsp-{}", env!("CARGO_PKG_VERSION")));
     std::fs::create_dir_all(&dir).ok()?;
     replace_file(&dir.join("prelude.stn"), stone::stdlib::PRELUDE)?;

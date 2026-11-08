@@ -157,8 +157,30 @@ impl Document {
 
     /// Returns `text` with the linked names of packages' modules written as the program's files
     /// write them, as `geo.shapes.area` for `geo.1.shapes.area`.
-    fn shown(&self, text: &str) -> String {
+    /// Writes the linked names in `text` as the program writes them, such as `geo.shapes.area`
+    /// for `geo.1.shapes.area`.
+    pub fn shown(&self, text: &str) -> String {
         shown_names(text, &self.packages)
+    }
+
+    /// Returns the problems in the document's own file, in order, each with whether it is about
+    /// a name that is never used, which an editor fades.
+    ///
+    /// These are the checker's errors and warnings, an error at each `use` of a package that
+    /// cannot be read, and the unused names `stone check` warns about.
+    pub fn problems(&self) -> Vec<(&stone::diagnostic::Diagnostic, bool)> {
+        let found = self.analysis.diagnostics.iter().map(|d| (d, false));
+        // the program's errors say once, in the manifest, why a package cannot be used, and an
+        // editor shows it at each `use` of it too
+        let unavailable = self.unavailable.iter().map(|d| (d, false));
+        let unused = self.unused.iter().map(|d| (d, true));
+        let mut problems: Vec<_> = found
+            .chain(unavailable)
+            .chain(unused)
+            .filter(|(d, _)| d.span.file == self.file)
+            .collect();
+        problems.sort_by_key(|(d, _)| d.span.start);
+        problems
     }
 
     /// Returns the package `file` belongs to: its index in `packages`.
@@ -332,19 +354,7 @@ fn program_of(path: &Path, text: &str, sources: &dyn Sources) -> Linked {
 
 /// Returns the document's problems as LSP diagnostics.
 pub fn diagnostics(doc: &Document) -> Vec<Diagnostic> {
-    let found = doc.analysis.diagnostics.iter().map(|d| (d, false));
-    // the program's errors say once, in the manifest, why a package cannot be used, and an
-    // editor shows it at each `use` of it too
-    let unavailable = doc.unavailable.iter().map(|d| (d, false));
-    // an editor fades what is unused as well as underlining it
-    let unused = doc.unused.iter().map(|d| (d, true));
-    let mut diagnostics: Vec<_> = found
-        .chain(unavailable)
-        .chain(unused)
-        .filter(|(d, _)| d.span.file == doc.file)
-        .collect();
-    diagnostics.sort_by_key(|(d, _)| d.span.start);
-    diagnostics
+    doc.problems()
         .into_iter()
         .map(|(d, unused)| lsp_diagnostic(doc, &doc.index, d, unused))
         .collect()

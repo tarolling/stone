@@ -546,10 +546,12 @@ fn build_compiles_the_kernels_of_each_gpu_to_a_cubin() {
 
 /// The program of the GPU image tests: `stone_k0` is `a * 2.0 + b` and `stone_k1` divides, as the
 /// kernels of the fixture cubin `two_kernels.sm_75.cubin` are.
+#[cfg(target_os = "linux")]
 const TWO_KERNEL_PROGRAM: &str =
     "a = [1.0, 2.0]\nb = [0.5, 0.25]\nprint(a * 2.0 + b)\nprint(a / b)\n";
 
 /// Returns the image a GPU build embedded in the executable at `exe`.
+#[cfg(target_os = "linux")]
 fn embedded_image(exe: &Path) -> stone::codegen::gpu::image::Image {
     use stone::codegen::gpu::image;
     let bytes = std::fs::read(exe).unwrap();
@@ -560,7 +562,8 @@ fn embedded_image(exe: &Path) -> stone::codegen::gpu::image::Image {
     image::parse(&bytes[at..]).unwrap()
 }
 
-#[cfg(unix)]
+// only Linux programs carry the image so far
+#[cfg(target_os = "linux")]
 #[test]
 fn build_embeds_the_machine_code_of_each_gpu_in_the_program() {
     use std::os::unix::fs::PermissionsExt;

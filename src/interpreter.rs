@@ -10,7 +10,7 @@ use crate::checker::{
     collect_assigned, place, prints_bare, struct_display, type_text,
 };
 use crate::diagnostic::Diagnostic;
-use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses};
+use crate::last_use::{GlobalReads, global_reads, kept_at_exit, last_uses, locals};
 use crate::span::Span;
 use crate::stdlib::random::Rng;
 use crate::stdlib::spec::{self, FormatSpec, Presentation};
@@ -48,10 +48,10 @@ struct LastUses {
 }
 
 impl LastUses {
-    /// Finds the last uses in `body`, a function's or the program's, given what each function
-    /// reads and what the function returns besides its value, `exit`.
-    fn new(body: &[Stmt], reads: &GlobalReads, exit: &HashSet<String>) -> Self {
-        let by_span = last_uses(body, reads, exit);
+    /// Finds the last uses in `body`, a function's with parameters `args` or the program's, given
+    /// what each function reads and what the function returns besides its value, `exit`.
+    fn new(body: &[Stmt], args: &[Arg], reads: &GlobalReads, exit: &HashSet<String>) -> Self {
+        let by_span = last_uses(body, reads, exit, &locals(args, body));
         let mut lines = Vec::new();
         for span in by_span.keys() {
             let line = span.start.line;
@@ -1444,7 +1444,7 @@ impl<'out> Interpreter<'out> {
         collect_assigned(body, &mut assigned);
         let globals = assigned.into_iter().map(|(name, _)| name).collect();
         self.global_reads = global_reads(body, &globals);
-        let last_uses = LastUses::new(body, &self.global_reads, &HashSet::new());
+        let last_uses = LastUses::new(body, &[], &self.global_reads, &HashSet::new());
         self.define_all(body, &last_uses)
     }
 
@@ -1570,7 +1570,7 @@ impl<'out> Interpreter<'out> {
     /// body against the definitions so far and the check that saw it.
     fn define(&mut self, name: &str, args: &[Arg], body: &[Stmt]) {
         let layout = Layout::new(args, body);
-        let last_uses = LastUses::new(body, &self.global_reads, &kept_at_exit(args));
+        let last_uses = LastUses::new(body, args, &self.global_reads, &kept_at_exit(args));
         let resolved = self.resolved.clone();
         let body = code::Resolver::new(self, &resolved, Some(&layout), &last_uses).block(body);
         let id = self.function_id(name);

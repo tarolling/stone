@@ -51,7 +51,7 @@ use crate::checker::{
 use crate::codegen::Os;
 use crate::codegen::context::{FUNCTION_PREFIX, function_label, module_routine};
 use crate::codegen::gpu::kernel::{Argument, arguments};
-use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after};
+use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after, locals};
 use crate::project::PRELUDE_MODULE;
 use crate::span::{FileId, Span};
 use crate::stdlib::spec::{Align, FormatSpec, Presentation, Sign};
@@ -1100,7 +1100,12 @@ impl<'a> Lowerer<'a> {
             }
         }
 
-        self.live_after = live_after(body, &self.context.global_reads, &kept_at_exit(args));
+        self.live_after = live_after(
+            body,
+            &self.context.global_reads,
+            &kept_at_exit(args),
+            &locals(args, body),
+        );
         // a method owns `self` exactly when it changes it
         self.returns_self = args.first().is_some_and(|arg| arg.arg == "self")
             && self.base.as_ref().is_some_and(|name| {

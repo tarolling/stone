@@ -86,6 +86,7 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
         matches!(
             *label,
             "stone.fs_read"
+                | "stone.fs_read_bytes"
                 | "stone.fs_read_lines"
                 | "stone.fs_write"
                 | "stone.fs_append"

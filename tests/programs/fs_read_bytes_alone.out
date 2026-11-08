@@ -1,0 +1,2 @@
+ok(b'zone\x00data\n')
+err("no such file or directory: 'missing.bin'")

@@ -60,7 +60,7 @@ impl Context {
     /// builtin's definition has a file to point at.
     pub fn new(cwd: PathBuf) -> Self {
         Context {
-            cwd: cwd.canonicalize().unwrap_or(cwd),
+            cwd: crate::uri::plain(&cwd.canonicalize().unwrap_or(cwd)),
             builtins: crate::write_builtins_reference().map(Builtins::new),
             fuel: tools::SNIPPET_FUEL,
             timeout: tools::SNIPPET_TIMEOUT,

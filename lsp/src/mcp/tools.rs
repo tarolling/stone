@@ -393,6 +393,7 @@ fn absolute(context: &Context, path: &str) -> Result<PathBuf, String> {
     let joined = context.cwd.join(path);
     joined
         .canonicalize()
+        .map(|path| crate::uri::plain(&path))
         .map_err(|_| format!("no file or directory at '{path}'"))
 }
 

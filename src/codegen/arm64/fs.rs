@@ -49,7 +49,11 @@ pub fn fs_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
     if used.iter().any(|label| {
         matches!(
             *label,
-            "stone.fs_read" | "stone.fs_read_lines" | "stone.fs_write" | "stone.fs_append"
+            "stone.fs_read"
+                | "stone.fs_read_bytes"
+                | "stone.fs_read_lines"
+                | "stone.fs_write"
+                | "stone.fs_append"
         )
     }) || (uses("stone.fs_list_dir") && r#gen.target().os == Os::Linux)
     {

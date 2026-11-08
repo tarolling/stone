@@ -124,6 +124,20 @@ pub(crate) fn kept_at_exit(args: &[crate::ast::Arg]) -> HashSet<String> {
         .collect()
 }
 
+/// Returns the variables of a function with parameters `args` and body `body`: its parameters
+/// and every name it assigns. For the program's top-level statements, with no parameters, these
+/// are the globals.
+///
+/// A variable is never the function of the same name, so in `fn f(s: str)` with `digits = s`,
+/// `digits` is a variable even if the program also has `fn digits`.
+pub(crate) fn locals(args: &[crate::ast::Arg], body: &[Stmt]) -> HashSet<String> {
+    let mut locals: HashSet<String> = args.iter().map(|arg| arg.arg.clone()).collect();
+    let mut assigned = Vec::new();
+    collect_assigned(body, &mut assigned);
+    locals.extend(assigned.into_iter().map(|(name, _)| name));
+    locals
+}
+
 /// The names code mentions: variables and functions, and the names after a dot of the methods
 /// it calls, as `get` in `p.get()`.
 #[derive(Default)]
@@ -272,10 +286,7 @@ pub(crate) fn global_reads(body: &[Stmt], globals: &HashSet<String>) -> GlobalRe
             .map(|name| name.to_string()),
     );
     for (name, args, body) in &functions {
-        let mut locals: HashSet<String> = args.args.iter().map(|arg| arg.arg.clone()).collect();
-        let mut assigned = Vec::new();
-        collect_assigned(body, &mut assigned);
-        locals.extend(assigned.into_iter().map(|(name, _)| name));
+        let locals = locals(&args.args, body);
         let mut names = Names::default();
         for stmt in *body {
             stmt_names(stmt, &mut names);
@@ -549,10 +560,19 @@ fn expr_names<'a>(expr: &'a Expr, out: &mut Names<'a>) {
 /// method that changes `self` returns `self`; and after `break` and `cont` whatever is read where
 /// they jump to. For example, in `x = [1]` followed by `y = x` and `print(y)`, `x` is live after
 /// the first statement only, and `y` after the second.
-pub(crate) fn live_after(body: &[Stmt], reads: &GlobalReads, exit: &HashSet<String>) -> LiveAfter {
+///
+/// A name in `locals`, the body's own variables from [`locals`], is a variable even where the
+/// program has a function of that name.
+pub(crate) fn live_after(
+    body: &[Stmt],
+    reads: &GlobalReads,
+    exit: &HashSet<String>,
+    locals: &HashSet<String>,
+) -> LiveAfter {
     let mut liveness = Liveness {
         reads,
         exit,
+        locals,
         after: LiveAfter::new(),
         loops: Vec::new(),
     };
@@ -569,8 +589,9 @@ pub(crate) fn last_uses(
     body: &[Stmt],
     reads: &GlobalReads,
     exit: &HashSet<String>,
+    locals: &HashSet<String>,
 ) -> HashMap<Span, Vec<String>> {
-    let after = live_after(body, reads, exit);
+    let after = live_after(body, reads, exit, locals);
     let mut uses = HashMap::new();
     let mut statements: Vec<&Stmt> = body.iter().collect();
     while let Some(stmt) = statements.pop() {
@@ -589,7 +610,8 @@ pub(crate) fn last_uses(
         stmt_names(stmt, &mut names);
         let mut last: Vec<String> = Vec::new();
         for name in names.names {
-            let variable = !is_builtin(name) && !reads.contains_key(name);
+            let variable =
+                locals.contains(name) || (!is_builtin(name) && !reads.contains_key(name));
             if variable && !live.contains(name) && !last.iter().any(|seen| seen == name) {
                 last.push(name.to_string());
             }
@@ -606,6 +628,8 @@ struct Liveness<'a> {
     reads: &'a GlobalReads,
     /// What is live where the function returns, besides its value.
     exit: &'a HashSet<String>,
+    /// The body's own variables, which are never the functions of the same name.
+    locals: &'a HashSet<String>,
     after: LiveAfter,
     /// For each enclosing loop, innermost last, what is live where `break` and `cont` go.
     loops: Vec<(HashSet<String>, HashSet<String>)>,
@@ -745,12 +769,16 @@ impl Liveness<'_> {
             }
         }
         if names.calls_a_value(
-            |name| self.reads.contains_key(name),
+            |name| !self.locals.contains(name) && self.reads.contains_key(name),
             &self.reads.value_fields,
         ) {
             live.extend(self.reads.of_values().iter().cloned());
         }
         for name in names.names {
+            if self.locals.contains(name) {
+                live.insert(name.to_string());
+                continue;
+            }
             match self.reads.get(name) {
                 Some(globals) => live.extend(globals.iter().cloned()),
                 None if is_builtin(name) => {}
@@ -785,10 +813,11 @@ mod tests {
             })
             .collect();
         let reads = global_reads(body, &globals);
-        let mut after = live_after(body, &reads, &HashSet::new());
+        let mut after = live_after(body, &reads, &HashSet::new(), &locals(&[], body));
         for stmt in body {
-            if let StmtKind::FunctionDef { body, .. } = &stmt.kind {
-                after.extend(live_after(body, &reads, &HashSet::new()));
+            if let StmtKind::FunctionDef { args, body, .. } = &stmt.kind {
+                let locals = locals(&args.args, body);
+                after.extend(live_after(body, &reads, &HashSet::new(), &locals));
             }
         }
         statements
@@ -858,6 +887,22 @@ mod tests {
         assert_eq!(
             live("x = [1]\ny = x\nprint(y)\n"),
             [names(&["x"]), names(&["y"]), names(&[])]
+        );
+    }
+
+    #[test]
+    fn a_local_named_like_a_function_is_a_variable() {
+        // `digits` in `f` is its own variable, still read after `grouped = digits`
+        let source = "fn digits(x: int) -> int:\n    ret x\nfn f(s: str) -> int:\n    \
+                      digits = s\n    grouped = digits\n    ret digits.len() + grouped.len()\n";
+        assert_eq!(
+            live(source),
+            [
+                names(&[]),
+                names(&["digits"]),
+                names(&["digits", "grouped"]),
+                names(&[])
+            ]
         );
     }
 
@@ -981,7 +1026,12 @@ mod tests {
         let source = "x = [1]\ny = x\nprint(y, x)\n";
         let module = parse(source).unwrap();
         let crate::ast::Mod::Module { body } = &module;
-        let uses = last_uses(body, &GlobalReads::default(), &HashSet::new());
+        let uses = last_uses(
+            body,
+            &GlobalReads::default(),
+            &HashSet::new(),
+            &locals(&[], body),
+        );
         let mut last: Vec<String> = uses[&body[2].span].clone();
         last.sort();
         assert_eq!(last, names(&["x", "y"]));
@@ -1085,14 +1135,14 @@ mod tests {
         let module = parse(source).unwrap();
         let crate::ast::Mod::Module { body } = &module;
         let exit = HashSet::from(["self".to_string()]);
-        let after = live_after(body, &GlobalReads::default(), &exit);
+        let after = live_after(body, &GlobalReads::default(), &exit, &locals(&[], body));
         let StmtKind::If { body: then, .. } = &body[0].kind else {
             panic!("expected an if");
         };
         assert!(after[&then[0].span].contains("self"));
         assert!(after[&body[1].span].contains("self"));
         assert!(after[&body[2].span].contains("self"));
-        let uses = last_uses(body, &GlobalReads::default(), &exit);
+        let uses = last_uses(body, &GlobalReads::default(), &exit, &locals(&[], body));
         assert!(
             uses.get(&body[1].span)
                 .is_none_or(|last| !last.contains(&"self".to_string()))

@@ -10,9 +10,10 @@ use lsp_types::Uri;
 /// characters and separators.
 ///
 /// For example, `/tmp/my dir/builtins.stn` becomes `file:///tmp/my%20dir/builtins.stn`, and
-/// `C:\Temp\builtins.stn` becomes `file:///C:/Temp/builtins.stn`.
+/// `C:\Temp\builtins.stn` (or its verbatim form, `\\?\C:\Temp\builtins.stn`) becomes
+/// `file:///C:/Temp/builtins.stn`.
 pub fn file_uri(path: &Path) -> Option<Uri> {
-    let path = path.to_str()?.replace('\\', "/");
+    let path = plain(path).to_str()?.replace('\\', "/");
     let path = if path.starts_with('/') {
         path
     } else {
@@ -29,6 +30,26 @@ pub fn file_uri(path: &Path) -> Option<Uri> {
         })
         .collect();
     format!("file://{encoded}").parse().ok()
+}
+
+/// Returns `path` without a Windows verbatim drive prefix, which `canonicalize` adds there, so
+/// that it compares equal to the same path as editors and URIs write it.
+///
+/// For example, `\\?\C:\Temp\main.stn` becomes `C:\Temp\main.stn`, and any other path, such as
+/// `/tmp/main.stn` or `\\?\UNC\server\share`, comes back unchanged.
+pub fn plain(path: &Path) -> PathBuf {
+    let Some(text) = path.to_str() else {
+        return path.to_path_buf();
+    };
+    match text.strip_prefix(r"\\?\") {
+        Some(rest)
+            if rest.as_bytes().get(1) == Some(&b':')
+                && rest.as_bytes()[0].is_ascii_alphabetic() =>
+        {
+            PathBuf::from(rest)
+        }
+        _ => path.to_path_buf(),
+    }
 }
 
 /// Returns the path a `file://` URI names, or `None` for any other kind of URI, such as an
@@ -95,6 +116,26 @@ mod tests {
         assert_eq!(path("untitled:Untitled-1"), None);
         // not UTF-8
         assert_eq!(path("file:///%FF.stn"), None);
+    }
+
+    #[test]
+    fn verbatim_windows_paths_become_plain_uris() {
+        let uri = file_uri(Path::new(r"\\?\C:\Temp\main.stn")).unwrap();
+        assert_eq!(uri.as_str(), "file:///C:/Temp/main.stn");
+    }
+
+    #[test]
+    fn plain_drops_only_a_verbatim_drive_prefix() {
+        assert_eq!(
+            plain(Path::new(r"\\?\C:\Temp\x")),
+            PathBuf::from(r"C:\Temp\x")
+        );
+        assert_eq!(plain(Path::new("/tmp/x")), PathBuf::from("/tmp/x"));
+        assert_eq!(plain(Path::new(r"C:\x")), PathBuf::from(r"C:\x"));
+        assert_eq!(
+            plain(Path::new(r"\\?\UNC\server\share")),
+            PathBuf::from(r"\\?\UNC\server\share")
+        );
     }
 
     #[test]

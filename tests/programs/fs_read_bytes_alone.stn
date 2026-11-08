@@ -1,0 +1,6 @@
+// A program whose only file read is fs.read_bytes, which needs the routine that opens a file
+// even though nothing reads text.
+use fs
+
+print(fs.read_bytes("zone.bin"))
+print(fs.read_bytes("missing.bin"))

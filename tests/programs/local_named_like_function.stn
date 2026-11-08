@@ -1,0 +1,24 @@
+// A local or parameter may share its name with a top-level function, and is still a variable:
+// copying it leaves it readable, and calling it calls the value it holds.
+fn digits(x: int) -> int:
+    ret x * 10
+
+fn r(n: int) -> int:
+    ret n + 1
+
+fn shown(s: str) -> str:
+    digits = s[1:]
+    grouped = digits
+    ret "{grouped} has {digits.len()}"
+
+fn twice(r: fn(int) -> int, n: int) -> int:
+    ret r(r(n))
+
+fn double(n: int) -> int:
+    ret n * 2
+
+print(shown("x12345"))
+print(twice(double, 3), twice(r, 3))
+m = digits(2)
+// the prelude's format specs have a local named digits too
+print("{m:04}", "{m:+06,}")

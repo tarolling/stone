@@ -26,6 +26,15 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   place itself (a literal pool in another constant bank, global or local memory) is left out of
   the table with a warning.
 
+### Fixed
+
+- A compiled program whose only file read is `fs.read_bytes` links again, instead of failing with
+  `undefined label '.Lfs_open'`.
+- A compiled function no longer crashes when it has a variable named like a function of the
+  entry file, such as a local `digits` next to `fn digits`. The variable counted as unused after
+  its first copy, so the copy took its value. Format specs such as `{m:02}` hit this, since the
+  prelude code behind them has a local `digits`.
+
 ## [0.4.3] - 2026-11-07
 
 ### Added

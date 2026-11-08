@@ -10,6 +10,15 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- A Linux program built with `--gpu` and a `ptxas` now carries the machine code of its kernels
+  for every GPU it was built for, with each kernel's registers, parameter layout, and whether it
+  takes a flag for zero divisors, in one table in the executable. Nothing reads it yet, so
+  programs still compute on the processor. A cubin whose kernels need data that a program cannot
+  place itself (a literal pool in another constant bank, global or local memory) is left out of
+  the table with a warning.
+
 ## [0.4.3] - 2026-11-07
 
 ### Added

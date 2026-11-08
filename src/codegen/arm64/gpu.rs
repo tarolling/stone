@@ -1,6 +1,7 @@
 //! The runtime that runs a kernel on a GPU, as [`x64::gpu`](crate::codegen::x64::gpu) does.
 //!
-//! `stone.gpu_launch` takes the kernel's number in `x0` and the list of what it takes in `x1`,
+//! `stone.gpu_launch` takes the number of a piece of arithmetic in `x0`, which the image at
+//! `stone.gpu_image` maps to a kernel, and the list of what it takes in `x1`,
 //! and gives 1 in `x0` if the GPU computed the result and 0 if the processor must. No GPU is
 //! reachable yet, so it always gives 0.
 

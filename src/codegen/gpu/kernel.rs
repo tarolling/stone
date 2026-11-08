@@ -11,29 +11,75 @@ use super::ir::{Block, BlockId, Inst, Kernel, Op, Special, Terminator, Ty, Value
 use crate::codegen::ir::{self, BinOp, Cond, DeviceKernel, Operand};
 use std::collections::HashMap;
 
+/// The kernels of a program and which of them computes each recorded piece of arithmetic.
+#[derive(Debug)]
+pub struct Numbered {
+    /// The distinct kernels, named `stone_k0`, `stone_k1`, ... in the order first met.
+    pub kernels: Vec<Kernel>,
+    /// For each recorded piece of arithmetic, the index in `kernels` of the kernel that computes
+    /// it, which is the number `stone.gpu_launch` is called with.
+    pub record_kernel: Vec<usize>,
+    /// What a launch needs to know about each kernel besides its code, indexed like `kernels`.
+    pub shapes: Vec<Shape>,
+}
+
+/// How a kernel is launched, apart from its machine code.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Shape {
+    /// Whether the kernel computes floats, rather than ints.
+    pub float: bool,
+    /// Whether the kernel takes the address of a flag it sets when a divisor is zero, last.
+    pub fail_flag: bool,
+    /// The number of 8-byte parameters, the flag included.
+    pub params: u32,
+}
+
 /// Returns a kernel for each distinct piece of arithmetic in `recorded`, named `stone_k0`,
 /// `stone_k1`, ... in the order first met, each with the sites that compute it.
 ///
 /// For example, `c = a * 2.0 + b` in two copies of a generic function records the same
 /// arithmetic twice, which gives one kernel with two sites.
 pub fn kernels(recorded: &[DeviceKernel]) -> Result<Vec<Kernel>, String> {
+    numbered(recorded).map(|numbered| numbered.kernels)
+}
+
+/// Returns the kernels of `recorded` as [`kernels`] does, and for each record the kernel that
+/// computes it.
+///
+/// For example, records of `a * 2.0`, `b * 2.0` (the same code), and `a * 4.0` give two kernels
+/// and the map `[0, 0, 1]`.
+pub fn numbered(recorded: &[DeviceKernel]) -> Result<Numbered, String> {
     let mut kernels: Vec<Kernel> = Vec::new();
+    let mut record_kernel = Vec::with_capacity(recorded.len());
+    let mut shapes = Vec::new();
     for record in recorded {
         let mut kernel = translate(&record.kernel, record.float)?;
-        match kernels.iter_mut().find(|known| known.same_code(&kernel)) {
-            Some(known) => {
+        match kernels.iter().position(|known| known.same_code(&kernel)) {
+            Some(index) => {
+                let known = &mut kernels[index];
                 if !known.sites.contains(&record.span) {
                     known.sites.push(record.span);
                 }
+                record_kernel.push(index);
             }
             None => {
                 kernel.name = format!("stone_k{}", kernels.len());
                 kernel.sites.push(record.span);
+                record_kernel.push(kernels.len());
+                shapes.push(Shape {
+                    float: record.float,
+                    fail_flag: record.float && divides(&record.kernel),
+                    params: kernel.params.len() as u32,
+                });
                 kernels.push(kernel);
             }
         }
     }
-    Ok(kernels)
+    Ok(Numbered {
+        kernels,
+        record_kernel,
+        shapes,
+    })
 }
 
 /// Returns the kernel that computes `kernel` for every element, of floats if `float` and of ints
@@ -535,5 +581,31 @@ b5:
                 ("stone_k1", &[site(3)][..])
             ]
         );
+    }
+
+    #[test]
+    fn each_record_maps_to_the_kernel_that_computes_it() {
+        let site = |line| Span::new(Pos::new(line, 5), Pos::new(line, 16));
+        let record = |line, first, constant: f64| DeviceKernel {
+            span: site(line),
+            float: true,
+            kernel: *binary(BinOp::Mul, list(first), number(constant.to_bits() as i64)),
+        };
+        let numbered = numbered(&[
+            record(1, 3, 2.0),
+            record(2, 9, 2.0),
+            record(3, 3, 4.0),
+            record(4, 3, 2.0),
+        ])
+        .unwrap();
+        assert_eq!(numbered.kernels.len(), 2);
+        assert_eq!(numbered.record_kernel, [0, 0, 1, 0]);
+        // out, length, and one list each; a multiplication has no flag
+        let shape = Shape {
+            float: true,
+            fail_flag: false,
+            params: 3,
+        };
+        assert_eq!(numbered.shapes, [shape, shape]);
     }
 }

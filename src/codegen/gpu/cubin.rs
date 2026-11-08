@@ -61,6 +61,35 @@ pub fn parse(cubin: &[u8]) -> Result<Vec<CubinKernel>, String> {
     Ok(kernels)
 }
 
+/// Returns the names of the sections of `cubin` that a program loading its kernels itself would
+/// have to place in memory or patch, which stone cannot do: constant banks other than bank 0,
+/// global and local memory, and relocations of code.
+///
+/// For example, a cubin of kernels that use only registers, their parameters, and global memory
+/// through pointers gives no names, and one with a literal pool in `.nv.constant2.stone_k0` gives
+/// that name.
+pub fn unplaceable_sections(cubin: &[u8]) -> Result<Vec<String>, String> {
+    let file = Elf::new(cubin)?;
+    Ok(file
+        .sections
+        .iter()
+        .filter(|section| is_unplaceable(&section.name))
+        .map(|section| section.name.clone())
+        .collect())
+}
+
+/// Returns whether a section called `name` holds data or relocations that a loader must place.
+fn is_unplaceable(name: &str) -> bool {
+    let constant_bank = name
+        .strip_prefix(".nv.constant")
+        .is_some_and(|rest| !rest.starts_with('0'));
+    constant_bank
+        || name.starts_with(".nv.global")
+        || name.starts_with(".nv.local")
+        || name.starts_with(".rel.text")
+        || name.starts_with(".rela.text")
+}
+
 const SYMBOL_SIZE: usize = 24;
 const SECTION_HEADER_SIZE: usize = 64;
 const STT_FUNC: u8 = 2;
@@ -230,6 +259,41 @@ mod tests {
         assert_eq!(k1.sass.len(), 0x980);
         assert_eq!(k1.registers, 26);
         assert_eq!((k1.param_offset, k1.param_size), (0x160, 40));
+    }
+
+    #[test]
+    fn a_cubin_of_plain_kernels_needs_nothing_placed_besides_their_code() {
+        assert_eq!(
+            unplaceable_sections(TWO_KERNELS).unwrap(),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn sections_that_hold_data_or_relocations_are_unplaceable() {
+        for name in [
+            ".nv.constant2.stone_k0",
+            ".nv.constant3",
+            ".nv.global",
+            ".nv.global.init",
+            ".nv.local.stone_k0",
+            ".rel.text.stone_k0",
+            ".rela.text.stone_k0",
+        ] {
+            assert!(is_unplaceable(name), "{name}");
+        }
+        for name in [
+            ".text.stone_k0",
+            ".nv.constant0.stone_k0",
+            ".nv.info.stone_k0",
+            ".nv.shared.stone_k0",
+            ".nv.callgraph",
+            ".debug_frame",
+            ".rel.debug_frame",
+            ".nv.rel.action",
+        ] {
+            assert!(!is_unplaceable(name), "{name}");
+        }
     }
 
     #[test]

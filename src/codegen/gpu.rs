@@ -3,16 +3,18 @@
 //! Lowering records each piece of arithmetic on lists that a GPU could compute
 //! ([`DeviceKernel`](crate::codegen::ir::DeviceKernel)), [`kernels`] turns them into the device
 //! [`ir`], and [`ptx`] writes that as PTX for an NVIDIA GPU. [`compile`] turns the PTX into
-//! machine code with `ptxas`, and [`cubin`] reads the kernels out of it. Nothing runs the kernels
-//! yet: `stone build --gpu sm_75` writes them beside the program, which still computes everything
-//! on the processor.
+//! machine code with `ptxas`, and [`cubin`] reads the kernels out of it. [`image`] lays the machine
+//! code and what a launch needs to know about each kernel out as one table that a Linux program
+//! carries. Nothing runs the kernels yet: `stone build --gpu sm_75` writes them beside the
+//! program, which still computes everything on the processor.
 
 pub mod compile;
 pub mod cubin;
 #[cfg(test)]
 mod eval;
+pub mod image;
 pub mod ir;
 pub mod kernel;
 pub mod ptx;
 
-pub use kernel::kernels;
+pub use kernel::{kernels, numbered};

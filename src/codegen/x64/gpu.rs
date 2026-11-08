@@ -1,10 +1,12 @@
 //! The runtime that runs a kernel on a GPU.
 //!
-//! `stone.gpu_launch` takes the number of a kernel in `rdi`, as `Program::device_kernels` numbers
-//! them, and in `rsi` a list of ints holding what the kernel takes: the address of the result's
-//! elements, their count, then the address of each list's elements and the bits of each number
-//! the kernel's arithmetic names, left to right. It gives 1 in `rax` if the GPU computed the
-//! result, and 0 if the processor must, which every caller then does.
+//! `stone.gpu_launch` takes the number of a piece of arithmetic in `rdi`, as
+//! `Program::device_kernels` numbers them (the image at `stone.gpu_image` maps it to a kernel, see
+//! [`image`](crate::codegen::gpu::image)), and in `rsi` a list of ints holding what the kernel
+//! takes: the address of the result's elements, their count, then the address of each list's
+//! elements and the bits of each number the kernel's arithmetic names, left to right. It gives 1
+//! in `rax` if the GPU computed the result, and 0 if the processor must, which every caller then
+//! does.
 //!
 //! No GPU is reachable yet, so it always gives 0.
 

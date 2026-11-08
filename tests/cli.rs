@@ -544,6 +544,149 @@ fn build_compiles_the_kernels_of_each_gpu_to_a_cubin() {
     }
 }
 
+/// The program of the GPU image tests: `stone_k0` is `a * 2.0 + b` and `stone_k1` divides, as the
+/// kernels of the fixture cubin `two_kernels.sm_75.cubin` are.
+const TWO_KERNEL_PROGRAM: &str =
+    "a = [1.0, 2.0]\nb = [0.5, 0.25]\nprint(a * 2.0 + b)\nprint(a / b)\n";
+
+/// Returns the image a GPU build embedded in the executable at `exe`.
+fn embedded_image(exe: &Path) -> stone::codegen::gpu::image::Image {
+    use stone::codegen::gpu::image;
+    let bytes = std::fs::read(exe).unwrap();
+    let at = bytes
+        .windows(image::MAGIC.len())
+        .position(|window| window == image::MAGIC)
+        .expect("the executable holds an image");
+    image::parse(&bytes[at..]).unwrap()
+}
+
+#[cfg(unix)]
+#[test]
+fn build_embeds_the_machine_code_of_each_gpu_in_the_program() {
+    use std::os::unix::fs::PermissionsExt;
+    use stone::codegen::gpu::cubin;
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    // a `ptxas` that gives the fixture's cubin, so no CUDA toolkit is needed
+    let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("src/codegen/gpu/testdata");
+    let cubin_file = fixture.join("two_kernels.sm_75.cubin");
+    let fake = dir.join("fake_ptxas_for_the_image");
+    std::fs::write(
+        &fake,
+        format!(
+            "#!/bin/sh\nwhile [ \"$1\" != -o ]; do shift; done\ncp '{}' \"$2\"\n",
+            cubin_file.display()
+        ),
+    )
+    .unwrap();
+    std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let file = dir.join("gpu_image.stn");
+    std::fs::write(&file, TWO_KERNEL_PROGRAM).unwrap();
+    let exe = dir.join("gpu_image");
+    let _ = std::fs::remove_file(&exe);
+    let build = || {
+        Command::new(env!("CARGO_BIN_EXE_stone"))
+            .args(["build", "--gpu", "sm_90", "--gpu", "sm_75", "-o"])
+            .arg(&exe)
+            .arg(&file)
+            .env("STONE_PTXAS", &fake)
+            .output()
+            .unwrap()
+    };
+    let mut output = build();
+    // another test may have a fork holding the script open for writing
+    for _ in 0..20 {
+        if !String::from_utf8_lossy(&output.stderr).contains("Text file busy") {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+        output = build();
+    }
+    assert!(output.status.success(), "{output:?}");
+    assert_eq!(String::from_utf8_lossy(&output.stderr), "");
+
+    let image = embedded_image(&exe);
+    assert_eq!(image.record_kernel, [0, 1]);
+    let devices: Vec<(u32, bool)> = image.devices.iter().map(|d| (d.sm, d.specific)).collect();
+    assert_eq!(devices, [(75, false), (90, false)]);
+    let kernels = cubin::parse(&std::fs::read(&cubin_file).unwrap()).unwrap();
+    for device in &image.devices {
+        for (index, kernel) in device.kernels.iter().enumerate() {
+            let expected = kernels
+                .iter()
+                .find(|k| k.name == format!("stone_k{index}"))
+                .unwrap();
+            assert_eq!(kernel.sass, expected.sass);
+            assert_eq!(kernel.registers, expected.registers);
+            assert_eq!(kernel.param_size, expected.param_size);
+        }
+        assert!(!device.kernels[0].fail_flag);
+        assert!(device.kernels[1].fail_flag);
+    }
+
+    if cfg!(target_os = "linux") {
+        let ran = Command::new(&exe).output().unwrap();
+        assert_eq!(
+            String::from_utf8_lossy(&ran.stdout),
+            "[2.5, 4.25]\n[2.0, 8.0]\n"
+        );
+    }
+}
+
+#[cfg(target_os = "linux")]
+#[test]
+fn a_gpu_build_without_ptxas_embeds_an_image_with_no_devices() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let file = dir.join("gpu_image_empty.stn");
+    std::fs::write(&file, TWO_KERNEL_PROGRAM).unwrap();
+    let exe = dir.join("gpu_image_empty");
+    let _ = std::fs::remove_file(&exe);
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["build", "--gpu", "sm_75", "-o"])
+        .arg(&exe)
+        .arg(&file)
+        .env("STONE_PTXAS", "/nonexistent/ptxas")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("warning: cannot run '/nonexistent/ptxas'"),
+        "{stderr}"
+    );
+    let image = embedded_image(&exe);
+    assert_eq!(image.record_kernel, [0, 1]);
+    assert!(image.devices.is_empty());
+    let ran = Command::new(&exe).output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&ran.stdout),
+        "[2.5, 4.25]\n[2.0, 8.0]\n"
+    );
+}
+
+#[test]
+fn a_build_without_gpus_embeds_no_image() {
+    if !cfg!(target_os = "linux") {
+        return;
+    }
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
+    let file = dir.join("no_gpu_image.stn");
+    std::fs::write(&file, TWO_KERNEL_PROGRAM).unwrap();
+    let exe = dir.join("no_gpu_image");
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["build", "-o"])
+        .arg(&exe)
+        .arg(&file)
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{output:?}");
+    let bytes = std::fs::read(&exe).unwrap();
+    assert!(
+        !bytes
+            .windows(8)
+            .any(|window| window == stone::codegen::gpu::image::MAGIC)
+    );
+}
+
 #[test]
 fn build_rejects_a_gpu_it_cannot_generate_code_for() {
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));

@@ -290,6 +290,40 @@ Variants are always written with their enum, `Shape.Empty`, except `some`/`none`
 and the `ordering` variants `less`/`equal`/`greater`, which are reserved names. An enum can hold itself, which is how you build
 trees and linked lists.
 
+A variant can name its values (all or none of them). It is made with named values in any order,
+and matched by name: a field left out matches anything, and a bare field name binds it. Patterns
+can also be int, str, or bool literals and alternatives joined by `|`, and `match` takes an int,
+str, or bool subject, which needs a final `case _:`. Floats are never patterns.
+
+```stone
+enum Command:
+    Move(dx: int, dy: int)
+    Say(text: str)
+    Quit
+
+fn run(c: Command) -> str:
+    match c:
+        case Command.Move(dx=0, dy=0):
+            ret "stay"
+        case Command.Move(dx, dy):
+            ret "move {dx} {dy}"
+        case Command.Say(text="hi" | "hello") | Command.Quit:
+            ret "short"
+        case Command.Say(text):
+            ret text
+
+fn size(n: int) -> str:
+    match n:
+        case 0:
+            ret "none"
+        case 1 | 2:
+            ret "few"
+        case _:
+            ret "many"
+
+print(run(Command.Move(dy=1, dx=2)), run(Command.Quit), size(2))
+```
+
 ### Generics and traits
 
 ```stone

@@ -975,7 +975,8 @@ fn a_call_through_a_value_is_checked() {
     );
     assert_error(
         &format!("{f}x = [f][0](y=1)\n"),
-        "only a struct is made with named values; pass this value without its name",
+        "only a struct or a named variant is made with named values; pass this value without its \
+         name",
         4,
         12,
     );
@@ -2832,6 +2833,235 @@ fn variants_check_their_values() {
     );
 }
 
+const NAMED: &str =
+    "enum Shape:\n    Circle(radius: float)\n    Rect(w: float, h: float)\n    Dot(int)\n";
+
+#[test]
+fn named_variants_are_made_with_their_names() {
+    assert_error(
+        &format!("{NAMED}a = Shape.Rect(w=1.0)\n"),
+        "missing field 'h' for 'Shape.Rect'",
+        5,
+        5,
+    );
+    assert_error(
+        &format!("{NAMED}a = Shape.Rect(w=1.0, h=2.0, w=3.0)\n"),
+        "field 'w' is given more than once",
+        5,
+        30,
+    );
+    assert_error(
+        &format!("{NAMED}a = Shape.Rect(w=1.0, h=2.0, d=3.0)\n"),
+        "'Shape.Rect' has no field 'd'",
+        5,
+        30,
+    );
+    assert_error(
+        &format!("{NAMED}a = Shape.Rect(1.0, 2.0)\n"),
+        "a named variant's values are named, as in 'Shape.Rect(w=..., h=...)'",
+        5,
+        5,
+    );
+    assert_error(
+        &format!("{NAMED}a = Shape.Dot(n=1)\n"),
+        "'Shape.Dot' takes its values in order, without names",
+        5,
+        15,
+    );
+    assert_error(
+        &format!("{NAMED}a = Shape.Circle(radius=\"one\")\n"),
+        "expected float, found str",
+        5,
+        25,
+    );
+    assert_error(
+        "enum E:\n    A(x: int, x: str)\n",
+        "'E.A' already has a field 'x'",
+        2,
+        15,
+    );
+    assert_error(
+        "struct P:\n    x: int\na = P(x=1)\nb = print(x=1)\n",
+        "only a struct or a named variant is made with named values; pass this value without its \
+         name",
+        4,
+        11,
+    );
+}
+
+#[test]
+fn named_variants_are_matched_by_name() {
+    let source = |case: &str| {
+        format!(
+            "{NAMED}fn f(s: Shape) -> float:\n    match s:\n        case {case}:\n            ret 1.0\n        case _:\n            ret 0.0\n"
+        )
+    };
+    assert_eq!(errors(&source("Shape.Rect(w, h=height)")), vec![]);
+    assert_eq!(errors(&source("Shape.Rect")), vec![]);
+    assert_error(
+        &source("Shape.Rect(x)"),
+        "'Shape.Rect' has no field 'x'; write 'w=x' to bind field w to x",
+        7,
+        25,
+    );
+    assert_error(
+        &source("Shape.Rect(d=x)"),
+        "'Shape.Rect' has no field 'd'",
+        7,
+        25,
+    );
+    assert_error(
+        &source("Shape.Rect(_)"),
+        "match a named variant's values by name, as in 'Shape.Rect(w=_)'",
+        7,
+        25,
+    );
+    assert_error(
+        &source("Shape.Rect(w, w=x)"),
+        "field 'w' is matched more than once",
+        7,
+        28,
+    );
+    assert_error(
+        &source("Shape.Dot(n=x)"),
+        "'Shape.Dot' takes its values in order, without names",
+        7,
+        24,
+    );
+    assert_error(
+        &format!(
+            "{NAMED}fn f(s: Shape) -> float:\n    match s:\n        case Shape.Circle(radius):\n            ret radius\n        case Shape.Dot(_):\n            ret 0.0\n"
+        ),
+        "'match' does not cover Shape.Rect; add 'case Shape.Rect:' or 'case _:'",
+        6,
+        11,
+    );
+}
+
+fn warnings(source: &str) -> Vec<(String, usize, usize)> {
+    analyze_source(source)
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == crate::diagnostic::Severity::Warning)
+        .map(|d| (d.message.clone(), d.span.start.line, d.span.start.col))
+        .collect()
+}
+
+#[test]
+fn literal_patterns_match_ints_strings_and_bools() {
+    let source = |subject: &str, cases: &str| format!("x = {subject}\nmatch x:\n{cases}");
+    assert_eq!(
+        errors(&source(
+            "1",
+            "    case 0 | -1:\n        print(0)\n    case _:\n        print(1)\n"
+        )),
+        vec![]
+    );
+    assert_eq!(
+        errors(&source(
+            "true",
+            "    case true:\n        print(0)\n    case false:\n        print(1)\n"
+        )),
+        vec![]
+    );
+    assert_error(
+        &source(
+            "1",
+            "    case 0:\n        print(0)\n    case 1:\n        print(1)\n",
+        ),
+        "'match' does not cover every value; add 'case _:'",
+        2,
+        7,
+    );
+    assert_error(
+        &source("true", "    case true:\n        print(0)\n"),
+        "'match' does not cover false; add 'case false:' or 'case _:'",
+        2,
+        7,
+    );
+    assert_error(
+        &source(
+            "some(\"a\")",
+            "    case some(\"a\") | none:\n        print(0)\n",
+        ),
+        "'match' does not cover some(_); add 'case some(_):' or 'case _:'",
+        2,
+        7,
+    );
+    assert_error(
+        &source(
+            "\"a\"",
+            "    case 1:\n        print(0)\n    case _:\n        print(1)\n",
+        ),
+        "this pattern matches int, but the value is str",
+        3,
+        10,
+    );
+    assert_error(
+        &source("1.0", "    case _:\n        print(1)\n"),
+        "'match' needs an enum, option, int, str, or bool value, found float",
+        2,
+        7,
+    );
+    assert_eq!(
+        warnings(&source(
+            "1",
+            "    case 0:\n        print(0)\n    case 2 | 0:\n        print(1)\n    case 0 | 2:\n        print(1)\n    case _:\n        print(2)\n"
+        )),
+        vec![
+            (
+                "this alternative never matches, since the patterns before it match every value \
+                 it would"
+                    .to_string(),
+                5,
+                14
+            ),
+            (
+                "this case never runs, since the cases before it match every value it would"
+                    .to_string(),
+                7,
+                10
+            ),
+        ]
+    );
+}
+
+#[test]
+fn alternatives_bind_the_same_names() {
+    let source = |cases: &str| {
+        format!(
+            "{NAMED}fn f(s: Shape) -> float:\n    match s:\n{cases}        case _:\n            ret 0.0\n"
+        )
+    };
+    assert_eq!(
+        errors(&source(
+            "        case Shape.Rect(w=r, h=_) | Shape.Circle(radius=r):\n            ret r\n"
+        )),
+        vec![]
+    );
+    assert_error(
+        &source("        case Shape.Rect(w, h) | Shape.Circle(radius=w):\n            ret 1.0\n"),
+        "'h' is bound in 'Shape.Rect(w, h)' but not in 'Shape.Circle(radius=w)'",
+        7,
+        33,
+    );
+    assert_error(
+        &source("        case Shape.Dot(n) | Shape.Circle(radius=n):\n            ret 1.0\n"),
+        "cannot assign float to 'n', which is int",
+        7,
+        49,
+    );
+    let many = ["0 | 1"; 9].join(", ");
+    assert_error(
+        &format!(
+            "enum W:\n    V(int, int, int, int, int, int, int, int, int)\nx = W.V(0, 0, 0, 0, 0, 0, 0, 0, 0)\nmatch x:\n    case W.V({many}):\n        print(0)\n    case _:\n        print(1)\n"
+        ),
+        "this pattern stands for more than 256 patterns without '|'; split it into more cases",
+        5,
+        10,
+    );
+}
+
 #[test]
 fn enum_definitions_are_checked() {
     assert_error(
@@ -3043,8 +3273,8 @@ fn patterns_are_checked_against_the_value() {
         24,
     );
     assert_error(
-        "match 3:\n    case n:\n        print(n)\n",
-        "'match' needs an enum or option value, found int",
+        "match 3.0:\n    case n:\n        print(n)\n",
+        "'match' needs an enum, option, int, str, or bool value, found float",
         1,
         7,
     );
@@ -3121,13 +3351,15 @@ fn struct_values_are_checked() {
     );
     assert_error(
         "fn f(a: int) -> int:\n    ret a\nprint(f(a=1))\n",
-        "only a struct is made with named values; pass this value without its name",
+        "only a struct or a named variant is made with named values; pass this value without its \
+         name",
         3,
         9,
     );
     assert_error(
         "xs = [1]\nxs.append(x=1)\n",
-        "only a struct is made with named values; pass this value without its name",
+        "only a struct or a named variant is made with named values; pass this value without its \
+         name",
         2,
         11,
     );

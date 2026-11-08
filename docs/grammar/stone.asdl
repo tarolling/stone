@@ -90,7 +90,8 @@ module stone
     -- a trait, maybe through its module and with type arguments, such as geo.Shape or from[int]
     trait_name = (identifier name, type* args)
 
-    variant = (identifier name, type* fields)
+    -- names holds a name per field, or none, as in Rect(w: float, h: float)
+    variant = (identifier name, type* fields, identifier* names)
 
     field = (identifier name, type annotation)
 
@@ -102,7 +103,10 @@ module stone
     pattern = MatchWildcard
             | MatchName(identifier name)
             -- path names the variant, such as Shape.Circle, some, or none
-            | MatchVariant(identifier* path, pattern* fields)
+            | MatchVariant(identifier* path, pattern_field* fields)
+
+    -- a value of a variant pattern, by name for a named variant, as h=0 in Shape.Rect(h=0)
+    pattern_field = (identifier? name, pattern pattern)
 
     type = Int | Float | Bool | Str | Bytes | List(type elem) | Map(type key, type value) | Set(type elem)
          | Tuple(type* elts)

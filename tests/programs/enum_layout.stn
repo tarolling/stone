@@ -1,0 +1,195 @@
+// enums that do not hold themselves are kept as values side by side in compiled code, and the
+// rest as objects, so both must agree with the interpreter everywhere an enum goes
+
+use fs
+
+enum Shape:
+    Circle(r: float)
+    Rect(w: float, h: float)
+    Label(text: str)
+    Empty
+
+enum Tree:
+    Leaf(int)
+    Node(Tree, Tree)
+
+struct Node:
+    value: int
+    next: option[Node]
+
+struct Named:
+    name: option[str]
+    shape: Shape
+
+fn find(xs: list[str], x: str) -> option[int]:
+    for i in range(xs.len()):
+        if xs[i] == x:
+            ret some(i)
+    ret none
+
+fn parse_all(xs: list[str]) -> result[list[int], str]:
+    out = []
+    for x in xs:
+        out.append(int(x)?)
+    ret ok(out)
+
+fn first_len(xs: list[option[str]]) -> option[int]:
+    for x in xs:
+        s = x?
+        ret some(s.len())
+    ret none
+
+fn total(t: Tree) -> int:
+    match t:
+        case Tree.Leaf(n):
+            ret n
+        case Tree.Node(a, b):
+            ret total(a) + total(b)
+
+fn area(s: Shape) -> float:
+    match s:
+        case Shape.Circle(r):
+            ret 3.0 * r * r
+        case Shape.Rect(w, h):
+            ret w * h
+        case _:
+            ret 0.0
+
+fn length(n: Node) -> int:
+    match n.next:
+        case some(rest):
+            ret 1 + length(rest)
+        case none:
+            ret 1
+
+fn noisy(x: int) -> option[int]:
+    print("noisy", x)
+    ret some(x)
+
+struct Tagged:
+    name: option[str]
+    tags: list[option[int]]
+
+enum Pick[T]:
+    One(T)
+    Two(T, T)
+    Nothing
+
+fn first[T](xs: list[T]) -> option[T]:
+    if xs.len() == 0:
+        ret none
+    ret some(xs[0])
+
+fn both[T](p: Pick[T]) -> list[T]:
+    match p:
+        case Pick.One(a):
+            ret [a]
+        case Pick.Two(a, b):
+            ret [a, b]
+        case Pick.Nothing:
+            ret []
+
+fn name_len(n: Tagged) -> option[int]:
+    s = n.name?
+    ret some(s.len())
+
+fn pair(x: int) -> tuple[option[int], str]:
+    ret (some(x), "x")
+
+fn apply(f: fn(int) -> option[int], x: int) -> option[int]:
+    ret f(x)
+
+fn halve(x: int) -> option[int]:
+    if x % 2 == 0:
+        ret some(x / 2)
+    ret none
+
+// lists, maps, and sets of flat values
+names = [some("ada"), none, some("bo")]
+print(names, names.len(), names[0], names[-1].unwrap_or("?"))
+names[1] = some("cy")
+names.append(none)
+last = names.pop()
+head = names.pop(0)
+print(names, last, head)
+print(some("bo") in names, none in names, some("zed") not in names)
+counts = {"a": some(1), "b": none}
+counts["c"] = find(["x", "c"], "c")
+print(counts, counts["c"], counts.get("b"), counts.get("z"))
+for k, v in counts.items():
+    print(k, v.is_some())
+shapes = [Shape.Circle(r=1.0), Shape.Rect(w=2.0, h=3.0), Shape.Label(text="hi"), Shape.Empty]
+for s in shapes:
+    print(s, area(s))
+print(shapes[1] == Shape.Rect(h=3.0, w=2.0), shapes[2] != Shape.Label(text="hi"))
+print(Named(name=some("box"), shape=shapes[1]), Named(name=none, shape=Shape.Empty).name)
+
+// results from the runtime and from the program
+print(int("42"), int("x"), float("1.5"), int(2.5), bytes([1, 300]))
+print(parse_all(["1", "2"]), parse_all(["1", "two"]), first_len([some("abc")]), first_len([none]))
+print(fs.read("missing.txt").is_err(), "1 2".split(" ").map(|s| int(s)))
+lookup = |x: str| find(["p", "q"], x)
+print(lookup("q"), lookup("r"), [lookup("p"), lookup("z")])
+
+// nested options, discarded results, and comparisons evaluated once
+nested = some(some(3))
+print(nested, nested.unwrap().unwrap(), some(none) == some(none), nested == some(some(4)))
+noisy(1)
+print(noisy(2) == some(2), noisy(3).unwrap())
+match nested:
+    case some(some(n)):
+        print("two deep", n)
+    case _:
+        print("not")
+
+// enums that hold themselves stay objects, including through a struct's option
+tree = Tree.Node(Tree.Leaf(1), Tree.Node(Tree.Leaf(2), Tree.Leaf(3)))
+print(tree, total(tree))
+chain = Node(value=1, next=some(Node(value=2, next=some(Node(value=3, next=none)))))
+print(length(chain), chain.next.unwrap().value)
+maybe_tree = some(tree)
+print(maybe_tree.is_some(), maybe_tree)
+
+// generic enums, closures, function values, changed fields, and options of options
+default = some("global")
+fn read_default() -> str:
+    ret default.unwrap_or("none")
+
+tagged = Tagged(name=none, tags=[some(1), none])
+print(tagged, name_len(tagged))
+tagged.name = some("ann")
+tagged.tags[1] = some(7)
+tagged.tags.append(none)
+print(tagged, name_len(tagged), tagged.tags[1].unwrap())
+print(first([some("a"), none]), first([3]), first([""]).is_some())
+empty = [""]
+empty.pop()
+print(first(empty))
+print(both(Pick.Two(some(1), none)), both(Pick.One("s")), both(Pick.Nothing).len())
+q, label = pair(5)
+print(q, label, pair(6)[0])
+print(apply(halve, 4), apply(halve, 3), apply(|x| some(x + 1), 1))
+base = some(10)
+add = |x: int| some(base.unwrap() + x)
+steps = [halve, add]
+print(steps[1](2), steps[0](8), read_default())
+opts = [some(3), none, some(1)]
+print(opts.map(|o| o.unwrap_or(0)), opts.filter(|o| o.is_some()), opts.any(|o| o.is_none()))
+count = 0
+i = 0
+while i < opts.len():
+    match opts[i]:
+        case some(amount):
+            count += amount
+        case none:
+            count -= 1
+    i += 1
+print(count)
+words = {"a": some("x")}
+words["b"] = none
+words["a"] = some("y")
+popped = words.pop("a")
+missing = words.pop("zz")
+print(words, popped, missing)
+deep = some(some(some(some("bottom"))))
+print(deep, deep == some(some(some(some("bottom")))))

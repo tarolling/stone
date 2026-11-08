@@ -38,6 +38,30 @@ error: 'match' does not cover Shape.Empty; add 'case Shape.Empty:' or 'case _:'
 
 So adding a variant to an enum points at every `match` that needs a case for it.
 
+## Named values
+
+A variant can name its values instead, as `Move(dx: int, dy: int)` does in `Command`. Its values
+are then given by name, in any order, as a struct's are: `Command.Move(dy=2, dx=1)`. A variant
+names all of its values or none, and a named one prints with its names, as
+`Command.Move(dx=1, dy=2)`.
+
+Its patterns name the values too. `Command.Move(dx=0, dy=0)` fits a move whose `dx` and `dy` are
+both 0, and `Command.Move(dx, dy)` is short for `Command.Move(dx=dx, dy=dy)`, naming each value
+after its field. A value the pattern leaves out fits anything, so `case Command.Move:` alone fits
+every move.
+
+## More patterns
+
+A pattern can be an int, a string, or a bool, which fits a value equal to it, as `0` and
+`"hi"` do above. `|` joins patterns, any of which may fit, as in `case 1 | 2 | 3:`, and it works
+inside a variant too: `Command.Say(text="hi" | "hello")`. Every pattern joined by `|` names the
+same values.
+
+`match` takes an int, a string, or a bool as well as an enum. There are too many ints and
+strings for cases to list them all, so a `match` on one ends with a case that fits any value,
+such as `case _:`. A float is never a pattern, since `nan` equals nothing; compare floats with
+`if`.
+
 ## Options
 
 Some answers can be missing, such as the position of a name that is not in a list. stone has no

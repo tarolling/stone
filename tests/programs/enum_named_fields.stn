@@ -1,0 +1,46 @@
+// variants whose values are named, made with names in any order and matched by name
+enum Shape:
+    Circle(radius: float)
+    Rect(w: float, h: float)
+    Labeled(name: str, shape: list[Shape])
+    Empty
+
+fn area(s: Shape) -> float:
+    match s:
+        case Shape.Circle(radius):
+            ret 3.0 * radius * radius
+        case Shape.Rect(h, w=width):
+            ret width * h
+        case Shape.Labeled(shape=inner):
+            total = 0.0
+            for part in inner:
+                total += area(part)
+            ret total
+        case Shape.Empty:
+            ret 0.0
+
+fn label(s: Shape) -> str:
+    match s:
+        case Shape.Labeled(name=text):
+            ret text
+        case Shape.Rect:
+            ret "a rectangle"
+        case _:
+            ret "something"
+
+fn note(text: str) -> float:
+    print("evaluating {text}")
+    ret 2.0
+
+r = Shape.Rect(h=note("h"), w=note("w") + 1.0)
+print(r)
+print(area(r))
+print(area(Shape.Rect(w=0.0, h=5.0)))
+c = Shape.Circle(radius=1.0)
+print(c, area(c))
+group = Shape.Labeled(shape=[r, c, Shape.Empty], name="group")
+print(group)
+print(area(group))
+print(label(group), label(r), label(c))
+print([Shape.Circle(radius=0.5)], r == Shape.Rect(w=3.0, h=2.0))
+print("{c}")

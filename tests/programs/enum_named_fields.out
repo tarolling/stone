@@ -1,0 +1,11 @@
+evaluating h
+evaluating w
+Shape.Rect(w=3.0, h=2.0)
+6.0
+0.0
+Shape.Circle(radius=1.0) 3.0
+Shape.Labeled(name='group', shape=[Shape.Rect(w=3.0, h=2.0), Shape.Circle(radius=1.0), Shape.Empty])
+9.0
+group a rectangle something
+[Shape.Circle(radius=0.5)] true
+Shape.Circle(radius=1.0)

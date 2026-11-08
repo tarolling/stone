@@ -10,8 +10,20 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.4.3] - 2026-11-07
+
 ### Added
 
+- Named variant values: `Rect(w: float, h: float)` in an enum names its values, all or none.
+  It is made with named values in any order, `Shape.Rect(h=2.0, w=1.0)`, evaluated as written,
+  prints as `Shape.Rect(w=1.0, h=2.0)`, and is matched by name: `Shape.Rect(w=0.0)` leaves `h`
+  out to match anything, and `Shape.Rect(w, h)` is short for `Shape.Rect(w=w, h=h)`. The
+  language server shows the names on hover and renames a shorthand field to `field=variable`.
+- Literal and `|` patterns: a `case` can match an int (negative ones too), a string, or a bool,
+  and join patterns with `|` at any depth, as `case 1 | 2:` or `case some("a" | "b"):`, each
+  alternative binding the same names. `match` takes an int, str, or bool subject, a bool's two
+  values covering it while ints and strings need a final `case _:`. An alternative that never
+  matches is a warning.
 - Methods with type parameters of their own: `impl Box: fn map[U](self, f: fn(T) -> U) ->
   Box[U]` comes after the struct's `T`, each call infers `U`, and associated functions
   (`Box.wrap[U](u: U)`) and a trait's methods (`fn convert[U: ord](self, u: U) -> U`, each
@@ -52,6 +64,13 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Changed
 
+- `stone build` keeps an enum that does not hold itself, options and results included, as its
+  tag and its values side by side, as it keeps a tuple, rather than as a counted object, so
+  `some(x)`, `ok(x)`, and `Shape.Circle(1.0)` allocate nothing, a function returns an
+  `option[int]` in two registers, and a list of options stores them inline. An enum that holds
+  itself, such as a tree, or one that would be wider than 8 values or make a list's element or
+  a stored variant hold more than 32, is still an object. A loop of 10 million steps that each
+  make and match an `option[int]` ran 2.1x faster.
 - A variable a closure's statement uses for the last time moves into the closure instead of
   being copied, so `ret |s: str| prefix + s` counts `prefix` once.
 - A program can no longer define a trait named `add`, `sub`, `mul`, `div`, `rem`, or `neg`,

@@ -756,8 +756,11 @@ enum Shape:
 ```
 
 A variant is written with its enum's name, so `Shape.Circle(1.0)` and `Shape.Rect(2.0, 3.0)` are
-values of `Shape`, and so is `Shape.Empty`, without parentheses. `match` tells the variants apart
-and names the values they hold:
+values of `Shape`, and so is `Shape.Empty`, without parentheses. A variant can name its values
+instead, all of them, as `Rect(w: float, h: float)`; it is then made with them named, in any
+order, as a struct is, `Shape.Rect(h=3.0, w=2.0)`, evaluating them as written, and prints them
+named, as `Shape.Rect(w=2.0, h=3.0)`. `match` tells the variants apart and names the values they
+hold:
 
 ```{literalinclude} ../examples/enums.stn
 :language: stone
@@ -771,8 +774,21 @@ pattern is one of:
 
 - a variant with a pattern for each of its values, as in `Shape.Rect(w, h)`, which fits a value
   of that variant whose values fit those patterns, at any depth, as in `some(Shape.Circle(r))`
+- for a variant that names its values, the variant with patterns by name, as in
+  `Shape.Rect(w=0.0)`, where a value left out fits anything (so `Shape.Rect` alone fits every
+  `Rect`) and a name alone, as `w` in `Shape.Rect(w, h=0.0)`, is short for `w=w`
 - a name, which fits any value and assigns it to that variable, like `=`
 - `_`, which fits any value and assigns nothing
+- an int, possibly negative, a string without values, or `true` or `false`, which fits a value
+  equal to it; floats and bytes are not patterns, since `nan` equals nothing
+- patterns joined by `|`, as in `1 | 2` or `Shape.Circle(_) | Shape.Empty`, which fits a value
+  any of them fits, trying them in order; each must assign the same names, with the same types.
+  A pattern may stand for at most 256 patterns without `|`, counting each combination of nested
+  ones, and one that never fits after those before it is a warning
+
+`match` also takes an int, a string, or a bool. The cases must cover every value, and a `bool`
+has only two, but ints and strings are never all listed, so their last case must fit anything,
+as `case _:` does.
 
 So `case Empty:`, without `Shape.`, would assign any value to a variable named `Empty`, which is
 an error that suggests `Shape.Empty`. The names a case assigns are ordinary variables, so a name
@@ -799,10 +815,17 @@ Enums are defined at the top level, and can be used before their definition. A l
 makes one usable from other files with `pub enum`, and `use shapes.Shape` imports it, or
 `shapes.Shape.Circle(1.0)` names it through its module. See [Modules](modules.md).
 
-A value of an enum is stored once and shared by every variable that holds it, with a count of
-the variables that do, like a list, so passing one around never copies it. A variant without
-values is stored once for the whole program. Freeing a long chain of values, such as a linked
-list of a million nodes, takes no more stack than freeing one. An enum value can print at most
+How an enum's values are stored is the compiler's choice, made for each type with its type
+arguments filled in, and never changes what a program does. An enum that holds itself, through
+its variants' values, tuples, structs, and other enums but not through lists or maps, as a
+tree does, is stored once and shared by every variable that holds it, with a count of the
+variables that do, like a list, so passing one around never copies it, and a variant without
+values is stored once for the whole program. Freeing a long chain of such values, such as a
+linked list of a million nodes, takes no more stack than freeing one. Every other enum, such as
+`option[int]`, `result[str, str]`, or a `Shape` of circles and rectangles, is kept as its tag
+and its values side by side, as a tuple is, so making one allocates nothing, unless that would
+take more than 8 values or make a list's element, a map entry, or a stored variant hold more
+than 32. An enum value can print at most
 10,000 enum values deep: `print` stops the program at a deeper one, after printing what comes
 before it, with `value is nested too deeply to print (more than 10000 levels)`.
 

@@ -1,0 +1,70 @@
+// literal patterns, alternatives with `|`, and matches on ints, strings, and bools
+enum Shape:
+    Circle(radius: int)
+    Rect(w: int, h: int)
+    Square(int)
+    Empty
+
+fn describe(n: int) -> str:
+    match n:
+        case 0:
+            ret "zero"
+        case 1 | 2 | 3:
+            ret "small"
+        case -1:
+            ret "minus one"
+        case -9223372036854775807:
+            ret "the smallest"
+        case _:
+            ret "other"
+
+fn command(text: str) -> str:
+    match text:
+        case "quit" | "exit":
+            ret "bye"
+        case "":
+            ret "nothing"
+        case other:
+            ret "unknown {other}"
+
+fn flag(b: bool) -> int:
+    match b:
+        case true:
+            ret 1
+        case false:
+            ret 0
+
+fn width(s: Shape) -> int:
+    match s:
+        case Shape.Rect(w, h=0) | Shape.Square(w) | Shape.Circle(radius=w):
+            ret w
+        case Shape.Rect(w=0 | 1, h):
+            ret h
+        case Shape.Rect(w, h):
+            ret w + h
+        case Shape.Empty:
+            ret -1
+
+fn first(xs: list[option[int]]) -> str:
+    out = ""
+    for x in xs:
+        match x:
+            case some(0):
+                out += "z"
+            case some(1 | 2):
+                out += "s"
+            case some(n):
+                out += "{n}"
+            case none:
+                out += "."
+    ret out
+
+for n in [0, 1, 3, 4, -1, -9223372036854775807]:
+    print(n, describe(n))
+for t in ["quit", "exit", "", "help"]:
+    print(command(t))
+print(flag(true), flag(false))
+shapes = [Shape.Rect(w=5, h=0), Shape.Square(4), Shape.Circle(radius=2), Shape.Rect(w=1, h=7), Shape.Rect(w=2, h=3), Shape.Empty]
+for s in shapes:
+    print(s, width(s))
+print(first([some(0), some(2), none, some(9)]))

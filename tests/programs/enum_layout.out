@@ -1,0 +1,38 @@
+[some('ada'), none, some('bo')] 3 some('ada') bo
+[some('cy'), some('bo')] some(none) some('ada')
+true false true
+{'a': some(1), 'b': none, 'c': some(1)} some(1) some(none) none
+a true
+b false
+c true
+Shape.Circle(r=1.0) 3.0
+Shape.Rect(w=2.0, h=3.0) 6.0
+Shape.Label(text='hi') 0.0
+Shape.Empty 0.0
+true false
+Named(name=some('box'), shape=Shape.Rect(w=2.0, h=3.0)) none
+ok(42) err("invalid literal for int() with base 10: 'x'") ok(1.5) ok(2) err('byte out of range (value 300)')
+ok([1, 2]) err("invalid literal for int() with base 10: 'two'") some(3) none
+true [ok(1), ok(2)]
+some(1) none [some(0), none]
+some(some(3)) 3 true false
+noisy 1
+noisy 2
+noisy 3
+true 3
+two deep 3
+Tree.Node(Tree.Leaf(1), Tree.Node(Tree.Leaf(2), Tree.Leaf(3))) 6
+3 2
+true some(Tree.Node(Tree.Leaf(1), Tree.Node(Tree.Leaf(2), Tree.Leaf(3))))
+Tagged(name=none, tags=[some(1), none]) none
+Tagged(name=some('ann'), tags=[some(1), some(7), none]) some(3) 7
+some(some('a')) some(3) true
+none
+[some(1), none] ['s'] 0
+some(5) x some(6)
+some(2) none some(2)
+some(12) some(4) global
+[3, 0, 1] [some(3), some(1)] true
+3
+{'b': none} some(some('y')) none
+some(some(some(some('bottom')))) true

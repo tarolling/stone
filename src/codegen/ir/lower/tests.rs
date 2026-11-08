@@ -1066,7 +1066,9 @@ fn a_list_of_tuples_records_its_width_and_kinds() {
 
 #[test]
 fn a_variant_with_values_is_a_new_value_and_one_without_is_static() {
-    let source = "enum Shape:\n    Circle(float)\n    Named(str, int)\n    Empty\n\
+    // a shape that holds shapes is an object, not values side by side
+    let source = "enum Shape:\n    Circle(float)\n    Named(str, int)\n    Empty\n    \
+                  Pair(Shape, Shape)\n\
                   fn f(s: str) -> Shape:\n    ret Shape.Named(s, 2)\n\
                   fn g() -> Shape:\n    ret Shape.Empty\n";
     let ir = dump(source);
@@ -1088,9 +1090,76 @@ fn a_variant_with_values_is_a_new_value_and_one_without_is_static() {
 }
 
 #[test]
+fn a_flat_variant_is_its_tag_then_slots_grouped_by_how_they_are_counted() {
+    let source = "enum Shape:\n    Circle(float)\n    Named(str, int)\n    Empty\n\
+                  fn f(s: str) -> Shape:\n    ret Shape.Named(s, 2)\n\
+                  fn g() -> Shape:\n    ret Shape.Empty\n";
+    let ir = dump(source);
+    let f = ir.split("fn g").next().unwrap();
+    // the float and the int share the slot of values that are not counted, before the string
+    assert_eq!(
+        f,
+        "fn f(v0):\nb0:\n  retain v0\n  v1 = copy 1\n  v2 = copy 2\n  v3 = copy v0\n  \
+         ret v1, v2, v3\n"
+    );
+    let g = ir.split("fn g").nth(1).unwrap();
+    assert!(
+        g.starts_with("():\nb0:\n  v0 = copy 2\n  v1 = copy 0\n  v2 = copy 0\n  ret v0, v1, v2\n"),
+        "{g}"
+    );
+    assert!(!ir.contains("enum_new"), "{ir}");
+}
+
+#[test]
+fn an_option_of_an_int_is_two_values_and_allocates_nothing() {
+    let ir = dump(
+        "fn half(x: int) -> option[int]:\n    if x % 2 == 0:\n        ret some(x / 2)\n    \
+         ret none\nprint(half(4).unwrap_or(0))\n",
+    );
+    let half = ir.split("fn main").next().unwrap();
+    assert_eq!(
+        half,
+        "fn half(v0):\nb0:\n  v1 = rem v0, 2\n  br_eq v1, 0 -> b1, b2\nb1:\n  v2 = div v0, 2\n  \
+         v3 = copy 1\n  v4 = copy v2\n  ret v3, v4\nb2:\n  v5 = copy 0\n  v6 = copy 0\n  \
+         ret v5, v6\n"
+    );
+    assert!(!ir.contains("enum_new") && !ir.contains("variant"), "{ir}");
+}
+
+#[test]
+fn an_option_of_a_struct_that_holds_one_of_itself_is_an_object() {
+    let ir = dump(
+        "struct Node:\n    value: int\n    next: option[Node]\n\
+         fn last(n: Node) -> int:\n    match n.next:\n        case some(rest):\n            \
+         ret last(rest)\n        case none:\n            ret n.value\n\
+         print(last(Node(value=1, next=none)))\n",
+    );
+    assert!(ir.contains("fn last(v0, v1):"), "{ir}");
+    assert!(ir.contains("enum_tag v"), "{ir}");
+    assert!(ir.contains("variant 0"), "{ir}");
+}
+
+#[test]
+fn an_enum_too_wide_for_a_list_element_is_an_object() {
+    // 32 values fit an element, and each option of a tuple of three would add four
+    let fields = ["option[tuple[int, int, int]]"; 9].join(", ");
+    let ir = dump(&format!(
+        "fn f(xs: list[tuple[{fields}]]) -> int:\n    ret xs.len()\nprint(f([]))\n"
+    ));
+    assert!(ir.contains("fn f(v0):"), "{ir}");
+    let flat = dump(
+        "fn f(x: tuple[option[tuple[int, int, int]], int]) -> int:\n    ret x[1]\n\
+         print(f((none, 1)))\n",
+    );
+    // on its own it is four values, then the int
+    assert!(flat.contains("fn f(v0, v1, v2, v3, v4):"), "{flat}");
+}
+
+#[test]
 fn a_match_checks_tags_then_binds_retained_values() {
-    let source = "fn f(x: option[str]) -> str:\n    match x:\n        case some(s):\n            \
-                  ret s\n        case none:\n            ret \"\"\n";
+    let source = "enum Chain:\n    End\n    Link(str, Chain)\n\
+                  fn f(x: Chain) -> str:\n    match x:\n        case Chain.Link(s, _):\n            \
+                  ret s\n        case Chain.End:\n            ret \"\"\n";
     let ir = dump(source);
     let f = ir.split("fn main").next().unwrap();
     // the subject is read through a copy, since a case may assign the variable it came from
@@ -1099,7 +1168,25 @@ fn a_match_checks_tags_then_binds_retained_values() {
         "{f}"
     );
     assert!(
-        f.contains("b1:\n  v4 = field_get v2, 0\n  retain v4\n  release_str v1\n  v1 = copy v4"),
+        f.contains(
+            "b1:\n  v4 = field_get v2, 0\n  v5 = field_get v2, 1\n  retain v4\n  \
+                    release_str v1\n  v1 = copy v4"
+        ),
+        "{f}"
+    );
+}
+
+#[test]
+fn a_match_on_a_flat_option_reads_its_tag_and_slots() {
+    let source = "fn f(x: option[str]) -> str:\n    match x:\n        case some(s):\n            \
+                  ret s\n        case none:\n            ret \"\"\n";
+    let ir = dump(source);
+    let f = ir.split("fn main").next().unwrap();
+    assert!(
+        f.starts_with(
+            "fn f(v0, v1):\nb0:\n  v2 = copy 0\n  v3 = copy v0\n  v4 = copy v1\n  \
+             br_eq v3, 1 -> b1, b2\nb1:\n  retain v4\n  release_str v2\n  v2 = copy v4\n"
+        ),
         "{f}"
     );
 }
@@ -1109,15 +1196,14 @@ fn pop_without_an_index_is_some_of_the_last_element_or_none() {
     let ir = first_function(
         "fn f(xs: list[str]) -> option[str]:\n    o = xs.pop()\n    ret o\nprint(f([]))\n",
     );
-    // the list's reference to the element moves into the option, and the static none is
-    // retained, so the option is owned either way
+    // the list's reference to the element moves into the option's string slot
     assert_eq!(
         ir,
-        "fn f(v0):\nb0:\n  v1 = copy 0\n  v0 = list_unique v0\n  v2 = len v0\n  \
-         br_ne v2, 0 -> b1, b2\nb1:\n  v4 = sub v2, 1\n  v5 = call stone.list_pop(v0, v4)\n  \
-         v3 = call stone.enum_new(1, 1, 1)\n  field_init v3[0], v5\n  jmp b3\nb2:\n  \
-         v3 = variant 0\n  retain v3\n  jmp b3\nb3:\n  release_enum v1\n  v1 = copy v3\n  \
-         release_list v0\n  ret v1\n"
+        "fn f(v0):\nb0:\n  v2 = copy 0\n  v0 = list_unique v0\n  v3 = len v0\n  \
+         br_ne v3, 0 -> b1, b2\nb1:\n  v6 = sub v3, 1\n  v7 = call stone.list_pop(v0, v6)\n  \
+         v4 = copy 1\n  v5 = copy v7\n  jmp b3\nb2:\n  v4 = copy 0\n  v5 = copy 0\n  jmp b3\n\
+         b3:\n  v1 = copy v4\n  release_str v2\n  v2 = copy v5\n  release_list v0\n  \
+         ret v1, v2\n"
     );
 }
 
@@ -1127,21 +1213,20 @@ fn find_get_and_os_env_are_some_of_a_value_or_none() {
         "fn f(s: str, m: map[int, str]) -> tuple[option[int], option[str]]:\n    \
          ret (s.find(\"a\"), m.get(1))\nprint(f(\"a\", {}))\n",
     );
+    // each option is its tag and its value, 0 for none
     assert_eq!(
         ir,
         "fn f(v0, v1):\nb0:\n  v2 = str \"a\"\n  v3 = call stone.str_position(v0, v2)\n  \
-         br_ge v3, 0 -> b1, b2\nb1:\n  v4 = call stone.enum_new(1, 0, 1)\n  \
-         field_init v4[0], v3\n  jmp b3\nb2:\n  v4 = variant 0\n  retain v4\n  jmp b3\nb3:\n  \
-         v5 = call stone.map_find(v1, 1, 0)\n  br_ge v5, 0 -> b4, b5\nb4:\n  v7 = add v5, 1\n  \
-         v8 = list_get v1, v7\n  retain v8\n  v6 = call stone.enum_new(1, 1, 1)\n  \
-         field_init v6[0], v8\n  jmp b6\nb5:\n  v6 = variant 0\n  retain v6\n  jmp b6\nb6:\n  \
-         ret v4, v6\n"
+         br_ge v3, 0 -> b1, b2\nb1:\n  v4 = copy 1\n  v5 = copy v3\n  jmp b3\nb2:\n  \
+         v4 = copy 0\n  v5 = copy 0\n  jmp b3\nb3:\n  v6 = call stone.map_find(v1, 1, 0)\n  \
+         br_ge v6, 0 -> b4, b5\nb4:\n  v9 = add v6, 1\n  v10 = list_get v1, v9\n  \
+         retain v10\n  v7 = copy 1\n  v8 = copy v10\n  jmp b6\nb5:\n  v7 = copy 0\n  \
+         v8 = copy 0\n  jmp b6\nb6:\n  ret v4, v5, v7, v8\n"
     );
     let ir = dump_linked("use os\nprint(os.env(\"A\"))\n");
     assert!(
         ir.contains(
-            "call stone.os_env(v0)\n  br_ne v1, 0 -> b1, b2\nb1:\n  \
-                     v2 = call stone.enum_new(1, 1, 1)\n  field_init v2[0], v1"
+            "call stone.os_env(v0)\n  br_ne v1, 0 -> b1, b2\nb1:\n  v2 = copy 1\n  v3 = copy v1"
         ),
         "{ir}"
     );
@@ -1161,10 +1246,12 @@ fn printing_an_enum_calls_a_function_made_for_its_type() {
         ir.contains("call stone.print_enum.option.list_int(v"),
         "{ir}"
     );
+    // a flat option is printed from its tag and its list
     assert!(
-        ir.contains("fn stone.print_enum.option.list_int(v0, v1):"),
+        ir.contains("fn stone.print_enum.option.list_int(v0, v1, v2):"),
         "{ir}"
     );
+    assert!(!ir.contains("enum_new"), "{ir}");
     assert!(
         ir.contains("fail \"value is nested too deeply to print (more than 10000 levels)\""),
         "{ir}"
@@ -1286,13 +1373,11 @@ fn comparing_tuples_as_a_value_writes_one_or_zero() {
 #[test]
 fn comparing_enums_calls_a_function_made_for_their_type() {
     let ir = dump(
-        "fn f(a: option[int], b: option[int]) -> bool:\n    ret a == b\nprint(f(none, none))\n",
+        "enum Chain:\n    End\n    Link(int, Chain)\n\
+         fn f(a: Chain, b: Chain) -> bool:\n    ret a == b\nprint(f(Chain.End, Chain.End))\n",
     );
-    assert!(
-        ir.contains("call stone.eq_enum.option.int(v0, v1, 0)"),
-        "{ir}"
-    );
-    let helper = ir.split("fn stone.eq_enum.option.int(v0, v1, v2):").nth(1);
+    assert!(ir.contains("call stone.eq_enum.Chain(v0, v1, 0)"), "{ir}");
+    let helper = ir.split("fn stone.eq_enum.Chain(v0, v1, v2):").nth(1);
     let helper = helper.unwrap_or_else(|| panic!("{ir}"));
     for line in [
         "fail \"value is nested too deeply to compare (more than 10000 levels)\"",
@@ -1300,11 +1385,27 @@ fn comparing_enums_calls_a_function_made_for_their_type() {
         "= enum_tag v1",
         "= field_get v0, 0",
         "= field_get v1, 0",
+        "call stone.eq_enum.Chain(v7, v9, v3)",
         "ret 1",
         "ret 0",
     ] {
         assert!(helper.contains(line), "{line} in {helper}");
     }
+    // a flat option's comparer takes both values of each side, and compares tags first
+    let ir = dump(
+        "fn f(a: option[int], b: option[int]) -> bool:\n    ret a == b\nprint(f(none, none))\n",
+    );
+    assert!(
+        ir.contains("call stone.eq_enum.option.int(v0, v1, v2, v3, 0)"),
+        "{ir}"
+    );
+    let helper = ir
+        .split("fn stone.eq_enum.option.int(v0, v1, v2, v3, v4):")
+        .nth(1);
+    let helper = helper.unwrap_or_else(|| panic!("{ir}"));
+    assert!(helper.contains("br_eq v0, v2 -> b3, b7"), "{helper}");
+    assert!(helper.contains("br_eq v1, v3 -> b6, b7"), "{helper}");
+    assert!(!helper.contains("enum_tag"), "{helper}");
 }
 
 /// Returns whether every division in `function` either stops the program, computing the length
@@ -1475,9 +1576,9 @@ fn a_question_mark_returns_the_err_it_found_and_moves_like_a_call() {
     // xs moves into grow, so the err goes back as it is, with nothing left to release
     assert!(
         f.starts_with(
-            "(v0, v1):\nb0:\n  v2 = call grow(v0)\n  v3 = enum_tag v2\n  br_eq v3, 1 -> b1, b2\n\
-             b1:\n  ret v2\nb2:\n  v4 = field_get v2, 0\n  v5 = copy v4\n  retain v5\n  \
-             release_enum v2\n  v0 = copy v5\n"
+            "(v0, v1):\nb0:\n  v2, v3, v4 = call grow(v0)\n  br_eq v2, 1 -> b1, b2\n\
+             b1:\n  ret v2, v3, v4\nb2:\n  v5 = copy v4\n  retain v5\n  release_str v3\n  \
+             release_list v4\n  v0 = copy v5\n"
         ),
         "{f}"
     );
@@ -1487,7 +1588,30 @@ fn a_question_mark_returns_the_err_it_found_and_moves_like_a_call() {
                   print(f(\"a\"))\n";
     let second = dump(source);
     let f = second.split("fn f").nth(1).unwrap();
-    assert!(f.contains("b1:\n  release_str v2\n  ret v3\n"), "{f}");
+    assert!(f.contains("b1:\n  release_str v2\n  ret v3, v4\n"), "{f}");
+}
+
+#[test]
+fn a_question_mark_makes_the_err_or_none_of_its_functions_own_type() {
+    let source = "fn f(x: option[str]) -> option[int]:\n    s = x?\n    ret some(s.len())\n\
+                  print(f(some(\"a\")))\n\
+                  fn g(x: result[int, str]) -> result[str, str]:\n    n = x?\n    \
+                  ret ok(str(n))\nprint(g(ok(1)))\n";
+    let ir = dump(source);
+    let f = ir.split("fn g").next().unwrap();
+    // an option[str]'s none becomes an option[int]'s, holding nothing
+    assert!(
+        f.contains("br_eq v0, 0 -> b1, b2\nb1:\n  v3 = copy 0\n  v4 = copy 0\n  release_str v2\n  ret v3, v4\n"),
+        "{f}"
+    );
+    // a result[int, str]'s err gives its string to a result[str, str]'s
+    let g = ir.split("fn g").nth(1).unwrap();
+    assert!(
+        g.contains(
+            "b1:\n  v4 = copy v2\n  retain v4\n  v5 = copy 1\n  v6 = copy v4\n  ret v5, v6\n"
+        ),
+        "{g}"
+    );
 }
 
 #[test]

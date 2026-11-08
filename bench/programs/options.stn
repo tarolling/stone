@@ -1,0 +1,28 @@
+// options in a hot loop: a step that may find nothing, matched on every turn, and a list of
+// the options it gave, summed at the end
+fn step(x: int) -> option[int]:
+    if x % 7 == 0:
+        ret none
+    ret some((x * 31 + 7) % 1000003)
+
+fn run(n: int):
+    x = 1
+    hits = 0
+    misses = 0
+    kept = []
+    for i in range(n):
+        match step(x + i):
+            case some(y):
+                x = y
+                hits += 1
+            case none:
+                x += 1
+                misses += 1
+        if i % 16 == 0:
+            kept.append(step(i))
+    total = 0
+    for k in kept:
+        total += k.unwrap_or(0)
+    print(x, hits, misses, total)
+
+run(int(args()[0]).unwrap())

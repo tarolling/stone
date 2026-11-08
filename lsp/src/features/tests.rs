@@ -1391,6 +1391,69 @@ fn a_variant_leads_to_its_definition_and_renames_everywhere() {
     );
 }
 
+const NAMED_ENUMS: &str = "enum Shape:
+    Rect(w: float, h: float)
+    Empty
+s = Shape.Rect(h=2.0, w=1.0)
+match s:
+    case Shape.Rect(w, h=height):
+        print(w + height)
+    case Shape.Empty:
+        print(0)
+";
+
+#[test]
+fn hover_shows_a_named_variant_with_its_fields() {
+    let doc = doc(NAMED_ENUMS);
+    assert_eq!(
+        hover_text(&doc, at(1, 6)).unwrap(),
+        "```stone\nenum Shape\n    Rect(w: float, h: float)\n    Empty\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(4, 17)).unwrap(),
+        "```stone\nShape.Rect.h: float\n```"
+    );
+    // a shorthand is the variable it binds
+    assert_eq!(
+        hover_text(&doc, at(6, 21)).unwrap(),
+        "```stone\n(global) w: float\n```"
+    );
+}
+
+#[test]
+fn renaming_a_shorthand_field_keeps_the_other_name() {
+    let doc = doc(NAMED_ENUMS);
+    let texts = |pos: Position, name: &str| {
+        let edit = rename(&doc, &uri(), pos, name).unwrap();
+        let mut edits: Vec<(u32, u32, String)> = edit.changes.unwrap()[&uri()]
+            .iter()
+            .map(|e| {
+                (
+                    e.range.start.line,
+                    e.range.start.character,
+                    e.new_text.clone(),
+                )
+            })
+            .collect();
+        edits.sort();
+        edits
+    };
+    // the field, from its definition
+    assert_eq!(
+        texts(at(2, 10), "width"),
+        [
+            (1, 9, "width".to_string()),
+            (3, 22, "width".to_string()),
+            (5, 20, "width=w".to_string())
+        ]
+    );
+    // the variable, from its use
+    assert_eq!(
+        texts(at(7, 15), "size"),
+        [(5, 20, "w=size".to_string()), (6, 14, "size".to_string())]
+    );
+}
+
 #[test]
 fn an_enum_is_outlined_with_its_variants() {
     let symbols = document_symbols(&doc(ENUMS));
@@ -2211,6 +2274,8 @@ fn completion_where_a_type_is_written_offers_types() {
     has("struct Point:\n    x: float\n    y: ", at(3, 8), &["float"]);
     has("enum Shape:\n    Circle(", at(2, 12), &["float"]);
     has("enum Shape:\n    Rect(float, ", at(2, 17), &["float"]);
+    has("enum Shape:\n    Rect(w: ", at(2, 13), &["float"]);
+    has("enum Shape:\n    Rect(w: float, h: ", at(2, 23), &["float"]);
     // a method's parameter, and `Self` in an `impl` or `trait` block
     has(
         "struct P:\n    x: int\nimpl P:\n    fn me(self) -> Self:\n        ret self\n",

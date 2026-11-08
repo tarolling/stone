@@ -253,7 +253,7 @@ impl Facts {
             StmtKind::Match { cases, .. } => {
                 for case in cases {
                     let mut names = vec![];
-                    case.pattern.names(&mut names);
+                    case.pattern.all_names(&mut names);
                     self.writes.extend(names.into_iter().map(|(_, span)| span));
                     self.block(&case.body, owner);
                 }

@@ -306,8 +306,10 @@ enum Shape:
     Empty
 ```
 
-`Shape.Circle(1.0)` and `Shape.Empty` make values of it. `match` runs the first case whose pattern
-fits a value:
+`Shape.Circle(1.0)` and `Shape.Empty` make values of it. A variant may instead name its values,
+all of them, as `Rect(w: float, h: float)`, and is then made with named values in any order, as
+`Shape.Rect(h=2.0, w=1.0)`, which are evaluated in the order they are written. `match` runs the
+first case whose pattern fits a value:
 
 ```stone
 match s:
@@ -320,10 +322,14 @@ match s:
 ```
 
 A pattern is a variant with a pattern for each of its values, such as `Shape.Rect(w, _)` or
-`some(Shape.Circle(r))`, a name, which matches any value and binds it, or `_`, which matches any
-value and binds nothing. `some(p)` and `none` are the patterns of an option, and `ok(p)` and
-`err(p)` those of a result. The cases must cover
-every value. See [Types](types.md#enums).
+`some(Shape.Circle(r))`, a name, which matches any value and binds it, `_`, which matches any
+value and binds nothing, an int (possibly negative), a string, or a bool, which matches a value
+equal to it, or patterns joined by `|`, which matches what any of them does, as `1 | 2` or
+`some(0 | 1)`, each binding the same names. A named variant's pattern gives its values by name,
+`Shape.Rect(w=0.0)`, where a field left out matches anything and a name alone, as `w` in
+`Shape.Rect(w, h=0.0)`, is short for `w=w`. `some(p)` and `none` are the patterns of an option,
+and `ok(p)` and `err(p)` those of a result. `match` takes an enum, an int, a string, or a bool,
+and the cases must cover every value. See [Types](types.md#enums).
 
 ## Structs
 

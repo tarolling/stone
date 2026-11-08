@@ -264,9 +264,12 @@ still called directly, its copies passed with the other arguments. A closure kep
 one object holding its code's address and its copies, counted like any other, and a variable
 used for the last time where the closure is made moves into it rather than being counted twice.
 A closure in a generic function is compiled once for each copy of the function, like a call.
-Enum values, including options, are stored on the heap for now, which lets an enum hold itself,
-as a tree or linked list does, without the `Box` Rust asks for; keeping the values of an enum
-that does not hold itself in registers, as tuples are, is future work.
+An enum that holds itself, as a tree or linked list does, is stored on the heap, which lets it
+do so without the `Box` Rust asks for. Every other enum, options and results included, is kept
+in registers as its tag and its values side by side, as a tuple is, once its type arguments are
+known, so `some(x)` allocates nothing and a function returns an `option[int]` in two registers;
+the compiler decides this for each type, boxing one that would be wider than eight values or
+make a list's element or a boxed variant hold more than 32.
 The same arithmetic on lists is the first code stone writes for GPUs: with `--gpu sm_75`,
 `stone build` turns each such expression into a kernel, in PTX for NVIDIA GPUs, that computes
 every element exactly as the processor does, rounding each float operation on its own and

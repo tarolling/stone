@@ -723,13 +723,24 @@ pub enum StmtKind {
     Continue,
 }
 
-/// One variant of an enum, such as `Rect(float, float)`, with the types of its values in order.
+/// One variant of an enum, such as `Rect(float, float)` or `Rect(w: float, h: float)`, with the
+/// types of its values in order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct Variant {
     pub name: Identifier,
     /// The span of the variant's name.
     pub span: Span,
     pub fields: Vec<TypeExpr>,
+    /// The name of each value with its span, as `w` and `h` in `Rect(w: float, h: float)`, if the
+    /// variant names them; a variant names all of its values or none.
+    pub names: Option<Vec<(Identifier, Span)>>,
+}
+
+impl Variant {
+    /// Returns whether the variant names its values, as `Rect(w: float, h: float)` does.
+    pub fn is_named(&self) -> bool {
+        self.names.is_some()
+    }
 }
 
 /// One field of a struct, such as `x: float`.
@@ -764,24 +775,171 @@ pub enum PatternKind {
     Name(Identifier),
     /// A variant and a pattern for each of its values: `path` is the variant's name with what
     /// qualifies it, such as `["Shape", "Circle"]` for `Shape.Circle(r)`, `["some"]` for
-    /// `some(x)`, and `["none"]` for `none`.
+    /// `some(x)`, and `["none"]` for `none`. A field of a named variant may be matched by name,
+    /// as `w=0.0` in `Shape.Rect(w=0.0, h)`.
     Variant {
         path: Vec<(Identifier, Span)>,
-        fields: Vec<Pattern>,
+        fields: Vec<PatternField>,
     },
+    /// A literal, which matches a value equal to it: an int (possibly negated), a string, or a
+    /// bool, as `0`, `-1`, `"quit"`, or `true`.
+    Literal(Constant),
+    /// Alternatives, any of which may match, as `1 | 2` or `Shape.Circle(_) | Shape.Empty`. Each
+    /// binds the same names.
+    Or(Vec<Pattern>),
+}
+
+/// One value of a variant pattern, such as `r` in `Shape.Circle(r)` or `w=0.0` in
+/// `Shape.Rect(w=0.0)`: the pattern, and the field it names with its span, if it names one.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PatternField {
+    pub name: Option<(Identifier, Span)>,
+    pub pattern: Pattern,
+}
+
+impl From<Pattern> for PatternField {
+    /// Makes a value of a variant pattern that names no field, as `r` in `Shape.Circle(r)`.
+    fn from(pattern: Pattern) -> Self {
+        PatternField {
+            name: None,
+            pattern,
+        }
+    }
+}
+
+impl Display for PatternField {
+    /// Writes the value as it is written in source, such as `w=0.0` or `r`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if let Some((name, _)) = &self.name {
+            write!(f, "{name}=")?;
+        }
+        write!(f, "{}", self.pattern)
+    }
 }
 
 impl Pattern {
     /// Pushes the names the pattern binds, with their spans, in order.
     ///
     /// For example, `Shape.Rect(w, _)` gives `w`, and `some(Tree.Node(a, b))` gives `a` and `b`.
+    ///
+    /// Every alternative of an or-pattern binds the same names, so only the first one's count.
     pub fn names<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
         match &self.kind {
-            PatternKind::Wildcard => {}
+            PatternKind::Wildcard | PatternKind::Literal(_) => {}
             PatternKind::Name(name) => out.push((name, self.span)),
-            PatternKind::Variant { fields, .. } => fields.iter().for_each(|f| f.names(out)),
+            PatternKind::Variant { fields, .. } => fields.iter().for_each(|f| f.pattern.names(out)),
+            PatternKind::Or(alternatives) => {
+                if let Some(first) = alternatives.first() {
+                    first.names(out);
+                }
+            }
         }
     }
+
+    /// Pushes the names the pattern binds, with their spans, in every alternative of its
+    /// or-patterns, where [`Pattern::names`] takes the first alone.
+    ///
+    /// For example, `some(x) | x` gives `x` twice, with each one's span.
+    pub fn all_names<'a>(&'a self, out: &mut Vec<(&'a str, Span)>) {
+        match &self.kind {
+            PatternKind::Wildcard | PatternKind::Literal(_) => {}
+            PatternKind::Name(name) => out.push((name, self.span)),
+            PatternKind::Variant { fields, .. } => {
+                fields.iter().for_each(|f| f.pattern.all_names(out))
+            }
+            PatternKind::Or(alternatives) => alternatives.iter().for_each(|a| a.all_names(out)),
+        }
+    }
+
+    /// Returns how many patterns without alternatives this one stands for, the product of its
+    /// values' counts for a variant and the sum of its alternatives' for an or-pattern, which
+    /// stops growing at `limit`.
+    ///
+    /// For example, `some(1 | 2) | none` stands for three: `some(1)`, `some(2)`, and `none`.
+    pub fn alternatives(&self, limit: usize) -> usize {
+        match &self.kind {
+            PatternKind::Variant { fields, .. } => fields.iter().fold(1, |count, f| {
+                count
+                    .saturating_mul(f.pattern.alternatives(limit))
+                    .min(limit)
+            }),
+            PatternKind::Or(alternatives) => alternatives.iter().fold(0, |count, a| {
+                count.saturating_add(a.alternatives(limit)).min(limit)
+            }),
+            _ => 1,
+        }
+    }
+
+    /// Returns the patterns without alternatives this one stands for, in order, as
+    /// [`Pattern::alternatives`] counts them.
+    ///
+    /// For example, `some(1 | 2)` gives `some(1)` and `some(2)`.
+    pub fn expand(&self) -> Vec<Pattern> {
+        match &self.kind {
+            PatternKind::Or(alternatives) => {
+                alternatives.iter().flat_map(Pattern::expand).collect()
+            }
+            PatternKind::Variant { path, fields } => {
+                let mut out: Vec<Vec<PatternField>> = vec![vec![]];
+                for field in fields {
+                    let options = field.pattern.expand();
+                    out = out
+                        .into_iter()
+                        .flat_map(|done| {
+                            options.iter().map(move |option| {
+                                let mut next = done.clone();
+                                next.push(PatternField {
+                                    name: field.name.clone(),
+                                    pattern: option.clone(),
+                                });
+                                next
+                            })
+                        })
+                        .collect();
+                }
+                out.into_iter()
+                    .map(|fields| Pattern {
+                        kind: PatternKind::Variant {
+                            path: path.clone(),
+                            fields,
+                        },
+                        span: self.span,
+                    })
+                    .collect()
+            }
+            _ => vec![self.clone()],
+        }
+    }
+}
+
+/// Arranges the values of a variant pattern in the order of the variant's fields: the pattern
+/// for each field, or `None` for a field the pattern leaves out, which matches anything.
+/// `names` are the variant's field names if it names them; otherwise the values are already in
+/// order. A value that names no field of a named variant is the shorthand `w` for `w=w`, a name
+/// pattern binding the field's value.
+///
+/// For example, with fields `w` and `h`, `Rect(h=0.0)` gives `None` then `0.0`, and `Rect(h, w)`
+/// gives `w` then `h`.
+pub fn arrange_fields<'a, S: AsRef<str>>(
+    fields: &'a [PatternField],
+    names: Option<&[S]>,
+) -> Vec<Option<&'a Pattern>> {
+    let Some(names) = names else {
+        return fields.iter().map(|f| Some(&f.pattern)).collect();
+    };
+    names
+        .iter()
+        .map(|name| {
+            let name = name.as_ref();
+            fields
+                .iter()
+                .find(|f| match &f.name {
+                    Some((given, _)) => given == name,
+                    None => matches!(&f.pattern.kind, PatternKind::Name(n) if n == name),
+                })
+                .map(|f| &f.pattern)
+        })
+        .collect()
 }
 
 impl Display for Pattern {
@@ -790,6 +948,19 @@ impl Display for Pattern {
         match &self.kind {
             PatternKind::Wildcard => write!(f, "_"),
             PatternKind::Name(name) => write!(f, "{name}"),
+            PatternKind::Literal(Constant::Str(text)) => write!(f, "{text:?}"),
+            PatternKind::Literal(Constant::Bool(b)) => write!(f, "{b}"),
+            PatternKind::Literal(Constant::Int(n)) => write!(f, "{n}"),
+            PatternKind::Literal(other) => write!(f, "{other:?}"),
+            PatternKind::Or(alternatives) => {
+                for (i, alternative) in alternatives.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " | ")?;
+                    }
+                    write!(f, "{alternative}")?;
+                }
+                Ok(())
+            }
             PatternKind::Variant { path, fields } => {
                 let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
                 write!(f, "{}", names.join("."))?;

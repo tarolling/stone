@@ -2169,10 +2169,14 @@ impl<'a> Rewriter<'a> {
             };
             return;
         }
+        if let PatternKind::Or(alternatives) = &mut pattern.kind {
+            alternatives.iter_mut().for_each(|a| self.pattern(a));
+            return;
+        }
         let PatternKind::Variant { path, fields } = &mut pattern.kind else {
             return;
         };
-        fields.iter_mut().for_each(|f| self.pattern(f));
+        fields.iter_mut().for_each(|f| self.pattern(&mut f.pattern));
         match path.as_mut_slice() {
             [(name, span), ..] if is_prelude_enum(name) => {
                 self.diagnostics

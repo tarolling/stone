@@ -383,6 +383,8 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit("\tmov\trax, QWORD PTR [rbx + 16]");
     r#gen.emit("\tmov\trax, QWORD PTR [rax + r12 * 8]");
     r#gen.emit("\tinc\tr12");
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lfree_list_loop"); // an empty slot, as a set's removed entry
     r#gen.emit("\tdec\tQWORD PTR [rax - 8]");
     r#gen.emit("\tjnz\t.Lfree_list_loop");
     r#gen.emit("\tcmp\tQWORD PTR [rbx + 24], 1");
@@ -427,7 +429,7 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit("\tinc\tr12");
     r#gen.emit("\ttest\trcx, rcx");
     r#gen.emit("\tjz\t.Lfree_list_wide_loop"); // this field is not counted
-    // a removed map entry's counted values were zeroed
+    // a removed map entry's counted values were zeroed, as are a flat enum's unused slots
     r#gen.emit("\ttest\trax, rax");
     r#gen.emit("\tjz\t.Lfree_list_wide_loop");
     r#gen.emit("\tdec\tQWORD PTR [rax - 8]");
@@ -577,6 +579,8 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, sockets: bool, windows: b
     r#gen.emit("\tadd\tr13, 8");
     r#gen.emit("\ttest\trcx, rcx");
     r#gen.emit("\tjz\t.Lfree_enum_slot"); // this slot is not counted
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lfree_enum_slot"); // a flat enum's unused slot holds nothing
     r#gen.emit("\tdec\tQWORD PTR [rax - 8]");
     r#gen.emit("\tjnz\t.Lfree_enum_slot");
     r#gen.emit("\tcmp\trcx, 1");
@@ -1258,6 +1262,8 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator, maps_shrink: bool) {
     r#gen.emit("\tinc\tr8");
     r#gen.emit("\ttest\tr11, 3");
     r#gen.emit("\tjz\t.Lretain_slots_loop"); // this field is not counted
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Lretain_slots_loop"); // a flat enum's unused slot holds nothing
     r#gen.emit("\tinc\tQWORD PTR [rax - 8]");
     r#gen.emit("\tjmp\t.Lretain_slots_loop");
     r#gen.emit(".Lretain_slots_done:");
@@ -1335,6 +1341,8 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator, maps_shrink: bool) {
     r#gen.emit("\tinc\trcx");
     r#gen.emit("\ttest\tr8, r8");
     r#gen.emit("\tjz\t.Llist_copy_loop"); // the elements are not counted
+    r#gen.emit("\ttest\trax, rax");
+    r#gen.emit("\tjz\t.Llist_copy_loop");
     r#gen.emit("\tinc\tQWORD PTR [rax - 8]");
     r#gen.emit("\tjmp\t.Llist_copy_loop");
     r#gen.emit(".Llist_copy_done:");

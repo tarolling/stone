@@ -146,6 +146,10 @@ pub(super) enum Pattern {
         name: String,
         fields: Vec<Pattern>,
     },
+    /// A value equal to an int, a string, or a bool.
+    Literal(Value),
+    /// Alternatives, the first that matches binding its names.
+    Or(Vec<Pattern>),
     /// A pattern that matches nothing, such as a variant of an enum that does not exist.
     Never,
 }
@@ -186,11 +190,14 @@ pub(super) enum ExprKind {
     Membership(CompOp, Box<Expr>, Box<Expr>),
     Compare(Box<Expr>, Vec<(CompOp, Expr)>),
     Call(Box<Call>),
-    /// A variant of the enum with the id `id`, as `Shape.Circle(1.0)` or `Shape.Empty`.
+    /// A variant of the enum with the id `id`, as `Shape.Circle(1.0)` or `Shape.Empty`. A named
+    /// variant's values, as in `Shape.Rect(h=2.0, w=1.0)`, are in the order they are written,
+    /// and `positions` gives each one's field.
     Variant {
         id: usize,
         name: String,
         args: Vec<Expr>,
+        positions: Option<Vec<usize>>,
     },
     Field(Box<Expr>, String),
     Index(Box<Expr>, Box<Expr>),
@@ -603,13 +610,26 @@ impl<'r, 'out> Resolver<'r, 'out> {
         match &pattern.kind {
             PatternKind::Wildcard => Pattern::Wildcard,
             PatternKind::Name(name) => Pattern::Bind(self.var(name)),
+            PatternKind::Literal(literal) => Pattern::Literal(Value::from(literal)),
+            PatternKind::Or(alternatives) => {
+                Pattern::Or(alternatives.iter().map(|a| self.pattern(a)).collect())
+            }
             PatternKind::Variant { path, fields } => match path.as_slice() {
                 [(enum_name, _), (variant, _)] => match self.interpreter.enum_ids.get(enum_name) {
-                    Some(&id) => Pattern::Variant {
-                        id,
-                        name: variant.clone(),
-                        fields: fields.iter().map(|field| self.pattern(field)).collect(),
-                    },
+                    Some(&id) => {
+                        let names = self.interpreter.variant_names(id, variant);
+                        Pattern::Variant {
+                            id,
+                            name: variant.clone(),
+                            fields: ast::arrange_fields(fields, names.as_deref())
+                                .into_iter()
+                                .map(|field| match field {
+                                    Some(field) => self.pattern(field),
+                                    None => Pattern::Wildcard,
+                                })
+                                .collect(),
+                        }
+                    }
                     None => Pattern::Never,
                 },
                 _ => Pattern::Never,
@@ -730,6 +750,7 @@ impl<'r, 'out> Resolver<'r, 'out> {
                         id: self.interpreter.enum_ids[id],
                         name: attr.clone(),
                         args: vec![],
+                        positions: None,
                     }
                 }
                 _ => ExprKind::Field(self.boxed(value), attr.clone()),
@@ -871,11 +892,34 @@ impl<'r, 'out> Resolver<'r, 'out> {
             && may_name_enum(value)
             && let Some(&enum_id) = self.interpreter.enum_ids.get(id)
         {
+            if !keywords.is_empty() {
+                let names = self.interpreter.variant_names(enum_id, attr);
+                let positions = keywords
+                    .iter()
+                    .map(|k| {
+                        names
+                            .iter()
+                            .flat_map(|names| names.iter())
+                            .position(|name| *name == k.arg)
+                            .unwrap_or_default()
+                    })
+                    .collect();
+                return Expr {
+                    kind: ExprKind::Variant {
+                        id: enum_id,
+                        name: attr.clone(),
+                        args: keywords.iter().map(|k| self.expr(&k.value)).collect(),
+                        positions: Some(positions),
+                    },
+                    span,
+                };
+            }
             return Expr {
                 kind: ExprKind::Variant {
                     id: enum_id,
                     name: attr.clone(),
                     args: self.exprs(args),
+                    positions: None,
                 },
                 span,
             };

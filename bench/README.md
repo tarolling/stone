@@ -38,6 +38,7 @@ A benchmark of arithmetic on lists can also have a numpy version, `name.np.py`, 
 | `wordcount` | a `map[str, int]`: `get`, `contains`, reads, and sets | counting 2 million words drawn from 50,000 |
 | `nbody` | a `list` of structs, changes to their fields, and `impl` methods | a million steps of the Sun and the four gas giants orbiting |
 | `binary_trees` | an enum that holds itself, `match`, and freeing | building and walking binary trees of depth 4 to 15, as in the Benchmarks Game |
+| `options` | making and matching `option[int]`, and a list of options | 10 million steps that may find nothing, keeping every 16th option |
 | `sort` | `sort` on lists of ints and floats, against C's `qsort` and Python's `list.sort` | sorting 2 million 62-bit ints, then 2 million floats |
 | `trig` | `math.sin`, `math.cos`, `math.atan2`, and `math.asin`, against glibc's | 3 million steps of a point around a wobbling circle |
 
@@ -100,6 +101,8 @@ On 2026-10-23, timed against the previous binary in the same session: reading gl
 Later the same day, timed against that binary: keeping floats in vector registers made `nbody` 2.2x faster (0.33 s to 0.15 s), and loading the bodies' element address once per loop rather than for every field took it to 0.13 s. Reading `a[i]` once before `matmul`'s inner loop made it about 1.1x faster, and `matmul_float` gained about 1.15x from both. Testing loops at the bottom changed no benchmark measurably, since the jump back to the test was always predicted, but it leaves one branch per turn.
 
 On 2026-10-27, for 0.3.6, timed against 0.3.5: `fib` took 60 ms rather than 100 ms, `wordcount` 183 ms rather than 330 ms, `collatz` 85 ms rather than 103 ms, `strings` about 13% less, and `nbody`, `vector`, and `matmul` 5 to 10% less. The changes: a function whose first step tests its parameters and returns one of them, as `fib`'s base case does, returns before setting up its frame; a `for` counter over `range` is known never to be negative, so indexing with it checks only the length; `append` stores without a call when the list has room; strings compare eight bytes at a time and ints print without dividing; and map keys hash eight bytes at a time, with part of each hash kept in the index, while `m.get(k).unwrap_or(d)` makes no option.
+
+On 2026-11-07, timed against the same compiler with every enum kept as an object, pinned to one core: keeping enums that do not hold themselves as their tag and values side by side made the new `options` benchmark 2.1x faster (0.24 s to 0.11 s), since `some(x)` no longer allocates and `step` returns its option in two registers. `binary_trees`, whose tree holds itself, compiles to the same code, and `wordcount`, `nbody`, `strings`, and `sort` differ at most in how `main` reads its arguments.
 
 ## Where the time goes
 

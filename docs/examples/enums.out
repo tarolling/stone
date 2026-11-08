@@ -3,3 +3,8 @@ Shape.Rect(2.0, 3.0) 6.0
 Shape.Empty 0.0
 bo is at 1
 none 0
+Command.Move(dx=1, dy=2) move by 1, 2
+Command.Move(dx=0, dy=0) stay
+Command.Say(text='hi') greet
+Command.Quit stop
+none a few many

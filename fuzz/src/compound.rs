@@ -9,6 +9,8 @@
 //!
 //! - A type only holds types declared before it, so no struct holds itself, except that an enum's
 //!   variants after `V0` may hold the enum itself, so `V0` always ends a value.
+//! - A variant may name its values, each by a name of its own ([`field_name`]), so a shorthand
+//!   pattern such as `E0.V1(e0v1w0)` always binds a variable of the field's one type.
 //! - Every list has at least two elements and nothing shrinks one, so indexes from -2 to 1 are
 //!   always in range, and a `pop` always follows an `append` to the same list.
 //! - A map variable is never assigned again, only given entries, so the keys it is known to hold
@@ -182,7 +184,38 @@ pub(crate) enum TypeDef {
     },
     Enum {
         variants: Vec<Vec<Ty>>,
+        /// Whether each variant names its values, as `V1(e0v1w0: int)`, which are then given
+        /// and matched by name ([`field_name`]).
+        named: Vec<bool>,
     },
+}
+
+/// Returns the key type of the same type as `ty`, an int, a string, or a bool, whose literals a
+/// pattern may hold.
+fn scalar_key(ty: &Ty) -> Key {
+    match ty {
+        Ty::Str => Key::Str,
+        Ty::Bool => Key::Bool,
+        _ => Key::Int,
+    }
+}
+
+/// Returns every literal pattern of `key`'s type the generator writes, in a random order: a few
+/// ints, a negative one among them, three strings, or both bools.
+fn shuffled_literals(u: &mut Unstructured, key: Key) -> Result<Vec<String>> {
+    let all: &[&str] = match key {
+        Key::Int => &["0", "1", "2", "-1"],
+        Key::Str => &["\"a\"", "\"b\"", "\"\""],
+        Key::Bool => &["true", "false"],
+    };
+    let order = shuffled(u, all.len())?;
+    Ok(order.iter().map(|&k| all[k].to_string()).collect())
+}
+
+/// Returns the name of value `j` of the named variant `V<k>` of `E<i>`, unique to it, so a
+/// shorthand pattern's variable always has the field's type.
+fn field_name(i: usize, k: usize, j: usize) -> String {
+    format!("e{i}v{k}w{j}")
 }
 
 /// A function of an `impl` block.
@@ -351,8 +384,18 @@ impl Generator {
 
     fn variants(&self, index: usize) -> &[Vec<Ty>] {
         match &self.types[index] {
-            TypeDef::Enum { variants } => variants,
+            TypeDef::Enum { variants, .. } => variants,
             TypeDef::Struct { .. } => &[],
+        }
+    }
+
+    /// Returns the names of the values of variant `k` of `E<index>`, if it names them.
+    fn variant_names(&self, index: usize, k: usize) -> Option<Vec<String>> {
+        match &self.types[index] {
+            TypeDef::Enum { variants, named } if named[k] => {
+                Some((0..variants[k].len()).map(|j| field_name(index, k, j)).collect())
+            }
+            _ => None,
         }
     }
 
@@ -412,6 +455,7 @@ impl Generator {
                 }
             } else {
                 let mut variants = vec![];
+                let mut named = vec![];
                 for k in 0..u.int_in_range(1..=3)? {
                     // only later variants hold the enum itself, so `V0` always ends a value
                     let own = (k > 0).then_some(index);
@@ -419,12 +463,21 @@ impl Generator {
                     for _ in 0..u.int_in_range(0..=3)? {
                         fields.push(self.field_type(u, own, 0)?);
                     }
+                    named.push(!fields.is_empty() && u.int_in_range(0..=2)? == 0);
                     variants.push(fields);
                 }
-                self.types.push(TypeDef::Enum { variants });
+                self.types.push(TypeDef::Enum { variants, named });
                 self.line(0, &format!("enum E{index}:"));
                 for (k, fields) in self.variants(index).to_vec().iter().enumerate() {
                     let names: Vec<String> = fields.iter().map(|t| self.type_name(t)).collect();
+                    let names: Vec<String> = match self.variant_names(index, k) {
+                        Some(fields) => fields
+                            .iter()
+                            .zip(&names)
+                            .map(|(field, ty)| format!("{field}: {ty}"))
+                            .collect(),
+                        None => names,
+                    };
                     match names.is_empty() {
                         true => self.line(1, &format!("V{k}")),
                         false => self.line(1, &format!("V{k}({})", names.join(", "))),
@@ -1152,6 +1205,17 @@ impl Generator {
                 if fields.is_empty() {
                     return Ok(format!("E{i}.V{k}"));
                 }
+                if let Some(names) = self.variant_names(*i, k) {
+                    // named values in any order, evaluated as written
+                    let mut args = Vec::with_capacity(fields.len());
+                    for (name, ty) in names.iter().zip(&fields) {
+                        let value = self.value(u, scope, ty, nesting + 1, true)?;
+                        args.push(format!("{name}={value}"));
+                    }
+                    let order = shuffled(u, args.len())?;
+                    let args: Vec<&str> = order.iter().map(|&j| args[j].as_str()).collect();
+                    return Ok(format!("E{i}.V{k}({})", args.join(", ")));
+                }
                 let args = self.arguments(u, scope, &fields, nesting + 1)?;
                 Ok(format!("E{i}.V{k}({args})"))
             }
@@ -1647,6 +1711,9 @@ impl Generator {
         indent: usize,
         nesting: usize,
     ) -> Result<()> {
+        if u.int_in_range(0..=3)? == 0 {
+            return self.literal_match(u, scope, indent, nesting);
+        }
         let paths = self.paths(scope);
         let subjects: Vec<&Path> = paths
             .iter()
@@ -1682,35 +1749,86 @@ impl Generator {
             Ty::H(t) => generic_variants(t),
             _ => unreachable!(),
         };
+        // the names of each variant's values, if it names them
+        let names: Vec<Option<Vec<String>>> = match &ty {
+            Ty::Enum(i) => (0..variants.len())
+                .map(|k| self.variant_names(*i, k))
+                .collect(),
+            _ => vec![None; variants.len()],
+        };
         self.line(indent, &format!("match {subject}:"));
         let order = shuffled(u, variants.len())?;
         let covered = match variants.len() >= 2 && u.arbitrary()? {
             true => u.int_in_range(1..=variants.len() - 1)?,
             false => variants.len(),
         };
+        // each case's pattern, what it binds, and whether it covers all of its variant
+        let mut cases: Vec<(String, Vec<(String, Ty)>, bool)> = vec![];
         for &k in &order[..covered] {
             let (head, fields) = &variants[k];
             // a case for part of a variant goes before the case for all of it
             if u.int_in_range(0..=2)? == 2
-                && let Some(pattern) = self.refining(u, head, fields)?
+                && let Some(pattern) = self.refining(u, head, fields, names[k].as_deref())?
             {
-                self.case(u, scope, indent, nesting, &pattern, vec![])?;
+                cases.push((pattern, vec![], false));
             }
             let mut parts = vec![];
             let mut bindings = vec![];
-            for field in fields {
-                if u.arbitrary()? {
-                    let name = self.fresh("b");
-                    parts.push(name.clone());
-                    bindings.push((name, field.clone()));
-                } else {
-                    parts.push("_".to_string());
+            for (j, field) in fields.iter().enumerate() {
+                let Some(names) = &names[k] else {
+                    if u.arbitrary()? {
+                        let name = self.fresh("b");
+                        parts.push(name.clone());
+                        bindings.push((name, field.clone()));
+                    } else {
+                        parts.push("_".to_string());
+                    }
+                    continue;
+                };
+                // a named value is left out, matched by name, or the shorthand for its name
+                let name = &names[j];
+                match u.int_in_range(0..=3)? {
+                    0 => {}
+                    1 => parts.push(format!("{name}=_")),
+                    2 => {
+                        let bound = self.fresh("b");
+                        parts.push(format!("{name}={bound}"));
+                        bindings.push((bound, field.clone()));
+                    }
+                    _ => {
+                        parts.push(name.clone());
+                        bindings.push((name.clone(), field.clone()));
+                    }
                 }
             }
-            let pattern = match fields.is_empty() {
+            if names[k].is_some() {
+                let order = shuffled(u, parts.len())?;
+                parts = order.iter().map(|&j| parts[j].clone()).collect();
+            }
+            let pattern = match parts.is_empty() {
                 true => head.clone(),
                 false => format!("{head}({})", parts.join(", ")),
             };
+            cases.push((pattern, bindings, true));
+        }
+        // a case for all of a variant that binds nothing may take the next one's as an
+        // alternative, which no case for part of it comes between
+        let mut k = 0;
+        while k < cases.len() {
+            let (pattern, bindings, full) = cases[k].clone();
+            if full
+                && bindings.is_empty()
+                && let Some((next, next_bindings, true)) = cases.get(k + 1)
+                && next_bindings.is_empty()
+                && u.int_in_range(0..=2)? == 0
+            {
+                let joined = format!("{pattern} | {next}");
+                cases.remove(k + 1);
+                cases[k].0 = joined;
+            }
+            k += 1;
+        }
+        for (pattern, bindings, _) in cases {
             self.case(u, scope, indent, nesting, &pattern, bindings)?;
         }
         if covered < variants.len() {
@@ -1732,10 +1850,11 @@ impl Generator {
         u: &mut Unstructured,
         head: &str,
         fields: &[Ty],
+        names: Option<&[String]>,
     ) -> Result<Option<String>> {
         let refinable: Vec<usize> = (0..fields.len())
             .filter(|&k| match &fields[k] {
-                Ty::Option(_) | Ty::H(_) => true,
+                Ty::Option(_) | Ty::H(_) | Ty::Int | Ty::Str | Ty::Bool => true,
                 Ty::Enum(j) => self.variants(*j).len() >= 2,
                 _ => false,
             })
@@ -1749,15 +1868,29 @@ impl Generator {
             Ty::H(_) => u
                 .choose(&["H.Nothing", "H.Just(_)", "H.Both(_, _)"])?
                 .to_string(),
+            Ty::Int | Ty::Str | Ty::Bool => {
+                let key = scalar_key(&fields[k]);
+                let literals = shuffled_literals(u, key)?;
+                // both bools would cover every value, leaving the case after unreachable
+                match key == Key::Bool || u.arbitrary()? {
+                    true => literals[0].clone(),
+                    false => format!("{} | {}", literals[0], literals[1]),
+                }
+            }
             Ty::Enum(j) => {
                 let w = u.choose_index(self.variants(*j).len())?;
-                match self.variants(*j)[w].len() {
-                    0 => format!("E{j}.V{w}"),
-                    n => format!("E{j}.V{w}({})", vec!["_"; n].join(", ")),
+                match (self.variants(*j)[w].len(), self.variant_names(*j, w)) {
+                    (0, _) => format!("E{j}.V{w}"),
+                    // a named variant whose values are all left out
+                    (_, Some(_)) => format!("E{j}.V{w}"),
+                    (n, None) => format!("E{j}.V{w}({})", vec!["_"; n].join(", ")),
                 }
             }
             _ => unreachable!(),
         };
+        if let Some(names) = names {
+            return Ok(Some(format!("{head}({}={nested})", names[k])));
+        }
         let parts: Vec<String> = (0..fields.len())
             .map(|f| {
                 if f == k {
@@ -1768,6 +1901,56 @@ impl Generator {
             })
             .collect();
         Ok(Some(format!("{head}({})", parts.join(", "))))
+    }
+
+    /// Emits a `match` on an int, a string, or a bool, with a case for some of its literals,
+    /// a few joined with `|`, then a final `case _:` or `case name:`, or for a bool sometimes
+    /// both `true` and `false`. No literal appears twice, so no case is unreachable.
+    fn literal_match(
+        &mut self,
+        u: &mut Unstructured,
+        scope: &Scope,
+        indent: usize,
+        nesting: usize,
+    ) -> Result<()> {
+        let paths = self.paths(scope);
+        let subjects: Vec<&Path> = paths
+            .iter()
+            .filter(|p| matches!(p.ty, Ty::Int | Ty::Str | Ty::Bool))
+            .collect();
+        let (subject, ty) = if !subjects.is_empty() && u.arbitrary()? {
+            let path = subjects[u.choose_index(subjects.len())?];
+            (fill(u, &path.text)?, path.ty.clone())
+        } else {
+            let ty = u.choose(&[Ty::Int, Ty::Str, Ty::Bool])?.clone();
+            (self.value(u, scope, &ty, 0, false)?, ty)
+        };
+        let literals = shuffled_literals(u, scalar_key(&ty))?;
+        self.line(indent, &format!("match {subject}:"));
+        if ty == Ty::Bool && u.arbitrary()? {
+            for literal in &literals {
+                self.case(u, scope, indent, nesting, literal, vec![])?;
+            }
+            return Ok(());
+        }
+        // some literals, each used once, leaving at least one for the last case
+        let used = u.int_in_range(1..=literals.len() - 1)?;
+        let mut k = 0;
+        while k < used {
+            let take = match k + 1 < used && u.arbitrary()? {
+                true => 2,
+                false => 1,
+            };
+            let pattern = literals[k..k + take].join(" | ");
+            self.case(u, scope, indent, nesting, &pattern, vec![])?;
+            k += take;
+        }
+        if u.arbitrary()? {
+            let name = self.fresh("b");
+            self.case(u, scope, indent, nesting, &name.clone(), vec![(name, ty)])
+        } else {
+            self.case(u, scope, indent, nesting, "_", vec![])
+        }
     }
 
     fn case(

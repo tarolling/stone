@@ -412,14 +412,14 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 .filter(|s| {
                     s.kind == StoneSymbolKind::Variant && s.scope.as_deref() == Some(&symbol.name)
                 })
-                .map(|variant| format!("\n    {}", variant_signature(variant)))
+                .map(|variant| format!("\n    {}", variant_signature(analysis, variant)))
                 .collect();
             let params = type_params_of(analysis, &symbol.name, Some(symbol.span.file));
             format!("enum {}{params}{}", symbol.name, variants.concat())
         }
         (StoneSymbolKind::Variant, Type::Function { ret, .. }) => match &**ret {
-            Type::Enum { name, .. } if prints_bare(name) => variant_signature(symbol),
-            _ => format!("{ret}.{}", variant_signature(symbol)),
+            Type::Enum { name, .. } if prints_bare(name) => variant_signature(analysis, symbol),
+            _ => format!("{ret}.{}", variant_signature(analysis, symbol)),
         },
         (StoneSymbolKind::Struct, _) => {
             let fields: Vec<String> = struct_fields(analysis, &symbol.name)
@@ -603,10 +603,28 @@ fn is_trait(analysis: &Analysis, name: &str) -> bool {
 }
 
 /// Writes a variant as its enum declares it, such as `Rect(float, float)` or `Empty`.
-fn variant_signature(variant: &Symbol) -> String {
+fn variant_signature(analysis: &Analysis, variant: &Symbol) -> String {
     match &variant.ty {
         Type::Function { params, .. } if !params.is_empty() => {
-            let params: Vec<String> = params.iter().map(Type::to_string).collect();
+            let owner = format!(
+                "{}.{}",
+                variant.scope.as_deref().unwrap_or_default(),
+                variant.name
+            );
+            let names: Vec<&str> = analysis
+                .symbols
+                .iter()
+                .filter(|s| s.kind == StoneSymbolKind::Field && s.scope.as_deref() == Some(&owner))
+                .map(|s| s.name.as_str())
+                .collect();
+            let params: Vec<String> = params
+                .iter()
+                .enumerate()
+                .map(|(i, ty)| match names.get(i) {
+                    Some(name) if names.len() == params.len() => format!("{name}: {ty}"),
+                    _ => ty.to_string(),
+                })
+                .collect();
             format!("{}({})", variant.name, params.join(", "))
         }
         _ => variant.name.clone(),
@@ -1238,7 +1256,13 @@ pub fn rename(
         let Some(location) = doc.location(span, uri) else {
             return Err("cannot find a file to rename in".to_string());
         };
-        let edit = TextEdit::new(location.range, new_name.to_string());
+        // a shorthand field, as `w` in `Shape.Rect(w)`, names both the field and the variable
+        let text = match doc.analysis.shorthand_fields.contains(&span) {
+            true if symbol.kind == StoneSymbolKind::Field => format!("{new_name}={name}"),
+            true => format!("{name}={new_name}"),
+            false => new_name.to_string(),
+        };
+        let edit = TextEdit::new(location.range, text);
         match changes.iter_mut().find(|(uri, _)| *uri == location.uri) {
             Some((_, edits)) => edits.push(edit),
             None => changes.push((location.uri, vec![edit])),
@@ -1829,6 +1853,18 @@ fn slot(doc: &Document, line: usize, tokens: &[&Token]) -> Option<Slot> {
                 TokenType::LParen => (!plus).then_some(Slot::Type),
                 _ => Some(Slot::Bound),
             }
+        }
+        // a named value of a variant, as in `Circle(radius: `
+        TokenType::Colon
+            if open.len() == 1
+                && open[0] == 1
+                && tokens[1].r#type == TokenType::LParen
+                && matches!(tokens[0].r#type, TokenType::Name(_)) =>
+        {
+            let header = headers(doc, line).first().copied();
+            header
+                .is_some_and(|h| starts_with_keyword(h, "enum"))
+                .then_some(Slot::Type)
         }
         // a struct's field
         TokenType::Colon if open.is_empty() => {

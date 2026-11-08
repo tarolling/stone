@@ -754,6 +754,7 @@ pub fn memory_runtime(r#gen: &mut dyn AssemblyGenerator, enums: bool) {
     r#gen.emit("\tldr\tx10, [x19, #16]");
     r#gen.emit("\tldr\tx9, [x10, x20, lsl #3]");
     r#gen.emit("\tadd\tx20, x20, #1");
+    r#gen.emit("\tcbz\tx9, .Lfree_list_loop"); // an empty slot, as a set's removed entry
     r#gen.emit("\tldur\tx10, [x9, #-8]");
     r#gen.emit("\tsubs\tx10, x10, #1");
     r#gen.emit("\tstur\tx10, [x9, #-8]");
@@ -935,6 +936,7 @@ pub fn enum_runtime(r#gen: &mut dyn AssemblyGenerator, handles: bool) {
     r#gen.emit("\tldr\tx9, [x21]");
     r#gen.emit("\tadd\tx21, x21, #8");
     r#gen.emit("\tcbz\tx11, .Lfree_enum_slot"); // this slot is not counted
+    r#gen.emit("\tcbz\tx9, .Lfree_enum_slot"); // a flat enum's unused slot holds nothing
     r#gen.emit("\tldur\tx10, [x9, #-8]");
     r#gen.emit("\tsubs\tx10, x10, #1");
     r#gen.emit("\tstur\tx10, [x9, #-8]");
@@ -1518,6 +1520,7 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator, maps_shrink: bool) {
     r#gen.emit("\tldr\tx16, [x0, x8, lsl #3]");
     r#gen.emit("\tadd\tx8, x8, #1");
     r#gen.emit("\tcbz\tx11, .Lretain_slots_loop"); // this field is not counted
+    r#gen.emit("\tcbz\tx16, .Lretain_slots_loop"); // a flat enum's unused slot holds nothing
     r#gen.emit("\tldur\tx17, [x16, #-8]");
     r#gen.emit("\tadd\tx17, x17, #1");
     r#gen.emit("\tstur\tx17, [x16, #-8]");
@@ -1583,6 +1586,7 @@ pub fn list_runtime(r#gen: &mut dyn AssemblyGenerator, maps_shrink: bool) {
     r#gen.emit("\tstr\tx9, [x10, x8, lsl #3]");
     r#gen.emit("\tadd\tx8, x8, #1");
     r#gen.emit("\tcbz\tx17, .Llist_copy_loop"); // the elements are not counted
+    r#gen.emit("\tcbz\tx9, .Llist_copy_loop");
     r#gen.emit("\tldur\tx16, [x9, #-8]");
     r#gen.emit("\tadd\tx16, x16, #1");
     r#gen.emit("\tstur\tx16, [x9, #-8]");

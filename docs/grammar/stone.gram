@@ -193,8 +193,12 @@ type:
 enum_def:
     | ['pub'] 'enum' NAME [type_params] ':' NEWLINE INDENT variant+ DEDENT
 
+# a variant's values are all named, as in Rect(w: float, h: float), or all unnamed
 variant:
-    | NAME ['(' ','.type+ [','] ')'] NEWLINE
+    | NAME ['(' (','.variant_field+ | ','.type+) [','] ')'] NEWLINE
+
+variant_field:
+    | NAME ':' type
 
 # Struct definitions
 # ------------------
@@ -238,7 +242,13 @@ case_block:
 # as in Shape.Circle(r), some(x), or Shape.Empty
 pattern:
     | 'none'
-    | NAME ('.' NAME)* ['(' ','.pattern+ [','] ')']
+    | NAME ('.' NAME)* ['(' ','.pattern_field+ [','] ')']
+
+# a named variant's values are matched by name, as in Shape.Rect(w=0, h), where a NAME alone
+# that names a field is short for NAME '=' NAME, and fields left out match anything
+pattern_field:
+    | NAME '=' pattern
+    | pattern
 
 # If statement
 # ------------

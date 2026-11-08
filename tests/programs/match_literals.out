@@ -1,0 +1,18 @@
+0 zero
+1 small
+3 small
+4 other
+-1 minus one
+-9223372036854775807 the smallest
+bye
+bye
+nothing
+unknown help
+1 0
+Shape.Rect(w=5, h=0) 5
+Shape.Square(4) 4
+Shape.Circle(radius=2) 2
+Shape.Rect(w=1, h=7) 7
+Shape.Rect(w=2, h=3) 5
+Shape.Empty -1
+zs.9

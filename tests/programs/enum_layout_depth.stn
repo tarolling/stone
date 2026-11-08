@@ -1,0 +1,17 @@
+// an option inside each link of a chain counts as a level of its own, as the chain's links do,
+// so printing stops at the same place whether the option is kept flat or as an object
+enum Chain:
+    End
+    Link(option[str], Chain)
+
+fn chain(n: int) -> Chain:
+    c = Chain.End
+    for i in range(n):
+        c = Chain.Link(some("x"), c)
+    ret c
+
+print(chain(2))
+print(chain(4999) == chain(4999))
+long = chain(10000)
+print("before")
+print(long)

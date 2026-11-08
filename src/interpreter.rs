@@ -347,11 +347,19 @@ pub struct StructDef {
     cmp: usize,
 }
 
-/// An enum's definition, as the interpreter needs it: its linked name, and how each variant
-/// prints, in the order of their tags.
+/// An enum's definition, as the interpreter needs it: its linked name, and each variant, in the
+/// order of their tags.
 struct EnumInfo {
     name: String,
-    variants: Vec<(String, Rc<str>)>,
+    variants: Vec<VariantInfo>,
+}
+
+/// A variant of an enum: its name, how it prints before its values, such as `Shape.Rect` or
+/// `some`, and the names of its values if it names them.
+struct VariantInfo {
+    name: String,
+    shown: Rc<str>,
+    names: Option<Rc<[String]>>,
 }
 
 /// Names given ids in the order they are first seen, so code resolved before a name is defined
@@ -414,6 +422,9 @@ pub struct EnumValue {
     /// The variant's position in its enum's definition, which tells variants apart.
     pub tag: usize,
     pub fields: Vec<Value>,
+    /// The names of the values, which print before them, if the variant names them, as
+    /// `Shape.Rect(w=1.0, h=2.0)`.
+    pub names: Option<Rc<[String]>>,
 }
 
 impl Drop for EnumValue {
@@ -472,6 +483,7 @@ fn ordering(order: Ordering) -> Value {
     };
     Value::Enum(Rc::new(EnumValue {
         name: name.into(),
+        names: None,
         tag,
         fields: vec![],
     }))
@@ -493,6 +505,7 @@ fn ordering_of(value: &Value) -> EvalResult<Ordering> {
 fn none() -> Value {
     Value::Enum(Rc::new(EnumValue {
         name: "none".into(),
+        names: None,
         tag: 0,
         fields: vec![],
     }))
@@ -502,6 +515,7 @@ fn none() -> Value {
 fn some(value: Value) -> Value {
     Value::Enum(Rc::new(EnumValue {
         name: "some".into(),
+        names: None,
         tag: 1,
         fields: vec![value],
     }))
@@ -516,6 +530,7 @@ fn result(outcome: Result<Value, String>) -> Value {
     };
     Value::Enum(Rc::new(EnumValue {
         name: name.into(),
+        names: None,
         tag,
         fields: vec![value],
     }))
@@ -669,6 +684,10 @@ impl Value {
                     for (i, field) in value.fields.iter().enumerate() {
                         if i > 0 {
                             out.push_str(", ");
+                        }
+                        if let Some(name) = value.names.as_ref().and_then(|names| names.get(i)) {
+                            out.push_str(name);
+                            out.push('=');
                         }
                         field.write(out, true, depth + 1, custom)?;
                     }
@@ -1504,7 +1523,14 @@ impl<'out> Interpreter<'out> {
                         } else {
                             format!("{short}.{}", v.name)
                         };
-                        (v.name.clone(), shown.into())
+                        VariantInfo {
+                            name: v.name.clone(),
+                            shown: shown.into(),
+                            names: v
+                                .names
+                                .as_ref()
+                                .map(|names| names.iter().map(|(n, _)| n.clone()).collect()),
+                        }
                     })
                     .collect();
                 let info = EnumInfo {
@@ -1842,7 +1868,7 @@ impl<'out> Interpreter<'out> {
                     return false;
                 };
                 let variants = &self.enums[*id].variants;
-                let Some(tag) = variants.iter().position(|(variant, _)| variant == name) else {
+                let Some(tag) = variants.iter().position(|variant| variant.name == *name) else {
                     return false;
                 };
                 found.tag == tag
@@ -1852,8 +1878,33 @@ impl<'out> Interpreter<'out> {
                         .zip(&found.fields)
                         .all(|(field, value)| self.pattern_matches(field, value, bindings))
             }
+            code::Pattern::Literal(literal) => match (literal, value) {
+                (Value::Int(a), Value::Int(b)) => a == b,
+                (Value::Bool(a), Value::Bool(b)) => a == b,
+                (Value::Str(a), Value::Str(b)) => a == b,
+                _ => false,
+            },
+            code::Pattern::Or(alternatives) => alternatives.iter().any(|alternative| {
+                let mut found = vec![];
+                let matched = self.pattern_matches(alternative, value, &mut found);
+                if matched {
+                    bindings.append(&mut found);
+                }
+                matched
+            }),
             code::Pattern::Never => false,
         }
+    }
+
+    /// Returns the names of the values of the variant `variant` of the enum with the id `id`, if
+    /// it names them.
+    fn variant_names(&self, id: usize, variant: &str) -> Option<Rc<[String]>> {
+        let info = self.enums.get(id)?;
+        info.variants
+            .iter()
+            .find(|v| v.name == variant)?
+            .names
+            .clone()
     }
 
     /// Makes the variant `variant` of the enum with the id `id` holding `fields`.
@@ -1862,10 +1913,11 @@ impl<'out> Interpreter<'out> {
         let tag = info
             .variants
             .iter()
-            .position(|(name, _)| name == variant)
+            .position(|v| v.name == variant)
             .ok_or_else(|| format!("'{}' has no variant '{variant}'", info.name))?;
         Ok(Value::Enum(Rc::new(EnumValue {
-            name: info.variants[tag].1.clone(),
+            name: info.variants[tag].shown.clone(),
+            names: info.variants[tag].names.clone(),
             tag,
             fields,
         })))
@@ -2098,8 +2150,21 @@ impl<'out> Interpreter<'out> {
                 Ok(Value::Bool(true))
             }
             E::Call(call) => self.eval_call(expr.span, call),
-            E::Variant { id, name, args } => {
-                let values = self.eval_exprs(args)?;
+            E::Variant {
+                id,
+                name,
+                args,
+                positions,
+            } => {
+                let mut values = self.eval_exprs(args)?;
+                // named values are evaluated in the order they are written, each into its field
+                if let Some(positions) = positions {
+                    let mut ordered = vec![Value::Unit; values.len()];
+                    for (value, &position) in values.drain(..).zip(positions) {
+                        ordered[position] = value;
+                    }
+                    values = ordered;
+                }
                 self.variant(*id, name, values)
             }
             E::Field(value, attr) => {

@@ -28,3 +28,35 @@ match find(names, "bo"):
     case none:
         print("bo is missing")
 print(find(names, "cy"), find(names, "ada").unwrap_or(-1))
+
+enum Command:
+    Move(dx: int, dy: int)
+    Say(text: str)
+    Quit
+
+fn run(c: Command) -> str:
+    match c:
+        case Command.Move(dx=0, dy=0):
+            ret "stay"
+        case Command.Move(dx, dy):
+            ret "move by {dx}, {dy}"
+        case Command.Say(text="hi" | "hello"):
+            ret "greet"
+        case Command.Say(text):
+            ret "say {text}"
+        case Command.Quit:
+            ret "stop"
+
+for c in [Command.Move(dy=2, dx=1), Command.Move(dx=0, dy=0), Command.Say(text="hi"), Command.Quit]:
+    print(c, run(c))
+
+fn size(n: int) -> str:
+    match n:
+        case 0:
+            ret "none"
+        case 1 | 2 | 3:
+            ret "a few"
+        case _:
+            ret "many"
+
+print(size(0), size(2), size(10))

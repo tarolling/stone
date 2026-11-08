@@ -1415,6 +1415,13 @@ mod tests {
             "] += ",
             "print(str(",
             "print(\"text",
+            // named variant values, literal patterns, and alternatives
+            "w0: ",
+            "w0=",
+            "case 0",
+            "case \"",
+            "case true",
+            " | ",
         ] {
             let count = sources.iter().filter(|s| s.contains(feature)).count();
             assert!(count >= 5, "only {count} of 1000 programs use {feature:?}");

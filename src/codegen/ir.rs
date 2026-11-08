@@ -16,6 +16,7 @@
 //! ```
 
 pub mod inline;
+pub mod layout;
 pub mod liveness;
 pub mod lower;
 pub mod opt;

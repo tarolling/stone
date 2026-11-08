@@ -33,19 +33,20 @@
 mod tests;
 
 use super::inline::retarget;
+use super::layout::{FlatLayout, Layouts};
 use super::{
     BinOp, Block, BlockId, Callee, Cond, DeviceKernel, Function, Inst, Kernel, Operand, Program,
     RcKind, Rounding, Terminator, TrigFunc, VReg, leaf_name, variable_of,
 };
 use crate::ast::{
-    Arg, BoolOp, Constant, Expr, ExprKind, Keyword, MatchCase, Mod, Operator, Pattern, PatternKind,
-    Stmt, StmtKind, UnaryOp, constant_int, is_lambda, is_test,
+    Arg, BoolOp, Constant, Expr, ExprKind, Keyword, MatchCase, Mod, Operator, Pattern,
+    PatternField, PatternKind, Stmt, StmtKind, UnaryOp, constant_int, is_lambda, is_test,
 };
 use crate::checker::{
     Analysis, Conversion, Converter, DISPLAY, EQ, Enums, Instance, Method, Methods,
-    OPERATOR_TRAITS, OPTION, ORD, RESULT, Step, Structs, SymbolKind, Type, collect_assigned,
-    collect_changed, may_name_enum, may_name_struct, place, place_root, place_spans, range_args,
-    struct_display, trait_operator, type_text, variant_display, variants,
+    OPERATOR_TRAITS, OPTION, ORD, ORDERING, RESULT, Step, Structs, SymbolKind, Type,
+    collect_assigned, collect_changed, may_name_enum, may_name_struct, place, place_root,
+    place_spans, range_args, struct_display, trait_operator, type_text, variant_display, variants,
 };
 use crate::codegen::Os;
 use crate::codegen::context::{FUNCTION_PREFIX, function_label, module_routine};
@@ -120,8 +121,26 @@ pub fn lower_with(
         function_values,
         indirect_calls,
         conversions,
+        held_types,
         ..
     } = analysis;
+    let layouts = Layouts::new(enums, structs, held_types);
+    // the type each function returns, by its linked name, which `?` builds its way out for
+    let returns: HashMap<String, Type> = symbols
+        .iter()
+        .enumerate()
+        .filter_map(|(i, symbol)| {
+            let name = match symbol.kind {
+                SymbolKind::Function => symbol.name.clone(),
+                SymbolKind::Method => analysis.method_function(i),
+                _ => return None,
+            };
+            match &symbol.ty {
+                Type::Function { ret, .. } => Some((name, (**ret).clone())),
+                _ => None,
+            }
+        })
+        .collect();
 
     let mut assigned = Vec::new();
     collect_assigned(body, &mut assigned);
@@ -161,11 +180,11 @@ pub fn lower_with(
     // each value of a tuple or struct is a variable of its own, so neither is ever stored as one
     let tuples: Vec<_> = variables
         .iter()
-        .filter(|(_, ty)| ty.is_flat())
+        .filter(|(_, ty)| layouts.is_flat(ty))
         .map(|(key, ty)| (key.clone(), ty.clone()))
         .collect();
     for ((scope, name), ty) in tuples {
-        for (i, leaf) in ty.leaves(structs).into_iter().enumerate() {
+        for (i, leaf) in layouts.leaves(&ty).into_iter().enumerate() {
             variables.insert((scope.clone(), leaf_name(&name, i)), leaf);
         }
     }
@@ -173,7 +192,7 @@ pub fn lower_with(
     let globals: Vec<String> = assigned
         .into_iter()
         .flat_map(|(name, _)| match variables.get(&(None, name.clone())) {
-            Some(ty) if ty.is_flat() => (0..ty.leaves(structs).len())
+            Some(ty) if layouts.is_flat(ty) => (0..layouts.leaves(ty).len())
                 .map(|i| leaf_name(&name, i))
                 .collect(),
             _ => vec![name],
@@ -206,6 +225,8 @@ pub fn lower_with(
         helpers: RefCell::new(Vec::new()),
         requested: RefCell::new(Vec::new()),
         device_kernels: RefCell::new(Vec::new()),
+        layouts,
+        returns,
     };
 
     let mut functions = Vec::new();
@@ -671,6 +692,10 @@ struct Context<'a> {
     helpers: RefCell<Vec<Helper>>,
     /// Each piece of arithmetic on lists a GPU could compute, in the order lowering met it.
     device_kernels: RefCell<Vec<DeviceKernel>>,
+    /// How the values of each enum type are laid out, boxed or flat.
+    layouts: Layouts,
+    /// The type each function returns, by its linked name.
+    returns: HashMap<String, Type>,
 }
 
 /// A copy of a function lowering makes: of a generic function for the types `instance` gives
@@ -816,7 +841,7 @@ struct Lowerer<'a> {
     /// The values the `match` statements being lowered hold, which they release when they end,
     /// each with how many loops enclose it, so `ret` releases them all and `break` and `cont`
     /// those inside the loop they leave.
-    held: Vec<(Operand, usize)>,
+    held: Vec<(Operand, RcKind, usize)>,
     /// How many enum values the value being printed is inside, which a printer of an enum
     /// passes on to the printers of the enum values it holds.
     print_depth: Operand,
@@ -829,6 +854,12 @@ struct Lowerer<'a> {
     /// The keys that [`Lowerer::place_indexes`] evaluated to owned strings for the statement
     /// being lowered, which it releases once the change is made.
     place_keys: Vec<Operand>,
+    /// Whether the next expression lowered with [`Lowerer::expr_into`] may be a flat enum,
+    /// which [`Lowerer::flat_enum`] asks for.
+    allow_flat: bool,
+    /// The values of a flat enum a builtin lowered, with the span of the expression they are the
+    /// value of, which [`Lowerer::flat_enum`] takes ([`Lowerer::flat_result`]).
+    flat_out: Option<(Span, Vec<Operand>)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -859,6 +890,8 @@ impl<'a> Lowerer<'a> {
             statement_last_uses: Vec::new(),
             closure_moves: Vec::new(),
             place_keys: Vec::new(),
+            allow_flat: false,
+            flat_out: None,
             span: Span::default(),
             held: Vec::new(),
             print_depth: Operand::Imm(0),
@@ -892,8 +925,8 @@ impl<'a> Lowerer<'a> {
                 continue;
             }
             let ty = ty.substitute(&substitution);
-            if ty.is_flat() {
-                for (i, leaf) in ty.leaves(context.structs).into_iter().enumerate() {
+            if context.layouts.is_flat(&ty) {
+                for (i, leaf) in context.layouts.leaves(&ty).into_iter().enumerate() {
                     lowerer.instance_variables.insert(leaf_name(name, i), leaf);
                 }
             }
@@ -1200,39 +1233,50 @@ impl<'a> Lowerer<'a> {
     /// inside. Printing one nested too deeply stops the program, pointing at the `print` that
     /// called it, which recorded its site.
     fn enum_printer(mut self, ty: &Type) -> Result<Function, String> {
-        let (value, depth) = (self.fresh(), self.fresh());
+        let params = self.fresh_leaves(ty);
+        let values: Vec<Operand> = params.iter().copied().map(Operand::Reg).collect();
+        let depth = self.fresh();
         let entry = self.new_block();
         self.start(entry);
         self.print_depth = self.enter_level(Operand::Reg(depth), PRINT_DEPTH);
         let all = variants(self.context.enums, ty);
-        let tag = self.fresh();
-        self.push(Inst::EnumTag {
-            dst: tag,
-            value: Operand::Reg(value),
-        });
+        let tag = self.tag_value(ty, &values);
+        let def = match ty {
+            Type::Enum { name, .. } => self.context.enums.get(name),
+            _ => None,
+        };
+        let names: Vec<Option<Vec<String>>> = (0..all.len())
+            .map(|k| {
+                def.and_then(|def| def.field_names(k))
+                    .map(<[String]>::to_vec)
+            })
+            .collect();
         for (k, (name, fields)) in all.iter().enumerate() {
+            let names = names[k].as_deref();
             if k + 1 < all.len() {
                 let (this, next) = (self.new_block(), self.new_block());
                 self.terminate(Terminator::CmpBranch {
                     cond: Cond::Eq,
                     float: false,
-                    lhs: Operand::Reg(tag),
+                    lhs: tag,
                     rhs: Operand::Imm(k as i64),
                     then: this,
                     otherwise: next,
                 });
                 self.start(this);
-                self.print_variant(ty, name, fields, Operand::Reg(value));
+                self.print_variant(ty, k, name, fields, names, &values);
                 self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
                 self.start(next);
             } else {
-                self.print_variant(ty, name, fields, Operand::Reg(value));
+                self.print_variant(ty, k, name, fields, names, &values);
                 self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
             }
         }
+        let mut params = params;
+        params.push(depth);
         Ok(Function {
             name: self.name.clone(),
-            params: vec![value, depth],
+            params,
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: true,
@@ -1313,25 +1357,21 @@ impl<'a> Lowerer<'a> {
     /// nested too deeply stops the program, pointing at the comparison that called it, which
     /// recorded its site.
     fn enum_comparer(mut self, ty: &Type) -> Result<Function, String> {
-        let (a, b, depth) = (self.fresh(), self.fresh(), self.fresh());
+        let (a, b) = (self.fresh_leaves(ty), self.fresh_leaves(ty));
+        let depth = self.fresh();
+        let a_values: Vec<Operand> = a.iter().copied().map(Operand::Reg).collect();
+        let b_values: Vec<Operand> = b.iter().copied().map(Operand::Reg).collect();
         let entry = self.new_block();
         self.start(entry);
         self.compare_depth = self.enter_level(Operand::Reg(depth), COMPARE_DEPTH);
-        let (tag_a, tag_b) = (self.fresh(), self.fresh());
-        self.push(Inst::EnumTag {
-            dst: tag_a,
-            value: Operand::Reg(a),
-        });
-        self.push(Inst::EnumTag {
-            dst: tag_b,
-            value: Operand::Reg(b),
-        });
+        let tag_a = self.tag_value(ty, &a_values);
+        let tag_b = self.tag_value(ty, &b_values);
         let (same, equal, differ) = (self.new_block(), self.new_block(), self.new_block());
         self.terminate(Terminator::CmpBranch {
             cond: Cond::Eq,
             float: false,
-            lhs: Operand::Reg(tag_a),
-            rhs: Operand::Reg(tag_b),
+            lhs: tag_a,
+            rhs: tag_b,
             then: same,
             otherwise: differ,
         });
@@ -1347,15 +1387,15 @@ impl<'a> Lowerer<'a> {
             self.terminate(Terminator::CmpBranch {
                 cond: Cond::Eq,
                 float: false,
-                lhs: Operand::Reg(tag_a),
+                lhs: tag_a,
                 rhs: Operand::Imm(k as i64),
                 then: this,
                 otherwise: next,
             });
             self.start(this);
             // comparing changes nothing, so the values are borrowed
-            let lhs = self.field_values(Operand::Reg(a), 0, leaves.len());
-            let rhs = self.field_values(Operand::Reg(b), 0, leaves.len());
+            let lhs = self.variant_values(ty, k, &a_values);
+            let rhs = self.variant_values(ty, k, &b_values);
             self.equal_leaves(&compared, &lhs, &rhs, equal, differ);
             self.start(next);
         }
@@ -1364,9 +1404,12 @@ impl<'a> Lowerer<'a> {
         self.terminate(Terminator::Return(vec![Operand::Imm(1)]));
         self.start(differ);
         self.terminate(Terminator::Return(vec![Operand::Imm(0)]));
+        let mut params = a;
+        params.extend(b);
+        params.push(depth);
         Ok(Function {
             name: self.name.clone(),
-            params: vec![a, b, depth],
+            params,
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: true,
@@ -1716,18 +1759,28 @@ impl<'a> Lowerer<'a> {
                     });
                 }
                 Type::Enum { .. } | Type::List(_) | Type::Map(..) => {
+                    // a flat enum is several values, all handed over
+                    let width = self.leaves(leaf).len();
                     let label = self.helper(Helper::Equal(leaf.clone()));
                     let equal = self.fresh();
+                    let mut args = lhs[k..k + width].to_vec();
+                    args.extend_from_slice(&rhs[k..k + width]);
+                    args.push(self.compare_depth);
                     self.push(Inst::Call {
                         dsts: vec![equal],
                         callee: Callee::Helper(label),
-                        args: vec![lhs[k], rhs[k], self.compare_depth],
+                        args,
                     });
                     self.terminate(Terminator::Branch {
                         cond: Operand::Reg(equal),
                         then: next,
                         otherwise,
                     });
+                    k += width;
+                    if next != then {
+                        self.start(next);
+                    }
+                    continue;
                 }
                 _ => self.terminate(Terminator::CmpBranch {
                     cond: Cond::Eq,
@@ -1747,7 +1800,15 @@ impl<'a> Lowerer<'a> {
 
     /// Prints `value`, a value of the variant `name` of the enum type `ty` whose values have the
     /// types `fields`, with its values in parentheses, the way the interpreter writes it.
-    fn print_variant(&mut self, ty: &Type, name: &str, fields: &[Type], value: Operand) {
+    fn print_variant(
+        &mut self,
+        ty: &Type,
+        tag: usize,
+        name: &str,
+        fields: &[Type],
+        names: Option<&[String]>,
+        values: &[Operand],
+    ) {
         let text = self.fresh();
         self.push(Inst::StrAddr {
             dst: text,
@@ -1762,16 +1823,28 @@ impl<'a> Lowerer<'a> {
             return;
         }
         self.print_char('(');
+        // printing changes nothing, so the values are borrowed
+        let held = self.variant_values(ty, tag, values);
         let mut slot = 0;
         for (k, field) in fields.iter().enumerate() {
             if k > 0 {
                 self.print_char(',');
                 self.print_char(' ');
             }
-            // printing changes nothing, so the values are borrowed
-            let width = field.leaves(self.context.structs).len();
-            let values = self.field_values(value, slot, width);
-            self.print_flat(field, &values, true);
+            if let Some(name) = names.and_then(|names| names.get(k)) {
+                let text = self.fresh();
+                self.push(Inst::StrAddr {
+                    dst: text,
+                    text: format!("{name}="),
+                });
+                self.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Print(Type::Str),
+                    args: vec![Operand::Reg(text)],
+                });
+            }
+            let width = self.leaves(field).len();
+            self.print_flat(field, &held[slot..slot + width], true);
             slot += width;
         }
         self.print_char(')');
@@ -1816,7 +1889,7 @@ impl<'a> Lowerer<'a> {
     /// For example, a `t` of type `tuple[int, tuple[str, float]]` is `t.0`, `t.1`, and `t.2`.
     fn leaf_names(&self, name: &str) -> Vec<String> {
         match self.variable_type(name) {
-            Some(ty) if ty.is_flat() => (0..self.leaves(ty).len())
+            Some(ty) if self.context.layouts.is_flat(ty) => (0..self.leaves(ty).len())
                 .map(|i| leaf_name(name, i))
                 .collect(),
             _ => vec![name.to_string()],
@@ -1825,7 +1898,7 @@ impl<'a> Lowerer<'a> {
 
     /// Returns the values a value of type `ty` is made of, from [`Type::leaves`].
     fn leaves(&self, ty: &Type) -> Vec<Type> {
-        ty.leaves(self.context.structs)
+        self.context.layouts.leaves(ty)
     }
 
     /// Returns how each value of `expr` is counted: one for each value of a tuple or struct, or
@@ -1886,7 +1959,7 @@ impl<'a> Lowerer<'a> {
     /// Returns whether each element of the list `expr` is several values lowering keeps apart:
     /// a tuple or a struct.
     fn holds_flat(&self, expr: &Expr) -> bool {
-        matches!(self.span_type(expr.span), Some(Type::List(elem)) if elem.is_flat())
+        matches!(self.span_type(expr.span), Some(Type::List(elem)) if self.context.layouts.is_flat(&elem))
     }
 
     /// Returns the type of the keys of `expr` if it is a map.
@@ -2129,18 +2202,15 @@ impl<'a> Lowerer<'a> {
     /// Releases each value a `match` holds inside at least `loops` loops, innermost first, where
     /// `ret` leaves them all and `break` or `cont` the innermost loop.
     fn release_held(&mut self, loops: usize) {
-        let held: Vec<Operand> = self
+        let held: Vec<(Operand, RcKind)> = self
             .held
             .iter()
             .rev()
-            .filter(|(_, depth)| *depth >= loops)
-            .map(|(value, _)| *value)
+            .filter(|(_, _, depth)| *depth >= loops)
+            .map(|&(value, kind, _)| (value, kind))
             .collect();
-        for src in held {
-            self.push(Inst::Release {
-                src,
-                kind: RcKind::Enum,
-            });
+        for (src, kind) in held {
+            self.push(Inst::Release { src, kind });
         }
     }
 
@@ -2515,34 +2585,57 @@ impl<'a> Lowerer<'a> {
     /// `field_get v0, 0`.
     fn match_stmt(&mut self, subject: &Expr, cases: &[MatchCase]) -> Result<(), String> {
         let ty = self.type_of(subject)?;
-        let value = self.expr(subject)?;
+        let found = self.expr_flat(subject)?;
         // a case can assign the variable it matches, so it is read through a copy
-        let value = self.snapshot(value);
-        let held = match value {
-            Operand::Reg(reg) if self.owned.remove(&reg).is_some() => {
-                self.held.push((value, self.loops.len()));
-                true
+        let values: Vec<Operand> = found.into_iter().map(|v| self.snapshot(v)).collect();
+        let before = self.held.len();
+        for &value in &values {
+            if let Operand::Reg(reg) = value
+                && let Some(kind) = self.owned.remove(&reg)
+            {
+                self.held.push((value, kind, self.loops.len()));
             }
-            _ => false,
-        };
+        }
+        let held: Vec<(Operand, RcKind, usize)> = self.held[before..].to_vec();
         let end = self.new_block();
         for case in cases {
             let next = self.new_block();
-            self.pattern_test(&case.pattern, value, &ty, next);
-            // every value is read and retained before any name is assigned, since assigning
-            // one can release the value the others come from
-            let mut bindings = Vec::new();
-            self.pattern_bindings(&case.pattern, &[value], &ty, &mut bindings);
-            for (_, values, kinds) in &bindings {
-                for (&value, &kind) in values.iter().zip(kinds) {
-                    self.take(value, kind);
+            // each alternative of the pattern tests and binds on its own way to the one body
+            let alternatives = case.pattern.expand();
+            let body = match alternatives.len() {
+                1 => None,
+                _ => Some(self.new_block()),
+            };
+            for (k, alternative) in alternatives.iter().enumerate() {
+                let otherwise = match k + 1 == alternatives.len() {
+                    true => next,
+                    false => self.new_block(),
+                };
+                self.pattern_test(alternative, &values, &ty, otherwise);
+                // every value is read and retained before any name is assigned, since assigning
+                // one can release the value the others come from
+                let mut bindings = Vec::new();
+                self.pattern_bindings(alternative, &values, &ty, &mut bindings);
+                for (_, values, kinds) in &bindings {
+                    for (&value, &kind) in values.iter().zip(kinds) {
+                        self.take(value, kind);
+                    }
+                }
+                for (name, values, kinds) in bindings {
+                    let leaves = self.leaf_names(&name);
+                    for ((leaf, value), kind) in leaves.iter().zip(values).zip(kinds) {
+                        self.assign_name(leaf, value, kind);
+                    }
+                }
+                if let Some(body) = body {
+                    self.jump(body);
+                    if otherwise != next {
+                        self.start(otherwise);
+                    }
                 }
             }
-            for (name, values, kinds) in bindings {
-                let leaves = self.leaf_names(&name);
-                for ((leaf, value), kind) in leaves.iter().zip(values).zip(kinds) {
-                    self.assign_name(leaf, value, kind);
-                }
+            if let Some(body) = body {
+                self.start(body);
             }
             for stmt in &case.body {
                 self.stmt(stmt)?;
@@ -2558,12 +2651,9 @@ impl<'a> Lowerer<'a> {
             vec![],
         ));
         self.start(end);
-        if held {
-            self.held.pop();
-            self.push(Inst::Release {
-                src: value,
-                kind: RcKind::Enum,
-            });
+        self.held.truncate(before);
+        for (src, kind, _) in held {
+            self.push(Inst::Release { src, kind });
         }
         Ok(())
     }
@@ -2571,7 +2661,50 @@ impl<'a> Lowerer<'a> {
     /// Checks that `value`, of type `ty`, fits `pattern`, going on in a new block if it does and
     /// to `otherwise` if not. Only variants check anything, each its tag, then its values that
     /// are variants in turn.
-    fn pattern_test(&mut self, pattern: &Pattern, value: Operand, ty: &Type, otherwise: BlockId) {
+    fn pattern_test(
+        &mut self,
+        pattern: &Pattern,
+        values: &[Operand],
+        ty: &Type,
+        otherwise: BlockId,
+    ) {
+        if let PatternKind::Literal(literal) = &pattern.kind {
+            let value = values[0];
+            let fits = self.new_block();
+            match literal {
+                Constant::Str(text) => {
+                    let found = self.fresh();
+                    self.push(Inst::StrAddr {
+                        dst: found,
+                        text: text.clone(),
+                    });
+                    self.equal_branch(
+                        &Type::Str,
+                        &[value],
+                        &[Operand::Reg(found)],
+                        fits,
+                        otherwise,
+                    );
+                }
+                _ => {
+                    let expected = match literal {
+                        Constant::Bool(b) => *b as i64,
+                        Constant::Int(n) => *n,
+                        _ => 0,
+                    };
+                    self.terminate(Terminator::CmpBranch {
+                        cond: Cond::Eq,
+                        float: false,
+                        lhs: value,
+                        rhs: Operand::Imm(expected),
+                        then: fits,
+                        otherwise,
+                    });
+                }
+            }
+            self.start(fits);
+            return;
+        }
         let PatternKind::Variant { path, fields } = &pattern.kind else {
             return;
         };
@@ -2583,33 +2716,60 @@ impl<'a> Lowerer<'a> {
             return;
         };
         if all.len() > 1 {
-            let found = self.fresh();
-            self.push(Inst::EnumTag { dst: found, value });
+            let found = self.tag_value(ty, values);
             let fits = self.new_block();
             self.terminate(Terminator::CmpBranch {
                 cond: Cond::Eq,
                 float: false,
-                lhs: Operand::Reg(found),
+                lhs: found,
                 rhs: Operand::Imm(tag as i64),
                 then: fits,
                 otherwise,
             });
             self.start(fits);
         }
-        let mut slot = 0;
-        for (field, field_ty) in fields.iter().zip(&all[tag].1) {
-            if let PatternKind::Variant { .. } = field.kind {
-                // a variant's type is an enum, which is one slot
-                let inner = self.fresh();
-                self.push(Inst::FieldGet {
-                    dst: inner,
-                    value,
-                    slot,
-                });
-                self.pattern_test(field, Operand::Reg(inner), field_ty, otherwise);
-            }
-            slot += self.leaves(field_ty).len();
+        let fields = self.arranged(ty, tag, fields);
+        if !fields.iter().any(|field| {
+            field.is_some_and(|f| {
+                matches!(
+                    f.kind,
+                    PatternKind::Variant { .. } | PatternKind::Literal(_)
+                )
+            })
+        }) {
+            return;
         }
+        let held = self.variant_values(ty, tag, values);
+        let mut slot = 0;
+        for (field, field_ty) in fields.into_iter().zip(&all[tag].1) {
+            let width = self.leaves(field_ty).len();
+            if let Some(field) = field
+                && let PatternKind::Variant { .. } | PatternKind::Literal(_) = field.kind
+            {
+                self.pattern_test(field, &held[slot..slot + width], field_ty, otherwise);
+            }
+            slot += width;
+        }
+    }
+
+    /// Returns the patterns of `fields`, the values of a pattern of the variant `tag` of the enum
+    /// type `ty`, in the order of the variant's fields, `None` for a field a named variant's
+    /// pattern leaves out ([`crate::ast::arrange_fields`]).
+    fn arranged<'p>(
+        &self,
+        ty: &Type,
+        tag: usize,
+        fields: &'p [PatternField],
+    ) -> Vec<Option<&'p Pattern>> {
+        let names = match ty {
+            Type::Enum { name, .. } => self
+                .context
+                .enums
+                .get(name)
+                .and_then(|def| def.field_names(tag)),
+            _ => None,
+        };
+        crate::ast::arrange_fields(fields, names)
     }
 
     /// Pushes each name `pattern` binds, with the values of `values`, of type `ty`, it takes,
@@ -2622,7 +2782,8 @@ impl<'a> Lowerer<'a> {
         out: &mut Vec<Binding>,
     ) {
         match &pattern.kind {
-            PatternKind::Wildcard => {}
+            // the alternatives are expanded before any pattern binds
+            PatternKind::Wildcard | PatternKind::Literal(_) | PatternKind::Or(_) => {}
             PatternKind::Name(name) => {
                 let kinds = self.leaves(ty).iter().map(RcKind::of).collect();
                 out.push((name.clone(), values.to_vec(), kinds));
@@ -2635,12 +2796,23 @@ impl<'a> Lowerer<'a> {
                 else {
                     return;
                 };
+                let fields = self.arranged(ty, tag, fields);
+                let binds = |field: &Option<&Pattern>| {
+                    field.is_some_and(|f| {
+                        !matches!(f.kind, PatternKind::Wildcard | PatternKind::Literal(_))
+                    })
+                };
+                if !fields.iter().any(binds) {
+                    return;
+                }
+                let held = self.variant_values(ty, tag, values);
                 let mut slot = 0;
-                for (field, field_ty) in fields.iter().zip(&all[tag].1) {
+                for (field, field_ty) in fields.into_iter().zip(&all[tag].1) {
                     let width = self.leaves(field_ty).len();
-                    if !matches!(field.kind, PatternKind::Wildcard) {
-                        let field_values = self.field_values(values[0], slot, width);
-                        self.pattern_bindings(field, &field_values, field_ty, out);
+                    if let Some(field) = field
+                        && binds(&Some(field))
+                    {
+                        self.pattern_bindings(field, &held[slot..slot + width], field_ty, out);
                     }
                     slot += width;
                 }
@@ -2648,13 +2820,15 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Makes a value of the variant `tag` of the enum type `ty` holding `args`, evaluated left to
-    /// right: a new value with a count of 1, or the static value of a variant without values.
+    /// Makes a value of the variant `tag` of the enum type `ty` holding `args`, or for a named
+    /// variant `keywords`, evaluated left to right: a new value with a count of 1, or the static
+    /// value of a variant without values.
     fn variant(
         &mut self,
         ty: &Type,
         tag: usize,
         args: &[Expr],
+        keywords: &[Keyword],
         into: Option<VReg>,
     ) -> Result<Operand, String> {
         let all = variants(self.context.enums, ty);
@@ -2673,6 +2847,9 @@ impl<'a> Lowerer<'a> {
         for arg in args {
             values.extend(self.expr_flat(arg)?);
         }
+        if !keywords.is_empty() {
+            values = self.named_values(ty, tag, keywords)?;
+        }
         // the value keeps a reference to what it holds
         for (&value, &kind) in values.iter().zip(&kinds) {
             self.take(value, kind);
@@ -2681,6 +2858,378 @@ impl<'a> Lowerer<'a> {
         self.new_variant(dst, tag, values, &kinds);
         self.own(Operand::Reg(dst), Some(RcKind::Enum));
         Ok(self.finish(Operand::Reg(dst), into))
+    }
+
+    /// Lowers the named values `keywords` of the named variant `tag` of the enum type `ty` to its
+    /// values in the order of its fields, evaluating them in the order they are written, as
+    /// [`Lowerer::construct`] does for a struct.
+    ///
+    /// For example, `Shape.Rect(h=f(), w=1.0)` calls `f` and gives `1.0`, then the call's result.
+    fn named_values(
+        &mut self,
+        ty: &Type,
+        tag: usize,
+        keywords: &[Keyword],
+    ) -> Result<Vec<Operand>, String> {
+        let Type::Enum { name, .. } = ty else {
+            return Err(format!("{ty} is not an enum"));
+        };
+        let names: Vec<String> = self
+            .context
+            .enums
+            .get(name)
+            .and_then(|def| def.field_names(tag))
+            .ok_or_else(|| format!("variant {tag} of '{name}' names no values"))?
+            .to_vec();
+        let mut given: Vec<Option<Vec<Operand>>> = vec![None; names.len()];
+        for keyword in keywords {
+            let values = self.expr_flat(&keyword.value)?;
+            let position = names
+                .iter()
+                .position(|field| *field == keyword.arg)
+                .ok_or_else(|| format!("'{name}' has no field '{}'", keyword.arg))?;
+            given[position] = Some(values);
+        }
+        let mut values = Vec::new();
+        for (field, name) in given.into_iter().zip(&names) {
+            values.extend(field.ok_or_else(|| format!("field '{name}' has no value"))?);
+        }
+        Ok(values)
+    }
+
+    /// Returns the flat layout of `ty`, if it is an enum type laid out flat.
+    fn flat_layout(&self, ty: &Type) -> Option<FlatLayout> {
+        self.context.layouts.flat(ty)
+    }
+
+    /// Returns whether `expr` is a value of an enum laid out flat.
+    fn is_flat_enum(&self, expr: &Expr) -> bool {
+        self.span_type(expr.span)
+            .is_some_and(|ty| self.flat_layout(&ty).is_some())
+    }
+
+    /// Returns how each value of a value of type `ty` is counted, one for each of its leaves.
+    fn leaf_kinds_of(&self, ty: &Type) -> Vec<Option<RcKind>> {
+        self.leaves(ty).iter().map(RcKind::of).collect()
+    }
+
+    /// Returns how each value the variant `tag` of the enum type `ty` holds is counted, one for
+    /// each leaf of its values.
+    fn variant_kinds(&self, ty: &Type, tag: usize) -> Vec<Option<RcKind>> {
+        variants(self.context.enums, ty)
+            .get(tag)
+            .map(|(_, fields)| fields.iter().flat_map(|f| self.leaf_kinds_of(f)).collect())
+            .unwrap_or_default()
+    }
+
+    /// Returns the tag of `values`, a value of the enum type `ty`: its first value if it is flat,
+    /// or the tag its object holds.
+    fn tag_value(&mut self, ty: &Type, values: &[Operand]) -> Operand {
+        if self.flat_layout(ty).is_some() {
+            return values[0];
+        }
+        let tag = self.fresh();
+        self.push(Inst::EnumTag {
+            dst: tag,
+            value: values[0],
+        });
+        Operand::Reg(tag)
+    }
+
+    /// Returns the leaves of the values the variant `tag` holds in `values`, a value of the
+    /// enum type `ty` known to be that variant, borrowed.
+    ///
+    /// For example, `some` of a flat `option[str]` is its second value, and of a boxed one its
+    /// object's slot 0.
+    fn variant_values(&mut self, ty: &Type, tag: usize, values: &[Operand]) -> Vec<Operand> {
+        match self.flat_layout(ty) {
+            Some(layout) => layout.variant_slots[tag]
+                .iter()
+                .map(|&slot| values[slot])
+                .collect(),
+            None => {
+                let width = self.variant_kinds(ty, tag).len();
+                self.field_values(values[0], 0, width)
+            }
+        }
+    }
+
+    /// Writes the value of the variant `tag` of the enum type `ty` holding `payload`, which
+    /// already carries the references the value keeps, into `dsts`, one for each of its values:
+    /// a flat one's tag and slots, 0 in the slots the variant does not use, or a boxed one's new
+    /// object, or its static one, retained.
+    fn variant_into(&mut self, ty: &Type, tag: usize, payload: Vec<Operand>, dsts: &[VReg]) {
+        match self.flat_layout(ty) {
+            Some(layout) => {
+                let mut slots = vec![Operand::Imm(0); layout.leaves.len()];
+                slots[0] = Operand::Imm(tag as i64);
+                for (value, &slot) in payload.into_iter().zip(&layout.variant_slots[tag]) {
+                    slots[slot] = value;
+                }
+                for (&dst, src) in dsts.iter().zip(slots) {
+                    self.push(Inst::Copy { dst, src });
+                }
+            }
+            None => {
+                let kinds = self.variant_kinds(ty, tag);
+                if kinds.is_empty() {
+                    self.push(Inst::VariantStatic { dst: dsts[0], tag });
+                    self.push(Inst::Retain {
+                        src: Operand::Reg(dsts[0]),
+                    });
+                } else {
+                    self.new_variant(dsts[0], tag, payload, &kinds);
+                }
+            }
+        }
+    }
+
+    /// Returns new vregs for the values of a value of type `ty`.
+    fn fresh_leaves(&mut self, ty: &Type) -> Vec<VReg> {
+        (0..self.leaves(ty).len()).map(|_| self.fresh()).collect()
+    }
+
+    /// Marks `values`, the values of a value of type `ty`, as temporaries owning a reference,
+    /// and returns them.
+    fn own_leaves(&mut self, ty: &Type, values: Vec<VReg>) -> Vec<Operand> {
+        let kinds = self.leaf_kinds_of(ty);
+        let values: Vec<Operand> = values.into_iter().map(Operand::Reg).collect();
+        for (&value, kind) in values.iter().zip(kinds) {
+            self.own(value, kind);
+        }
+        values
+    }
+
+    /// Makes a value of the variant `tag` of the enum type `ty` holding `payload`, which already
+    /// carries the references it keeps, and returns its values, owned.
+    fn make_variant(&mut self, ty: &Type, tag: usize, payload: Vec<Operand>) -> Vec<Operand> {
+        let dsts = self.fresh_leaves(ty);
+        self.variant_into(ty, tag, payload, &dsts);
+        self.own_leaves(ty, dsts)
+    }
+
+    /// Returns where a builtin that makes an enum value on several ways writes it: the values of
+    /// a flat enum, with its type, if the expression being lowered is one, or else one vreg,
+    /// `into` if given.
+    fn enum_dsts(&mut self, into: Option<VReg>) -> (Option<Type>, Vec<VReg>) {
+        match self.flat_target() {
+            Some(ty) => {
+                let dsts = self.fresh_leaves(&ty);
+                (Some(ty), dsts)
+            }
+            None => (None, vec![self.dst(into)]),
+        }
+    }
+
+    /// Writes the variant `tag` holding `payload`, counted as `kinds`, into `dsts`, from
+    /// [`Lowerer::enum_dsts`], on one of the ways a builtin makes an enum value.
+    fn branch_variant(
+        &mut self,
+        flat: &Option<Type>,
+        dsts: &[VReg],
+        tag: usize,
+        payload: Vec<Operand>,
+        kinds: &[Option<RcKind>],
+    ) {
+        match flat {
+            Some(ty) => self.variant_into(ty, tag, payload, dsts),
+            None => self.new_variant(dsts[0], tag, payload, kinds),
+        }
+    }
+
+    /// Returns the enum value a builtin wrote into `dsts` on every way, owned: the placeholder of
+    /// a flat one, whose values go to [`Lowerer::flat_enum`], or the one object.
+    fn enum_done(&mut self, flat: Option<Type>, dsts: Vec<VReg>) -> Operand {
+        match flat {
+            Some(ty) => {
+                let values = self.own_leaves(&ty, dsts);
+                self.flat_result(values)
+            }
+            None => {
+                self.own(Operand::Reg(dsts[0]), Some(RcKind::Enum));
+                Operand::Reg(dsts[0])
+            }
+        }
+    }
+
+    /// Hands the values of a flat enum a builtin made, owned, to [`Lowerer::flat_enum`], which
+    /// asked for the expression being lowered, and returns a placeholder for its one value,
+    /// which owns nothing.
+    fn flat_result(&mut self, values: Vec<Operand>) -> Operand {
+        // a flat enum of its tag alone, such as `ordering`, is that one value
+        if let [value] = values[..] {
+            return value;
+        }
+        self.flat_out = Some((self.span, values));
+        Operand::Imm(0)
+    }
+
+    /// Returns the type of the expression being lowered if it is an enum laid out flat, whose
+    /// values a builtin making it hands over with [`Lowerer::flat_result`].
+    fn flat_target(&self) -> Option<Type> {
+        self.span_type(self.span)
+            .filter(|ty| self.flat_layout(ty).is_some())
+    }
+
+    /// Lowers `expr`, a value of a flat enum that a builtin, a method, or the runtime makes, to
+    /// its values: those the builtin handed over, or else the values of the object it returned,
+    /// laid out as the runtime lays out enums, which it releases.
+    fn flat_enum(&mut self, expr: &Expr) -> Result<Vec<Operand>, String> {
+        let ty = self.type_of(expr)?;
+        self.flat_out = None;
+        self.allow_flat = true;
+        let value = self.expr_into(expr, None)?;
+        self.allow_flat = false;
+        match self.flat_out.take() {
+            Some((span, values)) if span == expr.span => Ok(values),
+            // no runtime routine makes an enum of its tag alone, which is its one value
+            _ if self.leaves(&ty).len() == 1 => Ok(vec![value]),
+            _ => self.unbox_runtime(&ty, value),
+        }
+    }
+
+    /// Converts `value`, an owned object of the enum type `ty` laid out as the runtime makes
+    /// every enum value, boxed with its values' enums boxed too, into the values this program
+    /// lays `ty` out as, owned, releasing the object.
+    ///
+    /// For example, `input()`'s `result[str, str]` comes back as an object holding a tag and a
+    /// string, which becomes the tag and the string, retained, before the object is released.
+    fn unbox_runtime(&mut self, ty: &Type, value: Operand) -> Result<Vec<Operand>, String> {
+        if !self.differs_from_runtime(ty, &mut HashSet::new()) {
+            return Ok(vec![value]);
+        }
+        if self.flat_layout(ty).is_none() {
+            return Err(format!(
+                "the runtime makes values of {ty} that this program lays out otherwise"
+            ));
+        }
+        let view = self.runtime_view(ty, &[value])?;
+        let kinds = self.leaf_kinds_of(ty);
+        let results: Vec<VReg> = view.iter().map(|_| self.fresh()).collect();
+        for ((&result, &leaf), kind) in results.iter().zip(&view).zip(&kinds) {
+            self.push(Inst::Copy {
+                dst: result,
+                src: leaf,
+            });
+            if kind.is_some() {
+                self.push(Inst::Retain {
+                    src: Operand::Reg(result),
+                });
+            }
+        }
+        match value {
+            Operand::Reg(reg) if self.owned.remove(&reg).is_some() => self.push(Inst::Release {
+                src: value,
+                kind: RcKind::Enum,
+            }),
+            _ => {}
+        }
+        Ok(self.own_leaves(ty, results))
+    }
+
+    /// Returns whether this program lays out values of type `ty` other than the runtime does,
+    /// which boxes every enum: if it is or holds, outside lists and maps, an enum laid out flat.
+    fn differs_from_runtime(&self, ty: &Type, seen: &mut HashSet<String>) -> bool {
+        match ty {
+            Type::Tuple(fields) => fields.iter().any(|f| self.differs_from_runtime(f, seen)),
+            Type::Struct { .. } => ty
+                .struct_fields(self.context.structs)
+                .iter()
+                .any(|(_, f)| self.differs_from_runtime(f, seen)),
+            Type::Enum { .. } => {
+                self.flat_layout(ty).is_some()
+                    || (seen.insert(format!("{ty:?}"))
+                        && variants(self.context.enums, ty)
+                            .iter()
+                            .flat_map(|(_, fields)| fields)
+                            .any(|f| self.differs_from_runtime(f, seen)))
+            }
+            _ => false,
+        }
+    }
+
+    /// Returns the values this program lays a value of type `ty` out as, borrowed, given
+    /// `values`, the values the runtime lays it out as, which [`Type::leaves`] counts, every
+    /// enum one object.
+    fn runtime_view(&mut self, ty: &Type, values: &[Operand]) -> Result<Vec<Operand>, String> {
+        let width = |ty: &Type, structs| ty.leaves(structs).len();
+        match ty {
+            Type::Tuple(_) | Type::Struct { .. } => {
+                let fields: Vec<Type> = match ty {
+                    Type::Tuple(fields) => fields.clone(),
+                    _ => ty
+                        .struct_fields(self.context.structs)
+                        .into_iter()
+                        .map(|(_, f)| f)
+                        .collect(),
+                };
+                let mut out = vec![];
+                let mut start = 0;
+                for field in fields {
+                    let end = start + width(&field, self.context.structs);
+                    out.extend(self.runtime_view(&field, &values[start..end])?);
+                    start = end;
+                }
+                Ok(out)
+            }
+            Type::Enum { .. } if self.flat_layout(ty).is_some() => {
+                let object = values[0];
+                let tag = self.fresh();
+                self.push(Inst::EnumTag {
+                    dst: tag,
+                    value: object,
+                });
+                let results = self.fresh_leaves(ty);
+                let all = variants(self.context.enums, ty);
+                let end = self.new_block();
+                for (k, (_, fields)) in all.iter().enumerate() {
+                    let next = self.new_block();
+                    if k + 1 < all.len() {
+                        let this = self.new_block();
+                        self.terminate(Terminator::CmpBranch {
+                            cond: Cond::Eq,
+                            float: false,
+                            lhs: Operand::Reg(tag),
+                            rhs: Operand::Imm(k as i64),
+                            then: this,
+                            otherwise: next,
+                        });
+                        self.start(this);
+                    }
+                    let count: usize = fields.iter().map(|f| width(f, self.context.structs)).sum();
+                    let slots = self.field_values(object, 0, count);
+                    let mut payload = vec![];
+                    let mut start = 0;
+                    for field in fields {
+                        let end = start + width(field, self.context.structs);
+                        payload.extend(self.runtime_view(field, &slots[start..end])?);
+                        start = end;
+                    }
+                    // borrowed, so nothing is retained here
+                    let layout = self.flat_layout(ty).ok_or("a flat enum has a layout")?;
+                    let mut leaves = vec![Operand::Imm(0); layout.leaves.len()];
+                    leaves[0] = Operand::Imm(k as i64);
+                    for (value, &slot) in payload.into_iter().zip(&layout.variant_slots[k]) {
+                        leaves[slot] = value;
+                    }
+                    for (&dst, src) in results.iter().zip(leaves) {
+                        self.push(Inst::Copy { dst, src });
+                    }
+                    self.jump(end);
+                    self.start(next);
+                    if k + 1 == all.len() {
+                        // every tag was one of the variants
+                        self.jump(end);
+                    }
+                }
+                self.start(end);
+                Ok(results.into_iter().map(Operand::Reg).collect())
+            }
+            Type::Enum { .. } if self.differs_from_runtime(ty, &mut HashSet::new()) => Err(
+                format!("the runtime makes values of {ty} that this program lays out otherwise"),
+            ),
+            _ => Ok(values.to_vec()),
+        }
     }
 
     /// Makes a new value of the variant `tag` in `dst` holding `values`, counted as `kinds`
@@ -2737,7 +3286,12 @@ impl<'a> Lowerer<'a> {
         into: Option<VReg>,
         values: impl FnOnce(&mut Self) -> Vec<(Operand, Option<RcKind>)>,
     ) -> Operand {
-        let dst = self.dst(into);
+        let flat = self.flat_target();
+        let dsts = match &flat {
+            Some(ty) => self.fresh_leaves(ty),
+            None => vec![self.dst(into)],
+        };
+        let dst = dsts[0];
         let (holds, empty, end) = (self.new_block(), self.new_block(), self.new_block());
         self.terminate(Terminator::CmpBranch {
             cond,
@@ -2749,6 +3303,16 @@ impl<'a> Lowerer<'a> {
         });
         self.start(holds);
         let (values, kinds): (Vec<Operand>, Vec<Option<RcKind>>) = values(self).into_iter().unzip();
+        if let Some(ty) = &flat {
+            self.variant_into(ty, 1, values, &dsts);
+            self.jump(end);
+            self.start(empty);
+            self.variant_into(ty, 0, vec![], &dsts);
+            self.jump(end);
+            self.start(end);
+            let values = self.own_leaves(ty, dsts);
+            return self.flat_result(values);
+        }
         self.new_variant(dst, 1, values, &kinds);
         self.jump(end);
         self.start(empty);
@@ -2811,7 +3375,7 @@ impl<'a> Lowerer<'a> {
         if let Some((map, key)) = self.map_get(receiver) {
             return self.map_get_value(receiver, (map, key), default, &kinds);
         }
-        let option = self.expr(receiver)?;
+        let option = self.expr_flat(receiver)?;
         let defaults = match default {
             Some(default) => {
                 let values = self.expr_flat(default)?;
@@ -2823,23 +3387,19 @@ impl<'a> Lowerer<'a> {
             }
             None => None,
         };
-        let tag = self.fresh();
-        self.push(Inst::EnumTag {
-            dst: tag,
-            value: option,
-        });
+        let tag = self.tag_value(&ty, &option);
         let results: Vec<VReg> = kinds.iter().map(|_| self.fresh()).collect();
         let (holds, empty, end) = (self.new_block(), self.new_block(), self.new_block());
         self.terminate(Terminator::CmpBranch {
             cond: Cond::Eq,
             float: false,
-            lhs: Operand::Reg(tag),
+            lhs: tag,
             rhs: Operand::Imm(holding as i64),
             then: holds,
             otherwise: empty,
         });
         self.start(holds);
-        let values = self.field_values(option, 0, kinds.len());
+        let values = self.variant_values(&ty, holding, &option);
         for ((&result, value), &kind) in results.iter().zip(values).zip(&kinds) {
             self.push(Inst::Copy {
                 dst: result,
@@ -2874,8 +3434,8 @@ impl<'a> Lowerer<'a> {
                 if let Some(other) = other {
                     // the message goes on with the other variant's value, as print writes it
                     let other_ty = args.get(other).cloned().unwrap_or(Type::Int);
-                    let count = self.leaves(&other_ty).len();
-                    let values = self.field_values(option, 0, count);
+                    // a result's other variant is the one of its two tags it does not hold
+                    let values = self.variant_values(&ty, 1 - holding, &option);
                     let outer = self.runtime_call("stone.text_begin", vec![], None);
                     self.print_text(&format!("{failure}: "));
                     self.print_flat(&other_ty, &values, false);
@@ -2891,7 +3451,9 @@ impl<'a> Lowerer<'a> {
             }
         }
         self.start(end);
-        self.release_temp(option);
+        for value in option {
+            self.release_temp(value);
+        }
         let results: Vec<Operand> = results.into_iter().map(Operand::Reg).collect();
         for (&result, &kind) in results.iter().zip(&kinds) {
             self.own(result, kind);
@@ -3011,56 +3573,113 @@ impl<'a> Lowerer<'a> {
             RESULT => self.tag_of(RESULT, "err")?,
             _ => self.tag_of(OPTION, "none")?,
         };
+        let holding = 1 - leaving;
         let held = args.first().cloned().unwrap_or(Type::Int);
-        let kinds: Vec<Option<RcKind>> = self.leaves(&held).iter().map(RcKind::of).collect();
-        let found = self.expr(value)?;
-        let tag = self.fresh();
-        self.push(Inst::EnumTag {
-            dst: tag,
-            value: found,
-        });
+        let kinds = self.leaf_kinds_of(&held);
+        // the function's own result, whose `err` or `none` this one becomes
+        let returned = self
+            .base
+            .as_ref()
+            .and_then(|base| self.context.returns.get(base))
+            .map(|ty| self.fill(ty));
+        let found = self.expr_flat(value)?;
+        let tag = self.tag_value(&ty, &found);
         let (leave, holds) = (self.new_block(), self.new_block());
         self.terminate(Terminator::CmpBranch {
             cond: Cond::Eq,
             float: false,
-            lhs: Operand::Reg(tag),
+            lhs: tag,
             rhs: Operand::Imm(leaving as i64),
             then: leave,
             otherwise: holds,
         });
 
         self.start(leave);
-        let Operand::Reg(found_reg) = found else {
-            return Err("an enum value is in a register".to_string());
+        // an err of the function's own type, or any err while both are objects, goes as it is
+        let rebuilt = match &returned {
+            Some(returned) => {
+                *returned != ty
+                    && (self.flat_layout(&ty).is_some() || self.flat_layout(returned).is_some())
+            }
+            None => false,
         };
-        let mut releases: Vec<(VReg, RcKind)> = self
-            .owned
-            .iter()
-            .filter(|(reg, _)| **reg != found_reg)
-            .map(|(&reg, &kind)| (reg, kind))
-            .collect();
-        releases.sort_by_key(|(reg, _)| reg.0);
-        for (reg, kind) in releases {
-            self.push(Inst::Release {
-                src: Operand::Reg(reg),
-                kind,
-            });
-        }
+        let given: Vec<Operand> = if rebuilt {
+            let returned = returned.ok_or("a function's result has a type")?;
+            // the value carried out gets its own references to what it holds
+            let payload = self.variant_values(&ty, leaving, &found);
+            let payload_kinds = self.variant_kinds(&ty, leaving);
+            let copies: Vec<Operand> = payload
+                .into_iter()
+                .zip(&payload_kinds)
+                .map(|(value, kind)| {
+                    let copy = self.fresh();
+                    self.push(Inst::Copy {
+                        dst: copy,
+                        src: value,
+                    });
+                    if kind.is_some() {
+                        self.push(Inst::Retain {
+                            src: Operand::Reg(copy),
+                        });
+                    }
+                    Operand::Reg(copy)
+                })
+                .collect();
+            let dsts = self.fresh_leaves(&returned);
+            self.variant_into(&returned, leaving, copies, &dsts);
+            let mut releases: Vec<(VReg, RcKind)> =
+                self.owned.iter().map(|(&reg, &kind)| (reg, kind)).collect();
+            releases.sort_by_key(|(reg, _)| reg.0);
+            for (reg, kind) in releases {
+                self.push(Inst::Release {
+                    src: Operand::Reg(reg),
+                    kind,
+                });
+            }
+            dsts.into_iter().map(Operand::Reg).collect()
+        } else {
+            let found_regs: Vec<VReg> = found
+                .iter()
+                .filter_map(|value| match value {
+                    Operand::Reg(reg) => Some(*reg),
+                    Operand::Imm(_) => None,
+                })
+                .collect();
+            let mut releases: Vec<(VReg, RcKind)> = self
+                .owned
+                .iter()
+                .filter(|(reg, _)| !found_regs.contains(reg))
+                .map(|(&reg, &kind)| (reg, kind))
+                .collect();
+            releases.sort_by_key(|(reg, _)| reg.0);
+            for (reg, kind) in releases {
+                self.push(Inst::Release {
+                    src: Operand::Reg(reg),
+                    kind,
+                });
+            }
+            // the caller gets a reference: a temporary's or a counted local's own, else a new one
+            for (&value, kind) in found.iter().zip(self.leaf_kinds_of(&ty)) {
+                let Operand::Reg(reg) = value else {
+                    continue;
+                };
+                let local = self.counted_locals.iter().any(|(r, _)| *r == reg);
+                if kind.is_some() && !local && !self.owned.contains_key(&reg) {
+                    self.push(Inst::Retain { src: value });
+                }
+            }
+            found.clone()
+        };
         for (src, kind) in self.pending.clone() {
             self.push(Inst::Release { src, kind });
         }
-        // the caller gets a reference: a temporary's or a counted local's own, else a new one
-        let local = self.counted_locals.iter().any(|(reg, _)| *reg == found_reg);
-        if !local && !self.owned.contains_key(&found_reg) {
-            self.push(Inst::Retain { src: found });
-        }
         // the way on still has the statement's moves to make
         let moved = self.moved_locals.clone();
-        self.leave(&[found]);
+        self.leave(&given);
         self.moved_locals = moved;
 
         self.start(holds);
-        let values = self.field_values(found, 0, kinds.len());
+        let values = self.variant_values(&ty, holding, &found);
         let results: Vec<Operand> = values
             .into_iter()
             .zip(&kinds)
@@ -3078,7 +3697,9 @@ impl<'a> Lowerer<'a> {
                 Operand::Reg(result)
             })
             .collect();
-        self.release_temp(found);
+        for value in found {
+            self.release_temp(value);
+        }
         for (&result, &kind) in results.iter().zip(&kinds) {
             self.own(result, kind);
         }
@@ -3382,8 +4003,10 @@ impl<'a> Lowerer<'a> {
         for (step, span) in steps.into_iter().zip(place_spans(place_expr)) {
             match step {
                 Step::Field(name) => {
-                    let (range, field) = ty
-                        .struct_field(name, self.context.structs)
+                    let (range, field) = self
+                        .context
+                        .layouts
+                        .struct_field(&ty, name)
                         .ok_or_else(|| format!("{ty} has no field '{name}'"))?;
                     location = match location {
                         Location::Leaves(names) => Location::Leaves(names[range].to_vec()),
@@ -4108,7 +4731,8 @@ impl<'a> Lowerer<'a> {
     }
 
     fn expr_into_unspanned(&mut self, expr: &Expr, into: Option<VReg>) -> Result<Operand, String> {
-        if self.is_flat(expr) {
+        let allow_flat = std::mem::take(&mut self.allow_flat);
+        if self.is_flat(expr) && !(allow_flat && self.is_flat_enum(expr)) {
             return Err(
                 "a tuple or struct has several values, which `expr_flat` lowers".to_string(),
             );
@@ -4310,7 +4934,11 @@ impl<'a> Lowerer<'a> {
                 comparators,
             } => self.compare(left, ops, comparators, into),
 
-            ExprKind::Call { func, args, .. } => {
+            ExprKind::Call {
+                func,
+                args,
+                keywords,
+            } => {
                 if let Some(conversion) = self.context.conversions.get(&expr.span) {
                     return Ok(self.conversion(expr, conversion, &args[0], into, kind)?[0]);
                 }
@@ -4330,7 +4958,7 @@ impl<'a> Lowerer<'a> {
                     {
                         let ty = self.type_of(expr)?;
                         let tag = self.tag_of(id, attr)?;
-                        return self.variant(&ty, tag, args, into);
+                        return self.variant(&ty, tag, args, keywords, into);
                     }
                     // the prelude's function moves the list in and gives it back sorted, as a
                     // method changing `self` does
@@ -4358,7 +4986,7 @@ impl<'a> Lowerer<'a> {
                 {
                     let ty = self.type_of(expr)?;
                     let tag = self.tag_of(id, attr)?;
-                    self.variant(&ty, tag, &[], into)
+                    self.variant(&ty, tag, &[], &[], into)
                 }
                 // one value, since the field is not a tuple or struct itself
                 _ => {
@@ -5378,11 +6006,12 @@ impl<'a> Lowerer<'a> {
             // ordered by its `cmp`, whose ordering's tag says which comes first
             ty if !matches!(cond, Cond::Eq | Cond::Ne) && self.implements(&ty, ORD) => {
                 let order = self.compare_call(&ty, "cmp", lhs_values, rhs_values);
-                let tag = self.fresh();
-                self.push(Inst::EnumTag {
-                    dst: tag,
-                    value: Operand::Reg(order),
-                });
+                let ordering = Type::Enum {
+                    name: ORDERING.to_string(),
+                    args: vec![],
+                };
+                let flat = self.flat_layout(&ordering).is_some();
+                let tag = self.tag_value(&ordering, &[Operand::Reg(order)]);
                 // `less` is 0, `equal` 1, and `greater` 2
                 let (cond, against) = match cond {
                     Cond::Lt => (Cond::Eq, 0),
@@ -5394,13 +6023,15 @@ impl<'a> Lowerer<'a> {
                     cond,
                     float: false,
                     dst: result,
-                    lhs: Operand::Reg(tag),
+                    lhs: tag,
                     rhs: Operand::Imm(against),
                 });
-                self.push(Inst::Release {
-                    src: Operand::Reg(order),
-                    kind: RcKind::Enum,
-                });
+                if !flat {
+                    self.push(Inst::Release {
+                        src: Operand::Reg(order),
+                        kind: RcKind::Enum,
+                    });
+                }
             }
             // compared value by value, which only == and != do
             ty if is_compound(&ty) => {
@@ -5622,15 +6253,24 @@ impl<'a> Lowerer<'a> {
             }
             other => return Err(format!("cannot order {other}")),
         }
+        let ordering = Type::Enum {
+            name: ORDERING.to_string(),
+            args: vec![],
+        };
+        let dsts = match self.flat_layout(&ordering) {
+            Some(_) => self.fresh_leaves(&ordering),
+            None => vec![dst],
+        };
         for (tag, block) in blocks.into_iter().enumerate() {
             self.start(block);
-            self.push(Inst::VariantStatic { dst, tag });
-            self.push(Inst::Retain {
-                src: Operand::Reg(dst),
-            });
+            self.variant_into(&ordering, tag, vec![], &dsts);
             self.jump(end);
         }
         self.start(end);
+        if self.flat_layout(&ordering).is_some() {
+            let values = self.own_leaves(&ordering, dsts);
+            return Ok(self.flat_result(values));
+        }
         Ok(Operand::Reg(dst))
     }
 
@@ -5658,7 +6298,13 @@ impl<'a> Lowerer<'a> {
                 let order = self.ordering(&ty, lhs, rhs, into)?;
                 self.release_temp(lhs);
                 self.release_temp(rhs);
-                self.own(order, Some(RcKind::Enum));
+                let ordering = Type::Enum {
+                    name: ORDERING.to_string(),
+                    args: vec![],
+                };
+                if self.flat_layout(&ordering).is_none() {
+                    self.own(order, Some(RcKind::Enum));
+                }
                 Ok(order)
             }
             // as `str` of the value writes it
@@ -5704,21 +6350,20 @@ impl<'a> Lowerer<'a> {
                     "is_ok" => self.tag_of(RESULT, "ok")?,
                     _ => self.tag_of(RESULT, "err")?,
                 };
-                let option = self.expr(receiver)?;
-                let tag = self.fresh();
-                self.push(Inst::EnumTag {
-                    dst: tag,
-                    value: option,
-                });
+                let ty = self.type_of(receiver)?;
+                let option = self.expr_flat(receiver)?;
+                let tag = self.tag_value(&ty, &option);
                 let dst = self.dst(into);
                 self.push(Inst::Compare {
                     cond: Cond::Eq,
                     float: false,
                     dst,
-                    lhs: Operand::Reg(tag),
+                    lhs: tag,
                     rhs: Operand::Imm(tag_of as i64),
                 });
-                self.release_temp(option);
+                for value in option {
+                    self.release_temp(value);
+                }
                 Ok(Operand::Reg(dst))
             }
             "unwrap" | "unwrap_or" | "unwrap_err" => {
@@ -5738,17 +6383,13 @@ impl<'a> Lowerer<'a> {
                 let kinds: Vec<Option<RcKind>> =
                     self.leaves(&held).iter().map(RcKind::of).collect();
                 let tag_of = self.tag_of(RESULT, name)?;
-                let result = self.expr(receiver)?;
-                let tag = self.fresh();
-                self.push(Inst::EnumTag {
-                    dst: tag,
-                    value: result,
-                });
+                let result = self.expr_flat(receiver)?;
+                let tag = self.tag_value(&ty, &result);
                 let option = self.option_if(
-                    (Cond::Eq, Operand::Reg(tag), Operand::Imm(tag_of as i64)),
+                    (Cond::Eq, tag, Operand::Imm(tag_of as i64)),
                     into,
                     |lowerer| {
-                        let values = lowerer.field_values(result, 0, kinds.len());
+                        let values = lowerer.variant_values(&ty, tag_of, &result);
                         // the option keeps a reference of its own
                         for (&value, kind) in values.iter().zip(&kinds) {
                             if kind.is_some() {
@@ -5758,7 +6399,9 @@ impl<'a> Lowerer<'a> {
                         values.into_iter().zip(kinds).collect()
                     },
                 );
-                self.release_temp(result);
+                for value in result {
+                    self.release_temp(value);
+                }
                 Ok(option)
             }
             "contains" => {
@@ -6452,7 +7095,7 @@ impl<'a> Lowerer<'a> {
                 let line = self.runtime_call("stone.input", vec![prompt], None);
                 self.release_temp(prompt);
                 let (ok, err) = (self.tag_of(RESULT, "ok")?, self.tag_of(RESULT, "err")?);
-                let dst = self.dst(into);
+                let (flat, dsts) = self.enum_dsts(into);
                 let (read, ended, end) = (self.new_block(), self.new_block(), self.new_block());
                 self.terminate(Terminator::CmpBranch {
                     cond: Cond::Ne,
@@ -6464,7 +7107,7 @@ impl<'a> Lowerer<'a> {
                 });
                 self.start(read);
                 // the new line's reference goes to the ok
-                self.new_variant(dst, ok, vec![line], &[Some(RcKind::Str)]);
+                self.branch_variant(&flat, &dsts, ok, vec![line], &[Some(RcKind::Str)]);
                 self.jump(end);
                 self.start(ended);
                 let message = self.fresh();
@@ -6475,11 +7118,16 @@ impl<'a> Lowerer<'a> {
                 self.push(Inst::Retain {
                     src: Operand::Reg(message),
                 });
-                self.new_variant(dst, err, vec![Operand::Reg(message)], &[Some(RcKind::Str)]);
+                self.branch_variant(
+                    &flat,
+                    &dsts,
+                    err,
+                    vec![Operand::Reg(message)],
+                    &[Some(RcKind::Str)],
+                );
                 self.jump(end);
                 self.start(end);
-                self.own(Operand::Reg(dst), Some(RcKind::Enum));
-                Ok(Operand::Reg(dst))
+                Ok(self.enum_done(flat, dsts))
             }
             "eof" => Ok(self.runtime_call("stone.eof", vec![], into)),
             "args" => {
@@ -7187,7 +7835,7 @@ impl<'a> Lowerer<'a> {
         let Converter::Function(function, copy) = converter else {
             if target == source {
                 // every type converts from itself, whatever its values
-                return match target.is_flat() {
+                return match self.context.layouts.is_flat(&target) {
                     true => self.expr_flat(arg),
                     false => Ok(vec![self.expr(arg).map(|value| self.finish(value, into))?]),
                 };
@@ -7285,7 +7933,7 @@ impl<'a> Lowerer<'a> {
     fn float_to_int_result(&mut self, arg: &Expr, into: Option<VReg>) -> Result<Operand, String> {
         let x = self.expr(arg)?;
         let (ok, err) = (self.tag_of(RESULT, "ok")?, self.tag_of(RESULT, "err")?);
-        let dst = self.dst(into);
+        let (flat, dsts) = self.enum_dsts(into);
         let (above, fits, fails, end) = (
             self.new_block(),
             self.new_block(),
@@ -7319,15 +7967,14 @@ impl<'a> Lowerer<'a> {
             checked: false,
             rounding: Rounding::Zero,
         });
-        self.new_variant(dst, ok, vec![Operand::Reg(whole)], &[None]);
+        self.branch_variant(&flat, &dsts, ok, vec![Operand::Reg(whole)], &[None]);
         self.jump(end);
         self.start(fails);
         let message = self.literal(math::FLOAT_TO_INT);
-        self.new_variant(dst, err, vec![message], &[Some(RcKind::Str)]);
+        self.branch_variant(&flat, &dsts, err, vec![message], &[Some(RcKind::Str)]);
         self.jump(end);
         self.start(end);
-        self.own(Operand::Reg(dst), Some(RcKind::Enum));
-        Ok(Operand::Reg(dst))
+        Ok(self.enum_done(flat, dsts))
     }
 
     /// Lowers `bytes(xs)` of a list `arg`: `ok` of the bytes, or `err` naming the first value
@@ -7337,7 +7984,7 @@ impl<'a> Lowerer<'a> {
         // the routine gives where the first value that is not a byte is, or -1
         let bad = self.runtime_call("stone.bytes_check", vec![values], None);
         let (ok, err) = (self.tag_of(RESULT, "ok")?, self.tag_of(RESULT, "err")?);
-        let dst = self.dst(into);
+        let (flat, dsts) = self.enum_dsts(into);
         let (holds, fails, end) = (self.new_block(), self.new_block(), self.new_block());
         self.terminate(Terminator::CmpBranch {
             cond: Cond::Lt,
@@ -7349,7 +7996,7 @@ impl<'a> Lowerer<'a> {
         });
         self.start(holds);
         let bytes = self.runtime_call("stone.bytes_from_list", vec![values], None);
-        self.new_variant(dst, ok, vec![bytes], &[Some(RcKind::Str)]);
+        self.branch_variant(&flat, &dsts, ok, vec![bytes], &[Some(RcKind::Str)]);
         self.jump(end);
         self.start(fails);
         let value = self.fresh();
@@ -7374,12 +8021,11 @@ impl<'a> Lowerer<'a> {
             src: text,
             kind: RcKind::Str,
         });
-        self.new_variant(dst, err, vec![message], &[Some(RcKind::Str)]);
+        self.branch_variant(&flat, &dsts, err, vec![message], &[Some(RcKind::Str)]);
         self.jump(end);
         self.start(end);
         self.release_temp(values);
-        self.own(Operand::Reg(dst), Some(RcKind::Enum));
-        Ok(Operand::Reg(dst))
+        Ok(self.enum_done(flat, dsts))
     }
 
     /// Returns the immortal string `text`, retained, so whatever stores it owns a reference.
@@ -7606,7 +8252,7 @@ impl<'a> Lowerer<'a> {
                 let field = self
                     .type_of(value)
                     .ok()
-                    .and_then(|ty| ty.struct_field(attr, self.context.structs));
+                    .and_then(|ty| self.context.layouts.struct_field(&ty, attr));
                 let sources = self.flat_sources(value);
                 match field {
                     Some((range, _)) if range.end <= sources.len() => sources[range].to_vec(),
@@ -7636,9 +8282,11 @@ impl<'a> Lowerer<'a> {
         }
     }
 
-    /// Returns whether `expr` is a tuple or a struct, which lowers to several values.
+    /// Returns whether `expr` is a tuple, a struct, or a flat enum, which lowers to several
+    /// values.
     fn is_flat(&self, expr: &Expr) -> bool {
-        self.span_type(expr.span).is_some_and(|ty| ty.is_flat())
+        self.span_type(expr.span)
+            .is_some_and(|ty| self.context.layouts.is_flat(&ty))
     }
 
     /// Lowers `expr` to its values: one for each value of a tuple, nested tuples flattened, or
@@ -7654,6 +8302,16 @@ impl<'a> Lowerer<'a> {
         let outer = std::mem::replace(&mut self.span, expr.span);
         let result = self.tuple_values(expr);
         self.span = outer;
+        if let Ok(values) = &result {
+            let ty = self.type_of(expr)?;
+            if values.len() != self.leaves(&ty).len() {
+                return Err(format!(
+                    "a value of {ty} is {} values, not {}",
+                    self.leaves(&ty).len(),
+                    values.len()
+                ));
+            }
+        }
         result
     }
 
@@ -7689,6 +8347,42 @@ impl<'a> Lowerer<'a> {
                 }
                 Ok(values)
             }
+            // a variant of an enum laid out flat, as `Shape.Empty` or `none`
+            ExprKind::Attribute { value, attr, .. }
+                if let ExprKind::Name { id, .. } = &value.kind
+                    && self.context.enums.contains_key(id)
+                    && may_name_enum(value) =>
+            {
+                let ty = self.type_of(expr)?;
+                let tag = self.tag_of(id, attr)?;
+                Ok(self.make_variant(&ty, tag, vec![]))
+            }
+            ExprKind::Call {
+                func,
+                args,
+                keywords,
+            } if let ExprKind::Attribute { value, attr, .. } = &func.kind
+                && let ExprKind::Name { id, .. } = &value.kind
+                && self.context.enums.contains_key(id)
+                && may_name_enum(value)
+                && !self.context.methods.contains_key(&expr.span) =>
+            {
+                let ty = self.type_of(expr)?;
+                let tag = self.tag_of(id, attr)?;
+                let mut values = Vec::new();
+                for arg in args {
+                    values.extend(self.expr_flat(arg)?);
+                }
+                if !keywords.is_empty() {
+                    values = self.named_values(&ty, tag, keywords)?;
+                }
+                // the value keeps a reference to what it holds
+                let kinds = self.variant_kinds(&ty, tag);
+                for (&value, &kind) in values.iter().zip(&kinds) {
+                    self.take(value, kind);
+                }
+                Ok(self.make_variant(&ty, tag, values))
+            }
             ExprKind::Subscript { value, slice, .. } if self.is_flat(value) => {
                 self.tuple_field(value, slice)
             }
@@ -7718,7 +8412,17 @@ impl<'a> Lowerer<'a> {
                 keywords,
             } => match &func.kind {
                 _ if let Some(conversion) = self.context.conversions.get(&expr.span) => {
-                    self.conversion(expr, conversion, &args[0], None, None)
+                    let ty = self.type_of(expr)?;
+                    self.flat_out = None;
+                    let values = self.conversion(expr, conversion, &args[0], None, None)?;
+                    // a builtin's result comes back as one object, or handed over if it is flat
+                    if self.flat_layout(&ty).is_some() && values.len() != self.leaves(&ty).len() {
+                        return match self.flat_out.take() {
+                            Some((span, flat)) if span == expr.span => Ok(flat),
+                            _ => self.unbox_runtime(&ty, values[0]),
+                        };
+                    }
+                    Ok(values)
                 }
                 _ if self.context.indirect_calls.contains(&expr.span) => {
                     let kinds = self.leaf_kinds(expr)?;
@@ -7730,6 +8434,12 @@ impl<'a> Lowerer<'a> {
                     self.construct(id, keywords)
                 }
                 ExprKind::Name { id, .. } if id == "random.choice" => self.choose_element(&args[0]),
+                // a builtin that makes a flat enum hands it over or returns the runtime's object
+                ExprKind::Name { id, .. }
+                    if self.is_flat_enum(expr) && !self.context.owned_params.contains_key(id) =>
+                {
+                    self.flat_enum(expr)
+                }
                 ExprKind::Name { id, .. } => {
                     let kinds = self.leaf_kinds(expr)?;
                     self.user_call(id, expr.span, args, None, &kinds)
@@ -7740,7 +8450,12 @@ impl<'a> Lowerer<'a> {
                     let method = &self.context.methods[&expr.span];
                     self.struct_call(expr, method, value, args, None)
                 }
-                ExprKind::Attribute { value, attr, .. } if attr == "pop" => {
+                // a list's `pop(i)` gives the element, and `pop()` an option, as a map's does
+                ExprKind::Attribute { value, attr, .. }
+                    if attr == "pop"
+                        && !args.is_empty()
+                        && matches!(self.span_type(value.span), Some(Type::List(_))) =>
+                {
                     self.pop_element(value, args)
                 }
                 ExprKind::Attribute { value, attr, .. }
@@ -7748,8 +8463,10 @@ impl<'a> Lowerer<'a> {
                 {
                     self.option_value(value, attr, args.first())
                 }
+                _ if self.is_flat_enum(expr) => self.flat_enum(expr),
                 _ => Err("this method does not return a tuple".to_string()),
             },
+            _ if self.is_flat_enum(expr) => self.flat_enum(expr),
             _ => Err("this expression cannot be a tuple".to_string()),
         }
     }
@@ -7769,7 +8486,7 @@ impl<'a> Lowerer<'a> {
         } else {
             index
         };
-        let leaves = ty.field_leaves(index as usize, self.context.structs);
+        let leaves = self.context.layouts.field_leaves(&ty, index as usize);
         // a field of a list's element is read on its own, as in `pairs[i][0]`
         if let ExprKind::Subscript {
             value: list,
@@ -7825,8 +8542,10 @@ impl<'a> Lowerer<'a> {
     /// of the element.
     fn struct_field(&mut self, value: &Expr, attr: &str) -> Result<Vec<Operand>, String> {
         let ty = self.type_of(value)?;
-        let (leaves, _) = ty
-            .struct_field(attr, self.context.structs)
+        let (leaves, _) = self
+            .context
+            .layouts
+            .struct_field(&ty, attr)
             .ok_or_else(|| format!("{ty} has no field '{attr}'"))?;
         // a field of a list's element is read on its own, as in `ps[i].y`
         if let ExprKind::Subscript {

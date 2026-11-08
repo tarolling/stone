@@ -106,10 +106,11 @@ print(seen, seen.len(), 2 in seen, 7 in seen)
 | `__add__`, `__sub__`, `__mul__`, `__truediv__`, `__mod__`, `__neg__` | `impl add[P] for P:` with `fn add(self, other: P) -> Self`, and likewise `sub`, `mul`, `div`, `rem`, and `neg` (`fn neg(self) -> Self`); the result is always `P`, and one block per right operand's type (`impl mul[float] for P:`) |
 | `__radd__`, `__rmul__` (`2 * p`) | none: the left operand's type picks the impl, so write `p * 2.0` |
 | `__repr__` for printing | usually unnecessary: a struct prints as `P(x=1, y=2)`, like a dataclass |
-| subclasses that are alternatives (`Circle(Shape)`, `Square(Shape)`) | an `enum` with a variant per subclass and a `match` |
+| subclasses that are alternatives (`Circle(Shape)`, `Square(Shape)`) | an `enum` with a variant per subclass and a `match`; a variant can name its values like a dataclass, `Circle(radius: float)`, made as `Shape.Circle(radius=1.0)` and matched as `Shape.Circle(radius)` |
 | an abstract base class or a protocol | a `trait`, implemented by each struct, used through `[T: Trait]` |
 | class attributes, `@staticmethod` | a top-level value or function, or an associated function |
 | `isinstance(x, Circle)` | `match` on an enum |
+| `match cmd:` with `case "quit" \| "exit":` | the same: int, str, and bool literals and `\|` are patterns, and a `match` on an int or a str ends with `case _:`; floats are not patterns |
 
 Choose an enum when the code switches on the kind of value, and a trait when it calls the same
 method on any of them. A trait cannot hold a mix of types in one list; if the Python list holds

@@ -127,6 +127,12 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
                     name: v.name,
                     span: Span::default(),
                     fields: v.fields.into_iter().map(strip_type).collect(),
+                    names: v.names.map(|names| {
+                        names
+                            .into_iter()
+                            .map(|(name, _)| (name, Span::default()))
+                            .collect()
+                    }),
                 })
                 .collect(),
         },
@@ -212,8 +218,17 @@ fn strip_pattern(pattern: Pattern) -> Pattern {
                 .into_iter()
                 .map(|(name, _)| (name, Span::default()))
                 .collect(),
-            fields: fields.into_iter().map(strip_pattern).collect(),
+            fields: fields
+                .into_iter()
+                .map(|f| PatternField {
+                    name: f.name.map(|(name, _)| (name, Span::default())),
+                    pattern: strip_pattern(f.pattern),
+                })
+                .collect(),
         },
+        PatternKind::Or(alternatives) => {
+            PatternKind::Or(alternatives.into_iter().map(strip_pattern).collect())
+        }
         kind => kind,
     };
     Pattern {
@@ -2370,6 +2385,7 @@ fn variant(name: &str, fields: &[&str]) -> Variant {
         name: name.to_string(),
         span: Span::default(),
         fields: fields.iter().map(|f| named_type(f)).collect(),
+        names: None,
     }
 }
 
@@ -2402,11 +2418,135 @@ fn an_enum_lists_its_variants() {
                             kind: TypeExprKind::List(Box::new(named_type("Shape"))),
                             span: Span::default(),
                         }],
+                        names: None,
                     },
                 ],
             }
             .into()
         ]
+    );
+}
+
+#[test]
+fn a_variant_may_name_its_values() {
+    let module = Parser::new(
+        &Lexer::new("enum Shape:\n    Rect(w: float, h: float,)\n    Dot(int)\n")
+            .lex()
+            .unwrap(),
+    )
+    .parse()
+    .unwrap();
+    let Mod::Module { body } = without_spans(module);
+    let StmtKind::EnumDef { variants, .. } = &body[0].kind else {
+        panic!("expected an enum");
+    };
+    assert_eq!(
+        variants[0].names,
+        Some(vec![
+            ("w".to_string(), Span::default()),
+            ("h".to_string(), Span::default())
+        ])
+    );
+    assert_eq!(
+        variants[0].fields,
+        vec![named_type("float"), named_type("float")]
+    );
+    assert_eq!(variants[1].names, None);
+    let mixed = "a variant's values are all named, as in 'Rect(w: float, h: float)', or all \
+                 unnamed, as in 'Rect(float, float)'"
+        .to_string();
+    assert_eq!(
+        error_of("enum Shape:\n    Rect(w: float, float)\n"),
+        (mixed.clone(), 2, 20)
+    );
+    assert_eq!(
+        error_of("enum Shape:\n    Rect(float, h: float)\n"),
+        (mixed, 2, 17)
+    );
+}
+
+#[test]
+fn a_variant_pattern_may_name_its_values() {
+    let source = "match s:\n    case Shape.Rect(w, h=Size.Big(n)):\n        print(w)\n";
+    let module = Parser::new(&Lexer::new(source).lex().unwrap())
+        .parse()
+        .unwrap();
+    let Mod::Module { body } = without_spans(module);
+    let StmtKind::Match { cases, .. } = &body[0].kind else {
+        panic!("expected a match");
+    };
+    assert_eq!(
+        cases[0].pattern,
+        pattern(PatternKind::Variant {
+            path: vec![
+                ("Shape".to_string(), Span::default()),
+                ("Rect".to_string(), Span::default())
+            ],
+            fields: vec![
+                pattern(PatternKind::Name("w".to_string())).into(),
+                PatternField {
+                    name: Some(("h".to_string(), Span::default())),
+                    pattern: variant_pattern(
+                        &["Size", "Big"],
+                        vec![pattern(PatternKind::Name("n".to_string()))]
+                    ),
+                },
+            ],
+        })
+    );
+    assert_eq!(cases[0].pattern.to_string(), "Shape.Rect(w, h=Size.Big(n))");
+}
+
+#[test]
+fn a_pattern_may_be_a_literal_or_alternatives() {
+    let source = "match n:\n    case 0 | -1 | \"a\" | true | some(1 | false):\n        print(n)\n";
+    let module = Parser::new(&Lexer::new(source).lex().unwrap())
+        .parse()
+        .unwrap();
+    let Mod::Module { body } = without_spans(module);
+    let StmtKind::Match { cases, .. } = &body[0].kind else {
+        panic!("expected a match");
+    };
+    let literal = |c: Constant| pattern(PatternKind::Literal(c));
+    assert_eq!(
+        cases[0].pattern,
+        pattern(PatternKind::Or(vec![
+            literal(Constant::Int(0)),
+            literal(Constant::Int(-1)),
+            literal(Constant::Str("a".to_string())),
+            literal(Constant::Bool(true)),
+            variant_pattern(
+                &["some"],
+                vec![pattern(PatternKind::Or(vec![
+                    literal(Constant::Int(1)),
+                    literal(Constant::Bool(false)),
+                ]))]
+            ),
+        ]))
+    );
+    assert_eq!(
+        cases[0].pattern.to_string(),
+        "0 | -1 | \"a\" | true | some(1 | false)"
+    );
+    assert_eq!(
+        error_of("match x:\n    case 1.5:\n        print(x)\n"),
+        (
+            "a float cannot be a pattern, since nan equals nothing; compare with 'if'".to_string(),
+            2,
+            10
+        )
+    );
+    assert_eq!(
+        error_of("match x:\n    case \"{x}\":\n        print(x)\n"),
+        (
+            "a string with values cannot be a pattern; compare with 'if'".to_string(),
+            2,
+            10
+        )
+    );
+    assert_eq!(
+        error_of("match x:\n    case 1 |:\n        print(x)\n").0,
+        "expected a pattern, found ':'"
     );
 }
 
@@ -2471,7 +2611,7 @@ fn variant_pattern(path: &[&str], fields: Vec<Pattern>) -> Pattern {
             .iter()
             .map(|name| (name.to_string(), Span::default()))
             .collect(),
-        fields,
+        fields: fields.into_iter().map(PatternField::from).collect(),
     })
 }
 
@@ -2567,7 +2707,7 @@ fn patterns_span_their_text() {
         panic!("expected a variant pattern");
     };
     assert_eq!(path[1].1, span(2, 16, 2, 20));
-    assert_eq!(fields[0].span, span(2, 21, 2, 22));
+    assert_eq!(fields[0].pattern.span, span(2, 21, 2, 22));
 }
 
 #[test]
@@ -2577,10 +2717,9 @@ fn match_needs_cases() {
         ("expected 'case', found 'print'".to_string(), 2, 5)
     );
     assert_eq!(
-        error_of("match s:\n    case 1:\n        print(s)\n"),
+        error_of("match s:\n    case b\"x\":\n        print(s)\n"),
         (
-            "a pattern is a variant such as 'Shape.Circle(r)', 'some(x)', or 'none', a name, or '_'"
-                .to_string(),
+            "bytes cannot be a pattern; compare with 'if'".to_string(),
             2,
             10
         )
@@ -2593,7 +2732,7 @@ fn match_needs_cases() {
 
 #[test]
 fn a_bad_case_is_skipped_with_its_match() {
-    let tokens = Lexer::new("match s:\n    case 1:\n        print(s)\nx = 1\n")
+    let tokens = Lexer::new("match s:\n    case 1.0:\n        print(s)\nx = 1\n")
         .lex()
         .unwrap();
     let (module, diagnostics) = Parser::new(&tokens).parse_recovering();
@@ -3544,7 +3683,7 @@ fn shortcuts_report_errors_alike() {
         "for x in:\n    print(x)\n",
         "for x xs:\n    print(x)\n",
         "while :\n    cont\n",
-        "match x:\n    case 1:\n        y = 2\n",
+        "match x:\n    case 1.0:\n        y = 2\n",
         "match x:\n    some(y):\n        y\n",
         "enum E:\n    A(\n",
         "struct P:\n    x\n",

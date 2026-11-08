@@ -26,8 +26,8 @@ use std::sync::Arc;
 
 use crate::ast::{
     Arguments, CompOp, Constant, Expr, ExprKind, Field, Keyword, MatchCase, Mod, Operator, Pattern,
-    PatternKind, Stmt, StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam, UnaryOp, Variant,
-    constant_int, is_lambda, is_test, target_names,
+    PatternField, PatternKind, Stmt, StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam,
+    UnaryOp, Variant, constant_int, is_lambda, is_test, target_names,
 };
 use crate::diagnostic::Diagnostic;
 use crate::span::{FileId, Pos, Span};
@@ -450,11 +450,21 @@ pub fn substitution(params: &[String], args: &[Type]) -> HashMap<String, Type> {
 }
 
 /// An enum a program defines: its type parameters, such as `T` in `enum Tree[T]:`, and its
-/// variants, each with the types of its values in order, as in `Circle` holding `float`.
+/// variants, each with the types of its values in order, as in `Circle` holding `float`, plus,
+/// by tag, the names of a variant's values if it names them, as `w` and `h` of
+/// `Rect(w: float, h: float)`.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EnumDef {
     pub params: Vec<String>,
     pub variants: Vec<(String, Vec<Type>)>,
+    pub names: Vec<Option<Vec<String>>>,
+}
+
+impl EnumDef {
+    /// Returns the names of the values of the variant with the tag `tag`, if it names them.
+    pub fn field_names(&self, tag: usize) -> Option<&[String]> {
+        self.names.get(tag)?.as_deref()
+    }
 }
 
 /// Every enum a program defines, keyed by linked name, including the prelude's `option`.
@@ -867,6 +877,14 @@ pub struct Analysis {
     /// The linked name of each method of an `impl` block of a generic trait, by its symbol's
     /// index, since it is not its struct's name, a dot, and its own, but `V.add..int`.
     pub method_functions: HashMap<usize, String>,
+    /// The span of each shorthand field of a variant pattern, as `w` in `Shape.Rect(w)`, which
+    /// stands for `w=w` and so refers to both the field and the variable it binds.
+    pub shorthand_fields: Vec<Span>,
+    /// Every type, with no type parameters, that the program holds inside another value, and
+    /// how: a list's elements, a map entry's value, an enum (for its variants' values), or the
+    /// copies a closure takes, a tuple of them. Each holds at most [`MAX_ELEMENT_VALUES`]
+    /// values, which lowering keeps to when it lays out enums.
+    pub held_types: Vec<(Type, Held)>,
 }
 
 impl Analysis {
@@ -1283,6 +1301,9 @@ struct VariantInfo {
     name: String,
     symbol: usize,
     fields: Vec<Ty>,
+    /// The name and symbol of each value, if the variant names them, as `w` and `h` in
+    /// `Rect(w: float, h: float)`.
+    names: Option<Vec<(String, usize)>>,
 }
 
 /// A struct a program defines: its symbol, its type parameters, and its fields, each with its
@@ -1372,8 +1393,8 @@ struct FunctionInfo {
 }
 
 /// How a value is held inside another, for counting the values it takes up.
-#[derive(Clone, Copy, PartialEq)]
-enum Held {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Held {
     /// An element of a list.
     Element,
     /// The value of a map's entry, stored after its key.
@@ -1541,6 +1562,11 @@ struct Inference {
     /// The linked name of each method of an `impl` block of a generic trait, by its symbol,
     /// since it is not its struct's name, a dot, and its own.
     method_functions: HashMap<usize, String>,
+    /// The span of each shorthand field of a variant pattern, as `w` in `Shape.Rect(w)`.
+    shorthand_fields: Vec<Span>,
+    /// Every type with no type parameters held inside another value, for
+    /// [`Analysis::held_types`].
+    held_types: Vec<(Ty, Held)>,
     /// The type `Self` names in the `impl` block whose signatures are being read.
     self_type: Option<Ty>,
     /// How each call of a function of an `impl` block was resolved, by the call's span.
@@ -4388,10 +4414,29 @@ impl Inference {
                     own.clone(),
                 );
                 self.symbols[symbol].scope = Some(name.clone());
+                let names = variant.names.as_ref().map(|names| {
+                    let mut declared: Vec<(String, usize)> = vec![];
+                    for ((field, span), ty) in names.iter().zip(&fields) {
+                        if declared.iter().any(|(other, _)| other == field) {
+                            self.error(
+                                *span,
+                                format!("'{name}.{}' already has a field '{field}'", variant.name),
+                            );
+                            continue;
+                        }
+                        let symbol = self.add_symbol(field, SymbolKind::Field, *span, ty.clone());
+                        self.symbols[symbol].scope = Some(format!("{name}.{}", variant.name));
+                        declared.push((field.clone(), symbol));
+                    }
+                    declared
+                });
+                // a variant whose names repeat keeps its values unnamed from here on
+                let names = names.filter(|names| names.len() == fields.len());
                 infos.push(VariantInfo {
                     name: variant.name.clone(),
                     symbol,
                     fields,
+                    names,
                 });
             }
             if let Some(info) = self.enums.get_mut(name) {
@@ -6029,6 +6074,16 @@ impl Inference {
         } else {
             format!("{enum_name}.{variant}")
         };
+        if let Some(args) = args
+            && !args.is_empty()
+            && let Some(example) = self.named_variant_example(enum_name, variant)
+        {
+            self.error(
+                expr.span,
+                format!("a named variant's values are named, as in '{example}'"),
+            );
+            return enum_ty;
+        }
         match args {
             None if !fields.is_empty() => {
                 let count = values_phrase(fields.len());
@@ -6067,6 +6122,123 @@ impl Inference {
             None => {}
         }
         enum_ty
+    }
+
+    /// Infers `enum_name.variant(name=value, ...)`, a named variant made with its values named in
+    /// any order, written as `call`, evaluating the values in the order they are written, and
+    /// returns the enum's type.
+    ///
+    /// For example, `Shape.Rect(h=2.0, w=1.0)` is a `Shape` if `Rect` holds `w: float` and
+    /// `h: float`.
+    fn infer_named_variant(
+        &mut self,
+        call: &Expr,
+        func: &Expr,
+        enum_name: &str,
+        variant: &str,
+        args: &[Expr],
+        keywords: &[Keyword],
+    ) -> Ty {
+        for arg in args {
+            self.infer(arg);
+        }
+        let found: Vec<Ty> = keywords.iter().map(|k| self.infer(&k.value)).collect();
+        let type_args = self.fresh_args(enum_name);
+        let enum_ty = Ty::Enum(enum_name.to_string(), type_args.clone());
+        let ExprKind::Attribute { value, .. } = &func.kind else {
+            return enum_ty;
+        };
+        let info = &self.enums[enum_name];
+        let enum_symbol = info.symbol;
+        let type_params = info.type_params.clone();
+        let found_variant = info.variants.iter().find(|v| v.name == variant).map(|v| {
+            let fields = v
+                .fields
+                .iter()
+                .map(|f| Self::substitute(f, &type_params, &type_args))
+                .collect::<Vec<Ty>>();
+            (v.symbol, fields, v.names.clone())
+        });
+        self.add_reference(value.span, enum_symbol);
+        let attr_span = Self::attr_span(func, variant);
+        let Some((symbol, fields, names)) = found_variant else {
+            self.error(
+                attr_span,
+                format!("'{enum_name}' has no variant '{variant}'"),
+            );
+            return enum_ty;
+        };
+        self.add_reference(attr_span, symbol);
+        let written = format!(
+            "{}.{variant}",
+            enum_name.rsplit('.').next().unwrap_or(enum_name)
+        );
+        let Some(names) = names else {
+            self.error(
+                keywords[0].arg_span,
+                format!("'{written}' takes its values in order, without names"),
+            );
+            return enum_ty;
+        };
+        let mut given: Vec<&str> = vec![];
+        for (keyword, found) in keywords.iter().zip(&found) {
+            let Some(position) = names.iter().position(|(n, _)| *n == keyword.arg) else {
+                self.error(
+                    keyword.arg_span,
+                    format!("'{written}' has no field '{}'", keyword.arg),
+                );
+                continue;
+            };
+            self.add_reference(keyword.arg_span, names[position].1);
+            if given.contains(&keyword.arg.as_str()) {
+                self.error(
+                    keyword.arg_span,
+                    format!("field '{}' is given more than once", keyword.arg),
+                );
+                continue;
+            }
+            given.push(&keyword.arg);
+            self.expect(&fields[position], found, keyword.value.span);
+        }
+        if !args.is_empty() {
+            let example = self
+                .named_variant_example(enum_name, variant)
+                .unwrap_or_default();
+            self.error(
+                call.span,
+                format!("a named variant's values are named, as in '{example}'"),
+            );
+            return enum_ty;
+        }
+        let missing: Vec<String> = names
+            .iter()
+            .filter(|(n, _)| !given.contains(&n.as_str()))
+            .map(|(n, _)| format!("'{n}'"))
+            .collect();
+        if !missing.is_empty() {
+            let (noun, names) = match &missing[..] {
+                [only] => ("field", only.clone()),
+                [rest @ .., last] => ("fields", format!("{} and {last}", rest.join(", "))),
+                [] => unreachable!(),
+            };
+            self.error(call.span, format!("missing {noun} {names} for '{written}'"));
+        }
+        enum_ty
+    }
+
+    /// Returns how the named variant `variant` of the enum `enum_name` is made, as
+    /// `Shape.Rect(w=..., h=...)`, or nothing if its values are unnamed.
+    fn named_variant_example(&self, enum_name: &str, variant: &str) -> Option<String> {
+        let info = self.enums.get(enum_name)?;
+        let names = info
+            .variants
+            .iter()
+            .find(|v| v.name == variant)?
+            .names
+            .as_ref()?;
+        let short = enum_name.rsplit('.').next().unwrap_or(enum_name);
+        let values: Vec<String> = names.iter().map(|(n, _)| format!("{n}=...")).collect();
+        Some(format!("{short}.{variant}({})", values.join(", ")))
     }
 
     /// Returns whether `name` is an enum whose name no variable may take: any but the prelude's,
@@ -7589,8 +7761,15 @@ impl Inference {
         {
             return self.infer_struct(call, func, &name, args, keywords);
         }
+        if let ExprKind::Attribute { value, attr, .. } = &func.kind
+            && !keywords.is_empty()
+            && let Some(name) = self.enum_named(value)
+        {
+            return self.infer_named_variant(call, func, &name, attr, args, keywords);
+        }
         if let Some(keyword) = keywords.first() {
-            // a struct's values are the only named ones, so nothing else is checked
+            // a struct's and a named variant's values are the only named ones, so nothing else
+            // is checked
             for arg in args {
                 self.infer(arg);
             }
@@ -7599,7 +7778,8 @@ impl Inference {
             }
             self.error(
                 keyword.arg_span,
-                "only a struct is made with named values; pass this value without its name",
+                "only a struct or a named variant is made with named values; pass this value \
+                 without its name",
             );
             return self.fresh();
         }
@@ -7830,6 +8010,15 @@ impl Inference {
         for case in cases {
             let mut bound = vec![];
             self.check_pattern(&case.pattern, &ty, &mut bound);
+            if case.pattern.alternatives(MAX_ALTERNATIVES + 1) > MAX_ALTERNATIVES {
+                self.error(
+                    case.pattern.span,
+                    format!(
+                        "this pattern stands for more than {MAX_ALTERNATIVES} patterns without \
+                         '|'; split it into more cases"
+                    ),
+                );
+            }
             self.check_block(&case.body);
         }
         self.matches.push(PendingMatch {
@@ -7848,6 +8037,24 @@ impl Inference {
         self.expr_types.push((pattern.span, expected.clone()));
         match &pattern.kind {
             PatternKind::Wildcard => {}
+            PatternKind::Literal(literal) => {
+                let ty = match literal {
+                    Constant::Int(_) => Ty::Int,
+                    Constant::Bool(_) => Ty::Bool,
+                    _ => Ty::Str,
+                };
+                if !self.unify(expected, &ty) {
+                    let message = format!(
+                        "this pattern matches {}, but the value is {}",
+                        self.show(&ty),
+                        self.show(expected)
+                    );
+                    self.error(pattern.span, message);
+                }
+            }
+            PatternKind::Or(alternatives) => {
+                self.check_alternatives(alternatives, expected, bound);
+            }
             PatternKind::Name(id) => {
                 if bound.contains(id) {
                     self.error(
@@ -7881,10 +8088,11 @@ impl Inference {
                 self.check_target(&target, expected, pattern.span);
             }
             PatternKind::Variant { path, fields } => {
-                let Some((enum_ty, written, field_types)) = self.variant_of_pattern(path) else {
+                let Some((enum_ty, written, field_types, names)) = self.variant_of_pattern(path)
+                else {
                     for field in fields {
                         let unknown = self.fresh();
-                        self.check_pattern(field, &unknown, bound);
+                        self.check_pattern(&field.pattern, &unknown, bound);
                     }
                     return;
                 };
@@ -7895,6 +8103,17 @@ impl Inference {
                         self.show(expected)
                     );
                     self.error(pattern.span, message);
+                }
+                if let Some(names) = names {
+                    self.check_named_fields(&written, fields, &field_types, &names, bound);
+                    return;
+                }
+                if let Some(field) = fields.iter().find(|f| f.name.is_some()) {
+                    let (_, span) = field.name.as_ref().unwrap();
+                    self.error(
+                        *span,
+                        format!("'{written}' takes its values in order, without names"),
+                    );
                 }
                 if fields.len() != field_types.len() {
                     let message = match field_types.len() {
@@ -7912,8 +8131,124 @@ impl Inference {
                 }
                 for (i, field) in fields.iter().enumerate() {
                     let field_ty = field_types.get(i).cloned().unwrap_or_else(|| self.fresh());
-                    self.check_pattern(field, &field_ty, bound);
+                    self.check_pattern(&field.pattern, &field_ty, bound);
                 }
+            }
+        }
+    }
+
+    /// Checks the alternatives of an or-pattern against a value of type `expected`, each of which
+    /// must bind the same names, which `bound` then holds as one pattern's would.
+    ///
+    /// For example, `some(x) | x` is an error, since `x` is an option in one and its value in the
+    /// other, while `Shape.Rect(w, _) | Shape.Square(w)` binds `w` either way.
+    fn check_alternatives(
+        &mut self,
+        alternatives: &[Pattern],
+        expected: &Ty,
+        bound: &mut Vec<String>,
+    ) {
+        let before = bound.len();
+        let mut first: Vec<String> = vec![];
+        for (i, alternative) in alternatives.iter().enumerate() {
+            let mut mine = bound[..before].to_vec();
+            self.check_pattern(alternative, expected, &mut mine);
+            let names = mine[before..].to_vec();
+            if i == 0 {
+                first = names;
+                continue;
+            }
+            for name in &first {
+                if !names.contains(name) {
+                    self.error(
+                        alternative.span,
+                        format!(
+                            "'{name}' is bound in '{}' but not in '{alternative}'",
+                            alternatives[0]
+                        ),
+                    );
+                }
+            }
+            for name in &names {
+                if !first.contains(name) {
+                    self.error(
+                        alternative.span,
+                        format!(
+                            "'{name}' is bound in '{alternative}' but not in '{}'",
+                            alternatives[0]
+                        ),
+                    );
+                }
+            }
+        }
+        bound.truncate(before);
+        bound.extend(first);
+    }
+
+    /// Checks the values of a pattern of the named variant `written`, whose fields are `names`
+    /// with the types `field_types`: each names a field once, as `w=0.0`, or is the shorthand
+    /// `w` for `w=w`, and fields it leaves out match anything.
+    ///
+    /// For example, `Shape.Rect(w, h=0.0)` binds `w` and matches only a `Rect` whose `h` is 0.0.
+    fn check_named_fields(
+        &mut self,
+        written: &str,
+        fields: &[PatternField],
+        field_types: &[Ty],
+        names: &[(String, usize)],
+        bound: &mut Vec<String>,
+    ) {
+        let short = written;
+        let mut given: Vec<&str> = vec![];
+        for field in fields {
+            let (name, span, shorthand) = match (&field.name, &field.pattern.kind) {
+                (Some((name, span)), _) => (name, *span, false),
+                (None, PatternKind::Name(name)) => (name, field.pattern.span, true),
+                (None, _) => {
+                    let example = names
+                        .first()
+                        .map(|(n, _)| format!("{n}={}", field.pattern))
+                        .unwrap_or_default();
+                    self.error(
+                        field.pattern.span,
+                        format!(
+                            "match a named variant's values by name, as in '{short}({example})'"
+                        ),
+                    );
+                    let unknown = self.fresh();
+                    self.check_pattern(&field.pattern, &unknown, bound);
+                    continue;
+                }
+            };
+            let Some(position) = names.iter().position(|(n, _)| n == name) else {
+                let message = match (
+                    shorthand,
+                    names.iter().find(|(n, _)| !given.contains(&n.as_str())),
+                ) {
+                    (true, Some((other, _))) => format!(
+                        "'{short}' has no field '{name}'; write '{other}={name}' to bind field \
+                         {other} to {name}"
+                    ),
+                    _ => format!("'{short}' has no field '{name}'"),
+                };
+                self.error(span, message);
+                let unknown = self.fresh();
+                self.check_pattern(&field.pattern, &unknown, bound);
+                continue;
+            };
+            if given.contains(&name.as_str()) {
+                self.error(span, format!("field '{name}' is matched more than once"));
+                let unknown = self.fresh();
+                self.check_pattern(&field.pattern, &unknown, bound);
+                continue;
+            }
+            given.push(name);
+            let ty = field_types[position].clone();
+            self.check_pattern(&field.pattern, &ty, bound);
+            // after the variable a shorthand binds, which is what the name finds first
+            self.add_reference(span, names[position].1);
+            if shorthand {
+                self.shorthand_fields.push(span);
             }
         }
     }
@@ -7923,7 +8258,11 @@ impl Inference {
     ///
     /// For example, `["Shape", "Circle"]` gives `Shape`, `Shape.Circle`, and `[float]`, and
     /// `["some"]` gives `option[T]`, `some`, and `[T]` for a new unknown `T`.
-    fn variant_of_pattern(&mut self, path: &[(String, Span)]) -> Option<(Ty, String, Vec<Ty>)> {
+    #[allow(clippy::type_complexity)]
+    fn variant_of_pattern(
+        &mut self,
+        path: &[(String, Span)],
+    ) -> Option<(Ty, String, Vec<Ty>, Option<Vec<(String, usize)>>)> {
         match path {
             [(name, span)] => {
                 self.error(
@@ -7951,10 +8290,10 @@ impl Inference {
                         .iter()
                         .map(|f| Self::substitute(f, &type_params, &type_args))
                         .collect::<Vec<Ty>>();
-                    (v.symbol, fields)
+                    (v.symbol, fields, v.names.clone())
                 });
                 self.add_reference(*enum_span, enum_symbol);
-                let Some((symbol, fields)) = found else {
+                let Some((symbol, fields, names)) = found else {
                     self.error(
                         *variant_span,
                         format!("'{enum_name}' has no variant '{variant}'"),
@@ -7963,7 +8302,7 @@ impl Inference {
                 };
                 self.add_reference(*variant_span, symbol);
                 let written = format!("{enum_name}.{variant}");
-                Some((Ty::Enum(name, type_args), written, fields))
+                Some((Ty::Enum(name, type_args), written, fields, names))
             }
             _ => {
                 let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
@@ -9136,6 +9475,7 @@ impl Inference {
             let params = self.functions[&function].type_params.clone();
             for (ty, kind) in held.get(&function).cloned().unwrap_or_default() {
                 let ty = Self::substitute(&ty, &params, &args);
+                self.held_types.push((ty.clone(), kind));
                 let (what, count) = self.held_width(&ty, kind);
                 if count > MAX_ELEMENT_VALUES && reported.insert(outer) {
                     let short = function.rsplit('.').next().unwrap_or(&function);
@@ -9396,12 +9736,14 @@ impl Inference {
             .collect();
         let mut seen = HashSet::new();
         let mut errors = vec![];
+        let mut held = vec![];
         for (span, ty) in &self.expr_types {
             if generic.iter().any(|f| f.encloses(*span)) {
                 continue;
             }
             let mut found = vec![];
             self.stored(&self.resolve(ty), &mut found, &mut HashSet::new());
+            held.extend(found.iter().cloned());
             for (ty, kind) in found {
                 if kind != Held::Variants || !seen.insert(self.show(&ty)) {
                     continue;
@@ -9422,6 +9764,7 @@ impl Inference {
         for (span, message) in errors {
             self.error(span, message);
         }
+        self.held_types.extend(held);
     }
 
     /// Reports a global whose type holds a type parameter, which a generic function gave it by
@@ -9467,6 +9810,10 @@ impl Inference {
                 .iter()
                 .for_each(|(_, _, ty)| self.params_in(ty, &mut params));
             let count: usize = values.iter().map(|(_, _, ty)| self.values(ty)).sum();
+            if params.is_empty() {
+                let captured = values.iter().map(|(_, _, ty)| self.resolve(ty)).collect();
+                self.held_types.push((Ty::Tuple(captured), Held::Captures));
+            }
             if count > MAX_ELEMENT_VALUES && params.is_empty() {
                 errors.push((
                     *span,
@@ -9622,12 +9969,16 @@ impl Inference {
                     }
                 }
                 SymbolKind::Field => {
-                    let struct_name = symbol.scope.clone().unwrap_or_default();
-                    self.structs[&struct_name]
-                        .fields
-                        .iter()
-                        .find(|f| f.symbol == i)
-                        .map_or(Type::Int, |f| self.finalize(&f.ty))
+                    let owner = symbol.scope.clone().unwrap_or_default();
+                    match self.structs.get(&owner) {
+                        Some(info) => info
+                            .fields
+                            .iter()
+                            .find(|f| f.symbol == i)
+                            .map_or(Type::Int, |f| self.finalize(&f.ty)),
+                        // a named variant's field, scoped to `<Enum>.<Variant>`
+                        None => self.finalize(&self.symbol_types[i]),
+                    }
                 }
                 _ => self.finalize(&self.symbol_types[i]),
             };
@@ -9655,9 +10006,23 @@ impl Inference {
             if !params.is_empty() {
                 analysis.type_params.insert(name.clone(), params.clone());
             }
-            analysis
-                .enums
-                .insert(name.clone(), EnumDef { params, variants });
+            let field_names = info
+                .variants
+                .iter()
+                .map(|v| {
+                    v.names
+                        .as_ref()
+                        .map(|names| names.iter().map(|(n, _)| n.clone()).collect())
+                })
+                .collect();
+            analysis.enums.insert(
+                name.clone(),
+                EnumDef {
+                    params,
+                    variants,
+                    names: field_names,
+                },
+            );
         }
         for (name, info) in &self.structs {
             let fields = info
@@ -9731,6 +10096,14 @@ impl Inference {
             }
         }
         analysis.method_functions = std::mem::take(&mut self.method_functions);
+        analysis.shorthand_fields = std::mem::take(&mut self.shorthand_fields);
+        let mut seen = HashSet::new();
+        for (ty, kind) in std::mem::take(&mut self.held_types) {
+            let ty = self.finalize(&ty);
+            if !ty.has_params() && seen.insert(format!("{ty:?}{kind:?}")) {
+                analysis.held_types.push((ty, kind));
+            }
+        }
         analysis.references = self.references;
         analysis
             .references
@@ -9791,38 +10164,66 @@ impl Inference {
     /// reachable if some value matches it and no case before it.
     fn check_cases(&mut self, pending: PendingMatch) {
         let subject = self.resolve(&pending.subject);
-        if !matches!(subject, Ty::Enum(..)) {
+        if !matches!(subject, Ty::Enum(..) | Ty::Int | Ty::Str | Ty::Bool) {
             let message = format!(
-                "'match' needs an enum or option value, found {}",
+                "'match' needs an enum, option, int, str, or bool value, found {}",
                 self.show(&subject)
             );
             self.error(pending.subject_span, message);
             return;
         }
         let mut rows: Vec<Vec<Space>> = vec![];
+        let types = std::slice::from_ref(&subject);
         for pattern in &pending.patterns {
             // a pattern that names no variant was reported already
             let Some(space) = self.space(pattern, &subject) else {
                 return;
             };
-            if !self.useful(
-                &rows,
-                std::slice::from_ref(&space),
-                std::slice::from_ref(&subject),
-            ) {
+            let Space::Or(alternatives) = space else {
+                if !self.useful(&rows, std::slice::from_ref(&space), types) {
+                    self.diagnostics.push(Diagnostic::warning(
+                        pattern.span,
+                        "this case never runs, since the cases before it match every value it \
+                         would",
+                    ));
+                }
+                rows.push(vec![space]);
+                continue;
+            };
+            let PatternKind::Or(written) = &pattern.kind else {
+                return;
+            };
+            // each alternative is tried after the ones before it
+            let mut useless = vec![];
+            let start = rows.len();
+            for (alternative, written) in alternatives.into_iter().zip(written) {
+                if !self.useful(&rows, std::slice::from_ref(&alternative), types) {
+                    useless.push(written.span);
+                }
+                rows.push(vec![alternative]);
+            }
+            if useless.len() == rows.len() - start {
                 self.diagnostics.push(Diagnostic::warning(
                     pattern.span,
                     "this case never runs, since the cases before it match every value it would",
                 ));
+                continue;
             }
-            rows.push(vec![space]);
+            for span in useless {
+                self.diagnostics.push(Diagnostic::warning(
+                    span,
+                    "this alternative never matches, since the patterns before it match every \
+                     value it would",
+                ));
+            }
         }
-        if let Some(witness) = self.missing(&rows, std::slice::from_ref(&subject)) {
+        if let Some(witness) = self.missing(&rows, types) {
             let missed = &witness[0];
-            self.error(
-                pending.subject_span,
-                format!("'match' does not cover {missed}; add 'case {missed}:' or 'case _:'"),
-            );
+            let message = match missed.as_str() {
+                "_" => "'match' does not cover every value; add 'case _:'".to_string(),
+                _ => format!("'match' does not cover {missed}; add 'case {missed}:' or 'case _:'"),
+            };
+            self.error(pending.subject_span, message);
         }
     }
 
@@ -9847,23 +10248,63 @@ impl Inference {
         }
     }
 
+    /// Returns the variants a `match` tells apart in a value of type `ty`, as
+    /// [`Inference::ty_variants`] does, plus `false` and `true` for a bool, which `match` treats
+    /// as an enum of two variants without values.
+    fn match_variants(&self, ty: &Ty) -> Option<Vec<(String, Vec<Ty>)>> {
+        match self.resolve(ty) {
+            Ty::Bool => Some(vec![
+                ("false".to_string(), vec![]),
+                ("true".to_string(), vec![]),
+            ]),
+            _ => self.ty_variants(ty),
+        }
+    }
+
+    /// Returns the names of the values of the variant `tag` of the enum type `ty`, if it names
+    /// them.
+    fn variant_field_names(&self, ty: &Ty, tag: usize) -> Option<Vec<String>> {
+        let Ty::Enum(name, _) = self.resolve(ty) else {
+            return None;
+        };
+        let names = self.enums.get(&name)?.variants.get(tag)?.names.as_ref()?;
+        Some(names.iter().map(|(n, _)| n.clone()).collect())
+    }
+
     /// Converts `pattern`, which matches a value of type `ty`, to the [`Space`] of values it
     /// matches, or `None` if it names a variant `ty` does not have.
     fn space(&self, pattern: &Pattern, ty: &Ty) -> Option<Space> {
         match &pattern.kind {
             PatternKind::Wildcard | PatternKind::Name(_) => Some(Space::Any),
+            PatternKind::Literal(Constant::Bool(b)) => Some(Space::Variant(*b as usize, vec![])),
+            PatternKind::Literal(Constant::Int(n)) => Some(Space::Lit(Literal::Int(*n))),
+            PatternKind::Literal(Constant::Str(text)) => {
+                Some(Space::Lit(Literal::Str(text.clone())))
+            }
+            PatternKind::Literal(_) => None,
+            PatternKind::Or(alternatives) => Some(Space::Or(
+                alternatives
+                    .iter()
+                    .map(|a| self.space(a, ty))
+                    .collect::<Option<Vec<_>>>()?,
+            )),
             PatternKind::Variant { path, fields } => {
                 let variant = &path.last()?.0;
                 let variants = self.ty_variants(ty)?;
                 let tag = variants.iter().position(|(name, _)| name == variant)?;
                 let field_types = &variants[tag].1;
-                if field_types.len() != fields.len() {
+                let names = self.variant_field_names(ty, tag);
+                let arranged = crate::ast::arrange_fields(fields, names.as_deref());
+                if field_types.len() != arranged.len() {
                     return None;
                 }
-                let fields = fields
-                    .iter()
+                let fields = arranged
+                    .into_iter()
                     .zip(field_types)
-                    .map(|(field, ty)| self.space(field, ty))
+                    .map(|(field, ty)| match field {
+                        Some(field) => self.space(field, ty),
+                        None => Some(Space::Any),
+                    })
                     .collect::<Option<Vec<_>>>()?;
                 Some(Space::Variant(tag, fields))
             }
@@ -9876,8 +10317,26 @@ impl Inference {
         let Some((ty, rest)) = types.split_first() else {
             return rows.is_empty();
         };
-        let variants = self.ty_variants(ty);
+        let rows = &expand_rows(rows);
+        let variants = self.match_variants(ty);
         match &row[0] {
+            Space::Or(alternatives) => alternatives.iter().any(|alternative| {
+                let row: Vec<Space> = std::iter::once(alternative.clone())
+                    .chain(row[1..].iter().cloned())
+                    .collect();
+                self.useful(rows, &row, types)
+            }),
+            Space::Lit(literal) => {
+                let specialized: Vec<Vec<Space>> = rows
+                    .iter()
+                    .filter(|r| match &r[0] {
+                        Space::Lit(other) => other == literal,
+                        _ => matches!(r[0], Space::Any),
+                    })
+                    .map(|r| r[1..].to_vec())
+                    .collect();
+                self.useful(&specialized, &row[1..], rest)
+            }
             Space::Variant(tag, fields) => {
                 let field_types = variants.map(|v| v[*tag].1.clone()).unwrap_or_default();
                 let specialized = specialize(rows, *tag, fields.len());
@@ -9913,7 +10372,8 @@ impl Inference {
         let Some((ty, rest)) = types.split_first() else {
             return rows.is_empty().then(Vec::new);
         };
-        let variants = self.ty_variants(ty);
+        let rows = &expand_rows(rows);
+        let variants = self.match_variants(ty);
         match variants {
             Some(variants) if covers_all(rows, variants.len()) => {
                 for (tag, (name, field_types)) in variants.iter().enumerate() {
@@ -9921,7 +10381,7 @@ impl Inference {
                     let types: Vec<Ty> = field_types.iter().chain(rest).cloned().collect();
                     if let Some(witness) = self.missing(&specialized, &types) {
                         let (fields, after) = witness.split_at(field_types.len());
-                        let mut out = vec![self.written_variant(ty, name, fields)];
+                        let mut out = vec![self.written_variant(ty, tag, name, fields)];
                         out.extend(after.iter().cloned());
                         return Some(out);
                     }
@@ -9933,13 +10393,12 @@ impl Inference {
                 let used = used_tags(rows);
                 let first = match variants {
                     Some(variants) if !used.is_empty() => {
-                        let (name, field_types) = variants
+                        let (tag, (name, field_types)) = variants
                             .iter()
                             .enumerate()
-                            .find(|(tag, _)| !used.contains(tag))
-                            .map(|(_, variant)| variant)?;
+                            .find(|(tag, _)| !used.contains(tag))?;
                         let wild = vec!["_".to_string(); field_types.len()];
-                        self.written_variant(ty, name, &wild)
+                        self.written_variant(ty, tag, name, &wild)
                     }
                     _ => "_".to_string(),
                 };
@@ -9950,12 +10409,22 @@ impl Inference {
         }
     }
 
-    /// Writes the variant `name` of the enum type `ty` with the patterns `fields`, as a pattern is
-    /// written, such as `Shape.Rect(_, _)` or `none`.
-    fn written_variant(&self, ty: &Ty, name: &str, fields: &[String]) -> String {
+    /// Writes the variant `name`, with the tag `tag`, of the enum type `ty` with the patterns
+    /// `fields`, as a pattern is written, such as `Shape.Rect(_, _)`, `none`, or, for a named
+    /// variant, `Shape.Rect(w=0.0)`, leaving out the fields any value matches.
+    fn written_variant(&self, ty: &Ty, tag: usize, name: &str, fields: &[String]) -> String {
         let prefix = match self.resolve(ty) {
             Ty::Enum(enum_name, _) if !prints_bare(&enum_name) => format!("{enum_name}.{name}"),
             _ => name.to_string(),
+        };
+        let fields: Vec<String> = match self.variant_field_names(ty, tag) {
+            Some(names) => names
+                .iter()
+                .zip(fields)
+                .filter(|(_, field)| *field != "_")
+                .map(|(name, field)| format!("{name}={field}"))
+                .collect(),
+            None => fields.to_vec(),
         };
         if fields.is_empty() {
             prefix
@@ -9965,12 +10434,46 @@ impl Inference {
     }
 }
 
-/// The values a pattern matches, for checking `match` cases: any value, or a variant, by its
-/// tag, whose values match the given spaces.
+/// The values a pattern matches, for checking `match` cases: any value, a variant, by its tag,
+/// whose values match the given spaces (`false` and `true` are a bool's tags 0 and 1), a value
+/// equal to an int or a string, or any of several spaces.
 #[derive(Clone)]
 enum Space {
     Any,
     Variant(usize, Vec<Space>),
+    Lit(Literal),
+    Or(Vec<Space>),
+}
+
+/// An int or a string a pattern matches, which, unlike an enum's variants, are never all
+/// listed.
+#[derive(Clone, PartialEq)]
+enum Literal {
+    Int(i64),
+    Str(String),
+}
+
+/// Returns `rows` with each row that starts with alternatives replaced by a row for each of them,
+/// in order, so the rows start with no [`Space::Or`].
+fn expand_rows(rows: &[Vec<Space>]) -> Vec<Vec<Space>> {
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        match &row[0] {
+            Space::Or(alternatives) => {
+                let expanded: Vec<Vec<Space>> = alternatives
+                    .iter()
+                    .map(|a| {
+                        std::iter::once(a.clone())
+                            .chain(row[1..].iter().cloned())
+                            .collect()
+                    })
+                    .collect();
+                out.extend(expand_rows(&expanded));
+            }
+            _ => out.push(row.clone()),
+        }
+    }
+    out
 }
 
 /// Returns the tags of the variants that start the rows of `rows`.
@@ -9978,7 +10481,7 @@ fn used_tags(rows: &[Vec<Space>]) -> HashSet<usize> {
     rows.iter()
         .filter_map(|row| match &row[0] {
             Space::Variant(tag, _) => Some(*tag),
-            Space::Any => None,
+            Space::Any | Space::Lit(_) | Space::Or(_) => None,
         })
         .collect()
 }
@@ -9996,7 +10499,7 @@ fn specialize(rows: &[Vec<Space>], tag: usize, arity: usize) -> Vec<Vec<Space>> 
         .filter_map(|row| {
             let head: Vec<Space> = match &row[0] {
                 Space::Variant(t, fields) if *t == tag => fields.clone(),
-                Space::Variant(..) => return None,
+                Space::Variant(..) | Space::Lit(_) | Space::Or(_) => return None,
                 Space::Any => vec![Space::Any; arity],
             };
             Some(head.into_iter().chain(row[1..].iter().cloned()).collect())
@@ -10011,6 +10514,10 @@ fn default_rows(rows: &[Vec<Space>]) -> Vec<Vec<Space>> {
         .map(|row| row[1..].to_vec())
         .collect()
 }
+
+/// The most patterns without `|` a case's pattern may stand for ([`Pattern::alternatives`]),
+/// since compiled code tests each of them in turn.
+pub const MAX_ALTERNATIVES: usize = 256;
 
 /// Writes how many values a variant holds, such as `1 value` or `2 values`.
 fn values_phrase(count: usize) -> String {

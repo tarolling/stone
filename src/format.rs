@@ -234,7 +234,11 @@ impl<'a> Layout<'a> {
                     TokenType::Keyword("fn" | "struct" | "enum" | "trait" | "impl")
                 )
             });
-        let mut spacer = Spacer::new(header);
+        let case = line
+            .tokens
+            .first()
+            .is_some_and(|token| token.r#type == TokenType::Keyword("case"));
+        let mut spacer = Spacer::new(header, case);
         let mut out = String::new();
         for token in &line.tokens {
             if spacer.space_before(token) {
@@ -307,6 +311,8 @@ struct Spacer {
     frames: Vec<Frame>,
     /// Whether the line is a definition's header, whose `[`s hold type parameters.
     header: bool,
+    /// Whether the line is a `case`, whose `|`s separate alternatives rather than open a lambda.
+    case: bool,
     previous: Option<Kind>,
 }
 
@@ -354,13 +360,14 @@ impl Kind {
 }
 
 impl Spacer {
-    fn new(header: bool) -> Self {
+    fn new(header: bool, case: bool) -> Self {
         Spacer {
             frames: vec![Frame {
                 group: Group::Line,
                 in_bars: false,
             }],
             header,
+            case,
             previous: None,
         }
     }
@@ -388,6 +395,7 @@ impl Spacer {
             TokenType::Keyword("true" | "false" | "none") => Kind::Operand,
             TokenType::Keyword("fn") => Kind::FnType,
             TokenType::Keyword(_) => Kind::Keyword,
+            TokenType::VBar if self.case => Kind::Binary,
             TokenType::VBar if self.top().in_bars => Kind::CloseBar,
             TokenType::VBar => Kind::OpenBar,
             TokenType::StringStart(_) => Kind::TextStart,
@@ -460,10 +468,12 @@ impl Spacer {
                     self.frames.pop();
                 }
             }
-            TokenType::VBar => {
+            TokenType::VBar if !self.case => {
                 let frame = self.top();
                 frame.in_bars = !frame.in_bars;
             }
+            // the `:` that opens a case's block ends its pattern, and a body may follow
+            TokenType::Colon if self.frames.len() == 1 => self.case = false,
             _ => {}
         }
         self.previous = Some(kind);
@@ -631,6 +641,10 @@ mod tests {
             (
                 "fn f(x: option[int]) -> option[int]:\n    ret some(x ? + 1)",
                 "fn f(x: option[int]) -> option[int]:\n    ret some(x? + 1)",
+            ),
+            (
+                "match n:\n    case 1|2 |-3:\n        print(n)\n    case some(1|2):  ys = xs.map(|x| x)\n    case S.R(w=0|1,h):\n        print(h)",
+                "match n:\n    case 1 | 2 | -3:\n        print(n)\n    case some(1 | 2): ys = xs.map(|x| x)\n    case S.R(w=0 | 1, h):\n        print(h)",
             ),
         ]);
     }

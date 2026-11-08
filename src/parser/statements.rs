@@ -2,12 +2,16 @@
 
 use super::Parser;
 use crate::ast::{
-    Arg, Arguments, Expr, Field, MatchCase, Operator, ParserError, Pattern, PatternKind, Stmt,
-    StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam, Variant,
+    Arg, Arguments, Constant, Expr, Field, MatchCase, Operator, ParserError, Pattern, PatternField,
+    PatternKind, Stmt, StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam, Variant,
 };
 use crate::debug;
 use crate::span::{FileId, Span};
 use crate::token::TokenType;
+
+/// The names of a variant's values, each with its span, as `w` and `h` in
+/// `Rect(w: float, h: float)`.
+type Names = Vec<(String, Span)>;
 
 impl Parser {
     /// Parses a `for` loop, such as `for i in range(3): print(i)`.
@@ -659,7 +663,9 @@ impl Parser {
     ///
     /// ```text
     /// variant:
-    ///     | NAME ['(' ','.type+ [','] ')'] NEWLINE
+    ///     | NAME ['(' (','.variant_field+ | ','.type+) [','] ')'] NEWLINE
+    /// variant_field:
+    ///     | NAME ':' type
     /// ```
     fn parse_variants(&mut self) -> Result<Vec<Variant>, ParserError> {
         let mut variants = vec![];
@@ -686,17 +692,22 @@ impl Parser {
                     );
                     None
                 } else {
-                    match self.parse_types() {
+                    match self.parse_variant_fields() {
                         Some(fields) if self.expect(TokenType::RParen).is_some() => Some(fields),
                         _ => None,
                     }
                 }
             } else {
-                Some(vec![])
+                Some((vec![], None))
             };
             match fields {
-                Some(fields) if self.expect(TokenType::Newline).is_some() => {
-                    variants.push(Variant { name, span, fields });
+                Some((fields, names)) if self.expect(TokenType::Newline).is_some() => {
+                    variants.push(Variant {
+                        name,
+                        span,
+                        fields,
+                        names,
+                    });
                 }
                 _ => {
                     self.pos = mark;
@@ -709,6 +720,50 @@ impl Parser {
         }
 
         Err(self.error_here("parse_variants"))
+    }
+
+    /// Parses the values of a variant inside its parentheses, either all named, as
+    /// `w: float, h: float`, or all unnamed, as `float, float`, allowing a trailing comma, and
+    /// returns their types with their names if they have them. Returns `None` if they do not
+    /// parse, with a hint where a variant mixes the two.
+    fn parse_variant_fields(&mut self) -> Option<(Vec<TypeExpr>, Option<Names>)> {
+        let named = |parser: &Self| {
+            matches!(parser.peek().r#type, TokenType::Name(_))
+                && parser.tokens.get(parser.pos + 1).map(|t| &t.r#type) == Some(&TokenType::Colon)
+        };
+        let mixed = "a variant's values are all named, as in 'Rect(w: float, h: float)', or all \
+                     unnamed, as in 'Rect(float, float)'";
+        if !named(self) {
+            let types = self.parse_types()?;
+            // a name read as a type, as `h` in `Rect(float, h: float)`
+            if self.peek().r#type == TokenType::Colon {
+                let span = self.tokens[self.pos - 1].span;
+                self.hint(span, mixed);
+            }
+            return Some((types, None));
+        }
+        let mut types = vec![];
+        let mut names = vec![];
+        loop {
+            if !named(self) {
+                // a trailing comma is allowed
+                if self.peek().r#type == TokenType::RParen {
+                    break;
+                }
+                let span = self.peek().span;
+                self.hint(span, mixed);
+                return None;
+            }
+            let name = self.expect_name("a value's name", false)?;
+            self.expect(TokenType::Colon)?;
+            let ty = self.nested(Self::parse_type).ok()?;
+            types.push(*ty);
+            names.push(name);
+            if self.expect(TokenType::Comma).is_none() {
+                break;
+            }
+        }
+        Some((types, Some(names)))
     }
 
     /// Parses a `match` statement, such as `match s:` followed by an indented `case` for each
@@ -748,7 +803,7 @@ impl Parser {
         loop {
             let mark = self.pos;
             if self.expect(TokenType::Keyword("case")).is_some()
-                && let Ok(pattern) = self.parse_pattern()
+                && let Ok(pattern) = self.parse_or_pattern()
                 && self.expect_block_start().is_some()
                 && let Ok(body) = self.nested(Self::parse_block)
             {
@@ -765,13 +820,14 @@ impl Parser {
         Err(self.error_here("parse_cases"))
     }
 
-    /// Parses a pattern after `case`, such as `Shape.Rect(w, _)`, `some(x)`, `none`, a name, or
-    /// `_`.
+    /// Parses a pattern after `case`, such as `Shape.Rect(w, _)`, `some(x)`, `none`, a name,
+    /// `_`, or a literal such as `0` or `"quit"`.
     ///
     /// ```text
     /// pattern:
     ///     | 'none'
-    ///     | NAME ('.' NAME)* ['(' ','.pattern+ [','] ')']
+    ///     | NAME ('.' NAME)* ['(' ','.pattern_field+ [','] ')']
+    ///     | literal_pattern
     /// ```
     pub(super) fn parse_pattern(&mut self) -> Result<Pattern, ParserError> {
         let mark = self.pos;
@@ -821,31 +877,121 @@ impl Parser {
                     span: self.span_from(mark),
                 });
             }
-        } else if matches!(
-            self.peek().r#type,
-            TokenType::Number(_) | TokenType::Float(_) | TokenType::String(_)
-        ) || matches!(&self.peek().r#type, TokenType::Keyword(word) if *word == "true" || *word == "false")
-            || matches!(&self.peek().r#type, TokenType::Operator(op) if *op == "-")
-        {
-            let span = self.peek().span;
-            self.hint(
-                span,
-                "a pattern is a variant such as 'Shape.Circle(r)', 'some(x)', or 'none', a name, or '_'",
-            );
+        } else if let Some(literal) = self.parse_literal_pattern() {
+            return Ok(Pattern {
+                kind: PatternKind::Literal(literal),
+                span: self.span_from(mark),
+            });
         }
         self.pos = mark;
 
         Err(self.error_here("parse_pattern"))
     }
 
-    /// Parses one or more patterns separated by commas, allowing a trailing comma, such as
-    /// `w, _` in `Shape.Rect(w, _)`. Returns `None` if the first pattern fails.
-    fn parse_patterns(&mut self) -> Option<Vec<Pattern>> {
-        let first = self.nested(Self::parse_pattern).ok()?;
+    /// Parses a literal pattern: an int, maybe negated, a string without values, `true`, or
+    /// `false`. A float, bytes, or a string with values gets a hint, and nothing parses.
+    ///
+    /// ```text
+    /// literal_pattern:
+    ///     | ['-'] NUMBER
+    ///     | STRING
+    ///     | 'true'
+    ///     | 'false'
+    /// ```
+    fn parse_literal_pattern(&mut self) -> Option<Constant> {
+        let token = self.peek().clone();
+        let negated = token.r#type == TokenType::Operator("-");
+        let value = if negated {
+            self.tokens.get(self.pos + 1).cloned()?
+        } else {
+            token.clone()
+        };
+        let literal = match &value.r#type {
+            TokenType::Number(n) if negated => Some(Constant::Int(n.wrapping_neg())),
+            TokenType::Number(n) => Some(Constant::Int(*n)),
+            TokenType::String(text) if !negated => Some(Constant::Str(text.clone())),
+            TokenType::Keyword("true") if !negated => Some(Constant::Bool(true)),
+            TokenType::Keyword("false") if !negated => Some(Constant::Bool(false)),
+            _ => None,
+        };
+        if let Some(literal) = literal {
+            self.pos += if negated { 2 } else { 1 };
+            return Some(literal);
+        }
+        let hint = match &value.r#type {
+            TokenType::Float(_) => {
+                Some("a float cannot be a pattern, since nan equals nothing; compare with 'if'")
+            }
+            TokenType::Bytes(_) => Some("bytes cannot be a pattern; compare with 'if'"),
+            TokenType::StringStart(_) => {
+                Some("a string with values cannot be a pattern; compare with 'if'")
+            }
+            _ => None,
+        };
+        if let Some(hint) = hint {
+            self.hint(token.span, hint);
+        }
+        None
+    }
+
+    /// Parses one value of a variant pattern, a pattern or a field's name, `=`, and a pattern, as
+    /// `w=0.0` in `Shape.Rect(w=0.0)`.
+    ///
+    /// ```text
+    /// pattern_field:
+    ///     | NAME '=' pattern
+    ///     | pattern
+    /// ```
+    fn parse_pattern_field(&mut self) -> Result<PatternField, ParserError> {
+        let mark = self.pos;
+        if let TokenType::Name(name) = self.peek().r#type.clone()
+            && self.tokens.get(self.pos + 1).map(|t| &t.r#type) == Some(&TokenType::Operator("="))
+        {
+            let span = self.peek().span;
+            self.pos += 2;
+            if let Ok(pattern) = self.parse_or_pattern() {
+                return Ok(PatternField {
+                    name: Some((name, span)),
+                    pattern,
+                });
+            }
+            self.pos = mark;
+            return Err(self.error_here("parse_pattern_field"));
+        }
+        self.parse_or_pattern().map(PatternField::from)
+    }
+
+    /// Parses a pattern and any alternatives after it, each after a `|`, as `1 | 2` or
+    /// `Shape.Circle(_) | Shape.Empty`. One pattern alone is itself.
+    ///
+    /// ```text
+    /// or_pattern:
+    ///     | '|'.pattern+
+    /// ```
+    pub(super) fn parse_or_pattern(&mut self) -> Result<Pattern, ParserError> {
+        let mark = self.pos;
+        let first = self.parse_pattern()?;
+        let mut alternatives = vec![first];
+        while self.expect(TokenType::VBar).is_some() {
+            alternatives.push(self.nested(Self::parse_pattern)?);
+        }
+        if alternatives.len() == 1 {
+            return Ok(alternatives.pop().unwrap());
+        }
+        Ok(Pattern {
+            kind: PatternKind::Or(alternatives),
+            span: self.span_from(mark),
+        })
+    }
+
+    /// Parses one or more values of a variant pattern separated by commas, allowing a trailing
+    /// comma, such as `w, _` in `Shape.Rect(w, _)`. Returns `None` if the first value fails.
+    fn parse_patterns(&mut self) -> Option<Vec<PatternField>> {
+        let first = self.nested(Self::parse_pattern_field).ok()?;
         let mut patterns = vec![first];
         while self.expect(TokenType::Comma).is_some() {
             let before = self.pos;
-            match self.nested(Self::parse_pattern) {
+            match self.nested(Self::parse_pattern_field) {
                 Ok(pattern) => patterns.push(pattern),
                 Err(_) => {
                     // a trailing comma is allowed

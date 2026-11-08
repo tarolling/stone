@@ -301,6 +301,7 @@ time.sleep(0)
 xs = [0]
 for i in range(100000):
     xs.append(i)
+print([1.0, 2.0] * 2.0 + [3.0, 4.0])
 match gui.open(\"t\", 1, 1):
     case ok(w):
         w.show(gui.blank(1, 1, 0))
@@ -324,10 +325,19 @@ match net.listen(\"127.0.0.1\", 0):
         &crate::project::MapSources::default(),
     );
     let module = module.unwrap().module;
-    let assembly = crate::codegen::Target::X64_WINDOWS
-        .generator()
-        .assemble(&module)
-        .unwrap();
+    // built as `--gpu` builds, so the runtime launches the arithmetic on lists on a GPU
+    let mut generator = crate::codegen::Target::X64_WINDOWS.generator();
+    generator.set_gpu_launch(true);
+    let mut assembly = generator.assemble(&module).unwrap();
+    // the image `stone build` appends, empty since only what the runtime calls matters here
+    let image = crate::codegen::gpu::image::build(
+        &[],
+        &[],
+        &[],
+        crate::codegen::gpu::image::Carry::Modules,
+    )
+    .unwrap();
+    assembly.push_str(&crate::codegen::gpu::image::assembly(&image));
     for call in Sys::ALL {
         assert!(
             assembly.contains(&format!("{}:", call.shim())),

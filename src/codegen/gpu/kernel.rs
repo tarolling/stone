@@ -32,6 +32,20 @@ pub struct Shape {
     pub fail_flag: bool,
     /// The number of 8-byte parameters, the flag included.
     pub params: u32,
+    /// The parameters that are the address of a list's elements, the result's included, as bit
+    /// `i` for parameter `i`; a kernel of more than 64 parameters is never launched.
+    pub lists: u64,
+}
+
+impl Shape {
+    /// The most parameters a kernel that is launched may have, one per bit of
+    /// [`lists`](Shape::lists).
+    pub const MAX_PARAMS: u32 = 64;
+
+    /// Returns whether a launch can pass the kernel what it takes.
+    pub fn launchable(&self) -> bool {
+        self.params <= Self::MAX_PARAMS
+    }
 }
 
 /// Returns a kernel for each distinct piece of arithmetic in `recorded`, named `stone_k0`,
@@ -66,10 +80,19 @@ pub fn numbered(recorded: &[DeviceKernel]) -> Result<Numbered, String> {
                 kernel.name = format!("stone_k{}", kernels.len());
                 kernel.sites.push(record.span);
                 record_kernel.push(kernels.len());
+                let fail_flag = record.float && divides(&record.kernel);
+                // every address but the flag's is a list's
+                let addresses = kernel.params.len() - usize::from(fail_flag);
+                let lists = kernel.params[..addresses]
+                    .iter()
+                    .enumerate()
+                    .filter(|&(index, &ty)| ty == Ty::Ptr && index < Shape::MAX_PARAMS as usize)
+                    .fold(0, |lists, (index, _)| lists | 1 << index);
                 shapes.push(Shape {
                     float: record.float,
-                    fail_flag: record.float && divides(&record.kernel),
+                    fail_flag,
                     params: kernel.params.len() as u32,
+                    lists,
                 });
                 kernels.push(kernel);
             }
@@ -605,7 +628,36 @@ b5:
             float: true,
             fail_flag: false,
             params: 3,
+            lists: 0b101,
         };
         assert_eq!(numbered.shapes, [shape, shape]);
+    }
+
+    #[test]
+    fn a_shape_marks_the_parameters_that_are_lists() {
+        let site = Span::new(Pos::new(1, 5), Pos::new(1, 16));
+        // a * x + b, then a / x, which takes the flag last
+        let x = Box::new(ir::Kernel::Number(Operand::Reg(VReg(7))));
+        let record = |kernel: Box<ir::Kernel>| DeviceKernel {
+            span: site,
+            float: true,
+            kernel: *kernel,
+        };
+        let numbered = numbered(&[
+            record(binary(
+                BinOp::Add,
+                binary(BinOp::Mul, list(1), x.clone()),
+                list(2),
+            )),
+            record(binary(BinOp::Div, list(1), x)),
+        ])
+        .unwrap();
+        // out, length, a, x, b
+        assert_eq!(numbered.shapes[0].params, 5);
+        assert_eq!(numbered.shapes[0].lists, 0b10101);
+        // out, length, a, x, flag
+        assert_eq!(numbered.shapes[1].params, 5);
+        assert!(numbered.shapes[1].fail_flag);
+        assert_eq!(numbered.shapes[1].lists, 0b101);
     }
 }

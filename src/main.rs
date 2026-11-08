@@ -63,9 +63,10 @@ enum Command {
         #[arg(long = "target", value_name = "TARGET", value_parser = str::parse::<Target>)]
         targets: Vec<Target>,
         /// A GPU to write kernels for, named as its vendor names it, such as `sm_75`. Each
-        /// piece of arithmetic on lists becomes a kernel in `<output>.<GPU>.ptx`, though nothing
-        /// launches them yet. Give it more than once for several GPUs; only NVIDIA's are
-        /// supported.
+        /// piece of arithmetic on lists becomes a kernel in `<output>.<GPU>.ptx`. Windows
+        /// programs run the kernels on an NVIDIA GPU when one is usable (`STONE_GPU=off` never,
+        /// `require` always), and others compute on the processor. Give it more than once for
+        /// several GPUs; only NVIDIA's are supported.
         #[arg(long = "gpu", value_name = "GPU", value_parser = str::parse::<Device>)]
         devices: Vec<Device>,
         /// Builds Windows programs as programs with windows, which start with no console, so

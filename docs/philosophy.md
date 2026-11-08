@@ -274,9 +274,12 @@ The same arithmetic on lists is the first code stone writes for GPUs: with `--gp
 `stone build` turns each such expression into a kernel, in PTX for NVIDIA GPUs, that computes
 every element exactly as the processor does, rounding each float operation on its own and
 flagging a zero divisor for the program to report. No keyword marks the code for a GPU, since the
-compiler finds it. Launching the kernels, which needs a way to reach the GPU's driver from a
-program that uses no C library, and deciding when a list is large enough to be worth sending to
-the GPU, are future work, as are AMD GPUs.
+compiler finds it. An x86-64 Windows program launches the kernels through NVIDIA's driver,
+which it loads only when it runs, so the same executable computes on the processor on a machine
+without one; `STONE_GPU=off` keeps it there, and `STONE_GPU=require` makes it an error not to
+use the GPU. Launching on Linux, which needs a way to reach the GPU's driver from a program
+that uses no C library, and deciding when a list is large enough to be worth sending to the GPU,
+are future work, as are AMD GPUs.
 Vector code beyond arithmetic on lists (searching strings, comparing lists, summing them),
 splitting a value's live range around calls, and removing reference counts it can prove
 redundant beyond moves at last use are future work.

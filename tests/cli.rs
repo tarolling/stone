@@ -622,9 +622,9 @@ fn build_embeds_the_machine_code_of_each_gpu_in_the_program() {
             assert_eq!(kernel.registers, expected.registers);
             assert_eq!(kernel.param_size, expected.param_size);
         }
-        assert!(!device.kernels[0].fail_flag);
-        assert!(device.kernels[1].fail_flag);
     }
+    assert!(!image.shapes[0].fail_flag);
+    assert!(image.shapes[1].fail_flag);
 
     if cfg!(target_os = "linux") {
         let ran = Command::new(&exe).output().unwrap();
@@ -666,11 +666,9 @@ fn a_gpu_build_without_ptxas_embeds_an_image_with_no_devices() {
     );
 }
 
+#[cfg(target_os = "linux")]
 #[test]
 fn a_build_without_gpus_embeds_no_image() {
-    if !cfg!(target_os = "linux") {
-        return;
-    }
     let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR"));
     let file = dir.join("no_gpu_image.stn");
     std::fs::write(&file, TWO_KERNEL_PROGRAM).unwrap();

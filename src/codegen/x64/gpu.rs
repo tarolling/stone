@@ -1,4 +1,5 @@
-//! The runtime that runs a kernel on a GPU.
+//! The runtime that runs a kernel on a GPU, on every system but Windows, which has its own in
+//! [`gpu_windows`](super::gpu_windows).
 //!
 //! `stone.gpu_launch` takes the number of a piece of arithmetic in `rdi`, as
 //! `Program::device_kernels` numbers them (the image at `stone.gpu_image` maps it to a kernel, see
@@ -8,7 +9,7 @@
 //! in `rax` if the GPU computed the result, and 0 if the processor must, which every caller then
 //! does.
 //!
-//! No GPU is reachable yet, so it always gives 0.
+//! Linux programs reach no GPU yet, so it always gives 0.
 
 use crate::codegen::AssemblyGenerator;
 

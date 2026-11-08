@@ -51,9 +51,23 @@ which NVIDIA's driver compiles for the GPU it runs on. Give it more than once fo
 Only NVIDIA GPUs from `sm_50` to `sm_120` are supported, so an AMD GPU such as `gfx1100` is an
 error. With NVIDIA's `ptxas` on `PATH` (or named by the `STONE_PTXAS` environment variable) the
 kernels are also compiled to machine code beside the PTX (`build/basics.sm_75.cubin`); without
-it, `stone build` warns and goes on, and a `ptxas` that rejects the kernels is an error. This is
-a first step: nothing runs the kernels yet, so the program still computes everything on the
-processor.
+it, `stone build` warns and goes on, and a `ptxas` that rejects the kernels is an error.
+
+A Windows executable built with `--gpu` runs its kernels on an NVIDIA GPU. It carries the PTX
+for every GPU it was built for, and the machine code when `ptxas` made it. When it first
+computes such a piece of arithmetic, it loads NVIDIA's driver, `nvcuda.dll`, from the system
+directory and picks code for the machine's first GPU: machine code made for a GPU of the same
+generation that is not newer than it, or else the newest PTX that is not newer than it, which
+the driver compiles. If nothing fits, or there is no driver or GPU, it computes everything on
+the processor, so the executable runs on any machine. The results are the same either way, and
+a zero divisor is still reported at the element and position `stone run` reports.
+
+The `STONE_GPU` environment variable changes this when the program runs: `off` computes
+everything on the processor, and `require` makes a program that cannot use the GPU stop with
+an error at the arithmetic instead, such as `no GPU ran this program's kernels: nvcuda.dll is
+missing or too old`, `there is no CUDA device`, `it has no code for compute capability 8.6`,
+or `CUDA error 2`. Linux executables carry the machine code too, but they do not run it yet,
+and macOS executables carry no GPU code, so both compute everything on the processor.
 
 `--windows-gui` builds Windows executables as programs with windows rather than console
 programs, so opening one from Explorer opens no console beside its window. Such a program has

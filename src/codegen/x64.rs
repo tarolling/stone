@@ -11,6 +11,7 @@ mod emit;
 pub mod floats;
 pub mod fs;
 pub mod gpu;
+pub mod gpu_windows;
 pub mod gui_windows;
 pub mod net;
 pub mod process;
@@ -489,7 +490,18 @@ impl X64Generator {
             fs::fs_runtime(self, &fs);
         }
         if self.ctx.uses(&["stone.gpu_launch"]) {
-            gpu::gpu_runtime(self);
+            if self.target.os == Os::Windows {
+                let refusals = gpu_windows::Refusals {
+                    driver: self.ctx.fail_label(crate::codegen::gpu::NO_DRIVER),
+                    device: self.ctx.fail_label(crate::codegen::gpu::NO_DEVICE),
+                    code: self.ctx.fail_label(crate::codegen::gpu::NO_CODE),
+                    cuda: self.ctx.fail_label(crate::codegen::gpu::CUDA_ERROR),
+                    too_many: self.ctx.fail_label(crate::codegen::gpu::TOO_MANY_VALUES),
+                };
+                gpu_windows::gpu_runtime(self, &refusals);
+            } else {
+                gpu::gpu_runtime(self);
+            }
         }
         let random: Vec<&str> = [
             "stone.random_seed",

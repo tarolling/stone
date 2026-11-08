@@ -252,6 +252,7 @@ pub const FALLIBLE_ROUTINES: &[&str] = &[
     "stone.os_cwd",
     "stone.time_sleep",
     "stone.map_missing_str",
+    "stone.gpu_launch",
 ];
 
 /// A runtime error the code can jump to, from [`Context::fail_label`] or [`Context::fail_at`].
@@ -909,7 +910,13 @@ impl Context {
     /// through the leak check every program with strings or lists ends with, which looks for
     /// `STONE_LEAK_CHECK`.
     pub fn needs_env(&self) -> bool {
-        self.counts_references || self.uses(&["stone.os_env", "stone.os_has_env", "stone.os_run"])
+        self.counts_references
+            || self.uses(&[
+                "stone.os_env",
+                "stone.os_has_env",
+                "stone.os_run",
+                "stone.gpu_launch",
+            ])
     }
 
     /// Returns the runtime routines of a builtin module that the program calls, by the prefix

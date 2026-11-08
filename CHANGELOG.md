@@ -12,6 +12,13 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- An x86-64 Windows program built with `--gpu` now runs its arithmetic on lists on an NVIDIA
+  GPU. It carries the PTX for each GPU it was built for, plus the machine code when `ptxas` is
+  there, and loads NVIDIA's `nvcuda.dll` from the system directory only when it runs. It picks
+  machine code for the GPU or else PTX for the driver to compile, and computes on the processor
+  when it finds no driver, GPU, or code, so the executable still runs anywhere. A zero divisor
+  is still reported at the element `stone run` reports. `STONE_GPU=off` keeps a program on the
+  processor, and `STONE_GPU=require` makes not using the GPU a runtime error that says why.
 - A Linux program built with `--gpu` and a `ptxas` now carries the machine code of its kernels
   for every GPU it was built for, with each kernel's registers, parameter layout, and whether it
   takes a flag for zero divisors, in one table in the executable. Nothing reads it yet, so

@@ -145,7 +145,7 @@ pub fn window_runtime(r#gen: &mut dyn AssemblyGenerator, used: &[&str]) {
 
 /// Emits the start of a routine's frame: `rbp` and then each of `saved` pushed, and the stack
 /// aligned to 16 bytes, for [`leave`] to end.
-fn enter(r#gen: &mut dyn AssemblyGenerator, saved: &[&str]) {
+pub(super) fn enter(r#gen: &mut dyn AssemblyGenerator, saved: &[&str]) {
     r#gen.emit("\tpush\trbp");
     r#gen.emit("\tmov\trbp, rsp");
     for reg in saved {
@@ -155,7 +155,7 @@ fn enter(r#gen: &mut dyn AssemblyGenerator, saved: &[&str]) {
 }
 
 /// Emits the end of a frame [`enter`] began with the same `saved` registers, and a return.
-fn leave(r#gen: &mut dyn AssemblyGenerator, saved: &[&str]) {
+pub(super) fn leave(r#gen: &mut dyn AssemblyGenerator, saved: &[&str]) {
     r#gen.emit(&format!("\tlea\trsp, [rbp - {}]", 8 * saved.len()));
     for reg in saved.iter().rev() {
         r#gen.emit(&format!("\tpop\t{reg}"));

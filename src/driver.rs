@@ -449,8 +449,13 @@ fn compile_with(
     let mut generator = target.generator();
     generator.set_sources(sources.clone());
     generator.set_analysis(Rc::clone(&checked.analysis));
-    // only Linux programs launch kernels so far
-    generator.set_gpu_launch(!devices.is_empty() && target.os == Os::Linux);
+    // Linux and Windows programs launch kernels; others compute everything on the processor
+    let carry = match target.os {
+        Os::Linux => Some(image::Carry::Sass),
+        Os::Windows => Some(image::Carry::Modules),
+        Os::MacOs => None,
+    };
+    generator.set_gpu_launch(!devices.is_empty() && carry.is_some());
     if let Some(tests) = tests {
         generator.set_tests(tests);
     }
@@ -461,25 +466,45 @@ fn compile_with(
         for &device in devices {
             let text = ptx::module(&numbered.kernels, device)?;
             std::fs::write(ptx_path(output, device), &text)?;
-            match compile_cubin(&text, device) {
+            let cubin = match compile_cubin(&text, device) {
                 Ok(bytes) => {
                     let kernels = cubin::parse(&bytes)?;
                     std::fs::write(cubin_path(output, device), &bytes)?;
-                    let code = image::DeviceCode { device, kernels };
-                    match embeddable(&bytes, &numbered, code) {
-                        Ok(code) => embedded.push(code),
+                    Some(image::Cubin { bytes, kernels })
+                }
+                Err(CompileError::Missing(message)) => {
+                    match carry {
+                        // the driver compiles the PTX the program carries
+                        Some(image::Carry::Modules) => eprintln!(
+                            "warning: {message}, so the GPU's driver compiles the PTX when the \
+                             program runs"
+                        ),
+                        // without machine code the program computes on the processor
+                        _ => eprintln!("warning: {message}"),
+                    }
+                    None
+                }
+                Err(error) => return Err(Box::new(error)),
+            };
+            let code = image::DeviceCode {
+                device,
+                cubin,
+                ptx: text,
+            };
+            match carry {
+                Some(image::Carry::Sass) if code.cubin.is_some() => {
+                    match embeddable(&code, &numbered) {
+                        Ok(()) => embedded.push(code),
                         // the program still computes on the processor, as it did before
                         Err(reason) => eprintln!("warning: {reason}"),
                     }
                 }
-                // without a compiler the program computes on the processor, as it did before
-                Err(CompileError::Missing(message)) => eprintln!("warning: {message}"),
-                Err(error) => return Err(Box::new(error)),
+                Some(image::Carry::Modules) => embedded.push(code),
+                _ => {}
             }
         }
-        // only Linux programs launch kernels so far, so only they carry the machine code
-        if target.os == Os::Linux {
-            let image = image::build(&numbered.record_kernel, &numbered.shapes, &embedded)?;
+        if let Some(carry) = carry {
+            let image = image::build(&numbered.record_kernel, &numbered.shapes, &embedded, carry)?;
             assembly.push_str(&image::assembly(&image));
         }
     }
@@ -487,17 +512,20 @@ fn compile_with(
     Ok(())
 }
 
-/// Returns `code` if a program can carry it in its image, else why not.
+/// Returns whether a Linux program can carry the machine code of `code`, which has a cubin,
+/// in its image, else why not.
 ///
 /// For example, a cubin whose kernels keep a table of constants in `.nv.constant2` cannot be
 /// loaded without placing that section, which stone does not do, so its device's code is left
 /// out of the image and the program computes on the processor on those GPUs.
 fn embeddable(
-    cubin: &[u8],
+    code: &image::DeviceCode,
     numbered: &codegen::gpu::kernel::Numbered,
-    code: image::DeviceCode,
-) -> Result<image::DeviceCode, String> {
-    let unplaceable = cubin::unplaceable_sections(cubin)?;
+) -> Result<(), String> {
+    let Some(cubin) = &code.cubin else {
+        return Err(format!("there is no cubin for {}", code.device));
+    };
+    let unplaceable = cubin::unplaceable_sections(&cubin.bytes)?;
     if !unplaceable.is_empty() {
         return Err(format!(
             "the kernels for {} need {}, which a program cannot load itself, so it computes on \
@@ -509,10 +537,11 @@ fn embeddable(
     image::build(
         &numbered.record_kernel,
         &numbered.shapes,
-        std::slice::from_ref(&code),
+        std::slice::from_ref(code),
+        image::Carry::Sass,
     )
     .map_err(|reason| format!("{reason}, so the program computes on the processor there"))?;
-    Ok(code)
+    Ok(())
 }
 
 /// Returns where `stone build` writes the PTX for `device` of the executable at `output`, which

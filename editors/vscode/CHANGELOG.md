@@ -10,6 +10,8 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+## [0.4.4] - 2026-11-08
+
 ### Added
 
 - `stone-lsp --mcp` serves the Model Context Protocol for coding agents, with tools that check

@@ -10,6 +10,16 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+## [0.4.5] - 2026-11-08
+
+### Fixed
+
+- A macOS program whose globals landed past the last page of its data in the file, with a
+  symbol table of a page or more, could start with garbage in those globals and crash: the
+  chained fixups told dyld to map those pages from the file, where the symbol table is.
+
+## [0.4.4] - 2026-11-08
+
 ### Added
 
 - A builtin `json` module, written in stone: `json.parse(text)` reads strict JSON (RFC 8259)

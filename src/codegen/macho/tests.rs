@@ -256,6 +256,29 @@ fn the_program_starts_at_start_and_reaches_its_data() {
     assert_eq!(read64(&file, constants.offset as usize), 1);
 }
 
+/// Returns the `page_count` of `__DATA`'s chain starts in `file`.
+fn data_chain_pages(file: &[u8]) -> u64 {
+    let fixups = command(file, LC_DYLD_CHAINED_FIXUPS);
+    let blob = read32(file, fixups + 8) as usize;
+    let starts = blob + read32(file, blob + 4) as usize;
+    let segment = starts + read32(file, starts + 12) as usize;
+    u16::from_le_bytes([file[segment + 20], file[segment + 21]]) as u64
+}
+
+#[test]
+fn chain_starts_cover_only_the_pages_of_data_in_the_file() {
+    // __data ends just short of a page, so __bss runs onto a page with no bytes in the file,
+    // which dyld must not map from the file, where __LINKEDIT's bytes are
+    let program = PROGRAM
+        .replace("\t.string \"hi\"", "\t.zero\t16300")
+        .replace("\t.zero\t8", "\t.zero\t4096");
+    let file = linked(&program).unwrap();
+    let data = segments(&file).remove(2);
+    assert_eq!(data.name, "__DATA");
+    assert_eq!((data.file_size, data.memory_size), (PAGE, 2 * PAGE));
+    assert_eq!(data_chain_pages(&file) * PAGE, data.file_size);
+}
+
 #[test]
 fn system_calls_go_through_stubs_that_dyld_binds() {
     let file = linked(PROGRAM).unwrap();

@@ -378,11 +378,15 @@ const CHAIN_START_NONE: u16 = 0xffff;
 /// Returns the `LC_DYLD_CHAINED_FIXUPS` data that binds each GOT slot to its import from
 /// libSystem: a `dyld_chained_fixups_header`, the chain starts of every segment (only
 /// `__DATA` has any), the `DYLD_CHAINED_IMPORT` table, and the imports' names.
+///
+/// `__DATA`'s starts cover only its pages in the file, never the zero-fill pages of `__bss`
+/// after them: dyld's page-in linking maps `page_count` pages from the segment's file offset,
+/// so a page past the segment's file bytes would hold `__LINKEDIT`'s bytes instead of zeros.
 fn chained_fixups(imports: &[&str], layout: &Layout) -> Vec<u8> {
     const STARTS: u32 = 32;
     // __PAGEZERO, __TEXT, __DATA, __LINKEDIT, with only __DATA's starts 24 bytes in
     const SEGMENT_STARTS: u32 = 24;
-    let pages = (layout.data_end - layout.text_end) / PAGE;
+    let pages = (layout.data_file_end - layout.text_end) / PAGE;
     let segment_size = 22 + 2 * pages as u32;
     let imports_at = (STARTS + SEGMENT_STARTS + segment_size).next_multiple_of(4);
     let names_at = imports_at + 4 * imports.len() as u32;

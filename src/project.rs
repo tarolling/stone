@@ -245,8 +245,10 @@ impl SourceMap {
     /// For example, an error in `util.stn` renders as `util.stn:2:9: error: ...` followed by the
     /// line and a caret.
     pub fn render(&self, diagnostic: &Diagnostic) -> String {
-        let file = self.file(diagnostic.span.file);
-        diagnostic.render(&file.path.display().to_string(), &file.source)
+        diagnostic.render_in(|id| {
+            let file = self.file(id);
+            (file.path.display().to_string(), file.source.as_str())
+        })
     }
 
     /// Returns what a diagnostic at `span` renders before and after its `error: message` line:

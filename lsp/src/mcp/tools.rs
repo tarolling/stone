@@ -409,12 +409,15 @@ fn guide(_: &Args, _: &Context) -> Result<String, String> {
 
 /// Renders `diagnostic`, from file `file` of `doc`'s program, as `stone check` does.
 fn render(context: &Context, doc: &Document, file: FileId, diagnostic: &Diagnostic) -> String {
-    let source = doc.sources.file(file);
     let shown = Diagnostic {
         message: doc.shown(&diagnostic.message),
+        span: diagnostic.span.in_file(file),
         ..diagnostic.clone()
     };
-    shown.render(&shown_path(context, &source.path), &source.source)
+    shown.render_in(|id| {
+        let source = doc.sources.file(id);
+        (shown_path(context, &source.path), source.source.as_str())
+    })
 }
 
 /// Counts errors and warnings for a summary line.

@@ -414,10 +414,10 @@ the specification the compiler is tested against.
 When choosing between designs, stone puts these first, in this order:
 
 1. **Safety.** No accepted program has undefined behavior.
-2. **Simplicity for the programmer.** Fewer concepts and less to write, even if the compiler
-   has to do much more work.
+2. **Speed.** As fast as possible, accelerated by any available resources.
 3. **Clear errors.** A design whose failures are hard to explain is worse than one whose
    failures are easy to explain.
-4. **Speed.** As fast as possible within the first three.
+4. **Simplicity for the programmer.** Fewer concepts and less to write, even if the compiler
+   has to do much more work.
 5. **Compiler simplicity.** This comes last. A complicated compiler is an acceptable price
    for a simpler language.

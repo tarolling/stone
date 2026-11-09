@@ -16,15 +16,16 @@ use lsp_types::notification::{
     Notification as LspNotification, PublishDiagnostics,
 };
 use lsp_types::request::{
-    Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
+    CodeActionRequest, Completion, DocumentSymbolRequest, Formatting, GotoDefinition, HoverRequest,
     PrepareRenameRequest, References, RegisterCapability, Rename, Request as LspRequest,
 };
 use lsp_types::{
-    CompletionOptions, CompletionResponse, Diagnostic, DidChangeWatchedFilesRegistrationOptions,
-    DocumentSymbolResponse, FileSystemWatcher, GlobPattern, GotoDefinitionResponse,
-    HoverProviderCapability, InitializeParams, InitializeResult, OneOf, PositionEncodingKind,
-    PublishDiagnosticsParams, Registration, RegistrationParams, RenameOptions, ServerCapabilities,
-    ServerInfo, TextDocumentSyncCapability, TextDocumentSyncKind, Uri, WorkDoneProgressOptions,
+    CodeActionProviderCapability, CompletionOptions, CompletionResponse, Diagnostic,
+    DidChangeWatchedFilesRegistrationOptions, DocumentSymbolResponse, FileSystemWatcher,
+    GlobPattern, GotoDefinitionResponse, HoverProviderCapability, InitializeParams,
+    InitializeResult, OneOf, PositionEncodingKind, PublishDiagnosticsParams, Registration,
+    RegistrationParams, RenameOptions, ServerCapabilities, ServerInfo, TextDocumentSyncCapability,
+    TextDocumentSyncKind, Uri, WorkDoneProgressOptions,
 };
 
 use stone::project::{FsSources, Sources};
@@ -181,6 +182,8 @@ fn capabilities(encoding: Encoding) -> ServerCapabilities {
         })),
         document_symbol_provider: Some(OneOf::Left(true)),
         document_formatting_provider: Some(OneOf::Left(true)),
+        // the fixes errors suggest as code
+        code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
         // a `.` asks for completion, so a value's fields and methods show as it is typed
         completion_provider: Some(CompletionOptions {
             trigger_characters: Some(vec![".".to_string()]),
@@ -251,6 +254,10 @@ impl Server {
             Formatting::METHOD => {
                 self.answer::<Formatting>(request, |doc, _| Ok(features::formatting(doc)))
             }
+            CodeActionRequest::METHOD => self
+                .answer::<CodeActionRequest>(request, |doc, params| {
+                    Ok(Some(features::code_actions(doc, params.range)))
+                }),
             Completion::METHOD => self.answer::<Completion>(request, |doc, params| {
                 let position = params.text_document_position.position;
                 Ok(Some(CompletionResponse::Array(features::completion(
@@ -483,6 +490,12 @@ impl Sources for Workspace {
 /// Request parameters that name the document they are about.
 trait DocumentParams {
     fn uri(&self) -> &Uri;
+}
+
+impl DocumentParams for lsp_types::CodeActionParams {
+    fn uri(&self) -> &Uri {
+        &self.text_document.uri
+    }
 }
 
 impl DocumentParams for lsp_types::HoverParams {

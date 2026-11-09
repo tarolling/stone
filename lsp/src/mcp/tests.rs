@@ -225,6 +225,21 @@ fn check_snippet_reports_errors() {
 }
 
 #[test]
+fn check_snippet_shows_labels_and_help() {
+    let dir = project("check_snippet_help", &[]);
+    let (text, _) = call_in(
+        &dir,
+        "stone_check_snippet",
+        json!({ "code": "fn f(a: int) -> int:\n    ret a\nprint(f(\"s\"))\nprnit(1)\n" }),
+    );
+    assert!(
+        text.contains("--- expected because of this parameter"),
+        "{text}"
+    );
+    assert!(text.contains("= help: did you mean 'print'?"), "{text}");
+}
+
+#[test]
 fn run_snippet_captures_output_and_errors() {
     let dir = project("run_snippet", &[]);
     let text = ok(

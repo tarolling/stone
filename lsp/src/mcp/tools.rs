@@ -410,9 +410,8 @@ fn guide(_: &Args, _: &Context) -> Result<String, String> {
 /// Renders `diagnostic`, from file `file` of `doc`'s program, as `stone check` does.
 fn render(context: &Context, doc: &Document, file: FileId, diagnostic: &Diagnostic) -> String {
     let shown = Diagnostic {
-        message: doc.shown(&diagnostic.message),
         span: diagnostic.span.in_file(file),
-        ..diagnostic.clone()
+        ..diagnostic.map_texts(|text| doc.shown(text))
     };
     shown.render_in(|id| {
         let source = doc.sources.file(id);

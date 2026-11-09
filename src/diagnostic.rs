@@ -179,6 +179,43 @@ impl Diagnostic {
         self
     }
 
+    /// Returns the diagnostic with `f` applied to every text it shows: its message, its labels'
+    /// and notes, and its help and suggested code, as an editor does to write a dependency's
+    /// linked names as the program writes them.
+    pub fn map_texts(&self, f: impl Fn(&str) -> String) -> Diagnostic {
+        let details = self.details.as_ref().map(|details| {
+            Box::new(Details {
+                code: details.code,
+                labels: details
+                    .labels
+                    .iter()
+                    .map(|label| Label {
+                        span: label.span,
+                        text: f(&label.text),
+                    })
+                    .collect(),
+                notes: details.notes.iter().map(|note| f(note)).collect(),
+                help: details
+                    .help
+                    .iter()
+                    .map(|help| Help {
+                        text: f(&help.text),
+                        suggestion: help.suggestion.as_ref().map(|s| Suggestion {
+                            span: s.span,
+                            replacement: f(&s.replacement),
+                        }),
+                    })
+                    .collect(),
+            })
+        });
+        Diagnostic {
+            severity: self.severity,
+            span: self.span,
+            message: f(&self.message),
+            details,
+        }
+    }
+
     /// Returns what a rendered diagnostic writes before its message: the severity, then the code
     /// in brackets if it has one, such as `error[E0003]`.
     pub fn heading(&self) -> String {

@@ -142,6 +142,7 @@ fn falls_back_to_utf16_positions() {
     assert_eq!(capabilities["positionEncoding"], "utf-16");
     assert_eq!(capabilities["hoverProvider"], true);
     assert_eq!(capabilities["renameProvider"]["prepareProvider"], true);
+    assert_eq!(capabilities["codeActionProvider"], true);
     session.shut_down();
 }
 
@@ -160,7 +161,17 @@ fn publishes_diagnostics_as_the_document_changes() {
             },
             "severity": 1,
             "source": "stone",
-            "message": "cannot assign str to 'x', which is int"
+            "message": "cannot assign str to 'x', which is int",
+            "relatedInformation": [{
+                "location": {
+                    "uri": URI,
+                    "range": {
+                        "start": { "line": 0, "character": 0 },
+                        "end": { "line": 0, "character": 1 }
+                    }
+                },
+                "message": "'x' is first assigned here"
+            }]
         }])
     );
 

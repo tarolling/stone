@@ -2725,3 +2725,79 @@ fn an_edited_copy_of_the_prelude_is_checked_as_written() {
     let edited = format!("{PRELUDE}\nx = 1\n");
     assert!(Document::builtin(Written::Prelude, &edited, Encoding::Utf16).is_none());
 }
+
+#[test]
+fn a_label_becomes_related_information() {
+    let doc = project_doc(
+        "main.stn",
+        &[("main.stn", "fn f(a: int):\n    print(a)\nf(\"x\")\n")],
+    );
+    let found = diagnostics(&doc);
+    assert_eq!(found.len(), 1);
+    let related = found[0].related_information.as_ref().expect("a label");
+    assert_eq!(related.len(), 1);
+    assert_eq!(related[0].message, "expected because of this parameter");
+    assert_eq!(related[0].location.uri, uri_of("main.stn"));
+    assert_eq!(
+        related[0].location.range,
+        Range::new(Position::new(0, 8), Position::new(0, 11))
+    );
+}
+
+#[test]
+fn a_label_in_another_file_points_there() {
+    let doc = project_doc(
+        "main.stn",
+        &[
+            ("main.stn", "use geo\ngeo.f(\"x\")\n"),
+            ("geo.stn", "pub fn f(a: int):\n    print(a)\n"),
+        ],
+    );
+    let found = diagnostics(&doc);
+    let related = found[0].related_information.as_ref().expect("a label");
+    assert_eq!(related[0].location.uri, uri_of("geo.stn"));
+}
+
+#[test]
+fn notes_and_help_follow_the_message() {
+    let doc = doc("c = args().len() > 0\nif c:\n    x = 1\nprint(x)\n");
+    let found = diagnostics(&doc);
+    assert_eq!(
+        found[0].message,
+        "'x' might be used before it is assigned\nnote: a variable must be assigned on every \
+         path that reaches a read of it, since a loop's body or an 'if' without an 'else' might \
+         not run"
+    );
+    let doc = project_doc("main.stn", &[("main.stn", "length = 3\nprint(lenght)\n")]);
+    let found = diagnostics(&doc);
+    let error = found
+        .iter()
+        .find(|d| d.severity == Some(DiagnosticSeverity::ERROR))
+        .expect("an error");
+    assert_eq!(
+        error.message,
+        "undefined name 'lenght'\nhelp: did you mean 'length'?"
+    );
+}
+
+#[test]
+fn a_suggestion_is_a_quick_fix() {
+    let source = "fn f(a) -> int:\n    ret a + 1\nprint(f(2))\n";
+    let doc = project_doc("main.stn", &[("main.stn", source)]);
+    let actions = code_actions(&doc, Range::new(at(1, 6), at(1, 6)));
+    assert_eq!(actions.len(), 1);
+    let CodeActionOrCommand::CodeAction(action) = &actions[0] else {
+        panic!("{actions:?}")
+    };
+    assert_eq!(action.title, "write the type its calls give it");
+    assert_eq!(action.kind, Some(CodeActionKind::QUICKFIX));
+    assert_eq!(
+        action.edit.as_ref().unwrap().changes.as_ref().unwrap()[&uri_of("main.stn")],
+        [TextEdit {
+            range: Range::new(at(1, 7), at(1, 7)),
+            new_text: ": int".to_string(),
+        }]
+    );
+    // nothing to fix away from the error
+    assert_eq!(code_actions(&doc, Range::new(at(3, 1), at(3, 1))), []);
+}

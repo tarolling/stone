@@ -10,6 +10,16 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ## [Unreleased]
 
+### Added
+
+- Errors point at the other places that explain them, such as the parameter whose type an
+  argument does not fit, as related information the editor links to, in any file of the program,
+  and show their notes and help after the message.
+- Quick fixes: an error that suggests a fix as code, such as the type of a parameter written
+  without one, offers it as a code action.
+- The MCP tools `stone_diagnostics` and `stone_check_snippet` show the same labels, notes, and
+  help that `stone check` prints.
+
 ## [0.4.4] - 2026-11-08
 
 ### Added

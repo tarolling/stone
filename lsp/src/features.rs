@@ -8,8 +8,9 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lsp_types::{
-    CompletionItem, CompletionItemKind, Diagnostic, DiagnosticSeverity, DiagnosticTag,
-    DocumentSymbol, Hover, HoverContents, Location, MarkupContent, MarkupKind, Position,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CompletionItem, CompletionItemKind,
+    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, DocumentSymbol,
+    Hover, HoverContents, Location, MarkupContent, MarkupKind, NumberOrString, Position,
     PrepareRenameResponse, Range, SymbolKind, TextEdit, Uri, WorkspaceEdit,
 };
 use stone::ast::{is_lambda, is_test};
@@ -389,17 +390,86 @@ fn lsp_diagnostic(
     d: &stone::diagnostic::Diagnostic,
     unused: bool,
 ) -> Diagnostic {
+    let d = d.map_texts(|text| doc.shown(text));
+    let related: Vec<DiagnosticRelatedInformation> = d
+        .labels()
+        .iter()
+        .filter_map(|label| {
+            Some(DiagnosticRelatedInformation {
+                location: span_location(doc, label.span)?,
+                message: label.text.clone(),
+            })
+        })
+        .collect();
+    // an editor shows the message alone, so the notes and help go after it
+    let mut message = d.message.clone();
+    for note in d.notes() {
+        message.push_str(&format!("\nnote: {note}"));
+    }
+    for help in d.help() {
+        message.push_str(&format!("\nhelp: {}", help.text));
+    }
     Diagnostic {
         range: index.range(d.span),
         severity: Some(match d.severity {
             Severity::Error => DiagnosticSeverity::ERROR,
             Severity::Warning => DiagnosticSeverity::WARNING,
         }),
+        code: d
+            .code()
+            .map(|code| NumberOrString::String(code.to_string())),
         source: Some("stone".to_string()),
-        message: doc.shown(&d.message),
+        message,
+        related_information: (!related.is_empty()).then_some(related),
         tags: unused.then(|| vec![DiagnosticTag::UNNECESSARY]),
         ..Diagnostic::default()
     }
+}
+
+/// Returns where `span` is, in any file of `doc`'s program that is on disk, or `None` for the
+/// prelude, a builtin module, or a file without a path an editor can open.
+fn span_location(doc: &Document, span: Span) -> Option<Location> {
+    let own = file_uri(&doc.sources.file(doc.file).path)?;
+    doc.location(span, &own)
+}
+
+/// Returns the quick fixes for the problems of `doc` that `range` touches: each suggestion of
+/// their help, as an edit of the file it changes.
+///
+/// For example, at a parameter written without a type, the fix writes the type its calls give it.
+pub fn code_actions(doc: &Document, range: Range) -> Vec<CodeActionOrCommand> {
+    let mut actions = vec![];
+    for (d, unused) in doc.problems() {
+        let at = doc.index.range(d.span);
+        if at.end < range.start || range.end < at.start {
+            continue;
+        }
+        let shown = d.map_texts(|text| doc.shown(text));
+        for help in shown.help() {
+            let Some(suggestion) = &help.suggestion else {
+                continue;
+            };
+            let Some(location) = span_location(doc, suggestion.span) else {
+                continue;
+            };
+            let edit = TextEdit {
+                range: location.range,
+                new_text: suggestion.replacement.clone(),
+            };
+            actions.push(CodeActionOrCommand::CodeAction(CodeAction {
+                title: help.text.clone(),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: Some(vec![lsp_diagnostic(doc, &doc.index, d, unused)]),
+                edit: Some(WorkspaceEdit {
+                    changes: Some(HashMap::from([(location.uri, vec![edit])])),
+                    ..WorkspaceEdit::default()
+                }),
+                is_preferred: Some(true),
+                ..CodeAction::default()
+            }));
+        }
+    }
+    actions
 }
 
 /// Describes a symbol the way stone would declare it, such as `fn add(a: int) -> int`,

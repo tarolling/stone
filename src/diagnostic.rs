@@ -499,6 +499,53 @@ fn apply(source: &str, suggestion: &Suggestion) -> Option<Vec<String>> {
     Some(changed.split('\n').map(str::to_string).collect())
 }
 
+/// Returns how far apart two names are: how many characters must be added, removed, or
+/// replaced, or neighbors swapped, to turn one into the other (the optimal string alignment
+/// distance), which counts the common slips of typing.
+///
+/// For example, `distance("pritn", "print")` and `distance("pirnt", "print")` are 1.
+pub fn distance(a: &str, b: &str) -> usize {
+    let a: Vec<char> = a.chars().collect();
+    let b: Vec<char> = b.chars().collect();
+    let mut d = vec![vec![0usize; b.len() + 1]; a.len() + 1];
+    for (i, row) in d.iter_mut().enumerate() {
+        row[0] = i;
+    }
+    for (j, cell) in d[0].iter_mut().enumerate() {
+        *cell = j;
+    }
+    for i in 1..=a.len() {
+        for j in 1..=b.len() {
+            let cost = usize::from(a[i - 1] != b[j - 1]);
+            let mut best = (d[i - 1][j] + 1)
+                .min(d[i][j - 1] + 1)
+                .min(d[i - 1][j - 1] + cost);
+            if i > 1 && j > 1 && a[i - 1] == b[j - 2] && a[i - 2] == b[j - 1] {
+                best = best.min(d[i - 2][j - 2] + 1);
+            }
+            d[i][j] = best;
+        }
+    }
+    d[a.len()][b.len()]
+}
+
+/// Returns the name among `candidates` closest to `name`, a misspelling of it, for a "did you
+/// mean" help: one within a third of its length (at least 1) of it and not `name` itself, the
+/// first in order of the candidates' text among equally close ones.
+///
+/// For example, `similar("lenght", ["length", "width"])` is `Some("length")`, and
+/// `similar("x", ["width"])` is `None`.
+pub fn similar<'a>(name: &str, candidates: impl IntoIterator<Item = &'a str>) -> Option<&'a str> {
+    let most = (name.chars().count() / 3).max(1);
+    candidates
+        .into_iter()
+        .filter(|candidate| *candidate != name)
+        .map(|candidate| (distance(name, candidate), candidate))
+        .filter(|(far, _)| *far <= most)
+        .min()
+        .map(|(_, candidate)| candidate)
+}
+
 /// Returns where `span` starts, as the `file:line:col: ` that begins a rendered diagnostic.
 ///
 /// For example, a span starting at line 3, column 7 of `main.stn` gives `main.stn:3:7: `.
@@ -780,6 +827,16 @@ help: write it
   |             --- expected because of this
 "
         );
+    }
+
+    #[test]
+    fn similar_finds_the_closest_misspelling() {
+        assert_eq!(distance("pritn", "print"), 1);
+        assert_eq!(distance("kitten", "sitting"), 3);
+        assert_eq!(similar("lenght", ["width", "length"]), Some("length"));
+        assert_eq!(similar("totl", ["total", "tot"]), Some("tot"));
+        assert_eq!(similar("x", ["width"]), None);
+        assert_eq!(similar("x", ["x"]), None);
     }
 
     #[test]

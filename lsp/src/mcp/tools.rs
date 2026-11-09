@@ -16,7 +16,7 @@ use std::time::Duration;
 
 use lsp_types::{DocumentSymbol, HoverContents, Location, Position, SymbolKind, Uri};
 use serde_json::{Value, json};
-use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
+use stone::diagnostic::{Diagnostic, Diagnostics, Severity, distance};
 use stone::interpreter::{Exit, Limits};
 use stone::project::{DEFAULT_ENTRY, FsSources, MapSources, SourceMap, Sources};
 use stone::span::FileId;
@@ -944,24 +944,6 @@ fn docs(args: &Args, _: &Context) -> Result<String, String> {
             similar.join(", ")
         ),
     })
-}
-
-/// Returns the Levenshtein distance between two names.
-///
-/// For example, `distance("pritn", "print")` is 2.
-fn distance(a: &str, b: &str) -> usize {
-    let b: Vec<char> = b.chars().collect();
-    let mut row: Vec<usize> = (0..=b.len()).collect();
-    for (i, ca) in a.chars().enumerate() {
-        let mut previous = row[0];
-        row[0] = i + 1;
-        for (j, &cb) in b.iter().enumerate() {
-            let substituted = previous + usize::from(ca != cb);
-            previous = row[j + 1];
-            row[j + 1] = substituted.min(row[j] + 1).min(previous + 1);
-        }
-    }
-    row[b.len()]
 }
 
 /// How long a snippet may run before its answer says it is still running.

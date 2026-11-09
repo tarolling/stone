@@ -56,6 +56,58 @@ fn check_suggests_parentheses_for_a_tuple() {
 }
 
 #[test]
+fn check_labels_the_parameter_an_argument_does_not_fit() {
+    let source = "fn f(a: int):\n    print(a)\nf(\"x\")\n";
+    let (output, file) = stone(&["check"], "labeled_argument", source);
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "{}:3:3: error: expected int, found str
+  |
+1 | fn f(a: int):
+  |         --- expected because of this parameter
+2 |     print(a)
+3 | f(\"x\")
+  |   ^^^
+",
+            file.display()
+        )
+    );
+}
+
+#[test]
+fn check_labels_a_parameter_in_another_file() {
+    let dir = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("labeled_module");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("main.stn"), "use geo\ngeo.f(\"x\")\n").unwrap();
+    std::fs::write(dir.join("geo.stn"), "pub fn f(a: int):\n    print(a)\n").unwrap();
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["check", "main.stn"])
+        .current_dir(&dir)
+        .output()
+        .expect("stone should run");
+    assert_eq!(output.status.code(), Some(1));
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        format!(
+            "{}:2:7: error: expected int, found str
+  |
+2 | geo.f(\"x\")
+  |       ^^^
+  |
+ ::: {}:1:13
+  |
+1 | pub fn f(a: int):
+  |             --- expected because of this parameter
+",
+            "main.stn", "geo.stn"
+        )
+    );
+}
+
+#[test]
 fn fmt_rewrites_a_file_and_check_reports_it() {
     let (output, file) = stone(
         &["fmt", "--check"],

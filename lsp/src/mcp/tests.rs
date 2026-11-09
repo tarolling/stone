@@ -180,6 +180,7 @@ fn diagnostics_render_as_stone_check_does() {
     assert_eq!(
         text,
         "main.stn:2:5: error: cannot assign str to 'x', which is int\n  |\n\
+         1 | x = 1\n  | - 'x' is first assigned here\n\
          2 | x = \"s\"\n  |     ^^^\n\n1 error in 1 file"
     );
 }

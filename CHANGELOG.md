@@ -23,6 +23,14 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   `main.stn` (`stone check` a library's `lib.stn` too). `stone test`, `clean`, `fetch`, `tree`,
   `add`, and `remove` find the project the same way.
 
+- Errors explain themselves more as rustc's do: they label the other places that explain them
+  (the parameter's type an argument does not fit, the `-> T` a `ret` value does not match, a
+  variable's first assignment, the definition of a function called with the wrong number of
+  arguments, and an assignment that does not happen on every path before a read), add notes on
+  the rule involved and help such as `did you mean 'length'?` for a misspelled name, function,
+  or method, and the converting help for an int and a float, and suggest a missing parameter
+  type as the rewritten line. A label in another file of the program shows in a block of its own.
+
 ### Changed
 
 - Arguments for a program that `stone run` (or `stone FILE`) runs now go after `--`, as in

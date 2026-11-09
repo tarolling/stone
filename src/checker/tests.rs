@@ -6567,3 +6567,208 @@ fn set_methods_take_sets_of_their_element_type() {
         11,
     );
 }
+
+/// Renders every diagnostic of `source` as `stone check` writes it for `main.stn`.
+fn rendered(source: &str) -> String {
+    analyze_source(source)
+        .diagnostics
+        .iter()
+        .map(|d| d.render("main.stn", source))
+        .collect()
+}
+
+#[test]
+fn a_mismatched_argument_labels_its_parameters_type() {
+    let source = "fn f(a: int, b: str):\n    print(a, b)\nf(1, 2)\n";
+    assert_eq!(
+        rendered(source),
+        "main.stn:3:6: error: expected str, found int
+  |
+1 | fn f(a: int, b: str):
+  |                 --- expected because of this parameter
+2 |     print(a, b)
+3 | f(1, 2)
+  |      ^
+"
+    );
+}
+
+#[test]
+fn a_mismatched_method_argument_labels_its_parameter_past_self() {
+    let source = "struct P:\n    x: int\nimpl P:\n    fn add(self, n: int) -> int:\n        ret self.x + n\np = P(x=1)\nprint(p.add(\"a\"))\n";
+    let out = rendered(source);
+    assert!(
+        out.contains("4 |     fn add(self, n: int) -> int:\n  |                     --- expected because of this parameter\n"),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_call_with_too_many_arguments_labels_the_definition() {
+    let source = "fn f(a: int):\n    print(a)\nf(1, 2)\n";
+    assert_eq!(
+        rendered(source),
+        "main.stn:3:1: error: 'f' takes 1 argument, but 2 were given
+  |
+1 | fn f(a: int):
+  |    - 'f' is defined here
+2 |     print(a)
+3 | f(1, 2)
+  | ^^^^^^^
+"
+    );
+}
+
+#[test]
+fn a_mismatched_return_labels_the_return_type() {
+    let source = "fn f() -> int:\n    ret \"a\"\nprint(f())\n";
+    let out = rendered(source);
+    assert!(
+        out.contains(
+            "1 | fn f() -> int:\n  |           --- expected because of this return type\n"
+        ),
+        "{out}"
+    );
+}
+
+#[test]
+fn a_mismatched_assignment_labels_the_first_one() {
+    let source = "x = 1\nx = \"a\"\n";
+    assert_eq!(
+        rendered(source),
+        "main.stn:2:5: error: cannot assign str to 'x', which is int
+  |
+1 | x = 1
+  | - 'x' is first assigned here
+2 | x = \"a\"
+  |     ^^^
+"
+    );
+}
+
+#[test]
+fn labels_never_point_into_the_prelude() {
+    let source = "xs = [1, 2]\nys = xs.map(1)\n";
+    let analysis = analyze_source(source);
+    assert!(!analysis.diagnostics.is_empty());
+    for d in &analysis.diagnostics {
+        assert!(
+            d.labels().iter().all(|l| l.span.file != FileId::PRELUDE),
+            "{d:?}"
+        );
+    }
+}
+
+#[test]
+fn a_maybe_unassigned_read_labels_the_assignment_and_notes_the_rule() {
+    let source = "c = args().len() > 0\nif c:\n    x = 1\nprint(x)\n";
+    assert_eq!(
+        rendered(source),
+        "main.stn:4:7: error: 'x' might be used before it is assigned
+  |
+3 |     x = 1
+  |     - 'x' is assigned here, but not on every path to its use
+4 | print(x)
+  |       ^
+  |
+  = note: a variable must be assigned on every path that reaches a read of it, since a loop's body or an 'if' without an 'else' might not run
+"
+    );
+}
+
+#[test]
+fn mixing_an_int_and_a_float_suggests_converting() {
+    let source = "x = 1\ny = x + 1.5\nprint(y)\n";
+    assert_eq!(
+        rendered(source),
+        "main.stn:2:9: error: expected int, found float
+  |
+2 | y = x + 1.5
+  |         ^^^
+  |
+  = help: an int and a float never mix; convert the int with 'float(...)', or round the float down with '.floor()'
+"
+    );
+}
+
+#[test]
+fn a_misspelled_name_suggests_the_one_meant() {
+    let source = "length = 3\nprint(lenght)\n";
+    let analysis = analyze_source(source);
+    let [d] = analysis.diagnostics.as_slice() else {
+        panic!("{:?}", analysis.diagnostics)
+    };
+    assert_eq!(d.message, "undefined name 'lenght'");
+    assert_eq!(d.help()[0].text, "did you mean 'length'?");
+}
+
+#[test]
+fn a_misspelled_function_suggests_a_builtin_too() {
+    let source = "pirnt(1)\n";
+    let analysis = analyze_source(source);
+    assert_eq!(
+        analysis.diagnostics[0].help()[0].text,
+        "did you mean 'print'?"
+    );
+}
+
+#[test]
+fn a_misspelled_method_suggests_the_one_meant() {
+    let source = "struct P:\n    x: int\nimpl P:\n    fn norm(self) -> int:\n        ret self.x\np = P(x=1)\nprint(p.nrom())\n";
+    let analysis = analyze_source(source);
+    let [d] = analysis.diagnostics.as_slice() else {
+        panic!("{:?}", analysis.diagnostics)
+    };
+    assert_eq!(d.help()[0].text, "did you mean 'norm'?");
+}
+
+#[test]
+fn a_name_like_nothing_gets_no_suggestion() {
+    let analysis = analyze_source("print(zzzzzz)\n");
+    assert!(analysis.diagnostics[0].help().is_empty());
+}
+
+#[test]
+fn a_lost_change_labels_the_parameter_and_notes_the_rule() {
+    let source = "fn f(xs: list[int]):\n    xs.append(1)\nf([1])\n";
+    let analysis = analyze_source(source);
+    let [d] = analysis.diagnostics.as_slice() else {
+        panic!("{:?}", analysis.diagnostics)
+    };
+    assert_eq!(
+        d.labels()[0].text,
+        "'xs' is a copy of the value it is called with"
+    );
+    assert_eq!(d.labels()[0].span.start, Pos::new(1, 6));
+    assert!(d.notes()[0].contains("'xs = f(xs)'"), "{d:?}");
+}
+
+#[test]
+fn changing_a_global_notes_the_rule() {
+    let source = "xs = [1]\nfn f():\n    xs.append(1)\nf()\n";
+    let analysis = analyze_source(source);
+    let d = analysis
+        .diagnostics
+        .iter()
+        .find(|d| d.message.contains("cannot change the global"))
+        .expect("an error");
+    assert!(d.notes()[0].contains("returning it"), "{d:?}");
+}
+
+#[test]
+fn a_parameter_without_a_type_suggests_the_one_its_calls_give() {
+    let source = "fn f(a) -> int:\n    ret a + 1\nprint(f(2))\n";
+    assert_eq!(
+        rendered(source),
+        "main.stn:1:6: error: parameter 'a' needs a type, such as 'a: int'
+  |
+1 | fn f(a) -> int:
+  |      ^
+  |
+help: write the type its calls give it
+  |
+1 | fn f(a: int) -> int:
+  |       +++++
+"
+    );
+}

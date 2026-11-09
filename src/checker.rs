@@ -29,12 +29,12 @@ use crate::ast::{
     PatternField, PatternKind, Stmt, StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam,
     UnaryOp, Variant, constant_int, is_lambda, is_test, target_names,
 };
-use crate::diagnostic::Diagnostic;
+use crate::diagnostic::{Diagnostic, similar};
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::spec::{FormatSpec, Presentation};
 use crate::stdlib::{
-    HANDLE_METHODS, MAX_ELEMENT_VALUES, METHODS, ORD_METHODS, OUTPUT, PRELUDE_CLAMP, SET_METHODS,
-    STR_METHODS, changes_receiver, is_builtin, is_reserved, prelude_method,
+    BUILTINS, HANDLE_METHODS, MAX_ELEMENT_VALUES, METHODS, ORD_METHODS, OUTPUT, PRELUDE_CLAMP,
+    SET_METHODS, STR_METHODS, changes_receiver, is_builtin, is_reserved, prelude_method,
 };
 
 #[cfg(test)]
@@ -1390,6 +1390,36 @@ struct FunctionInfo {
     /// How many of the first `params` take copies of the variables a lambda captured, which its
     /// value takes no argument for.
     captures: usize,
+    /// Where the function's name is written, for errors that point at its definition.
+    name_span: Span,
+    /// Where each parameter's type is written (its name, for one written without), in the
+    /// order of `params`, for errors that say why an argument was expected to have a type.
+    param_spans: Vec<Span>,
+    /// Where the return type is written, if it is.
+    ret_span: Option<Span>,
+}
+
+/// Returns where each of `args`' types is written (its name's span, for one written without) and
+/// where `returns` is, for [`FunctionInfo`].
+///
+/// For example, `fn f(a: int, self) -> str` gives the spans of `int` and `self`, and of `str`.
+fn written_spans(args: &Arguments, returns: Option<&TypeExpr>) -> (Vec<Span>, Option<Span>) {
+    let params = args
+        .args
+        .iter()
+        .map(|arg| arg.annotation.as_ref().map_or(arg.span, |ty| ty.span))
+        .collect();
+    (params, returns.map(|ty| ty.span))
+}
+
+/// The note on an error about a change a function cannot make, which explains the rule.
+const VALUE_NOTE: &str = "values are copied when they are passed or assigned, so a function changes \
+                          what its caller holds only by returning it, as in 'xs = f(xs)'";
+
+/// Returns `span` if an error may label it: not in the prelude and not written by linking, since
+/// the programmer wrote neither.
+fn labelable(span: Span) -> Option<Span> {
+    (span.file != FileId::PRELUDE && !span.is_empty()).then_some(span)
 }
 
 /// How a value is held inside another, for counting the values it takes up.
@@ -1971,13 +2001,74 @@ impl Inference {
     /// Unifies the type that was found with the type that was expected, reporting
     /// `expected X, found Y` at `span` if they differ.
     fn expect(&mut self, expected: &Ty, found: &Ty, span: Span) {
+        self.expect_because(expected, found, span, None);
+    }
+
+    /// Does what [`Inference::expect`] does, labeling `because`'s span with its text in the
+    /// error, the place that says why the type was expected.
+    ///
+    /// For example, an argument of the wrong type labels the parameter's written type with
+    /// `expected because of this parameter`.
+    fn expect_because(
+        &mut self,
+        expected: &Ty,
+        found: &Ty,
+        span: Span,
+        because: Option<(Span, &str)>,
+    ) {
         if !self.unify(expected, found) {
             let message = format!(
                 "expected {}, found {}",
                 self.show(expected),
                 self.show(found)
             );
-            self.error(span, message);
+            let mut diagnostic = Diagnostic::error(span, message);
+            if let Some((at, text)) = because
+                && let Some(at) = labelable(at)
+            {
+                diagnostic = diagnostic.with_label(at, text);
+            }
+            if let Some(help) = self.mismatch_help(expected, found) {
+                diagnostic = diagnostic.with_help(help);
+            }
+            self.diagnostics.push(diagnostic);
+        }
+    }
+
+    /// Returns advice for a value of type `found` where `expected` was, for the mismatches with
+    /// a usual fix: an int and a float, which never mix.
+    fn mismatch_help(&self, expected: &Ty, found: &Ty) -> Option<&'static str> {
+        match (self.resolve(expected), self.resolve(found)) {
+            (Ty::Float, Ty::Int) => {
+                Some("an int and a float never mix; convert the int with 'float(...)'")
+            }
+            (Ty::Int, Ty::Float) => Some(
+                "an int and a float never mix; convert the int with 'float(...)', or round the \
+                 float down with '.floor()'",
+            ),
+            _ => None,
+        }
+    }
+
+    /// Checks each argument of a call of `function` against its parameter, the first `skip`
+    /// parameters (`self`) having no argument, labeling the parameter's type in an error.
+    fn expect_args(
+        &mut self,
+        function: Option<&str>,
+        skip: usize,
+        params: &[Ty],
+        arg_types: &[Ty],
+        args: &[Expr],
+    ) {
+        let spans: Vec<Span> = function
+            .and_then(|f| self.functions.get(f))
+            .map(|info| info.param_spans.iter().skip(skip).copied().collect())
+            .unwrap_or_default();
+        for (i, ((param, arg_ty), arg)) in params.iter().zip(arg_types).zip(args).enumerate() {
+            let because = spans
+                .get(i)
+                .map(|&at| (at, "expected because of this parameter"));
+            self.expect_because(param, arg_ty, arg.span, because);
         }
     }
 
@@ -2759,6 +2850,7 @@ impl Inference {
         self.scope_params.clear();
         // the symbol's type is rebuilt from `params` and `ret` in `finish`
         let symbol = self.add_symbol(name, SymbolKind::Function, name_span, Ty::Unit);
+        let (param_spans, ret_span) = written_spans(args, returns);
         self.functions.insert(
             name.to_string(),
             FunctionInfo {
@@ -2768,6 +2860,9 @@ impl Inference {
                 ret,
                 ret_written: returns.is_some() || lambda,
                 captures: args.captures,
+                name_span,
+                param_spans,
+                ret_span,
             },
         );
     }
@@ -3548,6 +3643,7 @@ impl Inference {
         let symbol = self.add_symbol(name, SymbolKind::Method, *name_span, Ty::Unit);
         self.symbols[symbol].scope = Some(owner.to_string());
         let function = format!("{owner}.{key}");
+        let (param_spans, ret_span) = written_spans(args, returns.as_ref());
         self.functions.insert(
             function.clone(),
             FunctionInfo {
@@ -3557,6 +3653,9 @@ impl Inference {
                 ret,
                 ret_written: returns.is_some(),
                 captures: 0,
+                name_span: *name_span,
+                param_spans,
+                ret_span,
             },
         );
         self.function_spans.insert(function.clone(), method.span);
@@ -3812,6 +3911,7 @@ impl Inference {
                         self.symbols[param].scope = Some(function.clone());
                     }
                 }
+                let (param_spans, ret_span) = written_spans(args, returns.as_ref());
                 self.functions.insert(
                     function.clone(),
                     FunctionInfo {
@@ -3821,6 +3921,9 @@ impl Inference {
                         ret,
                         ret_written: returns.is_some(),
                         captures: 0,
+                        name_span: *name_span,
+                        param_spans,
+                        ret_span,
                     },
                 );
                 if !body.is_empty() {
@@ -4898,7 +5001,17 @@ impl Inference {
                                 self.show(&ret),
                                 self.show(&found)
                             );
-                            self.error(span, message);
+                            let mut diagnostic = Diagnostic::error(span, message);
+                            if let Some(at) = self
+                                .functions
+                                .get(&name)
+                                .and_then(|info| info.ret_span)
+                                .and_then(labelable)
+                            {
+                                diagnostic = diagnostic
+                                    .with_label(at, "expected because of this return type");
+                            }
+                            self.diagnostics.push(diagnostic);
                         } else {
                             self.untyped_returns.push((name, span, found));
                         }
@@ -5241,7 +5354,12 @@ impl Inference {
                          are copies; return it and assign the result where '{name}' is called"
                     ),
                 };
-                self.diagnostics.push(Diagnostic::warning(span, message));
+                let mut diagnostic = Diagnostic::warning(span, message);
+                if let Some(at) = labelable(arg.span) {
+                    let label = format!("'{param}' is a copy of the value it is called with");
+                    diagnostic = diagnostic.with_label(at, label);
+                }
+                self.diagnostics.push(diagnostic.with_note(VALUE_NOTE));
             }
         }
 
@@ -5313,7 +5431,22 @@ impl Inference {
                         self.show(found),
                         self.show(&expected)
                     );
-                    self.error(value_span, message);
+                    let mut diagnostic = Diagnostic::error(value_span, message);
+                    let first = &self.symbols[symbol];
+                    let label = match first.kind {
+                        SymbolKind::Parameter => Some(format!("'{id}' is a parameter")),
+                        SymbolKind::Local | SymbolKind::Global => {
+                            Some(format!("'{id}' is first assigned here"))
+                        }
+                        _ => None,
+                    };
+                    if let Some(label) = label
+                        && first.span != target.span
+                        && let Some(at) = labelable(first.span)
+                    {
+                        diagnostic = diagnostic.with_label(at, label);
+                    }
+                    self.diagnostics.push(diagnostic);
                 }
             }
             ExprKind::Subscript { value, slice, .. } => {
@@ -5501,12 +5634,15 @@ impl Inference {
         };
         match outside {
             Outside::Nothing => {}
-            Outside::Global => self.error(
-                root.span,
-                format!(
-                    "a function cannot change the global '{id}'; pass it as an argument and \
-                     return the changed value"
-                ),
+            Outside::Global => self.diagnostics.push(
+                Diagnostic::error(
+                    root.span,
+                    format!(
+                        "a function cannot change the global '{id}'; pass it as an argument and \
+                         return the changed value"
+                    ),
+                )
+                .with_note(VALUE_NOTE),
             ),
             Outside::Capture => self.error(
                 root.span,
@@ -6330,7 +6466,7 @@ impl Inference {
         self.methods.insert(
             call.span,
             Method {
-                function,
+                function: function.clone(),
                 receiver: false,
                 changes: false,
                 implementations: None,
@@ -6338,12 +6474,11 @@ impl Inference {
             },
         );
         if params.len() != args.len() {
-            self.arity_error(call.span, name, &params.len().to_string(), args.len());
+            let defined = self.functions[&function].name_span;
+            self.arity_error_at(call.span, name, params.len(), args.len(), defined);
             return ret;
         }
-        for ((param, arg_ty), arg) in params.iter().zip(&arg_types).zip(args) {
-            self.expect(param, arg_ty, arg.span);
-        }
+        self.expect_args(Some(&function), 0, &params, &arg_types, args);
         ret
     }
 
@@ -6400,8 +6535,15 @@ impl Inference {
                     message.push_str(&format!(
                         "; '{name}' is a field of '{short}', so read it without parentheses"
                     ));
+                    self.error(name_span, message);
+                } else {
+                    let methods = self.method_names(owner);
+                    let mut diagnostic = Diagnostic::error(name_span, message);
+                    if let Some(like) = similar(name, methods.iter().map(String::as_str)) {
+                        diagnostic = diagnostic.with_help(format!("did you mean '{like}'?"));
+                    }
+                    self.diagnostics.push(diagnostic);
                 }
-                self.error(name_span, message);
                 return self.fresh();
             }
             Some((_, false, _)) => {
@@ -6423,14 +6565,14 @@ impl Inference {
         self.methods.insert(
             call.span,
             Method {
-                function,
+                function: function.clone(),
                 receiver: true,
                 changes,
                 implementations: None,
                 trait_args: vec![],
             },
         );
-        self.check_method_args(call, name, &params, &arg_types, args);
+        self.check_method_args(call, (name, Some(&function)), &params, &arg_types, args);
         if changes {
             self.check_changing_call(call.span, receiver, name, &ret);
             self.check_change_of(receiver, true);
@@ -6466,7 +6608,7 @@ impl Inference {
             );
             self.error(receiver.span, message);
         }
-        self.check_method_args(call, name, &params[1..], arg_types, args);
+        self.check_method_args(call, (name, None), &params[1..], arg_types, args);
         if changes_receiver(name) {
             return Ty::Unit;
         }
@@ -6546,17 +6688,23 @@ impl Inference {
     fn check_method_args(
         &mut self,
         call: &Expr,
-        name: &str,
+        (name, function): (&str, Option<&str>),
         params: &[Ty],
         arg_types: &[Ty],
         args: &[Expr],
     ) {
+        let defined = function
+            .and_then(|f| self.functions.get(f))
+            .map(|info| info.name_span);
         if params.len() != args.len() {
-            self.arity_error(call.span, name, &params.len().to_string(), args.len());
-        } else {
-            for ((param, arg_ty), arg) in params.iter().zip(arg_types).zip(args) {
-                self.expect(param, arg_ty, arg.span);
+            match defined {
+                Some(defined) => {
+                    self.arity_error_at(call.span, name, params.len(), args.len(), defined)
+                }
+                None => self.arity_error(call.span, name, &params.len().to_string(), args.len()),
             }
+        } else {
+            self.expect_args(function, 1, params, arg_types, args);
         }
     }
 
@@ -6704,7 +6852,8 @@ impl Inference {
             let candidate = candidates[*one].clone();
             let ret = self.call_candidate(call.span, name_span, candidate.clone());
             let params = self.candidate_params(&candidate);
-            self.check_method_args(call, name, &params, arg_types, args);
+            let function = candidate.function.clone();
+            self.check_method_args(call, (name, Some(&function)), &params, arg_types, args);
             if candidate.changes {
                 self.check_changing_call(call.span, receiver, name, &ret);
                 self.check_change_of(receiver, true);
@@ -7319,7 +7468,7 @@ impl Inference {
                     self.fresh()
                 }
                 Resolved::Undefined => {
-                    self.error(expr.span, format!("undefined name '{id}'"));
+                    self.undefined(expr.span, format!("undefined name '{id}'"), id);
                     self.fresh()
                 }
             },
@@ -7812,12 +7961,11 @@ impl Inference {
                 self.add_reference(func.span, symbol);
                 self.expr_types.push((func.span, Ty::Unit));
                 if params.len() != args.len() {
-                    self.arity_error(call.span, id, &params.len().to_string(), args.len());
+                    let defined = self.functions[&name].name_span;
+                    self.arity_error_at(call.span, id, params.len(), args.len(), defined);
                     return ret;
                 }
-                for ((param, arg_ty), arg) in params.iter().zip(&arg_types).zip(args) {
-                    self.expect(param, arg_ty, arg.span);
-                }
+                self.expect_args(Some(&name), 0, &params, &arg_types, args);
                 ret
             }
             Resolved::Builtin => self.infer_builtin(call, id, args, &arg_types),
@@ -7840,7 +7988,7 @@ impl Inference {
                 self.fresh()
             }
             Resolved::Undefined => {
-                self.error(func.span, format!("undefined function '{id}'"));
+                self.undefined(func.span, format!("undefined function '{id}'"), id);
                 self.fresh()
             }
         }
@@ -9211,6 +9359,64 @@ impl Inference {
 
     /// Reports a call to `name` with `given` arguments when it takes `expected`, such as `1` or
     /// `0 or 1`.
+    /// Reports a call at `span` of `name`, a function of the program defined at `defined`, with
+    /// `given` arguments where it takes `expected`, labeling its definition.
+    fn arity_error_at(
+        &mut self,
+        span: Span,
+        name: &str,
+        expected: usize,
+        given: usize,
+        defined: Span,
+    ) {
+        self.arity_error(span, name, &expected.to_string(), given);
+        if let Some(defined) = labelable(defined)
+            && let Some(last) = self.diagnostics.pop()
+        {
+            let label = format!("'{name}' is defined here");
+            self.diagnostics.push(last.with_label(defined, label));
+        }
+    }
+
+    /// Reports `message` at `span` about `id`, a name nothing defines, with help naming the
+    /// closest name that is defined there: a variable, a function, or a builtin.
+    fn undefined(&mut self, span: Span, message: String, id: &str) {
+        let mut names: Vec<&str> = self
+            .function
+            .iter()
+            .flat_map(|scope| scope.locals.keys())
+            .chain(self.globals.keys())
+            .map(String::as_str)
+            .chain(
+                self.functions
+                    .keys()
+                    .map(String::as_str)
+                    .filter(|name| !name.contains('.')),
+            )
+            .chain(BUILTINS.iter().copied())
+            .collect();
+        names.sort_unstable();
+        names.dedup();
+        let mut diagnostic = Diagnostic::error(span, message);
+        if let Some(like) = similar(id, names) {
+            diagnostic = diagnostic.with_help(format!("did you mean '{like}'?"));
+        }
+        self.diagnostics.push(diagnostic);
+    }
+
+    /// Returns the names of the methods a struct (or builtin type key) `owner` has, sorted, for
+    /// a "did you mean" help.
+    fn method_names(&self, owner: &str) -> Vec<String> {
+        let mut names: Vec<String> = self
+            .struct_methods
+            .get(owner)
+            .map(|methods| methods.values().map(|m| m.name.clone()).collect())
+            .unwrap_or_default();
+        names.sort_unstable();
+        names.dedup();
+        names
+    }
+
     fn arity_error(&mut self, span: Span, name: &str, expected: &str, given: usize) {
         let plural = if expected == "1" { "" } else { "s" };
         let verb = if given == 1 { "was" } else { "were" };
@@ -9915,10 +10121,22 @@ impl Inference {
         // suggest the type inference found, which is what the program already relies on
         for (name, span, ty) in std::mem::take(&mut self.untyped_params) {
             let ty = self.finalize(&ty);
-            self.error(
+            let mut diagnostic = Diagnostic::error(
                 span,
                 format!("parameter '{name}' needs a type, such as '{name}: {ty}'"),
             );
+            if labelable(span).is_some() {
+                let at = Span {
+                    start: span.end,
+                    ..span
+                };
+                diagnostic = diagnostic.with_suggestion(
+                    "write the type its calls give it",
+                    at,
+                    format!(": {ty}"),
+                );
+            }
+            self.diagnostics.push(diagnostic);
         }
         for (name, span, ty) in std::mem::take(&mut self.untyped_returns) {
             let ty = self.finalize(&ty);
@@ -10543,6 +10761,8 @@ struct AssignmentCheck<'a> {
     tracked: HashSet<String>,
     /// Variables already reported, so each is reported once.
     reported: HashSet<String>,
+    /// Where each variable is first assigned in the code walked so far, which an error labels.
+    first: HashMap<String, Span>,
     diagnostics: &'a mut Vec<Diagnostic>,
 }
 
@@ -10551,7 +10771,16 @@ impl<'a> AssignmentCheck<'a> {
         AssignmentCheck {
             tracked,
             reported: HashSet::new(),
+            first: HashMap::new(),
             diagnostics,
+        }
+    }
+
+    /// Notes that `name`, a variable's name written as a target, assigns it.
+    fn assign(&mut self, name: &Expr, assigned: &mut HashSet<String>) {
+        if let ExprKind::Name { id, .. } = &name.kind {
+            assigned.insert(id.clone());
+            self.first.entry(id.clone()).or_insert(name.span);
         }
     }
 
@@ -10575,9 +10804,7 @@ impl<'a> AssignmentCheck<'a> {
                             let mut names = Vec::new();
                             target_names(target, &mut names);
                             for name in names {
-                                if let ExprKind::Name { id, .. } = &name.kind {
-                                    assigned.insert(id.clone());
-                                }
+                                self.assign(name, &mut assigned);
                             }
                         }
                         _ => self.reads(target, &assigned),
@@ -10633,9 +10860,7 @@ impl<'a> AssignmentCheck<'a> {
                 let mut names = Vec::new();
                 target_names(target, &mut names);
                 for name in names {
-                    if let ExprKind::Name { id, .. } = &name.kind {
-                        inside.insert(id.clone());
-                    }
+                    self.assign(name, &mut inside);
                 }
                 self.block(body, Some(inside));
                 Some(assigned)
@@ -10678,9 +10903,21 @@ impl<'a> AssignmentCheck<'a> {
                     && !assigned.contains(id)
                     && self.reported.insert(id.clone())
                 {
-                    self.diagnostics.push(Diagnostic::error(
+                    let mut diagnostic = Diagnostic::error(
                         expr.span,
                         format!("'{id}' might be used before it is assigned"),
+                    );
+                    if let Some(&at) = self.first.get(id)
+                        && let Some(at) = labelable(at)
+                    {
+                        diagnostic = diagnostic.with_label(
+                            at,
+                            format!("'{id}' is assigned here, but not on every path to its use"),
+                        );
+                    }
+                    self.diagnostics.push(diagnostic.with_note(
+                        "a variable must be assigned on every path that reaches a read of it, \
+                         since a loop's body or an 'if' without an 'else' might not run",
                     ));
                 }
             }

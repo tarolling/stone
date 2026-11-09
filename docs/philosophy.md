@@ -318,8 +318,12 @@ renders each place an error can happen into the executable, so it costs nothing 
 happens. A failed `unwrap` of an `err` shows the error it found, as in
 `cannot unwrap err: end of input`, and a failed `assert` of a comparison shows both sides, as in
 `assertion failed: [1, 2] == [1, 3]`. `stone test` runs each test block alone, interpreted
-or compiled, with the same report from both. Labels, notes, suggestions, error codes, and the chain of calls behind a runtime error
-are future work.
+or compiled, with the same report from both. Errors from the checker label the other places that explain them, in any file of the program
+(the parameter's type an argument does not fit, the return type a `ret` value does not match, a
+variable's first assignment), add notes on the rule involved, and help with the fix, as a
+rewritten line where the checker knows it, such as a parameter's missing type, or by naming a
+similar name for a misspelled one. Error codes, more of the checker's errors in this form, and
+the chain of calls behind a runtime error are future work.
 
 ## Run anywhere: no libc
 

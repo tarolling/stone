@@ -373,13 +373,179 @@ fn stone_stdout(before: &[&str], name: &str, source: &str, after: &[&str]) -> St
 }
 
 #[test]
-fn run_passes_the_arguments_after_the_file_to_the_program() {
+fn run_passes_the_arguments_after_dashes_to_the_program() {
     let source = "print(args())\n";
-    let expected = "['a', '-b', '--c', 'd e']\n";
-    let after = ["a", "-b", "--c", "d e"];
+    let expected = "['a', '-b', '--c', 'd e', '--']\n";
+    let after = ["--", "a", "-b", "--c", "d e", "--"];
     assert_eq!(stone_stdout(&["run"], "args_run", source, &after), expected);
     assert_eq!(stone_stdout(&[], "args_bare", source, &after), expected);
     assert_eq!(stone_stdout(&["run"], "args_none", source, &[]), "[]\n");
+}
+
+#[test]
+fn run_refuses_arguments_without_dashes() {
+    let (output, _) = stone(&["run"], "args_undashed", "print(args())\n");
+    assert!(output.status.success(), "{output:?}");
+    let file = PathBuf::from(env!("CARGO_TARGET_TMPDIR")).join("args_undashed.stn");
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .arg("run")
+        .arg(&file)
+        .arg("a")
+        .output()
+        .expect("stone should run");
+    assert!(!output.status.success(), "{output:?}");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(stderr.contains("unexpected argument 'a'"), "{stderr}");
+    let tip = format!(
+        "tip: to give 'a' to the program, write it after '--', as in 'stone run {} -- a'",
+        file.display()
+    );
+    assert!(stderr.contains(&tip), "{stderr}");
+}
+
+#[test]
+fn init_starts_a_program_that_runs_builds_checks_and_tests() {
+    let dir = project("init_program", &[]);
+    std::fs::create_dir_all(&dir).unwrap();
+    let output = stone_in(&dir, &["init", "my-app", "--no-git"]);
+    assert!(output.status.success(), "{output:?}");
+    let app = dir.join("my-app");
+    let created = |file: &str| Path::new("my-app").join(file).display().to_string();
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout),
+        format!(
+            "created {}\ncreated {}\ncreated {}\nmade the program my_app; run it with \
+             `cd my-app` and `stone run`\n",
+            created("stone.toml"),
+            created("main.stn"),
+            created(".gitignore")
+        )
+    );
+    assert!(!app.join(".git").exists());
+
+    let run = stone_in(&app, &["run"]);
+    assert!(run.status.success(), "{run:?}");
+    assert_eq!(String::from_utf8_lossy(&run.stdout), "Hello, world!\n");
+    // from a directory inside the project, the same program
+    std::fs::create_dir_all(app.join("notes/old")).unwrap();
+    let nested = stone_in(&app.join("notes/old"), &["run"]);
+    assert!(nested.status.success(), "{nested:?}");
+    assert_eq!(String::from_utf8_lossy(&nested.stdout), "Hello, world!\n");
+    // and a directory names its program
+    let named = stone_in(&dir, &["run", "my-app"]);
+    assert_eq!(String::from_utf8_lossy(&named.stdout), "Hello, world!\n");
+
+    let check = stone_in(&app.join("notes"), &["check"]);
+    assert!(check.status.success(), "{check:?}");
+    assert_eq!(String::from_utf8_lossy(&check.stderr), "");
+    let fmt = stone_in(&app, &["fmt", "--check"]);
+    assert!(fmt.status.success(), "{fmt:?}");
+    // tests run from anywhere inside the project, as everything else does
+    for dir in [app.clone(), app.join("notes/old")] {
+        let test = stone_in(&dir, &["test"]);
+        assert!(test.status.success(), "{test:?}");
+        assert!(String::from_utf8_lossy(&test.stdout).contains("1 passed, 0 failed"));
+    }
+
+    let build = stone_in(&app.join("notes"), &["build"]);
+    assert!(build.status.success(), "{build:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&build.stdout),
+        format!(
+            "Compiled {}{}\n",
+            Path::new("..").join("build").join("my_app").display(),
+            std::env::consts::EXE_SUFFIX
+        )
+    );
+    assert_eq!(stdout_of(&app.join("build/my_app")), "Hello, world!\n");
+    let clean = stone_in(&app.join("notes"), &["clean"]);
+    assert!(clean.status.success(), "{clean:?}");
+    assert!(!app.join("build").exists());
+
+    std::fs::write(app.join("main.stn"), "print(args())\n").unwrap();
+    let args = stone_in(&app, &["run", "--", "a", "-b"]);
+    assert_eq!(String::from_utf8_lossy(&args.stdout), "['a', '-b']\n");
+}
+
+#[test]
+fn init_starts_a_library_that_checks_but_does_not_run() {
+    let dir = project("init_library", &[]);
+    let output = stone_in(
+        &PathBuf::from(env!("CARGO_TARGET_TMPDIR")),
+        &[
+            "init",
+            "init_library",
+            "--lib",
+            "--name",
+            "greet",
+            "--no-git",
+        ],
+    );
+    assert!(output.status.success(), "{output:?}");
+    assert!(
+        String::from_utf8_lossy(&output.stdout)
+            .ends_with("made the library greet; test it with `cd init_library` and `stone test`\n")
+    );
+    let manifest = std::fs::read_to_string(dir.join("stone.toml")).unwrap();
+    assert!(manifest.contains("name = \"greet\""), "{manifest}");
+    let check = stone_in(&dir, &["check"]);
+    assert!(check.status.success(), "{check:?}");
+    assert_eq!(String::from_utf8_lossy(&check.stderr), "");
+    let run = stone_in(&dir, &["run"]);
+    assert!(!run.status.success(), "{run:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&run.stderr),
+        "error: this directory is a library, with a lib.stn but no main.stn, so there is nothing \
+         to run; check it with `stone check` or test it with `stone test`\n"
+    );
+}
+
+#[test]
+fn init_leaves_a_project_alone() {
+    let dir = project("init_existing", &[("main.stn", "print(1)\n")]);
+    let output = stone_in(&dir, &["init"]);
+    assert!(!output.status.success(), "{output:?}");
+    assert_eq!(
+        String::from_utf8_lossy(&output.stderr),
+        "error: main.stn already exists, so stone init left this directory alone\n"
+    );
+    assert!(!dir.join("stone.toml").exists());
+}
+
+#[test]
+fn init_makes_a_git_repository_outside_one() {
+    if Command::new("git").arg("--version").output().is_err() {
+        eprintln!("skipping: git is not on PATH");
+        return;
+    }
+    let dir = project("init_git", &[]);
+    std::fs::create_dir_all(&dir).unwrap();
+    // the temporary directory is inside stone's own repository, which git must not find
+    let output = Command::new(env!("CARGO_BIN_EXE_stone"))
+        .args(["init", "repo"])
+        .current_dir(&dir)
+        .env("GIT_CEILING_DIRECTORIES", &dir)
+        .output()
+        .expect("stone should run");
+    assert!(output.status.success(), "{output:?}");
+    assert!(dir.join("repo/.git").is_dir());
+    assert!(String::from_utf8_lossy(&output.stdout).contains("created a git repository"));
+}
+
+#[test]
+fn run_outside_a_program_says_how_to_start_one() {
+    let dir = project("no_program", &[]);
+    std::fs::create_dir_all(&dir).unwrap();
+    // nothing above the temporary directory is a program either
+    for command in ["run", "build", "check"] {
+        let output = stone_in(&dir, &[command]);
+        assert!(!output.status.success(), "{output:?}");
+        assert_eq!(
+            String::from_utf8_lossy(&output.stderr),
+            "error: there is no stone program here, since neither this directory nor any above \
+             it holds a main.stn or a stone.toml; run `stone init` to start one, or name a file\n"
+        );
+    }
 }
 
 /// Writes each `(path, source)` file under a fresh temporary directory named after `name` and

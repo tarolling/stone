@@ -70,11 +70,12 @@ print(total)
 ```
 
 ```sh
-stone run sum.stn 1 2 3                        # prints 6
+stone run sum.stn -- 1 2 3                     # prints 6
 stone build sum.stn && ./build/sum 1 2 3       # prints 6 too
 ```
 
-Everything after the file belongs to the program, even arguments starting with `-`, so
-`stone run sum.stn -5 --x` gives it `["-5", "--x"]`.
+`stone run` gives the program everything after `--`, even arguments starting with `-`, so
+`stone run sum.stn -- -5 --x` gives it `["-5", "--x"]`. A built executable needs no `--`, since
+every argument is its own.
 
 Next, {doc}`modules`.

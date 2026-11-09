@@ -18,14 +18,20 @@ const NO_FETCH: &str = "this build of stone cannot download packages; install a 
                         `cargo install --features fetch`";
 
 /// Returns the entry file of the program `path` names: the file itself, or the `main.stn` of a
-/// directory, or of the current directory if there is no path. Only its manifest matters, so it
-/// need not exist.
+/// directory, or of the program the current directory is in if there is no path (the current
+/// directory itself if it is in none). Only its manifest matters, so it need not exist.
 fn entry_of(path: Option<&Path>) -> PathBuf {
     match path {
-        None => PathBuf::from(DEFAULT_ENTRY),
+        None => root().join(DEFAULT_ENTRY),
         Some(path) if path.is_dir() => path.join(DEFAULT_ENTRY),
         Some(path) => path.to_path_buf(),
     }
+}
+
+/// Returns the root of the program the current directory is in, relative to it, or the current
+/// directory (an empty path) if it is in none, which is where `stone add` makes a `stone.toml`.
+fn root() -> PathBuf {
+    stone::driver::program_dir().unwrap_or_default()
 }
 
 /// Downloads every package the program whose entry file is `entry` uses that is not in the
@@ -133,11 +139,14 @@ fn add_package(spec: &str, name: Option<&str>, host: Option<&str>) -> Result<boo
     if let Some(message) = dependency_name_error(&name) {
         return Err(format!("{message}, with --name"));
     }
-    let old = std::fs::read_to_string(MANIFEST).unwrap_or_default();
+    let root = root();
+    let manifest = root.join(MANIFEST);
+    let old = std::fs::read_to_string(&manifest).unwrap_or_default();
     let new = edit::set_dependency(&old, &name, &edit::dependency_value(&source, &version))?;
-    std::fs::write(MANIFEST, new).map_err(|e| format!("cannot write {MANIFEST}: {e}"))?;
+    std::fs::write(&manifest, new)
+        .map_err(|e| format!("cannot write {}: {e}", manifest.display()))?;
     let linked =
-        stone::package::fetch::fetch_missing(Path::new(DEFAULT_ENTRY), &mut client, &mut log)?;
+        stone::package::fetch::fetch_missing(&root.join(DEFAULT_ENTRY), &mut client, &mut log)?;
     let ok = finish(&linked);
     if ok {
         println!("added {name} {version} ({source})");
@@ -149,11 +158,14 @@ fn add_package(spec: &str, name: Option<&str>, host: Option<&str>) -> Result<boo
 /// `stone.toml`, and out of `stone.lock` with any package only it used.
 pub fn remove(name: &str) -> ExitCode {
     exit((|| {
-        let old = std::fs::read_to_string(MANIFEST)
-            .map_err(|_| format!("there is no {MANIFEST} in this directory"))?;
+        let root = root();
+        let manifest = root.join(MANIFEST);
+        let old = std::fs::read_to_string(&manifest)
+            .map_err(|_| format!("there is no {MANIFEST} in this directory or any above it"))?;
         let new = edit::remove_dependency(&old, name)?;
-        std::fs::write(MANIFEST, new).map_err(|e| format!("cannot write {MANIFEST}: {e}"))?;
-        let ok = finish(&project::link(Path::new(DEFAULT_ENTRY), "", &FsSources));
+        std::fs::write(&manifest, new)
+            .map_err(|e| format!("cannot write {}: {e}", manifest.display()))?;
+        let ok = finish(&project::link(&root.join(DEFAULT_ENTRY), "", &FsSources));
         if ok {
             println!("removed {name}");
         }

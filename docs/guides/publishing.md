@@ -26,6 +26,9 @@ description = "Reading and writing JSON"
 license = "MIT"
 ```
 
+`stone init --lib --name csv` starts this layout: a `stone.toml` naming the package at version
+0.1.0, a `lib.stn` with a `pub fn` and a test block, and a `.gitignore`.
+
 `name` is how programs name the package by default. It is made of ASCII letters, digits, and
 `_`, and does not start with a digit. Avoid the name of a builtin module or builtin, such as
 `math` or `print`, which programs cannot use, so each would have to pick another name for it.

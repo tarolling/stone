@@ -179,7 +179,7 @@ args() -> list[str]
 ```
 
 Returns the command-line arguments given after the program, without the program's own name.
-`stone run sum.stn 1 2` and a built `./sum 1 2` both see `["1", "2"]`. Each call returns a new
+`stone run sum.stn -- 1 2` and a built `./sum 1 2` both see `["1", "2"]`. Each call returns a new
 list.
 
 ```stone

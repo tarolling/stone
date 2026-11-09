@@ -374,25 +374,27 @@ pub fn dependency_name_error(name: &str) -> Option<String> {
     if let Some(message) = identifier_error(name, "a dependency's name") {
         return Some(message);
     }
+    taken_name(name).map(|what| format!("'{name}' is {what}, so give the dependency another name"))
+}
+
+/// Returns what takes `name` so that no dependency can be named it, if anything does: a builtin
+/// module, the prelude, or a builtin function.
+///
+/// For example, `taken_name("os")` is `Some("a builtin module")`, and `taken_name("geo")` is
+/// `None`.
+pub fn taken_name(name: &str) -> Option<&'static str> {
     let builtin_module = crate::stdlib::module(name).is_some()
         || crate::stdlib::source_module(name).is_some()
         || crate::stdlib::is_internal_module(name);
     if builtin_module {
-        return Some(format!(
-            "'{name}' is a builtin module, so give the dependency another name"
-        ));
+        Some("a builtin module")
+    } else if name == crate::project::PRELUDE_MODULE {
+        Some("the name of stone's prelude")
+    } else if crate::stdlib::is_reserved(name) {
+        Some("a builtin")
+    } else {
+        None
     }
-    if name == crate::project::PRELUDE_MODULE {
-        return Some(format!(
-            "'{name}' is the name of stone's prelude, so give the dependency another name"
-        ));
-    }
-    if crate::stdlib::is_reserved(name) {
-        return Some(format!(
-            "'{name}' is a builtin, so give the dependency another name"
-        ));
-    }
-    None
 }
 
 /// Returns whether `name` may be a segment of a repository's path on a host.

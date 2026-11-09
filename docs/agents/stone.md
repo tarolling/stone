@@ -21,8 +21,9 @@ in `.stn`.
 | command | does |
 | --- | --- |
 | `stone check app.stn` | type checks without running; run it after every edit |
-| `stone run app.stn [args...]` | interprets the program; heavy loops can run slower than in Python |
+| `stone run app.stn [-- args...]` | interprets the program, giving it the arguments after `--`; heavy loops can run slower than in Python |
 | `stone build app.stn` | compiles a standalone executable to `build/app` next to the file; use it for large inputs and timing. `--target x86_64-linux`, `aarch64-linux`, `aarch64-macos`, or `x86_64-windows` builds for another machine, and `--windows-gui` makes a Windows program with windows open no console |
+| `stone init [dir]` | starts a project: `stone.toml`, `main.stn`, `.gitignore` (`--lib` for a library's `lib.stn`); in a project, `stone run`, `stone build`, and `stone check` need no file |
 | `stone clean` | deletes the `build/` directories `stone build` made |
 | `stone fmt app.stn` | rewrites the file in the standard layout (only whitespace changes); run it before finishing |
 

@@ -1,4 +1,5 @@
-use clap::{Parser as ClapParser, Subcommand};
+use clap::error::{ContextKind, ContextValue, ErrorKind};
+use clap::{CommandFactory, Parser as ClapParser, Subcommand};
 use std::error::Error;
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -6,8 +7,9 @@ use std::process::ExitCode;
 use stone::codegen::device::Device;
 use stone::codegen::{Os, Subsystem, Target};
 use stone::diagnostic::{Diagnostic, Diagnostics, Severity};
-use stone::driver::{self, Checked};
+use stone::driver::{self, Checked, EntryUse};
 use stone::format;
+use stone::init;
 use stone::interpreter::{Exit, Limits};
 use stone::project::{DEFAULT_ENTRY, FsSources, SourceMap};
 use stone::testing;
@@ -28,29 +30,45 @@ struct Args {
     /// The file to run when no subcommand is given.
     file: Option<String>,
 
-    /// Arguments for the program, which it reads with `args()`.
-    #[arg(trailing_var_arg = true, allow_hyphen_values = true, requires = "file")]
+    /// Arguments for the program, after `--`, which it reads with `args()`.
+    #[arg(last = true, requires = "file")]
     args: Vec<String>,
 }
 
 #[derive(Subcommand, Debug)]
 enum Command {
-    /// Runs a file with the interpreter.
+    /// Starts a project: a `stone.toml`, a `main.stn` to run, and a `.gitignore`.
+    Init {
+        /// The project's directory, made if there is none. Defaults to the current directory.
+        path: Option<PathBuf>,
+        /// Start a library, with a `lib.stn` for programs to use, instead of a program.
+        #[arg(long)]
+        lib: bool,
+        /// The package's name, instead of the directory's.
+        #[arg(long)]
+        name: Option<String>,
+        /// Do not make the directory a git repository, which stone init otherwise does when it
+        /// is not in one already and git is installed.
+        #[arg(long)]
+        no_git: bool,
+    },
+    /// Runs a program with the interpreter.
     Run {
         /// Use only packages already downloaded.
         #[arg(long)]
         offline: bool,
-        /// The file to run.
-        file: String,
-        /// Arguments for the program, which it reads with `args()`.
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        /// The file to run, or a directory to run the `main.stn` of. Defaults to the program the
+        /// current directory is in.
+        file: Option<String>,
+        /// Arguments for the program, after `--`, which it reads with `args()`.
+        #[arg(last = true)]
         args: Vec<String>,
     },
-    /// Compiles files to native executables in the `build` directory next to each.
+    /// Compiles programs to native executables in the `build` directory next to each.
     Build {
         /// The files to build, each into an executable named after it (or, for a `main.stn`,
-        /// after its directory).
-        #[arg(required = true)]
+        /// after its package, else its directory), or directories to build the `main.stn` of. Defaults to the
+        /// program the current directory is in.
         files: Vec<String>,
         /// Where to write the executable instead, which needs exactly one file and one target.
         /// The assembly goes next to it with a `.s` extension.
@@ -104,10 +122,11 @@ enum Command {
         #[arg(long)]
         offline: bool,
     },
-    /// Checks a file for errors without running it.
+    /// Checks a program for errors without running it.
     Check {
-        /// The file to check.
-        file: String,
+        /// The file to check, or a directory to check the `main.stn` (or a library's `lib.stn`)
+        /// of. Defaults to the program the current directory is in.
+        file: Option<String>,
         /// Use only packages already downloaded.
         #[arg(long)]
         offline: bool,
@@ -184,8 +203,12 @@ enum ExecutionMode {
         offline: bool,
     },
     Check {
-        file: String,
+        file: Option<String>,
         offline: bool,
+    },
+    Init {
+        path: Option<PathBuf>,
+        options: init::Options,
     },
     Test {
         paths: Vec<PathBuf>,
@@ -209,7 +232,7 @@ enum ExecutionMode {
         check: bool,
     },
     Run {
-        file: String,
+        file: Option<String>,
         args: Vec<String>,
         offline: bool,
     },
@@ -223,7 +246,10 @@ enum ExecutionMode {
 }
 
 fn main() -> ExitCode {
-    let args = Args::parse();
+    let args = match Args::try_parse() {
+        Ok(args) => args,
+        Err(error) => with_dashes_tip(error).exit(),
+    };
 
     let mode = match args.command {
         Some(Command::Run {
@@ -251,6 +277,19 @@ fn main() -> ExitCode {
             offline,
         },
         Some(Command::Check { file, offline }) => ExecutionMode::Check { file, offline },
+        Some(Command::Init {
+            path,
+            lib,
+            name,
+            no_git,
+        }) => ExecutionMode::Init {
+            path,
+            options: init::Options {
+                lib,
+                name,
+                git: !no_git,
+            },
+        },
         Some(Command::Test {
             paths,
             build,
@@ -287,7 +326,7 @@ fn main() -> ExitCode {
         Some(Command::Uninstall { yes }) => ExecutionMode::Uninstall { yes },
         // clap prints the usage when there is neither a subcommand nor a file
         None => ExecutionMode::Run {
-            file: args.file.unwrap_or_default(),
+            file: args.file,
             args: args.args,
             offline: false,
         },
@@ -323,7 +362,12 @@ fn main() -> ExitCode {
         ExecutionMode::Remove(name) => deps::remove(&name),
         ExecutionMode::Fetch { path, locked } => deps::fetch(path.as_deref(), locked),
         ExecutionMode::Tree(path) => deps::tree(path.as_deref()),
+        ExecutionMode::Init { path, options } => init(path.as_deref(), &options),
         ExecutionMode::Check { file, offline } => {
+            let file = match entry(file.as_deref(), EntryUse::Any) {
+                Ok(file) => file,
+                Err(code) => return code,
+            };
             let Some(source) = read(&file) else {
                 return ExitCode::FAILURE;
             };
@@ -350,23 +394,13 @@ fn main() -> ExitCode {
             file,
             args,
             offline,
-        } => with_program(&file, offline, |checked, sources| {
-            // the interpreter runs only what the machine it runs on can
-            if let Ok(host) = Target::host() {
-                let unsupported = driver::unsupported(&checked.module, sources, host.os);
-                if !unsupported.is_empty() {
-                    return Err(Box::new(Diagnostics(unsupported)));
-                }
-            }
-            driver::run_module(
-                &checked.module,
-                &checked.calls,
-                &mut std::io::BufReader::new(std::io::stdin()),
-                &mut std::io::stdout(),
-                &args,
-                Limits::DEFAULT,
-            )
-        }),
+        } => {
+            let file = match entry(file.as_deref(), EntryUse::Program) {
+                Ok(file) => file,
+                Err(code) => return code,
+            };
+            run(&file, &args, offline)
+        }
         ExecutionMode::Uninstall { yes } => match uninstall::run(yes) {
             Ok(()) => ExitCode::SUCCESS,
             Err(e) => {
@@ -376,6 +410,39 @@ fn main() -> ExitCode {
         },
         ExecutionMode::Update { check, tag } => update(check, tag.as_deref()),
     }
+}
+
+/// Adds a tip to an error about an argument clap did not expect after `stone run FILE` (or
+/// `stone FILE`), since a program's arguments go after `--`.
+///
+/// For example, `stone run sum.stn 1 2` fails with `unexpected argument '1' found` and the tip
+/// `to give '1' to the program, write it after '--', as in 'stone run sum.stn -- 1'`.
+fn with_dashes_tip(mut error: clap::Error) -> clap::Error {
+    let words: Vec<String> = std::env::args().skip(1).collect();
+    let running = match words.first() {
+        Some(word) => word == "run" || Args::command().find_subcommand(word).is_none(),
+        None => false,
+    };
+    if error.kind() != ErrorKind::UnknownArgument || !running {
+        return error;
+    }
+    let Some(ContextValue::String(arg)) = error.get(ContextKind::InvalidArg) else {
+        return error;
+    };
+    let before: Vec<&str> = words
+        .iter()
+        .take_while(|word| *word != arg)
+        .map(String::as_str)
+        .collect();
+    let tip = format!(
+        "to give '{arg}' to the program, write it after '--', as in 'stone {} -- {arg}'",
+        before.join(" ")
+    );
+    error.insert(
+        ContextKind::Suggested,
+        ContextValue::StyledStrs(vec![tip.into()]),
+    );
+    error
 }
 
 /// Runs `stone build`, compiling each of `files` for each of `targets` (the host if there are
@@ -419,7 +486,19 @@ fn build(
         }
     }
     let mut status = ExitCode::SUCCESS;
-    for file in files {
+    let named: Vec<Option<&str>> = match files.is_empty() {
+        true => vec![None],
+        false => files.iter().map(|file| Some(file.as_str())).collect(),
+    };
+    for file in named {
+        let file = match entry(file, EntryUse::Program) {
+            Ok(file) => file,
+            Err(code) => {
+                status = code;
+                continue;
+            }
+        };
+        let file = &file;
         let code = with_program(file, offline, |checked, sources| {
             let targets = if unique.is_empty() {
                 vec![Target::host()?]
@@ -447,15 +526,95 @@ fn build(
     status
 }
 
+/// Runs `stone run`, interpreting the program whose entry file is `file` with `args` as its
+/// arguments, after downloading the packages it uses unless `offline`.
+fn run(file: &str, args: &[String], offline: bool) -> ExitCode {
+    with_program(file, offline, |checked, sources| {
+        // the interpreter runs only what the machine it runs on can
+        if let Ok(host) = Target::host() {
+            let unsupported = driver::unsupported(&checked.module, sources, host.os);
+            if !unsupported.is_empty() {
+                return Err(Box::new(Diagnostics(unsupported)));
+            }
+        }
+        driver::run_module(
+            &checked.module,
+            &checked.calls,
+            &mut std::io::BufReader::new(std::io::stdin()),
+            &mut std::io::stdout(),
+            args,
+            Limits::DEFAULT,
+        )
+    })
+}
+
+/// Returns the entry file of the program `path` names, or of the program the current directory
+/// is in if there is none (see [`driver::find_entry`]), printing why there is none.
+///
+/// For example, `entry(None, EntryUse::Program)` in a project made by `stone init` is
+/// `main.stn`, and `entry(Some("sum.stn"), EntryUse::Program)` is `sum.stn`.
+fn entry(path: Option<&str>, want: EntryUse) -> Result<String, ExitCode> {
+    match driver::find_entry(path.map(Path::new), want) {
+        Ok(file) => Ok(file.to_string_lossy().into_owned()),
+        Err(e) => {
+            eprintln!("error: {e}");
+            Err(ExitCode::FAILURE)
+        }
+    }
+}
+
+/// Runs `stone init`, starting a project in `path` (the current directory if there is none) as
+/// `options` say, and printing each file it wrote and how to go on.
+///
+/// For example, `stone init hello` prints `created hello/stone.toml` and the other files, then
+/// `made the program hello; run it with `cd hello` and `stone run``.
+fn init(path: Option<&Path>, options: &init::Options) -> ExitCode {
+    let created = match init::init(path.unwrap_or(Path::new("")), options) {
+        Ok(created) => created,
+        Err(e) => {
+            eprintln!("error: {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+    for file in &created.files {
+        println!("created {}", file.display());
+    }
+    if created.git {
+        println!("created a git repository");
+    }
+    let (what, next) = match options.lib {
+        true => ("library", "test it with"),
+        false => ("program", "run it with"),
+    };
+    let command = match options.lib {
+        true => "stone test",
+        false => "stone run",
+    };
+    let name = &created.name;
+    match path {
+        Some(path) => println!(
+            "made the {what} {name}; {next} `cd {}` and `{command}`",
+            path.display()
+        ),
+        None => println!("made the {what} {name}; {next} `{command}`"),
+    }
+    ExitCode::SUCCESS
+}
+
 /// Runs `stone test`, testing every file of `paths` with test blocks (every such file under a
-/// directory, and under the current directory if there are none) as `options` says, after
+/// directory, and with no paths under the program the current directory is in, or the current
+/// directory if it is in none) as `options` says, after
 /// downloading the packages their programs use unless `offline`.
 ///
 /// For example, `stone test geo` runs the tests of `geo/shapes.stn` and `geo/vec.stn`, printing
 /// a line per test and a summary, and fails if any test failed or any file has errors.
 fn test(paths: &[PathBuf], options: &testing::Options, offline: bool) -> ExitCode {
+    // with no paths, the program the current directory is in, else the directory itself
     let paths = match paths.is_empty() {
-        true => vec![PathBuf::from(".")],
+        true => match driver::program_dir() {
+            Some(root) if !root.as_os_str().is_empty() => vec![root],
+            _ => vec![PathBuf::from(".")],
+        },
         false => paths.to_vec(),
     };
     let (files, errors) = testing::test_files(&paths);
@@ -489,8 +648,9 @@ fn test(paths: &[PathBuf], options: &testing::Options, offline: bool) -> ExitCod
 /// For example, `stone clean examples/basics.stn` and `stone clean examples` both remove
 /// `examples/build`.
 fn clean(path: Option<&Path>) -> ExitCode {
+    let root = driver::program_dir().unwrap_or_default();
     let dir = match path {
-        None => Path::new(""),
+        None => &root,
         Some(path) if path.is_dir() => path,
         Some(path) => path.parent().unwrap_or(Path::new("")),
     };

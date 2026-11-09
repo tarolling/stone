@@ -10,6 +10,28 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `stone init [PATH]` starts a project: a `stone.toml` naming the package (after the directory,
+  or `--name`), a `main.stn` with a function, a print, and a test block, and a `.gitignore` of
+  `build/`, made a git repository unless it is in one already or `--no-git` is given. `--lib`
+  starts a library with a `lib.stn` instead. It never writes over a project that is already
+  there.
+- A project's `main.stn` is its official entry file: `stone run`, `stone build`, and
+  `stone check` with no file use the program the current directory is in, the nearest directory
+  at or above it with a `stone.toml` or a `main.stn`, and given a directory they use its
+  `main.stn` (`stone check` a library's `lib.stn` too). `stone test`, `clean`, `fetch`, `tree`,
+  `add`, and `remove` find the project the same way.
+
+### Changed
+
+- Arguments for a program that `stone run` (or `stone FILE`) runs now go after `--`, as in
+  `stone run sum.stn -- 1 2 3`, so that `stone run -- 1 2 3` can run the current project with
+  them. An argument after the file without `--` is an error with a tip that says where to put it.
+- `stone build` now names a project's executable after the package, the `name` in its `stone.toml`,
+  so `my-app/main.stn` of a package `my_app` builds `my-app/build/my_app`. A `main.stn` with no
+  `stone.toml` naming a package is still named after its directory.
+
 ## [0.4.5] - 2026-11-08
 
 ### Fixed

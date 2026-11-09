@@ -89,6 +89,11 @@ downloaded from GitHub and GitLab releases, so there is no registry to run or to
 host and the hashes. Not done yet: packages in a subdirectory of a repository, sources other than
 GitHub and GitLab, and a shared database of checksums beyond trust on first use.
 
+Status: a project's layout is a convention rather than configuration. `stone init` writes a
+`stone.toml` and a `main.stn` (or a library's `lib.stn`) side by side, the program always starts
+at `main.stn`, and every module is found from that directory, so `stone run`, `stone build`, and
+`stone check` find the program from anywhere inside it with no entry point to declare.
+
 ## Simple like Python
 
 The code a programmer reads and writes should look like Python's and need as few concepts.

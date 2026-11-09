@@ -365,6 +365,7 @@ fn execute(program: &Path, backend: Backend) -> Result<Outcome, String> {
             Command::new(stone)
                 .arg("run")
                 .arg(program)
+                .arg("--")
                 .args(&args)
                 .envs(env)
                 .current_dir(&cwd),

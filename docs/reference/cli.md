@@ -1,11 +1,12 @@
 # Command line
 
 ```text
-stone [FILE [ARGS...]] [COMMAND]
+stone [FILE [-- ARGS...]] [COMMAND]
 ```
 
 `run`, `build`, and `check` read one `.stn` file, the entry file, along with every module it uses (see
-[Modules](modules.md)), then checks them before doing anything else. If the checker
+[Modules](modules.md)), then checks them before doing anything else. Inside a project, the
+entry file need not be named (see [Projects and their entry file](#projects-and-their-entry-file)). If the checker
 finds errors, the command prints all of them and exits with status 1 without running anything.
 Errors print as `file:line:col: error: message`, followed by the source line and a caret under
 the problem.
@@ -15,20 +16,75 @@ A program with a `stone.toml` next to its entry file uses packages (see
 uses that is not downloaded yet, unless given `--offline`, which uses only what is already in
 the package store and never connects to anything.
 
-## `stone run [--offline] FILE [ARGS...]`
+## Projects and their entry file
 
-Interprets the program. `stone FILE` is shorthand for `stone run FILE`. Everything after the
-file is passed to the program, which reads it with `args()`, even arguments that start with `-`.
-The program's standard input is stone's own, for `input()` and `eof()`.
+A project is a directory holding a `stone.toml` that names it (see {doc}`../guides/packages`),
+and every `.stn` file under it is one of its modules, found from that directory. A program's
+entry file, where it starts running, is always the project's `main.stn`. A library has a
+`lib.stn` instead, the module a program gets from `use` of the library's name, and nothing to
+run. `stone init` makes either.
+
+`stone run`, `stone build`, and `stone check` find the entry file themselves:
+
+- Given a file, as in `stone run tools/sum.stn`, they use that file, which may be any `.stn`
+  file, inside a project or not. A program of one file needs no project.
+- Given a directory, as in `stone run app`, they use its `main.stn`. `stone check` takes a
+  library's `lib.stn` too.
+- Given nothing, they use the project the current directory is in: the nearest directory, the
+  current one or any above it, that holds a `stone.toml` or a `main.stn`. So `stone run` works
+  from anywhere inside a project, and errors and the build directory read as if the entry had
+  been named, as in `../main.stn:3:7: error: ...`. Outside any project, it is an error that
+  suggests `stone init`.
+
+`stone test`, `stone clean`, `stone fetch`, `stone tree`, `stone add`, and `stone remove` find
+the project the same way when given no path.
+
+## `stone init [PATH] [--lib] [--name NAME] [--no-git]`
+
+Starts a project in `PATH`, by default the current directory, making the directory if there is
+none:
+
+```text
+hello/
+  stone.toml    [package] with the name, version 0.1.0, and this stone's version as the oldest
+  main.stn      a function, a line printing what it gives, and a test block for `stone test`
+  .gitignore    build/
+```
+
+The package is named after the directory, with each `-` written as `_` (`my-app` is `my_app`),
+unless `--name` gives the name, which must be a stone name. `--lib` starts a library: `lib.stn`
+holds a `pub fn` and a test block, and its name cannot be one a builtin module, the prelude, or
+a builtin takes, since programs use the library under it. An existing `.gitignore` is kept,
+gaining a `build/` line if it has none. `stone init` refuses a directory that already holds a
+`stone.toml`, `stone.lock`, `main.stn`, or `lib.stn`, and then writes nothing.
+
+When git is installed and the directory is not inside a git repository already, `stone init`
+also makes it one with `git init`. `--no-git` leaves it alone.
+
+```sh
+stone init hello && cd hello && stone run   # prints Hello, world!
+stone init --lib --name csv
+```
+
+## `stone run [--offline] [FILE] [-- ARGS...]`
+
+Interprets the program: `FILE`, the `main.stn` of a directory, or the program the current
+directory is in (see [Projects and their entry file](#projects-and-their-entry-file)).
+`stone FILE` is shorthand for `stone run FILE`. Everything after `--` is passed to the program,
+which reads it with `args()`, even arguments that start with `-`, and an argument after the file
+without `--` is an error. The program's standard input is stone's own, for `input()` and `eof()`.
 
 ```sh
 stone run examples/basics.stn
-stone run sum.stn 1 2 3 < numbers.txt
+stone run sum.stn -- 1 2 3 < numbers.txt
+stone run                                  # the project's main.stn
+stone run -- --verbose input.txt           # the same, with two arguments
 ```
 
-## `stone build FILE... [-o OUTPUT] [--target TARGET]... [--gpu GPU]... [--windows-gui] [--offline]`
+## `stone build [FILE...] [-o OUTPUT] [--target TARGET]... [--gpu GPU]... [--windows-gui] [--offline]`
 
-Compiles each program to a native executable in its build directory (see
+Compiles each program (each file, each directory's `main.stn`, or with neither the program the
+current directory is in) to a native executable in its build directory (see
 [Where executables go](#where-executables-go)), writing the assembly next to it with a `.s`
 extension. stone assembles and links
 the program itself, so no assembler, linker, or C compiler needs to be installed. A Linux
@@ -118,7 +174,7 @@ such as `stone-x86_64-linux.tar.gz` and `stone-x86_64-windows.zip`, plus
 other targets, but cannot build programs for Intel Macs, so a build there needs `--target`.
 
 The executable reads its own arguments and standard input the same way, so `./build/sum 1 2 3`
-behaves like `stone run sum.stn 1 2 3`.
+behaves like `stone run sum.stn -- 1 2 3`.
 
 ### Where executables go
 
@@ -138,8 +194,10 @@ examples/
 ```
 
 - An executable is named after its entry file, so `basics.stn` becomes `basics` (`basics.exe`
-  for Windows). A `main.stn` is named after its directory instead, as a program of several files
-  usually is, so `geometry/main.stn` becomes `geometry/build/geometry`.
+  for Windows). A `main.stn` is named after its package instead, the `name` its `stone.toml`
+  gives, so a project `my-app` that `stone init` made builds `my-app/build/my_app`. Without a
+  `stone.toml` naming one, a `main.stn` is named after its directory, as a program of several
+  files usually is, so `geometry/main.stn` becomes `geometry/build/geometry`.
 - An executable for the machine stone runs on goes straight into `build/`, and one for any
   other target into `build/TARGET/`, named as `--target` names it (`aarch64-macos`,
   `x86_64v3-linux`). Builds for different targets never overwrite each other.
@@ -154,17 +212,18 @@ stone marks each build directory it makes with a `.stone` file, which `stone cle
 ## `stone clean [PATH]`
 
 Removes the build directory of the program in `PATH`, which is an entry file or a directory
-and defaults to the current directory. It only removes a `build` directory that `stone build`
+and defaults to the program the current directory is in (or the current directory, in none). It only removes a `build` directory that `stone build`
 made; any other is an error and stays as it is.
 
 ```sh
 stone clean examples/basics.stn   # removes examples/build
-stone clean                      # removes ./build
+stone clean                      # removes the current project's build
 ```
 
-## `stone check [--offline] FILE`
+## `stone check [--offline] [FILE]`
 
-Reports every syntax and type error without running the program, and exits with status 1 if
+Reports every syntax and type error without running the program (`FILE`, a directory's
+`main.stn` or `lib.stn`, or the program the current directory is in), and exits with status 1 if
 there are any. Warnings alone print but leave the status at 0.
 
 `check` also warns about everything the program defines but never uses: variables that are
@@ -190,7 +249,8 @@ stone check examples/basics.stn
 ## `stone test [PATH...] [--build] [--filter TEXT] [-j N] [--offline]`
 
 Runs the test blocks (`test "description":`) of every file of `PATH` that has any, every such
-file under a directory, and those under the current directory if no path is given (see
+file under a directory, and with no path those under the program the current directory is in
+(or the current directory, in none; see
 {doc}`../guides/testing`). Each file is checked as part of the program it belongs to, the
 nearest directory at or above it with a `main.stn` or a `stone.toml`. Each test runs alone,
 without the file's top-level statements, with no arguments and empty input, and passes if it
@@ -214,7 +274,7 @@ stone test --build
 
 ## `stone add PACKAGE [--name NAME] [--host HOST]`
 
-Adds a package from a GitHub or GitLab release to the program in the current directory: it finds
+Adds a package from a GitHub or GitLab release to the program the current directory is in: it finds
 the release, downloads it with every package it uses, names it under `[dependencies]` in
 `stone.toml` (making the file if there is none), and updates `stone.lock`. `PACKAGE` is
 `github:owner/repo`, `gitlab:group/project`, or a link to either, optionally followed by
@@ -230,13 +290,13 @@ stone add gitlab:bob/num@0.3 --name numbers
 
 ## `stone remove NAME`
 
-Removes the dependency `NAME` from the current directory's `stone.toml`, and from `stone.lock`
+Removes the dependency `NAME` from the `stone.toml` of the program the current directory is in, and from `stone.lock`
 along with any package only it used. The downloaded files stay in the package store.
 
 ## `stone fetch [PATH] [--locked]`
 
 Downloads every package the program in `PATH` (an entry file or a directory, by default the
-current directory) uses, and brings its `stone.lock` up to date. With `--locked`, it fails if
+program the current directory is in) uses, and brings its `stone.lock` up to date. With `--locked`, it fails if
 `stone.lock` would change instead of changing it, so CI builds only what was locked.
 
 ## `stone tree [PATH]`

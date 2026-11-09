@@ -7,7 +7,8 @@ releases hold a stone package is one.
 
 ## Adding a package
 
-In the directory of your program's `main.stn`, run
+In your program's directory (a project that `stone init` made, or any directory with a
+`main.stn`, or one inside it), run
 
 ```sh
 stone add github:alice/stone-csv

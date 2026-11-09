@@ -618,10 +618,104 @@ pub const MARKER: &str = ".stone";
 /// is `app`, so linking it there resolves `use geo.vec` as the program does.
 pub fn program_root(path: &Path, sources: &dyn Sources) -> Option<PathBuf> {
     let dir = path.parent().unwrap_or(Path::new(""));
-    let holds = |d: &Path, name: &str| sources.read(&d.join(name)).is_some();
     dir.ancestors()
-        .find(|d| holds(d, DEFAULT_ENTRY) || holds(d, crate::package::MANIFEST))
+        .find(|d| is_root(d, sources))
         .map(Path::to_path_buf)
+}
+
+/// Returns whether `dir` is the root of a program: whether it holds a `main.stn` or a
+/// `stone.toml`.
+fn is_root(dir: &Path, sources: &dyn Sources) -> bool {
+    let holds = |name: &str| sources.read(&dir.join(name)).is_some();
+    holds(DEFAULT_ENTRY) || holds(crate::package::MANIFEST)
+}
+
+/// Returns the root of the program the directory `start` is in: the nearest directory at or
+/// above it that holds a `main.stn` or a `stone.toml`, or `None` if there is none.
+///
+/// For example, in a project made by `stone init app`, `find_root(Path::new("/home/me/app/src"))`
+/// is `/home/me/app`.
+pub fn find_root(start: &Path) -> Option<PathBuf> {
+    start
+        .ancestors()
+        .find(|d| is_root(d, &project::FsSources))
+        .map(Path::to_path_buf)
+}
+
+/// Returns the root of the program the current directory is in (see [`find_root`]), written
+/// relative to the current directory, or `None` if there is none.
+///
+/// For example, run in `app/src` of a project `app`, `program_dir()` is `Some("..")`, and run in
+/// `app` itself, `Some("")`.
+pub fn program_dir() -> Option<PathBuf> {
+    relative_root(&std::env::current_dir().ok()?)
+}
+
+/// Returns the root of the program `cwd` is in, written relative to `cwd` as `..`s, or `None` if
+/// there is none.
+fn relative_root(cwd: &Path) -> Option<PathBuf> {
+    let root = find_root(cwd)?;
+    let depth = cwd
+        .strip_prefix(&root)
+        .map_or(0, |rest| rest.components().count());
+    Some((0..depth).map(|_| Path::new("..")).collect())
+}
+
+/// What a command wants of the entry file [`find_entry`] finds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EntryUse {
+    /// A program to run or build, so a `main.stn`.
+    Program,
+    /// Anything to check, so a library's `lib.stn` too.
+    Any,
+}
+
+/// The error [`find_entry`] gives when no path is named and no program is found.
+pub const NO_PROGRAM: &str = "there is no stone program here, since neither this directory nor \
+                              any above it holds a main.stn or a stone.toml; run `stone init` to \
+                              start one, or name a file";
+
+/// Returns the entry file a command such as `stone run` uses, given the path it was named, if
+/// any (see [`find_entry_in`]).
+pub fn find_entry(path: Option<&Path>, want: EntryUse) -> Result<PathBuf, String> {
+    let cwd =
+        std::env::current_dir().map_err(|e| format!("cannot read the current directory: {e}"))?;
+    find_entry_in(&cwd, path, want)
+}
+
+/// Returns the entry file a command run in `cwd` uses, given the path it was named, if any. A
+/// file is its own entry. A directory's entry is its `main.stn`, or, for [`EntryUse::Any`], its
+/// `lib.stn` if it is a library. Without a path, the entry is that of the program's root (see
+/// [`find_root`]) from `cwd`, written relative to `cwd`, so errors and the build directory read
+/// as if it had been named.
+///
+/// For example, run in `app/src` of a project `app`, `find_entry_in(cwd, None,
+/// EntryUse::Program)` is `../main.stn`, and `find_entry_in(cwd, Some(Path::new("sum.stn")),
+/// EntryUse::Program)` is `sum.stn`.
+pub fn find_entry_in(cwd: &Path, path: Option<&Path>, want: EntryUse) -> Result<PathBuf, String> {
+    let dir = match path {
+        Some(path) if !cwd.join(path).is_dir() => return Ok(path.to_path_buf()),
+        Some(dir) => dir.to_path_buf(),
+        None => relative_root(cwd).ok_or(NO_PROGRAM)?,
+    };
+    let shown = match dir.as_os_str().is_empty() {
+        true => "this directory".to_string(),
+        false => dir.display().to_string(),
+    };
+    let main = dir.join(DEFAULT_ENTRY);
+    if cwd.join(&main).is_file() {
+        return Ok(main);
+    }
+    let lib = dir.join(project::LIB_ENTRY);
+    match (want, cwd.join(&lib).is_file()) {
+        (EntryUse::Any, true) => Ok(lib),
+        (EntryUse::Program, true) => Err(format!(
+            "{shown} is a library, with a {} but no {DEFAULT_ENTRY}, so there is nothing to run; \
+             check it with `stone check` or test it with `stone test`",
+            project::LIB_ENTRY
+        )),
+        (_, false) => Err(format!("there is no {DEFAULT_ENTRY} in {shown}")),
+    }
 }
 
 /// Returns the build directory of the program whose entry file is `entry`: `build` next to it,
@@ -634,10 +728,13 @@ pub fn build_dir(entry: &Path) -> PathBuf {
 }
 
 /// Returns the name of the executable built from the entry file `entry`: the file's stem, or,
-/// for a `main.stn`, the name of the directory it is in, as a Cargo package is named.
+/// for a `main.stn`, the name its project's `stone.toml` gives the package, else the name of the
+/// directory it is in, as Cargo names a package's executable.
 ///
 /// For example, `examples/basics.stn` is named `basics`, `tests/programs/modules/main.stn` is
-/// named `modules`, and `/main.stn`, whose directory has no name, is named `main`.
+/// named `modules`, the `main.stn` of a directory `my-app` whose `stone.toml` holds
+/// `name = "my_app"` is named `my_app`, and `/main.stn`, whose directory has no name, is named
+/// `main`.
 pub fn program_name(entry: &Path) -> String {
     let stem = entry.file_stem().unwrap_or_default().to_string_lossy();
     if entry.file_name().and_then(|name| name.to_str()) != Some(DEFAULT_ENTRY) {
@@ -648,6 +745,9 @@ pub fn program_name(entry: &Path) -> String {
         Some(parent) if !parent.as_os_str().is_empty() => parent,
         _ => Path::new("."),
     };
+    if let Some(name) = package_name(parent) {
+        return name;
+    }
     std::fs::canonicalize(parent)
         .ok()
         .and_then(|dir| {
@@ -655,6 +755,19 @@ pub fn program_name(entry: &Path) -> String {
                 .map(|name| name.to_string_lossy().into_owned())
         })
         .unwrap_or_else(|| stem.into_owned())
+}
+
+/// Returns the name the `stone.toml` in `dir` gives its package, or `None` if there is no
+/// manifest, it names no package, or it has errors, which loading the program reports.
+///
+/// For example, a `stone.toml` holding `[package]` and `name = "hello"` gives `Some("hello")`.
+fn package_name(dir: &Path) -> Option<String> {
+    let text = std::fs::read_to_string(dir.join(crate::package::MANIFEST)).ok()?;
+    let (manifest, errors) = crate::package::Manifest::parse(&text, crate::span::FileId(0));
+    match errors.is_empty() {
+        true => manifest.name.map(|(name, _)| name),
+        false => None,
+    }
 }
 
 /// Returns where `stone build` writes the executable for `target` built from the entry file
@@ -1223,6 +1336,81 @@ ret y
     }
 
     #[test]
+    fn a_named_file_is_its_own_entry() {
+        let dir = scratch("entry_file");
+        let found = find_entry_in(&dir, Some(Path::new("sum.stn")), EntryUse::Program);
+        assert_eq!(found, Ok(PathBuf::from("sum.stn")));
+    }
+
+    #[test]
+    fn a_directory_runs_its_main_and_checks_its_lib() {
+        let dir = scratch("entry_dir");
+        std::fs::create_dir_all(dir.join("app")).unwrap();
+        std::fs::write(dir.join("app/main.stn"), "").unwrap();
+        std::fs::create_dir_all(dir.join("geo")).unwrap();
+        std::fs::write(dir.join("geo/lib.stn"), "").unwrap();
+        let app = Some(Path::new("app"));
+        assert_eq!(
+            find_entry_in(&dir, app, EntryUse::Program),
+            Ok(PathBuf::from("app/main.stn"))
+        );
+        let geo = Some(Path::new("geo"));
+        assert_eq!(
+            find_entry_in(&dir, geo, EntryUse::Any),
+            Ok(PathBuf::from("geo/lib.stn"))
+        );
+        assert_eq!(
+            find_entry_in(&dir, geo, EntryUse::Program),
+            Err(
+                "geo is a library, with a lib.stn but no main.stn, so there is nothing to run; \
+                 check it with `stone check` or test it with `stone test`"
+                    .to_string()
+            )
+        );
+        std::fs::create_dir_all(dir.join("empty")).unwrap();
+        assert_eq!(
+            find_entry_in(&dir, Some(Path::new("empty")), EntryUse::Any),
+            Err("there is no main.stn in empty".to_string())
+        );
+    }
+
+    #[test]
+    fn without_a_path_the_nearest_program_above_is_found() {
+        let dir = scratch("entry_found");
+        std::fs::write(dir.join("stone.toml"), "").unwrap();
+        std::fs::write(dir.join("main.stn"), "").unwrap();
+        std::fs::create_dir_all(dir.join("a/b")).unwrap();
+        assert_eq!(
+            find_entry_in(&dir, None, EntryUse::Program),
+            Ok(PathBuf::from("main.stn"))
+        );
+        assert_eq!(
+            find_entry_in(&dir.join("a/b"), None, EntryUse::Program),
+            Ok(PathBuf::from("../../main.stn"))
+        );
+        assert_eq!(find_root(&dir.join("a/b")), Some(dir.clone()));
+        // a library's root has no main.stn, so only checking finds an entry
+        std::fs::remove_file(dir.join("main.stn")).unwrap();
+        std::fs::write(dir.join("lib.stn"), "").unwrap();
+        assert_eq!(
+            find_entry_in(&dir.join("a"), None, EntryUse::Any),
+            Ok(PathBuf::from("../lib.stn"))
+        );
+        assert!(find_entry_in(&dir, None, EntryUse::Program).is_err());
+    }
+
+    #[test]
+    fn without_a_path_or_a_program_above_there_is_no_entry() {
+        // the system's root directory holds no stone program
+        let root = Path::new("/");
+        assert_eq!(find_root(root), None);
+        assert_eq!(
+            find_entry_in(root, None, EntryUse::Program),
+            Err(NO_PROGRAM.to_string())
+        );
+    }
+
+    #[test]
     fn the_build_directory_sits_next_to_the_entry_file() {
         assert_eq!(
             build_dir(Path::new("examples/basics.stn")),
@@ -1244,6 +1432,22 @@ ret y
         std::fs::write(&nested, "").unwrap();
         assert_eq!(program_name(&dir.join("sub/../main.stn")), "modules");
         assert_eq!(program_name(Path::new("/main.stn")), "main");
+    }
+
+    #[test]
+    fn a_projects_main_is_named_after_its_package() {
+        let dir = scratch("my-app");
+        std::fs::write(dir.join("main.stn"), "").unwrap();
+        std::fs::write(dir.join("tool.stn"), "").unwrap();
+        std::fs::write(dir.join("stone.toml"), "[package]\nname = \"my_app\"\n").unwrap();
+        assert_eq!(program_name(&dir.join("main.stn")), "my_app");
+        // only the project's entry file takes the package's name
+        assert_eq!(program_name(&dir.join("tool.stn")), "tool");
+        // a manifest without a name, or one that does not parse, leaves the directory's
+        std::fs::write(dir.join("stone.toml"), "[dependencies]\n").unwrap();
+        assert_eq!(program_name(&dir.join("main.stn")), "my-app");
+        std::fs::write(dir.join("stone.toml"), "[package\n").unwrap();
+        assert_eq!(program_name(&dir.join("main.stn")), "my-app");
     }
 
     #[test]

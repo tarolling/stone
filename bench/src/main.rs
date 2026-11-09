@@ -271,6 +271,7 @@ fn run() -> Result<(), String> {
                     stone.clone().into(),
                     "run".into(),
                     program.file("stn").into(),
+                    "--".into(),
                 ];
                 argv.extend(args.iter().map(OsString::from));
                 let samples = measure(&argv, options.runs, &expected, &what)?;

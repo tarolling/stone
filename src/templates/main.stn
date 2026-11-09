@@ -1,0 +1,7 @@
+fn greeting(name: str) -> str:
+    ret "Hello, {name}!"
+
+print(greeting("world"))
+
+test "greeting greets by name":
+    assert greeting("stone") == "Hello, stone!"

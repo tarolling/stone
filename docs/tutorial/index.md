@@ -49,6 +49,21 @@ stone check hello.stn        # only look for errors
 :language: text
 ```
 
+A single file is enough for small programs. For anything larger, `stone init` starts a
+project, a directory with a `stone.toml` that names it and a `main.stn` to start from:
+
+```sh
+stone init hello             # makes hello/stone.toml, hello/main.stn, hello/.gitignore
+cd hello
+stone run                    # prints Hello, world!
+stone build && ./build/hello
+stone test                   # runs the test block main.stn starts with
+```
+
+Inside a project, `stone run`, `stone build`, and `stone check` need no file: they use the
+project's `main.stn`, from its directory or any directory inside it. See
+{doc}`../reference/cli` for the details.
+
 ## Blocks and indentation
 
 Like Python, stone groups statements by indentation. A line that opens a block ends in `:`, as

@@ -400,6 +400,10 @@ pub fn shown_names(text: &str, packages: &[PackageInfo]) -> String {
 /// [`crate::driver::interpret`].
 pub const DEFAULT_ENTRY: &str = "main.stn";
 
+/// The entry file of a library, which a package's `use` of its own name loads (see
+/// [`crate::package::LIB`]), and which `stone check` checks in a directory with no `main.stn`.
+pub const LIB_ENTRY: &str = "lib.stn";
+
 /// Loads the program whose entry file is at `entry` and holds `source`, reading the modules it
 /// uses from `sources`, and links them into one module.
 ///

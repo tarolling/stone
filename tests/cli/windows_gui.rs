@@ -263,7 +263,10 @@ fn win32_windows_report_input_in_order_under_both_backends() {
         if host == Host::Windows {
             let title = format!("stone gui run {id} {scale}");
             let mut run = Command::new(env!("CARGO_BIN_EXE_stone"));
-            run.arg("run").arg(dir.join("events.stn")).arg(&title);
+            run.arg("run")
+                .arg(dir.join("events.stn"))
+                .arg("--")
+                .arg(&title);
             check_events(host, &dir, &mut run, &title, scale);
         }
     }
@@ -294,7 +297,10 @@ fn win32_windows_go_on_drawing_while_moved() {
     if host == Host::Windows {
         let title = format!("stone gui frames run {}", std::process::id());
         let mut run = Command::new(env!("CARGO_BIN_EXE_stone"));
-        run.arg("run").arg(dir.join("frames.stn")).arg(&title);
+        run.arg("run")
+            .arg(dir.join("frames.stn"))
+            .arg("--")
+            .arg(&title);
         let (driven, printed) = drive(host, &dir, &mut run, (&title, ""), &["-Mode", "move"]);
         assert!(
             driven.ends_with("\nok\n") && driven.lines().count() == 2,

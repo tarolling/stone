@@ -13,6 +13,7 @@ mod tests;
 use crate::ast::{Expr, Mod, ParserError, Stmt};
 use crate::debug;
 use crate::diagnostic::Diagnostic;
+use crate::explain::Code;
 use crate::span::{FileId, Pos, Span};
 use crate::token::{Token, TokenType};
 
@@ -285,13 +286,13 @@ impl Parser {
     /// For example, for `print(1` this is `expected ')', found end of line` at the end of the line.
     fn syntax_error(&self) -> Diagnostic {
         if let Some(span) = self.too_deep {
-            return Diagnostic::error(
+            return Code::Syntax.error(
                 span,
                 format!("code is nested more than {MAX_DEPTH} levels deep"),
             );
         }
         if let Some(hint) = self.hints.iter().find(|h| h.index == self.furthest) {
-            return Diagnostic::error(hint.span, hint.message.clone());
+            return Code::Syntax.error(hint.span, hint.message.clone());
         }
         let found = self
             .tokens
@@ -299,7 +300,7 @@ impl Parser {
             .or(self.tokens.last())
             .unwrap_or(&EOF);
         if found.r#type == TokenType::Indent {
-            return Diagnostic::error(found.span, "unexpected indent");
+            return Code::Syntax.error(found.span, "unexpected indent");
         }
         // different expectations can read alike, such as a name token and `a name`
         let mut loud: Vec<std::borrow::Cow<str>> = vec![];
@@ -325,7 +326,7 @@ impl Parser {
                 format!("expected {} or {last}, found {found_text}", rest.join(", "))
             }
         };
-        Diagnostic::error(found.span, message)
+        Code::Syntax.error(found.span, message)
     }
 
     /// Parses all tokens into a module. This is the entry point of the parser.

@@ -2279,8 +2279,9 @@ fn a_package_that_is_not_downloaded_is_an_error_where_it_is_named() {
     let files = owned(&[("main.stn", "use mime\nprint(mime.v())\n"), USES_JSON]);
     let (printed, written) = stored_run(&files);
     assert!(
-        printed
-            .starts_with("stone.toml:2:1: error: mime 1.2.0 (github:alice/mime) is not downloaded"),
+        printed.starts_with(
+            "stone.toml:2:1: error[E0048]: mime 1.2.0 (github:alice/mime) is not downloaded"
+        ),
         "{printed}"
     );
     assert_eq!(written, []);
@@ -2305,12 +2306,12 @@ fn a_use_of_a_package_that_is_not_downloaded_is_noted_for_editors() {
     // the program's errors say it once, where the manifest names the package
     assert_eq!(
         first_lines(&linked, &linked.diagnostics),
-        ["stone.toml:2:1: error: mime 1.2.0 (github:alice/mime) is not downloaded"]
+        ["stone.toml:2:1: error[E0048]: mime 1.2.0 (github:alice/mime) is not downloaded"]
     );
     assert_eq!(
         first_lines(&linked, &linked.unavailable),
         [
-            "main.stn:1:5: error: 'mime' cannot be used: mime 1.2.0 (github:alice/mime) is not \
+            "main.stn:1:5: error[E0048]: 'mime' cannot be used: mime 1.2.0 (github:alice/mime) is not \
              downloaded; run `stone fetch`"
         ]
     );
@@ -2323,7 +2324,7 @@ fn a_use_of_a_directory_that_is_not_a_package_is_noted_for_editors() {
     assert_eq!(
         first_lines(&linked, &linked.unavailable),
         [
-            "main.stn:1:5: error: 'geo' cannot be used: '../geo' has no stone.toml, so it is not \
+            "main.stn:1:5: error[E0048]: 'geo' cannot be used: '../geo' has no stone.toml, so it is not \
              a package"
         ]
     );
@@ -2335,7 +2336,7 @@ fn a_use_of_a_package_whose_manifest_has_errors_points_at_it() {
     let linked = link(Path::new("main.stn"), "use geo\n", &sources);
     assert_eq!(
         first_lines(&linked, &linked.unavailable),
-        ["main.stn:1:5: error: 'geo' cannot be used, because of an error in its stone.toml"]
+        ["main.stn:1:5: error[E0048]: 'geo' cannot be used, because of an error in its stone.toml"]
     );
 }
 
@@ -2408,7 +2409,7 @@ fn a_package_whose_files_changed_does_not_match_its_lock() {
     let (printed, written) = stored_run(&files);
     assert!(
         printed.starts_with(&format!(
-            "stone.lock:5:8: error: mime 1.2.0 (github:alice/mime) does not hold what it held \
+            "stone.lock:5:8: error[E0048]: mime 1.2.0 (github:alice/mime) does not hold what it held \
              when it was locked: its hash was {wrong}, and is now sha256:"
         )),
         "{printed}"
@@ -2430,7 +2431,7 @@ fn a_package_from_a_host_must_be_the_version_it_was_released_as() {
     let (printed, _) = stored_run(&files);
     assert!(
         printed.starts_with(
-            "store/github.com/alice/mime/1.2.0/stone.toml:3:11: error: this package says it is \
+            "store/github.com/alice/mime/1.2.0/stone.toml:3:11: error[E0048]: this package says it is \
              version 1.1.0, but it was released as 1.2.0"
         ),
         "{printed}"
@@ -2447,7 +2448,7 @@ fn a_package_from_a_host_cannot_use_a_directory() {
     let (printed, _) = stored_run(&files);
     assert!(
         printed.starts_with(
-            "store/github.com/alice/mime/1.2.0/stone.toml:6:1: error: a package from a host \
+            "store/github.com/alice/mime/1.2.0/stone.toml:6:1: error[E0048]: a package from a host \
              cannot use a directory, since the directory is not part of its release"
         ),
         "{printed}"

@@ -17,13 +17,16 @@ print(price * count)
 `stone check prices.stn` reports
 
 ```text
-prices.stn:3:15: error: expected float, found int
+prices.stn:3:15: error[E0005]: expected float, found int
   |
 3 | print(price * count)
   |               ^^^^^
+For more about this error, try `stone explain E0005`.
 ```
 
-and exits with status 1. The fix is `price * float(count)`. Syntax errors look the same:
+and exits with status 1. `E0005` is the error's code: `stone explain E0005` describes that kind
+of error at length, with an example of it and its fix, and [Error codes](../reference/errors.md)
+lists every code. The fix is `price * float(count)`. Syntax errors look the same:
 forgetting the `:` after `if x > 1` reports `expected ':', found end of line`.
 
 Among the things the checker reports:

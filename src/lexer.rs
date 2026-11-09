@@ -4,6 +4,7 @@
 //! `Newline`, `Indent`, and later `Dedent` tokens around the function body.
 
 use crate::diagnostic::Diagnostic;
+use crate::explain::Code;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::spec::FormatSpec;
 use crate::token::{RESERVED_KEYWORDS, Token, TokenType};
@@ -17,6 +18,8 @@ const TAB_SIZE: usize = 4;
 /// For example, lexing `99999999999999999999` fails because the literal does not fit in an `i64`.
 #[derive(Debug, PartialEq)]
 pub struct LexError {
+    /// The kind of error, [`Code::Literal`] or, for a format spec, [`Code::FormatSpec`].
+    pub code: Code,
     pub message: String,
     pub span: Span,
 }
@@ -35,7 +38,7 @@ impl Error for LexError {}
 
 impl From<LexError> for Diagnostic {
     fn from(err: LexError) -> Self {
-        Diagnostic::error(err.span, err.message)
+        err.code.error(err.span, err.message)
     }
 }
 
@@ -114,6 +117,7 @@ impl Lexer {
         match self.lex_tokens(None) {
             Ok(tokens) => Ok(self.in_file(tokens)),
             Err(e) => Err(LexError {
+                code: Code::Literal,
                 span: e.span.in_file(file),
                 ..e
             }),
@@ -370,12 +374,14 @@ impl Lexer {
             match num.parse::<f64>() {
                 Ok(value) if value.is_finite() => Ok(TokenType::Float(value)),
                 _ => Err(LexError {
+                    code: Code::Literal,
                     message: format!("float literal {num} is too large"),
                     span,
                 }),
             }
         } else {
             num.parse().map(TokenType::Number).map_err(|_| LexError {
+                code: Code::Literal,
                 message: format!("integer literal {num} is too large"),
                 span,
             })
@@ -431,6 +437,7 @@ impl Lexer {
                             self.advance();
                         }
                         return Err(LexError {
+                            code: Code::Literal,
                             message: "empty '{}' in a string; write '{{' and '}}' for braces"
                                 .to_string(),
                             span: Span::new(brace, self.pos()),
@@ -449,6 +456,7 @@ impl Lexer {
                     let brace = self.pos();
                     self.advance();
                     return Err(LexError {
+                        code: Code::Literal,
                         message: "a '}' in a string is written '}}'".to_string(),
                         span: Span::new(brace, self.pos()),
                     });
@@ -460,6 +468,7 @@ impl Lexer {
             }
         }
         Err(LexError {
+            code: Code::Literal,
             message: "unterminated string".to_string(),
             span: Span::new(start, self.pos()),
         })
@@ -480,12 +489,14 @@ impl Lexer {
                     let brace = self.pos();
                     self.advance();
                     return Err(LexError {
+                        code: Code::FormatSpec,
                         message: "values in a format spec are not supported yet".to_string(),
                         span: Span::new(brace, self.pos()),
                     });
                 }
                 None | Some('\n' | '"') => {
                     return Err(LexError {
+                        code: Code::FormatSpec,
                         message: "a format spec must end with '}'".to_string(),
                         span: Span::new(start, self.pos()),
                     });
@@ -502,6 +513,7 @@ impl Lexer {
                 let at = Pos::new(text_start.line, text_start.col + offset);
                 let end = Pos::new(at.line, at.col + 1);
                 LexError {
+                    code: Code::FormatSpec,
                     message,
                     span: Span::new(at, end),
                 }
@@ -529,6 +541,7 @@ impl Lexer {
                     let at = self.pos();
                     self.advance();
                     return Err(LexError {
+                        code: Code::Literal,
                         message: "a bytes literal holds only ASCII characters; write others as \
                                   '\\xhh'"
                             .to_string(),
@@ -542,6 +555,7 @@ impl Lexer {
             }
         }
         Err(LexError {
+            code: Code::Literal,
             message: "unterminated bytes literal".to_string(),
             span: Span::new(start, self.pos()),
         })
@@ -577,6 +591,7 @@ impl Lexer {
         let start = self.pos();
         self.advance();
         let error = |lexer: &Self, message: String| LexError {
+            code: Code::Literal,
             message,
             span: Span::new(start, lexer.pos()),
         };
@@ -655,6 +670,7 @@ impl Lexer {
             && matches!(self.peek(), None | Some('\n'))
         {
             return Err(LexError {
+                code: Code::Literal,
                 message: "unterminated string".to_string(),
                 span: Span::new(hole.string, self.pos()),
             });
@@ -766,6 +782,7 @@ impl Lexer {
                     })
                 } else if first == '!' {
                     return Err(LexError {
+                        code: Code::Literal,
                         message: "unexpected character '!'".to_string(),
                         span: Span::new(start, self.pos()),
                     });
@@ -801,6 +818,7 @@ impl Lexer {
             Some(ch) => {
                 self.advance();
                 return Err(LexError {
+                    code: Code::Literal,
                     message: format!("unexpected character '{ch}'"),
                     span: Span::new(start, self.pos()),
                 });

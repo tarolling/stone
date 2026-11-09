@@ -33,7 +33,7 @@ The cases must cover every value. Leave out `case Shape.Empty:` from `area`, and
 stops before the program runs:
 
 ```text
-error: 'match' does not cover Shape.Empty; add 'case Shape.Empty:' or 'case _:'
+error[E0027]: 'match' does not cover Shape.Empty; add 'case Shape.Empty:' or 'case _:'
 ```
 
 So adding a variant to an enum points at every `match` that needs a case for it.

@@ -128,10 +128,10 @@ fn write_lock(linked: &Linked, sources: &dyn Sources) -> Option<Diagnostic> {
         return None;
     }
     let error = sources.write(path, text).err()?;
-    Some(Diagnostic::error(
-        crate::span::Span::empty(crate::span::Pos::new(1, 1)),
-        error,
-    ))
+    Some(
+        crate::explain::Code::Manifest
+            .error(crate::span::Span::empty(crate::span::Pos::new(1, 1)), error),
+    )
 }
 
 fn has_errors(diagnostics: &[Diagnostic]) -> bool {
@@ -580,10 +580,10 @@ pub fn unsupported(module: &Mod, sources: &SourceMap, os: Os) -> Vec<Diagnostic>
             return;
         };
         if WINDOWS_UNSUPPORTED.contains(&id.as_str()) {
-            errors.push(Diagnostic::error(
-                expr.span,
-                format!("{id} is not supported on Windows yet"),
-            ));
+            errors.push(
+                crate::explain::Code::Unsupported
+                    .error(expr.span, format!("{id} is not supported on Windows yet")),
+            );
         }
     };
     let Mod::Module { body } = module;
@@ -886,7 +886,7 @@ u = net.connect_unix(\"/tmp/x\")
             .collect();
         assert_eq!(
             errors,
-            ["main.stn:9:9: error: net.connect_unix is not supported on Windows yet"]
+            ["main.stn:9:9: error[E0046]: net.connect_unix is not supported on Windows yet"]
         );
         let output = std::env::temp_dir().join(format!("stone-net-{}.exe", std::process::id()));
         let built = compile_module(
@@ -1106,7 +1106,9 @@ ret y
             .collect();
         assert_eq!(
             rendered,
-            ["main.stn:2:5: error: expected ':', found end of line\n  |\n2 | if x\n  |     ^\n"]
+            [
+                "main.stn:2:5: error[E0001]: expected ':', found end of line\n  |\n2 | if x\n  |     ^\n"
+            ]
         );
     }
 
@@ -1120,7 +1122,7 @@ ret y
         assert_eq!(
             rendered,
             [concat!(
-                "big.stn:1:5: error: integer literal 99999999999999999999 is too large\n",
+                "big.stn:1:5: error[E0002]: integer literal 99999999999999999999 is too large\n",
                 "  |\n",
                 "1 | x = 99999999999999999999\n",
                 "  |     ^^^^^^^^^^^^^^^^^^^^\n",

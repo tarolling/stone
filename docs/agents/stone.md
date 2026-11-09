@@ -27,8 +27,9 @@ in `.stn`.
 | `stone clean` | deletes the `build/` directories `stone build` made |
 | `stone fmt app.stn` | rewrites the file in the standard layout (only whitespace changes); run it before finishing |
 
-Errors print as `app.stn:3:7: error: message`, with the source line and a caret under the
-problem, and exit with status 1. Warnings use the same format with `warning:`. The messages are
+Errors print as `app.stn:3:7: error[E0005]: message`, with the source line and a caret under the
+problem, and exit with status 1. `stone explain E0005` explains a code with an example of the
+error and its fix. Warnings use the same format with `warning:`. The messages are
 written to be acted on: they usually say what to write instead, so read them before guessing.
 Runtime errors (an index out of range, `unwrap` of `none`, division by zero) print the same way
 under both `run` and `build`. Fix warnings too: each one points at a likely bug, such as a change

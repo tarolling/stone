@@ -17,6 +17,7 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
   and show their notes and help after the message.
 - Quick fixes: an error that suggests a fix as code, such as the type of a parameter written
   without one, offers it as a code action.
+- Each error shows its code, such as `E0005`, linked to its explanation in the documentation.
 - The MCP tools `stone_diagnostics` and `stone_check_snippet` show the same labels, notes, and
   help that `stone check` prints.
 

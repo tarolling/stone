@@ -799,7 +799,7 @@ mod tests {
     fn invalid_programs_are_rejected_before_code_generation() {
         assert_eq!(
             assemble("x = 1 + \"a\"\n"),
-            Err("1:9: error: expected int, found str".to_string())
+            Err("1:9: error[E0005]: expected int, found str".to_string())
         );
     }
 

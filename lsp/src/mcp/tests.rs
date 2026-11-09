@@ -179,7 +179,7 @@ fn diagnostics_render_as_stone_check_does() {
     let text = ok(&dir, "stone_diagnostics", json!({ "path": "main.stn" }));
     assert_eq!(
         text,
-        "main.stn:2:5: error: cannot assign str to 'x', which is int\n  |\n\
+        "main.stn:2:5: error[E0005]: cannot assign str to 'x', which is int\n  |\n\
          1 | x = 1\n  | - 'x' is first assigned here\n\
          2 | x = \"s\"\n  |     ^^^\n\n1 error in 1 file"
     );
@@ -199,7 +199,7 @@ fn diagnostics_of_a_directory_cover_every_file_with_relative_paths() {
     );
     let text = ok(&dir, "stone_diagnostics", json!({ "path": "." }));
     assert!(
-        text.starts_with("util.stn:2:13: error: expected int, found str"),
+        text.starts_with("util.stn:2:13: error[E0005]: expected int, found str"),
         "{text}"
     );
     assert!(text.ends_with("1 error in 2 files"), "{text}");
@@ -221,7 +221,7 @@ fn check_snippet_reports_errors() {
         json!({ "code": "fn f(a: int) -> int:\n    ret a\nprint(f(\"s\"))\n" }),
     );
     assert!(!is_error);
-    assert!(text.starts_with("main.stn:3:9: error:"), "{text}");
+    assert!(text.starts_with("main.stn:3:9: error[E0005]:"), "{text}");
 }
 
 #[test]

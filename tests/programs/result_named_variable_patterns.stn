@@ -1,0 +1,12 @@
+result = int("4")
+match result:
+    case ok(n):
+        print(n)
+    case err(e):
+        print(e)
+result = int("x")
+match result:
+    case ok(n):
+        print(n)
+    case err(e):
+        print(e)

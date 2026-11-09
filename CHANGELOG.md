@@ -30,6 +30,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   the rule involved and help such as `did you mean 'length'?` for a misspelled name, function,
   or method, and the converting help for an int and a float, and suggest a missing parameter
   type as the rewritten line. A label in another file of the program shows in a block of its own.
+- Every error the lexer, parser, linker, package reader, and checker report has a code, shown as
+  `error[E0005]: expected int, found str`, and `stone explain E0005` explains it with a program
+  that fails with it and the same program fixed. `check`, `run`, and `build` end their errors with
+  a line naming `stone explain`, the documentation lists every code, and the language server
+  gives each error its code and a link to it. Runtime errors and warnings have no code.
 
 ### Changed
 
@@ -39,6 +44,11 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 - `stone build` now names a project's executable after the package, the `name` in its `stone.toml`,
   so `my-app/main.stn` of a package `my_app` builds `my-app/build/my_app`. A `main.stn` with no
   `stone.toml` naming a package is still named after its directory.
+
+### Fixed
+
+- A top-level variable named `result` no longer breaks a `match` on a result, in the program or
+  in the builtin `net` module (`'result' is not an enum`).
 
 ## [0.4.5] - 2026-11-08
 

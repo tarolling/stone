@@ -663,7 +663,7 @@ test \"clamps\":
         let errors = report.errors.clone().unwrap();
         assert!(
             errors.starts_with(
-                "limits.stn:6:6: error: this test reads the global 'LIMIT' (through 'clamp'), \
+                "limits.stn:6:6: error[E0041]: this test reads the global 'LIMIT' (through 'clamp'), \
                  but stone test runs no top-level code"
             ),
             "{errors}"

@@ -35,7 +35,8 @@ fn check_reports_a_syntax_error_and_fails() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{}:1:5: error: expected ':', found end of line\n  |\n1 | if 1\n  |     ^\n",
+            "{}:1:5: error[E0001]: expected ':', found end of line\n  |\n1 | if 1\n  |     ^\n\
+             For more about this error, try `stone explain E0001`.\n",
             file.display()
         )
     );
@@ -48,8 +49,8 @@ fn check_suggests_parentheses_for_a_tuple() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{}:1:8: error: values separated by commas need parentheses to make a tuple, as in \
-             '(a, b)'\n  |\n1 | pair = 1, \"a\"\n  |        ^^^^^^\n",
+            "{}:1:8: error[E0001]: values separated by commas need parentheses to make a tuple, as \
+             in '(a, b)'\n  |\n1 | pair = 1, \"a\"\n  |        ^^^^^^\nFor more about this error, try `stone explain E0001`.\n",
             file.display()
         )
     );
@@ -63,13 +64,14 @@ fn check_labels_the_parameter_an_argument_does_not_fit() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{}:3:3: error: expected int, found str
+            "{}:3:3: error[E0005]: expected int, found str
   |
 1 | fn f(a: int):
   |         --- expected because of this parameter
 2 |     print(a)
 3 | f(\"x\")
   |   ^^^
+For more about this error, try `stone explain E0005`.
 ",
             file.display()
         )
@@ -92,7 +94,7 @@ fn check_labels_a_parameter_in_another_file() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{}:2:7: error: expected int, found str
+            "{}:2:7: error[E0005]: expected int, found str
   |
 2 | geo.f(\"x\")
   |       ^^^
@@ -101,6 +103,7 @@ fn check_labels_a_parameter_in_another_file() {
   |
 1 | pub fn f(a: int):
   |             --- expected because of this parameter
+For more about this error, try `stone explain E0005`.
 ",
             "main.stn", "geo.stn"
         )
@@ -164,7 +167,10 @@ fn fmt_reports_a_syntax_error_and_formats_the_rest() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.starts_with(&format!("{}:1:5: error: ", dir.join("bad.stn").display())),
+        stderr.starts_with(&format!(
+            "{}:1:5: error[E0001]: ",
+            dir.join("bad.stn").display()
+        )),
         "{stderr}"
     );
     assert_eq!(
@@ -208,7 +214,7 @@ fn run_reports_a_syntax_error_without_running() {
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
     assert!(
         String::from_utf8_lossy(&output.stderr).starts_with(&format!(
-            "{}:2:8: error: expected ')', found end of line\n",
+            "{}:2:8: error[E0001]: expected ')', found end of line\n",
             file.display()
         ))
     );
@@ -623,7 +629,8 @@ fn errors_in_an_imported_file_name_that_file() {
         ],
     );
     let expected = format!(
-        "{}:2:12: error: expected an expression, found end of line\n  |\n2 |     ret 0 +\n  |            ^\n",
+        "{}:2:12: error[E0001]: expected an expression, found end of line\n  |\n2 |     ret 0 \
+         +\n  |            ^\nFor more about this error, try `stone explain E0001`.\n",
         dir.join("geometry").join("vec.stn").display()
     );
     for command in ["check", "run", "build"] {
@@ -2054,9 +2061,9 @@ fn check_reports_a_mistake_inside_a_generic_function() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{}:2:9: error: '+' needs 'T' to implement 'add', since 'T' may be any type; bound \
-             it, as in '[T: add[T]]'\n  |\n2 |     ret xs[0] + xs[1]\n  |         \
-             ^^^^^^^^^^^^^\n",
+            "{}:2:9: error[E0011]: '+' needs 'T' to implement 'add', since 'T' may be any type; \
+             bound it, as in '[T: add[T]]'\n  |\n2 |     ret xs[0] + xs[1]\n  |         \
+             ^^^^^^^^^^^^^\nFor more about this error, try `stone explain E0011`.\n",
             file.display()
         )
     );
@@ -2075,10 +2082,11 @@ fn check_reports_a_method_a_trait_needs() {
     assert_eq!(
         String::from_utf8_lossy(&output.stderr),
         format!(
-            "{file}:5:16: error: 'Sq' does not implement 'area' of 'Shape'\n  |\n5 | impl Shape \
-             for Sq:\n  |                ^^\n{file}:6:8: error: 'side' is not a method of \
-             'Shape', so it goes in an 'impl Sq:' block\n  |\n6 |     fn side(self) -> float:\n  \
-             |        ^^^^\n"
+            "{file}:5:16: error[E0032]: 'Sq' does not implement 'area' of 'Shape'\n  |\n5 | impl \
+             Shape for Sq:\n  |                ^^\n{file}:6:8: error[E0033]: 'side' is not a \
+             method of 'Shape', so it goes in an 'impl Sq:' block\n  |\n6 |     fn side(self) -> \
+             float:\n  |        ^^^^\nFor more about these errors, try `stone explain` with a \
+             code, as in `stone explain E0032`.\n"
         )
     );
 }
@@ -2375,7 +2383,7 @@ fn a_package_from_the_store_runs_and_is_locked() {
     assert_eq!(output.status.code(), Some(1));
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        stderr.contains("error: mime 1.2.0 (github:alice/mime) does not hold what it held"),
+        stderr.contains("error[E0048]: mime 1.2.0 (github:alice/mime) does not hold what it held"),
         "{stderr}"
     );
     assert_eq!(

@@ -66,6 +66,7 @@ reference/modules
 reference/manifest
 reference/types
 reference/builtins
+reference/errors
 reference/runtime-errors
 reference/cli
 reference/editor

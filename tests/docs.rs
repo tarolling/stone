@@ -126,3 +126,82 @@ fn agent_prompts_have_valid_programs() {
         }
     }
 }
+
+#[test]
+fn error_codes_page_is_current() {
+    let path = Path::new(env!("CARGO_MANIFEST_DIR")).join("docs/reference/errors.md");
+    let want = stone::explain::markdown();
+    if std::env::var_os("STONE_UPDATE_DOCS").is_some() {
+        std::fs::write(&path, &want).unwrap();
+    }
+    let page = std::fs::read_to_string(&path).unwrap_or_default();
+    assert!(
+        page == want,
+        "docs/reference/errors.md is out of date with src/explain.rs; rewrite it with \
+         `STONE_UPDATE_DOCS=1 cargo test --test docs error_codes_page_is_current`"
+    );
+}
+
+/// Writes the files of an example into a new directory `dir`, returning the path of its
+/// `main.stn`.
+fn write_example(dir: &Path, files: &[(&str, &str)]) -> std::path::PathBuf {
+    let _ = std::fs::remove_dir_all(dir);
+    for (path, source) in files {
+        let path = dir.join(path);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, source).unwrap();
+    }
+    dir.join("main.stn")
+}
+
+/// Checks the example whose entry is `main`, or builds it for `target`, returning whether it
+/// passed and what stone wrote to stderr.
+fn check_example(main: &Path, target: Option<&str>) -> (bool, String) {
+    let mut command = std::process::Command::new(env!("CARGO_BIN_EXE_stone"));
+    match target {
+        None => command.arg("check").arg("--offline").arg(main),
+        Some(target) => command
+            .arg("build")
+            .arg("--offline")
+            .arg(main)
+            .arg("--target")
+            .arg(target)
+            .arg("-o")
+            .arg(main.with_file_name("built")),
+    };
+    let output = command
+        .current_dir(main.parent().unwrap())
+        .stdin(std::process::Stdio::null())
+        .output()
+        .expect("stone should run");
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    (output.status.success(), stderr)
+}
+
+#[test]
+fn every_error_code_has_examples_that_behave() {
+    let scratch = Path::new(env!("CARGO_TARGET_TMPDIR")).join("error_codes");
+    for code in stone::explain::Code::ALL {
+        let explanation = code.explanation();
+        let id = explanation.id;
+        assert!(!explanation.text.is_empty(), "{id} has no explanation");
+        assert!(
+            !explanation.failing.is_empty(),
+            "{id} has no failing example"
+        );
+        assert!(!explanation.fixed.is_empty(), "{id} has no fixed example");
+        let main = write_example(&scratch.join(id).join("failing"), explanation.failing);
+        let (passed, stderr) = check_example(&main, explanation.target);
+        let first = stderr.lines().find(|line| line.contains(": error"));
+        assert!(
+            !passed && first.is_some_and(|line| line.contains(&format!("error[{id}]: "))),
+            "{id}'s failing example should fail with {id} first, but stone wrote:\n{stderr}"
+        );
+        let main = write_example(&scratch.join(id).join("fixed"), explanation.fixed);
+        let (passed, stderr) = check_example(&main, explanation.target);
+        assert!(
+            passed && !stderr.contains("warning"),
+            "{id}'s fixed example should pass with no warning, but stone wrote:\n{stderr}"
+        );
+    }
+}

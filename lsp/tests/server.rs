@@ -161,6 +161,10 @@ fn publishes_diagnostics_as_the_document_changes() {
             },
             "severity": 1,
             "source": "stone",
+            "code": "E0005",
+            "codeDescription": {
+                "href": "https://tarolling.github.io/stone/reference/errors.html#e0005"
+            },
             "message": "cannot assign str to 'x', which is int",
             "relatedInformation": [{
                 "location": {

@@ -16,6 +16,7 @@
 use super::toml::{self, Table, Value, quote};
 use super::{Source, Version};
 use crate::diagnostic::Diagnostic;
+use crate::explain::Code;
 use crate::span::{FileId, Span};
 
 /// The comment that starts every lockfile stone writes.
@@ -57,14 +58,14 @@ impl Lock {
                             Value::Table(table) => match locked(table) {
                                 Ok(locked) => lock.entries.push(locked),
                                 Err(message) => {
-                                    errors.push(Diagnostic::error(item.span, message));
+                                    errors.push(Code::Manifest.error(item.span, message));
                                 }
                             },
-                            _ => errors.push(Diagnostic::error(item.span, "expected a table")),
+                            _ => errors.push(Code::Manifest.error(item.span, "expected a table")),
                         }
                     }
                 }
-                _ => errors.push(Diagnostic::error(
+                _ => errors.push(Code::Manifest.error(
                     entry.key_span,
                     "a lockfile holds only [[package]] tables, which stone writes",
                 )),

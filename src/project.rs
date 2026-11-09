@@ -31,6 +31,7 @@ use crate::checker::{
     DISPLAY, EQ, FROM, OPERATOR_TRAITS, OPTION, ORD, RESULT, TRY_FROM, collect_assigned,
 };
 use crate::diagnostic::{Diagnostic, excerpt, location};
+use crate::explain::Code;
 use crate::lexer::Lexer;
 use crate::package::lock::{Lock, Locked};
 use crate::package::resolve::{self, Requirement};
@@ -724,7 +725,7 @@ impl Loader<'_> {
                     true => "program",
                     false => "package",
                 };
-                self.diagnostics.push(Diagnostic::error(
+                self.diagnostics.push(Code::Dependency.error(
                     dependency.span,
                     format!(
                         "'{}' is both a dependency and a module of this {whose}, so rename one",
@@ -735,7 +736,7 @@ impl Loader<'_> {
             }
             let (target, written) = match (&dependency.source, &dependency.version) {
                 (Source::Path(path), _) if remote => {
-                    self.diagnostics.push(Diagnostic::error(
+                    self.diagnostics.push(Code::Dependency.error(
                         dependency.span,
                         "a package from a host cannot use a directory, since the directory is \
                          not part of its release",
@@ -779,7 +780,7 @@ impl Loader<'_> {
                          directory to keep packages in; set STONE_HOME"
                     );
                     self.failed.insert(target.clone(), message.clone());
-                    self.diagnostics.push(Diagnostic::error(span, message));
+                    self.diagnostics.push(Code::Dependency.error(span, message));
                     return None;
                 }
             },
@@ -801,7 +802,7 @@ impl Loader<'_> {
             };
             self.failed
                 .insert(target.clone(), format!("{message}{hint}"));
-            self.diagnostics.push(Diagnostic::error(span, message));
+            self.diagnostics.push(Code::Dependency.error(span, message));
             return None;
         };
         let file = self.add_manifest(path, source.clone(), None);
@@ -811,7 +812,7 @@ impl Loader<'_> {
         let Some((name, _)) = manifest.name.clone() else {
             // a mistake in the manifest may be why it has no name
             if clean {
-                self.diagnostics.push(Diagnostic::error(
+                self.diagnostics.push(Code::Manifest.error(
                     Span::empty(Pos::new(1, 1)).in_file(file),
                     format!(
                         "a package that others use has a name, as name = \"{key}\" under \
@@ -829,7 +830,7 @@ impl Loader<'_> {
                 if let Some((said, span)) = &manifest.version
                     && said != released
                 {
-                    self.diagnostics.push(Diagnostic::error(
+                    self.diagnostics.push(Code::Dependency.error(
                         *span,
                         format!(
                             "this package says it is version {said}, but it was released as \
@@ -892,7 +893,7 @@ impl Loader<'_> {
             if let Some(locked) = lock.find(&source, &version)
                 && locked.hash != hash
             {
-                self.diagnostics.push(Diagnostic::error(
+                self.diagnostics.push(Code::Dependency.error(
                     locked.span,
                     format!(
                         "{} {version} ({source}) does not hold what it held when it was locked: \
@@ -1013,7 +1014,7 @@ impl Loader<'_> {
                         ),
                     };
                     let span = path[0].1.to(path[path.len() - 1].1);
-                    self.unavailable.push(Diagnostic::error(span, message));
+                    self.unavailable.push(Code::Dependency.error(span, message));
                     None
                 }
                 (Err(e), None) => {
@@ -1046,7 +1047,7 @@ impl Loader<'_> {
         }
         // the prelude's functions are linked as if in this module
         if names == [PRELUDE_MODULE] {
-            return Err(Diagnostic::error(
+            return Err(Code::Reserved.error(
                 span,
                 format!(
                     "'{PRELUDE_MODULE}' is the name of stone's prelude, which every program has, \
@@ -1055,10 +1056,9 @@ impl Loader<'_> {
             ));
         }
         if crate::stdlib::is_internal_module(&names[0]) && !self.own.contains(&file) {
-            return Err(Diagnostic::error(
-                span,
-                format!("no module named '{}'", names.join(".")),
-            ));
+            return Err(
+                Code::UnknownModule.error(span, format!("no module named '{}'", names.join(".")))
+            );
         }
         if let Some(module) = crate::stdlib::module(&names[0]) {
             return self.resolve_builtin_module(package, module, path, span);
@@ -1088,7 +1088,7 @@ impl Loader<'_> {
         };
         let entry = self.entry_names.join(".");
         let entry_error = || {
-            Diagnostic::error(
+            Code::UnknownModule.error(
                 span,
                 format!("'{entry}' is the entry file, so it cannot be imported"),
             )
@@ -1102,7 +1102,7 @@ impl Loader<'_> {
             return Ok(Target::Module(id));
         }
         if within.is_empty() {
-            return Err(Diagnostic::error(
+            return Err(Code::UnknownModule.error(
                 span,
                 format!(
                     "package '{}' has no {LIB}.stn, so use one of its modules",
@@ -1125,7 +1125,7 @@ impl Loader<'_> {
                 if let Some(&public) = public_types(parsed).get(function) {
                     let linked = format!("{linked_module}.{function}");
                     return if !(public || id == file) {
-                        Err(Diagnostic::error(
+                        Err(Code::Private.error(
                             *function_span,
                             format!("'{function}' is private to module '{module}'"),
                         ))
@@ -1141,11 +1141,11 @@ impl Loader<'_> {
                     Some(&public) if public || id == file => {
                         Ok(Target::Function(format!("{linked_module}.{function}")))
                     }
-                    Some(_) => Err(Diagnostic::error(
+                    Some(_) => Err(Code::Private.error(
                         *function_span,
                         format!("'{function}' is private to module '{module}'"),
                     )),
-                    None => Err(Diagnostic::error(
+                    None => Err(Code::NoMember.error(
                         *function_span,
                         format!("module '{module}' has no function '{function}'"),
                     )),
@@ -1158,15 +1158,12 @@ impl Loader<'_> {
             .root
             .join(within.iter().collect::<PathBuf>());
         if self.sources.is_dir(&dir) {
-            return Err(Diagnostic::error(
+            return Err(Code::UnknownModule.error(
                 span,
                 format!("'{dotted}' is a directory, so use a module inside it"),
             ));
         }
-        Err(Diagnostic::error(
-            span,
-            format!("no module named '{dotted}'"),
-        ))
+        Err(Code::UnknownModule.error(span, format!("no module named '{dotted}'")))
     }
 
     /// Finds what a `use` path starting with the name of a builtin module names: the module, or
@@ -1190,7 +1187,7 @@ impl Loader<'_> {
                 if module_function(&linked).is_some() {
                     Ok(Target::Function(linked))
                 } else {
-                    Err(Diagnostic::error(
+                    Err(Code::NoMember.error(
                         *function_span,
                         format!("module '{name}' has no function '{function}'"),
                     ))
@@ -1198,10 +1195,8 @@ impl Loader<'_> {
             }
             _ => {
                 let dotted: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
-                Err(Diagnostic::error(
-                    span,
-                    format!("no module named '{}'", dotted.join(".")),
-                ))
+                Err(Code::UnknownModule
+                    .error(span, format!("no module named '{}'", dotted.join("."))))
             }
         }
     }
@@ -1216,7 +1211,7 @@ impl Loader<'_> {
                 .read(&self.packages[package].root.join(module_path(&names)))
                 .is_some();
         match taken {
-            true => Err(Diagnostic::error(
+            true => Err(Code::Reserved.error(
                 span,
                 format!("'{name}' is a builtin module, so rename {name}.stn"),
             )),
@@ -1266,7 +1261,7 @@ impl Loader<'_> {
                 };
                 if let Some(message) = error {
                     self.diagnostics
-                        .push(Diagnostic::error(u.name_span, message));
+                        .push(Code::Duplicate.error(u.name_span, message));
                     continue;
                 }
                 let binding = match &u.target {
@@ -1387,7 +1382,7 @@ impl Loader<'_> {
                         if let Some(message) = error {
                             rewriter
                                 .diagnostics
-                                .push(Diagnostic::error(*name_span, message));
+                                .push(Code::ImplNotAllowed.error(*name_span, message));
                             continue;
                         }
                         let Ok((linked, outer, _)) = found else {
@@ -1445,7 +1440,7 @@ impl Loader<'_> {
                         if let Some(message) = error {
                             rewriter
                                 .diagnostics
-                                .push(Diagnostic::error(*name_span, message));
+                                .push(Code::ImplNotAllowed.error(*name_span, message));
                             continue;
                         }
                         let outer = own_structs[name.as_str()].clone();
@@ -1643,7 +1638,7 @@ fn report_method_collisions(library: &[Stmt], entry: &[Stmt], diagnostics: &mut 
                 Some((module, short)) => format!("'{short}' in module '{module}'"),
                 None => format!("'{owner}'"),
             };
-            diagnostics.push(Diagnostic::error(
+            diagnostics.push(Code::Duplicate.error(
                 *name_span,
                 format!("'{name}' is both a function of this module and a method of {owner}"),
             ));
@@ -1798,10 +1793,8 @@ fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnosti
     let mut after_use = false;
     for stmt in body {
         match &stmt.kind {
-            StmtKind::Use { .. } if after_use => diagnostics.push(Diagnostic::error(
-                stmt.span,
-                "use must come before other statements",
-            )),
+            StmtKind::Use { .. } if after_use => diagnostics
+                .push(Code::Placement.error(stmt.span, "use must come before other statements")),
             StmtKind::Use { .. } => {}
             StmtKind::FunctionDef { .. }
             | StmtKind::EnumDef { .. }
@@ -1811,7 +1804,7 @@ fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnosti
             _ => {
                 after_use = true;
                 if library {
-                    diagnostics.push(Diagnostic::error(
+                    diagnostics.push(Code::Placement.error(
                         stmt.span,
                         "only use, fn, enum, struct, impl, and trait are allowed at the top level \
                          of a module",
@@ -1903,10 +1896,10 @@ impl<'a> Rewriter<'a> {
         for param in own {
             // the checker reports the file's own types in the entry file, whose names stay
             if self.enum_name(&param.name).is_some() {
-                self.diagnostics.push(Diagnostic::error(
-                    param.span,
-                    format!("'{}' is already a type", param.name),
-                ));
+                self.diagnostics.push(
+                    Code::Duplicate
+                        .error(param.span, format!("'{}' is already a type", param.name)),
+                );
             }
         }
         self.type_params
@@ -2112,14 +2105,14 @@ impl<'a> Rewriter<'a> {
                 Some(format!("{module}.{enum_name}"))
             }
             Some(_) => {
-                self.diagnostics.push(Diagnostic::error(
+                self.diagnostics.push(Code::Private.error(
                     span,
                     format!("'{enum_name}' is private to module '{module}'"),
                 ));
                 None
             }
             None => {
-                self.diagnostics.push(Diagnostic::error(
+                self.diagnostics.push(Code::NoMember.error(
                     span,
                     format!("module '{module}' has no {what} '{enum_name}'"),
                 ));
@@ -2186,7 +2179,7 @@ impl<'a> Rewriter<'a> {
         match path.as_mut_slice() {
             [(name, span), ..] if is_prelude_enum(name) => {
                 self.diagnostics
-                    .push(Diagnostic::error(*span, prelude_qualified(name)));
+                    .push(Code::Undefined.error(*span, prelude_qualified(name)));
             }
             [(name, span)] if let Some(enum_name) = prelude_variant(name) => {
                 let unwritten = Span::new(span.start, span.start).in_file(span.file);
@@ -2218,7 +2211,7 @@ impl<'a> Rewriter<'a> {
             && !self.globals.contains(id)
         {
             self.diagnostics
-                .push(Diagnostic::error(expr.span, prelude_qualified(id)));
+                .push(Code::Undefined.error(expr.span, prelude_qualified(id)));
             return;
         }
         match &mut expr.kind {
@@ -2353,7 +2346,7 @@ impl<'a> Rewriter<'a> {
                         attr_span,
                     );
                 } else {
-                    self.diagnostics.push(Diagnostic::error(
+                    self.diagnostics.push(Code::NoMember.error(
                         attr_span,
                         format!("module '{}' has no function '{attr}'", module.name),
                     ));
@@ -2389,11 +2382,11 @@ impl<'a> Rewriter<'a> {
                     attr_span,
                 );
             }
-            Some(_) => self.diagnostics.push(Diagnostic::error(
+            Some(_) => self.diagnostics.push(Code::Private.error(
                 attr_span,
                 format!("'{attr}' is private to module '{module}'"),
             )),
-            None => self.diagnostics.push(Diagnostic::error(
+            None => self.diagnostics.push(Code::NoMember.error(
                 attr_span,
                 format!("module '{module}' has no function '{attr}'"),
             )),
@@ -2418,9 +2411,9 @@ impl<'a> Rewriter<'a> {
         }
         match self.binding(id) {
             Some(Binding::Function(name) | Binding::Type(name)) => *id = name.clone(),
-            Some(Binding::Module(_) | Binding::BuiltinModule(_)) => self.diagnostics.push(
-                Diagnostic::error(span, format!("'{id}' is a module, not a value")),
-            ),
+            Some(Binding::Module(_) | Binding::BuiltinModule(_)) => self
+                .diagnostics
+                .push(Code::NotAValue.error(span, format!("'{id}' is a module, not a value"))),
             Some(Binding::Unresolved) => {}
             None if !self.library => {}
             None if self.own.contains_key(id) || self.own_types.contains_key(id) => {
@@ -2430,7 +2423,7 @@ impl<'a> Rewriter<'a> {
             None => {
                 let what = if called { "function" } else { "name" };
                 self.diagnostics
-                    .push(Diagnostic::error(span, format!("undefined {what} '{id}'")));
+                    .push(Code::Undefined.error(span, format!("undefined {what} '{id}'")));
             }
         }
     }

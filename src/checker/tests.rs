@@ -1,4 +1,5 @@
 use super::*;
+use crate::diagnostic::Severity;
 use crate::driver::parse_program;
 use crate::span::{FileId, Pos, Span};
 
@@ -11,10 +12,19 @@ fn analyze_source(source: &str) -> Analysis {
 /// Returns each diagnostic of `source` as its message and start position.
 ///
 /// For example, `errors("x = y\n")` returns `[("undefined name 'y'", 1, 5)]`.
+///
+/// Every error must have a code, which `stone explain` describes.
 fn errors(source: &str) -> Vec<(String, usize, usize)> {
     analyze_source(source)
         .diagnostics
         .into_iter()
+        .inspect(|d| {
+            assert!(
+                d.severity != Severity::Error || d.code().is_some(),
+                "this error has no code: {}",
+                d.message
+            )
+        })
         .map(|d| (d.message, d.span.start.line, d.span.start.col))
         .collect()
 }
@@ -6582,7 +6592,7 @@ fn a_mismatched_argument_labels_its_parameters_type() {
     let source = "fn f(a: int, b: str):\n    print(a, b)\nf(1, 2)\n";
     assert_eq!(
         rendered(source),
-        "main.stn:3:6: error: expected str, found int
+        "main.stn:3:6: error[E0005]: expected str, found int
   |
 1 | fn f(a: int, b: str):
   |                 --- expected because of this parameter
@@ -6608,7 +6618,7 @@ fn a_call_with_too_many_arguments_labels_the_definition() {
     let source = "fn f(a: int):\n    print(a)\nf(1, 2)\n";
     assert_eq!(
         rendered(source),
-        "main.stn:3:1: error: 'f' takes 1 argument, but 2 were given
+        "main.stn:3:1: error[E0006]: 'f' takes 1 argument, but 2 were given
   |
 1 | fn f(a: int):
   |    - 'f' is defined here
@@ -6636,7 +6646,7 @@ fn a_mismatched_assignment_labels_the_first_one() {
     let source = "x = 1\nx = \"a\"\n";
     assert_eq!(
         rendered(source),
-        "main.stn:2:5: error: cannot assign str to 'x', which is int
+        "main.stn:2:5: error[E0005]: cannot assign str to 'x', which is int
   |
 1 | x = 1
   | - 'x' is first assigned here
@@ -6664,7 +6674,7 @@ fn a_maybe_unassigned_read_labels_the_assignment_and_notes_the_rule() {
     let source = "c = args().len() > 0\nif c:\n    x = 1\nprint(x)\n";
     assert_eq!(
         rendered(source),
-        "main.stn:4:7: error: 'x' might be used before it is assigned
+        "main.stn:4:7: error[E0010]: 'x' might be used before it is assigned
   |
 3 |     x = 1
   |     - 'x' is assigned here, but not on every path to its use
@@ -6681,7 +6691,7 @@ fn mixing_an_int_and_a_float_suggests_converting() {
     let source = "x = 1\ny = x + 1.5\nprint(y)\n";
     assert_eq!(
         rendered(source),
-        "main.stn:2:9: error: expected int, found float
+        "main.stn:2:9: error[E0005]: expected int, found float
   |
 2 | y = x + 1.5
   |         ^^^
@@ -6760,7 +6770,7 @@ fn a_parameter_without_a_type_suggests_the_one_its_calls_give() {
     let source = "fn f(a) -> int:\n    ret a + 1\nprint(f(2))\n";
     assert_eq!(
         rendered(source),
-        "main.stn:1:6: error: parameter 'a' needs a type, such as 'a: int'
+        "main.stn:1:6: error[E0007]: parameter 'a' needs a type, such as 'a: int'
   |
 1 | fn f(a) -> int:
   |      ^
@@ -6771,4 +6781,15 @@ help: write the type its calls give it
   |       +++++
 "
     );
+}
+
+#[test]
+fn a_global_named_like_a_prelude_enum_leaves_its_patterns_alone() {
+    // `ok(x)` is `result.ok(x)` once linked, whatever a variable is named
+    let source = "result = int(\"4\")\nmatch result:\n    case ok(n):\n        print(n)\n    \
+                  case err(e):\n        print(e)\n";
+    assert_eq!(linked_errors(source), []);
+    // the builtin `net` module matches results too
+    let source = "use net\n\nresult = net.connect(\"localhost\", 8080)\nprint(result.is_ok())\n";
+    assert_eq!(linked_errors(source), []);
 }

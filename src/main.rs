@@ -181,6 +181,11 @@ enum Command {
         #[arg(long, value_name = "TAG")]
         version: Option<String>,
     },
+    /// Explains an error code, such as E0005, with an example of the error and its fix.
+    Explain {
+        /// The code, as an error shows it, such as E0005.
+        code: String,
+    },
     /// Removes the stone binary.
     Uninstall {
         /// Remove it without asking first.
@@ -239,6 +244,7 @@ enum ExecutionMode {
     Uninstall {
         yes: bool,
     },
+    Explain(String),
     Update {
         check: bool,
         tag: Option<String>,
@@ -324,6 +330,7 @@ fn main() -> ExitCode {
             tag: version,
         },
         Some(Command::Uninstall { yes }) => ExecutionMode::Uninstall { yes },
+        Some(Command::Explain { code }) => ExecutionMode::Explain(code),
         // clap prints the usage when there is neither a subcommand nor a file
         None => ExecutionMode::Run {
             file: args.file,
@@ -377,6 +384,7 @@ fn main() -> ExitCode {
             // warnings alone still pass
             let rendered: String = diagnostics.iter().map(|d| sources.render(d)).collect();
             eprint!("{rendered}");
+            eprint!("{}", stone::explain::hint(&diagnostics).unwrap_or_default());
             if diagnostics.iter().any(|d| d.severity == Severity::Error) {
                 ExitCode::FAILURE
             } else {
@@ -409,7 +417,26 @@ fn main() -> ExitCode {
             }
         },
         ExecutionMode::Update { check, tag } => update(check, tag.as_deref()),
+        ExecutionMode::Explain(code) => explain(&code),
     }
+}
+
+/// Runs `stone explain`, printing what the code means, or an error naming a close code if there
+/// is no such code.
+fn explain(code: &str) -> ExitCode {
+    if let Some(found) = stone::explain::find(code) {
+        print!("{}", stone::explain::text(found));
+        return ExitCode::SUCCESS;
+    }
+    let ids = stone::explain::Code::ALL.iter().map(|c| c.id());
+    match stone::diagnostic::similar(code, ids) {
+        Some(like) => eprintln!("error: no error has the code '{code}'; did you mean '{like}'?"),
+        None => eprintln!(
+            "error: no error has the code '{code}'; codes go from E0001 to {}",
+            stone::explain::Code::ALL.last().map_or("E0001", |c| c.id())
+        ),
+    }
+    ExitCode::FAILURE
 }
 
 /// Adds a tip to an error about an argument clap did not expect after `stone run FILE` (or
@@ -829,8 +856,11 @@ fn with_program(
     if let Some(Diagnostics(diagnostics)) = err.downcast_ref::<Diagnostics>() {
         let rendered: String = diagnostics.iter().map(|d| sources.render(d)).collect();
         eprint!("{rendered}");
+        eprint!("{}", stone::explain::hint(diagnostics).unwrap_or_default());
     } else if let Some(diagnostic) = err.downcast_ref::<Diagnostic>() {
         eprint!("{}", sources.render(diagnostic));
+        let hint = stone::explain::hint(std::slice::from_ref(diagnostic));
+        eprint!("{}", hint.unwrap_or_default());
     } else {
         eprintln!("{file}: error: {err}");
     }

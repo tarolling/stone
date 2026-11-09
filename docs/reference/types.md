@@ -56,7 +56,7 @@ after. Assigning a different type later is an error:
 
 ```text
 x = 1
-x = "one"   // error: cannot assign str to 'x', which is int
+x = "one"   // error[E0005]: cannot assign str to 'x', which is int
 ```
 
 An empty list `[]` starts with an unknown element type, which is filled in by what is appended

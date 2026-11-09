@@ -13,7 +13,7 @@ shapes.stn
 failures:
 
 limits.stn
-limits.stn:7:6: error: this test reads the global 'LIMIT' (through 'clamp'), but stone test runs no top-level code
+limits.stn:7:6: error[E0041]: this test reads the global 'LIMIT' (through 'clamp'), but stone test runs no top-level code
   |
 7 | test "clamps":
   |      ^^^^^^^^

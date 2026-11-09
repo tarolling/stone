@@ -8,8 +8,10 @@ stone [FILE [-- ARGS...]] [COMMAND]
 [Modules](modules.md)), then checks them before doing anything else. Inside a project, the
 entry file need not be named (see [Projects and their entry file](#projects-and-their-entry-file)). If the checker
 finds errors, the command prints all of them and exits with status 1 without running anything.
-Errors print as `file:line:col: error: message`, followed by the source line and a caret under
-the problem.
+Errors print as `file:line:col: error[E0005]: message`, followed by the source line and a caret
+under the problem. The code in brackets names the kind of error, which `stone explain E0005`
+describes at length (see [Error codes](errors.md)); runtime errors print as
+`file:line:col: error: message`, without one.
 
 A program with a `stone.toml` next to its entry file uses packages (see
 {doc}`../guides/packages`). `run`, `build`, `check`, and `test` first download any package the program
@@ -244,6 +246,19 @@ main.stn:3:17: warning: parameter 'h' is never used; remove it or name it '_h'
 
 ```sh
 stone check examples/basics.stn
+```
+
+## `stone explain CODE`
+
+Explains the kind of error a code names, such as `E0005` in
+`main.stn:3:9: error[E0005]: expected int, found str`: what it means, then a program that fails
+with it and the same program fixed. `check`, `run`, and `build` end their errors with a line
+naming the command, as in ``For more about this error, try `stone explain E0005`.``
+[Error codes](errors.md) lists every code. An unknown code is an error that names the closest
+one.
+
+```sh
+stone explain E0005
 ```
 
 ## `stone test [PATH...] [--build] [--filter TEXT] [-j N] [--offline]`

@@ -10,6 +10,7 @@
 //! gives a table with one entry, `dependencies`, whose table has one entry, `mime`.
 
 use crate::diagnostic::Diagnostic;
+use crate::explain::Code;
 use crate::span::{FileId, Pos, Span};
 
 /// A value with the span of its text.
@@ -114,7 +115,7 @@ impl Reader {
     }
 
     fn error(&self, message: impl Into<String>) -> Diagnostic {
-        Diagnostic::error(
+        Code::Manifest.error(
             Span::new(self.pos, Pos::new(self.pos.line, self.pos.col + 1)).in_file(self.file),
             message,
         )
@@ -267,10 +268,9 @@ impl Reader {
                 }
                 Ok(Current::ArrayTable(i))
             }
-            (Some(_), _) => Err(Diagnostic::error(
-                key_span,
-                format!("'{key}' is already defined"),
-            )),
+            (Some(_), _) => {
+                Err(Code::Manifest.error(key_span, format!("'{key}' is already defined")))
+            }
         }
     }
 
@@ -344,7 +344,7 @@ impl Reader {
                     "true" => Value::Bool(true),
                     "false" => Value::Bool(false),
                     _ => {
-                        return Err(Diagnostic::error(
+                        return Err(Code::Manifest.error(
                             self.span_from(start),
                             format!("expected a value, found '{word}' (write a string in quotes)"),
                         ));
@@ -373,7 +373,7 @@ impl Reader {
             self.bump();
         }
         text.parse().map(Value::Int).map_err(|_| {
-            Diagnostic::error(
+            Code::Manifest.error(
                 self.span_from(start),
                 "expected an integer (floats and dates are not supported)",
             )
@@ -505,7 +505,7 @@ impl Reader {
 /// Adds `entry` to `table`, unless it already has the key.
 fn insert(table: &mut Table, entry: Entry) -> Result<(), Diagnostic> {
     if table.get(&entry.key).is_some() {
-        return Err(Diagnostic::error(
+        return Err(Code::Manifest.error(
             entry.key_span,
             format!("'{}' is already defined", entry.key),
         ));

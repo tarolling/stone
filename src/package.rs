@@ -32,6 +32,7 @@ use std::fmt;
 use std::path::{Path, PathBuf};
 
 use crate::diagnostic::Diagnostic;
+use crate::explain::Code;
 use crate::span::{FileId, Span};
 use crate::token::RESERVED_KEYWORDS;
 use toml::{Entry, Table, Value};
@@ -121,11 +122,11 @@ impl Manifest {
                         }
                     }
                 }
-                ("package" | "dependencies", _) => errors.push(Diagnostic::error(
+                ("package" | "dependencies", _) => errors.push(Code::Manifest.error(
                     entry.key_span,
                     format!("'{}' is a table, written as '[{}]'", entry.key, entry.key),
                 )),
-                (key, _) => errors.push(Diagnostic::error(
+                (key, _) => errors.push(Code::Manifest.error(
                     entry.key_span,
                     format!("unknown key '{key}'; a manifest holds [package] and [dependencies]"),
                 )),
@@ -141,7 +142,7 @@ impl Manifest {
                 "name" => {
                     if let Some(name) = string(entry, errors) {
                         match identifier_error(&name, "a package's name") {
-                            Some(message) => errors.push(Diagnostic::error(span, message)),
+                            Some(message) => errors.push(Code::Manifest.error(span, message)),
                             None => self.name = Some((name, span)),
                         }
                     }
@@ -153,7 +154,7 @@ impl Manifest {
                         && let Ok(running) = Version::parse(env!("CARGO_PKG_VERSION"))
                         && *needed > running
                     {
-                        errors.push(Diagnostic::error(
+                        errors.push(Code::Manifest.error(
                             *span,
                             format!("this package needs stone {needed} or newer, and this is stone {running}"),
                         ));
@@ -162,7 +163,7 @@ impl Manifest {
                 "description" | "license" => {
                     string(entry, errors);
                 }
-                key => errors.push(Diagnostic::error(
+                key => errors.push(Code::Manifest.error(
                     entry.key_span,
                     format!(
                         "unknown key '{key}' in [package], which holds name, version, stone, \
@@ -177,7 +178,7 @@ impl Manifest {
 /// Reads one entry of `[dependencies]`.
 fn dependency(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<Dependency> {
     let Value::Table(table) = &entry.item.value else {
-        errors.push(Diagnostic::error(
+        errors.push(Code::Manifest.error(
             entry.item.span,
             format!(
                 "write the dependency as {{ github = \"owner/repo\", version = \"1.0.0\" }}, \
@@ -188,7 +189,7 @@ fn dependency(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<Dependency>
         return None;
     };
     if let Some(message) = dependency_name_error(&entry.key) {
-        errors.push(Diagnostic::error(entry.key_span, message));
+        errors.push(Code::Manifest.error(entry.key_span, message));
         return None;
     }
     let mut sources = vec![];
@@ -210,7 +211,7 @@ fn dependency(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<Dependency>
                             .all(|b| b.is_ascii_alphanumeric() || b"-.:".contains(&b));
                     match valid {
                         true => host = Some((text, field.key_span)),
-                        false => errors.push(Diagnostic::error(
+                        false => errors.push(Code::Manifest.error(
                             field.item.span,
                             "a host is a name such as 'gitlab.example.com', without 'https://'",
                         )),
@@ -218,7 +219,7 @@ fn dependency(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<Dependency>
                 }
             }
             "version" => version_found = Some((version(field, errors), field.key_span)),
-            key => errors.push(Diagnostic::error(
+            key => errors.push(Code::Manifest.error(
                 field.key_span,
                 format!(
                     "unknown key '{key}' in a dependency, which holds github, gitlab, or path, \
@@ -233,14 +234,14 @@ fn dependency(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<Dependency>
     let (kind, text, span) = match sources.as_slice() {
         [one] => one.clone(),
         [] => {
-            errors.push(Diagnostic::error(
+            errors.push(Code::Manifest.error(
                 entry.item.span,
                 "a dependency names where it comes from with github, gitlab, or path",
             ));
             return None;
         }
         [_, (_, _, span), ..] => {
-            errors.push(Diagnostic::error(
+            errors.push(Code::Manifest.error(
                 *span,
                 "a dependency comes from one place, so give one of github, gitlab, and path",
             ));
@@ -251,10 +252,9 @@ fn dependency(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<Dependency>
         "github" => {
             let segments: Vec<&str> = text.split('/').collect();
             if segments.len() != 2 || !segments.iter().all(|s| is_repository_name(s)) {
-                errors.push(Diagnostic::error(
-                    span,
-                    "a GitHub repository is written as 'owner/repo'",
-                ));
+                errors.push(
+                    Code::Manifest.error(span, "a GitHub repository is written as 'owner/repo'"),
+                );
                 return None;
             }
             Source::GitHub {
@@ -265,7 +265,7 @@ fn dependency(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<Dependency>
         "gitlab" => {
             let segments: Vec<&str> = text.split('/').collect();
             if segments.len() < 2 || !segments.iter().all(|s| is_repository_name(s)) {
-                errors.push(Diagnostic::error(
+                errors.push(Code::Manifest.error(
                     span,
                     "a GitLab project is written as 'group/project' or 'group/subgroup/project'",
                 ));
@@ -278,18 +278,18 @@ fn dependency(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<Dependency>
         }
         _ => {
             if let Some((_, span)) = host {
-                errors.push(Diagnostic::error(span, "a path dependency has no host"));
+                errors.push(Code::Manifest.error(span, "a path dependency has no host"));
                 return None;
             }
             if let Some((_, span)) = version_found {
-                errors.push(Diagnostic::error(
+                errors.push(Code::Manifest.error(
                     span,
                     "a path dependency uses the directory as it is, so it has no version",
                 ));
                 return None;
             }
             if text.is_empty() {
-                errors.push(Diagnostic::error(span, "a path names a directory"));
+                errors.push(Code::Manifest.error(span, "a path names a directory"));
                 return None;
             }
             Source::Path(PathBuf::from(text))
@@ -298,7 +298,7 @@ fn dependency(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<Dependency>
     let version = match version_found {
         Some((version, _)) => version,
         None if !matches!(source, Source::Path(_)) => {
-            errors.push(Diagnostic::error(
+            errors.push(Code::Manifest.error(
                 entry.item.span,
                 "a dependency from a host gives the oldest version it works with, as \
                  version = \"1.0.0\"",
@@ -320,7 +320,7 @@ fn string(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<String> {
     match &entry.item.value {
         Value::Str(text) => Some(text.clone()),
         other => {
-            errors.push(Diagnostic::error(
+            errors.push(Code::Manifest.error(
                 entry.item.span,
                 format!("'{}' is a string, not {}", entry.key, other.kind()),
             ));
@@ -335,7 +335,7 @@ fn version(entry: &Entry, errors: &mut Vec<Diagnostic>) -> Option<(Version, Span
     match Version::parse(&text) {
         Ok(version) => Some((version, entry.item.span)),
         Err(message) => {
-            errors.push(Diagnostic::error(entry.item.span, message));
+            errors.push(Code::Manifest.error(entry.item.span, message));
             None
         }
     }

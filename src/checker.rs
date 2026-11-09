@@ -30,6 +30,7 @@ use crate::ast::{
     UnaryOp, Variant, constant_int, is_lambda, is_test, target_names,
 };
 use crate::diagnostic::{Diagnostic, similar};
+use crate::explain::Code;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::spec::{FormatSpec, Presentation};
 use crate::stdlib::{
@@ -1086,6 +1087,8 @@ fn handle_method(name: &str) -> Option<(Option<Handle>, Vec<Ty>, Ty)> {
 ///
 /// For example, `a + b` requires `int` or `str`, and `if x` requires `int` or `bool`.
 struct Constraint {
+    /// The kind of error reported if the type is not allowed.
+    code: Code,
     ty: Ty,
     /// The allowed kinds of type, where the first is the default if the type is never pinned down.
     allowed: &'static [Kind],
@@ -1787,8 +1790,8 @@ impl Inference {
         Ty::Var(self.vars.len() - 1)
     }
 
-    fn error(&mut self, span: Span, message: impl Into<String>) {
-        self.diagnostics.push(Diagnostic::error(span, message));
+    fn error(&mut self, code: Code, span: Span, message: impl Into<String>) {
+        self.diagnostics.push(code.error(span, message));
     }
 
     fn add_symbol(&mut self, name: &str, kind: SymbolKind, span: Span, ty: Ty) -> usize {
@@ -2022,7 +2025,7 @@ impl Inference {
                 self.show(expected),
                 self.show(found)
             );
-            let mut diagnostic = Diagnostic::error(span, message);
+            let mut diagnostic = Code::Mismatch.error(span, message);
             if let Some((at, text)) = because
                 && let Some(at) = labelable(at)
             {
@@ -2171,7 +2174,13 @@ impl Inference {
                         "+" => "'+' needs an int or float operand, found {}",
                         _ => "'-' needs an int or float operand, found {}",
                     };
-                    self.require(left.clone(), NUMBERS, op.operand_span, message);
+                    self.require(
+                        Code::WrongKind,
+                        left.clone(),
+                        NUMBERS,
+                        op.operand_span,
+                        message,
+                    );
                 }
             }
             self.unify(&op.result, &left);
@@ -2207,7 +2216,7 @@ impl Inference {
                 self.show(&left),
                 self.show(&right)
             );
-            self.error(op.span, message);
+            self.error(Code::Bound, op.span, message);
             self.unify(&op.result, &right);
             return true;
         }
@@ -2223,7 +2232,7 @@ impl Inference {
                 "/" => "'/' needs int or float operands, found {}",
                 _ => "'%' needs int or float operands, found {}",
             };
-            self.require(param.clone(), NUMBERS, op.span, message);
+            self.require(Code::WrongKind, param.clone(), NUMBERS, op.span, message);
             return true;
         }
         // a string, bool, or none is never a list, so an unknown other operand has its type
@@ -2331,12 +2340,12 @@ impl Inference {
                         Ty::Tuple(_) | Ty::Enum(..) | Ty::Struct(..) | Ty::Fn(..)
                     )
                 }) {
-                    self.require(tuple.clone(), allowed, op.span, message);
+                    self.require(Code::WrongKind, tuple.clone(), allowed, op.span, message);
                     self.unify(&op.result, &left);
                     return true;
                 }
                 self.expect(&left, &right, op.operand_span);
-                self.require(left.clone(), allowed, op.span, message);
+                self.require(Code::WrongKind, left.clone(), allowed, op.span, message);
                 self.unify(&op.result, &left);
                 true
             }
@@ -2422,7 +2431,7 @@ impl Inference {
                      {shown}"
                 ),
             };
-            self.error(op.span, message);
+            self.error(Code::WrongKind, op.span, message);
             self.unify(&op.result, left);
             return true;
         }
@@ -2450,6 +2459,7 @@ impl Inference {
                     .map(|&i| format!("'{}'", candidates[i].text))
                     .collect();
                 self.error(
+                    Code::Ambiguous,
                     op.span,
                     format!(
                         "this '{symbol}' could call the '{trait_}' of any of {}, since its right \
@@ -2496,7 +2506,7 @@ impl Inference {
                 if !self.unify(elem, &Ty::Int) {
                     let message =
                         format!("'**' needs an int exponent, found {}", self.show(&exponent));
-                    self.error(op.operand_span, message);
+                    self.error(Code::WrongKind, op.operand_span, message);
                 }
                 true
             }
@@ -2506,6 +2516,7 @@ impl Inference {
             }
             _ => {
                 self.require(
+                    Code::WrongKind,
                     exponent,
                     &[Kind::Int],
                     op.operand_span,
@@ -2528,6 +2539,7 @@ impl Inference {
             }
             _ => {
                 self.require(
+                    Code::WrongKind,
                     base.clone(),
                     NUMBERS,
                     op.span,
@@ -2553,7 +2565,7 @@ impl Inference {
             "%" => "'%' on lists needs int or float elements, found {}",
             _ => "'**' on lists needs int or float elements, found {}",
         };
-        self.require(elem, NUMBERS, span, message);
+        self.require(Code::WrongKind, elem, NUMBERS, span, message);
     }
 
     /// Reports that `found` should have been `expected`, as [`Inference::expect`] does.
@@ -2563,11 +2575,19 @@ impl Inference {
             self.show(expected),
             self.show(found)
         );
-        self.error(span, message);
+        self.error(Code::Mismatch, span, message);
     }
 
-    fn require(&mut self, ty: Ty, allowed: &'static [Kind], span: Span, message: &'static str) {
+    fn require(
+        &mut self,
+        code: Code,
+        ty: Ty,
+        allowed: &'static [Kind],
+        span: Span,
+        message: &'static str,
+    ) {
         self.constraints.push(Constraint {
+            code,
             ty,
             allowed,
             span,
@@ -2622,11 +2642,12 @@ impl Inference {
                 ),
                 Presentation::Str => (&[Kind::Str], "format type 's' needs a str, found {}"),
             };
-            self.require(ty, allowed, span, message);
+            self.require(Code::FormatSpec, ty, allowed, span, message);
             return;
         }
         if spec.needs_number() {
             self.require(
+                Code::FormatSpec,
                 ty.clone(),
                 NUMERIC,
                 span,
@@ -2635,6 +2656,7 @@ impl Inference {
         }
         if spec.precision.is_some() {
             self.require(
+                Code::FormatSpec,
                 ty,
                 &[Kind::Float, Kind::Str],
                 span,
@@ -2647,6 +2669,7 @@ impl Inference {
     /// that implements `ord`.
     fn require_ordered(&mut self, ty: Ty, span: Span, message: &'static str) {
         self.constraints.push(Constraint {
+            code: Code::Unordered,
             ty,
             allowed: ORDERED,
             span,
@@ -2659,6 +2682,7 @@ impl Inference {
     /// be, so `if 1 or 0:` is an error while `if n != 0:` is fine.
     fn require_condition(&mut self, ty: Ty, span: Span) {
         self.require(
+            Code::Condition,
             ty,
             &[Kind::Bool],
             span,
@@ -2775,6 +2799,7 @@ impl Inference {
                 _ => String::new(),
             };
             self.error(
+                Code::TestGlobal,
                 span,
                 format!(
                     "this test reads the global '{global}'{through}, but stone test runs no \
@@ -2799,19 +2824,32 @@ impl Inference {
         returns: Option<&TypeExpr>,
     ) {
         if self.functions.contains_key(name) {
-            self.error(name_span, format!("function '{name}' is already defined"));
+            self.error(
+                Code::Duplicate,
+                name_span,
+                format!("function '{name}' is already defined"),
+            );
             return;
         }
         if is_reserved(name) {
-            self.error(name_span, format!("cannot redefine builtin '{name}'"));
+            self.error(
+                Code::Reserved,
+                name_span,
+                format!("cannot redefine builtin '{name}'"),
+            );
             return;
         }
         if self.value_enum(name) {
-            self.error(name_span, format!("'{name}' is already defined as an enum"));
+            self.error(
+                Code::Duplicate,
+                name_span,
+                format!("'{name}' is already defined as an enum"),
+            );
             return;
         }
         if self.structs.contains_key(name) {
             self.error(
+                Code::Duplicate,
                 name_span,
                 format!("'{name}' is already defined as a struct"),
             );
@@ -2822,7 +2860,11 @@ impl Inference {
         if let Some(info) = self.traits.get(name)
             && self.symbols[info.symbol].span.file != FileId::PRELUDE
         {
-            self.error(name_span, format!("'{name}' is already defined as a trait"));
+            self.error(
+                Code::Duplicate,
+                name_span,
+                format!("'{name}' is already defined as a trait"),
+            );
             return;
         }
         self.scope_params.clear();
@@ -2901,7 +2943,11 @@ impl Inference {
                     || ((self.enums.contains_key(name) || self.structs.contains_key(name))
                         && visible_type(name, param.span.file)))
             {
-                self.error(param.span, format!("'{name}' is already a type"));
+                self.error(
+                    Code::Duplicate,
+                    param.span,
+                    format!("'{name}' is already a type"),
+                );
                 continue;
             }
             if let Some(&outer) = self.scope_params.get(name) {
@@ -2914,7 +2960,7 @@ impl Inference {
                     ),
                     _ => format!("'{owner}' already has a type parameter '{name}'"),
                 };
-                self.error(param.span, message);
+                self.error(Code::Duplicate, param.span, message);
                 continue;
             }
             let symbol = self.add_symbol(name, SymbolKind::TypeParam, param.span, Ty::Unit);
@@ -2945,6 +2991,7 @@ impl Inference {
             let short = struct_display(name);
             if !bounded {
                 self.error(
+                    Code::TypeParameter,
                     bound.span,
                     "only a function's type parameters can have bounds for now",
                 );
@@ -2966,12 +3013,24 @@ impl Inference {
                     }
                 }
                 None if visible && self.structs.contains_key(name) => {
-                    self.error(bound.span, format!("'{short}' is a struct, not a trait"));
+                    self.error(
+                        Code::Undefined,
+                        bound.span,
+                        format!("'{short}' is a struct, not a trait"),
+                    );
                 }
                 None if visible && self.enums.contains_key(name) => {
-                    self.error(bound.span, format!("'{short}' is an enum, not a trait"));
+                    self.error(
+                        Code::Undefined,
+                        bound.span,
+                        format!("'{short}' is an enum, not a trait"),
+                    );
                 }
-                None => self.error(bound.span, format!("there is no trait '{short}'")),
+                None => self.error(
+                    Code::Undefined,
+                    bound.span,
+                    format!("there is no trait '{short}'"),
+                ),
             }
         }
         traits
@@ -2993,7 +3052,7 @@ impl Inference {
                     vec!["int"; count].join(", ")
                 ),
             };
-            self.error(name.span, message);
+            self.error(Code::Arity, name.span, message);
             return None;
         }
         Some(name.args.iter().map(|arg| self.written(arg)).collect())
@@ -3124,6 +3183,7 @@ impl Inference {
                             _ => String::new(),
                         };
                         self.error(
+                            Code::SelfParam,
                             arg.span,
                             format!(
                                 "'self' needs no type, since it is the '{name}' the method is \
@@ -3137,6 +3197,7 @@ impl Inference {
                 (None, _) if i < args.captures => self.fresh(),
                 (annotation, _) if arg.arg == "self" => {
                     self.error(
+                        Code::SelfParam,
                         arg.span,
                         "'self' can only be the first parameter of a method",
                     );
@@ -3229,6 +3290,7 @@ impl Inference {
                     || self.struct_field_ty(&owner, &name).is_some()
                 {
                     self.error(
+                        Code::Duplicate,
                         span,
                         format!(
                             "'{}' already has a method or field '{name}', so it cannot get the \
@@ -3358,16 +3420,21 @@ impl Inference {
             } else {
                 format!("there is no trait '{short}'")
             };
-            self.error(trait_name.span, message);
+            self.error(Code::Undefined, trait_name.span, message);
             return None;
         };
         self.add_reference(trait_name.span, info.symbol);
         if (name == EQ || name == ORD || name == DISPLAY) && !self.structs.contains_key(owner) {
-            self.error(owner_span, format!("{owner} already implements '{name}'"));
+            self.error(
+                Code::ImplNotAllowed,
+                owner_span,
+                format!("{owner} already implements '{name}'"),
+            );
             return None;
         }
         if OPERATOR_TRAITS.contains(&name.as_str()) && !self.structs.contains_key(owner) {
             self.error(
+                Code::ImplNotAllowed,
                 owner_span,
                 format!("{owner}'s operators are builtin, so it cannot implement '{name}'"),
             );
@@ -3386,7 +3453,7 @@ impl Inference {
         self.scope_params.clear();
         let args = args?;
         if let Some(message) = self.conversion_conflict(owner, name, &args) {
-            self.error(owner_span, message);
+            self.error(Code::ImplNotAllowed, owner_span, message);
             return None;
         }
         // linking leaves a builtin type's conversions to this check, which needs a struct of
@@ -3398,6 +3465,7 @@ impl Inference {
                 .any(|arg| self.names_struct_of(arg, owner_span.file))
         {
             self.error(
+                Code::ImplNotAllowed,
                 owner_span,
                 format!(
                     "an impl of '{name}' for {owner} needs a struct of this file among its type \
@@ -3418,7 +3486,7 @@ impl Inference {
                     self.trait_text(name, &args)
                 ),
             };
-            self.error(owner_span, message);
+            self.error(Code::ImplNotAllowed, owner_span, message);
             return None;
         }
         self.impl_args.entry(key).or_default().push(args.clone());
@@ -3585,18 +3653,24 @@ impl Inference {
         let error = if let Some(builtin) = builtin_trait
             && trait_.is_none()
         {
-            Some(format!(
-                "'{name}' is the method of the trait '{builtin}', so it goes in an \
+            Some((
+                Code::TraitSignature,
+                format!(
+                    "'{name}' is the method of the trait '{builtin}', so it goes in an \
                  'impl {builtin} for {short}:' block"
+                ),
             ))
         } else if trait_method == Some(false) {
             let trait_ = struct_display(trait_.unwrap_or_default());
-            Some(match self.structs.contains_key(owner) {
-                true => format!(
-                    "'{name}' is not a method of '{trait_}', so it goes in an 'impl {short}:' block"
-                ),
-                false => format!("'{name}' is not a method of '{trait_}'"),
-            })
+            Some((
+                Code::TraitSignature,
+                match self.structs.contains_key(owner) {
+                    true => format!(
+                        "'{name}' is not a method of '{trait_}', so it goes in an 'impl {short}:' block"
+                    ),
+                    false => format!("'{name}' is not a method of '{trait_}'"),
+                },
+            ))
         } else if self.struct_methods.get(owner).is_some_and(|methods| {
             // a generic trait's blocks each have the method, but nothing else shares its name
             methods
@@ -3604,24 +3678,29 @@ impl Inference {
                 .any(|m| m.name == *name && (suffix.is_empty() || m.trait_.as_deref() != trait_))
                 || methods.contains_key(key)
         }) {
-            Some(format!("'{short}' already has a method '{name}'"))
+            Some((
+                Code::Duplicate,
+                format!("'{short}' already has a method '{name}'"),
+            ))
         } else if self.struct_field_ty(owner, name).is_some() {
-            Some(format!(
-                "'{name}' is a field of '{short}', so a method cannot have its name"
+            Some((
+                Code::Duplicate,
+                format!("'{name}' is a field of '{short}', so a method cannot have its name"),
             ))
         } else if !self.structs.contains_key(owner)
             && METHODS.contains(&name.as_str())
             // a builtin type that can have methods is never a set
             && !SET_METHODS.contains(&name.as_str())
         {
-            Some(format!(
-                "'{name}' is a builtin method, so a method cannot have its name"
+            Some((
+                Code::Reserved,
+                format!("'{name}' is a builtin method, so a method cannot have its name"),
             ))
         } else {
             None
         };
-        if let Some(message) = error {
-            self.error(*name_span, message);
+        if let Some((code, message)) = error {
+            self.error(code, *name_span, message);
             self.scope_params.clear();
             return None;
         }
@@ -3763,6 +3842,7 @@ impl Inference {
             ty => format!(" -> {}", self.show(&fill(&ty))),
         };
         self.error(
+            Code::TraitSignature,
             name_span,
             format!(
                 "'{name}' must take and return what '{}' says, as in \
@@ -3820,6 +3900,7 @@ impl Inference {
             [rest @ .., last] => format!("{} and {last}", rest.join(", ")),
         };
         self.error(
+            Code::MissingMethods,
             span,
             format!(
                 "'{}' does not implement {list} of '{}'",
@@ -3874,6 +3955,7 @@ impl Inference {
                 };
                 if infos.iter().any(|m| &m.name == name) {
                     self.error(
+                        Code::Duplicate,
                         *name_span,
                         format!("'{}' already has a method '{name}'", struct_display(owner)),
                     );
@@ -3885,6 +3967,7 @@ impl Inference {
                     [FROM, TRY_FROM].contains(&owner.as_str()) && name_span.file == FileId::PRELUDE;
                 if !has_self && !conversion {
                     self.error(
+                        Code::TraitSignature,
                         *name_span,
                         format!(
                             "a trait's method takes 'self' first, as in 'fn {name}(self)', since \
@@ -3974,7 +4057,11 @@ impl Inference {
                 None
             };
             if let Some(message) = error {
-                self.error(*name_span, message);
+                let code = match message.starts_with("cannot redefine") {
+                    true => Code::Reserved,
+                    false => Code::Duplicate,
+                };
+                self.error(code, *name_span, message);
                 continue;
             }
             let symbol = self.add_symbol(name, SymbolKind::Trait, *name_span, Ty::Unit);
@@ -4146,7 +4233,7 @@ impl Inference {
         }
         reported.sort_by_key(|(span, _)| (span.file, span.start));
         for (span, message) in reported {
-            self.error(span, message);
+            self.error(Code::TraitSignature, span, message);
         }
     }
 
@@ -4370,6 +4457,7 @@ impl Inference {
                     .unwrap_or_default();
                 let param = self.type_params[q].name.clone();
                 self.error(
+                    Code::InfiniteType,
                     span,
                     format!(
                         "this gives '{owner}' a type that nests '{}' for '{param}', so its values \
@@ -4468,11 +4556,19 @@ impl Inference {
             if name_span.file != FileId::PRELUDE
                 && (is_reserved(name) || BUILTIN_TYPES.contains(&name.as_str()))
             {
-                self.error(*name_span, format!("cannot redefine builtin '{name}'"));
+                self.error(
+                    Code::Reserved,
+                    *name_span,
+                    format!("cannot redefine builtin '{name}'"),
+                );
                 continue;
             }
             if self.enums.contains_key(name) {
-                self.error(*name_span, format!("enum '{name}' is already defined"));
+                self.error(
+                    Code::Duplicate,
+                    *name_span,
+                    format!("enum '{name}' is already defined"),
+                );
                 continue;
             }
             let ty = Ty::Enum(name.clone(), vec![]);
@@ -4500,6 +4596,7 @@ impl Inference {
             for variant in variants {
                 if infos.iter().any(|info| info.name == variant.name) {
                     self.error(
+                        Code::Duplicate,
                         variant.span,
                         format!("'{name}' already has a variant '{}'", variant.name),
                     );
@@ -4522,6 +4619,7 @@ impl Inference {
                     for ((field, span), ty) in names.iter().zip(&fields) {
                         if declared.iter().any(|(other, _)| other == field) {
                             self.error(
+                                Code::Duplicate,
                                 *span,
                                 format!("'{name}.{}' already has a field '{field}'", variant.name),
                             );
@@ -4570,18 +4668,27 @@ impl Inference {
             };
             self.struct_spans.insert(stmt.span);
             if self.structs.contains_key(name) {
-                self.error(*name_span, format!("struct '{name}' is already defined"));
+                self.error(
+                    Code::Duplicate,
+                    *name_span,
+                    format!("struct '{name}' is already defined"),
+                );
                 continue;
             }
             if self.enums.contains_key(name) {
                 self.error(
+                    Code::Duplicate,
                     *name_span,
                     format!("'{name}' is already defined as an enum"),
                 );
                 continue;
             }
             if is_reserved(name) || BUILTIN_TYPES.contains(&name.as_str()) {
-                self.error(*name_span, format!("cannot redefine builtin '{name}'"));
+                self.error(
+                    Code::Reserved,
+                    *name_span,
+                    format!("cannot redefine builtin '{name}'"),
+                );
                 continue;
             }
             let ty = Ty::Struct(name.clone(), vec![]);
@@ -4610,6 +4717,7 @@ impl Inference {
             for field in fields.iter() {
                 if infos.iter().any(|info| info.name == field.name) {
                     self.error(
+                        Code::Duplicate,
                         field.span,
                         format!("'{name}' already has a field '{}'", field.name),
                     );
@@ -4640,6 +4748,7 @@ impl Inference {
                     continue;
                 }
                 self.error(
+                    Code::InfiniteType,
                     field.span,
                     format!(
                         "'{name}' holds itself through '{}', so a value of it would never end; \
@@ -4697,6 +4806,7 @@ impl Inference {
         let count: usize = fields.iter().map(|f| self.values(f)).sum();
         if count > MAX_ELEMENT_VALUES {
             self.error(
+                Code::TooManyValues,
                 variant.span,
                 format!(
                     "a variant can hold at most {MAX_ELEMENT_VALUES} values, but '{name}.{}' \
@@ -4760,7 +4870,7 @@ impl Inference {
                  {count}",
                 self.show(value)
             );
-            self.error(span, message);
+            self.error(Code::TooManyValues, span, message);
         }
     }
 
@@ -4773,7 +4883,7 @@ impl Inference {
                 "a list element can hold at most {MAX_ELEMENT_VALUES} values, but {} holds {count}",
                 self.show(elem)
             );
-            self.error(span, message);
+            self.error(Code::TooManyValues, span, message);
         }
     }
 
@@ -4788,15 +4898,19 @@ impl Inference {
     fn written(&mut self, annotation: &TypeExpr) -> Ty {
         let mut errors = vec![];
         let ty = self.written_type(annotation, &mut errors);
-        for (span, message) in errors {
-            self.error(span, message);
+        for (code, span, message) in errors {
+            self.error(code, span, message);
         }
         ty
     }
 
     /// Converts a type written in a signature as [`Inference::written`] does, pushing its errors
     /// to `errors`. A name that is not a type becomes an unknown type, so checking goes on.
-    fn written_type(&mut self, annotation: &TypeExpr, errors: &mut Vec<(Span, String)>) -> Ty {
+    fn written_type(
+        &mut self,
+        annotation: &TypeExpr,
+        errors: &mut Vec<(Code, Span, String)>,
+    ) -> Ty {
         match &annotation.kind {
             TypeExprKind::Int => Ty::Int,
             TypeExprKind::Float => Ty::Float,
@@ -4806,12 +4920,18 @@ impl Inference {
             TypeExprKind::List(elem) => Ty::List(Box::new(self.written_type(elem, errors))),
             TypeExprKind::Map(key, value) => {
                 let key_ty = self.written_type(key, errors);
-                self.require(key_ty.clone(), MAP_KEYS, key.span, MAP_KEY);
+                self.require(Code::MapKey, key_ty.clone(), MAP_KEYS, key.span, MAP_KEY);
                 Ty::Map(Box::new(key_ty), Box::new(self.written_type(value, errors)))
             }
             TypeExprKind::Set(elem) => {
                 let elem_ty = self.written_type(elem, errors);
-                self.require(elem_ty.clone(), MAP_KEYS, elem.span, SET_ELEMENT);
+                self.require(
+                    Code::MapKey,
+                    elem_ty.clone(),
+                    MAP_KEYS,
+                    elem.span,
+                    SET_ELEMENT,
+                );
                 set_of(elem_ty)
             }
             TypeExprKind::Tuple(fields) => Ty::Tuple(
@@ -4836,7 +4956,11 @@ impl Inference {
                 if let Some(&param) = self.scope_params.get(name) {
                     self.add_reference(annotation.span, self.type_params[param].symbol);
                     if !args.is_empty() {
-                        errors.push((annotation.span, format!("'{name}' takes no types")));
+                        errors.push((
+                            Code::Arity,
+                            annotation.span,
+                            format!("'{name}' takes no types"),
+                        ));
                         return self.fresh();
                     }
                     return Ty::Param(param);
@@ -4845,11 +4969,16 @@ impl Inference {
                     return match self.self_type.clone() {
                         Some(ty) if args.is_empty() => ty,
                         Some(_) => {
-                            errors.push((annotation.span, "'Self' takes no types".to_string()));
+                            errors.push((
+                                Code::Arity,
+                                annotation.span,
+                                "'Self' takes no types".to_string(),
+                            ));
                             self.fresh()
                         }
                         None => {
                             errors.push((
+                                Code::SelfParam,
                                 annotation.span,
                                 "'Self' is only a type in a trait or an impl block".to_string(),
                             ));
@@ -4859,7 +4988,11 @@ impl Inference {
                 }
                 if let Some(handle) = Handle::named(name) {
                     if !args.is_empty() {
-                        errors.push((annotation.span, format!("'{name}' takes no types")));
+                        errors.push((
+                            Code::Arity,
+                            annotation.span,
+                            format!("'{name}' takes no types"),
+                        ));
                     }
                     return Ty::Handle(handle);
                 }
@@ -4870,6 +5003,7 @@ impl Inference {
                     self.add_reference(annotation.span, symbol);
                     let short = struct_display(name);
                     errors.push((
+                        Code::Undefined,
                         annotation.span,
                         format!(
                             "'{short}' is a trait, not a type; to take any type that implements \
@@ -4888,7 +5022,11 @@ impl Inference {
                         .map(|info| (Some(info.symbol), info.type_params.len(), true))
                 };
                 let Some((symbol, takes, is_struct)) = found else {
-                    errors.push((annotation.span, format!("there is no type '{name}'")));
+                    errors.push((
+                        Code::Undefined,
+                        annotation.span,
+                        format!("there is no type '{name}'"),
+                    ));
                     return self.fresh();
                 };
                 if let Some(symbol) = symbol {
@@ -4904,7 +5042,7 @@ impl Inference {
                             format!("'{name}' takes {n} types, as in '{name}[{example}]'")
                         }
                     };
-                    errors.push((annotation.span, message));
+                    errors.push((Code::Arity, annotation.span, message));
                     return self.fresh();
                 }
                 match is_struct {
@@ -4943,7 +5081,11 @@ impl Inference {
             if let Some(conflict) = first_conflict(&mentions, &call.path, &exempt)
                 && reported.insert(conflict.span)
             {
-                self.error(conflict.span, conflict_message(&call.name, &conflict));
+                self.error(
+                    Code::ChangeConflict,
+                    conflict.span,
+                    conflict_message(&call.name, &conflict),
+                );
             }
         }
         for method in &mut self.deferred_methods[deferred..] {
@@ -4973,7 +5115,11 @@ impl Inference {
                     return;
                 }
                 if self.function.is_some() || self.loop_depth > 0 {
-                    self.error(*name_span, "functions can only be defined at the top level");
+                    self.error(
+                        Code::Placement,
+                        *name_span,
+                        "functions can only be defined at the top level",
+                    );
                     return;
                 }
                 self.check_function(name, *name_span, args, body);
@@ -4993,7 +5139,7 @@ impl Inference {
                                 "'{name}' returns {}, so 'ret' needs a value",
                                 self.show(&ret)
                             );
-                            self.error(span, message);
+                            self.error(Code::ReturnType, span, message);
                         } else if ret_written {
                             let message = format!(
                                 "{} returns {}, but this is {}",
@@ -5001,7 +5147,7 @@ impl Inference {
                                 self.show(&ret),
                                 self.show(&found)
                             );
-                            let mut diagnostic = Diagnostic::error(span, message);
+                            let mut diagnostic = Code::ReturnType.error(span, message);
                             if let Some(at) = self
                                 .functions
                                 .get(&name)
@@ -5044,11 +5190,11 @@ impl Inference {
                     } => {
                         let (elem, indexed) = self.subscript_of(list, slice);
                         if let Some(message) = indexed.change_error() {
-                            self.error(target.span, message);
+                            self.error(Code::Unchangeable, target.span, message);
                             return;
                         }
                         if matches!(slice.kind, ExprKind::Slice { .. }) {
-                            self.error(target.span, SLICE_CHANGE);
+                            self.error(Code::Unchangeable, target.span, SLICE_CHANGE);
                             return;
                         }
                         self.expr_types.push((target.span, elem.clone()));
@@ -5062,7 +5208,11 @@ impl Inference {
                         field
                     }
                     _ => {
-                        self.error(target.span, "cannot assign to this expression");
+                        self.error(
+                            Code::AssignTarget,
+                            target.span,
+                            "cannot assign to this expression",
+                        );
                         return;
                     }
                 };
@@ -5105,13 +5255,14 @@ impl Inference {
                             Ty::Int
                         } else if let Ty::Tuple(_) = self.shallow(&iter_ty) {
                             self.error(
+                                Code::Tuple,
                                 iter.span,
                                 "a tuple cannot be iterated; unpack it, or use a list",
                             );
                             self.fresh()
                         } else if let Ty::Map(key, _) = self.shallow(&iter_ty) {
                             if matches!(target.kind, ExprKind::Tuple { .. }) {
-                                self.error(target.span, MAP_PAIRS);
+                                self.error(Code::WrongKind, target.span, MAP_PAIRS);
                                 // still declare each name, so the error does not lead to others
                                 let mut names = Vec::new();
                                 target_names(target, &mut names);
@@ -5134,6 +5285,7 @@ impl Inference {
                     self.check_target(target, &elem, target.span);
                 } else {
                     self.error(
+                        Code::AssignTarget,
                         target.span,
                         "a 'for' loop's variable must be a name, or names to unpack each element \
                          into, as in 'for a, b in pairs'",
@@ -5163,7 +5315,7 @@ impl Inference {
                              one, as in \"{{x}}\"",
                             self.show(&ty)
                         );
-                        self.error(msg.span, message);
+                        self.error(Code::WrongKind, msg.span, message);
                     }
                 }
             }
@@ -5176,12 +5328,20 @@ impl Inference {
             }
             StmtKind::EnumDef { name_span, .. } => {
                 if !self.enum_spans.contains(&stmt.span) {
-                    self.error(*name_span, "enums can only be defined at the top level");
+                    self.error(
+                        Code::Placement,
+                        *name_span,
+                        "enums can only be defined at the top level",
+                    );
                 }
             }
             StmtKind::StructDef { name_span, .. } => {
                 if !self.struct_spans.contains(&stmt.span) {
-                    self.error(*name_span, "structs can only be defined at the top level");
+                    self.error(
+                        Code::Placement,
+                        *name_span,
+                        "structs can only be defined at the top level",
+                    );
                 }
             }
             StmtKind::ImplDef {
@@ -5191,7 +5351,11 @@ impl Inference {
                 ..
             } => {
                 if !self.impl_spans.contains(&stmt.span) {
-                    self.error(*name_span, "impl blocks can only be at the top level");
+                    self.error(
+                        Code::Placement,
+                        *name_span,
+                        "impl blocks can only be at the top level",
+                    );
                     return;
                 }
                 for method in methods {
@@ -5214,7 +5378,11 @@ impl Inference {
                 ..
             } => {
                 if !self.trait_spans.contains(&stmt.span) {
-                    self.error(*name_span, "traits can only be defined at the top level");
+                    self.error(
+                        Code::Placement,
+                        *name_span,
+                        "traits can only be defined at the top level",
+                    );
                     return;
                 }
                 for method in methods {
@@ -5236,17 +5404,21 @@ impl Inference {
             StmtKind::Test { .. } => {}
             StmtKind::Break => {
                 if self.loop_depth == 0 {
-                    self.error(stmt.span, "'break' outside a loop");
+                    self.error(Code::Placement, stmt.span, "'break' outside a loop");
                 }
             }
             StmtKind::Continue => {
                 if self.loop_depth == 0 {
-                    self.error(stmt.span, "'cont' outside a loop");
+                    self.error(Code::Placement, stmt.span, "'cont' outside a loop");
                 }
             }
             // the linker removes every top-level `use`, so any left over is nested
             StmtKind::Use { .. } => {
-                self.error(stmt.span, "use is only allowed at the top level of a file");
+                self.error(
+                    Code::Placement,
+                    stmt.span,
+                    "use is only allowed at the top level of a file",
+                );
             }
         }
     }
@@ -5264,6 +5436,7 @@ impl Inference {
         if !(1..=2).contains(&args.len()) {
             let verb = if args.len() == 1 { "was" } else { "were" };
             self.error(
+                Code::Arity,
                 iter.span,
                 format!(
                     "'range' takes 1 or 2 arguments, but {} {verb} given",
@@ -5315,7 +5488,11 @@ impl Inference {
                 continue;
             }
             if self.local(&arg.arg).is_some() {
-                self.error(arg.span, format!("duplicate parameter '{}'", arg.arg));
+                self.error(
+                    Code::Duplicate,
+                    arg.span,
+                    format!("duplicate parameter '{}'", arg.arg),
+                );
                 continue;
             }
             let symbol = self.add_symbol(&arg.arg, SymbolKind::Parameter, arg.span, ty);
@@ -5366,6 +5543,7 @@ impl Inference {
         // falling off the end returns no value, which must agree with every `ret`
         if !always_exits(body) && !self.unify(&ret, &Ty::Unit) {
             self.error(
+                Code::ReturnType,
                 name_span,
                 format!("'{name}' does not return a value on every path"),
             );
@@ -5402,19 +5580,35 @@ impl Inference {
                 let symbol = match self.resolve_name(id) {
                     Resolved::Variable(symbol) => symbol,
                     Resolved::Function(_) => {
-                        self.error(target.span, format!("cannot assign to function '{id}'"));
+                        self.error(
+                            Code::AssignTarget,
+                            target.span,
+                            format!("cannot assign to function '{id}'"),
+                        );
                         return;
                     }
                     Resolved::Builtin => {
-                        self.error(target.span, format!("cannot assign to builtin '{id}'"));
+                        self.error(
+                            Code::AssignTarget,
+                            target.span,
+                            format!("cannot assign to builtin '{id}'"),
+                        );
                         return;
                     }
                     Resolved::Enum(_) => {
-                        self.error(target.span, format!("cannot assign to enum '{id}'"));
+                        self.error(
+                            Code::AssignTarget,
+                            target.span,
+                            format!("cannot assign to enum '{id}'"),
+                        );
                         return;
                     }
                     Resolved::Struct(_) => {
-                        self.error(target.span, format!("cannot assign to struct '{id}'"));
+                        self.error(
+                            Code::AssignTarget,
+                            target.span,
+                            format!("cannot assign to struct '{id}'"),
+                        );
                         return;
                     }
                     // unreachable, since every assigned name is declared up front
@@ -5431,7 +5625,7 @@ impl Inference {
                         self.show(found),
                         self.show(&expected)
                     );
-                    let mut diagnostic = Diagnostic::error(value_span, message);
+                    let mut diagnostic = Code::Mismatch.error(value_span, message);
                     let first = &self.symbols[symbol];
                     let label = match first.kind {
                         SymbolKind::Parameter => Some(format!("'{id}' is a parameter")),
@@ -5452,11 +5646,11 @@ impl Inference {
             ExprKind::Subscript { value, slice, .. } => {
                 let (elem, indexed) = self.subscript_of(value, slice);
                 if let Some(message) = indexed.change_error() {
-                    self.error(target.span, message);
+                    self.error(Code::Unchangeable, target.span, message);
                     return;
                 }
                 if matches!(slice.kind, ExprKind::Slice { .. }) {
-                    self.error(target.span, SLICE_CHANGE);
+                    self.error(Code::Unchangeable, target.span, SLICE_CHANGE);
                     return;
                 }
                 self.expect(&elem, found, value_span);
@@ -5481,7 +5675,11 @@ impl Inference {
                     }
                 }
             }
-            _ => self.error(target.span, "cannot assign to this expression"),
+            _ => self.error(
+                Code::AssignTarget,
+                target.span,
+                "cannot assign to this expression",
+            ),
         }
     }
 
@@ -5499,6 +5697,7 @@ impl Inference {
         }
         if let Some(other) = first_other(target) {
             self.error(
+                Code::AssignTarget,
                 other.span,
                 "only names can be unpacked into, as in 'a, b = t'; assign an element on a line of \
                  its own",
@@ -5515,7 +5714,11 @@ impl Inference {
                 |earlier| matches!(&earlier.kind, ExprKind::Name { id: other, .. } if other == id),
             );
             if repeated {
-                self.error(name.span, format!("'{id}' is unpacked into more than once"));
+                self.error(
+                    Code::Duplicate,
+                    name.span,
+                    format!("'{id}' is unpacked into more than once"),
+                );
                 return false;
             }
         }
@@ -5542,7 +5745,7 @@ impl Inference {
                     elts.len(),
                     have.len()
                 );
-                self.error(target.span, message);
+                self.error(Code::Tuple, target.span, message);
                 false
             }
             Ty::Tuple(_) | Ty::Var(_) => self.unify(&Ty::Tuple(fields.clone()), found),
@@ -5551,7 +5754,7 @@ impl Inference {
                     "cannot unpack {}; only a tuple can be unpacked, as in 'a, b = (1, 2)'",
                     self.show(found)
                 );
-                self.error(target.span, message);
+                self.error(Code::Tuple, target.span, message);
                 false
             }
         };
@@ -5601,7 +5804,7 @@ impl Inference {
     /// variable from outside the function, `outside`, which `finish` cannot find out itself.
     fn check_change_with(&mut self, list: &Expr, is_struct: bool, outside: Outside) {
         if has_slice(list) {
-            self.error(list.span, SLICE_CHANGE);
+            self.error(Code::Unchangeable, list.span, SLICE_CHANGE);
             return;
         }
         // a value inside a tuple, as in `t[0].append(1)`, cannot change
@@ -5611,7 +5814,7 @@ impl Inference {
             match &node.kind {
                 ExprKind::Subscript { value, .. } => {
                     if self.indexed_tuples.contains(&value.span) {
-                        self.error(node.span, TUPLE_CHANGE);
+                        self.error(Code::Unchangeable, node.span, TUPLE_CHANGE);
                         return;
                     }
                     node = value;
@@ -5629,13 +5832,13 @@ impl Inference {
                 true => "this value is not stored in a variable, so changing it has no effect",
                 false => "this list is not stored in a variable, so changing it has no effect",
             };
-            self.error(root.span, message);
+            self.error(Code::Unchangeable, root.span, message);
             return;
         };
         match outside {
             Outside::Nothing => {}
             Outside::Global => self.diagnostics.push(
-                Diagnostic::error(
+                Code::ChangeOutside.error(
                     root.span,
                     format!(
                         "a function cannot change the global '{id}'; pass it as an argument and \
@@ -5644,7 +5847,7 @@ impl Inference {
                 )
                 .with_note(VALUE_NOTE),
             ),
-            Outside::Capture => self.error(
+            Outside::Capture => self.error(Code::ChangeOutside,
                 root.span,
                 format!(
                     "a lambda cannot change '{id}', since it holds a copy of the variable from \
@@ -5707,7 +5910,7 @@ impl Inference {
                 ),
                 None => "this has no value".to_string(),
             };
-            self.error(expr.span, message);
+            self.error(Code::NoValue, expr.span, message);
             return self.fresh();
         }
         ty
@@ -5732,6 +5935,7 @@ impl Inference {
             self.add_reference(span, symbol);
         }
         self.error(
+            Code::NotAValue,
             span,
             format!("'{id}' is an enum, so a value of it is one of its variants{example}"),
         );
@@ -5745,6 +5949,7 @@ impl Inference {
         }
         let example = self.struct_example(id);
         self.error(
+            Code::NotAValue,
             span,
             format!("'{id}' is a struct, so a value of it is made with a call, as in '{example}'"),
         );
@@ -5780,7 +5985,7 @@ impl Inference {
             "list" => Some(Ty::List(Box::new(self.fresh()))),
             "set" => {
                 let elem = self.fresh();
-                self.require(elem.clone(), MAP_KEYS, span, SET_ELEMENT);
+                self.require(Code::MapKey, elem.clone(), MAP_KEYS, span, SET_ELEMENT);
                 Some(set_of(elem))
             }
             _ => None,
@@ -5849,6 +6054,7 @@ impl Inference {
                 return Some(pending);
             }
             self.error(
+                Code::UnknownType,
                 pending.arg,
                 "the type of this value must be known before it is converted",
             );
@@ -5873,7 +6079,7 @@ impl Inference {
                 self.unify(&pending.result, &ty);
                 self.conversions.push((pending.call, info));
             }
-            Err(message) => self.error(pending.arg, message),
+            Err(message) => self.error(Code::Conversion, pending.arg, message),
         }
         None
     }
@@ -6026,6 +6232,7 @@ impl Inference {
                 .map(|f| (f.symbol, Self::substitute(&f.ty, &type_params, &type_args)));
             let Some((field_symbol, ty)) = field else {
                 self.error(
+                    Code::Construction,
                     keyword.arg_span,
                     format!("'{name}' has no field '{}'", keyword.arg),
                 );
@@ -6034,6 +6241,7 @@ impl Inference {
             self.add_reference(keyword.arg_span, field_symbol);
             if given.contains(&keyword.arg.as_str()) {
                 self.error(
+                    Code::Construction,
                     keyword.arg_span,
                     format!("field '{}' is given more than once", keyword.arg),
                 );
@@ -6045,6 +6253,7 @@ impl Inference {
         if !args.is_empty() {
             let example = self.struct_example(name);
             self.error(
+                Code::Construction,
                 call.span,
                 format!("a struct's values are named, as in '{example}'"),
             );
@@ -6062,7 +6271,11 @@ impl Inference {
                 [rest @ .., last] => ("fields", format!("{} and {last}", rest.join(", "))),
                 [] => unreachable!(),
             };
-            self.error(call.span, format!("missing {noun} {names} for '{name}'"));
+            self.error(
+                Code::Construction,
+                call.span,
+                format!("missing {noun} {names} for '{name}'"),
+            );
         }
         struct_ty
     }
@@ -6095,6 +6308,7 @@ impl Inference {
                     _ => String::new(),
                 };
                 self.error(
+                    Code::UnknownType,
                     base.span,
                     format!(
                         "the type of this value must be known before its field '{attr}' is \
@@ -6106,12 +6320,13 @@ impl Inference {
             other => {
                 if METHODS.contains(&attr) {
                     self.error(
+                        Code::CallForm,
                         expr.span,
                         format!("'{attr}' is a method, so it can only be called"),
                     );
                 } else {
                     let message = format!("{} has no field '{attr}'", self.show(&other));
-                    self.error(attr_span, message);
+                    self.error(Code::NoMember, attr_span, message);
                 }
                 self.fresh()
             }
@@ -6139,7 +6354,7 @@ impl Inference {
                 } else {
                     format!("'{name}' has no field '{attr}'")
                 };
-                self.error(attr_span, message);
+                self.error(Code::NoMember, attr_span, message);
                 self.fresh()
             }
         }
@@ -6154,7 +6369,7 @@ impl Inference {
             }
             other => {
                 let message = format!("{} has no field '{}'", self.show(&other), deferred.attr);
-                self.error(deferred.attr_span, message);
+                self.error(Code::NoMember, deferred.attr_span, message);
             }
         }
     }
@@ -6199,6 +6414,7 @@ impl Inference {
         let attr_span = Self::attr_span(func, variant);
         let Some((symbol, fields)) = found else {
             self.error(
+                Code::NoMember,
                 attr_span,
                 format!("'{enum_name}' has no variant '{variant}'"),
             );
@@ -6215,6 +6431,7 @@ impl Inference {
             && let Some(example) = self.named_variant_example(enum_name, variant)
         {
             self.error(
+                Code::Construction,
                 expr.span,
                 format!("a named variant's values are named, as in '{example}'"),
             );
@@ -6224,6 +6441,7 @@ impl Inference {
             None if !fields.is_empty() => {
                 let count = values_phrase(fields.len());
                 self.error(
+                    Code::Construction,
                     expr.span,
                     format!(
                         "'{written}' holds {count}, so make one with a call, as in '{written}(...)'"
@@ -6232,6 +6450,7 @@ impl Inference {
             }
             Some(_) if fields.is_empty() => {
                 self.error(
+                    Code::Construction,
                     expr.span,
                     format!(
                         "'{written}' holds no values, so it is written without parentheses, as \
@@ -6242,6 +6461,7 @@ impl Inference {
             Some(args) if args.len() != fields.len() => {
                 let verb = if args.len() == 1 { "was" } else { "were" };
                 self.error(
+                    Code::Construction,
                     expr.span,
                     format!(
                         "'{written}' holds {}, but {} {verb} given",
@@ -6299,6 +6519,7 @@ impl Inference {
         let attr_span = Self::attr_span(func, variant);
         let Some((symbol, fields, names)) = found_variant else {
             self.error(
+                Code::NoMember,
                 attr_span,
                 format!("'{enum_name}' has no variant '{variant}'"),
             );
@@ -6311,6 +6532,7 @@ impl Inference {
         );
         let Some(names) = names else {
             self.error(
+                Code::Construction,
                 keywords[0].arg_span,
                 format!("'{written}' takes its values in order, without names"),
             );
@@ -6320,6 +6542,7 @@ impl Inference {
         for (keyword, found) in keywords.iter().zip(&found) {
             let Some(position) = names.iter().position(|(n, _)| *n == keyword.arg) else {
                 self.error(
+                    Code::Construction,
                     keyword.arg_span,
                     format!("'{written}' has no field '{}'", keyword.arg),
                 );
@@ -6328,6 +6551,7 @@ impl Inference {
             self.add_reference(keyword.arg_span, names[position].1);
             if given.contains(&keyword.arg.as_str()) {
                 self.error(
+                    Code::Construction,
                     keyword.arg_span,
                     format!("field '{}' is given more than once", keyword.arg),
                 );
@@ -6341,6 +6565,7 @@ impl Inference {
                 .named_variant_example(enum_name, variant)
                 .unwrap_or_default();
             self.error(
+                Code::Construction,
                 call.span,
                 format!("a named variant's values are named, as in '{example}'"),
             );
@@ -6357,7 +6582,11 @@ impl Inference {
                 [rest @ .., last] => ("fields", format!("{} and {last}", rest.join(", "))),
                 [] => unreachable!(),
             };
-            self.error(call.span, format!("missing {noun} {names} for '{written}'"));
+            self.error(
+                Code::Construction,
+                call.span,
+                format!("missing {noun} {names} for '{written}'"),
+            );
         }
         enum_ty
     }
@@ -6447,11 +6676,16 @@ impl Inference {
         // a trait's default method always has `self`, so this is a function of the struct's
         let symbol = match method {
             None => {
-                self.error(name_span, format!("'{short}' has no function '{name}'"));
+                self.error(
+                    Code::NoMember,
+                    name_span,
+                    format!("'{short}' has no function '{name}'"),
+                );
                 return self.fresh();
             }
             Some((_, true)) => {
                 self.error(
+                    Code::CallForm,
                     name_span,
                     format!("'{name}' is a method, so call it on a value, as in 'value.{name}()'"),
                 );
@@ -6535,10 +6769,10 @@ impl Inference {
                     message.push_str(&format!(
                         "; '{name}' is a field of '{short}', so read it without parentheses"
                     ));
-                    self.error(name_span, message);
+                    self.error(Code::NoMember, name_span, message);
                 } else {
                     let methods = self.method_names(owner);
-                    let mut diagnostic = Diagnostic::error(name_span, message);
+                    let mut diagnostic = Code::NoMember.error(name_span, message);
                     if let Some(like) = similar(name, methods.iter().map(String::as_str)) {
                         diagnostic = diagnostic.with_help(format!("did you mean '{like}'?"));
                     }
@@ -6548,6 +6782,7 @@ impl Inference {
             }
             Some((_, false, _)) => {
                 self.error(
+                    Code::CallForm,
                     name_span,
                     format!(
                         "'{name}' has no 'self', so call it on the struct, as in \
@@ -6606,7 +6841,7 @@ impl Inference {
                 "'{name}' is a method of lists, but this is {}",
                 self.show(receiver_ty)
             );
-            self.error(receiver.span, message);
+            self.error(Code::NoMember, receiver.span, message);
         }
         self.check_method_args(call, (name, None), &params[1..], arg_types, args);
         if changes_receiver(name) {
@@ -6715,6 +6950,7 @@ impl Inference {
     fn check_changing_call(&mut self, call: Span, receiver: &Expr, name: &str, ret: &Ty) {
         if *ret == Ty::Unit && self.statement_call != Some(call) {
             self.error(
+                Code::NoValue,
                 call,
                 format!(
                     "'{name}' changes its receiver and returns no value, so it can only be a \
@@ -6971,6 +7207,7 @@ impl Inference {
             _ => texts.join(""),
         };
         self.error(
+            Code::Bound,
             span,
             format!("no '{name}' of '{owner}' takes {taken}: '{owner}' implements {list}"),
         );
@@ -6994,6 +7231,7 @@ impl Inference {
                     .map(|&i| format!("'{}'", deferred.candidates[i].text))
                     .collect();
                 self.error(
+                    Code::Ambiguous,
                     deferred.name_span,
                     format!(
                         "this '{}' could be the method of any of {}, since its arguments' types \
@@ -7092,11 +7330,12 @@ impl Inference {
                         " that implements a trait with it, as in '[{shown}: {short}]'"
                     ));
                 }
-                self.error(name_span, message);
+                self.error(Code::NoMember, name_span, message);
                 return self.fresh();
             }
             [first, second, ..] => {
                 self.error(
+                    Code::Ambiguous,
                     name_span,
                     format!(
                         "'{name}' is a method of both '{}' and '{}', which bound '{shown}', so \
@@ -7192,6 +7431,7 @@ impl Inference {
                 );
                 if ret == Ty::Unit && !deferred.statement {
                     self.error(
+                        Code::NoValue,
                         deferred.call,
                         format!(
                             "'{name}' returns no value, so it can only be called as a statement \
@@ -7214,6 +7454,7 @@ impl Inference {
             }
             Ty::Var(_) => {
                 self.error(
+                    Code::UnknownType,
                     deferred.receiver.span,
                     format!(
                         "the type of this value must be known before its method '{name}' is called"
@@ -7223,7 +7464,7 @@ impl Inference {
             }
             other => {
                 let message = format!("{} has no method '{}'", self.show(&other), deferred.name);
-                self.error(deferred.name_span, message);
+                self.error(Code::NoMember, deferred.name_span, message);
                 return;
             }
         };
@@ -7243,6 +7484,7 @@ impl Inference {
             );
             if self.shallow(&ret) == Ty::Unit && !deferred.statement {
                 self.error(
+                    Code::NoValue,
                     deferred.call,
                     format!(
                         "'{name}' returns no value, so it can only be called as a statement of \
@@ -7273,7 +7515,7 @@ impl Inference {
         }
         let Some((symbol, true, changes)) = method else {
             let message = format!("'{}' has no method '{name}'", struct_display(&owner));
-            self.error(deferred.name_span, message);
+            self.error(Code::NoMember, deferred.name_span, message);
             return;
         };
         self.add_reference(deferred.name_span, symbol);
@@ -7283,6 +7525,7 @@ impl Inference {
         if changes {
             if ret == Ty::Unit && !deferred.statement {
                 self.error(
+                    Code::NoValue,
                     deferred.call,
                     format!(
                         "'{name}' changes its receiver and returns no value, so it can only be a \
@@ -7293,11 +7536,16 @@ impl Inference {
                 && !deferred.assigned
                 && let Some(conflict) = &deferred.conflict
             {
-                self.error(conflict.span, conflict_message(name, conflict));
+                self.error(
+                    Code::ChangeConflict,
+                    conflict.span,
+                    conflict_message(name, conflict),
+                );
             }
             self.check_change_with(&deferred.receiver, true, deferred.outside);
         } else if ret == Ty::Unit && !deferred.statement {
             self.error(
+                Code::NoValue,
                 deferred.call,
                 format!(
                     "'{name}' returns no value, so it can only be called as a statement of its own"
@@ -7336,7 +7584,7 @@ impl Inference {
         let inner = self.fresh();
         let Some(function) = &self.function else {
             let message = "'?' can only return from a function that returns a result or an option";
-            self.error(expr.span, message.to_string());
+            self.error(Code::Try, expr.span, message.to_string());
             return inner;
         };
         let (lambda, mut ret) = (function.lambda, self.shallow(&function.ret));
@@ -7369,7 +7617,7 @@ impl Inference {
                         ),
                         _ => format!("'?' needs a result, found {}", self.show(&found)),
                     };
-                    self.error(expr.span, message);
+                    self.error(Code::Try, expr.span, message);
                 } else if let Some(returned) = args.get(1)
                     && !self.unify(returned, &error)
                 {
@@ -7379,7 +7627,7 @@ impl Inference {
                         self.show(returned),
                         self.show(&error)
                     );
-                    self.error(expr.span, message);
+                    self.error(Code::Try, expr.span, message);
                 }
             }
             Ty::Enum(enum_name, _) if enum_name == OPTION => {
@@ -7393,7 +7641,7 @@ impl Inference {
                         ),
                         _ => format!("'?' needs an option, found {}", self.show(&found)),
                     };
-                    self.error(expr.span, message);
+                    self.error(Code::Try, expr.span, message);
                 }
             }
             _ => {
@@ -7404,7 +7652,7 @@ impl Inference {
                 let message = format!(
                     "'?' returns from {name}, which returns {returns}, not a result or an option"
                 );
-                self.error(expr.span, message);
+                self.error(Code::Try, expr.span, message);
             }
         }
         inner
@@ -7414,7 +7662,11 @@ impl Inference {
         match &expr.kind {
             // linking turns every lambda into a function named as a value
             ExprKind::Lambda { .. } => {
-                self.error(expr.span, "a lambda must be linked before it is checked");
+                self.error(
+                    Code::Placement,
+                    expr.span,
+                    "a lambda must be linked before it is checked",
+                );
                 self.fresh()
             }
             ExprKind::Try { value } => self.infer_try(expr, value),
@@ -7451,6 +7703,7 @@ impl Inference {
                 Resolved::Builtin if crate::stdlib::module_constant(id).is_some() => Ty::Float,
                 Resolved::Builtin => {
                     self.error(
+                        Code::NotAValue,
                         expr.span,
                         format!(
                             "'{id}' is a builtin, which cannot be a value yet; to pass it, define \
@@ -7541,7 +7794,7 @@ impl Inference {
                         "'{name}' cannot be chained with other comparisons; add parentheses, as \
                          in '(x {name} xs) == b'"
                     );
-                    self.error(expr.span, message);
+                    self.error(Code::ChainedIn, expr.span, message);
                     return Ty::Bool;
                 }
                 self.membership(Membership {
@@ -7628,7 +7881,7 @@ impl Inference {
                     self.expect(&value_ty, &ty, value.span);
                 }
                 let key_span = keys.first().map_or(expr.span, |key| key.span);
-                self.require(key_ty.clone(), MAP_KEYS, key_span, MAP_KEY);
+                self.require(Code::MapKey, key_ty.clone(), MAP_KEYS, key_span, MAP_KEY);
                 let map = Ty::Map(Box::new(key_ty), Box::new(value_ty));
                 self.map_literals.push((expr.span, map.clone()));
                 map
@@ -7640,7 +7893,7 @@ impl Inference {
                     self.expect(&elem, &ty, elt.span);
                 }
                 let span = elts.first().map_or(expr.span, |elt| elt.span);
-                self.require(elem.clone(), MAP_KEYS, span, SET_ELEMENT);
+                self.require(Code::MapKey, elem.clone(), MAP_KEYS, span, SET_ELEMENT);
                 set_of(elem)
             }
             ExprKind::Tuple { elts, .. } => {
@@ -7649,6 +7902,7 @@ impl Inference {
             // the parser only makes a slice inside a subscript, which `subscript` handles
             ExprKind::Slice { .. } => {
                 self.error(
+                    Code::Placement,
                     expr.span,
                     "a slice can only appear in brackets, as in 'xs[1:]'",
                 );
@@ -7706,7 +7960,7 @@ impl Inference {
                     return (self.fresh(), Indexed::Map);
                 }
                 if matches!(slice.kind, ExprKind::Slice { .. }) {
-                    self.error(slice.span, "a map cannot be sliced");
+                    self.error(Code::WrongKind, slice.span, "a map cannot be sliced");
                     return (*entry, Indexed::Map);
                 }
                 let index = self.infer(slice);
@@ -7744,7 +7998,7 @@ impl Inference {
         match self.shallow(&value) {
             ty if is_no_value(&ty) => {
                 let message = message.replace("{}", &self.show(map_ty));
-                self.error(span, message);
+                self.error(Code::WrongKind, span, message);
                 false
             }
             _ => {
@@ -7775,7 +8029,7 @@ impl Inference {
         let elem = self.fresh();
         if !self.unify(&set_of(elem.clone()), receiver_ty) {
             let message = format!("'{name}' needs a set, found {}", self.show(receiver_ty));
-            self.error(span, message);
+            self.error(Code::WrongKind, span, message);
         }
         elem
     }
@@ -7814,7 +8068,7 @@ impl Inference {
                     test.name,
                     self.show(&other)
                 );
-                self.error(test.container, message);
+                self.error(Code::WrongKind, test.container, message);
             }
         }
     }
@@ -7870,6 +8124,7 @@ impl Inference {
         self.indexed_tuples.insert(value);
         if matches!(slice.kind, ExprKind::Slice { .. }) {
             self.error(
+                Code::Tuple,
                 slice.span,
                 "a tuple cannot be sliced; unpack it to name its values, as in 'a, b, c = t'",
             );
@@ -7879,6 +8134,7 @@ impl Inference {
         self.expect(&Ty::Int, &index, slice.span);
         let Some(k) = constant_int(slice) else {
             self.error(
+                Code::Tuple,
                 slice.span,
                 "a tuple index must be a number written in the code, such as 't[0]'; unpack the \
                  tuple to name its values, as in 'a, b = t'",
@@ -7892,7 +8148,7 @@ impl Inference {
                 "index {k} is out of range for {}, which has {len} values",
                 self.show(&Ty::Tuple(fields.to_vec()))
             );
-            self.error(slice.span, message);
+            self.error(Code::Tuple, slice.span, message);
             return self.fresh();
         }
         fields[position as usize].clone()
@@ -7926,6 +8182,7 @@ impl Inference {
                 self.infer(&keyword.value);
             }
             self.error(
+                Code::Construction,
                 keyword.arg_span,
                 "only a struct or a named variant is made with named values; pass this value \
                  without its name",
@@ -7982,6 +8239,7 @@ impl Inference {
             Resolved::Undefined if METHODS.contains(&id.as_str()) => {
                 let args = if id == "len" { "" } else { "..." };
                 self.error(
+                    Code::CallForm,
                     func.span,
                     format!("'{id}' is a method, so call it as value.{id}({args})"),
                 );
@@ -8064,7 +8322,11 @@ impl Inference {
     /// one on the same variable.
     fn infer_closure(&mut self, span: Span, function: &str, captures: &[Expr]) -> Ty {
         let Some(params) = self.functions.get(function).map(|info| info.params.clone()) else {
-            self.error(span, "a lambda must be linked before it is checked");
+            self.error(
+                Code::Placement,
+                span,
+                "a lambda must be linked before it is checked",
+            );
             return self.fresh();
         };
         let (mut symbols, mut values) = (vec![], vec![]);
@@ -8121,7 +8383,7 @@ impl Inference {
                     "{what} {}, not a function, so it cannot be called",
                     self.show(&other)
                 );
-                self.error(func.span, message);
+                self.error(Code::CallForm, func.span, message);
                 return self.fresh();
             }
         };
@@ -8139,7 +8401,7 @@ impl Inference {
                         params.len(),
                         args.len()
                     );
-                    self.error(call.span, message);
+                    self.error(Code::Arity, call.span, message);
                 }
             }
             return ret;
@@ -8160,6 +8422,7 @@ impl Inference {
             self.check_pattern(&case.pattern, &ty, &mut bound);
             if case.pattern.alternatives(MAX_ALTERNATIVES + 1) > MAX_ALTERNATIVES {
                 self.error(
+                    Code::Pattern,
                     case.pattern.span,
                     format!(
                         "this pattern stands for more than {MAX_ALTERNATIVES} patterns without \
@@ -8197,7 +8460,7 @@ impl Inference {
                         self.show(&ty),
                         self.show(expected)
                     );
-                    self.error(pattern.span, message);
+                    self.error(Code::Pattern, pattern.span, message);
                 }
             }
             PatternKind::Or(alternatives) => {
@@ -8206,6 +8469,7 @@ impl Inference {
             PatternKind::Name(id) => {
                 if bound.contains(id) {
                     self.error(
+                        Code::Pattern,
                         pattern.span,
                         format!("'{id}' is bound more than once in this pattern"),
                     );
@@ -8218,6 +8482,7 @@ impl Inference {
                 {
                     let short = name.rsplit('.').next().unwrap_or(&name);
                     self.error(
+                        Code::Pattern,
                         pattern.span,
                         format!(
                             "'{id}' here is a new variable that matches any value; to match the \
@@ -8250,7 +8515,7 @@ impl Inference {
                         self.show(&enum_ty),
                         self.show(expected)
                     );
-                    self.error(pattern.span, message);
+                    self.error(Code::Pattern, pattern.span, message);
                 }
                 if let Some(names) = names {
                     self.check_named_fields(&written, fields, &field_types, &names, bound);
@@ -8259,6 +8524,7 @@ impl Inference {
                 if let Some(field) = fields.iter().find(|f| f.name.is_some()) {
                     let (_, span) = field.name.as_ref().unwrap();
                     self.error(
+                        Code::Pattern,
                         *span,
                         format!("'{written}' takes its values in order, without names"),
                     );
@@ -8275,7 +8541,7 @@ impl Inference {
                             fields.len()
                         ),
                     };
-                    self.error(pattern.span, message);
+                    self.error(Code::Pattern, pattern.span, message);
                 }
                 for (i, field) in fields.iter().enumerate() {
                     let field_ty = field_types.get(i).cloned().unwrap_or_else(|| self.fresh());
@@ -8309,6 +8575,7 @@ impl Inference {
             for name in &first {
                 if !names.contains(name) {
                     self.error(
+                        Code::Pattern,
                         alternative.span,
                         format!(
                             "'{name}' is bound in '{}' but not in '{alternative}'",
@@ -8320,6 +8587,7 @@ impl Inference {
             for name in &names {
                 if !first.contains(name) {
                     self.error(
+                        Code::Pattern,
                         alternative.span,
                         format!(
                             "'{name}' is bound in '{alternative}' but not in '{}'",
@@ -8358,6 +8626,7 @@ impl Inference {
                         .map(|(n, _)| format!("{n}={}", field.pattern))
                         .unwrap_or_default();
                     self.error(
+                        Code::Pattern,
                         field.pattern.span,
                         format!(
                             "match a named variant's values by name, as in '{short}({example})'"
@@ -8379,13 +8648,17 @@ impl Inference {
                     ),
                     _ => format!("'{short}' has no field '{name}'"),
                 };
-                self.error(span, message);
+                self.error(Code::Pattern, span, message);
                 let unknown = self.fresh();
                 self.check_pattern(&field.pattern, &unknown, bound);
                 continue;
             };
             if given.contains(&name.as_str()) {
-                self.error(span, format!("field '{name}' is matched more than once"));
+                self.error(
+                    Code::Pattern,
+                    span,
+                    format!("field '{name}' is matched more than once"),
+                );
                 let unknown = self.fresh();
                 self.check_pattern(&field.pattern, &unknown, bound);
                 continue;
@@ -8414,6 +8687,7 @@ impl Inference {
         match path {
             [(name, span)] => {
                 self.error(
+                    Code::Pattern,
                     *span,
                     format!(
                         "'{name}' is not a variant; write a variant with its enum, as in \
@@ -8423,8 +8697,19 @@ impl Inference {
                 None
             }
             [(enum_name, enum_span), (variant, variant_span)] => {
-                let Resolved::Enum(name) = self.resolve_name(enum_name) else {
-                    self.error(*enum_span, format!("'{enum_name}' is not an enum"));
+                // a pattern names an enum, never a variable, so a variable named `result`
+                // leaves the `result.ok` that linking wrote for `ok(x)` alone
+                let resolved = match self.enums.contains_key(enum_name) && self.sees_type(enum_name)
+                {
+                    true => Resolved::Enum(enum_name.clone()),
+                    false => self.resolve_name(enum_name),
+                };
+                let Resolved::Enum(name) = resolved else {
+                    self.error(
+                        Code::Pattern,
+                        *enum_span,
+                        format!("'{enum_name}' is not an enum"),
+                    );
                     return None;
                 };
                 // the subject fills in the type arguments, as `some(x)` fills in `option`'s
@@ -8443,6 +8728,7 @@ impl Inference {
                 self.add_reference(*enum_span, enum_symbol);
                 let Some((symbol, fields, names)) = found else {
                     self.error(
+                        Code::Pattern,
                         *variant_span,
                         format!("'{enum_name}' has no variant '{variant}'"),
                     );
@@ -8455,7 +8741,11 @@ impl Inference {
             _ => {
                 let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
                 let span = path[0].1.to(path[path.len() - 1].1);
-                self.error(span, format!("'{}' is not a variant", names.join(".")));
+                self.error(
+                    Code::Pattern,
+                    span,
+                    format!("'{}' is not a variant", names.join(".")),
+                );
                 None
             }
         }
@@ -8566,6 +8856,7 @@ impl Inference {
             if !returns && self.statement_call != Some(call.span) {
                 let what = if name == "add" { "a set" } else { "a list" };
                 self.error(
+                    Code::NoValue,
                     call.span,
                     format!(
                         "'{name}' changes {what} and returns none, so it can only be a statement \
@@ -8591,6 +8882,7 @@ impl Inference {
                     self.arity_error(call.span, name, "0", args.len());
                 }
                 self.require(
+                    Code::WrongKind,
                     receiver_ty,
                     &[Kind::Str, Kind::Bytes, Kind::List, Kind::Map],
                     receiver.span,
@@ -8758,7 +9050,13 @@ impl Inference {
                     "abs" => "'abs' needs an int or float, found {}",
                     _ => "'floor' needs an int or float, found {}",
                 };
-                self.require(receiver_ty.clone(), NUMERIC, receiver.span, message);
+                self.require(
+                    Code::WrongKind,
+                    receiver_ty.clone(),
+                    NUMERIC,
+                    receiver.span,
+                    message,
+                );
                 match name {
                     "abs" => receiver_ty,
                     _ => Ty::Int,
@@ -8802,7 +9100,7 @@ impl Inference {
                 if !self.unify(&result, &receiver_ty) {
                     let message =
                         format!("'{name}' needs a result, found {}", self.show(&receiver_ty));
-                    self.error(receiver.span, message);
+                    self.error(Code::WrongKind, receiver.span, message);
                 }
                 match (name, args) {
                     ("unwrap_or", [default]) => self.expect(&value, &arg_types[0], default.span),
@@ -8844,7 +9142,7 @@ impl Inference {
                             self.show(&receiver_ty)
                         ),
                     };
-                    self.error(receiver.span, message);
+                    self.error(Code::WrongKind, receiver.span, message);
                 }
                 match (name, args) {
                     ("unwrap_or", [default]) => self.expect(&elem, &arg_types[0], default.span),
@@ -8888,7 +9186,11 @@ impl Inference {
                     }
                     _ => format!("there is no method '{name}'"),
                 };
-                self.error(Span::new(start, end).in_file(func.span.file), message);
+                self.error(
+                    Code::NoMember,
+                    Span::new(start, end).in_file(func.span.file),
+                    message,
+                );
                 self.fresh()
             }
         }
@@ -8912,7 +9214,13 @@ impl Inference {
                     "lower" => "'lower' needs a str, found {}",
                     _ => "'upper' needs a str, found {}",
                 };
-                self.require(receiver_ty, &[Kind::Str], receiver, message);
+                self.require(
+                    Code::WrongKind,
+                    receiver_ty,
+                    &[Kind::Str],
+                    receiver,
+                    message,
+                );
                 match (name, args) {
                     (_, []) => {}
                     ("split", [(separator, span)]) => self.expect(&Ty::Str, separator, *span),
@@ -8926,7 +9234,13 @@ impl Inference {
             }
             "replace" => {
                 let message = "'replace' needs a str, found {}";
-                self.require(receiver_ty, &[Kind::Str], receiver, message);
+                self.require(
+                    Code::WrongKind,
+                    receiver_ty,
+                    &[Kind::Str],
+                    receiver,
+                    message,
+                );
                 match args {
                     [old, new] | [old, new, _] => {
                         self.expect(&Ty::Str, &old.0, old.1);
@@ -8960,7 +9274,13 @@ impl Inference {
                     "startswith" => ("'startswith' needs a str, found {}", Ty::Str, Ty::Bool),
                     _ => ("'endswith' needs a str, found {}", Ty::Str, Ty::Bool),
                 };
-                self.require(receiver_ty, &[Kind::Str], receiver, message);
+                self.require(
+                    Code::WrongKind,
+                    receiver_ty,
+                    &[Kind::Str],
+                    receiver,
+                    message,
+                );
                 match args {
                     [(only, span)] => self.expect(&arg, only, *span),
                     _ => self.arity_error(call, name, "1", args.len()),
@@ -8987,9 +9307,14 @@ impl Inference {
             Some(handle) => self.expect(&Ty::Handle(handle), receiver_ty, receiver),
             // `close` and `set_timeout` take any handle but a window
             None if self.resolve(receiver_ty) == Ty::Handle(Handle::Window) => {
-                self.error(call, format!("'native_window' has no method '{name}'"));
+                self.error(
+                    Code::NoMember,
+                    call,
+                    format!("'native_window' has no method '{name}'"),
+                );
             }
             None => self.require(
+                Code::WrongKind,
                 receiver_ty.clone(),
                 &[Kind::Handle],
                 receiver,
@@ -9033,6 +9358,7 @@ impl Inference {
             }
             "range" => {
                 self.error(
+                    Code::Placement,
                     call.span,
                     "'range' can only be used as the iterable of a 'for' loop",
                 );
@@ -9249,6 +9575,7 @@ impl Inference {
                 match args {
                     [list] => {
                         self.require(
+                            Code::WrongKind,
                             arg_types[0].clone(),
                             &[Kind::List],
                             list.span,
@@ -9263,6 +9590,7 @@ impl Inference {
             "time.sleep" => {
                 match args {
                     [arg] => self.require(
+                        Code::WrongKind,
                         arg_types[0].clone(),
                         NUMERIC,
                         arg.span,
@@ -9286,7 +9614,13 @@ impl Inference {
                     "math.sqrt" => "'math.sqrt' needs an int or float, found {}",
                     _ => "'math.floor' needs an int or float, found {}",
                 };
-                self.require(arg_types[0].clone(), NUMERIC, arg.span, message);
+                self.require(
+                    Code::WrongKind,
+                    arg_types[0].clone(),
+                    NUMERIC,
+                    arg.span,
+                    message,
+                );
                 match name {
                     "math.sqrt" => Ty::Float,
                     "math.floor" => Ty::Int,
@@ -9310,12 +9644,16 @@ impl Inference {
                     _ => "'math.atan2' needs ints or floats, found {}",
                 };
                 for (arg, ty) in args.iter().zip(arg_types) {
-                    self.require(ty.clone(), NUMERIC, arg.span, message);
+                    self.require(Code::WrongKind, ty.clone(), NUMERIC, arg.span, message);
                 }
                 Ty::Float
             }
             "math.pi" | "math.tau" | "math.e" => {
-                self.error(call.span, format!("'{name}' is a constant, not a function"));
+                self.error(
+                    Code::CallForm,
+                    call.span,
+                    format!("'{name}' is a constant, not a function"),
+                );
                 Ty::Float
             }
             "math.min" | "math.max" => match args {
@@ -9325,6 +9663,7 @@ impl Inference {
                 }
                 [list] => {
                     self.require(
+                        Code::WrongKind,
                         arg_types[0].clone(),
                         &[Kind::List],
                         list.span,
@@ -9333,6 +9672,7 @@ impl Inference {
                     let elem = self.fresh();
                     if self.unify(&Ty::List(Box::new(elem.clone())), &arg_types[0]) {
                         self.require(
+                            Code::WrongKind,
                             elem.clone(),
                             NUMERIC,
                             list.span,
@@ -9346,7 +9686,13 @@ impl Inference {
                         "math.min" => "'math.min' needs ints or floats, found {}",
                         _ => "'math.max' needs ints or floats, found {}",
                     };
-                    self.require(arg_types[0].clone(), NUMERIC, first.span, message);
+                    self.require(
+                        Code::WrongKind,
+                        arg_types[0].clone(),
+                        NUMERIC,
+                        first.span,
+                        message,
+                    );
                     for (arg, ty) in args.iter().zip(arg_types).skip(1) {
                         self.expect(&arg_types[0], ty, arg.span);
                     }
@@ -9397,7 +9743,7 @@ impl Inference {
             .collect();
         names.sort_unstable();
         names.dedup();
-        let mut diagnostic = Diagnostic::error(span, message);
+        let mut diagnostic = Code::Undefined.error(span, message);
         if let Some(like) = similar(id, names) {
             diagnostic = diagnostic.with_help(format!("did you mean '{like}'?"));
         }
@@ -9421,6 +9767,7 @@ impl Inference {
         let plural = if expected == "1" { "" } else { "s" };
         let verb = if given == 1 { "was" } else { "were" };
         self.error(
+            Code::Arity,
             span,
             format!("'{name}' takes {expected} argument{plural}, but {given} {verb} given"),
         );
@@ -9447,7 +9794,7 @@ impl Inference {
             }
             Ty::Unit | Ty::Fn(..) | Ty::Handle(_) => {
                 let message = format!("{what} cannot compare {}", self.show(&ty));
-                self.error(span, message);
+                self.error(Code::Uncomparable, span, message);
             }
             Ty::Param(p) if self.type_params[p].bounds.iter().any(|b| b.name == EQ) => {}
             Ty::Param(_) => {
@@ -9456,7 +9803,7 @@ impl Inference {
                     "{what} cannot compare {name}, since '{name}' may be any type; to compare \
                      its values, bound it by 'eq', as in '[{name}: eq]'"
                 );
-                self.error(span, message);
+                self.error(Code::Uncomparable, span, message);
             }
             _ => {
                 let Some(found) = self.uncomparable(&ty, &mut HashSet::new()) else {
@@ -9471,7 +9818,7 @@ impl Inference {
                     self.show(&ty),
                     self.show(&found.ty)
                 );
-                self.error(span, message);
+                self.error(Code::Uncomparable, span, message);
             }
         }
     }
@@ -9608,6 +9955,7 @@ impl Inference {
                 .unwrap_or_default();
             let short = function.rsplit('.').next().unwrap_or(function);
             self.error(
+                Code::InfiniteType,
                 *span,
                 format!(
                     "this call gives '{short}' {arg} for '{param}' and leads back to itself, so \
@@ -9686,6 +10034,7 @@ impl Inference {
                 if count > MAX_ELEMENT_VALUES && reported.insert(outer) {
                     let short = function.rsplit('.').next().unwrap_or(&function);
                     self.error(
+                        Code::TooManyValues,
                         outer,
                         format!(
                             "this call makes '{short}' store {what}, which holds {count} \
@@ -9733,7 +10082,7 @@ impl Inference {
                         self.trait_text(&bound.name, &bound.args),
                         self.type_params[q].name
                     );
-                    self.error(*span, message);
+                    self.error(Code::Bound, *span, message);
                 }
             }
         }
@@ -9957,6 +10306,7 @@ impl Inference {
                 let (what, count) = self.held_width(&ty, kind);
                 if count > MAX_ELEMENT_VALUES {
                     errors.push((
+                        Code::TooManyValues,
                         *span,
                         format!(
                             "this makes {what}, which holds {count} values, but at most \
@@ -9966,9 +10316,9 @@ impl Inference {
                 }
             }
         }
-        errors.sort_by_key(|(span, _)| (span.file, span.start));
-        for (span, message) in errors {
-            self.error(span, message);
+        errors.sort_by_key(|(_, span, _)| (span.file, span.start));
+        for (code, span, message) in errors {
+            self.error(code, span, message);
         }
         self.held_types.extend(held);
     }
@@ -9988,6 +10338,7 @@ impl Inference {
                 let param = &self.type_params[p];
                 let function = self.symbols[param.symbol].scope.clone().unwrap_or_default();
                 errors.push((
+                    Code::TypeParameter,
                     self.symbols[symbol].span,
                     format!(
                         "'{name}' holds a value of type {}, the type parameter of '{function}', \
@@ -9997,8 +10348,8 @@ impl Inference {
                 ));
             }
         }
-        for (span, message) in errors {
-            self.error(span, message);
+        for (code, span, message) in errors {
+            self.error(code, span, message);
         }
     }
 
@@ -10022,6 +10373,7 @@ impl Inference {
             }
             if count > MAX_ELEMENT_VALUES && params.is_empty() {
                 errors.push((
+                    Code::TooManyValues,
                     *span,
                     format!(
                         "a lambda can capture at most {MAX_ELEMENT_VALUES} values, but this one \
@@ -10030,8 +10382,8 @@ impl Inference {
                 ));
             }
         }
-        for (span, message) in errors {
-            self.error(span, message);
+        for (code, span, message) in errors {
+            self.error(code, span, message);
         }
     }
 
@@ -10105,7 +10457,7 @@ impl Inference {
             if !constraint.allowed.contains(&kind) && !(constraint.ord && self.satisfies(&ty, ORD))
             {
                 let message = constraint.message.replace("{}", &self.show(&ty));
-                self.error(constraint.span, message);
+                self.error(constraint.code, constraint.span, message);
             }
         }
         for (ty, span, what) in std::mem::take(&mut self.equalities) {
@@ -10121,7 +10473,7 @@ impl Inference {
         // suggest the type inference found, which is what the program already relies on
         for (name, span, ty) in std::mem::take(&mut self.untyped_params) {
             let ty = self.finalize(&ty);
-            let mut diagnostic = Diagnostic::error(
+            let mut diagnostic = Code::UntypedParam.error(
                 span,
                 format!("parameter '{name}' needs a type, such as '{name}: {ty}'"),
             );
@@ -10141,6 +10493,7 @@ impl Inference {
         for (name, span, ty) in std::mem::take(&mut self.untyped_returns) {
             let ty = self.finalize(&ty);
             self.error(
+                Code::ReturnType,
                 span,
                 format!(
                     "'{name}' has no return type, so it cannot return {ty}; add '-> {ty}' after \
@@ -10387,7 +10740,7 @@ impl Inference {
                 "'match' needs an enum, option, int, str, or bool value, found {}",
                 self.show(&subject)
             );
-            self.error(pending.subject_span, message);
+            self.error(Code::WrongKind, pending.subject_span, message);
             return;
         }
         let mut rows: Vec<Vec<Space>> = vec![];
@@ -10441,7 +10794,7 @@ impl Inference {
                 "_" => "'match' does not cover every value; add 'case _:'".to_string(),
                 _ => format!("'match' does not cover {missed}; add 'case {missed}:' or 'case _:'"),
             };
-            self.error(pending.subject_span, message);
+            self.error(Code::NonExhaustive, pending.subject_span, message);
         }
     }
 
@@ -10903,7 +11256,7 @@ impl<'a> AssignmentCheck<'a> {
                     && !assigned.contains(id)
                     && self.reported.insert(id.clone())
                 {
-                    let mut diagnostic = Diagnostic::error(
+                    let mut diagnostic = Code::Unassigned.error(
                         expr.span,
                         format!("'{id}' might be used before it is assigned"),
                     );

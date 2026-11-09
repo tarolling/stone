@@ -80,7 +80,7 @@ another one did. So a test cannot read a global, even through a function it call
 code that would assign it never runs; the checker reports one that might:
 
 ```text
-limits.stn:7:6: error: this test reads the global 'LIMIT' (through 'clamp'), but stone test runs no top-level code
+limits.stn:7:6: error[E0041]: this test reads the global 'LIMIT' (through 'clamp'), but stone test runs no top-level code
 ```
 
 Make what a test needs inside it, or pass it to the functions as a parameter. A test gets no

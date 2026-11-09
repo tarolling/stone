@@ -8,10 +8,11 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use lsp_types::{
-    CodeAction, CodeActionKind, CodeActionOrCommand, CompletionItem, CompletionItemKind,
-    Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity, DiagnosticTag, DocumentSymbol,
-    Hover, HoverContents, Location, MarkupContent, MarkupKind, NumberOrString, Position,
-    PrepareRenameResponse, Range, SymbolKind, TextEdit, Uri, WorkspaceEdit,
+    CodeAction, CodeActionKind, CodeActionOrCommand, CodeDescription, CompletionItem,
+    CompletionItemKind, Diagnostic, DiagnosticRelatedInformation, DiagnosticSeverity,
+    DiagnosticTag, DocumentSymbol, Hover, HoverContents, Location, MarkupContent, MarkupKind,
+    NumberOrString, Position, PrepareRenameResponse, Range, SymbolKind, TextEdit, Uri,
+    WorkspaceEdit,
 };
 use stone::ast::{is_lambda, is_test};
 use stone::checker::{
@@ -418,6 +419,10 @@ fn lsp_diagnostic(
         code: d
             .code()
             .map(|code| NumberOrString::String(code.to_string())),
+        code_description: d
+            .code()
+            .and_then(|code| stone::explain::docs_url(code).parse().ok())
+            .map(|href| CodeDescription { href }),
         source: Some("stone".to_string()),
         message,
         related_information: (!related.is_empty()).then_some(related),

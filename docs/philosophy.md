@@ -311,8 +311,9 @@ good as rustc's:
   programs as well as from the interpreter.
 
 Status: every error from the lexer, parser, linker, and checker prints as
-`file:line:col: error: message` with the source line and a caret, and the language server
-shows the same errors in the editor. Runtime errors print the same way, pointing at the
+`file:line:col: error[E0005]: message` with the source line and a caret, and the language server
+shows the same errors in the editor. Each has a code for its kind, which `stone explain` explains
+with a program that fails with it and the same program fixed, and which the documentation lists. Runtime errors print the same way, pointing at the
 expression that failed, from compiled programs as well as from the interpreter: the compiler
 renders each place an error can happen into the executable, so it costs nothing until the error
 happens. A failed `unwrap` of an `err` shows the error it found, as in
@@ -322,8 +323,8 @@ or compiled, with the same report from both. Errors from the checker label the o
 (the parameter's type an argument does not fit, the return type a `ret` value does not match, a
 variable's first assignment), add notes on the rule involved, and help with the fix, as a
 rewritten line where the checker knows it, such as a parameter's missing type, or by naming a
-similar name for a misspelled one. Error codes, more of the checker's errors in this form, and
-the chain of calls behind a runtime error are future work.
+similar name for a misspelled one. More of the checker's errors in this form, and the chain of
+calls behind a runtime error, are future work.
 
 ## Run anywhere: no libc
 

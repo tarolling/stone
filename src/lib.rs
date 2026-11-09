@@ -9,6 +9,7 @@ pub mod checker;
 pub mod codegen;
 pub mod diagnostic;
 pub mod driver;
+pub mod explain;
 pub mod format;
 pub mod init;
 pub mod interpreter;

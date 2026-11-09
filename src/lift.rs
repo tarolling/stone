@@ -11,6 +11,7 @@ use crate::ast::{
 };
 use crate::checker::collect_assigned;
 use crate::diagnostic::Diagnostic;
+use crate::explain::Code;
 use crate::project::Test;
 use crate::span::Span;
 use std::collections::HashSet;
@@ -34,7 +35,7 @@ pub fn lift_tests(body: &mut [Stmt], errors: &mut Vec<Diagnostic>) -> Vec<Test> 
             continue;
         };
         if tests.iter().any(|test| test.description == *name) {
-            errors.push(Diagnostic::error(
+            errors.push(Code::Duplicate.error(
                 *name_span,
                 format!("this file already has a test \"{name}\""),
             ));

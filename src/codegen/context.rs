@@ -282,15 +282,56 @@ impl Failure {
     }
 }
 
-/// Where a runtime error points, rendered when the program is compiled: the location, such as
-/// `main.stn:3:7: `, and the excerpt that follows the message, both escaped for a `.string`
-/// directive. A backend emits the two strings one after the other behind `label`, so the
-/// excerpt starts right after the location's terminating zero.
+/// The text of a place in the source, rendered when the program is compiled: the location, such
+/// as `main.stn:3:7: `, and the excerpt that follows a runtime error's message or a call's
+/// `called from here`, both escaped for a `.string` directive and emitted one after the other
+/// behind `label`, so the excerpt starts right after the location's terminating zero.
 #[derive(Clone, Debug, PartialEq)]
-pub struct Site {
+pub struct SiteText {
     pub label: String,
     pub location: String,
     pub excerpt: String,
+}
+
+/// How a runtime error's walk up the calls treats a call it finds the return address of, or an
+/// inlined call a site record lists, written as a `.long` of its number.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CallKind {
+    /// A call of a stone function the program writes, shown as a frame.
+    Frame = 0,
+    /// A call of a helper the program writes, such as `print` calling a printer, shown only if a
+    /// stone function was called below it, since the interpreter shows the call that entered a
+    /// function and has no helpers.
+    Helper = 1,
+    /// A call of a stone function the program does not write, in the prelude or a helper, which
+    /// is not shown but counts as entering a stone function.
+    Entered = 2,
+    /// A call of a helper the program does not write, which is not shown.
+    Silent = 3,
+}
+
+/// What tells sites apart: the span a site shows (none for a call that shows none), then the
+/// inlined calls its code was copied in by, innermost first.
+type SiteKey = (Option<Span>, Vec<Span>);
+
+/// Where a runtime error points or a call is, as a compiled program reads it when it fails:
+/// emitted behind `label` as a `.long` distance to its [`SiteText`] (0 for none), the number of
+/// inlined calls it was copied in by, and for each, innermost first, its [`CallKind`] (only
+/// `Frame` or `Entered`) and the distance to its text (0 for none).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Site {
+    pub label: String,
+    pub text: Option<String>,
+    pub inlined: Vec<(CallKind, Option<String>)>,
+}
+
+/// A call whose return address a runtime error's walk looks up: the label right after the call,
+/// how to treat it, and its site, if it has one.
+#[derive(Clone, Debug, PartialEq)]
+struct CallEntry {
+    ret: String,
+    kind: CallKind,
+    site: Option<String>,
 }
 
 /// The reference count of a string literal or other static object, which is never freed: no
@@ -531,8 +572,17 @@ pub struct Context {
     failures: Vec<Failure>,
     /// The program's files, which runtime errors are rendered from, if the driver gave them.
     sources: Option<SourceMap>,
-    /// Every place a runtime error can point at, by span.
-    sites: Vec<(Span, Site)>,
+    /// The text of every place a site shows, by span.
+    texts: Vec<(Span, SiteText)>,
+    /// Every place a runtime error can point at or a call can be, by its span (none for a call
+    /// that shows none) and the inlined calls it was copied in by.
+    sites: Vec<(SiteKey, Site)>,
+    /// Every call a runtime error's walk can find the return address of.
+    calls: Vec<CallEntry>,
+    /// The inlined calls the instruction being emitted was copied in by, innermost first, from
+    /// [`ir::Function::inlined_calls`](crate::codegen::ir::Function::inlined_calls), which its
+    /// sites list.
+    pub inlined: Vec<Span>,
     /// Whether runtime routines build messages for `stone.fail` themselves, so it is needed even
     /// without a [`Context::fail_label`].
     pub needs_fail: bool,
@@ -763,32 +813,144 @@ impl Context {
         self.checked = true;
     }
 
-    /// Returns the label of the site record for `span`, the same one for every use, or `None`
-    /// without sources or for a span that is in no source, such as code `main` adds.
+    /// Returns the label of the site record a runtime error at `span` points at, inside the
+    /// inlined calls of [`Context::inlined`], or `None` without sources or for a span stone made
+    /// up, which has no place in the source.
     pub fn site_label(&mut self, span: Span) -> Option<String> {
-        let sources = self.sources.as_ref()?;
-        if span.start.line == 0 {
+        if self.sources.is_none() || span.start.line == 0 {
             return None;
         }
-        if let Some((_, site)) = self.sites.iter().find(|(s, _)| *s == span) {
-            return Some(site.label.clone());
+        Some(self.site(Some(span)))
+    }
+
+    /// Returns the label of the site record of `span` (none for a call that shows none) inside
+    /// the inlined calls of [`Context::inlined`], making it the first time it is asked for. Each
+    /// inlined call is a frame if it shows, else it only enters a stone function.
+    fn site(&mut self, span: Option<Span>) -> String {
+        let key = (span, self.inlined.clone());
+        if let Some((_, site)) = self.sites.iter().find(|(k, _)| *k == key) {
+            return site.label.clone();
         }
-        let (location, excerpt) = sources.site(span);
+        let text = span.map(|span| self.text_label(span));
+        let mut inlined = Vec::new();
+        for call in key.1.clone() {
+            inlined.push(match self.shows_call(call) {
+                true => (CallKind::Frame, Some(self.text_label(call))),
+                false => (CallKind::Entered, None),
+            });
+        }
         let label = self.new_label("site");
         self.sites.push((
-            span,
+            key,
             Site {
+                label: label.clone(),
+                text,
+                inlined,
+            },
+        ));
+        label
+    }
+
+    /// Returns the label of the text of `span`, making it the first time it is asked for.
+    fn text_label(&mut self, span: Span) -> String {
+        if let Some((_, text)) = self.texts.iter().find(|(s, _)| *s == span) {
+            return text.label.clone();
+        }
+        let sources = self
+            .sources
+            .as_ref()
+            .expect("only a site with sources has text");
+        let (location, excerpt) = sources.site(span);
+        let label = self.new_label("site_text");
+        self.texts.push((
+            span,
+            SiteText {
                 label: label.clone(),
                 location: escape(&location),
                 excerpt: escape(&excerpt),
             },
         ));
-        Some(label)
+        label
     }
 
-    /// Returns every site record asked for, in the order they were asked for.
-    pub fn sites(&self) -> Vec<Site> {
-        self.sites.iter().map(|(_, site)| site.clone()).collect()
+    /// Returns whether a runtime error shows a call at `span` (see [`SourceMap::shows_call`]).
+    fn shows_call(&self, span: Span) -> bool {
+        self.sources
+            .as_ref()
+            .is_some_and(|sources| sources.shows_call(span))
+    }
+
+    /// Returns whether a runtime error walks up the calls that led to it, which needs sources,
+    /// so `main` keeps its frame where the walk stops.
+    pub fn walks_calls(&self) -> bool {
+        self.sources.is_some()
+    }
+
+    /// Returns the label a backend puts right after a call at `span`, of a helper if `helper`
+    /// and otherwise of a stone function (directly or through a value), which a runtime error's
+    /// walk finds as a return address, or `None` for a call the walk can pass over.
+    ///
+    /// For example, `print(f(0))` gives the call of `f` a label whose entry shows
+    /// `main.stn:1:7: called from here` if `f` fails.
+    pub fn return_label(&mut self, helper: bool, span: Span) -> Option<String> {
+        self.sources.as_ref()?;
+        let shown = self.shows_call(span);
+        let kind = match (helper, shown) {
+            (false, true) => CallKind::Frame,
+            (true, true) => CallKind::Helper,
+            (false, false) => CallKind::Entered,
+            (true, false) => CallKind::Silent,
+        };
+        let site = match (shown, self.inlined.is_empty()) {
+            (true, _) => Some(self.site(Some(span))),
+            (false, false) => Some(self.site(None)),
+            (false, true) if kind == CallKind::Silent => return None,
+            (false, true) => None,
+        };
+        let ret = self.new_label("ret");
+        self.calls.push(CallEntry {
+            ret: ret.clone(),
+            kind,
+            site,
+        });
+        Some(ret)
+    }
+
+    /// Returns the `.rodata` lines of every site's text, every site record, and the table of
+    /// calls a runtime error's walk reads, `stone.calls`: the number of calls as a `.quad`, then
+    /// for each the `.long`s of the distance to its return label, its [`CallKind`], and the
+    /// distance to its site (0 for none). Both backends emit the same lines.
+    pub fn site_lines(&self) -> Vec<String> {
+        let mut lines = vec!["\t.section\t.rodata".to_string()];
+        for (_, text) in &self.texts {
+            lines.push(format!("{}:", text.label));
+            lines.push(format!("\t.string \"{}\"", text.location));
+            lines.push(format!("\t.string \"{}\"", text.excerpt));
+        }
+        let distance = |label: &Option<String>| match label {
+            Some(label) => format!("\t.long\t{label} - ."),
+            None => "\t.long\t0".to_string(),
+        };
+        lines.push("\t.balign\t4".to_string());
+        for (_, site) in &self.sites {
+            lines.push(format!("{}:", site.label));
+            lines.push(distance(&site.text));
+            lines.push(format!("\t.long\t{}", site.inlined.len()));
+            for (kind, text) in &site.inlined {
+                lines.push(format!("\t.long\t{}", *kind as u8));
+                lines.push(distance(text));
+            }
+        }
+        lines.push("\t.balign\t8".to_string());
+        lines.push("stone.calls:".to_string());
+        lines.push(format!("\t.quad\t{}", self.calls.len()));
+        for call in &self.calls {
+            lines.push(distance(&Some(call.ret.clone())));
+            lines.push(format!("\t.long\t{}", call.kind as u8));
+            lines.push(distance(&call.site));
+        }
+        lines.push("\t.text".to_string());
+        lines
     }
 
     /// Returns the routine that prints a value of type `ty`, quoting strings inside lists.

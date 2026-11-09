@@ -1,0 +1,8 @@
+pub fn mean(xs: list[int]) -> int:
+    ret total(xs) / xs.len()
+
+fn total(xs: list[int]) -> int:
+    sum = 0
+    for x in xs:
+        sum += x
+    ret sum

@@ -1,0 +1,13 @@
+// lambdas, closures, function values, and generic functions are calls too
+fn apply[T](f: fn(T) -> T, x: T) -> T:
+    ret f(x)
+
+fn inverse(n: int) -> int:
+    ret 100 / n
+
+fn scaled(xs: list[int], by: int) -> list[int]:
+    ret xs.map(|x| apply(inverse, x) * by)
+
+print(apply(inverse, 4))
+print(scaled([1, 2], 3))
+print(scaled([5, 0], 2))

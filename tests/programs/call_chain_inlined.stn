@@ -1,0 +1,9 @@
+// a small function compiled into its caller still shows as a call
+fn ratio(a: int, b: int) -> int:
+    ret a / b
+
+fn percent(a: int, b: int) -> int:
+    ret ratio(a * 100, b)
+
+print(percent(1, 4))
+print(percent(1, 0))

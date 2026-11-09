@@ -1,0 +1,20 @@
+call_chain_values.stn:6:9: error: division by zero
+  |
+6 |     ret 100 / n
+  |         ^^^^^^^
+call_chain_values.stn:3:9: called from here
+  |
+3 |     ret f(x)
+  |         ^^^^
+call_chain_values.stn:9:20: called from here
+  |
+9 |     ret xs.map(|x| apply(inverse, x) * by)
+  |                    ^^^^^^^^^^^^^^^^^
+call_chain_values.stn:9:9: called from here
+  |
+9 |     ret xs.map(|x| apply(inverse, x) * by)
+  |         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+call_chain_values.stn:13:7: called from here
+   |
+13 | print(scaled([5, 0], 2))
+   |       ^^^^^^^^^^^^^^^^^

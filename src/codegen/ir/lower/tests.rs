@@ -974,7 +974,7 @@ fn spans_of(source: &str, pick: impl Fn(&Inst) -> bool) -> Vec<Span> {
         .iter()
         .flat_map(|block| block.insts.iter().zip(&block.spans))
         .filter(|(inst, _)| pick(inst))
-        .map(|(_, span)| *span)
+        .map(|(_, origin)| origin.span)
         .collect()
 }
 

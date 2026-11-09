@@ -1,0 +1,12 @@
+call_chain_deep.stn:3:9: error: recursion is too deep (more than 1000 nested calls)
+  |
+3 |     ret forever(n + 1) + 1
+  |         ^^^^^^^^^^^^^^
+call_chain_deep.stn:3:9: called from here (999 times)
+  |
+3 |     ret forever(n + 1) + 1
+  |         ^^^^^^^^^^^^^^
+call_chain_deep.stn:5:7: called from here
+  |
+5 | print(forever(0))
+  |       ^^^^^^^^^^

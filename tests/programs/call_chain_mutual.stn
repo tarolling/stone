@@ -1,0 +1,13 @@
+// at most 20 frames are written, then a count of the calls past them
+fn even(n: int) -> bool:
+    if n == 0:
+        ret [true][n + 1]
+    ret odd(n - 1)
+
+fn odd(n: int) -> bool:
+    if n == 0:
+        ret false
+    ret even(n - 1)
+
+print("going")
+print(even(30))

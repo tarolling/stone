@@ -1,0 +1,85 @@
+call_chain_mutual.stn:4:13: error: list index out of range (index 1, length 1)
+  |
+4 |         ret [true][n + 1]
+  |             ^^^^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+call_chain_mutual.stn:10:9: called from here
+   |
+10 |     ret even(n - 1)
+   |         ^^^^^^^^^^^
+call_chain_mutual.stn:5:9: called from here
+  |
+5 |     ret odd(n - 1)
+  |         ^^^^^^^^^^
+... and 11 more calls

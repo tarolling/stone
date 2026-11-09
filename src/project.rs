@@ -246,10 +246,32 @@ impl SourceMap {
     /// For example, an error in `util.stn` renders as `util.stn:2:9: error: ...` followed by the
     /// line and a caret.
     pub fn render(&self, diagnostic: &Diagnostic) -> String {
-        diagnostic.render_in(|id| {
+        let files = |id| {
             let file = self.file(id);
             (file.path.display().to_string(), file.source.as_str())
-        })
+        };
+        if diagnostic
+            .calls()
+            .iter()
+            .any(|call| !self.shows_call(*call))
+        {
+            return diagnostic
+                .keeping_calls(|call| self.shows_call(call))
+                .render_in(files);
+        }
+        diagnostic.render_in(files)
+    }
+
+    /// Returns whether a runtime error shows a call at `span` among the calls that led to it:
+    /// only a call the program writes, not one in the prelude or a builtin module written in
+    /// stone, such as `xs.map(f)`'s call of `f`, and not one stone adds, which has no place.
+    pub fn shows_call(&self, span: Span) -> bool {
+        span.start.line > 0
+            && span.file != FileId::PRELUDE
+            && self
+                .files
+                .get(span.file.0 as usize)
+                .is_some_and(|file| !file.is_builtin())
     }
 
     /// Returns what a diagnostic at `span` renders before and after its `error: message` line:

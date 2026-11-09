@@ -1233,6 +1233,9 @@ pub struct Interpreter<'out> {
     depth: usize,
     /// Function calls currently active, compared against [`Limits::max_calls`].
     calls: usize,
+    /// The expression or statement being evaluated, which a function called now is called from,
+    /// as compiled code records the instruction it calls from.
+    here: Span,
     /// How many times a change copied a list that something else still shared, which tests use
     /// to check that values move rather than being copied.
     copies: u64,
@@ -1293,6 +1296,7 @@ impl<'out> Interpreter<'out> {
             fuel_used: 0,
             depth: 0,
             calls: 0,
+            here: Span::default(),
             copies: 0,
             rng: None,
         }
@@ -1456,6 +1460,14 @@ impl<'out> Interpreter<'out> {
     /// Executes one statement and reports whether it breaks, continues, or returns, then drops
     /// the variables it used for the last time.
     fn eval_stmt(&mut self, stmt: &code::Stmt) -> EvalResult<ControlFlow> {
+        let outer = std::mem::replace(&mut self.here, stmt.span);
+        let flow = self.eval_stmt_located(stmt);
+        self.here = outer;
+        flow
+    }
+
+    /// Does what [`Interpreter::eval_stmt`] does once `here` is the statement.
+    fn eval_stmt_located(&mut self, stmt: &code::Stmt) -> EvalResult<ControlFlow> {
         self.nested(|this| {
             let flow = match this.eval_stmt_unguarded(stmt) {
                 Ok(flow) => flow,
@@ -2049,8 +2061,12 @@ impl<'out> Interpreter<'out> {
     /// Evaluates one expression to a value, so `1 + 2` evaluates to `Int(3)`, giving an error
     /// the position of the innermost expression that raised it.
     fn eval_expr(&mut self, expr: &code::Expr) -> EvalResult<Value> {
-        self.nested(|this| this.eval_expr_unguarded(expr))
-            .map_err(|e| located(e, expr.span))
+        let outer = std::mem::replace(&mut self.here, expr.span);
+        let value = self
+            .nested(|this| this.eval_expr_unguarded(expr))
+            .map_err(|e| located(e, expr.span));
+        self.here = outer;
+        value
     }
 
     /// Evaluates `exprs` left to right, as a call's arguments are.
@@ -3591,6 +3607,8 @@ impl<'out> Interpreter<'out> {
         }
 
         self.calls += 1;
+        // a runtime error in the body shows this call among those that led to it
+        let site = self.here;
         let types = match self.next_types.take() {
             Some(types) => std::mem::replace(&mut self.types, types),
             None => std::mem::replace(&mut self.types, self.no_types.clone()),
@@ -3612,6 +3630,12 @@ impl<'out> Interpreter<'out> {
         self.types = types;
         self.calls -= 1;
 
+        let flow = flow.map_err(|mut error| {
+            if let Some(diagnostic) = error.downcast_mut::<Diagnostic>() {
+                diagnostic.push_call(site);
+            }
+            error
+        });
         let value = match flow? {
             ControlFlow::Return(value) => value,
             _ => Value::Unit,

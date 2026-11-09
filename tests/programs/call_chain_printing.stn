@@ -1,0 +1,16 @@
+// printing a value nested too deeply fails inside print itself, not in a call
+enum Chain:
+    end
+    link(Chain)
+
+fn deep(n: int) -> Chain:
+    c = Chain.end
+    for i in range(n):
+        c = Chain.link(c)
+    ret c
+
+fn show(c: Chain):
+    print(c)
+
+show(deep(2))
+show(deep(20000))

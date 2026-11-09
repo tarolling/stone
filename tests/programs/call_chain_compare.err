@@ -1,0 +1,8 @@
+call_chain_compare.stn:11:13: error: list index out of range (index 0, length 0)
+   |
+11 |         ret self.points[0].cmp(other.points[0])
+   |             ^^^^^^^^^^^^^^
+call_chain_compare.stn:18:1: called from here
+   |
+18 | scores.sort()
+   | ^^^^^^^^^^^^^

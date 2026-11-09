@@ -1,0 +1,28 @@
+// methods, associated functions, changing methods, operators, and conversions are calls too
+struct Meter:
+    value: int
+
+impl Meter:
+    fn of(value: int) -> Meter:
+        ret Meter(value=value)
+
+    fn per(self, n: int) -> int:
+        ret self.value / n
+
+    fn halve(self):
+        self.value = self.per(2) + self.per(self.value - 6)
+
+impl add[int] for Meter:
+    fn add(self, other: int) -> Meter:
+        ret Meter.of(self.per(other))
+
+impl from[str] for Meter:
+    fn from(text: str) -> Meter:
+        ret Meter.of(10) + (text.len() - 3)
+
+m = Meter.of(10)
+m.halve()
+print(m.value)
+print((m + 2).value)
+print(Meter("abcd").value)
+print(Meter("abc").value)

@@ -1,0 +1,8 @@
+call_chain_printing.stn:13:5: error: value is nested too deeply to print (more than 10000 levels)
+   |
+13 |     print(c)
+   |     ^^^^^^^^
+call_chain_printing.stn:16:1: called from here
+   |
+16 | show(deep(20000))
+   | ^^^^^^^^^^^^^^^^^

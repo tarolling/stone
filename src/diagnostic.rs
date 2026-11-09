@@ -82,6 +82,43 @@ pub struct Details {
     pub notes: Vec<String>,
     /// Advice on fixing the problem, shown after the notes.
     pub help: Vec<Help>,
+    /// For a runtime error, the calls that were running when it happened, innermost first, each
+    /// at the call that entered the function the one before it is in.
+    pub calls: Vec<Span>,
+}
+
+/// How many frames of a runtime error's calls are shown before the rest are counted, as in
+/// `... and 980 more calls`; a run of calls from one place is one frame.
+pub const MAX_FRAMES: usize = 20;
+
+/// What a runtime error's frame says after its location, before its excerpt.
+pub const CALLED_FROM: &str = "called from here";
+
+/// Returns the frames a runtime error shows for `calls` (innermost first): each run of calls from
+/// the same place as one frame with the number of calls, at most [`MAX_FRAMES`] of them, and the
+/// number of calls left out after those.
+///
+/// For example, a call from `a` and then 999 calls from `b` give `[(a, 1), (b, 999)]` and 0.
+pub fn frames(calls: &[Span]) -> (Vec<(Span, usize)>, usize) {
+    let mut runs: Vec<(Span, usize)> = Vec::new();
+    for &call in calls {
+        match runs.last_mut() {
+            Some((span, count)) if *span == call => *count += 1,
+            _ => runs.push((call, 1)),
+        }
+    }
+    let more = runs.iter().skip(MAX_FRAMES).map(|(_, count)| count).sum();
+    runs.truncate(MAX_FRAMES);
+    (runs, more)
+}
+
+/// Returns the line that ends a runtime error's frames when `more` calls were left out, such as
+/// `... and 980 more calls`.
+pub fn more_calls(more: usize) -> String {
+    match more {
+        1 => "... and 1 more call\n".to_string(),
+        _ => format!("... and {more} more calls\n"),
+    }
 }
 
 impl Diagnostic {
@@ -126,6 +163,27 @@ impl Diagnostic {
     /// Returns the advice on fixing the problem.
     pub fn help(&self) -> &[Help] {
         self.details.as_ref().map_or(&[], |d| &d.help)
+    }
+
+    /// Returns the calls that were running when a runtime error happened, innermost first.
+    pub fn calls(&self) -> &[Span] {
+        self.details.as_ref().map_or(&[], |d| &d.calls)
+    }
+
+    /// Adds `call` as the call that entered the function the error happened in, or the one the
+    /// calls already added were made from, as a runtime error passes out of each call.
+    pub fn push_call(&mut self, call: Span) {
+        self.details_mut().calls.push(call);
+    }
+
+    /// Returns the diagnostic with only the calls `keep` says to show, as a source map drops
+    /// calls made in stone's own files.
+    pub fn keeping_calls(&self, keep: impl Fn(Span) -> bool) -> Diagnostic {
+        let mut kept = self.clone();
+        if let Some(details) = kept.details.as_mut() {
+            details.calls.retain(|call| keep(*call));
+        }
+        kept
     }
 
     /// Adds a label at `span`, another place that explains the problem.
@@ -206,6 +264,7 @@ impl Diagnostic {
                         }),
                     })
                     .collect(),
+                calls: details.calls.clone(),
             })
         });
         Diagnostic {
@@ -238,6 +297,11 @@ impl Diagnostic {
     ///   |     ^
     /// ```
     pub fn render(&self, file: &str, source: &str) -> String {
+        // calls in other files cannot be shown without their source
+        if self.calls().iter().any(|call| call.file != self.span.file) {
+            let kept = self.keeping_calls(|call| call.file == self.span.file);
+            return kept.render_in(|_| (file.to_string(), source));
+        }
         self.render_in(|_| (file.to_string(), source))
     }
 
@@ -418,6 +482,28 @@ impl Diagnostic {
                 ));
             }
             wrote_source = true;
+        }
+
+        // a runtime error's calls, each as a compiled program writes them from its site records
+        let shown: Vec<Span> = self
+            .calls()
+            .iter()
+            .copied()
+            .filter(|call| call.start.line > 0)
+            .collect();
+        let (frames, more) = frames(&shown);
+        for (call, count) in frames {
+            let (path, source) = files(call.file);
+            out.push_str(&location(&path, call));
+            out.push_str(CALLED_FROM);
+            if count > 1 {
+                out.push_str(&format!(" ({count} times)"));
+            }
+            out.push('\n');
+            out.push_str(&excerpt(source, call));
+        }
+        if more > 0 {
+            out.push_str(&more_calls(more));
         }
         out
     }
@@ -663,6 +749,68 @@ mod tests {
     /// Returns the span of line `line`, columns `start` up to `end`, in the entry file.
     fn at(line: usize, start: usize, end: usize) -> Span {
         Span::new(Pos::new(line, start), Pos::new(line, end))
+    }
+
+    #[test]
+    fn a_runtime_error_shows_each_call_that_led_to_it() {
+        let source = "fn f(n: int) -> int:\n    ret 1 / n\nprint(f(0))\n";
+        let mut d = Diagnostic::error(at(2, 9, 14), "division by zero");
+        d.push_call(at(3, 7, 11));
+        assert_eq!(
+            d.render("main.stn", source),
+            "main.stn:2:9: error: division by zero\n  |\n2 |     ret 1 / n\n  |         \
+             ^^^^^\nmain.stn:3:7: called from here\n  |\n3 | print(f(0))\n  |       ^^^^\n"
+        );
+    }
+
+    #[test]
+    fn calls_from_one_place_show_as_one_frame_with_their_count() {
+        let source = "fn f(n: int) -> int:\n    ret f(n - 1)\nprint(f(3))\n";
+        let mut d = Diagnostic::error(at(2, 9, 17), "recursion is too deep");
+        for _ in 0..3 {
+            d.push_call(at(2, 9, 17));
+        }
+        d.push_call(at(3, 7, 11));
+        let rendered = d.render("main.stn", source);
+        assert!(
+            rendered.ends_with(
+                "main.stn:2:9: called from here (3 times)\n  |\n2 |     ret f(n - 1)\n  |         \
+                 ^^^^^^^^\nmain.stn:3:7: called from here\n  |\n3 | print(f(3))\n  |       \
+                 ^^^^\n"
+            ),
+            "{rendered}"
+        );
+    }
+
+    #[test]
+    fn calls_past_the_shown_frames_are_counted() {
+        let source = "a\n".repeat(30);
+        let mut d = Diagnostic::error(at(1, 1, 2), "bad");
+        for line in 1..=25 {
+            d.push_call(at(line, 1, 2));
+        }
+        // a frame of several calls counts as one frame but adds all its calls
+        d.push_call(at(25, 1, 2));
+        let rendered = d.render("main.stn", &source);
+        assert_eq!(rendered.matches(CALLED_FROM).count(), MAX_FRAMES);
+        assert!(
+            rendered.ends_with("^\n... and 6 more calls\n"),
+            "{rendered}"
+        );
+        let (frames, more) = frames(&[at(1, 1, 2); 1]);
+        assert_eq!((frames.len(), more), (1, 0));
+        assert_eq!(more_calls(1), "... and 1 more call\n");
+    }
+
+    #[test]
+    fn calls_with_no_place_in_the_source_are_left_out() {
+        let mut d = Diagnostic::error(at(1, 1, 2), "bad");
+        d.push_call(Span::default());
+        d.push_call(at(1, 1, 2).in_file(FileId(3)));
+        assert_eq!(
+            d.render("main.stn", "a\n"),
+            "main.stn:1:1: error: bad\n  |\n1 | a\n  | ^\n"
+        );
     }
 
     #[test]

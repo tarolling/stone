@@ -6,7 +6,10 @@
 //!
 //! A program that should fail at runtime, such as one indexing past the end of a list, has a
 //! sibling `.err` file too. It must then exit with an error under both backends, print the `.out`
-//! text first, and print the `.err` text somewhere in its stderr.
+//! text first, and print the `.err` text somewhere in its stderr, read with the program's
+//! directory left out of every path. So `:3:7: error: division by zero` pins where an error is,
+//! and a `.err` starting `chain.stn:2:9: error: division by zero` can go on to pin each
+//! `chain.stn:5:9: called from here` frame and its excerpt.
 //!
 //! A program that writes to stderr with `eprint` has a sibling `.stderr` file holding exactly what
 //! its stderr must be under every backend.
@@ -285,6 +288,21 @@ struct Outcome {
 }
 
 /// Runs a command to completion with `input` as its stdin, failing only if it cannot be started.
+/// Returns `stderr` with the directory of `program` left out of every path in it, so that
+/// `tests/programs/chain.stn:2:9: error: ...` reads `chain.stn:2:9: error: ...` whatever
+/// directory the program sits in and whichever separator the system writes.
+fn without_directory(stderr: &str, program: &Path) -> String {
+    let Some(directory) = program.parent().filter(|d| !d.as_os_str().is_empty()) else {
+        return stderr.to_string();
+    };
+    let directory = directory.display().to_string();
+    ['/', '\\']
+        .iter()
+        .fold(stderr.to_string(), |text, separator| {
+            text.replace(&format!("{directory}{separator}"), "")
+        })
+}
+
 fn outcome_of(command: &mut Command, input: &[u8]) -> Result<Outcome, String> {
     let mut child = command
         .stdin(Stdio::piped())
@@ -537,7 +555,10 @@ fn check_all(backend: Backend) {
                     outcome.stderr
                 ))
             }
-            Ok(outcome) => match (outcome.error, &expected_error) {
+            Ok(outcome) => match (
+                outcome.error.map(|e| without_directory(&e, &program)),
+                &expected_error,
+            ) {
                 (None, None) => None,
                 (Some(stderr), Some(want)) if stderr.contains(want.as_str()) => None,
                 (Some(stderr), Some(want)) => Some(format!(

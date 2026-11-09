@@ -23,6 +23,10 @@ shapes.stn:8:47: error: list index out of range (index 1, length 1)
   |
 8 |     ret Point(x=int(parts[0]).unwrap(), y=int(parts[1]).unwrap())
   |                                               ^^^^^^^^
+shapes.stn:18:9: called from here
+   |
+18 |     p = parse("34")
+   |         ^^^^^^^^^^^
 
 shapes.stn: prints before it fails
 checking the origin

@@ -22,13 +22,14 @@ pub mod windows;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
-    BYTES_ROUTINES, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, REDUCE_PIO2,
+    BYTES_ROUTINES, CallKind, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, REDUCE_PIO2,
     STRING_METHOD_ROUTINES, escape, function_statics, global_label, immortal_bytes,
     immortal_string, variant_statics,
 };
 use crate::codegen::x64::builtins::print;
 use crate::codegen::x64::system::{Sys, system_call};
 use crate::codegen::{AssemblyGenerator, Level, Os, Subsystem, Target};
+use crate::diagnostic::{CALLED_FROM, MAX_FRAMES};
 use crate::project::SourceMap;
 use crate::span::Span;
 use crate::stdlib::CUT_CHARACTER;
@@ -308,13 +309,15 @@ impl X64Generator {
         let common = self.ctx.new_label("fail_common");
         let [first, second] = emit::FAIL_VALUES;
         // rbx says whether rdi starts the pieces of a detailed message, whose values wait in r14
-        // and r15 and which has rbp holes, and r12 and r13 hold the message and the site
+        // and r15 and which has r9 holes, r12 and r13 hold the message and the site record, r10
+        // its excerpt, and rbp is still the frame of the code that failed, where the walk up the
+        // calls starts
         self.emit("stone.fail_detail1:");
-        self.emit("\tmov\trbp, 1");
+        self.emit("\tmov\tr9, 1");
         let detailed = self.ctx.new_label("fail_detailed");
         self.emit(&format!("\tjmp\t{detailed}"));
         self.emit("stone.fail_detail:");
-        self.emit("\tmov\trbp, 2");
+        self.emit("\tmov\tr9, 2");
         self.emit(&format!("{detailed}:"));
         self.emit(&format!("\tmov\tr14, {first}"));
         self.emit(&format!("\tmov\tr15, {second}"));
@@ -329,12 +332,11 @@ impl X64Generator {
         self.emit("\tmov\tr13, QWORD PTR [rip + stone.site]");
         self.emit("\ttest\tr13, r13");
         self.emit(&format!("\tje\t{no_location}"));
-        self.emit("\tmov\trsi, r13");
+        // a site record starts with the distance to its text, the location then the excerpt
+        self.emit("\tmovsxd\trsi, DWORD PTR [r13]");
+        self.emit("\tadd\trsi, r13");
         self.write_stderr();
-        // the excerpt follows the location's terminating zero
-        self.emit("\tmov\tr13, rsi");
-        self.emit("\tadd\tr13, rdx");
-        self.emit("\tinc\tr13");
+        self.emit("\tlea\tr10, [rsi + rdx + 1]");
         self.emit(&format!("{no_location}:"));
         self.emit(&format!("\tlea\trsi, [rip + {prefix}]"));
         self.write_stderr();
@@ -345,7 +347,7 @@ impl X64Generator {
         self.emit(&format!("\tje\t{plain}"));
         for value in ["r14", "r15"] {
             if value == "r15" {
-                self.emit("\tcmp\trbp, 1");
+                self.emit("\tcmp\tr9, 1");
                 self.emit(&format!("\tje\t{plain}"));
             }
             // the next piece follows the last one's terminating zero
@@ -363,8 +365,11 @@ impl X64Generator {
         let done = self.ctx.new_label("fail_done");
         self.emit("\ttest\tr13, r13");
         self.emit(&format!("\tje\t{done}"));
-        self.emit("\tmov\trsi, r13");
+        self.emit("\tmov\trsi, r10");
         self.write_stderr();
+        if self.ctx.walks_calls() {
+            self.walk_calls(&done);
+        }
         self.emit(&format!("{done}:"));
         self.emit("\tmov\trdi, 1");
         system_call(self, Sys::Exit);
@@ -379,16 +384,244 @@ impl X64Generator {
             }
             self.emit("\t.text");
         }
-        let sites = self.ctx.sites();
-        if !sites.is_empty() {
-            self.emit("\t.section\t.rodata");
-            for site in sites {
-                self.emit(&format!("{}:", site.label));
-                self.emit(&format!("\t.string \"{}\"", site.location));
-                self.emit(&format!("\t.string \"{}\"", site.excerpt));
+        if self.ctx.walks_calls() {
+            for line in self.ctx.site_lines() {
+                self.emit(&line);
             }
-            self.emit("\t.text");
         }
+    }
+
+    /// Emits the end of `stone.fail` that writes the calls that led to the error, with the site
+    /// record in `r13` and the frame of the code that failed in `rbp`, then goes to `done`: the
+    /// record's inlined calls, then each return address up the frames to `main`'s that
+    /// `stone.calls` lists, as [`Diagnostic::render_in`](crate::diagnostic::Diagnostic::render_in)
+    /// writes them. A run of calls from one site is one frame with a count, at most
+    /// [`MAX_FRAMES`] frames are written, and the calls past them are counted.
+    ///
+    /// The walk keeps whether a stone function was entered since the last frame in `rbx`, how
+    /// many frames it wrote in `r12`, the frame it has not written yet in `r13` (a site record,
+    /// or 0) with its count in `r14`, and the calls past the last frame in `r15`.
+    fn walk_calls(&mut self, done: &str) {
+        let frame = self.ctx.new_label("fail_frame");
+        let flush = self.ctx.new_label("fail_flush");
+        let push = self.ctx.new_label("fail_push");
+        let inlined = self.ctx.new_label("fail_inlined");
+        let called = self.ctx.intern_string(CALLED_FROM);
+        let open = self.ctx.intern_string(" (");
+        let times = self.ctx.intern_string(" times)");
+        let newline = self.ctx.intern_string("\n");
+        let and = self.ctx.intern_string("... and ");
+        let more_one = self.ctx.intern_string(" more call\n");
+        let more_many = self.ctx.intern_string(" more calls\n");
+        let walk = self.ctx.new_label("fail_walk");
+        let scan = self.ctx.new_label("fail_scan");
+        let found = self.ctx.new_label("fail_found");
+        let next = self.ctx.new_label("fail_next");
+        let end = self.ctx.new_label("fail_walked");
+        let one = self.ctx.new_label("fail_one_more");
+
+        self.emit("\tsub\trsp, 64");
+        self.emit("\txor\tebx, ebx");
+        self.emit("\txor\tr12d, r12d");
+        self.emit("\txor\tr14d, r14d");
+        self.emit("\txor\tr15d, r15d");
+        // the calls the code that failed was inlined through
+        self.emit("\tmov\trdi, r13");
+        self.emit(&format!("\tcall\t{inlined}"));
+        self.emit("\txor\tr13d, r13d");
+        self.emit(&format!("{walk}:"));
+        self.emit("\ttest\trbp, rbp");
+        self.emit(&format!("\tje\t{end}"));
+        self.emit("\tcmp\trbp, QWORD PTR [rip + stone.main_frame]");
+        self.emit(&format!("\tje\t{end}"));
+        // the return address, looked up among the calls
+        self.emit("\tmov\trax, QWORD PTR [rbp + 8]");
+        self.emit("\tlea\tr10, [rip + stone.calls]");
+        self.emit("\tmov\tr9, QWORD PTR [r10]");
+        self.emit("\tadd\tr10, 8");
+        self.emit(&format!("{scan}:"));
+        self.emit("\ttest\tr9, r9");
+        self.emit(&format!("\tje\t{next}"));
+        self.emit("\tmovsxd\trcx, DWORD PTR [r10]");
+        self.emit("\tadd\trcx, r10");
+        self.emit("\tcmp\trcx, rax");
+        self.emit(&format!("\tje\t{found}"));
+        self.emit("\tadd\tr10, 12");
+        self.emit("\tdec\tr9");
+        self.emit(&format!("\tjmp\t{scan}"));
+        self.emit(&format!("{found}:"));
+        // rdi is the call's site record, or 0
+        self.emit("\tmovsxd\trdi, DWORD PTR [r10 + 8]");
+        let no_site = self.ctx.new_label("fail_no_site");
+        self.emit("\ttest\trdi, rdi");
+        self.emit(&format!("\tje\t{no_site}"));
+        self.emit("\tlea\trdi, [r10 + rdi + 8]");
+        self.emit(&format!("{no_site}:"));
+        self.emit("\tmov\teax, DWORD PTR [r10 + 4]");
+        let helper = self.ctx.new_label("fail_helper");
+        let entered = self.ctx.new_label("fail_entered");
+        let events = self.ctx.new_label("fail_events");
+        self.emit(&format!("\tcmp\teax, {}", CallKind::Helper as u8));
+        self.emit(&format!("\tje\t{helper}"));
+        self.emit(&format!("\tcmp\teax, {}", CallKind::Entered as u8));
+        self.emit(&format!("\tje\t{entered}"));
+        self.emit(&format!("\tcmp\teax, {}", CallKind::Silent as u8));
+        self.emit(&format!("\tje\t{events}"));
+        // a frame
+        self.emit("\tmov\tQWORD PTR [rsp], rdi");
+        self.emit(&format!("\tcall\t{push}"));
+        self.emit("\tmov\trdi, QWORD PTR [rsp]");
+        self.emit(&format!("\tjmp\t{events}"));
+        // a helper's call shows only if it entered a stone function
+        self.emit(&format!("{helper}:"));
+        self.emit("\ttest\trbx, rbx");
+        self.emit(&format!("\tje\t{events}"));
+        self.emit("\tmov\tQWORD PTR [rsp], rdi");
+        self.emit(&format!("\tcall\t{push}"));
+        self.emit("\tmov\trdi, QWORD PTR [rsp]");
+        self.emit(&format!("\tjmp\t{events}"));
+        self.emit(&format!("{entered}:"));
+        self.emit("\tmov\tebx, 1");
+        self.emit(&format!("{events}:"));
+        self.emit(&format!("\tcall\t{inlined}"));
+        self.emit(&format!("{next}:"));
+        // up to the caller's frame, which is always higher on the stack
+        self.emit("\tmov\trax, QWORD PTR [rbp]");
+        self.emit("\tcmp\trax, rbp");
+        self.emit(&format!("\tjbe\t{end}"));
+        self.emit("\tmov\trbp, rax");
+        self.emit(&format!("\tjmp\t{walk}"));
+        self.emit(&format!("{end}:"));
+        self.emit(&format!("\tcall\t{flush}"));
+        self.emit("\ttest\tr15, r15");
+        self.emit(&format!("\tje\t{done}"));
+        self.emit(&format!("\tlea\trsi, [rip + {and}]"));
+        self.write_stderr();
+        self.emit("\tmov\trax, r15");
+        self.write_int_stderr();
+        self.emit(&format!("\tlea\trsi, [rip + {more_many}]"));
+        self.emit("\tcmp\tr15, 1");
+        self.emit(&format!("\tjne\t{one}"));
+        self.emit(&format!("\tlea\trsi, [rip + {more_one}]"));
+        self.emit(&format!("{one}:"));
+        self.write_stderr();
+        self.emit(&format!("\tjmp\t{done}"));
+
+        // writes the frame whose text rdi points at, of rax calls, unless MAX_FRAMES are written
+        let write = self.ctx.new_label("fail_frame_write");
+        let single = self.ctx.new_label("fail_frame_single");
+        self.emit(&format!("{frame}:"));
+        self.emit(&format!("\tcmp\tr12, {MAX_FRAMES}"));
+        self.emit(&format!("\tjb\t{write}"));
+        self.emit("\tadd\tr15, rax");
+        self.emit("\tret");
+        self.emit(&format!("{write}:"));
+        self.emit("\tinc\tr12");
+        self.emit("\tsub\trsp, 56");
+        self.emit("\tmov\tQWORD PTR [rsp + 32], rax");
+        self.emit("\tmov\trsi, rdi");
+        self.write_stderr();
+        self.emit("\tlea\trax, [rsi + rdx + 1]");
+        self.emit("\tmov\tQWORD PTR [rsp + 40], rax");
+        self.emit(&format!("\tlea\trsi, [rip + {called}]"));
+        self.write_stderr();
+        self.emit("\tcmp\tQWORD PTR [rsp + 32], 1");
+        self.emit(&format!("\tjbe\t{single}"));
+        self.emit(&format!("\tlea\trsi, [rip + {open}]"));
+        self.write_stderr();
+        self.emit("\tmov\trax, QWORD PTR [rsp + 32]");
+        self.write_int_stderr();
+        self.emit(&format!("\tlea\trsi, [rip + {times}]"));
+        self.write_stderr();
+        self.emit(&format!("{single}:"));
+        self.emit(&format!("\tlea\trsi, [rip + {newline}]"));
+        self.write_stderr();
+        self.emit("\tmov\trsi, QWORD PTR [rsp + 40]");
+        self.write_stderr();
+        self.emit("\tadd\trsp, 56");
+        self.emit("\tret");
+
+        // writes the frame not written yet, if there is one
+        let flushed = self.ctx.new_label("fail_flushed");
+        self.emit(&format!("{flush}:"));
+        self.emit("\ttest\tr14, r14");
+        self.emit(&format!("\tje\t{flushed}"));
+        self.emit("\tmovsxd\trdi, DWORD PTR [r13]");
+        self.emit("\tadd\trdi, r13");
+        self.emit("\tmov\trax, r14");
+        self.emit(&format!("\tcall\t{frame}"));
+        self.emit("\txor\tr14d, r14d");
+        self.emit("\txor\tr13d, r13d");
+        self.emit(&format!("{flushed}:"));
+        self.emit("\tret");
+
+        // shows the call of the site record rdi: one more call of the frame not written yet if
+        // it is that site's and no inlined call follows, else that frame, then this one's
+        let again = self.ctx.new_label("fail_again");
+        let alone = self.ctx.new_label("fail_alone");
+        self.emit(&format!("{push}:"));
+        self.emit("\txor\tebx, ebx");
+        self.emit("\tcmp\tDWORD PTR [rdi + 4], 0");
+        self.emit(&format!("\tjne\t{alone}"));
+        self.emit("\tcmp\trdi, r13");
+        self.emit(&format!("\tje\t{again}"));
+        self.emit("\tpush\trdi");
+        self.emit(&format!("\tcall\t{flush}"));
+        self.emit("\tpop\trdi");
+        self.emit("\tmov\tr13, rdi");
+        self.emit("\tmov\tr14d, 1");
+        self.emit("\tret");
+        self.emit(&format!("{again}:"));
+        self.emit("\tinc\tr14");
+        self.emit("\tret");
+        self.emit(&format!("{alone}:"));
+        self.emit("\tpush\trdi");
+        self.emit(&format!("\tcall\t{flush}"));
+        self.emit("\tpop\trdi");
+        self.emit("\tmovsxd\trax, DWORD PTR [rdi]");
+        self.emit("\tadd\trdi, rax");
+        self.emit("\tmov\teax, 1");
+        self.emit(&format!("\tjmp\t{frame}"));
+
+        // goes through the inlined calls of the site record rdi (or 0): a frame for each that
+        // shows, and otherwise a stone function entered
+        let loop_ = self.ctx.new_label("fail_inlined_loop");
+        let shown = self.ctx.new_label("fail_inlined_shown");
+        let step = self.ctx.new_label("fail_inlined_step");
+        let none = self.ctx.new_label("fail_inlined_none");
+        self.emit(&format!("{inlined}:"));
+        self.emit("\ttest\trdi, rdi");
+        self.emit(&format!("\tje\t{none}"));
+        self.emit("\tmov\tr9d, DWORD PTR [rdi + 4]");
+        self.emit("\tlea\tr10, [rdi + 8]");
+        self.emit(&format!("{loop_}:"));
+        self.emit("\ttest\tr9, r9");
+        self.emit(&format!("\tje\t{none}"));
+        self.emit(&format!(
+            "\tcmp\tDWORD PTR [r10], {}",
+            CallKind::Frame as u8
+        ));
+        self.emit(&format!("\tje\t{shown}"));
+        self.emit("\tmov\tebx, 1");
+        self.emit(&format!("\tjmp\t{step}"));
+        self.emit(&format!("{shown}:"));
+        self.emit("\tpush\tr9");
+        self.emit("\tpush\tr10");
+        self.emit(&format!("\tcall\t{flush}"));
+        self.emit("\tmov\tr10, QWORD PTR [rsp]");
+        self.emit("\tmovsxd\trdi, DWORD PTR [r10 + 4]");
+        self.emit("\tlea\trdi, [r10 + rdi + 4]");
+        self.emit("\tmov\teax, 1");
+        self.emit(&format!("\tcall\t{frame}"));
+        self.emit("\tpop\tr10");
+        self.emit("\tpop\tr9");
+        self.emit("\txor\tebx, ebx");
+        self.emit(&format!("{step}:"));
+        self.emit("\tadd\tr10, 8");
+        self.emit("\tdec\tr9");
+        self.emit(&format!("\tjmp\t{loop_}"));
+        self.emit(&format!("{none}:"));
+        self.emit("\tret");
     }
 
     /// Writes the zero-terminated string at `rsi` to stderr, leaving its length in `rdx` and
@@ -621,6 +854,11 @@ impl X64Generator {
         self.emit("\t.p2align\t3");
         self.emit("stone.call_depth:");
         self.emit("\t.zero\t8");
+        if self.ctx.walks_calls() {
+            // the frame of `main`, where a runtime error's walk up the calls stops
+            self.emit("stone.main_frame:");
+            self.emit("\t.zero\t8");
+        }
         if self.ctx.failures().is_some() {
             // the site a runtime error points at, or 0
             self.emit("stone.site:");

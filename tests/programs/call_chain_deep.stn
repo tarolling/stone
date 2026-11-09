@@ -1,0 +1,5 @@
+// recursion that never ends fails at the call that goes too deep
+fn forever(n: int) -> int:
+    ret forever(n + 1) + 1
+
+print(forever(0))

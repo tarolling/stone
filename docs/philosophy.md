@@ -323,8 +323,13 @@ or compiled, with the same report from both. Errors from the checker label the o
 (the parameter's type an argument does not fit, the return type a `ret` value does not match, a
 variable's first assignment), add notes on the rule involved, and help with the fix, as a
 rewritten line where the checker knows it, such as a parameter's missing type, or by naming a
-similar name for a misspelled one. More of the checker's errors in this form, and the chain of
-calls behind a runtime error, are future work.
+similar name for a misspelled one. A runtime error also shows the calls that led to it,
+innermost first, a run of calls from one place as one frame with a count, at most 20, byte for
+byte the same from `stone run` and from every compiled target: an executable walks its own frame
+pointers at the error, looks each return address up in a table of its calls, and remembers the
+calls `stone build` inlined in each site's record, allocating nothing. The walk and the table
+cost about 1.3 KB per executable plus 12 bytes per call, 8% over the benchmarks, and nothing
+until an error happens. More of the checker's errors in this form are future work.
 
 ## Run anywhere: no libc
 

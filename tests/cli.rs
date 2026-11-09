@@ -257,7 +257,11 @@ fn built_programs_report_runtime_errors_as_run_does() {
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(stderr.starts_with(&expected), "{stderr}");
         assert!(
-            stderr.ends_with("\n  |\n2 |     ret xs[0] / xs.len()\n  |         ^^^^^\n"),
+            stderr.ends_with(&format!(
+                "\n  |\n2 |     ret xs[0] / xs.len()\n  |         ^^^^^\n\
+                 {}:5:7: called from here\n  |\n5 | print(mean([]))\n  |       ^^^^^^^^\n",
+                file.display()
+            )),
             "{stderr}"
         );
     }
@@ -277,8 +281,10 @@ fn built_programs_render_runtime_errors_byte_for_byte_as_run_does() {
         .expect("stone should run");
     assert!(build.status.success(), "{build:?}");
     let built = Command::new(&exe).output().expect("program should run");
+    // ratio is compiled into main, and still shows as the call that led to the error
     let expected = format!(
-        "{}:2:9: error: division by zero\n  |\n2 |     ret a / b\n  |         ^^^^^\n",
+        "{0}:2:9: error: division by zero\n  |\n2 |     ret a / b\n  |         ^^^^^\n\
+         {0}:5:7: called from here\n  |\n5 | print(ratio(1, 0))\n  |       ^^^^^^^^^^^\n",
         file.display()
     );
     assert_eq!(String::from_utf8_lossy(&run.stderr), expected);
@@ -2461,6 +2467,10 @@ shapes.stn:8:47: error: list index out of range (index 1, length 1)
   |
 8 |     ret Point(x=int(parts[0]).unwrap(), y=int(parts[1]).unwrap())
   |                                               ^^^^^^^^
+shapes.stn:18:9: called from here
+   |
+18 |     p = parse(\"34\")
+   |         ^^^^^^^^^^^
 
 1 passed, 1 failed, 3 filtered out in 1 file
 "

@@ -1,0 +1,12 @@
+stats.stn:2:9: error: division by zero
+  |
+2 |     ret total(xs) / xs.len()
+  |         ^^^^^^^^^^^^^^^^^^^^
+main.stn:5:16: called from here
+  |
+5 |     ret "mean {stats.mean(xs)}"
+  |                ^^^^^^^^^^^^^^
+main.stn:8:7: called from here
+  |
+8 | print(report([]))
+  |       ^^^^^^^^^^

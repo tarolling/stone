@@ -39,7 +39,9 @@ tests/programs/
 ```
 
 A program that should fail at runtime also gets a `name.err` file holding text its stderr must
-contain, the position line without the path, such as `:3:7: error: division by zero`. It must
+contain, read with the program's directory left out of every path: the position line without
+the path, such as `:3:7: error: division by zero`, or the whole error with the calls that led to
+it, as `tests/programs/call_chain_recursion.err` holds. It must
 then exit with an error under both backends, after printing its `.out`. A few more sibling files
 set a program up:
 

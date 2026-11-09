@@ -9,7 +9,9 @@
 //! it would have, and since the callee calls no stone function, nothing deeper can tell the
 //! difference. Every runtime error in the callee keeps the callee's span.
 
-use super::{Block, BlockId, Callee, Function, Inst, Operand, Program, Terminator, VReg};
+use super::{
+    Block, BlockId, Callee, Function, InlinedCall, Inst, Operand, Origin, Program, Terminator, VReg,
+};
 use std::collections::HashMap;
 
 /// The most instructions a function may have to be inlined.
@@ -97,6 +99,26 @@ fn splice(function: &mut Function, b: usize, i: usize, callee: &Function) {
         unreachable!("only a call is inlined");
     };
     let call_span = function.blocks[b].spans[i];
+    // the call becomes an inlined call, and the callee's own inlined calls follow it, so a
+    // runtime error in the copy still shows every call that led to it
+    function.inlined.push(InlinedCall {
+        call: call_span.span,
+        parent: call_span.inlined,
+    });
+    // the callee's call k (counted from 1) is the caller's call `root + k`, and its own
+    // instructions are the call's
+    let root = function.inlined.len() as u32;
+    let chain = move |k: u32| root + k;
+    let origin = move |origin: Origin| Origin {
+        span: origin.span,
+        inlined: chain(origin.inlined),
+    };
+    for call in &callee.inlined {
+        function.inlined.push(InlinedCall {
+            call: call.call,
+            parent: chain(call.parent),
+        });
+    }
     let first_vreg = function.vreg_count;
     function.vreg_count += callee.vreg_count;
     let rename = |VReg(n): VReg| VReg(first_vreg + n);
@@ -137,7 +159,7 @@ fn splice(function: &mut Function, b: usize, i: usize, callee: &Function) {
             .iter()
             .map(|inst| rename_inst(inst, &rename, &rename_operand))
             .collect();
-        let mut spans = block.spans.clone();
+        let mut spans: Vec<Origin> = block.spans.iter().map(|&span| origin(span)).collect();
         let into_callee = |BlockId(n): BlockId| BlockId(b + 1 + n);
         let term = match &block.term {
             Terminator::Return(values) => {
@@ -146,7 +168,7 @@ fn splice(function: &mut Function, b: usize, i: usize, callee: &Function) {
                         dst,
                         src: rename_operand(value),
                     });
-                    spans.push(block.term_span);
+                    spans.push(origin(block.term_span));
                 }
                 Terminator::Jump(rest)
             }
@@ -156,7 +178,7 @@ fn splice(function: &mut Function, b: usize, i: usize, callee: &Function) {
             insts,
             spans,
             term,
-            term_span: block.term_span,
+            term_span: origin(block.term_span),
             loop_depth: block.loop_depth + depth,
         });
     }
@@ -575,5 +597,29 @@ mod tests {
         assert_eq!(calls(&f, "P.shift"), 0, "{f}");
         let text = f.to_string();
         assert!(text.contains("fadd") && text.contains("fsub"), "{text}");
+    }
+
+    #[test]
+    fn an_inlined_instruction_knows_every_call_it_was_inlined_through() {
+        // quad's two sq calls are inlined into quad, and quad into f
+        let f = inlined(
+            "fn sq(x: int) -> int:\n    ret x * x\nfn quad(x: int) -> int:\n    ret sq(sq(x))\n\
+             fn f(a: int) -> int:\n    ret quad(a)\n",
+            Some("f"),
+        );
+        let chains: Vec<Vec<(usize, usize)>> = f
+            .blocks
+            .iter()
+            .flat_map(|block| block.insts.iter().zip(&block.spans))
+            .filter(|(inst, _)| matches!(inst, Inst::Binary { .. }))
+            .map(|(_, origin)| {
+                f.inlined_calls(*origin)
+                    .iter()
+                    .map(|call| (call.start.line, call.start.col))
+                    .collect()
+            })
+            .collect();
+        // innermost first: the sq call in quad, then the quad call in f
+        assert_eq!(chains, [vec![(4, 12), (6, 9)], vec![(4, 9), (6, 9)]], "{f}");
     }
 }

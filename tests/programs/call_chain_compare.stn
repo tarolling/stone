@@ -1,0 +1,18 @@
+// == calls a struct's eq, and sort calls its cmp
+struct Score:
+    points: list[int]
+
+impl eq for Score:
+    fn eq(self, other: Score) -> bool:
+        ret self.points[0] == other.points[0]
+
+impl ord for Score:
+    fn cmp(self, other: Score) -> ordering:
+        ret self.points[0].cmp(other.points[0])
+
+fn same(a: Score, b: Score) -> bool:
+    ret a == b
+
+print(same(Score(points=[1]), Score(points=[1])))
+scores = [Score(points=[3]), Score(points=[1]), Score(points=[])]
+scores.sort()

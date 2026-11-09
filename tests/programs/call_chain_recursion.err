@@ -1,0 +1,12 @@
+call_chain_recursion.stn:4:13: error: division by zero
+  |
+4 |         ret 10 / n
+  |             ^^^^^^
+call_chain_recursion.stn:5:9: called from here (3 times)
+  |
+5 |     ret countdown(n - 1)
+  |         ^^^^^^^^^^^^^^^^
+call_chain_recursion.stn:8:7: called from here
+  |
+8 | print(countdown(3))
+  |       ^^^^^^^^^^^^

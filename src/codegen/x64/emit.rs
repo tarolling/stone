@@ -282,6 +282,9 @@ impl X64Generator {
         }
         self.emit("\tpush\trbp");
         self.emit("\tmov\trbp, rsp");
+        if frame.is_main && self.ctx.walks_calls() {
+            self.emit("\tmov\tQWORD PTR [rip + stone.main_frame], rbp");
+        }
         if frame.is_main && self.ctx.uses(&["stone.args"]) {
             // argc is a C int, so only its low half is set
             self.emit("\tmov\tDWORD PTR [rip + stone.argc], edi");
@@ -326,13 +329,16 @@ impl X64Generator {
 
         for (i, block) in function.blocks.iter().enumerate() {
             self.emit(&format!("{}:", frame.blocks[i]));
-            for (inst, span) in block.insts.iter().zip(&block.spans) {
-                self.span = *span;
+            for (inst, origin) in block.insts.iter().zip(&block.spans) {
+                self.span = origin.span;
+                self.ctx.inlined = function.inlined_calls(*origin);
                 self.emit_inst(&frame, inst)?;
             }
-            self.span = block.term_span;
+            self.span = block.term_span.span;
+            self.ctx.inlined = function.inlined_calls(block.term_span);
             self.emit_terminator(&frame, &block.term, BlockId(i + 1))?;
         }
+        self.ctx.inlined.clear();
 
         self.emit(&format!("{}:", frame.epilogue));
         if frame.is_main && self.ctx.counts_references {
@@ -1752,18 +1758,33 @@ impl X64Generator {
                     Callee::Helper(label) => label.clone(),
                     Callee::Value(_) => "r11".to_string(),
                 };
-                // the routine's own runtime errors point at this call
+                // the routine's own runtime errors point at this call, and a helper's leave the
+                // calls this one was inlined through to the walk, which finds this call's return
+                let inlined = matches!(callee, Callee::Helper(_))
+                    .then(|| std::mem::take(&mut self.ctx.inlined));
                 if (FALLIBLE_ROUTINES.contains(&label.as_str())
                     || matches!(callee, Callee::Helper(_)))
                     && let Some(site) = self.ctx.site_label(self.span)
                 {
                     self.record_site(&site);
                 }
+                if let Some(inlined) = inlined {
+                    self.ctx.inlined = inlined;
+                }
                 match callee {
                     Callee::Runtime("stone.list_append") if dsts.is_empty() => {
                         self.append_inline();
                     }
                     _ => self.emit(&format!("\tcall\t{label}")),
+                }
+                // the return address a runtime error's walk up the calls finds
+                let returned = match callee {
+                    Callee::User(_) | Callee::Value(_) => self.ctx.return_label(false, self.span),
+                    Callee::Helper(_) => self.ctx.return_label(true, self.span),
+                    _ => None,
+                };
+                if let Some(label) = returned {
+                    self.emit(&format!("{label}:"));
                 }
                 if extra > 0 {
                     self.emit(&format!("\tadd\trsp, {}", 8 * extra));

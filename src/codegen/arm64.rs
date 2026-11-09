@@ -25,11 +25,12 @@ pub mod sort;
 
 use crate::ast::Mod;
 use crate::codegen::context::{
-    BYTES_ROUTINES, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, REDUCE_PIO2,
+    BYTES_ROUTINES, CallKind, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, REDUCE_PIO2,
     STRING_METHOD_ROUTINES, escape, function_statics, global_label, immortal_bytes,
     immortal_string, variant_statics,
 };
 use crate::codegen::{AssemblyGenerator, Os, Subsystem, Target};
+use crate::diagnostic::{CALLED_FROM, MAX_FRAMES};
 use crate::project::SourceMap;
 use crate::span::Span;
 use crate::stdlib::CUT_CHARACTER;
@@ -282,7 +283,9 @@ impl Arm64Generator {
         let common = self.ctx.new_label("fail_common");
         let [first, second] = emit::FAIL_VALUES;
         // x21 is 0, or the number of holes of a detailed message whose pieces x0 starts and
-        // whose values wait in x22 and x23, and x19 and x20 hold the message and the site
+        // whose values wait in x22 and x23, x19 and x20 hold the message and the site record,
+        // x25 its excerpt, and x29 is still the frame of the code that failed, where the walk up
+        // the calls starts
         self.emit("stone.fail_detail1:");
         self.emit("\tmov\tx21, #1");
         let detailed = self.ctx.new_label("fail_detailed");
@@ -302,11 +305,12 @@ impl Arm64Generator {
         self.emit("\tadrp\tx16, stone.site");
         self.emit("\tldr\tx20, [x16, :lo12:stone.site]");
         self.emit(&format!("\tcbz\tx20, {no_location}"));
-        self.emit("\tmov\tx1, x20");
+        // a site record starts with the distance to its text, the location then the excerpt
+        self.emit("\tldrsw\tx9, [x20]");
+        self.emit("\tadd\tx1, x20, x9");
         self.write_stderr();
-        // the excerpt follows the location's terminating zero
-        self.emit("\tadd\tx20, x1, x2");
-        self.emit("\tadd\tx20, x20, #1");
+        self.emit("\tadd\tx25, x1, x2");
+        self.emit("\tadd\tx25, x25, #1");
         self.emit(&format!("{no_location}:"));
         address(self, "x1", &prefix);
         self.write_stderr();
@@ -332,8 +336,11 @@ impl Arm64Generator {
         self.write_stderr();
         let done = self.ctx.new_label("fail_done");
         self.emit(&format!("\tcbz\tx20, {done}"));
-        self.emit("\tmov\tx1, x20");
+        self.emit("\tmov\tx1, x25");
         self.write_stderr();
+        if self.ctx.walks_calls() {
+            self.walk_calls(&done);
+        }
         self.emit(&format!("{done}:"));
         self.emit("\tmov\tx0, #1");
         system_call(self, Sys::Exit);
@@ -348,16 +355,239 @@ impl Arm64Generator {
             }
             self.emit("\t.text");
         }
-        let sites = self.ctx.sites();
-        if !sites.is_empty() {
-            self.emit("\t.section\t.rodata");
-            for site in sites {
-                self.emit(&format!("{}:", site.label));
-                self.emit(&format!("\t.string \"{}\"", site.location));
-                self.emit(&format!("\t.string \"{}\"", site.excerpt));
+        if self.ctx.walks_calls() {
+            for line in self.ctx.site_lines() {
+                self.emit(&line);
             }
-            self.emit("\t.text");
         }
+    }
+
+    /// Emits the end of `stone.fail` that writes the calls that led to the error, with the site
+    /// record in `x20` and the frame of the code that failed in `x29`, then goes to `done`, as
+    /// x86-64's `walk_calls` does: the record's inlined calls, then each return address up the
+    /// frames to `main`'s that `stone.calls` lists, a run of calls from one site as one frame
+    /// with a count, at most [`MAX_FRAMES`] frames, and a count of the calls past them.
+    ///
+    /// The walk keeps whether a stone function was entered since the last frame in `x26`, how
+    /// many frames it wrote in `x27`, the frame it has not written yet in `x24` (a site record,
+    /// or 0) with its count in `x23`, and the calls past the last frame in `x28`. A frame's text
+    /// and count go to the routine that writes it in `x14` and `x15`.
+    fn walk_calls(&mut self, done: &str) {
+        let frame = self.ctx.new_label("fail_frame");
+        let flush = self.ctx.new_label("fail_flush");
+        let push = self.ctx.new_label("fail_push");
+        let inlined = self.ctx.new_label("fail_inlined");
+        let called = self.ctx.intern_string(CALLED_FROM);
+        let open = self.ctx.intern_string(" (");
+        let times = self.ctx.intern_string(" times)");
+        let newline = self.ctx.intern_string("\n");
+        let and = self.ctx.intern_string("... and ");
+        let more_one = self.ctx.intern_string(" more call\n");
+        let more_many = self.ctx.intern_string(" more calls\n");
+        let walk = self.ctx.new_label("fail_walk");
+        let scan = self.ctx.new_label("fail_scan");
+        let found = self.ctx.new_label("fail_found");
+        let next = self.ctx.new_label("fail_next");
+        let end = self.ctx.new_label("fail_walked");
+        let many = self.ctx.new_label("fail_many_more");
+
+        self.emit("\tsub\tsp, sp, #64");
+        self.emit("\tmov\tx26, #0");
+        self.emit("\tmov\tx27, #0");
+        self.emit("\tmov\tx23, #0");
+        self.emit("\tmov\tx28, #0");
+        // the calls the code that failed was inlined through
+        self.emit("\tmov\tx14, x20");
+        self.emit(&format!("\tbl\t{inlined}"));
+        self.emit("\tmov\tx24, #0");
+        self.emit(&format!("{walk}:"));
+        self.emit(&format!("\tcbz\tx29, {end}"));
+        self.emit("\tadrp\tx9, stone.main_frame");
+        self.emit("\tldr\tx9, [x9, :lo12:stone.main_frame]");
+        self.emit("\tcmp\tx29, x9");
+        self.emit(&format!("\tb.eq\t{end}"));
+        // the return address, looked up among the calls
+        self.emit("\tldr\tx12, [x29, #8]");
+        address(self, "x10", "stone.calls");
+        self.emit("\tldr\tx11, [x10]");
+        self.emit("\tadd\tx10, x10, #8");
+        self.emit(&format!("{scan}:"));
+        self.emit(&format!("\tcbz\tx11, {next}"));
+        self.emit("\tldrsw\tx9, [x10]");
+        self.emit("\tadd\tx9, x9, x10");
+        self.emit("\tcmp\tx9, x12");
+        self.emit(&format!("\tb.eq\t{found}"));
+        self.emit("\tadd\tx10, x10, #12");
+        self.emit("\tsub\tx11, x11, #1");
+        self.emit(&format!("\tb\t{scan}"));
+        self.emit(&format!("{found}:"));
+        // x14 is the call's site record, or 0
+        let no_site = self.ctx.new_label("fail_no_site");
+        self.emit("\tldrsw\tx14, [x10, #8]");
+        self.emit(&format!("\tcbz\tx14, {no_site}"));
+        self.emit("\tadd\tx14, x14, x10");
+        self.emit("\tadd\tx14, x14, #8");
+        self.emit(&format!("{no_site}:"));
+        self.emit("\tldr\tw9, [x10, #4]");
+        let helper = self.ctx.new_label("fail_helper");
+        let entered = self.ctx.new_label("fail_entered");
+        let events = self.ctx.new_label("fail_events");
+        self.emit(&format!("\tcmp\tw9, #{}", CallKind::Helper as u8));
+        self.emit(&format!("\tb.eq\t{helper}"));
+        self.emit(&format!("\tcmp\tw9, #{}", CallKind::Entered as u8));
+        self.emit(&format!("\tb.eq\t{entered}"));
+        self.emit(&format!("\tcmp\tw9, #{}", CallKind::Silent as u8));
+        self.emit(&format!("\tb.eq\t{events}"));
+        // a frame
+        self.emit("\tstr\tx14, [sp]");
+        self.emit(&format!("\tbl\t{push}"));
+        self.emit("\tldr\tx14, [sp]");
+        self.emit(&format!("\tb\t{events}"));
+        // a helper's call shows only if it entered a stone function
+        self.emit(&format!("{helper}:"));
+        self.emit(&format!("\tcbz\tx26, {events}"));
+        self.emit("\tstr\tx14, [sp]");
+        self.emit(&format!("\tbl\t{push}"));
+        self.emit("\tldr\tx14, [sp]");
+        self.emit(&format!("\tb\t{events}"));
+        self.emit(&format!("{entered}:"));
+        self.emit("\tmov\tx26, #1");
+        self.emit(&format!("{events}:"));
+        self.emit(&format!("\tbl\t{inlined}"));
+        self.emit(&format!("{next}:"));
+        // up to the caller's frame, which is always higher on the stack
+        self.emit("\tldr\tx9, [x29]");
+        self.emit("\tcmp\tx9, x29");
+        self.emit(&format!("\tb.ls\t{end}"));
+        self.emit("\tmov\tx29, x9");
+        self.emit(&format!("\tb\t{walk}"));
+        self.emit(&format!("{end}:"));
+        self.emit(&format!("\tbl\t{flush}"));
+        self.emit(&format!("\tcbz\tx28, {done}"));
+        address(self, "x1", &and);
+        self.write_stderr();
+        self.emit("\tmov\tx9, x28");
+        self.write_int_stderr();
+        address(self, "x1", &more_one);
+        self.emit("\tcmp\tx28, #1");
+        self.emit(&format!("\tb.eq\t{many}"));
+        address(self, "x1", &more_many);
+        self.emit(&format!("{many}:"));
+        self.write_stderr();
+        self.emit(&format!("\tb\t{done}"));
+
+        // writes the frame whose text x14 points at, of x15 calls, unless MAX_FRAMES are written
+        let write = self.ctx.new_label("fail_frame_write");
+        let single = self.ctx.new_label("fail_frame_single");
+        self.emit(&format!("{frame}:"));
+        self.emit(&format!("\tcmp\tx27, #{MAX_FRAMES}"));
+        self.emit(&format!("\tb.lo\t{write}"));
+        self.emit("\tadd\tx28, x28, x15");
+        self.emit("\tret");
+        self.emit(&format!("{write}:"));
+        self.emit("\tstp\tx29, x30, [sp, #-16]!");
+        self.emit("\tsub\tsp, sp, #32");
+        self.emit("\tadd\tx27, x27, #1");
+        self.emit("\tmov\tx1, x14");
+        self.write_stderr();
+        self.emit("\tadd\tx14, x1, x2");
+        self.emit("\tadd\tx14, x14, #1");
+        address(self, "x1", &called);
+        self.write_stderr();
+        self.emit("\tcmp\tx15, #1");
+        self.emit(&format!("\tb.ls\t{single}"));
+        address(self, "x1", &open);
+        self.write_stderr();
+        self.emit("\tmov\tx9, x15");
+        self.write_int_stderr();
+        address(self, "x1", &times);
+        self.write_stderr();
+        self.emit(&format!("{single}:"));
+        address(self, "x1", &newline);
+        self.write_stderr();
+        self.emit("\tmov\tx1, x14");
+        self.write_stderr();
+        self.emit("\tadd\tsp, sp, #32");
+        self.emit("\tldp\tx29, x30, [sp], #16");
+        self.emit("\tret");
+
+        // writes the frame not written yet, if there is one
+        let flushed = self.ctx.new_label("fail_flushed");
+        self.emit(&format!("{flush}:"));
+        self.emit(&format!("\tcbz\tx23, {flushed}"));
+        self.emit("\tstp\tx29, x30, [sp, #-16]!");
+        self.emit("\tldrsw\tx9, [x24]");
+        self.emit("\tadd\tx14, x24, x9");
+        self.emit("\tmov\tx15, x23");
+        self.emit(&format!("\tbl\t{frame}"));
+        self.emit("\tmov\tx23, #0");
+        self.emit("\tmov\tx24, #0");
+        self.emit("\tldp\tx29, x30, [sp], #16");
+        self.emit(&format!("{flushed}:"));
+        self.emit("\tret");
+
+        // shows the call of the site record x14: one more call of the frame not written yet if
+        // it is that site's and no inlined call follows, else that frame, then this one's
+        let again = self.ctx.new_label("fail_again");
+        let alone = self.ctx.new_label("fail_alone");
+        self.emit(&format!("{push}:"));
+        self.emit("\tmov\tx26, #0");
+        self.emit("\tldr\tw9, [x14, #4]");
+        self.emit(&format!("\tcbnz\tw9, {alone}"));
+        self.emit("\tcmp\tx14, x24");
+        self.emit(&format!("\tb.eq\t{again}"));
+        self.emit("\tstp\tx14, x30, [sp, #-16]!");
+        self.emit(&format!("\tbl\t{flush}"));
+        self.emit("\tldp\tx14, x30, [sp], #16");
+        self.emit("\tmov\tx24, x14");
+        self.emit("\tmov\tx23, #1");
+        self.emit("\tret");
+        self.emit(&format!("{again}:"));
+        self.emit("\tadd\tx23, x23, #1");
+        self.emit("\tret");
+        self.emit(&format!("{alone}:"));
+        self.emit("\tstp\tx14, x30, [sp, #-16]!");
+        self.emit(&format!("\tbl\t{flush}"));
+        self.emit("\tldp\tx14, x30, [sp], #16");
+        self.emit("\tldrsw\tx9, [x14]");
+        self.emit("\tadd\tx14, x14, x9");
+        self.emit("\tmov\tx15, #1");
+        self.emit(&format!("\tb\t{frame}"));
+
+        // goes through the inlined calls of the site record x14 (or 0): a frame for each that
+        // shows, and otherwise a stone function entered
+        let loop_ = self.ctx.new_label("fail_inlined_loop");
+        let shown = self.ctx.new_label("fail_inlined_shown");
+        let step = self.ctx.new_label("fail_inlined_step");
+        let out = self.ctx.new_label("fail_inlined_out");
+        let none = self.ctx.new_label("fail_inlined_none");
+        self.emit(&format!("{inlined}:"));
+        self.emit(&format!("\tcbz\tx14, {none}"));
+        self.emit("\tstp\tx29, x30, [sp, #-16]!");
+        self.emit("\tldr\tw21, [x14, #4]");
+        self.emit("\tadd\tx22, x14, #8");
+        self.emit(&format!("{loop_}:"));
+        self.emit(&format!("\tcbz\tx21, {out}"));
+        self.emit("\tldr\tw9, [x22]");
+        self.emit(&format!("\tcbz\tw9, {shown}"));
+        self.emit("\tmov\tx26, #1");
+        self.emit(&format!("\tb\t{step}"));
+        self.emit(&format!("{shown}:"));
+        self.emit(&format!("\tbl\t{flush}"));
+        self.emit("\tldrsw\tx9, [x22, #4]");
+        self.emit("\tadd\tx14, x22, x9");
+        self.emit("\tadd\tx14, x14, #4");
+        self.emit("\tmov\tx15, #1");
+        self.emit(&format!("\tbl\t{frame}"));
+        self.emit("\tmov\tx26, #0");
+        self.emit(&format!("{step}:"));
+        self.emit("\tadd\tx22, x22, #8");
+        self.emit("\tsub\tx21, x21, #1");
+        self.emit(&format!("\tb\t{loop_}"));
+        self.emit(&format!("{out}:"));
+        self.emit("\tldp\tx29, x30, [sp], #16");
+        self.emit(&format!("{none}:"));
+        self.emit("\tret");
     }
 
     /// Writes the zero-terminated string at `x1` to stderr, leaving its length in `x2` and `x1`
@@ -576,6 +806,11 @@ impl Arm64Generator {
         self.emit("\t.p2align\t3");
         self.emit("stone.call_depth:");
         self.emit("\t.zero\t8");
+        if self.ctx.walks_calls() {
+            // the frame of `main`, where a runtime error's walk up the calls stops
+            self.emit("stone.main_frame:");
+            self.emit("\t.zero\t8");
+        }
         if self.ctx.failures().is_some() {
             // the site a runtime error points at, or 0
             self.emit("stone.site:");

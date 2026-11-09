@@ -1,0 +1,8 @@
+// a run of calls from one place is one frame with a count
+fn countdown(n: int) -> int:
+    if n == 0:
+        ret 10 / n
+    ret countdown(n - 1)
+
+print("counting down")
+print(countdown(3))

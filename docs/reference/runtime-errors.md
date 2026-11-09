@@ -2,7 +2,7 @@
 
 When a program fails while running, it prints the error to stderr the way the checker prints
 one, with the file, line, and column, the message, and the source line with carets under the
-expression that failed, then exits with status 1. Output printed before the error stays
+expression that failed, then the calls that led there, and exits with status 1. Output printed before the error stays
 printed. A compiled executable prints exactly what the interpreter does, since `stone build`
 writes each place an error can happen into the executable:
 
@@ -13,12 +13,20 @@ average.stn:5:9: error: division by zero
   |
 5 |     ret total / values.len()
   |         ^^^^^^^^^^^^^^^^^^^^
+average.stn:8:7: called from here
+  |
+8 | print(average([]))
+  |       ^^^^^^^^^^^
 $ stone build average.stn -o average && ./average
 7
 average.stn:5:9: error: division by zero
   |
 5 |     ret total / values.len()
   |         ^^^^^^^^^^^^^^^^^^^^
+average.stn:8:7: called from here
+  |
+8 | print(average([]))
+  |       ^^^^^^^^^^^
 ```
 
 Both backends stop at the same point with the same message, since operands are evaluated left
@@ -28,6 +36,39 @@ to right in both. The error points at the innermost expression that failed: the 
 for `recursion is too deep`, the call that went one level too deep. A change such as
 `grid[i][j] = v` or `ps[i].x = v` points at the subscript whose index is out of range. An executable names the
 file by the path it was built from.
+
+## Calls that led to an error
+
+After the error come the calls that led to it, innermost first, each as
+`file:line:col: called from here` and the call's line with carets under it. Every call of a
+function written in stone counts, in any file of the program: functions, methods, associated
+functions, function values, lambdas, and closures, operators and conversions a struct
+implements, and the calls stone makes for you, such as `print` or a string's `{value}` calling a
+struct's `display`, `==` calling its `eq`, and `<` or `sort` calling its `cmp`. Calls made inside
+the prelude and the builtin modules written in stone (`net`, `gui`, `json`) are left out, and so
+is the call of a test by `stone test`.
+
+A run of calls from one place, as in recursion, is written once with a count:
+
+```text
+countdown.stn:4:13: error: division by zero
+  |
+4 |         ret 10 / n
+  |             ^^^^^^
+countdown.stn:5:9: called from here (3 times)
+  |
+5 |     ret countdown(n - 1)
+  |         ^^^^^^^^^^^^^^^^
+countdown.stn:8:7: called from here
+  |
+8 | print(countdown(3))
+  |       ^^^^^^^^^^^^
+```
+
+At most 20 calls are written, a run counting as one, then `... and 11 more calls` says how many
+calls are left out. A compiled executable writes the same calls as `stone run`, even where
+`stone build` compiled a small function into its caller, and finds them by walking its own
+stack, allocating nothing.
 
 | message | cause |
 | --- | --- |

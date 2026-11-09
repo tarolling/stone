@@ -1,0 +1,14 @@
+// print and interpolation call a struct's display, which is a call like any other
+struct Ratio:
+    top: int
+    bottom: int
+
+impl display for Ratio:
+    fn display(self) -> str:
+        ret "{self.top / self.bottom}"
+
+fn describe(r: Ratio) -> str:
+    ret "ratio {r}"
+
+print(Ratio(top=6, bottom=3))
+print(describe(Ratio(top=1, bottom=0)))

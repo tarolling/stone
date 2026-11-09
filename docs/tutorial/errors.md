@@ -54,10 +54,14 @@ runtime_error.stn:5:9: error: division by zero
   |
 5 |     ret total / values.len()
   |         ^^^^^^^^^^^^^^^^^^^^
+runtime_error.stn:8:7: called from here
+  |
+8 | print(average([]))
+  |       ^^^^^^^^^^^
 ```
 
-A runtime error prints like a checker error, pointing at the expression that failed, then exits
-with status 1. `stone run` and a compiled executable print the same thing. See {doc}`../reference/runtime-errors` for
+A runtime error prints like a checker error, pointing at the expression that failed, then shows
+the calls that led there, innermost first, and exits with status 1. `stone run` and a compiled executable print the same thing. See {doc}`../reference/runtime-errors` for
 every one.
 
 A program can check what it relies on with `assert`, which stops it the same way unless a

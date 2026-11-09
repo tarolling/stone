@@ -810,16 +810,45 @@ impl Terminator {
     }
 }
 
+/// Where an instruction came from: the span of the source it was lowered from, which a runtime
+/// error at it points at, and the inlined call that copied it into its function, if one did.
+///
+/// For example, the division of `fn ratio(a: int, b: int) -> int: ret a / b` inlined into
+/// `print(ratio(1, 0))` keeps the span of `a / b`, and its `inlined` names the call
+/// `ratio(1, 0)`, so a runtime error there shows that call as a compiled program's caller would.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub struct Origin {
+    pub span: Span,
+    /// 0 for an instruction of the function's own, else one more than the index in
+    /// [`Function::inlined`] of the innermost inlined call it came from.
+    pub inlined: u32,
+}
+
+impl From<Span> for Origin {
+    fn from(span: Span) -> Self {
+        Origin { span, inlined: 0 }
+    }
+}
+
+/// A call that inlining replaced with a copy of the function it called, which a runtime error
+/// in the copy shows as a call that led to it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct InlinedCall {
+    /// The call, as written.
+    pub call: Span,
+    /// The [`Origin::inlined`] of the call itself, for a call inside a copy of another.
+    pub parent: u32,
+}
+
 /// A straight-line run of instructions ending in a terminator.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Block {
     pub insts: Vec<Inst>,
-    /// The span of the source each instruction was lowered from, by index, which a runtime error
-    /// at that instruction points at.
-    pub spans: Vec<Span>,
+    /// Where each instruction came from, by index.
+    pub spans: Vec<Origin>,
     pub term: Terminator,
-    /// The span of the source the terminator was lowered from.
-    pub term_span: Span,
+    /// Where the terminator came from.
+    pub term_span: Origin,
     /// How many loops the block is nested in, which weights how costly spilling is.
     pub loop_depth: u32,
 }
@@ -838,6 +867,9 @@ pub struct Function {
     /// `name` is its assembly label and calling it does not count toward the limit on nested
     /// calls.
     pub helper: bool,
+    /// The calls inlining replaced with copies of what they called, which [`Origin::inlined`]
+    /// indexes.
+    pub inlined: Vec<InlinedCall>,
 }
 
 /// A return a function can take before making its frame, which [`Function::early_return`]
@@ -852,6 +884,18 @@ pub struct EarlyReturn {
 }
 
 impl Function {
+    /// Returns the inlined calls an instruction from `origin` was copied in by, innermost first,
+    /// which a runtime error there shows before the calls the program really made.
+    pub fn inlined_calls(&self, origin: Origin) -> Vec<Span> {
+        let mut calls = Vec::new();
+        let mut at = origin.inlined;
+        while let Some(call) = at.checked_sub(1).and_then(|i| self.inlined.get(i as usize)) {
+            calls.push(call.call);
+            at = call.parent;
+        }
+        calls
+    }
+
     /// Returns the return the function takes at once when its first block only tests its
     /// parameters and goes to a block that only returns parameters or constants, so that the
     /// backends can take it before saving registers, counting the call, or making a frame, none

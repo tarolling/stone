@@ -1,0 +1,12 @@
+call_chain_display.stn:8:15: error: division by zero
+  |
+8 |         ret "{self.top / self.bottom}"
+  |               ^^^^^^^^^^^^^^^^^^^^^^
+call_chain_display.stn:11:9: called from here
+   |
+11 |     ret "ratio {r}"
+   |         ^^^^^^^^^^^
+call_chain_display.stn:14:7: called from here
+   |
+14 | print(describe(Ratio(top=1, bottom=0)))
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

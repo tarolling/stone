@@ -1,0 +1,12 @@
+call_chain_inlined.stn:3:9: error: division by zero
+  |
+3 |     ret a / b
+  |         ^^^^^
+call_chain_inlined.stn:6:9: called from here
+  |
+6 |     ret ratio(a * 100, b)
+  |         ^^^^^^^^^^^^^^^^^
+call_chain_inlined.stn:9:7: called from here
+  |
+9 | print(percent(1, 0))
+  |       ^^^^^^^^^^^^^

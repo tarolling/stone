@@ -35,6 +35,12 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
   that fails with it and the same program fixed. `check`, `run`, and `build` end their errors with
   a line naming `stone explain`, the documentation lists every code, and the language server
   gives each error its code and a link to it. Runtime errors and warnings have no code.
+- A runtime error shows the calls that led to it after its own excerpt, innermost first, as
+  `main.stn:8:7: called from here` and the call's line, from `stone run` and from compiled
+  programs alike, calls `stone build` compiled into their callers included. A run of calls from
+  one place, as in recursion, is one frame with a count (`called from here (999 times)`), at most
+  20 frames are written, then `... and 11 more calls`. Calls inside the prelude and `net`, `gui`,
+  and `json` are left out.
 
 ### Changed
 

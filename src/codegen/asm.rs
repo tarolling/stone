@@ -2,8 +2,8 @@
 //! code, so `stone build` needs no assembler or linker installed.
 //!
 //! It accepts exactly the subset of GNU as syntax the backends write: labels, the directives
-//! `.text`, `.data`, `.bss`, `.section`, `.globl`, `.p2align`, `.balign`, `.zero`, `.quad`, and
-//! `.string`, and the instructions [`x64`] and [`arm64`] encode. [`assemble`] returns an
+//! `.text`, `.data`, `.bss`, `.section`, `.globl`, `.p2align`, `.balign`, `.zero`, `.quad`,
+//! `.long` (a number, or `label - .`), and `.string`, and the instructions [`x64`] and [`arm64`] encode. [`assemble`] returns an
 //! [`Object`], whose sections still refer to labels through [`Fixup`]s, and
 //! [`elf::link`](crate::codegen::elf::link), [`macho::link`](crate::codegen::macho::link), or
 //! [`pe::link`](crate::codegen::pe::link) lays it out and resolves them. For example,
@@ -315,6 +315,25 @@ impl Assembler {
                 let value = parse_int(rest).ok_or_else(|| format!("bad number '{rest}'"))?;
                 self.push(Item::Bytes(value.to_le_bytes().to_vec(), vec![]))?;
             }
+            // a number, or `label - .`, the distance from here to a label, which tables of
+            // places in the code hold since no image is relocated
+            ".long" => match rest.strip_suffix("- .").map(str::trim) {
+                Some(symbol) if is_symbol(symbol) => {
+                    let fixup = LocalFixup {
+                        offset: 0,
+                        kind: FixupKind::X64Rel32,
+                        symbol: symbol.to_string(),
+                        addend: 0,
+                    };
+                    self.push(Item::Bytes(vec![0; 4], vec![fixup]))?;
+                }
+                _ => {
+                    let value = parse_int(rest)
+                        .and_then(|value| i32::try_from(value).ok())
+                        .ok_or_else(|| format!("bad number '{rest}'"))?;
+                    self.push(Item::Bytes(value.to_le_bytes().to_vec(), vec![]))?;
+                }
+            },
             ".string" => {
                 let mut bytes = parse_string(rest)?;
                 bytes.push(0);
@@ -750,6 +769,30 @@ mod tests {
             object.data,
             [b'a', b'"', b'\n', 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0x40]
         );
+    }
+
+    #[test]
+    fn a_long_holds_a_number_or_the_distance_to_a_label() {
+        for arch in [Architecture::X64, Architecture::Arm64] {
+            let object = assemble(
+                "\t.section\t.rodata\nfirst:\n\t.long\t7\n\t.long\t-2\n\t.long\tfirst - .\n",
+                arch,
+            )
+            .unwrap();
+            assert_eq!(object.rodata, [7, 0, 0, 0, 254, 255, 255, 255, 0, 0, 0, 0]);
+            assert_eq!(
+                object.fixups,
+                [Fixup {
+                    section: Section::Rodata,
+                    offset: 8,
+                    kind: FixupKind::X64Rel32,
+                    symbol: "first".to_string(),
+                    addend: 0,
+                }]
+            );
+        }
+        let error = x64("\t.section\t.rodata\n\t.long\t4294967296\n").unwrap_err();
+        assert!(error.contains("bad number"), "{error}");
     }
 
     #[test]

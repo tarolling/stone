@@ -32,7 +32,8 @@ problem, and exit with status 1. `stone explain E0005` explains a code with an e
 error and its fix. Warnings use the same format with `warning:`. The messages are
 written to be acted on: they usually say what to write instead, so read them before guessing.
 Runtime errors (an index out of range, `unwrap` of `none`, division by zero) print the same way
-under both `run` and `build`. Fix warnings too: each one points at a likely bug, such as a change
+under both `run` and `build`, followed by the calls that led there (`app.stn:9:7: called from
+here`), innermost first, so the first frame is usually where the bad value came in. Fix warnings too: each one points at a likely bug, such as a change
 that is lost or `[0] * n` meaning something other than in Python. `stone check` also warns about
 unused variables, parameters, functions, types, and imports; remove them, or start the name with
 `_` to keep one on purpose (`for _ in range(3):`).

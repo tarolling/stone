@@ -1,0 +1,8 @@
+// a runtime error shows the calls that led to it, through another file too
+use stats
+
+fn report(xs: list[int]) -> str:
+    ret "mean {stats.mean(xs)}"
+
+print(report([1, 2, 3]))
+print(report([]))

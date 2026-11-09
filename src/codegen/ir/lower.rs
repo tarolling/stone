@@ -35,8 +35,8 @@ mod tests;
 use super::inline::retarget;
 use super::layout::{FlatLayout, Layouts};
 use super::{
-    BinOp, Block, BlockId, Callee, Cond, DeviceKernel, Function, Inst, Kernel, Operand, Program,
-    RcKind, Rounding, Terminator, TrigFunc, VReg, leaf_name, variable_of,
+    BinOp, Block, BlockId, Callee, Cond, DeviceKernel, Function, Inst, Kernel, Operand, Origin,
+    Program, RcKind, Rounding, Terminator, TrigFunc, VReg, leaf_name, variable_of,
 };
 use crate::ast::{
     Arg, BoolOp, Constant, Expr, ExprKind, Keyword, MatchCase, Mod, Operator, Pattern,
@@ -1162,6 +1162,7 @@ impl<'a> Lowerer<'a> {
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: false,
+            inlined: Vec::new(),
         })
     }
 
@@ -1230,6 +1231,7 @@ impl<'a> Lowerer<'a> {
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: false,
+            inlined: Vec::new(),
         }
     }
 
@@ -1285,6 +1287,7 @@ impl<'a> Lowerer<'a> {
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: true,
+            inlined: Vec::new(),
         })
     }
 
@@ -1327,6 +1330,7 @@ impl<'a> Lowerer<'a> {
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: true,
+            inlined: Vec::new(),
         })
     }
 
@@ -1418,6 +1422,7 @@ impl<'a> Lowerer<'a> {
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: true,
+            inlined: Vec::new(),
         })
     }
 
@@ -1494,6 +1499,7 @@ impl<'a> Lowerer<'a> {
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: true,
+            inlined: Vec::new(),
         })
     }
 
@@ -1597,6 +1603,7 @@ impl<'a> Lowerer<'a> {
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: true,
+            inlined: Vec::new(),
         })
     }
 
@@ -2247,9 +2254,9 @@ impl<'a> Lowerer<'a> {
                 let term = retarget(&term, renumber, |operand| operand);
                 Block {
                     insts: block.insts,
-                    spans: block.spans,
+                    spans: block.spans.into_iter().map(Origin::from).collect(),
                     term,
-                    term_span: block.term_span,
+                    term_span: block.term_span.into(),
                     loop_depth: block.loop_depth,
                 }
             })
@@ -7855,6 +7862,7 @@ impl<'a> Lowerer<'a> {
             blocks: self.layout(),
             vreg_count: self.vreg_count,
             helper: true,
+            inlined: Vec::new(),
         })
     }
 

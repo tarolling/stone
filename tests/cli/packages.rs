@@ -260,7 +260,7 @@ fn packages_are_added_downloaded_locked_and_removed() {
     let (ok, _, err) = stone_in(&dir, &api, &["run", "--offline", "main.stn"]);
     assert!(!ok);
     assert!(
-        err.contains("error: mime 1.2.0 (github:alice/mime) is not downloaded"),
+        err.contains("error[E0048]: mime 1.2.0 (github:alice/mime) is not downloaded"),
         "{err}"
     );
     let (ok, out, err) = stone_in(&dir, &api, &["run", "main.stn"]);
@@ -278,7 +278,7 @@ fn packages_are_added_downloaded_locked_and_removed() {
     let (ok, _, err) = stone_in(&dir, &api, &["run", "main.stn"]);
     assert!(!ok);
     assert!(
-        err.contains("stone.toml:3:11: error: this package says it is version 0.3.9, but it was released as 0.3.0"),
+        err.contains("stone.toml:3:11: error[E0048]: this package says it is version 0.3.9, but it was released as 0.3.0"),
         "{err}"
     );
     github.release(
@@ -294,7 +294,7 @@ fn packages_are_added_downloaded_locked_and_removed() {
     assert!(!ok);
     assert!(
         err.contains(
-            "error: num 0.3.0 (github:bob/num) does not hold what it held when it was locked"
+            "error[E0048]: num 0.3.0 (github:bob/num) does not hold what it held when it was locked"
         ),
         "{err}"
     );

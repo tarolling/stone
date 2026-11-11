@@ -102,8 +102,13 @@ module stone
 
     pattern = MatchWildcard
             | MatchName(identifier name)
-            -- path names the variant, such as Shape.Circle, some, or none
+            | MatchValue(constant value)
+            | MatchOr(pattern* alternatives)
+            -- path names the variant, such as Shape.Circle, some, or none, or, for a trait
+            -- value, the type it holds, such as Circle or int
             | MatchVariant(identifier* path, pattern_field* fields)
+            -- binds the whole value pattern matched, as in Circle() as c
+            | MatchAs(pattern pattern, identifier name)
 
     -- a value of a variant pattern, by name for a named variant, as h=0 in Shape.Rect(h=0)
     pattern_field = (identifier? name, pattern pattern)

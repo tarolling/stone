@@ -1,0 +1,60 @@
+// a method that changes self changes the trait value it is called on, and no copy of it
+
+trait Grows:
+    fn grow(self, k: float):
+        self = self
+    fn size(self) -> float
+    fn rename(self, name: str) -> str:
+        self = self
+        ret name
+
+struct Plant:
+    h: float
+    tags: list[str]
+
+struct Crystal:
+    faces: int
+
+impl Grows for Plant:
+    fn grow(self, k: float):
+        self.h *= k
+        self.tags.append("grown")
+    fn size(self) -> float:
+        ret self.h
+
+impl Grows for Crystal:
+    fn grow(self, k: float):
+        self.faces += k.floor()
+    fn size(self) -> float:
+        ret float(self.faces)
+    fn rename(self, name: str) -> str:
+        self.faces = 0
+        ret "crystal {name}"
+
+struct Garden:
+    best: Grows
+    all: list[Grows]
+
+garden = [Grows(Plant(h=1.0, tags=[])), Crystal(faces=6)]
+for i in range(garden.len()):
+    garden[i].grow(2.0)
+print(garden)
+
+first = garden[0]
+first.grow(10.0)
+print(first, garden[0])
+
+g = Garden(best=Crystal(faces=1), all=garden)
+g.best.grow(3.0)
+g.all[1].grow(1.0)
+print(g.best.size(), g.all[1].size(), garden[1].size())
+renamed = g.all[1].rename("x")
+print(renamed, g.all[1])
+
+fn grown(x: Grows) -> Grows:
+    x.grow(4.0)
+    ret x
+
+before = Grows(Plant(h=2.0, tags=["seed"]))
+after = grown(before)
+print(before, after)

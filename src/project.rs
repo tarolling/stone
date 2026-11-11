@@ -2194,6 +2194,10 @@ impl<'a> Rewriter<'a> {
             alternatives.iter_mut().for_each(|a| self.pattern(a));
             return;
         }
+        if let PatternKind::As { pattern, .. } = &mut pattern.kind {
+            self.pattern(pattern);
+            return;
+        }
         let PatternKind::Variant { path, fields } = &mut pattern.kind else {
             return;
         };
@@ -2206,6 +2210,21 @@ impl<'a> Rewriter<'a> {
             [(name, span)] if let Some(enum_name) = prelude_variant(name) => {
                 let unwritten = Span::new(span.start, span.start).in_file(span.file);
                 path.insert(0, (enum_name.to_string(), unwritten));
+            }
+            // a struct, which a pattern of a trait value tests for, as `Circle(r)`
+            [(name, _)] => {
+                if let Some(linked) = self.enum_name(name) {
+                    *name = linked;
+                }
+            }
+            // a struct of an imported module, as `geo.Point(x)`
+            [(module, module_span), (type_name, type_span)]
+                if matches!(self.binding(module), Some(Binding::Module(_))) =>
+            {
+                let span = module_span.to(*type_span);
+                if let Some(linked) = self.module_type(module, type_name, span, "struct") {
+                    path.splice(0..2, [(linked, span)]);
+                }
             }
             [(name, _), _] => {
                 if let Some(linked) = self.enum_name(name) {

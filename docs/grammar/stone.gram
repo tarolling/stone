@@ -236,19 +236,29 @@ match_stmt:
     | 'match' expression ':' NEWLINE INDENT case_block+ DEDENT
 
 case_block:
-    | 'case' pattern ':' block
+    | 'case' as_pattern ':' block
+
+# binds the whole value the pattern matched, as in Circle() as c
+as_pattern:
+    | or_pattern 'as' NAME
+    | or_pattern
+
+or_pattern:
+    | '|'.pattern+
 
 # a single NAME without parentheses binds, and '_' matches anything; any other is a variant,
-# as in Shape.Circle(r), some(x), or Shape.Empty
+# as in Shape.Circle(r), some(x), or Shape.Empty, or, for a trait value, the type it holds,
+# as in Circle(r), Circle(), or int(n)
 pattern:
     | 'none'
-    | NAME ('.' NAME)* ['(' ','.pattern_field+ [','] ')']
+    | ['-'] NUMBER | STRING | 'true' | 'false'
+    | NAME ('.' NAME)* ['(' [','.pattern_field+ [',']] ')']
 
-# a named variant's values are matched by name, as in Shape.Rect(w=0, h), where a NAME alone
-# that names a field is short for NAME '=' NAME, and fields left out match anything
+# a named variant's or a struct's values are matched by name, as in Shape.Rect(w=0, h), where
+# a NAME alone that names a field is short for NAME '=' NAME, and fields left out match anything
 pattern_field:
-    | NAME '=' pattern
-    | pattern
+    | NAME '=' as_pattern
+    | as_pattern
 
 # If statement
 # ------------

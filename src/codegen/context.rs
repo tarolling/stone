@@ -7,7 +7,7 @@
 use crate::ast::{Expr, ExprKind, Mod, Stmt, StmtKind};
 use crate::checker::{Analysis, Structs, Type, TypeChecker, variants};
 use crate::codegen::ir::inline::inline;
-use crate::codegen::ir::lower::lower_with;
+use crate::codegen::ir::lower::{TABLE_ENTRY, lower_with};
 use crate::codegen::ir::opt::optimize;
 use crate::codegen::ir::trig;
 use crate::codegen::ir::{Callee, Inst, Program};
@@ -987,6 +987,8 @@ impl Context {
             // lowering fills in a generic function's type parameters before printing
             Type::Param(name) => return Err(format!("type parameter '{name}' was not filled in")),
             Type::Handle(handle) => format!("stone.print_{}", handle.name()),
+            // lowering prints a trait value through its type's table
+            Type::Trait(_) => return Err("a trait value is printed through its table".to_string()),
         })
     }
 
@@ -1015,6 +1017,8 @@ impl Context {
     /// function is called with, which its copy's values have.
     fn types(&self) -> impl Iterator<Item = &Type> {
         let instances = self.analysis.instances.values().flat_map(|i| &i.args);
+        // a trait value holds a value of its own type, which its span no longer has
+        let coerced = self.analysis.coercions.values().map(|c| &c.source);
         // the prelude's code runs only for values the program's own code has
         self.analysis
             .types
@@ -1022,6 +1026,7 @@ impl Context {
             .filter(|(span, _)| span.file != FileId::PRELUDE)
             .map(|(_, ty)| ty)
             .chain(instances)
+            .chain(coerced)
     }
 
     /// Returns whether the program needs the string runtime.
@@ -1237,6 +1242,26 @@ pub fn function_static(label: &str) -> String {
     format!("{label}.static")
 }
 
+/// Emits the table of methods of each type a trait value holds, in the code: at each table's
+/// label, a jump to each of its entries, [`TABLE_ENTRY`] bytes apart, so code finds entry `i` at
+/// the table's address plus `TABLE_ENTRY * i` with no address stored anywhere for a linker to
+/// fix. `jump` is the target's jump, `jmp` or `b`, which fits in that many bytes.
+///
+/// For example, `stone.table.Shape.Circle` jumps to `stone.dyn_print.Circle` first.
+pub fn tables(r#gen: &mut dyn AssemblyGenerator, tables: &[(String, Vec<String>)], jump: &str) {
+    let align = format!("\t.p2align\t{}", TABLE_ENTRY.trailing_zeros());
+    for (label, entries) in tables {
+        r#gen.emit(&align);
+        r#gen.emit(&format!("{label}:"));
+        for (i, entry) in entries.iter().enumerate() {
+            if i > 0 {
+                r#gen.emit(&align);
+            }
+            r#gen.emit(&format!("\t{jump}\t{entry}"));
+        }
+    }
+}
+
 /// Returns the label of the float constant whose bits are `bits`, from which it can be told.
 fn float_label(bits: i64) -> String {
     format!(".Lf64_{:016x}", bits as u64)
@@ -1329,8 +1354,8 @@ fn contains_list(ty: &Type, analysis: &Analysis, seen: &mut HashSet<String>) -> 
 /// needed. `seen` holds the structs already looked through.
 fn contains_enum(ty: &Type, structs: &Structs, seen: &mut HashSet<String>) -> bool {
     match ty {
-        // a handle and a function value are laid out as enum values
-        Type::Enum { .. } | Type::Handle(_) | Type::Function { .. } => true,
+        // a handle, a function value, and a trait value are laid out as enum values
+        Type::Enum { .. } | Type::Handle(_) | Type::Function { .. } | Type::Trait(_) => true,
         Type::List(elem) => contains_enum(elem, structs, seen),
         Type::Map(_, value) => contains_enum(value, structs, seen),
         Type::Tuple(fields) => fields.iter().any(|f| contains_enum(f, structs, seen)),

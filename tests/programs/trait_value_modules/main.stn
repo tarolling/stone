@@ -1,0 +1,23 @@
+use shapes
+use shapes.Shape
+use shapes.Circle
+
+struct Blob:
+    size: float
+
+impl Shape for Blob:
+    fn area(self) -> float:
+        ret self.size
+
+xs = [Shape(Circle(r=1.0)), shapes.Square(side=2.0), Blob(size=5.0), shapes.unit()]
+print(shapes.total(xs))
+for x in xs:
+    print(shapes.name(x))
+    match x:
+        case shapes.Square(side):
+            print("a square of side", side)
+        case Blob(size):
+            print("a blob of size", size)
+        case _:
+            print("something else")
+print(xs)

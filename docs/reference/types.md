@@ -22,6 +22,7 @@ runs, reporting every place they conflict.
 | structs | the named, typed fields a `struct` lists, such as `Point(x=1.0, y=2.0)`, which are values |
 | enums | the variants an `enum` lists, such as `Shape.Circle(1.0)`, which never change |
 | `ordering` | `less`, `equal`, or `greater`, which `cmp` returns |
+| traits | a value of any type that implements the trait, such as `list[Shape]` holding circles and squares |
 | `fn(T1, ...) -> R` | functions, such as `fn(int, list[str]) -> bool`, which are values: named, passed, stored, and called |
 | `socket`, `listener` | a TCP or Unix-socket connection, and a port waiting for connections, from the [`net` module](builtins.md#the-net-module): handles, so a copy refers to the same connection, which closes right after the last statement that uses it, or that uses the last closure holding it |
 
@@ -179,8 +180,9 @@ those of the prelude's `from` and `try_from`. A trait's method may have type par
 own, with bounds, as in `fn convert[U: ord](self, u: U) -> U`, and each implementation writes
 as many, with the same bounds, under any names. Inside a trait, `Self` is the type that
 implements it, and inside any `impl` block, the block's type, as in `fn same(self, other: Self)`.
-A trait is not a type: a value always has the type of the struct or builtin type it is, and a
-function that takes any type implementing a trait has a type parameter with a bound.
+A function that takes any type implementing a trait has either a type parameter with a bound,
+which the compiler copies for each type, or a trait value (see below), which holds a value of
+any of them at once.
 
 A type implements a trait at most once, or a generic trait once for each set of type arguments
 (see below), and its methods, whether its own or from traits, all have different names, except a
@@ -347,6 +349,60 @@ body does, as `fn advance(self): self = self.next()` does, and a method without 
 does. A type's method changes `self` exactly when the trait's does: a definition that changes
 `self` where the trait's does not is an error, and one that does not still follows the rules of a
 method that does, being a statement of its own, called on a variable, an element, or a field.
+
+### Trait values
+
+A trait's name is also a type, whose values are values of any type that implements it, so one
+list can hold shapes of several types:
+
+```stone
+fn total(shapes: list[Shape]) -> float:
+    t = 0.0
+    for s in shapes:
+        t += s.area()
+    ret t
+
+print(total([Circle(r=1.0), Square(side=2.0)]))
+```
+
+A value becomes a trait value wherever one is expected: an argument, a `ret`, a struct's field
+or a variant's value, an element, entry, or field assigned, `append` and `insert`, a name that
+holds a trait value already, and the elements of a list, map, or set literal once a written
+type or an earlier element makes them trait values. Anywhere else, `Shape(c)` makes one, as
+`shapes = [Shape(c), s]` does for a list no signature describes. A trait value has the trait's
+methods, including those that change `self`, which change the value in place, and `display`, so
+it prints, converts with `str`, and fills a string's values as the value it holds does. It is
+never compared with `==`, ordered, or a map key, and a list of trait values satisfies a bound of
+its trait, so `list[Shape]` can be passed to `fn f[T: Shape](xs: list[T])`.
+
+A trait is a type of values only when calls of its methods need nothing but the value: every
+method takes `self`, has no type parameters of its own, and names `Self` nowhere else, and the
+trait itself has no type parameters. So `display` and a program's own traits usually are, while
+`eq`, `ord`, the operator traits, `from`, and `try_from` are not, and a trait value cannot hold
+a function or a handle for now.
+
+`match` finds the type a trait value holds, with a pattern written like the struct's
+construction, as Python's class patterns are, or a builtin type's conversion:
+
+```stone
+match s:
+    case Circle(r=0.0):
+        print("a point")
+    case Circle(r):
+        print("a circle of radius", r)
+    case Square() as q:
+        print("a square of area", q.area())
+    case other:
+        print("another shape", other)
+```
+
+A struct's pattern gives its fields by name, as a named variant's does, `Square()` tests the
+type alone, `as` binds the whole value the pattern matched with its own type, here `Square`,
+and `int(n)` binds a builtin type's value itself. The struct must implement the trait, and
+since another type may implement it later, a match on a trait value needs a case that matches
+anything. Values are kept as they are with a table of their type's methods beside them, so a
+call through a trait value looks the method up when it runs, where a bound's call is copied for
+each type.
 
 ### eq, ord, and display
 

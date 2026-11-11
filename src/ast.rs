@@ -787,6 +787,13 @@ pub enum PatternKind {
     /// Alternatives, any of which may match, as `1 | 2` or `Shape.Circle(_) | Shape.Empty`. Each
     /// binds the same names.
     Or(Vec<Pattern>),
+    /// A pattern that also binds the value it matches to `name`, as `Circle() as c`, which
+    /// matches a trait value holding a circle and binds the circle.
+    As {
+        pattern: Box<Pattern>,
+        name: Identifier,
+        name_span: Span,
+    },
 }
 
 /// One value of a variant pattern, such as `r` in `Shape.Circle(r)` or `w=0.0` in
@@ -833,6 +840,14 @@ impl Pattern {
                     first.names(out);
                 }
             }
+            PatternKind::As {
+                pattern,
+                name,
+                name_span,
+            } => {
+                pattern.names(out);
+                out.push((name, *name_span));
+            }
         }
     }
 
@@ -848,6 +863,14 @@ impl Pattern {
                 fields.iter().for_each(|f| f.pattern.all_names(out))
             }
             PatternKind::Or(alternatives) => alternatives.iter().for_each(|a| a.all_names(out)),
+            PatternKind::As {
+                pattern,
+                name,
+                name_span,
+            } => {
+                pattern.all_names(out);
+                out.push((name, *name_span));
+            }
         }
     }
 
@@ -866,6 +889,7 @@ impl Pattern {
             PatternKind::Or(alternatives) => alternatives.iter().fold(0, |count, a| {
                 count.saturating_add(a.alternatives(limit)).min(limit)
             }),
+            PatternKind::As { pattern, .. } => pattern.alternatives(limit),
             _ => 1,
         }
     }
@@ -879,6 +903,22 @@ impl Pattern {
             PatternKind::Or(alternatives) => {
                 alternatives.iter().flat_map(Pattern::expand).collect()
             }
+            PatternKind::As {
+                pattern,
+                name,
+                name_span,
+            } => pattern
+                .expand()
+                .into_iter()
+                .map(|alternative| Pattern {
+                    kind: PatternKind::As {
+                        pattern: Box::new(alternative),
+                        name: name.clone(),
+                        name_span: *name_span,
+                    },
+                    span: self.span,
+                })
+                .collect(),
             PatternKind::Variant { path, fields } => {
                 let mut out: Vec<Vec<PatternField>> = vec![vec![]];
                 for field in fields {
@@ -961,9 +1001,14 @@ impl Display for Pattern {
                 }
                 Ok(())
             }
+            PatternKind::As { pattern, name, .. } => write!(f, "{pattern} as {name}"),
             PatternKind::Variant { path, fields } => {
                 let names: Vec<&str> = path.iter().map(|(name, _)| name.as_str()).collect();
                 write!(f, "{}", names.join("."))?;
+                // a type pattern such as `Circle()` keeps its parentheses
+                if fields.is_empty() && names.len() == 1 && names[0] != "none" {
+                    return write!(f, "()");
+                }
                 if !fields.is_empty() {
                     write!(f, "(")?;
                     for (i, field) in fields.iter().enumerate() {

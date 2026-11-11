@@ -1,0 +1,10 @@
+a point
+a square of side 3
+a circle of radius 2.0
+a rectangle 2.0 by 5.0
+a small number
+the number 42
+something of area 4.0: text
+pair, 2 parts, area 4.0
+some rect 1.0 2.0
+{'circles': 1, 'others': 7}

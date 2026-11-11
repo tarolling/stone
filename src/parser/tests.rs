@@ -229,6 +229,11 @@ fn strip_pattern(pattern: Pattern) -> Pattern {
         PatternKind::Or(alternatives) => {
             PatternKind::Or(alternatives.into_iter().map(strip_pattern).collect())
         }
+        PatternKind::As { pattern, name, .. } => PatternKind::As {
+            pattern: Box::new(strip_pattern(*pattern)),
+            name,
+            name_span: Span::default(),
+        },
         kind => kind,
     };
     Pattern {
@@ -2498,6 +2503,48 @@ fn a_variant_pattern_may_name_its_values() {
 }
 
 #[test]
+fn a_pattern_may_test_a_type_and_bind_the_whole_value() {
+    let source = "match s:\n    case Circle() as c:\n        print(c)\n    case some(Square(side) as q):\n        print(q)\n    case _:\n        print(0)\n";
+    let module = Parser::new(&Lexer::new(source).lex().unwrap())
+        .parse()
+        .unwrap();
+    let Mod::Module { body } = without_spans(module);
+    let StmtKind::Match { cases, .. } = &body[0].kind else {
+        panic!("expected a match");
+    };
+    let bound = |inner: Pattern, name: &str| {
+        pattern(PatternKind::As {
+            pattern: Box::new(inner),
+            name: name.to_string(),
+            name_span: Span::default(),
+        })
+    };
+    assert_eq!(
+        cases[0].pattern,
+        bound(variant_pattern(&["Circle"], vec![]), "c")
+    );
+    assert_eq!(cases[0].pattern.to_string(), "Circle() as c");
+    assert_eq!(
+        cases[1].pattern,
+        variant_pattern(
+            &["some"],
+            vec![bound(
+                variant_pattern(
+                    &["Square"],
+                    vec![pattern(PatternKind::Name("side".to_string()))]
+                ),
+                "q"
+            )]
+        )
+    );
+    assert_eq!(cases[1].pattern.to_string(), "some(Square(side) as q)");
+    assert_eq!(
+        error_of("match x:\n    case Circle() as:\n        print(x)\n").1,
+        2
+    );
+}
+
+#[test]
 fn a_pattern_may_be_a_literal_or_alternatives() {
     let source = "match n:\n    case 0 | -1 | \"a\" | true | some(1 | false):\n        print(n)\n";
     let module = Parser::new(&Lexer::new(source).lex().unwrap())
@@ -2725,8 +2772,8 @@ fn match_needs_cases() {
         )
     );
     assert_eq!(
-        error_of("match s:\n    case some():\n        print(s)\n"),
-        ("expected a pattern, found ')'".to_string(), 2, 15)
+        error_of("match s:\n    case some(,):\n        print(s)\n"),
+        ("expected ')' or a pattern, found ','".to_string(), 2, 15)
     );
 }
 

@@ -16,7 +16,8 @@ use lsp_types::{
 };
 use stone::ast::{is_lambda, is_test};
 use stone::checker::{
-    Analysis, ORD, Symbol, SymbolKind as StoneSymbolKind, Type, prints_bare, struct_display,
+    Analysis, DISPLAY, ORD, Symbol, SymbolKind as StoneSymbolKind, Type, prints_bare,
+    struct_display,
 };
 use stone::diagnostic::Severity;
 use stone::lexer::Lexer;
@@ -1757,6 +1758,8 @@ fn member_completion(doc: &Document, pos: Pos, held: Option<&Type>) -> Vec<Compl
             }
             items
         }
+        // a trait value has its trait's methods
+        Some(Type::Trait(trait_)) => trait_methods(&doc.analysis, trait_).map(method).collect(),
         Some(Type::Struct { name, .. }) => {
             let fields = struct_fields(&doc.analysis, name).map(|field| CompletionItem {
                 label: field.name.clone(),
@@ -2075,13 +2078,18 @@ fn type_completion(doc: &Document, pos: Pos, slot: Slot) -> Vec<CompletionItem> 
             );
         }
     }
-    let wanted = |kind: &StoneSymbolKind| match slot {
-        Slot::Type => matches!(kind, StoneSymbolKind::Struct | StoneSymbolKind::Enum),
-        Slot::Bound => *kind == StoneSymbolKind::Trait,
+    let wanted = |symbol: &Symbol| match slot {
+        // a trait is a type of values too, but of the prelude's only `display` is
+        Slot::Type => match symbol.kind {
+            StoneSymbolKind::Struct | StoneSymbolKind::Enum => true,
+            StoneSymbolKind::Trait => symbol.span.file != FileId::PRELUDE || symbol.name == DISPLAY,
+            _ => false,
+        },
+        Slot::Bound => symbol.kind == StoneSymbolKind::Trait,
     };
     let types = analysis.symbols.iter().filter(|s| {
         s.scope.is_none()
-            && wanted(&s.kind)
+            && wanted(s)
             && (s.span.file == doc.file || s.span.file == FileId::PRELUDE)
     });
     for symbol in types {
@@ -2101,9 +2109,7 @@ fn type_completion(doc: &Document, pos: Pos, slot: Slot) -> Vec<CompletionItem> 
                 (CompletionItemKind::STRUCT, format!("struct {name}"))
             }
             (Target::Enum(name), Slot::Type) => (CompletionItemKind::ENUM, format!("enum {name}")),
-            (Target::Trait(name), Slot::Bound) => {
-                (CompletionItemKind::INTERFACE, format!("trait {name}"))
-            }
+            (Target::Trait(name), _) => (CompletionItemKind::INTERFACE, format!("trait {name}")),
             _ => continue,
         };
         offer(&import.name, kind, detail);

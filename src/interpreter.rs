@@ -200,6 +200,17 @@ pub enum Value {
     /// A Win32 window of the `gui` module, which copies share and which closes once nothing
     /// holds it.
     Window(Rc<RefCell<gui::NativeWindow>>),
+    /// A trait value, such as a `Circle` given where a `Shape` was expected: the value, with
+    /// its own type, through whose methods calls on it run.
+    Trait(Rc<TraitValue>),
+}
+
+/// The value a trait value holds, and the value's own type, with every type argument filled in,
+/// since a struct value does not keep its type arguments.
+#[derive(Debug, Clone)]
+pub struct TraitValue {
+    pub value: Value,
+    pub ty: Type,
 }
 
 /// A map key, which is an int, a string, or a bool, since those hash and compare exactly.
@@ -644,6 +655,8 @@ impl Value {
             Value::Socket(_) => out.push_str(Handle::Socket.name()),
             Value::Listener(_) => out.push_str(Handle::Listener.name()),
             Value::Window(_) => out.push_str(Handle::Window.name()),
+            // a trait value is written as the value it holds
+            Value::Trait(held) => held.value.write(out, nested, depth, custom)?,
             Value::List(items) => {
                 out.push('[');
                 for (i, item) in items.iter().enumerate() {
@@ -726,7 +739,7 @@ impl Value {
     /// so the other end sees it close where compiled code closes it.
     fn drops_early(&self) -> bool {
         match self {
-            Value::List(_) | Value::Map(_) | Value::Enum(_) => true,
+            Value::List(_) | Value::Map(_) | Value::Enum(_) | Value::Trait(_) => true,
             Value::Socket(_) | Value::Listener(_) | Value::Window(_) => true,
             Value::Tuple(fields) => fields.iter().any(Value::drops_early),
             Value::Struct(value) => value.fields.iter().any(Value::drops_early),
@@ -1923,6 +1936,43 @@ impl<'out> Interpreter<'out> {
                 matched
             }),
             code::Pattern::Never => false,
+            code::Pattern::Type { key, fields } => {
+                let Value::Trait(held) = value else {
+                    return false;
+                };
+                let found = match &held.value {
+                    Value::Struct(found) => &*found.def.linked,
+                    Value::Int(_) => "int",
+                    Value::Float(_) => "float",
+                    Value::Bool(_) => "bool",
+                    Value::Str(_) => "str",
+                    Value::Bytes(_) => "bytes",
+                    _ => return false,
+                };
+                if found != key {
+                    return false;
+                }
+                match &held.value {
+                    Value::Struct(found) => fields
+                        .iter()
+                        .zip(&found.fields)
+                        .all(|(field, value)| self.pattern_matches(field, value, bindings)),
+                    value => fields
+                        .iter()
+                        .all(|field| self.pattern_matches(field, value, bindings)),
+                }
+            }
+            code::Pattern::As(pattern, var) => {
+                if !self.pattern_matches(pattern, value, bindings) {
+                    return false;
+                }
+                let bound = match (&**pattern, value) {
+                    (code::Pattern::Type { .. }, Value::Trait(held)) => held.value.clone(),
+                    _ => value.clone(),
+                };
+                bindings.push((*var, bound));
+                true
+            }
         }
     }
 
@@ -2268,6 +2318,15 @@ impl<'out> Interpreter<'out> {
             }
             E::Var(var) => self.read_var(*var),
             E::Take(var) => self.take_var(*var),
+            E::Coerce(value, source) => {
+                let value = self.eval_expr(value)?;
+                let ty = source.substitute(&self.types);
+                // a copy in which a type parameter is the trait value already
+                if matches!(ty, Type::Trait(_)) {
+                    return Ok(value);
+                }
+                Ok(Value::Trait(Rc::new(TraitValue { value, ty })))
+            }
             E::Function {
                 value,
                 id,
@@ -3016,7 +3075,10 @@ impl<'out> Interpreter<'out> {
             }
             let function = self.implementation(span, method, &receiver)?;
             let mut values = Vec::with_capacity(args.len() + 1);
-            values.push(receiver);
+            values.push(match receiver {
+                Value::Trait(held) => held.value.clone(),
+                receiver => receiver,
+            });
             for arg in args {
                 values.push(self.eval_expr(arg)?);
             }
@@ -3037,13 +3099,25 @@ impl<'out> Interpreter<'out> {
         self.apply_moves(moves, &function);
         let keep = self.keeps_receiver(root, &function);
         let place = self.place_value(root, &steps, spans)?;
-        values[0] = match keep {
+        let receiver = match keep {
             true => place.clone(),
             false => std::mem::replace(place, Value::Unit),
         };
+        // a trait value's method changes the value it holds, which goes back in it
+        let (receiver, held_ty) = match receiver {
+            Value::Trait(held) => {
+                let held = Rc::try_unwrap(held).unwrap_or_else(|shared| (*shared).clone());
+                (held.value, Some(held.ty))
+            }
+            receiver => (receiver, None),
+        };
+        values[0] = receiver;
         let (result, changed) = self.invoke(&function, values, true)?;
         if let Some(changed) = changed {
-            *self.place_value(root, &steps, spans)? = changed;
+            *self.place_value(root, &steps, spans)? = match held_ty {
+                Some(ty) => Value::Trait(Rc::new(TraitValue { value: changed, ty })),
+                None => changed,
+            };
         }
         Ok(result)
     }
@@ -3157,6 +3231,18 @@ impl<'out> Interpreter<'out> {
     /// [`Interpreter::next_types`]. The type the running copy gives the bounded type parameter
     /// picks it, and the value's type if the copy does not know it.
     fn implementation(&mut self, span: Span, method: &Method, value: &Value) -> EvalResult<String> {
+        // a trait value calls the method of the type of the value it holds
+        if let Value::Trait(held) = value {
+            let Some((function, copy)) = method.resolve(&held.ty, &[], &[]) else {
+                return Err(format!("{} does not implement {}", held.ty, method.function).into());
+            };
+            self.next_types = self
+                .resolved
+                .type_params
+                .get(&function)
+                .map(|params| Rc::new(params.iter().cloned().zip(copy).collect()));
+            return Ok(function);
+        }
         if let Some(instance) = self.resolved.instances.get(&span) {
             let args: Vec<Type> = instance
                 .args

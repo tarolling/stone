@@ -20,7 +20,7 @@
 //! The checker only accepts programs that the interpreter and the compiler run the same way. For
 //! example, conditions must be `bool`, since no other value is truthy.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::fmt::Display;
 use std::sync::Arc;
 
@@ -79,6 +79,9 @@ pub enum Type {
     /// A handle on something the system holds, such as a connection, which closes once nothing
     /// refers to it.
     Handle(Handle),
+    /// A trait value by the trait's linked name, such as `Shape` in `list[Shape]`: a value of any
+    /// type that implements the trait, whose methods are called through a table of that type's.
+    Trait(String),
 }
 
 /// What a [`Type::Handle`] holds on to.
@@ -223,7 +226,8 @@ impl Type {
             | Type::Str
             | Type::Bytes
             | Type::Unit
-            | Type::Handle(_) => self.clone(),
+            | Type::Handle(_)
+            | Type::Trait(_) => self.clone(),
         }
     }
 
@@ -295,6 +299,7 @@ impl Display for Type {
                 }
             }
             Type::Handle(handle) => write!(f, "{}", handle.name()),
+            Type::Trait(name) => write!(f, "{name}"),
         }
     }
 }
@@ -735,6 +740,10 @@ pub struct Calls {
     pub type_params: HashMap<String, Vec<String>>,
     /// Every conversion, from [`Analysis::conversions`].
     pub conversions: HashMap<Span, Conversion>,
+    /// Every value that becomes a trait value, from [`Analysis::coercions`].
+    pub coercions: HashMap<Span, Coercion>,
+    /// The type each pattern of a trait value tests for, from [`Analysis::type_patterns`].
+    pub type_patterns: HashMap<Span, Type>,
 }
 
 /// Returns `ty` as source writes it, each struct and enum by its own name without its module,
@@ -758,6 +767,7 @@ pub fn type_text(ty: &Type) -> String {
             Type::Unit => format!("fn({})", all(params)),
             _ => format!("fn({}) -> {}", all(params), type_text(ret)),
         },
+        Type::Trait(name) => struct_display(name).to_string(),
         other => other.to_string(),
     }
 }
@@ -886,6 +896,35 @@ pub struct Analysis {
     /// copies a closure takes, a tuple of them. Each holds at most [`MAX_ELEMENT_VALUES`]
     /// values, which lowering keeps to when it lays out enums.
     pub held_types: Vec<(Type, Held)>,
+    /// Every value that becomes a trait value, by the value's span, whose type in
+    /// [`Analysis::types`] is the trait value's.
+    pub coercions: HashMap<Span, Coercion>,
+    /// The methods of every trait that is a type of values, in the order a table of a type's
+    /// methods holds them, by the trait's linked name.
+    pub trait_values: HashMap<String, Vec<TraitValueMethod>>,
+    /// The type each pattern of a trait value tests for, by the pattern's span, such as `Circle`
+    /// for `Circle(r)` against a `Shape`.
+    pub type_patterns: HashMap<Span, Type>,
+}
+
+/// A value that becomes a trait value, such as `Circle(r=1.0)` given to a parameter of type
+/// `Shape`: the trait, and the value's own type, which may name the type parameters of the
+/// function it is in.
+#[derive(Debug, Clone, PartialEq)]
+pub struct Coercion {
+    pub trait_: String,
+    pub source: Type,
+}
+
+/// A method of a trait that is a type of values, as a call through a trait value's table calls
+/// it: its name, its call through a bound (whose implementations give each type's function), and
+/// the types of its parameters after `self` and of what it returns, which name no `Self`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TraitValueMethod {
+    pub name: String,
+    pub method: Method,
+    pub params: Vec<Type>,
+    pub ret: Type,
 }
 
 impl Analysis {
@@ -926,6 +965,8 @@ impl Analysis {
             instances: self.instances.clone(),
             type_params: self.type_params.clone(),
             conversions: self.conversions.clone(),
+            coercions: self.coercions.clone(),
+            type_patterns: self.type_patterns.clone(),
         }
     }
 
@@ -1025,6 +1066,8 @@ enum Ty {
     /// [`Ty::Unit`] for one that returns no value.
     Fn(Vec<Ty>, Box<Ty>),
     Handle(Handle),
+    /// A trait value by the trait's linked name, as [`Type::Trait`].
+    Trait(String),
 }
 
 /// Returns the builtin type a trait's `impl` block names by `key`, such as `int`, if it is one.
@@ -1225,6 +1268,7 @@ enum Kind {
     Param,
     Function,
     Handle,
+    Trait,
 }
 
 impl Kind {
@@ -1244,6 +1288,7 @@ impl Kind {
             Ty::Param(_) => Some(Kind::Param),
             Ty::Fn(..) => Some(Kind::Function),
             Ty::Handle(_) => Some(Kind::Handle),
+            Ty::Trait(_) => Some(Kind::Trait),
             Ty::Var(_) => None,
         }
     }
@@ -1436,6 +1481,8 @@ pub enum Held {
     Variants,
     /// The values a closure captures, a tuple of them.
     Captures,
+    /// The value a trait value holds.
+    TraitValue,
 }
 
 /// A call of a generic function and the type arguments it fills the type parameters with.
@@ -1615,6 +1662,31 @@ struct Inference {
     deferred_fields: Vec<DeferredField>,
     /// Every `match`, whose cases `finish` checks.
     matches: Vec<PendingMatch>,
+    /// Every trait written as a type of values, with its span, which `check_trait_types` checks
+    /// once every trait is declared.
+    trait_types: Vec<(Span, String)>,
+    /// Every value that becomes a trait value, which `finish` checks it can hold and gives
+    /// [`Analysis::coercions`].
+    coercions: Vec<PendingCoercion>,
+    /// The type the next expression inferred is expected to have, which a list, map, or set
+    /// literal starts its elements from, so `[Circle(..), Square(..)]` given to a parameter of
+    /// `list[Shape]` makes trait values.
+    literal_hint: Option<Ty>,
+    /// The span of the value of an assignment to one target, which may become a trait value
+    /// if the target holds one.
+    coercible: Option<Span>,
+    /// Every trait that is a type of values somewhere, for [`Analysis::trait_values`].
+    trait_values: BTreeSet<String>,
+    /// The type each pattern of a trait value tests for, by the pattern's span, such as `Circle`
+    /// for `Circle(r)`, for [`Analysis::type_patterns`].
+    type_patterns: HashMap<Span, Ty>,
+}
+
+/// A value that becomes a trait value: the value's span, the trait, and the value's own type.
+struct PendingCoercion {
+    span: Span,
+    trait_: String,
+    source: Ty,
 }
 
 /// `value[slice]`, with a constant `slice`, where `value` is a global not yet known to be a tuple
@@ -2038,6 +2110,131 @@ impl Inference {
         }
     }
 
+    /// Does what [`Inference::expect_because`] does for a value at `span`, except that a value of
+    /// a type that implements a trait becomes a trait value where one is expected.
+    ///
+    /// For example, `Circle(r=1.0)` given to a parameter of type `Shape` becomes a `Shape`.
+    fn expect_value(
+        &mut self,
+        expected: &Ty,
+        found: &Ty,
+        span: Span,
+        because: Option<(Span, &str)>,
+    ) {
+        if !self.coerce(expected, found, span) {
+            self.expect_because(expected, found, span, because);
+        }
+    }
+
+    /// Makes the value at `span`, of type `found`, a trait value if `expected` is one and the
+    /// value is not one already, reporting a type that does not implement the trait, and
+    /// returns whether it did. A value of unknown type is not made one, since unifying it with
+    /// the trait value makes it one already.
+    fn coerce(&mut self, expected: &Ty, found: &Ty, span: Span) -> bool {
+        let Ty::Trait(name) = self.shallow(expected) else {
+            return false;
+        };
+        let source = self.shallow(found);
+        match &source {
+            Ty::Var(_) => return false,
+            Ty::Trait(other) if *other == name => return false,
+            // no value was reported already
+            Ty::Unit => return true,
+            _ => {}
+        }
+        if self.satisfies(&source, &name) {
+            self.coercions.push(PendingCoercion {
+                span,
+                trait_: name.clone(),
+                source,
+            });
+        } else {
+            let short = struct_display(&name);
+            let message = format!(
+                "'{}' does not implement '{short}', so it cannot be a {short}",
+                self.show(&source)
+            );
+            self.error(Code::Bound, span, message);
+        }
+        self.expr_types.push((span, Ty::Trait(name)));
+        true
+    }
+
+    /// Checks an element of a literal against the elements before it, as
+    /// [`Inference::expect_value`] does, suggesting a trait value when two types that implement
+    /// one meet.
+    ///
+    /// For example, `[Circle(r=1.0), Square(s=1.0)]` suggests `Shape(...)` around the first.
+    fn expect_element(&mut self, elem: &Ty, found: &Ty, span: Span) {
+        if self.coerce(elem, found, span) {
+            return;
+        }
+        let (before, after) = (self.resolve(elem), self.resolve(found));
+        if self.unify(elem, found) {
+            return;
+        }
+        let message = format!(
+            "expected {}, found {}",
+            self.show(&before),
+            self.show(&after)
+        );
+        let mut diagnostic = Code::Mismatch.error(span, message);
+        if let Some(trait_) = self.common_trait(&before, &after) {
+            diagnostic = diagnostic.with_help(format!(
+                "to make a list of several types, write the trait around the first value, as \
+                 '{}(...)'",
+                struct_display(&trait_)
+            ));
+        }
+        self.diagnostics.push(diagnostic);
+    }
+
+    /// Returns a trait of the program's that both types implement and that can be a type of
+    /// values, the first by name, if there is one.
+    fn common_trait(&self, a: &Ty, b: &Ty) -> Option<String> {
+        let mut names: Vec<&String> = self
+            .traits
+            .keys()
+            .filter(|name| {
+                self.trait_value_error(name).is_none()
+                    && self.satisfies(a, name)
+                    && self.satisfies(b, name)
+                    && !matches!(name.as_str(), DISPLAY)
+            })
+            .collect();
+        names.sort();
+        names.first().map(|name| name.to_string())
+    }
+
+    /// Infers `expr`, which is expected to be of type `expected` (written, so possibly naming
+    /// type parameters), so that a list, map, or set literal holding trait values makes its
+    /// elements trait values from the first.
+    fn infer_expecting(&mut self, expr: &Expr, expected: Option<&Ty>) -> Ty {
+        if let Some(expected) = expected
+            && matches!(
+                expr.kind,
+                ExprKind::List { .. } | ExprKind::Dict { .. } | ExprKind::Set { .. }
+            )
+            && self.holds_trait(expected)
+        {
+            self.literal_hint = Some(expected.clone());
+        }
+        let ty = self.infer(expr);
+        self.literal_hint = None;
+        ty
+    }
+
+    /// Returns whether `ty` holds a trait value anywhere a literal could start from, inside lists
+    /// and map values.
+    fn holds_trait(&self, ty: &Ty) -> bool {
+        match self.shallow(ty) {
+            Ty::Trait(_) => true,
+            Ty::List(elem) => self.holds_trait(&elem),
+            Ty::Map(_, value) => self.holds_trait(&value),
+            _ => false,
+        }
+    }
+
     /// Returns advice for a value of type `found` where `expected` was, for the mismatches with
     /// a usual fix: an int and a float, which never mix.
     fn mismatch_help(&self, expected: &Ty, found: &Ty) -> Option<&'static str> {
@@ -2071,7 +2268,7 @@ impl Inference {
             let because = spans
                 .get(i)
                 .map(|&at| (at, "expected because of this parameter"));
-            self.expect_because(param, arg_ty, arg.span, because);
+            self.expect_value(param, arg_ty, arg.span, because);
         }
     }
 
@@ -2104,6 +2301,7 @@ impl Inference {
                 format!("{name}[{}]", args.join(", "))
             }
             Ty::Param(p) => self.type_params[p].name.clone(),
+            Ty::Trait(name) => name,
             Ty::Fn(params, ret) => {
                 let params: Vec<String> = params.iter().map(|p| self.show(p)).collect();
                 match *ret {
@@ -2725,6 +2923,7 @@ impl Inference {
                 }
             }
         }
+        self.check_trait_types();
         let mut assigned = vec![];
         collect_assigned(body, &mut assigned);
         for (name, span) in assigned {
@@ -5000,17 +5199,32 @@ impl Inference {
                     && visible_type(name, annotation.span.file)
                 {
                     let symbol = info.symbol;
+                    let generic = !info.params.is_empty();
                     self.add_reference(annotation.span, symbol);
                     let short = struct_display(name);
-                    errors.push((
-                        Code::Undefined,
-                        annotation.span,
-                        format!(
-                            "'{short}' is a trait, not a type; to take any type that implements \
-                             it, write a type parameter, as in 'fn f[T: {short}](x: T)'"
-                        ),
-                    ));
-                    return self.fresh();
+                    if generic {
+                        errors.push((
+                            Code::TraitValue,
+                            annotation.span,
+                            format!(
+                                "a trait with type parameters, as '{short}', cannot be a type of \
+                                 values yet"
+                            ),
+                        ));
+                        return self.fresh();
+                    }
+                    if !args.is_empty() {
+                        errors.push((
+                            Code::Arity,
+                            annotation.span,
+                            format!("'{short}' takes no types"),
+                        ));
+                        return self.fresh();
+                    }
+                    // whether its methods allow it is known once every trait is declared
+                    self.trait_types.push((annotation.span, name.clone()));
+                    self.trait_values.insert(name.clone());
+                    return Ty::Trait(name.clone());
                 }
                 let found = if !visible_type(name, annotation.span.file) {
                     None
@@ -5125,14 +5339,18 @@ impl Inference {
                 self.check_function(name, *name_span, args, body);
             }
             StmtKind::Return { value } => {
+                let expected = self.function.as_ref().map(|f| f.ret.clone());
                 let found = match value {
-                    Some(value) => self.infer(value),
+                    Some(value) => self.infer_expecting(value, expected.as_ref()),
                     None => Ty::Unit,
                 };
                 if let Some(function) = &self.function {
                     let (name, ret) = (function.name.clone(), function.ret.clone());
                     let ret_written = function.ret_written;
-                    if !self.unify(&ret, &found) {
+                    let coerced = value
+                        .as_ref()
+                        .is_some_and(|value| self.coerce(&ret, &found, value.span));
+                    if !coerced && !self.unify(&ret, &found) {
                         let span = value.as_ref().map_or(stmt.span, |v| v.span);
                         if value.is_none() {
                             let message = format!(
@@ -5168,9 +5386,16 @@ impl Inference {
                 self.assigned_call = Some(value.without_try().span);
                 let found = self.infer(value);
                 self.assigned_call = None;
+                // one value can become a trait value for one target, never part of a tuple
+                if let [target] = targets.as_slice()
+                    && !matches!(target.kind, ExprKind::Tuple { .. })
+                {
+                    self.coercible = Some(value.span);
+                }
                 for target in targets {
                     self.check_target(target, &found, value.span);
                 }
+                self.coercible = None;
             }
             StmtKind::AugAssign { target, op, value } => {
                 // the old value comes first, then the value, as `target = target op value`
@@ -5619,6 +5844,9 @@ impl Inference {
                 }
                 let expected = self.symbol_types[symbol].clone();
                 self.expr_types.push((target.span, expected.clone()));
+                if self.coercible == Some(value_span) && self.coerce(&expected, found, value_span) {
+                    return;
+                }
                 if !self.unify(&expected, found) {
                     let message = format!(
                         "cannot assign {} to '{id}', which is {}",
@@ -5653,13 +5881,17 @@ impl Inference {
                     self.error(Code::Unchangeable, target.span, SLICE_CHANGE);
                     return;
                 }
-                self.expect(&elem, found, value_span);
+                if self.coercible != Some(value_span) || !self.coerce(&elem, found, value_span) {
+                    self.expect(&elem, found, value_span);
+                }
                 self.check_change(value);
             }
             ExprKind::Attribute { value, attr, .. } => {
                 let field = self.field_of(target, value, attr);
                 self.expr_types.push((target.span, field.clone()));
-                self.expect(&field, found, value_span);
+                if self.coercible != Some(value_span) || !self.coerce(&field, found, value_span) {
+                    self.expect(&field, found, value_span);
+                }
                 self.check_change(target);
             }
             ExprKind::Tuple { .. } => {
@@ -6002,6 +6234,15 @@ impl Inference {
                 let args = self.fresh_args(&name);
                 Some(Ty::Struct(name, args))
             }
+            // a trait makes a trait value of any value of a type that implements it
+            Resolved::Undefined
+                if count == 1 && self.traits.contains_key(id) && visible_type(id, span.file) =>
+            {
+                self.add_reference(span, self.traits[id].symbol);
+                self.trait_types.push((span, id.to_string()));
+                self.trait_values.insert(id.to_string());
+                Some(Ty::Trait(id.to_string()))
+            }
             Resolved::Undefined => {
                 let function = self.function.as_ref()?.name.clone();
                 let param = self
@@ -6026,6 +6267,23 @@ impl Inference {
             self.arity_error(call.span, id, "1", args.len());
             return self.fresh();
         };
+        if let Ty::Trait(_) = target {
+            // the value becomes a trait value, which converts to itself
+            if !self.coerce(&target, source, arg.span) {
+                self.expect(&target, source, arg.span);
+            }
+            self.conversions.push((
+                call.span,
+                ConversionInfo {
+                    target: target.clone(),
+                    source: target.clone(),
+                    fallible: false,
+                    function: None,
+                    bound: None,
+                },
+            ));
+            return target;
+        }
         let result = self.fresh();
         let pending = PendingConversion {
             call: call.span,
@@ -6224,7 +6482,12 @@ impl Inference {
         let type_params = self.structs[name].type_params.clone();
         let mut given: Vec<&str> = vec![];
         for keyword in keywords {
-            let found = self.infer(&keyword.value);
+            let hint = self.structs[name]
+                .fields
+                .iter()
+                .find(|f| f.name == keyword.arg)
+                .map(|f| f.ty.clone());
+            let found = self.infer_expecting(&keyword.value, hint.as_ref());
             let field = self.structs[name]
                 .fields
                 .iter()
@@ -6248,7 +6511,7 @@ impl Inference {
                 continue;
             }
             given.push(&keyword.arg);
-            self.expect(&ty, &found, keyword.value.span);
+            self.expect_value(&ty, &found, keyword.value.span, None);
         }
         if !args.is_empty() {
             let example = self.struct_example(name);
@@ -6472,7 +6735,7 @@ impl Inference {
             }
             Some(args) => {
                 for ((field, arg_ty), arg) in fields.iter().zip(&arg_types).zip(args) {
-                    self.expect(field, arg_ty, arg.span);
+                    self.expect_value(field, arg_ty, arg.span, None);
                 }
             }
             None => {}
@@ -6558,7 +6821,7 @@ impl Inference {
                 continue;
             }
             given.push(&keyword.arg);
-            self.expect(&fields[position], found, keyword.value.span);
+            self.expect_value(&fields[position], found, keyword.value.span, None);
         }
         if !args.is_empty() {
             let example = self
@@ -7377,6 +7640,69 @@ impl Inference {
         )
     }
 
+    /// Infers `receiver.name(args)` on a trait value of `trait_`, which calls the method of the
+    /// value's own type through its table, recorded as a call through a bound whose `Self` is the
+    /// trait value.
+    ///
+    /// For example, `s.area()` with `s` a `Shape` calls `Circle.area` for a circle.
+    fn infer_trait_value_call(
+        &mut self,
+        call: &Expr,
+        func: &Expr,
+        receiver: &Expr,
+        trait_: &str,
+        name: &str,
+        args: &[Expr],
+    ) -> Ty {
+        let name_span = Self::attr_span(func, name);
+        let short = struct_display(trait_).to_string();
+        let Some(method) = self.traits[trait_].methods.iter().find(|m| m.name == name) else {
+            for arg in args {
+                self.infer(arg);
+            }
+            let mut diagnostic =
+                Code::NoMember.error(name_span, format!("'{short}' has no method '{name}'"));
+            let names: Vec<&str> = self.traits[trait_]
+                .methods
+                .iter()
+                .map(|m| m.name.as_str())
+                .collect();
+            if let Some(similar) = crate::diagnostic::similar(name, names) {
+                diagnostic = diagnostic.with_help(format!("did you mean '{similar}'?"));
+            }
+            self.diagnostics.push(diagnostic);
+            return self.fresh();
+        };
+        let candidate = Candidate {
+            function: format!("{trait_}.{name}"),
+            type_args: vec![Ty::Trait(trait_.to_string())],
+            symbol: method.symbol,
+            changes: method.changes,
+            bound: Some(trait_.to_string()),
+            trait_args: vec![],
+            text: short.clone(),
+        };
+        let hints: Vec<Ty> = self.functions[&candidate.function]
+            .params
+            .iter()
+            .skip(1)
+            .cloned()
+            .collect();
+        let arg_types: Vec<Ty> = args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| self.infer_expecting(arg, hints.get(i)))
+            .collect();
+        self.call_candidates(
+            call,
+            (func, receiver),
+            (name, &short),
+            vec![candidate],
+            &arg_types,
+            args,
+        )
+    }
+
     /// Returns whether any struct, or builtin type a trait is implemented for, has a method named
     /// `name`.
     fn struct_method_named(&self, name: &str) -> bool {
@@ -7862,23 +8188,37 @@ impl Inference {
             }
             ExprKind::Subscript { value, slice, .. } => self.subscript(value, slice),
             ExprKind::List { elts, .. } => {
-                let elem = self.fresh();
+                let hint = match self.literal_hint.take().map(|h| self.shallow(&h)) {
+                    Some(Ty::List(elem)) => Some(*elem),
+                    _ => None,
+                };
+                let elem = match hint.as_ref().map(|h| self.shallow(h)) {
+                    Some(trait_ @ Ty::Trait(_)) => trait_,
+                    _ => self.fresh(),
+                };
                 for elt in elts {
-                    let ty = self.infer(elt);
-                    self.expect(&elem, &ty, elt.span);
+                    let ty = self.infer_expecting(elt, hint.as_ref());
+                    self.expect_element(&elem, &ty, elt.span);
                 }
                 let list = Ty::List(Box::new(elem));
                 self.list_literals.push((expr.span, list.clone()));
                 list
             }
             ExprKind::Dict { keys, values } => {
+                let hint = match self.literal_hint.take().map(|h| self.shallow(&h)) {
+                    Some(Ty::Map(_, value)) => Some(*value),
+                    _ => None,
+                };
                 let key_ty = self.fresh();
-                let value_ty = self.fresh();
+                let value_ty = match hint.as_ref().map(|h| self.shallow(h)) {
+                    Some(trait_ @ Ty::Trait(_)) => trait_,
+                    _ => self.fresh(),
+                };
                 for (key, value) in keys.iter().zip(values) {
                     let ty = self.infer(key);
                     self.expect(&key_ty, &ty, key.span);
-                    let ty = self.infer(value);
-                    self.expect(&value_ty, &ty, value.span);
+                    let ty = self.infer_expecting(value, hint.as_ref());
+                    self.expect_element(&value_ty, &ty, value.span);
                 }
                 let key_span = keys.first().map_or(expr.span, |key| key.span);
                 self.require(Code::MapKey, key_ty.clone(), MAP_KEYS, key_span, MAP_KEY);
@@ -7887,10 +8227,11 @@ impl Inference {
                 map
             }
             ExprKind::Set { elts } => {
+                self.literal_hint = None;
                 let elem = self.fresh();
                 for elt in elts {
                     let ty = self.infer(elt);
-                    self.expect(&elem, &ty, elt.span);
+                    self.expect_element(&elem, &ty, elt.span);
                 }
                 let span = elts.first().map_or(expr.span, |elt| elt.span);
                 self.require(Code::MapKey, elem.clone(), MAP_KEYS, span, SET_ELEMENT);
@@ -8204,7 +8545,15 @@ impl Inference {
             let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
             return self.infer_value_call(call, func, None, &func_ty, args, &arg_types);
         };
-        let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
+        let hints: Vec<Ty> = match self.resolve_name(id) {
+            Resolved::Function(name) => self.functions[&name].params.clone(),
+            _ => vec![],
+        };
+        let arg_types: Vec<Ty> = args
+            .iter()
+            .enumerate()
+            .map(|(i, arg)| self.infer_expecting(arg, hints.get(i)))
+            .collect();
 
         match self.resolve_name(id) {
             Resolved::Function(name) => {
@@ -8500,6 +8849,40 @@ impl Inference {
                 );
                 self.check_target(&target, expected, pattern.span);
             }
+            PatternKind::As {
+                pattern: inner,
+                name,
+                name_span,
+            } => {
+                self.check_pattern(inner, expected, bound);
+                let narrowed = self
+                    .type_patterns
+                    .get(&inner.span)
+                    .cloned()
+                    .unwrap_or_else(|| expected.clone());
+                if bound.contains(name) {
+                    self.error(
+                        Code::Pattern,
+                        *name_span,
+                        format!("'{name}' is bound more than once in this pattern"),
+                    );
+                    return;
+                }
+                bound.push(name.clone());
+                let target = Expr::new(
+                    ExprKind::Name {
+                        id: name.clone(),
+                        ctx: crate::ast::ExprContext::Store,
+                    },
+                    *name_span,
+                );
+                self.check_target(&target, &narrowed, *name_span);
+            }
+            PatternKind::Variant { path, fields }
+                if let Ty::Trait(trait_) = self.shallow(expected) =>
+            {
+                self.check_type_pattern(pattern, &trait_, path, fields, bound);
+            }
             PatternKind::Variant { path, fields } => {
                 let Some((enum_ty, written, field_types, names)) = self.variant_of_pattern(path)
                 else {
@@ -8548,6 +8931,114 @@ impl Inference {
                     self.check_pattern(&field.pattern, &field_ty, bound);
                 }
             }
+        }
+    }
+
+    /// Checks the pattern `path(fields)` against a trait value of `trait_`, which tests the type
+    /// of the value it holds: a struct, whose fields are matched as a named variant's are, or a
+    /// builtin type, whose one value is the value itself, as `int(n)` binds `n`. The type must
+    /// implement the trait, and is recorded as the pattern's in `type_patterns`.
+    ///
+    /// For example, `Circle(r)` against a `Shape` matches a circle and binds its radius.
+    fn check_type_pattern(
+        &mut self,
+        pattern: &Pattern,
+        trait_: &str,
+        path: &[(String, Span)],
+        fields: &[PatternField],
+        bound: &mut Vec<String>,
+    ) {
+        let written = path
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect::<Vec<_>>()
+            .join(".");
+        let span = path.first().map_or(pattern.span, |(_, span)| *span);
+        let unknown_fields = |this: &mut Self, bound: &mut Vec<String>| {
+            for field in fields {
+                let unknown = this.fresh();
+                this.check_pattern(&field.pattern, &unknown, bound);
+            }
+        };
+        let builtin = match written.as_str() {
+            "int" => Some(Ty::Int),
+            "float" => Some(Ty::Float),
+            "bool" => Some(Ty::Bool),
+            "str" => Some(Ty::Str),
+            "bytes" => Some(Ty::Bytes),
+            _ => None,
+        };
+        let tested = match builtin {
+            Some(ty) => ty,
+            None => {
+                let Resolved::Struct(name) = self.resolve_name(&written) else {
+                    self.error(
+                        Code::Pattern,
+                        span,
+                        format!(
+                            "'{written}' is not a struct or a builtin type, so a {} never holds \
+                             one",
+                            struct_display(trait_)
+                        ),
+                    );
+                    unknown_fields(self, bound);
+                    return;
+                };
+                self.add_reference(span, self.structs[&name].symbol);
+                if !self.structs[&name].type_params.is_empty() {
+                    self.error(
+                        Code::Pattern,
+                        span,
+                        format!(
+                            "a pattern cannot test for the generic struct '{}' yet",
+                            struct_display(&name)
+                        ),
+                    );
+                    unknown_fields(self, bound);
+                    return;
+                }
+                Ty::Struct(name, vec![])
+            }
+        };
+        if !self.satisfies(&tested, trait_) {
+            let message = format!(
+                "'{}' does not implement '{}', so a {} never holds one",
+                self.show(&tested),
+                struct_display(trait_),
+                struct_display(trait_)
+            );
+            self.error(Code::Pattern, span, message);
+            unknown_fields(self, bound);
+            return;
+        }
+        self.type_patterns.insert(pattern.span, tested.clone());
+        match &tested {
+            Ty::Struct(name, _) => {
+                let names: Vec<(String, usize)> = self.structs[name]
+                    .fields
+                    .iter()
+                    .map(|f| (f.name.clone(), f.symbol))
+                    .collect();
+                let field_types = self.field_types(name, &[]);
+                let short = struct_display(name).to_string();
+                self.check_named_fields(&short, fields, &field_types, &names, bound);
+            }
+            builtin => match fields {
+                [] => {}
+                [field] if field.name.is_none() => {
+                    self.check_pattern(&field.pattern, builtin, bound);
+                }
+                _ => {
+                    self.error(
+                        Code::Pattern,
+                        pattern.span,
+                        format!(
+                            "'{written}' holds one value, its own, so its pattern is '{written}(x)'"
+                        ),
+                    );
+                    unknown_fields(self, bound);
+                }
+            },
         }
     }
 
@@ -8735,7 +9226,11 @@ impl Inference {
                     return None;
                 };
                 self.add_reference(*variant_span, symbol);
-                let written = format!("{enum_name}.{variant}");
+                // linking writes the enum of a bare `some(x)` with an empty span
+                let written = match enum_span.start == enum_span.end {
+                    true => variant.clone(),
+                    false => format!("{enum_name}.{variant}"),
+                };
                 Some((Ty::Enum(name, type_args), written, fields, names))
             }
             _ => {
@@ -8756,7 +9251,7 @@ impl Inference {
         let elem = self.fresh();
         let list = Ty::List(Box::new(elem.clone()));
         if self.unify(&list, receiver_ty) {
-            self.expect(&elem, item_ty, item.span);
+            self.expect_value(&elem, item_ty, item.span, None);
         } else {
             // the element pins down the message, as in `expected list[int]`
             self.unify(&elem, item_ty);
@@ -8809,6 +9304,10 @@ impl Inference {
             Ty::Param(param) => {
                 let arg_types: Vec<Ty> = args.iter().map(|arg| self.infer(arg)).collect();
                 return self.infer_trait_call(call, func, receiver, param, name, args, &arg_types);
+            }
+            // a trait value has its trait's methods, and is written as text like every value
+            Ty::Trait(trait_) if name != DISPLAY => {
+                return self.infer_trait_value_call(call, func, receiver, &trait_, name, args);
             }
             ty if ty_key(&ty).is_some_and(|key| self.has_struct_method(&key, name)) => {
                 let key = ty_key(&ty).unwrap_or_default();
@@ -9792,7 +10291,7 @@ impl Inference {
             Ty::Var(_) => {
                 self.unify(&ty, &Ty::Int);
             }
-            Ty::Unit | Ty::Fn(..) | Ty::Handle(_) => {
+            Ty::Unit | Ty::Fn(..) | Ty::Handle(_) | Ty::Trait(_) => {
                 let message = format!("{what} cannot compare {}", self.show(&ty));
                 self.error(Code::Uncomparable, span, message);
             }
@@ -9832,7 +10331,7 @@ impl Inference {
             // a struct that implements `eq` compares however it says
             Ty::Struct(name, _) if self.impls.contains_key(&(EQ.to_string(), name.clone())) => None,
             // a type parameter may be a function
-            ty @ (Ty::Param(_) | Ty::Fn(..) | Ty::Handle(_)) => {
+            ty @ (Ty::Param(_) | Ty::Fn(..) | Ty::Handle(_) | Ty::Trait(_)) => {
                 Some(Uncomparable { ty, field: None })
             }
             Ty::List(elem) => self.uncomparable(&elem, seen),
@@ -9874,6 +10373,62 @@ impl Inference {
     /// Returns the type parameters that appear in `ty`, in order, each once.
     ///
     /// For example, `tuple[A, list[B], A]` holds `A` and `B`.
+    /// Reports each trait written as a type of values whose methods cannot be called through a
+    /// table of a type's methods ([`Inference::trait_value_error`]), once every signature is read.
+    fn check_trait_types(&mut self) {
+        let mut reported = HashSet::new();
+        for (span, name) in std::mem::take(&mut self.trait_types) {
+            if let Some(message) = self.trait_value_error(&name)
+                && reported.insert(span)
+            {
+                self.error(Code::TraitValue, span, message);
+            }
+        }
+    }
+
+    /// Returns why the trait `name` cannot be a type of values, if it cannot: a value's methods
+    /// are called through a table that every type fills the same way, so each must take `self`
+    /// first, take and return no other `Self`, and have no type parameters of its own.
+    ///
+    /// For example, `eq` cannot, since its `eq` takes another `Self`.
+    fn trait_value_error(&self, name: &str) -> Option<String> {
+        let info = self.traits.get(name)?;
+        let short = struct_display(name);
+        if !info.params.is_empty() {
+            return Some(format!(
+                "a trait with type parameters, as '{short}', cannot be a type of values yet"
+            ));
+        }
+        for method in &info.methods {
+            let because = |why: &str| {
+                format!(
+                    "'{short}' cannot be a type of values, since its method '{}' {why}",
+                    method.name
+                )
+            };
+            if !method.has_self {
+                return Some(because("takes no 'self'"));
+            }
+            let function = self.functions.get(&format!("{name}.{}", method.name))?;
+            if function.type_params.len() > 1 + info.params.len() {
+                return Some(because("has type parameters of its own"));
+            }
+            let mut found = vec![];
+            function.params[1..]
+                .iter()
+                .for_each(|p| self.params_in(p, &mut found));
+            if found.contains(&info.self_param) {
+                return Some(because("takes another 'Self'"));
+            }
+            found.clear();
+            self.params_in(&function.ret, &mut found);
+            if found.contains(&info.self_param) {
+                return Some(because("returns 'Self'"));
+            }
+        }
+        None
+    }
+
     fn params_in(&self, ty: &Ty, found: &mut Vec<usize>) {
         match self.shallow(ty) {
             Ty::Param(p) if !found.contains(&p) => found.push(p),
@@ -10006,6 +10561,21 @@ impl Inference {
             }
         }
 
+        // and the values that become trait values in generic code
+        for coercion in &self.coercions {
+            let source = self.resolve(&coercion.source);
+            let mut params = vec![];
+            self.params_in(&source, &mut params);
+            if params.is_empty() {
+                continue;
+            }
+            if let Some((function, _)) = spans.iter().find(|(_, f)| f.encloses(coercion.span)) {
+                held.entry(function.clone())
+                    .or_default()
+                    .push((source, Held::TraitValue));
+            }
+        }
+
         // fill them in from each call outside a generic function's own type parameters
         let mut seen = HashSet::new();
         let mut reported = HashSet::new();
@@ -10095,9 +10665,11 @@ impl Inference {
             // every value is written as text
             ty if trait_ == DISPLAY => !matches!(ty, Ty::Unit),
             Ty::Param(p) => self.type_params[p].bounds.iter().any(|b| b.name == trait_),
+            // a trait value has its own trait's methods, through its type's
+            Ty::Trait(name) => name == trait_,
             // every type `==` compares part by part
             ty if trait_ == EQ => {
-                !matches!(ty, Ty::Unit | Ty::Fn(..) | Ty::Handle(_))
+                !matches!(ty, Ty::Unit | Ty::Fn(..) | Ty::Handle(_) | Ty::Trait(_))
                     && self.uncomparable(&ty, &mut HashSet::new()).is_none()
             }
             Ty::Int | Ty::Float | Ty::Str | Ty::Bytes if trait_ == ORD => true,
@@ -10274,6 +10846,10 @@ impl Inference {
                 format!("the values a lambda captures, {}", self.show(ty)),
                 self.values(ty),
             ),
+            Held::TraitValue => (
+                format!("a trait value of {}", self.show(ty)),
+                self.values(ty),
+            ),
         }
     }
 
@@ -10350,6 +10926,86 @@ impl Inference {
         }
         for (code, span, message) in errors {
             self.error(code, span, message);
+        }
+    }
+
+    /// Reports a value that becomes a trait value but holds what one cannot hold yet, a function
+    /// or a handle, or more values than one object holds. One whose type depends on a type
+    /// parameter is counted for each copy, in [`Inference::check_instances`].
+    ///
+    /// For example, a struct of 33 int fields cannot become a `display`.
+    fn check_coercions(&mut self) {
+        let mut errors = vec![];
+        for coercion in &self.coercions {
+            let source = self.resolve(&coercion.source);
+            let mut params = vec![];
+            self.params_in(&source, &mut params);
+            if !params.is_empty() {
+                continue;
+            }
+            if let Some(what) = self.unholdable(&source, &mut HashSet::new()) {
+                errors.push((
+                    coercion.span,
+                    format!(
+                        "a trait value cannot hold {} yet, since it holds {what}",
+                        self.show(&source)
+                    ),
+                ));
+                continue;
+            }
+            let count = self.values(&source);
+            if count > MAX_ELEMENT_VALUES {
+                errors.push((
+                    coercion.span,
+                    format!(
+                        "a trait value holds at most {MAX_ELEMENT_VALUES} values, but a {} is \
+                         {count}",
+                        self.show(&source)
+                    ),
+                ));
+                continue;
+            }
+            self.held_types.push((source, Held::TraitValue));
+        }
+        for (span, message) in errors {
+            self.error(Code::TraitValue, span, message);
+        }
+    }
+
+    /// Returns what inside `ty` a trait value cannot hold yet, a function or a handle, if
+    /// anything, looking into lists, maps, tuples, struct fields, and variants, each enum and
+    /// struct once, by its name in `seen`.
+    fn unholdable(&self, ty: &Ty, seen: &mut HashSet<String>) -> Option<String> {
+        match self.shallow(ty) {
+            Ty::Fn(..) => Some("a function".to_string()),
+            Ty::Handle(handle) => Some(format!("a {}", handle.name())),
+            Ty::List(elem) => self.unholdable(&elem, seen),
+            Ty::Map(key, value) => self
+                .unholdable(&key, seen)
+                .or_else(|| self.unholdable(&value, seen)),
+            Ty::Tuple(fields) => fields.iter().find_map(|f| self.unholdable(f, seen)),
+            ty @ Ty::Struct(..) => {
+                if !seen.insert(self.show(&ty)) {
+                    return None;
+                }
+                let Ty::Struct(name, args) = &ty else {
+                    return None;
+                };
+                self.field_types(name, args)
+                    .iter()
+                    .find_map(|f| self.unholdable(f, seen))
+            }
+            ty @ Ty::Enum(..) => {
+                if !seen.insert(self.show(&ty)) {
+                    return None;
+                }
+                self.ty_variants(&ty)
+                    .unwrap_or_default()
+                    .iter()
+                    .flat_map(|(_, fields)| fields)
+                    .find_map(|f| self.unholdable(f, seen))
+            }
+            _ => None,
         }
     }
 
@@ -10449,7 +11105,8 @@ impl Inference {
                     | Kind::Struct
                     | Kind::Param
                     | Kind::Function
-                    | Kind::Handle => continue,
+                    | Kind::Handle
+                    | Kind::Trait => continue,
                 };
                 self.unify(&ty, &default);
                 continue;
@@ -10467,6 +11124,7 @@ impl Inference {
         self.check_variant_widths();
         self.check_captured_params();
         self.check_closures();
+        self.check_coercions();
         for pending in std::mem::take(&mut self.matches) {
             self.check_cases(pending);
         }
@@ -10666,6 +11324,44 @@ impl Inference {
                 analysis.type_params.insert(name.clone(), names);
             }
         }
+        for coercion in std::mem::take(&mut self.coercions) {
+            analysis.coercions.insert(
+                coercion.span,
+                Coercion {
+                    trait_: coercion.trait_,
+                    source: self.finalize(&coercion.source),
+                },
+            );
+        }
+        for name in std::mem::take(&mut self.trait_values) {
+            if self.trait_value_error(&name).is_some() {
+                continue;
+            }
+            let methods = self.traits[&name]
+                .methods
+                .iter()
+                .map(|m| {
+                    let function = format!("{name}.{}", m.name);
+                    let info = &self.functions[&function];
+                    TraitValueMethod {
+                        name: m.name.clone(),
+                        method: Method {
+                            function: function.clone(),
+                            receiver: true,
+                            changes: m.changes,
+                            implementations: Some(self.implementations(&name, &m.name)),
+                            trait_args: vec![],
+                        },
+                        params: info.params[1..].iter().map(|p| self.finalize(p)).collect(),
+                        ret: self.finalize(&info.ret),
+                    }
+                })
+                .collect();
+            analysis.trait_values.insert(name, methods);
+        }
+        for (span, ty) in std::mem::take(&mut self.type_patterns) {
+            analysis.type_patterns.insert(span, self.finalize(&ty));
+        }
         analysis.method_functions = std::mem::take(&mut self.method_functions);
         analysis.shorthand_fields = std::mem::take(&mut self.shorthand_fields);
         let mut seen = HashSet::new();
@@ -10720,6 +11416,7 @@ impl Inference {
                 ret: Box::new(self.finalize(&ret)),
             },
             Ty::Handle(handle) => Type::Handle(handle),
+            Ty::Trait(name) => Type::Trait(name),
         }
     }
 
@@ -10735,9 +11432,12 @@ impl Inference {
     /// reachable if some value matches it and no case before it.
     fn check_cases(&mut self, pending: PendingMatch) {
         let subject = self.resolve(&pending.subject);
-        if !matches!(subject, Ty::Enum(..) | Ty::Int | Ty::Str | Ty::Bool) {
+        if !matches!(
+            subject,
+            Ty::Enum(..) | Ty::Int | Ty::Str | Ty::Bool | Ty::Trait(_)
+        ) {
             let message = format!(
-                "'match' needs an enum, option, int, str, or bool value, found {}",
+                "'match' needs an enum, option, int, str, bool, or trait value, found {}",
                 self.show(&subject)
             );
             self.error(Code::WrongKind, pending.subject_span, message);
@@ -10859,6 +11559,36 @@ impl Inference {
                     .map(|a| self.space(a, ty))
                     .collect::<Option<Vec<_>>>()?,
             )),
+            PatternKind::As { pattern, .. } => self.space(pattern, ty),
+            PatternKind::Variant { fields, .. }
+                if self.type_patterns.contains_key(&pattern.span) =>
+            {
+                let tested = self.type_patterns[&pattern.span].clone();
+                let key = ty_key(&tested)?;
+                let (field_types, names) = match &tested {
+                    Ty::Struct(name, args) => (
+                        self.field_types(name, args),
+                        Some(
+                            self.structs[name]
+                                .fields
+                                .iter()
+                                .map(|f| f.name.clone())
+                                .collect(),
+                        ),
+                    ),
+                    builtin => (vec![builtin.clone()], None),
+                };
+                let names: Option<Vec<String>> = names;
+                let arranged = crate::ast::arrange_fields(fields, names.as_deref());
+                let mut spaces = vec![];
+                for (i, field_ty) in field_types.iter().enumerate() {
+                    spaces.push(match arranged.get(i).copied().flatten() {
+                        Some(field) => self.space(field, field_ty)?,
+                        None => Space::Any,
+                    });
+                }
+                Some(Space::Type(key, spaces, field_types))
+            }
             PatternKind::Variant { path, fields } => {
                 let variant = &path.last()?.0;
                 let variants = self.ty_variants(ty)?;
@@ -10907,6 +11637,22 @@ impl Inference {
                     .map(|r| r[1..].to_vec())
                     .collect();
                 self.useful(&specialized, &row[1..], rest)
+            }
+            Space::Type(key, fields, field_types) => {
+                let specialized: Vec<Vec<Space>> = rows
+                    .iter()
+                    .filter_map(|r| {
+                        let head = match &r[0] {
+                            Space::Type(other, fields, _) if other == key => fields.clone(),
+                            Space::Any => vec![Space::Any; fields.len()],
+                            _ => return None,
+                        };
+                        Some(head.into_iter().chain(r[1..].iter().cloned()).collect())
+                    })
+                    .collect();
+                let row: Vec<Space> = fields.iter().chain(&row[1..]).cloned().collect();
+                let types: Vec<Ty> = field_types.iter().chain(rest).cloned().collect();
+                self.useful(&specialized, &row, &types)
             }
             Space::Variant(tag, fields) => {
                 let field_types = variants.map(|v| v[*tag].1.clone()).unwrap_or_default();
@@ -11014,6 +11760,9 @@ enum Space {
     Variant(usize, Vec<Space>),
     Lit(Literal),
     Or(Vec<Space>),
+    /// A trait value holding a value of the type with this key, whose values match the given
+    /// spaces, of the given types. A trait's types are never all listed, like ints.
+    Type(String, Vec<Space>, Vec<Ty>),
 }
 
 /// An int or a string a pattern matches, which, unlike an enum's variants, are never all
@@ -11052,7 +11801,7 @@ fn used_tags(rows: &[Vec<Space>]) -> HashSet<usize> {
     rows.iter()
         .filter_map(|row| match &row[0] {
             Space::Variant(tag, _) => Some(*tag),
-            Space::Any | Space::Lit(_) | Space::Or(_) => None,
+            Space::Any | Space::Lit(_) | Space::Or(_) | Space::Type(..) => None,
         })
         .collect()
 }
@@ -11070,7 +11819,7 @@ fn specialize(rows: &[Vec<Space>], tag: usize, arity: usize) -> Vec<Vec<Space>> 
         .filter_map(|row| {
             let head: Vec<Space> = match &row[0] {
                 Space::Variant(t, fields) if *t == tag => fields.clone(),
-                Space::Variant(..) | Space::Lit(_) | Space::Or(_) => return None,
+                Space::Variant(..) | Space::Lit(_) | Space::Or(_) | Space::Type(..) => return None,
                 Space::Any => vec![Space::Any; arity],
             };
             Some(head.into_iter().chain(row[1..].iter().cloned()).collect())

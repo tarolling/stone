@@ -14,8 +14,10 @@ impl Encoder for Arm64Encoder {
         "//"
     }
 
-    fn nop(&self) -> &'static [u8] {
-        &[0x1f, 0x20, 0x03, 0xd5]
+    fn padding(&self, size: u64) -> Option<Vec<u8>> {
+        // one `nop` per instruction's worth of the gap
+        size.is_multiple_of(4)
+            .then(|| [0x1f, 0x20, 0x03, 0xd5].repeat(size as usize / 4))
     }
 
     fn instruction(

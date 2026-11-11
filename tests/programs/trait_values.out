@@ -1,0 +1,24 @@
+14.5
+circle of area 3.0
+shape of area 4.0
+int of area 7.0
+tag of area 0.5
+[Circle(r=1.0), Square(side=2.0), 7, Labeled(label='tag', value=[1, 2])]
+Circle(r=1.0) Square(side=2.0) 7 Labeled(label='tag', value=[1, 2])
+Circle(r=1.0)
+3.0 4.0 5.0
+21.0
+14.5 3.0
+16.0 3.0
+25.0 4.75
+Scene(main=Square(side=5.0), rest=[Square(side=1.0), 3, Circle(r=0.5)])
+a circle
+b shape
+9.0 some(Square(side=3.0))
+shape 4.0
+[1, 'two', [3.0], Circle(r=4.0), 7]
+1
+two
+[3.0]
+Circle(r=4.0)
+7

@@ -388,6 +388,50 @@ of its bounds. `[T: eq]` allows `==`, and `[T: ord]` allows `<` and `sort`. Impl
 `sort_by_key`. Implementing `display` (with `fn display(self) -> str`) changes how `print`,
 `str`, and `"{x}"` write a struct, everywhere it appears.
 
+A trait's name is also a type, holding a value of any type that implements it, so one list can
+hold several types. A value becomes one wherever one is expected (an argument, a `ret`, a
+field, an element, `append`); elsewhere write `Shape(c)`. `match` finds the type back, with
+patterns like Python's class patterns, and needs a case that matches anything:
+
+```stone
+trait Shape:
+    fn area(self) -> float
+
+struct Circle:
+    r: float
+
+struct Square:
+    side: float
+
+impl Shape for Circle:
+    fn area(self) -> float:
+        ret 3.0 * self.r * self.r
+
+impl Shape for Square:
+    fn area(self) -> float:
+        ret self.side * self.side
+
+fn total(shapes: list[Shape]) -> float:
+    t = 0.0
+    for s in shapes:
+        t += s.area()
+    ret t
+
+shapes = [Shape(Circle(r=1.0)), Square(side=2.0)]
+print(total(shapes))
+for s in shapes:
+    match s:
+        case Circle(r):
+            print("circle", r)
+        case Square() as q:
+            print("square", q.side)
+        case _:
+            print("other")
+```
+
+A trait is a type of values only if every method takes `self` and names `Self` nowhere else, so
+`eq`, `ord`, and the operator traits are not; trait values are never compared with `==`.
+
 ### Functions as values
 
 ```stone
@@ -516,6 +560,7 @@ assign the result where 'add' is called
 | `min(xs, key=f)`, `max(xs, key=f)` | `xs.min_by_key(f)`, `xs.max_by_key(f)`, options (the max is the last of equal ones) |
 | `try`/`except`, `raise` | return a `result` and pass errors on with `?`, as in `int(s)?` |
 | `class` with inheritance | a `struct` plus `impl`, an `enum` for alternatives, a `trait` for shared behavior |
+| a list of objects of several classes, `isinstance(x, C)` | `list[Shape]` of a trait's values, and `match x:` with `case C():` |
 | `None`, `Optional[T]` | `none`, `option[T]` |
 | `pass` | restructure so every block has a real statement |
 | `del`, `global`, `nonlocal`, `is`, `with`, `yield` | not available |

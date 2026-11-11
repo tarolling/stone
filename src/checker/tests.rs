@@ -3009,7 +3009,7 @@ fn literal_patterns_match_ints_strings_and_bools() {
     );
     assert_error(
         &source("1.0", "    case _:\n        print(1)\n"),
-        "'match' needs an enum, option, int, str, or bool value, found float",
+        "'match' needs an enum, option, int, str, bool, or trait value, found float",
         2,
         7,
     );
@@ -3284,7 +3284,7 @@ fn patterns_are_checked_against_the_value() {
     );
     assert_error(
         "match 3.0:\n    case n:\n        print(n)\n",
-        "'match' needs an enum, option, int, str, or bool value, found float",
+        "'match' needs an enum, option, int, str, bool, or trait value, found float",
         1,
         7,
     );
@@ -4965,9 +4965,8 @@ fn an_impl_block_of_a_trait_defines_its_methods() {
 #[test]
 fn traits_are_named_only_as_bounds() {
     assert_error(
-        &format!("{SHAPES}fn f(x: Shape) -> float:\n    ret 1.0\n"),
-        "'Shape' is a trait, not a type; to take any type that implements it, write a type \
-         parameter, as in 'fn f[T: Shape](x: T)'",
+        &format!("{SHAPES}fn f(x: Shape[int]) -> float:\n    ret 1.0\n"),
+        "'Shape' takes no types",
         22,
         9,
     );
@@ -6792,4 +6791,294 @@ fn a_global_named_like_a_prelude_enum_leaves_its_patterns_alone() {
     // the builtin `net` module matches results too
     let source = "use net\n\nresult = net.connect(\"localhost\", 8080)\nprint(result.is_ok())\n";
     assert_eq!(linked_errors(source), []);
+}
+
+#[test]
+fn a_trait_is_a_type_of_values_of_any_type_that_implements_it() {
+    let source = format!(
+        "{SHAPES}fn sum(xs: list[Shape]) -> float:\n    t = 0.0\n    for x in xs:\n        \
+         t += x.area() + x.twice()\n    ret t\n\
+         print(sum([Shape(Circle(r=1.0)), Square(s=2.0)]))\n"
+    );
+    assert_eq!(errors(&source), []);
+}
+
+#[test]
+fn a_value_becomes_a_trait_value_where_one_is_expected() {
+    let sites = [
+        // an argument, and a list literal pinned by its parameter
+        "fn f(x: Shape) -> float:\n    ret x.area()\nprint(f(Circle(r=1.0)))\n",
+        "fn f(xs: list[Shape]) -> int:\n    ret xs.len()\nprint(f([Circle(r=1.0), Square(s=1.0)]))\n",
+        // a ret
+        "fn f(b: bool) -> Shape:\n    if b:\n        ret Circle(r=1.0)\n    ret Square(s=1.0)\n\
+         print(f(true).area())\n",
+        // a struct's field, and a list literal pinned by it
+        "struct Scene:\n    main: Shape\n    rest: list[Shape]\n\
+         s = Scene(main=Circle(r=1.0), rest=[Square(s=1.0), Circle(r=2.0)])\nprint(s.main.area())\n",
+        // a list pinned by its first value, then append and element and field assignment
+        "xs = [Shape(Circle(r=1.0)), Square(s=1.0)]\nxs.append(Circle(r=2.0))\n\
+         xs[0] = Square(s=3.0)\nprint(xs[0].area())\n",
+        "struct Scene:\n    main: Shape\ns = Scene(main=Circle(r=1.0))\ns.main = Square(s=1.0)\n\
+         print(s.main.area())\n",
+        // a name that holds a trait value already
+        "s = Shape(Circle(r=1.0))\ns = Square(s=1.0)\nprint(s.area())\n",
+        // a map's values
+        "m = {\"a\": Shape(Circle(r=1.0)), \"b\": Square(s=1.0)}\nm[\"c\"] = Circle(r=3.0)\n\
+         print(m[\"c\"].area())\n",
+    ];
+    for site in sites {
+        assert_eq!(errors(&format!("{SHAPES}{site}")), [], "{site}");
+    }
+    let source = format!("{SHAPES}one = Shape(Circle(r=1.0))\nmany = [one]\n");
+    assert_eq!(type_of_symbol(&source, "one"), "Shape");
+    assert_eq!(type_of_symbol(&source, "many"), "list[Shape]");
+}
+
+#[test]
+fn a_coercion_is_recorded_with_the_type_it_comes_from() {
+    let source =
+        format!("{SHAPES}fn f(x: Shape) -> float:\n    ret x.area()\nprint(f(Circle(r=1.0)))\n");
+    let analysis = analyze_source(&source);
+    assert_eq!(analysis.diagnostics, []);
+    let coercions: Vec<(String, String)> = analysis
+        .coercions
+        .values()
+        .map(|c| (c.trait_.clone(), c.source.to_string()))
+        .collect();
+    assert_eq!(coercions, [("Shape".to_string(), "Circle".to_string())]);
+}
+
+#[test]
+fn only_a_type_that_implements_the_trait_becomes_its_value() {
+    assert_error(
+        &format!(
+            "{SHAPES}struct Point:\n    x: float\nfn f(x: Shape):\n    print(x)\nf(Point(x=1.0))\n"
+        ),
+        "'Point' does not implement 'Shape', so it cannot be a Shape",
+        26,
+        3,
+    );
+    assert_error(
+        &format!("{SHAPES}fn f(x: Shape):\n    print(x)\nf(1)\n"),
+        "'int' does not implement 'Shape', so it cannot be a Shape",
+        24,
+        3,
+    );
+}
+
+#[test]
+fn values_of_several_types_need_a_trait_value_first() {
+    let source = format!("{SHAPES}xs = [Circle(r=1.0), Square(s=1.0)]\n");
+    assert_error(&source, "expected Circle, found Square", 22, 22);
+    assert!(
+        rendered(&source).contains(
+            "help: to make a list of several types, write the trait around the first value, \
+             as 'Shape(...)'"
+        ),
+        "{}",
+        rendered(&source)
+    );
+    let source =
+        format!("{SHAPES}fn f(xs: list[Shape]):\n    print(xs)\nys = [Circle(r=1.0)]\nf(ys)\n");
+    assert_error(&source, "expected list[Shape], found list[Circle]", 25, 3);
+}
+
+#[test]
+fn a_trait_with_a_method_that_needs_its_type_is_no_type_of_values() {
+    let cases = [
+        (
+            "fn f(x: eq):\n    print(x)\n",
+            "'eq' cannot be a type of values, since its method 'eq' takes another 'Self'",
+        ),
+        (
+            "trait Make:\n    fn make(self) -> Self\nfn f(x: Make):\n    print(x)\n",
+            "'Make' cannot be a type of values, since its method 'make' returns 'Self'",
+        ),
+        (
+            "trait Wrap:\n    fn wrap[U](self, u: U) -> U\nfn f(x: Wrap):\n    print(x)\n",
+            "'Wrap' cannot be a type of values, since its method 'wrap' has type parameters of \
+             its own",
+        ),
+        (
+            "fn f(x: add[int]):\n    print(x)\n",
+            "a trait with type parameters, as 'add', cannot be a type of values yet",
+        ),
+    ];
+    for (source, message) in cases {
+        let found = errors(source);
+        assert_eq!(found.len(), 1, "{source}: {found:?}");
+        assert_eq!(found[0].0, message, "{source}");
+    }
+}
+
+#[test]
+fn trait_values_print_but_never_compare_or_key_a_map() {
+    let base = format!("{SHAPES}a = Shape(Circle(r=1.0))\nb = Shape(Square(s=1.0))\n");
+    assert_eq!(
+        errors(&format!("{base}print(a, \"{{b}}\", str(a), a.display())\n")),
+        []
+    );
+    let found = errors(&format!("{base}print(a == b)\n"));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert!(found[0].0.contains("cannot compare Shape"), "{found:?}");
+    let found = errors(&format!("{base}m = {{a: 1}}\n"));
+    assert_eq!(found.len(), 1, "{found:?}");
+}
+
+#[test]
+fn a_trait_value_holds_neither_a_function_nor_a_handle_nor_too_many_values() {
+    let found = errors("fn f(x: display):\n    print(x)\nf(|a: int| a)\n");
+    assert_eq!(
+        found,
+        [(
+            "a trait value cannot hold fn(int) -> int yet, since it holds a function".to_string(),
+            3,
+            3
+        )]
+    );
+    let fields: String = (0..33).map(|i| format!("    f{i}: int\n")).collect();
+    let values: Vec<String> = (0..33).map(|i| format!("f{i}=0")).collect();
+    let source = format!(
+        "struct Wide:\n{fields}fn f(x: display):\n    print(x)\nf(Wide({}))\n",
+        values.join(", ")
+    );
+    let found = errors(&source);
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        found[0].0,
+        "a trait value holds at most 32 values, but a Wide is 33"
+    );
+}
+
+#[test]
+fn a_trait_value_satisfies_its_traits_bound() {
+    let source = format!(
+        "{SHAPES}xs = [Shape(Circle(r=1.0)), Square(s=1.0)]\nprint(total(xs))\n\
+         fn show[T: display](x: T):\n    print(x)\nshow(xs[0])\n"
+    );
+    assert_eq!(errors(&source), []);
+}
+
+#[test]
+fn a_method_that_changes_self_changes_a_trait_value_in_place() {
+    let source = "trait Grows:\n    fn grow(self, k: float):\n        self = self\n    \
+                  fn size(self) -> float\n\
+                  struct Plant:\n    h: float\n\
+                  impl Grows for Plant:\n    fn grow(self, k: float):\n        self.h *= k\n    \
+                  fn size(self) -> float:\n        ret self.h\n\
+                  xs = [Grows(Plant(h=1.0))]\nxs[0].grow(2.0)\np = xs[0]\np.grow(3.0)\n\
+                  print(p.size(), xs[0].size())\n";
+    let analysis = analyze_source(source);
+    assert_eq!(analysis.diagnostics, []);
+    let changing = analysis
+        .methods
+        .values()
+        .filter(|m| m.function == "Grows.grow" && m.changes)
+        .count();
+    assert_eq!(changing, 2);
+}
+
+#[test]
+fn a_call_on_a_trait_value_needs_one_of_its_methods() {
+    let found = errors(&format!(
+        "{SHAPES}s = Shape(Circle(r=1.0))\nprint(s.aera())\n"
+    ));
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].0, "'Shape' has no method 'aera'");
+}
+
+#[test]
+fn a_match_tests_the_type_a_trait_value_holds() {
+    // SHAPES is 21 lines, so the subject is on line 22
+    let source = |cases: &str| {
+        format!(
+            "{SHAPES}struct Point:\n    x: float\nstruct Box[T]:\n    v: T\nx = Shape(Circle(r=1.0))\nmatch x:\n{cases}"
+        )
+    };
+    assert_eq!(
+        errors(&source(
+            "    case Circle() as c:\n        print(c.r)\n    case Square(s=_) as q:\n        print(q.s)\n    \
+             case other:\n        print(other.area())\n"
+        )),
+        []
+    );
+    assert_eq!(
+        errors(&source(
+            "    case Square(s) | Circle(r=s):\n        print(s)\n    case _:\n        print(0)\n"
+        )),
+        []
+    );
+    // a trait value may hold a type no program has written yet, so a catch-all is required
+    assert_eq!(
+        errors(&source(
+            "    case Circle(r):\n        print(r)\n    case Square(s):\n        print(s)\n"
+        )),
+        [(
+            "'match' does not cover every value; add 'case _:'".to_string(),
+            27,
+            7
+        )]
+    );
+    assert_eq!(
+        warnings(&source(
+            "    case Circle():\n        print(1)\n    case Circle(r):\n        print(r)\n    case _:\n        \
+             print(0)\n"
+        )),
+        [(
+            "this case never runs, since the cases before it match every value it would"
+                .to_string(),
+            30,
+            10
+        )]
+    );
+    assert_eq!(
+        errors(&source(
+            "    case Point(x):\n        print(x)\n    case _:\n        print(0)\n"
+        )),
+        [(
+            "'Point' does not implement 'Shape', so a Shape never holds one".to_string(),
+            28,
+            10
+        )]
+    );
+    assert_eq!(
+        errors(&source(
+            "    case int(n):\n        print(n)\n    case _:\n        print(0)\n"
+        )),
+        [(
+            "'int' does not implement 'Shape', so a Shape never holds one".to_string(),
+            28,
+            10
+        )]
+    );
+    assert_eq!(
+        errors(&source(
+            "    case Box(v=_):\n        print(1)\n    case _:\n        print(0)\n"
+        )),
+        [(
+            "a pattern cannot test for the generic struct 'Box' yet".to_string(),
+            28,
+            10
+        )]
+    );
+    assert_eq!(
+        errors(&source(
+            "    case Circle(side):\n        print(side)\n    case _:\n        print(0)\n"
+        )),
+        [(
+            "'Circle' has no field 'side'; write 'r=side' to bind field r to side".to_string(),
+            28,
+            17
+        )]
+    );
+}
+
+#[test]
+fn an_as_pattern_binds_the_narrowed_value() {
+    let source = format!(
+        "{SHAPES}x = Shape(Circle(r=1.0))\nmatch x:\n    case Circle() as c:\n        print(c.r)\n    \
+         case some_shape:\n        print(some_shape.area())\n"
+    );
+    assert_eq!(type_of_symbol(&source, "c"), "Circle");
+    assert_eq!(type_of_symbol(&source, "some_shape"), "Shape");
 }

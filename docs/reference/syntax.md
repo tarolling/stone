@@ -328,8 +328,12 @@ equal to it, or patterns joined by `|`, which matches what any of them does, as 
 `some(0 | 1)`, each binding the same names. A named variant's pattern gives its values by name,
 `Shape.Rect(w=0.0)`, where a field left out matches anything and a name alone, as `w` in
 `Shape.Rect(w, h=0.0)`, is short for `w=w`. `some(p)` and `none` are the patterns of an option,
-and `ok(p)` and `err(p)` those of a result. `match` takes an enum, an int, a string, or a bool,
-and the cases must cover every value. See [Types](types.md#enums).
+and `ok(p)` and `err(p)` those of a result. On a trait value, a struct's name with its fields'
+patterns by name, as `Circle(r=0.0)` or `Circle()`, matches a value of that struct, and a builtin
+type's name, as `int(n)`, one of that type. `p as name` matches what `p` does and binds the whole
+value to `name`, as `case Circle() as c:`. `match` takes an enum, an int, a string, a bool, or a
+trait value, and the cases must cover every value, which for a trait value takes a case that
+matches anything. See [Types](types.md#enums).
 
 ## Structs
 

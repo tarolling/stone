@@ -12,6 +12,19 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Trait values: a trait's name is a type whose values are values of any type that implements
+  it, as `dyn Shape` is in Rust, so `list[Shape]` holds circles and squares together. A value
+  becomes one wherever one is expected (an argument, a `ret`, a field, an element, `append`, a
+  literal whose elements a type or an earlier element makes trait values), or with `Shape(c)`.
+  Calls look up the method in a table of the value's type, methods that change `self` change
+  it in place, trait values print as what they hold, and a list of them satisfies their trait's
+  bound. A trait whose methods need another `Self` (`eq`, `ord`, the operator traits) or that
+  takes type parameters is not a type of values (error `E0049`).
+- `match` on a trait value tests the type it holds, with patterns like Python's class patterns:
+  `case Circle(r):` binds a field, `case Circle(r=0.0):` tests one, `case Circle():` tests the
+  type, and `case int(n):` binds a builtin type's value. `p as name` binds the whole value a
+  pattern matched, as in `case Circle() as c:`, in any match. A match on a trait value needs a
+  case that matches anything.
 - `stone init [PATH]` starts a project: a `stone.toml` naming the package (after the directory,
   or `--name`), a `main.stn` with a function, a print, and a test block, and a `.gitignore` of
   `build/`, made a git repository unless it is in one already or `--no-git` is given. `--lib`

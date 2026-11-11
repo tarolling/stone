@@ -1405,3 +1405,54 @@ version = "0.1.0"
 pub fn area(r: float) -> float:
     ret 3.14 * r * r
 ```
+
+(e0049)=
+## E0049: a value that cannot be a trait value
+
+A trait's name is a type of values of any type that implements the trait, as `list[Shape]`
+holds circles and squares alike, each called through a table of its type's methods. That table
+can only call a method whose types are the same for every type: one that takes `self` first,
+never takes or returns another `Self`, and has no type parameters of its own, of a trait that has
+none either. A trait such as `eq`, whose `eq` takes another `Self`, can be a bound, as in
+`fn f[T: eq](a: T, b: T)`, but not a type of values.
+
+A trait value also holds at most 32 values, counting each field of a struct, and cannot hold a
+socket, a listener, or a function yet.
+
+This program fails with E0049:
+
+```stone
+trait Grows:
+    fn bigger(self, other: Self) -> bool
+
+struct Plant:
+    height: float
+
+impl Grows for Plant:
+    fn bigger(self, other: Self) -> bool:
+        ret self.height > other.height
+
+fn tallest(xs: list[Grows]) -> int:
+    ret xs.len()
+
+print(tallest([Plant(height=1.0)]))
+```
+
+This one is fixed:
+
+```stone
+trait Grows:
+    fn bigger(self, other: Self) -> bool
+
+struct Plant:
+    height: float
+
+impl Grows for Plant:
+    fn bigger(self, other: Self) -> bool:
+        ret self.height > other.height
+
+fn tallest[T: Grows](xs: list[T]) -> int:
+    ret xs.len()
+
+print(tallest([Plant(height=1.0)]))
+```

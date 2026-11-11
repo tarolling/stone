@@ -54,8 +54,9 @@ What stone already infers:
   calls it directly, so passing functions costs nothing over writing the loop by hand.
 - **Which method a bound calls.** A trait lists methods that types implement, and a bound such
   as `fn total[T: Shape](xs: list[T])` lets a generic function call them. Each copy of the
-  function calls the method of its own type directly, so there is no `dyn` to write and no
-  lookup while the program runs. Whether a trait's method changes `self` is decided by the
+  function calls the method of its own type directly, with no lookup while the program runs,
+  and a list of several types holds trait values, `list[Shape]`, which values become where one
+  is expected, so there is no `dyn` or `Box` to write. Whether a trait's method changes `self` is decided by the
   trait, from its default body, so no `mut` marks it either. Even `==` and `<` are the prelude's
   traits `eq` and `ord`, which a struct can implement to compare its own way, printing is its
   trait `display`, `+` and the other arithmetic operators are its generic traits `add[R]`,
@@ -261,9 +262,13 @@ direct call of its impl, or the builtin conversion's own instructions, in each c
 interpreter, which makes no copies, carries each generic call's type arguments with it to pick
 the same impl. An operator on a struct is a direct call of its trait's impl, and the same
 operator through a bound, as `a + b` under `[T: add[T]]`, is the number's own instruction in
-the copy for `int`. A trait is not yet a type of
-values, as `dyn Shape` is in Rust, so a list holds values of one type; a list of shapes of
-several types would need its values boxed with a table of their methods.
+the copy for `int`. A trait is also a type of values, as `dyn Shape` is in Rust but with
+nothing to write: a value becomes a `Shape` wherever one is expected, and is then one counted
+object holding the value and the address of its type's table of methods, a table of jumps in
+the code so no executable needs its data relocated, and a call through it is an indirect call
+of the table's entry. A method that changes `self` through one makes a new object for now,
+where a uniquely held one could change in place, and `match` finds the type back by comparing
+the table's address.
 A function value is the address of its function, so a call through one is an indirect call,
 but a call that passes a function by its name, as `xs.map(double)` does, compiles to a copy of
 the callee that calls that function directly, as a copy of a generic function does its bound's

@@ -1,0 +1,22 @@
+// a runtime error in a method called through a trait value shows the calls that led to it
+
+trait Shape:
+    fn area(self) -> float
+    fn half(self) -> float:
+        ret self.area() / 2.0
+
+struct Poly:
+    sides: list[float]
+
+impl Shape for Poly:
+    fn area(self) -> float:
+        ret self.sides[0] * self.sides[1]
+
+fn halves(shapes: list[Shape]) -> list[float]:
+    out = []
+    for s in shapes:
+        out.append(s.half())
+    ret out
+
+print(halves([Poly(sides=[2.0, 3.0])]))
+print(halves([Poly(sides=[2.0])]))

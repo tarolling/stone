@@ -773,7 +773,7 @@ impl Parser {
     /// match_stmt:
     ///     | 'match' expression ':' NEWLINE INDENT case_block+ DEDENT
     /// case_block:
-    ///     | 'case' pattern ':' block
+    ///     | 'case' as_pattern ':' block
     /// ```
     pub(super) fn parse_match_stmt(&mut self) -> Result<Box<Stmt>, ParserError> {
         let mark = self.pos;
@@ -803,7 +803,7 @@ impl Parser {
         loop {
             let mark = self.pos;
             if self.expect(TokenType::Keyword("case")).is_some()
-                && let Ok(pattern) = self.parse_or_pattern()
+                && let Ok(pattern) = self.parse_as_pattern()
                 && self.expect_block_start().is_some()
                 && let Ok(body) = self.nested(Self::parse_block)
             {
@@ -826,7 +826,7 @@ impl Parser {
     /// ```text
     /// pattern:
     ///     | 'none'
-    ///     | NAME ('.' NAME)* ['(' ','.pattern_field+ [','] ')']
+    ///     | NAME ('.' NAME)* ['(' [','.pattern_field+ [',']] ')']
     ///     | literal_pattern
     /// ```
     pub(super) fn parse_pattern(&mut self) -> Result<Pattern, ParserError> {
@@ -859,9 +859,14 @@ impl Parser {
             }
             let called = self.expect(TokenType::LParen).is_some();
             let fields = if called {
-                match self.parse_patterns() {
-                    Some(fields) if self.expect(TokenType::RParen).is_some() => Some(fields),
-                    _ => None,
+                // a struct's pattern may test its type alone, as `Circle()`
+                if self.expect(TokenType::RParen).is_some() {
+                    Some(vec![])
+                } else {
+                    match self.parse_patterns() {
+                        Some(fields) if self.expect(TokenType::RParen).is_some() => Some(fields),
+                        _ => None,
+                    }
                 }
             } else {
                 Some(vec![])
@@ -949,7 +954,7 @@ impl Parser {
         {
             let span = self.peek().span;
             self.pos += 2;
-            if let Ok(pattern) = self.parse_or_pattern() {
+            if let Ok(pattern) = self.parse_as_pattern() {
                 return Ok(PatternField {
                     name: Some((name, span)),
                     pattern,
@@ -958,7 +963,34 @@ impl Parser {
             self.pos = mark;
             return Err(self.error_here("parse_pattern_field"));
         }
-        self.parse_or_pattern().map(PatternField::from)
+        self.parse_as_pattern().map(PatternField::from)
+    }
+
+    /// Parses a pattern that may bind what it matches to a name after `as`, as
+    /// `Circle() as c`, which matches a circle and binds it as `c`.
+    ///
+    /// ```text
+    /// as_pattern:
+    ///     | or_pattern ['as' NAME]
+    /// ```
+    pub(super) fn parse_as_pattern(&mut self) -> Result<Pattern, ParserError> {
+        let mark = self.pos;
+        let pattern = self.parse_or_pattern()?;
+        if self.expect(TokenType::Keyword("as")).is_none() {
+            return Ok(pattern);
+        }
+        let Some((name, name_span)) = self.expect_name("a name to bind", true) else {
+            self.pos = mark;
+            return Err(self.error_here("parse_as_pattern"));
+        };
+        Ok(Pattern {
+            kind: PatternKind::As {
+                pattern: Box::new(pattern),
+                name,
+                name_span,
+            },
+            span: self.span_from(mark),
+        })
     }
 
     /// Parses a pattern and any alternatives after it, each after a `|`, as `1 | 2` or

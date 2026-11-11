@@ -213,7 +213,10 @@ impl RcKind {
             Type::List(_) | Type::Map(..) => Some(RcKind::List),
             // a handle is laid out as an enum value whose tag says what it is
             // a function value is laid out as an enum value whose tag is its code's address
-            Type::Enum { .. } | Type::Handle(_) | Type::Function { .. } => Some(RcKind::Enum),
+            // and a trait value as one whose tag is its type's table of methods
+            Type::Enum { .. } | Type::Handle(_) | Type::Function { .. } | Type::Trait(_) => {
+                Some(RcKind::Enum)
+            }
             _ => None,
         }
     }
@@ -965,6 +968,9 @@ pub struct Program {
     pub globals: Vec<String>,
     /// Each piece of arithmetic on lists a GPU could compute, as lowering met it.
     pub device_kernels: Vec<DeviceKernel>,
+    /// The table of methods of each type a trait value holds: its label, and the label of each
+    /// entry, which the table jumps to, entries 8 bytes apart.
+    pub tables: Vec<(String, Vec<String>)>,
 }
 
 /// Arithmetic on lists that a GPU could compute, one element per thread, which

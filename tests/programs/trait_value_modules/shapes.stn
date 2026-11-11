@@ -1,0 +1,36 @@
+// a trait and its types in a library, used as values from another file
+
+pub trait Shape:
+    fn area(self) -> float
+
+pub struct Circle:
+    r: float
+
+pub struct Square:
+    side: float
+
+impl Shape for Circle:
+    fn area(self) -> float:
+        ret 3.0 * self.r * self.r
+
+impl Shape for Square:
+    fn area(self) -> float:
+        ret self.side * self.side
+
+pub fn total(xs: list[Shape]) -> float:
+    t = 0.0
+    for x in xs:
+        t += x.area()
+    ret t
+
+pub fn name(s: Shape) -> str:
+    match s:
+        case Circle(r) as c:
+            ret "circle {r} {c.area()}"
+        case Square():
+            ret "square"
+        case _:
+            ret "other"
+
+pub fn unit() -> Shape:
+    ret Square(side=1.0)

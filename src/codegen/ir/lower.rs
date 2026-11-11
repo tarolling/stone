@@ -43,9 +43,9 @@ use crate::ast::{
     PatternField, PatternKind, Stmt, StmtKind, UnaryOp, constant_int, is_lambda, is_test,
 };
 use crate::checker::{
-    Analysis, Conversion, Converter, DISPLAY, EQ, Enums, Instance, Method, Methods,
-    OPERATOR_TRAITS, OPTION, ORD, ORDERING, RESULT, Step, Structs, SymbolKind, Type,
-    collect_assigned, collect_changed, may_name_enum, may_name_struct, place, place_root,
+    Analysis, Coercion, Conversion, Converter, DISPLAY, EQ, Enums, Instance, Method, Methods,
+    OPERATOR_TRAITS, OPTION, ORD, ORDERING, RESULT, Step, Structs, SymbolKind, TraitValueMethod,
+    Type, collect_assigned, collect_changed, may_name_enum, may_name_struct, place, place_root,
     place_spans, range_args, struct_display, trait_operator, type_text, variant_display, variants,
 };
 use crate::codegen::Os;
@@ -122,6 +122,9 @@ pub fn lower_with(
         indirect_calls,
         conversions,
         held_types,
+        coercions,
+        trait_values,
+        type_patterns,
         ..
     } = analysis;
     let layouts = Layouts::new(enums, structs, held_types);
@@ -222,6 +225,10 @@ pub fn lower_with(
         function_values,
         indirect_calls,
         conversions,
+        coercions,
+        trait_values,
+        type_patterns,
+        tables: RefCell::new(Vec::new()),
         helpers: RefCell::new(Vec::new()),
         requested: RefCell::new(Vec::new()),
         device_kernels: RefCell::new(Vec::new()),
@@ -370,14 +377,20 @@ pub fn lower_with(
                 params,
                 ret,
             } => lowerer.function_value_thunk(&function, &captures, &owned, &params, &ret)?,
+            Helper::TraitPrint { ty, nested } => lowerer.trait_printer(&ty, nested)?,
+            Helper::TraitMethod { trait_, ty, index } => {
+                lowerer.trait_method_thunk(&trait_, &ty, index)?
+            }
         });
     }
 
     let device_kernels = context.device_kernels.take();
+    let tables = context.tables.take();
     Ok(Program {
         functions,
         globals,
         device_kernels,
+        tables,
     })
 }
 
@@ -574,6 +587,16 @@ enum Helper {
         params: Vec<Type>,
         ret: Type,
     },
+    /// Prints the value of type `ty` a trait value holds, with strings quoted if `nested`,
+    /// taking the trait value and the print depth: an entry of the type's table.
+    TraitPrint { ty: Type, nested: bool },
+    /// Calls the method at `index` of `trait_` for the value of type `ty` a trait value holds,
+    /// taking the trait value and then the method's arguments: an entry of the type's table.
+    TraitMethod {
+        trait_: String,
+        ty: Type,
+        index: usize,
+    },
 }
 
 impl Helper {
@@ -592,6 +615,13 @@ impl Helper {
             Helper::Equal(ty @ Type::Map(..)) => format!("stone.eq_map.{}", mangle(ty)),
             Helper::Equal(ty) => format!("stone.eq_enum.{}", mangle(ty)),
             Helper::FunctionValue { function, .. } => format!("stone.fn_value.{function}"),
+            Helper::TraitPrint { ty, nested: false } => format!("stone.dyn_print.{}", mangle(ty)),
+            Helper::TraitPrint { ty, nested: true } => {
+                format!("stone.dyn_print_nested.{}", mangle(ty))
+            }
+            Helper::TraitMethod { trait_, ty, index } => {
+                format!("stone.dyn.{trait_}.{}.{index}", mangle(ty))
+            }
         }
     }
 }
@@ -634,9 +664,19 @@ fn mangle(ty: &Type) -> String {
             };
             format!("fn{}_{}_{ret}", params.len(), params.join("_"))
         }
+        Type::Trait(name) => format!("dyn_{name}"),
         other => other.to_string(),
     }
 }
+
+/// How many bytes apart the entries of a trait value's table are: each is a jump, padded to 8.
+pub const TABLE_ENTRY: usize = 8;
+/// The entry of a trait value's table that prints the value it holds.
+const TABLE_PRINT: usize = 0;
+/// The entry that prints it inside a list, with strings quoted.
+const TABLE_PRINT_NESTED: usize = 1;
+/// The entry of the trait's first method, after which the others follow in order.
+const TABLE_METHODS: usize = 2;
 
 /// What lowering each function shares.
 struct Context<'a> {
@@ -682,6 +722,15 @@ struct Context<'a> {
     indirect_calls: &'a HashSet<Span>,
     /// Every conversion `Type(value)`, by the call's span.
     conversions: &'a HashMap<Span, Conversion>,
+    /// Every value that becomes a trait value, by the value's span.
+    coercions: &'a HashMap<Span, Coercion>,
+    /// The type each pattern of a trait value tests for, by the pattern's span.
+    type_patterns: &'a HashMap<Span, Type>,
+    /// The methods of each trait that is a type of values, in the order of its tables.
+    trait_values: &'a HashMap<String, Vec<TraitValueMethod>>,
+    /// The table of methods of each type some trait value holds, in the order lowering first
+    /// needed it: its label and the label of each entry ([`Lowerer::table`]).
+    tables: RefCell<Vec<(String, Vec<String>)>>,
     /// Each copy of a function some code calls, in the order it was first called: one for each
     /// set of types a generic function is called with, and for each function value a function
     /// is passed for a parameter it never assigns.
@@ -860,6 +909,9 @@ struct Lowerer<'a> {
     /// The values of a flat enum a builtin lowered, with the span of the expression they are the
     /// value of, which [`Lowerer::flat_enum`] takes ([`Lowerer::flat_result`]).
     flat_out: Option<(Span, Vec<Operand>)>,
+    /// The expression whose value becomes a trait value, by its span, while its own value is
+    /// lowered, and that value's type, which the span has instead of the trait value's.
+    uncoerced: Option<(Span, Type)>,
 }
 
 impl<'a> Lowerer<'a> {
@@ -892,6 +944,7 @@ impl<'a> Lowerer<'a> {
             place_keys: Vec::new(),
             allow_flat: false,
             flat_out: None,
+            uncoerced: None,
             span: Span::default(),
             held: Vec::new(),
             print_depth: Operand::Imm(0),
@@ -947,7 +1000,25 @@ impl<'a> Lowerer<'a> {
     /// Returns the type the checker gave the expression at `span`, with the type parameters of
     /// this copy of a generic function filled in.
     fn span_type(&self, span: Span) -> Option<Type> {
+        if let Some((coerced, ty)) = &self.uncoerced
+            && *coerced == span
+        {
+            return Some(ty.clone());
+        }
         self.context.types.get(&span).map(|ty| self.fill(ty))
+    }
+
+    /// Returns the coercion that makes the value of `expr` a trait value, unless its own value
+    /// is being lowered.
+    fn coercion(&self, expr: &Expr) -> Option<&'a Coercion> {
+        if self
+            .uncoerced
+            .as_ref()
+            .is_some_and(|(span, _)| *span == expr.span)
+        {
+            return None;
+        }
+        self.context.coercions.get(&expr.span)
     }
 
     /// Returns the label to call for the stone function `name` at the call `call`: its own, or
@@ -2682,6 +2753,17 @@ impl<'a> Lowerer<'a> {
         ty: &Type,
         otherwise: BlockId,
     ) {
+        if let PatternKind::As { pattern, .. } = &pattern.kind {
+            return self.pattern_test(pattern, values, ty, otherwise);
+        }
+        if let Some(tested) = self.context.type_patterns.get(&pattern.span)
+            && let PatternKind::Variant { fields, .. } = &pattern.kind
+            && let Type::Trait(trait_) = ty
+        {
+            let tested = self.fill(tested);
+            self.type_test(trait_, &tested, fields, values[0], otherwise);
+            return;
+        }
         if let PatternKind::Literal(literal) = &pattern.kind {
             let value = values[0];
             let fits = self.new_block();
@@ -2743,14 +2825,7 @@ impl<'a> Lowerer<'a> {
             self.start(fits);
         }
         let fields = self.arranged(ty, tag, fields);
-        if !fields.iter().any(|field| {
-            field.is_some_and(|f| {
-                matches!(
-                    f.kind,
-                    PatternKind::Variant { .. } | PatternKind::Literal(_)
-                )
-            })
-        }) {
+        if !fields.iter().any(|field| field.is_some_and(tests)) {
             return;
         }
         let held = self.variant_values(ty, tag, values);
@@ -2758,12 +2833,87 @@ impl<'a> Lowerer<'a> {
         for (field, field_ty) in fields.into_iter().zip(&all[tag].1) {
             let width = self.leaves(field_ty).len();
             if let Some(field) = field
-                && let PatternKind::Variant { .. } | PatternKind::Literal(_) = field.kind
+                && tests(field)
             {
                 self.pattern_test(field, &held[slot..slot + width], field_ty, otherwise);
             }
             slot += width;
         }
+    }
+
+    /// Goes on if the trait value `value` of `trait_` holds a value of type `tested` whose values
+    /// match `fields`, a struct's by name or a builtin type's value itself, and jumps to
+    /// `otherwise` if not. A trait value's tag is the table of its value's type, so the test
+    /// compares it with the table of `tested`.
+    fn type_test(
+        &mut self,
+        trait_: &str,
+        tested: &Type,
+        fields: &[PatternField],
+        value: Operand,
+        otherwise: BlockId,
+    ) {
+        let Ok(label) = self.table(trait_, tested) else {
+            self.terminate(Terminator::Jump(otherwise));
+            return;
+        };
+        let found = self.fresh();
+        self.push(Inst::EnumTag { dst: found, value });
+        let expected = self.fresh();
+        self.push(Inst::FunctionAddress {
+            dst: expected,
+            label,
+        });
+        let fits = self.new_block();
+        self.terminate(Terminator::CmpBranch {
+            cond: Cond::Eq,
+            float: false,
+            lhs: Operand::Reg(found),
+            rhs: Operand::Reg(expected),
+            then: fits,
+            otherwise,
+        });
+        self.start(fits);
+        let parts = self.type_fields(tested, fields);
+        if !parts.iter().any(|(field, _, _)| field.is_some_and(tests)) {
+            return;
+        }
+        let held = self.held_values(value, tested);
+        for (field, range, field_ty) in parts {
+            if let Some(field) = field
+                && tests(field)
+            {
+                self.pattern_test(field, &held[range], &field_ty, otherwise);
+            }
+        }
+    }
+
+    /// Returns, for each value of a value of type `tested` that a type pattern's `fields` match,
+    /// in order, the pattern of it, if any, which of the value's values it is, and its type: a
+    /// struct's fields by name, or a builtin type's value itself.
+    fn type_fields<'p>(
+        &self,
+        tested: &Type,
+        fields: &'p [PatternField],
+    ) -> Vec<(Option<&'p Pattern>, std::ops::Range<usize>, Type)> {
+        let Type::Struct { .. } = tested else {
+            let field = fields.first().map(|f| &f.pattern);
+            return vec![(field, 0..1, tested.clone())];
+        };
+        let struct_fields = tested.struct_fields(self.context.structs);
+        let names: Vec<&str> = struct_fields
+            .iter()
+            .map(|(name, _)| name.as_str())
+            .collect();
+        let arranged = crate::ast::arrange_fields(fields, Some(&names));
+        let mut start = 0;
+        let mut out = vec![];
+        for (field, (_, field_ty)) in arranged.into_iter().zip(&struct_fields) {
+            let width = self.leaves(field_ty).len();
+            out.push((field, start..start + width, field_ty.clone()));
+            start += width;
+        }
+        out
     }
 
     /// Returns the patterns of `fields`, the values of a pattern of the variant `tag` of the enum
@@ -2802,6 +2952,43 @@ impl<'a> Lowerer<'a> {
                 let kinds = self.leaves(ty).iter().map(RcKind::of).collect();
                 out.push((name.clone(), values.to_vec(), kinds));
             }
+            PatternKind::As {
+                pattern: inner,
+                name,
+                ..
+            } => {
+                self.pattern_bindings(inner, values, ty, out);
+                // a pattern that tests a trait value's type binds the value it holds
+                match self.context.type_patterns.get(&inner.span) {
+                    Some(tested) => {
+                        let tested = self.fill(tested);
+                        let held = self.held_values(values[0], &tested);
+                        let kinds = self.leaves(&tested).iter().map(RcKind::of).collect();
+                        out.push((name.clone(), held, kinds));
+                    }
+                    None => {
+                        let kinds = self.leaves(ty).iter().map(RcKind::of).collect();
+                        out.push((name.clone(), values.to_vec(), kinds));
+                    }
+                }
+            }
+            PatternKind::Variant { fields, .. }
+                if self.context.type_patterns.contains_key(&pattern.span) =>
+            {
+                let tested = self.fill(&self.context.type_patterns[&pattern.span]);
+                let parts = self.type_fields(&tested, fields);
+                if !parts.iter().any(|(field, _, _)| field.is_some_and(binds)) {
+                    return;
+                }
+                let held = self.held_values(values[0], &tested);
+                for (field, range, field_ty) in parts {
+                    if let Some(field) = field
+                        && binds(field)
+                    {
+                        self.pattern_bindings(field, &held[range], &field_ty, out);
+                    }
+                }
+            }
             PatternKind::Variant { path, fields } => {
                 let all = variants(self.context.enums, ty);
                 let Some(tag) = path
@@ -2811,12 +2998,7 @@ impl<'a> Lowerer<'a> {
                     return;
                 };
                 let fields = self.arranged(ty, tag, fields);
-                let binds = |field: &Option<&Pattern>| {
-                    field.is_some_and(|f| {
-                        !matches!(f.kind, PatternKind::Wildcard | PatternKind::Literal(_))
-                    })
-                };
-                if !fields.iter().any(binds) {
+                if !fields.iter().any(|field| field.is_some_and(binds)) {
                     return;
                 }
                 let held = self.variant_values(ty, tag, values);
@@ -2824,7 +3006,7 @@ impl<'a> Lowerer<'a> {
                 for (field, field_ty) in fields.into_iter().zip(&all[tag].1) {
                     let width = self.leaves(field_ty).len();
                     if let Some(field) = field
-                        && binds(&Some(field))
+                        && binds(field)
                     {
                         self.pattern_bindings(field, &held[slot..slot + width], field_ty, out);
                     }
@@ -4745,6 +4927,11 @@ impl<'a> Lowerer<'a> {
     }
 
     fn expr_into_unspanned(&mut self, expr: &Expr, into: Option<VReg>) -> Result<Operand, String> {
+        if let Some(coercion) = self.coercion(expr) {
+            self.allow_flat = false;
+            let value = self.coerce(expr, coercion)?;
+            return Ok(self.finish(value, into));
+        }
         let allow_flat = std::mem::take(&mut self.allow_flat);
         if self.is_flat(expr) && !(allow_flat && self.is_flat_enum(expr)) {
             return Err(
@@ -7395,6 +7582,10 @@ impl<'a> Lowerer<'a> {
                 let ty = self
                     .span_type(receiver.span)
                     .ok_or("receiver has no type")?;
+                // a trait value calls the method of the type of what it holds, through its table
+                if let Type::Trait(trait_) = &ty {
+                    return self.trait_value_call(method, trait_, receiver, args, into, &kinds);
+                }
                 let trait_args: Vec<Type> =
                     method.trait_args.iter().map(|a| self.fill(a)).collect();
                 // a number, a string, or a type compared part by part has the builtin method
@@ -7797,6 +7988,383 @@ impl<'a> Lowerer<'a> {
         self.new_object(dst, Operand::Reg(code), values, &kinds);
         self.own(Operand::Reg(dst), Some(RcKind::Enum));
         Ok(self.finish(Operand::Reg(dst), into))
+    }
+
+    /// Lowers `expr`, whose value becomes a trait value as `coercion` says, to that trait value:
+    /// a new one holding the value, owned, or the value itself if it is a trait value already,
+    /// as a type parameter of this copy may be.
+    ///
+    /// For example, `Circle(r=1.0)` given to a parameter of type `Shape` is an object whose tag
+    /// is `stone.table.Shape.Circle` and whose one slot holds `1.0`.
+    fn coerce(&mut self, expr: &Expr, coercion: &Coercion) -> Result<Operand, String> {
+        let source = self.fill(&coercion.source);
+        let outer = self.uncoerced.replace((expr.span, source.clone()));
+        let values = self.expr_flat(expr);
+        self.uncoerced = outer;
+        let values = values?;
+        if let Type::Trait(_) = source {
+            return values
+                .first()
+                .copied()
+                .ok_or_else(|| "a trait value is one value".to_string());
+        }
+        self.trait_value(&coercion.trait_, &source, values)
+    }
+
+    /// Makes a trait value of `trait_` holding `values`, the values of a value of type `ty`, each
+    /// of which it keeps a reference to: a temporary's own, else a new one.
+    fn trait_value(
+        &mut self,
+        trait_: &str,
+        ty: &Type,
+        values: Vec<Operand>,
+    ) -> Result<Operand, String> {
+        let kinds: Vec<Option<RcKind>> = self.leaves(ty).iter().map(RcKind::of).collect();
+        if kinds.len() != values.len() {
+            return Err(format!(
+                "a value of {ty} is {} values, not {}",
+                kinds.len(),
+                values.len()
+            ));
+        }
+        let label = self.table(trait_, ty)?;
+        for (&value, &kind) in values.iter().zip(&kinds) {
+            self.take(value, kind);
+        }
+        let table = self.fresh();
+        self.push(Inst::FunctionAddress { dst: table, label });
+        let dst = self.fresh();
+        self.new_object(dst, Operand::Reg(table), values, &kinds);
+        self.own(Operand::Reg(dst), Some(RcKind::Enum));
+        Ok(Operand::Reg(dst))
+    }
+
+    /// Returns the label of the table of the methods of `trait_` for values of type `ty`, which
+    /// every trait value of `trait_` holding such a value has as its tag, asking for the table
+    /// and its entries to be made: a jump to each, [`TABLE_ENTRY`] bytes apart, the printers
+    /// first and then each method in the order of [`Analysis::trait_values`].
+    ///
+    /// For example, `Shape` for `Circle` is `stone.table.Shape.Circle`.
+    fn table(&self, trait_: &str, ty: &Type) -> Result<String, String> {
+        let label = format!("stone.table.{trait_}.{}", mangle(ty));
+        if self
+            .context
+            .tables
+            .borrow()
+            .iter()
+            .any(|(l, _)| *l == label)
+        {
+            return Ok(label);
+        }
+        let methods = self
+            .context
+            .trait_values
+            .get(trait_)
+            .ok_or_else(|| format!("'{trait_}' is no type of values"))?;
+        let mut entries = vec![
+            self.helper(Helper::TraitPrint {
+                ty: ty.clone(),
+                nested: false,
+            }),
+            self.helper(Helper::TraitPrint {
+                ty: ty.clone(),
+                nested: true,
+            }),
+        ];
+        for index in 0..methods.len() {
+            entries.push(self.helper(Helper::TraitMethod {
+                trait_: trait_.to_string(),
+                ty: ty.clone(),
+                index,
+            }));
+        }
+        self.context
+            .tables
+            .borrow_mut()
+            .push((label.clone(), entries));
+        Ok(label)
+    }
+
+    /// Returns a vreg holding the address of entry `entry` of the table of the trait value
+    /// `value`, which its tag is the address of.
+    fn table_entry(&mut self, value: Operand, entry: usize) -> VReg {
+        let table = self.fresh();
+        self.push(Inst::EnumTag { dst: table, value });
+        if entry == 0 {
+            return table;
+        }
+        let code = self.fresh();
+        self.push(Inst::Binary {
+            op: BinOp::Add,
+            dst: code,
+            lhs: Operand::Reg(table),
+            rhs: Operand::Imm((entry * TABLE_ENTRY) as i64),
+        });
+        code
+    }
+
+    /// Lowers the call `call` of `method` of `trait_` on the trait value `receiver`, which calls
+    /// the method of the type of the value it holds through its table, borrowing the receiver
+    /// and every argument, unless the method changes `self`: then the receiver moves into the
+    /// call, which gives back a new trait value for its place after its own result.
+    fn trait_value_call(
+        &mut self,
+        method: &Method,
+        trait_: &str,
+        receiver: &Expr,
+        args: &[Expr],
+        into: Option<VReg>,
+        kinds: &[Option<RcKind>],
+    ) -> Result<Vec<Operand>, String> {
+        let name = method.function.rsplit('.').next().unwrap_or_default();
+        let methods = self
+            .context
+            .trait_values
+            .get(trait_)
+            .ok_or_else(|| format!("'{trait_}' is no type of values"))?;
+        let index = methods
+            .iter()
+            .position(|m| m.name == name)
+            .ok_or_else(|| format!("'{trait_}' has no method '{name}'"))?;
+        let entry = TABLE_METHODS + index;
+        // nothing moves into a call that borrows, nor into a call among the arguments
+        self.movable.clear();
+        if !methods[index].method.changes {
+            let value = self.expr(receiver)?;
+            let mut values = vec![vec![value]];
+            for arg in args {
+                values.push(self.expr_flat(arg)?);
+            }
+            let code = self.table_entry(value, entry);
+            let mut dsts = vec![self.dst(into)];
+            dsts.extend((1..kinds.len()).map(|_| self.fresh()));
+            self.push(Inst::Call {
+                dsts: dsts.clone(),
+                callee: Callee::Value(Operand::Reg(code)),
+                args: values.concat(),
+            });
+            for value in values.into_iter().flatten() {
+                self.release_temp(value);
+            }
+            let results: Vec<Operand> = dsts.into_iter().map(Operand::Reg).collect();
+            for (&result, &kind) in results.iter().zip(kinds) {
+                self.own(result, kind);
+            }
+            return Ok(results);
+        }
+        let Some((root, _)) = place(receiver) else {
+            return Err("only a value in a variable can be changed".to_string());
+        };
+        let indexes = self.place_indexes(receiver)?;
+        let mut values = Vec::new();
+        for arg in args {
+            values.push(self.expr_flat(arg)?);
+        }
+        let location = self.locate(receiver, &indexes)?;
+        let this = self.location_values(&location);
+        let [value] = this.as_slice() else {
+            return Err("a trait value is one value".to_string());
+        };
+        let value = *value;
+        // a global that a method of any type may read keeps its own value while the call runs
+        let reads = |function: &str| {
+            self.context
+                .global_reads
+                .get(function)
+                .is_some_and(|reads| reads.contains(root))
+        };
+        let keep = self.name.is_none()
+            && (reads(&method.function)
+                || methods[index]
+                    .method
+                    .implementations
+                    .iter()
+                    .flatten()
+                    .any(|i| reads(&i.function)));
+        if keep {
+            self.push(Inst::Retain { src: value });
+        }
+        let code = self.table_entry(value, entry);
+        let mut dsts = vec![self.dst(into)];
+        dsts.extend((1..kinds.len() + 1).map(|_| self.fresh()));
+        let mut call_args = vec![value];
+        call_args.extend(values.iter().flatten());
+        self.push(Inst::Call {
+            dsts: dsts.clone(),
+            callee: Callee::Value(Operand::Reg(code)),
+            args: call_args,
+        });
+        for value in values.into_iter().flatten() {
+            self.release_temp(value);
+        }
+        let (results, changed) = dsts.split_at(kinds.len());
+        let changed: Vec<Operand> = changed.iter().map(|&reg| Operand::Reg(reg)).collect();
+        // moved, the old value is the call's, so only a kept one is released
+        let stored_kinds = match keep {
+            true => vec![Some(RcKind::Enum)],
+            false => vec![None],
+        };
+        self.store_location(location, &changed, &stored_kinds);
+        let results: Vec<Operand> = results.iter().map(|&reg| Operand::Reg(reg)).collect();
+        for (&result, &kind) in results.iter().zip(kinds) {
+            self.own(result, kind);
+        }
+        Ok(results)
+    }
+
+    /// Makes the entry of a table that [`Helper::TraitPrint`] describes, which takes a trait
+    /// value holding a value of type `ty` and the print depth, and prints the value, quoting
+    /// strings if `nested`, as `print` does inside a list.
+    fn trait_printer(mut self, ty: &Type, nested: bool) -> Result<Function, String> {
+        let entry = self.new_block();
+        self.start(entry);
+        let value = self.fresh();
+        let depth = self.fresh();
+        // a trait value is no level of its own, as in the interpreter
+        self.print_depth = Operand::Reg(depth);
+        let leaves = self.held_values(Operand::Reg(value), ty);
+        self.print_flat(ty, &leaves, nested);
+        self.terminate(Terminator::Return(vec![]));
+        Ok(Function {
+            name: self.name.clone(),
+            params: vec![value, depth],
+            blocks: self.layout(),
+            vreg_count: self.vreg_count,
+            helper: true,
+            inlined: Vec::new(),
+        })
+    }
+
+    /// Reads the values a trait value `value` holds, those of a value of type `ty`, borrowed.
+    fn held_values(&mut self, value: Operand, ty: &Type) -> Vec<Operand> {
+        (0..self.leaves(ty).len())
+            .map(|slot| {
+                let dst = self.fresh();
+                self.push(Inst::FieldGet { dst, value, slot });
+                Operand::Reg(dst)
+            })
+            .collect()
+    }
+
+    /// Makes the entry of a table that [`Helper::TraitMethod`] describes, which takes a trait
+    /// value holding a value of type `ty` and the method's arguments and calls the method of
+    /// `ty`: the copy of its function, or of the trait's default, or, for `display` of a type
+    /// without its own, the builtin. One that changes `self` takes the trait value, gives back
+    /// what the method returns and then a new trait value holding the changed value.
+    fn trait_method_thunk(
+        mut self,
+        trait_: &str,
+        ty: &Type,
+        index: usize,
+    ) -> Result<Function, String> {
+        let method = self
+            .context
+            .trait_values
+            .get(trait_)
+            .and_then(|methods| methods.get(index))
+            .ok_or_else(|| format!("'{trait_}' has no method {index}"))?;
+        let Some((function, copy)) = method.method.resolve(ty, &[], &[]) else {
+            if method.name != DISPLAY {
+                return Err(format!("{ty} does not implement '{trait_}'"));
+            }
+            // a type without its own `display` is written as `print` writes it
+            let entry = self.new_block();
+            self.start(entry);
+            let value = self.fresh();
+            let leaves = self.held_values(Operand::Reg(value), ty);
+            let text = self.display_values(ty, &leaves)?;
+            self.terminate(Terminator::Return(vec![text]));
+            return Ok(Function {
+                name: self.name.clone(),
+                params: vec![value],
+                blocks: self.layout(),
+                vreg_count: self.vreg_count,
+                helper: true,
+                inlined: Vec::new(),
+            });
+        };
+        let label = match copy.is_empty() {
+            true => function.clone(),
+            false => self.request(Instance {
+                function: function.clone(),
+                args: copy,
+            }),
+        };
+        let owned = self
+            .context
+            .owned_params
+            .get(&function)
+            .cloned()
+            .unwrap_or_default();
+        if !method.method.changes {
+            return self.function_value_thunk(
+                &label,
+                std::slice::from_ref(ty),
+                &owned,
+                &method.params,
+                &method.ret,
+            );
+        }
+        let entry = self.new_block();
+        self.start(entry);
+        let value = self.fresh();
+        let mut taken = vec![value];
+        let table = self.fresh();
+        self.push(Inst::EnumTag {
+            dst: table,
+            value: Operand::Reg(value),
+        });
+        // the method owns the value it changes, so it gets a reference to each of its values
+        // before the trait value, which this owns, goes
+        let kinds: Vec<Option<RcKind>> = self.leaves(ty).iter().map(RcKind::of).collect();
+        let mut args = self.held_values(Operand::Reg(value), ty);
+        for (&leaf, kind) in args.iter().zip(&kinds) {
+            if kind.is_some() {
+                self.push(Inst::Retain { src: leaf });
+            }
+        }
+        self.push(Inst::Release {
+            src: Operand::Reg(value),
+            kind: RcKind::Enum,
+        });
+        for (k, param) in method.params.iter().enumerate() {
+            let owns = owned.get(1 + k).copied().unwrap_or(false);
+            for leaf in self.leaves(param) {
+                let reg = self.fresh();
+                taken.push(reg);
+                if owns && RcKind::of(&leaf).is_some() {
+                    self.push(Inst::Retain {
+                        src: Operand::Reg(reg),
+                    });
+                }
+                args.push(Operand::Reg(reg));
+            }
+        }
+        let results: Vec<VReg> = self
+            .leaves(&method.ret)
+            .iter()
+            .map(|_| self.fresh())
+            .collect();
+        let changed: Vec<VReg> = kinds.iter().map(|_| self.fresh()).collect();
+        self.push(Inst::Call {
+            dsts: [results.clone(), changed.clone()].concat(),
+            callee: Callee::User(label),
+            args,
+        });
+        let dst = self.fresh();
+        let changed = changed.into_iter().map(Operand::Reg).collect();
+        self.new_object(dst, Operand::Reg(table), changed, &kinds);
+        let mut returned: Vec<Operand> = results.into_iter().map(Operand::Reg).collect();
+        returned.push(Operand::Reg(dst));
+        self.terminate(Terminator::Return(returned));
+        Ok(Function {
+            name: self.name.clone(),
+            params: taken,
+            blocks: self.layout(),
+            vreg_count: self.vreg_count,
+            helper: true,
+            inlined: Vec::new(),
+        })
     }
 
     /// Makes the function [`Helper::FunctionValue`] describes, which takes the function value
@@ -8310,6 +8878,7 @@ impl<'a> Lowerer<'a> {
         last_uses: &[String],
     ) {
         if kind.is_some()
+            && self.coercion(expr).is_none()
             && let ExprKind::Name { id, .. } = &expr.kind
             && last_uses.contains(id)
             && self.mark_moved(id)
@@ -8344,6 +8913,10 @@ impl<'a> Lowerer<'a> {
     /// For example, `(xs, f(), t)` with `t` a pair gives `xs`, nothing, `t.0`, and `t.1`.
     fn flat_sources(&self, expr: &Expr) -> Vec<Option<String>> {
         let unknown = || vec![None; self.type_of(expr).map_or(1, |ty| self.leaves(&ty).len())];
+        // a new trait value holds what it is made of
+        if self.coercion(expr).is_some() {
+            return vec![None];
+        }
         match &expr.kind {
             ExprKind::Name { id, .. } => self.leaf_names(id).into_iter().map(Some).collect(),
             ExprKind::Tuple { elts, .. } => {
@@ -8398,7 +8971,7 @@ impl<'a> Lowerer<'a> {
     /// For example, `(x, ("a", f()))` gives `x`'s vreg, the string's address, and the call's
     /// result.
     fn expr_flat(&mut self, expr: &Expr) -> Result<Vec<Operand>, String> {
-        if !self.is_flat(expr) {
+        if self.coercion(expr).is_some() || !self.is_flat(expr) {
             return Ok(vec![self.expr(expr)?]);
         }
         let outer = std::mem::replace(&mut self.span, expr.span);
@@ -9556,6 +10129,19 @@ impl<'a> Lowerer<'a> {
                 });
             }
             Type::Map(key, value) => self.print_entries(Some(key), value, values[0]),
+            // the table of the type of the value it holds writes it
+            Type::Trait(_) => {
+                let entry = match nested {
+                    true => TABLE_PRINT_NESTED,
+                    false => TABLE_PRINT,
+                };
+                let code = self.table_entry(values[0], entry);
+                self.push(Inst::Call {
+                    dsts: vec![],
+                    callee: Callee::Value(Operand::Reg(code)),
+                    args: vec![values[0], self.print_depth],
+                });
+            }
             // its own display says how it is written
             Type::Struct { .. } if self.implements(ty, DISPLAY) => {
                 let text = Operand::Reg(self.compare_call(ty, DISPLAY, values, &[]));
@@ -9738,6 +10324,14 @@ impl<'a> Lowerer<'a> {
         }
         self.own(text, kind);
         Ok(text)
+    }
+
+    /// Writes `values`, those of a value of type `ty`, into a new string as `print` writes them,
+    /// as the builtin `display` does, and returns the string, which the caller owns.
+    fn display_values(&mut self, ty: &Type, values: &[Operand]) -> Result<Operand, String> {
+        let outer = self.runtime_call("stone.text_begin", vec![], None);
+        self.print_flat(ty, values, false);
+        Ok(self.runtime_call("stone.text_end", vec![outer], None))
     }
 
     /// Lowers a string with values in it, such as `"x is {x}"`, which evaluates every value
@@ -10059,10 +10653,28 @@ fn holds_handle(
 /// any depth, which lowering prints as its type rather than with a runtime printer.
 fn holds_function(ty: &Type) -> bool {
     match ty {
-        Type::Function { .. } | Type::Handle(_) => true,
+        Type::Function { .. } | Type::Handle(_) | Type::Trait(_) => true,
         Type::List(elem) => holds_function(elem),
         _ => false,
     }
+}
+
+/// Returns whether `pattern` tests the value it matches, rather than matching any value: a
+/// variant, a literal, or either bound with `as`.
+fn tests(pattern: &Pattern) -> bool {
+    match &pattern.kind {
+        PatternKind::Variant { .. } | PatternKind::Literal(_) => true,
+        PatternKind::As { pattern, .. } => tests(pattern),
+        _ => false,
+    }
+}
+
+/// Returns whether `pattern` binds a name anywhere.
+fn binds(pattern: &Pattern) -> bool {
+    !matches!(
+        pattern.kind,
+        PatternKind::Wildcard | PatternKind::Literal(_)
+    )
 }
 
 /// Returns whether `target` is a variable or values of variables an assignment replaces as a

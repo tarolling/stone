@@ -2061,3 +2061,36 @@ fn appending_to_a_string_variable_moves_it_into_the_append() {
     let text = dump("fn f(s: str) -> str:\n    t = s + \"!\"\n    ret s + t\n");
     assert!(!text.contains("stone.str_append"), "{text}");
 }
+
+#[test]
+fn a_call_on_a_trait_value_goes_through_its_types_table() {
+    let source = "trait Shape:\n    fn area(self) -> float\nstruct Circle:\n    r: float\n\
+                  impl Shape for Circle:\n    fn area(self) -> float:\n        ret 3.0 * self.r\n\
+                  fn total(xs: list[Shape]) -> float:\n    t = 0.0\n    for x in xs:\n        \
+                  t += x.area()\n    ret t\nprint(total([Circle(r=1.0)]))\n";
+    let program = lower_source(source);
+    let ir: String = program.functions.iter().map(ToString::to_string).collect();
+    // boxing writes the table's address as the tag and the value's leaves as its slots
+    assert!(ir.contains("= fn_addr stone.table.Shape.Circle\n"), "{ir}");
+    assert!(ir.contains("call stone.enum_new(v"), "{ir}");
+    // a call reads the tag, steps to the method's entry past the two printing ones, and
+    // calls it with the value first
+    let total = program
+        .functions
+        .iter()
+        .find(|f| f.name.as_deref() == Some("total"))
+        .unwrap()
+        .to_string();
+    assert!(total.contains("= enum_tag "), "{total}");
+    assert!(total.contains(", 16\n"), "{total}");
+    assert!(total.contains("call value "), "{total}");
+    // the table's entries are the printing helpers and then the method's thunk
+    let table = &program.tables[0];
+    assert_eq!(table.0, "stone.table.Shape.Circle");
+    assert_eq!(table.1.len(), 3);
+    assert!(
+        table.1[2].starts_with("stone.dyn.Shape.Circle."),
+        "{:?}",
+        table.1
+    );
+}

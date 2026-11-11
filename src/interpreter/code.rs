@@ -152,6 +152,16 @@ pub(super) enum Pattern {
     Or(Vec<Pattern>),
     /// A pattern that matches nothing, such as a variant of an enum that does not exist.
     Never,
+    /// A trait value holding a value of the type with this key, a struct's linked name or a
+    /// builtin type's, with patterns for a struct's fields, in order, or for a builtin type's
+    /// value itself.
+    Type {
+        key: String,
+        fields: Vec<Pattern>,
+    },
+    /// A pattern that also binds the value it matches, the value a trait value holds if the
+    /// pattern tests its type.
+    As(Box<Pattern>, Var),
 }
 
 pub(super) struct Expr {
@@ -165,6 +175,9 @@ pub(super) enum ExprKind {
     /// A local read for the last time, taken from its slot rather than copied, as a closure
     /// takes what it captures there.
     Take(Var),
+    /// A value that becomes a trait value, with its own type, which may name the running copy's
+    /// type parameters.
+    Coerce(Box<Expr>, Type),
     /// A function named as a value, or a closure, which holds a copy of the value of each of
     /// `captures`, taken where it is made.
     Function {
@@ -614,6 +627,35 @@ impl<'r, 'out> Resolver<'r, 'out> {
             PatternKind::Or(alternatives) => {
                 Pattern::Or(alternatives.iter().map(|a| self.pattern(a)).collect())
             }
+            PatternKind::As { pattern, name, .. } => {
+                Pattern::As(Box::new(self.pattern(pattern)), self.var(name))
+            }
+            PatternKind::Variant { fields, .. }
+                if let Some(ty) = self.calls.type_patterns.get(&pattern.span) =>
+            {
+                let (key, names) = match ty {
+                    Type::Struct { name, .. } => {
+                        let names = self
+                            .interpreter
+                            .struct_ids
+                            .get(name)
+                            .map(|&id| self.interpreter.structs[id].fields.clone());
+                        (name.clone(), names)
+                    }
+                    other => (other.to_string(), None),
+                };
+                let fields = match names {
+                    Some(names) => ast::arrange_fields(fields, Some(&names))
+                        .into_iter()
+                        .map(|field| match field {
+                            Some(field) => self.pattern(field),
+                            None => Pattern::Wildcard,
+                        })
+                        .collect(),
+                    None => fields.iter().map(|f| self.pattern(&f.pattern)).collect(),
+                };
+                Pattern::Type { key, fields }
+            }
             PatternKind::Variant { path, fields } => match path.as_slice() {
                 [(enum_name, _), (variant, _)] => match self.interpreter.enum_ids.get(enum_name) {
                     Some(&id) => {
@@ -682,8 +724,21 @@ impl<'r, 'out> Resolver<'r, 'out> {
         self.expr_with(expr, None)
     }
 
-    /// Resolves `expr`, whose call at `top`'s span, if any, is its statement's top call.
+    /// Resolves `expr`, whose call at `top`'s span, if any, is its statement's top call, making
+    /// its value a trait value where the checker says it becomes one.
     fn expr_with(&mut self, expr: &ast::Expr, top: Option<&TopCall>) -> Expr {
+        let resolved = self.expr_unwrapped(expr, top);
+        match self.calls.coercions.get(&expr.span) {
+            Some(coercion) => Expr {
+                kind: ExprKind::Coerce(Box::new(resolved), coercion.source.clone()),
+                span: expr.span,
+            },
+            None => resolved,
+        }
+    }
+
+    /// Resolves `expr` as [`Resolver::expr_with`] does, as its own value.
+    fn expr_unwrapped(&mut self, expr: &ast::Expr, top: Option<&TopCall>) -> Expr {
         let kind = match &expr.kind {
             ast::ExprKind::Lambda { .. } => {
                 ExprKind::Fail("a lambda must be linked before it runs".into())

@@ -152,8 +152,12 @@ pub enum Encoded {
 pub trait Encoder {
     /// Returns what starts a comment, such as `#` on x86-64.
     fn comment(&self) -> &'static str;
-    /// Returns the bytes that fill a gap in `.text` before an aligned label.
-    fn nop(&self) -> &'static [u8];
+    /// Returns the bytes that fill a gap of `size` bytes in `.text` before an aligned label, as
+    /// GNU as fills it, or `None` if no instructions fill it exactly.
+    ///
+    /// For example, `padding(3)` is `Some(vec![0x0f, 0x1f, 0x00])` on x86-64, one `nopl`, and
+    /// `None` on arm64, whose instructions are 4 bytes.
+    fn padding(&self, size: u64) -> Option<Vec<u8>>;
     /// Encodes one instruction, given its mnemonic and operands as written.
     ///
     /// For example, `instruction("ret", &[])` is `Encoded::Fixed(vec![0xc3], vec![])` on x86-64.
@@ -433,13 +437,10 @@ impl Assembler {
                         }
                     }
                     Item::Align(_) if section == Section::Text => {
-                        let nop = encoder.nop();
-                        if size % nop.len() as u64 != 0 {
+                        let Some(padding) = encoder.padding(size) else {
                             return Err(format!("{} is misaligned", section.name()));
-                        }
-                        for _ in 0..size / nop.len() as u64 {
-                            bytes.extend_from_slice(nop);
-                        }
+                        };
+                        bytes.extend_from_slice(&padding);
                     }
                     Item::Align(_) | Item::Zero(_) => {
                         if section != Section::Bss {
@@ -808,7 +809,35 @@ mod tests {
                 .unwrap();
         assert_eq!(object.data, [0, 0, 0, 0]);
         assert_eq!(object.symbols[0].offset, 4);
-        assert_eq!(object.text, [0xc3, 0x90, 0x90, 0x90]);
+        // GNU as fills a gap in code with its longest no-ops, here `nopl [rax]`
+        assert_eq!(object.text, [0xc3, 0x0f, 0x1f, 0x00]);
+    }
+
+    #[test]
+    fn code_is_padded_with_the_no_ops_gnu_as_writes() {
+        let padding = |size| x64::X64Encoder.padding(size).unwrap();
+        assert!(padding(0).is_empty());
+        assert_eq!(padding(1), [0x90]);
+        assert_eq!(padding(2), [0x66, 0x90]);
+        assert_eq!(padding(6), [0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00]);
+        assert_eq!(
+            padding(11),
+            [
+                0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00
+            ]
+        );
+        // past 11 bytes, the longest no-op and then one for what is left
+        assert_eq!(
+            padding(14),
+            [
+                0x66, 0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00, 0x0f, 0x1f, 0x00
+            ]
+        );
+        assert_eq!(
+            arm64::Arm64Encoder.padding(8).unwrap(),
+            [0x1f, 0x20, 0x03, 0xd5].repeat(2)
+        );
+        assert_eq!(arm64::Arm64Encoder.padding(3), None);
     }
 
     #[test]

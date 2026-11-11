@@ -2801,3 +2801,35 @@ fn a_suggestion_is_a_quick_fix() {
     // nothing to fix away from the error
     assert_eq!(code_actions(&doc, Range::new(at(3, 1), at(3, 1))), []);
 }
+
+#[test]
+fn a_trait_value_hovers_as_its_trait_and_completes_its_methods() {
+    let source = format!("{TRAITS}v = Shape(q)\nshapes = [v]\nw = v.\n");
+    let doc = doc(&source);
+    assert_eq!(
+        hover_text(&doc, at(17, 1)).unwrap(),
+        "```stone\n(global) v: Shape\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(18, 1)).unwrap(),
+        "```stone\n(global) shapes: list[Shape]\n```"
+    );
+    let labels: Vec<String> = completion(&doc, at(19, 7), &MapSources::default())
+        .into_iter()
+        .map(|item| item.label)
+        .collect();
+    assert_eq!(labels, ["area", "half", "display"]);
+}
+
+#[test]
+fn completion_where_a_type_is_written_offers_traits_that_hold_values() {
+    let source = "trait Shape:\n    fn area(self) -> float\nfn f(x: ";
+    let labels = offered(source, at(3, 9));
+    for name in ["Shape", "display", "int"] {
+        assert!(labels.contains(&name.to_string()), "{labels:?}");
+    }
+    // the prelude's other traits compare or combine values, so none is a type
+    for name in ["eq", "ord", "add"] {
+        assert!(!labels.contains(&name.to_string()), "{labels:?}");
+    }
+}

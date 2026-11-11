@@ -1,0 +1,16 @@
+call_chain_trait_values.stn:13:29: error: list index out of range (index 1, length 1)
+   |
+13 |         ret self.sides[0] * self.sides[1]
+   |                             ^^^^^^^^^^^^^
+call_chain_trait_values.stn:6:13: called from here
+  |
+6 |         ret self.area() / 2.0
+  |             ^^^^^^^^^^^
+call_chain_trait_values.stn:18:20: called from here
+   |
+18 |         out.append(s.half())
+   |                    ^^^^^^^^
+call_chain_trait_values.stn:22:7: called from here
+   |
+22 | print(halves([Poly(sides=[2.0])]))
+   |       ^^^^^^^^^^^^^^^^^^^^^^^^^^^

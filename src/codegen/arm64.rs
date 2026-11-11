@@ -27,7 +27,7 @@ use crate::ast::Mod;
 use crate::codegen::context::{
     BYTES_ROUTINES, CallKind, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, REDUCE_PIO2,
     STRING_METHOD_ROUTINES, escape, function_statics, global_label, immortal_bytes,
-    immortal_string, variant_statics,
+    immortal_string, tables, variant_statics,
 };
 use crate::codegen::{AssemblyGenerator, Os, Subsystem, Target};
 use crate::diagnostic::{CALLED_FROM, MAX_FRAMES};
@@ -99,6 +99,8 @@ impl AssemblyGenerator for Arm64Generator {
         for function in std::mem::take(&mut self.ctx.program.functions) {
             self.emit_function(&function)?;
         }
+        let program_tables = std::mem::take(&mut self.ctx.program.tables);
+        tables(self, &program_tables, "b");
 
         builtins::start_runtime(self);
         self.emit_io_runtime();

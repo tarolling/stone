@@ -24,7 +24,7 @@ use crate::ast::Mod;
 use crate::codegen::context::{
     BYTES_ROUTINES, CallKind, Context, LIST_ROUTINES, MAP_ROUTINES, NET_ROUTINES, REDUCE_PIO2,
     STRING_METHOD_ROUTINES, escape, function_statics, global_label, immortal_bytes,
-    immortal_string, variant_statics,
+    immortal_string, tables, variant_statics,
 };
 use crate::codegen::x64::builtins::print;
 use crate::codegen::x64::system::{Sys, system_call};
@@ -95,6 +95,8 @@ impl AssemblyGenerator for X64Generator {
         for function in std::mem::take(&mut self.ctx.program.functions) {
             self.emit_function(&function)?;
         }
+        let program_tables = std::mem::take(&mut self.ctx.program.tables);
+        tables(self, &program_tables, "jmp");
 
         match self.target.os {
             Os::Windows => {

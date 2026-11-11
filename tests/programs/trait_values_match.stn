@@ -1,0 +1,87 @@
+// a match gets the type of the value a trait value holds back out
+
+trait Shape:
+    fn area(self) -> float
+
+struct Circle:
+    r: float
+
+struct Rect:
+    w: float
+    h: float
+
+struct Square:
+    side: int
+
+struct Group:
+    name: str
+    parts: list[Shape]
+
+impl Shape for Circle:
+    fn area(self) -> float:
+        ret 3.0 * self.r * self.r
+
+impl Shape for Rect:
+    fn area(self) -> float:
+        ret self.w * self.h
+
+impl Shape for Square:
+    fn area(self) -> float:
+        ret float(self.side * self.side)
+
+impl Shape for Group:
+    fn area(self) -> float:
+        t = 0.0
+        for p in self.parts:
+            t += p.area()
+        ret t
+
+impl Shape for int:
+    fn area(self) -> float:
+        ret float(self)
+
+impl Shape for str:
+    fn area(self) -> float:
+        ret float(self.len())
+
+fn describe(s: Shape) -> str:
+    match s:
+        case Square(side=0):
+            ret "a point"
+        case Square(side):
+            ret "a square of side {side}"
+        case Circle(r):
+            ret "a circle of radius {r}"
+        case Rect() as rect:
+            ret "a rectangle {rect.w} by {rect.h}"
+        case Group(name, parts) as group:
+            ret "{name}, {parts.len()} parts, area {group.area()}"
+        case int(0) | int(1):
+            ret "a small number"
+        case int(n):
+            ret "the number {n}"
+        case other:
+            ret "something of area {other.area()}: {other}"
+
+shapes = [Shape(Square(side=0)), Square(side=3), Circle(r=2.0), Rect(w=2.0, h=5.0), 1, 42, "text"]
+shapes.append(Group(name="pair", parts=[Circle(r=1.0), Rect(w=1.0, h=1.0)]))
+for s in shapes:
+    print(describe(s))
+
+maybe = some(Shape(Rect(w=1.0, h=2.0)))
+match maybe:
+    case some(Rect(w, h)):
+        print("some rect", w, h)
+    case some(_):
+        print("some other")
+    case none:
+        print("nothing")
+
+counts = {"circles": 0, "others": 0}
+for s in shapes:
+    match s:
+        case Circle():
+            counts["circles"] += 1
+        case _:
+            counts["others"] += 1
+print(counts)

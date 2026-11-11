@@ -110,7 +110,9 @@ impl Layouts {
     /// enum, or the copies.
     fn held_widths(&self, ty: &Type, how: Held) -> Vec<(usize, Vec<Type>)> {
         match how {
-            Held::Element | Held::Captures => vec![(self.leaves(ty).len(), vec![ty.clone()])],
+            Held::Element | Held::Captures | Held::TraitValue => {
+                vec![(self.leaves(ty).len(), vec![ty.clone()])]
+            }
             Held::Entry => vec![(1 + self.leaves(ty).len(), vec![ty.clone()])],
             Held::Variants => match *self.of(ty) {
                 EnumLayout::Boxed => variants(&self.enums, ty)

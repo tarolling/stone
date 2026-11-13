@@ -1,0 +1,55 @@
+// constants are worked out when the program is built, and read anywhere in their file
+use math
+
+const total = size * count
+const size = 1 << 10
+const count = 4
+const name = "stone"
+const greeting = name + "!"
+const magic = b"\x7fELF"
+const half = 0.5
+const turn = math.tau / 2.0
+const debug = false
+const limits = (3, -2, ("lo", 1.5))
+const top = limits[2][1]
+const modulus = 1_000_000_007
+const big = 9223372036854775807 + 1
+
+struct Box:
+    label: str
+    size: int
+
+fn wrap(n: int) -> int:
+    ret n % modulus
+
+fn scaled(x: float) -> float:
+    ret x * half
+
+fn tag() -> str:
+    ret name
+
+fn first() -> int:
+    ret limits[0]
+
+test "a test may read a constant":
+    assert wrap(modulus + 5) == 5
+
+print(total, size, count)
+print(greeting, name.len(), greeting[0])
+print(magic, magic[0])
+print(scaled(3.0), turn == math.pi, debug or count > 3)
+print(limits, top, first())
+print(wrap(modulus * 2 + 7), big)
+b = Box(label=tag(), size=size)
+print(b)
+words = [name, greeting]
+words.append(name)
+print(words)
+copy = name
+copy += "?"
+print(copy, name)
+lo, n, (word, x) = limits
+print(lo + n, word, x)
+for i in range(count):
+    if i == count - 1:
+        print("last", i)

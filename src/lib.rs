@@ -7,6 +7,7 @@
 pub mod ast;
 pub mod checker;
 pub mod codegen;
+pub mod constant;
 pub mod diagnostic;
 pub mod driver;
 pub mod explain;

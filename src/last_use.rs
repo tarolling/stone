@@ -420,6 +420,7 @@ pub(crate) fn stmt_names<'a>(stmt: &'a Stmt, out: &mut Names<'a>) {
         | StmtKind::TraitDef { .. }
         | StmtKind::Use { .. }
         | StmtKind::Test { .. }
+        | StmtKind::ConstDef { .. }
         | StmtKind::Break
         | StmtKind::Continue => {}
     }
@@ -747,6 +748,7 @@ impl Liveness<'_> {
             | StmtKind::Continue
             | StmtKind::FunctionDef { .. }
             | StmtKind::Test { .. }
+            | StmtKind::ConstDef { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }

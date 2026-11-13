@@ -23,6 +23,7 @@ KEYWORDS = (
     "assert",
     "break",
     "case",
+    "const",
     "cont",
     "elif",
     "else",

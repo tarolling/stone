@@ -1,0 +1,10 @@
+# a hosts file for net_resolve.stn
+10.0.0.1   alpha alpha.example  # first
+::a:1      alpha
+10.0.0.2   beta
+10.0.0.3   Beta.Example
+bad.address gamma
+10.0.0.1   alpha
+
+2001:db8::1:0:0:1 sixy
+10.9.0.1   256.0.0.1 1.2.3 01.2.3.4

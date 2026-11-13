@@ -36,6 +36,10 @@ module stone
           -- parameters named test.<line>.<col>, which only stone test calls
           | Test(string name, stmt* body)
 
+          -- only at the top level of a file; 'value' is evaluated when the program is built,
+          -- and every read of 'name' is that value
+          | ConstDef(identifier name, bool public, expr value)
+
           | Expr(expr value)
           | Use(identifier* path, identifier? alias)
           | Break | Continue

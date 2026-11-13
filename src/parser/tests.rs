@@ -77,6 +77,17 @@ fn strip_stmt(stmt: Stmt) -> Stmt {
             test: Box::new(strip_expr(*test)),
             msg: msg.map(|m| Box::new(strip_expr(*m))),
         },
+        StmtKind::ConstDef {
+            name,
+            public,
+            value,
+            ..
+        } => StmtKind::ConstDef {
+            name,
+            name_span: Span::default(),
+            public,
+            value: Box::new(strip_expr(*value)),
+        },
         StmtKind::Assign { targets, value } => StmtKind::Assign {
             targets: targets.into_iter().map(strip_expr).collect(),
             value: Box::new(strip_expr(*value)),
@@ -2184,7 +2195,7 @@ fn pub_must_come_before_def() {
     assert_eq!(
         error_of("pub x = 1\n"),
         (
-            "expected 'fn', 'enum', 'struct' or 'trait', found 'x'".to_string(),
+            "expected 'fn', 'enum', 'struct', 'trait' or 'const', found 'x'".to_string(),
             1,
             5
         )
@@ -3910,6 +3921,68 @@ fn a_test_block_is_top_level_with_a_plain_description() {
     assert_eq!(
         error_of("test \"adds\"\n    f()\n"),
         ("expected ':', found end of line".to_string(), 1, 12)
+    );
+}
+
+#[test]
+fn a_constant_has_a_name_and_a_value() {
+    let int = |n: i64| -> Box<Expr> {
+        Box::new(
+            ExprKind::Constant {
+                value: Box::new(Constant::Int(n)),
+                kind: None,
+            }
+            .into(),
+        )
+    };
+    assert_eq!(
+        parse_ok("const port = 53\npub const max = 3\n"),
+        Mod::Module {
+            body: vec![
+                StmtKind::ConstDef {
+                    name: "port".to_string(),
+                    name_span: Span::default(),
+                    public: false,
+                    value: int(53),
+                }
+                .into(),
+                StmtKind::ConstDef {
+                    name: "max".to_string(),
+                    name_span: Span::default(),
+                    public: true,
+                    value: int(3),
+                }
+                .into(),
+            ]
+        }
+    );
+}
+
+#[test]
+fn a_constant_is_top_level_with_no_type() {
+    assert_eq!(
+        error_of("fn f():\n    const x = 1\n"),
+        (
+            "a constant can only be at the top level of a file".to_string(),
+            2,
+            5
+        )
+    );
+    assert_eq!(
+        error_of("const x: int = 1\n"),
+        (
+            "a constant's type is its value's, so it is written `const x = 1`".to_string(),
+            1,
+            8
+        )
+    );
+    assert_eq!(
+        error_of("const x\n"),
+        ("expected '=', found end of line".to_string(), 1, 8)
+    );
+    assert_eq!(
+        error_of("const = 1\n"),
+        ("expected a constant name, found '='".to_string(), 1, 7)
     );
 }
 

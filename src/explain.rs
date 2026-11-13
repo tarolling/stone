@@ -61,6 +61,7 @@ pub enum Code {
     Manifest,
     Dependency,
     TraitValue,
+    Constant,
 }
 
 /// What `stone explain` says about a [`Code`]: a title, a longer text, and a program that
@@ -138,6 +139,7 @@ impl Code {
         Code::Manifest,
         Code::Dependency,
         Code::TraitValue,
+        Code::Constant,
     ];
 
     /// Returns the code as written, such as `E0006` for [`Code::Mismatch`].
@@ -1725,6 +1727,38 @@ fn tallest[T: Grows](xs: list[T]) -> int:
     ret xs.len()
 
 print(tallest([Plant(height=1.0)]))
+"#,
+        )],
+        target: None,
+    },
+    Explanation {
+        code: Code::Constant,
+        id: "E0050",
+        title: r#"a constant that is not one"#,
+        text: r#"A constant's value is worked out when the program is built, so it is made only of literals
+(numbers, `true` and `false`, strings without values in braces, and bytes), other constants,
+`math.pi`, `math.tau`, and `math.e`, the operators, and tuples of them. A call, a variable, a
+list, or a map is not known until the program runs; keep such a value in a function, or in a
+variable at the top level of the entry file. An operation that would fail when the program runs,
+such as a division by zero, fails the build instead.
+
+A constant is never assigned again, and no variable or parameter takes its name, so its name
+always means its value."#,
+        failing: &[(
+            r#"main.stn"#,
+            r#"fn kilobytes(n: int) -> int:
+    ret n * 1024
+
+const buffer = kilobytes(64)
+
+print(buffer)
+"#,
+        )],
+        fixed: &[(
+            r#"main.stn"#,
+            r#"const buffer = 64 * 1024
+
+print(buffer)
 "#,
         )],
         target: None,

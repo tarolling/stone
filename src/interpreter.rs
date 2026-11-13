@@ -621,7 +621,7 @@ impl Value {
     /// `(1, 'a')`.
     /// It never runs a struct's own `display`, so it serves error messages, which
     /// [`Interpreter::write_value`] does not.
-    fn display(&self, nested: bool) -> String {
+    pub(crate) fn display(&self, nested: bool) -> String {
         let mut out = String::new();
         // an error message writes what it can of a value nested too deeply
         let _ = self.write(&mut out, nested, 0, &mut |_, _| Ok(false));
@@ -761,7 +761,7 @@ impl Value {
     /// [`stdlib::MAX_PRINT_DEPTH`] deep fails, as compiled code does.
     ///
     /// For example, `some((1, "a"))` equals `some((1, "a"))` but not `some((1, "b"))` or `none`.
-    fn equals(&self, other: &Value, depth: usize) -> EvalResult<bool> {
+    pub(crate) fn equals(&self, other: &Value, depth: usize) -> EvalResult<bool> {
         fn all_equal(a: &[Value], b: &[Value], depth: usize) -> EvalResult<bool> {
             for (a, b) in a.iter().zip(b) {
                 if !a.equals(b, depth)? {
@@ -799,7 +799,7 @@ impl Value {
     }
 
     /// Orders two numbers, or returns `None` if either is nan.
-    fn compare(&self, other: &Value) -> EvalResult<Option<Ordering>> {
+    pub(crate) fn compare(&self, other: &Value) -> EvalResult<Option<Ordering>> {
         match (self, other) {
             (Value::Int(a), Value::Int(b)) => Ok(Some(a.cmp(b))),
             (Value::Float(a), Value::Float(b)) => Ok(a.partial_cmp(b)),
@@ -994,7 +994,7 @@ fn combine(op: Operator, left: Lazy, right: Lazy) -> EvalResult<Lazy> {
     }
 }
 
-fn binary(op: Operator, lhs: Value, rhs: Value) -> EvalResult<Value> {
+pub(crate) fn binary(op: Operator, lhs: Value, rhs: Value) -> EvalResult<Value> {
     match (lhs, rhs) {
         // the exponent is always an int, even for a float base
         (Value::Int(_), Value::Int(r)) if op == Operator::Power && r < 0 => {
@@ -1055,7 +1055,7 @@ fn binary(op: Operator, lhs: Value, rhs: Value) -> EvalResult<Value> {
 }
 
 /// Applies the unary operator `op` to a value.
-fn unary(op: UnaryOp, value: Value) -> EvalResult<Value> {
+pub(crate) fn unary(op: UnaryOp, value: Value) -> EvalResult<Value> {
     match op {
         UnaryOp::Not => Ok(Value::Bool(!value.is_true())),
         UnaryOp::UnaryAdd => Ok(value),
@@ -4013,6 +4013,7 @@ fn is_definition(stmt: &Stmt) -> bool {
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }
             | StmtKind::TraitDef { .. }
+            | StmtKind::ConstDef { .. }
     )
 }
 

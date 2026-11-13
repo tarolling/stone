@@ -79,6 +79,12 @@ it with no `f` prefix (`{{` and `}}` for braces), `xs.len()` instead of `len(xs)
 instead of `abs(x)`. Variables are never annotated; their types are inferred. `for _ in range(n):` works for
 a loop variable you do not need, and `main` is an ordinary function name.
 
+A value that never changes is a constant, `const max_size = 1 << 10`, written at the top level of
+any file, libraries included, and readable everywhere in it, functions and test blocks too. Its
+value is worked out when the program is built, so it is made of literals (numbers, bools, strings
+without `{values}`, bytes), other constants, `math.pi`, operators, and tuples: never a call, a
+variable, a list, or a map. Nothing assigns it, and no variable takes its name.
+
 ## Types
 
 | type | example | notes |
@@ -553,6 +559,7 @@ assign the result where 'add' is called
 | `[f(x) for x in xs if p(x)]` | `xs.filter(p).map(f)` with named functions, or a `for` loop with `if` and `append` |
 | `f"{a} and {b}"`, `f"{x:.2f}"`, `"%d" % n`, `.format` | `"{a} and {b}"`, `"{x:.2f}"`: every string takes values, with no `f`, and Python's format specs (`{n:>5}`, `{n:08}`, `{x:e}`, `{n:,}`) write the same text; a value inside a spec (`{x:.{p}f}`) is not supported |
 | `"{}"` in a string that is not an f-string | `"{{}}"`, since braces hold values |
+| `MAX_SIZE = 1024` at module level, as a constant | `const max_size = 1024` (`pub const` to use it from other files); a list or a map stays a function that returns it |
 | `__str__`, `__repr__` | `impl display for T:` with `fn display(self) -> str` |
 | `a if cond else b` | an `if`/`else` assigning a variable |
 | `for k, v in d.items():` | the same; `d.items()` is a list of tuples |
@@ -773,9 +780,10 @@ nothing in a function without a value is `ret`.
 
 A program is an entry file plus the `.stn` files it uses, named by path from the entry file's
 directory: `geometry/shapes.stn` is `use geometry.shapes`, called as `shapes.area(r)`, or
-`use geometry.shapes.area` to call `area(r)`. Only `pub fn`, `pub struct`, `pub enum`, and
-`pub trait` are visible to other files. A module other than the entry file holds only `use`,
-`fn`, `struct`, `enum`, `trait`, and `impl`, never top-level statements. A program of several
+`use geometry.shapes.area` to call `area(r)`. Only `pub fn`, `pub const`, `pub struct`,
+`pub enum`, and `pub trait` are visible to other files, a constant read as `shapes.unit` or,
+after `use geometry.shapes.unit`, `unit`. A module other than the entry file holds only `use`,
+`fn`, `const`, `struct`, `enum`, `trait`, and `impl`, never top-level statements. A program of several
 files conventionally starts at `main.stn`.
 
 Packages come from GitHub or GitLab releases, named in a `stone.toml` beside `main.stn`, which

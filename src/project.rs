@@ -1251,6 +1251,20 @@ impl Loader<'_> {
             self.modules.iter().map(struct_params).collect();
         let traits: Vec<HashSet<String>> = self.modules.iter().map(trait_names).collect();
         let module_names: Vec<String> = self.files.iter().map(|f| f.module.clone()).collect();
+        // every constant by its linked name, so an import can tell one from a function
+        let file_constants: Vec<HashSet<String>> =
+            self.modules.iter().map(constant_names).collect();
+        let linked_constants: HashSet<String> = file_constants
+            .iter()
+            .enumerate()
+            .flat_map(|(i, names)| {
+                let module = &module_names[i];
+                names.iter().map(move |name| match i {
+                    0 => name.clone(),
+                    _ => format!("{module}.{name}"),
+                })
+            })
+            .collect();
         let mut imports = vec![];
         let mut library_body = vec![];
         let mut entry_body = vec![];
@@ -1317,6 +1331,13 @@ impl Loader<'_> {
             if !library {
                 collect_assigned(&body, &mut globals);
             }
+            let mut constants = file_constants[i].clone();
+            constants.extend(bindings.iter().filter_map(|(name, binding)| match binding {
+                Binding::Function(linked) if linked_constants.contains(linked) => {
+                    Some(name.clone())
+                }
+                _ => None,
+            }));
             let mut rewriter = Rewriter {
                 file,
                 library,
@@ -1331,6 +1352,7 @@ impl Loader<'_> {
                 locals: HashSet::new(),
                 globals: globals.into_iter().map(|(name, _)| name).collect(),
                 type_params: HashSet::new(),
+                constants,
                 diagnostics: &mut self.diagnostics,
             };
             for mut stmt in body {
@@ -1508,6 +1530,14 @@ impl Loader<'_> {
                             *name = format!("{}.{name}", module_names[i]);
                         }
                     }
+                    StmtKind::ConstDef { name, .. } => {
+                        if library {
+                            *name = format!("{}.{name}", module_names[i]);
+                        }
+                        rewriter.locals.clear();
+                        rewriter.type_params.clear();
+                        rewriter.stmt(&mut stmt);
+                    }
                     // already reported, and leaving it out keeps a module from running code
                     _ if library => continue,
                     _ => {
@@ -1613,6 +1643,7 @@ fn prelude(diagnostics: &mut Vec<Diagnostic>) -> Vec<Stmt> {
                 locals: HashSet::new(),
                 globals: HashSet::new(),
                 type_params: HashSet::new(),
+                constants: HashSet::new(),
                 diagnostics,
             };
             for stmt in &mut body {
@@ -1798,19 +1829,33 @@ fn is_struct(module: &Mod, name: &str) -> bool {
         .any(|stmt| matches!(&stmt.kind, StmtKind::StructDef { name: n, .. } if n == name))
 }
 
-/// Returns each function a module defines at the top level, mapped to whether it is `pub`.
+/// Returns the constants a module defines, such as `port` for `const port = 53`.
+fn constant_names(module: &Mod) -> HashSet<String> {
+    let Mod::Module { body } = module;
+    body.iter()
+        .filter_map(|stmt| match &stmt.kind {
+            StmtKind::ConstDef { name, .. } => Some(name.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+/// Returns each function and constant a module defines at the top level, mapped to whether it
+/// is `pub`. Both are linked alike: `use m.f` binds either, `m.f` reads either, and a library
+/// renames both to `<module>.<name>`.
 fn public_functions(module: &Mod) -> HashMap<String, bool> {
     let Mod::Module { body } = module;
     body.iter()
         .filter_map(|stmt| match &stmt.kind {
-            StmtKind::FunctionDef { name, public, .. } => Some((name.clone(), *public)),
+            StmtKind::FunctionDef { name, public, .. }
+            | StmtKind::ConstDef { name, public, .. } => Some((name.clone(), *public)),
             _ => None,
         })
         .collect()
 }
 
 /// Reports a `use` after other statements, and in a library, any top-level statement that is not
-/// a `use`, `fn`, `enum`, `struct`, `impl`, or `trait`.
+/// a `use`, `fn`, `const`, `enum`, `struct`, `impl`, or `trait`.
 fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnostic>) {
     let mut after_use = false;
     for stmt in body {
@@ -1819,6 +1864,7 @@ fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnosti
                 .push(Code::Placement.error(stmt.span, "use must come before other statements")),
             StmtKind::Use { .. } => {}
             StmtKind::FunctionDef { .. }
+            | StmtKind::ConstDef { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::ImplDef { .. }
@@ -1828,8 +1874,8 @@ fn check_top_level(body: &[Stmt], library: bool, diagnostics: &mut Vec<Diagnosti
                 if library {
                     diagnostics.push(Code::Placement.error(
                         stmt.span,
-                        "only use, fn, enum, struct, impl, and trait are allowed at the top level \
-                         of a module",
+                        "only use, fn, const, enum, struct, impl, and trait are allowed at the top \
+                         level of a module",
                     ));
                 }
             }
@@ -1865,6 +1911,9 @@ struct Rewriter<'a> {
     /// The type parameters of the function being rewritten, such as `T` in
     /// `fn first[T](xs: list[T]) -> T:`, which its types never rename.
     type_params: HashSet<String>,
+    /// The names that mean a constant in this file, its own and those it imports, which no
+    /// parameter or variable of its functions may take.
+    constants: HashSet<String>,
     diagnostics: &'a mut Vec<Diagnostic>,
 }
 
@@ -1898,9 +1947,17 @@ impl<'a> Rewriter<'a> {
         self.bounds(type_params);
         let mut locals = vec![];
         collect_assigned(body, &mut locals);
+        let params = args.args.iter().map(|arg| (arg.arg.clone(), arg.span));
+        for (name, span) in params.clone().chain(locals.iter().cloned()) {
+            if self.constants.contains(&name) {
+                self.diagnostics.push(Code::Constant.error(
+                    span,
+                    format!("'{name}' is a constant, so a variable cannot take its name"),
+                ));
+            }
+        }
         self.locals = locals.into_iter().map(|(name, _)| name).collect();
-        self.locals
-            .extend(args.args.iter().map(|arg| arg.arg.clone()));
+        self.locals.extend(params.map(|(name, _)| name));
         for annotation in args.args.iter_mut().filter_map(|a| a.annotation.as_mut()) {
             self.type_expr(annotation);
         }
@@ -2027,7 +2084,7 @@ impl<'a> Rewriter<'a> {
                 self.block(body);
                 self.block(orelse);
             }
-            StmtKind::Expr { value } => self.expr(value),
+            StmtKind::Expr { value } | StmtKind::ConstDef { value, .. } => self.expr(value),
             StmtKind::Assert { test, msg } => {
                 self.expr(test);
                 if let Some(msg) = msg {

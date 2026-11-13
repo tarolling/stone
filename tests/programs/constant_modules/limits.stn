@@ -1,0 +1,6 @@
+const step = 2
+
+pub const most = step * 50
+
+pub fn twice() -> int:
+    ret most * 2

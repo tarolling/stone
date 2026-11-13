@@ -16,27 +16,19 @@ use os
 use net_sys
 
 // The most addresses `nameserver` lines may list, as in the C library.
-fn max_servers() -> int:
-    ret 3
+const max_servers = 3
 
 // The port DNS servers answer on.
-fn dns_port() -> int:
-    ret 53
+const dns_port = 53
 
 // The DNS record types of an IPv4 address, an IPv6 address, and another name for a host.
-fn type_a() -> int:
-    ret 1
-
-fn type_aaaa() -> int:
-    ret 28
-
-fn type_cname() -> int:
-    ret 5
+const type_a = 1
+const type_aaaa = 28
+const type_cname = 5
 
 // Every printable ASCII character, from code 32 to 126, so a character's code is 32 more than
 // its position.
-fn printable() -> str:
-    ret " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{{|}}~"
+const printable = " !\"#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[\\]^_`abcdefghijklmnopqrstuvwxyz{{|}}~"
 
 ////////////////////////////////////////////////////////////////
 // connections
@@ -404,7 +396,7 @@ fn read_resolver() -> Resolver:
         key = fields[0]
         if key == "nameserver":
             server = parse_server(fields[1])
-            if server.is_some() and settings.servers.len() < max_servers():
+            if server.is_some() and settings.servers.len() < max_servers:
                 settings.servers.append(server.unwrap())
         elif key == "domain":
             settings.search = [fields[1].lower()]
@@ -425,7 +417,7 @@ fn read_resolver() -> Resolver:
                 elif parts[0] == "attempts":
                     settings.attempts = value.clamp(1, 5)
     if settings.servers.len() == 0:
-        settings.servers.append(([127, 0, 0, 1], dns_port()))
+        settings.servers.append(([127, 0, 0, 1], dns_port))
     ret settings
 
 // Returns the server a `nameserver` line names: an address, which uses port 53, or, as stone
@@ -443,7 +435,7 @@ fn parse_server(text: str) -> option[tuple[list[int], int]]:
         if port < 1 or port > 65535:
             ret none
         ret some((parse_ipv4(parts[0])?, port))
-    ret some((parse_address(text)?, dns_port()))
+    ret some((parse_address(text)?, dns_port))
 
 // Asks the DNS servers for the addresses of `name` (as `host` was written), trying it in each
 // search domain as the C library's `res_search` does: as it is first if it has at least `ndots`
@@ -477,7 +469,7 @@ fn dns_lookup(host: str, name: str) -> result[list[list[int]], str]:
 // Asks for the IPv4 and then the IPv6 addresses of `name`.
 fn ask(name: str, settings: Resolver) -> Answer:
     found = []
-    for record in [type_a(), type_aaaa()]:
+    for record in [type_a, type_aaaa]:
         match ask_type(name, record, settings):
             case Answer.Found(addresses):
                 found.extend(addresses)
@@ -528,7 +520,7 @@ fn encode_query(name: str, record: int) -> list[int]:
 
 // Returns the ASCII code of the printable character `c`.
 fn code(c: str) -> int:
-    ret 32 + printable().find(c).unwrap_or(0)
+    ret 32 + printable.find(c).unwrap_or(0)
 
 // Returns what a reply to a query for `name`'s records of type `record` says: the addresses it
 // gives `name`, following the other names it gives it, nothing if it has no such name, or a
@@ -563,7 +555,7 @@ fn decode_reply(reply: list[int], name: str, record: int) -> option[Answer]:
         if start + length > reply.len():
             ret none
         if class == 1 and owner == target:
-            if kind == type_cname():
+            if kind == type_cname:
                 target = read_name(reply, start)?[0]
             elif kind == record and (length == 4 or length == 16):
                 found.append(reply[start:start + length])
@@ -600,7 +592,7 @@ fn read_name(reply: list[int], at: int) -> option[tuple[str, int]]:
         for b in reply[at + 1:at + 1 + length]:
             if b < 32 or b > 126:
                 ret none
-            label += printable()[b - 32]
+            label += printable[b - 32]
         labels.append(label.lower())
         at += 1 + length
     ret some((".".join(labels), end))

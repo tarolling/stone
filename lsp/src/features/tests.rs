@@ -2833,3 +2833,98 @@ fn completion_where_a_type_is_written_offers_traits_that_hold_values() {
         assert!(!labels.contains(&name.to_string()), "{labels:?}");
     }
 }
+
+const LIMITS_MAIN: &str = "\
+use limits
+use limits.most
+
+const here = most + 1
+print(here, limits.most)
+";
+
+const LIMITS: &str = "\
+pub const most = 100
+
+pub fn twice() -> int:
+    ret most * 2
+";
+
+#[test]
+fn hover_shows_a_constants_value() {
+    let doc = doc("const name = \"st\" + \"one\"\nconst pair = (1, 0.5)\nprint(name, pair)\n");
+    assert_eq!(
+        hover_text(&doc, at(3, 7)).unwrap(),
+        "```stone\nconst name: str = \"stone\"\n```"
+    );
+    assert_eq!(
+        hover_text(&doc, at(2, 7)).unwrap(),
+        "```stone\nconst pair: tuple[int, float] = (1, 0.5)\n```"
+    );
+}
+
+#[test]
+fn constants_are_outlined_and_completed_as_constants() {
+    let doc = doc("const limit = 3\nprint(lim)\n");
+    let symbols = document_symbols(&doc);
+    assert_eq!(symbols[0].name, "limit");
+    assert_eq!(symbols[0].kind, SymbolKind::CONSTANT);
+    let items = completion(&doc, at(2, 10), &MapSources::default());
+    let item = items
+        .iter()
+        .find(|item| item.label == "limit")
+        .expect("expected the constant");
+    assert_eq!(item.kind, Some(CompletionItemKind::CONSTANT));
+}
+
+#[test]
+fn a_modules_constants_complete_after_its_name() {
+    let files = [
+        ("main.stn", "use limits\nprint(limits.)\n"),
+        ("limits.stn", LIMITS),
+    ];
+    let doc = project_doc("main.stn", &files);
+    let items = completion(&doc, at(2, 14), &MapSources::default());
+    let found: Vec<(&str, Option<CompletionItemKind>)> = items
+        .iter()
+        .map(|item| (item.label.as_str(), item.kind))
+        .collect();
+    assert!(
+        found.contains(&("most", Some(CompletionItemKind::CONSTANT))),
+        "{found:?}"
+    );
+    assert!(
+        found.contains(&("twice", Some(CompletionItemKind::FUNCTION))),
+        "{found:?}"
+    );
+}
+
+#[test]
+fn a_constant_renames_in_every_file() {
+    let files = [("main.stn", LIMITS_MAIN), ("limits.stn", LIMITS)];
+    let doc = project_doc("main.stn", &files);
+    assert_eq!(
+        hover_text(&doc, at(4, 14)).unwrap(),
+        "```stone\nconst limits.most: int = 100\n```"
+    );
+    let edit = rename(&doc, &uri_of("main.stn"), at(4, 14), "largest").unwrap();
+    let starts = |path: &str| -> Vec<Position> {
+        let mut starts: Vec<Position> = edit.changes.as_ref().unwrap()[&uri_of(path)]
+            .iter()
+            .map(|e| e.range.start)
+            .collect();
+        starts.sort_by_key(|p| (p.line, p.character));
+        starts
+    };
+    assert_eq!(
+        starts("limits.stn"),
+        [Position::new(0, 10), Position::new(3, 8)]
+    );
+    assert_eq!(
+        starts("main.stn"),
+        [
+            Position::new(1, 11),
+            Position::new(3, 13),
+            Position::new(4, 19)
+        ]
+    );
+}

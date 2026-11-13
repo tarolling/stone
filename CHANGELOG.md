@@ -12,6 +12,24 @@ changelog in `editors/vscode/CHANGELOG.md`. The format follows
 
 ### Added
 
+- Constants: `const port = 53` at the top level of any file, library modules included, and
+  `pub const` to use one from other files (`limits.most`, or `most` after `use limits.most`).
+  A constant's value is worked out when the program is built, from literals, other constants,
+  `math.pi`, `math.tau`, `math.e`, the operators, and tuples, exactly as it would be computed at
+  runtime, so an operation that would fail, such as `1 / 0`, fails the build instead (error
+  `E0050`, as are a call, a variable, or a list in one). Code anywhere in the file reads a
+  constant, before or after its line, test blocks included; nothing assigns it, and no variable
+  takes its name. Every read compiles to the value itself. `stone check` warns about an unused
+  private constant, and editors hover a constant with its value.
+
+### Changed
+
+- `net` and `gui` keep their fixed values as constants rather than functions returning them.
+
+## [0.4.6] - 2026-11-12
+
+### Added
+
 - Bitwise operators: `&`, `|`, `^`, `~`, `<<`, and `>>` on ints, with Python's precedence (looser
   than arithmetic and tighter than comparisons, so `a & b == c` is `(a & b) == c`), and their
   assignments `&=`, `|=`, `^=`, `<<=`, and `>>=`. `&`, `|`, and `^` also take two bools, giving a

@@ -29,7 +29,8 @@ use crate::ast::{
     PatternField, PatternKind, Stmt, StmtKind, TraitName, TypeExpr, TypeExprKind, TypeParam,
     UnaryOp, Variant, constant_int, is_lambda, is_test, target_names,
 };
-use crate::diagnostic::{Diagnostic, similar};
+use crate::constant::{self, ConstValue, Failure};
+use crate::diagnostic::{Diagnostic, Severity, similar};
 use crate::explain::Code;
 use crate::span::{FileId, Pos, Span};
 use crate::stdlib::spec::{FormatSpec, Presentation};
@@ -787,6 +788,8 @@ pub struct Calls {
     pub coercions: HashMap<Span, Coercion>,
     /// The type each pattern of a trait value tests for, from [`Analysis::type_patterns`].
     pub type_patterns: HashMap<Span, Type>,
+    /// The value of every constant, from [`Analysis::constants`].
+    pub constants: HashMap<String, ConstValue>,
 }
 
 /// Returns `ty` as source writes it, each struct and enum by its own name without its module,
@@ -866,6 +869,8 @@ pub enum SymbolKind {
     Local,
     /// A variable assigned at the top level.
     Global,
+    /// A constant, such as `port` in `const port = 53`.
+    Constant,
 }
 
 /// A named thing a program defines, such as a function or a variable.
@@ -948,6 +953,9 @@ pub struct Analysis {
     /// The type each pattern of a trait value tests for, by the pattern's span, such as `Circle`
     /// for `Circle(r)` against a `Shape`.
     pub type_patterns: HashMap<Span, Type>,
+    /// The value of every constant with one, by its linked name, such as `net.dns_port`, which
+    /// every read of the constant is. A constant whose value failed is left out.
+    pub constants: HashMap<String, ConstValue>,
 }
 
 /// A value that becomes a trait value, such as `Circle(r=1.0)` given to a parameter of type
@@ -1010,6 +1018,7 @@ impl Analysis {
             conversions: self.conversions.clone(),
             coercions: self.coercions.clone(),
             type_patterns: self.type_patterns.clone(),
+            constants: self.constants.clone(),
         }
     }
 
@@ -1662,6 +1671,11 @@ struct Inference {
     /// `finish` reports once inference can suggest a type.
     untyped_returns: Vec<(String, Span, Ty)>,
     globals: HashMap<String, usize>,
+    /// The symbol of every constant, by its linked name.
+    constants: HashMap<String, usize>,
+    /// Every constant's linked name and value, in the order they are defined, which `finish`
+    /// evaluates.
+    constant_values: Vec<(String, Expr)>,
     function: Option<FunctionScope>,
     loop_depth: usize,
     function_spans: HashMap<String, Span>,
@@ -1927,6 +1941,8 @@ enum Indexed {
 /// What a name refers to where it is used.
 enum Resolved {
     Variable(usize),
+    /// A constant, by its symbol.
+    Constant(usize),
     Function(String),
     Enum(String),
     Struct(String),
@@ -1953,7 +1969,8 @@ impl Inference {
             | SymbolKind::Enum
             | SymbolKind::Struct
             | SymbolKind::Trait
-            | SymbolKind::Global => None,
+            | SymbolKind::Global
+            | SymbolKind::Constant => None,
             // set by the caller
             SymbolKind::Variant
             | SymbolKind::Field
@@ -3020,11 +3037,13 @@ impl Inference {
                 }
             }
         }
+        self.declare_constants(body);
         self.check_trait_types();
         let mut assigned = vec![];
         collect_assigned(body, &mut assigned);
         for (name, span) in assigned {
             if !self.globals.contains_key(&name)
+                && !self.constants.contains_key(&name)
                 && !self.functions.contains_key(&name)
                 && !self.value_enum(&name)
                 && !self.value_struct(&name)
@@ -3035,6 +3054,7 @@ impl Inference {
                 self.globals.insert(name, symbol);
             }
         }
+        self.check_constants();
 
         for stmt in body {
             self.check_stmt(stmt);
@@ -3063,6 +3083,94 @@ impl Inference {
             }
         }
         self.check_tests(body);
+    }
+
+    /// Declares every constant of the top level `body`, with a type its value settles in
+    /// [`Self::check_constants`], so code anywhere can read one before or after its line.
+    fn declare_constants(&mut self, body: &[Stmt]) {
+        for stmt in body {
+            let StmtKind::ConstDef {
+                name,
+                name_span,
+                value,
+                ..
+            } = &stmt.kind
+            else {
+                continue;
+            };
+            let taken = self.constants.contains_key(name)
+                || self.functions.contains_key(name)
+                || self.enums.contains_key(name)
+                || self.structs.contains_key(name)
+                || self.traits.contains_key(name);
+            if taken {
+                self.error(
+                    Code::Duplicate,
+                    *name_span,
+                    format!("'{name}' is already defined"),
+                );
+                continue;
+            }
+            if is_reserved(name) {
+                self.error(
+                    Code::Reserved,
+                    *name_span,
+                    format!("'{name}' is a builtin, so a constant cannot take its name"),
+                );
+                continue;
+            }
+            let ty = self.fresh();
+            let symbol = self.add_symbol(name, SymbolKind::Constant, *name_span, ty);
+            self.constants.insert(name.clone(), symbol);
+            self.constant_values.push((name.clone(), (**value).clone()));
+        }
+    }
+
+    /// Infers each constant's type from its value, once every function is declared, so a call in
+    /// one is reported as a call rather than an unknown name.
+    fn check_constants(&mut self) {
+        for (name, value) in self.constant_values.clone() {
+            let found = self.infer(&value);
+            let ty = self.symbol_types[self.constants[&name]].clone();
+            self.expect(&ty, &found, value.span);
+        }
+    }
+
+    /// Works out every constant's value, in the order each needs the others, reporting a value
+    /// that is not constant, an operation that fails, and a constant defined in terms of itself.
+    /// A constant whose value has a type error is left out silently.
+    fn evaluate_constants(&mut self) -> HashMap<String, ConstValue> {
+        let values = std::mem::take(&mut self.constant_values);
+        let index: HashMap<&str, usize> = values
+            .iter()
+            .enumerate()
+            .map(|(i, (name, _))| (name.as_str(), i))
+            .collect();
+        let has_error = |span: Span, diagnostics: &[Diagnostic]| {
+            diagnostics.iter().any(|d| {
+                d.severity == Severity::Error
+                    && d.span.file == span.file
+                    && d.span.start >= span.start
+                    && d.span.end <= span.end
+            })
+        };
+        let mut states: Vec<Option<Option<Result<ConstValue, ()>>>> = values
+            .iter()
+            .map(|(_, value)| has_error(value.span, &self.diagnostics).then_some(Some(Err(()))))
+            .collect();
+        let mut errors = vec![];
+        for i in 0..values.len() {
+            let _ = constant_value(i, &values, &index, &mut states, &mut errors);
+        }
+        self.diagnostics.extend(errors);
+        values
+            .into_iter()
+            .zip(states)
+            .filter_map(|((name, _), state)| match state {
+                Some(Some(Ok(value))) => Some((name, value)),
+                _ => None,
+            })
+            .collect()
     }
 
     /// Reports each test of the top level `body` that may read a global, itself or through a
@@ -5724,6 +5832,8 @@ impl Inference {
             StmtKind::Match { subject, cases } => self.check_match(subject, cases),
             // linking makes each test a function, so this is code that was never linked
             StmtKind::Test { .. } => {}
+            // checked with every constant before any function (`declare_constants`)
+            StmtKind::ConstDef { .. } => {}
             StmtKind::Break => {
                 if self.loop_depth == 0 {
                     self.error(Code::Placement, stmt.span, "'break' outside a loop");
@@ -5901,6 +6011,15 @@ impl Inference {
             ExprKind::Name { id, .. } => {
                 let symbol = match self.resolve_name(id) {
                     Resolved::Variable(symbol) => symbol,
+                    Resolved::Constant(symbol) => {
+                        self.add_reference(target.span, symbol);
+                        self.error(
+                            Code::Constant,
+                            target.span,
+                            format!("'{id}' is a constant, so it cannot be assigned"),
+                        );
+                        return;
+                    }
                     Resolved::Function(_) => {
                         self.error(
                             Code::AssignTarget,
@@ -6193,6 +6312,9 @@ impl Inference {
         }
         if let Some(&symbol) = self.globals.get(name) {
             return Resolved::Variable(symbol);
+        }
+        if let Some(&symbol) = self.constants.get(name) {
+            return Resolved::Constant(symbol);
         }
         if self.functions.contains_key(name) {
             return Resolved::Function(name.to_string());
@@ -8118,7 +8240,7 @@ impl Inference {
                 _ => Ty::Int,
             },
             ExprKind::Name { id, .. } => match self.resolve_name(id) {
-                Resolved::Variable(symbol) => {
+                Resolved::Variable(symbol) | Resolved::Constant(symbol) => {
                     self.add_reference(expr.span, symbol);
                     self.symbol_types[symbol].clone()
                 }
@@ -8678,7 +8800,7 @@ impl Inference {
             }
             // made by `infer_struct`, above
             Resolved::Struct(_) => self.fresh(),
-            Resolved::Variable(_) => {
+            Resolved::Variable(_) | Resolved::Constant(_) => {
                 let func_ty = self.infer(func);
                 self.infer_value_call(call, func, Some(id), &func_ty, args, &arg_types)
             }
@@ -11258,7 +11380,11 @@ impl Inference {
             );
         }
 
-        let mut analysis = Analysis::default();
+        let constants = self.evaluate_constants();
+        let mut analysis = Analysis {
+            constants,
+            ..Analysis::default()
+        };
         for (span, ty) in std::mem::take(&mut self.expr_types) {
             let ty = self.finalize(&ty);
             analysis.types.insert(span, ty);
@@ -12085,6 +12211,7 @@ impl<'a> AssignmentCheck<'a> {
             StmtKind::Break | StmtKind::Continue => None,
             StmtKind::FunctionDef { .. }
             | StmtKind::Test { .. }
+            | StmtKind::ConstDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
@@ -12202,6 +12329,65 @@ pub fn range_args(iter: &Expr) -> Option<&[Expr]> {
     }
 }
 
+/// Works out the value of the constant `i` of `values`, first those it reads, keeping each
+/// constant's state in `states` (`None` before it is reached, `Some(None)` while its value is
+/// being worked out, then its value, or `Err` if it has none) and adding to `errors` why one has
+/// none.
+fn constant_value(
+    i: usize,
+    values: &[(String, Expr)],
+    index: &HashMap<&str, usize>,
+    states: &mut [Option<Option<Result<ConstValue, ()>>>],
+    errors: &mut Vec<Diagnostic>,
+) -> Result<ConstValue, ()> {
+    match &states[i] {
+        Some(Some(done)) => return done.clone(),
+        Some(None) => return Err(()),
+        None => {}
+    }
+    states[i] = Some(None);
+    let mut lookup = |name: &str, span: Span| {
+        let &j = index.get(name)?;
+        if states[j] == Some(None) {
+            errors.push(Code::Constant.error(
+                span,
+                format!(
+                    "'{}' is defined in terms of itself",
+                    struct_display(&values[j].0)
+                ),
+            ));
+            states[j] = Some(Some(Err(())));
+            return Some(Err(()));
+        }
+        Some(constant_value(j, values, index, states, errors))
+    };
+    let result = match constant::evaluate(&values[i].1, &mut lookup) {
+        Ok(value) => Ok(value),
+        Err(failure) => {
+            match failure {
+                Failure::NotConstant(span, what) => errors.push(Code::Constant.error(
+                    span,
+                    format!(
+                        "a constant's value is worked out when the program is built, so it \
+                         cannot {what}"
+                    ),
+                )),
+                Failure::Fails(span, message) => errors.push(Code::Constant.error(span, message)),
+                Failure::Silent => {}
+            }
+            Err(())
+        }
+    };
+    // a cycle through this constant has already given it no value
+    if states[i] == Some(None) {
+        states[i] = Some(Some(result.clone()));
+    }
+    match &states[i] {
+        Some(Some(done)) => done.clone(),
+        _ => Err(()),
+    }
+}
+
 /// Collects every name assigned in `body`, with the span of its first assignment, without
 /// looking inside function definitions.
 ///
@@ -12257,6 +12443,7 @@ pub(crate) fn collect_assigned(body: &[Stmt], out: &mut Vec<(String, Span)>) {
             | StmtKind::Expr { .. }
             | StmtKind::Assert { .. }
             | StmtKind::Test { .. }
+            | StmtKind::ConstDef { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
         }
@@ -12651,6 +12838,7 @@ impl ParameterUse<'_> {
             | StmtKind::TraitDef { .. }
             | StmtKind::Use { .. }
             | StmtKind::Test { .. }
+            | StmtKind::ConstDef { .. }
             | StmtKind::Break
             | StmtKind::Continue => {}
         }

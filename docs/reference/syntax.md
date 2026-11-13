@@ -45,7 +45,8 @@ These names are reserved and cannot be used for variables or functions:
 | `struct` | defines a struct |
 | `trait` | defines a trait: methods that types implement, as in `trait Shape:` |
 | `impl` | defines the methods and associated functions of a struct, or implements a trait for a type, as in `impl Shape for Circle:` |
-| `pub` | lets other files use the function, enum, struct, or trait after it, as in `pub fn f() -> int:` |
+| `pub` | lets other files use the function, constant, enum, struct, or trait after it, as in `pub fn f() -> int:` |
+| `const` | defines a constant, as in `const port = 53` |
 | `use`, `as` | uses a module or one of its functions, optionally under another name |
 | `ret` | returns from a function, or ends the program at the top level |
 | `if`, `elif`, `else` | conditional blocks |
@@ -168,6 +169,7 @@ are an error.
 | `for` | `for x in items:`, `for c in text:`, `for i in range(n):`, `for name, score in pairs:` |
 | `assert` | `assert x > 0`, `assert xs == [1, 2]`, `assert n > 0, "n is {n}"` |
 | test block | `test "parses a point":` plus a block, at the top level only |
+| constant | `const port = 53`, `pub const kb = 1 << 10`, at the top level only |
 | `break`, `cont` | inside a loop only |
 | `use` | `use util`, `use geometry.shapes.area as area` |
 
@@ -205,6 +207,38 @@ values in braces, and no two tests of a file share one. Test blocks may be in an
 modules included, and a package's tests are left out of the programs that use it.
 
 `use` statements come first in a file. See [Modules](modules.md) for how `use` finds files.
+
+## Constants
+
+`const name = value` defines a constant, which is worked out when the program is built and
+never changes:
+
+```stone
+const size = 1 << 10
+const count = 4
+const total = size * count
+const name = "stone"
+const limits = (3, 0.5)
+
+fn kilobytes(n: int) -> int:
+    ret n * size
+
+print(total, kilobytes(2), name, limits[1])
+```
+
+This prints `4096 2048 stone 0.5`. A constant's value is made of literals (numbers, `true` and
+`false`, strings without values in braces, and bytes), other constants, `math.pi`, `math.tau`, and
+`math.e`, the operators, and tuples of them, so it is an `int`, `float`, `bool`, `str`, `bytes`,
+or a tuple of those, and its type is its value's; it is never written. Arithmetic is computed
+exactly as at runtime, and an operation that would fail when the program runs, such as
+`1 / 0` or `1 << 64`, fails the build instead. A call, a variable, a list, or a map is not
+known until the program runs, so it cannot be part of one (error `E0050`).
+
+A constant can only be defined at the top level of a file, and code anywhere in the file reads
+it, before or after its line, functions and test blocks included, since a constant is not a
+global. It is never assigned again, and no parameter or variable takes its name. Library
+modules may define constants, and `pub const` lets other files read one, as `limits.most` or,
+after `use limits.most`, `most`.
 
 ## Augmented assignment
 

@@ -12,6 +12,14 @@ follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions f
 
 ### Added
 
+- Constants (`const port = 53`): highlighting of `const`, hover with the constant's value, the
+  outline and completion showing constants as constants (after a module's name too), and
+  rename across every file.
+
+## [0.4.5] - 2026-11-12
+
+### Added
+
 - Highlighting of the bitwise operators (`&`, `^`, `~`, `<<`, `>>`, and their assignments) and
   of hexadecimal, octal, and binary numbers and numbers with `_` between digits.
 - Errors point at the other places that explain them, such as the parameter whose type an

@@ -20,10 +20,17 @@ the compiler can always infer them instead.
 Python 3.15's `lazy import numpy` is a good example. Python needs the keyword because
 importing a module runs its top-level code, which can be slow and can have side effects, so
 the interpreter cannot delay it without being told to. stone avoids the problem by design: a
-library module holds only `use`, `fn`, `enum`, `struct`, `trait`, and `impl`, so importing it
-runs nothing, and the compiler
+library module holds only `use`, `fn`, `const`, `enum`, `struct`, `trait`, and `impl`, and a
+constant's value is worked out when the program is built, so importing it runs nothing, and the
+compiler
 links in only what the program uses. Every import is effectively lazy, and there is no keyword
 for it.
+
+Status: a library's fixed values are constants, `const dns_port = 53`, which the compiler works
+out while it builds the program from literals, operators, and other constants, exactly as they
+would compute at runtime. `const` is a keyword because it says something to the reader rather than
+to the compiler: the name means one value everywhere, before its line as after, in functions and
+tests alike, and nothing ever assigns it, so a library needs no top-level code to have one.
 
 The pattern applies to the whole language. When a feature would need a keyword to be fast or
 safe, the better fix is to change the semantics so that the compiler can always choose the
@@ -240,8 +247,8 @@ index checks, reads, and uniqueness checks it can prove repeated (moving those a
 before it) and index checks a loop's own test proves (comparing a loop's bound with a list's
 length once, before the loop, when the bound is not the length itself), allocates registers with linear scan, keeping floats in the processor's
 floating-point registers, and specializes a few cases such as division and
-remainder by a constant, which multiply by a magic number, and globals that hold one literal for
-the whole program, which read as that literal. Arithmetic on whole lists, such as `a * 2.0 + b`,
+remainder by a constant, which multiply by a magic number, and constants and globals that hold
+one literal for the whole program, which read as that literal. Arithmetic on whole lists, such as `a * 2.0 + b`,
 compiles to one loop with no intermediate lists and no index checks, which handles two elements
 at a time with SSE2 or NEON where the operations allow (four with AVX2 for `--target x86_64v3`,
 eight with AVX-512 for `v4`, and as many as the vectors hold with SVE for `aarch64v9-linux`,

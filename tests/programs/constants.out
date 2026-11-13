@@ -1,0 +1,11 @@
+4096 1024 4
+stone! 5 s
+b'\x7fELF' 127
+1.5 true true
+(3, -2, ('lo', 1.5)) 1.5 3
+7 -9223372036854775808
+Box(label='stone', size=1024)
+['stone', 'stone!', 'stone']
+stone? stone
+1 lo 1.5
+last 3

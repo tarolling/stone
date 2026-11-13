@@ -7183,3 +7183,108 @@ fn bitwise_operators_call_the_impls_of_their_traits() {
         5,
     );
 }
+
+/// Returns the value the checker found for the constant `name` of `source`, which must check
+/// without errors.
+fn constant_of(source: &str, name: &str) -> Option<crate::constant::ConstValue> {
+    let analysis = analyze_source(source);
+    let problems: Vec<_> = analysis
+        .diagnostics
+        .iter()
+        .filter(|d| d.severity == Severity::Error)
+        .map(|d| d.message.clone())
+        .collect();
+    assert_eq!(problems, Vec::<String>::new());
+    analysis.constants.get(name).cloned()
+}
+
+#[test]
+fn constants_are_worked_out_in_any_order() {
+    use crate::constant::ConstValue;
+    let source = "use math\nconst total = size * count\nconst size = 1 << 10\nconst count = 4\n\
+                  const both = (total, \"kb\")\nconst turn = math.tau / 2.0\n\
+                  fn f() -> int:\n    ret total\nprint(f(), both, turn)\n";
+    assert_eq!(constant_of(source, "total"), Some(ConstValue::Int(4096)));
+    assert_eq!(
+        constant_of(source, "both"),
+        Some(ConstValue::Tuple(vec![
+            ConstValue::Int(4096),
+            ConstValue::Str("kb".to_string())
+        ]))
+    );
+    assert_eq!(
+        constant_of(source, "turn"),
+        Some(ConstValue::Float(std::f64::consts::PI))
+    );
+    let analysis = analyze_source(source);
+    let symbol = analysis
+        .symbols
+        .iter()
+        .find(|s| s.name == "total")
+        .expect("expected the constant's symbol");
+    assert_eq!(symbol.kind, SymbolKind::Constant);
+    assert_eq!(symbol.ty, Type::Int);
+}
+
+#[test]
+fn a_test_may_read_a_constant() {
+    let source = "const limit = 10\nfn under(n: int) -> bool:\n    ret n < limit\n\
+                  test \"limit\":\n    assert under(limit - 1)\n";
+    assert_eq!(errors(source), []);
+}
+
+#[test]
+fn a_constant_is_made_of_literals_constants_and_operators() {
+    let because = |what: &str| {
+        format!("a constant's value is worked out when the program is built, so it cannot {what}")
+    };
+    assert_eq!(
+        errors("fn kb(n: int) -> int:\n    ret n * 1024\nconst size = kb(4)\nprint(size)\n"),
+        [(because("call a function"), 3, 14)]
+    );
+    assert_eq!(
+        errors("n = 3\nconst size = n * 2\nprint(size)\n"),
+        [(because("read 'n', which is not a constant"), 2, 14)]
+    );
+    assert_eq!(
+        errors("const xs = [1, 2]\nprint(xs)\n"),
+        [(because("hold a list"), 1, 12)]
+    );
+    assert_eq!(
+        errors("const half = 1 / (2 - 2)\nprint(half)\n"),
+        [("division by zero".to_string(), 1, 14)]
+    );
+    assert_eq!(
+        errors("const a = b + 1\nconst b = a * 2\nprint(a)\n"),
+        [("'a' is defined in terms of itself".to_string(), 2, 11)]
+    );
+    // a type error is reported alone, with no value worked out
+    assert_eq!(
+        errors("const x = 1 + 2.0\nprint(x)\n"),
+        [("expected int, found float".to_string(), 1, 15)]
+    );
+}
+
+#[test]
+fn a_constant_is_never_assigned() {
+    assert_eq!(
+        errors("const limit = 10\nlimit = 11\nprint(limit)\n"),
+        [(
+            "'limit' is a constant, so it cannot be assigned".to_string(),
+            2,
+            1
+        )]
+    );
+    assert_eq!(
+        errors("const limit = 10\nlimit += 1\n"),
+        [(
+            "'limit' is a constant, so it cannot be assigned".to_string(),
+            2,
+            1
+        )]
+    );
+    assert_eq!(
+        errors("const limit = 10\nfn limit() -> int:\n    ret 1\n"),
+        [("'limit' is already defined".to_string(), 1, 7)]
+    );
+}

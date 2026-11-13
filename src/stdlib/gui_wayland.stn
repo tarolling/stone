@@ -104,11 +104,8 @@ struct keyboard:
     delay: int
 
 // The height of our title bar, and the width of the edges around it to resize by.
-fn title_height() -> int:
-    ret 24
-
-fn edge() -> int:
-    ret 4
+const title_height = 24
+const edge = 4
 
 // A link on `conn` with no objects but the display, and the keymap `keys`.
 fn new_link(conn: socket, keys: gui_keys.keymap) -> link:
@@ -515,7 +512,7 @@ impl link:
             width = self.look.want[0]
             height = self.look.want[1]
             if self.ours():
-                height = (height - title_height()).max(1)
+                height = (height - title_height).max(1)
         first = not self.configured()
         sized = (width, height) != self.extent
         if sized:
@@ -628,7 +625,7 @@ impl link:
     // none of.
     fn border(self) -> int:
         if self.ours() and not self.look.snug:
-            ret edge()
+            ret edge
         ret 0
 
     // The size of the window's surface: the content's, with our frame around it.
@@ -636,7 +633,7 @@ impl link:
         if not self.ours():
             ret self.extent
         b = self.border()
-        ret (self.extent[0] + 2 * b, self.extent[1] + title_height() + 2 * b)
+        ret (self.extent[0] + 2 * b, self.extent[1] + title_height + 2 * b)
 
     // Makes new memory to share and new buffers in it for the window's size and scale, in place
     // of the ones before: two of the content, two of the frame, and the cursor's, drawn at once.
@@ -659,7 +656,7 @@ impl link:
         if self.ours():
             frame = whole[0] * whole[1] * 4
         // the cursor's side in the screen's pixels
-        side = physical(cursor_size(), self.store.scale)
+        side = physical(cursor_size, self.store.scale)
         size = 2 * content + 2 * frame + side * side * 4
         match gui_sys.shm_create(self.conn, size):
             case ok(_):
@@ -692,7 +689,7 @@ impl link:
         self.store.black = []
         for _ in range(width):
             self.store.black.append(0)
-        small = cursor_size()
+        small = cursor_size
         self.write(at, gui_sys.pack_scaled(arrow(), small, small, side, side, 3))
         cursor = self.id("cursor")
         asks = self.scaled(cursor, self.id("cursor_view"), (small, small))
@@ -734,7 +731,7 @@ impl link:
             ret
         whole = self.whole()
         b = self.border()
-        bar = title_height()
+        bar = title_height
         color = opaque(gui.rgb(70, 70, 78))
         if self.look.active:
             color = opaque(gui.rgb(43, 43, 51))
@@ -878,8 +875,8 @@ impl link:
             edges += 8
         if edges > 0:
             ret edges
-        if y < b + title_height():
-            if x >= whole[0] - b - title_height():
+        if y < b + title_height:
+            if x >= whole[0] - b - title_height:
                 ret -2
             ret -1
         ret 0
@@ -1022,8 +1019,7 @@ fn opaque(color: int) -> int:
     ret 4278190080 + color
 
 // The cursor's width and height, in logical pixels.
-fn cursor_size() -> int:
-    ret 16
+const cursor_size = 16
 
 // Our cursor, an arrow, its pixels opaque black and white where it is drawn.
 fn arrow() -> list[int]:

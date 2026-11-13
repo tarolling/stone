@@ -1499,6 +1499,7 @@ fn collect_calls_from_stmt(stmt: &Stmt, calls: &mut HashSet<String>) {
         StmtKind::EnumDef { .. }
         | StmtKind::StructDef { .. }
         | StmtKind::Test { .. }
+        | StmtKind::ConstDef { .. }
         | StmtKind::Break
         | StmtKind::Continue
         | StmtKind::Use { .. } => {}

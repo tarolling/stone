@@ -98,6 +98,12 @@ pub fn find(linked: &Linked, analysis: &Analysis) -> Vec<Diagnostic> {
                 }
                 format!("function '{short}' is never used")
             }
+            SymbolKind::Constant => {
+                if outside {
+                    continue;
+                }
+                format!("constant '{short}' is never used")
+            }
             SymbolKind::Method => {
                 if outside {
                     continue;
@@ -203,6 +209,9 @@ impl Facts {
                 name_span, public, ..
             }
             | StmtKind::EnumDef {
+                name_span, public, ..
+            }
+            | StmtKind::ConstDef {
                 name_span, public, ..
             } => {
                 self.definitions.insert(*name_span, stmt.span);
@@ -354,6 +363,16 @@ test \"doubles\":
                 5
             )]
         );
+    }
+
+    #[test]
+    fn a_constant_that_is_never_read_is_reported() {
+        assert_eq!(
+            unused("const used = 1\nconst unused = used + 1\nconst _quiet = 2\nprint(used)\n"),
+            [warning("constant 'unused' is never used", 2, 7)]
+        );
+        // a public constant may be used by another file
+        assert_eq!(unused("pub const shared = 1\n"), []);
     }
 
     #[test]

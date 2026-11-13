@@ -1,0 +1,4 @@
+pub const kb = 1 << 10
+
+pub fn kb_of(n: int) -> int:
+    ret n * kb

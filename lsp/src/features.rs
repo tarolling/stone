@@ -533,6 +533,11 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
             let params = type_params_of(analysis, &symbol.name, Some(symbol.span.file));
             format!("trait {}{params}{}", symbol.name, methods.concat())
         }
+        // a constant shows its value, which is what every read of it is
+        (StoneSymbolKind::Constant, ty) => match analysis.constants.get(&symbol.name) {
+            Some(value) => format!("const {}: {ty} = {value}", symbol.name),
+            None => format!("const {}: {ty}", symbol.name),
+        },
         (StoneSymbolKind::TypeParam, _) => {
             let index = analysis
                 .symbols
@@ -557,6 +562,7 @@ fn signature(analysis: &Analysis, symbol: &Symbol) -> String {
                 | StoneSymbolKind::Field
                 | StoneSymbolKind::Method
                 | StoneSymbolKind::Trait
+                | StoneSymbolKind::Constant
                 | StoneSymbolKind::TypeParam => "global",
             };
             format!("({kind}) {}: {ty}", symbol.name)
@@ -1375,6 +1381,7 @@ fn document_symbol(doc: &Document, symbol: &Symbol, range: Span) -> DocumentSymb
             StoneSymbolKind::Trait => SymbolKind::INTERFACE,
             StoneSymbolKind::Method => SymbolKind::FUNCTION,
             StoneSymbolKind::TypeParam => SymbolKind::TYPE_PARAMETER,
+            StoneSymbolKind::Constant => SymbolKind::CONSTANT,
             _ => SymbolKind::VARIABLE,
         },
         tags: None,
@@ -1671,6 +1678,7 @@ fn completion_at(doc: &Document, position: Position, sources: &dyn Sources) -> V
                 StoneSymbolKind::Function => CompletionItemKind::FUNCTION,
                 StoneSymbolKind::Enum => CompletionItemKind::ENUM,
                 StoneSymbolKind::Struct => CompletionItemKind::STRUCT,
+                StoneSymbolKind::Constant => CompletionItemKind::CONSTANT,
                 _ => CompletionItemKind::VARIABLE,
             }),
             detail: Some(signature(&doc.analysis, symbol)),
@@ -2209,16 +2217,24 @@ fn signature_forms(signature: &str) -> Vec<&str> {
     forms
 }
 
-/// Returns the public functions of the module in `file`, by their own names.
+/// Returns the public functions and constants of the module in `file`, by their own names.
 fn module_functions(doc: &Document, file: FileId) -> Vec<CompletionItem> {
     doc.analysis
         .symbols
         .iter()
-        .filter(|s| s.kind == StoneSymbolKind::Function && s.span.file == file)
+        .filter(|s| {
+            matches!(
+                s.kind,
+                StoneSymbolKind::Function | StoneSymbolKind::Constant
+            ) && s.span.file == file
+        })
         .filter(|s| doc.public.contains(&s.name))
         .map(|symbol| CompletionItem {
             label: doc.local_name(symbol).to_string(),
-            kind: Some(CompletionItemKind::FUNCTION),
+            kind: Some(match symbol.kind {
+                StoneSymbolKind::Constant => CompletionItemKind::CONSTANT,
+                _ => CompletionItemKind::FUNCTION,
+            }),
             detail: Some(signature(&doc.analysis, symbol)),
             ..CompletionItem::default()
         })

@@ -1,0 +1,13 @@
+use limits
+use limits.most
+use units
+use units.kb as k
+
+const here = most + limits.most
+
+fn report() -> str:
+    ret "{limits.most} {here} {k}"
+
+print(most, here, limits.twice(), k)
+print(report())
+print(units.kb_of(3))

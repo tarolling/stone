@@ -52,6 +52,7 @@ use crate::checker::{
 use crate::codegen::Os;
 use crate::codegen::context::{FUNCTION_PREFIX, function_label, module_routine};
 use crate::codegen::gpu::kernel::{Argument, arguments};
+use crate::constant::ConstValue;
 use crate::last_use::{GlobalReads, LiveAfter, global_reads, kept_at_exit, live_after, locals};
 use crate::project::PRELUDE_MODULE;
 use crate::span::{FileId, Span};
@@ -126,6 +127,7 @@ pub fn lower_with(
         coercions,
         trait_values,
         type_patterns,
+        constants,
         ..
     } = analysis;
     let layouts = Layouts::new(enums, structs, held_types);
@@ -162,6 +164,7 @@ pub fn lower_with(
                     | SymbolKind::Method
                     | SymbolKind::Trait
                     | SymbolKind::TypeParam
+                    | SymbolKind::Constant
             )
         })
         .map(|symbol| {
@@ -212,6 +215,7 @@ pub fn lower_with(
         globals: &globals,
         owned_params: owned_params(body, methods),
         constant_globals: constant_globals(body, &global_reads),
+        constants,
         shrinks_maps: pops_maps(body, types),
         global_reads,
         global_set,
@@ -695,6 +699,9 @@ struct Context<'a> {
     /// The globals that hold one literal for the whole program, with the immediate each reads as
     /// (see [`constant_globals`]).
     constant_globals: HashMap<String, i64>,
+    /// The value of every constant, by its linked name (`Analysis::constants`), which every read
+    /// of one lowers to.
+    constants: &'a HashMap<String, ConstValue>,
     /// Whether the program removes entries from maps, which can leave holes in a map's entries
     /// that must close up before anything reads them as a list (see `builtins::map_runtime`).
     shrinks_maps: bool,
@@ -2653,7 +2660,8 @@ impl<'a> Lowerer<'a> {
             | StmtKind::TraitDef { .. } => {
                 return Err("functions must be defined at the top level".to_string());
             }
-            StmtKind::EnumDef { .. } | StmtKind::StructDef { .. } => {}
+            // every read of a constant is its value (`Analysis::constants`)
+            StmtKind::EnumDef { .. } | StmtKind::StructDef { .. } | StmtKind::ConstDef { .. } => {}
             StmtKind::Match { subject, cases } => self.match_stmt(subject, cases)?,
             StmtKind::Use { .. } => {
                 return Err("use is only allowed at the top level of a file".to_string());
@@ -5043,6 +5051,14 @@ impl<'a> Lowerer<'a> {
                 }
                 if let Some(&local) = self.locals.get(id) {
                     return Ok(self.finish(Operand::Reg(local), into));
+                }
+                if let Some(value) = self.constant_read(id) {
+                    let mut leaves = vec![];
+                    self.constant_leaves(value, &mut leaves);
+                    let [leaf] = leaves[..] else {
+                        return Err(format!("the constant '{id}' is a tuple"));
+                    };
+                    return Ok(self.finish(leaf, into));
                 }
                 if let Some(value) = module_constant(id) {
                     return Ok(self.finish(Operand::Imm(value.to_bits() as i64), into));
@@ -8993,6 +9009,8 @@ impl<'a> Lowerer<'a> {
             return vec![None];
         }
         match &expr.kind {
+            // a constant's values are literals, which no variable holds
+            ExprKind::Name { id, .. } if self.constant_read(id).is_some() => unknown(),
             ExprKind::Name { id, .. } => self.leaf_names(id).into_iter().map(Some).collect(),
             ExprKind::Tuple { elts, .. } => {
                 elts.iter().flat_map(|elt| self.flat_sources(elt)).collect()
@@ -9065,6 +9083,49 @@ impl<'a> Lowerer<'a> {
         result
     }
 
+    /// Returns the value of the constant `name` reads, unless a local takes the name, as one of
+    /// a library may where an entry file's constant is unseen.
+    fn constant_read(&self, name: &str) -> Option<&'a ConstValue> {
+        let constants: &'a HashMap<String, ConstValue> = self.context.constants;
+        constants.get(name).filter(|_| {
+            !self.locals.contains_key(name) && !self.locals.contains_key(&leaf_name(name, 0))
+        })
+    }
+
+    /// Appends the values of the constant `value` to `out`, a tuple's in turn: each number and
+    /// bool as an immediate, and each string and bytes as its literal, which is never freed and
+    /// so is borrowed.
+    ///
+    /// For example, `(3, "kb")` gives `3` and the address of the literal `"kb"`.
+    fn constant_leaves(&mut self, value: &ConstValue, out: &mut Vec<Operand>) {
+        match value {
+            ConstValue::Int(n) => out.push(Operand::Imm(*n)),
+            ConstValue::Float(x) => out.push(Operand::Imm(x.to_bits() as i64)),
+            ConstValue::Bool(b) => out.push(Operand::Imm(*b as i64)),
+            ConstValue::Str(text) => {
+                let dst = self.fresh();
+                self.push(Inst::StrAddr {
+                    dst,
+                    text: text.clone(),
+                });
+                out.push(Operand::Reg(dst));
+            }
+            ConstValue::Bytes(bytes) => {
+                let dst = self.fresh();
+                self.push(Inst::BytesAddr {
+                    dst,
+                    bytes: bytes.clone(),
+                });
+                out.push(Operand::Reg(dst));
+            }
+            ConstValue::Tuple(values) => {
+                for value in values {
+                    self.constant_leaves(value, out);
+                }
+            }
+        }
+    }
+
     fn tuple_values(&mut self, expr: &Expr) -> Result<Vec<Operand>, String> {
         match &expr.kind {
             ExprKind::Try { value } => self.try_values(value),
@@ -9073,6 +9134,11 @@ impl<'a> Lowerer<'a> {
                 for elt in elts {
                     values.extend(self.expr_flat(elt)?);
                 }
+                Ok(values)
+            }
+            ExprKind::Name { id, .. } if let Some(value) = self.constant_read(id) => {
+                let mut values = Vec::new();
+                self.constant_leaves(value, &mut values);
                 Ok(values)
             }
             ExprKind::Name { id, .. } => {

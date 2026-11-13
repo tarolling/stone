@@ -564,6 +564,7 @@ impl Stmt {
             | StmtKind::EnumDef { .. }
             | StmtKind::StructDef { .. }
             | StmtKind::Assert { .. }
+            | StmtKind::ConstDef { .. }
             | StmtKind::Break
             | StmtKind::Continue => vec![],
         }
@@ -584,6 +585,7 @@ impl Stmt {
             StmtKind::Expr { value } => vec![value],
             StmtKind::Match { subject, .. } => vec![subject],
             StmtKind::Assert { test, msg } => [&**test].into_iter().chain(msg.as_deref()).collect(),
+            StmtKind::ConstDef { value, .. } => vec![value],
             StmtKind::FunctionDef { .. }
             | StmtKind::Test { .. }
             | StmtKind::Use { .. }
@@ -730,6 +732,17 @@ pub enum StmtKind {
         name: String,
         name_span: Span,
         body: Vec<Stmt>,
+    },
+    /// A constant, such as `const port = 53` or `pub const pi2 = math.pi * 2.0`, which only the
+    /// top level of a file holds. Its value is evaluated when the program is built
+    /// ([`crate::constant::evaluate`]), and every read of `name` is that value.
+    ConstDef {
+        name: Identifier,
+        /// The span of the constant's name, which editor features point at.
+        name_span: Span,
+        /// Whether the definition starts with `pub`, so other modules may use it.
+        public: bool,
+        value: Box<Expr>,
     },
     /// A `break` statement.
     Break,

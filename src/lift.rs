@@ -154,7 +154,7 @@ impl Lifter {
                 self.expr(value);
                 vec![]
             }
-            StmtKind::Expr { value } => {
+            StmtKind::Expr { value } | StmtKind::ConstDef { value, .. } => {
                 self.expr(value);
                 vec![]
             }

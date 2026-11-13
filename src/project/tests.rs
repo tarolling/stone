@@ -384,7 +384,8 @@ fn a_module_only_holds_use_and_def() {
             ("util.stn", "print(1)\n\npub fn f() -> int:\n    ret 1\n"),
         ],
         "util.stn",
-        "only use, fn, enum, struct, impl, and trait are allowed at the top level of a module",
+        "only use, fn, const, enum, struct, impl, and trait are allowed at the top level of a \
+         module",
         1,
         1,
     );
@@ -2550,5 +2551,123 @@ fn a_files_tests_have_different_descriptions() {
         "this file already has a test \"same\"",
         4,
         6,
+    );
+}
+
+const LIMITS: (&str, &str) = (
+    "limits.stn",
+    "const step = 2\npub const most = step * 50\npub fn twice() -> int:\n    ret most * 2\n",
+);
+
+/// Returns the value of the linked constant `name` in `body`.
+fn constant_value<'a>(body: &'a [Stmt], name: &str) -> &'a Expr {
+    body.iter()
+        .find_map(|stmt| match &stmt.kind {
+            StmtKind::ConstDef { name: n, value, .. } if n == name => Some(&**value),
+            _ => None,
+        })
+        .expect("expected the constant")
+}
+
+/// Returns the name an expression reads, such as `limits.most` for `limits.most * 2`'s left.
+fn read_name(expr: &Expr) -> &str {
+    match &expr.kind {
+        ExprKind::Name { id, .. } => id,
+        ExprKind::BinOp { left, .. } => read_name(left),
+        _ => panic!("expected a name in {expr:?}"),
+    }
+}
+
+#[test]
+fn a_library_constant_is_named_by_its_linked_name() {
+    let body = linked_body(&[
+        (
+            "main.stn",
+            "use limits\nuse limits.most\nconst here = most + limits.most\nprint(here)\n",
+        ),
+        LIMITS,
+    ]);
+    assert_eq!(
+        read_name(constant_value(&body, "limits.most")),
+        "limits.step"
+    );
+    assert_eq!(read_name(constant_value(&body, "here")), "limits.most");
+    let ExprKind::BinOp { right, .. } = &constant_value(&body, "here").kind else {
+        panic!("expected a sum");
+    };
+    assert_eq!(read_name(right), "limits.most");
+}
+
+#[test]
+fn a_constant_import_binds_the_constant() {
+    let linked = link(
+        Path::new("main.stn"),
+        "use limits.most\n",
+        &sources_of(&[LIMITS]),
+    );
+    assert_eq!(
+        linked.imports[0].target,
+        Target::Function("limits.most".to_string())
+    );
+    assert!(linked.public.contains("limits.most"));
+    assert!(!linked.public.contains("limits.step"));
+}
+
+#[test]
+fn a_private_constant_cannot_be_used_from_another_file() {
+    assert_error(
+        &[("main.stn", "use limits.step\n"), LIMITS],
+        "main.stn",
+        "'step' is private to module 'limits'",
+        1,
+        12,
+    );
+    assert_error(
+        &[("main.stn", "use limits\nprint(limits.step)\n"), LIMITS],
+        "main.stn",
+        "'step' is private to module 'limits'",
+        2,
+        14,
+    );
+}
+
+#[test]
+fn no_variable_takes_a_constants_name() {
+    let message = "'most' is a constant, so a variable cannot take its name";
+    assert_error(
+        &[
+            (
+                "main.stn",
+                "use limits.most\nfn f(most: int) -> int:\n    ret most\n",
+            ),
+            LIMITS,
+        ],
+        "main.stn",
+        message,
+        2,
+        6,
+    );
+    assert_error(
+        &[(
+            "main.stn",
+            "const most = 1\nfn f() -> int:\n    for most in range(3):\n        print(1)\n    ret 0\n",
+        )],
+        "main.stn",
+        message,
+        3,
+        9,
+    );
+    assert_error(
+        &[
+            ("main.stn", "use limits\n"),
+            (
+                "limits.stn",
+                "pub const most = 1\npub fn f() -> int:\n    most = 2\n    ret most\n",
+            ),
+        ],
+        "limits.stn",
+        message,
+        3,
+        5,
     );
 }

@@ -152,6 +152,7 @@ print(total)
 | an exception passing through a function | `?`: `n = int(s)?` returns the `err` from a function that returns a `result` with the same error type |
 | a function that mutates a list argument | return the list: `xs = f(xs)`, which is still in place |
 | a function that mutates a global | take it as a parameter and return it |
+| a module-level constant such as `MAX_RETRIES = 3` or `NAME = "app"` | `const max_retries = 3`, readable in every function and test of the file (`pub const` for other files); a list or dict constant becomes a function returning it |
 | recursion deeper than 1000 | a loop with an explicit stack (a `list`) |
 | `total = 0` and later `total = 0.0` | a second name: each variable keeps one type |
 | `x * (i + 1)` with a float `x` | `x * float(i + 1)`: convert every int that meets a float |

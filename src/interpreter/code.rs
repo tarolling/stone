@@ -369,6 +369,11 @@ impl<'r, 'out> Resolver<'r, 'out> {
         body.iter().map(|stmt| self.stmt(stmt)).collect()
     }
 
+    /// Returns whether `name` is a parameter or variable of the function being resolved.
+    fn is_local(&self, name: &str) -> bool {
+        self.layout.and_then(|layout| layout.slot(name)).is_some()
+    }
+
     fn var(&mut self, name: &str) -> Var {
         match self.layout.and_then(|layout| layout.slot(name)) {
             Some(slot) => Var::Local(slot),
@@ -480,7 +485,8 @@ impl<'r, 'out> Resolver<'r, 'out> {
             | ast::StmtKind::ImplDef { .. }
             | ast::StmtKind::TraitDef { .. }
             | ast::StmtKind::EnumDef { .. }
-            | ast::StmtKind::StructDef { .. } => {
+            | ast::StmtKind::StructDef { .. }
+            | ast::StmtKind::ConstDef { .. } => {
                 StmtKind::Fail("a definition must be at the top level".into())
             }
             ast::StmtKind::Return { value } => StmtKind::Return(value.as_ref().map(|value| {
@@ -829,7 +835,13 @@ impl<'r, 'out> Resolver<'r, 'out> {
                 },
                 None => match stdlib::module_constant(id) {
                     Some(value) => ExprKind::Constant(Value::Float(value)),
-                    None => ExprKind::Var(self.var(id)),
+                    // a local may take a constant's name only where the constant is unseen
+                    None => match self.calls.constants.get(id) {
+                        Some(value) if !self.is_local(id) => {
+                            ExprKind::Constant(Value::from(value.clone()))
+                        }
+                        _ => ExprKind::Var(self.var(id)),
+                    },
                 },
             },
             ast::ExprKind::Closure { captures, .. } => {

@@ -1293,6 +1293,51 @@ impl Parser {
         Err(self.error_here("parse_assert_stmt"))
     }
 
+    /// Parses a constant, such as `const port = 53` or `pub const name = "stone"`, at the top
+    /// level of a file.
+    ///
+    /// ```text
+    /// const_def: ['pub'] 'const' NAME '=' expressions
+    /// ```
+    pub(super) fn parse_const_def(&mut self) -> Result<Box<Stmt>, ParserError> {
+        let mark = self.pos;
+        let public = self.expect(TokenType::Keyword("pub")).is_some();
+        let Some(keyword) = self.expect(TokenType::Keyword("const")) else {
+            self.pos = mark;
+            return Err(self.error_here("parse_const_def"));
+        };
+        if self.nesting > 0 {
+            self.hint(
+                keyword.span,
+                "a constant can only be at the top level of a file",
+            );
+        } else if let Some((name, name_span)) = self.expect_name("a constant name", false) {
+            if self.peek().r#type == TokenType::Colon {
+                let colon = self.peek().span;
+                self.hint(
+                    colon,
+                    &format!(
+                        "a constant's type is its value's, so it is written `const {name} = 1`"
+                    ),
+                );
+            } else if self.expect(TokenType::Operator("=")).is_some()
+                && let Ok(value) = self.parse_expressions()
+            {
+                return Ok(Box::new(Stmt::new(
+                    StmtKind::ConstDef {
+                        name,
+                        name_span,
+                        public,
+                        value,
+                    },
+                    self.span_from(mark),
+                )));
+            }
+        }
+        self.pos = mark;
+        Err(self.error_here("parse_const_def"))
+    }
+
     /// Parses the chain of targets in an assignment, such as `a = b =` in `a = b = 1`.
     ///
     /// ```text
@@ -1660,7 +1705,7 @@ impl Parser {
         // no expression starts with these keywords, which only their own statements take
         let statement_keyword = matches!(
             self.peek().r#type,
-            TokenType::Keyword("ret" | "use" | "break" | "cont" | "assert")
+            TokenType::Keyword("ret" | "use" | "break" | "cont" | "assert" | "const" | "pub")
         );
         let (assign, augmented) = if self.exhaustive {
             (true, true)
@@ -1713,6 +1758,12 @@ impl Parser {
 
         // assert_stmt
         if let Ok(stmt) = self.parse_assert_stmt() {
+            return Ok(stmt);
+        }
+        self.pos = mark;
+
+        // const_def
+        if let Ok(stmt) = self.parse_const_def() {
             return Ok(stmt);
         }
         self.pos = mark;

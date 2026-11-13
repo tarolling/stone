@@ -199,7 +199,7 @@ fn handshake(conn: socket, number: str, width: int, height: int) -> result[link,
         ret err("the X server refused the connection: {reason.text().unwrap_or("")}")
     reply = head + rest
     if reply.len() < 40:
-        ret err(bad_setup())
+        ret err(bad_setup)
     base = get32(reply, 12)
     mask = get32(reply, 16)
     vendor = get16(reply, 24)
@@ -209,7 +209,7 @@ fn handshake(conn: socket, number: str, width: int, height: int) -> result[link,
     bits = 0
     screen = at + 8 * formats
     if reply.len() < screen + 40:
-        ret err(bad_setup())
+        ret err(bad_setup)
     root = get32(reply, screen)
     depth = reply[screen + 38]
     for i in range(formats):
@@ -236,8 +236,7 @@ fn handshake(conn: socket, number: str, width: int, height: int) -> result[link,
     ret ok(w)
 
 // The error for a setup reply too short for what it says it holds.
-fn bad_setup() -> str:
-    ret "the X server sent a setup reply that is cut short"
+const bad_setup = "the X server sent a setup reply that is cut short"
 
 // Whether the visual `visual` of the screen at `screen` in the setup reply is TrueColor with
 // red, green, and blue in that order of significance, eight bits each.

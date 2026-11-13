@@ -86,6 +86,7 @@ simple_stmt:
     | return_stmt
     | use_stmt
     | assert_stmt
+    | const_def
     | 'break'
     | 'cont' 
 
@@ -124,6 +125,11 @@ return_stmt:
 # the message runs only if the test fails
 assert_stmt:
     | 'assert' expression [',' expression]
+
+# only at the top level of a file; the value is evaluated when the program is built, from
+# literals, operators, and other constants
+const_def:
+    | ['pub'] 'const' NAME '=' expressions
 
 # only valid at the top level of a file, which the checker enforces
 use_stmt:

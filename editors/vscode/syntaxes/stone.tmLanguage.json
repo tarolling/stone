@@ -127,6 +127,10 @@
           "match": "\\b(pub)\\b"
         },
         {
+          "name": "storage.type.stone",
+          "match": "\\b(const)\\b"
+        },
+        {
           "name": "keyword.control.stone",
           "match": "\\b(if|elif|else|while|for|in|break|cont|ret|match|case|assert)\\b"
         },

@@ -94,9 +94,10 @@ own variables and functions `min`, `max`, `sleep`, or `env`.
 
 ## pub
 
-`pub fn` makes a function usable from other files, `pub enum` an enum, `pub struct` a struct, and
-`pub trait` a trait. Every other function, enum, struct, and trait is private to the file it is
-in. `pub` makes no difference in the entry file, so a
+`pub fn` makes a function usable from other files, `pub const` a constant, `pub enum` an enum,
+`pub struct` a struct, and `pub trait` a trait. Every other function, constant, enum, struct, and
+trait is private to the file it is in. A constant is used as a function is: `use limits` and then
+`limits.most`, or `use limits.most` and then `most`. `pub` makes no difference in the entry file, so a
 module can also be run on its own.
 
 A struct's `impl` blocks are in the file that defines the struct, and its methods and associated
@@ -108,10 +109,11 @@ trait for `int`, `float`, `bool`, or `str` in the trait's.
 
 ## Module bodies
 
-A module other than the entry file holds only `use` statements, `fn`s, `enum`s, `struct`s,
-`impl` blocks, and `trait`s.
-Any other top-level statement is an error: `only use, fn, enum, struct, impl, and trait are
-allowed at the top level of a module`. So using a module never runs code, and modules may use each other in a cycle.
+A module other than the entry file holds only `use` statements, `fn`s, `const`s, `enum`s,
+`struct`s, `impl` blocks, and `trait`s.
+Any other top-level statement is an error: `only use, fn, const, enum, struct, impl, and trait
+are allowed at the top level of a module`. A constant's value is worked out when the program is
+built, so using a module never runs code, and modules may use each other in a cycle.
 
 A module's functions see their parameters and locals, their own file's functions, builtins, and
 the names their file binds with `use`. They never see the entry file's variables or functions:

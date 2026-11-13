@@ -47,9 +47,9 @@ pub fn blank(width: int, height: int, color: int) -> canvas:
         pixels.append(color)
     ret canvas(width=w, height=h, pixels=pixels)
 
-// How many pixels wide `text` is when drawn, each character taking `glyph_size()`.
+// How many pixels wide `text` is when drawn, each character taking `glyph_size`.
 pub fn text_width(text: str) -> int:
-    ret characters(text) * glyph_size()
+    ret characters(text) * glyph_size
 
 impl canvas:
     // Whether the pixel at `x`, `y` is on the canvas.
@@ -164,7 +164,7 @@ impl canvas:
                 self.pixels[start + column] = source.pixels[from + column]
 
     // Draws `text` with the top left of its first character at `x`, `y`, in letters
-    // `glyph_size()` pixels square. A newline starts a line below, and a character outside ASCII
+    // `glyph_size` pixels square. A newline starts a line below, and a character outside ASCII
     // draws as a box.
     fn text(self, x: int, y: int, text: str, color: int):
         self.text_scaled(x, y, text, color, 1)
@@ -173,7 +173,7 @@ impl canvas:
     fn text_scaled(self, x: int, y: int, text: str, color: int, scale: int):
         if scale <= 0:
             ret
-        size = glyph_size() * scale
+        size = glyph_size * scale
         letters = font()
         left = x
         top = y
@@ -188,8 +188,8 @@ impl canvas:
     // Draws glyph `index` of `letters`, the font, at `x`, `y`, each of its pixels `scale` pixels
     // square.
     fn glyph(self, letters: bytes, x: int, y: int, index: int, color: int, scale: int):
-        for row in range(glyph_size()):
-            bits = letters[index * glyph_size() + row]
+        for row in range(glyph_size):
+            bits = letters[index * glyph_size + row]
             column = 0
             while bits > 0:
                 if bits % 2 == 1:
@@ -365,7 +365,7 @@ impl window:
             awaiting = self.x[0].awaiting()
         until = self.due
         if awaiting:
-            until = time.clock() + hidden_wait()
+            until = time.clock() + hidden_wait
         found = []
         if gui_sys.on_windows():
             found = self.win[0].pace(until)
@@ -375,9 +375,9 @@ impl window:
             found = self.x[0].pace(until)
         now = time.clock()
         if awaiting:
-            self.due = now + frame_time()
+            self.due = now + frame_time
         else:
-            self.due = (self.due + frame_time()).max(now)
+            self.due = (self.due + frame_time).max(now)
         ret found
 
     // Shows `c` in the window, its top left pixel at the window's. What the window has outside
@@ -460,17 +460,14 @@ pub fn run[A: app](title: str, width: int, height: int, state: A) -> result[A, s
     ret ok(state)
 
 // The seconds between frames when the display does not pace them.
-fn frame_time() -> float:
-    ret 1.0 / 60.0
+const frame_time = 1.0 / 60.0
 
 // The most seconds `next_frame` waits for the display to show an image, which it never does
 // for a hidden window.
-fn hidden_wait() -> float:
-    ret 1.0
+const hidden_wait = 1.0
 
 // How many pixels wide and high each character of the font is.
-fn glyph_size() -> int:
-    ret 8
+const glyph_size = 8
 
 // How many characters `text` has, a newline included.
 fn characters(text: str) -> int:

@@ -50,3 +50,6 @@ graphify-out
 
 # claude
 .claude/
+
+# tests
+stone-tests/
